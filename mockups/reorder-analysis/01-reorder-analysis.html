@@ -279,6 +279,47 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 .pg-footer { margin-top: 30px; color: var(--faint); font-size: 11.5px; text-align: center; }
 
+/* rev2 — chip / header info tooltips (styled, not native title) */
+.pg-info { position: relative; display: inline-block; margin-left: 5px; font-size: 12px; font-style: normal; opacity: .75; cursor: help; }
+.pg-tip { display: none; position: absolute; top: calc(100% + 9px); left: 50%; transform: translateX(-50%); width: 240px; background: var(--primary); color: var(--primary-fg); border-radius: 8px; padding: 8px 11px; font-size: 11.5px; font-weight: 500; line-height: 1.5; text-align: left; text-transform: none; letter-spacing: 0; white-space: normal; box-shadow: var(--shadow-lg); z-index: 80; pointer-events: none; }
+.pg-tip::before { content: ""; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-bottom-color: var(--primary); }
+.pg-info:hover .pg-tip, .pg-hastip:hover .pg-tip { display: block; }
+.pg-hastip { position: relative; cursor: help; border-bottom: 1px dotted var(--faint); }
+.pg-tip.pg-tip-r { left: auto; right: -6px; transform: none; }
+.pg-tip.pg-tip-r::before { left: auto; right: 14px; transform: none; }
+
+/* rev2 — order-queue context line above the table */
+.pg-ctx { padding: 10px 14px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
+.pg-viewall { color: var(--blue); font-weight: 600; cursor: pointer; }
+.pg-viewall:hover { text-decoration: underline; }
+
+/* rev2 — amber order-soon dates sub-line */
+.pg-soonline { font-size: 11px; color: var(--amber); margin-top: 2px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* rev2 — checkbox column */
+.pg-ckcell input { width: 14px; height: 14px; accent-color: var(--primary); cursor: pointer; vertical-align: middle; }
+
+/* rev2 — sticky review-order bar */
+.pg-orderbar { position: sticky; bottom: 14px; z-index: 40; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); padding: 12px 16px; display: none; align-items: center; gap: 14px; }
+.pg-orderbar .pg-obtext { font-size: 13.5px; }
+.pg-orderbar.pg-flash { animation: pg-obflash .7s ease; }
+@keyframes pg-obflash { 30% { box-shadow: 0 0 0 5px var(--blue-bd), var(--shadow-lg); } }
+
+/* rev2 — order builder drawer (wider variant of .drawer) */
+.pg-obdrawer { width: 640px; right: -680px; max-width: 96vw; }
+.pg-obdrawer.open { right: 0; }
+.pg-obvendor { border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 14px; overflow: hidden; }
+.pg-obvh { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 10px 12px; background: var(--accent); border-bottom: 1px solid var(--border); font-size: 13px; }
+.pg-obvendor .pg-mini th, .pg-obvendor .pg-mini td { padding-left: 12px; padding-right: 12px; }
+.ob-qty { width: 74px; padding: 4px 7px; font-size: 12.5px; text-align: right; }
+.pg-obvfoot { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 9px 12px; border-top: 1px solid var(--border); background: #fcfcfd; font-size: 12.5px; flex-wrap: wrap; }
+.pg-obradios { display: inline-flex; gap: 14px; color: var(--text-2); }
+.pg-obradios label { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+.pg-obradios input { accent-color: var(--primary); }
+.pg-obgrand { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 4px; padding-top: 12px; border-top: 2px solid var(--border-strong); flex-wrap: wrap; }
+.pg-obgrand b { font-size: 16px; }
+.btn:disabled { opacity: .55; cursor: default; }
+
 @media (max-width: 1345px) {
   .pg-scroll { overflow-x: auto; }
   .pg-tablecard { overflow: hidden; }
@@ -354,18 +395,20 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
         <div class="pg-groupctl">
           <span class="pg-seglabel">Group by</span>
           <div class="pg-seg" id="groupSeg">
-            <button data-g="category" class="on">Category</button>
+            <button data-g="category">Category</button>
             <button data-g="line">Product line</button>
-            <button data-g="none">None</button>
+            <button data-g="none" class="on">None</button>
           </div>
           <span class="pg-excl" id="exclToggle"><span class="switch" id="exclSwitch"></span><span id="exclLabel">Show excluded</span></span>
         </div>
       </div>
 
       <div class="card pg-tablecard">
+        <div class="pg-ctx" id="tableCtx" style="display:none"></div>
         <div class="pg-scroll">
           <table class="tbl pg-main-tbl">
             <thead><tr>
+              <th class="pg-tc" style="width:30px"></th>
               <th style="width:100px">SKU</th>
               <th>Product</th>
               <th style="width:102px">Status</th>
@@ -373,7 +416,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
               <th class="num" style="width:62px">Available</th>
               <th class="num" style="width:76px">Inbound</th>
               <th class="right" style="width:102px">Days of supply</th>
-              <th class="num" style="width:58px">Adj. RP</th>
+              <th class="num" style="width:96px" id="thRp">Reorder point</th>
               <th class="num" style="width:80px">Suggested</th>
               <th style="width:76px">Confidence</th>
               <th style="width:132px"></th>
@@ -410,6 +453,12 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
         </div>
       </div>
 
+      <div class="pg-orderbar" id="orderBar">
+        <div class="pg-obtext" id="orderBarText"></div>
+        <div class="pg-grow"></div>
+        <button class="btn btn-primary" id="btnOpenBuilder">Open order builder</button>
+      </div>
+
       <div class="pg-footer">Design mockup · not wired to live data · Echelon Reorder Analysis redesign · Jul 2026</div>
     </div>
   </div>
@@ -419,6 +468,10 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 <aside class="drawer" id="drawer" aria-label="Recommendation math">
   <div class="drawer-h" id="drawerHead"></div>
   <div class="drawer-b" id="drawerBody"></div>
+</aside>
+<aside class="drawer pg-obdrawer" id="obDrawer" aria-label="Order builder">
+  <div class="drawer-h" id="obHead"></div>
+  <div class="drawer-b" id="obBody"></div>
 </aside>
 <div class="pg-toasts" id="toasts"></div>
 
@@ -1891,9 +1944,32 @@ window.MOCK_EXTRA = {
   var SEV = ['stockout', 'order_now', 'order_soon', 'on_order', 'ok', 'no_movement', 'excluded'];
   var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-  /* status = chip filter ('all' | 'needs_order' | 'order_soon' | 'on_order' | 'ok'), null while a
-     health filter is active. health = null | 'stagnant' | 'overstock' (Inventory health card). */
-  var state = { q: '', status: 'all', health: null, group: 'category', showExcluded: false, collapsed: {} };
+  /* statuses = additive chip toggles (subset of CHIP_KEYS); combine multi-select. All four on =
+     "All" (also shows stagnant/excluded groups). Cleared while a health filter is active.
+     Default = the order queue: needs_order + order_soon, ungrouped, severity-sorted.
+     order = Order Builder state: checked rows, editable pieces, per-vendor PO/RFQ mode. */
+  var CHIP_KEYS = ['needs_order', 'order_soon', 'on_order', 'ok'];
+  var state = {
+    q: '', health: null, group: 'none', showExcluded: false, collapsed: {},
+    statuses: { needs_order: true, order_soon: true },
+    order: { checked: {}, qty: {}, vendorMode: {} }
+  };
+  function allOn() { return CHIP_KEYS.every(function (k) { return !!state.statuses[k]; }); }
+  function setAllStatuses(on) {
+    state.statuses = {};
+    if (on) CHIP_KEYS.forEach(function (k) { state.statuses[k] = true; });
+  }
+  function isQueueView() {
+    return !state.health && !!state.statuses.needs_order && !!state.statuses.order_soon &&
+      !state.statuses.on_order && !state.statuses.ok;
+  }
+
+  /* SKUs whose vendor cost is unverified — parsed from the run-report warnings (MOCK_EXTRA) */
+  var UNVERIFIED = {};
+  X.runReport.warnings.forEach(function (w) {
+    var m = /^([A-Z0-9-]+): vendor cost is unverified \(no quote in (\d+) days\)/.exec(w.text);
+    if (m) UNVERIFIED[m[1]] = +m[2];
+  });
 
   /* ---------- formatters ---------- */
   function fmt(n) { return n.toLocaleString('en-US'); }
@@ -1906,6 +1982,19 @@ window.MOCK_EXTRA = {
   function pw(x) { return x % 1 === 0 ? String(x) : x.toFixed(1); }
   function fdate(iso) { if (!iso) return ''; var p = iso.split('-'); return MONTHS[+p[1] - 1] + ' ' + (+p[2]); }
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+  function addDays(iso, n) {
+    var p = iso.split('-');
+    var d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2] + n));
+    return MONTHS[d.getUTCMonth()] + ' ' + d.getUTCDate();
+  }
+  /* projected dates for order_soon items: stockout = asOf + days of supply;
+     order-by = asOf + max(0, daysOfSupply − (lead + safety)) */
+  function soonDates(it) {
+    return {
+      stockout: addDays(M.asOf, it.daysOfSupply),
+      orderBy: addDays(M.asOf, Math.max(0, it.daysOfSupply - (it.leadTimeDays + it.safetyStockDays)))
+    };
+  }
 
   function toast(msg) {
     var t = document.createElement('div');
@@ -1957,11 +2046,13 @@ window.MOCK_EXTRA = {
       if (!matchQ(it)) return false;
       if (state.health === 'stagnant') return it.status === 'no_movement';
       if (state.health === 'overstock') return isOverstock(it);
-      if (state.status && state.status !== 'all') {
-        if (state.status === 'needs_order') return it.status === 'stockout' || it.status === 'order_now';
-        return it.status === state.status;
-      }
-      return true;
+      if (allOn()) return true;
+      var sel = state.statuses;
+      if (sel.needs_order && (it.status === 'stockout' || it.status === 'order_now')) return true;
+      if (sel.order_soon && it.status === 'order_soon') return true;
+      if (sel.on_order && it.status === 'on_order') return true;
+      if (sel.ok && it.status === 'ok') return true;
+      return false;
     });
   }
 
@@ -1976,17 +2067,33 @@ window.MOCK_EXTRA = {
       else if (i.status === 'on_order') onOrderItems.push(i);
       else if (i.status === 'ok') okN++;
     });
-    /* days left before an order_soon item eats into lead time + safety stock */
-    var soonDays = null;
-    soonItems.forEach(function (i) {
-      var d = Math.max(0, i.daysOfSupply - (i.leadTimeDays + i.safetyStockDays));
-      if (soonDays === null || d < soonDays) soonDays = d;
-    });
     var eta = null;
     onOrderItems.forEach(function (i) { if (i.poEta && (!eta || i.poEta < eta)) eta = i.poEta; });
 
+    /* styled hover tooltips replacing the old inline hint sentences */
+    function tip(text) {
+      return '<span class="pg-info" aria-label="More info">&#9432;<span class="pg-tip">' + text + '</span></span>';
+    }
+    var needTip = tip('Below reorder point — order today. ' + stockoutN + ' out of stock · ' +
+      orderNowN + ' below reorder point.');
+    var soonSent = soonItems.map(function (i) {
+      var d = soonDates(i);
+      return i.sku + ': stockout ' + d.stockout + ' · order by ' + d.orderBy +
+        ' to keep the ' + i.safetyStockDays + '-day safety buffer.';
+    }).join(' ');
+    var soonTip = tip('The ordering window is closing: days of supply are inside 1.5× the vendor lead time.' +
+      (soonSent ? ' ' + soonSent : ''));
+    var onOrderTip = tip('Below reorder point but open POs cover the gap.' +
+      (eta ? ' Earliest ETA ' + fdate(eta) + '.' : ''));
+    var okTip = tip('Above reorder point with normal movement.');
+
+    function chipOn(key) {
+      if (state.health) return false;
+      if (key === 'all') return allOn();
+      return !!state.statuses[key];
+    }
     function chip(key, label, n, cls, colored, extra) {
-      var on = !state.health && state.status === key;
+      var on = chipOn(key);
       return '<button class="chip' + (cls ? ' ' + cls : '') + (on ? ' on' : '') + '" data-s="' + key + '">' +
         (on && colored ? '<span class="pg-ck">&#10003;</span>' : '') +
         label + '<span class="n">' + n + '</span>' + (extra || '') + '</button>';
@@ -1994,16 +2101,14 @@ window.MOCK_EXTRA = {
 
     $('#statusChips').innerHTML =
       '<div class="pg-tier"><div class="pg-tier-label">Order queue</div><div class="pg-tier-row">' +
-        chip('needs_order', 'Needs order', stockoutN + orderNowN, 'c-red', true) +
-        '<span class="pg-hint">' + stockoutN + ' out of stock · ' + orderNowN + ' below reorder point</span>' +
-        chip('order_soon', 'Order soon', soonItems.length, 'c-amber', true) +
-        (soonDays === null ? '' : '<span class="pg-hint">order within ' + soonDays + ' day' + (soonDays === 1 ? '' : 's') + ' to stay ahead of lead time</span>') +
+        chip('needs_order', 'Needs order', stockoutN + orderNowN, 'c-red', true, needTip) +
+        chip('order_soon', 'Order soon', soonItems.length, 'c-amber', true, soonTip) +
       '</div></div>' +
       '<div class="pg-tier"><div class="pg-tier-label">Watching</div><div class="pg-tier-row">' +
         chip('all', 'All', base.length, '', false) +
         chip('on_order', 'Inbound covers', onOrderItems.length, 'c-quiet', false,
-          eta ? '<span class="pg-eta">&middot; ETA ' + fdate(eta) + '</span>' : '') +
-        chip('ok', 'Healthy', okN, 'c-quiet', false) +
+          (eta ? '<span class="pg-eta">&middot; ETA ' + fdate(eta) + '</span>' : '') + onOrderTip) +
+        chip('ok', 'Healthy', okN, 'c-quiet', false, okTip) +
       '</div></div>';
   }
 
@@ -2055,6 +2160,7 @@ window.MOCK_EXTRA = {
     if (it.excluded) {
       var rule = M.exclusionRules.filter(function (r) { return r.field === 'category' && r.value === it.category; })[0];
       return '<tr class="excluded-row" data-sku="' + it.sku + '">' +
+        '<td class="pg-tc"></td>' +
         '<td class="mono">' + it.sku + '</td>' +
         '<td><div class="pg-name" title="' + esc(it.name) + '">' + esc(it.name) + '</div><div class="pg-subline">No vendor · ' + esc(it.productLine) + '</div></td>' +
         '<td><span class="badge b-gray">Excluded</span><div class="pg-subline">rule: ' + (rule ? rule.field + ' = ' + esc(rule.value) : 'manual') + '</div></td>' +
@@ -2077,23 +2183,34 @@ window.MOCK_EXTRA = {
     var sug = it.suggestedPieces > 0
       ? '<div><b>' + fmt(it.suggestedPieces) + '</b></div><div class="pg-subline">' + money(it.suggestedValueCents) + '</div>'
       : '<span class="muted">&mdash;</span>';
+    var checked = !!state.order.checked[it.sku];
+    var soonLine = '';
+    if (it.status === 'order_soon') {
+      var sd = soonDates(it);
+      soonLine = '<div class="pg-soonline">stockout ' + sd.stockout + ' · order by ' + sd.orderBy + '</div>';
+    }
     return '<tr data-sku="' + it.sku + '">' +
+      '<td class="pg-tc pg-ckcell"><input type="checkbox" class="pg-rowck" aria-label="Add ' + it.sku + ' to order"' + (checked ? ' checked' : '') + '></td>' +
       '<td class="mono">' + it.sku + '</td>' +
       '<td><div class="pg-name" title="' + esc(it.name) + '">' + esc(it.name) + '</div><div class="pg-subline">' + esc(it.vendor || 'No vendor') + ' · ' + esc(it.productLine) + '</div></td>' +
       '<td><span class="badge ' + st.cls + '">' + st.label + '</span></td>' +
       '<td class="pg-tc">' + trendHtml(it) + '</td>' +
       '<td class="num">' + (it.available === 0 ? '<span class="pg-cred">0</span>' : fmt(it.available)) + '</td>' +
       '<td class="num">' + inb + '</td>' +
-      '<td class="right">' + dosHtml(it) + '</td>' +
+      '<td class="right">' + dosHtml(it) + soonLine + '</td>' +
       '<td class="num">' + rp + '</td>' +
       '<td class="num">' + sug + '</td>' +
       '<td><span class="badge ' + conf.cls + '">' + conf.label + '</span></td>' +
-      '<td><div class="pg-actions"><button class="btn btn-outline btn-sm act-explain">Explain</button><button class="btn btn-ghost btn-sm act-plan">＋ Plan</button></div></td>' +
+      '<td><div class="pg-actions"><button class="btn btn-outline btn-sm act-explain">Explain</button>' +
+        (checked
+          ? '<button class="btn btn-ghost btn-sm act-plan pg-cgreen">&#10003; Added</button>'
+          : '<button class="btn btn-ghost btn-sm act-plan">Add to order</button>') +
+      '</div></td>' +
       '</tr>';
   }
 
   function emptyRow() {
-    return '<tr><td colspan="11" style="text-align:center;padding:28px" class="muted">No SKUs match the current filters.</td></tr>';
+    return '<tr><td colspan="12" style="text-align:center;padding:28px" class="muted">No SKUs match the current filters.</td></tr>';
   }
 
   function renderTable() {
@@ -2121,11 +2238,11 @@ window.MOCK_EXTRA = {
         var sug = g.reduce(function (s, i) { return s + i.suggestedValueCents; }, 0);
         var oh = g.reduce(function (s, i) { return s + i.available * i.unitCostCents; }, 0);
         var below = g.filter(function (i) { return !i.excluded && i.effectiveSupply < i.adjustedReorderPoint; }).length;
-        html += '<tr class="group-row ' + (collapsed ? '' : 'open') + '" data-group="' + esc(k) + '"><td colspan="11">' +
+        html += '<tr class="group-row ' + (collapsed ? '' : 'open') + '" data-group="' + esc(k) + '"><td colspan="12">' +
           '<span class="caret">&#9654;</span>' + esc(k) +
           '<span class="pg-groupchips">' +
           '<span class="pg-gc">' + g.length + ' SKU' + (g.length === 1 ? '' : 's') + '</span>' +
-          '<span class="pg-gc' + (below ? ' pg-warn' : '') + '">' + below + ' below RP</span>' +
+          '<span class="pg-gc' + (below ? ' pg-warn' : '') + '" title="Below reorder point — SKUs whose effective supply is under the stock level at which you must order so delivery arrives before you dip into safety stock (incl. demand events)">' + below + ' below RP</span>' +
           '<span class="pg-gc">suggested ' + money(sug) + '</span>' +
           '<span class="pg-gc">on hand ' + money(oh) + '</span>' +
           '</span></td></tr>';
@@ -2133,6 +2250,17 @@ window.MOCK_EXTRA = {
       });
     }
     $('#tbody').innerHTML = html;
+    renderTableCtx(rs);
+  }
+
+  /* rev2 — context line above the table while the default order-queue view is active */
+  function renderTableCtx(rs) {
+    var ctx = $('#tableCtx');
+    if (!isQueueView()) { ctx.style.display = 'none'; return; }
+    var activeN = M.items.filter(function (i) { return !i.excluded; }).length;
+    ctx.style.display = '';
+    ctx.innerHTML = 'Showing order queue · <b>' + rs.length + ' of ' + activeN + ' SKUs</b> · ' +
+      '<span class="pg-viewall" role="button" tabindex="0">View all</span>';
   }
 
   /* ---------- forecast accuracy strip ---------- */
@@ -2273,7 +2401,13 @@ window.MOCK_EXTRA = {
         monitor:       ['co-gray', 'Monitoring']
       }[act.action];
       var gateText = act.gate.replace(/^(Held|Auto-draft)\s+—\s+/, '');
-      gate = '<div class="callout ' + gm[0] + '" style="margin-top:10px"><div><b>' + gm[1] + '</b> — ' + esc(gateText) + '.' + (act.note ? ' ' + esc(act.note) + '.' : '') + '</div></div>';
+      var soonNote = '';
+      if (it.status === 'order_soon') {
+        var sd8 = soonDates(it);
+        soonNote = ' Stockout ' + sd8.stockout + ' · order by ' + sd8.orderBy +
+          ' to keep the ' + it.safetyStockDays + '-day safety buffer.';
+      }
+      gate = '<div class="callout ' + gm[0] + '" style="margin-top:10px"><div><b>' + gm[1] + '</b> — ' + esc(gateText) + '.' + (act.note ? ' ' + esc(act.note) + '.' : '') + soonNote + '</div></div>';
     }
     var btns = '<div class="pg-dfoot">' +
       (it.suggestedPieces > 0
@@ -2315,7 +2449,190 @@ window.MOCK_EXTRA = {
   }
   function closeDrawer() {
     $('#drawer').classList.remove('open');
-    $('#overlay').classList.remove('open');
+    if (!$('#obDrawer').classList.contains('open')) $('#overlay').classList.remove('open');
+  }
+
+  /* ---------- order builder (rev2) ---------- */
+  function setChecked(sku, on, flash) {
+    var it = M.items.filter(function (i) { return i.sku === sku; })[0];
+    if (!it) return;
+    if (on) {
+      state.order.checked[sku] = true;
+      if (state.order.qty[sku] === undefined) state.order.qty[sku] = it.suggestedPieces || 0;
+    } else {
+      delete state.order.checked[sku];
+    }
+    renderTable();
+    renderOrderBar(flash);
+  }
+
+  function renderOrderBar(flash) {
+    var bar = $('#orderBar');
+    var count = 0, total = 0;
+    M.items.forEach(function (it) {
+      if (!state.order.checked[it.sku]) return;
+      count++;
+      total += (state.order.qty[it.sku] || 0) * it.unitCostCents;
+    });
+    if (!count) { bar.style.display = 'none'; return; }
+    bar.style.display = 'flex';
+    $('#orderBarText').innerHTML = 'Review order — <b>' + count + ' item' + (count === 1 ? '' : 's') +
+      ' · ' + money(total) + '</b>';
+    if (flash) {
+      bar.classList.remove('pg-flash');
+      void bar.offsetWidth;
+      bar.classList.add('pg-flash');
+    }
+  }
+
+  /* checked lines grouped by vendor, in item order */
+  function builderGroups() {
+    var groups = [], map = {};
+    M.items.forEach(function (it) {
+      if (!state.order.checked[it.sku]) return;
+      var v = it.vendor || 'No vendor';
+      if (!map[v]) { map[v] = { name: v, items: [] }; groups.push(map[v]); }
+      map[v].items.push(it);
+    });
+    return groups;
+  }
+
+  function needBy(it) {
+    if (it.status === 'stockout' || it.status === 'order_now') return '<span class="pg-cred">today</span>';
+    if (it.status === 'order_soon') return 'by ' + soonDates(it).orderBy;
+    return '<span class="muted">&mdash;</span>';
+  }
+
+  /* next PO number = highest PO-#### already mentioned in the run report, + 1 */
+  function nextPoNumber() {
+    var max = 0;
+    X.runReport.actions.forEach(function (a) {
+      var m = /PO-(\d+)/.exec(a.note || '');
+      if (m && +m[1] > max) max = +m[1];
+    });
+    return max + 1;
+  }
+
+  function renderBuilder() {
+    var groups = builderGroups();
+    $('#obHead').innerHTML =
+      '<div class="pg-titlebox" style="flex:1">' +
+      '<div style="font-weight:700;font-size:14.5px">Order builder</div>' +
+      '<div class="small muted" id="obSub"></div></div>' +
+      '<button class="btn btn-ghost btn-sm" id="obClose" aria-label="Close">✕</button>';
+    var html = groups.map(function (g) {
+      var vrec = M.vendors.filter(function (v) { return v.name === g.name; })[0];
+      var mode = state.order.vendorMode[g.name] || 'po';
+      var lines = g.items.map(function (it) {
+        var qty = state.order.qty[it.sku] || 0;
+        var uv = UNVERIFIED[it.sku];
+        return '<tr>' +
+          '<td class="mono">' + it.sku + '</td>' +
+          '<td><div class="pg-name" style="max-width:150px" title="' + esc(it.name) + '">' + esc(it.name) + '</div>' +
+            (uv ? '<div class="pg-subline pg-camber" style="max-width:none">vendor cost unverified &gt;' + uv + 'd — consider requesting a quote</div>' : '') +
+          '</td>' +
+          '<td style="white-space:nowrap">' + needBy(it) + '</td>' +
+          '<td class="right"><input type="number" min="0" step="1" class="input ob-qty" data-sku="' + it.sku + '" value="' + qty + '">' +
+            '<div class="pg-subline ob-hint" data-sku="' + it.sku + '" style="max-width:none;text-align:right"></div></td>' +
+          '<td class="right">' + money(it.unitCostCents) + '</td>' +
+          '<td class="right"><b class="ob-line" data-sku="' + it.sku + '"></b></td>' +
+          '</tr>';
+      }).join('');
+      return '<div class="pg-obvendor">' +
+        '<div class="pg-obvh"><b>' + esc(g.name) + '</b>' +
+          (vrec ? '<span class="muted small">' + esc(vrec.terms) + '</span>' : '') + '</div>' +
+        '<table class="pg-mini"><thead><tr><th>SKU</th><th>Product</th><th>Need by</th><th class="right">Pieces</th><th class="right">Unit cost</th><th class="right">Line total</th></tr></thead>' +
+        '<tbody>' + lines + '</tbody></table>' +
+        '<div class="pg-obvfoot">' +
+          '<span>Vendor total <b class="ob-vtotal" data-vendor="' + esc(g.name) + '"></b>' +
+            '<span class="muted"> · lead ' + (vrec ? vrec.leadTimeDays : g.items[0].leadTimeDays) + 'd</span></span>' +
+          '<span class="pg-obradios">' +
+            '<label><input type="radio" name="obmode-' + esc(g.name) + '" value="po"' + (mode === 'po' ? ' checked' : '') + '> Send as PO</label>' +
+            '<label><input type="radio" name="obmode-' + esc(g.name) + '" value="rfq"' + (mode === 'rfq' ? ' checked' : '') + '> Request quote</label>' +
+          '</span></div></div>';
+    }).join('');
+    html += '<div class="pg-obgrand">' +
+      '<div>Order total <b id="obGrand"></b><div class="tiny muted" id="obGrandSub"></div></div>' +
+      '<div class="row" style="gap:8px;flex-wrap:wrap">' +
+        '<a class="btn btn-ghost btn-sm" id="obRfqLink" href="05-rfq-workbench.html" style="display:none">RFQs tab &rarr;</a>' +
+        '<button class="btn btn-outline" id="obKeep">Keep editing</button>' +
+        '<button class="btn btn-primary" id="obPrimary"></button>' +
+      '</div></div>';
+    $('#obBody').innerHTML = html;
+    $('#obClose').onclick = closeBuilder;
+    $('#obKeep').onclick = closeBuilder;
+    $('#obPrimary').onclick = createOrders;
+    updateBuilderTotals();
+  }
+
+  /* live recompute of line / vendor / grand totals from builder state (no re-render, keeps focus) */
+  function updateBuilderTotals() {
+    var groups = builderGroups();
+    var grand = 0, nPo = 0, nRfq = 0, itemCount = 0, anyRfqMode = false;
+    groups.forEach(function (g) {
+      var vt = 0;
+      g.items.forEach(function (it) {
+        var qty = state.order.qty[it.sku] || 0;
+        var lt = qty * it.unitCostCents;
+        vt += lt; itemCount++;
+        var el = document.querySelector('.ob-line[data-sku="' + it.sku + '"]');
+        if (el) el.textContent = money(lt);
+        var hint = document.querySelector('.ob-hint[data-sku="' + it.sku + '"]');
+        if (hint) hint.textContent = (qty > 0 && qty % it.increment !== 0)
+          ? 'rounds to case of ' + it.increment + ' → ' + (Math.ceil(qty / it.increment) * it.increment)
+          : '';
+      });
+      grand += vt;
+      var vel = document.querySelector('.ob-vtotal[data-vendor="' + g.name + '"]');
+      if (vel) vel.textContent = money(vt);
+      var mode = state.order.vendorMode[g.name] || 'po';
+      if (mode === 'rfq') anyRfqMode = true;
+      if (vt > 0) { if (mode === 'rfq') nRfq++; else nPo++; }
+    });
+    $('#obGrand').textContent = money(grand);
+    $('#obGrandSub').textContent = itemCount + ' item' + (itemCount === 1 ? '' : 's') + ' · ' +
+      groups.length + ' vendor' + (groups.length === 1 ? '' : 's');
+    $('#obSub').textContent = 'Lines grouped by vendor · edit pieces to resize the order';
+    var parts = [];
+    if (nPo) parts.push(nPo + ' PO' + (nPo === 1 ? '' : 's'));
+    if (nRfq) parts.push(nRfq + ' RFQ' + (nRfq === 1 ? '' : 's'));
+    var btn = $('#obPrimary');
+    btn.textContent = parts.length ? 'Create ' + parts.join(' · ') : 'Nothing to order';
+    btn.disabled = !parts.length;
+    $('#obRfqLink').style.display = anyRfqMode ? '' : 'none';
+  }
+
+  function createOrders() {
+    var groups = builderGroups();
+    var pos = [], rfqs = [];
+    groups.forEach(function (g) {
+      var vt = 0, n = 0;
+      g.items.forEach(function (it) {
+        var q = state.order.qty[it.sku] || 0;
+        if (q > 0) { vt += q * it.unitCostCents; n++; }
+      });
+      if (!vt) return;
+      if ((state.order.vendorMode[g.name] || 'po') === 'rfq') rfqs.push(g.name);
+      else pos.push({ name: g.name, lines: n, total: vt });
+    });
+    var poBase = nextPoNumber();
+    var parts = pos.map(function (p, i) {
+      return 'PO-' + (poBase + i) + ' (' + p.name + (p.lines > 1 ? ', ' + p.lines + ' lines' : '') + ', ' + money(p.total) + ')';
+    });
+    var segs = [];
+    if (parts.length) segs.push('Would create ' + parts.join(' · ') + ' · drafts open for review');
+    if (rfqs.length) segs.push('RFQ draft' + (rfqs.length === 1 ? '' : 's') + ' created — track in the RFQs tab');
+    toast(segs.length ? segs.join(' · ') : 'Nothing to order — set pieces above zero first');
+  }
+
+  function openBuilder() {
+    renderBuilder();
+    $('#obDrawer').classList.add('open');
+    $('#overlay').classList.add('open');
+  }
+  function closeBuilder() {
+    $('#obDrawer').classList.remove('open');
+    if (!$('#drawer').classList.contains('open')) $('#overlay').classList.remove('open');
   }
 
   /* ---------- events ---------- */
@@ -2334,17 +2651,41 @@ window.MOCK_EXTRA = {
     if (e.target.closest('.act-explain')) {
       openDrawer(it);
     } else if (e.target.closest('.act-plan')) {
-      toast(it.suggestedPieces > 0
-        ? 'Would add ' + it.sku + ' — ' + fmt(it.suggestedPieces) + ' pc (' + money(it.suggestedValueCents) + ') to a draft PO for ' + it.vendor
-        : 'Would add ' + it.sku + ' to a manual purchase plan');
+      setChecked(it.sku, true, true);
     }
   });
 
+  /* row checkboxes → order builder selection */
+  $('#tbody').addEventListener('change', function (e) {
+    var ck = e.target.closest('.pg-rowck');
+    if (!ck) return;
+    var tr = ck.closest('tr[data-sku]');
+    if (!tr) return;
+    setChecked(tr.getAttribute('data-sku'), ck.checked, ck.checked);
+  });
+
   $('#statusChips').addEventListener('click', function (e) {
+    if (e.target.closest('.pg-info')) return; /* info icon — tooltip only, not a toggle */
     var b = e.target.closest('.chip');
     if (!b) return;
-    state.status = b.getAttribute('data-s');
+    var key = b.getAttribute('data-s');
     state.health = null;
+    if (key === 'all') {
+      setAllStatuses(!allOn()); /* reset: select everything, or clear if already everything */
+    } else if (state.statuses[key]) {
+      delete state.statuses[key];
+    } else {
+      state.statuses[key] = true;
+    }
+    renderChips();
+    renderHealth();
+    renderTable();
+  });
+
+  $('#tableCtx').addEventListener('click', function (e) {
+    if (!e.target.closest('.pg-viewall')) return;
+    state.health = null;
+    setAllStatuses(true);
     renderChips();
     renderHealth();
     renderTable();
@@ -2354,8 +2695,8 @@ window.MOCK_EXTRA = {
     var r = e.target.closest('.pg-hrow');
     if (!r) return;
     var h = r.getAttribute('data-h');
-    if (state.health === h) { state.health = null; state.status = 'all'; }
-    else { state.health = h; state.status = null; }
+    if (state.health === h) { state.health = null; setAllStatuses(true); }
+    else { state.health = h; state.statuses = {}; }
     renderChips();
     renderHealth();
     renderTable();
@@ -2385,8 +2726,26 @@ window.MOCK_EXTRA = {
     renderTable();
   });
 
-  $('#overlay').addEventListener('click', closeDrawer);
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeDrawer(); });
+  $('#overlay').addEventListener('click', function () { closeDrawer(); closeBuilder(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeDrawer(); closeBuilder(); } });
+
+  $('#btnOpenBuilder').addEventListener('click', openBuilder);
+
+  /* builder inputs (delegated on the static container so re-renders keep working) */
+  $('#obBody').addEventListener('input', function (e) {
+    var inp = e.target.closest('.ob-qty');
+    if (!inp) return;
+    var v = parseInt(inp.value, 10);
+    state.order.qty[inp.getAttribute('data-sku')] = (isNaN(v) || v < 0) ? 0 : v;
+    updateBuilderTotals();
+    renderOrderBar(false);
+  });
+  $('#obBody').addEventListener('change', function (e) {
+    var r = e.target.closest('input[type="radio"]');
+    if (!r) return;
+    state.order.vendorMode[r.name.replace(/^obmode-/, '')] = r.value;
+    updateBuilderTotals();
+  });
 
   $('#btnRefresh').addEventListener('click', function () {
     toast('Would start a fresh analysis run now — last run #' + X.runReport.runId + ' completed in ' + X.runReport.durationSec + 's');
@@ -2409,11 +2768,25 @@ window.MOCK_EXTRA = {
   $('#autoChipText').textContent = 'Automation: Stage ' + stageN + ' · ' + X.automation.stages[stageN].name;
   $('#exclLabel').textContent = 'Show excluded (' + M.items.filter(function (i) { return i.excluded; }).length + ')';
 
+  /* rev2 — Reorder point column header tooltip (horizon computed from MOCK) */
+  $('#thRp').innerHTML = '<span class="pg-hastip">Reorder point<span class="pg-tip pg-tip-r">' +
+    'Stock level at which you must order so delivery arrives before you dip into safety stock. ' +
+    'Includes demand events inside the ' + M.horizonDays + '-day horizon.</span></span>';
+
+  /* rev2 — pre-check every SKU the engine suggests ordering */
+  M.items.forEach(function (i) {
+    if (!i.excluded && i.suggestedPieces > 0) {
+      state.order.checked[i.sku] = true;
+      state.order.qty[i.sku] = i.suggestedPieces;
+    }
+  });
+
   renderKpis();
   renderChips();
   renderHealth();
   renderTable();
   renderAccuracy();
+  renderOrderBar(false);
 })();
 </script>
 </body>

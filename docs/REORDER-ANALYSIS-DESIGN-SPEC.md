@@ -116,7 +116,16 @@ Each step lands behind the usual branch→PR flow; steps 2–3 need migrations a
    - KPI labels aligned: "Needs order" / "Order soon".
    Implementation note: this is presentation-layer grouping only — the engine taxonomy is unchanged; the UI maps statuses → queues.
 
-## 11. Open questions (parked)
+## 11. Revision 2 (owner review, 2026-07-26)
+
+1. **Additive queue chips.** `Needs order` and `Order soon` are toggles that combine; the cockpit's default view IS the combined order queue (severity-sorted), with "View all" one click away. Chip explainer sentences move into hover tooltips; order-soon gets concrete dates (projected stockout + order-by date = `asOf + daysOfSupply − (lead + safety)`), shown on the row, in the tooltip, and in the math drawer.
+2. **The Order Builder is the single ordering flow.** Queue rows carry checkboxes (suggestions pre-checked; any row can be added — healthy rows exist for MOQ/freight top-offs; the old "+ Plan" is now "Add to order"). A sticky bar opens the builder: lines grouped by vendor, editable pieces with case-rounding hints, live totals, and one per-vendor choice — **Send as PO** (default; the owner buys each SKU from one vendor at known cost) or **Request quote** when cost is unknown/stale. Both output a vendor-facing document through the existing PO email pipeline.
+3. **RFQ workbench demoted to a tracking surface.** It is no longer an entry point: lines land there only via "Request quote", and the multi-vendor comparison matrix appears only when more than one vendor actually quotes a line. The full lifecycle design remains for that case.
+4. **Terminology:** "Reorder point" spelled out in column headers (tooltip carries the definition); "RP" only in space-constrained rollup chips with a tooltip.
+
+Implementation mapping: the builder's per-vendor PO path is the existing accepted-recommendation → PO handoff + `po_email_outbox`; the Request-quote path is the existing RFQ draft creation. Quantity edits vs suggestion map to the existing override-reason contract (RFQ lines already require a ≥3-char reason when qty ≠ recommendation; the PO path should mirror it).
+
+## 12. Open questions (parked)
 
 - Multi-warehouse dimension (blocked on engine gaining warehouse-scoped demand/supply — out of scope v1).
 - Accuracy trust thresholds (`accuracy_thresholds_not_configured` today) — needed before Stage 4; propose configuring after 60d of cohort data.

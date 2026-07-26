@@ -318,7 +318,7 @@ tr.pg-qrow { cursor: pointer; }
       <span class="sub" id="pgSub"></span>
       <span class="spacer"></span>
       <button class="btn btn-ghost" id="pgHowBtn">How quotes get in</button>
-      <button class="btn btn-primary" id="pgNewRfq">New RFQ from suggestions</button>
+      <a class="btn btn-ghost muted" href="01-reorder-analysis.html">RFQs start in the Reorder Engine &rarr; Order Builder</a>
     </div>
 
     <div class="engine-tabs">
@@ -333,6 +333,11 @@ tr.pg-qrow { cursor: pointer; }
 
     <div class="content">
       <div class="tabs" id="pgTabs"></div>
+
+      <div class="callout co-gray" style="margin-bottom:16px">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" style="flex:0 0 15px;margin-top:1px;color:var(--muted)"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M12 11.5V16"/></svg>
+        <div>Most orders go straight to a PO &mdash; you usually buy each SKU from one vendor. A line lands here only when you chose <b>Request quote</b> in the <a class="pg-link" href="01-reorder-analysis.html">Order Builder</a>. The side-by-side comparison below appears only when more than one vendor quotes a line.</div>
+      </div>
 
       <!-- Award showcase -->
       <div class="section-gap" id="panel-award">
@@ -1878,11 +1883,6 @@ window.MOCK_EXTRA = {
   var runTime = X.runReport.at.split(" ")[1]; // "02:00"
   $("#pgSub").innerHTML = "As of " + fdate(M.asOf) + " &middot; Last run #" + X.runReport.runId +
     " (" + runTime + " UTC) &middot; Policy cohort <span class=\"mono\">" + M.policy.cohort + "</span>";
-  var sugCount = M.items.filter(function (i) { return i.suggestedPieces > 0; }).length;
-  $("#pgNewRfq").addEventListener("click", function () {
-    toast("Would start a new RFQ seeded with today's " + sugCount + " suggested order lines");
-  });
-
   /* ---------- pipeline tabs ---------- */
   var TABS = [["draft","Draft"],["sent","Sent"],["quoting","Quoting"],["award","Award"],["converted","Converted"]];
   var tabsEl = $("#pgTabs");
