@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildShopifyMappingReconciliationReport,
+  buildShopifyOwnershipReview,
+  collectDuplicateShopifyOwnershipProductIds,
   evaluateDeadMappingRetirement,
   normalizeShopifyAdminDomain,
   normalizeShopifyProductReference,
@@ -249,6 +251,220 @@ describe("Shopify product mapping reconciliation", () => {
       expect(item.ownerProductIds).toEqual([10, 11]);
       expect(item.issueCodes).toContain("duplicate_local_owner");
     }
+  });
+});
+
+describe("Shopify duplicate ownership review", () => {
+  function ownershipReview(input: {
+    products: ShopifyMappingLocalProduct[];
+    remote?: ShopifyRemoteProductSnapshot[];
+    filter?: "all" | "canonical_owner_recommended" | "manual_review";
+    page?: number;
+    pageSize?: number;
+  }) {
+    return buildShopifyOwnershipReview({
+      generatedAt: "2026-07-24T12:00:00.000Z",
+      channel: {
+        id: 36,
+        name: "Shopify",
+        shopDomain: "cardshellz.myshopify.com",
+      },
+      localProducts: input.products,
+      remoteProducts: new Map(
+        (input.remote ?? [remoteProduct()])
+          .map((product) => [product.productId, product]),
+      ),
+      filter: input.filter ?? "all",
+      page: input.page ?? 1,
+      pageSize: input.pageSize ?? 20,
+    });
+  }
+
+  it("collects only Shopify identities with more than one local owner", () => {
+    expect(collectDuplicateShopifyOwnershipProductIds([
+      localProduct(),
+      localProduct({
+        productId: 11,
+        rawShopifyProductId: null,
+        shopifyProductId: null,
+        evidenceProductIds: ["9001"],
+      }),
+      localProduct({
+        productId: 12,
+        rawShopifyProductId: "9002",
+        shopifyProductId: "9002",
+        evidenceProductIds: ["9002"],
+      }),
+    ])).toEqual(["9001"]);
+  });
+
+  it("recommends one canonical owner only when active catalog and channel evidence agree", () => {
+    const result = ownershipReview({
+      products: [
+        localProduct(),
+        localProduct({
+          productId: 11,
+          productName: "Archived duplicate",
+          shopifyProductId: null,
+          rawShopifyProductId: null,
+          mappingStatus: "channel_only",
+          mappingFingerprint: "fingerprint-11",
+          evidenceProductIds: ["9001"],
+          activeVariantCount: 0,
+        }),
+      ],
+    });
+
+    expect(result).toMatchObject({
+      readOnly: true,
+      summary: {
+        duplicateOwnershipGroupCount: 1,
+        canonicalOwnerRecommendationCount: 1,
+        manualReviewOwnershipGroupCount: 0,
+      },
+      pagination: {
+        page: 1,
+        pageSize: 20,
+        totalItems: 1,
+        totalPages: 1,
+      },
+    });
+    expect(result.items[0]).toMatchObject({
+      shopifyProductId: "9001",
+      decision: "canonical_owner_recommended",
+      reason: "single_active_owner_with_matching_evidence",
+      recommendedProductId: 10,
+      nonCanonicalProductIds: [11],
+    });
+  });
+
+  it("requires manual review when multiple owners remain active", () => {
+    const result = ownershipReview({
+      products: [
+        localProduct(),
+        localProduct({
+          productId: 11,
+          productName: "Second active owner",
+          mappingFingerprint: "fingerprint-11",
+        }),
+      ],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      decision: "manual_review",
+      reason: "multiple_active_owners",
+      recommendedProductId: null,
+      nonCanonicalProductIds: [],
+    });
+  });
+
+  it("requires manual review when owner shipping groups conflict", () => {
+    const result = ownershipReview({
+      products: [
+        localProduct(),
+        localProduct({
+          productId: 11,
+          shopifyProductId: null,
+          rawShopifyProductId: null,
+          shippingGroupCode: "storage_boxes",
+          mappingStatus: "channel_only",
+          mappingFingerprint: "fingerprint-11",
+          evidenceProductIds: ["9001"],
+          activeVariantCount: 0,
+        }),
+      ],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      decision: "manual_review",
+      reason: "shipping_group_conflict",
+      shippingGroupCode: null,
+    });
+  });
+
+  it("filters and paginates groups without changing the global summary", () => {
+    const result = ownershipReview({
+      products: [
+        localProduct(),
+        localProduct({
+          productId: 11,
+          shopifyProductId: null,
+          rawShopifyProductId: null,
+          mappingStatus: "channel_only",
+          mappingFingerprint: "fingerprint-11",
+          evidenceProductIds: ["9001"],
+          activeVariantCount: 0,
+        }),
+        localProduct({
+          productId: 20,
+          productName: "Second Shopify product",
+          rawShopifyProductId: "9002",
+          shopifyProductId: "9002",
+          mappingFingerprint: "fingerprint-20",
+          evidenceProductIds: ["9002"],
+        }),
+        localProduct({
+          productId: 21,
+          productName: "Second active duplicate",
+          rawShopifyProductId: "9002",
+          shopifyProductId: "9002",
+          mappingFingerprint: "fingerprint-21",
+          evidenceProductIds: ["9002"],
+        }),
+      ],
+      remote: [
+        remoteProduct(),
+        remoteProduct({
+          productId: "9002",
+          title: "Second Shopify product",
+        }),
+      ],
+      filter: "manual_review",
+      page: 1,
+      pageSize: 1,
+    });
+
+    expect(result.summary).toEqual({
+      duplicateOwnershipGroupCount: 2,
+      canonicalOwnerRecommendationCount: 1,
+      manualReviewOwnershipGroupCount: 1,
+    });
+    expect(result.pagination).toEqual({
+      page: 1,
+      pageSize: 1,
+      totalItems: 1,
+      totalPages: 1,
+    });
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].shopifyProductId).toBe("9002");
+  });
+
+  it("returns an empty bounded page when no ownership groups match", () => {
+    const result = ownershipReview({
+      products: [localProduct()],
+      filter: "manual_review",
+      page: 1,
+      pageSize: 20,
+    });
+
+    expect(result.pagination).toEqual({
+      page: 1,
+      pageSize: 20,
+      totalItems: 0,
+      totalPages: 0,
+    });
+    expect(result.items).toEqual([]);
+  });
+
+  it("rejects ownership pages outside the bounded contract", () => {
+    expect(() => ownershipReview({
+      products: [],
+      page: 10_001,
+    })).toThrow("from 1 through 10000");
+    expect(() => ownershipReview({
+      products: [],
+      pageSize: 51,
+    })).toThrow("from 1 through 50");
   });
 });
 

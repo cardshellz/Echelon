@@ -1,9 +1,13 @@
 import {
   buildShopifyMappingReconciliationReport,
+  buildShopifyOwnershipReview,
+  collectDuplicateShopifyOwnershipProductIds,
   evaluateDeadMappingRetirement,
   normalizeShopifyAdminDomain,
   normalizeShopifyProductReference,
   type ShopifyMappingReconciliationReport,
+  type ShopifyOwnershipReviewFilter,
+  type ShopifyOwnershipReviewPage,
 } from "./shopify-product-mapping-reconciliation.domain";
 import {
   collectAllMappedShopifyVariantIds,
@@ -30,32 +34,66 @@ export function createShopifyProductMappingReconciliationService(input: {
   const verifier = input.verifier ?? createShopifyProductMappingVerifier();
   const clock = input.clock ?? (() => new Date());
 
+  async function loadLocalEvidence(channelId: number) {
+    const context = await repository.loadChannelContext(channelId);
+    const localProducts = await repository.listMappedProducts(channelId);
+    return {
+      channel: context.channel,
+      credentials: context.credentials,
+      localProducts: localProducts.map((product) => ({
+        ...product.local,
+        mappingFingerprint: product.summary.fingerprint,
+      })),
+    };
+  }
+
   async function scan(
     channelId: number,
   ): Promise<ShopifyMappingReconciliationReport> {
-    const context = await repository.loadChannelContext(channelId);
-    const localProducts = await repository.listMappedProducts(channelId);
-    const productIds = [...new Set(localProducts
+    const evidence = await loadLocalEvidence(channelId);
+    const productIds = [...new Set(evidence.localProducts
       .flatMap((product) => [
-        product.local.shopifyProductId,
-        ...product.local.evidenceProductIds,
+        product.shopifyProductId,
+        ...product.evidenceProductIds,
       ])
       .filter((productId): productId is string => productId !== null))]
       .sort((left, right) =>
         left.localeCompare(right, "en", { numeric: true }));
     const remoteProducts = await verifier.lookupProducts(
-      context.credentials,
+      evidence.credentials,
       productIds,
     );
 
     return buildShopifyMappingReconciliationReport({
       generatedAt: clock().toISOString(),
-      channel: context.channel,
-      localProducts: localProducts.map((product) => ({
-        ...product.local,
-        mappingFingerprint: product.summary.fingerprint,
-      })),
+      channel: evidence.channel,
+      localProducts: evidence.localProducts,
       remoteProducts,
+    });
+  }
+
+  async function reviewOwnership(inputToReview: {
+    channelId: number;
+    filter: ShopifyOwnershipReviewFilter;
+    page: number;
+    pageSize: number;
+  }): Promise<ShopifyOwnershipReviewPage> {
+    const evidence = await loadLocalEvidence(inputToReview.channelId);
+    const duplicateProductIds = collectDuplicateShopifyOwnershipProductIds(
+      evidence.localProducts,
+    );
+    const remoteProducts = await verifier.lookupProducts(
+      evidence.credentials,
+      duplicateProductIds,
+    );
+    return buildShopifyOwnershipReview({
+      generatedAt: clock().toISOString(),
+      channel: evidence.channel,
+      localProducts: evidence.localProducts,
+      remoteProducts,
+      filter: inputToReview.filter,
+      page: inputToReview.page,
+      pageSize: inputToReview.pageSize,
     });
   }
 
@@ -178,7 +216,7 @@ export function createShopifyProductMappingReconciliationService(input: {
     });
   }
 
-  return { scan, retireStaleMapping };
+  return { scan, reviewOwnership, retireStaleMapping };
 }
 
 export type ShopifyProductMappingReconciliationService = ReturnType<

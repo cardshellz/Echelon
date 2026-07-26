@@ -11,6 +11,7 @@
 import React, { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
+import { ShopifyOwnershipReview } from "@/components/ShopifyOwnershipReview";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -111,6 +112,7 @@ interface ShopifyMappingReconciliationReport {
 }
 
 type FeedStatus = "all" | "listed" | "not_listed" | "errors";
+type MappingView = "issues" | "ownership" | "all";
 const MAPPING_PAGE_SIZE = 20;
 
 const mappingIssueLabels: Record<ShopifyMappingIssueCode, string> = {
@@ -130,7 +132,7 @@ export default function ShopifyChannelPage() {
   const [feedFilter, setFeedFilter] = useState<FeedStatus>("all");
   const [feedSearch, setFeedSearch] = useState("");
   const [pushingProductId, setPushingProductId] = useState<number | null>(null);
-  const [showHealthyMappings, setShowHealthyMappings] = useState(false);
+  const [mappingView, setMappingView] = useState<MappingView>("issues");
   const [mappingPage, setMappingPage] = useState(1);
   const [retireCandidate, setRetireCandidate] =
     useState<ShopifyMappingReconciliationItem | null>(null);
@@ -489,10 +491,10 @@ export default function ShopifyChannelPage() {
 
   const visibleMappingItems = useMemo(() => {
     const items = mappingReconciliationQuery.data?.items ?? [];
-    return showHealthyMappings
+    return mappingView === "all"
       ? items
       : items.filter((item) => item.issueCodes.length > 0);
-  }, [mappingReconciliationQuery.data, showHealthyMappings]);
+  }, [mappingReconciliationQuery.data, mappingView]);
   const mappingPageCount = Math.max(
     1,
     Math.ceil(visibleMappingItems.length / MAPPING_PAGE_SIZE),
@@ -582,11 +584,12 @@ export default function ShopifyChannelPage() {
               size="sm"
               disabled={
                 !shopifyChannel || mappingReconciliationQuery.isFetching
-              }
-              onClick={() => {
-                setMappingPage(1);
-                void mappingReconciliationQuery.refetch();
-              }}
+            }
+            onClick={() => {
+              setMappingView("issues");
+              setMappingPage(1);
+              void mappingReconciliationQuery.refetch();
+            }}
             >
               {mappingReconciliationQuery.isFetching ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -598,7 +601,46 @@ export default function ShopifyChannelPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {mappingReconciliationQuery.error ? (
+          <div className="flex gap-2">
+            <Button
+              variant={mappingView === "issues" ? "default" : "outline"}
+              size="sm"
+              onClick={() => {
+                setMappingView("issues");
+                setMappingPage(1);
+              }}
+            >
+              Issues
+            </Button>
+            <Button
+              variant={mappingView === "ownership" ? "default" : "outline"}
+              size="sm"
+              onClick={() => {
+                setMappingView("ownership");
+                setMappingPage(1);
+              }}
+            >
+              Ownership review
+            </Button>
+            <Button
+              variant={mappingView === "all" ? "default" : "outline"}
+              size="sm"
+              onClick={() => {
+                setMappingView("all");
+                setMappingPage(1);
+              }}
+            >
+              All
+            </Button>
+          </div>
+
+          {mappingView === "ownership" && shopifyChannel ? (
+            <ShopifyOwnershipReview
+              channelId={shopifyChannel.id}
+              onOpenProduct={(productId) =>
+                navigate(`/products/${productId}?tab=channels`)}
+            />
+          ) : mappingReconciliationQuery.error ? (
             <div className="flex items-start gap-2 border border-red-200 bg-red-50 p-3 text-sm text-red-700">
               <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
               <span>{mappingReconciliationQuery.error.message}</span>
@@ -635,29 +677,6 @@ export default function ShopifyChannelPage() {
                     mappingReconciliationQuery.data.generatedAt,
                   ).toLocaleString()}
                 </span>
-              </div>
-
-              <div className="flex gap-2">
-                <Button
-                  variant={!showHealthyMappings ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => {
-                    setShowHealthyMappings(false);
-                    setMappingPage(1);
-                  }}
-                >
-                  Issues
-                </Button>
-                <Button
-                  variant={showHealthyMappings ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => {
-                    setShowHealthyMappings(true);
-                    setMappingPage(1);
-                  }}
-                >
-                  All
-                </Button>
               </div>
 
               <div className="border rounded-lg overflow-x-auto">
@@ -764,7 +783,7 @@ export default function ShopifyChannelPage() {
                           colSpan={5}
                           className="text-center text-sm text-muted-foreground py-8"
                         >
-                          {showHealthyMappings
+                          {mappingView === "all"
                             ? "No mapped Shopify products were returned."
                             : "No mapping issues were found."}
                         </TableCell>

@@ -17,6 +17,7 @@ const { requirePermissionMock, serviceMocks, createServiceMock } = vi.hoisted(
   () => {
     const serviceMocks = {
       scan: vi.fn(),
+      reviewOwnership: vi.fn(),
       retireStaleMapping: vi.fn(),
     };
     return {
@@ -54,6 +55,7 @@ describe("Shopify product mapping reconciliation routes", () => {
     requirePermissionMock.mockClear();
     createServiceMock.mockClear();
     serviceMocks.scan.mockReset();
+    serviceMocks.reviewOwnership.mockReset();
     serviceMocks.retireStaleMapping.mockReset();
     server = await startServer(buildApp());
   });
@@ -93,6 +95,60 @@ describe("Shopify product mapping reconciliation routes", () => {
       code: "INVALID_SHOPIFY_MAPPING_RECONCILIATION_REQUEST",
     });
     expect(serviceMocks.scan).not.toHaveBeenCalled();
+  });
+
+  it("validates and forwards a bounded read-only ownership review", async () => {
+    serviceMocks.reviewOwnership.mockResolvedValue({
+      generatedAt: "2026-07-24T12:00:00.000Z",
+      readOnly: true,
+      filter: "manual_review",
+      pagination: {
+        page: 2,
+        pageSize: 10,
+        totalItems: 11,
+        totalPages: 2,
+      },
+      items: [],
+    });
+
+    const result = await jsonRequest(
+      `${server.url}/api/channels/36/shopify-mapping-reconciliation/ownership-review?filter=manual_review&page=2&pageSize=10`,
+    );
+
+    expect(result).toEqual({
+      status: 200,
+      body: {
+        generatedAt: "2026-07-24T12:00:00.000Z",
+        readOnly: true,
+        filter: "manual_review",
+        pagination: {
+          page: 2,
+          pageSize: 10,
+          totalItems: 11,
+          totalPages: 2,
+        },
+        items: [],
+      },
+    });
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory", "view");
+    expect(serviceMocks.reviewOwnership).toHaveBeenCalledWith({
+      channelId: 36,
+      filter: "manual_review",
+      page: 2,
+      pageSize: 10,
+    });
+  });
+
+  it("rejects oversized ownership-review pages before scanning Shopify", async () => {
+    const result = await jsonRequest(
+      `${server.url}/api/channels/36/shopify-mapping-reconciliation/ownership-review?pageSize=51`,
+    );
+
+    expect(result.status).toBe(400);
+    expect(result.body).toMatchObject({
+      code: "INVALID_SHOPIFY_MAPPING_RECONCILIATION_REQUEST",
+    });
+    expect(serviceMocks.reviewOwnership).not.toHaveBeenCalled();
   });
 
   it("validates and forwards an audited stale-mapping retirement", async () => {
