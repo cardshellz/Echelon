@@ -112,6 +112,7 @@ const CHECK_IDENTITY_COLUMNS: Record<string, readonly string[]> = {
   closed_receipt_line_ledger_drift: ["receiving_order_id", "product_variant_id", "warehouse_location_id"],
   receipt_identity_collision_shape: ["receiving_order_id", "product_variant_id", "putaway_location_id"],
   closed_receipt_header_drift: ["receiving_order_id"],
+  return_status_invalid: ["return_id"],
   return_item_quantity_invalid: ["return_item_id"],
   cumulative_return_exceeds_fulfilled: ["order_item_id"],
   duplicate_refund_return_identity: ["order_id", "refund_external_id"],
@@ -838,6 +839,27 @@ export function buildWmsIntegrityChecks(): WmsIntegrityCheck[] {
             OR COALESCE(ro.received_total_units, 0) <> COALESCE(t.received_total_units, 0)
           )
         ORDER BY ro.closed_date DESC NULLS LAST, ro.id DESC
+      `,
+    },
+    {
+      id: "return_status_invalid",
+      category: "returns",
+      severity: "blocker",
+      description: "Returns must use a supported lifecycle status.",
+      remediationTarget: "WMS return lifecycle transitions",
+      sql: `
+        SELECT
+          r.id AS return_id,
+          r.order_id,
+          o.order_number,
+          r.refund_external_id,
+          r.status,
+          r.created_at,
+          r.updated_at
+        FROM wms.returns r
+        LEFT JOIN wms.orders o ON o.id = r.order_id
+        WHERE r.status NOT IN ('expected', 'partially_received', 'received', 'closed')
+        ORDER BY r.updated_at DESC, r.id DESC
       `,
     },
     {
