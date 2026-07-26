@@ -46,6 +46,7 @@ import {
   getOmsLineMaterializableQuantity,
   getOmsLineRemainingMaterializableQuantity,
 } from "./oms-line-authority";
+import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
 
 type WmsBinLocation = { location: string; zone: string };
 type DbLike = typeof db | any;
@@ -1195,32 +1196,10 @@ export class WmsSyncService {
   }
 
   private async refreshOmsLineMaterializedQuantities(omsOrderId: number): Promise<void> {
-    await db.execute(sql`
-      WITH target_lines AS (
-        SELECT id
-        FROM oms.oms_order_lines
-        WHERE order_id = ${omsOrderId}
-      ),
-      materialized AS (
-        SELECT
-          oi.oms_order_line_id,
-          COALESCE(SUM(COALESCE(oi.quantity, 0)), 0)::int AS quantity
-        FROM wms.order_items oi
-        JOIN wms.orders w ON w.id = oi.order_id
-        WHERE w.source = 'oms'
-          AND w.oms_fulfillment_order_id = ${String(omsOrderId)}
-          AND oi.oms_order_line_id IS NOT NULL
-          AND oi.status <> 'cancelled'
-        GROUP BY oi.oms_order_line_id
-      )
-      UPDATE oms.oms_order_lines ol
-         SET wms_materialized_quantity = COALESCE(materialized.quantity, 0),
-             updated_at = NOW()
-        FROM target_lines
-        LEFT JOIN materialized
-          ON materialized.oms_order_line_id = target_lines.id
-       WHERE ol.id = target_lines.id
-    `);
+    await refreshOmsLineMaterializedQuantities(db, {
+      omsOrderId,
+      updatedAt: new Date(),
+    });
   }
 
   private hasOpenShippableOmsDemand(lines: Array<typeof omsOrderLines.$inferSelect>): boolean {
