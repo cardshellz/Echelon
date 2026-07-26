@@ -22,4 +22,25 @@ describe("WMS order creation idempotency", () => {
     expect(ORDERS_STORAGE_SRC).toMatch(/eq\(orders\.omsFulfillmentOrderId, order\.omsFulfillmentOrderId\)/);
     expect(ORDERS_STORAGE_SRC).toMatch(/eq\(orders\.fulfillmentPartitionKey, fulfillmentPartitionKeyForCreate\(order\)\)/);
   });
+
+  it("does not collapse a new OMS fulfillment partition by external order id", () => {
+    const resolverStart = ORDERS_STORAGE_SRC.indexOf(
+      "async function findExistingOrderForCreate",
+    );
+    const omsIdentityStart = ORDERS_STORAGE_SRC.indexOf(
+      'if (order.source === "oms" && order.omsFulfillmentOrderId)',
+      resolverStart,
+    );
+    const externalIdentityStart = ORDERS_STORAGE_SRC.indexOf(
+      "if (order.externalOrderId)",
+      omsIdentityStart,
+    );
+    const omsIdentityBlock = ORDERS_STORAGE_SRC.slice(
+      omsIdentityStart,
+      externalIdentityStart,
+    );
+
+    expect(omsIdentityBlock).toContain("return null;");
+    expect(omsIdentityBlock).not.toContain("orders.externalOrderId");
+  });
 });

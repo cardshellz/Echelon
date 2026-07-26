@@ -35,6 +35,13 @@ export type OmsLineFinancialFields = {
   totalPriceCents: number;
 };
 
+export type ResidualOmsLineFinancialFields = Pick<
+  OmsLineFinancialFields,
+  "id" | "paidPriceCents"
+> & {
+  remainingQuantity: number;
+};
+
 /**
  * Pure validation of an OMS order's financial fields + each line's
  * price fields. Throws `WmsSyncValidationError` on the first issue.
@@ -157,6 +164,99 @@ export function buildWmsItemFinancialSnapshot(
     paidPriceCents: omsLine.paidPriceCents,
     totalPriceCents: omsLine.totalPriceCents,
   };
+}
+
+/**
+ * Build a partition-scoped financial snapshot for a residual fulfillment line.
+ *
+ * A residual WMS partition represents only quantity that was not materialized
+ * into an earlier partition. Copying the OMS line's original extended total
+ * would double-count value when only part of a multi-unit line remains.
+ */
+export function buildResidualWmsItemFinancialSnapshot(
+  omsLine: ResidualOmsLineFinancialFields,
+): {
+  unitPriceCents: number;
+  paidPriceCents: number;
+  totalPriceCents: number;
+} {
+  const quantity = ensurePositiveInteger(
+    `omsOrderLines[${omsLine.id}].remainingQuantity`,
+    omsLine.remainingQuantity,
+  );
+  const paidPriceCents = ensureNonNegativeCents(
+    `omsOrderLines[${omsLine.id}].paidPriceCents`,
+    omsLine.paidPriceCents,
+  );
+  const totalPriceCents = paidPriceCents * quantity;
+  if (!Number.isSafeInteger(totalPriceCents)) {
+    throw new RangeError(
+      `omsOrderLines[${omsLine.id}].residualTotalPriceCents exceeds the safe integer range`,
+    );
+  }
+
+  return {
+    unitPriceCents: paidPriceCents,
+    paidPriceCents,
+    totalPriceCents,
+  };
+}
+
+/**
+ * Build the WMS header snapshot for a residual fulfillment partition.
+ *
+ * Shipping, tax, and discount stay on the original order partition. The
+ * residual partition carries only its remaining merchandise value so WMS and
+ * the shipping engine do not report the original order total twice.
+ */
+export function buildResidualWmsOrderFinancialSnapshot(
+  omsOrderId: number,
+  currency: string,
+  lines: readonly ResidualOmsLineFinancialFields[],
+): {
+  amountPaidCents: number;
+  taxCents: number;
+  shippingCents: number;
+  discountCents: number;
+  totalCents: number;
+  currency: string;
+} {
+  const normalizedCurrency = ensureCurrencyCode("omsOrder.currency", currency);
+  let totalCents = 0;
+
+  for (const line of lines) {
+    const item = buildResidualWmsItemFinancialSnapshot(line);
+    totalCents += item.totalPriceCents;
+    if (!Number.isSafeInteger(totalCents)) {
+      throw new RangeError(
+        `OMS order ${omsOrderId} residual total exceeds the safe integer range`,
+      );
+    }
+  }
+
+  return {
+    amountPaidCents: totalCents,
+    taxCents: 0,
+    shippingCents: 0,
+    discountCents: 0,
+    totalCents,
+    currency: normalizedCurrency,
+  };
+}
+
+function ensurePositiveInteger(field: string, value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) <= 0) {
+    throw new RangeError(`${field} must be a positive safe integer`);
+  }
+  return Number(value);
+}
+
+function ensureNonNegativeCents(field: string, value: unknown): number {
+  ensureCents(field, value);
+  if (!Number.isSafeInteger(value)) {
+    throw new RangeError(`${field} must be a safe integer`);
+  }
+  return Number(value);
 }
 
 // Re-export CurrencyValidationError so callers that want to catch the
