@@ -24,7 +24,7 @@ const destinationScopeSchema = z.object({
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["regions"],
-      message: "Select at least one destination state or ZIP prefix.",
+      message: "Select at least one destination region or ZIP prefix.",
     });
   }
 });

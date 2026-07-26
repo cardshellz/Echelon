@@ -2,8 +2,8 @@
  * Pure model for the pricing-program rate editor.
  *
  * Destination groups are a UI abstraction: each group applies one band
- * schedule to many states (plus optional ZIP-prefix overrides) and expands
- * into individual state/ZIP/band rows on save. Rates are integer cents and
+ * schedule to many US postal regions (plus optional ZIP-prefix overrides) and
+ * expands into individual region/ZIP/band rows on save. Rates are integer cents and
  * measures integer grams / whole pallets at the API boundary; operators only
  * ever see dollars, pounds, and pallet counts.
  */
@@ -249,8 +249,12 @@ export function groupDisplayName(group: RateGroup, index: number): string {
     const states = [...new Set(group.zipEntries.map((entry) => entry.state))];
     return `${states.join(", ")} ZIP overrides`;
   }
-  if (regions.size > 0) return `${regions.size} states`;
+  if (regions.size > 0) return formatUsRegionCount(regions.size);
   return `Rate group ${index + 1}`;
+}
+
+export function formatUsRegionCount(count: number): string {
+  return `${count} US region${count === 1 ? "" : "s"}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +339,7 @@ export function validateRateGroups(
   const rows: DraftRow[] = [];
   const errors: string[] = [];
   const issues: GroupIssue[] = [];
-  const statewideOwner = new Map<string, number>();
+  const regionWideOwner = new Map<string, number>();
   const zipOwner = new Map<string, number>();
   const groupLabel = (index: number) => groupDisplayName(groups[index], index);
 
@@ -349,10 +353,10 @@ export function validateRateGroups(
     }
     for (const region of group.regions) {
       const key = `${group.originWarehouseId ?? "any"}|${region}`;
-      if (statewideOwner.has(key)) {
-        fail(`${region} is assigned statewide in more than one destination group for this warehouse scope.`);
+      if (regionWideOwner.has(key)) {
+        fail(`${region} is assigned region-wide in more than one destination group for this warehouse scope.`);
       }
-      statewideOwner.set(key, groupIndex);
+      regionWideOwner.set(key, groupIndex);
     }
     for (const entry of group.zipEntries) {
       for (const prefix of entry.prefixes) {
@@ -466,8 +470,8 @@ export function validateRateGroups(
 
   for (const zipKey of zipOwner.keys()) {
     const [warehouseScope, state] = zipKey.split("|");
-    if (!statewideOwner.has(`${warehouseScope}|${state}`)) {
-      const message = `${state} ZIP overrides require a statewide fallback rate in the same warehouse scope.`;
+    if (!regionWideOwner.has(`${warehouseScope}|${state}`)) {
+      const message = `${state} ZIP overrides require a region-wide fallback rate in the same warehouse scope.`;
       errors.push(message);
       const ownerIndex = zipOwner.get(zipKey);
       if (ownerIndex !== undefined && groups[ownerIndex]) {
@@ -944,14 +948,14 @@ export function diffRateRows(
 
 function describeScope(row: DraftRow): string {
   const geography = row.postalPrefix === null
-    ? `${row.destinationRegion} statewide`
+    ? `${row.destinationRegion} region-wide`
     : `${row.destinationRegion} ZIP ${row.postalPrefix}*`;
   return row.originWarehouseId === null ? geography : `${geography} (warehouse-specific)`;
 }
 
 function describeScopeKey(scope: string): string {
   const [warehouse, state, prefix] = scope.split("|");
-  const geography = prefix === "" ? `${state} statewide` : `${state} ZIP ${prefix}*`;
+  const geography = prefix === "" ? `${state} region-wide` : `${state} ZIP ${prefix}*`;
   return warehouse === "any" ? geography : `${geography} (warehouse-specific)`;
 }
 

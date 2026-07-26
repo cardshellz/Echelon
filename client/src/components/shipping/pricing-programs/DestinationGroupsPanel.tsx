@@ -2,7 +2,7 @@
  * Master-detail destination-group workspace (spec §8.2): a compact group
  * list on the left, and the selected group's destinations, warehouse scope,
  * ZIP-prefix overrides, and band matrix on the right. Replaces the old
- * permanently-expanded 50-state checkbox grid.
+ * permanently-expanded US-region checkbox grid.
  */
 
 import { useMemo, useState } from "react";
@@ -245,8 +245,8 @@ export function DestinationGroupsPanel({
         <MapPin className="mx-auto mb-2 h-8 w-8 text-muted-foreground/60" />
         <p className="text-sm font-medium">No destination groups yet</p>
         <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
-          A destination group applies one rate schedule to the states you choose, with optional
-          ZIP-prefix exceptions. Create separate groups when states need different prices.
+          A destination group applies one rate schedule to the US regions you choose, with optional
+          ZIP-prefix exceptions. Create separate groups when regions need different prices.
         </p>
         <AddDestinationGroupMenu className="mt-4" onAdd={addGroup} />
       </div>
@@ -260,7 +260,7 @@ export function DestinationGroupsPanel({
         <div className="px-1 pb-1">
           <h3 className="text-sm font-semibold">Destination groups</h3>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            States in one group share this option's rate schedule. Put Pennsylvania and
+            US regions in one group share this option's rate schedule. Put Pennsylvania and
             California in separate groups when their prices differ.
           </p>
         </div>
@@ -289,7 +289,7 @@ export function DestinationGroupsPanel({
                 )}
               </div>
               <div className="mt-0.5 text-xs text-muted-foreground">
-                {group.regions.length} state{group.regions.length === 1 ? "" : "s"}
+                {group.regions.length} US region{group.regions.length === 1 ? "" : "s"}
                 {group.zipEntries.length > 0 && (
                   <> · {group.zipEntries.reduce((sum, entry) => sum + entry.prefixes.length, 0)} ZIP</>
                 )}
@@ -457,13 +457,13 @@ export function DestinationGroupsPanel({
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  Applying a template replaces the selected states and group name. ZIP overrides are preserved.
+                  Applying a template replaces the selected regions and group name. ZIP overrides are preserved.
                 </p>
               </div>
 
               <div className="space-y-1.5">
-                <Label>Destination states</Label>
-                <StateMultiSelect
+                <Label>Destination US regions</Label>
+                <RegionMultiSelect
                   selected={selectedGroup.regions}
                   conflicted={conflictedRegions}
                   onChange={(regions) => updateGroup(selectedGroup.id, (group) => ({
@@ -482,7 +482,7 @@ export function DestinationGroupsPanel({
             </div>
           </div>
 
-          <SelectedStateChips
+          <SelectedRegionChips
             group={selectedGroup}
             conflicted={conflictedRegions}
             onRemove={(region) => updateGroup(selectedGroup.id, (group) => ({
@@ -496,7 +496,7 @@ export function DestinationGroupsPanel({
               <Label>ZIP-prefix overrides</Label>
               <p className="text-xs text-muted-foreground">
                 Charge this group's rates for specific ZIP prefixes. The longest matching prefix
-                wins; the state still needs a statewide rate as fallback.
+                wins; the region still needs a region-wide rate as fallback.
               </p>
             </div>
             {selectedGroup.zipEntries.length > 0 && (
@@ -533,7 +533,7 @@ export function DestinationGroupsPanel({
                 value={zipDraft.state}
                 onValueChange={(state) => setZipDraft((current) => ({ ...current, state }))}
               >
-                <SelectTrigger className="h-9" aria-label="State for ZIP prefixes"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="h-9" aria-label="US region for ZIP prefixes"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {US_POSTAL_REGIONS.map(([code, name]) => (
                     <SelectItem key={code} value={code}>{code} — {name}</SelectItem>
@@ -674,7 +674,7 @@ export function DestinationGroupsPanel({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this destination group?</AlertDialogTitle>
             <AlertDialogDescription>
-              Its states, ZIP overrides, and rates come out of the draft. Nothing changes for
+              Its regions, ZIP overrides, and rates come out of the draft. Nothing changes for
               live quoting until you activate.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -718,7 +718,7 @@ function AddDestinationGroupMenu({
       <DropdownMenuContent align="start" className="w-64">
         <DropdownMenuItem onSelect={() => onAdd(null)}>
           <span className="flex-1">Custom group</span>
-          <span className="text-xs text-muted-foreground">No states</span>
+          <span className="text-xs text-muted-foreground">No regions</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Coverage</DropdownMenuLabel>
@@ -742,16 +742,16 @@ function AddDestinationGroupMenu({
 }
 
 // ---------------------------------------------------------------------------
-// State multi-select (searchable, keyboard-operable, with presets)
+// US-region multi-select (searchable, keyboard-operable, with presets)
 // ---------------------------------------------------------------------------
 
-interface StateMultiSelectProps {
+interface RegionMultiSelectProps {
   selected: string[];
   conflicted: Set<string>;
   onChange: (regions: string[]) => void;
 }
 
-function StateMultiSelect({ selected, conflicted, onChange }: StateMultiSelectProps) {
+function RegionMultiSelect({ selected, conflicted, onChange }: RegionMultiSelectProps) {
   const [open, setOpen] = useState(false);
   const selectedSet = new Set(selected);
 
@@ -774,8 +774,8 @@ function StateMultiSelect({ selected, conflicted, onChange }: StateMultiSelectPr
           className="h-9 w-full justify-between font-normal"
         >
           {selected.length === 0
-            ? <span className="text-muted-foreground">Select states…</span>
-            : `${selected.length} state${selected.length === 1 ? "" : "s"} selected`}
+            ? <span className="text-muted-foreground">Select US regions…</span>
+            : `${selected.length} US region${selected.length === 1 ? "" : "s"} selected`}
           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
@@ -795,9 +795,9 @@ function StateMultiSelect({ selected, conflicted, onChange }: StateMultiSelectPr
           </Button>
         </div>
         <Command>
-          <CommandInput placeholder="Search states…" />
+          <CommandInput placeholder="Search US regions…" />
           <CommandList className="max-h-64">
-            <CommandEmpty>No state matches.</CommandEmpty>
+            <CommandEmpty>No US region matches.</CommandEmpty>
             <CommandGroup>
               {US_POSTAL_REGIONS.map(([code, name]) => (
                 <CommandItem
@@ -831,12 +831,12 @@ function StateMultiSelect({ selected, conflicted, onChange }: StateMultiSelectPr
 }
 
 // ---------------------------------------------------------------------------
-// Selected-state chips (individual chips small sets, summary for presets)
+// Selected-region chips (individual chips for small sets, summary for presets)
 // ---------------------------------------------------------------------------
 
 const CHIP_LIMIT = 14;
 
-function SelectedStateChips({
+function SelectedRegionChips({
   group,
   conflicted,
   onRemove,
@@ -850,7 +850,7 @@ function SelectedStateChips({
     const conflictedSelected = group.regions.filter((region) => conflicted.has(region));
     return (
       <p className="text-xs text-muted-foreground">
-        {groupDisplayName({ ...group, name: "" }, 0)} — {group.regions.length} states selected.
+        {groupDisplayName({ ...group, name: "" }, 0)} — {group.regions.length} US regions selected.
         {conflictedSelected.length > 0 && (
           <span className="text-amber-700"> Conflicts: {conflictedSelected.join(", ")}.</span>
         )}

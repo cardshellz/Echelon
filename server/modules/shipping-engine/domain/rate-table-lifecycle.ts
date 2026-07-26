@@ -1,5 +1,5 @@
 import {
-  findMissingStateDefaults,
+  findMissingRegionDefaults,
   ratePricingAreaKey,
   type RateTableImportRow,
 } from "./rate-table-import";
@@ -14,6 +14,8 @@ export interface RateTableLifecycleAnalysis {
   warnings: string[];
   coverage: {
     rowCount: number;
+    regionCount: number;
+    /** @deprecated Use regionCount. Retained for API compatibility. */
     stateCount: number;
     zipOverrideCount: number;
     missingRegions: string[];
@@ -36,25 +38,27 @@ export function analyzeRateTable(
   errors.push(...findBandIssues(rows, pricingBasis));
   errors.push(...findBasisIssues(rows, pricingBasis));
 
-  errors.push(...findMissingStateDefaults(rows));
+  errors.push(...findMissingRegionDefaults(rows));
 
-  const statewideRegions = new Set(
+  const regionWideRegions = new Set(
     rows
       .filter((row) => row.destinationCountry === "US" && row.postalPrefix === null)
       .map((row) => row.destinationRegion),
   );
-  const missingRegions = US_POSTAL_REGIONS.filter((region) => !statewideRegions.has(region));
+  const missingRegions = US_POSTAL_REGIONS.filter((region) => !regionWideRegions.has(region));
   if (missingRegions.length > 0) {
-    warnings.push(`No statewide rates are configured for: ${missingRegions.join(", ")}.`);
+    warnings.push(`No region-wide rates are configured for: ${missingRegions.join(", ")}.`);
   }
 
+  const regionCount = regionWideRegions.size;
   return {
     canActivate: errors.length === 0,
     errors,
     warnings,
     coverage: {
       rowCount: rows.length,
-      stateCount: statewideRegions.size,
+      regionCount,
+      stateCount: regionCount,
       zipOverrideCount: rows.filter((row) => row.postalPrefix !== null).length,
       missingRegions,
       minMeasure: rows.length > 0 ? Math.min(...rows.map((row) => row.minMeasure)) : null,
@@ -161,7 +165,7 @@ function formatMeasure(value: number | null, pricingBasis: ShippingPricingBasis)
 
 function pricingAreaLabel(row: RateTableImportRow): string {
   const geography = row.postalPrefix === null
-    ? `${row.destinationRegion} statewide`
+    ? `${row.destinationRegion} region-wide`
     : `${row.destinationRegion} ZIP ${row.postalPrefix}*`;
   return row.originWarehouseId === null
     ? geography

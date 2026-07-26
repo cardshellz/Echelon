@@ -5,6 +5,7 @@ import {
   pricingFlowKey,
   pricingFlowLabel,
   productRuleRevisionStatus,
+  rateTableRegionCount,
   type RateBookAssignment,
 } from "../pricing-programs/api";
 
@@ -64,5 +65,12 @@ describe("pricing program product-rule status", () => {
       active: null,
       draft: { productRuleCount: 0 },
     })).toEqual({ liveCount: null, draftCount: 0 });
+  });
+});
+
+describe("rateTableRegionCount", () => {
+  it("prefers the corrected region count and supports the legacy state count", () => {
+    expect(rateTableRegionCount({ regionCount: 52, stateCount: 50 })).toBe(52);
+    expect(rateTableRegionCount({ stateCount: 52 })).toBe(52);
   });
 });

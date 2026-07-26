@@ -43,7 +43,11 @@ import {
 } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { groupsFromLayout, groupsFromRows } from "../rate-table-model";
+import {
+  formatUsRegionCount,
+  groupsFromLayout,
+  groupsFromRows,
+} from "../rate-table-model";
 import {
   RATE_TABLES_KEY,
   assignmentLabel,
@@ -52,6 +56,7 @@ import {
   formatDate,
   getJson,
   postJson,
+  rateTableRegionCount,
   rateTableDetailKey,
   type ProgramOverview,
   type RateTableDetail,
@@ -469,7 +474,7 @@ function ProgramRow({ program, onOpen }: { program: ProgramOverview; onOpen: () 
                   </TooltipTrigger>
                   <TooltipContent>
                     {state === "live" && option.active && (
-                      <>Live since {formatDate(option.active.effectiveFrom)} · {option.active.stateCount} states
+                      <>Live since {formatDate(option.active.effectiveFrom)} · {formatUsRegionCount(rateTableRegionCount(option.active))}
                         {option.draft && " · draft in progress"}</>
                     )}
                     {state === "draft" && "Draft in progress — not quoting yet"}
@@ -484,7 +489,7 @@ function ProgramRow({ program, onOpen }: { program: ProgramOverview; onOpen: () 
       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
         {liveOptions.length === 0
           ? "No live rates"
-          : `${program.maxLiveStateCount} states · ${program.totalZipOverrides} ZIP overrides`}
+          : `${formatUsRegionCount(program.maxLiveRegionCount)} · ${program.totalZipOverrides} ZIP overrides`}
       </TableCell>
       <TableCell>{programStatusBadge(book.status)}</TableCell>
       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">

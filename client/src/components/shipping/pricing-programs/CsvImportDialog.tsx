@@ -2,7 +2,7 @@
  * CSV import (spec §9): an accelerator, not the primary editor. Uploaded or
  * pasted CSV is parsed server-side, previewed in business units with
  * line-level errors, then converted into destination groups in the visual
- * editor. Aggregate issues (band gaps, missing statewide fallbacks) do not
+ * editor. Aggregate issues (band gaps, missing region-wide fallbacks) do not
  * block loading — they surface in the editor where they can be fixed.
  */
 
@@ -235,7 +235,7 @@ export function CsvImportDialog({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>State</TableHead>
+                    <TableHead>US region</TableHead>
                     <TableHead>ZIP</TableHead>
                     <TableHead>
                       {preview.pricingBasis === "pallet_count" ? "Pallets" : "Weight"}
@@ -251,7 +251,7 @@ export function CsvImportDialog({
                         {REGION_NAME.get(row.destinationRegion) ?? row.destinationRegion}
                       </TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
-                        {row.postalPrefix ? `${row.postalPrefix}*` : "Statewide"}
+                        {row.postalPrefix ? `${row.postalPrefix}*` : "Region-wide"}
                       </TableCell>
                       <TableCell className="whitespace-nowrap text-xs">
                         {describeMeasureRange(

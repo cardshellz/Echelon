@@ -5,6 +5,7 @@ import {
   diffRateRows,
   emitDraftRows,
   findDestinationGroupTemplate,
+  formatUsRegionCount,
   groupDisplayName,
   groupsFromLayout,
   groupsFromRows,
@@ -246,7 +247,7 @@ describe("validateRateGroups", () => {
     expect(result.rows.map((row) => row.originWarehouseId)).toEqual([null, 1]);
   });
 
-  it("rejects fractional pallet bands and ZIP overrides without a statewide fallback", () => {
+  it("rejects fractional pallet bands and ZIP overrides without a region-wide fallback", () => {
     const result = validateRateGroups([
       group({
         regions: [],
@@ -257,7 +258,7 @@ describe("validateRateGroups", () => {
 
     expect(result.rows).toEqual([]);
     expect(result.errors.some((error) => error.includes("pallet limits must be whole numbers"))).toBe(true);
-    expect(result.errors.some((error) => error.includes("PA ZIP overrides require a statewide fallback"))).toBe(true);
+    expect(result.errors.some((error) => error.includes("PA ZIP overrides require a region-wide fallback"))).toBe(true);
   });
 
   it("attributes issues to the owning group for remediation links", () => {
@@ -398,6 +399,12 @@ describe("groupDisplayName", () => {
     expect(groupDisplayName(group({ regions: ["PA"] }), 0)).toBe("Pennsylvania");
     expect(groupDisplayName(group({ name: "Local PA rates" }), 0)).toBe("Local PA rates");
   });
+
+  it("labels mixed postal-region groups without calling them states", () => {
+    expect(groupDisplayName(group({ regions: ["AE", "AP"] }), 0)).toBe("2 US regions");
+    expect(formatUsRegionCount(1)).toBe("1 US region");
+    expect(formatUsRegionCount(52)).toBe("52 US regions");
+  });
 });
 
 describe("serializeRowsToCsv", () => {
@@ -465,8 +472,8 @@ describe("diffRateRows", () => {
     expect(diff.identical).toBe(false);
     expect(diff.changedCount).toBe(1);
     expect(diff.changedRates[0]).toMatchObject({ fromCents: 899, toCents: 949 });
-    expect(diff.addedScopes).toEqual(["NY statewide"]);
-    expect(diff.removedScopes).toEqual(["OH statewide"]);
+    expect(diff.addedScopes).toEqual(["NY region-wide"]);
+    expect(diff.removedScopes).toEqual(["OH region-wide"]);
   });
 
   it("recognizes identical revisions", () => {

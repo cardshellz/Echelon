@@ -18,7 +18,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import {
   MAX_IMPORT_ROWS,
   findBandOverlaps,
-  findMissingStateDefaults,
+  findMissingRegionDefaults,
   parseRateTableCsv,
   type RateTableImportRow,
 } from "../../domain/rate-table-import";
@@ -146,7 +146,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
           db.select({
             rateTableId: shippingRateTableRows.rateTableId,
             rowCount: sql<number>`count(*)::int`,
-            stateCount: sql<number>`count(distinct case when ${shippingRateTableRows.postalPrefix} is null then ${shippingRateTableRows.destinationRegion} end)::int`,
+            regionCount: sql<number>`count(distinct case when ${shippingRateTableRows.postalPrefix} is null then ${shippingRateTableRows.destinationRegion} end)::int`,
             zipOverrideCount: sql<number>`count(*) filter (where ${shippingRateTableRows.postalPrefix} is not null)::int`,
             minMeasure: sql<number>`min(${shippingRateTableRows.minMeasure})::int`,
             maxMeasure: sql<number>`max(${shippingRateTableRows.maxMeasure})::int`,
@@ -204,7 +204,9 @@ export function registerRateTableAdminRoutes(app: Express): void {
             rateBook: bookById.get(table.rateBookId) ?? null,
             serviceLevel: serviceLevelById.get(table.serviceLevelId) ?? null,
             rowCount: coverageByTable.get(table.id)?.rowCount ?? 0,
-            stateCount: coverageByTable.get(table.id)?.stateCount ?? 0,
+            regionCount: coverageByTable.get(table.id)?.regionCount ?? 0,
+            // Preserve the original field for callers deployed before regionCount.
+            stateCount: coverageByTable.get(table.id)?.regionCount ?? 0,
             zipOverrideCount: coverageByTable.get(table.id)?.zipOverrideCount ?? 0,
             minMeasure: coverageByTable.get(table.id)?.minMeasure ?? null,
             maxMeasure: coverageByTable.get(table.id)?.hasOpenEnded
@@ -244,7 +246,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
         return res.json({
           ...result,
           bandErrors: result.errors.length === 0 ? findBandOverlaps(result.rows) : [],
-          geographyErrors: result.errors.length === 0 ? findMissingStateDefaults(result.rows) : [],
+          geographyErrors: result.errors.length === 0 ? findMissingRegionDefaults(result.rows) : [],
         });
       } catch (error) {
         return sendRateTableAdminError(res, error, "parse rate table CSV");
@@ -566,12 +568,12 @@ async function prepareRateTableImport(input: ImportInput) {
     if (bandErrors.length > 0) {
       throw new RateTableAdminError(400, "SHIPPING_ADMIN_RATE_BANDS_INVALID", "Rate bands overlap.", bandErrors);
     }
-    const geographyErrors = findMissingStateDefaults(rows);
+    const geographyErrors = findMissingRegionDefaults(rows);
     if (geographyErrors.length > 0) {
       throw new RateTableAdminError(
         400,
         "SHIPPING_ADMIN_STATE_FALLBACK_REQUIRED",
-        "Every ZIP override requires a statewide fallback rate.",
+        "Every ZIP override requires a region-wide fallback rate.",
         geographyErrors,
       );
     }

@@ -45,13 +45,17 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
-import { describeMeasureRange } from "../rate-table-model";
+import {
+  describeMeasureRange,
+  formatUsRegionCount,
+} from "../rate-table-model";
 import {
   assignmentLabel,
   formatDate,
   invalidateShippingAdmin,
   postJson,
   productRuleRevisionStatus,
+  rateTableRegionCount,
   type ProgramOverview,
   type ProgramOptionState,
   type WarehouseOption,
@@ -199,7 +203,7 @@ export function ProgramDetail({
                 </Badge>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                Active state, ZIP, warehouse, and weight rules in this program determine checkout prices.
+                Active US-region, ZIP, warehouse, and weight rules in this program determine checkout prices.
               </p>
             </div>
             <div className="border-t p-3 sm:border-t-0">
@@ -408,7 +412,7 @@ function OptionRow({
       </TableCell>
       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
         {active
-          ? `${active.stateCount} states · ${active.zipOverrideCount} ZIP · ${describeMeasureRange(active.pricingBasis, active.minMeasure, active.maxMeasure)}`
+          ? `${formatUsRegionCount(rateTableRegionCount(active))} · ${active.zipOverrideCount} ZIP · ${describeMeasureRange(active.pricingBasis, active.minMeasure, active.maxMeasure)}`
           : "—"}
       </TableCell>
       <TableCell className="whitespace-nowrap text-xs">

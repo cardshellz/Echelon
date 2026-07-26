@@ -58,6 +58,8 @@ export interface RateTableSummary {
   rateBook: RateBookSummary | null;
   serviceLevel: ServiceLevelOption | null;
   rowCount: number;
+  regionCount?: number;
+  /** @deprecated Use regionCount. Retained while older API consumers migrate. */
   stateCount: number;
   zipOverrideCount: number;
   productRuleCount: number;
@@ -71,6 +73,8 @@ export interface RateTableAnalysis {
   warnings: string[];
   coverage: {
     rowCount: number;
+    regionCount?: number;
+    /** @deprecated Use regionCount. Retained while older API consumers migrate. */
     stateCount: number;
     zipOverrideCount: number;
     missingRegions: string[];
@@ -468,10 +472,17 @@ export interface ProgramOverview {
   activeAssignments: RateBookAssignment[];
   liveOptionCount: number;
   draftCount: number;
-  /** Coverage of the broadest live option (client cannot union states). */
-  maxLiveStateCount: number;
+  /** Coverage of the broadest live option (client cannot union regions). */
+  maxLiveRegionCount: number;
   totalZipOverrides: number;
   lastTouched: string | null;
+}
+
+export function rateTableRegionCount(
+  coverage: Pick<RateTableSummary, "regionCount" | "stateCount">
+    | Pick<RateTableAnalysis["coverage"], "regionCount" | "stateCount">,
+): number {
+  return coverage.regionCount ?? coverage.stateCount;
 }
 
 export function buildProgramOverviews(data: RateTablesResponse): ProgramOverview[] {
@@ -510,7 +521,10 @@ export function buildProgramOverviews(data: RateTablesResponse): ProgramOverview
       activeAssignments: book.assignments.filter((assignment) => assignment.isActive),
       liveOptionCount: actives.length,
       draftCount: options.filter((option) => option.draft !== null).length,
-      maxLiveStateCount: actives.reduce((max, table) => Math.max(max, table.stateCount), 0),
+      maxLiveRegionCount: actives.reduce(
+        (max, table) => Math.max(max, rateTableRegionCount(table)),
+        0,
+      ),
       totalZipOverrides: actives.reduce((sum, table) => sum + table.zipOverrideCount, 0),
       lastTouched,
     };
