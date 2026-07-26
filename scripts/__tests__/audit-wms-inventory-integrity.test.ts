@@ -145,6 +145,12 @@ describe("audit-wms-inventory-integrity", () => {
       "parent.units_per_variant >= child.units_per_variant",
     );
     expect(checks.get("inline_replen_not_completed")).toContain("'blocked'");
+    expect(checks.get("return_status_invalid")).toContain(
+      "r.status NOT IN ('expected', 'partially_received', 'received', 'closed')",
+    );
+    expect(checks.get("return_item_quantity_invalid")).toContain(
+      "ri.received_qty > ri.expected_qty",
+    );
   });
 
   it("counts and samples each check with one database scan", async () => {
