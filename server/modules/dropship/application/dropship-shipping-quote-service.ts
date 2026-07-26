@@ -5,7 +5,6 @@ import type {
 } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
 import {
-  DROPSHIP_DEFAULT_SHIPPING_CURRENCY,
   calculateBasisPointsFeeCents,
   normalizeDropshipQuoteItems,
   normalizeDropshipShippingDestination,
@@ -20,14 +19,16 @@ import type {
 import type { DropshipCartonizationProvider } from "./dropship-cartonization-provider";
 import { quoteDropshipShippingForMemberInputSchema } from "./dropship-shipping-dtos";
 import type {
-  DropshipShippingRateMatch,
-  DropshipShippingRateProvider,
-  DropshipShippingZoneMatch,
-} from "./dropship-shipping-rate-provider";
+  DropshipShippingPricingProvider,
+  DropshipShippingPricingResult,
+} from "./dropship-shipping-pricing-service";
 import {
   quoteDropshipShippingInputSchema,
   type QuoteDropshipShippingInput,
 } from "./dropship-use-case-dtos";
+import type {
+  DropshipShippingShadowComparator,
+} from "./dropship-shipping-shadow-comparison";
 
 export interface DropshipShippingStoreContext {
   vendorId: number;
@@ -119,7 +120,8 @@ export interface DropshipShippingQuoteServiceDependencies {
   vendorProvisioning: DropshipVendorProvisioningService;
   repository: DropshipShippingQuoteRepository;
   cartonization: DropshipCartonizationProvider;
-  rateProvider: DropshipShippingRateProvider;
+  pricingProvider: DropshipShippingPricingProvider;
+  shadowComparison?: DropshipShippingShadowComparator;
   clock: DropshipClock;
   logger: DropshipLogger;
 }
@@ -190,6 +192,7 @@ export class DropshipShippingQuoteService {
           { vendorId: parsed.vendorId },
         );
       }
+      await this.observeSharedShippingShadow(existingSnapshot);
       return mapSnapshotToQuoteResult(existingSnapshot, true);
     }
 
@@ -205,19 +208,18 @@ export class DropshipShippingQuoteService {
     });
     const packages = cartonization.packages;
 
-    const ratedPackages = await this.deps.rateProvider.quoteRates({
+    const pricing = await this.deps.pricingProvider.quote({
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       warehouseId: parsed.warehouseId,
       destination: normalizedDestination,
+      items: normalizedItems,
       packages,
+      cartonizationProvider: cartonization.engine,
       quotedAt,
     });
-    const { zone, rates: rateMatches } = ratedPackages;
-    assertEveryPackageHasRate(packages, rateMatches);
-
-    const currency = assertSingleCurrency(rateMatches);
-    const baseRateCents = sumCents(rateMatches.map((rate) => rate.rateCents));
+    const currency = pricing.currency;
+    const baseRateCents = pricing.baseRateCents;
     const [markupPolicy, insurancePolicy] = await Promise.all([
       this.deps.repository.getActiveShippingMarkupPolicy(quotedAt),
       this.deps.repository.getActiveInsurancePoolPolicy(quotedAt),
@@ -245,15 +247,13 @@ export class DropshipShippingQuoteService {
       maxCents: resolvedInsurancePolicy.maxFeeCents,
     });
     const totalShippingCents = baseRateCents + markupCents + dunnageCents + insurancePoolCents;
-    const rateTableId = resolveSnapshotRateTableId(rateMatches);
+    const rateTableId = pricing.rateTableId;
     const quotePayload = buildQuotePayload({
       destination: normalizedDestination,
       items: normalizedItems,
       packages,
-      zone,
-      rateMatches,
+      pricing,
       cartonizationProvider: cartonization.engine,
-      rateProvider: ratedPackages.provider,
       cartonizationWarnings: cartonization.warnings,
       markupPolicy: resolvedMarkupPolicy,
       insurancePolicy: resolvedInsurancePolicy,
@@ -295,9 +295,13 @@ export class DropshipShippingQuoteService {
         quoteSnapshotId: snapshot.quoteSnapshotId,
         packageCount: packages.length,
         totalShippingCents,
+        pricingSource: pricing.source,
+        cutoverMode: pricing.decision.mode,
+        cutoverReasonCode: pricing.decision.reasonCode,
       },
     });
 
+    await this.observeSharedShippingShadow(snapshot);
     return mapSnapshotToQuoteResult(snapshot, false);
   }
 
@@ -316,6 +320,28 @@ export class DropshipShippingQuoteService {
 
     assertVendorCanQuoteShipping(context);
     assertStoreCanQuoteShipping(context);
+  }
+
+  private async observeSharedShippingShadow(
+    snapshot: DropshipShippingQuoteSnapshotRecord,
+  ): Promise<void> {
+    if (!this.deps.shadowComparison) return;
+    if (snapshot.quotePayload.version !== 2) return;
+    try {
+      await this.deps.shadowComparison.compare(snapshot);
+    } catch (error) {
+      this.deps.logger.error({
+        code: "DROPSHIP_SHIPPING_SHADOW_COMPARISON_FAILED",
+        message:
+          "Shared shipping shadow comparison failed without changing the legacy quote.",
+        context: {
+          legacyQuoteSnapshotId: snapshot.quoteSnapshotId,
+          vendorId: snapshot.vendorId,
+          storeConnectionId: snapshot.storeConnectionId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
   }
 }
 
@@ -373,42 +399,6 @@ function assertStoreCanQuoteShipping(context: DropshipShippingStoreContext): voi
   }
 }
 
-function assertEveryPackageHasRate(
-  packages: readonly DropshipCartonizedPackage[],
-  rateMatches: readonly DropshipShippingRateMatch[],
-): void {
-  const ratedSequences = new Set(rateMatches.map((rate) => rate.packageSequence));
-  const missingPackage = packages.find((carton) => !ratedSequences.has(carton.packageSequence));
-  if (missingPackage) {
-    throw new DropshipError(
-      "DROPSHIP_SHIPPING_RATE_REQUIRED",
-      "Active dropship shipping rate data is required before quoting shipping.",
-      { packageSequence: missingPackage.packageSequence },
-    );
-  }
-}
-
-function assertSingleCurrency(rateMatches: readonly DropshipShippingRateMatch[]): string {
-  const currencies = new Set(rateMatches.map((rate) => rate.currency));
-  if (currencies.size !== 1) {
-    throw new DropshipError(
-      "DROPSHIP_SHIPPING_RATE_CURRENCY_MISMATCH",
-      "Dropship shipping quote cannot combine rates with different currencies.",
-      { currencies: [...currencies] },
-    );
-  }
-  return rateMatches[0]?.currency ?? DROPSHIP_DEFAULT_SHIPPING_CURRENCY;
-}
-
-function sumCents(values: readonly number[]): number {
-  return values.reduce((sum, value) => sum + value, 0);
-}
-
-function resolveSnapshotRateTableId(rateMatches: readonly DropshipShippingRateMatch[]): number | null {
-  const uniqueRateTableIds = new Set(rateMatches.map((rate) => rate.rateTableId));
-  return uniqueRateTableIds.size === 1 ? rateMatches[0]?.rateTableId ?? null : null;
-}
-
 function requireActiveShippingMarkupPolicy(
   policy: DropshipShippingMarkupPolicy | null,
   context: { vendorId: number; storeConnectionId: number; warehouseId: number },
@@ -437,10 +427,8 @@ function buildQuotePayload(input: {
   destination: NormalizedDropshipShippingDestination;
   items: readonly NormalizedDropshipShippingQuoteItem[];
   packages: readonly DropshipCartonizedPackage[];
-  zone: DropshipShippingZoneMatch;
-  rateMatches: readonly DropshipShippingRateMatch[];
+  pricing: DropshipShippingPricingResult;
   cartonizationProvider: { name: string; version: string };
-  rateProvider: { name: string; version: string };
   cartonizationWarnings: readonly string[];
   markupPolicy: DropshipShippingMarkupPolicy;
   insurancePolicy: DropshipInsurancePoolPolicy;
@@ -452,15 +440,48 @@ function buildQuotePayload(input: {
     totalShippingCents: number;
   };
 }): Record<string, unknown> {
-  const ratesByPackage = new Map(input.rateMatches.map((rate) => [rate.packageSequence, rate]));
+  if (input.pricing.source === "shared") {
+    return buildSharedQuotePayload({
+      ...input,
+      pricing: input.pricing,
+    });
+  }
+  return buildLegacyQuotePayload({
+    ...input,
+    pricing: input.pricing,
+  });
+}
+
+function buildLegacyQuotePayload(input: {
+  destination: NormalizedDropshipShippingDestination;
+  items: readonly NormalizedDropshipShippingQuoteItem[];
+  packages: readonly DropshipCartonizedPackage[];
+  pricing: Extract<DropshipShippingPricingResult, { source: "legacy" }>;
+  cartonizationProvider: { name: string; version: string };
+  cartonizationWarnings: readonly string[];
+  markupPolicy: DropshipShippingMarkupPolicy;
+  insurancePolicy: DropshipInsurancePoolPolicy;
+  totals: {
+    baseRateCents: number;
+    markupCents: number;
+    insurancePoolCents: number;
+    dunnageCents: number;
+    totalShippingCents: number;
+  };
+}): Record<string, unknown> {
+  const ratesByPackage = new Map(
+    input.pricing.rateMatches.map(
+      (rate) => [rate.packageSequence, rate],
+    ),
+  );
   return {
     version: 2,
     destination: input.destination,
     items: input.items,
-    zone: input.zone,
+    zone: input.pricing.zone,
     providers: {
       cartonization: input.cartonizationProvider,
-      rates: input.rateProvider,
+      rates: input.pricing.rateProvider,
     },
     warnings: {
       cartonization: input.cartonizationWarnings,
@@ -484,6 +505,71 @@ function buildQuotePayload(input: {
         rate,
       };
     }),
+    policies: {
+      shippingMarkup: input.markupPolicy,
+      insurancePool: input.insurancePolicy,
+    },
+    totals: input.totals,
+  };
+}
+
+function buildSharedQuotePayload(input: {
+  destination: NormalizedDropshipShippingDestination;
+  items: readonly NormalizedDropshipShippingQuoteItem[];
+  packages: readonly DropshipCartonizedPackage[];
+  pricing: Extract<DropshipShippingPricingResult, { source: "shared" }>;
+  cartonizationProvider: { name: string; version: string };
+  cartonizationWarnings: readonly string[];
+  markupPolicy: DropshipShippingMarkupPolicy;
+  insurancePolicy: DropshipInsurancePoolPolicy;
+  totals: {
+    baseRateCents: number;
+    markupCents: number;
+    insurancePoolCents: number;
+    dunnageCents: number;
+    totalShippingCents: number;
+  };
+}): Record<string, unknown> {
+  return {
+    version: 3,
+    destination: input.destination,
+    items: input.items,
+    providers: {
+      cartonization: input.cartonizationProvider,
+      rates: input.pricing.quote.rateProvider,
+    },
+    warnings: {
+      cartonization: input.cartonizationWarnings,
+      rates: input.pricing.quote.warnings,
+    },
+    packages: input.packages.map((carton) => ({
+      packageSequence: carton.packageSequence,
+      items: carton.items,
+      placements: carton.placements,
+      productVariantId: carton.productVariantId,
+      quantity: carton.quantity,
+      boxId: carton.boxId,
+      boxCode: carton.boxCode,
+      weightGrams: carton.weightGrams,
+      dimensionsMm: {
+        length: carton.lengthMm,
+        width: carton.widthMm,
+        height: carton.heightMm,
+      },
+    })),
+    pricing: {
+      scope: "shipment",
+      source: "shared_engine",
+      cutover: input.pricing.decision,
+      serviceLevelCode: input.pricing.quote.serviceLevelCode,
+      rateBookId: input.pricing.quote.rateBookId,
+      rateBookCode: input.pricing.quote.rateBookCode,
+      rateTableId: input.pricing.quote.rateTableId,
+      resolvedZone: input.pricing.quote.resolvedZone,
+      ratedWeightGrams: input.pricing.quote.ratedWeightGrams,
+      selectedRate: input.pricing.quote.selectedRate,
+      routing: input.pricing.quote.routing,
+    },
     policies: {
       shippingMarkup: input.markupPolicy,
       insurancePool: input.insurancePolicy,

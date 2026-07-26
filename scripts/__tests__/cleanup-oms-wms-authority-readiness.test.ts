@@ -18,22 +18,28 @@ describe("cleanup-oms-wms-authority-readiness", () => {
         "nonpositive-shipment-items",
         "materialized-counter-drift",
       ],
+      counterDirection: "all",
+      summaryOnly: false,
       operator: "script:cleanup-oms-wms-authority-readiness",
     });
   });
 
-  it("parses execute mode, operation subsets, all limit, and operator", async () => {
+  it("parses safe execute mode, operation subsets, all limit, counter direction, and operator", async () => {
     const { parseFlags } = await loadCleanupModule();
 
     expect(parseFlags([
       "--execute",
       "--limit=all",
       "--operation=orphan-oms-line-refs,materialized-counter-drift",
+      "--counter-direction=recorded-below-actual",
+      "--summary-only",
       "--operator=manual-prod-cleanup",
     ])).toMatchObject({
       mode: "execute",
       limit: null,
       operations: ["orphan-oms-line-refs", "materialized-counter-drift"],
+      counterDirection: "recorded-below-actual",
+      summaryOnly: true,
       operator: "manual-prod-cleanup",
     });
   });
@@ -45,8 +51,44 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     expect(() => parseFlags(["--limit=0"])).toThrow(/positive integer or all/);
     expect(() => parseFlags(["--operation="])).toThrow(/cannot be blank/);
     expect(() => parseFlags(["--operation=not-real"])).toThrow(/Unknown cleanup operation/);
+    expect(() => parseFlags(["--counter-direction="])).toThrow(/must be all/);
+    expect(() => parseFlags(["--counter-direction=sideways"])).toThrow(/must be all/);
+    expect(() => parseFlags([
+      "--execute",
+      "--operation=materialized-counter-drift",
+    ])).toThrow(/requires --counter-direction=recorded-below-actual/);
+    expect(() => parseFlags([
+      "--execute",
+      "--operation=materialized-counter-drift",
+      "--counter-direction=recorded-above-actual",
+    ])).toThrow(/lowering an over-recorded counter can reopen fulfillment authority/);
     expect(() => parseFlags(["--operator="])).toThrow(/cannot be blank/);
     expect(() => parseFlags(["--bogus"])).toThrow(/Unknown flag/);
+  });
+
+  it("does not require a counter direction when execute excludes materialized-counter cleanup", async () => {
+    const { parseFlags } = await loadCleanupModule();
+
+    expect(parseFlags([
+      "--execute",
+      "--operation=orphan-oms-line-refs,nonpositive-shipment-items",
+    ])).toMatchObject({
+      mode: "execute",
+      counterDirection: "all",
+    });
+  });
+
+  it("chunks audit snapshots into bounded inserts", async () => {
+    const { chunkForAuditInsert } = await loadCleanupModule();
+    const values = Array.from({ length: 1_201 }, (_, index) => index + 1);
+
+    expect(chunkForAuditInsert(values)).toEqual([
+      values.slice(0, 500),
+      values.slice(500, 1_000),
+      values.slice(1_000),
+    ]);
+    expect(chunkForAuditInsert([])).toEqual([]);
+    expect(() => chunkForAuditInsert(values, 0)).toThrow(/positive integer/);
   });
 
   it("defines the three cleanup operations proven by the readiness audit output", async () => {
@@ -108,8 +150,40 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     expect(sql).not.toContain("o.completed_at IS NULL");
     expect(sql).not.toContain("'completed', 'short'");
     expect(sql).toContain("actual_materialized_wms_quantity");
+    expect(sql).toContain("'counter_direction'");
     expect(sql).toContain("COALESCE(ol.wms_materialized_quantity, 0) <> COALESCE(materialized.materialized_quantity, 0)");
     expect(sql).toContain("FOR UPDATE OF ol");
+  });
+
+  it("isolates materialized counter drift by direction and counts unsafe decreases", async () => {
+    const {
+      materializedCounterDriftCandidateSql,
+      unsafeMaterializedCounterDecreaseCountSql,
+    } = await loadCleanupModule();
+
+    const belowSql = materializedCounterDriftCandidateSql(
+      null,
+      false,
+      "recorded-below-actual",
+    );
+    expect(belowSql).toContain(
+      "COALESCE(ol.wms_materialized_quantity, 0) < COALESCE(materialized.materialized_quantity, 0)",
+    );
+
+    const aboveSql = materializedCounterDriftCandidateSql(
+      null,
+      false,
+      "recorded-above-actual",
+    );
+    expect(aboveSql).toContain(
+      "COALESCE(ol.wms_materialized_quantity, 0) > COALESCE(materialized.materialized_quantity, 0)",
+    );
+
+    const unsafeSql = unsafeMaterializedCounterDecreaseCountSql();
+    expect(unsafeSql).toContain("COUNT(*)::int AS unsafe_count");
+    expect(unsafeSql).toContain(
+      "COALESCE(ol.wms_materialized_quantity, 0) > COALESCE(materialized.materialized_quantity, 0)",
+    );
   });
 
   it("does not reference WMS order-item timestamp columns that do not exist", async () => {
@@ -130,6 +204,16 @@ describe("cleanup-oms-wms-authority-readiness", () => {
       "utf8",
     );
 
+    const auditFn = source.slice(
+      source.indexOf("async function insertAuditRows"),
+      source.indexOf("async function clearOrphanOmsLineRefs"),
+    );
+    expect(auditFn).toContain("chunkForAuditInsert(args.candidates)");
+    expect(auditFn).toContain("FROM jsonb_to_recordset($7::jsonb)");
+    expect(auditFn).toContain(
+      "assertExpectedRowCount(args.operation.id, args.candidates.length, insertedCount)",
+    );
+
     const clearFn = source.slice(
       source.indexOf("async function clearOrphanOmsLineRefs"),
       source.indexOf("async function deleteNonpositiveShipmentItems"),
@@ -148,5 +232,19 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     expect(deleteFn.indexOf("DELETE FROM wms.outbound_shipment_items")).toBeGreaterThan(deleteFn.indexOf("insertAuditRows"));
     expect(deleteFn).toContain("assertExpectedRowCount");
     expect(deleteFn).toContain("COALESCE(si.qty, 0) <= 0");
+
+    const counterFn = source.slice(
+      source.indexOf("async function refreshMaterializedCounters"),
+      source.indexOf("function assertExpectedRowCount"),
+    );
+    expect(counterFn.indexOf("insertAuditRows")).toBeGreaterThan(-1);
+    expect(counterFn.indexOf("UPDATE oms.oms_order_lines")).toBeGreaterThan(counterFn.indexOf("insertAuditRows"));
+    expect(counterFn).toContain(
+      "COALESCE(ol.wms_materialized_quantity, 0) < input.actual_quantity",
+    );
+    expect(counterFn).toContain(
+      "input.actual_quantity = COALESCE(materialized.actual_quantity, 0)",
+    );
+    expect(counterFn).toContain("assertExpectedRowCount");
   });
 });
