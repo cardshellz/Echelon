@@ -2,13 +2,15 @@
  * Repair historical OMS/WMS line authority from persisted Shopify refund facts.
  *
  * This script is intentionally narrow:
- * - Shopify refund line adjustment exists exactly once and is `no_restock`.
+ * - Shopify refund line adjustment exists exactly once and is `no_restock`, or
+ *   is `cancel` for a fully cancelled, refunded, unfulfilled order.
  * - The refund quantity equals the paid line quantity.
  * - Exactly one WMS order item maps to the OMS line.
  * - The historical WMS line is already cancelled with no picked/fulfilled
  *   quantity, or exact shipped package evidence can restore it canonically.
- * - Shipped evidence must exactly equal the paid line quantity and the Shopify
- *   order must already be fulfilled before canonical lineage is restored.
+ * - Only `no_restock` adjustments can use shipped evidence. It must exactly
+ *   equal the paid line quantity and the Shopify order must already be
+ *   fulfilled before canonical lineage is restored.
  *
  * Dry-run is the default. Execute requires an exact candidate count and
  * operator-supplied audit metadata.
@@ -190,7 +192,7 @@ export function buildCandidateQuery(flags: Flags): { text: string; values: unkno
         GROUP BY adjustment.order_id, adjustment.order_line_id
         HAVING COUNT(*) = 1
           AND COUNT(DISTINCT adjustment.source_event_id) = 1
-          AND MIN(adjustment.restock_policy) = 'no_restock'
+          AND MIN(adjustment.restock_policy) IN ('no_restock', 'cancel')
       ),
       wms_lineage AS (
         SELECT
@@ -292,6 +294,9 @@ export function buildCandidateQuery(flags: Flags): { text: string; values: unkno
           AND (
             (
               oms_order.status = 'cancelled'
+              AND oms_order.financial_status = 'refunded'
+              AND oms_order.fulfillment_status = 'unfulfilled'
+              AND refund.restock_policy IN ('no_restock', 'cancel')
               AND lineage.wms_item_status = 'cancelled'
               AND lineage.picked_quantity = 0
               AND lineage.fulfilled_quantity = 0
@@ -302,7 +307,8 @@ export function buildCandidateQuery(flags: Flags): { text: string; values: unkno
               AND COALESCE(canonical.shipped_quantity, 0) = 0
             )
             OR (
-              oms_order.status = 'shipped'
+              refund.restock_policy = 'no_restock'
+              AND oms_order.status = 'shipped'
               AND oms_order.fulfillment_status = 'fulfilled'
               AND COALESCE(legacy.shipped_quantity, 0) = oms_line.paid_quantity
               AND CARDINALITY(COALESCE(legacy.legacy_shipment_ids, ARRAY[]::int[])) > 0
@@ -376,18 +382,26 @@ function positiveInteger(value: unknown, field: string): number {
   return parsed;
 }
 
+function isAcceptedHistoricalRepairPolicy(
+  value: unknown,
+): value is "no_restock" | "cancel" {
+  return value === "no_restock" || value === "cancel";
+}
+
 export function toCandidate(row: any): RepairCandidate {
   const adjustments = Array.isArray(row.adjustments)
     ? row.adjustments.map((adjustment: any) => {
       const externalLineItemId = String(adjustment.externalLineItemId ?? "").trim();
       if (!externalLineItemId) throw new Error("adjustment.externalLineItemId cannot be blank");
-      if (adjustment.restockPolicy !== "no_restock") {
-        throw new Error("historical refund authority repair only accepts no_restock adjustments");
+      if (!isAcceptedHistoricalRepairPolicy(adjustment.restockPolicy)) {
+        throw new Error(
+          "historical refund authority repair only accepts no_restock or cancel adjustments",
+        );
       }
       return Object.freeze({
         externalLineItemId,
         quantity: positiveInteger(adjustment.quantity, "adjustment.quantity"),
-        restockPolicy: "no_restock" as const,
+        restockPolicy: adjustment.restockPolicy,
         raw: adjustment.raw && typeof adjustment.raw === "object" ? adjustment.raw : {},
       });
     })
@@ -403,6 +417,12 @@ export function toCandidate(row: any): RepairCandidate {
     throw new Error(
       "candidate physical restoration flag must agree with legacy shipment lineage",
     );
+  }
+  if (
+    requiresPhysicalRestoration
+    && adjustments.some((adjustment) => adjustment.restockPolicy === "cancel")
+  ) {
+    throw new Error("cancel adjustments cannot restore physical shipment lineage");
   }
 
   return Object.freeze({
