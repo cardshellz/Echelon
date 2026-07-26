@@ -8,7 +8,7 @@
  * Usage:
  *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --limit=25
  *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --operation=materialized-counter-drift --counter-direction=recorded-above-actual
- *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift --counter-direction=recorded-below-actual
+ *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift --counter-direction=recorded-below-actual --summary-only
  */
 
 import crypto from "node:crypto";
@@ -35,6 +35,7 @@ interface Flags {
   limit: number | null;
   operations: CleanupOperationId[];
   counterDirection: MaterializedCounterDirection;
+  summaryOnly: boolean;
   operator: string;
 }
 
@@ -75,6 +76,7 @@ interface CleanupOperationDefinition {
 
 const DEFAULT_LIMIT = 100;
 const DEFAULT_OPERATOR = "script:cleanup-oms-wms-authority-readiness";
+const AUDIT_INSERT_BATCH_SIZE = 500;
 const ALL_OPERATION_IDS: CleanupOperationId[] = [
   "orphan-oms-line-refs",
   "nonpositive-shipment-items",
@@ -113,11 +115,12 @@ export function parseFlags(argv: string[]): Flags {
   const help = argv.includes("--help") || argv.includes("-h");
   const execute = argv.includes("--execute");
   const dryRun = argv.includes("--dry-run");
+  const summaryOnly = argv.includes("--summary-only");
   if (execute && dryRun) {
     throw new Error("Cannot pass both --execute and --dry-run");
   }
 
-  const knownFlag = /^(--help|-h|--execute|--dry-run|--limit=|--operation=|--counter-direction=|--operator=)/;
+  const knownFlag = /^(--help|-h|--execute|--dry-run|--summary-only|--limit=|--operation=|--counter-direction=|--operator=)/;
   const unknown = argv.find((arg) => !knownFlag.test(arg));
   if (unknown) {
     throw new Error(`Unknown flag: ${unknown}`);
@@ -156,6 +159,7 @@ export function parseFlags(argv: string[]): Flags {
     limit,
     operations,
     counterDirection,
+    summaryOnly,
     operator,
   };
 }
@@ -211,11 +215,12 @@ function usage(): string {
     "Usage:",
     "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --limit=25",
     "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --operation=materialized-counter-drift --counter-direction=recorded-above-actual",
-    "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift --counter-direction=recorded-below-actual",
+    "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift --counter-direction=recorded-below-actual --summary-only",
     "",
     "Flags:",
     "  --dry-run          Classify and print planned repairs. Default.",
     "  --execute          Apply repairs transactionally with audit snapshots.",
+    "  --summary-only     Print operation totals without one line per candidate.",
     "  --limit=N|all      Max candidates per operation. Default 100.",
     "  --operation=ID     all, orphan-oms-line-refs, nonpositive-shipment-items, materialized-counter-drift.",
     "  --counter-direction=VALUE",
@@ -450,10 +455,6 @@ function asObject(value: unknown): Record<string, unknown> {
   return {};
 }
 
-function toJson(value: unknown): string {
-  return JSON.stringify(value ?? null);
-}
-
 async function fetchUnsafeCount(client: PoolClient, sqlText: string): Promise<number> {
   const result = await client.query(sqlText);
   const unsafeCount = Number(result.rows[0]?.unsafe_count ?? 0);
@@ -494,8 +495,14 @@ async function insertAuditRows(
     operator: string;
   },
 ): Promise<void> {
-  for (const candidate of args.candidates) {
-    await client.query(`
+  let insertedCount = 0;
+  for (const batch of chunkForAuditInsert(args.candidates)) {
+    const auditRows = batch.map((candidate) => ({
+      source_id: candidate.sourceId,
+      before_row: candidate.beforeRow,
+      after_row: candidate.afterRow,
+    }));
+    const insertResult = await client.query(`
       INSERT INTO wms.oms_wms_authority_cleanup_audit (
         run_id,
         operation,
@@ -507,29 +514,48 @@ async function insertAuditRows(
         after_row,
         operator
       )
-      VALUES (
+      SELECT
         $1::uuid,
         $2::text,
         $3::text,
-        $4::bigint,
+        input.source_id,
+        $4::text,
         $5::text,
-        $6::text,
-        $7::jsonb,
-        $8::jsonb,
-        $9::text
+        input.before_row,
+        input.after_row,
+        $6::text
+      FROM jsonb_to_recordset($7::jsonb) AS input(
+        source_id bigint,
+        before_row jsonb,
+        after_row jsonb
       )
     `, [
       args.runId,
       args.operation.id,
       args.operation.sourceTable,
-      candidate.sourceId,
       args.operation.action,
       args.operation.reason,
-      toJson(candidate.beforeRow),
-      toJson(candidate.afterRow),
       args.operator,
+      JSON.stringify(auditRows),
     ]);
+    insertedCount += insertResult.rowCount ?? 0;
   }
+  assertExpectedRowCount(args.operation.id, args.candidates.length, insertedCount);
+}
+
+export function chunkForAuditInsert<T>(
+  values: T[],
+  batchSize = AUDIT_INSERT_BATCH_SIZE,
+): T[][] {
+  if (!Number.isInteger(batchSize) || batchSize <= 0) {
+    throw new Error("Audit insert batch size must be a positive integer");
+  }
+
+  const batches: T[][] = [];
+  for (let start = 0; start < values.length; start += batchSize) {
+    batches.push(values.slice(start, start + batchSize));
+  }
+  return batches;
 }
 
 async function clearOrphanOmsLineRefs(
@@ -693,6 +719,8 @@ function printOperationPlan(
   if (unsafeSkipped > 0) {
     console.log(`  UNSAFE_SKIPPED ${unsafeSkipped} row(s) do not match the operation's proven-safe predicate`);
   }
+  if (flags.summaryOnly) return;
+
   for (const candidate of candidates) {
     const action = flags.mode === "execute" ? operation.action.toUpperCase() : `PLAN_${operation.action.toUpperCase()}`;
     console.log(`  ${action} ${operation.sourceTable} id=${candidate.sourceId} summary=${JSON.stringify(candidate.summary)}`);
@@ -775,7 +803,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `[OMS/WMS authority cleanup] mode=${flags.mode} operations=${flags.operations.join(",")} counterDirection=${flags.counterDirection} limit=${flags.limit ?? "all"}`,
+    `[OMS/WMS authority cleanup] mode=${flags.mode} operations=${flags.operations.join(",")} counterDirection=${flags.counterDirection} summaryOnly=${flags.summaryOnly} limit=${flags.limit ?? "all"}`,
   );
   const summary = await runCleanup(flags);
   console.log(`[OMS/WMS authority cleanup] complete ${JSON.stringify(summary)}`);
