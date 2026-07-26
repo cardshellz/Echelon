@@ -201,7 +201,7 @@ export function RateTestDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="rate-test-region">Destination state</Label>
+            <Label htmlFor="rate-test-region">Destination US region</Label>
             <Select value={region} onValueChange={(value) => {
               setRegion(value);
               setResult(null);

@@ -208,7 +208,7 @@ function parseDataLine(
 
   const destinationRegion = normalizeUsPostalRegion(cells[layout.stateIdx] ?? "");
   if (destinationRegion === null) {
-    return fail(`invalid US state or territory ${JSON.stringify(cells[layout.stateIdx] ?? "")}`);
+    return fail(`invalid US postal region ${JSON.stringify(cells[layout.stateIdx] ?? "")}`);
   }
   const prefix = layout.postalPrefixIdx === -1
     ? ""
@@ -361,9 +361,9 @@ function compareMaximums(a: number | null, b: number | null): number {
   return a - b;
 }
 
-/** Every ZIP override needs a statewide fallback in the same warehouse scope. */
-export function findMissingStateDefaults(rows: readonly RateTableImportRow[]): string[] {
-  const statewide = new Set(
+/** Every ZIP override needs a region-wide fallback in the same warehouse scope. */
+export function findMissingRegionDefaults(rows: readonly RateTableImportRow[]): string[] {
+  const regionWide = new Set(
     rows
       .filter((row) => row.postalPrefix === null)
       .map((row) => `${row.originWarehouseId ?? "any"}|${row.destinationCountry}|${row.destinationRegion}`),
@@ -372,7 +372,7 @@ export function findMissingStateDefaults(rows: readonly RateTableImportRow[]): s
   for (const row of rows) {
     if (row.postalPrefix === null) continue;
     const scope = `${row.originWarehouseId ?? "any"}|${row.destinationCountry}|${row.destinationRegion}`;
-    if (!statewide.has(scope)) {
+    if (!regionWide.has(scope)) {
       missing.add(
         `${row.destinationRegion}${row.originWarehouseId === null ? "" : ` at warehouse ${row.originWarehouseId}`}`,
       );
@@ -380,12 +380,15 @@ export function findMissingStateDefaults(rows: readonly RateTableImportRow[]): s
   }
   return [...missing]
     .sort()
-    .map((scope) => `${scope} has a ZIP override but no statewide fallback rate`);
+    .map((scope) => `${scope} has a ZIP override but no region-wide fallback rate`);
 }
+
+/** @deprecated Use findMissingRegionDefaults. */
+export const findMissingStateDefaults = findMissingRegionDefaults;
 
 function pricingAreaLabel(row: RateTableImportRow): string {
   const geography = row.postalPrefix === null
-    ? `${row.destinationRegion} statewide`
+    ? `${row.destinationRegion} region-wide`
     : `${row.destinationRegion} ZIP ${row.postalPrefix}*`;
   return row.originWarehouseId === null ? geography : `${geography} at warehouse ${row.originWarehouseId}`;
 }

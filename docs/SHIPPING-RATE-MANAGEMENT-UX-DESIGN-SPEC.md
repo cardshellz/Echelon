@@ -91,6 +91,11 @@ Examples:
 
 Every program must visibly show **Used by** assignments. An administrator should never have to infer whether a program is used for dropship.
 
+The pricing program is the highest-level configuration owner. Destination
+groups and shipping options are equal axes inside it; neither is nested under
+the other. Their intersection records whether that option is offered to that
+destination group and, when offered, which revision supplies its prices.
+
 ### 4.3 Shipping Option
 
 **User-facing term:** Shipping option
@@ -122,16 +127,33 @@ Draft -> Active -> Superseded or Retired
 
 ### 4.5 Destination Group
 
-A destination group applies the same rate bands to multiple destinations.
+A destination group is a stable, named geography within one pricing program.
+The same group can be reused across multiple shipping options without
+re-entering its regions or ZIP prefixes.
 
 A group contains:
 
 - One or more US states or territories.
 - Optional ZIP-prefix overrides associated with a state.
-- Optional origin-warehouse scope.
-- One charge method: fixed weight bands, base plus each started pound, or pallet bands.
+- A stable identity and optimistic-lock version.
 
-Destination groups are a user-interface abstraction. The system expands them into individual rate rows when saved.
+Warehouse overrides and charge methods belong to a destination-group /
+shipping-option intersection, not to the reusable geography itself. Saving a
+revision freezes the destination-group name and members so later edits cannot
+silently change a live revision.
+
+### 4.5.1 Coverage State
+
+Every destination-group / shipping-option intersection has one visible state:
+
+| State | Meaning |
+|---|---|
+| `Offered` | The option is available and the revision must contain valid rate rows for every destination in the group |
+| `Not offered` | The option is intentionally unavailable and the revision must contain no rate rows for the group |
+| `Not configured` | No decision has been saved for that intersection |
+
+`Not offered` is a business decision. `Not configured` is unfinished setup.
+They must never be displayed or validated as the same state.
 
 ### 4.6 Carrier or Fulfillment Method
 
@@ -238,21 +260,24 @@ The detail view must answer these questions without opening another modal:
 - Last activated and last edited metadata.
 - Any program-level warning.
 
-#### Shipping-option table
+#### Coverage and rates matrix
 
-One row per Card Shellz shipping option:
+Use destination groups as rows and Card Shellz shipping options as columns.
+The matrix makes missing and intentional coverage visible without opening an
+editor.
 
-| Column | Example |
-|---|---|
-| Shipping option | Standard Shipping |
-| Mode | Parcel |
-| Pricing basis | Shipment weight |
-| Live revision | Active since Jul 16, 2026 |
-| Coverage | 48 states, 3 ZIP overrides, 0-50 lb |
-| Draft | In progress, 2 errors |
-| Actions | View active, continue draft, create revision |
+| Destination group | Standard Shipping | Priority Shipping | Overnight Shipping |
+|---|---|---|---|
+| Lower 48 | Active rates | Not configured | Not offered |
+| Alaska | Draft rates | Not offered | Not offered |
+| Military mail | Rates required | Not offered | Not offered |
 
-Clicking a row opens its rate-table detail or editor.
+Each cell displays its explicit state, live/draft status, and the action needed
+to configure or inspect it. A changed destination group must mark older live
+or draft snapshots as using the previous group version; it must not relabel
+those rates as current coverage. When a cell has an all-warehouse default plus
+one or more exact warehouse overrides, the cell summarizes every scope and
+must never silently display only the first one.
 
 ### 7.3 Create or Edit Rate Table
 
@@ -307,7 +332,7 @@ The current full-width grid of every state is not the target experience. Design 
 
 Recommended structure:
 
-- Left pane or upper list: destination groups with compact summaries.
+- Left pane or upper list: the pricing program's named destination groups with compact summaries.
 - Right pane or expanded row: selected group's destinations, warehouse, and overrides.
 - Primary action: `Add destination group`.
 
@@ -329,6 +354,12 @@ Do not require the user to scroll through a permanently expanded 50-state matrix
 - Default: `All warehouses`.
 - Never request a warehouse ID.
 - Explain that a warehouse-specific rate takes precedence over the all-warehouse default.
+- `Add warehouse pricing` reuses the same saved destination-group identity and
+  copies the selected schedule into a new editable scope.
+- A destination group can have at most one all-warehouse scope and one scope
+  per exact warehouse for a given shipping-option revision.
+- Renaming or changing geography updates every warehouse scope sharing that
+  destination-group identity; availability and prices remain scope-specific.
 
 #### ZIP-prefix overrides
 
@@ -342,9 +373,13 @@ Do not require the user to scroll through a permanently expanded 50-state matrix
 #### Group actions
 
 - Rename group for operator clarity. Example: `Contiguous US`, `Alaska and Hawaii`, `Local PA rates`.
+- Reuse an existing program group when configuring another shipping option.
+- Choose `Offered` or `Not offered` for the current shipping option.
 - Duplicate group.
 - Copy rates from another group.
 - Delete group with confirmation when it contains rates.
+- When the current group changed after the revision was opened, show the stale
+  version and require an explicit `Use current destinations` action.
 
 ### 8.3 Step 3: Parcel Rates
 
@@ -712,6 +747,11 @@ The designer does not need to design around table names, but the following const
 - Warehouse scope can be global or reference a configured warehouse.
 - Activation and revision history are server-controlled lifecycle operations.
 - The API can expand destination groups into individual state/ZIP/band rows.
+- Named destination groups are first-class within one pricing program.
+- Each rate-table revision freezes destination group name, members, version,
+  warehouse override, and offered/not-offered intent.
+- Offered coverage requires price rows. Not-offered coverage rejects price
+  rows. Unconfigured coverage cannot be inferred from zero rows.
 
 The final design should optimize the operator's mental model, not mirror the storage model.
 
@@ -724,7 +764,7 @@ The designer should include these target behaviors even though the current scaff
 | Use `Pricing Program` throughout the UI | Relabel the current rate-book surfaces without renaming the backend object |
 | Create and edit pricing-program assignments | Add or complete admin APIs and UI for channel, purpose, and warehouse assignment |
 | Save an incomplete draft | Relax draft persistence validation while retaining strict activation validation |
-| Name destination groups | Persist names in draft metadata or a future first-class grouping model |
+| Name destination groups | Implemented as first-class pricing-program groups with frozen per-revision coverage manifests |
 | Schedule activation | Add activation scheduling and job execution around `effectiveFrom` |
 | Show revision author and change history | Add or expose audit metadata and revision comparison |
 | Copy bands or duplicate groups | Add client-side transformation and corresponding draft persistence |

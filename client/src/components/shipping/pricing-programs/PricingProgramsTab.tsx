@@ -43,7 +43,15 @@ import {
 } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { groupsFromLayout, groupsFromRows } from "../rate-table-model";
+import {
+  formatUsRegionCount,
+  groupsFromLayout,
+  groupsFromRows,
+  newGroup,
+  newId,
+  type PricingBasis,
+  type RateGroup,
+} from "../rate-table-model";
 import {
   RATE_TABLES_KEY,
   assignmentLabel,
@@ -52,8 +60,10 @@ import {
   formatDate,
   getJson,
   postJson,
+  rateTableRegionCount,
   rateTableDetailKey,
   type ProgramOverview,
+  type ProgramDestinationGroup,
   type RateTableDetail,
   type RateTablesResponse,
   type WarehouseOption,
@@ -120,6 +130,9 @@ export function PricingProgramsTab() {
       });
       const groups = groupsFromLayout(detail.rateTable.metadata)
         ?? groupsFromRows(detail.rows, detail.rateTable.pricingBasis);
+      const program = programs.find(
+        (item) => item.book.id === detail.rateTable.rateBookId,
+      );
       setView({
         kind: "editor",
         returnTo,
@@ -129,6 +142,7 @@ export function PricingProgramsTab() {
           serviceLevelCode: detail.serviceLevel?.code ?? null,
           groups,
           lockProgram: true,
+          availableDestinationGroups: program?.destinationGroups ?? [],
         },
       });
     } catch (error) {
@@ -232,17 +246,29 @@ export function PricingProgramsTab() {
         onViewTable={(tableId) => setView({ kind: "revision", tableId, returnTo: here })}
         onContinueDraft={(draftId) => openDraft(draftId, here)}
         onCreateRevision={(sourceTableId) => createRevision(sourceTableId, here)}
-        onStartRates={(serviceLevelCode) => setView({
-          kind: "editor",
-          returnTo: here,
-          launch: {
-            draftId: null,
-            rateBookCode: program.book.code,
-            serviceLevelCode,
-            groups: null,
-            lockProgram: true,
-          },
-        })}
+        onStartRates={(serviceLevelCode, destinationGroup) => {
+          const serviceLevel = data?.serviceLevels.find(
+            (level) => level.code === serviceLevelCode,
+          );
+          const pricingBasis: PricingBasis =
+            serviceLevel?.fulfillmentMode === "freight"
+              ? "pallet_count"
+              : "shipment_weight";
+          setView({
+            kind: "editor",
+            returnTo: here,
+            launch: {
+              draftId: null,
+              rateBookCode: program.book.code,
+              serviceLevelCode,
+              groups: destinationGroup
+                ? [editorGroupFromProgramGroup(destinationGroup, pricingBasis)]
+                : null,
+              lockProgram: true,
+              availableDestinationGroups: program.destinationGroups,
+            },
+          });
+        }}
       />
     );
   }
@@ -469,7 +495,7 @@ function ProgramRow({ program, onOpen }: { program: ProgramOverview; onOpen: () 
                   </TooltipTrigger>
                   <TooltipContent>
                     {state === "live" && option.active && (
-                      <>Live since {formatDate(option.active.effectiveFrom)} · {option.active.stateCount} states
+                      <>Live since {formatDate(option.active.effectiveFrom)} · {formatUsRegionCount(rateTableRegionCount(option.active))}
                         {option.draft && " · draft in progress"}</>
                     )}
                     {state === "draft" && "Draft in progress — not quoting yet"}
@@ -484,7 +510,7 @@ function ProgramRow({ program, onOpen }: { program: ProgramOverview; onOpen: () 
       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
         {liveOptions.length === 0
           ? "No live rates"
-          : `${program.maxLiveStateCount} states · ${program.totalZipOverrides} ZIP overrides`}
+          : `${formatUsRegionCount(program.maxLiveRegionCount)} · ${program.totalZipOverrides} ZIP overrides`}
       </TableCell>
       <TableCell>{programStatusBadge(book.status)}</TableCell>
       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
@@ -495,6 +521,40 @@ function ProgramRow({ program, onOpen }: { program: ProgramOverview; onOpen: () 
       </TableCell>
     </TableRow>
   );
+}
+
+function editorGroupFromProgramGroup(
+  source: ProgramDestinationGroup,
+  pricingBasis: PricingBasis,
+): RateGroup {
+  const regions = source.destinations
+    .filter((destination) =>
+      destination.destinationCountry === "US"
+      && destination.destinationRegion !== null
+      && destination.postalPrefix === null)
+    .map((destination) => destination.destinationRegion!);
+  const zipByRegion = new Map<string, string[]>();
+  for (const destination of source.destinations) {
+    if (
+      destination.destinationCountry !== "US"
+      || destination.destinationRegion === null
+      || destination.postalPrefix === null
+    ) continue;
+    zipByRegion.set(destination.destinationRegion, [
+      ...(zipByRegion.get(destination.destinationRegion) ?? []),
+      destination.postalPrefix,
+    ]);
+  }
+  return {
+    ...newGroup(pricingBasis, regions, source.name),
+    destinationGroupId: source.id,
+    destinationGroupLockVersion: source.lockVersion,
+    zipEntries: [...zipByRegion].map(([state, prefixes]) => ({
+      id: newId(),
+      state,
+      prefixes,
+    })),
+  };
 }
 
 function ProgramsSkeleton() {

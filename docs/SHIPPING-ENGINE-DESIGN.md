@@ -12,7 +12,7 @@ Mini-Amazon shipping engine: checkout sells Card Shellz-owned **service levels**
 
 > **Rate-book foundation — migration 137:** `shipping.zone_sets`, `shipping.rate_books`, and deterministic channel/warehouse assignments now own rate selection. Existing `shipping.*` zones and tables backfill into the active `shopify-retail-default` book. The live dropship `$8.00` provider/table is deliberately unchanged until a later import + dual-run proves identical vendor charges.
 
-> **Operator geography decision — migration 139:** rates are configured by US state and weight, with an optional 1-5 digit ZIP-prefix override. Operators never create or assign zones. The engine generates internal pricing-area keys and routing rules so rate selection and transit contracts remain reusable. ZIP overrides win over the matching state default; the longest ZIP prefix wins between overrides.
+> **Operator geography decision — migrations 139 and 0597:** rates are configured by US postal region and weight, with an optional 1-5 digit ZIP-prefix override. Supported regions include states, DC, territories, and AA/AE/AP military mail. Operators never create or assign zones. The engine generates internal pricing-area keys and routing rules so rate selection and transit contracts remain reusable. ZIP overrides win over the matching region default; the longest ZIP prefix wins between overrides.
 
 ## Verified current state (all claims checked in-file or against prod 2026-07-02)
 
@@ -113,6 +113,41 @@ The evaluator is deterministic and integer-based. Restrictions run first. Each l
 Rules may measure all matching units together or each item independently. Carton is reserved in the contract but activation rejects carton-scoped rules until verified cartonization is connected to checkout. This prevents an administrator from publishing a promise the current weight-only checkout path cannot enforce.
 
 The admin workflow is organized by destination group: **Default pricing**, **Product exceptions**, **Restrictions**, and **Test rate**. Draft testing evaluates the same draft rows and product rules that activation validates. Product-rule creates, updates, and deletes persist the authenticated operator and complete before/after rule snapshots through the shared audit API in the same transaction as the change. Activation locks the revision, revalidates product policies inside the activation transaction, and then supersedes the prior active revision atomically.
+
+### Pricing-program coverage model
+
+The pricing program (`shipping.rate_books`) is the configuration owner.
+Destination groups and service levels are equal axes beneath it. The admin
+detail view renders destination groups as rows and shipping options as columns;
+one rate-table revision owns each service-level column's prices.
+
+Named program geography is stored in
+`shipping.rate_book_destination_groups` and
+`shipping.rate_book_destination_group_members`. A rate-table revision freezes
+its group name, lock version, destinations, warehouse override, and explicit
+availability in `shipping.rate_table_coverages` and
+`shipping.rate_table_coverage_destinations`. The expanded
+`shipping.rate_table_rows` remain the only amount authority used by runtime
+selection.
+
+One destination group may have one all-warehouse rate scope plus exact
+warehouse overrides within the same service-level revision. Those scopes share
+one geography identity and optimistic-lock version; availability and amount
+rows remain scope-specific. Runtime selection continues to prefer an exact
+warehouse row over the all-warehouse default.
+
+Each destination-group / service-level cell is exactly one of:
+
+- **Offered:** every frozen destination must have rate rows.
+- **Not offered:** the frozen destinations are intentional exclusions and must
+  have no rate rows.
+- **Unconfigured:** the revision has no manifest entry for the group.
+
+Activation validates manifest intent against expanded rows in the same
+transaction as the lifecycle transition. Editing a program group increments
+its optimistic-lock version but cannot rewrite active revision snapshots.
+Admin read models surface the resulting version drift until a new revision
+explicitly adopts the current geography.
 
 ## Modules & contracts
 
