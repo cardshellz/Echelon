@@ -1,0 +1,2130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RFQ Workbench — Echelon</title>
+<!-- self-contained mockup: foundation.css + data.js + data-extra.js inlined -->
+<style>
+/* Echelon Reorder Analysis mockups — shared design system.
+   Mimics the app's shadcn/ui (new-york, neutral) light theme. Inline this whole file
+   into a <style> tag in every mockup. Do not restyle these primitives per-page. */
+
+:root {
+  --bg: #fafafa;            /* page background */
+  --surface: #ffffff;       /* cards, panels */
+  --border: #e4e4e7;        /* zinc-200 */
+  --border-strong: #d4d4d8; /* zinc-300 */
+  --text: #09090b;          /* zinc-950 */
+  --text-2: #52525b;        /* zinc-600 */
+  --muted: #71717a;         /* zinc-500 */
+  --faint: #a1a1aa;         /* zinc-400 */
+  --primary: #18181b;       /* zinc-900 buttons */
+  --primary-fg: #fafafa;
+  --accent: #f4f4f5;        /* zinc-100 hover */
+  --ring: #2563eb;
+
+  --red: #dc2626;  --red-bg: #fef2f2;  --red-bd: #fecaca;
+  --orange: #ea580c; --orange-bg: #fff7ed; --orange-bd: #fed7aa;
+  --amber: #d97706; --amber-bg: #fffbeb; --amber-bd: #fde68a;
+  --blue: #2563eb;  --blue-bg: #eff6ff; --blue-bd: #bfdbfe;
+  --green: #059669; --green-bg: #ecfdf5; --green-bd: #a7f3d0;
+  --gray: #71717a;  --gray-bg: #f4f4f5; --gray-bd: #e4e4e7;
+  --violet: #7c3aed; --violet-bg: #f5f3ff; --violet-bd: #ddd6fe;
+
+  --radius: 8px;
+  --radius-lg: 12px;
+  --shadow: 0 1px 2px rgb(0 0 0 / .05);
+  --shadow-lg: 0 10px 30px rgb(0 0 0 / .12);
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body { font-family: var(--font); font-size: 14px; color: var(--text); background: var(--bg); -webkit-font-smoothing: antialiased; }
+a { color: inherit; text-decoration: none; }
+button { font: inherit; cursor: pointer; background: none; border: none; color: inherit; }
+
+/* ---------- App shell ---------- */
+.shell { display: flex; min-height: 100vh; }
+.sidebar { width: 236px; flex: 0 0 236px; background: var(--surface); border-right: 1px solid var(--border); padding: 12px 10px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; padding: 6px 10px 14px; letter-spacing: .2px; }
+.brand .logo { width: 26px; height: 26px; border-radius: 7px; background: var(--primary); color: var(--primary-fg); display: grid; place-items: center; font-size: 13px; font-weight: 800; }
+.nav-group-label { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); cursor: pointer; }
+.nav a, .nav .navlink { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: var(--radius); font-size: 13.5px; color: var(--text-2); }
+.nav a:hover { background: var(--accent); color: var(--text); }
+.nav a.active { background: var(--accent); color: var(--text); font-weight: 600; box-shadow: inset 2px 0 0 var(--primary); }
+.nav .icon { width: 16px; height: 16px; opacity: .75; flex: 0 0 16px; }
+.nav .group-children { margin-left: 8px; border-left: 1px solid var(--border); padding-left: 6px; }
+.nav .collapsed .group-children { display: none; }
+
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.topbar { position: sticky; top: 0; z-index: 30; background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 12px; }
+.topbar h1 { font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+.topbar .sub { color: var(--muted); font-size: 12.5px; }
+.topbar .spacer { flex: 1; }
+.content { padding: 20px 24px 60px; max-width: 1440px; width: 100%; }
+
+/* ---------- Primitives ---------- */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow); }
+.card-h { padding: 14px 16px 0; display: flex; align-items: center; gap: 8px; }
+.card-h h2 { font-size: 14.5px; font-weight: 650; }
+.card-h .desc { font-size: 12.5px; color: var(--muted); }
+.card-b { padding: 14px 16px 16px; }
+
+.btn { display: inline-flex; align-items: center; gap: 7px; border-radius: var(--radius); font-size: 13px; font-weight: 550; padding: 7px 13px; border: 1px solid transparent; transition: filter .12s; white-space: nowrap; }
+.btn:hover { filter: brightness(.96); }
+.btn-primary { background: var(--primary); color: var(--primary-fg); }
+.btn-outline { background: var(--surface); border-color: var(--border-strong); color: var(--text); }
+.btn-ghost { color: var(--text-2); }
+.btn-ghost:hover { background: var(--accent); }
+.btn-danger { background: var(--red); color: #fff; }
+.btn-sm { padding: 4px 9px; font-size: 12px; border-radius: 6px; }
+
+.badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; border-radius: 999px; padding: 2.5px 9px; border: 1px solid; line-height: 1.35; white-space: nowrap; }
+.badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.b-red    { color: var(--red);    background: var(--red-bg);    border-color: var(--red-bd); }
+.b-orange { color: var(--orange); background: var(--orange-bg); border-color: var(--orange-bd); }
+.b-amber  { color: var(--amber);  background: var(--amber-bg);  border-color: var(--amber-bd); }
+.b-blue   { color: var(--blue);   background: var(--blue-bg);   border-color: var(--blue-bd); }
+.b-green  { color: var(--green);  background: var(--green-bg);  border-color: var(--green-bd); }
+.b-gray   { color: var(--gray);   background: var(--gray-bg);   border-color: var(--gray-bd); }
+.b-violet { color: var(--violet); background: var(--violet-bg); border-color: var(--violet-bd); }
+
+/* status mapping (canonical): stockout=b-red "Stockout" · order_now=b-orange "Order now" ·
+   order_soon=b-amber "Burn rate high" · on_order=b-blue "Inbound covers" · ok=b-green "Healthy" ·
+   no_movement=b-gray "Stagnant" · excluded=b-gray outline "Excluded" */
+
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; box-shadow: var(--shadow); }
+.kpi .v { font-size: 22px; font-weight: 700; letter-spacing: -.02em; }
+.kpi .l { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.kpi .d { font-size: 11.5px; margin-top: 6px; }
+.kpi.alert { border-color: var(--red-bd); background: linear-gradient(180deg, var(--red-bg), var(--surface) 70%); }
+.kpi.warn  { border-color: var(--amber-bd); background: linear-gradient(180deg, var(--amber-bg), var(--surface) 70%); }
+
+/* ---------- Tables ---------- */
+table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th { text-align: left; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); padding: 9px 10px; border-bottom: 1px solid var(--border); background: var(--surface); position: sticky; top: 57px; z-index: 5; }
+.tbl td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.tbl tbody tr:hover td { background: #fafafa; }
+.tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl .mono { font-family: var(--mono); font-size: 12px; }
+.tbl tr.group-row td { background: var(--accent); font-weight: 650; font-size: 12.5px; cursor: pointer; border-top: 1px solid var(--border-strong); }
+.tbl tr.excluded-row td { color: var(--faint); background: #fcfcfd; }
+.caret { display: inline-block; transition: transform .15s; margin-right: 6px; font-size: 10px; color: var(--muted); }
+.open .caret { transform: rotate(90deg); }
+
+.bar { height: 5px; border-radius: 999px; background: var(--accent); overflow: hidden; min-width: 64px; }
+.bar > i { display: block; height: 100%; border-radius: 999px; }
+
+/* ---------- Chips / filters / tabs ---------- */
+.chips { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.chip { border: 1px solid var(--border-strong); background: var(--surface); border-radius: 999px; padding: 5px 12px; font-size: 12.5px; font-weight: 550; color: var(--text-2); }
+.chip:hover { background: var(--accent); }
+.chip.on { background: var(--primary); border-color: var(--primary); color: var(--primary-fg); }
+.chip .n { opacity: .65; font-weight: 600; margin-left: 4px; }
+
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); }
+.tab { padding: 9px 14px; font-size: 13.5px; font-weight: 550; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab.on { color: var(--text); border-bottom-color: var(--primary); font-weight: 650; }
+.tab .n { background: var(--accent); border-radius: 999px; padding: 1px 7px; font-size: 11px; margin-left: 6px; }
+
+.input, .select { border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 7px 11px; font-size: 13px; background: var(--surface); color: var(--text); font-family: var(--font); }
+.input:focus, .select:focus { outline: 2px solid var(--ring); outline-offset: 1px; border-color: var(--ring); }
+.input::placeholder { color: var(--faint); }
+
+.switch { width: 34px; height: 19px; border-radius: 999px; background: var(--border-strong); position: relative; transition: background .15s; flex: 0 0 34px; display: inline-block; vertical-align: middle; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: #fff; box-shadow: var(--shadow); transition: left .15s; }
+.switch.on { background: var(--primary); }
+.switch.on::after { left: 17px; }
+
+/* ---------- Drawer / dialog / misc ---------- */
+.drawer-overlay { position: fixed; inset: 0; background: rgb(0 0 0 / .32); z-index: 60; display: none; }
+.drawer { position: fixed; top: 0; right: -560px; width: 560px; max-width: 92vw; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); box-shadow: var(--shadow-lg); z-index: 61; transition: right .22s ease; overflow-y: auto; }
+.drawer.open { right: 0; }
+.drawer-overlay.open { display: block; }
+.drawer-h { position: sticky; top: 0; background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 18px; display: flex; align-items: center; gap: 10px; z-index: 2; }
+.drawer-b { padding: 16px 18px 40px; }
+
+.dialog { border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); background: var(--surface); }
+
+/* math stepper */
+.steps { display: flex; flex-direction: column; gap: 0; }
+.step { display: flex; gap: 12px; position: relative; padding-bottom: 18px; }
+.step::before { content: ""; position: absolute; left: 13px; top: 30px; bottom: 0; width: 2px; background: var(--border); }
+.step:last-child::before { display: none; }
+.step .no { width: 27px; height: 27px; flex: 0 0 27px; border-radius: 50%; background: var(--primary); color: var(--primary-fg); font-size: 12.5px; font-weight: 700; display: grid; place-items: center; z-index: 1; }
+.step .body { flex: 1; min-width: 0; }
+.step .t { font-weight: 650; font-size: 13.5px; margin-bottom: 3px; }
+.step .expl { font-size: 12.5px; color: var(--text-2); line-height: 1.5; }
+.step .calc { font-family: var(--mono); font-size: 12px; background: var(--accent); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; margin-top: 7px; color: var(--text); overflow-x: auto; white-space: nowrap; }
+.step .result { font-weight: 700; }
+
+.callout { border: 1px solid; border-radius: var(--radius); padding: 10px 13px; font-size: 12.5px; line-height: 1.5; display: flex; gap: 9px; align-items: flex-start; }
+.co-red   { border-color: var(--red-bd);   background: var(--red-bg); }
+.co-amber { border-color: var(--amber-bd); background: var(--amber-bg); }
+.co-blue  { border-color: var(--blue-bd);  background: var(--blue-bg); }
+.co-green { border-color: var(--green-bd); background: var(--green-bg); }
+.co-gray  { border-color: var(--border);   background: var(--accent); }
+
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; font-size: 12.5px; }
+.kv dt { color: var(--muted); }
+.kv dd { font-weight: 550; text-align: right; font-variant-numeric: tabular-nums; }
+
+.section-gap { display: flex; flex-direction: column; gap: 16px; }
+.row { display: flex; gap: 12px; align-items: center; }
+.muted { color: var(--muted); } .small { font-size: 12px; } .tiny { font-size: 11px; }
+.mono { font-family: var(--mono); }
+.up { color: var(--green); } .down { color: var(--red); }
+.right { text-align: right; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+@media (max-width: 1100px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+.avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--violet-bg); color: var(--violet); font-size: 11px; font-weight: 700; display: grid; place-items: center; border: 1px solid var(--violet-bd); }
+.tooltip-hint { border-bottom: 1px dotted var(--faint); cursor: help; }
+
+
+/* ============ page-specific: RFQ Workbench (pg-) ============ */
+.pg-link { color: var(--blue); font-weight: 550; }
+.pg-link:hover { text-decoration: underline; }
+.tabs { margin-bottom: 16px; }
+@media (max-width: 1150px) { .topbar .sub { display: none; } }
+
+/* header card */
+.pg-head-grid { display: flex; gap: 28px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.pg-rfq-no { font-family: var(--mono); font-size: 15.5px; font-weight: 700; letter-spacing: -.01em; }
+.pg-meta { font-size: 12.5px; color: var(--muted); margin-top: 7px; }
+.pg-meta b { color: var(--text-2); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* mini timeline */
+.pg-timeline { display: flex; align-items: flex-start; padding-top: 2px; }
+.pg-tstep { display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 80px; }
+.pg-dot { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; border: 2px solid var(--border-strong); background: var(--surface); color: var(--muted); }
+.pg-tstep.done .pg-dot { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+.pg-tstep.current .pg-dot { background: var(--violet); border-color: var(--violet); color: #fff; box-shadow: 0 0 0 4px var(--violet-bg); }
+.pg-tl { font-size: 11.5px; font-weight: 650; color: var(--text-2); }
+.pg-tstep.current .pg-tl { color: var(--violet); }
+.pg-ts { font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+.pg-tcon { height: 2px; background: var(--border); flex: 0 0 30px; margin-top: 12px; border-radius: 1px; }
+.pg-tcon.done { background: var(--green-bd); }
+
+/* line comparison cards */
+.pg-line-card { overflow: hidden; }
+.pg-line-h { display: flex; align-items: baseline; gap: 10px; padding: 14px 16px 12px; flex-wrap: wrap; }
+.pg-sku { font-family: var(--mono); font-size: 12.5px; font-weight: 600; background: var(--accent); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; }
+.pg-name { font-weight: 650; font-size: 14px; }
+.pg-tbl-wrap { overflow-x: auto; }
+.pg-quote-tbl { min-width: 860px; }
+.pg-quote-tbl th { position: static; }
+.pg-strong { font-weight: 650; }
+.pg-vname { font-weight: 560; }
+.pg-vnote { font-size: 11.5px; color: var(--muted); margin-top: 2px; font-weight: 400; }
+.pg-moq-flag { font-size: 11px; color: var(--amber); font-weight: 600; margin-top: 2px; white-space: nowrap; }
+tr.pg-qrow { cursor: pointer; }
+.tbl tbody tr.pg-sel td { background: var(--accent); }
+.tbl tbody tr.pg-sel td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
+.tbl tbody tr.pg-declined td, .tbl tbody tr.pg-declined:hover td { color: var(--faint); background: #fcfcfd; cursor: default; }
+.pg-declined-note { font-size: 12.5px; }
+.pg-radio-c input { accent-color: var(--primary); cursor: pointer; width: 14px; height: 14px; }
+.pg-why { margin: 12px 16px; }
+.pg-line-foot { border-top: 1px solid var(--border); background: #fafafa; padding: 11px 16px; font-size: 13px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.pg-line-foot b { font-variant-numeric: tabular-nums; }
+.pg-saves { color: var(--green); font-weight: 650; font-variant-numeric: tabular-nums; }
+.pg-saves.neg { color: var(--red); }
+
+/* sticky award bar */
+.pg-awardbar { position: sticky; bottom: 16px; z-index: 40; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); padding: 12px 16px; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.pg-barstats { font-size: 13px; color: var(--text-2); white-space: nowrap; }
+.pg-barstats b { color: var(--text); font-variant-numeric: tabular-nums; }
+.pg-total { font-size: 15px; font-weight: 750; color: var(--text); font-variant-numeric: tabular-nums; }
+.pg-promote { display: flex; gap: 9px; align-items: flex-start; font-size: 12.5px; cursor: pointer; line-height: 1.35; }
+.pg-promote input { accent-color: var(--primary); margin-top: 2px; width: 14px; height: 14px; }
+
+/* lifecycle */
+.pg-life { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+.pg-life-step { max-width: 150px; }
+.pg-life-pill { display: inline-block; font-size: 12px; font-weight: 650; border: 1px solid var(--border-strong); border-radius: 999px; padding: 3px 11px; background: var(--surface); color: var(--text-2); white-space: nowrap; }
+.pg-life-step.on .pg-life-pill { background: var(--violet-bg); border-color: var(--violet-bd); color: var(--violet); }
+.pg-life-desc { font-size: 11px; color: var(--muted); margin-top: 5px; line-height: 1.45; }
+.pg-life-arrow { color: var(--faint); margin-top: 4px; }
+
+/* generic pipeline placeholder */
+.pg-empty { padding: 56px 24px; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+.pg-empty .pg-count { font-size: 18px; font-weight: 700; }
+.pg-empty svg { color: var(--faint); }
+
+/* quote-entry side sheet */
+.pg-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.pg-field { display: flex; flex-direction: column; gap: 5px; }
+.pg-field label { font-size: 11.5px; font-weight: 600; color: var(--text-2); }
+.pg-field.full { grid-column: 1 / -1; }
+.pg-form .input, .pg-form .select { width: 100%; }
+.pg-form textarea.input { min-height: 70px; resize: vertical; font-family: var(--font); }
+.pg-nobid-row { display: flex; align-items: center; gap: 11px; padding: 13px 0; border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); margin: 15px 0; cursor: pointer; }
+.pg-dim { opacity: .45; pointer-events: none; }
+.pg-drawer-foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+
+/* toasts */
+.pg-toasts { position: fixed; right: 20px; bottom: 20px; z-index: 120; display: flex; flex-direction: column; gap: 8px; }
+.pg-toast { background: var(--primary); color: var(--primary-fg); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 10px 14px; font-size: 12.5px; line-height: 1.45; max-width: 380px; animation: pg-in .18s ease; }
+.pg-toast.out { opacity: 0; transition: opacity .28s; }
+@keyframes pg-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+.pg-pagefoot { text-align: center; color: var(--faint); font-size: 11.5px; margin: 34px 0 8px; }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><span class="logo">E</span> Echelon</div>
+    <nav class="nav">
+      <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg> Dashboard</a>
+      <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.2"/><path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2"/></svg> Operations Control Tower</a>
+
+      <div class="nav-group-label">Procurement</div>
+      <div class="group-children">
+        <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16"/><path d="M7 20v-6M12 20V6M17 20v-9"/></svg> Dashboard</a>
+        <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4"/><path d="M9 12.5h6M9 16h6"/></svg> Purchase Orders</a>
+        <a href="01-reorder-analysis.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12a7.5 7.5 0 0 1 13-5.1"/><path d="M17.5 3.6v3.3h-3.3"/><path d="M19.5 12a7.5 7.5 0 0 1-13 5.1"/><path d="M6.5 20.4v-3.3h3.3"/></svg> Reorder Analysis</a>
+        <a href="02-forecast-adjustments.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 17.5 9 12l3.5 3.5 7.5-7.5"/><path d="M15.5 8H20v4.5"/></svg> Forecast Adjustments</a>
+        <a class="active" href="05-rfq-workbench.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 8h11"/><path d="M14.5 5l3 3-3 3"/><path d="M17.5 16h-11"/><path d="M9.5 13l-3 3 3 3"/></svg> RFQ Workbench</a>
+        <a href="03-automation.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg> Automation</a>
+        <a href="04-run-report.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M8.5 8.5h7M8.5 12h7M8.5 15.5h4"/></svg> Run Reports</a>
+        <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 13.5h5l1.5 2.5h4l1.5-2.5h5"/><path d="M3.5 13.5V19a1.5 1.5 0 0 0 1.5 1.5h14a1.5 1.5 0 0 0 1.5-1.5v-5.5"/><path d="M12 3.5V10M9.5 8l2.5 2.5L14.5 8"/></svg> Receiving</a>
+        <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5h11v9h-11z"/><path d="M13.5 9.5h4l3 3v3h-7"/><circle cx="6.5" cy="17.9" r="1.7"/><circle cx="17" cy="17.9" r="1.7"/></svg> Shipments</a>
+        <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20.5V8.5l8-5 8 5v12"/><path d="M9.5 20.5v-6h5v6"/></svg> Suppliers</a>
+      </div>
+
+      <div class="nav-group-label">Accounts Payable</div>
+      <div class="nav-group-label">Inventory</div>
+      <div class="nav-group-label">Orders (OMS)</div>
+      <div class="nav-group-label">Warehouse (WMS)</div>
+      <div class="nav-group-label">Shipping</div>
+      <div class="nav-group-label">Catalog &amp; Channels</div>
+      <div class="nav-group-label">Dropship</div>
+      <div class="nav-group-label" style="margin-top:14px">Admin</div>
+      <div class="group-children">
+        <a href="06-exclusions-policy.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7.5h16M4 16.5h16"/><circle cx="9.5" cy="7.5" r="2.2" fill="#fff"/><circle cx="14.5" cy="16.5" r="2.2" fill="#fff"/></svg> Planning Policy</a>
+        <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg> Settings</a>
+      </div>
+    </nav>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <h1>RFQ Workbench</h1>
+      <span class="sub" id="pgSub"></span>
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" id="pgHowBtn">How quotes get in</button>
+      <button class="btn btn-primary" id="pgNewRfq">New RFQ from suggestions</button>
+    </div>
+
+    <div class="content">
+      <div class="tabs" id="pgTabs"></div>
+
+      <!-- Award showcase -->
+      <div class="section-gap" id="panel-award">
+        <div class="card"><div class="card-b" id="pgHead"></div></div>
+        <div class="section-gap" id="pgLines"></div>
+
+        <div class="pg-awardbar" id="pgAwardBar">
+          <div class="pg-barstats" id="pgBarStats"></div>
+          <span class="spacer" style="flex:1"></span>
+          <label class="pg-promote"><input type="checkbox" id="pgPromote">
+            <span><b>Promote awarded quotes to supplier catalog</b><br>
+            <span class="muted tiny">updates vendor_products pricing evidence</span></span></label>
+          <button class="btn btn-ghost" id="pgBackBtn">Back to quoting</button>
+          <button class="btn btn-primary" id="pgAwardBtn">Award &amp; draft POs</button>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><h2>RFQ lifecycle</h2><span class="desc">where this screen sits in the flow</span></div>
+          <div class="card-b">
+            <div class="pg-life" id="pgLife"></div>
+            <div class="muted small" style="margin-top:12px">Every transition is a logged command; nothing auto-sends beyond Stage&nbsp;4 autopilot. <a class="pg-link" href="03-automation.html">Automation Control Center &rarr;</a></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- placeholder for non-award pipeline stages -->
+      <div class="card" id="panel-generic" style="display:none"><div id="pgGenericBody"></div></div>
+
+      <div class="pg-pagefoot">Design mockup &middot; not wired to live data &middot; Echelon Reorder Analysis redesign &middot; Jul 2026</div>
+    </div>
+  </div>
+</div>
+
+<!-- quote entry side sheet -->
+<div class="drawer-overlay" id="pgOverlay"></div>
+<aside class="drawer" id="pgDrawer" role="dialog" aria-modal="true" aria-label="Capture a vendor quote">
+  <div class="drawer-h">
+    <div>
+      <div style="font-weight:700">Capture a vendor quote</div>
+      <div class="muted tiny mono" id="pgDrawerRfq"></div>
+    </div>
+    <span class="spacer" style="flex:1"></span>
+    <button class="btn btn-ghost btn-sm" id="pgDrawerX" aria-label="Close">&#10005;</button>
+  </div>
+  <div class="drawer-b">
+    <div class="callout co-blue" style="margin-bottom:15px">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 15px;margin-top:1px;color:var(--blue)"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.5 6.5 8.5 6 8.5-6"/></svg>
+      <div>Vendors reply by email &mdash; paste the quote here, or forward the email and let the AI intake draft it for your approval <span class="muted">(future)</span>.</div>
+    </div>
+    <div class="pg-form">
+      <div class="pg-field"><label for="pgQVendor">Vendor</label><select class="select" id="pgQVendor"></select></div>
+      <div class="pg-field"><label for="pgQLine">Line</label><select class="select" id="pgQLine"></select></div>
+    </div>
+    <div class="pg-nobid-row" id="pgNoBidRow">
+      <span class="switch" id="pgNoBid" role="switch" aria-checked="false" tabindex="0"></span>
+      <div><b>No bid</b><div class="muted tiny">Vendor declined to quote this line</div></div>
+    </div>
+    <div class="pg-field" id="pgNoBidReason" style="display:none;margin-bottom:15px"><label for="pgQReason">Reason</label><select class="select" id="pgQReason"></select></div>
+    <div class="pg-form" id="pgQuoteFields"></div>
+    <div class="pg-drawer-foot">
+      <button class="btn btn-ghost" id="pgQCancel">Cancel</button>
+      <button class="btn btn-primary" id="pgQSave">Save quote</button>
+    </div>
+  </div>
+</aside>
+
+<div class="pg-toasts" id="pgToasts"></div>
+
+<script>
+// GENERATED by gen_data.py - do not hand-edit numbers; they follow the real engine formulas.
+window.MOCK = {
+ "asOf": "2026-07-26",
+ "horizonDays": 90,
+ "confidenceWeights": {
+  "high": 100,
+  "medium": 70,
+  "low": 40
+ },
+ "policy": {
+  "method": "weighted_blend_v1",
+  "windows": {
+   "short": 7,
+   "standard": 30,
+   "long": 90,
+   "seasonal": 30
+  },
+  "weights": {
+   "short": 30,
+   "standard": 35,
+   "long": 20,
+   "seasonal": 15
+  },
+  "cohort": "3f9a2c1e",
+  "forecastVersion": 2
+ },
+ "vendors": [
+  {
+   "id": 1,
+   "code": "GTS",
+   "name": "GTS Distribution",
+   "leadTimeDays": 7,
+   "terms": "Net 30",
+   "email": "orders@gtsdistribution.com",
+   "stage": 3,
+   "caps": {
+    "maxPoCents": 250000,
+    "maxDayCents": 500000,
+    "maxLinesRun": 25
+   }
+  },
+  {
+   "id": 2,
+   "code": "SHD",
+   "name": "Southern Hobby",
+   "leadTimeDays": 10,
+   "terms": "Net 30",
+   "email": "sales@southernhobby.com",
+   "stage": 2,
+   "caps": {
+    "maxPoCents": 150000,
+    "maxDayCents": 300000,
+    "maxLinesRun": 25
+   }
+  },
+  {
+   "id": 3,
+   "code": "PSC",
+   "name": "Peach State Cards",
+   "leadTimeDays": 12,
+   "terms": "Net 15",
+   "email": "po@peachstatecards.com",
+   "stage": 1,
+   "caps": null
+  },
+  {
+   "id": 4,
+   "code": "BCW",
+   "name": "BCW Direct",
+   "leadTimeDays": 5,
+   "terms": "Net 30",
+   "email": "wholesale@bcwsupplies.com",
+   "stage": 3,
+   "caps": {
+    "maxPoCents": 200000,
+    "maxDayCents": 250000,
+    "maxLinesRun": 25
+   }
+  },
+  {
+   "id": 5,
+   "code": "MEX",
+   "name": "Magazine Exchange",
+   "leadTimeDays": 14,
+   "terms": "Prepaid",
+   "email": "orders@magazineexchange.com",
+   "stage": 1,
+   "caps": null
+  }
+ ],
+ "adjustments": [
+  {
+   "id": 1,
+   "scope": "category",
+   "target": "Sealed - Pokemon",
+   "pct": 20,
+   "start": "2026-07-15",
+   "end": "2026-08-31",
+   "reason": "Summer set surge - Destined Rivals wave 2",
+   "active": true,
+   "createdBy": "owner"
+  },
+  {
+   "id": 2,
+   "scope": "business",
+   "target": "All SKUs",
+   "pct": 15,
+   "start": "2026-11-01",
+   "end": "2026-12-24",
+   "reason": "Holiday season baseline lift",
+   "active": false,
+   "createdBy": "owner"
+  },
+  {
+   "id": 3,
+   "scope": "category",
+   "target": "Sealed - Pokemon",
+   "pct": 40,
+   "start": "2026-11-01",
+   "end": "2026-11-30",
+   "reason": "Black Friday + Mega Evolution launch",
+   "active": false,
+   "createdBy": "owner"
+  }
+ ],
+ "events": [
+  {
+   "id": 11,
+   "name": "Mega Evolution ETB preorder drop",
+   "type": "preorder",
+   "status": "active",
+   "sku": "PKM-MEGA-ETB",
+   "pieces": 900,
+   "confidence": "high",
+   "start": "2026-09-26",
+   "end": "2026-10-10"
+  },
+  {
+   "id": 12,
+   "name": "Collect-A-Con wholesale order",
+   "type": "wholesale",
+   "status": "planned",
+   "sku": "PKM-PRE-ETB",
+   "pieces": 300,
+   "confidence": "high",
+   "start": "2026-08-14",
+   "end": "2026-08-16"
+  },
+  {
+   "id": 13,
+   "name": "Black Friday supplies push",
+   "type": "promotion",
+   "status": "planned",
+   "sku": null,
+   "category": "Supplies",
+   "pieces": 2500,
+   "confidence": "medium",
+   "start": "2026-11-27",
+   "end": "2026-12-01"
+  }
+ ],
+ "exclusionRules": [
+  {
+   "id": 1,
+   "field": "category",
+   "value": "Singles",
+   "excludedCount": 34,
+   "addedBy": "owner",
+   "addedAt": "2026-05-02"
+  },
+  {
+   "id": 2,
+   "field": "tag",
+   "value": "discontinued",
+   "excludedCount": 2,
+   "addedBy": "owner",
+   "addedAt": "2026-05-02"
+  },
+  {
+   "id": 3,
+   "field": "sku_prefix",
+   "value": "GRD-",
+   "excludedCount": 1,
+   "addedBy": "auto-suggest, approved by owner",
+   "addedAt": "2026-06-18"
+  }
+ ],
+ "items": [
+  {
+   "sku": "PKM-PRE-ETB",
+   "name": "Prismatic Evolutions Elite Trainer Box",
+   "category": "Sealed - Pokemon",
+   "productLine": "Prismatic Evolutions",
+   "vendor": "GTS Distribution",
+   "vendorCode": "GTS",
+   "leadTimeDays": 7,
+   "leadTimeSource": "vendor",
+   "safetyStockDays": 7,
+   "unitCostCents": 4650,
+   "moq": 10,
+   "increment": 10,
+   "usage": {
+    "d7": 96,
+    "d30": 342,
+    "d90": 810,
+    "seasonal30": 168,
+    "prior30": 236
+   },
+   "windowAdu": {
+    "d7": 13.71,
+    "d30": 11.4,
+    "d90": 9.0,
+    "seasonal": 5.6
+   },
+   "blendWeights": {
+    "short": 30,
+    "standard": 35,
+    "long": 20,
+    "seasonal": 15
+   },
+   "adu": 10.74,
+   "growthMultiplier": 1.2,
+   "growthAdjustments": [
+    {
+     "label": "+20% Sealed - Pokemon",
+     "pct": 20,
+     "id": 1,
+     "reason": "Summer set surge - Destined Rivals wave 2",
+     "range": "2026-07-15 to 2026-08-31"
+    }
+   ],
+   "adjustedAdu": 12.89,
+   "onHand": 118,
+   "reserved": 22,
+   "available": 96,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 300,
+   "forwardDemandRows": [
+    {
+     "event": "Collect-A-Con wholesale order",
+     "type": "wholesale",
+     "raw": 300,
+     "confidence": "high",
+     "weighted": 300,
+     "allocated": false
+    }
+   ],
+   "reorderPoint": 181,
+   "adjustedReorderPoint": 481,
+   "effectiveSupply": 96,
+   "gap": 385,
+   "suggestedPieces": 390,
+   "suggestedValueCents": 1813500,
+   "baseline": {
+    "reorderPoint": 151,
+    "adjustedReorderPoint": 451,
+    "gap": 355,
+    "suggestedPieces": 360
+   },
+   "daysOfSupply": 7,
+   "trend": "flat",
+   "trendRatio": 1.45,
+   "demandQuality": "normal",
+   "confidence": "high",
+   "lastSaleDaysAgo": 12,
+   "status": "order_now",
+   "excluded": false
+  },
+  {
+   "sku": "PKM-PRE-BB",
+   "name": "Prismatic Evolutions Booster Bundle",
+   "category": "Sealed - Pokemon",
+   "productLine": "Prismatic Evolutions",
+   "vendor": "GTS Distribution",
+   "vendorCode": "GTS",
+   "leadTimeDays": 7,
+   "leadTimeSource": "vendor",
+   "safetyStockDays": 7,
+   "unitCostCents": 2350,
+   "moq": 12,
+   "increment": 6,
+   "usage": {
+    "d7": 58,
+    "d30": 214,
+    "d90": 566,
+    "seasonal30": 121,
+    "prior30": 189
+   },
+   "windowAdu": {
+    "d7": 8.29,
+    "d30": 7.13,
+    "d90": 6.29,
+    "seasonal": 4.03
+   },
+   "blendWeights": {
+    "short": 30,
+    "standard": 35,
+    "long": 20,
+    "seasonal": 15
+   },
+   "adu": 6.85,
+   "growthMultiplier": 1.2,
+   "growthAdjustments": [
+    {
+     "label": "+20% Sealed - Pokemon",
+     "pct": 20,
+     "id": 1,
+     "reason": "Summer set surge - Destined Rivals wave 2",
+     "range": "2026-07-15 to 2026-08-31"
+    }
+   ],
+   "adjustedAdu": 8.21,
+   "onHand": 176,
+   "reserved": 14,
+   "available": 162,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 115,
+   "adjustedReorderPoint": 115,
+   "effectiveSupply": 162,
+   "gap": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "baseline": {
+    "reorderPoint": 96,
+    "adjustedReorderPoint": 96,
+    "gap": 0,
+    "suggestedPieces": 0
+   },
+   "daysOfSupply": 20,
+   "trend": "flat",
+   "trendRatio": 1.13,
+   "demandQuality": "normal",
+   "confidence": "high",
+   "lastSaleDaysAgo": 9,
+   "status": "ok",
+   "excluded": false
+  },
+  {
+   "sku": "PKM-DRI-BB36",
+   "name": "Destined Rivals Booster Box (36ct)",
+   "category": "Sealed - Pokemon",
+   "productLine": "Destined Rivals",
+   "vendor": "GTS Distribution",
+   "vendorCode": "GTS",
+   "leadTimeDays": 7,
+   "leadTimeSource": "vendor",
+   "safetyStockDays": 7,
+   "unitCostCents": 10800,
+   "moq": 6,
+   "increment": 6,
+   "usage": {
+    "d7": 41,
+    "d30": 150,
+    "d90": 366,
+    "seasonal30": 0,
+    "prior30": 139
+   },
+   "windowAdu": {
+    "d7": 5.86,
+    "d30": 5.0,
+    "d90": 4.07,
+    "seasonal": 0.0
+   },
+   "blendWeights": {
+    "short": 35.3,
+    "standard": 41.2,
+    "long": 23.5,
+    "seasonal": 0
+   },
+   "adu": 5.08,
+   "growthMultiplier": 1.2,
+   "growthAdjustments": [
+    {
+     "label": "+20% Sealed - Pokemon",
+     "pct": 20,
+     "id": 1,
+     "reason": "Summer set surge - Destined Rivals wave 2",
+     "range": "2026-07-15 to 2026-08-31"
+    }
+   ],
+   "adjustedAdu": 6.1,
+   "onHand": 84,
+   "reserved": 8,
+   "available": 76,
+   "onOrder": 144,
+   "openPoCount": 2,
+   "poEta": "2026-08-04",
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 86,
+   "adjustedReorderPoint": 86,
+   "effectiveSupply": 220,
+   "gap": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "baseline": {
+    "reorderPoint": 72,
+    "adjustedReorderPoint": 72,
+    "gap": 0,
+    "suggestedPieces": 0
+   },
+   "daysOfSupply": 12,
+   "trend": "flat",
+   "trendRatio": 1.08,
+   "demandQuality": "normal",
+   "confidence": "high",
+   "lastSaleDaysAgo": 31,
+   "status": "on_order",
+   "excluded": false
+  },
+  {
+   "sku": "PKM-151-UPC",
+   "name": "151 Ultra Premium Collection",
+   "category": "Sealed - Pokemon",
+   "productLine": "Scarlet & Violet",
+   "vendor": "Southern Hobby",
+   "vendorCode": "SHD",
+   "leadTimeDays": 10,
+   "leadTimeSource": "vendor",
+   "safetyStockDays": 7,
+   "unitCostCents": 9200,
+   "moq": 6,
+   "increment": 6,
+   "usage": {
+    "d7": 18,
+    "d30": 74,
+    "d90": 231,
+    "seasonal30": 89,
+    "prior30": 81
+   },
+   "windowAdu": {
+    "d7": 2.57,
+    "d30": 2.47,
+    "d90": 2.57,
+    "seasonal": 2.97
+   },
+   "blendWeights": {
+    "short": 30,
+    "standard": 35,
+    "long": 20,
+    "seasonal": 15
+   },
+   "adu": 2.59,
+   "growthMultiplier": 1.2,
+   "growthAdjustments": [
+    {
+     "label": "+20% Sealed - Pokemon",
+     "pct": 20,
+     "id": 1,
+     "reason": "Summer set surge - Destined Rivals wave 2",
+     "range": "2026-07-15 to 2026-08-31"
+    }
+   ],
+   "adjustedAdu": 3.11,
+   "onHand": 6,
+   "reserved": 6,
+   "available": 0,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 53,
+   "adjustedReorderPoint": 53,
+   "effectiveSupply": 0,
+   "gap": 53,
+   "suggestedPieces": 54,
+   "suggestedValueCents": 496800,
+   "baseline": {
+    "reorderPoint": 45,
+    "adjustedReorderPoint": 45,
+    "gap": 45,
+    "suggestedPieces": 48
+   },
+   "daysOfSupply": 0,
+   "trend": "flat",
+   "trendRatio": 0.91,
+   "demandQuality": "normal",
+   "confidence": "high",
+   "lastSaleDaysAgo": 44,
+   "status": "stockout",
+   "excluded": false
+  },
+  {
+   "sku": "PKM-SVP-TIN",
+   "name": "Paldea Adventure Chest Tin",
+   "category": "Sealed - Pokemon",
+   "productLine": "Scarlet & Violet",
+   "vendor": "Southern Hobby",
+   "vendorCode": "SHD",
+   "leadTimeDays": 10,
+   "leadTimeSource": "vendor",
+   "safetyStockDays": 7,
+   "unitCostCents": 2100,
+   "moq": 12,
+   "increment": 12,
+   "usage": {
+    "d7": 22,
+    "d30": 96,
+    "d90": 270,
+    "seasonal30": 208,
+    "prior30": 90
+   },
+   "windowAdu": {
+    "d7": 3.14,
+    "d30": 3.2,
+    "d90": 3.0,
+    "seasonal": 6.93
+   },
+   "blendWeights": {
+    "short": 30,
+    "standard": 35,
+    "long": 20,
+    "seasonal": 15
+   },
+   "adu": 3.7,
+   "growthMultiplier": 1.2,
+   "growthAdjustments": [
+    {
+     "label": "+20% Sealed - Pokemon",
+     "pct": 20,
+     "id": 1,
+     "reason": "Summer set surge - Destined Rivals wave 2",
+     "range": "2026-07-15 to 2026-08-31"
+    }
+   ],
+   "adjustedAdu": 4.44,
+   "onHand": 310,
+   "reserved": 12,
+   "available": 298,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 76,
+   "adjustedReorderPoint": 76,
+   "effectiveSupply": 298,
+   "gap": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "baseline": {
+    "reorderPoint": 63,
+    "adjustedReorderPoint": 63,
+    "gap": 0,
+    "suggestedPieces": 0
+   },
+   "daysOfSupply": 67,
+   "trend": "flat",
+   "trendRatio": 1.07,
+   "demandQuality": "normal",
+   "confidence": "high",
+   "lastSaleDaysAgo": 61,
+   "status": "ok",
+   "excluded": false
+  },
+  {
+   "sku": "PKM-MEGA-ETB",
+   "name": "Mega Evolution ETB (Preorder)",
+   "category": "Sealed - Pokemon",
+   "productLine": "Mega Evolution",
+   "vendor": "GTS Distribution",
+   "vendorCode": "GTS",
+   "leadTimeDays": 21,
+   "leadTimeSource": "override",
+   "safetyStockDays": 7,
+   "unitCostCents": 5200,
+   "moq": 10,
+   "increment": 10,
+   "usage": {
+    "d7": 4,
+    "d30": 9,
+    "d90": 9,
+    "seasonal30": 0,
+    "prior30": 0
+   },
+   "windowAdu": {
+    "d7": 0.57,
+    "d30": 0.3,
+    "d90": 0.1,
+    "seasonal": 0.0
+   },
+   "blendWeights": {
+    "short": 35.3,
+    "standard": 41.2,
+    "long": 23.5,
+    "seasonal": 0
+   },
+   "adu": 0.35,
+   "growthMultiplier": 1.2,
+   "growthAdjustments": [
+    {
+     "label": "+20% Sealed - Pokemon",
+     "pct": 20,
+     "id": 1,
+     "reason": "Summer set surge - Destined Rivals wave 2",
+     "range": "2026-07-15 to 2026-08-31"
+    }
+   ],
+   "adjustedAdu": 0.42,
+   "onHand": 0,
+   "reserved": 0,
+   "available": 0,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 900,
+   "forwardDemandRows": [
+    {
+     "event": "Mega Evolution ETB preorder drop",
+     "type": "preorder",
+     "raw": 900,
+     "confidence": "high",
+     "weighted": 900,
+     "allocated": false
+    }
+   ],
+   "reorderPoint": 12,
+   "adjustedReorderPoint": 912,
+   "effectiveSupply": 0,
+   "gap": 912,
+   "suggestedPieces": 920,
+   "suggestedValueCents": 4784000,
+   "baseline": {
+    "reorderPoint": 10,
+    "adjustedReorderPoint": 910,
+    "gap": 910,
+    "suggestedPieces": 910
+   },
+   "daysOfSupply": 0,
+   "trend": "rising",
+   "trendRatio": 99,
+   "demandQuality": "thin_history",
+   "confidence": "low",
+   "lastSaleDaysAgo": 6,
+   "status": "stockout",
+   "excluded": false
+  },
+  {
+   "sku": "TOP-25C-HOB",
+   "name": "2025 Topps Chrome Hobby Box",
+   "category": "Sealed - Sports",
+   "productLine": "2025 Topps Chrome",
+   "vendor": "Peach State Cards",
+   "vendorCode": "PSC",
+   "leadTimeDays": 12,
+   "leadTimeSource": "vendor",
+   "safetyStockDays": 7,
+   "unitCostCents": 7400,
+   "moq": 8,
+   "increment": 8,
+   "usage": {
+    "d7": 26,
+    "d30": 118,
+    "d90": 342,
+    "seasonal30": 96,
+    "prior30": 124
+   },
+   "windowAdu": {
+    "d7": 3.71,
+    "d30": 3.93,
+    "d90": 3.8,
+    "seasonal": 3.2
+   },
+   "blendWeights": {
+    "short": 30,
+    "standard": 35,
+    "long": 20,
+    "seasonal": 15
+   },
+   "adu": 3.73,
+   "growthMultiplier": 1.0,
+   "growthAdjustments": [],
+   "adjustedAdu": 3.73,
+   "onHand": 214,
+   "reserved": 10,
+   "available": 204,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 71,
+   "adjustedReorderPoint": 71,
+   "effectiveSupply": 204,
+   "gap": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "baseline": {
+    "reorderPoint": 71,
+    "adjustedReorderPoint": 71,
+    "gap": 0,
+    "suggestedPieces": 0
+   },
+   "daysOfSupply": 55,
+   "trend": "flat",
+   "trendRatio": 0.95,
+   "demandQuality": "normal",
+   "confidence": "high",
+   "lastSaleDaysAgo": 27,
+   "status": "ok",
+   "excluded": false
+  },
+  {
+   "sku": "TOP-25S1-BL",
+   "name": "2025 Topps Series One Blaster",
+   "category": "Sealed - Sports",
+   "productLine": "2025 Topps Chrome",
+   "vendor": "Peach State Cards",
+   "vendorCode": "PSC",
+   "leadTimeDays": 12,
+   "leadTimeSource": "vendor",
+   "safetyStockDays": 7,
+   "unitCostCents": 1950,
+   "moq": 24,
+   "increment": 12,
+   "usage": {
+    "d7": 9,
+    "d30": 62,
+    "d90": 294,
+    "seasonal30": 88,
+    "prior30": 131
+   },
+   "windowAdu": {
+    "d7": 1.29,
+    "d30": 2.07,
+    "d90": 3.27,
+    "seasonal": 2.93
+   },
+   "blendWeights": {
+    "short": 30,
+    "standard": 35,
+    "long": 20,
+    "seasonal": 15
+   },
+   "adu": 2.2,
+   "growthMultiplier": 1.0,
+   "growthAdjustments": [],
+   "adjustedAdu": 2.2,
+   "onHand": 342,
+   "reserved": 4,
+   "available": 338,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 42,
+   "adjustedReorderPoint": 42,
+   "effectiveSupply": 338,
+   "gap": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "baseline": {
+    "reorderPoint": 42,
+    "adjustedReorderPoint": 42,
+    "gap": 0,
+    "suggestedPieces": 0
+   },
+   "daysOfSupply": 153,
+   "trend": "falling",
+   "trendRatio": 0.47,
+   "demandQuality": "normal",
+   "confidence": "medium",
+   "lastSaleDaysAgo": 88,
+   "status": "ok",
+   "excluded": false
+  },
+  {
+   "sku": "TOP-25B-JMB",
+   "name": "2025 Bowman Jumbo Hobby Box",
+   "category": "Sealed - Sports",
+   "productLine": "2025 Bowman",
+   "vendor": "Magazine Exchange",
+   "vendorCode": "MEX",
+   "leadTimeDays": 14,
+   "leadTimeSource": "vendor",
+   "safetyStockDays": 7,
+   "unitCostCents": 15800,
+   "moq": 4,
+   "increment": 4,
+   "usage": {
+    "d7": 3,
+    "d30": 17,
+    "d90": 92,
+    "seasonal30": 41,
+    "prior30": 46
+   },
+   "windowAdu": {
+    "d7": 0.43,
+    "d30": 0.57,
+    "d90": 1.02,
+    "seasonal": 1.37
+   },
+   "blendWeights": {
+    "short": 30,
+    "standard": 35,
+    "long": 20,
+    "seasonal": 15
+   },
+   "adu": 0.74,
+   "growthMultiplier": 1.0,
+   "growthAdjustments": [],
+   "adjustedAdu": 0.74,
+   "onHand": 164,
+   "reserved": 2,
+   "available": 162,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 16,
+   "adjustedReorderPoint": 16,
+   "effectiveSupply": 162,
+   "gap": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "baseline": {
+    "reorderPoint": 16,
+    "adjustedReorderPoint": 16,
+    "gap": 0,
+    "suggestedPieces": 0
+   },
+   "daysOfSupply": 220,
+   "trend": "falling",
+   "trendRatio": 0.37,
+   "demandQuality": "normal",
+   "confidence": "medium",
+   "lastSaleDaysAgo": 196,
+   "status": "ok",
+   "excluded": false
+  },
+  {
+   "sku": "PAN-PRZ-HOB",
+   "name": "Prizm Basketball Hobby Box",
+   "category": "Sealed - Sports",
+   "productLine": "Prizm Basketball",
+   "vendor": "Peach State Cards",
+   "vendorCode": "PSC",
+   "leadTimeDays": 25,
+   "leadTimeSource": "override",
+   "safetyStockDays": 7,
+   "unitCostCents": 12600,
+   "moq": 4,
+   "increment": 4,
+   "usage": {
+    "d7": 19,
+    "d30": 74,
+    "d90": 198,
+    "seasonal30": 66,
+    "prior30": 70
+   },
+   "windowAdu": {
+    "d7": 2.71,
+    "d30": 2.47,
+    "d90": 2.2,
+    "seasonal": 2.2
+   },
+   "blendWeights": {
+    "short": 30,
+    "standard": 35,
+    "long": 20,
+    "seasonal": 15
+   },
+   "adu": 2.45,
+   "growthMultiplier": 1.0,
+   "growthAdjustments": [],
+   "adjustedAdu": 2.45,
+   "onHand": 92,
+   "reserved": 6,
+   "available": 86,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 79,
+   "adjustedReorderPoint": 79,
+   "effectiveSupply": 86,
+   "gap": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "baseline": {
+    "reorderPoint": 79,
+    "adjustedReorderPoint": 79,
+    "gap": 0,
+    "suggestedPieces": 0
+   },
+   "daysOfSupply": 35,
+   "trend": "flat",
+   "trendRatio": 1.06,
+   "demandQuality": "normal",
+   "confidence": "high",
+   "lastSaleDaysAgo": 33,
+   "status": "order_soon",
+   "excluded": false
+  },
+  {
+   "sku": "BCW-TL-100",
+   "name": "BCW Toploaders 3x4 (100ct pack)",
+   "category": "Supplies",
+   "productLine": "BCW Essentials",
+   "vendor": "BCW Direct",
+   "vendorCode": "BCW",
+   "leadTimeDays": 5,
+   "leadTimeSource": "vendor",
+   "safetyStockDays": 7,
+   "unitCostCents": 680,
+   "moq": 50,
+   "increment": 25,
+   "usage": {
+    "d7": 210,
+    "d30": 884,
+    "d90": 2561,
+    "seasonal30": 792,
+    "prior30": 858
+   },
+   "windowAdu": {
+    "d7": 30.0,
+    "d30": 29.47,
+    "d90": 28.46,
+    "seasonal": 26.4
+   },
+   "blendWeights": {
+    "short": 30,
+    "standard": 35,
+    "long": 20,
+    "seasonal": 15
+   },
+   "adu": 28.96,
+   "growthMultiplier": 1.0,
+   "growthAdjustments": [],
+   "adjustedAdu": 28.96,
+   "onHand": 1120,
+   "reserved": 96,
+   "available": 1024,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 348,
+   "adjustedReorderPoint": 348,
+   "effectiveSupply": 1024,
+   "gap": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "baseline": {
+    "reorderPoint": 348,
+    "adjustedReorderPoint": 348,
+    "gap": 0,
+    "suggestedPieces": 0
+   },
+   "daysOfSupply": 35,
+   "trend": "flat",
+   "trendRatio": 1.03,
+   "demandQuality": "normal",
+   "confidence": "high",
+   "lastSaleDaysAgo": 15,
+   "status": "ok",
+   "excluded": false
+  },
+  {
+   "sku": "ULP-DS-100",
+   "name": "Ultra Pro Deck Sleeves (100ct)",
+   "category": "Supplies",
+   "productLine": "Ultra Pro Core",
+   "vendor": "BCW Direct",
+   "vendorCode": "BCW",
+   "leadTimeDays": 5,
+   "leadTimeSource": "vendor",
+   "safetyStockDays": 7,
+   "unitCostCents": 420,
+   "moq": 72,
+   "increment": 36,
+   "usage": {
+    "d7": 118,
+    "d30": 501,
+    "d90": 1489,
+    "seasonal30": 468,
+    "prior30": 512
+   },
+   "windowAdu": {
+    "d7": 16.86,
+    "d30": 16.7,
+    "d90": 16.54,
+    "seasonal": 15.6
+   },
+   "blendWeights": {
+    "short": 30,
+    "standard": 35,
+    "long": 20,
+    "seasonal": 15
+   },
+   "adu": 16.55,
+   "growthMultiplier": 1.0,
+   "growthAdjustments": [],
+   "adjustedAdu": 16.55,
+   "onHand": 1490,
+   "reserved": 60,
+   "available": 1430,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 199,
+   "adjustedReorderPoint": 199,
+   "effectiveSupply": 1430,
+   "gap": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "baseline": {
+    "reorderPoint": 199,
+    "adjustedReorderPoint": 199,
+    "gap": 0,
+    "suggestedPieces": 0
+   },
+   "daysOfSupply": 86,
+   "trend": "flat",
+   "trendRatio": 0.98,
+   "demandQuality": "normal",
+   "confidence": "high",
+   "lastSaleDaysAgo": 19,
+   "status": "ok",
+   "excluded": false
+  },
+  {
+   "sku": "BCW-GB-200",
+   "name": "BCW Graded Card Box (200ct)",
+   "category": "Supplies",
+   "productLine": "BCW Essentials",
+   "vendor": "BCW Direct",
+   "vendorCode": "BCW",
+   "leadTimeDays": 5,
+   "leadTimeSource": "vendor",
+   "safetyStockDays": 7,
+   "unitCostCents": 1150,
+   "moq": 20,
+   "increment": 10,
+   "usage": {
+    "d7": 0,
+    "d30": 0,
+    "d90": 0,
+    "seasonal30": 0,
+    "prior30": 2
+   },
+   "windowAdu": {
+    "d7": 0.0,
+    "d30": 0.0,
+    "d90": 0.0,
+    "seasonal": 0.0
+   },
+   "blendWeights": {
+    "short": 35.3,
+    "standard": 41.2,
+    "long": 23.5,
+    "seasonal": 0
+   },
+   "adu": 0.0,
+   "growthMultiplier": 1.0,
+   "growthAdjustments": [],
+   "adjustedAdu": 0.0,
+   "onHand": 86,
+   "reserved": 0,
+   "available": 86,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 0,
+   "adjustedReorderPoint": 0,
+   "effectiveSupply": 86,
+   "gap": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "baseline": {
+    "reorderPoint": 0,
+    "adjustedReorderPoint": 0,
+    "gap": 0,
+    "suggestedPieces": 0
+   },
+   "daysOfSupply": 9999,
+   "trend": "falling",
+   "trendRatio": 0.0,
+   "demandQuality": "no_recent_demand",
+   "confidence": "low",
+   "lastSaleDaysAgo": 214,
+   "status": "no_movement",
+   "excluded": false
+  },
+  {
+   "sku": "SGL-CHZ-PIKA",
+   "name": "Pikachu ex 238/191 (Single)",
+   "category": "Singles",
+   "productLine": "Singles Inventory",
+   "vendor": null,
+   "vendorCode": null,
+   "leadTimeDays": 14,
+   "leadTimeSource": "default",
+   "safetyStockDays": 7,
+   "unitCostCents": 0,
+   "moq": 1,
+   "increment": 1,
+   "usage": {
+    "d7": 5,
+    "d30": 21,
+    "d90": 60,
+    "seasonal30": 18,
+    "prior30": 24
+   },
+   "windowAdu": {
+    "d7": 0.71,
+    "d30": 0.7,
+    "d90": 0.67,
+    "seasonal": 0.6
+   },
+   "blendWeights": {
+    "short": 30,
+    "standard": 35,
+    "long": 20,
+    "seasonal": 15
+   },
+   "adu": 0.68,
+   "growthMultiplier": 1.0,
+   "growthAdjustments": [],
+   "adjustedAdu": 0.68,
+   "onHand": 3,
+   "reserved": 0,
+   "available": 3,
+   "onOrder": 0,
+   "openPoCount": 0,
+   "poEta": null,
+   "forwardDemandPieces": 0,
+   "forwardDemandRows": [],
+   "reorderPoint": 15,
+   "adjustedReorderPoint": 15,
+   "effectiveSupply": 3,
+   "gap": 12,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "baseline": {
+    "reorderPoint": 15,
+    "adjustedReorderPoint": 15,
+    "gap": 12,
+    "suggestedPieces": 0
+   },
+   "daysOfSupply": 4,
+   "trend": "flat",
+   "trendRatio": 0.88,
+   "demandQuality": "normal",
+   "confidence": "high",
+   "lastSaleDaysAgo": 5,
+   "status": "excluded",
+   "excluded": true
+  }
+ ],
+ "byCategory": {
+  "Sealed - Pokemon": {
+   "skus": 6,
+   "belowRp": 3,
+   "suggestedPieces": 1364,
+   "suggestedValueCents": 7094300,
+   "availableValueCents": 2273700,
+   "onOrderValueCents": 1555200,
+   "statuses": {
+    "order_now": 1,
+    "ok": 2,
+    "on_order": 1,
+    "stockout": 2
+   }
+  },
+  "Sealed - Sports": {
+   "skus": 4,
+   "belowRp": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "availableValueCents": 5811900,
+   "onOrderValueCents": 0,
+   "statuses": {
+    "ok": 3,
+    "order_soon": 1
+   }
+  },
+  "Supplies": {
+   "skus": 3,
+   "belowRp": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "availableValueCents": 1395820,
+   "onOrderValueCents": 0,
+   "statuses": {
+    "ok": 2,
+    "no_movement": 1
+   }
+  }
+ },
+ "byProductLine": {
+  "Prismatic Evolutions": {
+   "skus": 2,
+   "belowRp": 1,
+   "suggestedPieces": 390,
+   "suggestedValueCents": 1813500,
+   "availableValueCents": 827100,
+   "onOrderValueCents": 0,
+   "statuses": {
+    "order_now": 1,
+    "ok": 1
+   }
+  },
+  "Destined Rivals": {
+   "skus": 1,
+   "belowRp": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "availableValueCents": 820800,
+   "onOrderValueCents": 1555200,
+   "statuses": {
+    "on_order": 1
+   }
+  },
+  "Scarlet & Violet": {
+   "skus": 2,
+   "belowRp": 1,
+   "suggestedPieces": 54,
+   "suggestedValueCents": 496800,
+   "availableValueCents": 625800,
+   "onOrderValueCents": 0,
+   "statuses": {
+    "stockout": 1,
+    "ok": 1
+   }
+  },
+  "Mega Evolution": {
+   "skus": 1,
+   "belowRp": 1,
+   "suggestedPieces": 920,
+   "suggestedValueCents": 4784000,
+   "availableValueCents": 0,
+   "onOrderValueCents": 0,
+   "statuses": {
+    "stockout": 1
+   }
+  },
+  "2025 Topps Chrome": {
+   "skus": 2,
+   "belowRp": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "availableValueCents": 2168700,
+   "onOrderValueCents": 0,
+   "statuses": {
+    "ok": 2
+   }
+  },
+  "2025 Bowman": {
+   "skus": 1,
+   "belowRp": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "availableValueCents": 2559600,
+   "onOrderValueCents": 0,
+   "statuses": {
+    "ok": 1
+   }
+  },
+  "Prizm Basketball": {
+   "skus": 1,
+   "belowRp": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "availableValueCents": 1083600,
+   "onOrderValueCents": 0,
+   "statuses": {
+    "order_soon": 1
+   }
+  },
+  "BCW Essentials": {
+   "skus": 2,
+   "belowRp": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "availableValueCents": 795220,
+   "onOrderValueCents": 0,
+   "statuses": {
+    "ok": 1,
+    "no_movement": 1
+   }
+  },
+  "Ultra Pro Core": {
+   "skus": 1,
+   "belowRp": 0,
+   "suggestedPieces": 0,
+   "suggestedValueCents": 0,
+   "availableValueCents": 600600,
+   "onOrderValueCents": 0,
+   "statuses": {
+    "ok": 1
+   }
+  }
+ }
+};
+
+</script>
+<script>
+// Hand-authored supplementary mock data for surfaces 03/04/05/06 and the accuracy strip.
+// All dollar amounts cross-checked against data.js unit costs. Do not change numbers.
+window.MOCK_EXTRA = {
+
+  // ---------- Automation Control Center (03) ----------
+  automation: {
+    stages: [
+      { n: 0, key: "off",       name: "Off",            desc: "No analysis runs. Manual purchasing only." },
+      { n: 1, key: "observe",   name: "Observe",        desc: "Nightly analysis + recommendations and report only. No drafts created." },
+      { n: 2, key: "auto_draft",name: "Auto-draft",     desc: "System drafts POs / RFQs for eligible items. A human reviews and sends everything." },
+      { n: 3, key: "auto_send", name: "Auto-send",      desc: "Eligible POs send to the vendor automatically when inside all caps. Human handles exceptions." },
+      { n: 4, key: "autopilot", name: "Full autopilot", desc: "Includes RFQ send, quote award within tolerance, and PO conversion. Human sees the report and exceptions only." }
+    ],
+    globalDefaultStage: 2,
+    globalKillSwitch: false,
+    globalCaps: { maxDailySpendCents: 500000, maxLinesPerRun: 25, maxPoCents: 250000 },
+    // per-vendor ladder state; promotion requires N clean runs at current stage
+    vendors: [
+      { code: "GTS", name: "GTS Distribution",  stage: 3, cleanRuns: 14, cleanRunsRequired: 10, last30: { runs: 26, autoSent: 6, drafts: 9, interventions: 1 }, caps: { maxPoCents: 250000, maxDayCents: 500000 } },
+      { code: "BCW", name: "BCW Direct",        stage: 3, cleanRuns: 11, cleanRunsRequired: 10, last30: { runs: 26, autoSent: 4, drafts: 3, interventions: 0 }, caps: { maxPoCents: 200000, maxDayCents: 250000 } },
+      { code: "SHD", name: "Southern Hobby",    stage: 2, cleanRuns: 7,  cleanRunsRequired: 10, last30: { runs: 26, autoSent: 0, drafts: 6, interventions: 2 }, caps: { maxPoCents: 150000, maxDayCents: 300000 } },
+      { code: "PSC", name: "Peach State Cards", stage: 1, cleanRuns: 3,  cleanRunsRequired: 10, last30: { runs: 26, autoSent: 0, drafts: 0, interventions: 0 }, caps: null },
+      { code: "MEX", name: "Magazine Exchange", stage: 1, cleanRuns: 0,  cleanRunsRequired: 10, last30: { runs: 26, autoSent: 0, drafts: 0, interventions: 0 }, caps: null }
+    ],
+    categoryOverrides: [
+      { category: "Singles", stage: 0, note: "Also excluded from analysis by rule" },
+      { category: "Sealed - Pokemon", stageCap: 2, note: "Volatile demand — hold at Auto-draft through Q4 wave" }
+    ],
+    anomalyRules: [
+      { id: "qty_vs_history",  on: true,  label: "Suggested qty exceeds 3x the trailing 90-day average order", action: "Hold line + warn" },
+      { id: "cost_drift",      on: true,  label: "Vendor unit cost drifts more than 15% from last verified quote", action: "Hold line + warn" },
+      { id: "forecast_review", on: true,  label: "Forecast trust is at review (thin history, stale demand, missing windows)", action: "Hold line" },
+      { id: "new_sku",         on: true,  label: "SKU has under 30 days of sales history", action: "Always hold for human review" },
+      { id: "daily_cap",       on: true,  label: "Cumulative auto-send spend reaches the daily cap", action: "Pause auto-send until tomorrow + warn" },
+      { id: "run_overlap",     on: true,  label: "Previous run still holds the run lease", action: "Skip run + critical alert" }
+    ],
+    gateLog: [
+      { at: "2026-07-24 09:12", actor: "owner", entry: "Raised GTS per-PO cap $2,000 → $2,500 after 6 clean auto-sends" },
+      { at: "2026-07-12 08:40", actor: "owner", entry: "Promoted GTS Stage 2 → 3 (14 clean runs, 0 interventions in 30d)" },
+      { at: "2026-07-08 21:03", actor: "system", entry: "Auto-pause: daily spend cap reached ($5,000). Resumed next run." },
+      { at: "2026-06-30 10:15", actor: "owner", entry: "Promoted BCW Stage 2 → 3; capped at $2,000/PO" },
+      { at: "2026-06-18 07:55", actor: "owner", entry: "Enabled cost-drift anomaly rule at 15% after MEX price change slipped through" },
+      { at: "2026-06-02 09:30", actor: "owner", entry: "Global default set to Stage 2 (Auto-draft). Ladder went live." }
+    ]
+  },
+
+  // ---------- Run Report (04) ----------
+  runReport: {
+    runId: 1382, at: "2026-07-26 02:00 UTC", trigger: "scheduled", status: "success", durationSec: 46,
+    policyCohort: "3f9a2c1e", forecastVersion: 2, calculationVersion: "purchasing-recommendation-v2",
+    totals: { activeSkus: 214, excluded: 37, analyzed: 177, healthy: 171, actionable: 4, monitored: 2 },
+    suggestedSpendCents: 7094300,
+    actions: [
+      { sku: "PKM-151-UPC",  action: "auto_draft_po", vendor: "Southern Hobby", pieces: 54,  valueCents: 496800,  gate: "Auto-draft — vendor at Stage 2", note: "PO-2417 drafted, awaiting review & send" },
+      { sku: "PKM-PRE-ETB",  action: "held_by_cap",   vendor: "GTS Distribution", pieces: 390, valueCents: 1813500, gate: "Held — $18,135 exceeds GTS $2,500 auto-send cap", note: "Draft created for human review (PO-2418)" },
+      { sku: "PKM-MEGA-ETB", action: "held_review",   vendor: "GTS Distribution", pieces: 920, valueCents: 4784000, gate: "Held — low confidence (preorder, 6d history) + qty anomaly (>3x trailing avg)", note: "Routed to review queue" },
+      { sku: "PAN-PRZ-HOB",  action: "monitor",       vendor: "Peach State Cards", pieces: 0, valueCents: 0, gate: "Burn rate high — 35d supply vs 25d lead time. No order needed yet", note: "Recheck at next run" }
+    ],
+    warnings: [
+      { level: "warn", text: "PKM-MEGA-ETB: suggested 920 pieces is 30x trailing 90-day demand (event-driven). Anomaly rule qty_vs_history held the line." },
+      { level: "warn", text: "PKM-MEGA-ETB: vendor cost is unverified (no quote in 365 days). Verify with GTS before ordering." },
+      { level: "info", text: "Growth adjustment +20% Sealed - Pokemon (Jul 15 – Aug 31) is active and raised Pokemon reorder points this run." },
+      { level: "info", text: "Black Friday supplies push (2,500 pc) enters the 90-day forecast horizon on Aug 29." }
+    ],
+    history: [
+      { runId: 1382, at: "2026-07-26 02:00", trigger: "scheduled", status: "success", analyzed: 177, autoSent: 0, drafts: 2, held: 2, spentCents: 0 },
+      { runId: 1381, at: "2026-07-25 02:00", trigger: "scheduled", status: "success", analyzed: 176, autoSent: 0, drafts: 0, held: 1, spentCents: 0 },
+      { runId: 1380, at: "2026-07-24 02:00", trigger: "scheduled", status: "success", analyzed: 176, autoSent: 1, drafts: 1, held: 1, spentCents: 118100 },
+      { runId: 1379, at: "2026-07-23 14:21", trigger: "manual",    status: "success", analyzed: 176, autoSent: 0, drafts: 0, held: 0, spentCents: 0 },
+      { runId: 1378, at: "2026-07-23 02:00", trigger: "scheduled", status: "interrupted", analyzed: 0, autoSent: 0, drafts: 0, held: 0, spentCents: 0, note: "Lease reclaimed after dyno restart; rerun succeeded" },
+      { runId: 1377, at: "2026-07-20 02:00", trigger: "scheduled", status: "success", analyzed: 175, autoSent: 1, drafts: 2, held: 0, spentCents: 118100, note: "BCW-TL-100 top-off auto-sent to BCW Direct ($1,181)" }
+    ],
+    email: {
+      subject: "Echelon reorder run #1382 — 2 drafts waiting, 1 hold, $0 auto-sent",
+      preheader: "177 SKUs analyzed · 4 need action · suggested pipeline $70,943"
+    }
+  },
+
+  // ---------- RFQ Workbench (05) ----------
+  // Need-by figures come from data.js suggestions. Landed unit cost = unit + freight/pieces.
+  rfq: {
+    pipeline: { draft: 1, sent: 1, quoting: 1, award: 1, converted: 2 },
+    showcase: {
+      number: "RFQ-20260726-4F7A2B", status: "award", sentAt: "2026-07-26", dueAt: "2026-08-02",
+      lines: [
+        {
+          sku: "PKM-PRE-ETB", name: "Prismatic Evolutions Elite Trainer Box", needPieces: 390, currentCostCents: 4650,
+          quotes: [
+            { vendor: "GTS Distribution",  unitCents: 4590, moq: 100, leadDays: 7,  freightCents: 0,     landedUnitCents: 4590, totalCents: 1790100, note: "Freight included" },
+            { vendor: "Southern Hobby",    unitCents: 4450, moq: 200, leadDays: 10, freightCents: 18000, landedUnitCents: 4496, totalCents: 1753500, note: "$180 freight, allocated over 390 pc", recommended: true, why: "Lowest landed cost. +3 days lead is inside the 14-day coverage window." },
+            { vendor: "Peach State Cards", unitCents: 4700, moq: 50,  leadDays: 12, freightCents: 0,     landedUnitCents: 4700, totalCents: 1833000, note: "" }
+          ],
+          award: { vendor: "Southern Hobby", pieces: 390, totalCents: 1753500, savesVsCurrentCents: 60000 }
+        },
+        {
+          sku: "PKM-151-UPC", name: "151 Ultra Premium Collection", needPieces: 54, currentCostCents: 9200,
+          quotes: [
+            { vendor: "GTS Distribution",  unitCents: 9150, moq: 24, leadDays: 7,  freightCents: 0, landedUnitCents: 9150, totalCents: 494100, note: "", recommended: true, why: "PSC unit cost is lower, but its MOQ 60 forces 6 extra pieces: $5,334 total vs $4,941 for the exact 54. GTS also restocks 5 days sooner on a stockout." },
+            { vendor: "Southern Hobby",    declined: true, note: "No allocation this wave" },
+            { vendor: "Peach State Cards", unitCents: 8890, moq: 60, leadDays: 12, freightCents: 0, landedUnitCents: 8890, totalCents: 533400, notePieces: 60, note: "MOQ forces 60 pc (+6 over need)" }
+          ],
+          award: { vendor: "GTS Distribution", pieces: 54, totalCents: 494100, savesVsCurrentCents: 2700 }
+        }
+      ],
+      awardTotals: { totalCents: 2247600, savesCents: 62700, poCount: 2 },
+      promoteQuotesDefault: true
+    },
+    quoteEntryExample: {
+      vendor: "Southern Hobby", fields: ["Unit cost", "MOQ (pieces)", "Lead time (days)", "Freight", "Quote reference", "Valid until", "Notes"],
+      noBidReasons: ["No allocation", "Discontinued", "Below vendor minimum", "Other"]
+    }
+  },
+
+  // ---------- Exclusions & Policy (06) ----------
+  exclusions: {
+    totals: { activeSkus: 251, excluded: 37 },
+    addRulePreview: { field: "brand", value: "Funko", wouldExclude: 6, sample: ["FNK-POP-PIKA", "FNK-POP-CHZ", "FNK-POP-MEW", "FNK-SODA-SQ", "FNK-POP-EEV"] },
+    perProduct: [
+      { sku: "PKM-CEL-PC", name: "Celebrations Premium Collection (allocated, no reorders)", by: "owner", at: "2026-06-11" },
+      { sku: "TOP-24C-HOB", name: "2024 Topps Chrome Hobby (closeout — sell through)", by: "owner", at: "2026-07-02" }
+    ]
+  },
+
+  // ---------- Forecast accuracy strip (01) — mirrors the live ForecastAccuracyPanel ----------
+  accuracy: {
+    cohort: "3f9a2c1e", forecastVersion: 2, method: "Weighted blend", horizon: 30,
+    wape: { historical: 18.4, baseline: 24.1, overlayAdjusted: 17.2 },
+    overlayCoveragePct: 62, evaluations: 1842,
+    wins: { forecastVsBaselinePct: 61, overlayVsForecastPct: 54 },
+    pipeline: { status: "healthy", snapshotAt: "2026-07-26 02:00", evaluationAt: "2026-07-26 02:04" }
+  }
+};
+
+</script>
+<script>
+(function () {
+  "use strict";
+  var M = window.MOCK, X = window.MOCK_EXTRA;
+  var rfq = X.rfq, sc = rfq.showcase;
+  var $ = function (s) { return document.querySelector(s); };
+
+  var MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  function fdate(iso) { var p = iso.split("-"); return MO[+p[1] - 1] + " " + (+p[2]) + ", " + p[0]; }
+  function money(c) {
+    var v = c / 100, a = Math.abs(v), s;
+    if (a < 100) { s = a.toFixed(2); if (s.slice(-3) === ".00") s = s.slice(0, -3); }
+    else { s = Math.round(a).toLocaleString("en-US"); }
+    return (v < 0 ? "−$" : "$") + s;
+  }
+  var INFO_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" style="flex:0 0 15px;margin-top:1px;color:var(--green)"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M12 11.5V16"/></svg>';
+  var CHECK_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--green)"><path d="m4.5 12.5 5 5 10-11"/></svg>';
+
+  /* ---------- toasts ---------- */
+  function toast(msg) {
+    var box = $("#pgToasts"), t = document.createElement("div");
+    t.className = "pg-toast"; t.textContent = msg; box.appendChild(t);
+    setTimeout(function () { t.classList.add("out"); setTimeout(function () { t.remove(); }, 300); }, 3600);
+  }
+
+  /* ---------- topbar ---------- */
+  var runTime = X.runReport.at.split(" ")[1]; // "02:00"
+  $("#pgSub").innerHTML = "As of " + fdate(M.asOf) + " &middot; Last run #" + X.runReport.runId +
+    " (" + runTime + " UTC) &middot; Policy cohort <span class=\"mono\">" + M.policy.cohort + "</span>";
+  var sugCount = M.items.filter(function (i) { return i.suggestedPieces > 0; }).length;
+  $("#pgNewRfq").addEventListener("click", function () {
+    toast("Would start a new RFQ seeded with today's " + sugCount + " suggested order lines");
+  });
+
+  /* ---------- pipeline tabs ---------- */
+  var TABS = [["draft","Draft"],["sent","Sent"],["quoting","Quoting"],["award","Award"],["converted","Converted"]];
+  var tabsEl = $("#pgTabs");
+  TABS.forEach(function (t) {
+    var b = document.createElement("button");
+    b.className = "tab" + (t[0] === "award" ? " on" : "");
+    b.dataset.k = t[0];
+    b.innerHTML = t[1] + ' <span class="n">' + rfq.pipeline[t[0]] + "</span>";
+    b.addEventListener("click", function () { selectTab(t[0]); });
+    tabsEl.appendChild(b);
+  });
+
+  var GENERIC = {
+    draft:     { title: "in Draft",  copy: "Line selection and vendor invitations happen here before anything is sent." },
+    sent:      { title: "Sent",      copy: "Line sheets are with the vendors — responses land in Quoting as they arrive." },
+    quoting:   { title: "in Quoting", copy: "Quotes are captured as they come in; vendors get an automatic reminder after 3 days.", how: true },
+    converted: { title: "Converted", copy: "Awarded and turned into purchase orders — tracked from the Purchase Orders screen." }
+  };
+  function selectTab(k) {
+    tabsEl.querySelectorAll(".tab").forEach(function (t) { t.classList.toggle("on", t.dataset.k === k); });
+    var award = $("#panel-award"), gen = $("#panel-generic");
+    if (k === "award") { award.style.display = ""; gen.style.display = "none"; return; }
+    award.style.display = "none"; gen.style.display = "";
+    var g = GENERIC[k], n = rfq.pipeline[k];
+    $("#pgGenericBody").innerHTML =
+      '<div class="pg-empty">' +
+        '<svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4"/><path d="M9 12.5h6M9 16h6"/></svg>' +
+        '<div class="pg-count">' + n + " RFQ" + (n === 1 ? "" : "s") + " " + g.title + "</div>" +
+        '<div class="muted" style="max-width:440px">' + g.copy + "</div>" +
+        '<div class="muted tiny">This mockup showcases the Award stage.</div>' +
+        '<div class="row" style="margin-top:6px">' +
+          (g.how ? '<button class="btn btn-outline" id="pgHowGeneric">How quotes get in</button>' : "") +
+          '<button class="btn btn-primary" id="pgGoAward">Open award view</button>' +
+        "</div></div>";
+    $("#pgGoAward").addEventListener("click", function () { selectTab("award"); });
+    var hg = $("#pgHowGeneric");
+    if (hg) hg.addEventListener("click", openDrawer);
+  }
+
+  /* ---------- award header card ---------- */
+  var vendorsInvited = [];
+  sc.lines.forEach(function (l) { l.quotes.forEach(function (q) {
+    if (vendorsInvited.indexOf(q.vendor) < 0) vendorsInvited.push(q.vendor); }); });
+  var quoteCount = 0, noBidCount = 0;
+  sc.lines.forEach(function (l) { l.quotes.forEach(function (q) { if (q.declined) noBidCount++; else quoteCount++; }); });
+
+  var tSteps = [
+    { l: "Sent", s: MO[+sc.sentAt.split("-")[1] - 1] + " " + (+sc.sentAt.split("-")[2]), st: "done" },
+    { l: "Quotes in", s: quoteCount + " quotes · " + noBidCount + " no bid", st: "done" },
+    { l: "Award", s: "in progress", st: "current" },
+    { l: "POs", s: "next", st: "" }
+  ];
+  var tlHtml = tSteps.map(function (s, i) {
+    var con = i ? '<div class="pg-tcon ' + (tSteps[i - 1].st === "done" ? "done" : "") + '"></div>' : "";
+    var dot = s.st === "done" ? "✓" : (i + 1);
+    return con + '<div class="pg-tstep ' + s.st + '"><div class="pg-dot">' + dot + '</div><div class="pg-tl">' + s.l + '</div><div class="pg-ts">' + s.s + "</div></div>";
+  }).join("");
+
+  $("#pgHead").innerHTML =
+    '<div class="pg-head-grid">' +
+      "<div>" +
+        '<div class="row" style="gap:10px;flex-wrap:wrap">' +
+          '<span class="pg-rfq-no">' + sc.number + "</span>" +
+          '<span class="badge b-violet"><span class="dot"></span>Ready to award</span>' +
+        "</div>" +
+        '<div class="pg-meta">Sent <b>' + fdate(sc.sentAt) + "</b> &middot; responses due <b>" + fdate(sc.dueAt) +
+          "</b> &middot; <b>" + vendorsInvited.length + "</b> vendors invited &middot; <b>" + sc.lines.length + "</b> lines</div>" +
+        '<div class="pg-meta">Lines seeded from run <a class="pg-link" href="04-run-report.html">#' + X.runReport.runId +
+          '</a> reorder suggestions &middot; <a class="pg-link" href="01-reorder-analysis.html">open Reorder Analysis</a></div>' +
+      "</div>" +
+      '<div class="pg-timeline">' + tlHtml + "</div>" +
+    "</div>";
+
+  /* ---------- per-line comparison matrices ---------- */
+  var selection = sc.lines.map(function (l) {
+    var i = -1;
+    l.quotes.forEach(function (q, qi) { if (q.recommended) i = qi; });
+    return i < 0 ? 0 : i;
+  });
+
+  function lineFootHTML(li) {
+    var l = sc.lines[li], q = l.quotes[selection[li]];
+    var pieces = q.notePieces || l.needPieces;
+    var saves = l.currentCostCents * l.needPieces - q.totalCents;
+    var savesTxt = saves >= 0
+      ? '<span class="pg-saves">saves ' + money(saves) + " vs current cost</span>"
+      : '<span class="pg-saves neg">adds ' + money(-saves) + " vs current cost</span>";
+    var dev = q.recommended ? "" : '<span class="muted"> &middot; overrides recommendation</span>';
+    return CHECK_SVG + " Award <b>" + pieces + " pc</b> to <b>" + q.vendor + "</b> — <b>" +
+      money(q.totalCents) + "</b> &middot; " + savesTxt + dev;
+  }
+
+  function renderLines() {
+    var box = $("#pgLines");
+    box.innerHTML = sc.lines.map(function (l, li) {
+      var rec = null;
+      l.quotes.forEach(function (q) { if (q.recommended) rec = q; });
+      var rows = l.quotes.map(function (q, qi) {
+        if (q.declined) {
+          var reason = q.note ? q.note.charAt(0).toLowerCase() + q.note.slice(1) : "declined";
+          return '<tr class="pg-declined"><td></td><td><div class="pg-vname">' + q.vendor + "</div></td>" +
+            '<td colspan="6" class="pg-declined-note">No bid — ' + reason + "</td><td></td></tr>";
+        }
+        var sel = selection[li] === qi;
+        var flag = q.notePieces
+          ? '<div class="pg-moq-flag">forces ' + q.notePieces + " pc (+" + (q.notePieces - l.needPieces) + ")</div>"
+          : "";
+        return '<tr class="pg-qrow' + (sel ? " pg-sel" : "") + '" data-li="' + li + '" data-qi="' + qi + '">' +
+          '<td class="pg-radio-c"><input type="radio" name="pgline' + li + '"' + (sel ? " checked" : "") + ' aria-label="Award to ' + q.vendor + '"></td>' +
+          '<td><div class="pg-vname">' + q.vendor + "</div>" + (q.note ? '<div class="pg-vnote">' + q.note + "</div>" : "") + "</td>" +
+          '<td class="num">' + money(q.unitCents) + "</td>" +
+          '<td class="num">' + q.moq + flag + "</td>" +
+          '<td class="num">' + q.leadDays + "d</td>" +
+          '<td class="num">' + (q.freightCents ? money(q.freightCents) : "—") + "</td>" +
+          '<td class="num pg-strong">' + money(q.landedUnitCents) + "</td>" +
+          '<td class="num pg-strong">' + money(q.totalCents) + "</td>" +
+          '<td class="right">' + (q.recommended ? '<span class="badge b-green">Recommended</span>' : "") + "</td></tr>";
+      }).join("");
+      return '<div class="card pg-line-card">' +
+        '<div class="pg-line-h">' +
+          '<span class="pg-sku">' + l.sku + '</span><span class="pg-name">' + l.name + "</span>" +
+          '<span class="badge b-blue">Need ' + l.needPieces + " pc</span>" +
+          '<span class="muted small">Current cost ' + money(l.currentCostCents) + "/pc</span>" +
+        "</div>" +
+        '<div class="pg-tbl-wrap"><table class="tbl pg-quote-tbl"><thead><tr>' +
+          '<th style="width:36px"></th><th>Vendor</th><th class="num">Unit cost</th><th class="num">MOQ</th>' +
+          '<th class="num">Lead time</th><th class="num">Freight</th><th class="num">Landed unit</th>' +
+          '<th class="num">Total</th><th></th></tr></thead><tbody>' + rows + "</tbody></table></div>" +
+        (rec && rec.why
+          ? '<div class="callout co-green pg-why">' + INFO_SVG + "<div><b>Why " + rec.vendor + ":</b> " + rec.why + "</div></div>"
+          : "") +
+        '<div class="pg-line-foot" id="pgFoot' + li + '">' + lineFootHTML(li) + "</div></div>";
+    }).join("");
+
+    box.querySelectorAll("tr.pg-qrow").forEach(function (tr) {
+      tr.addEventListener("click", function () {
+        var li = +tr.dataset.li, qi = +tr.dataset.qi;
+        if (selection[li] === qi) { tr.querySelector("input").checked = true; return; }
+        selection[li] = qi;
+        tr.parentElement.querySelectorAll("tr.pg-qrow").forEach(function (r) {
+          var on = +r.dataset.qi === qi;
+          r.classList.toggle("pg-sel", on);
+          r.querySelector("input").checked = on;
+        });
+        document.getElementById("pgFoot" + li).innerHTML = lineFootHTML(li);
+        renderAwardBar();
+      });
+    });
+  }
+
+  /* ---------- sticky award bar ---------- */
+  function renderAwardBar() {
+    var sels = sc.lines.map(function (l, li) { return l.quotes[selection[li]]; });
+    var total = 0, saves = 0;
+    sc.lines.forEach(function (l, li) {
+      total += sels[li].totalCents;
+      saves += l.currentCostCents * l.needPieces - sels[li].totalCents;
+    });
+    var vendors = [];
+    sels.forEach(function (q) { if (vendors.indexOf(q.vendor) < 0) vendors.push(q.vendor); });
+    $("#pgBarStats").innerHTML =
+      "<b>" + sc.lines.length + " lines</b> &middot; <b>" + vendors.length + " PO" + (vendors.length === 1 ? "" : "s") +
+      '</b> &middot; total <span class="pg-total">' + money(total) + "</span> &middot; " +
+      (saves >= 0
+        ? '<span class="pg-saves">saves ' + money(saves) + " vs current costs</span>"
+        : '<span class="pg-saves neg">adds ' + money(-saves) + " vs current costs</span>");
+    $("#pgAwardBtn").onclick = function () {
+      var parts = vendors.map(function (v, i) { return "PO-" + (2419 + i) + " (" + v + ")"; });
+      toast("Would create " + parts.join(" and ") + " as drafts");
+    };
+  }
+  $("#pgPromote").checked = sc.promoteQuotesDefault !== false;
+  $("#pgBackBtn").addEventListener("click", function () {
+    toast("Would move " + sc.number + " back to Quoting — transition logged");
+  });
+
+  /* ---------- lifecycle footnote ---------- */
+  var LIFE = [
+    ["Draft", "Assemble lines & invite vendors"],
+    ["Sent", "Emails vendors the line sheet"],
+    ["Quoting", "Capture responses · remind at 3 days"],
+    ["Award", "Compare landed cost — this screen"],
+    ["POs drafted", "One PO per awarded vendor"],
+    ["Converted", "POs sent & tracked"]
+  ];
+  $("#pgLife").innerHTML = LIFE.map(function (s, i) {
+    return (i ? '<div class="pg-life-arrow">→</div>' : "") +
+      '<div class="pg-life-step' + (s[0] === "Award" ? " on" : "") + '"><div class="pg-life-pill">' + s[0] +
+      '</div><div class="pg-life-desc">' + s[1] + "</div></div>";
+  }).join("");
+
+  /* ---------- quote entry side sheet ---------- */
+  $("#pgDrawerRfq").textContent = sc.number;
+  var vSel = $("#pgQVendor");
+  vendorsInvited.forEach(function (v) {
+    var o = document.createElement("option"); o.textContent = v;
+    if (v === rfq.quoteEntryExample.vendor) o.selected = true;
+    vSel.appendChild(o);
+  });
+  var lSel = $("#pgQLine");
+  sc.lines.forEach(function (l) {
+    var o = document.createElement("option");
+    o.textContent = l.sku + " — need " + l.needPieces + " pc";
+    lSel.appendChild(o);
+  });
+  var rSel = $("#pgQReason");
+  rfq.quoteEntryExample.noBidReasons.forEach(function (r) {
+    var o = document.createElement("option"); o.textContent = r; rSel.appendChild(o);
+  });
+  var PH = {
+    "Unit cost": "$ per piece", "MOQ (pieces)": "pieces", "Lead time (days)": "days",
+    "Freight": "$ total", "Quote reference": "vendor quote #", "Valid until": "date",
+    "Notes": "anything unusual about this quote"
+  };
+  $("#pgQuoteFields").innerHTML = rfq.quoteEntryExample.fields.map(function (f) {
+    var ph = PH[f] || "";
+    if (f === "Notes") {
+      return '<div class="pg-field full"><label>' + f + '</label><textarea class="input" placeholder="' + ph + '"></textarea></div>';
+    }
+    return '<div class="pg-field"><label>' + f + '</label><input class="input" placeholder="' + ph + '"></div>';
+  }).join("");
+
+  var nb = $("#pgNoBid");
+  function toggleNoBid() {
+    nb.classList.toggle("on");
+    var on = nb.classList.contains("on");
+    nb.setAttribute("aria-checked", on ? "true" : "false");
+    $("#pgNoBidReason").style.display = on ? "" : "none";
+    $("#pgQuoteFields").classList.toggle("pg-dim", on);
+  }
+  $("#pgNoBidRow").addEventListener("click", toggleNoBid);
+  nb.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleNoBid(); }
+  });
+
+  function openDrawer() { $("#pgDrawer").classList.add("open"); $("#pgOverlay").classList.add("open"); }
+  function closeDrawer() { $("#pgDrawer").classList.remove("open"); $("#pgOverlay").classList.remove("open"); }
+  $("#pgHowBtn").addEventListener("click", openDrawer);
+  $("#pgOverlay").addEventListener("click", closeDrawer);
+  $("#pgDrawerX").addEventListener("click", closeDrawer);
+  $("#pgQCancel").addEventListener("click", closeDrawer);
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); });
+  $("#pgQSave").addEventListener("click", function () {
+    var v = vSel.value, on = nb.classList.contains("on");
+    toast((on ? "Would record a no-bid from " + v : "Would save " + v + "'s quote") + " against " + sc.number);
+    closeDrawer();
+  });
+
+  /* ---------- init ---------- */
+  renderLines();
+  renderAwardBar();
+})();
+</script>
+</body>
+</html>

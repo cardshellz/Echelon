@@ -1,0 +1,112 @@
+# Reorder Analysis Redesign — Design Spec
+
+**Date:** 2026-07-26 · **Status:** Design handoff (mockups + spec, no implementation)
+**Mockups:** `01-reorder-analysis.html` … `06-exclusions-policy.html` + `index.html` (open in any browser; self-contained)
+**Baseline commit audited:** origin/main after PR #1032 · Authoritative prior doc: `docs/PURCHASING-HARDENING-HANDOFF-2026-07-19.md`
+
+---
+
+## 1. Decisions (agreed with owner, 2026-07-26)
+
+1. **New page replaces PurchasingView.** Keep the `/api/purchasing/*` API surface; migrate server-generated deep links; retire `client/src/pages/PurchasingView.tsx` at parity (§8).
+2. **SKU rows are the analysis driver**, rolled up by **Category** and **Product Line** (grouped table with subtotals, not a separate aggregates page).
+3. **Two forward-demand inputs:** **Growth Adjustments** (NEW — % lifts with date ranges at business / category / product-line / SKU scope, stacking multiplicatively) and **Demand Events** (existing absolute-piece events, EXTENDED with category-level events materialized to SKUs by trailing-90d sales mix).
+4. **Automation is designed to a full-autopilot ceiling** via a 5-stage ladder (Off → Observe → Auto-draft → Auto-send → Full autopilot incl. RFQ award), unlocked per vendor with category caps, hard spend caps, anomaly holds, and a global kill switch. Every gate change is logged.
+5. **Full RFQ lifecycle is in scope for design** (send → quote capture → compare → award → promote quotes → PO conversion); implementation is phased.
+6. **Report = email digest + in-app run report** after every scheduled run.
+7. v1 stays **aggregated across warehouses and channels** (matches the engine's current `product_all_warehouses` scope).
+
+## 2. Terminology (binding)
+
+- **Growth Adjustment** — the % lever. Never call it an "overlay": *overlay* already means captured forward-demand contributions in the accuracy system (`purchase_forecast_overlay_contributions`).
+- **Demand Event** — absolute-piece future demand (existing `procurement.demand_events`).
+- **Reorder Point (RP)** / **Adjusted RP** — `ceil((lead + safety) × adjusted velocity)` / plus in-horizon weighted event pieces.
+- **Stage 0–4** — the automation ladder rungs (Off / Observe / Auto-draft / Auto-send / Full autopilot).
+
+## 3. What already exists (do not rebuild)
+
+| Capability | Where |
+|---|---|
+| Weighted-blend forecast (7/30/90 + last-year seasonal windows, policy in warehouse settings) | `purchasing-demand-forecast.engine.ts`, `purchasing-forecast-policy.ts` |
+| Reorder math incl. open-PO netting, MOQ/UOM rounding, status taxonomy | `purchasing-recommendation.engine.ts` |
+| Demand events + rebuilt Demand Planner UI (SKU picker, audit, optimistic concurrency) | `demand-events.*`, `DemandPlanner.tsx` |
+| Exclusions (per-product flag + rules table + modal) | `reorder_exclusion_rules`, `ExclusionRulesModal.tsx` — **note the `rules`→`exclusionRules` wiring bug, spun off separately** |
+| Immutable recommendation runs/lines, decisions, PO handoff | `purchase_recommendation_runs/lines`, handoff service |
+| Nightly auto-draft job with lease/heartbeat/run history; review_only vs draft_po; approval policies; quality gates | `auto-draft.job.ts`, `auto_draft_runs` |
+| Forecast accuracy: observations → overlay contributions → 7/30/90d evaluations → cohort-isolated WAPE report + `ForecastAccuracyPanel` | PRs #1009–#1023 |
+| Pipeline run ledger + recommendation-pipeline health | `purchase_pipeline_job_runs`, `/api/procurement/health/recommendation-pipeline` |
+| RFQ draft creation (manual + automatic policy) and schema for the full lifecycle | migration 148/151/158, `purchasing-rfq.service.ts` |
+| PO drafting, dual-status lifecycle, email outbox | `purchase-order.routes.ts`, `po_email_outbox` |
+
+## 4. What is genuinely new (build order in §9)
+
+### 4.1 Growth Adjustments (mockup 02)
+- New table `procurement.growth_adjustments`: `id, scope ('business'|'category'|'product_line'|'product'), target_id/value, percent (int, e.g. 20 = +20%), starts_on, ends_on, reason (required), created_by, created_at, ended_at/ended_by` (append-only; "end now" sets `ended_at`, never deletes).
+- Engine: `adjustedVelocity = blendedVelocity × Π(1 + pct/100)` over adjustments active on the as-of date whose scope matches the product. Applied **before** RP; events add after (matches mockup math drawer).
+- **Backtesting contract (required):** adjustments change the forecast number, so each `purchase_forecast_observations` row must capture the applied multiplier set (own capture version + exclusion reasons), or the adjustment set joins the policy-cohort fingerprint. Recommendation: **capture as evidence** (like overlay contributions) — fingerprinting would fragment accuracy cohorts on every edit. Integer math: store percent as int; multiplier product applied in micros with a deterministic rounding rule expressible as a SQL check.
+- Endpoints: CRUD under `/api/purchasing/growth-adjustments` (+ preview endpoint returning before/after RP/suggested for affected SKUs — the Impact tab).
+
+### 4.2 Category-level Demand Events (mockup 02)
+- Extend demand events: parent event may target a category (or product line); allocation **materializes** integer per-SKU lines by trailing-90d sales mix at creation (largest-remainder so lines sum exactly to the total — the overlay-capture reconciliation hard-fails on drift).
+- Store the allocation basis (`mix_window_days`, per-line share) for auditability; re-materialize (with audit) if the event is edited before entering the horizon.
+
+### 4.3 Automation ladder (mockup 03)
+- New settings model: per-vendor stage (0–4), per-category stage cap, caps (`max_po_cents`, `max_daily_spend_cents`, `max_lines_per_run`), promotion thresholds (clean-run counts). Effective stage of a line = `min(vendor stage, category cap, global default)`.
+- Maps onto existing plumbing: Stage 1 = `review_only`; Stage 2 = `draft_po`; Stage 3 = NEW auto-send step after handoff (reuses PO email outbox; respects caps; only quality-gate-eligible + policy-approved lines); Stage 4 = RFQ send + award-within-tolerance (last).
+- Anomaly rules (qty vs trailing average, cost drift, forecast trust, new-SKU, daily cap, run overlap) each hold the *line* (never the run) with a structured reason surfaced in the run report; all rule/gate/cap changes append to a `automation_gate_events` audit table.
+- Kill switch = existing scheduler-disable pattern + a DB flag so the UI can show/toggle it.
+
+### 4.4 Run Report page + email digest (mockup 04)
+- Page renders one analysis/auto-draft run: funnel (active → excluded → analyzed → actionable → outcomes), actions with gate reasoning, warnings, history. Data mostly exists (`auto_draft_runs.summary_json`, snapshots, pipeline ledger); needs a consolidated `GET /api/purchasing/runs/:id/report` endpoint.
+- Email digest after each scheduled run via the existing SMTP path with a durable outbox (mirror `po_email_outbox` pattern); settings: every run / daily rollup / only-when-action-needed.
+
+### 4.5 RFQ lifecycle (mockup 05)
+- First-class commands (all idempotent, append-only evidence): `send` (line-sheet email via outbox), `capture-quote` (per vendor per line; no-bid with reason), `award` (per line, splits allowed; tolerance policy for Stage 4), `promote-quotes` (write awarded pricing to `vendor_products` as new evidence), `convert-to-pos` (drafts via the existing handoff pattern), `close/cancel` (with reason).
+- The comparison matrix computes **landed unit cost** = unit + allocated freight; recommendation sentence must state the tradeoff (MOQ-forced excess vs unit price vs lead time), as mocked.
+
+### 4.6 Cockpit (mockup 01)
+- New page at `/reorder-analysis` consuming the existing analysis endpoint plus rollup grouping client-side (or a light `groupBy` param).
+- The **math drawer** is the core deliverable: an 8-step plain-English walkthrough (windows → blend → adjustments → coverage target → events → supply → sizing → outcome/gate) rendered from fields the API already returns (`forecastProvenance`, `demandBasis`, `supplierBasis`, `qualityGate`) plus the new adjustment step.
+- Embeds the existing `ForecastAccuracyPanel` (or its slim strip variant, as mocked).
+
+## 5. Surface map (mockup → route)
+
+| Mockup | Route | Replaces |
+|---|---|---|
+| 01 cockpit | `/reorder-analysis` | `PurchasingView.tsx` |
+| 02 forecast adjustments | `/forecast-adjustments` (new; Demand Planner merges in as the Events tab) | `DemandPlanner.tsx` (eventually) |
+| 03 automation | `/procurement/automation` (new) | scattered auto-draft settings |
+| 04 run report | `/procurement/runs/:id` (new) | dashboard run card (kept as summary link) |
+| 05 RFQ workbench | `/rfq` (new) | RFQ queue section of PurchasingView |
+| 06 planning policy | `/settings/planning-policy` (new) | `ExclusionRulesModal` |
+
+## 6. The math drawer contract (parity checklist for retirement)
+
+Every number in the drawer must be sourced from engine output, never recomputed client-side: window pieces + per-day rates; blend weights incl. seasonal-zeroed redistribution note; active adjustments with links; lead/safety sources (vendor/product/default); event rows with confidence weights and allocation shares; available/reserved/on-order; gap; MOQ/increment rounding; status + confidence + gate reason. If the API lacks a field the drawer needs, extend the API — do not duplicate math in the client (single-engine invariant from the 07-19 handoff).
+
+## 7. Sample-data provenance (mockups)
+
+`data.js` is generated by `gen_data.py` using the verified engine formulas (blend, RP, MOQ rounding, status taxonomy, 90-day event horizon). KPI totals, impact deltas, and RFQ totals are computed, not invented. If a mockup number looks wrong, check the generator before editing HTML.
+
+## 8. Deep-link migration & retirement criteria
+
+Server-generated links target `/reorder-analysis?…` with params `status, candidateBand, reviewQueue, reason, forecastAction, recommendationId` (health services, dashboard, forecast-input-gap diagnostics). The new cockpit must honor all of them (filter/scroll/open-drawer behaviors) before PurchasingView is deleted. Retirement checklist: deep links honored · review/accepted queues re-homed (cockpit drawer + run report) · RFQ queue re-homed to workbench · accuracy panel embedded · operator decision dialog (acknowledgments, ≥10-char note) preserved.
+
+## 9. Suggested implementation order
+
+1. Cockpit read-only (rollups + math drawer, existing API) — immediate daily value, zero risk.
+2. Growth Adjustments (schema + engine step + Impact preview + observation capture).
+3. Category demand events with materialized allocation.
+4. Run report page + email digest.
+5. Automation ladder (settings model + Stage 3 auto-send inside caps).
+6. RFQ lifecycle commands + workbench.
+7. Stage 4 autopilot (RFQ send/award tolerance) — last, after accuracy trust thresholds are configured.
+
+Each step lands behind the usual branch→PR flow; steps 2–3 need migrations and must state their backtesting interaction explicitly (per §4.1).
+
+## 10. Open questions (parked)
+
+- Multi-warehouse dimension (blocked on engine gaining warehouse-scoped demand/supply — out of scope v1).
+- Accuracy trust thresholds (`accuracy_thresholds_not_configured` today) — needed before Stage 4; propose configuring after 60d of cohort data.
+- AI-drafted quote intake from vendor email replies (noted in mockup 05 as "future").
+- Whether `/demand-planner` remains a standalone page or fully merges into 02 (design assumes merge; keep the route as a redirect).
