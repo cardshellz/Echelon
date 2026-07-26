@@ -99,15 +99,16 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     expect(unsafeSql).toContain("s.status IN ('shipped', 'cancelled', 'voided', 'returned', 'lost')");
   });
 
-  it("uses the readiness audit current-open predicate for materialized counter drift", async () => {
+  it("uses cumulative non-cancelled authority consumption for materialized counter drift", async () => {
     const { materializedCounterDriftCandidateSql } = await loadCleanupModule();
     const sql = materializedCounterDriftCandidateSql(10, true);
 
-    expect(sql).toContain("o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')");
-    expect(sql).toContain("o.cancelled_at IS NULL");
-    expect(sql).toContain("o.completed_at IS NULL");
-    expect(sql).toContain("COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')");
-    expect(sql).toContain("COALESCE(ol.wms_materialized_quantity, 0) <> COALESCE(am.materialized_quantity, 0)");
+    expect(sql).toContain("COALESCE(oi.status, '') <> 'cancelled'");
+    expect(sql).not.toContain("o.warehouse_status IN");
+    expect(sql).not.toContain("o.completed_at IS NULL");
+    expect(sql).not.toContain("'completed', 'short'");
+    expect(sql).toContain("actual_materialized_wms_quantity");
+    expect(sql).toContain("COALESCE(ol.wms_materialized_quantity, 0) <> COALESCE(materialized.materialized_quantity, 0)");
     expect(sql).toContain("FOR UPDATE OF ol");
   });
 

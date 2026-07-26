@@ -202,10 +202,10 @@ export function buildCleanupOperations(): CleanupOperationDefinition[] {
     },
     {
       id: "materialized-counter-drift",
-      description: "Refresh OMS line materialized counters from current-open active WMS item quantity.",
+      description: "Refresh OMS line materialized counters from cumulative non-cancelled WMS item quantity.",
       sourceTable: "oms.oms_order_lines",
       action: "update",
-      reason: "wms_materialized_quantity reconciled to current open WMS materialization before authority constraints",
+      reason: "wms_materialized_quantity reconciled to cumulative non-cancelled WMS materialization before authority constraints",
     },
   ];
 }
@@ -289,35 +289,34 @@ export function nonpositiveShipmentItemsUnsafeCountSql(): string {
 
 export function materializedCounterDriftCandidateSql(limit: number | null, forUpdate = false): string {
   return `
-    WITH active_materialized AS (
+    WITH materialized AS (
       SELECT
         oi.oms_order_line_id,
-        SUM(oi.quantity)::int AS materialized_quantity
+        SUM(COALESCE(oi.quantity, 0))::int AS materialized_quantity
       FROM wms.order_items oi
-      JOIN wms.orders o ON o.id = oi.order_id
       WHERE oi.oms_order_line_id IS NOT NULL
-        AND ${CURRENT_OPEN_WMS_ITEM_FILTER}
+        AND COALESCE(oi.status, '') <> 'cancelled'
       GROUP BY oi.oms_order_line_id
     )
     SELECT
       ol.id::int AS source_id,
-      COALESCE(am.materialized_quantity, 0)::int AS actual_quantity,
+      COALESCE(materialized.materialized_quantity, 0)::int AS actual_quantity,
       to_jsonb(ol) AS before_row,
       to_jsonb(ol) || jsonb_build_object(
-        'wms_materialized_quantity', COALESCE(am.materialized_quantity, 0)
+        'wms_materialized_quantity', COALESCE(materialized.materialized_quantity, 0)
       ) AS after_row,
       jsonb_build_object(
         'oms_order_id', ol.order_id,
         'oms_order_line_id', ol.id,
         'sku', ol.sku,
         'recorded_wms_materialized_quantity', COALESCE(ol.wms_materialized_quantity, 0),
-        'actual_active_wms_quantity', COALESCE(am.materialized_quantity, 0),
-        'drift_quantity', COALESCE(am.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0)
+        'actual_materialized_wms_quantity', COALESCE(materialized.materialized_quantity, 0),
+        'drift_quantity', COALESCE(materialized.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0)
       ) AS summary
     FROM oms.oms_order_lines ol
-    LEFT JOIN active_materialized am ON am.oms_order_line_id = ol.id
-    WHERE COALESCE(ol.wms_materialized_quantity, 0) <> COALESCE(am.materialized_quantity, 0)
-    ORDER BY ABS(COALESCE(am.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0)) DESC,
+    LEFT JOIN materialized ON materialized.oms_order_line_id = ol.id
+    WHERE COALESCE(ol.wms_materialized_quantity, 0) <> COALESCE(materialized.materialized_quantity, 0)
+    ORDER BY ABS(COALESCE(materialized.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0)) DESC,
              ol.id DESC
     ${limitClause(limit)}
     ${forUpdate ? "FOR UPDATE OF ol" : ""}
