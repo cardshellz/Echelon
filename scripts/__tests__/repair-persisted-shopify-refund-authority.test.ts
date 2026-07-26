@@ -56,7 +56,7 @@ describe("repair-persisted-shopify-refund-authority", () => {
     });
   });
 
-  it("selects only exact persisted no-restock refunds with safe terminal WMS shapes", () => {
+  it("selects exact persisted refund policies with policy-specific terminal safeguards", () => {
     const flags = parseFlags([
       "--dry-run",
       "--order-number=#59855",
@@ -68,13 +68,20 @@ describe("repair-persisted-shopify-refund-authority", () => {
     expect(query.text).toContain("adjustment.source = 'shopify_webhook'");
     expect(query.text).toContain("adjustment.adjustment_type = 'refund'");
     expect(query.text).toContain("COUNT(*) = 1");
-    expect(query.text).toContain("MIN(adjustment.restock_policy) = 'no_restock'");
+    expect(query.text).toContain(
+      "MIN(adjustment.restock_policy) IN ('no_restock', 'cancel')",
+    );
     expect(query.text).toContain("refund.refund_quantity = oms_line.paid_quantity");
     expect(query.text).toContain("lineage.wms_order_count = 1");
     expect(query.text).toContain("lineage.wms_item_count = 1");
+    expect(query.text).toContain("oms_order.status = 'cancelled'");
+    expect(query.text).toContain("oms_order.financial_status = 'refunded'");
+    expect(query.text).toContain("oms_order.fulfillment_status = 'unfulfilled'");
+    expect(query.text).toContain("refund.restock_policy IN ('no_restock', 'cancel')");
     expect(query.text).toContain("lineage.wms_item_status = 'cancelled'");
     expect(query.text).toContain("lineage.picked_quantity = 0");
     expect(query.text).toContain("lineage.fulfilled_quantity = 0");
+    expect(query.text).toContain("refund.restock_policy = 'no_restock'");
     expect(query.text).toContain("oms_order.fulfillment_status = 'fulfilled'");
     expect(query.text).toContain("COALESCE(legacy.shipped_quantity, 0) = oms_line.paid_quantity");
     expect(query.text).toContain("lineage.wms_item_status = 'completed'");
@@ -133,6 +140,66 @@ describe("repair-persisted-shopify-refund-authority", () => {
         raw: { source: "persisted_shopify_refund_adjustment" },
       }],
     }));
+  });
+
+  it("normalizes a cancelled refund without scheduling physical restoration", () => {
+    expect(toCandidate({
+      oms_order_id: "239512",
+      wms_order_id: 205000,
+      external_order_number: "#59855",
+      refund_external_id: "refund-1",
+      requires_physical_restoration: false,
+      legacy_shipment_ids: [],
+      adjustments: [{
+        externalLineItemId: "line-1",
+        quantity: 5,
+        restockPolicy: "cancel",
+        raw: { source: "persisted_shopify_refund_adjustment" },
+      }],
+    })).toEqual(candidate({
+      legacyShipmentIds: [],
+      requiresPhysicalRestoration: false,
+      adjustments: [{
+        externalLineItemId: "line-1",
+        quantity: 5,
+        restockPolicy: "cancel",
+        raw: { source: "persisted_shopify_refund_adjustment" },
+      }],
+    }));
+  });
+
+  it("rejects refund policies outside the proven historical repair cohort", () => {
+    expect(() => toCandidate({
+      oms_order_id: "239512",
+      wms_order_id: 205000,
+      external_order_number: "#59855",
+      refund_external_id: "refund-1",
+      requires_physical_restoration: false,
+      legacy_shipment_ids: [],
+      adjustments: [{
+        externalLineItemId: "line-1",
+        quantity: 5,
+        restockPolicy: "return",
+        raw: {},
+      }],
+    })).toThrow(/only accepts no_restock or cancel/);
+  });
+
+  it("rejects physical shipment restoration for cancel adjustments", () => {
+    expect(() => toCandidate({
+      oms_order_id: "239512",
+      wms_order_id: 205000,
+      external_order_number: "#59855",
+      refund_external_id: "refund-1",
+      requires_physical_restoration: true,
+      legacy_shipment_ids: [6605],
+      adjustments: [{
+        externalLineItemId: "line-1",
+        quantity: 5,
+        restockPolicy: "cancel",
+        raw: {},
+      }],
+    })).toThrow(/cancel adjustments cannot restore physical shipment lineage/);
   });
 
   it("validates lineage during dry-run without mutating canonical or authority state", async () => {
