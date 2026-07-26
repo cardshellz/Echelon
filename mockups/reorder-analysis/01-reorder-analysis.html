@@ -101,6 +101,8 @@ button { font: inherit; cursor: pointer; background: none; border: none; color: 
 .kpi .d { font-size: 11.5px; margin-top: 6px; }
 .kpi.alert { border-color: var(--red-bd); background: linear-gradient(180deg, var(--red-bg), var(--surface) 70%); }
 .kpi.warn  { border-color: var(--amber-bd); background: linear-gradient(180deg, var(--amber-bg), var(--surface) 70%); }
+.kpi.pg-kpi-link { cursor: pointer; transition: border-color .12s, box-shadow .12s; }
+.kpi.pg-kpi-link:hover { border-color: var(--border-strong); box-shadow: 0 3px 10px rgb(0 0 0 / .08); }
 
 /* ---------- Tables ---------- */
 table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -220,17 +222,6 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .chip.c-amber:hover { background: var(--amber-bg); filter: brightness(.98); }
 .chip.c-amber.on { background: var(--amber-bg); border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); color: var(--amber); }
 .chip.c-quiet:not(.on) { color: var(--muted); }
-
-/* inventory health card */
-.pg-health { display: flex; flex-direction: column; gap: 8px; }
-.pg-hrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 13px; cursor: pointer; }
-.pg-hrow:hover { background: var(--accent); }
-.pg-hrow.on { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); background: var(--accent); }
-.pg-htitle { font-weight: 650; font-size: 13.5px; }
-.pg-htitle .n { color: var(--muted); font-weight: 600; margin-left: 5px; font-variant-numeric: tabular-nums; }
-.pg-hsub { font-size: 12px; color: var(--muted); margin-top: 1px; }
-.pg-hgo { font-size: 12px; color: var(--muted); white-space: nowrap; }
-.pg-hfoot { font-size: 12px; color: var(--muted); margin-top: 10px; }
 
 .pg-scroll { overflow: visible; }
 .pg-main-tbl { min-width: 960px; }
@@ -378,7 +369,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
     <div class="pg-enginebar">
       <nav class="tabs">
         <a class="tab on" href="01-reorder-analysis.html">Analysis</a>
-        <a class="tab" href="02-forecast-adjustments.html">Forecast inputs</a>
+        <a class="tab" href="02-forecast-adjustments.html">Forecast inputs <span class="n">Soon</span></a>
         <a class="tab" href="03-automation.html">Automation</a>
         <a class="tab" href="04-run-report.html">Runs</a>
         <a class="tab" href="05-rfq-workbench.html">RFQs</a>
@@ -423,17 +414,6 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
             </tr></thead>
             <tbody id="tbody"></tbody>
           </table>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-h">
-          <h2>Inventory health</h2>
-          <span class="desc">Not reorder problems &mdash; these need the opposite action</span>
-        </div>
-        <div class="card-b">
-          <div class="pg-health" id="healthBody"></div>
-          <div class="pg-hfoot" id="healthFoot"></div>
         </div>
       </div>
 
@@ -1944,15 +1924,17 @@ window.MOCK_EXTRA = {
   var SEV = ['stockout', 'order_now', 'order_soon', 'on_order', 'ok', 'no_movement', 'excluded'];
   var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-  /* statuses = additive chip toggles (subset of CHIP_KEYS); combine multi-select. All four on =
-     "All" (also shows stagnant/excluded groups). Cleared while a health filter is active.
+  /* statuses = additive chip toggles (subset of CHIP_KEYS); combine multi-select (union).
+     All six on = "All" (excluded stays hidden behind the toggle). Overstocked deliberately
+     overlaps Healthy (status ok) — union semantics make the overlap safe.
      Default = the order queue: needs_order + order_soon, ungrouped, severity-sorted.
-     order = Order Builder state: checked rows, editable pieces, per-vendor PO/RFQ mode. */
-  var CHIP_KEYS = ['needs_order', 'order_soon', 'on_order', 'ok'];
+     order = Order Builder state: checked rows, editable pieces, per-vendor PO/RFQ mode;
+     order.adjusted = per-SKU "rounded up" feedback text, cleared on the next edit. */
+  var CHIP_KEYS = ['needs_order', 'order_soon', 'on_order', 'ok', 'stagnant', 'overstock'];
   var state = {
-    q: '', health: null, group: 'none', showExcluded: false, collapsed: {},
+    q: '', group: 'none', showExcluded: false, collapsed: {},
     statuses: { needs_order: true, order_soon: true },
-    order: { checked: {}, qty: {}, vendorMode: {} }
+    order: { checked: {}, qty: {}, vendorMode: {}, adjusted: {} }
   };
   function allOn() { return CHIP_KEYS.every(function (k) { return !!state.statuses[k]; }); }
   function setAllStatuses(on) {
@@ -1960,8 +1942,9 @@ window.MOCK_EXTRA = {
     if (on) CHIP_KEYS.forEach(function (k) { state.statuses[k] = true; });
   }
   function isQueueView() {
-    return !state.health && !!state.statuses.needs_order && !!state.statuses.order_soon &&
-      !state.statuses.on_order && !state.statuses.ok;
+    return !!state.statuses.needs_order && !!state.statuses.order_soon &&
+      !state.statuses.on_order && !state.statuses.ok &&
+      !state.statuses.stagnant && !state.statuses.overstock;
   }
 
   /* SKUs whose vendor cost is unverified — parsed from the run-report warnings (MOCK_EXTRA) */
@@ -2028,7 +2011,7 @@ window.MOCK_EXTRA = {
       '<div class="kpi warn"><div class="v">' + burn.length + '</div><div class="l">Order soon</div><div class="d pg-camber">' + burnD + '</div></div>' +
       '<div class="kpi"><div class="v">' + money(inboundCents) + '</div><div class="l">Inbound pipeline</div><div class="d pg-cmut">' + inboundLines + ' open PO lines</div></div>' +
       '<div class="kpi"><div class="v">' + money(sugCents) + '</div><div class="l">Suggested spend</div><div class="d pg-cmut">' + sugCount + ' SKUs need ordering</div></div>' +
-      '<div class="kpi"><div class="v">' + money(idleCents) + '</div><div class="l">Idle capital</div><div class="d pg-cmut">&gt;180 days of supply · ' + idle.length + ' SKUs</div></div>';
+      '<div class="kpi pg-kpi-link" id="kpiIdle" role="button" tabindex="0" title="Filter the table to stagnant and overstocked SKUs"><div class="v">' + money(idleCents) + '</div><div class="l">Idle capital</div><div class="d pg-cmut">&gt;180 days of supply · ' + idle.length + ' SKUs</div></div>';
   }
 
   /* ---------- filtering ---------- */
@@ -2044,14 +2027,14 @@ window.MOCK_EXTRA = {
     return M.items.filter(function (it) {
       if (it.excluded && !state.showExcluded) return false;
       if (!matchQ(it)) return false;
-      if (state.health === 'stagnant') return it.status === 'no_movement';
-      if (state.health === 'overstock') return isOverstock(it);
       if (allOn()) return true;
       var sel = state.statuses;
       if (sel.needs_order && (it.status === 'stockout' || it.status === 'order_now')) return true;
       if (sel.order_soon && it.status === 'order_soon') return true;
       if (sel.on_order && it.status === 'on_order') return true;
       if (sel.ok && it.status === 'ok') return true;
+      if (sel.stagnant && it.status === 'no_movement') return true;
+      if (sel.overstock && isOverstock(it)) return true;
       return false;
     });
   }
@@ -2059,13 +2042,15 @@ window.MOCK_EXTRA = {
   function renderChips() {
     var base = M.items.filter(function (i) { return !i.excluded && matchQ(i); });
     var stockoutN = 0, orderNowN = 0, okN = 0;
-    var soonItems = [], onOrderItems = [];
+    var soonItems = [], onOrderItems = [], stagItems = [], overItems = [];
     base.forEach(function (i) {
       if (i.status === 'stockout') stockoutN++;
       else if (i.status === 'order_now') orderNowN++;
       else if (i.status === 'order_soon') soonItems.push(i);
       else if (i.status === 'on_order') onOrderItems.push(i);
       else if (i.status === 'ok') okN++;
+      if (i.status === 'no_movement') stagItems.push(i);
+      if (isOverstock(i)) overItems.push(i); /* deliberate overlap with Healthy (ok) — chips are a union */
     });
     var eta = null;
     onOrderItems.forEach(function (i) { if (i.poEta && (!eta || i.poEta < eta)) eta = i.poEta; });
@@ -2086,9 +2071,12 @@ window.MOCK_EXTRA = {
     var onOrderTip = tip('Below reorder point but open POs cover the gap.' +
       (eta ? ' Earliest ETA ' + fdate(eta) + '.' : ''));
     var okTip = tip('Above reorder point with normal movement.');
+    var stagCents = stagItems.reduce(function (s, i) { return s + i.available * i.unitCostCents; }, 0);
+    var overCents = overItems.reduce(function (s, i) { return s + i.available * i.unitCostCents; }, 0);
+    var stagTip = tip('No sales in 90 days &mdash; review or liquidate. ' + money(stagCents) + ' idle.');
+    var overTip = tip('&gt;180 days of supply &mdash; stop ordering, consider markdown. ' + money(overCents) + ' idle.');
 
     function chipOn(key) {
-      if (state.health) return false;
       if (key === 'all') return allOn();
       return !!state.statuses[key];
     }
@@ -2109,28 +2097,9 @@ window.MOCK_EXTRA = {
         chip('on_order', 'Inbound covers', onOrderItems.length, 'c-quiet', false,
           (eta ? '<span class="pg-eta">&middot; ETA ' + fdate(eta) + '</span>' : '') + onOrderTip) +
         chip('ok', 'Healthy', okN, 'c-quiet', false, okTip) +
+        chip('stagnant', 'Stagnant', stagItems.length, 'c-quiet', false, stagTip) +
+        chip('overstock', 'Overstocked', overItems.length, 'c-quiet', false, overTip) +
       '</div></div>';
-  }
-
-  /* ---------- inventory health card ---------- */
-  function renderHealth() {
-    var act = M.items.filter(function (i) { return !i.excluded; });
-    var stag = act.filter(function (i) { return i.status === 'no_movement'; });
-    var over = act.filter(isOverstock);
-    var stagCents = stag.reduce(function (s, i) { return s + i.available * i.unitCostCents; }, 0);
-    var overCents = over.reduce(function (s, i) { return s + i.available * i.unitCostCents; }, 0);
-    var maxDos = over.reduce(function (m, i) { return Math.max(m, i.daysOfSupply); }, 0);
-    function hrow(key, title, n, sub) {
-      var on = state.health === key;
-      return '<div class="pg-hrow' + (on ? ' on' : '') + '" data-h="' + key + '">' +
-        '<div><div class="pg-htitle">' + title + '<span class="n">' + n + '</span></div>' +
-        '<div class="pg-hsub">' + sub + '</div></div>' +
-        '<span class="pg-hgo">' + (on ? 'Clear filter' : 'Filter table &rarr;') + '</span></div>';
-    }
-    $('#healthBody').innerHTML =
-      hrow('stagnant', 'Stagnant', stag.length, 'No sales in 90 days · ' + money(stagCents) + ' idle') +
-      hrow('overstock', 'Overstocked', over.length, fmt(maxDos) + ' days of supply · ' + money(overCents) + ' idle');
-    $('#healthFoot').textContent = 'Together these hold the ' + money(stagCents + overCents) + ' shown in Idle capital above.';
   }
 
   /* ---------- table ---------- */
@@ -2532,7 +2501,7 @@ window.MOCK_EXTRA = {
             (uv ? '<div class="pg-subline pg-camber" style="max-width:none">vendor cost unverified &gt;' + uv + 'd — consider requesting a quote</div>' : '') +
           '</td>' +
           '<td style="white-space:nowrap">' + needBy(it) + '</td>' +
-          '<td class="right"><input type="number" min="0" step="1" class="input ob-qty" data-sku="' + it.sku + '" value="' + qty + '">' +
+          '<td class="right"><input type="number" min="0" step="' + it.increment + '" class="input ob-qty" data-sku="' + it.sku + '" value="' + qty + '">' +
             '<div class="pg-subline ob-hint" data-sku="' + it.sku + '" style="max-width:none;text-align:right"></div></td>' +
           '<td class="right">' + money(it.unitCostCents) + '</td>' +
           '<td class="right"><b class="ob-line" data-sku="' + it.sku + '"></b></td>' +
@@ -2578,9 +2547,7 @@ window.MOCK_EXTRA = {
         var el = document.querySelector('.ob-line[data-sku="' + it.sku + '"]');
         if (el) el.textContent = money(lt);
         var hint = document.querySelector('.ob-hint[data-sku="' + it.sku + '"]');
-        if (hint) hint.textContent = (qty > 0 && qty % it.increment !== 0)
-          ? 'rounds to case of ' + it.increment + ' → ' + (Math.ceil(qty / it.increment) * it.increment)
-          : '';
+        if (hint) hint.textContent = state.order.adjusted[it.sku] || '';
       });
       grand += vt;
       var vel = document.querySelector('.ob-vtotal[data-vendor="' + g.name + '"]');
@@ -2669,7 +2636,6 @@ window.MOCK_EXTRA = {
     var b = e.target.closest('.chip');
     if (!b) return;
     var key = b.getAttribute('data-s');
-    state.health = null;
     if (key === 'all') {
       setAllStatuses(!allOn()); /* reset: select everything, or clear if already everything */
     } else if (state.statuses[key]) {
@@ -2678,31 +2644,31 @@ window.MOCK_EXTRA = {
       state.statuses[key] = true;
     }
     renderChips();
-    renderHealth();
     renderTable();
   });
 
   $('#tableCtx').addEventListener('click', function (e) {
     if (!e.target.closest('.pg-viewall')) return;
-    state.health = null;
     setAllStatuses(true);
     renderChips();
-    renderHealth();
     renderTable();
   });
 
-  $('#healthBody').addEventListener('click', function (e) {
-    var r = e.target.closest('.pg-hrow');
-    if (!r) return;
-    var h = r.getAttribute('data-h');
-    if (state.health === h) { state.health = null; setAllStatuses(true); }
-    else { state.health = h; state.statuses = {}; }
+  /* Idle capital KPI → select exactly the two idle-capital chips and jump to the table */
+  function filterIdleCapital() {
+    state.statuses = { stagnant: true, overstock: true };
     renderChips();
-    renderHealth();
     renderTable();
-    if (state.health) {
-      var top = $('.pg-tablecard').getBoundingClientRect().top + window.pageYOffset - headerH() - 10;
-      window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    var top = $('.pg-tablecard').getBoundingClientRect().top + window.pageYOffset - headerH() - 10;
+    window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  }
+  $('#kpis').addEventListener('click', function (e) {
+    if (e.target.closest('#kpiIdle')) filterIdleCapital();
+  });
+  $('#kpis').addEventListener('keydown', function (e) {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('#kpiIdle')) {
+      e.preventDefault();
+      filterIdleCapital();
     }
   });
 
@@ -2731,16 +2697,37 @@ window.MOCK_EXTRA = {
 
   $('#btnOpenBuilder').addEventListener('click', openBuilder);
 
-  /* builder inputs (delegated on the static container so re-renders keep working) */
+  /* builder inputs (delegated on the static container so re-renders keep working).
+     Totals track the raw value while typing; on change/blur any value > 0 that is not
+     a full case is rounded UP to the next multiple of the increment, with a hint note
+     that stays until the next edit. 0 stays allowed and means "skip this line". */
   $('#obBody').addEventListener('input', function (e) {
     var inp = e.target.closest('.ob-qty');
     if (!inp) return;
+    var sku = inp.getAttribute('data-sku');
     var v = parseInt(inp.value, 10);
-    state.order.qty[inp.getAttribute('data-sku')] = (isNaN(v) || v < 0) ? 0 : v;
+    state.order.qty[sku] = (isNaN(v) || v < 0) ? 0 : v;
+    delete state.order.adjusted[sku]; /* a new edit clears the "rounded up" note */
     updateBuilderTotals();
     renderOrderBar(false);
   });
   $('#obBody').addEventListener('change', function (e) {
+    var inp = e.target.closest('.ob-qty');
+    if (inp) {
+      var sku = inp.getAttribute('data-sku');
+      var it = M.items.filter(function (i) { return i.sku === sku; })[0];
+      var v = parseInt(inp.value, 10);
+      if (isNaN(v) || v < 0) v = 0;
+      if (it && v > 0 && v % it.increment !== 0) {
+        v = Math.ceil(v / it.increment) * it.increment;
+        state.order.adjusted[sku] = 'rounded up to ' + fmt(v) + ' (case of ' + fmt(it.increment) + ')';
+      }
+      inp.value = v;
+      state.order.qty[sku] = v;
+      updateBuilderTotals();
+      renderOrderBar(false);
+      return;
+    }
     var r = e.target.closest('input[type="radio"]');
     if (!r) return;
     state.order.vendorMode[r.name.replace(/^obmode-/, '')] = r.value;
@@ -2783,7 +2770,6 @@ window.MOCK_EXTRA = {
 
   renderKpis();
   renderChips();
-  renderHealth();
   renderTable();
   renderAccuracy();
   renderOrderBar(false);
