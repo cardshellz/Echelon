@@ -87,6 +87,12 @@ function statusForDropshipShippingError(code: string): number {
   if (code === "DROPSHIP_STORE_CONNECTION_REQUIRED") {
     return 404;
   }
+  if (
+    code === "DROPSHIP_SHARED_SHIPPING_QUOTE_FAILED"
+    || code === "DROPSHIP_SHARED_SHIPPING_QUOTE_INVALID"
+  ) {
+    return 503;
+  }
   if (code === "DROPSHIP_SHIPPING_VENDOR_BLOCKED" || code === "DROPSHIP_SHIPPING_STORE_BLOCKED") {
     return 403;
   }
@@ -101,6 +107,7 @@ function statusForDropshipShippingError(code: string): number {
     || code === "DROPSHIP_SHIPPING_ZONE_REQUIRED"
     || code === "DROPSHIP_SHIPPING_RATE_REQUIRED"
     || code === "DROPSHIP_SHIPPING_RATE_CURRENCY_MISMATCH"
+    || code === "DROPSHIP_SHARED_SHIPPING_QUOTE_UNAVAILABLE"
   ) {
     return 409;
   }

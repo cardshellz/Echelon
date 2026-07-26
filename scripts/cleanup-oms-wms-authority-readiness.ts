@@ -7,8 +7,8 @@
  *
  * Usage:
  *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --limit=25
- *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=all --limit=all
- *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift
+ *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --operation=materialized-counter-drift --counter-direction=recorded-above-actual
+ *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift --counter-direction=recorded-below-actual --summary-only
  */
 
 import crypto from "node:crypto";
@@ -24,11 +24,18 @@ export type CleanupOperationId =
   | "nonpositive-shipment-items"
   | "materialized-counter-drift";
 
+export type MaterializedCounterDirection =
+  | "all"
+  | "recorded-below-actual"
+  | "recorded-above-actual";
+
 interface Flags {
   mode: Mode;
   help: boolean;
   limit: number | null;
   operations: CleanupOperationId[];
+  counterDirection: MaterializedCounterDirection;
+  summaryOnly: boolean;
   operator: string;
 }
 
@@ -69,10 +76,16 @@ interface CleanupOperationDefinition {
 
 const DEFAULT_LIMIT = 100;
 const DEFAULT_OPERATOR = "script:cleanup-oms-wms-authority-readiness";
+const AUDIT_INSERT_BATCH_SIZE = 500;
 const ALL_OPERATION_IDS: CleanupOperationId[] = [
   "orphan-oms-line-refs",
   "nonpositive-shipment-items",
   "materialized-counter-drift",
+];
+const ALL_COUNTER_DIRECTIONS: MaterializedCounterDirection[] = [
+  "all",
+  "recorded-below-actual",
+  "recorded-above-actual",
 ];
 
 export const CURRENT_OPEN_WMS_ORDER_FILTER = `
@@ -102,11 +115,12 @@ export function parseFlags(argv: string[]): Flags {
   const help = argv.includes("--help") || argv.includes("-h");
   const execute = argv.includes("--execute");
   const dryRun = argv.includes("--dry-run");
+  const summaryOnly = argv.includes("--summary-only");
   if (execute && dryRun) {
     throw new Error("Cannot pass both --execute and --dry-run");
   }
 
-  const knownFlag = /^(--help|-h|--execute|--dry-run|--limit=|--operation=|--operator=)/;
+  const knownFlag = /^(--help|-h|--execute|--dry-run|--summary-only|--limit=|--operation=|--counter-direction=|--operator=)/;
   const unknown = argv.find((arg) => !knownFlag.test(arg));
   if (unknown) {
     throw new Error(`Unknown flag: ${unknown}`);
@@ -117,6 +131,19 @@ export function parseFlags(argv: string[]): Flags {
 
   const operationArg = argv.find((arg) => arg.startsWith("--operation="));
   const operations = parseOperations(operationArg);
+
+  const counterDirectionArg = argv.find((arg) => arg.startsWith("--counter-direction="));
+  const counterDirection = parseCounterDirection(counterDirectionArg);
+  if (
+    execute &&
+    operations.includes("materialized-counter-drift") &&
+    counterDirection !== "recorded-below-actual"
+  ) {
+    throw new Error(
+      "Execute mode for materialized-counter-drift requires --counter-direction=recorded-below-actual; " +
+      "lowering an over-recorded counter can reopen fulfillment authority and requires a separate reviewed repair",
+    );
+  }
 
   const operatorArg = argv.find((arg) => arg.startsWith("--operator="));
   const operator = operatorArg == null
@@ -131,6 +158,8 @@ export function parseFlags(argv: string[]): Flags {
     help,
     limit,
     operations,
+    counterDirection,
+    summaryOnly,
     operator,
   };
 }
@@ -168,18 +197,35 @@ function parseOperations(operationArg: string | undefined): CleanupOperationId[]
   return [...new Set(selected as CleanupOperationId[])];
 }
 
+function parseCounterDirection(
+  directionArg: string | undefined,
+): MaterializedCounterDirection {
+  if (directionArg == null) return "all";
+  const direction = directionArg.slice("--counter-direction=".length).trim();
+  if (!ALL_COUNTER_DIRECTIONS.includes(direction as MaterializedCounterDirection)) {
+    throw new Error(
+      "--counter-direction must be all, recorded-below-actual, or recorded-above-actual",
+    );
+  }
+  return direction as MaterializedCounterDirection;
+}
+
 function usage(): string {
   return [
     "Usage:",
     "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --limit=25",
-    "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=all --limit=all",
-    "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift",
+    "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --operation=materialized-counter-drift --counter-direction=recorded-above-actual",
+    "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift --counter-direction=recorded-below-actual --summary-only",
     "",
     "Flags:",
     "  --dry-run          Classify and print planned repairs. Default.",
     "  --execute          Apply repairs transactionally with audit snapshots.",
+    "  --summary-only     Print operation totals without one line per candidate.",
     "  --limit=N|all      Max candidates per operation. Default 100.",
     "  --operation=ID     all, orphan-oms-line-refs, nonpositive-shipment-items, materialized-counter-drift.",
+    "  --counter-direction=VALUE",
+    "                     Materialized-counter cohort: all, recorded-below-actual, or recorded-above-actual.",
+    "                     Execute mode only permits recorded-below-actual because lowering a counter can reopen authority.",
     "  --operator=TEXT    Audit operator label. Default script:cleanup-oms-wms-authority-readiness.",
   ].join("\n");
 }
@@ -287,7 +333,20 @@ export function nonpositiveShipmentItemsUnsafeCountSql(): string {
   `;
 }
 
-export function materializedCounterDriftCandidateSql(limit: number | null, forUpdate = false): string {
+function materializedCounterDirectionPredicate(
+  direction: MaterializedCounterDirection,
+): string {
+  if (direction === "recorded-below-actual") return "<";
+  if (direction === "recorded-above-actual") return ">";
+  return "<>";
+}
+
+export function materializedCounterDriftCandidateSql(
+  limit: number | null,
+  forUpdate = false,
+  direction: MaterializedCounterDirection = "all",
+): string {
+  const directionPredicate = materializedCounterDirectionPredicate(direction);
   return `
     WITH materialized AS (
       SELECT
@@ -311,15 +370,38 @@ export function materializedCounterDriftCandidateSql(limit: number | null, forUp
         'sku', ol.sku,
         'recorded_wms_materialized_quantity', COALESCE(ol.wms_materialized_quantity, 0),
         'actual_materialized_wms_quantity', COALESCE(materialized.materialized_quantity, 0),
+        'counter_direction', CASE
+          WHEN COALESCE(ol.wms_materialized_quantity, 0) < COALESCE(materialized.materialized_quantity, 0)
+            THEN 'recorded-below-actual'
+          ELSE 'recorded-above-actual'
+        END,
         'drift_quantity', COALESCE(materialized.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0)
       ) AS summary
     FROM oms.oms_order_lines ol
     LEFT JOIN materialized ON materialized.oms_order_line_id = ol.id
-    WHERE COALESCE(ol.wms_materialized_quantity, 0) <> COALESCE(materialized.materialized_quantity, 0)
+    WHERE COALESCE(ol.wms_materialized_quantity, 0) ${directionPredicate} COALESCE(materialized.materialized_quantity, 0)
     ORDER BY ABS(COALESCE(materialized.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0)) DESC,
              ol.id DESC
     ${limitClause(limit)}
     ${forUpdate ? "FOR UPDATE OF ol" : ""}
+  `;
+}
+
+export function unsafeMaterializedCounterDecreaseCountSql(): string {
+  return `
+    WITH materialized AS (
+      SELECT
+        oi.oms_order_line_id,
+        SUM(COALESCE(oi.quantity, 0))::int AS materialized_quantity
+      FROM wms.order_items oi
+      WHERE oi.oms_order_line_id IS NOT NULL
+        AND COALESCE(oi.status, '') <> 'cancelled'
+      GROUP BY oi.oms_order_line_id
+    )
+    SELECT COUNT(*)::int AS unsafe_count
+    FROM oms.oms_order_lines ol
+    LEFT JOIN materialized ON materialized.oms_order_line_id = ol.id
+    WHERE COALESCE(ol.wms_materialized_quantity, 0) > COALESCE(materialized.materialized_quantity, 0)
   `;
 }
 
@@ -373,10 +455,6 @@ function asObject(value: unknown): Record<string, unknown> {
   return {};
 }
 
-function toJson(value: unknown): string {
-  return JSON.stringify(value ?? null);
-}
-
 async function fetchUnsafeCount(client: PoolClient, sqlText: string): Promise<number> {
   const result = await client.query(sqlText);
   const unsafeCount = Number(result.rows[0]?.unsafe_count ?? 0);
@@ -396,8 +474,15 @@ async function fetchNonpositiveShipmentCandidates(client: PoolClient, limit: num
   return coerceCandidates(result.rows);
 }
 
-async function fetchCounterDriftCandidates(client: PoolClient, limit: number | null, forUpdate: boolean): Promise<CounterDriftCandidate[]> {
-  const result = await client.query(materializedCounterDriftCandidateSql(limit, forUpdate));
+async function fetchCounterDriftCandidates(
+  client: PoolClient,
+  limit: number | null,
+  forUpdate: boolean,
+  direction: MaterializedCounterDirection,
+): Promise<CounterDriftCandidate[]> {
+  const result = await client.query(
+    materializedCounterDriftCandidateSql(limit, forUpdate, direction),
+  );
   return coerceCandidates<CounterDriftCandidate>(result.rows);
 }
 
@@ -410,8 +495,14 @@ async function insertAuditRows(
     operator: string;
   },
 ): Promise<void> {
-  for (const candidate of args.candidates) {
-    await client.query(`
+  let insertedCount = 0;
+  for (const batch of chunkForAuditInsert(args.candidates)) {
+    const auditRows = batch.map((candidate) => ({
+      source_id: candidate.sourceId,
+      before_row: candidate.beforeRow,
+      after_row: candidate.afterRow,
+    }));
+    const insertResult = await client.query(`
       INSERT INTO wms.oms_wms_authority_cleanup_audit (
         run_id,
         operation,
@@ -423,29 +514,48 @@ async function insertAuditRows(
         after_row,
         operator
       )
-      VALUES (
+      SELECT
         $1::uuid,
         $2::text,
         $3::text,
-        $4::bigint,
+        input.source_id,
+        $4::text,
         $5::text,
-        $6::text,
-        $7::jsonb,
-        $8::jsonb,
-        $9::text
+        input.before_row,
+        input.after_row,
+        $6::text
+      FROM jsonb_to_recordset($7::jsonb) AS input(
+        source_id bigint,
+        before_row jsonb,
+        after_row jsonb
       )
     `, [
       args.runId,
       args.operation.id,
       args.operation.sourceTable,
-      candidate.sourceId,
       args.operation.action,
       args.operation.reason,
-      toJson(candidate.beforeRow),
-      toJson(candidate.afterRow),
       args.operator,
+      JSON.stringify(auditRows),
     ]);
+    insertedCount += insertResult.rowCount ?? 0;
   }
+  assertExpectedRowCount(args.operation.id, args.candidates.length, insertedCount);
+}
+
+export function chunkForAuditInsert<T>(
+  values: T[],
+  batchSize = AUDIT_INSERT_BATCH_SIZE,
+): T[][] {
+  if (!Number.isInteger(batchSize) || batchSize <= 0) {
+    throw new Error("Audit insert batch size must be a positive integer");
+  }
+
+  const batches: T[][] = [];
+  for (let start = 0; start < values.length; start += batchSize) {
+    batches.push(values.slice(start, start + batchSize));
+  }
+  return batches;
 }
 
 async function clearOrphanOmsLineRefs(
@@ -518,10 +628,18 @@ async function refreshMaterializedCounters(
   operation: CleanupOperationDefinition,
   flags: Flags,
 ): Promise<OperationResult> {
-  const candidates = await fetchCounterDriftCandidates(client, flags.limit, flags.mode === "execute");
-  printOperationPlan(operation, candidates, 0, flags);
+  const unsafeSkipped = flags.counterDirection === "recorded-below-actual"
+    ? await fetchUnsafeCount(client, unsafeMaterializedCounterDecreaseCountSql())
+    : 0;
+  const candidates = await fetchCounterDriftCandidates(
+    client,
+    flags.limit,
+    flags.mode === "execute",
+    flags.counterDirection,
+  );
+  printOperationPlan(operation, candidates, unsafeSkipped, flags);
   if (flags.mode === "dry-run" || candidates.length === 0) {
-    return resultFor(operation.id, candidates.length, 0, 0);
+    return resultFor(operation.id, candidates.length, unsafeSkipped, 0);
   }
 
   const updateTimestamp = (await client.query("SELECT NOW() AS updated_at")).rows[0]?.updated_at;
@@ -540,15 +658,36 @@ async function refreshMaterializedCounters(
   }));
 
   const updateResult = await client.query(`
+    WITH materialized AS (
+      SELECT
+        oi.oms_order_line_id,
+        SUM(COALESCE(oi.quantity, 0))::int AS actual_quantity
+      FROM wms.order_items oi
+      WHERE oi.oms_order_line_id IS NOT NULL
+        AND COALESCE(oi.status, '') <> 'cancelled'
+      GROUP BY oi.oms_order_line_id
+    ),
+    input AS (
+      SELECT *
+      FROM jsonb_to_recordset($1::jsonb) AS record(id bigint, actual_quantity int)
+    )
     UPDATE oms.oms_order_lines ol
        SET wms_materialized_quantity = input.actual_quantity,
            updated_at = $2::timestamptz
-      FROM jsonb_to_recordset($1::jsonb) AS input(id bigint, actual_quantity int)
+      FROM input
+      LEFT JOIN materialized ON materialized.oms_order_line_id = input.id
      WHERE ol.id = input.id
+       AND COALESCE(ol.wms_materialized_quantity, 0) < input.actual_quantity
+       AND input.actual_quantity = COALESCE(materialized.actual_quantity, 0)
   `, [JSON.stringify(updateInput), updateTimestamp]);
   assertExpectedRowCount(operation.id, candidates.length, updateResult.rowCount ?? 0);
 
-  return resultFor(operation.id, candidates.length, 0, updateResult.rowCount ?? 0);
+  return resultFor(
+    operation.id,
+    candidates.length,
+    unsafeSkipped,
+    updateResult.rowCount ?? 0,
+  );
 }
 
 function assertExpectedRowCount(operation: CleanupOperationId, expected: number, actual: number): void {
@@ -580,6 +719,8 @@ function printOperationPlan(
   if (unsafeSkipped > 0) {
     console.log(`  UNSAFE_SKIPPED ${unsafeSkipped} row(s) do not match the operation's proven-safe predicate`);
   }
+  if (flags.summaryOnly) return;
+
   for (const candidate of candidates) {
     const action = flags.mode === "execute" ? operation.action.toUpperCase() : `PLAN_${operation.action.toUpperCase()}`;
     console.log(`  ${action} ${operation.sourceTable} id=${candidate.sourceId} summary=${JSON.stringify(candidate.summary)}`);
@@ -662,7 +803,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `[OMS/WMS authority cleanup] mode=${flags.mode} operations=${flags.operations.join(",")} limit=${flags.limit ?? "all"}`,
+    `[OMS/WMS authority cleanup] mode=${flags.mode} operations=${flags.operations.join(",")} counterDirection=${flags.counterDirection} summaryOnly=${flags.summaryOnly} limit=${flags.limit ?? "all"}`,
   );
   const summary = await runCleanup(flags);
   console.log(`[OMS/WMS authority cleanup] complete ${JSON.stringify(summary)}`);
