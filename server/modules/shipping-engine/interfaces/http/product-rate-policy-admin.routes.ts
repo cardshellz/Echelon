@@ -63,6 +63,22 @@ const ruleSchema = z.object({
   perStartedPoundCents: z.number().int().min(0).nullable().default(null),
   thresholdCents: z.number().int().min(0).nullable().default(null),
   bands: z.array(bandSchema).max(100).default([]),
+}).superRefine((rule, context) => {
+  if (
+    rule.action === "block"
+    && (
+      rule.rateCents !== null
+      || rule.perStartedPoundCents !== null
+      || rule.thresholdCents !== null
+      || rule.bands.length > 0
+    )
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["action"],
+      message: "Shipping restrictions cannot include pricing.",
+    });
+  }
 });
 
 const previewSchema = z.object({

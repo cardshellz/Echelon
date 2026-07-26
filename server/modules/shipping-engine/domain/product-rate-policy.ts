@@ -296,6 +296,17 @@ export function validateProductRateRules(
     if (!ACTIONS_BY_KIND[rule.kind].includes(rule.action)) {
       errors.push(`${rule.name}: ${rule.action} is not valid for ${rule.kind}.`);
     }
+    if (
+      rule.action === "block"
+      && (
+        rule.rateCents !== null
+        || rule.perStartedPoundCents !== null
+        || rule.thresholdCents !== null
+        || rule.bands.length > 0
+      )
+    ) {
+      errors.push(`${rule.name}: shipping restrictions cannot include pricing.`);
+    }
     if (rule.measurementScope === "carton") {
       errors.push(`${rule.name}: carton measurement is unavailable until cartonization is connected.`);
     }
