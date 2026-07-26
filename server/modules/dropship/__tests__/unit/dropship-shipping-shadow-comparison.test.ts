@@ -7,9 +7,9 @@ import type {
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import {
   DropshipShippingShadowComparisonService,
+  type DropshipSharedShippingQuoteRequest,
   type DropshipSharedShippingQuoteProvider,
   type DropshipSharedShippingQuoteResult,
-  type DropshipShippingShadowQuoteRequest,
 } from "../../application/dropship-shipping-shadow-comparison";
 import type {
   DropshipShippingQuoteSnapshotRecord,
@@ -137,6 +137,23 @@ describe("DropshipShippingShadowComparisonService", () => {
     });
   });
 
+  it("does not compare a shared cutover snapshot against itself", async () => {
+    const harness = createHarness(quoted(1000));
+
+    await harness.service.compare(snapshot({
+      quotePayload: {
+        version: 3,
+        pricing: {
+          source: "shared_engine",
+          scope: "shipment",
+        },
+      },
+    }));
+
+    expect(harness.provider.requests).toHaveLength(0);
+    expect(harness.writer.inputs).toHaveLength(0);
+  });
+
   it("records a missing store connection as invalid legacy evidence", async () => {
     const harness = createHarness(quoted(1000), {
       mode: "all",
@@ -197,14 +214,14 @@ function createHarness(
 }
 
 class FakeSharedQuoteProvider implements DropshipSharedShippingQuoteProvider {
-  requests: DropshipShippingShadowQuoteRequest[] = [];
+  requests: DropshipSharedShippingQuoteRequest[] = [];
 
   constructor(
     private readonly result: DropshipSharedShippingQuoteResult | Error,
   ) {}
 
   async quote(
-    input: DropshipShippingShadowQuoteRequest,
+    input: DropshipSharedShippingQuoteRequest,
   ): Promise<DropshipSharedShippingQuoteResult> {
     this.requests.push(input);
     if (this.result instanceof Error) throw this.result;
@@ -236,6 +253,30 @@ function quoted(
     rateTableId: 34,
     resolvedZone: "PA",
     ratedWeightGrams: 120,
+    rateProvider: {
+      name: "cardshellz-rates",
+      version: "2.0.0",
+    },
+    selectedRate: {
+      serviceLevelId: 1,
+      serviceLevelCode: "standard",
+      displayName: "Standard Shipping",
+      description: null,
+      fulfillmentMode: "parcel",
+      pricingBasis: "shipment_weight",
+      totalCents: baseRateCents,
+      currency: "USD",
+      promiseMinBusinessDays: 3,
+      promiseMaxBusinessDays: 7,
+      ratedMeasure: 120,
+      maxShipmentWeightGrams: null,
+      chargeModel: "fixed_band",
+      perStartedPoundCents: null,
+      billablePounds: null,
+      rateTableId: 34,
+      productPolicyApplied: false,
+      calculationTrace: [],
+    },
     warnings: [],
     routing: {
       source: "legacy_profile",

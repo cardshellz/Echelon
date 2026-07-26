@@ -33,6 +33,17 @@ import type {
   DropshipShippingShadowComparator,
 } from "../../application/dropship-shipping-shadow-comparison";
 import type {
+  DropshipSharedShippingQuoteProvider,
+  DropshipSharedShippingQuoteRequest,
+  DropshipSharedShippingQuoteResult,
+} from "../../application/dropship-shared-shipping-quote";
+import type {
+  DropshipShippingCutoverPolicy,
+} from "../../application/dropship-shipping-cutover-policy";
+import {
+  CutoverDropshipShippingPricingProvider,
+} from "../../application/dropship-shipping-pricing-service";
+import type {
   DropshipProvisionVendorRepositoryResult,
   DropshipProvisionedVendorProfile,
   DropshipVendorProvisioningService,
@@ -284,18 +295,24 @@ describe("DropshipShippingQuoteService", () => {
     rateProvider = new FakeRateProvider();
     shadowComparison = new FakeShadowComparison();
     logs = [];
+    const logger = {
+      info: (event: DropshipLogEvent) => logs.push(event),
+      warn: (event: DropshipLogEvent) => logs.push(event),
+      error: (event: DropshipLogEvent) => logs.push(event),
+    };
     service = new DropshipShippingQuoteService({
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
       repository,
       cartonization,
-      rateProvider,
+      pricingProvider: new CutoverDropshipShippingPricingProvider({
+        cutoverPolicy: legacyCutoverPolicy(),
+        legacyRateProvider: rateProvider,
+        sharedQuoteProvider: new FakeSharedQuoteProvider(sharedQuote(800)),
+        logger,
+      }),
       shadowComparison,
       clock: { now: () => now },
-      logger: {
-        info: (event) => logs.push(event),
-        warn: (event) => logs.push(event),
-        error: (event) => logs.push(event),
-      },
+      logger,
     });
   });
 
@@ -363,6 +380,108 @@ describe("DropshipShippingQuoteService", () => {
       ...input,
       warehouseId: 4,
     })).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("creates one shipment-scoped shared snapshot and preserves it across rollback", async () => {
+    const sharedProvider = new FakeSharedQuoteProvider(sharedQuote(800));
+    const logger = {
+      info: (event: DropshipLogEvent) => logs.push(event),
+      warn: (event: DropshipLogEvent) => logs.push(event),
+      error: (event: DropshipLogEvent) => logs.push(event),
+    };
+    service = new DropshipShippingQuoteService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository,
+      cartonization,
+      pricingProvider: new CutoverDropshipShippingPricingProvider({
+        cutoverPolicy: {
+          mode: "test",
+          storeConnectionIds: new Set([22]),
+        },
+        legacyRateProvider: rateProvider,
+        sharedQuoteProvider: sharedProvider,
+        logger,
+      }),
+      shadowComparison,
+      clock: { now: () => now },
+      logger,
+    });
+    const input = {
+      storeConnectionId: 22,
+      warehouseId: 3,
+      destination: { country: "US", region: "PA", postalCode: "16066" },
+      items: [{ productVariantId: 101, quantity: 1 }],
+      idempotencyKey: "quote-shared-cutover",
+    };
+
+    const first = await service.quoteForMember("member-1", input);
+
+    expect(first).toMatchObject({
+      totalShippingCents: 897,
+      currency: "USD",
+      carrierServices: [],
+      internalBreakdown: {
+        baseRateCents: 800,
+        markupCents: 80,
+        insurancePoolCents: 17,
+        rateTableId: 44,
+      },
+    });
+    expect(repository.snapshots).toHaveLength(1);
+    expect(repository.snapshots[0]?.quotePayload).toMatchObject({
+      version: 3,
+      providers: {
+        cartonization: { name: "fake_cartonization" },
+        rates: { name: "cardshellz-rates", version: "2.0.0" },
+      },
+      pricing: {
+        scope: "shipment",
+        source: "shared_engine",
+        cutover: {
+          mode: "test",
+          source: "shared",
+          reasonCode: "TEST_STORE_ALLOWED",
+        },
+        rateBookId: 12,
+        rateTableId: 44,
+        selectedRate: {
+          totalCents: 800,
+          serviceLevelCode: "standard",
+        },
+      },
+      totals: {
+        totalShippingCents: 897,
+      },
+    });
+    expect(sharedProvider.requests).toHaveLength(1);
+    expect(rateProvider.requests).toHaveLength(0);
+    expect(shadowComparison.snapshots).toHaveLength(0);
+
+    const rollbackService = new DropshipShippingQuoteService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository,
+      cartonization,
+      pricingProvider: new CutoverDropshipShippingPricingProvider({
+        cutoverPolicy: legacyCutoverPolicy(),
+        legacyRateProvider: rateProvider,
+        sharedQuoteProvider: sharedProvider,
+        logger,
+      }),
+      shadowComparison,
+      clock: { now: () => now },
+      logger,
+    });
+    const replay = await rollbackService.quoteForMember("member-1", input);
+
+    expect(replay).toMatchObject({
+      quoteSnapshotId: first.quoteSnapshotId,
+      idempotentReplay: true,
+      totalShippingCents: 897,
+    });
+    expect(repository.snapshots).toHaveLength(1);
+    expect(rateProvider.requests).toHaveLength(0);
+    expect(sharedProvider.requests).toHaveLength(1);
+    expect(shadowComparison.snapshots).toHaveLength(0);
   });
 
   it("returns the legacy quote when the shared shadow comparison fails", async () => {
@@ -542,8 +661,10 @@ class FakeCartonizationProvider implements DropshipCartonizationProvider {
 
 class FakeRateProvider implements DropshipShippingRateProvider {
   zone: DropshipShippingZoneMatch = { zoneRuleId: 5, zone: "zone-1" };
+  requests: DropshipShippingRateRequest[] = [];
 
   async quoteRates(input: DropshipShippingRateRequest): Promise<DropshipShippingRateResult> {
+    this.requests.push(input);
     const rates: DropshipShippingRateMatch[] = input.packages.map((carton) => ({
       packageSequence: carton.packageSequence,
       rateTableId: 33,
@@ -571,6 +692,75 @@ class FakeShadowComparison implements DropshipShippingShadowComparator {
     this.snapshots.push(snapshot);
     if (this.error) throw this.error;
   }
+}
+
+class FakeSharedQuoteProvider implements DropshipSharedShippingQuoteProvider {
+  requests: DropshipSharedShippingQuoteRequest[] = [];
+
+  constructor(
+    public result: DropshipSharedShippingQuoteResult | Error,
+  ) {}
+
+  async quote(
+    input: DropshipSharedShippingQuoteRequest,
+  ): Promise<DropshipSharedShippingQuoteResult> {
+    this.requests.push(input);
+    if (this.result instanceof Error) throw this.result;
+    return this.result;
+  }
+}
+
+function legacyCutoverPolicy(): DropshipShippingCutoverPolicy {
+  return {
+    mode: "legacy",
+    storeConnectionIds: new Set(),
+  };
+}
+
+function sharedQuote(
+  baseRateCents: number,
+): Extract<DropshipSharedShippingQuoteResult, { status: "quoted" }> {
+  return {
+    status: "quoted",
+    baseRateCents,
+    currency: "USD",
+    serviceLevelCode: "standard",
+    rateBookId: 12,
+    rateBookCode: "dropship-vendor-default",
+    rateTableId: 44,
+    resolvedZone: "PA",
+    ratedWeightGrams: 120,
+    rateProvider: {
+      name: "cardshellz-rates",
+      version: "2.0.0",
+    },
+    selectedRate: {
+      serviceLevelId: 1,
+      serviceLevelCode: "standard",
+      displayName: "Standard Shipping",
+      description: null,
+      fulfillmentMode: "parcel",
+      pricingBasis: "shipment_weight",
+      totalCents: baseRateCents,
+      currency: "USD",
+      promiseMinBusinessDays: 3,
+      promiseMaxBusinessDays: 7,
+      ratedMeasure: 120,
+      maxShipmentWeightGrams: null,
+      chargeModel: "fixed_band",
+      perStartedPoundCents: null,
+      billablePounds: null,
+      rateTableId: 44,
+      productPolicyApplied: false,
+      calculationTrace: [],
+    },
+    warnings: [],
+    routing: {
+      source: "channel_policy",
+      mode: "engine_quoted",
+      rateBookId: 12,
+    },
+  };
 }
 
 function makeVendor(overrides: Partial<DropshipProvisionedVendorProfile> = {}): DropshipProvisionedVendorProfile {

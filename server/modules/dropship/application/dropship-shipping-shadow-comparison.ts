@@ -4,9 +4,18 @@ import type {
 } from "../../shipping-engine/application/shipping-quote-evidence-writer";
 import {
   calculateBasisPointsFeeCents,
-  type NormalizedDropshipShippingDestination,
 } from "../domain/shipping-quote";
 import type { DropshipLogger } from "./dropship-ports";
+import type {
+  DropshipSharedShippingQuoteProvider,
+  DropshipSharedShippingQuoteRequest,
+  DropshipSharedShippingQuoteResult,
+} from "./dropship-shared-shipping-quote";
+export type {
+  DropshipSharedShippingQuoteProvider,
+  DropshipSharedShippingQuoteRequest,
+  DropshipSharedShippingQuoteResult,
+} from "./dropship-shared-shipping-quote";
 import type {
   DropshipShippingQuoteSnapshotRecord,
 } from "./dropship-shipping-quote-service";
@@ -70,62 +79,9 @@ const legacyQuotePayloadSchema = z.object({
   }).strict(),
 }).passthrough();
 
-export interface DropshipShippingShadowQuoteRequest {
+export interface DropshipShippingShadowQuoteRequest
+extends DropshipSharedShippingQuoteRequest {
   legacyQuoteSnapshotId: number;
-  vendorId: number;
-  storeConnectionId: number;
-  warehouseId: number;
-  destination: NormalizedDropshipShippingDestination;
-  items: Array<{
-    productVariantId: number;
-    quantity: number;
-  }>;
-  packages: Array<{
-    packageSequence: number;
-    items: Array<{
-      productVariantId: number;
-      quantity: number;
-    }>;
-    boxId: number;
-    boxCode: string;
-    weightGrams: number;
-    lengthMm: number;
-    widthMm: number;
-    heightMm: number;
-  }>;
-  cartonizationProvider: {
-    name: string;
-    version: string;
-  };
-  quotedAt: Date;
-}
-
-export type DropshipSharedShippingQuoteResult =
-  | {
-      status: "quoted";
-      baseRateCents: number;
-      currency: string;
-      serviceLevelCode: string;
-      rateBookId: number;
-      rateBookCode: string;
-      rateTableId: number;
-      resolvedZone: string | null;
-      ratedWeightGrams: number;
-      warnings: string[];
-      routing: Record<string, unknown>;
-    }
-  | {
-      status: "unavailable";
-      code: string;
-      message: string;
-      warnings: string[];
-      routing: Record<string, unknown> | null;
-    };
-
-export interface DropshipSharedShippingQuoteProvider {
-  quote(
-    input: DropshipShippingShadowQuoteRequest,
-  ): Promise<DropshipSharedShippingQuoteResult>;
 }
 
 type DropshipSharedShippingComparisonEvidence =
@@ -164,6 +120,9 @@ implements DropshipShippingShadowComparator {
   async compare(
     snapshot: DropshipShippingQuoteSnapshotRecord,
   ): Promise<void> {
+    if (isSharedCutoverQuotePayload(snapshot.quotePayload)) {
+      return;
+    }
     if (!shouldShadowDropshipShippingQuote(
       this.deps.rolloutPolicy,
       snapshot.storeConnectionId,
@@ -338,6 +297,18 @@ implements DropshipShippingShadowComparator {
       },
     });
   }
+}
+
+function isSharedCutoverQuotePayload(
+  payload: Record<string, unknown>,
+): boolean {
+  if (payload.version !== 3) return false;
+  const pricing = payload.pricing;
+  return Boolean(
+    pricing
+    && typeof pricing === "object"
+    && (pricing as { source?: unknown }).source === "shared_engine",
+  );
 }
 
 function buildSharedQuoteRequest(
