@@ -62,6 +62,9 @@ const CURRENT_OPEN_WMS_ITEM_FILTER = `
   ${CURRENT_OPEN_WMS_ORDER_FILTER}
   AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
 `;
+const MATERIALIZED_WMS_ITEM_FILTER = `
+  COALESCE(oi.status, '') <> 'cancelled'
+`;
 const ACTIVE_SHIPMENT_FILTER = "s.status IN ('planned', 'queued', 'labeled', 'on_hold')";
 const COMBINED_CHILD_SOURCE_FILTER = `
   COALESCE(s.source, '') NOT IN ('echelon_combined_child', 'shipstation_combined_child')
@@ -294,17 +297,16 @@ export function buildReadinessChecks(): ReadinessCheck[] {
     {
       id: "wms_order_materialized_counter_drift",
       severity: "warning",
-      description: "OMS line materialized counters should match active WMS item quantity before relying on counters operationally.",
+      description: "OMS line materialized counters must match cumulative non-cancelled WMS item quantity.",
       constraintTarget: "Backfill readiness for oms.oms_order_lines.wms_materialized_quantity.",
       sql: `
-        WITH active_materialized AS (
+        WITH materialized AS (
           SELECT
             oi.oms_order_line_id,
-            SUM(oi.quantity)::int AS materialized_quantity
+            SUM(COALESCE(oi.quantity, 0))::int AS materialized_quantity
           FROM wms.order_items oi
-          JOIN wms.orders o ON o.id = oi.order_id
           WHERE oi.oms_order_line_id IS NOT NULL
-            AND ${CURRENT_OPEN_WMS_ITEM_FILTER}
+            AND ${MATERIALIZED_WMS_ITEM_FILTER}
           GROUP BY oi.oms_order_line_id
         )
         SELECT
@@ -312,12 +314,12 @@ export function buildReadinessChecks(): ReadinessCheck[] {
           ol.id AS oms_order_line_id,
           ol.sku,
           COALESCE(ol.wms_materialized_quantity, 0) AS recorded_wms_materialized_quantity,
-          COALESCE(am.materialized_quantity, 0) AS actual_active_wms_quantity,
-          COALESCE(am.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0) AS drift_quantity
+          COALESCE(materialized.materialized_quantity, 0) AS actual_materialized_wms_quantity,
+          COALESCE(materialized.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0) AS drift_quantity
         FROM oms.oms_order_lines ol
-        LEFT JOIN active_materialized am ON am.oms_order_line_id = ol.id
-        WHERE COALESCE(ol.wms_materialized_quantity, 0) <> COALESCE(am.materialized_quantity, 0)
-        ORDER BY ABS(COALESCE(am.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0)) DESC,
+        LEFT JOIN materialized ON materialized.oms_order_line_id = ol.id
+        WHERE COALESCE(ol.wms_materialized_quantity, 0) <> COALESCE(materialized.materialized_quantity, 0)
+        ORDER BY ABS(COALESCE(materialized.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0)) DESC,
                  ol.id DESC
       `,
     },
@@ -419,8 +421,53 @@ export function buildReadinessChecks(): ReadinessCheck[] {
     {
       id: "shipment_items_missing_order_item",
       severity: "blocker",
-      description: "Shipment items must point at a WMS order item before shipment-item lineage can be constrained.",
-      constraintTarget: "NOT NULL/FK constraint on wms.outbound_shipment_items.order_item_id.",
+      description: "Shipment items must carry the authority reference required by their item purpose.",
+      constraintTarget: "Purpose-specific authority constraint on wms.outbound_shipment_items.",
+      sql: `
+        SELECT
+          si.id AS shipment_item_id,
+          si.shipment_id,
+          s.order_id AS shipment_wms_order_id,
+          s.status AS shipment_status,
+          si.shipment_item_purpose,
+          si.order_item_id,
+          si.replacement_for_order_item_id,
+          si.product_variant_id,
+          si.qty
+        FROM wms.outbound_shipment_items si
+        JOIN wms.outbound_shipments s ON s.id = si.shipment_id
+        WHERE si.shipment_item_purpose IS NULL
+           OR NOT (
+             (
+               si.shipment_item_purpose = 'customer_fulfillment'
+               AND si.order_item_id IS NOT NULL
+               AND si.replacement_for_order_item_id IS NULL
+             )
+             OR (
+               si.shipment_item_purpose = 'replacement'
+               AND si.order_item_id IS NULL
+               AND si.replacement_for_order_item_id IS NOT NULL
+             )
+             OR (
+               si.shipment_item_purpose = 'concession'
+               AND si.order_item_id IS NULL
+               AND si.replacement_for_order_item_id IS NULL
+               AND si.product_variant_id IS NOT NULL
+             )
+             OR (
+               si.shipment_item_purpose = 'unclassified'
+               AND si.order_item_id IS NULL
+               AND si.replacement_for_order_item_id IS NULL
+             )
+           )
+        ORDER BY si.id DESC
+      `,
+    },
+    {
+      id: "shipment_items_unclassified_authority",
+      severity: "warning",
+      description: "Unclassified shipment items retain no customer, replacement, or concession authority and require review.",
+      constraintTarget: "Historical review boundary for wms.outbound_shipment_items.shipment_item_purpose.",
       sql: `
         SELECT
           si.id AS shipment_item_id,
@@ -431,28 +478,34 @@ export function buildReadinessChecks(): ReadinessCheck[] {
           si.qty
         FROM wms.outbound_shipment_items si
         JOIN wms.outbound_shipments s ON s.id = si.shipment_id
-        WHERE si.order_item_id IS NULL
+        WHERE si.shipment_item_purpose = 'unclassified'
         ORDER BY si.id DESC
       `,
     },
     {
       id: "shipment_item_order_mismatch",
       severity: "blocker",
-      description: "A shipment item cannot reference a WMS order item from a different WMS order.",
+      description: "Customer and replacement shipment authority cannot reference a WMS order item from a different WMS order.",
       constraintTarget: "Composite lineage guard tying outbound_shipment_items to outbound_shipments.order_id.",
       sql: `
         SELECT
           si.id AS shipment_item_id,
           si.shipment_id,
           s.order_id AS shipment_wms_order_id,
+          si.shipment_item_purpose,
           si.order_item_id,
+          si.replacement_for_order_item_id,
           oi.order_id AS item_wms_order_id,
           s.status AS shipment_status,
           oi.sku,
           si.qty
         FROM wms.outbound_shipment_items si
         JOIN wms.outbound_shipments s ON s.id = si.shipment_id
-        JOIN wms.order_items oi ON oi.id = si.order_item_id
+        JOIN wms.order_items oi ON oi.id = CASE si.shipment_item_purpose
+          WHEN 'customer_fulfillment' THEN si.order_item_id
+          WHEN 'replacement' THEN si.replacement_for_order_item_id
+          ELSE NULL
+        END
         WHERE oi.order_id <> s.order_id
         ORDER BY si.id DESC
       `,

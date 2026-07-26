@@ -359,7 +359,7 @@ Changes:
 - Run the authority-readiness cleanup tool before validating Phase 4 constraints:
   - Clear historical terminal `wms.order_items.oms_order_line_id` values only when the referenced `oms.oms_order_lines` row no longer exists.
   - Delete terminal `wms.outbound_shipment_items` rows with `qty <= 0`; these rows carry no physical quantity and block a positive-quantity constraint.
-  - Refresh current-open `oms.oms_order_lines.wms_materialized_quantity` from active WMS item quantity using the same current-open predicate as the readiness audit.
+  - Refresh `oms.oms_order_lines.wms_materialized_quantity` from cumulative non-cancelled WMS item quantity. This counter records authority already consumed and must remain populated after pick, ship, and order completion.
   - Write every cleanup mutation to `wms.oms_wms_authority_cleanup_audit` with before/after row snapshots.
 
 Acceptance criteria:
@@ -367,7 +367,7 @@ Acceptance criteria:
 - No active OMS-origin WMS item lacks valid OMS line authority.
 - No active shipment has ambiguous ShipStation identity.
 - Historical rows that cannot be proven are visible as exceptions.
-- The readiness audit reports zero blockers for orphan OMS line references, non-positive shipment item quantities, shipment item order mismatches caused by zero-quantity rows, and current-open materialized-counter drift.
+- The readiness audit reports zero blockers for orphan OMS line references, non-positive shipment item quantities, purpose-specific shipment item authority, shipment item order mismatches, and cumulative materialized-counter drift.
 
 ### Phase 7: Conformance Tests And Monitoring
 

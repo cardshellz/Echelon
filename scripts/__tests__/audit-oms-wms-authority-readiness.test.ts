@@ -48,6 +48,8 @@ describe("audit-oms-wms-authority-readiness", () => {
     expect(ids).toContain("oms_line_over_materialized");
     expect(ids).toContain("wms_order_materialized_counter_drift");
     expect(ids).toContain("active_engine_order_ref_duplicates");
+    expect(ids).toContain("shipment_items_missing_order_item");
+    expect(ids).toContain("shipment_items_unclassified_authority");
     expect(ids).toContain("shipment_item_order_mismatch");
     expect(ids).toContain("negative_wms_order_item_quantities");
 
@@ -85,23 +87,54 @@ describe("audit-oms-wms-authority-readiness", () => {
     }
   });
 
-  it("scopes materialization checks to current open WMS orders", async () => {
+  it("scopes active materialization checks to current open WMS orders", async () => {
     const { buildReadinessChecks } = await loadAuditModule();
     const activeMaterializationChecks = buildReadinessChecks()
       .filter((check) =>
         check.id === "oms_wms_item_missing_oms_line_id" ||
         check.id === "oms_wms_duplicate_order_line_items" ||
         check.id === "oms_line_multiple_active_wms_orders" ||
-        check.id === "oms_line_over_materialized" ||
-        check.id === "wms_order_materialized_counter_drift"
+        check.id === "oms_line_over_materialized"
       );
 
-    expect(activeMaterializationChecks.length).toBe(5);
+    expect(activeMaterializationChecks.length).toBe(4);
     for (const check of activeMaterializationChecks) {
       expect(check.sql, check.id).toContain("o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')");
       expect(check.sql, check.id).toContain("o.cancelled_at IS NULL");
       expect(check.sql, check.id).toContain("o.completed_at IS NULL");
     }
+  });
+
+  it("compares materialized counters to cumulative non-cancelled WMS authority consumption", async () => {
+    const { buildReadinessChecks } = await loadAuditModule();
+    const counterCheck = buildReadinessChecks()
+      .find((check) => check.id === "wms_order_materialized_counter_drift");
+
+    expect(counterCheck).toBeDefined();
+    expect(counterCheck!.sql).toContain("COALESCE(oi.status, '') <> 'cancelled'");
+    expect(counterCheck!.sql).not.toContain("o.warehouse_status IN");
+    expect(counterCheck!.sql).not.toContain("o.completed_at IS NULL");
+    expect(counterCheck!.sql).toContain("actual_materialized_wms_quantity");
+  });
+
+  it("validates shipment items against purpose-specific authority", async () => {
+    const { buildReadinessChecks } = await loadAuditModule();
+    const authorityCheck = buildReadinessChecks()
+      .find((check) => check.id === "shipment_items_missing_order_item");
+    const orderMatchCheck = buildReadinessChecks()
+      .find((check) => check.id === "shipment_item_order_mismatch");
+
+    expect(authorityCheck).toBeDefined();
+    expect(authorityCheck!.sql).toContain("si.shipment_item_purpose = 'customer_fulfillment'");
+    expect(authorityCheck!.sql).toContain("si.shipment_item_purpose = 'replacement'");
+    expect(authorityCheck!.sql).toContain("si.replacement_for_order_item_id IS NOT NULL");
+    expect(authorityCheck!.sql).toContain("si.shipment_item_purpose = 'concession'");
+    expect(authorityCheck!.sql).toContain("si.product_variant_id IS NOT NULL");
+    expect(authorityCheck!.sql).not.toContain("WHERE si.order_item_id IS NULL");
+
+    expect(orderMatchCheck).toBeDefined();
+    expect(orderMatchCheck!.sql).toContain("WHEN 'customer_fulfillment' THEN si.order_item_id");
+    expect(orderMatchCheck!.sql).toContain("WHEN 'replacement' THEN si.replacement_for_order_item_id");
   });
 
   it("keeps orphan OMS-line FK checks broad because FK validation is table-wide", async () => {
