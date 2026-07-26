@@ -204,6 +204,15 @@ active feed or listing evidence survives without that parent ID, and checks:
 4. A duplicate owner cannot project conflicting shipping-group codes.
 5. The live `cardshellz.shipping_group` product metafield matches Echelon.
 
+Duplicate ownership review is a separate, operator-requested read model. It
+returns at most 50 groups per page and never adds ownership groups to the
+existing mapping-health payload. A canonical owner is recommended only when
+one active local product has matching catalog and channel evidence, the remote
+Shopify product exists, and every owner has the same shipping group without a
+mapping conflict. Every other case remains manual review. A recommendation is
+evidence only: this review does not change catalog IDs, feeds, listings,
+metafields, policies, or checkout routing.
+
 A remote-missing mapping may be retired only through the audited reconciliation
 command. The command rechecks the optimistic-lock fingerprint, then asks Shopify
 again for the product and every referenced active or archived variant. It makes

@@ -9,10 +9,18 @@ import {
 import {
   ShopifyMappingVerificationError,
 } from "./shopify-product-mapping-verifier";
+import {
+  SHOPIFY_OWNERSHIP_REVIEW_FILTERS,
+} from "./shopify-product-mapping-reconciliation.domain";
 
 const reconciliationParamsSchema = z.object({
   channelId: z.coerce.number().int().positive(),
 });
+const ownershipReviewQuerySchema = z.object({
+  filter: z.enum(SHOPIFY_OWNERSHIP_REVIEW_FILTERS).default("all"),
+  page: z.coerce.number().int().min(1).max(10_000).default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).default(20),
+}).strict();
 const retireParamsSchema = reconciliationParamsSchema.extend({
   productId: z.coerce.number().int().positive(),
 });
@@ -103,6 +111,29 @@ export function registerShopifyProductMappingReconciliationRoutes(
           res,
           error,
           "reconcile Shopify product mappings",
+        );
+      }
+    },
+  );
+
+  app.get(
+    "/api/channels/:channelId/shopify-mapping-reconciliation/ownership-review",
+    requirePermission("inventory", "view"),
+    async (req, res) => {
+      try {
+        const params = reconciliationParamsSchema.parse(req.params);
+        const query = ownershipReviewQuerySchema.parse(req.query);
+        return res.json(await service.reviewOwnership({
+          channelId: params.channelId,
+          filter: query.filter,
+          page: query.page,
+          pageSize: query.pageSize,
+        }));
+      } catch (error: unknown) {
+        return sendMappingError(
+          res,
+          error,
+          "review duplicate Shopify product ownership",
         );
       }
     },

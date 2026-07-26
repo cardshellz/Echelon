@@ -151,6 +151,84 @@ describe("Shopify product mapping reconciliation service", () => {
     expect(result.summary.healthyProductCount).toBe(1);
   });
 
+  it("returns a bounded read-only ownership review without invoking a writer", async () => {
+    const { loaded, repository, verifier, service } = dependencies();
+    const duplicate: LoadedLocalProduct = {
+      summary: {
+        ...loaded.summary,
+        productId: 11,
+        productName: "Archived duplicate",
+        catalogProductId: null,
+        status: "channel_only",
+        fingerprint: "fingerprint-11",
+        activeVariantCount: 0,
+      },
+      local: {
+        ...loaded.local,
+        productId: 11,
+        productName: "Archived duplicate",
+        rawShopifyProductId: null,
+        shopifyProductId: null,
+        mappingStatus: "channel_only",
+        mappingFingerprint: "fingerprint-11",
+        activeVariantCount: 0,
+      },
+    };
+    const unrelatedUniqueOwner: LoadedLocalProduct = {
+      summary: {
+        ...loaded.summary,
+        productId: 12,
+        productName: "Unique Shopify product",
+        catalogProductId: "9002",
+        evidenceProductIds: ["9002"],
+        fingerprint: "fingerprint-12",
+      },
+      local: {
+        ...loaded.local,
+        productId: 12,
+        productName: "Unique Shopify product",
+        rawShopifyProductId: "9002",
+        shopifyProductId: "9002",
+        evidenceProductIds: ["9002"],
+        mappingFingerprint: "fingerprint-12",
+      },
+    };
+    vi.mocked(repository.listMappedProducts).mockResolvedValue([
+      loaded,
+      duplicate,
+      unrelatedUniqueOwner,
+    ]);
+
+    const result = await service.reviewOwnership({
+      channelId: 36,
+      filter: "canonical_owner_recommended",
+      page: 1,
+      pageSize: 10,
+    });
+
+    expect(repository.loadChannelContext).toHaveBeenCalledWith(36);
+    expect(repository.listMappedProducts).toHaveBeenCalledWith(36);
+    expect(verifier.lookupProducts).toHaveBeenCalledWith(
+      context.credentials,
+      ["9001"],
+    );
+    expect(repository.retireStaleMapping).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      generatedAt: fixedNow.toISOString(),
+      readOnly: true,
+      filter: "canonical_owner_recommended",
+      pagination: {
+        page: 1,
+        pageSize: 10,
+        totalItems: 1,
+      },
+    });
+    expect(result.items[0]).toMatchObject({
+      recommendedProductId: 10,
+      nonCanonicalProductIds: [11],
+    });
+  });
+
   it("rejects a stale optimistic-lock fingerprint before calling Shopify", async () => {
     const { verifier, repository, service } = dependencies();
 
