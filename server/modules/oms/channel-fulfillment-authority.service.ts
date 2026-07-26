@@ -71,7 +71,11 @@ export interface ChannelFulfillmentAuthorityService {
   ): Promise<MaterializeAndDispatchResult>;
   ensureLegacyShipment(
     legacyWmsShipmentId: number,
-    options?: { executeImmediately?: boolean; source?: string },
+    options?: {
+      executeImmediately?: boolean;
+      source?: string;
+      suppressChannelProviders?: readonly string[];
+    },
   ): Promise<MaterializeAndDispatchResult>;
   projectPhysicalPackage(physicalShipmentId: number): Promise<void>;
   runDueBatch(options?: {
@@ -408,13 +412,20 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
 
   async function ensureLegacyShipment(
     legacyWmsShipmentId: number,
-    options: { executeImmediately?: boolean; source?: string } = {},
+    options: {
+      executeImmediately?: boolean;
+      source?: string;
+      suppressChannelProviders?: readonly string[];
+    } = {},
   ): Promise<MaterializeAndDispatchResult> {
     const resolved = await dependencies.repository.resolveLegacyPhysicalPackage(legacyWmsShipmentId);
     return recordPhysicalPackage({
       ...resolved,
       legacyWmsShipmentIds: [...resolved.legacyWmsShipmentIds],
       source: options.source ?? "legacy_fulfillment_reconciliation",
+      suppressChannelProviders: options.suppressChannelProviders == null
+        ? undefined
+        : [...options.suppressChannelProviders],
     }, options);
   }
 
