@@ -77,6 +77,12 @@ describe("SharedEngineDropshipShippingQuoteProvider", () => {
       rateBookCode: "dropship-vendor-default",
       rateTableId: 44,
       ratedWeightGrams: 454,
+      rateProvider: { name: "unused", version: "test" },
+      selectedRate: {
+        serviceLevelCode: "standard",
+        totalCents: 799,
+        chargeModel: "fixed_band",
+      },
     });
   });
 

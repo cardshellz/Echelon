@@ -27,9 +27,9 @@ import {
 } from "../../shipping-engine/infrastructure/channel-shipping-policy-runtime.repository";
 import type {
   DropshipSharedShippingQuoteProvider,
+  DropshipSharedShippingQuoteRequest,
   DropshipSharedShippingQuoteResult,
-  DropshipShippingShadowQuoteRequest,
-} from "../application/dropship-shipping-shadow-comparison";
+} from "../application/dropship-shared-shipping-quote";
 
 const DROPSHIP_VENDOR_RATE_CONTEXT = {
   pricingChannel: "dropship",
@@ -42,7 +42,7 @@ interface SharedEngineDropshipShippingDependencies {
   loadCatalogFacts: typeof loadCatalogShippingFactsByVariantIds;
   resolveChannelShipping(input: {
     originWarehouseId: number;
-    destination: DropshipShippingShadowQuoteRequest["destination"];
+    destination: DropshipSharedShippingQuoteRequest["destination"];
   }): Promise<RuntimeChannelShippingResolution>;
   quoteShipment(
     request: ShipmentQuoteRequest,
@@ -61,7 +61,7 @@ implements DropshipSharedShippingQuoteProvider {
   ) {}
 
   async quote(
-    input: DropshipShippingShadowQuoteRequest,
+    input: DropshipSharedShippingQuoteRequest,
   ): Promise<DropshipSharedShippingQuoteResult> {
     const routing = await this.deps.resolveChannelShipping({
       originWarehouseId: input.warehouseId,
@@ -159,6 +159,27 @@ implements DropshipSharedShippingQuoteProvider {
         (sum, parcel) => sum + parcel.billableWeightGrams,
         0,
       ),
+      rateProvider: this.deps.rateProvider.provider,
+      selectedRate: {
+        serviceLevelId: standardRate.serviceLevelId,
+        serviceLevelCode: standardRate.serviceLevelCode,
+        displayName: standardRate.displayName,
+        description: standardRate.description,
+        fulfillmentMode: standardRate.fulfillmentMode,
+        pricingBasis: standardRate.pricingBasis,
+        totalCents: standardRate.totalCents,
+        currency: standardRate.currency,
+        promiseMinBusinessDays: standardRate.promiseMinBusinessDays,
+        promiseMaxBusinessDays: standardRate.promiseMaxBusinessDays,
+        ratedMeasure: standardRate.ratedMeasure,
+        maxShipmentWeightGrams: standardRate.maxShipmentWeightGrams,
+        chargeModel: standardRate.chargeModel,
+        perStartedPoundCents: standardRate.perStartedPoundCents,
+        billablePounds: standardRate.billablePounds,
+        rateTableId: standardRate.rateTableId,
+        productPolicyApplied: standardRate.productPolicyApplied,
+        calculationTrace: standardRate.calculationTrace,
+      },
       warnings,
       routing: routingSummary(routing),
     };
@@ -190,7 +211,7 @@ SharedEngineDropshipShippingQuoteProvider {
 }
 
 function buildShipmentLines(
-  input: DropshipShippingShadowQuoteRequest,
+  input: DropshipSharedShippingQuoteRequest,
   factsByVariantId: ReadonlyMap<number, CatalogShippingFactByVariant>,
 ): ShipmentLineInput[] {
   return input.items.map((item) => {
@@ -211,7 +232,7 @@ function buildShipmentLines(
 }
 
 function buildCartonSnapshotParcelPlan(
-  input: DropshipShippingShadowQuoteRequest,
+  input: DropshipSharedShippingQuoteRequest,
   factsByVariantId: ReadonlyMap<number, CatalogShippingFactByVariant>,
 ): ShipmentParcelPlan {
   return {
@@ -251,7 +272,7 @@ function fixedParcelProvider(
 }
 
 function resolvePackageShippingGroup(
-  items: DropshipShippingShadowQuoteRequest["packages"][number]["items"],
+  items: DropshipSharedShippingQuoteRequest["packages"][number]["items"],
   factsByVariantId: ReadonlyMap<number, CatalogShippingFactByVariant>,
 ): string | null {
   const groups = new Set(
@@ -262,7 +283,7 @@ function resolvePackageShippingGroup(
 }
 
 function missingCatalogFactWarnings(
-  items: DropshipShippingShadowQuoteRequest["items"],
+  items: DropshipSharedShippingQuoteRequest["items"],
   factsByVariantId: ReadonlyMap<number, CatalogShippingFactByVariant>,
 ): string[] {
   return items.flatMap((item) => {

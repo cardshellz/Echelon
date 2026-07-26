@@ -349,6 +349,27 @@ The shared result remains internal evidence only. The legacy dropship quote
 snapshot, amount, idempotency response, and downstream charge remain
 authoritative until the separate cutover PR is reviewed and enabled.
 
+The separate cutover path is controlled by:
+
+- `DROPSHIP_SHARED_SHIPPING_CUTOVER_MODE=legacy|test|live` (default `legacy`);
+- `DROPSHIP_SHARED_SHIPPING_CUTOVER_STORE_CONNECTION_IDS=<comma-separated IDs>` (required in `test` mode).
+
+Merging the cutover code does not activate shared dropship pricing. Missing or
+invalid configuration resolves to legacy pricing and records a structured
+configuration error. In `test` mode, only exact store connection IDs use the
+shared engine. Once a store is deliberately routed to the shared engine, no
+automatic legacy fallback is allowed: missing coverage or a provider failure
+fails the quote so an incorrect legacy amount cannot be charged silently.
+Rollback is immediate by restoring cutover mode to `legacy`.
+
+Legacy quotes retain payload version 2 and their package-level rate evidence.
+Shared quotes use payload version 3 with shipment-level rate evidence, the
+selected service/rate book/rate table, routing decision, rollout decision,
+canonical cartons, markup policy, insurance policy, and final totals. The
+shared amount is not allocated back across cartons. Existing idempotency keys
+always replay their original immutable snapshot even after rollout
+configuration changes; use a new key for every cutover test quote.
+
 ### E. Resume the dogfood checklist in parallel
 
 Resume `docs/DROPSHIP-DOGFOOD-TEST-PLAN.md` at Phases 3 through 5:
