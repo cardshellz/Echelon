@@ -19,6 +19,7 @@ describe("cleanup-oms-wms-authority-readiness", () => {
         "materialized-counter-drift",
       ],
       counterDirection: "all",
+      summaryOnly: false,
       operator: "script:cleanup-oms-wms-authority-readiness",
     });
   });
@@ -31,12 +32,14 @@ describe("cleanup-oms-wms-authority-readiness", () => {
       "--limit=all",
       "--operation=orphan-oms-line-refs,materialized-counter-drift",
       "--counter-direction=recorded-below-actual",
+      "--summary-only",
       "--operator=manual-prod-cleanup",
     ])).toMatchObject({
       mode: "execute",
       limit: null,
       operations: ["orphan-oms-line-refs", "materialized-counter-drift"],
       counterDirection: "recorded-below-actual",
+      summaryOnly: true,
       operator: "manual-prod-cleanup",
     });
   });
@@ -73,6 +76,19 @@ describe("cleanup-oms-wms-authority-readiness", () => {
       mode: "execute",
       counterDirection: "all",
     });
+  });
+
+  it("chunks audit snapshots into bounded inserts", async () => {
+    const { chunkForAuditInsert } = await loadCleanupModule();
+    const values = Array.from({ length: 1_201 }, (_, index) => index + 1);
+
+    expect(chunkForAuditInsert(values)).toEqual([
+      values.slice(0, 500),
+      values.slice(500, 1_000),
+      values.slice(1_000),
+    ]);
+    expect(chunkForAuditInsert([])).toEqual([]);
+    expect(() => chunkForAuditInsert(values, 0)).toThrow(/positive integer/);
   });
 
   it("defines the three cleanup operations proven by the readiness audit output", async () => {
@@ -186,6 +202,16 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     const source = fs.readFileSync(
       path.resolve(process.cwd(), "scripts/cleanup-oms-wms-authority-readiness.ts"),
       "utf8",
+    );
+
+    const auditFn = source.slice(
+      source.indexOf("async function insertAuditRows"),
+      source.indexOf("async function clearOrphanOmsLineRefs"),
+    );
+    expect(auditFn).toContain("chunkForAuditInsert(args.candidates)");
+    expect(auditFn).toContain("FROM jsonb_to_recordset($7::jsonb)");
+    expect(auditFn).toContain(
+      "assertExpectedRowCount(args.operation.id, args.candidates.length, insertedCount)",
     );
 
     const clearFn = source.slice(
