@@ -14,6 +14,10 @@ export interface CatalogShippingFact {
   shipsInOwnContainer: boolean;
 }
 
+export interface CatalogShippingFactByVariant extends CatalogShippingFact {
+  sku: string | null;
+}
+
 /** Load immutable quote facts by exact SKU in one bounded query. */
 export async function loadCatalogShippingFactsBySku(
   skus: readonly string[],
@@ -60,4 +64,42 @@ export async function loadCatalogWeightsBySku(
 ): Promise<Map<string, number | null>> {
   const facts = await loadCatalogShippingFactsBySku(skus);
   return new Map([...facts].map(([sku, value]) => [sku, value.weightGrams]));
+}
+
+/** Load canonical quote facts by exact product-variant ID in one bounded query. */
+export async function loadCatalogShippingFactsByVariantIds(
+  productVariantIds: readonly number[],
+): Promise<Map<number, CatalogShippingFactByVariant>> {
+  const uniqueIds = [...new Set(productVariantIds)].filter(
+    (id) => Number.isSafeInteger(id) && id > 0,
+  );
+  if (uniqueIds.length === 0) return new Map();
+
+  const rows = await db
+    .select({
+      id: productVariants.id,
+      sku: productVariants.sku,
+      weightGrams: productVariants.weightGrams,
+      shippingGroupCode: shippingGroups.code,
+      shipsInOwnContainer: shippingVariantAttrs.shipsInOwnContainer,
+    })
+    .from(productVariants)
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .leftJoin(shippingGroups, eq(shippingGroups.id, products.shippingGroupId))
+    .leftJoin(
+      shippingVariantAttrs,
+      eq(shippingVariantAttrs.productVariantId, productVariants.id),
+    )
+    .where(inArray(productVariants.id, uniqueIds));
+
+  return new Map(rows.map((row) => [
+    row.id,
+    {
+      productVariantId: row.id,
+      sku: row.sku,
+      weightGrams: row.weightGrams,
+      shippingGroupCode: row.shippingGroupCode,
+      shipsInOwnContainer: row.shipsInOwnContainer ?? false,
+    },
+  ]));
 }

@@ -340,6 +340,15 @@ The next engineering PR after real rates exist should compare, not replace:
 7. Test state default, ZIP override, missing-weight underquote, boundary weights, no-coverage, and warehouse override behavior.
 8. Switch the factory only in a separate reviewed cutover PR.
 
+The comparison rollout is controlled by:
+
+- `DROPSHIP_SHARED_SHIPPING_SHADOW_MODE=off|test|all` (default `off`);
+- `DROPSHIP_SHARED_SHIPPING_SHADOW_STORE_CONNECTION_IDS=<comma-separated IDs>` (required in `test` mode).
+
+The shared result remains internal evidence only. The legacy dropship quote
+snapshot, amount, idempotency response, and downstream charge remain
+authoritative until the separate cutover PR is reviewed and enabled.
+
 ### E. Resume the dogfood checklist in parallel
 
 Resume `docs/DROPSHIP-DOGFOOD-TEST-PLAN.md` at Phases 3 through 5:
