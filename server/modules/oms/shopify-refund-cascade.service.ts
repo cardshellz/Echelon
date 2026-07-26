@@ -13,6 +13,7 @@ import {
   recomputeOrderStatusFromShipments,
 } from "../orders/shipment-rollup";
 import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
+import { recordOmsWmsAuthorityCleanupAudit } from "../wms/oms-wms-authority-cleanup-audit.repository";
 
 const REFUND_LOCK_NAMESPACE = 918413;
 
@@ -75,6 +76,26 @@ export interface ShopifyRefundCascadeOptions {
   sourceInboxId?: number | null;
   now?: Date;
   logPrefix?: string;
+}
+
+export interface ReconcilePersistedShopifyRefundAuthorityInput {
+  omsOrderId: number;
+  wmsOrderId: number;
+  refundExternalId: string;
+  adjustments: readonly ShopifyRefundLineAdjustment[];
+  sourceInboxId?: number | null;
+  now: Date;
+  audit: {
+    runId: string;
+    operator: string;
+    reason: string;
+  };
+}
+
+export interface ReconcilePersistedShopifyRefundAuthorityResult {
+  authorityChanges: number;
+  wmsLineChanges: number;
+  warnings: readonly string[];
 }
 
 interface OmsLineStateRow {
@@ -269,6 +290,16 @@ async function persistRefundAdjustments(
   return inserted;
 }
 
+function deriveAuthorityForRefundLine(line: OmsLineStateRow) {
+  return deriveRefundAuthority({
+    paidQuantity: Number(line.paid_quantity),
+    previousAuthorityFulfillableQuantity: Number(line.authority_fulfillable_quantity),
+    cancelledQuantity: Number(line.cancelled_quantity),
+    refundCancelQuantity: Number(line.refund_cancel_quantity),
+    refundOtherQuantity: Number(line.refund_other_quantity),
+  });
+}
+
 async function applyOmsLineAuthority(
   tx: any,
   args: {
@@ -283,13 +314,7 @@ async function applyOmsLineAuthority(
   const warnings: string[] = [];
 
   for (const line of args.lines) {
-    const authority = deriveRefundAuthority({
-      paidQuantity: Number(line.paid_quantity),
-      previousAuthorityFulfillableQuantity: Number(line.authority_fulfillable_quantity),
-      cancelledQuantity: Number(line.cancelled_quantity),
-      refundCancelQuantity: Number(line.refund_cancel_quantity),
-      refundOtherQuantity: Number(line.refund_other_quantity),
-    });
+    const authority = deriveAuthorityForRefundLine(line);
     const stateChanged =
       Number(line.authority_fulfillable_quantity) !== authority.authorityFulfillableQuantity ||
       Number(line.refunded_quantity) !== authority.refundedQuantity ||
@@ -914,6 +939,239 @@ async function applyInternalRefundState(
       returnItemsCreated: expectedReturn.itemsCreated,
       warnings: [...authorityResult.warnings, ...expectedReturn.warnings],
     };
+  });
+}
+
+function requireRepairText(value: string, field: string, maxLength: number): string {
+  const normalized = value.trim();
+  if (!normalized) throw new Error(`${field} cannot be blank`);
+  if (normalized.length > maxLength) {
+    throw new Error(`${field} cannot exceed ${maxLength} characters`);
+  }
+  return normalized;
+}
+
+async function assertPersistedRefundAdjustments(
+  tx: any,
+  args: {
+    omsOrderId: number;
+    refundExternalId: string;
+    adjustments: readonly ShopifyRefundLineAdjustment[];
+  },
+): Promise<void> {
+  const externalIds = args.adjustments.map((adjustment) => adjustment.externalLineItemId);
+  const uniqueExternalIds = new Set(externalIds);
+  if (externalIds.length === 0) {
+    throw new Error("Historical refund authority repair requires at least one line adjustment");
+  }
+  if (uniqueExternalIds.size !== externalIds.length) {
+    throw new Error("Historical refund authority repair adjustments must have unique line identities");
+  }
+
+  const result = await tx.execute(sql`
+    SELECT
+      external_line_item_id,
+      quantity,
+      restock_policy
+    FROM oms.order_line_adjustments
+    WHERE order_id = ${args.omsOrderId}
+      AND source = 'shopify_webhook'
+      AND source_event_id = ${args.refundExternalId}
+      AND adjustment_type = 'refund'
+      AND external_line_item_id = ANY(
+        ARRAY[${sql.join(externalIds, sql`, `)}]::text[]
+      )
+    ORDER BY external_line_item_id
+  `);
+  const persistedByExternalId = new Map(
+    rowsOf<any>(result).map((row) => [String(row.external_line_item_id), row]),
+  );
+  for (const adjustment of args.adjustments) {
+    const persisted = persistedByExternalId.get(adjustment.externalLineItemId);
+    if (
+      !persisted
+      || Number(persisted.quantity) !== adjustment.quantity
+      || String(persisted.restock_policy) !== adjustment.restockPolicy
+    ) {
+      throw new Error(
+        `Persisted Shopify refund fact does not match repair input for line ${adjustment.externalLineItemId}`,
+      );
+    }
+  }
+}
+
+async function auditPersistedRefundAuthorityRepair(
+  tx: any,
+  args: {
+    runId: string;
+    operator: string;
+    reason: string;
+    now: Date;
+    lines: readonly OmsLineStateRow[];
+  },
+): Promise<number> {
+  let inserted = 0;
+  for (const line of args.lines) {
+    const authority = deriveAuthorityForRefundLine(line);
+    if (authority.overDispositionQuantity > 0) {
+      throw new Error(
+        `OMS line ${line.id} has ${authority.overDispositionQuantity} disposition unit(s) beyond paid quantity`,
+      );
+    }
+    const stateChanged =
+      Number(line.authority_fulfillable_quantity) !== authority.authorityFulfillableQuantity
+      || Number(line.refunded_quantity) !== authority.refundedQuantity
+      || String(line.authorization_status) !== authority.authorizationStatus;
+    if (!stateChanged) continue;
+
+    const beforeRow = { ...line };
+    const afterRow = {
+      ...line,
+      authority_fulfillable_quantity: authority.authorityFulfillableQuantity,
+      refunded_quantity: authority.refundedQuantity,
+      authorization_status: authority.authorizationStatus,
+      updated_at: args.now,
+    };
+    await recordOmsWmsAuthorityCleanupAudit(tx, {
+      runId: args.runId,
+      operation: "historical-refund-authority-repair",
+      sourceTable: "oms.oms_order_lines",
+      sourceId: Number(line.id),
+      action: "update",
+      reason: args.reason,
+      beforeRow,
+      afterRow,
+      operator: args.operator,
+      createdAt: args.now,
+    });
+    inserted++;
+  }
+  return inserted;
+}
+
+async function assertHistoricalRefundWmsState(
+  tx: any,
+  args: {
+    wmsOrderId: number;
+    lines: readonly OmsLineStateRow[];
+  },
+): Promise<void> {
+  const lineIds = args.lines.map((line) => Number(line.id));
+  const result = await tx.execute(sql`
+    SELECT
+      item.id,
+      item.oms_order_line_id,
+      item.status,
+      item.quantity,
+      item.picked_quantity,
+      item.fulfilled_quantity
+    FROM wms.order_items item
+    WHERE item.order_id = ${args.wmsOrderId}
+      AND item.oms_order_line_id = ANY(
+        ARRAY[${sql.join(lineIds, sql`, `)}]::bigint[]
+      )
+    ORDER BY item.id
+    FOR UPDATE OF item
+  `);
+  const rows = rowsOf<any>(result);
+  const rowsByLineId = new Map<number, any[]>();
+  for (const row of rows) {
+    const lineId = Number(row.oms_order_line_id);
+    rowsByLineId.set(lineId, [...(rowsByLineId.get(lineId) ?? []), row]);
+  }
+
+  for (const line of args.lines) {
+    const mapped = rowsByLineId.get(Number(line.id)) ?? [];
+    if (line.requires_shipping !== false && mapped.length !== 1) {
+      throw new Error(
+        `Historical refund authority repair requires exactly one WMS item for OMS line ${line.id}; found ${mapped.length}`,
+      );
+    }
+    for (const item of mapped) {
+      const status = String(item.status ?? "");
+      const pickedQuantity = Number(item.picked_quantity ?? 0);
+      const fulfilledQuantity = Number(item.fulfilled_quantity ?? 0);
+      const validCancelledState =
+        status === "cancelled" && pickedQuantity === 0 && fulfilledQuantity === 0;
+      const validProjectedShipmentState =
+        status === "completed"
+        && fulfilledQuantity > 0
+        && pickedQuantity >= fulfilledQuantity;
+      if (!validCancelledState && !validProjectedShipmentState) {
+        throw new Error(
+          `OMS line ${line.id} has unsafe historical WMS state ` +
+          `status=${status} picked=${pickedQuantity} fulfilled=${fulfilledQuantity}`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Reconcile line authority from already-persisted Shopify refund facts.
+ *
+ * This is intentionally narrower than applyShopifyRefundCascade: it does not
+ * create adjustments, release reservations, mutate active shipment plans, or
+ * create returns. Callers must select only historical terminal rows whose
+ * operational side effects were already applied.
+ */
+export async function reconcilePersistedShopifyRefundAuthority(
+  db: any,
+  input: ReconcilePersistedShopifyRefundAuthorityInput,
+): Promise<ReconcilePersistedShopifyRefundAuthorityResult> {
+  const refundExternalId = requireRepairText(
+    input.refundExternalId,
+    "refundExternalId",
+    100,
+  );
+  const operator = requireRepairText(input.audit.operator, "audit.operator", 120);
+  const reason = requireRepairText(input.audit.reason, "audit.reason", 2_000);
+  const adjustments = input.adjustments.map((adjustment) => ({ ...adjustment }));
+
+  return db.transaction(async (tx: any) => {
+    await tx.execute(sql`
+      SELECT pg_advisory_xact_lock(${REFUND_LOCK_NAMESPACE}, ${input.omsOrderId})
+    `);
+    await assertPersistedRefundAdjustments(tx, {
+      omsOrderId: input.omsOrderId,
+      refundExternalId,
+      adjustments,
+    });
+    await loadAndLockOmsLines(tx, input.omsOrderId, adjustments);
+    const lines = await loadRefundAggregates(tx, input.omsOrderId, adjustments);
+    await assertHistoricalRefundWmsState(tx, {
+      wmsOrderId: input.wmsOrderId,
+      lines,
+    });
+    const auditedChanges = await auditPersistedRefundAuthorityRepair(tx, {
+      runId: input.audit.runId,
+      operator,
+      reason,
+      now: input.now,
+      lines,
+    });
+    const authorityResult = await applyOmsLineAuthority(tx, {
+      omsOrderId: input.omsOrderId,
+      refundExternalId,
+      sourceInboxId: input.sourceInboxId ?? null,
+      now: input.now,
+      lines,
+    });
+    if (authorityResult.changed !== auditedChanges) {
+      throw new Error(
+        `Historical refund authority repair changed ${authorityResult.changed} line(s) after auditing ${auditedChanges}`,
+      );
+    }
+    await refreshOmsLineMaterializedQuantities(tx, {
+      omsOrderId: input.omsOrderId,
+      updatedAt: input.now,
+    });
+
+    return Object.freeze({
+      authorityChanges: authorityResult.changed,
+      wmsLineChanges: 0,
+      warnings: Object.freeze([...authorityResult.warnings]),
+    });
   });
 }
 

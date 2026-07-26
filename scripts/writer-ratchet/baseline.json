@@ -732,6 +732,9 @@
   "wms.fulfillment_plans": [
     "modules/oms"
   ],
+  "wms.oms_wms_authority_cleanup_audit": [
+    "modules/wms"
+  ],
   "wms.order_items": [
     "modules/catalog",
     "modules/inventory",

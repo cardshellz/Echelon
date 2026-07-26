@@ -4,11 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   recordAuthorityEvent: vi.fn(async () => undefined),
+  recordCleanupAudit: vi.fn(async () => undefined),
   markShipmentCancelled: vi.fn(async () => ({ wmsOrderId: 204464, changed: true })),
   recomputeOrderStatusFromShipments: vi.fn(async () => undefined),
 }));
 const {
   recordAuthorityEvent,
+  recordCleanupAudit,
   markShipmentCancelled,
   recomputeOrderStatusFromShipments,
 } = mocks;
@@ -22,8 +24,13 @@ vi.mock("../../../orders/shipment-rollup", () => ({
   recomputeOrderStatusFromShipments: mocks.recomputeOrderStatusFromShipments,
 }));
 
+vi.mock("../../../wms/oms-wms-authority-cleanup-audit.repository", () => ({
+  recordOmsWmsAuthorityCleanupAudit: mocks.recordCleanupAudit,
+}));
+
 import {
   applyShopifyRefundCascade,
+  reconcilePersistedShopifyRefundAuthority,
   RefundsCreateBadPayloadError,
 } from "../../shopify-refund-cascade.service";
 
@@ -461,6 +468,248 @@ describe("applyShopifyRefundCascade", () => {
       name: "RefundsCreateBadPayloadError",
       message: expect.stringContaining(expectedMessage),
     });
+  });
+});
+
+describe("reconcilePersistedShopifyRefundAuthority", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("audits and applies a persisted refund fact without replaying operational side effects", async () => {
+    const mutationOrder: string[] = [];
+    recordCleanupAudit.mockImplementationOnce(async () => {
+      mutationOrder.push("audit");
+    });
+    const mock = makeDb((text) => {
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.order_line_adjustments") && text.includes("source_event_id")) {
+        return {
+          rows: [{
+            external_line_item_id: "441680952",
+            quantity: 5,
+            restock_policy: "no_restock",
+          }],
+        };
+      }
+      if (text.includes("FROM oms.oms_order_lines ol") && text.includes("FOR UPDATE OF ol")) {
+        return {
+          rows: [omsLine({
+            channel_observed_quantity: 5,
+            paid_quantity: 5,
+            authority_fulfillable_quantity: 5,
+          })],
+        };
+      }
+      if (text.includes("LEFT JOIN oms.order_line_adjustments")) {
+        return {
+          rows: [omsLine({
+            channel_observed_quantity: 5,
+            paid_quantity: 5,
+            authority_fulfillable_quantity: 5,
+            refund_other_quantity: 5,
+          })],
+        };
+      }
+      if (text.includes("UPDATE oms.oms_order_lines")) {
+        mutationOrder.push("authority-update");
+        return { rows: [] };
+      }
+      if (text.includes("FROM wms.order_items item") && text.includes("FOR UPDATE OF item")) {
+        return {
+          rows: [{
+            id: 312850,
+            oms_order_line_id: 110466,
+            external_line_item_id: "441680952",
+            quantity: 5,
+            picked_quantity: 0,
+            fulfilled_quantity: 0,
+            status: "cancelled",
+            requires_shipping: true,
+          }],
+        };
+      }
+      if (text.includes("wms_materialized_quantity = COALESCE(materialized.quantity, 0)")) {
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected SQL in persisted refund repair test: ${text}`);
+    });
+
+    const result = await reconcilePersistedShopifyRefundAuthority(mock.db, {
+      omsOrderId: 242960,
+      wmsOrderId: 204464,
+      refundExternalId: "1036275548319",
+      sourceInboxId: null,
+      now: NOW,
+      adjustments: [{
+        externalLineItemId: "441680952",
+        quantity: 5,
+        restockPolicy: "no_restock",
+        raw: { repair: true },
+      }],
+      audit: {
+        runId: "11111111-1111-4111-8111-111111111111",
+        operator: "owner@cardshellz.com",
+        reason: "historical persisted refund authority repair",
+      },
+    });
+
+    expect(result).toEqual({
+      authorityChanges: 1,
+      wmsLineChanges: 0,
+      warnings: [],
+    });
+    expect(recordCleanupAudit).toHaveBeenCalledWith(
+      mock.db,
+      expect.objectContaining({
+        runId: "11111111-1111-4111-8111-111111111111",
+        operation: "historical-refund-authority-repair",
+        sourceTable: "oms.oms_order_lines",
+        sourceId: 110466,
+        action: "update",
+        operator: "owner@cardshellz.com",
+        createdAt: NOW,
+      }),
+    );
+    expect(mutationOrder[0]).toBe("audit");
+    expect(mutationOrder.slice(1)).toEqual([
+      "authority-update",
+      "authority-update",
+    ]);
+    expect(mock.calls.some((text) => text.includes("reconcileActiveShipmentItems"))).toBe(false);
+    expect(mock.calls.some((text) => text.includes("INSERT INTO wms.returns"))).toBe(false);
+    expect(recordAuthorityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      orderId: 242960,
+      orderLineId: 110466,
+      refundedQuantity: 5,
+      authority: expect.objectContaining({
+        authorityFulfillableQuantity: 0,
+        authorizationStatus: "refunded",
+      }),
+    }));
+  });
+
+  it("accepts a canonically restored shipped line without rewriting historical WMS quantities", async () => {
+    const mock = makeDb((text) => {
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.order_line_adjustments") && text.includes("source_event_id")) {
+        return {
+          rows: [{
+            external_line_item_id: "441680952",
+            quantity: 5,
+            restock_policy: "no_restock",
+          }],
+        };
+      }
+      if (text.includes("FROM oms.oms_order_lines ol") && text.includes("FOR UPDATE OF ol")) {
+        return {
+          rows: [omsLine({
+            channel_observed_quantity: 5,
+            paid_quantity: 5,
+            authority_fulfillable_quantity: 5,
+          })],
+        };
+      }
+      if (text.includes("LEFT JOIN oms.order_line_adjustments")) {
+        return {
+          rows: [omsLine({
+            channel_observed_quantity: 5,
+            paid_quantity: 5,
+            authority_fulfillable_quantity: 5,
+            refund_other_quantity: 5,
+          })],
+        };
+      }
+      if (text.includes("FROM wms.order_items item") && text.includes("FOR UPDATE OF item")) {
+        return {
+          rows: [{
+            id: 312850,
+            oms_order_line_id: 110466,
+            quantity: 5,
+            picked_quantity: 5,
+            fulfilled_quantity: 5,
+            status: "completed",
+          }],
+        };
+      }
+      if (text.includes("UPDATE oms.oms_order_lines")) return { rows: [] };
+      if (text.includes("wms_materialized_quantity = COALESCE(materialized.quantity, 0)")) {
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected SQL in shipped persisted refund repair test: ${text}`);
+    });
+
+    const result = await reconcilePersistedShopifyRefundAuthority(mock.db, {
+      omsOrderId: 242960,
+      wmsOrderId: 204464,
+      refundExternalId: "1036275548319",
+      sourceInboxId: null,
+      now: NOW,
+      adjustments: [{
+        externalLineItemId: "441680952",
+        quantity: 5,
+        restockPolicy: "no_restock",
+        raw: { repair: true },
+      }],
+      audit: {
+        runId: "11111111-1111-4111-8111-111111111111",
+        operator: "owner@cardshellz.com",
+        reason: "historical persisted refund authority repair",
+      },
+    });
+
+    expect(result).toEqual({
+      authorityChanges: 1,
+      wmsLineChanges: 0,
+      warnings: [],
+    });
+    expect(mock.calls.some((text) => text.includes("UPDATE wms.order_items"))).toBe(false);
+    expect(recordAuthorityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      orderId: 242960,
+      orderLineId: 110466,
+      refundedQuantity: 5,
+      authority: expect.objectContaining({
+        authorityFulfillableQuantity: 0,
+        authorizationStatus: "refunded",
+      }),
+    }));
+  });
+
+  it("fails before mutation when the persisted refund fact differs from repair input", async () => {
+    const mock = makeDb((text) => {
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.order_line_adjustments")) {
+        return {
+          rows: [{
+            external_line_item_id: "441680952",
+            quantity: 4,
+            restock_policy: "no_restock",
+          }],
+        };
+      }
+      throw new Error(`Unexpected SQL after persisted mismatch: ${text}`);
+    });
+
+    await expect(reconcilePersistedShopifyRefundAuthority(mock.db, {
+      omsOrderId: 242960,
+      wmsOrderId: 204464,
+      refundExternalId: "1036275548319",
+      now: NOW,
+      adjustments: [{
+        externalLineItemId: "441680952",
+        quantity: 5,
+        restockPolicy: "no_restock",
+        raw: {},
+      }],
+      audit: {
+        runId: "11111111-1111-4111-8111-111111111111",
+        operator: "owner@cardshellz.com",
+        reason: "historical persisted refund authority repair",
+      },
+    })).rejects.toThrow(/does not match repair input/);
+
+    expect(mock.calls.some((text) => text.includes("UPDATE oms.oms_order_lines"))).toBe(false);
+    expect(recordCleanupAudit).not.toHaveBeenCalled();
   });
 });
 
