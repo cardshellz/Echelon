@@ -105,7 +105,7 @@ button { font: inherit; cursor: pointer; background: none; border: none; color: 
 
 /* ---------- Tables ---------- */
 table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
-.tbl th { text-align: left; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); padding: 9px 10px; border-bottom: 1px solid var(--border); background: var(--surface); position: sticky; top: 57px; z-index: 5; }
+.tbl th { text-align: left; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); padding: 9px 10px; border-bottom: 1px solid var(--border); background: var(--surface); position: sticky; top: 95px; z-index: 5; } /* 57px topbar + 38px engine tab strip */
 .tbl td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .tbl tbody tr:hover td { background: #fafafa; }
 .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -129,6 +129,10 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tab { padding: 9px 14px; font-size: 13.5px; font-weight: 550; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .tab.on { color: var(--text); border-bottom-color: var(--primary); font-weight: 650; }
 .tab .n { background: var(--accent); border-radius: 999px; padding: 1px 7px; font-size: 11px; margin-left: 6px; }
+
+/* engine tab strip — full-width bar under the topbar on engine pages (01–05) */
+.engine-tabbar { position: sticky; top: 57px; z-index: 29; background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; }
+.engine-tabbar .tabs { border-bottom: none; }
 
 .input, .select { border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 7px 11px; font-size: 13px; background: var(--surface); color: var(--text); font-family: var(--font); }
 .input:focus, .select:focus { outline: 2px solid var(--ring); outline-offset: 1px; border-color: var(--ring); }
@@ -290,11 +294,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
       <div class="group-children">
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20v-7M11 20V6M17 20v-4"/><path d="M3.5 20h17"/></svg> Dashboard</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h8l4 4v13h-12z"/><path d="M14 3.5V8h4.5"/><path d="M9.5 13h5M9.5 16.5h5"/></svg> Purchase Orders</a>
-        <a href="01-reorder-analysis.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 10h17M10 10v9.5"/></svg> Reorder Analysis</a>
-        <a href="02-forecast-adjustments.html" class="active"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 17.5L9 12l4 4 7.5-8"/><path d="M15.5 8h5v5"/></svg> Forecast Adjustments</a>
-        <a href="05-rfq-workbench.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h13M14 4.5L17.5 8 14 11.5"/><path d="M20 16H7M10 12.5L6.5 16l3.5 3.5"/></svg> RFQ Workbench</a>
-        <a href="03-automation.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3.2 1.8"/></svg> Automation</a>
-        <a href="04-run-report.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="3.5" width="15" height="17" rx="2"/><path d="M8.5 8.5h7M8.5 12h7M8.5 15.5h4.5"/></svg> Run Reports</a>
+        <a href="01-reorder-analysis.html" class="active"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 10h17M10 10v9.5"/></svg> Reorder Engine</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 13.5V19a1.5 1.5 0 0 0 1.5 1.5h14a1.5 1.5 0 0 0 1.5-1.5v-5.5"/><path d="M12 3.5V13M8.5 9.5l3.5 3.5 3.5-3.5"/></svg> Receiving</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5h11V16h-11z"/><path d="M13.5 10h4.5l3 3v3h-2"/><circle cx="7" cy="18" r="1.8"/><circle cx="16.5" cy="18" r="1.8"/></svg> Shipments</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5L5.5 4h13L20 9.5"/><path d="M5 9.5V20h14V9.5"/><path d="M10 20v-5.5h4V20"/></svg> Suppliers</a>
@@ -322,6 +322,16 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
       <span class="spacer"></span>
       <button class="btn btn-outline" id="btn-new-event" type="button">New demand event</button>
       <button class="btn btn-primary" id="btn-new-adj" type="button">New growth adjustment</button>
+    </div>
+
+    <div class="engine-tabbar">
+      <div class="tabs">
+        <a class="tab" href="01-reorder-analysis.html">Analysis</a>
+        <a class="tab on" href="02-forecast-adjustments.html">Forecast inputs</a>
+        <a class="tab" href="03-automation.html">Automation</a>
+        <a class="tab" href="04-run-report.html">Runs</a>
+        <a class="tab" href="05-rfq-workbench.html">RFQs</a>
+      </div>
     </div>
 
     <div class="content">

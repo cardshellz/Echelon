@@ -71,6 +71,8 @@
 
 ## 5. Surface map (mockup → route)
 
+**Navigation (revision 1):** the engine is ONE sidebar item — Procurement → **Reorder Engine** — not five siblings. Surfaces 01–05 are an internal tab strip (Analysis · Forecast inputs · Automation · Runs · RFQs) under a shared shell; Planning Policy stays under Admin. Routes below are the tab destinations.
+
 | Mockup | Route | Replaces |
 |---|---|---|
 | 01 cockpit | `/reorder-analysis` | `PurchasingView.tsx` |
@@ -104,7 +106,17 @@ Server-generated links target `/reorder-analysis?…` with params `status, candi
 
 Each step lands behind the usual branch→PR flow; steps 2–3 need migrations and must state their backtesting interaction explicitly (per §4.1).
 
-## 10. Open questions (parked)
+## 10. Revision 1 (owner review, 2026-07-26)
+
+1. **Single-entry navigation.** The five engine surfaces read as one menu item ("Reorder Engine") with an internal tab strip — they must never present as siblings of higher-level Procurement functions (POs, Receiving, Suppliers). Applied across all mockups.
+2. **Cockpit status model regrouped by operator question**, replacing the raw engine-bucket chip row (engine statuses are mutually exclusive, so "Order now 1" rendered below "Stockout 2" and read as a contradiction):
+   - **Order queue**: `Needs order` = stockout + order_now, one red chip with a severity breakdown ("2 out of stock · 1 below reorder point"); `Order soon` (was "Burn rate") becomes actionable with an order-by deadline computed as `daysOfSupply − (leadTime + safetyStock)` days of slack.
+   - **Watching**: `Inbound covers` (with earliest ETA) and `Healthy` — monitoring states, visually quiet.
+   - **Inventory health card** (new): `Stagnant` (no sales in 90d) and `Overstocked` (>180d supply, surfaced as a first-class state) move out of the reorder chips entirely — their actions run the opposite direction (stop ordering / discount / liquidate); the card reconciles to the Idle-capital KPI.
+   - KPI labels aligned: "Needs order" / "Order soon".
+   Implementation note: this is presentation-layer grouping only — the engine taxonomy is unchanged; the UI maps statuses → queues.
+
+## 11. Open questions (parked)
 
 - Multi-warehouse dimension (blocked on engine gaining warehouse-scoped demand/supply — out of scope v1).
 - Accuracy trust thresholds (`accuracy_thresholds_not_configured` today) — needed before Stage 4; propose configuring after 60d of cohort data.

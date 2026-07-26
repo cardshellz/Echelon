@@ -191,6 +191,10 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tabs { margin-bottom: 16px; }
 @media (max-width: 1150px) { .topbar .sub { display: none; } }
 
+/* engine tab strip — sticks directly under the topbar (57px tall) */
+.engine-tabs { position: sticky; top: 57px; z-index: 29; background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; }
+.engine-tabs .tabs { border-bottom: 0; margin-bottom: 0; }
+
 /* header card */
 .pg-head-grid { display: flex; gap: 28px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
 .pg-rfq-no { font-family: var(--mono); font-size: 15.5px; font-weight: 700; letter-spacing: -.01em; }
@@ -287,11 +291,7 @@ tr.pg-qrow { cursor: pointer; }
       <div class="group-children">
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16"/><path d="M7 20v-6M12 20V6M17 20v-9"/></svg> Dashboard</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4"/><path d="M9 12.5h6M9 16h6"/></svg> Purchase Orders</a>
-        <a href="01-reorder-analysis.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12a7.5 7.5 0 0 1 13-5.1"/><path d="M17.5 3.6v3.3h-3.3"/><path d="M19.5 12a7.5 7.5 0 0 1-13 5.1"/><path d="M6.5 20.4v-3.3h3.3"/></svg> Reorder Analysis</a>
-        <a href="02-forecast-adjustments.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 17.5 9 12l3.5 3.5 7.5-7.5"/><path d="M15.5 8H20v4.5"/></svg> Forecast Adjustments</a>
-        <a class="active" href="05-rfq-workbench.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 8h11"/><path d="M14.5 5l3 3-3 3"/><path d="M17.5 16h-11"/><path d="M9.5 13l-3 3 3 3"/></svg> RFQ Workbench</a>
-        <a href="03-automation.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg> Automation</a>
-        <a href="04-run-report.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M8.5 8.5h7M8.5 12h7M8.5 15.5h4"/></svg> Run Reports</a>
+        <a class="active" href="01-reorder-analysis.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12a7.5 7.5 0 0 1 13-5.1"/><path d="M17.5 3.6v3.3h-3.3"/><path d="M19.5 12a7.5 7.5 0 0 1-13 5.1"/><path d="M6.5 20.4v-3.3h3.3"/></svg> Reorder Engine</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 13.5h5l1.5 2.5h4l1.5-2.5h5"/><path d="M3.5 13.5V19a1.5 1.5 0 0 0 1.5 1.5h14a1.5 1.5 0 0 0 1.5-1.5v-5.5"/><path d="M12 3.5V10M9.5 8l2.5 2.5L14.5 8"/></svg> Receiving</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5h11v9h-11z"/><path d="M13.5 9.5h4l3 3v3h-7"/><circle cx="6.5" cy="17.9" r="1.7"/><circle cx="17" cy="17.9" r="1.7"/></svg> Shipments</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20.5V8.5l8-5 8 5v12"/><path d="M9.5 20.5v-6h5v6"/></svg> Suppliers</a>
@@ -319,6 +319,16 @@ tr.pg-qrow { cursor: pointer; }
       <span class="spacer"></span>
       <button class="btn btn-ghost" id="pgHowBtn">How quotes get in</button>
       <button class="btn btn-primary" id="pgNewRfq">New RFQ from suggestions</button>
+    </div>
+
+    <div class="engine-tabs">
+      <div class="tabs">
+        <a class="tab" href="01-reorder-analysis.html">Analysis</a>
+        <a class="tab" href="02-forecast-adjustments.html">Forecast inputs</a>
+        <a class="tab" href="03-automation.html">Automation</a>
+        <a class="tab" href="04-run-report.html">Runs</a>
+        <a class="tab on" href="05-rfq-workbench.html">RFQs</a>
+      </div>
     </div>
 
     <div class="content">

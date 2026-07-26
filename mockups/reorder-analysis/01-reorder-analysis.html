@@ -200,10 +200,42 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .pg-excl { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); cursor: pointer; user-select: none; white-space: nowrap; }
 .pg-groupctl { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
 
+/* engine tab strip (sticky under the topbar) */
+.pg-enginebar { position: sticky; top: var(--topbarH, 61px); z-index: 29; background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; }
+.pg-enginebar .tabs { border-bottom: none; }
+
+/* two-tier status chips */
+.pg-tiers { display: flex; gap: 18px; row-gap: 10px; flex-wrap: wrap; align-items: stretch; }
+.pg-tier { display: flex; flex-direction: column; gap: 6px; }
+.pg-tier + .pg-tier { border-left: 1px solid var(--border); padding-left: 18px; }
+.pg-tier-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.pg-tier-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pg-hint { font-size: 11.5px; color: var(--muted); max-width: 210px; line-height: 1.35; }
+.chip .pg-ck { margin-right: 5px; font-weight: 700; }
+.chip .pg-eta { font-size: 11px; opacity: .75; margin-left: 5px; }
+.chip.c-red { color: var(--red); background: var(--red-bg); border-color: var(--red-bd); }
+.chip.c-red:hover { background: var(--red-bg); filter: brightness(.98); }
+.chip.c-red.on { background: var(--red-bg); border-color: var(--red); box-shadow: inset 0 0 0 1px var(--red); color: var(--red); }
+.chip.c-amber { color: var(--amber); background: var(--amber-bg); border-color: var(--amber-bd); }
+.chip.c-amber:hover { background: var(--amber-bg); filter: brightness(.98); }
+.chip.c-amber.on { background: var(--amber-bg); border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); color: var(--amber); }
+.chip.c-quiet:not(.on) { color: var(--muted); }
+
+/* inventory health card */
+.pg-health { display: flex; flex-direction: column; gap: 8px; }
+.pg-hrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 13px; cursor: pointer; }
+.pg-hrow:hover { background: var(--accent); }
+.pg-hrow.on { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); background: var(--accent); }
+.pg-htitle { font-weight: 650; font-size: 13.5px; }
+.pg-htitle .n { color: var(--muted); font-weight: 600; margin-left: 5px; font-variant-numeric: tabular-nums; }
+.pg-hsub { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.pg-hgo { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.pg-hfoot { font-size: 12px; color: var(--muted); margin-top: 10px; }
+
 .pg-scroll { overflow: visible; }
 .pg-main-tbl { min-width: 960px; }
 .pg-main-tbl th, .pg-main-tbl td { padding: 9px 7px; white-space: nowrap; }
-.pg-main-tbl th { font-size: 10.5px; letter-spacing: .04em; }
+.pg-main-tbl th { font-size: 10.5px; letter-spacing: .04em; top: calc(var(--topbarH, 61px) + var(--enginebarH, 40px)); }
 .pg-main-tbl .badge { padding: 2.5px 7px; }
 .pg-actions .btn-sm { padding: 4px 7px; }
 .pg-main-tbl th.right, .pg-main-tbl td.right { text-align: right; }
@@ -268,11 +300,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
       <div class="group-children">
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg> Dashboard</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg> Purchase Orders</a>
-        <a class="active" href="01-reorder-analysis.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.5 9a9 9 0 0 1 14.9-3.4L23 10"/><path d="M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/></svg> Reorder Analysis</a>
-        <a href="02-forecast-adjustments.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M23 6l-9.5 9.5-5-5L1 18"/><path d="M17 6h6v6"/></svg> Forecast Adjustments</a>
-        <a href="05-rfq-workbench.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg> RFQ Workbench</a>
-        <a href="03-automation.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> Automation</a>
-        <a href="04-run-report.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg> Run Reports</a>
+        <a class="active" href="01-reorder-analysis.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.5 9a9 9 0 0 1 14.9-3.4L23 10"/><path d="M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/></svg> Reorder Engine</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg> Receiving</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1 3h15v13H1z"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg> Shipments</a>
         <a href="#"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> Suppliers</a>
@@ -306,12 +334,22 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
       <a class="pg-autochip" href="03-automation.html" title="Open Automation Control Center"><span class="pg-dot"></span><span id="autoChipText">Automation</span></a>
     </div>
 
+    <div class="pg-enginebar">
+      <nav class="tabs">
+        <a class="tab on" href="01-reorder-analysis.html">Analysis</a>
+        <a class="tab" href="02-forecast-adjustments.html">Forecast inputs</a>
+        <a class="tab" href="03-automation.html">Automation</a>
+        <a class="tab" href="04-run-report.html">Runs</a>
+        <a class="tab" href="05-rfq-workbench.html">RFQs</a>
+      </nav>
+    </div>
+
     <div class="content section-gap">
       <div class="kpis" id="kpis"></div>
 
       <div class="pg-toolbar">
         <input class="input pg-search" id="search" type="text" placeholder="Search SKU, product, vendor&hellip;">
-        <div class="chips" id="statusChips"></div>
+        <div class="pg-tiers" id="statusChips"></div>
         <div class="pg-grow"></div>
         <div class="pg-groupctl">
           <span class="pg-seglabel">Group by</span>
@@ -342,6 +380,17 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
             </tr></thead>
             <tbody id="tbody"></tbody>
           </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h">
+          <h2>Inventory health</h2>
+          <span class="desc">Not reorder problems &mdash; these need the opposite action</span>
+        </div>
+        <div class="card-b">
+          <div class="pg-health" id="healthBody"></div>
+          <div class="pg-hfoot" id="healthFoot"></div>
         </div>
       </div>
 
@@ -1840,18 +1889,11 @@ window.MOCK_EXTRA = {
     low:    { label: 'Low',    cls: 'b-red' }
   };
   var SEV = ['stockout', 'order_now', 'order_soon', 'on_order', 'ok', 'no_movement', 'excluded'];
-  var CHIPS = [
-    { key: 'all',         label: 'All' },
-    { key: 'stockout',    label: 'Stockout' },
-    { key: 'order_now',   label: 'Order now' },
-    { key: 'order_soon',  label: 'Burn rate' },
-    { key: 'on_order',    label: 'Inbound' },
-    { key: 'ok',          label: 'Healthy' },
-    { key: 'no_movement', label: 'Stagnant' }
-  ];
   var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-  var state = { q: '', status: 'all', group: 'category', showExcluded: false, collapsed: {} };
+  /* status = chip filter ('all' | 'needs_order' | 'order_soon' | 'on_order' | 'ok'), null while a
+     health filter is active. health = null | 'stagnant' | 'overstock' (Inventory health card). */
+  var state = { q: '', status: 'all', health: null, group: 'category', showExcluded: false, collapsed: {} };
 
   /* ---------- formatters ---------- */
   function fmt(n) { return n.toLocaleString('en-US'); }
@@ -1893,8 +1935,8 @@ window.MOCK_EXTRA = {
       ? burn[0].sku + ' · ' + burn[0].daysOfSupply + 'd supply vs ' + burn[0].leadTimeDays + 'd lead'
       : burn.length + ' SKUs burning fast';
     $('#kpis').innerHTML =
-      '<div class="kpi alert"><div class="v">' + (stockouts.length + orderNow.length) + '</div><div class="l">Critical restocks</div><div class="d pg-cred">' + stockouts.length + ' stockouts · ' + orderNow.length + ' below reorder point</div></div>' +
-      '<div class="kpi warn"><div class="v">' + burn.length + '</div><div class="l">Burn-rate warnings</div><div class="d pg-camber">' + burnD + '</div></div>' +
+      '<div class="kpi alert"><div class="v">' + (stockouts.length + orderNow.length) + '</div><div class="l">Needs order</div><div class="d pg-cred">' + stockouts.length + ' stockouts · ' + orderNow.length + ' below reorder point</div></div>' +
+      '<div class="kpi warn"><div class="v">' + burn.length + '</div><div class="l">Order soon</div><div class="d pg-camber">' + burnD + '</div></div>' +
       '<div class="kpi"><div class="v">' + money(inboundCents) + '</div><div class="l">Inbound pipeline</div><div class="d pg-cmut">' + inboundLines + ' open PO lines</div></div>' +
       '<div class="kpi"><div class="v">' + money(sugCents) + '</div><div class="l">Suggested spend</div><div class="d pg-cmut">' + sugCount + ' SKUs need ordering</div></div>' +
       '<div class="kpi"><div class="v">' + money(idleCents) + '</div><div class="l">Idle capital</div><div class="d pg-cmut">&gt;180 days of supply · ' + idle.length + ' SKUs</div></div>';
@@ -1906,23 +1948,84 @@ window.MOCK_EXTRA = {
     var q = state.q.toLowerCase();
     return [it.sku, it.name, it.productLine, it.vendor || '', it.category].join(' ').toLowerCase().indexOf(q) !== -1;
   }
+  function isOverstock(it) {
+    return it.status === 'ok' && it.daysOfSupply > 180 && it.daysOfSupply < 9999;
+  }
   function rows() {
     return M.items.filter(function (it) {
       if (it.excluded && !state.showExcluded) return false;
       if (!matchQ(it)) return false;
-      if (state.status !== 'all' && it.status !== state.status) return false;
+      if (state.health === 'stagnant') return it.status === 'no_movement';
+      if (state.health === 'overstock') return isOverstock(it);
+      if (state.status && state.status !== 'all') {
+        if (state.status === 'needs_order') return it.status === 'stockout' || it.status === 'order_now';
+        return it.status === state.status;
+      }
       return true;
     });
   }
 
   function renderChips() {
     var base = M.items.filter(function (i) { return !i.excluded && matchQ(i); });
-    var counts = { all: base.length };
-    base.forEach(function (i) { counts[i.status] = (counts[i.status] || 0) + 1; });
-    $('#statusChips').innerHTML = CHIPS.map(function (c) {
-      var n = c.key === 'all' ? counts.all : (counts[c.key] || 0);
-      return '<button class="chip ' + (state.status === c.key ? 'on' : '') + '" data-s="' + c.key + '">' + c.label + '<span class="n">' + n + '</span></button>';
-    }).join('');
+    var stockoutN = 0, orderNowN = 0, okN = 0;
+    var soonItems = [], onOrderItems = [];
+    base.forEach(function (i) {
+      if (i.status === 'stockout') stockoutN++;
+      else if (i.status === 'order_now') orderNowN++;
+      else if (i.status === 'order_soon') soonItems.push(i);
+      else if (i.status === 'on_order') onOrderItems.push(i);
+      else if (i.status === 'ok') okN++;
+    });
+    /* days left before an order_soon item eats into lead time + safety stock */
+    var soonDays = null;
+    soonItems.forEach(function (i) {
+      var d = Math.max(0, i.daysOfSupply - (i.leadTimeDays + i.safetyStockDays));
+      if (soonDays === null || d < soonDays) soonDays = d;
+    });
+    var eta = null;
+    onOrderItems.forEach(function (i) { if (i.poEta && (!eta || i.poEta < eta)) eta = i.poEta; });
+
+    function chip(key, label, n, cls, colored, extra) {
+      var on = !state.health && state.status === key;
+      return '<button class="chip' + (cls ? ' ' + cls : '') + (on ? ' on' : '') + '" data-s="' + key + '">' +
+        (on && colored ? '<span class="pg-ck">&#10003;</span>' : '') +
+        label + '<span class="n">' + n + '</span>' + (extra || '') + '</button>';
+    }
+
+    $('#statusChips').innerHTML =
+      '<div class="pg-tier"><div class="pg-tier-label">Order queue</div><div class="pg-tier-row">' +
+        chip('needs_order', 'Needs order', stockoutN + orderNowN, 'c-red', true) +
+        '<span class="pg-hint">' + stockoutN + ' out of stock · ' + orderNowN + ' below reorder point</span>' +
+        chip('order_soon', 'Order soon', soonItems.length, 'c-amber', true) +
+        (soonDays === null ? '' : '<span class="pg-hint">order within ' + soonDays + ' day' + (soonDays === 1 ? '' : 's') + ' to stay ahead of lead time</span>') +
+      '</div></div>' +
+      '<div class="pg-tier"><div class="pg-tier-label">Watching</div><div class="pg-tier-row">' +
+        chip('all', 'All', base.length, '', false) +
+        chip('on_order', 'Inbound covers', onOrderItems.length, 'c-quiet', false,
+          eta ? '<span class="pg-eta">&middot; ETA ' + fdate(eta) + '</span>' : '') +
+        chip('ok', 'Healthy', okN, 'c-quiet', false) +
+      '</div></div>';
+  }
+
+  /* ---------- inventory health card ---------- */
+  function renderHealth() {
+    var act = M.items.filter(function (i) { return !i.excluded; });
+    var stag = act.filter(function (i) { return i.status === 'no_movement'; });
+    var over = act.filter(isOverstock);
+    var stagCents = stag.reduce(function (s, i) { return s + i.available * i.unitCostCents; }, 0);
+    var overCents = over.reduce(function (s, i) { return s + i.available * i.unitCostCents; }, 0);
+    var maxDos = over.reduce(function (m, i) { return Math.max(m, i.daysOfSupply); }, 0);
+    function hrow(key, title, n, sub) {
+      var on = state.health === key;
+      return '<div class="pg-hrow' + (on ? ' on' : '') + '" data-h="' + key + '">' +
+        '<div><div class="pg-htitle">' + title + '<span class="n">' + n + '</span></div>' +
+        '<div class="pg-hsub">' + sub + '</div></div>' +
+        '<span class="pg-hgo">' + (on ? 'Clear filter' : 'Filter table &rarr;') + '</span></div>';
+    }
+    $('#healthBody').innerHTML =
+      hrow('stagnant', 'Stagnant', stag.length, 'No sales in 90 days · ' + money(stagCents) + ' idle') +
+      hrow('overstock', 'Overstocked', over.length, fmt(maxDos) + ' days of supply · ' + money(overCents) + ' idle');
+    $('#healthFoot').textContent = 'Together these hold the ' + money(stagCents + overCents) + ' shown in Idle capital above.';
   }
 
   /* ---------- table ---------- */
@@ -2241,8 +2344,25 @@ window.MOCK_EXTRA = {
     var b = e.target.closest('.chip');
     if (!b) return;
     state.status = b.getAttribute('data-s');
+    state.health = null;
     renderChips();
+    renderHealth();
     renderTable();
+  });
+
+  $('#healthBody').addEventListener('click', function (e) {
+    var r = e.target.closest('.pg-hrow');
+    if (!r) return;
+    var h = r.getAttribute('data-h');
+    if (state.health === h) { state.health = null; state.status = 'all'; }
+    else { state.health = h; state.status = null; }
+    renderChips();
+    renderHealth();
+    renderTable();
+    if (state.health) {
+      var top = $('.pg-tablecard').getBoundingClientRect().top + window.pageYOffset - headerH() - 10;
+      window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    }
   });
 
   $('#search').addEventListener('input', function (e) {
@@ -2276,12 +2396,22 @@ window.MOCK_EXTRA = {
   });
 
   /* ---------- init ---------- */
+  var topbarEl = $('.topbar'), engineEl = $('.pg-enginebar');
+  function headerH() { return topbarEl.offsetHeight + (engineEl ? engineEl.offsetHeight : 0); }
+  function setHeaderVars() {
+    document.documentElement.style.setProperty('--topbarH', topbarEl.offsetHeight + 'px');
+    if (engineEl) document.documentElement.style.setProperty('--enginebarH', engineEl.offsetHeight + 'px');
+  }
+  setHeaderVars();
+  window.addEventListener('resize', setHeaderVars);
+
   var stageN = X.automation.globalDefaultStage;
   $('#autoChipText').textContent = 'Automation: Stage ' + stageN + ' · ' + X.automation.stages[stageN].name;
   $('#exclLabel').textContent = 'Show excluded (' + M.items.filter(function (i) { return i.excluded; }).length + ')';
 
   renderKpis();
   renderChips();
+  renderHealth();
   renderTable();
   renderAccuracy();
 })();

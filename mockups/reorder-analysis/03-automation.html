@@ -261,11 +261,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
       <div class="group-children">
         <a href="#"><span class="icon">▤</span> Dashboard</a>
         <a href="#"><span class="icon">▧</span> Purchase Orders</a>
-        <a href="01-reorder-analysis.html"><span class="icon">◫</span> Reorder Analysis</a>
-        <a href="02-forecast-adjustments.html"><span class="icon">↗</span> Forecast Adjustments</a>
-        <a href="05-rfq-workbench.html"><span class="icon">⇄</span> RFQ Workbench</a>
-        <a href="03-automation.html" class="active"><span class="icon">◷</span> Automation</a>
-        <a href="04-run-report.html"><span class="icon">▣</span> Run Reports</a>
+        <a href="01-reorder-analysis.html" class="active"><span class="icon">◫</span> Reorder Engine</a>
         <a href="#"><span class="icon">▽</span> Receiving</a>
         <a href="#"><span class="icon">▭</span> Shipments</a>
         <a href="#"><span class="icon">◧</span> Suppliers</a>
@@ -298,6 +294,17 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M9 5v14M15 5v14"/></svg>
         Pause all automation
       </button>
+    </div>
+
+    <!-- Engine tab strip — the five engine views live under one "Reorder Engine" nav item -->
+    <div style="position:sticky; top:64px; z-index:29; background:var(--surface); border-bottom:1px solid var(--border); padding:0 24px;">
+      <div class="tabs" style="border-bottom:none">
+        <a class="tab" href="01-reorder-analysis.html">Analysis</a>
+        <a class="tab" href="02-forecast-adjustments.html">Forecast inputs</a>
+        <a class="tab on" href="03-automation.html">Automation</a>
+        <a class="tab" href="04-run-report.html">Runs</a>
+        <a class="tab" href="05-rfq-workbench.html">RFQs</a>
+      </div>
     </div>
 
     <div class="content section-gap">
