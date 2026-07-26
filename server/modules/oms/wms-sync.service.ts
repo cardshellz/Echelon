@@ -29,6 +29,8 @@ import {
   validateOmsOrderFinancials,
   buildWmsOrderFinancialSnapshot,
   buildWmsItemFinancialSnapshot,
+  buildResidualWmsItemFinancialSnapshot,
+  buildResidualWmsOrderFinancialSnapshot,
 } from "./wms-sync-financials";
 import {
   createShipmentForOrder,
@@ -65,14 +67,22 @@ type MaterializableOmsLine = {
 };
 
 const DEFAULT_FULFILLMENT_PARTITION_KEY = "default";
+const UNAUTHORIZED_PAID_LINE_RECOVERY_PARTITION_KEY =
+  "recovery:unauthorized-paid-lines:v1";
+
+type WmsSyncMode = "standard" | "terminal_residual_recovery";
 
 function normalizeFulfillmentPartitionKey(value: string | null | undefined): string {
   const normalized = String(value ?? "").trim();
   return normalized.length > 0 ? normalized : DEFAULT_FULFILLMENT_PARTITION_KEY;
 }
 
-function resolveOmsFulfillmentPartitionKey(): string {
-  return normalizeFulfillmentPartitionKey(DEFAULT_FULFILLMENT_PARTITION_KEY);
+function resolveOmsFulfillmentPartitionKey(mode: WmsSyncMode): string {
+  return normalizeFulfillmentPartitionKey(
+    mode === "terminal_residual_recovery"
+      ? UNAUTHORIZED_PAID_LINE_RECOVERY_PARTITION_KEY
+      : DEFAULT_FULFILLMENT_PARTITION_KEY,
+  );
 }
 
 function buildOmsWmsOrderScope(omsOrderId: number, fulfillmentPartitionKey: string) {
@@ -178,6 +188,7 @@ async function buildWmsLineItemFromOmsLine(
   line: MaterializableOmsLine,
   materializableQuantity: number,
   orderId = 0,
+  financialScope: "source_line" | "residual_quantity" = "source_line",
 ): Promise<InsertWmsOrderItem> {
   if (materializableQuantity <= 0) {
     throw new Error(`[WMS Sync] Cannot create WMS item for OMS line ${line.id} with non-positive quantity ${materializableQuantity}`);
@@ -194,12 +205,19 @@ async function buildWmsLineItemFromOmsLine(
   }
 
   const itemRequiresShipping = line.requiresShipping !== false;
-  const itemSnapshot = buildWmsItemFinancialSnapshot({
-    id: line.id,
-    quantity: materializableQuantity,
-    paidPriceCents: line.paidPriceCents,
-    totalPriceCents: line.totalPriceCents,
-  });
+  const itemSnapshot =
+    financialScope === "residual_quantity"
+      ? buildResidualWmsItemFinancialSnapshot({
+          id: line.id,
+          remainingQuantity: materializableQuantity,
+          paidPriceCents: line.paidPriceCents,
+        })
+      : buildWmsItemFinancialSnapshot({
+          id: line.id,
+          quantity: materializableQuantity,
+          paidPriceCents: line.paidPriceCents,
+          totalPriceCents: line.totalPriceCents,
+        });
 
   return {
     orderId,
@@ -435,6 +453,30 @@ export class WmsSyncService {
    *   treat a `null` return as a failure.
    */
   async syncOmsOrderToWms(omsOrderId: number): Promise<number | null> {
+    return this.syncOmsOrderToWmsInternal(omsOrderId, "standard");
+  }
+
+  /**
+   * Materialize quantity missed by the historical paid/updated authority race
+   * into a separate WMS partition after the original partition shipped.
+   *
+   * This is intentionally not a general terminal-order bypass. The method
+   * validates that the OMS order is still partially fulfilled and paid, and
+   * that an original default WMS partition has already shipped.
+   */
+  async recoverUnauthorizedPaidLinesToWms(
+    omsOrderId: number,
+  ): Promise<number | null> {
+    return this.syncOmsOrderToWmsInternal(
+      omsOrderId,
+      "terminal_residual_recovery",
+    );
+  }
+
+  private async syncOmsOrderToWmsInternal(
+    omsOrderId: number,
+    mode: WmsSyncMode,
+  ): Promise<number | null> {
     try {
       const omsOrderResult = await db
         .select()
@@ -448,7 +490,8 @@ export class WmsSyncService {
       }
 
       const omsOrder = omsOrderResult[0];
-      const fulfillmentPartitionKey = resolveOmsFulfillmentPartitionKey();
+      const isTerminalResidualRecovery = mode === "terminal_residual_recovery";
+      const fulfillmentPartitionKey = resolveOmsFulfillmentPartitionKey(mode);
 
       if (this.isFinalOrCancelledOmsOrder(omsOrder)) {
         await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
@@ -456,6 +499,13 @@ export class WmsSyncService {
           `[WMS Sync] OMS order ${omsOrderId} is ${omsOrder.status}/${omsOrder.financialStatus}; skipped WMS sync`,
         );
         return null;
+      }
+
+      if (isTerminalResidualRecovery) {
+        await this.assertUnauthorizedPaidLineRecoveryAllowed(
+          omsOrderId,
+          omsOrder,
+        );
       }
 
       // 1. Check if already synced (orders.source_table_id points to oms_orders.id)
@@ -478,6 +528,13 @@ export class WmsSyncService {
 
       if (existingWmsOrder.length > 0) {
         const wmsOrderId = existingWmsOrder[0].id;
+        if (isTerminalResidualRecovery) {
+          await this.refreshOmsLineMaterializedQuantities(omsOrderId);
+          console.log(
+            `[WMS Sync] Residual recovery partition already exists for OMS order ${omsOrderId} (WMS ${wmsOrderId}); reused without mutating the shipped original partition`,
+          );
+          return wmsOrderId;
+        }
         const headerRefresh = await this.refreshExistingWmsOrderHeaderFromOms(omsOrder, wmsOrderId);
         const reconciled = await this.reconcileExistingWmsOrderLines(omsOrderId, wmsOrderId);
         console.log(
@@ -504,7 +561,10 @@ export class WmsSyncService {
       // slips through.
       const omsStatusLower = String(omsOrder.status ?? "").toLowerCase();
       const omsFulfillmentLower = String(omsOrder.fulfillmentStatus ?? "").toLowerCase();
-      if (omsStatusLower === "shipped" || omsFulfillmentLower === "fulfilled") {
+      if (
+        !isTerminalResidualRecovery &&
+        (omsStatusLower === "shipped" || omsFulfillmentLower === "fulfilled")
+      ) {
         console.warn(
           `[WMS Sync] OMS order ${omsOrderId} is ${omsStatusLower}/${omsFulfillmentLower} with no existing WMS order — fulfilled out-of-band; skipping WMS create to avoid a duplicate shipping-engine push`,
         );
@@ -522,8 +582,10 @@ export class WmsSyncService {
         return null;
       }
 
-      const materializableOmsLines = omsLines.filter(
-        (line) => getOmsLineMaterializableQuantity(line) > 0,
+      const materializableOmsLines = omsLines.filter((line) =>
+        isTerminalResidualRecovery
+          ? getOmsLineRemainingMaterializableQuantity(line) > 0
+          : getOmsLineMaterializableQuantity(line) > 0,
       );
 
       if (materializableOmsLines.length === 0) {
@@ -552,15 +614,26 @@ export class WmsSyncService {
           totalPriceCents: (l as any).totalPriceCents ?? 0,
         })),
       );
-      const orderFinancialSnapshot = buildWmsOrderFinancialSnapshot({
-        id: omsOrder.id,
-        subtotalCents: omsOrder.subtotalCents ?? 0,
-        shippingCents: omsOrder.shippingCents ?? 0,
-        taxCents: omsOrder.taxCents ?? 0,
-        discountCents: omsOrder.discountCents ?? 0,
-        totalCents: omsOrder.totalCents ?? 0,
-        currency: omsOrder.currency ?? "USD",
-      });
+      const orderFinancialSnapshot = isTerminalResidualRecovery
+        ? buildResidualWmsOrderFinancialSnapshot(
+            omsOrder.id,
+            omsOrder.currency ?? "USD",
+            materializableOmsLines.map((line) => ({
+              id: line.id,
+              paidPriceCents: (line as any).paidPriceCents ?? 0,
+              remainingQuantity:
+                getOmsLineRemainingMaterializableQuantity(line),
+            })),
+          )
+        : buildWmsOrderFinancialSnapshot({
+            id: omsOrder.id,
+            subtotalCents: omsOrder.subtotalCents ?? 0,
+            shippingCents: omsOrder.shippingCents ?? 0,
+            taxCents: omsOrder.taxCents ?? 0,
+            discountCents: omsOrder.discountCents ?? 0,
+            totalCents: omsOrder.totalCents ?? 0,
+            currency: omsOrder.currency ?? "USD",
+          });
 
       // 3. Check if order has any shippable items
       const hasShippableItems = materializableOmsLines.some(line => line.requiresShipping !== false);
@@ -587,7 +660,9 @@ export class WmsSyncService {
         ? "completed" // Pure digital/donation/membership → skip pick queue
         : routing?.warehouseType === "3pl"
           ? "awaiting_3pl" // 3PL fulfills externally — no internal pick/pack
-          : this.determineWarehouseStatus(omsOrder);
+          : isTerminalResidualRecovery
+            ? this.determineResidualRecoveryWarehouseStatus(omsOrder)
+            : this.determineWarehouseStatus(omsOrder);
       const { priority, memberPlanName, memberPlanColor } = await this.determinePriority(omsOrder);
       // Compute SLA due date at sync time so sort_rank includes urgency
       // from the start. Priority: platform ship-by-date -> channel SLA ->
@@ -711,6 +786,10 @@ export class WmsSyncService {
               tx,
               line,
               getOmsLineRemainingMaterializableQuantity(line),
+              0,
+              isTerminalResidualRecovery
+                ? "residual_quantity"
+                : "source_line",
             ),
           );
         }
@@ -722,22 +801,64 @@ export class WmsSyncService {
           warehouseStatus: txWarehouseStatus,
           itemCount: txWmsLineItems.length,
           unitCount: txWmsLineItems.reduce((sum, item) => sum + (item.quantity ?? 0), 0),
+          ...(isTerminalResidualRecovery
+            ? buildResidualWmsOrderFinancialSnapshot(
+                omsOrder.id,
+                omsOrder.currency ?? "USD",
+                remainingOmsLines.map((line) => ({
+                  id: line.id,
+                  paidPriceCents: line.paidPriceCents,
+                  remainingQuantity:
+                    getOmsLineRemainingMaterializableQuantity(line),
+                })),
+              )
+            : {}),
         };
 
         // 5. Create WMS order (writes to orders + order_items)
         const newWmsOrder = await ordersStorage.createOrderWithItems(txWmsOrderData, txWmsLineItems, tx);
+        const returnedPartitionKey = normalizeFulfillmentPartitionKey(
+          (newWmsOrder as any).fulfillmentPartitionKey,
+        );
 
         if (
           (newWmsOrder as any).source !== "oms" ||
-          String((newWmsOrder as any).omsFulfillmentOrderId ?? "") !== String(omsOrderId)
+          String((newWmsOrder as any).omsFulfillmentOrderId ?? "") !== String(omsOrderId) ||
+          returnedPartitionKey !== fulfillmentPartitionKey
         ) {
+          if (isTerminalResidualRecovery) {
+            throw new Error(
+              `[WMS Sync] Residual recovery for OMS order ${omsOrderId} resolved to unexpected WMS order ${newWmsOrder.id} ` +
+                `(source=${String((newWmsOrder as any).source ?? "")}, ` +
+                `omsOrderId=${String((newWmsOrder as any).omsFulfillmentOrderId ?? "")}, ` +
+                `partition=${returnedPartitionKey}); refusing to consume line authority`,
+            );
+          }
           console.warn(
-            `[WMS Sync] createOrderWithItems returned existing non-OMS-linked WMS order ${newWmsOrder.id} for OMS order ${omsOrderId}; reconciling instead of consuming line authority`,
+            `[WMS Sync] createOrderWithItems returned WMS order ${newWmsOrder.id} outside OMS order ${omsOrderId} ` +
+              `partition ${fulfillmentPartitionKey}; reconciling instead of consuming line authority`,
           );
           return { racedExistingWmsOrderId: Number(newWmsOrder.id) };
         }
 
         await this.incrementOmsLineMaterializedQuantities(tx, txWmsLineItems);
+
+        if (isTerminalResidualRecovery) {
+          await tx.insert(omsOrderEvents).values({
+            orderId: omsOrderId,
+            eventType: "terminal_residual_wms_partition_created",
+            details: {
+              fulfillmentPartitionKey,
+              wmsOrderId: newWmsOrder.id,
+              source: "recover-unauthorized-paid-lines",
+              omsOrderLineIds: remainingOmsLines.map((line) => line.id),
+              quantities: remainingOmsLines.map((line) => ({
+                omsOrderLineId: line.id,
+                quantity: getOmsLineRemainingMaterializableQuantity(line),
+              })),
+            },
+          });
+        }
 
         console.log(`[WMS Sync] Synced OMS order ${omsOrderId} → WMS order ${newWmsOrder.id} (${omsOrder.externalOrderNumber})`);
 
@@ -861,6 +982,9 @@ export class WmsSyncService {
               console.error(
                 `[WMS Sync] Failed to create shipment for WMS order ${newWmsOrder.id}: ${err.message}`,
               );
+              if (isTerminalResidualRecovery) {
+                throw err;
+              }
             }
           }
         }
@@ -892,7 +1016,9 @@ export class WmsSyncService {
           `[WMS Sync] Concurrent sync race for OMS order ${omsOrderId} — WMS order ${racedId} already created by a parallel sync; reconciling instead of creating a duplicate`,
         );
         try {
-          await this.reconcileExistingWmsOrderLines(omsOrderId, racedId);
+          if (!isTerminalResidualRecovery) {
+            await this.reconcileExistingWmsOrderLines(omsOrderId, racedId);
+          }
           await this.refreshOmsLineMaterializedQuantities(omsOrderId);
         } catch (err: any) {
           console.error(
@@ -990,6 +1116,71 @@ export class WmsSyncService {
     if (omsOrder.fulfillmentStatus === "fulfilled") return "shipped";
     if (omsOrder.financialStatus === "paid") return "ready";
     return "pending";
+  }
+
+  private determineResidualRecoveryWarehouseStatus(
+    omsOrder: typeof omsOrders.$inferSelect,
+  ): string {
+    const financialStatus = String(
+      omsOrder.financialStatus ?? "",
+    ).toLowerCase();
+    return financialStatus === "paid" || financialStatus === "partially_paid"
+      ? "ready"
+      : "pending";
+  }
+
+  private async assertUnauthorizedPaidLineRecoveryAllowed(
+    omsOrderId: number,
+    omsOrder: typeof omsOrders.$inferSelect,
+  ): Promise<void> {
+    const financialStatus = String(
+      omsOrder.financialStatus ?? "",
+    ).toLowerCase();
+    const fulfillmentStatus = String(
+      omsOrder.fulfillmentStatus ?? "",
+    ).toLowerCase();
+
+    if (
+      financialStatus !== "paid" &&
+      financialStatus !== "partially_paid"
+    ) {
+      throw new Error(
+        `[WMS Sync] Residual recovery rejected for OMS order ${omsOrderId}: financial status ${financialStatus || "blank"} is not paid`,
+      );
+    }
+    if (fulfillmentStatus === "fulfilled") {
+      throw new Error(
+        `[WMS Sync] Residual recovery rejected for OMS order ${omsOrderId}: OMS fulfillment is already complete`,
+      );
+    }
+
+    const originalPartitions = await db
+      .select({
+        id: wmsOrders.id,
+        warehouseStatus: wmsOrders.warehouseStatus,
+      })
+      .from(wmsOrders)
+      .where(
+        buildOmsWmsOrderScope(
+          omsOrderId,
+          DEFAULT_FULFILLMENT_PARTITION_KEY,
+        ),
+      );
+
+    const shippedOriginal = originalPartitions.some(
+      (order) => order.warehouseStatus === "shipped",
+    );
+    const mutableOriginal = originalPartitions.find(
+      (order) =>
+        order.warehouseStatus !== "shipped" &&
+        order.warehouseStatus !== "cancelled",
+    );
+
+    if (!shippedOriginal || mutableOriginal) {
+      throw new Error(
+        `[WMS Sync] Residual recovery rejected for OMS order ${omsOrderId}: expected a shipped default partition and no mutable default partition`,
+      );
+    }
   }
 
   private isFinalOrCancelledOmsOrder(omsOrder: typeof omsOrders.$inferSelect): boolean {

@@ -93,6 +93,11 @@ async function findExistingOrderForCreate(tx: any, order: InsertOrder): Promise<
       );
       return existingByOmsId[0];
     }
+
+    // OMS-backed orders are identified by OMS order + fulfillment partition.
+    // Falling through to externalOrderId/sourceTableId would collapse a valid
+    // residual or future split-warehouse partition into the default partition.
+    return null;
   }
 
   if (order.externalOrderId) {

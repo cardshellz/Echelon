@@ -30,6 +30,8 @@ import {
   validateOmsOrderFinancials,
   buildWmsOrderFinancialSnapshot,
   buildWmsItemFinancialSnapshot,
+  buildResidualWmsItemFinancialSnapshot,
+  buildResidualWmsOrderFinancialSnapshot,
 } from "../../wms-sync-financials";
 import { WmsSyncValidationError } from "@shared/errors/wms-sync-errors";
 
@@ -337,6 +339,58 @@ describe("buildWmsItemFinancialSnapshot", () => {
     expect(snap.unitPriceCents).toBe(0);
     expect(snap.paidPriceCents).toBe(0);
     expect(snap.totalPriceCents).toBe(0);
+  });
+});
+
+describe("residual fulfillment financial snapshots", () => {
+  it("values only the remaining quantity of a partially materialized line", () => {
+    const snap = buildResidualWmsItemFinancialSnapshot({
+      id: 100,
+      paidPriceCents: 375,
+      remainingQuantity: 2,
+    });
+
+    expect(snap).toEqual({
+      unitPriceCents: 375,
+      paidPriceCents: 375,
+      totalPriceCents: 750,
+    });
+  });
+
+  it("sums residual merchandise without duplicating order shipping, tax, or discount", () => {
+    const snap = buildResidualWmsOrderFinancialSnapshot(42, "USD", [
+      { id: 100, paidPriceCents: 375, remainingQuantity: 2 },
+      { id: 101, paidPriceCents: 125, remainingQuantity: 1 },
+    ]);
+
+    expect(snap).toEqual({
+      amountPaidCents: 875,
+      taxCents: 0,
+      shippingCents: 0,
+      discountCents: 0,
+      totalCents: 875,
+      currency: "USD",
+    });
+  });
+
+  it("rejects non-positive remaining quantities", () => {
+    expect(() =>
+      buildResidualWmsItemFinancialSnapshot({
+        id: 100,
+        paidPriceCents: 375,
+        remainingQuantity: 0,
+      }),
+    ).toThrow(/positive safe integer/);
+  });
+
+  it("rejects unsafe integer multiplication", () => {
+    expect(() =>
+      buildResidualWmsItemFinancialSnapshot({
+        id: 100,
+        paidPriceCents: Number.MAX_SAFE_INTEGER,
+        remainingQuantity: 2,
+      }),
+    ).toThrow(/safe integer range/);
   });
 });
 

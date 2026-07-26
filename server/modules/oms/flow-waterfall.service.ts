@@ -501,12 +501,80 @@ const BASE_ISSUES: FlowIssueDef[] = [
     `,
   },
   {
+    code: "OMS_LINE_AUTHORITY_MATERIALIZATION_GAP", kind: "stuck", stage: "oms_to_wms", severity: "critical",
+    message: "Paid order lines did not fully reach the warehouse",
+    why: "A paid physical line is still unauthorized or has less warehouse quantity than its fulfillment authority after the intake window. Do not auto-repair this condition: inspect the authority event history and current WMS partition first, then use the appropriate idempotent recovery path.",
+    remediation: "MANUAL_REVIEW", replaySafe: false,
+    count: (win: any) => sql`
+      SELECT COUNT(DISTINCT oo.id)::int AS count
+      FROM oms.oms_orders oo
+      JOIN oms.oms_order_lines ol ON ol.order_id = oo.id
+      WHERE oo.financial_status IN ('paid', 'partially_paid')
+        AND oo.status NOT IN ('cancelled', 'refunded')
+        AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
+        AND oo.ordered_at > ${win}
+        AND oo.created_at < NOW() - INTERVAL '15 minutes'
+        AND ol.requires_shipping = true
+        AND ol.quantity > 0
+        AND COALESCE(ol.cancelled_quantity, 0) = 0
+        AND COALESCE(ol.refunded_quantity, 0) = 0
+        AND COALESCE(ol.fulfillment_status, '') <> 'fulfilled'
+        AND (
+          COALESCE(ol.authorization_status, 'seen') <> 'authorized'
+          OR COALESCE(ol.authority_fulfillable_quantity, 0) < ol.quantity
+          OR COALESCE(ol.wms_materialized_quantity, 0)
+             < LEAST(COALESCE(ol.authority_fulfillable_quantity, 0), ol.quantity)
+        )
+    `,
+    sample: (win: any) => sql`
+      SELECT
+        oo.id AS oms_order_id,
+        oo.external_order_number AS order_number,
+        oo.status AS oms_status,
+        oo.financial_status,
+        oo.fulfillment_status AS order_fulfillment_status,
+        ol.id AS oms_order_line_id,
+        ol.sku,
+        ol.quantity,
+        ol.authorization_status,
+        COALESCE(ol.authority_fulfillable_quantity, 0)::int AS authority_fulfillable_quantity,
+        COALESCE(ol.wms_materialized_quantity, 0)::int AS wms_materialized_quantity,
+        CASE
+          WHEN COALESCE(ol.authorization_status, 'seen') <> 'authorized'
+            OR COALESCE(ol.authority_fulfillable_quantity, 0) < ol.quantity
+            THEN 'authority_gap'
+          ELSE 'materialization_gap'
+        END AS gap_type,
+        oo.ordered_at AS at
+      FROM oms.oms_orders oo
+      JOIN oms.oms_order_lines ol ON ol.order_id = oo.id
+      WHERE oo.financial_status IN ('paid', 'partially_paid')
+        AND oo.status NOT IN ('cancelled', 'refunded')
+        AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
+        AND oo.ordered_at > ${win}
+        AND oo.created_at < NOW() - INTERVAL '15 minutes'
+        AND ol.requires_shipping = true
+        AND ol.quantity > 0
+        AND COALESCE(ol.cancelled_quantity, 0) = 0
+        AND COALESCE(ol.refunded_quantity, 0) = 0
+        AND COALESCE(ol.fulfillment_status, '') <> 'fulfilled'
+        AND (
+          COALESCE(ol.authorization_status, 'seen') <> 'authorized'
+          OR COALESCE(ol.authority_fulfillable_quantity, 0) < ol.quantity
+          OR COALESCE(ol.wms_materialized_quantity, 0)
+             < LEAST(COALESCE(ol.authority_fulfillable_quantity, 0), ol.quantity)
+        )
+      ORDER BY oo.ordered_at ASC, ol.id
+      LIMIT 50
+    `,
+  },
+  {
     code: "OMS_DOUBLE_PICKING", kind: "duplicate", stage: "oms_to_wms", severity: "critical",
     message: "One order is being picked twice",
     why: "A single order created two active warehouse jobs, so it would be picked and shipped twice. Cancel the duplicate job and keep one. (Multiple shipments for one order are fine — this only flags duplicate jobs.)",
     remediation: "MANUAL_REVIEW", replaySafe: false,
-    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM (SELECT oo.id FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} WHERE wo.warehouse_status <> 'cancelled' AND oo.ordered_at > ${win} GROUP BY oo.id HAVING COUNT(DISTINCT wo.id) > 1) t`,
-    sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, COUNT(DISTINCT wo.id)::int AS active_warehouse_jobs, oo.ordered_at AS at FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} WHERE wo.warehouse_status <> 'cancelled' AND oo.ordered_at > ${win} GROUP BY oo.external_order_number, oo.ordered_at HAVING COUNT(DISTINCT wo.id) > 1 ORDER BY 2 DESC LIMIT 50`,
+    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM (SELECT oo.id FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} WHERE wo.warehouse_status NOT IN ('shipped', 'cancelled', 'completed') AND wo.completed_at IS NULL AND oo.ordered_at > ${win} GROUP BY oo.id HAVING COUNT(DISTINCT wo.id) > 1) t`,
+    sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, COUNT(DISTINCT wo.id)::int AS active_warehouse_jobs, oo.ordered_at AS at FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} WHERE wo.warehouse_status NOT IN ('shipped', 'cancelled', 'completed') AND wo.completed_at IS NULL AND oo.ordered_at > ${win} GROUP BY oo.external_order_number, oo.ordered_at HAVING COUNT(DISTINCT wo.id) > 1 ORDER BY 2 DESC LIMIT 50`,
   },
   // ---- wms fulfill ----
   {

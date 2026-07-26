@@ -141,6 +141,34 @@ describe("getFlowWaterfall", () => {
     expect(issueBlock).toContain("wi.status = 'succeeded'");
   });
 
+  it("detects paid line authority and materialization gaps after the intake window", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf(
+      'code: "OMS_LINE_AUTHORITY_MATERIALIZATION_GAP"',
+    );
+    const end = FLOW_WATERFALL_SRC.indexOf("\n  },", start);
+    const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
+
+    expect(issueBlock).toContain("oo.created_at < NOW() - INTERVAL '15 minutes'");
+    expect(issueBlock).toContain(
+      "COALESCE(ol.authorization_status, 'seen') <> 'authorized'",
+    );
+    expect(issueBlock).toContain("ol.authority_fulfillable_quantity");
+    expect(issueBlock).toContain("ol.wms_materialized_quantity");
+    expect(issueBlock).toContain('remediation: "MANUAL_REVIEW"');
+    expect(issueBlock).toContain("replaySafe: false");
+  });
+
+  it("only counts non-terminal WMS jobs as duplicate picking", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf('code: "OMS_DOUBLE_PICKING"');
+    const end = FLOW_WATERFALL_SRC.indexOf("\n  },", start);
+    const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
+
+    expect(issueBlock).toContain(
+      "wo.warehouse_status NOT IN ('shipped', 'cancelled', 'completed')",
+    );
+    expect(issueBlock).toContain("wo.completed_at IS NULL");
+  });
+
   it("returns durable paid replay activity with the current exception rows", async () => {
     const replay = {
       oms_order_id: "255347",

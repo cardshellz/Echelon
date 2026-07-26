@@ -54,4 +54,16 @@ describe("flow-waterfall issue registry", () => {
     // The contradiction view is exactly the kind-filtered subset.
     expect(CONSISTENCY_INVARIANTS.every((i) => i.kind === "contradiction")).toBe(true);
   });
+
+  it("monitors paid line authority and WMS materialization gaps without auto-repair", () => {
+    const issue = FLOW_ISSUES.find(
+      (candidate) =>
+        candidate.code === "OMS_LINE_AUTHORITY_MATERIALIZATION_GAP",
+    );
+
+    expect(issue).toBeDefined();
+    expect(issue?.stage).toBe("oms_to_wms");
+    expect(issue?.remediation).toBe("MANUAL_REVIEW");
+    expect(issue?.replaySafe).toBe(false);
+  });
 });

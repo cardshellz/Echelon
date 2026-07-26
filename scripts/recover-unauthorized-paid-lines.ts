@@ -16,28 +16,30 @@
  * RECOVERY per line: re-authorize from order-paid truth via the canonical
  * deriveOmsLineAuthority (sourceTopic 'reconciler/authorize', an authorizing
  * topic) inside a FOR UPDATE transaction (re-checks the fingerprint under lock),
- * write the authority ledger event, then re-sync the order:
- * wmsSync.syncOmsOrderToWms materializes the now-authorized lines, adds them to
- * a shipment, and pushes to ShipStation (reconcileExistingWmsOrderLines Case A/B).
+ * write the authority ledger event, then create a dedicated residual fulfillment
+ * partition containing only the missed quantity. The original shipped WMS order
+ * and package remain immutable. Residual WMS order, items, and planned shipment
+ * are committed atomically before the shipment is pushed to the shipping engine.
  * Reservation shortfalls no longer hold the order (auto-hold removed 2026-07-06),
  * so the push proceeds and any unstocked line surfaces as a pick short.
  *
- * SAFETY: DRY-RUN by default. Idempotent — a re-run after apply finds nothing
- * (authorized lines no longer match the fingerprint).
+ * SAFETY: DRY-RUN by default. The recovery partition has a deterministic key,
+ * and interrupted runs can resume lines authorized by this script without
+ * duplicating a WMS order or shipment.
  *
  *   npx tsx scripts/recover-unauthorized-paid-lines.ts                 # dry-run report
  *   npx tsx scripts/recover-unauthorized-paid-lines.ts --order=60047   # dry-run, one order
- *   npx tsx scripts/recover-unauthorized-paid-lines.ts --apply         # re-authorize + re-sync + push
+ *   npx tsx scripts/recover-unauthorized-paid-lines.ts --apply         # authorize + create residual partition
  *
  * On Heroku:
  *   heroku run -a cardshellz-echelon -- npx tsx scripts/recover-unauthorized-paid-lines.ts --apply
  *
- * Verify after apply: re-run without --apply (expect zero rows); spot-check the
- * orders show fulfilled/ready and the items are on ShipStation.
+ * Verify after apply: re-run without --apply (expect zero rows); confirm the
+ * residual order is ready to pick and its package is present in the engine.
  */
 
 import { db } from "../server/db";
-import { sql, eq } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { omsOrderLines } from "@shared/schema/oms.schema";
 import { createServices } from "../server/services";
 import { deriveOmsLineAuthority } from "../server/modules/oms/oms-line-authority";
@@ -85,8 +87,31 @@ async function findAffectedLines(opts: CliOptions): Promise<AffectedLine[]> {
       AND l.quantity > 0
       AND COALESCE(l.cancelled_quantity,0) = 0
       AND COALESCE(l.refunded_quantity,0) = 0
-      AND l.authorization_status <> 'authorized'
+      AND (
+        COALESCE(l.authorization_status, 'seen') <> 'authorized'
+        OR (
+          l.authorization_status = 'authorized'
+          AND l.authorized_by_event_id = ${SOURCE_EVENT_ID}
+          AND l.authority_source_topic = 'reconciler/authorize'
+        )
+      )
       AND COALESCE(l.wms_materialized_quantity,0) < l.quantity
+      AND EXISTS (
+        SELECT 1
+        FROM wms.orders shipped_partition
+        WHERE shipped_partition.source = 'oms'
+          AND shipped_partition.oms_fulfillment_order_id = o.id::text
+          AND shipped_partition.fulfillment_partition_key = 'default'
+          AND shipped_partition.warehouse_status = 'shipped'
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM wms.orders mutable_partition
+        WHERE mutable_partition.source = 'oms'
+          AND mutable_partition.oms_fulfillment_order_id = o.id::text
+          AND mutable_partition.fulfillment_partition_key = 'default'
+          AND mutable_partition.warehouse_status NOT IN ('shipped','cancelled')
+      )
       AND o.created_at < NOW() - INTERVAL '15 minutes'
       ${opts.order ? sql`AND o.external_order_number = ${opts.order}` : sql``}
     ORDER BY o.created_at DESC, l.id
@@ -101,55 +126,82 @@ async function findAffectedLines(opts: CliOptions): Promise<AffectedLine[]> {
   }));
 }
 
-/** Re-authorize one stuck line under a row lock. Returns true if it authorized. */
-async function reauthorizeLine(omsOrderId: number, lineId: number): Promise<boolean> {
+/** Authorize selected lines under row locks; same-recovery retries are no-ops. */
+async function reauthorizeOrderLines(
+  omsOrderId: number,
+  lineIds: number[],
+): Promise<number> {
   return await db.transaction(async (tx: any) => {
-    const [current] = await tx
+    const currentLines = await tx
       .select()
       .from(omsOrderLines)
-      .where(eq(omsOrderLines.id, lineId))
+      .where(
+        and(
+          eq(omsOrderLines.orderId, omsOrderId),
+          inArray(omsOrderLines.id, lineIds),
+        ),
+      )
       .for("update")
-      .limit(1);
-    if (!current) return false;
-    // Re-check the fingerprint under lock — skip anything that changed.
-    if (current.authorizationStatus === "authorized") return false;
-    if ((current.cancelledQuantity ?? 0) > 0 || (current.refundedQuantity ?? 0) > 0) return false;
-    if ((current.quantity ?? 0) <= 0) return false;
+      .orderBy(omsOrderLines.id);
+    let authorized = 0;
+    for (const current of currentLines) {
+      // Re-check the fingerprint under lock; skip anything that changed.
+      if (
+        (current.cancelledQuantity ?? 0) > 0 ||
+        (current.refundedQuantity ?? 0) > 0 ||
+        (current.quantity ?? 0) <= 0 ||
+        (current.wmsMaterializedQuantity ?? 0) >= (current.quantity ?? 0)
+      ) {
+        continue;
+      }
+      if (current.authorizationStatus === "authorized") {
+        if (
+          current.authorizedByEventId === SOURCE_EVENT_ID &&
+          current.authoritySourceTopic === "reconciler/authorize"
+        ) {
+          continue;
+        }
+        throw new Error(
+          `OMS line ${current.id} became authorized by another workflow; refusing historical recovery`,
+        );
+      }
 
-    const authority = deriveOmsLineAuthority({
-      sourceTopic: "reconciler/authorize",
-      sourceEventId: SOURCE_EVENT_ID,
-      sourceInboxId: null,
-      financialStatus: "paid",
-      quantity: current.quantity,
-      fulfillableQuantity: current.fulfillableQuantity ?? null,
-      previous: current,
-    });
+      const authority = deriveOmsLineAuthority({
+        sourceTopic: "reconciler/authorize",
+        sourceEventId: SOURCE_EVENT_ID,
+        sourceInboxId: null,
+        financialStatus: "paid",
+        quantity: current.quantity,
+        fulfillableQuantity: current.fulfillableQuantity ?? null,
+        previous: current,
+      });
 
-    await tx
-      .update(omsOrderLines)
-      .set({
-        channelObservedQuantity: authority.channelObservedQuantity,
-        paidQuantity: authority.paidQuantity,
-        authorityFulfillableQuantity: authority.authorityFulfillableQuantity,
-        authorizationStatus: authority.authorizationStatus,
-        authorizedAt: authority.authorizedAt,
-        authorizedByEventId: authority.authorizedByEventId,
-        authoritySourceTopic: authority.authoritySourceTopic,
-        authoritySourceInboxId: authority.authoritySourceInboxId,
-      })
-      .where(eq(omsOrderLines.id, lineId));
+      await tx
+        .update(omsOrderLines)
+        .set({
+          channelObservedQuantity: authority.channelObservedQuantity,
+          paidQuantity: authority.paidQuantity,
+          authorityFulfillableQuantity: authority.authorityFulfillableQuantity,
+          authorizationStatus: authority.authorizationStatus,
+          authorizedAt: authority.authorizedAt,
+          authorizedByEventId: authority.authorizedByEventId,
+          authoritySourceTopic: authority.authoritySourceTopic,
+          authoritySourceInboxId: authority.authoritySourceInboxId,
+        })
+        .where(eq(omsOrderLines.id, current.id));
 
-    await recordOmsLineAuthorityEvent({
-      db: tx,
-      orderId: omsOrderId,
-      orderLineId: lineId,
-      eventType: "line_updated",
-      sourceEventId: SOURCE_EVENT_ID,
-      previous: current,
-      authority,
-    });
-    return true;
+      await recordOmsLineAuthorityEvent({
+        db: tx,
+        orderId: omsOrderId,
+        orderLineId: current.id,
+        eventType: "line_updated",
+        sourceEventId: SOURCE_EVENT_ID,
+        previous: current,
+        authority,
+      });
+      authorized++;
+    }
+    return authorized;
   });
 }
 
@@ -182,14 +234,18 @@ async function main() {
   }
 
   if (!opts.apply) {
-    console.log(`\n[RecoverUnauthorized] DRY-RUN complete. Re-run with --apply to re-authorize + re-sync + push.`);
+    console.log(
+      "\n[RecoverUnauthorized] DRY-RUN complete. Re-run with --apply to authorize and create the residual fulfillment partition.",
+    );
     return;
   }
 
   const services = createServices(db);
   const wmsSync: any = (services as any).wmsSync;
-  if (!wmsSync?.syncOmsOrderToWms) {
-    console.error("[RecoverUnauthorized] wmsSync.syncOmsOrderToWms unavailable — aborting.");
+  if (!wmsSync?.recoverUnauthorizedPaidLinesToWms) {
+    console.error(
+      "[RecoverUnauthorized] wmsSync.recoverUnauthorizedPaidLinesToWms unavailable; aborting.",
+    );
     return;
   }
 
@@ -198,29 +254,32 @@ async function main() {
   let ordersStillStuck = 0;
   for (const [omsOrderId, lines] of byOrder) {
     const label = lines[0].externalOrderNumber ?? `oms ${omsOrderId}`;
-    let authorizedThisOrder = 0;
-    for (const l of lines) {
-      try {
-        if (await reauthorizeLine(omsOrderId, l.lineId)) {
-          authorized++;
-          authorizedThisOrder++;
-        }
-      } catch (err: any) {
-        console.error(`[RecoverUnauthorized] re-authorize failed for ${label} line ${l.lineId}: ${err?.message}`);
-      }
-    }
-    if (authorizedThisOrder === 0) {
-      console.warn(`[RecoverUnauthorized] ${label}: no lines re-authorized (already changed); skipping re-sync.`);
+    let authorizedThisOrder: number;
+    try {
+      authorizedThisOrder = await reauthorizeOrderLines(
+        omsOrderId,
+        lines.map((line) => line.lineId),
+      );
+      authorized += authorizedThisOrder;
+    } catch (err: any) {
+      console.error(
+        `[RecoverUnauthorized] re-authorization failed for ${label} (oms ${omsOrderId}): ${err?.message}`,
+      );
+      ordersStillStuck++;
       continue;
     }
     try {
-      await wmsSync.syncOmsOrderToWms(omsOrderId);
+      await wmsSync.recoverUnauthorizedPaidLinesToWms(omsOrderId);
       ordersResynced++;
     } catch (err: any) {
-      console.error(`[RecoverUnauthorized] re-sync failed for ${label} (oms ${omsOrderId}): ${err?.message}`);
+      console.error(
+        `[RecoverUnauthorized] residual partition recovery failed for ${label} (oms ${omsOrderId}): ${err?.message}`,
+      );
+      ordersStillStuck++;
+      continue;
     }
 
-    // Verify: any lines still stuck for this order after re-sync?
+    // Verify both materialization and placement on a non-retired shipment.
     const check: any = await db.execute(sql`
       SELECT COUNT(*)::int AS n
       FROM oms.oms_order_lines l
@@ -229,19 +288,38 @@ async function main() {
         AND l.quantity > 0
         AND COALESCE(l.cancelled_quantity,0) = 0
         AND COALESCE(l.refunded_quantity,0) = 0
-        AND COALESCE(l.wms_materialized_quantity,0) < l.quantity
+        AND (
+          COALESCE(l.wms_materialized_quantity,0) < l.quantity
+          OR NOT EXISTS (
+            SELECT 1
+            FROM wms.order_items oi
+            JOIN wms.orders wo ON wo.id = oi.order_id
+            JOIN wms.outbound_shipment_items osi ON osi.order_item_id = oi.id
+            JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+            WHERE wo.source = 'oms'
+              AND wo.oms_fulfillment_order_id = l.order_id::text
+              AND oi.oms_order_line_id = l.id
+              AND oi.status <> 'cancelled'
+              AND osi.qty > 0
+              AND os.status NOT IN ('voided','cancelled')
+          )
+        )
     `);
     const stillStuck = Number(check?.rows?.[0]?.n ?? 0);
     if (stillStuck > 0) {
       ordersStillStuck++;
-      console.warn(`[RecoverUnauthorized] ${label}: ${stillStuck} line(s) STILL not materialized after re-sync — needs manual review.`);
+      console.warn(
+        `[RecoverUnauthorized] ${label}: ${stillStuck} line(s) still lack materialization or an active shipment; manual review required.`,
+      );
     } else {
-      console.log(`[RecoverUnauthorized] ${label}: recovered (${authorizedThisOrder} line(s) authorized + materialized).`);
+      console.log(
+        `[RecoverUnauthorized] ${label}: recovered (${authorizedThisOrder} line(s) newly authorized; residual fulfillment materialized).`,
+      );
     }
   }
 
   console.log(
-    `\n[RecoverUnauthorized] APPLY complete: re-authorized ${authorized} line(s), re-synced ${ordersResynced}/${byOrder.size} order(s)` +
+    `\n[RecoverUnauthorized] APPLY complete: authorized ${authorized} line(s), recovered ${ordersResynced}/${byOrder.size} order(s)` +
       (ordersStillStuck > 0 ? `, ${ordersStillStuck} order(s) still need manual review` : "") +
       ". Re-run without --apply to verify zero remaining.",
   );

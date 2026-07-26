@@ -44,10 +44,42 @@ describe("wms-sync duplicate WMS order / ShipStation push guard", () => {
     expect(WMS_SYNC_SRC).toMatch(/const DEFAULT_FULFILLMENT_PARTITION_KEY = "default"/);
     expect(WMS_SYNC_SRC).toMatch(/function normalizeFulfillmentPartitionKey/);
     expect(WMS_SYNC_SRC).toMatch(/function resolveOmsFulfillmentPartitionKey/);
-    expect(WMS_SYNC_SRC).toMatch(/const fulfillmentPartitionKey = resolveOmsFulfillmentPartitionKey\(\)/);
+    expect(WMS_SYNC_SRC).toMatch(/const fulfillmentPartitionKey = resolveOmsFulfillmentPartitionKey\(mode\)/);
     expect(WMS_SYNC_SRC.match(/buildOmsWmsOrderScope\(omsOrderId, fulfillmentPartitionKey\)/g)).toHaveLength(2);
     expect(WMS_SYNC_SRC).toMatch(/eq\(wmsOrders\.fulfillmentPartitionKey, normalizedPartitionKey\)/);
     expect(WMS_SYNC_SRC).toMatch(/fulfillmentPartitionKey,/);
+  });
+
+  it("isolates historical terminal recovery in a deterministic non-default partition", () => {
+    expect(WMS_SYNC_SRC).toContain(
+      'UNAUTHORIZED_PAID_LINE_RECOVERY_PARTITION_KEY =\n  "recovery:unauthorized-paid-lines:v1"',
+    );
+    expect(WMS_SYNC_SRC).toMatch(/recoverUnauthorizedPaidLinesToWms/);
+    expect(WMS_SYNC_SRC).toMatch(/"terminal_residual_recovery"/);
+    expect(WMS_SYNC_SRC).toMatch(/assertUnauthorizedPaidLineRecoveryAllowed/);
+    expect(WMS_SYNC_SRC).toMatch(/expected a shipped default partition and no mutable default partition/);
+  });
+
+  it("does not reconcile full OMS quantities into an existing residual partition", () => {
+    const existingPartitionBlock = WMS_SYNC_SRC.slice(
+      WMS_SYNC_SRC.indexOf("if (existingWmsOrder.length > 0)"),
+      WMS_SYNC_SRC.indexOf("const headerRefresh"),
+    );
+    expect(existingPartitionBlock).toContain("isTerminalResidualRecovery");
+    expect(existingPartitionBlock).not.toContain("reconcileExistingWmsOrderLines");
+  });
+
+  it("rolls back residual recovery if its shipment cannot be created", () => {
+    expect(WMS_SYNC_SRC).toMatch(
+      /Failed to create shipment for WMS order[\s\S]*if \(isTerminalResidualRecovery\) \{\s*throw err;/,
+    );
+  });
+
+  it("refuses to consume authority when storage returns the wrong partition", () => {
+    expect(WMS_SYNC_SRC).toContain(
+      "returnedPartitionKey !== fulfillmentPartitionKey",
+    );
+    expect(WMS_SYNC_SRC).toContain("refusing to consume line authority");
   });
 
   it("schema and migrations define the active OMS fulfillment partition backstop", () => {
