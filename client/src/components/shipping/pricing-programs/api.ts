@@ -14,6 +14,7 @@ import {
   type DraftLayout,
   type DraftRow,
   type PricingBasis,
+  type RateGroup,
   type RateGroupAvailability,
 } from "../rate-table-model";
 
@@ -635,6 +636,59 @@ export function coverageGroupKey(
 ): string {
   if (group.id !== null) return `id:${group.id}`;
   return `derived:${group.name.trim().toLocaleLowerCase()}|${destinationSignature(group.destinations)}`;
+}
+
+export interface DestinationGroupTarget {
+  id: number | null;
+  key: string;
+}
+
+/**
+ * Resolves the exact editor row for a destination selected in the program
+ * matrix. Persisted IDs are authoritative; the derived key preserves support
+ * for legacy rate tables that predate reusable destination-group records.
+ */
+export function findEditorRateGroup(
+  groups: readonly RateGroup[],
+  target: DestinationGroupTarget | null,
+): RateGroup | null {
+  if (target === null) return groups[0] ?? null;
+
+  if (target.id !== null) {
+    const matchingScopes = groups.filter(
+      (group) => group.destinationGroupId === target.id,
+    );
+    const defaultScope = matchingScopes.find(
+      (group) => group.originWarehouseId === null,
+    );
+    if (defaultScope !== undefined) return defaultScope;
+    if (matchingScopes[0] !== undefined) return matchingScopes[0];
+  }
+
+  return groups.find((group, index) =>
+    coverageGroupKey({
+      id: group.destinationGroupId,
+      name: groupDisplayName(group, index),
+      destinations: rateGroupDestinations(group),
+    }) === target.key) ?? null;
+}
+
+function rateGroupDestinations(
+  group: RateGroup,
+): RateCoverageDestination[] {
+  return [
+    ...group.regions.map((region) => ({
+      destinationCountry: "US",
+      destinationRegion: region,
+      postalPrefix: null,
+    })),
+    ...group.zipEntries.flatMap((entry) =>
+      entry.prefixes.map((prefix) => ({
+        destinationCountry: "US",
+        destinationRegion: entry.state,
+        postalPrefix: prefix,
+      }))),
+  ];
 }
 
 interface DerivedRateTableCoverage
