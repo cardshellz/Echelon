@@ -3,13 +3,17 @@ import {
   PRICING_FLOW_CHOICES,
   assignmentLabel,
   buildProgramOverviews,
+  countStaleRateTableCoverages,
   effectiveRateTableCoverages,
   findEditorRateGroup,
   pricingFlowKey,
   pricingFlowLabel,
   productRuleRevisionStatus,
+  rateTableCoveragesForGroup,
   rateTableRegionCount,
+  type ProgramDestinationGroup,
   type RateBookAssignment,
+  type RateTableCoverage,
   type RateTableSummary,
   type RateTablesResponse,
 } from "../pricing-programs/api";
@@ -23,6 +27,82 @@ function assignment(overrides: Partial<RateBookAssignment> = {}): RateBookAssign
     originWarehouseId: null,
     originWarehouseName: null,
     isActive: true,
+    ...overrides,
+  };
+}
+
+function destination(destinationRegion: string) {
+  return {
+    destinationCountry: "US",
+    destinationRegion,
+    postalPrefix: null,
+  };
+}
+
+function coverage(input: {
+  id: number;
+  rateTableId: number;
+  destinationGroupId: number;
+  destinationGroupName: string;
+  sortOrder: number;
+  regions: string[];
+}): RateTableCoverage {
+  return {
+    id: input.id,
+    rateTableId: input.rateTableId,
+    destinationGroupId: input.destinationGroupId,
+    originWarehouseId: null,
+    availability: "offered",
+    destinationGroupLockVersion: 1,
+    destinationGroupName: input.destinationGroupName,
+    name: input.destinationGroupName,
+    sortOrder: input.sortOrder,
+    rateRowCount: input.regions.length,
+    destinations: input.regions.map(destination),
+  };
+}
+
+function legacyLayoutGroup(name: string, regions: string[]) {
+  return {
+    name,
+    originWarehouseId: null,
+    regions,
+    zipEntries: [],
+    availability: "offered",
+    pricingModel: "weight_bands",
+    baseChargeUsd: "",
+    perStartedPoundUsd: "",
+    bands: [{
+      maxMeasure: "1",
+      rateUsd: "8.99",
+      maxShipmentWeightLb: "",
+      openEnded: false,
+    }],
+  };
+}
+
+function rateTable(overrides: Partial<RateTableSummary> = {}): RateTableSummary {
+  return {
+    id: 301,
+    rateBookId: 21,
+    serviceLevelId: 8,
+    pricingBasis: "shipment_weight",
+    currency: "USD",
+    status: "active",
+    effectiveFrom: "2026-07-01T00:00:00.000Z",
+    effectiveTo: null,
+    createdAt: "2026-07-01T00:00:00.000Z",
+    metadata: null,
+    rateBook: null,
+    serviceLevel: null,
+    coverages: [],
+    rowCount: 0,
+    regionCount: 0,
+    stateCount: 0,
+    zipOverrideCount: 0,
+    productRuleCount: 0,
+    minMeasure: null,
+    maxMeasure: null,
     ...overrides,
   };
 }
@@ -266,5 +346,181 @@ describe("pricing program coverage aggregation", () => {
       { warehouseId: 2, rateRows: 5 },
     ]);
     expect(buildProgramOverviews(response)[0]?.destinationGroups).toHaveLength(1);
+  });
+
+  it("reconciles legacy live groups with current definitions without hiding live-only coverage", () => {
+    const southeastRegions = ["AL", "FL", "GA", "KY", "MS", "NC", "SC", "TN"];
+    const midwestRegions = [
+      "IL", "IN", "IA", "KS", "MI", "MN", "MO", "NE", "ND", "OH", "SD", "WI",
+    ];
+    const currentDefinitions = [
+      {
+        id: 51,
+        name: "Military mail (APO/FPO/DPO)",
+        regions: ["AA", "AE", "AP"],
+      },
+      {
+        id: 52,
+        name: "AL, FL, GA + 17 more",
+        regions: [...southeastRegions, ...midwestRegions],
+      },
+      { id: 53, name: "South Central", regions: ["AR", "LA", "OK", "TX"] },
+      {
+        id: 54,
+        name: "Mountain West",
+        regions: ["AZ", "CO", "ID", "MT", "NV", "NM", "UT", "WY"],
+      },
+      { id: 55, name: "West Coast", regions: ["CA", "OR", "WA"] },
+      {
+        id: 56,
+        name: "Northeast",
+        regions: ["CT", "ME", "MA", "NH", "RI", "VT", "NJ", "NY", "PA"],
+      },
+      {
+        id: 57,
+        name: "Mid-Atlantic",
+        regions: ["DE", "DC", "MD", "VA", "WV"],
+      },
+      {
+        id: 58,
+        name: "Alaska and Hawaii",
+        regions: ["AK", "AS", "GU", "HI", "MP", "PR", "VI"],
+      },
+    ];
+    const legacyLiveDefinitions = [
+      // PA is intentionally absent so the compatibility row also proves drift detection.
+      { name: "Northeast", regions: ["CT", "ME", "MA", "NH", "RI", "VT", "NJ", "NY"] },
+      { name: "Mid-Atlantic", regions: ["DE", "DC", "MD", "VA", "WV"] },
+      { name: "Southeast", regions: southeastRegions },
+      { name: "South Central", regions: ["AR", "LA", "OK", "TX"] },
+      { name: "Midwest", regions: midwestRegions },
+      { name: "Mountain West", regions: ["AZ", "CO", "ID", "MT", "NV", "NM", "UT", "WY"] },
+      { name: "West Coast", regions: ["CA", "OR", "WA"] },
+      { name: "Military mail (APO/FPO/DPO)", regions: ["AA", "AE", "AP"] },
+      { name: "Alaska and Hawaii", regions: ["AK", "AS", "GU", "HI", "MP", "PR", "VI"] },
+    ];
+    const active = rateTable({
+      id: 301,
+      status: "active",
+      metadata: {
+        draftLayout: {
+          version: 1,
+          groups: legacyLiveDefinitions.map((group) =>
+            legacyLayoutGroup(group.name, group.regions)),
+        },
+      },
+      rowCount: 58,
+      regionCount: 58,
+      stateCount: 58,
+    });
+    const draft = rateTable({
+      id: 302,
+      status: "draft",
+      createdAt: "2026-07-02T00:00:00.000Z",
+      coverages: currentDefinitions.map((group, index) =>
+        coverage({
+          id: 501 + index,
+          rateTableId: 302,
+          destinationGroupId: group.id,
+          destinationGroupName: group.name,
+          sortOrder: index,
+          regions: group.regions,
+        })),
+    });
+    const historical = rateTable({
+      id: 303,
+      status: "superseded",
+      createdAt: "2026-06-01T00:00:00.000Z",
+      metadata: {
+        draftLayout: {
+          version: 1,
+          groups: [legacyLayoutGroup("Historical only", ["OH"])],
+        },
+      },
+    });
+    const response: RateTablesResponse = {
+      rateBooks: [{
+        id: 21,
+        code: "retail",
+        name: "Retail shipping",
+        status: "active",
+        zoneSetId: null,
+        metadata: null,
+        assignments: [],
+      }],
+      serviceLevels: [{
+        id: 8,
+        code: "standard",
+        displayName: "Standard shipping",
+        description: null,
+        fulfillmentMode: "parcel",
+        promiseMinBusinessDays: 3,
+        promiseMaxBusinessDays: 7,
+        sortOrder: 0,
+        isActive: true,
+      }],
+      destinationGroups: currentDefinitions.map((group, index) => ({
+          id: group.id,
+          rateBookId: 21,
+          name: group.name,
+          status: "active" as const,
+          sortOrder: index,
+          lockVersion: 1,
+          destinations: group.regions.map(destination),
+        })),
+      rateTables: [active, draft, historical],
+    };
+
+    const program = buildProgramOverviews(response)[0];
+    expect(program).toBeDefined();
+    expect(program!.destinationGroups).toHaveLength(10);
+    for (const sharedName of [
+      "Military mail (APO/FPO/DPO)",
+      "South Central",
+      "Mountain West",
+      "West Coast",
+      "Northeast",
+      "Mid-Atlantic",
+      "Alaska and Hawaii",
+    ]) {
+      expect(
+        program!.destinationGroups.filter((group) => group.name === sharedName),
+      ).toHaveLength(1);
+    }
+    expect(
+      program!.destinationGroups.some((group) => group.name === "Historical only"),
+    ).toBe(false);
+
+    const northeast = program!.destinationGroups.find(
+      (group) => group.name === "Northeast",
+    ) as ProgramDestinationGroup;
+    expect(northeast).toMatchObject({
+      id: 56,
+      hasCurrentDefinition: true,
+      appearsInLiveRevision: true,
+      appearsInDraftRevision: true,
+    });
+    const northeastLiveCoverages = rateTableCoveragesForGroup(active, northeast);
+    expect(northeastLiveCoverages).toHaveLength(1);
+    expect(countStaleRateTableCoverages(
+      northeastLiveCoverages,
+      northeast,
+    )).toBe(1);
+
+    const southeast = program!.destinationGroups.find(
+      (group) => group.name === "Southeast",
+    );
+    expect(southeast).toMatchObject({
+      id: null,
+      hasCurrentDefinition: false,
+      appearsInLiveRevision: true,
+      appearsInDraftRevision: false,
+    });
+    expect(
+      program!.destinationGroups
+        .filter((group) => !group.hasCurrentDefinition)
+        .map((group) => group.name)
+        .sort(),
+    ).toEqual(["Midwest", "Southeast"]);
   });
 });
