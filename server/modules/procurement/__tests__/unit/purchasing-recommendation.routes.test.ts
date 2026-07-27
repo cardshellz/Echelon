@@ -331,7 +331,205 @@ describe("purchasing recommendation routes", () => {
         },
       ],
     });
-    expect(body.items[0].forwardDemandBasis).not.toHaveProperty("contributions");
+    // Items keep contribution evidence for the cockpit math drawer; with no
+    // demand events in the fixture the capture resolves to an empty array.
+    expect(body.items[0].forwardDemandBasis.contributions).toEqual([]);
+  });
+
+  it("keeps forward-demand contributions on items and strips them from skippedItems", async () => {
+    const contribution = {
+      productId: 5,
+      productVariantId: 51,
+      demandEventId: 900,
+      demandEventLineId: 9001,
+      eventName: "August Drop",
+      eventType: "drop",
+      eventStatus: "planned",
+      eventStartDate: "2026-08-10",
+      eventEndDate: null,
+      planningAsOfDate: "2026-07-01",
+      expectedPieces: 20,
+      confidence: "high",
+      confidenceWeightPercent: 100,
+      weightedPieces: 20,
+      eventUpdatedAt: "2026-06-30T12:00:00.000Z",
+      lineUpdatedAt: "2026-06-30T12:00:00.000Z",
+    };
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        // Actionable: available 4 + 1 on order stays below the forward-adjusted
+        // reorder point, so this row lands in items.
+        product_id: 5,
+        variant_id: 51,
+        base_sku: "SKU-ACTIONABLE",
+        product_name: "Actionable Product",
+        variant_count: 1,
+        total_pieces: 5,
+        total_reserved_pieces: 1,
+        total_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        on_order_pieces: 1,
+        open_po_count: 1,
+        earliest_expected: "2026-08-04T00:00:00.000Z",
+        lead_time_days: 2,
+        safety_stock_days: 1,
+        product_category: "Card Sleeves",
+        product_line_names: ["Pro Line", "Shield Line"],
+        forward_demand_pieces: 20,
+        forward_demand_raw_pieces: 20,
+        forward_demand_event_count: 1,
+        forward_demand_contributions: [contribution],
+        forward_demand_planning_as_of_date: "2026-07-01",
+        forward_demand_horizon_days: 90,
+      },
+      {
+        // Skipped: ample stock keeps the row non-actionable, so it lands in
+        // skippedItems with the same contribution evidence attached.
+        product_id: 6,
+        variant_id: 61,
+        base_sku: "SKU-SKIPPED",
+        product_name: "Skipped Product",
+        variant_count: 1,
+        total_pieces: 500,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        earliest_expected: null,
+        lead_time_days: 2,
+        safety_stock_days: 1,
+        forward_demand_pieces: 20,
+        forward_demand_raw_pieces: 20,
+        forward_demand_event_count: 1,
+        forward_demand_contributions: [{ ...contribution, productId: 6, productVariantId: 61 }],
+        forward_demand_planning_as_of_date: "2026-07-01",
+        forward_demand_horizon_days: 90,
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");
+
+    expect(status).toBe(200);
+    // Non-excluded skipped rows are dual-listed in items, so both rows appear.
+    expect(body.items).toHaveLength(2);
+    const actionable = body.items.find((item: any) => item.sku === "SKU-ACTIONABLE");
+    expect(actionable).toMatchObject({
+      category: "Card Sleeves",
+      productLines: ["Pro Line", "Shield Line"],
+      onOrderPieces: 1,
+      earliestInboundEta: "2026-08-04",
+    });
+    expect(actionable.forwardDemandBasis.contributions).toHaveLength(1);
+    expect(actionable.forwardDemandBasis.contributions[0]).toMatchObject({
+      eventName: "August Drop",
+      eventType: "drop",
+      expectedPieces: 20,
+      confidence: "high",
+      weightedPieces: 20,
+    });
+    // Every entry in items keeps its contribution evidence, including the
+    // dual-listed skipped row.
+    const skippedInItems = body.items.find((item: any) => item.sku === "SKU-SKIPPED");
+    expect(skippedInItems.forwardDemandBasis.contributions).toHaveLength(1);
+
+    const skipped = body.skippedItems.find((item: any) => item.sku === "SKU-SKIPPED");
+    expect(skipped).toBeDefined();
+    expect(skipped.forwardDemandBasis).not.toHaveProperty("contributions");
+    expect(skipped.forwardDemandBasis).toMatchObject({
+      forwardDemandPieces: 20,
+      forwardDemandEventCount: 1,
+    });
+    expect(skipped).toMatchObject({
+      category: null,
+      productLines: [],
+      earliestInboundEta: null,
+    });
+  });
+
+  it("applies stored exclusion rules to reorder analysis through the shared context loader", async () => {
+    // Regression for the context/engine key mismatch: loadPurchasingRecommendationContext
+    // used to return `rules` while the engine reads `exclusionRules`, so the spread in the
+    // reorder-analysis route silently ignored rule-based exclusions.
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 20,
+        variant_id: 201,
+        base_sku: "DROP-1",
+        product_name: "Dropship Item",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 30,
+        on_order_pieces: 0,
+        lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 1,
+      },
+      {
+        product_id: 21,
+        variant_id: 211,
+        base_sku: "KEEP-1",
+        product_name: "Kept Item",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 30,
+        on_order_pieces: 0,
+        lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 1,
+      },
+    ]);
+    // The real context loader runs in this test (only db + storage/base are mocked):
+    // db.select().from(reorderExclusionRules) returns the stored rule, and the two
+    // db.execute calls serve the settings-defaults and product-meta queries.
+    mocks.db.select.mockImplementation(() =>
+      selectChain([{ id: 1, field: "category", value: "dropship" }]),
+    );
+    const stringifySql = (query: unknown) => {
+      try {
+        return JSON.stringify(query) ?? "";
+      } catch {
+        return "";
+      }
+    };
+    mocks.db.execute.mockImplementation(async (query: unknown) => {
+      const text = stringifySql(query);
+      if (text.includes("echelon_settings")) {
+        return {
+          rows: [
+            { key: "default_lead_time_days", value: "4" },
+            { key: "default_safety_stock_days", value: "3" },
+          ],
+        };
+      }
+      if (text.includes("reorder_excluded")) {
+        return {
+          rows: [
+            { id: 20, category: "dropship", brand: null, product_type: null, sku: "DROP-1", tags: null, reorder_excluded: false },
+            { id: 21, category: "singles", brand: null, product_type: null, sku: "KEEP-1", tags: null, reorder_excluded: false },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");
+
+    expect(status).toBe(200);
+    expect(body.items.map((item: any) => item.sku)).toEqual(["KEEP-1"]);
+    expect(body.summary.excludedCount).toBe(1);
+    expect(body.skippedItems).toHaveLength(1);
+    expect(body.skippedItems[0]).toMatchObject({
+      productId: 20,
+      sku: "DROP-1",
+      skippedReason: "excluded",
+    });
   });
 
   it("returns manual reorder approval-policy impact using active candidate score settings", async () => {

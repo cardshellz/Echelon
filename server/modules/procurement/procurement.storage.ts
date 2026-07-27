@@ -1352,6 +1352,8 @@ export const procurementMethods: IProcurementStorage = {
         p.id AS product_id,
         p.sku AS base_sku,
         p.name AS product_name,
+        p.category AS product_category,
+        COALESCE(pl_agg.product_line_names, ARRAY[]::text[]) AS product_line_names,
         p.lead_time_days,
         p.safety_stock_days,
         preferred_vendor.vendor_product_id,
@@ -1737,6 +1739,16 @@ export const procurementMethods: IProcurementStorage = {
         ) contribution
         GROUP BY contribution.product_id
       ) fwd ON fwd.product_id = p.id
+      LEFT JOIN (
+        -- Product-line names for cockpit grouping/filtering. Inactive lines are
+        -- excluded so retired groupings do not resurface as filter facets.
+        SELECT plp.product_id,
+               ARRAY_AGG(pl.name ORDER BY pl.sort_order, pl.name) AS product_line_names
+        FROM catalog.product_line_products plp
+        JOIN catalog.product_lines pl ON pl.id = plp.product_line_id
+        WHERE pl.is_active = true
+        GROUP BY plp.product_id
+      ) pl_agg ON pl_agg.product_id = p.id
       WHERE p.is_active = true
       ORDER BY p.sku, p.name
     `);

@@ -15,6 +15,7 @@ import {
 } from "@shared/schema";
 import { db } from "../../../../db";
 import { requirePermission } from "../../../../routes/middleware";
+import { parseRateTableAdminBulkJson } from "./rate-table-admin-body.middleware";
 import {
   MAX_IMPORT_ROWS,
   findBandOverlaps,
@@ -288,6 +289,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
   app.post(
     "/api/shipping/admin/rate-tables/parse-csv",
     requirePermission("settings", "edit"),
+    parseRateTableAdminBulkJson,
     async (req, res) => {
       try {
         const parsed = parseCsvSchema.safeParse(req.body);
@@ -307,6 +309,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
   app.post(
     ["/api/shipping/admin/rate-tables/drafts", "/api/shipping/admin/rate-tables/import"],
     requirePermission("settings", "edit"),
+    parseRateTableAdminBulkJson,
     async (req, res) => {
       try {
         const actor = auditActor(req);
@@ -368,6 +371,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
   app.put(
     "/api/shipping/admin/rate-tables/:id",
     requirePermission("settings", "edit"),
+    parseRateTableAdminBulkJson,
     async (req, res) => {
       try {
         const actor = auditActor(req);

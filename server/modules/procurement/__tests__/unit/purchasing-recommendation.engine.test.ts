@@ -3,6 +3,8 @@ import {
   generatePurchasingRecommendations,
   passesAutoDraftApprovalPolicy,
 } from "../../purchasing-recommendation.engine";
+// Type-only import: no runtime dependency on the context service (or the db it loads).
+import type { PurchasingRecommendationContext } from "../../purchasing-recommendation-context.service";
 
 describe("purchasing recommendation engine", () => {
   it("produces an explainable actionable recommendation using vendor lead time and per-piece ordering", () => {
@@ -583,6 +585,43 @@ describe("purchasing recommendation engine", () => {
         }),
       ]),
       actionable: false,
+    });
+  });
+
+  it("applies exclusion rules when the loader context shape is spread into the options", () => {
+    // Regression for the context/engine key mismatch: the context service used
+    // to return `rules` while the engine reads `exclusionRules`, so every call
+    // site that spread the loaded context silently dropped rule-based
+    // exclusions. This fixture is typed as the loader's return shape so a key
+    // drift between the two modules fails compilation here.
+    const context: PurchasingRecommendationContext = {
+      defaults: { leadTimeDays: 14, safetyStockDays: 7 },
+      exclusionRules: [{ field: "category", value: "dropship" }],
+      productMetaById: new Map([[20, { sku: "DROP-1", category: "dropship" }]]),
+    };
+    const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): deterministic relative to fixture demand.
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [
+        {
+          product_id: 20,
+          base_sku: "DROP-1",
+          product_name: "Dropship Item",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 30,
+          order_uom_units: 1,
+        },
+      ],
+      ...context,
+    });
+
+    expect(result.items).toEqual([]);
+    expect(result.summary.excludedCount).toBe(1);
+    expect(result.skippedItems[0]).toMatchObject({
+      productId: 20,
+      skippedReason: "excluded",
     });
   });
 
@@ -1483,6 +1522,129 @@ describe("purchasing recommendation engine", () => {
       autopilotBlockers: expect.arrayContaining([
         expect.objectContaining({ code: "invalid_supplier_minimum_order", severity: "block" }),
       ]),
+    });
+  });
+});
+
+describe("catalog dimension and inbound ETA pass-through", () => {
+  // Frozen clock (CLAUDE.md §3): keeps demand recency deterministic.
+  const asOf = "2026-05-20T12:00:00.000Z";
+  const baseRow = {
+    product_id: 5,
+    variant_id: 51,
+    base_sku: "SKU-P1",
+    product_name: "Product",
+    variant_count: 1,
+    total_pieces: 5,
+    total_reserved_pieces: 1,
+    total_outbound_pieces: 60,
+    demand_order_count: 12,
+    demand_active_days: 10,
+    latest_demand_at: "2026-05-18T12:00:00.000Z",
+    on_order_pieces: 0,
+    open_po_count: 0,
+    earliest_expected: null,
+    lead_time_days: 2,
+    safety_stock_days: 1,
+  };
+
+  it("passes category, product lines, and earliest inbound ETA through to items", () => {
+    const result = generatePurchasingRecommendations({
+      asOf,
+      lookbackDays: 30,
+      rows: [{
+        ...baseRow,
+        product_category: "Card Sleeves",
+        product_line_names: ["Pro Line", "Shield Line"],
+        // Keep effective supply (4 available + 1 on order) below the reorder
+        // point so the row stays actionable and lands in result.items.
+        on_order_pieces: 1,
+        open_po_count: 1,
+        earliest_expected: "2026-08-04T00:00:00.000Z",
+      }],
+    });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      category: "Card Sleeves",
+      productLines: ["Pro Line", "Shield Line"],
+      onOrderPieces: 1,
+      earliestInboundEta: "2026-08-04",
+    });
+  });
+
+  it("normalizes a Date-typed earliest_expected to a local calendar date", () => {
+    // node-postgres materializes `timestamp without time zone` as local-time
+    // Dates; the ETA must reflect the stored calendar date, not a UTC shift.
+    const result = generatePurchasingRecommendations({
+      asOf,
+      lookbackDays: 30,
+      rows: [{
+        ...baseRow,
+        on_order_pieces: 1,
+        open_po_count: 1,
+        earliest_expected: new Date(2026, 7, 4),
+      }],
+    });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].earliestInboundEta).toBe("2026-08-04");
+  });
+
+  it("defaults category to null, product lines to empty, and ETA to null when absent", () => {
+    const result = generatePurchasingRecommendations({
+      asOf,
+      lookbackDays: 30,
+      rows: [{ ...baseRow }],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      category: null,
+      productLines: [],
+      earliestInboundEta: null,
+    });
+  });
+
+  it("drops blank category strings and non-string product line entries", () => {
+    const result = generatePurchasingRecommendations({
+      asOf,
+      lookbackDays: 30,
+      rows: [{
+        ...baseRow,
+        product_category: "   ",
+        product_line_names: ["  Shield Line  ", "", 42, null],
+      }],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      category: null,
+      productLines: ["Shield Line"],
+    });
+  });
+
+  it("carries the same fields on skipped items", () => {
+    const result = generatePurchasingRecommendations({
+      asOf,
+      lookbackDays: 30,
+      rows: [{
+        ...baseRow,
+        total_pieces: 500,
+        product_category: "Storage",
+        product_line_names: ["Vault Line"],
+        on_order_pieces: 3,
+        open_po_count: 1,
+        earliest_expected: "2026-09-01T00:00:00.000Z",
+      }],
+    });
+
+    // Non-excluded skipped rows are dual-listed: present in items and in
+    // skippedItems with a skippedReason. Both carry the new fields.
+    expect(result.skippedItems).toHaveLength(1);
+    expect(result.skippedItems[0]).toMatchObject({
+      skippedReason: "not_actionable_status",
+      category: "Storage",
+      productLines: ["Vault Line"],
+      earliestInboundEta: "2026-09-01",
     });
   });
 });
