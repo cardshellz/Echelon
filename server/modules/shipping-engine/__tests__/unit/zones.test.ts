@@ -112,6 +112,14 @@ describe("resolveZone", () => {
     expect(resolveZone(rules, "US", "16066", "PA")).toBe("PA");
   });
 
+  it("resolves military postal regions when their state-and-ZIP rules are present", () => {
+    const rules = [
+      rule({ zone: "US-AE", destinationRegion: "AE" }),
+      rule({ zone: "US-PA", destinationRegion: "PA" }),
+    ];
+    expect(resolveZone(rules, "US", "09012", "AE")).toBe("US-AE");
+  });
+
   it("prefers a ZIP override over its state default", () => {
     const rules = [
       rule({ zone: "PA", destinationRegion: "PA" }),

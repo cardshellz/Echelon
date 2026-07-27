@@ -64,6 +64,14 @@ describe("product shipping policy", () => {
     expect(result).toMatchObject({ ok: false, code: "BLOCKED", ruleId: 1 });
   });
 
+  it("rejects monetary configuration on a restriction", () => {
+    expect(validateProductRateRules([
+      rule({ kind: "restriction", action: "block", rateCents: 1 }),
+    ])).toEqual([
+      expect.stringContaining("shipping restrictions cannot include pricing"),
+    ]);
+  });
+
   it("fails closed when one variant has overlapping base charges", () => {
     const result = evaluateProductRatePolicy({
       destination: DESTINATION,

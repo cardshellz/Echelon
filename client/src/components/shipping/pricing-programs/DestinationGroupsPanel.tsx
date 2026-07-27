@@ -2,18 +2,20 @@
  * Master-detail destination-group workspace (spec §8.2): a compact group
  * list on the left, and the selected group's destinations, warehouse scope,
  * ZIP-prefix overrides, and band matrix on the right. Replaces the old
- * permanently-expanded 50-state checkbox grid.
+ * permanently-expanded US-region checkbox grid.
  */
 
 import { useMemo, useState } from "react";
 import {
   AlertTriangle,
+  Ban,
   Check,
   ChevronDown,
   ChevronsUpDown,
   Copy,
   MapPin,
   Plus,
+  RefreshCw,
   Trash2,
   Warehouse as WarehouseIcon,
   X,
@@ -74,11 +76,15 @@ import {
   groupDisplayName,
   newGroup,
   newId,
+  replaceRateGroupAndPropagateIdentity,
   type DestinationGroupTemplate,
   type PricingBasis,
   type RateGroup,
 } from "../rate-table-model";
-import type { WarehouseOption } from "./api";
+import type {
+  ProgramDestinationGroup,
+  WarehouseOption,
+} from "./api";
 import { RateBandMatrix } from "./RateBandMatrix";
 import {
   DestinationProductPolicies,
@@ -96,6 +102,7 @@ interface DestinationGroupsPanelProps {
   draftId: number | null;
   onSaveDraft: () => void;
   savingDraft: boolean;
+  availableDestinationGroups: ProgramDestinationGroup[];
 }
 
 export function DestinationGroupsPanel({
@@ -109,6 +116,7 @@ export function DestinationGroupsPanel({
   draftId,
   onSaveDraft,
   savingDraft,
+  availableDestinationGroups,
 }: DestinationGroupsPanelProps) {
   const { toast } = useToast();
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -122,9 +130,20 @@ export function DestinationGroupsPanel({
   const selectedTemplate = selectedGroup === null
     ? null
     : findDestinationGroupTemplate(selectedGroup.regions);
+  const currentProgramGroup = selectedGroup?.destinationGroupId === null
+    || selectedGroup?.destinationGroupId === undefined
+    ? null
+    : availableDestinationGroups.find(
+        (group) => group.id === selectedGroup.destinationGroupId,
+      ) ?? null;
+  const selectedGroupIsStale = currentProgramGroup !== null
+    && selectedGroup?.destinationGroupLockVersion !== currentProgramGroup.lockVersion;
 
   const updateGroup = (groupId: string, update: (group: RateGroup) => RateGroup) => {
-    onChange(groups.map((group) => group.id === groupId ? update(group) : group));
+    const current = groups.find((group) => group.id === groupId);
+    if (current === undefined) return;
+    const next = update(current);
+    onChange(replaceRateGroupAndPropagateIdentity(groups, groupId, next));
   };
 
   const addGroup = (template: DestinationGroupTemplate | null) => {
@@ -135,6 +154,61 @@ export function DestinationGroupsPanel({
     );
     onChange([...groups, group]);
     onSelectGroup(group.id);
+  };
+
+  const addExistingGroup = (source: ProgramDestinationGroup) => {
+    const existing = groups.find(
+      (group) => group.destinationGroupId === source.id && source.id !== null,
+    );
+    if (existing) {
+      onSelectGroup(existing.id);
+      return;
+    }
+    const group = rateGroupFromProgramDestinationGroup(source, pricingBasis);
+    onChange([...groups, group]);
+    onSelectGroup(group.id);
+  };
+
+  const addWarehouseScope = (
+    source: RateGroup,
+    originWarehouseId: number | null,
+  ) => {
+    if (source.destinationGroupId === null) {
+      toast({
+        title: "Save the destination group first",
+        description: "Warehouse pricing reuses the saved geography identity.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const duplicateScope = groups.some((group) =>
+      group.destinationGroupId === source.destinationGroupId
+      && group.originWarehouseId === originWarehouseId);
+    if (duplicateScope) {
+      toast({
+        title: "That warehouse scope already exists",
+        variant: "destructive",
+      });
+      return;
+    }
+    const scope: RateGroup = {
+      ...source,
+      id: newId(),
+      originWarehouseId,
+      regions: [...source.regions],
+      zipEntries: cloneZipEntries(source.zipEntries),
+      bands: source.bands.map((band) => ({ ...band, id: newId() })),
+    };
+    const sourceIndex = groups.findIndex((group) => group.id === source.id);
+    const lastSharedIndex = groups.reduce(
+      (last, group, index) =>
+        group.destinationGroupId === source.destinationGroupId ? index : last,
+      sourceIndex,
+    );
+    const next = [...groups];
+    next.splice(lastSharedIndex + 1, 0, scope);
+    onChange(next);
+    onSelectGroup(scope.id);
   };
 
   const applyTemplate = (templateId: string) => {
@@ -154,6 +228,8 @@ export function DestinationGroupsPanel({
     const copy: RateGroup = {
       ...source,
       id: newId(),
+      destinationGroupId: null,
+      destinationGroupLockVersion: null,
       name: source.name.trim() === "" ? "" : `${source.name.trim()} copy`,
       regions: [],
       zipEntries: [],
@@ -188,6 +264,10 @@ export function DestinationGroupsPanel({
     const conflicts = new Set<string>();
     for (const group of groups) {
       if (group.id === selectedGroup.id) continue;
+      if (
+        selectedGroup.destinationGroupId !== null
+        && group.destinationGroupId === selectedGroup.destinationGroupId
+      ) continue;
       if ((group.originWarehouseId ?? null) !== (selectedGroup.originWarehouseId ?? null)) continue;
       for (const region of group.regions) {
         if (selectedGroup.regions.includes(region)) conflicts.add(region);
@@ -245,10 +325,16 @@ export function DestinationGroupsPanel({
         <MapPin className="mx-auto mb-2 h-8 w-8 text-muted-foreground/60" />
         <p className="text-sm font-medium">No destination groups yet</p>
         <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
-          A destination group applies one rate schedule to the states you choose, with optional
-          ZIP-prefix exceptions. Create separate groups when states need different prices.
+          A destination group applies one rate schedule to the US regions you choose, with optional
+          ZIP-prefix exceptions. Create separate groups when regions need different prices.
         </p>
-        <AddDestinationGroupMenu className="mt-4" onAdd={addGroup} />
+        <AddDestinationGroupMenu
+          className="mt-4"
+          onAdd={addGroup}
+          onAddExisting={addExistingGroup}
+          existingGroups={availableDestinationGroups}
+          selectedDestinationGroupIds={new Set()}
+        />
       </div>
     );
   }
@@ -260,7 +346,7 @@ export function DestinationGroupsPanel({
         <div className="px-1 pb-1">
           <h3 className="text-sm font-semibold">Destination groups</h3>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            States in one group share this option's rate schedule. Put Pennsylvania and
+            US regions in one group share this option's rate schedule. Put Pennsylvania and
             California in separate groups when their prices differ.
           </p>
         </div>
@@ -289,26 +375,45 @@ export function DestinationGroupsPanel({
                 )}
               </div>
               <div className="mt-0.5 text-xs text-muted-foreground">
-                {group.regions.length} state{group.regions.length === 1 ? "" : "s"}
-                {group.zipEntries.length > 0 && (
-                  <> · {group.zipEntries.reduce((sum, entry) => sum + entry.prefixes.length, 0)} ZIP</>
-                )}
-                {" · "}
-                {group.originWarehouseId === null
-                  ? "All warehouses"
-                  : warehouses.find((warehouse) => warehouse.id === group.originWarehouseId)?.name
-                    ?? `Warehouse ${group.originWarehouseId}`}
+                {warehouseScopeLabel(group.originWarehouseId, warehouses)}
+                {" | "}
+                {destinationSummary(group)}
+                {group.zipEntries.length > 0
+                  && ` | ${group.zipEntries.reduce(
+                    (sum, entry) => sum + entry.prefixes.length,
+                    0,
+                  )} ZIP`}
               </div>
+              {group.availability === "not_offered" && (
+                <Badge
+                  variant="outline"
+                  className="mt-1.5 border-slate-300 text-slate-700"
+                >
+                  Not offered
+                </Badge>
+              )}
             </button>
           );
         })}
-        <AddDestinationGroupMenu variant="outline" className="w-full" onAdd={addGroup} />
+        <AddDestinationGroupMenu
+          variant="outline"
+          className="w-full"
+          onAdd={addGroup}
+          onAddExisting={addExistingGroup}
+          existingGroups={availableDestinationGroups}
+          selectedDestinationGroupIds={new Set(
+            groups.flatMap((group) =>
+              group.destinationGroupId === null
+                ? []
+                : [group.destinationGroupId]),
+          )}
+        />
       </div>
 
       {/* Right: selected group detail */}
       {selectedGroup && (
         <div className="min-w-0 space-y-5 rounded-md border p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-end justify-between gap-3">
             <div className="min-w-52 flex-1">
               <Label htmlFor={`group-name-${selectedGroup.id}`} className="text-xs text-muted-foreground">
                 Group name
@@ -324,7 +429,34 @@ export function DestinationGroupsPanel({
                 className="mt-1 h-9 max-w-sm font-medium"
               />
             </div>
+            <div className="w-44">
+              <Label className="text-xs text-muted-foreground">
+                This shipping option
+              </Label>
+              <Select
+                value={selectedGroup.availability}
+                onValueChange={(availability: RateGroup["availability"]) =>
+                  updateGroup(selectedGroup.id, (group) => ({
+                    ...group,
+                    availability,
+                  }))}
+              >
+                <SelectTrigger className="mt-1 h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="offered">Offered</SelectItem>
+                  <SelectItem value="not_offered">Not offered</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             <div className="flex items-center gap-1.5 self-end">
+              <AddWarehouseScopeMenu
+                group={selectedGroup}
+                groups={groups}
+                warehouses={warehouses}
+                onAdd={addWarehouseScope}
+              />
               <Button
                 type="button"
                 variant="outline"
@@ -340,14 +472,15 @@ export function DestinationGroupsPanel({
                 variant="outline"
                 size="sm"
                 className="text-destructive hover:text-destructive"
-                disabled={groups.length === 1}
                 onClick={() => {
                   if (groupHasContent(selectedGroup)) setConfirmDeleteId(selectedGroup.id);
                   else removeGroup(selectedGroup.id);
                 }}
               >
                 <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-                Delete
+                {selectedGroup.originWarehouseId === null
+                  ? "Remove default"
+                  : "Remove override"}
               </Button>
             </div>
           </div>
@@ -362,6 +495,49 @@ export function DestinationGroupsPanel({
             </div>
           )}
 
+          {selectedGroup.availability === "not_offered" && (
+            <div className="flex items-start gap-2 rounded-md border bg-muted/40 px-3 py-2.5">
+              <Ban className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <div>
+                <p className="text-sm font-medium">
+                  This option is not offered to this destination group.
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Its geography is recorded, but no price rows are saved.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {selectedGroupIsStale && currentProgramGroup !== null && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2.5 text-amber-950">
+              <div>
+                <p className="text-sm font-medium">
+                  This draft uses an older version of {currentProgramGroup.name}.
+                </p>
+                <p className="text-xs text-amber-800">
+                  Refresh the destinations before saving this shipping option.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="border-amber-400 bg-white hover:bg-amber-100"
+                onClick={() => updateGroup(selectedGroup.id, (group) =>
+                  refreshRateGroupFromProgramGroup(
+                    group,
+                    currentProgramGroup,
+                    pricingBasis,
+                  ))}
+              >
+                <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                Use current destinations
+              </Button>
+            </div>
+          )}
+
+          {selectedGroup.availability === "offered" && (
           <div className="flex flex-wrap gap-1 rounded-md bg-muted p-1">
             {([
               ["default", "Default pricing"],
@@ -381,8 +557,9 @@ export function DestinationGroupsPanel({
               </Button>
             ))}
           </div>
+          )}
 
-          {detailView !== "default" && (
+          {selectedGroup.availability === "offered" && detailView !== "default" && (
             <DestinationProductPolicies
               view={detailView}
               draftId={draftId}
@@ -394,12 +571,12 @@ export function DestinationGroupsPanel({
             />
           )}
 
-          {detailView === "default" && <>
+          {(detailView === "default" || selectedGroup.availability === "not_offered") && <>
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label className="flex items-center gap-1.5">
                 <WarehouseIcon className="h-3.5 w-3.5 text-muted-foreground" />
-                Origin warehouse
+                Warehouse override
               </Label>
               <Select
                 value={selectedGroup.originWarehouseId === null
@@ -412,16 +589,34 @@ export function DestinationGroupsPanel({
               >
                 <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">All warehouses</SelectItem>
+                  <SelectItem
+                    value="all"
+                    disabled={warehouseScopeInUse(
+                      groups,
+                      selectedGroup,
+                      null,
+                    )}
+                  >
+                    All warehouses
+                  </SelectItem>
                   {warehouses.map((warehouse) => (
-                    <SelectItem key={warehouse.id} value={String(warehouse.id)}>
+                    <SelectItem
+                      key={warehouse.id}
+                      value={String(warehouse.id)}
+                      disabled={warehouseScopeInUse(
+                        groups,
+                        selectedGroup,
+                        warehouse.id,
+                      )}
+                    >
                       {warehouse.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Warehouse-specific pricing takes precedence over the all-warehouse default.
+                Leave this at the program scope unless this destination needs
+                warehouse-specific pricing.
               </p>
             </div>
 
@@ -457,13 +652,13 @@ export function DestinationGroupsPanel({
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  Applying a template replaces the selected states and group name. ZIP overrides are preserved.
+                  Applying a template replaces the selected regions and group name. ZIP overrides are preserved.
                 </p>
               </div>
 
               <div className="space-y-1.5">
-                <Label>Destination states</Label>
-                <StateMultiSelect
+                <Label>Destination US regions</Label>
+                <RegionMultiSelect
                   selected={selectedGroup.regions}
                   conflicted={conflictedRegions}
                   onChange={(regions) => updateGroup(selectedGroup.id, (group) => ({
@@ -482,7 +677,7 @@ export function DestinationGroupsPanel({
             </div>
           </div>
 
-          <SelectedStateChips
+          <SelectedRegionChips
             group={selectedGroup}
             conflicted={conflictedRegions}
             onRemove={(region) => updateGroup(selectedGroup.id, (group) => ({
@@ -491,12 +686,13 @@ export function DestinationGroupsPanel({
             }))}
           />
 
+          {selectedGroup.availability === "offered" && (
           <div className="space-y-2 border-t pt-4">
             <div>
               <Label>ZIP-prefix overrides</Label>
               <p className="text-xs text-muted-foreground">
                 Charge this group's rates for specific ZIP prefixes. The longest matching prefix
-                wins; the state still needs a statewide rate as fallback.
+                wins; the region still needs a region-wide rate as fallback.
               </p>
             </div>
             {selectedGroup.zipEntries.length > 0 && (
@@ -533,7 +729,7 @@ export function DestinationGroupsPanel({
                 value={zipDraft.state}
                 onValueChange={(state) => setZipDraft((current) => ({ ...current, state }))}
               >
-                <SelectTrigger className="h-9" aria-label="State for ZIP prefixes"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="h-9" aria-label="US region for ZIP prefixes"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {US_POSTAL_REGIONS.map(([code, name]) => (
                     <SelectItem key={code} value={code}>{code} — {name}</SelectItem>
@@ -562,7 +758,9 @@ export function DestinationGroupsPanel({
               </Button>
             </div>
           </div>
+          )}
 
+          {selectedGroup.availability === "offered" && (
           <div className="space-y-2 border-t pt-4">
             <div className="grid gap-3 sm:grid-cols-[260px_minmax(0,1fr)] sm:items-end">
               <div className="space-y-1.5">
@@ -662,6 +860,7 @@ export function DestinationGroupsPanel({
               </>
             )}
           </div>
+          )}
           </>}
         </div>
       )}
@@ -674,8 +873,8 @@ export function DestinationGroupsPanel({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this destination group?</AlertDialogTitle>
             <AlertDialogDescription>
-              Its states, ZIP overrides, and rates come out of the draft. Nothing changes for
-              live quoting until you activate.
+              This warehouse rate scope comes out of the draft. The reusable
+              destination group and live quoting do not change until activation.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -697,12 +896,18 @@ export function DestinationGroupsPanel({
 
 interface AddDestinationGroupMenuProps {
   onAdd: (template: DestinationGroupTemplate | null) => void;
+  onAddExisting: (group: ProgramDestinationGroup) => void;
+  existingGroups: ProgramDestinationGroup[];
+  selectedDestinationGroupIds: Set<number>;
   variant?: "default" | "outline";
   className?: string;
 }
 
 function AddDestinationGroupMenu({
   onAdd,
+  onAddExisting,
+  existingGroups,
+  selectedDestinationGroupIds,
   variant = "default",
   className,
 }: AddDestinationGroupMenuProps) {
@@ -716,9 +921,30 @@ function AddDestinationGroupMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-64">
+        {existingGroups.length > 0 && (
+          <>
+            <DropdownMenuLabel>From this pricing program</DropdownMenuLabel>
+            {existingGroups.map((group) => (
+              <DropdownMenuItem
+                key={group.key}
+                disabled={
+                  group.id !== null
+                  && selectedDestinationGroupIds.has(group.id)
+                }
+                onSelect={() => onAddExisting(group)}
+              >
+                <span className="flex-1 truncate">{group.name}</span>
+                {group.id !== null
+                  && selectedDestinationGroupIds.has(group.id)
+                  && <Check className="h-3.5 w-3.5" />}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+          </>
+        )}
         <DropdownMenuItem onSelect={() => onAdd(null)}>
           <span className="flex-1">Custom group</span>
-          <span className="text-xs text-muted-foreground">No states</span>
+          <span className="text-xs text-muted-foreground">No regions</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Coverage</DropdownMenuLabel>
@@ -741,17 +967,82 @@ function AddDestinationGroupMenu({
   );
 }
 
+function AddWarehouseScopeMenu({
+  group,
+  groups,
+  warehouses,
+  onAdd,
+}: {
+  group: RateGroup;
+  groups: RateGroup[];
+  warehouses: WarehouseOption[];
+  onAdd: (source: RateGroup, originWarehouseId: number | null) => void;
+}) {
+  const usedScopes = new Set(
+    groups
+      .filter((candidate) =>
+        group.destinationGroupId !== null
+        && candidate.destinationGroupId === group.destinationGroupId)
+      .map((candidate) => candidate.originWarehouseId ?? 0),
+  );
+  const allWarehouseAvailable = !usedScopes.has(0);
+  const availableWarehouses = warehouses.filter(
+    (warehouse) => !usedScopes.has(warehouse.id),
+  );
+  const disabled = group.destinationGroupId === null
+    || (!allWarehouseAvailable && availableWarehouses.length === 0);
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={disabled}
+          title={group.destinationGroupId === null
+            ? "Save this destination group before adding warehouse pricing"
+            : disabled
+              ? "Every configured warehouse scope already has pricing"
+              : "Add a default or warehouse-specific rate schedule"}
+        >
+          <WarehouseIcon className="mr-1.5 h-3.5 w-3.5" />
+          Add warehouse pricing
+          <ChevronDown className="ml-1.5 h-3.5 w-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        <DropdownMenuLabel>Rate scope</DropdownMenuLabel>
+        {allWarehouseAvailable && (
+          <DropdownMenuItem onSelect={() => onAdd(group, null)}>
+            <span className="flex-1">All warehouses</span>
+            <span className="text-xs text-muted-foreground">Default</span>
+          </DropdownMenuItem>
+        )}
+        {availableWarehouses.map((warehouse) => (
+          <DropdownMenuItem
+            key={warehouse.id}
+            onSelect={() => onAdd(group, warehouse.id)}
+          >
+            {warehouse.name}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 // ---------------------------------------------------------------------------
-// State multi-select (searchable, keyboard-operable, with presets)
+// US-region multi-select (searchable, keyboard-operable, with presets)
 // ---------------------------------------------------------------------------
 
-interface StateMultiSelectProps {
+interface RegionMultiSelectProps {
   selected: string[];
   conflicted: Set<string>;
   onChange: (regions: string[]) => void;
 }
 
-function StateMultiSelect({ selected, conflicted, onChange }: StateMultiSelectProps) {
+function RegionMultiSelect({ selected, conflicted, onChange }: RegionMultiSelectProps) {
   const [open, setOpen] = useState(false);
   const selectedSet = new Set(selected);
 
@@ -774,8 +1065,8 @@ function StateMultiSelect({ selected, conflicted, onChange }: StateMultiSelectPr
           className="h-9 w-full justify-between font-normal"
         >
           {selected.length === 0
-            ? <span className="text-muted-foreground">Select states…</span>
-            : `${selected.length} state${selected.length === 1 ? "" : "s"} selected`}
+            ? <span className="text-muted-foreground">Select US regions…</span>
+            : `${selected.length} US region${selected.length === 1 ? "" : "s"} selected`}
           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
@@ -795,9 +1086,9 @@ function StateMultiSelect({ selected, conflicted, onChange }: StateMultiSelectPr
           </Button>
         </div>
         <Command>
-          <CommandInput placeholder="Search states…" />
+          <CommandInput placeholder="Search US regions…" />
           <CommandList className="max-h-64">
-            <CommandEmpty>No state matches.</CommandEmpty>
+            <CommandEmpty>No US region matches.</CommandEmpty>
             <CommandGroup>
               {US_POSTAL_REGIONS.map(([code, name]) => (
                 <CommandItem
@@ -831,12 +1122,99 @@ function StateMultiSelect({ selected, conflicted, onChange }: StateMultiSelectPr
 }
 
 // ---------------------------------------------------------------------------
-// Selected-state chips (individual chips small sets, summary for presets)
+// Selected-region chips (individual chips for small sets, summary for presets)
 // ---------------------------------------------------------------------------
 
 const CHIP_LIMIT = 14;
 
-function SelectedStateChips({
+function rateGroupFromProgramDestinationGroup(
+  source: ProgramDestinationGroup,
+  pricingBasis: PricingBasis,
+): RateGroup {
+  const regionWide = source.destinations
+    .filter((destination) =>
+      destination.destinationCountry === "US"
+      && destination.destinationRegion !== null
+      && destination.postalPrefix === null)
+    .map((destination) => destination.destinationRegion!);
+  const zipByRegion = new Map<string, string[]>();
+  for (const destination of source.destinations) {
+    if (
+      destination.destinationCountry !== "US"
+      || destination.destinationRegion === null
+      || destination.postalPrefix === null
+    ) continue;
+    zipByRegion.set(destination.destinationRegion, [
+      ...(zipByRegion.get(destination.destinationRegion) ?? []),
+      destination.postalPrefix,
+    ]);
+  }
+  return {
+    ...newGroup(pricingBasis, regionWide, source.name),
+    destinationGroupId: source.id,
+    destinationGroupLockVersion: source.lockVersion,
+    zipEntries: [...zipByRegion].map(([state, prefixes]) => ({
+      id: newId(),
+      state,
+      prefixes,
+    })),
+  };
+}
+
+function refreshRateGroupFromProgramGroup(
+  current: RateGroup,
+  source: ProgramDestinationGroup,
+  pricingBasis: PricingBasis,
+): RateGroup {
+  const refreshed = rateGroupFromProgramDestinationGroup(source, pricingBasis);
+  return {
+    ...current,
+    destinationGroupId: refreshed.destinationGroupId,
+    destinationGroupLockVersion: refreshed.destinationGroupLockVersion,
+    name: refreshed.name,
+    regions: refreshed.regions,
+    zipEntries: refreshed.zipEntries,
+  };
+}
+
+function cloneZipEntries(
+  entries: RateGroup["zipEntries"],
+): RateGroup["zipEntries"] {
+  return entries.map((entry) => ({
+    ...entry,
+    prefixes: [...entry.prefixes],
+  }));
+}
+
+function warehouseScopeInUse(
+  groups: readonly RateGroup[],
+  selected: RateGroup,
+  originWarehouseId: number | null,
+): boolean {
+  if (selected.destinationGroupId === null) return false;
+  return groups.some((group) =>
+    group.id !== selected.id
+    && group.destinationGroupId === selected.destinationGroupId
+    && group.originWarehouseId === originWarehouseId);
+}
+
+function warehouseScopeLabel(
+  originWarehouseId: number | null,
+  warehouses: readonly WarehouseOption[],
+): string {
+  if (originWarehouseId === null) return "All warehouses";
+  return warehouses.find((warehouse) => warehouse.id === originWarehouseId)
+    ?.name ?? `Warehouse ${originWarehouseId}`;
+}
+
+function destinationSummary(group: RateGroup): string {
+  const ordered = [...new Set(group.regions)].sort();
+  if (ordered.length === 0) return "No region-wide destinations";
+  if (ordered.length <= 4) return ordered.join(", ");
+  return `${ordered.slice(0, 4).join(", ")} + ${ordered.length - 4} more`;
+}
+
+function SelectedRegionChips({
   group,
   conflicted,
   onRemove,
@@ -850,7 +1228,7 @@ function SelectedStateChips({
     const conflictedSelected = group.regions.filter((region) => conflicted.has(region));
     return (
       <p className="text-xs text-muted-foreground">
-        {groupDisplayName({ ...group, name: "" }, 0)} — {group.regions.length} states selected.
+        {groupDisplayName({ ...group, name: "" }, 0)} — {group.regions.length} US regions selected.
         {conflictedSelected.length > 0 && (
           <span className="text-amber-700"> Conflicts: {conflictedSelected.join(", ")}.</span>
         )}

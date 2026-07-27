@@ -46,6 +46,7 @@ import {
   getJson,
   invalidateShippingAdmin,
   postJson,
+  rateTableRegionCount,
   rateTableDetailKey,
   type RateTableDetail,
 } from "./api";
@@ -181,8 +182,10 @@ export function RevisionViewer({
           </div>
         </div>
         <div>
-          <div className="text-xs text-muted-foreground">States covered</div>
-          <div className="mt-0.5 text-base font-semibold tabular-nums">{analysis.coverage.stateCount}</div>
+          <div className="text-xs text-muted-foreground">US regions priced</div>
+          <div className="mt-0.5 text-base font-semibold tabular-nums">
+            {rateTableRegionCount(analysis.coverage)}
+          </div>
         </div>
         <div>
           <div className="text-xs text-muted-foreground">ZIP overrides</div>
@@ -203,7 +206,7 @@ export function RevisionViewer({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>State</TableHead>
+                <TableHead>US region</TableHead>
                 <TableHead>ZIP</TableHead>
                 <TableHead>Warehouse</TableHead>
                 <TableHead>{basis === "pallet_count" ? "Pallets" : "Weight"}</TableHead>
@@ -216,7 +219,7 @@ export function RevisionViewer({
                 <TableRow key={row.id}>
                   <TableCell className="text-xs font-medium">{row.destinationRegion}</TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground">
-                    {row.postalPrefix ? `${row.postalPrefix}*` : "Statewide"}
+                    {row.postalPrefix ? `${row.postalPrefix}*` : "Region-wide"}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {row.originWarehouseName ?? "All warehouses"}

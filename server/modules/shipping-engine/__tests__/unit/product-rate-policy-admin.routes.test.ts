@@ -67,6 +67,59 @@ describe("product-rate policy admin routes", () => {
     );
   });
 
+  it("accepts a shipping restriction without a monetary amount", async () => {
+    serviceMocks.createRateTableProductRule.mockResolvedValue({ id: 92 });
+    const response = await jsonRequest(`${server.url}/api/shipping/admin/rate-tables/12/product-rules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...validRule(),
+        name: "No cases to Alaska",
+        kind: "restriction",
+        action: "block",
+        rateCents: null,
+      }),
+    });
+
+    expect(response).toEqual({ status: 201, body: { rule: { id: 92 } } });
+    expect(serviceMocks.createRateTableProductRule).toHaveBeenCalledWith(
+      12,
+      expect.objectContaining({
+        kind: "restriction",
+        action: "block",
+        rateCents: null,
+        perStartedPoundCents: null,
+        thresholdCents: null,
+        bands: [],
+      }),
+      "operator-1",
+    );
+  });
+
+  it("rejects pricing fields on a shipping restriction", async () => {
+    const response = await jsonRequest(`${server.url}/api/shipping/admin/rate-tables/12/product-rules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...validRule(),
+        name: "Invalid restriction",
+        kind: "restriction",
+        action: "block",
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      error: {
+        code: "SHIPPING_PRODUCT_POLICY_INVALID_INPUT",
+        details: [expect.objectContaining({
+          message: "Shipping restrictions cannot include pricing.",
+        })],
+      },
+    });
+    expect(serviceMocks.createRateTableProductRule).not.toHaveBeenCalled();
+  });
+
   it("rejects an empty destination scope before calling the application service", async () => {
     const response = await jsonRequest(`${server.url}/api/shipping/admin/rate-tables/12/product-rules`, {
       method: "POST",

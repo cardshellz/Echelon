@@ -19,6 +19,7 @@ describe("cleanup-oms-wms-authority-readiness", () => {
         "materialized-counter-drift",
       ],
       counterDirection: "all",
+      counterDecreaseSafety: "none",
       summaryOnly: false,
       operator: "script:cleanup-oms-wms-authority-readiness",
     });
@@ -39,6 +40,7 @@ describe("cleanup-oms-wms-authority-readiness", () => {
       limit: null,
       operations: ["orphan-oms-line-refs", "materialized-counter-drift"],
       counterDirection: "recorded-below-actual",
+      counterDecreaseSafety: "none",
       summaryOnly: true,
       operator: "manual-prod-cleanup",
     });
@@ -56,12 +58,15 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     expect(() => parseFlags([
       "--execute",
       "--operation=materialized-counter-drift",
-    ])).toThrow(/requires --counter-direction=recorded-below-actual/);
+    ])).toThrow(/requires an explicit counter direction/);
     expect(() => parseFlags([
       "--execute",
       "--operation=materialized-counter-drift",
       "--counter-direction=recorded-above-actual",
-    ])).toThrow(/lowering an over-recorded counter can reopen fulfillment authority/);
+    ])).toThrow(/requires --counter-decrease-safety=zero-authority-zero-actual/);
+    expect(() => parseFlags([
+      "--counter-decrease-safety=unsafe",
+    ])).toThrow(/must be none or zero-authority-zero-actual/);
     expect(() => parseFlags(["--operator="])).toThrow(/cannot be blank/);
     expect(() => parseFlags(["--bogus"])).toThrow(/Unknown flag/);
   });
@@ -75,6 +80,21 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     ])).toMatchObject({
       mode: "execute",
       counterDirection: "all",
+    });
+  });
+
+  it("permits only the zero-authority zero-actual policy for counter decreases", async () => {
+    const { parseFlags } = await loadCleanupModule();
+
+    expect(parseFlags([
+      "--execute",
+      "--operation=materialized-counter-drift",
+      "--counter-direction=recorded-above-actual",
+      "--counter-decrease-safety=zero-authority-zero-actual",
+    ])).toMatchObject({
+      mode: "execute",
+      counterDirection: "recorded-above-actual",
+      counterDecreaseSafety: "zero-authority-zero-actual",
     });
   });
 
@@ -159,6 +179,7 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     const {
       materializedCounterDriftCandidateSql,
       unsafeMaterializedCounterDecreaseCountSql,
+      materializedCounterDecreaseCountSql,
     } = await loadCleanupModule();
 
     const belowSql = materializedCounterDriftCandidateSql(
@@ -179,11 +200,31 @@ describe("cleanup-oms-wms-authority-readiness", () => {
       "COALESCE(ol.wms_materialized_quantity, 0) > COALESCE(materialized.materialized_quantity, 0)",
     );
 
+    const safeAboveSql = materializedCounterDriftCandidateSql(
+      null,
+      false,
+      "recorded-above-actual",
+      "zero-authority-zero-actual",
+    );
+    expect(safeAboveSql).toContain(
+      "COALESCE(ol.authority_fulfillable_quantity, 0) = 0",
+    );
+    expect(safeAboveSql).toContain(
+      "COALESCE(materialized.materialized_quantity, 0) = 0",
+    );
+
     const unsafeSql = unsafeMaterializedCounterDecreaseCountSql();
     expect(unsafeSql).toContain("COUNT(*)::int AS unsafe_count");
     expect(unsafeSql).toContain(
       "COALESCE(ol.wms_materialized_quantity, 0) > COALESCE(materialized.materialized_quantity, 0)",
     );
+    expect(unsafeSql).toContain("AND NOT");
+    expect(unsafeSql).toContain(
+      "COALESCE(ol.authority_fulfillable_quantity, 0) = 0",
+    );
+
+    const allDecreaseSql = materializedCounterDecreaseCountSql();
+    expect(allDecreaseSql).not.toContain("AND NOT");
   });
 
   it("does not reference WMS order-item timestamp columns that do not exist", async () => {
@@ -240,10 +281,13 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     expect(counterFn.indexOf("insertAuditRows")).toBeGreaterThan(-1);
     expect(counterFn.indexOf("UPDATE oms.oms_order_lines")).toBeGreaterThan(counterFn.indexOf("insertAuditRows"));
     expect(counterFn).toContain(
-      "COALESCE(ol.wms_materialized_quantity, 0) < input.actual_quantity",
+      "COALESCE(ol.wms_materialized_quantity, 0) ${updateDirectionPredicate} input.actual_quantity",
     );
     expect(counterFn).toContain(
       "input.actual_quantity = COALESCE(materialized.actual_quantity, 0)",
+    );
+    expect(counterFn).toContain(
+      "COALESCE(ol.authority_fulfillable_quantity, 0) = 0",
     );
     expect(counterFn).toContain("assertExpectedRowCount");
   });

@@ -1,6 +1,6 @@
 /** Draft-first administration for direct-geography shipping rate tables. */
 
-import type { Express, Response } from "express";
+import type { Express, Request, Response } from "express";
 import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -18,7 +18,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import {
   MAX_IMPORT_ROWS,
   findBandOverlaps,
-  findMissingStateDefaults,
+  findMissingRegionDefaults,
   parseRateTableCsv,
   type RateTableImportRow,
 } from "../../domain/rate-table-import";
@@ -34,6 +34,23 @@ import {
   cloneProductRules,
   validateRateTableProductRules,
 } from "../../application/product-rate-policy-admin.service";
+import {
+  RateCoverageAdminError,
+  saveRateCoverageManifest,
+  type DraftRateCoverageGroup,
+  type SavedRateCoverageGroup,
+} from "../../application/rate-coverage-admin.service";
+import {
+  findStaleDraftCoverageErrors,
+  type RateCoverageDestination,
+} from "../../domain/rate-coverage";
+import {
+  cloneRateTableCoverages,
+  loadRateBookDestinationGroups,
+  loadRateTableCoverages,
+  PostgresRateCoverageAdminTransaction,
+} from "../../infrastructure/rate-coverage.repository";
+import { persistAuditEvent } from "../../../../infrastructure/auditLogger";
 
 const INITIAL_RATE_TABLE_SERVICE_LEVEL_CODE = "standard";
 
@@ -76,13 +93,14 @@ const rateRowSchema = z.object({
 });
 
 // Editor-owned presentation state persisted with a draft so the visual
-// destination groups (names, membership, raw band inputs — including cells
-// the operator has not finished typing) survive save/reopen exactly. The
-// server never interprets this beyond bounding its size; expanded rate rows
-// remain the single pricing source of truth.
-const draftLayoutSchema = z.object({
-  version: z.literal(1),
-  groups: z.array(z.object({
+// destination groups (names, membership, explicit availability, raw band
+// inputs — including cells the operator has not finished typing) survive
+// save/reopen exactly. Expanded rate rows remain the amount authority; the
+// server also freezes destination and availability intent for each revision.
+const draftLayoutGroupSchema = z.object({
+    destinationGroupId: z.number().int().positive().nullable().optional(),
+    destinationGroupLockVersion:
+      z.number().int().positive().nullable().optional(),
     name: z.string().trim().max(120),
     originWarehouseId: z.number().int().positive().nullable(),
     regions: z.array(z.string().trim().length(2)).max(60),
@@ -99,7 +117,12 @@ const draftLayoutSchema = z.object({
     pricingModel: z.enum(["weight_bands", "base_plus_per_started_pound"]).optional(),
     baseChargeUsd: z.string().max(20).optional(),
     perStartedPoundUsd: z.string().max(20).optional(),
-  })).max(100),
+    availability: z.enum(["offered", "not_offered"]).default("offered"),
+  });
+
+const draftLayoutSchema = z.object({
+  version: z.union([z.literal(1), z.literal(2)]),
+  groups: z.array(draftLayoutGroupSchema).max(100),
 });
 
 const importSchema = z.object({
@@ -132,7 +155,9 @@ const INSERT_CHUNK_SIZE = 1000;
 
 type RateRowInput = z.infer<typeof rateRowSchema>;
 type ImportInput = z.infer<typeof importSchema>;
+type DraftLayoutInput = z.infer<typeof draftLayoutSchema>;
 type RateTableTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type RateTableExecutor = typeof db | RateTableTransaction;
 
 export function registerRateTableAdminRoutes(app: Express): void {
   app.get(
@@ -140,13 +165,21 @@ export function registerRateTableAdminRoutes(app: Express): void {
     requirePermission("settings", "view"),
     async (_req, res) => {
       try {
-        const [tables, coverage, productRuleCounts, books, assignments, serviceLevels] = await Promise.all([
+        const [
+          tables,
+          rowCoverage,
+          productRuleCounts,
+          books,
+          assignments,
+          serviceLevels,
+          destinationGroups,
+        ] = await Promise.all([
           db.select().from(shippingRateTables)
             .orderBy(desc(shippingRateTables.effectiveFrom), desc(shippingRateTables.id)),
           db.select({
             rateTableId: shippingRateTableRows.rateTableId,
             rowCount: sql<number>`count(*)::int`,
-            stateCount: sql<number>`count(distinct case when ${shippingRateTableRows.postalPrefix} is null then ${shippingRateTableRows.destinationRegion} end)::int`,
+            regionCount: sql<number>`count(distinct case when ${shippingRateTableRows.postalPrefix} is null then ${shippingRateTableRows.destinationRegion} end)::int`,
             zipOverrideCount: sql<number>`count(*) filter (where ${shippingRateTableRows.postalPrefix} is not null)::int`,
             minMeasure: sql<number>`min(${shippingRateTableRows.minMeasure})::int`,
             maxMeasure: sql<number>`max(${shippingRateTableRows.maxMeasure})::int`,
@@ -182,10 +215,24 @@ export function registerRateTableAdminRoutes(app: Express): void {
             .orderBy(asc(shippingRateBookAssignments.pricingChannel), asc(shippingRateBookAssignments.ratePurpose)),
           db.select().from(shippingServiceLevels)
             .orderBy(asc(shippingServiceLevels.sortOrder), asc(shippingServiceLevels.id)),
+          loadRateBookDestinationGroups(),
         ]);
+        const coverageManifests = await loadRateTableCoverages(
+          db,
+          tables
+            .filter((table) =>
+              table.status === "active" || table.status === "draft")
+            .map((table) => table.id),
+        );
 
         const assignmentsByBook = groupBy(assignments, (assignment) => assignment.rateBookId);
-        const coverageByTable = new Map(coverage.map((item) => [item.rateTableId, item]));
+        const rowCoverageByTable = new Map(
+          rowCoverage.map((item) => [item.rateTableId, item]),
+        );
+        const manifestsByTable = groupBy(
+          coverageManifests,
+          (manifest) => manifest.rateTableId,
+        );
         const productRuleCountByTable = new Map(
           productRuleCounts.map((item) => [item.rateTableId, item.productRuleCount]),
         );
@@ -199,17 +246,22 @@ export function registerRateTableAdminRoutes(app: Express): void {
         return res.json({
           rateBooks: hydratedBooks,
           serviceLevels,
+          destinationGroups,
           rateTables: tables.map((table) => ({
             ...table,
             rateBook: bookById.get(table.rateBookId) ?? null,
             serviceLevel: serviceLevelById.get(table.serviceLevelId) ?? null,
-            rowCount: coverageByTable.get(table.id)?.rowCount ?? 0,
-            stateCount: coverageByTable.get(table.id)?.stateCount ?? 0,
-            zipOverrideCount: coverageByTable.get(table.id)?.zipOverrideCount ?? 0,
-            minMeasure: coverageByTable.get(table.id)?.minMeasure ?? null,
-            maxMeasure: coverageByTable.get(table.id)?.hasOpenEnded
+            coverages: manifestsByTable.get(table.id) ?? [],
+            rowCount: rowCoverageByTable.get(table.id)?.rowCount ?? 0,
+            regionCount: rowCoverageByTable.get(table.id)?.regionCount ?? 0,
+            // Preserve the original field for callers deployed before regionCount.
+            stateCount: rowCoverageByTable.get(table.id)?.regionCount ?? 0,
+            zipOverrideCount:
+              rowCoverageByTable.get(table.id)?.zipOverrideCount ?? 0,
+            minMeasure: rowCoverageByTable.get(table.id)?.minMeasure ?? null,
+            maxMeasure: rowCoverageByTable.get(table.id)?.hasOpenEnded
               ? null
-              : coverageByTable.get(table.id)?.maxMeasure ?? null,
+              : rowCoverageByTable.get(table.id)?.maxMeasure ?? null,
             productRuleCount: productRuleCountByTable.get(table.id) ?? 0,
           })),
         });
@@ -244,7 +296,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
         return res.json({
           ...result,
           bandErrors: result.errors.length === 0 ? findBandOverlaps(result.rows) : [],
-          geographyErrors: result.errors.length === 0 ? findMissingStateDefaults(result.rows) : [],
+          geographyErrors: result.errors.length === 0 ? findMissingRegionDefaults(result.rows) : [],
         });
       } catch (error) {
         return sendRateTableAdminError(res, error, "parse rate table CSV");
@@ -257,11 +309,12 @@ export function registerRateTableAdminRoutes(app: Express): void {
     requirePermission("settings", "edit"),
     async (req, res) => {
       try {
+        const actor = auditActor(req);
         const parsed = importSchema.safeParse(req.body);
         if (!parsed.success) return sendInvalidInput(res, parsed.error.issues);
         const prepared = await prepareRateTableImport(parsed.data);
         const now = new Date();
-        const rateTable = await db.transaction(async (tx) => {
+        const result = await db.transaction(async (tx) => {
           const [table] = await tx.insert(shippingRateTables).values({
             rateBookId: prepared.rateBook.id,
             serviceLevelId: prepared.serviceLevel.id,
@@ -272,10 +325,36 @@ export function registerRateTableAdminRoutes(app: Express): void {
             metadata: importMetadata(prepared.rows.length, now, prepared.draftLayout),
           }).returning();
           await insertRateRows(tx, table.id, prepared.rows);
-          return table;
+          const manifest = await persistPreparedCoverageManifest(
+            tx,
+            table.id,
+            prepared,
+            actor,
+            now,
+          );
+          const [savedTable] = await tx.update(shippingRateTables)
+            .set({
+              metadata: importMetadata(
+                prepared.rows.length,
+                now,
+                manifest.draftLayout,
+              ),
+            })
+            .where(eq(shippingRateTables.id, table.id))
+            .returning();
+          await persistAuditEvent(tx, {
+            actor,
+            action: "shipping.rate_table_draft.created",
+            target: `shipping.rate_tables:${table.id}`,
+            changes: {
+              before: null,
+              after: rateTableAuditState(savedTable, prepared.rows.length),
+            },
+          }, { timestamp: now });
+          return { rateTable: savedTable, ...manifest };
         });
         return res.status(201).json({
-          rateTable,
+          ...result,
           rowCount: prepared.rows.length,
           warnings: prepared.analysis.warnings,
           analysis: prepared.analysis,
@@ -291,12 +370,16 @@ export function registerRateTableAdminRoutes(app: Express): void {
     requirePermission("settings", "edit"),
     async (req, res) => {
       try {
+        const actor = auditActor(req);
         const id = parseTableId(req.params.id);
         const parsed = importSchema.safeParse(req.body);
         if (!parsed.success) return sendInvalidInput(res, parsed.error.issues);
         const prepared = await prepareRateTableImport(parsed.data);
         const now = new Date();
-        const rateTable = await db.transaction(async (tx) => {
+        const result = await db.transaction(async (tx) => {
+          const [before] = await tx.select().from(shippingRateTables)
+            .where(eq(shippingRateTables.id, id))
+            .limit(1);
           const [updated] = await tx.update(shippingRateTables)
             .set({
               rateBookId: prepared.rateBook.id,
@@ -312,10 +395,38 @@ export function registerRateTableAdminRoutes(app: Express): void {
           if (!updated) throw draftRequiredError("Only a draft rate table can be replaced.");
           await tx.delete(shippingRateTableRows).where(eq(shippingRateTableRows.rateTableId, id));
           await insertRateRows(tx, id, prepared.rows);
-          return updated;
+          const manifest = await persistPreparedCoverageManifest(
+            tx,
+            id,
+            prepared,
+            actor,
+            now,
+          );
+          const [savedTable] = await tx.update(shippingRateTables)
+            .set({
+              metadata: importMetadata(
+                prepared.rows.length,
+                now,
+                manifest.draftLayout,
+              ),
+            })
+            .where(eq(shippingRateTables.id, id))
+            .returning();
+          await persistAuditEvent(tx, {
+            actor,
+            action: "shipping.rate_table_draft.saved",
+            target: `shipping.rate_tables:${id}`,
+            changes: {
+              before: before
+                ? rateTableAuditState(before, null)
+                : null,
+              after: rateTableAuditState(savedTable, prepared.rows.length),
+            },
+          }, { timestamp: now });
+          return { rateTable: savedTable, ...manifest };
         });
         return res.json({
-          rateTable,
+          ...result,
           rowCount: prepared.rows.length,
           warnings: prepared.analysis.warnings,
           analysis: prepared.analysis,
@@ -403,6 +514,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
     requirePermission("settings", "edit"),
     async (req, res) => {
       try {
+        const actor = auditActor(req);
         const id = parseTableId(req.params.id);
         const detail = await loadRateTableDetail(id);
         if (!detail) throw notFoundError();
@@ -410,7 +522,8 @@ export function registerRateTableAdminRoutes(app: Express): void {
           throw new RateTableAdminError(409, "SHIPPING_ADMIN_ALREADY_DRAFT", "This table is already editable.");
         }
         const now = new Date();
-        const rateTable = await db.transaction(async (tx) => {
+        const result = await db.transaction(async (tx) => {
+          const sourceLayout = readDraftLayout(detail.rateTable.metadata);
           const [draft] = await tx.insert(shippingRateTables).values({
             rateBookId: detail.rateTable.rateBookId,
             serviceLevelId: detail.rateTable.serviceLevelId,
@@ -420,6 +533,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
             effectiveFrom: now,
             effectiveTo: null,
             metadata: {
+              ...metadataRecord(detail.rateTable.metadata),
               source: "admin-clone",
               clonedFromRateTableId: id,
               clonedAt: now.toISOString(),
@@ -428,9 +542,65 @@ export function registerRateTableAdminRoutes(app: Express): void {
           }).returning();
           await insertRateRows(tx, draft.id, detail.rows);
           await cloneProductRules(tx, id, draft.id);
-          return draft;
+          const clonedCoverageCount = await cloneRateTableCoverages(
+            tx,
+            id,
+            draft.id,
+          );
+          let draftLayout = sourceLayout;
+          let coverages = clonedCoverageCount > 0
+            ? await loadRateTableCoverages(tx, [draft.id])
+            : [];
+          if (clonedCoverageCount === 0 && sourceLayout !== null) {
+            const legacyGroups = coverageGroupsFromDraftLayout(sourceLayout);
+            if (legacyGroups.length > 0) {
+              const saved = await saveRateCoverageManifest(
+                new PostgresRateCoverageAdminTransaction(tx),
+                {
+                  rateBookId: detail.rateTable.rateBookId,
+                  rateTableId: draft.id,
+                  groups: legacyGroups,
+                  actor,
+                  now,
+                },
+              );
+              coverages = saved.coverages;
+              draftLayout = layoutWithSavedGroupIdentities(
+                sourceLayout,
+                saved.groups,
+              );
+            }
+          }
+          const [savedDraft] = await tx.update(shippingRateTables)
+            .set({
+              metadata: {
+                ...metadataRecord(draft.metadata),
+                ...(draftLayout === null ? {} : { draftLayout }),
+                ...(
+                  coverages.length === 0
+                    ? {}
+                    : { coverageManifestVersion: 1 }
+                ),
+              },
+            })
+            .where(eq(shippingRateTables.id, draft.id))
+            .returning();
+          await persistAuditEvent(tx, {
+            actor,
+            action: "shipping.rate_table_draft.cloned",
+            target: `shipping.rate_tables:${draft.id}`,
+            changes: {
+              before: null,
+              after: rateTableAuditState(savedDraft, detail.rows.length),
+            },
+            context: { sourceRateTableId: id },
+          }, { timestamp: now });
+          return { rateTable: savedDraft, coverages, draftLayout };
         });
-        return res.status(201).json({ rateTable, rowCount: detail.rows.length });
+        return res.status(201).json({
+          ...result,
+          rowCount: detail.rows.length,
+        });
       } catch (error) {
         return sendRateTableAdminError(res, error, "create editable rate-table draft");
       }
@@ -442,40 +612,58 @@ export function registerRateTableAdminRoutes(app: Express): void {
     requirePermission("settings", "edit"),
     async (req, res) => {
       try {
+        const actor = auditActor(req);
         const id = parseTableId(req.params.id);
         const parsed = activateSchema.safeParse(req.body ?? {});
         if (!parsed.success) return sendInvalidInput(res, parsed.error.issues);
-        const detail = await loadRateTableDetail(id);
-        if (!detail) throw notFoundError();
-        if (!canActivateRateTable(detail.rateTable.status)) throw draftRequiredError("Only a draft rate table can be activated.");
-        if (!detail.rateBook || detail.rateBook.status !== "active") {
-          throw new RateTableAdminError(409, "SHIPPING_ADMIN_RATE_BOOK_INACTIVE", "The rate book must be active before this table can be activated.");
-        }
-        const activeRateBook = detail.rateBook;
-        if (!detail.analysis.canActivate) {
-          throw new RateTableAdminError(
-            409,
-            "SHIPPING_ADMIN_ACTIVATION_BLOCKED",
-            "Resolve the rate-table validation errors before activation.",
-            detail.analysis.errors,
-          );
-        }
-        const warnings = [...detail.analysis.warnings];
-        if (!activeRateBook.assignments.some((assignment) => assignment.isActive)) {
-          warnings.push("This rate book is not assigned to an active channel and purpose.");
-        }
-        if (warnings.length > 0 && !parsed.data.confirmWarnings) {
-          throw new RateTableAdminError(
-            409,
-            "SHIPPING_ADMIN_ACTIVATION_CONFIRMATION_REQUIRED",
-            "Review and confirm the activation warnings.",
-            warnings,
-          );
-        }
 
         const now = new Date();
-        const activated = await db.transaction(async (tx) => {
+        const activation = await db.transaction(async (tx) => {
           await tx.execute(sql`SELECT id FROM shipping.rate_tables WHERE id = ${id} FOR UPDATE`);
+          const [lockedTarget] = await tx
+            .select({
+              rateBookId: shippingRateTables.rateBookId,
+            })
+            .from(shippingRateTables)
+            .where(eq(shippingRateTables.id, id))
+            .limit(1);
+          if (!lockedTarget) throw notFoundError();
+          // Serializes competing draft activations for one pricing program so
+          // superseding the prior live revision cannot race another activation.
+          await tx.execute(sql`
+            SELECT id
+            FROM shipping.rate_books
+            WHERE id = ${lockedTarget.rateBookId}
+            FOR UPDATE
+          `);
+          const detail = await loadRateTableDetail(id, tx);
+          if (!detail) throw notFoundError();
+          if (!canActivateRateTable(detail.rateTable.status)) {
+            throw draftRequiredError("Only a draft rate table can be activated.");
+          }
+          if (!detail.rateBook || detail.rateBook.status !== "active") {
+            throw new RateTableAdminError(
+              409,
+              "SHIPPING_ADMIN_RATE_BOOK_INACTIVE",
+              "The rate book must be active before this table can be activated.",
+            );
+          }
+          if (!detail.analysis.canActivate) {
+            throw new RateTableAdminError(
+              409,
+              "SHIPPING_ADMIN_ACTIVATION_BLOCKED",
+              "Resolve the rate-table validation errors before activation.",
+              detail.analysis.errors,
+            );
+          }
+          const warnings = [...detail.analysis.warnings];
+          if (!detail.rateBook.assignments.some(
+            (assignment) => assignment.isActive,
+          )) {
+            warnings.push(
+              "This rate book is not assigned to an active channel and purpose.",
+            );
+          }
           const productPolicyErrors = await validateRateTableProductRules(id, tx);
           if (productPolicyErrors.length > 0) {
             throw new RateTableAdminError(
@@ -485,23 +673,53 @@ export function registerRateTableAdminRoutes(app: Express): void {
               productPolicyErrors,
             );
           }
+          if (warnings.length > 0 && !parsed.data.confirmWarnings) {
+            throw new RateTableAdminError(
+              409,
+              "SHIPPING_ADMIN_ACTIVATION_CONFIRMATION_REQUIRED",
+              "Review and confirm the activation warnings.",
+              warnings,
+            );
+          }
           const [target] = await tx.update(shippingRateTables)
             .set({ status: "active", effectiveFrom: now, effectiveTo: null })
             .where(and(eq(shippingRateTables.id, id), eq(shippingRateTables.status, "draft")))
             .returning();
-          if (!target) return null;
+          if (!target) {
+            throw draftRequiredError(
+              "The table is no longer a draft. Refresh and try again.",
+            );
+          }
           await tx.update(shippingRateTables)
             .set({ status: "superseded", effectiveTo: now })
             .where(and(
-              eq(shippingRateTables.rateBookId, activeRateBook.id),
+              eq(shippingRateTables.rateBookId, detail.rateBook.id),
               eq(shippingRateTables.serviceLevelId, target.serviceLevelId),
               eq(shippingRateTables.status, "active"),
               ne(shippingRateTables.id, target.id),
             ));
-          return target;
+          await persistAuditEvent(tx, {
+            actor,
+            action: "shipping.rate_table.activated",
+            target: `shipping.rate_tables:${target.id}`,
+            changes: {
+              before: {
+                status: "draft",
+                effectiveFrom: detail.rateTable.effectiveFrom,
+              },
+              after: {
+                status: "active",
+                effectiveFrom: now.toISOString(),
+              },
+            },
+            context: {
+              rateBookId: detail.rateBook.id,
+              serviceLevelId: target.serviceLevelId,
+            },
+          }, { timestamp: now });
+          return { rateTable: target, warnings };
         });
-        if (!activated) throw draftRequiredError("The table is no longer a draft. Refresh and try again.");
-        return res.json({ rateTable: activated, warnings });
+        return res.json(activation);
       } catch (error) {
         return sendRateTableAdminError(res, error, "activate rate table");
       }
@@ -566,12 +784,12 @@ async function prepareRateTableImport(input: ImportInput) {
     if (bandErrors.length > 0) {
       throw new RateTableAdminError(400, "SHIPPING_ADMIN_RATE_BANDS_INVALID", "Rate bands overlap.", bandErrors);
     }
-    const geographyErrors = findMissingStateDefaults(rows);
+    const geographyErrors = findMissingRegionDefaults(rows);
     if (geographyErrors.length > 0) {
       throw new RateTableAdminError(
         400,
         "SHIPPING_ADMIN_STATE_FALLBACK_REQUIRED",
-        "Every ZIP override requires a statewide fallback rate.",
+        "Every ZIP override requires a region-wide fallback rate.",
         geographyErrors,
       );
     }
@@ -616,7 +834,15 @@ async function prepareRateTableImport(input: ImportInput) {
       `${serviceLevel.code} requires ${expectedBasis} pricing.`,
     );
   }
-  const analysis = analyzeRateTable(rows, input.pricingBasis);
+  const coverageGroups = input.draftLayout === null
+    || input.draftLayout === undefined
+    ? null
+    : coverageGroupsFromDraftLayout(input.draftLayout);
+  const analysis = analyzeRateTable(
+    rows,
+    input.pricingBasis,
+    coverageGroups,
+  );
   if (!input.allowIncomplete && !analysis.canActivate) {
     throw new RateTableAdminError(
       400,
@@ -634,6 +860,7 @@ async function prepareRateTableImport(input: ImportInput) {
     currency: input.currency.toUpperCase(),
     effectiveFrom: input.effectiveFrom,
     draftLayout: input.draftLayout ?? null,
+    coverageGroups,
   };
 }
 
@@ -682,19 +909,28 @@ async function insertRateRows(
   }
 }
 
-async function loadRateTableDetail(id: number) {
-  const [rateTable] = await db.select().from(shippingRateTables)
+async function loadRateTableDetail(
+  id: number,
+  executor: RateTableExecutor = db,
+) {
+  const [rateTable] = await executor.select().from(shippingRateTables)
     .where(eq(shippingRateTables.id, id)).limit(1);
   if (!rateTable) return null;
 
-  const [rateBook, serviceLevel, rows] = await Promise.all([
-    db.select().from(shippingRateBooks)
+  const [
+    rateBook,
+    serviceLevel,
+    rows,
+    coverages,
+    destinationGroups,
+  ] = await Promise.all([
+    executor.select().from(shippingRateBooks)
       .where(eq(shippingRateBooks.id, rateTable.rateBookId)).limit(1)
       .then((items) => items[0] ?? null),
-    db.select().from(shippingServiceLevels)
+    executor.select().from(shippingServiceLevels)
       .where(eq(shippingServiceLevels.id, rateTable.serviceLevelId)).limit(1)
       .then((items) => items[0] ?? null),
-    db.select({
+    executor.select({
       id: shippingRateTableRows.id,
       originWarehouseId: shippingRateTableRows.originWarehouseId,
       originWarehouseName: warehouses.name,
@@ -718,6 +954,8 @@ async function loadRateTableDetail(id: number) {
         asc(shippingRateTableRows.originWarehouseId),
         asc(shippingRateTableRows.minMeasure),
       ),
+    loadRateTableCoverages(executor, [id]),
+    loadRateBookDestinationGroups(executor, [rateTable.rateBookId]),
   ]);
 
   const [zoneSet, assignments] = rateBook === null
@@ -725,10 +963,10 @@ async function loadRateTableDetail(id: number) {
     : await Promise.all([
         rateBook.zoneSetId === null
           ? Promise.resolve(null)
-          : db.select().from(shippingZoneSets)
+          : executor.select().from(shippingZoneSets)
               .where(eq(shippingZoneSets.id, rateBook.zoneSetId)).limit(1)
               .then((items) => items[0] ?? null),
-        db.select({
+        executor.select({
           id: shippingRateBookAssignments.id,
           pricingChannel: shippingRateBookAssignments.pricingChannel,
           ratePurpose: shippingRateBookAssignments.ratePurpose,
@@ -746,6 +984,18 @@ async function loadRateTableDetail(id: number) {
     ...row,
     chargeModel: row.chargeModel as ShippingRateChargeModel,
   }));
+  const hasCoverageManifest =
+    metadataRecord(rateTable.metadata).coverageManifestVersion === 1;
+
+  const analysis = analyzeRateTable(
+    normalizedRows,
+    rateTable.pricingBasis as "shipment_weight" | "pallet_count",
+    coverages.length > 0 || hasCoverageManifest ? coverages : null,
+  );
+  const staleCoverageErrors = rateTable.status === "draft"
+    && hasCoverageManifest
+    ? findStaleDraftCoverageErrors(coverages, destinationGroups)
+    : [];
 
   return {
     rateTable,
@@ -753,7 +1003,17 @@ async function loadRateTableDetail(id: number) {
     rateBook: rateBook === null ? null : { ...rateBook, zoneSet, assignments },
     pricingMode: "state_zip" as const,
     rows: normalizedRows,
-    analysis: analyzeRateTable(normalizedRows, rateTable.pricingBasis as "shipment_weight" | "pallet_count"),
+    coverages,
+    analysis: staleCoverageErrors.length === 0
+      ? analysis
+      : {
+          ...analysis,
+          canActivate: false,
+          errors: [...new Set([
+            ...analysis.errors,
+            ...staleCoverageErrors,
+          ])],
+        },
   };
 }
 
@@ -862,8 +1122,190 @@ function importMetadata(
     pricingGeography: "state_zip",
     importedAt: importedAt.toISOString(),
     rowCount,
-    ...(draftLayout === null ? {} : { draftLayout }),
+    ...(draftLayout === null
+      ? {}
+      : { draftLayout, coverageManifestVersion: 1 }),
   };
+}
+
+async function persistPreparedCoverageManifest(
+  tx: RateTableTransaction,
+  rateTableId: number,
+  prepared: Awaited<ReturnType<typeof prepareRateTableImport>>,
+  actor: string,
+  now: Date,
+): Promise<{
+  draftLayout: DraftLayoutInput | null;
+  coverages: Awaited<ReturnType<typeof loadRateTableCoverages>>;
+}> {
+  const coverageTx = new PostgresRateCoverageAdminTransaction(tx);
+  if (prepared.coverageGroups === null || prepared.draftLayout === null) {
+    const before = await coverageTx.loadRateTableCoverages(rateTableId);
+    const coverages = await coverageTx.replaceRateTableCoverages({
+      rateTableId,
+      groups: [],
+    });
+    if (before.length > 0) {
+      await coverageTx.persistAudit({
+        actor,
+        action: "shipping.rate_table_coverage.cleared",
+        target: `shipping.rate_tables:${rateTableId}`,
+        changes: {
+          before: { coverageCount: before.length },
+          after: { coverageCount: 0 },
+        },
+      }, now);
+    }
+    return { draftLayout: null, coverages };
+  }
+
+  const saved = await saveRateCoverageManifest(coverageTx, {
+    rateBookId: prepared.rateBook.id,
+    rateTableId,
+    groups: prepared.coverageGroups,
+    actor,
+    now,
+  });
+  return {
+    draftLayout: layoutWithSavedGroupIdentities(
+      prepared.draftLayout,
+      saved.groups,
+    ),
+    coverages: saved.coverages,
+  };
+}
+
+function coverageGroupsFromDraftLayout(
+  layout: DraftLayoutInput,
+): DraftRateCoverageGroup[] {
+  return layout.groups.map((group, index) => ({
+    destinationGroupId: group.destinationGroupId ?? null,
+    destinationGroupLockVersion:
+      group.destinationGroupLockVersion ?? null,
+    name: destinationGroupName(group, index),
+    originWarehouseId: group.originWarehouseId,
+    availability: group.availability,
+    sortOrder: index,
+    destinations: draftGroupDestinations(group),
+  }));
+}
+
+function layoutWithSavedGroupIdentities(
+  layout: DraftLayoutInput,
+  savedGroups: readonly SavedRateCoverageGroup[],
+): DraftLayoutInput {
+  if (layout.groups.length !== savedGroups.length) {
+    throw new RateCoverageAdminError(
+      500,
+      "SHIPPING_ADMIN_COVERAGE_MANIFEST_MISMATCH",
+      "Saved destination groups did not match the draft layout.",
+    );
+  }
+  return {
+    version: 2,
+    groups: layout.groups.map((group, index) => ({
+      ...group,
+      destinationGroupId: savedGroups[index].destinationGroupId,
+      destinationGroupLockVersion:
+        savedGroups[index].destinationGroupLockVersion,
+      name: savedGroups[index].name,
+      availability: savedGroups[index].availability,
+    })),
+  };
+}
+
+function draftGroupDestinations(
+  group: DraftLayoutInput["groups"][number],
+): RateCoverageDestination[] {
+  return [
+    ...group.regions.map((region) => ({
+      destinationCountry: "US",
+      destinationRegion: region.trim().toUpperCase(),
+      postalPrefix: null,
+    })),
+    ...group.zipEntries.flatMap((entry) =>
+      entry.prefixes.map((prefix) => ({
+        destinationCountry: "US",
+        destinationRegion: entry.state.trim().toUpperCase(),
+        postalPrefix: prefix.trim().toUpperCase(),
+      }))),
+  ];
+}
+
+function destinationGroupName(
+  group: DraftLayoutInput["groups"][number],
+  index: number,
+): string {
+  const explicit = group.name.trim();
+  if (explicit !== "") return explicit;
+
+  const regions = [...new Set(
+    group.regions.map((region) => region.trim().toUpperCase()),
+  )].sort();
+  if (regions.length === 1) return regions[0];
+  if (regions.length > 1) {
+    const shown = regions.slice(0, 3).join(", ");
+    return regions.length <= 3
+      ? shown
+      : `${shown} + ${regions.length - 3} more`;
+  }
+  const zipRegions = [...new Set(
+    group.zipEntries.map((entry) => entry.state.trim().toUpperCase()),
+  )].sort();
+  if (zipRegions.length > 0) return `${zipRegions.join(", ")} ZIP overrides`;
+  return `Destination group ${index + 1}`;
+}
+
+function readDraftLayout(metadata: unknown): DraftLayoutInput | null {
+  const candidate = metadataRecord(metadata).draftLayout;
+  const parsed = draftLayoutSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
+}
+
+function metadataRecord(metadata: unknown): Record<string, unknown> {
+  return metadata !== null
+    && typeof metadata === "object"
+    && !Array.isArray(metadata)
+    ? { ...(metadata as Record<string, unknown>) }
+    : {};
+}
+
+function rateTableAuditState(
+  table: {
+    id: number;
+    rateBookId: number | null;
+    serviceLevelId: number;
+    pricingBasis: string;
+    currency: string;
+    status: string;
+    effectiveFrom: Date;
+    effectiveTo: Date | null;
+  },
+  rowCount: number | null,
+): Record<string, unknown> {
+  return {
+    id: table.id,
+    rateBookId: table.rateBookId,
+    serviceLevelId: table.serviceLevelId,
+    pricingBasis: table.pricingBasis,
+    currency: table.currency,
+    status: table.status,
+    effectiveFrom: table.effectiveFrom.toISOString(),
+    effectiveTo: table.effectiveTo?.toISOString() ?? null,
+    rowCount,
+  };
+}
+
+function auditActor(req: Request): string {
+  const actor = req.session?.user?.id;
+  if (!actor) {
+    throw new RateTableAdminError(
+      401,
+      "SHIPPING_ADMIN_ACTOR_REQUIRED",
+      "An authenticated operator is required to change shipping rates.",
+    );
+  }
+  return actor;
 }
 
 function parseTableId(value: string): number {
@@ -908,12 +1350,39 @@ function sendInvalidInput(res: Response, issues: z.ZodIssue[]): Response {
 }
 
 function sendRateTableAdminError(res: Response, error: unknown, action: string): Response {
+  if (error instanceof RateCoverageAdminError) {
+    return res.status(error.status).json({
+      error: {
+        code: error.code,
+        message: error.message,
+        details: error.details,
+      },
+    });
+  }
   if (error instanceof RateTableAdminError) {
     return res.status(error.status).json({
       error: { code: error.code, message: error.message, details: error.details },
     });
   }
-  if (typeof error === "object" && error !== null && "code" in error && error.code === "23505") {
+  if (
+    typeof error === "object"
+    && error !== null
+    && "code" in error
+    && error.code === "23505"
+  ) {
+    const constraint = "constraint" in error
+      && typeof error.constraint === "string"
+      ? error.constraint
+      : null;
+    if (constraint === "shipping_rate_book_destination_group_name_idx") {
+      return res.status(409).json({
+        error: {
+          code: "SHIPPING_ADMIN_DESTINATION_GROUP_NAME_CONFLICT",
+          message:
+            "A destination group with that name already exists in this pricing program.",
+        },
+      });
+    }
     return res.status(409).json({
       error: {
         code: "SHIPPING_ADMIN_DUPLICATE_RATE_ROW",

@@ -630,6 +630,12 @@
   "shipping.rate_book_assignments": [
     "modules/shipping-engine"
   ],
+  "shipping.rate_book_destination_group_members": [
+    "modules/shipping-engine"
+  ],
+  "shipping.rate_book_destination_groups": [
+    "modules/shipping-engine"
+  ],
   "shipping.rate_books": [
     "modules/shipping-engine"
   ],
@@ -640,6 +646,12 @@
     "modules/shipping-engine"
   ],
   "shipping.rate_rules": [
+    "modules/shipping-engine"
+  ],
+  "shipping.rate_table_coverage_destinations": [
+    "modules/shipping-engine"
+  ],
+  "shipping.rate_table_coverages": [
     "modules/shipping-engine"
   ],
   "shipping.rate_table_rows": [
@@ -731,6 +743,9 @@
   ],
   "wms.fulfillment_plans": [
     "modules/oms"
+  ],
+  "wms.oms_wms_authority_cleanup_audit": [
+    "modules/wms"
   ],
   "wms.order_items": [
     "modules/catalog",

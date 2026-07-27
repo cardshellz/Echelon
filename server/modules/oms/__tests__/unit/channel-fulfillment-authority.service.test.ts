@@ -87,6 +87,73 @@ describe("channel fulfillment authority service", () => {
     );
   });
 
+  it("excludes suppressed providers before evaluating channel writeback policy", () => {
+    const repositorySource = readFileSync(
+      resolve(__dirname, "../../channel-fulfillment-authority.repository.ts"),
+      "utf8",
+    );
+    const materializationSource = repositorySource.match(
+      /async function materializePhysicalPackage[\s\S]*?(?=\n  async function claimCommands)/,
+    )?.[0];
+
+    expect(materializationSource).toBeDefined();
+    expect(materializationSource).toMatch(
+      /const writebackCandidateItems = materializedCustomerItems\.filter\([\s\S]*?suppressChannelProviders/,
+    );
+    expect(materializationSource).toMatch(
+      /findLineWritebackEligibility\(\s*tx,\s*writebackCandidateItems,\s*\)/,
+    );
+    expect(materializationSource).not.toMatch(
+      /findLineWritebackEligibility\(\s*tx,\s*materializedCustomerItems,\s*\)/,
+    );
+  });
+
+  it("passes historical channel suppression through legacy shipment materialization", async () => {
+    const repository = repositoryMock([]);
+    vi.mocked(repository.resolveLegacyPhysicalPackage).mockResolvedValue({
+      legacyWmsShipmentIds: [501],
+      shippingProvider: "shipstation",
+      providerPhysicalShipmentId: "physical-1",
+      providerOrderId: "order-1",
+      providerOrderKey: "key-1",
+      trackingNumber: "1ZTEST",
+      carrier: "UPS",
+      trackingUrl: null,
+      serviceCode: null,
+      shippedAt: new Date("2026-07-22T12:00:00.000Z"),
+      source: "shipstation",
+      correlationId: null,
+      causationId: null,
+      legacyHeaderPolicy: "strict",
+    });
+    vi.mocked(repository.materializePhysicalPackage).mockResolvedValue({
+      physicalShipmentId: 200,
+      shipmentRequestId: 201,
+      fulfillmentPlanIds: Object.freeze([202]),
+      channelCommands: Object.freeze([]),
+      replayed: false,
+    });
+    const projector = { projectPhysicalShipment: vi.fn().mockResolvedValue(undefined) };
+    const service = createChannelFulfillmentAuthorityService({
+      repository,
+      projector,
+      providerExecutor: { execute: vi.fn() },
+    });
+
+    await service.ensureLegacyShipment(501, {
+      source: "script:historical-refund-authority-repair",
+      suppressChannelProviders: ["shopify"],
+    });
+
+    expect(repository.materializePhysicalPackage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "script:historical-refund-authority-repair",
+        suppressChannelProviders: ["shopify"],
+      }),
+    );
+    expect(projector.projectPhysicalShipment).toHaveBeenCalledWith(200);
+  });
+
   it("completes a leased command only after its provider succeeds", async () => {
     const repository = repositoryMock([command()]);
     const providerExecutor = {

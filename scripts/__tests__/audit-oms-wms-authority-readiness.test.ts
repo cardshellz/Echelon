@@ -117,6 +117,26 @@ describe("audit-oms-wms-authority-readiness", () => {
     expect(counterCheck!.sql).toContain("actual_materialized_wms_quantity");
   });
 
+  it("exposes proof context for materialized counter drift without assigning repair authority", async () => {
+    const { buildReadinessChecks } = await loadAuditModule();
+    const counterCheck = buildReadinessChecks()
+      .find((check) => check.id === "wms_order_materialized_counter_drift");
+
+    expect(counterCheck).toBeDefined();
+    expect(counterCheck!.sql).toContain("oms_order.external_order_number");
+    expect(counterCheck!.sql).toContain("LOWER(channel.provider) AS channel_provider");
+    expect(counterCheck!.sql).toContain("drift.authority_fulfillable_quantity");
+    expect(counterCheck!.sql).toContain("FROM oms.order_line_adjustments adjustment");
+    expect(counterCheck!.sql).toContain("FROM wms.order_items oi");
+    expect(counterCheck!.sql).toContain("FROM wms.fulfillment_plan_lines plan_line");
+    expect(counterCheck!.sql).toContain("LEFT JOIN wms.outbound_shipment_items shipment_item");
+    expect(counterCheck!.sql).toContain("shipped_evidence_without_active_materialization");
+    expect(counterCheck!.sql).toContain("cancelled_wms_line_with_positive_authority");
+    expect(counterCheck!.sql).toContain("positive_authority_without_wms_lineage");
+    expect(counterCheck!.sql).toContain("unsupported_materialization_drift");
+    expect(counterCheck!.sql).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
+  });
+
   it("validates shipment items against purpose-specific authority", async () => {
     const { buildReadinessChecks } = await loadAuditModule();
     const authorityCheck = buildReadinessChecks()

@@ -46,6 +46,7 @@ import {
   formatDate,
   getJson,
   postJson,
+  rateTableRegionCount,
   rateTableDetailKey,
   type RateBookSummary,
   type RateTableAnalysis,
@@ -169,7 +170,7 @@ export function ReviewStep({
       {coverage && (
         <section className="grid grid-cols-2 gap-4 rounded-md border p-4 sm:grid-cols-5">
           <Stat label="Destination groups" value={groups.length.toLocaleString()} />
-          <Stat label="States covered" value={String(coverage.stateCount)} />
+          <Stat label="US regions priced" value={String(rateTableRegionCount(coverage))} />
           <Stat label="ZIP overrides" value={String(coverage.zipOverrideCount)} />
           <Stat
             label={pricingBasis === "pallet_count" ? "Pallet coverage" : "Weight coverage"}

@@ -84,7 +84,7 @@ export async function runManualRateQuote(
   if (region === null) {
     throw new ManualRateQuoteError(
       "SHIPPING_RATE_TEST_REGION_INVALID",
-      "A valid United States state or territory is required.",
+      "A valid United States postal region is required.",
       { destinationRegion: input.destinationRegion },
     );
   }

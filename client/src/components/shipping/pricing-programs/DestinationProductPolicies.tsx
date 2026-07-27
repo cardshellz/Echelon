@@ -321,14 +321,13 @@ function RuleDialog({
     if ((selectorKind === "manual" && selectedVariantIds.length === 0) || (selectorKind !== "manual" && selectorRef === "")) {
       return setFormError("Select the products this rule applies to.");
     }
-    const parsedRate = parseUsd(rateUsd);
-    const parsedPerPound = parseUsd(perPoundUsd);
-    const parsedThreshold = parseUsd(thresholdUsd);
-    const emittedBands = behavior === "fixed_band" ? emitBands(bands) : [];
-    if ((behavior === "fixed" || behavior === "surcharge") && parsedRate === null) return setFormError("Enter a valid shipping amount.");
-    if (behavior === "base_plus_per_started_pound" && (parsedRate === null || parsedPerPound === null)) return setFormError("Enter valid base and per-pound amounts.");
-    if (behavior === "free_threshold" && parsedThreshold === null) return setFormError("Enter a valid free-shipping threshold.");
-    if (behavior === "fixed_band" && emittedBands === null) return setFormError("Complete gapless weight bands with an open-ended final row.");
+    const pricing = resolveRulePricing(ruleKind, behavior, {
+      rateUsd,
+      perPoundUsd,
+      thresholdUsd,
+      bands,
+    });
+    if (!pricing.ok) return setFormError(pricing.message);
 
     const action = ruleKind === "restriction" ? "block" : behavior;
     const kind = ruleKind === "restriction"
@@ -346,10 +345,10 @@ function RuleDialog({
       measurementScope: ruleKind === "restriction" ? "matched_items" : measurementScope,
       destinationScope: scopeFromGroup(group),
       selector,
-      rateCents: behavior === "fixed" || behavior === "surcharge" || behavior === "base_plus_per_started_pound" ? parsedRate : null,
-      perStartedPoundCents: behavior === "base_plus_per_started_pound" ? parsedPerPound : null,
-      thresholdCents: behavior === "free_threshold" ? parsedThreshold : null,
-      bands: emittedBands ?? [],
+      rateCents: pricing.rateCents,
+      perStartedPoundCents: pricing.perStartedPoundCents,
+      thresholdCents: pricing.thresholdCents,
+      bands: pricing.bands,
     });
   };
 
@@ -621,6 +620,76 @@ function ruleActionLabel(rule: ProductPolicyRule): string {
   if (rule.action === "base_plus_per_started_pound") return `${usdFromCents(rule.rateCents ?? 0)} + ${usdFromCents(rule.perStartedPoundCents ?? 0)}/lb`;
   if (rule.action === "surcharge") return `${usdFromCents(rule.rateCents ?? 0)} surcharge`;
   return `Free over ${usdFromCents(rule.thresholdCents ?? 0)}`;
+}
+
+interface RulePricingInput {
+  rateUsd: string;
+  perPoundUsd: string;
+  thresholdUsd: string;
+  bands: Array<{ maxLb: string; rateUsd: string; openEnded: boolean }>;
+}
+
+type RulePricingResult =
+  | {
+      ok: true;
+      rateCents: number | null;
+      perStartedPoundCents: number | null;
+      thresholdCents: number | null;
+      bands: Array<{ minMeasure: number; maxMeasure: number | null; rateCents: number }>;
+    }
+  | { ok: false; message: string };
+
+export function resolveRulePricing(
+  ruleKind: "restriction" | "exception",
+  behavior: Behavior,
+  input: RulePricingInput,
+): RulePricingResult {
+  if (ruleKind === "restriction") {
+    return {
+      ok: true,
+      rateCents: null,
+      perStartedPoundCents: null,
+      thresholdCents: null,
+      bands: [],
+    };
+  }
+
+  const parsedRate = parseUsd(input.rateUsd);
+  const parsedPerPound = parseUsd(input.perPoundUsd);
+  const parsedThreshold = parseUsd(input.thresholdUsd);
+  const emittedBands = behavior === "fixed_band" ? emitBands(input.bands) : [];
+  if ((behavior === "fixed" || behavior === "surcharge") && parsedRate === null) {
+    return { ok: false, message: "Enter a valid shipping amount." };
+  }
+  if (
+    behavior === "base_plus_per_started_pound"
+    && (parsedRate === null || parsedPerPound === null)
+  ) {
+    return { ok: false, message: "Enter valid base and per-pound amounts." };
+  }
+  if (behavior === "free_threshold" && parsedThreshold === null) {
+    return { ok: false, message: "Enter a valid free-shipping threshold." };
+  }
+  if (behavior === "fixed_band" && emittedBands === null) {
+    return {
+      ok: false,
+      message: "Complete gapless weight bands with an open-ended final row.",
+    };
+  }
+
+  return {
+    ok: true,
+    rateCents: behavior === "fixed"
+      || behavior === "surcharge"
+      || behavior === "base_plus_per_started_pound"
+      ? parsedRate
+      : null,
+    perStartedPoundCents: behavior === "base_plus_per_started_pound"
+      ? parsedPerPound
+      : null,
+    thresholdCents: behavior === "free_threshold" ? parsedThreshold : null,
+    bands: emittedBands ?? [],
+  };
 }
 
 function parseUsd(value: string): number | null {
