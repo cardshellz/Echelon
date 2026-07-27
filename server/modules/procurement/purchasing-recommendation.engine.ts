@@ -159,6 +159,8 @@ export interface PurchasingRecommendationRawRow {
   variant_id?: number | string | null;
   base_sku?: string | null;
   product_name?: string | null;
+  product_category?: string | null;
+  product_line_names?: unknown;
   variant_count?: number | string | null;
   total_pieces?: number | string | null;
   total_reserved_pieces?: number | string | null;
@@ -283,6 +285,8 @@ export interface PurchasingRecommendationItem {
   productVariantId?: number;
   sku: string;
   productName: string;
+  category: string | null;
+  productLines: string[];
   variantCount: number;
   totalOnHand: number;
   totalReserved: number;
@@ -302,6 +306,7 @@ export interface PurchasingRecommendationItem {
   onOrderPieces: number;
   openPoCount: number;
   earliestExpectedDate: string | Date | null;
+  earliestInboundEta: string | null;
   status: PurchasingRecommendationStatus;
   lastReceivedAt: string | Date | null;
   preferredVendorId: number | null;
@@ -581,6 +586,17 @@ function getMeta(
   if (!productMetaById) return {};
   if (productMetaById instanceof Map) return productMetaById.get(productId) ?? {};
   return productMetaById[String(productId)] ?? {};
+}
+
+function normalizeProductCategory(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeProductLineNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((name) => (typeof name === "string" ? name.trim() : ""))
+    .filter((name) => name.length > 0);
 }
 
 function normalizeTags(tags: unknown): string[] {
@@ -1201,6 +1217,26 @@ function parseDate(value: string | Date | null | undefined): Date | null {
   if (!value) return null;
   const parsed = value instanceof Date ? value : new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function toIsoDateOnly(value: string | Date | null | undefined): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") {
+    // Preserve the calendar date exactly as the database reported it — no
+    // timezone round-trip that could shift the day across midnight.
+    const match = /^(\d{4}-\d{2}-\d{2})/.exec(value.trim());
+    if (match) return match[1];
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
+  }
+  if (Number.isNaN(value.getTime())) return null;
+  // node-postgres materializes `timestamp without time zone` columns as
+  // local-time Date instances, so local calendar components recover the stored
+  // calendar date; toISOString() would shift it a day in UTC-positive zones.
+  const year = String(value.getFullYear()).padStart(4, "0");
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function toUtcDayNumber(value: Date): number {
@@ -2048,6 +2084,8 @@ export function generatePurchasingRecommendations(
       productVariantId,
       sku: row.base_sku || row.product_name || `product-${productId}`,
       productName: row.product_name || row.base_sku || `Product ${productId}`,
+      category: normalizeProductCategory(row.product_category),
+      productLines: normalizeProductLineNames(row.product_line_names),
       variantCount: asNumber(row.variant_count),
       totalOnHand,
       totalReserved,
@@ -2067,6 +2105,7 @@ export function generatePurchasingRecommendations(
       onOrderPieces,
       openPoCount,
       earliestExpectedDate: row.earliest_expected ?? null,
+      earliestInboundEta: toIsoDateOnly(row.earliest_expected ?? null),
       status,
       lastReceivedAt: row.last_received_at ?? null,
       preferredVendorId,
