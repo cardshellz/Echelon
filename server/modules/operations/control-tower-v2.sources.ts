@@ -8,6 +8,7 @@ import {
   positiveInteger,
   type ControlTowerSeverity,
   type ControlTowerSourceAdapter,
+  type ControlTowerSourcePage,
   type ProjectedControlTowerWorkItem,
 } from "./control-tower-v2.domain";
 import { EBAY_TRACKING_CONFLICT_RULE } from "../oms/channel-fulfillment-conflict";
@@ -76,6 +77,19 @@ const INVENTORY_CHECK_DESCRIPTIONS: Record<string, string> = {
 };
 
 type ProjectedWithoutFingerprint = Omit<ProjectedControlTowerWorkItem, "sourceFingerprint">;
+
+function sourcePage<Row extends Record<string, unknown>>(
+  rows: Row[],
+  cursorField: keyof Row,
+  limit: number,
+): ControlTowerSourcePage<Row> {
+  if (rows.length > limit) throw new Error(`source page exceeded requested limit ${limit}`);
+  if (rows.length < limit) return { rows, nextCursor: null };
+  const cursorValue = rows.at(-1)?.[cursorField];
+  const nextCursor = String(cursorValue ?? "").trim();
+  if (!nextCursor) throw new Error(`source page cursor ${String(cursorField)} is missing`);
+  return { rows, nextCursor };
+}
 
 function firstPresent(record: Record<string, unknown>, keys: string[]): unknown {
   for (const key of keys) {
@@ -184,7 +198,7 @@ export const inventoryIntegritySource: ControlTowerSourceAdapter<Record<string, 
   sourceNamespace: "inventory.integrity_findings",
   sourceType: "integrity_finding",
   projectionVersion: 3,
-  async loadRows(client) {
+  async loadPage(client, _now, page) {
     const result = await client.query(`
       SELECT
         finding.id,
@@ -256,9 +270,11 @@ export const inventoryIntegritySource: ControlTowerSourceAdapter<Record<string, 
       LEFT JOIN channels.channels AS channel
         ON channel.id = oms_order.channel_id
       WHERE finding.status IN ('open', 'acknowledged')
+        AND finding.id > COALESCE(NULLIF($1::TEXT, '')::BIGINT, 0)
       ORDER BY finding.id
-    `);
-    return result.rows;
+      LIMIT $2::INTEGER
+    `, [page.cursor, page.limit]);
+    return sourcePage(result.rows, "id", page.limit);
   },
   projectRow(row) {
     const id = positiveInteger(row.id, "inventory finding id");
@@ -370,7 +386,7 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
   sourceNamespace: "wms.reconciliation_exceptions",
   sourceType: "reconciliation_exception",
   projectionVersion: 2,
-  async loadRows(client) {
+  async loadPage(client, _now, page) {
     const result = await client.query(`
       SELECT
         exception.id,
@@ -447,9 +463,11 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
         ON channel.id = oms_order.channel_id
       WHERE exception.status IN ('open', 'acknowledged')
         AND exception.classification <> 'historical_ignore'
+        AND exception.id > COALESCE(NULLIF($1::TEXT, '')::BIGINT, 0)
       ORDER BY exception.id
-    `);
-    return result.rows;
+      LIMIT $2::INTEGER
+    `, [page.cursor, page.limit]);
+    return sourcePage(result.rows, "id", page.limit);
   },
   projectRow(row) {
     const id = positiveInteger(row.id, "WMS reconciliation exception id");
@@ -591,7 +609,7 @@ export const procurementExceptionsSource: ControlTowerSourceAdapter<Record<strin
   sourceNamespace: "procurement.po_exceptions",
   sourceType: "po_exception",
   projectionVersion: 1,
-  async loadRows(client) {
+  async loadPage(client, _now, page) {
     const result = await client.query(`
       SELECT
         exception.id,
@@ -611,9 +629,11 @@ export const procurementExceptionsSource: ControlTowerSourceAdapter<Record<strin
       JOIN procurement.purchase_orders AS purchase_order
         ON purchase_order.id = exception.po_id
       WHERE exception.status IN ('open', 'acknowledged')
+        AND exception.id > COALESCE(NULLIF($1::TEXT, '')::BIGINT, 0)
       ORDER BY exception.id
-    `);
-    return result.rows;
+      LIMIT $2::INTEGER
+    `, [page.cursor, page.limit]);
+    return sourcePage(result.rows, "id", page.limit);
   },
   projectRow(row) {
     const id = positiveInteger(row.id, "PO exception id");
@@ -689,7 +709,7 @@ export const channelFulfillmentSource: ControlTowerSourceAdapter<Record<string, 
   sourceNamespace: "oms.channel_fulfillment_pushes",
   sourceType: "channel_fulfillment_push",
   projectionVersion: 2,
-  async loadRows(client) {
+  async loadPage(client, _now, page) {
     const result = await client.query(`
       SELECT
         push.id,
@@ -722,14 +742,18 @@ export const channelFulfillmentSource: ControlTowerSourceAdapter<Record<string, 
         ON shipment_request.id = physical_shipment.shipment_request_id
       JOIN wms.orders AS wms_order
         ON wms_order.id = shipment_request.wms_order_id
-      WHERE push.push_status IN ('failed', 'review')
-         OR (
-           push.push_status = 'pending'
-           AND push.created_at <= NOW() - ($1::INTEGER * INTERVAL '1 minute')
-         )
+      WHERE (
+        push.push_status IN ('failed', 'review')
+        OR (
+          push.push_status = 'pending'
+          AND push.created_at <= NOW() - ($1::INTEGER * INTERVAL '1 minute')
+        )
+      )
+        AND push.id > COALESCE(NULLIF($2::TEXT, '')::BIGINT, 0)
       ORDER BY push.id
-    `, [CHANNEL_PUSH_PENDING_THRESHOLD_MINUTES]);
-    return result.rows;
+      LIMIT $3::INTEGER
+    `, [CHANNEL_PUSH_PENDING_THRESHOLD_MINUTES, page.cursor, page.limit]);
+    return sourcePage(result.rows, "id", page.limit);
   },
   projectRow(row) {
     const id = positiveInteger(row.id, "channel fulfillment push id");
@@ -931,7 +955,7 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
   sourceNamespace: "wms.carrier_tracking_authority",
   sourceType: "carrier_tracking_exception",
   projectionVersion: 2,
-  async loadRows(client, now) {
+  async loadPage(client, now, page) {
     const result = await client.query(`
       WITH label_link_targets AS (
         SELECT
@@ -1591,9 +1615,17 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
          'carrier_tracking_subscription_not_active',
          'carrier_tracking_subscription_review'
        )
-      ORDER BY first_seen_at, source_key
-    `, [now.toISOString(), CARRIER_LABEL_LINK_GRACE_MINUTES, CARRIER_ACCEPTANCE_GRACE_MINUTES]);
-    return result.rows;
+      WHERE $4::TEXT IS NULL OR issues.source_key > $4::TEXT
+      ORDER BY issues.source_key
+      LIMIT $5::INTEGER
+    `, [
+      now.toISOString(),
+      CARRIER_LABEL_LINK_GRACE_MINUTES,
+      CARRIER_ACCEPTANCE_GRACE_MINUTES,
+      page.cursor,
+      page.limit,
+    ]);
+    return sourcePage(result.rows, "source_key", page.limit);
   },
   projectRow(row) {
     const code = String(row.issue_code ?? "").trim();
