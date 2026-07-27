@@ -127,6 +127,27 @@ window.MOCK_EXTRA = {
     wape: { historical: 18.4, baseline: 24.1, overlayAdjusted: 17.2 },
     overlayCoveragePct: 62, evaluations: 1842,
     wins: { forecastVsBaselinePct: 61, overlayVsForecastPct: 54 },
-    pipeline: { status: "healthy", snapshotAt: "2026-07-26 02:00", evaluationAt: "2026-07-26 02:04" }
+    pipeline: { status: "healthy", snapshotAt: "2026-07-26 02:00", evaluationAt: "2026-07-26 02:04" },
+    trustNote: "Accuracy trust not yet assessed — evaluation thresholds not configured · 12 legacy evaluations excluded"
+  },
+
+  // ---------- Audit-merge additions (revision 4) ----------
+  // Active quality controls per SKU (the decision endpoint requires acknowledging EVERY
+  // current control before a PO handoff). Empty array = no active controls.
+  qualityControls: {
+    "PKM-PRE-ETB":  [{ code: "demand_acceleration_review", severity: "warn", label: "Short-window demand running hot vs baseline — confirm the surge is real" }],
+    "PKM-151-UPC":  [],
+    "PKM-MEGA-ETB": [
+      { code: "supplier_cost_unverified", severity: "block", label: "Vendor cost unverified — no quote in 365+ days" },
+      { code: "thin_demand_history",      severity: "block", label: "Only 6 days of sales history — forecast is event-driven" }
+    ],
+    "PAN-PRZ-HOB":  []
+  },
+  // Candidate score band per queue SKU (shown in the drawer's outcome step).
+  candidateBands: {
+    "PKM-PRE-ETB":  { score: 84, band: "strong" },
+    "PKM-151-UPC":  { score: 78, band: "strong" },
+    "PKM-MEGA-ETB": { score: 61, band: "review" },
+    "PAN-PRZ-HOB":  { score: 55, band: "watch" }
   }
 };

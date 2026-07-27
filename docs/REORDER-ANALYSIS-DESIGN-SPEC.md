@@ -116,7 +116,38 @@ Each step lands behind the usual branch→PR flow; steps 2–3 need migrations a
    - KPI labels aligned: "Needs order" / "Order soon".
    Implementation note: this is presentation-layer grouping only — the engine taxonomy is unchanged; the UI maps statuses → queues.
 
-## 11. Open questions (parked)
+## 11. Revision 2 (owner review, 2026-07-26)
+
+1. **Additive queue chips.** `Needs order` and `Order soon` are toggles that combine; the cockpit's default view IS the combined order queue (severity-sorted), with "View all" one click away. Chip explainer sentences move into hover tooltips; order-soon gets concrete dates (projected stockout + order-by date = `asOf + daysOfSupply − (lead + safety)`), shown on the row, in the tooltip, and in the math drawer.
+2. **The Order Builder is the single ordering flow.** Queue rows carry checkboxes (suggestions pre-checked; any row can be added — healthy rows exist for MOQ/freight top-offs; the old "+ Plan" is now "Add to order"). A sticky bar opens the builder: lines grouped by vendor, editable pieces with case-rounding hints, live totals, and one per-vendor choice — **Send as PO** (default; the owner buys each SKU from one vendor at known cost) or **Request quote** when cost is unknown/stale. Both output a vendor-facing document through the existing PO email pipeline.
+3. **RFQ workbench demoted to a tracking surface.** It is no longer an entry point: lines land there only via "Request quote", and the multi-vendor comparison matrix appears only when more than one vendor actually quotes a line. The full lifecycle design remains for that case.
+4. **Terminology:** "Reorder point" spelled out in column headers (tooltip carries the definition); "RP" only in space-constrained rollup chips with a tooltip.
+
+Implementation mapping: the builder's per-vendor PO path is the existing accepted-recommendation → PO handoff + `po_email_outbox`; the Request-quote path is the existing RFQ draft creation. Quantity edits vs suggestion map to the existing override-reason contract (RFQ lines already require a ≥3-char reason when qty ≠ recommendation; the PO path should mirror it).
+
+## 12. Revision 3 (owner review, 2026-07-26)
+
+1. **Full-case rounding is a rule, not a hint.** Suggested pieces always round UP to a full case, and the Order Builder's quantity input enforces it (snap-up on edit; 0 = skip line). **Engine flag for implementation:** today `purchasing-recommendation.engine.ts` rounds to the purchase UOM only when the vendor mapping is priced `per_purchase_uom` (increment falls back to 1 piece otherwise). The owner's rule: round up to a full case whenever a case pack is known — use `vendor_products.pieces_per_purchase_uom`, falling back to `vendor_products.pack_size`. Small engine change; test both pricing bases.
+2. **Inventory health leaves the cockpit.** The card was too sparse to do the job and the job is different (aging, turns, idle capital, markdown/liquidation candidates ≠ "what do I order today"). Cockpit keeps only quiet `Stagnant` and `Overstocked` filter chips in the Watching tier plus a clickable Idle-capital KPI. A dedicated **Inventory Health module under the Inventory menu group** is parked as future work.
+3. **Forecast inputs parked as coming-soon.** The 02 surface as designed was tool-first, not task-first; rather than slow the ordering flow, the tab stays in the strip with a "Soon" badge and the page states what's coming (growth adjustments, category events with materialized allocation) and what exists today (per-SKU demand events in the Demand Planner, already feeding recommendations). The §4.1/§4.2 designs remain the implementation reference when this resumes; redesign the page task-first at that point.
+
+## 13. Revision 4 — live-page merge audit (2026-07-26)
+
+A full inventory of the live PurchasingView.tsx + server contracts (86 items) decided what survives into the new page. Outcomes, approved by the owner:
+
+**Folded into the cockpit/Order Builder (the binding server contracts):**
+- PO handoff requires a prior `accepted_for_po` decision with note ≥10 chars, `confirmDecision`, `acknowledgeAutomationEligibilityUnchanged`, and `reviewedControlCodes` covering EVERY active quality control (`purchasing-recommendation.routes.ts` `validateRecommendationDecisionEvidence`). The Order Builder's confirm stage collects all of it; replay safety is the accepted-decision unique constraint (409), not the client's Idempotency-Key header (unused by this route).
+- RFQ over-allocation needs `quantityOverrideReason` ≥3 chars + `allocationOverrideApproved` (migration 158 trigger, fail-closed) — builder lines exceeding the suggestion collect both.
+- Deep-link params `reviewQueue / recommendationId / candidateBand / reason / forecastAction` are emitted by six server generators and frozen into persisted notification rows — the new page must honor all five forever; `status` (new) is a free namespace, verified unused server-side.
+- Kept: manual Refresh + run provenance, 30s KPI poll, toast/invalidation discipline, per-row Exclude action, skippedItems rendered under the excluded toggle with reason codes, confidence-factor tooltips, candidate band + quality controls in the drawer's outcome step.
+
+**Moved:** quality-gate rollup, approval-policy impact, held-items triage, review-queue filters → Automation (03); full accuracy detail (cohort selector, per-SKU backtests, evaluate-matured trigger) + decision history → Run report (04); RFQ tracking counts → workbench (05); exclusion rules + forecast policy editor → Planning Policy (06).
+
+**Dropped:** scroll-to-queue CTA, candidate-score spotlight, health-ratio bar, dense one-line provenance string.
+
+**API extensions required by the new page:** category/product-line fields on reorder items; per-row inbound ETA; stop stripping `forwardDemandBasis.contributions` (or drawer fetches demand-events); suggested-spend (client-computed acceptable); Overstocked derived client-side (>180d supply, ok status). Accuracy strip pins the 30-day horizon and keeps the trust caveat. Add a UI-contract test for the new page pinning deep-link params + decision-evidence fields (pattern: `demand-planner-ui-contract.test.ts`).
+
+## 14. Open questions (parked)
 
 - Multi-warehouse dimension (blocked on engine gaining warehouse-scoped demand/supply — out of scope v1).
 - Accuracy trust thresholds (`accuracy_thresholds_not_configured` today) — needed before Stage 4; propose configuring after 60d of cohort data.
