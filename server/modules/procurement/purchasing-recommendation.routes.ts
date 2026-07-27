@@ -48,7 +48,13 @@ import {
 } from "./purchasing-forecast-policy";
 const storage = { ...procurementStorage, ...inventoryStorage };
 
-function buildReorderAnalysisResponseItem(item: PurchasingRecommendationItem) {
+// Entries in `items` keep forwardDemandBasis.contributions in the response: the
+// cockpit math drawer renders the per-event lines (event name, type, raw pieces,
+// confidence, weighted pieces). The engine dual-lists non-excluded skipped rows
+// in both `items` and `skippedItems`, so `skippedItems` is a review-queue view —
+// its contribution evidence is stripped to avoid serializing the arrays twice
+// (and excluded rows, which only appear here, never carry them).
+function buildReorderAnalysisSkippedResponseItem(item: PurchasingRecommendationItem) {
   const {
     contributions: _overlayContributionEvidence,
     ...forwardDemandBasis
@@ -1761,10 +1767,10 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       });
 
       res.json({
-        items: recommendationResult.items.map(buildReorderAnalysisResponseItem),
+        items: recommendationResult.items,
         summary: recommendationResult.summary,
         approvalPolicyImpact: buildApprovalPolicyImpact(recommendationResult, approvalPolicySettings),
-        skippedItems: recommendationResult.skippedItems.map(buildReorderAnalysisResponseItem),
+        skippedItems: recommendationResult.skippedItems.map(buildReorderAnalysisSkippedResponseItem),
         lookbackDays,
       });
     } catch (error) {
