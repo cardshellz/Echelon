@@ -539,6 +539,9 @@ export interface ProgramDestinationGroup {
   sortOrder: number;
   lockVersion: number | null;
   destinations: RateCoverageDestination[];
+  hasCurrentDefinition: boolean;
+  appearsInLiveRevision: boolean;
+  appearsInDraftRevision: boolean;
 }
 
 export function rateTableRegionCount(
@@ -577,6 +580,10 @@ export function buildProgramOverviews(data: RateTablesResponse): ProgramOverview
       };
     });
     const actives = options.flatMap((option) => option.active ? [option.active] : []);
+    const currentTables = options.flatMap((option) => [
+      ...(option.active ? [option.active] : []),
+      ...(option.draft ? [option.draft] : []),
+    ]);
     const lastTouched = tables.reduce<string | null>((latest, table) => {
       const candidate = table.createdAt > table.effectiveFrom ? table.createdAt : table.effectiveFrom;
       return latest === null || candidate > latest ? candidate : latest;
@@ -584,7 +591,7 @@ export function buildProgramOverviews(data: RateTablesResponse): ProgramOverview
     const destinationGroups = mergeProgramDestinationGroups(
       book.id,
       persistedGroups,
-      tables,
+      currentTables,
     );
     return {
       book,
@@ -635,6 +642,10 @@ export function effectiveRateTableCoverages(
     ],
   }));
 }
+
+export type EffectiveRateTableCoverage = ReturnType<
+  typeof effectiveRateTableCoverages
+>[number];
 
 export function coverageGroupKey(
   group: Pick<
@@ -715,6 +726,7 @@ function mergeProgramDestinationGroups(
   tables: readonly RateTableSummary[],
 ): ProgramDestinationGroup[] {
   const merged = new Map<string, ProgramDestinationGroup>();
+  const persistedKeyByName = new Map<string, string | null>();
   for (const group of persisted) {
     const item: ProgramDestinationGroup = {
       key: `id:${group.id}`,
@@ -724,23 +736,46 @@ function mergeProgramDestinationGroups(
       sortOrder: group.sortOrder,
       lockVersion: group.lockVersion,
       destinations: group.destinations,
+      hasCurrentDefinition: true,
+      appearsInLiveRevision: false,
+      appearsInDraftRevision: false,
     };
     merged.set(item.key, item);
+    const normalizedName = normalizeDestinationGroupName(group.name);
+    persistedKeyByName.set(
+      normalizedName,
+      persistedKeyByName.has(normalizedName) ? null : item.key,
+    );
   }
   for (const table of tables) {
     for (const coverage of effectiveRateTableCoverages(table)) {
+      const coverageKey = coverageGroupKey({
+        id: coverage.destinationGroupId,
+        name: coverage.destinationGroupName,
+        destinations: coverage.destinations,
+      });
+      const currentNameKey = coverage.destinationGroupId === null
+        ? persistedKeyByName.get(
+            normalizeDestinationGroupName(coverage.destinationGroupName),
+          )
+        : undefined;
+      const matchedKey = currentNameKey ?? coverageKey;
+      const existing = merged.get(matchedKey);
+      if (existing !== undefined) {
+        merged.set(matchedKey, withRevisionPresence(existing, table.status));
+        continue;
+      }
       const item: ProgramDestinationGroup = {
-        key: coverageGroupKey({
-          id: coverage.destinationGroupId,
-          name: coverage.destinationGroupName,
-          destinations: coverage.destinations,
-        }),
+        key: coverageKey,
         id: coverage.destinationGroupId,
         rateBookId,
         name: coverage.destinationGroupName,
         sortOrder: coverage.sortOrder,
         lockVersion: coverage.destinationGroupLockVersion,
         destinations: coverage.destinations,
+        hasCurrentDefinition: false,
+        appearsInLiveRevision: table.status === "active",
+        appearsInDraftRevision: table.status === "draft",
       };
       if (!merged.has(item.key)) merged.set(item.key, item);
     }
@@ -751,6 +786,72 @@ function mergeProgramDestinationGroups(
       || left.name.localeCompare(right.name)
       || left.key.localeCompare(right.key),
   );
+}
+
+/**
+ * Resolve the coverage scopes shown in one program-matrix row. Persisted IDs
+ * remain authoritative. Legacy revisions predate those IDs, so an exact,
+ * unambiguous current group name is their compatibility identity.
+ */
+export function rateTableCoveragesForGroup(
+  table: RateTableSummary | null,
+  group: ProgramDestinationGroup,
+): EffectiveRateTableCoverage[] {
+  if (table === null) return [];
+  return effectiveRateTableCoverages(table).filter((coverage) => {
+    if (
+      group.id !== null
+      && coverage.destinationGroupId !== null
+    ) {
+      return group.id === coverage.destinationGroupId;
+    }
+    if (
+      group.hasCurrentDefinition
+      && group.id !== null
+      && coverage.destinationGroupId === null
+    ) {
+      return normalizeDestinationGroupName(group.name)
+        === normalizeDestinationGroupName(coverage.destinationGroupName);
+    }
+    if (group.id !== null || coverage.destinationGroupId !== null) return false;
+    return coverageGroupKey({
+      id: coverage.destinationGroupId,
+      name: coverage.destinationGroupName,
+      destinations: coverage.destinations,
+    }) === group.key;
+  });
+}
+
+export function countStaleRateTableCoverages(
+  coverages: readonly EffectiveRateTableCoverage[],
+  group: ProgramDestinationGroup,
+): number {
+  if (!group.hasCurrentDefinition || group.id === null) return 0;
+  const currentDestinationSignature = destinationSignature(group.destinations);
+  return coverages.filter((coverage) => {
+    if (coverage.destinationGroupId !== null) {
+      return coverage.destinationGroupLockVersion !== group.lockVersion;
+    }
+    return destinationSignature(coverage.destinations)
+      !== currentDestinationSignature;
+  }).length;
+}
+
+function withRevisionPresence(
+  group: ProgramDestinationGroup,
+  status: string,
+): ProgramDestinationGroup {
+  return {
+    ...group,
+    appearsInLiveRevision:
+      group.appearsInLiveRevision || status === "active",
+    appearsInDraftRevision:
+      group.appearsInDraftRevision || status === "draft",
+  };
+}
+
+function normalizeDestinationGroupName(name: string): string {
+  return name.trim().toLocaleLowerCase();
 }
 
 function destinationSignature(

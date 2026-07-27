@@ -44,15 +44,15 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import {
   assignmentLabel,
-  coverageGroupKey,
-  effectiveRateTableCoverages,
+  countStaleRateTableCoverages,
   formatDate,
   invalidateShippingAdmin,
   postJson,
+  rateTableCoveragesForGroup,
+  type EffectiveRateTableCoverage,
   type ProgramDestinationGroup,
   type ProgramOverview,
   type ProgramOptionState,
-  type RateTableSummary,
   type WarehouseOption,
 } from "./api";
 import { ProgramFormDialog } from "./ProgramFormDialog";
@@ -312,7 +312,14 @@ export function ProgramDetail({
                 {program.destinationGroups.map((group) => (
                   <TableRow key={group.key}>
                     <TableCell className="align-top">
-                      <div className="text-sm font-medium">{group.name}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-sm font-medium">{group.name}</div>
+                        {!group.hasCurrentDefinition && (
+                          <Badge variant="outline" className="font-normal">
+                            {revisionOnlyLabel(group)}
+                          </Badge>
+                        )}
+                      </div>
                       <div className="mt-0.5 text-xs text-muted-foreground">
                         {destinationGroupSummary(group)}
                       </div>
@@ -482,13 +489,13 @@ function CoverageCell({
     destinationGroup?: ProgramDestinationGroup,
   ) => void;
 }) {
-  const activeCoverages = findCoverages(option.active, group);
-  const draftCoverages = findCoverages(option.draft, group);
-  const staleActiveCoverageCount = countStaleCoverages(
+  const activeCoverages = rateTableCoveragesForGroup(option.active, group);
+  const draftCoverages = rateTableCoveragesForGroup(option.draft, group);
+  const staleActiveCoverageCount = countStaleRateTableCoverages(
     activeCoverages,
     group,
   );
-  const staleDraftCoverageCount = countStaleCoverages(
+  const staleDraftCoverageCount = countStaleRateTableCoverages(
     draftCoverages,
     group,
   );
@@ -638,39 +645,12 @@ function AddDestinationGroupButton({
   );
 }
 
-type EffectiveRateTableCoverage = ReturnType<
-  typeof effectiveRateTableCoverages
->[number];
-
-function findCoverages(
-  table: RateTableSummary | null,
-  group: ProgramDestinationGroup,
-): EffectiveRateTableCoverage[] {
-  if (table === null) return [];
-  return effectiveRateTableCoverages(table).filter((coverage) => {
-    if (
-      group.id !== null
-      && coverage.destinationGroupId !== null
-      && group.id === coverage.destinationGroupId
-    ) {
-      return true;
-    }
-    return coverageGroupKey({
-      id: coverage.destinationGroupId,
-      name: coverage.destinationGroupName,
-      destinations: coverage.destinations,
-    }) === group.key;
-  });
-}
-
-function countStaleCoverages(
-  coverages: readonly EffectiveRateTableCoverage[],
-  group: ProgramDestinationGroup,
-): number {
-  if (group.id === null) return 0;
-  return coverages.filter((coverage) =>
-    coverage.destinationGroupId !== null
-    && coverage.destinationGroupLockVersion !== group.lockVersion).length;
+function revisionOnlyLabel(group: ProgramDestinationGroup): string {
+  if (group.appearsInLiveRevision && group.appearsInDraftRevision) {
+    return "Revision only";
+  }
+  if (group.appearsInLiveRevision) return "Live revision only";
+  return "Draft revision only";
 }
 
 function draftCoverageState(
