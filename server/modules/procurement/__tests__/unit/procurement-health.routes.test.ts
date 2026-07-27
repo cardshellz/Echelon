@@ -97,7 +97,7 @@ describe("procurement health routes", () => {
     });
     mocks.loadPurchasingRecommendationContext.mockResolvedValue({
       defaults: { leadTimeDays: 5, safetyStockDays: 2 },
-      rules: [],
+      exclusionRules: [],
       productMetaById: new Map(),
     });
     mocks.loadPurchaseRecommendationPipelineHealth.mockResolvedValue({

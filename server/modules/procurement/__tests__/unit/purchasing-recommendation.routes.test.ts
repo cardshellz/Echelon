@@ -451,6 +451,87 @@ describe("purchasing recommendation routes", () => {
     });
   });
 
+  it("applies stored exclusion rules to reorder analysis through the shared context loader", async () => {
+    // Regression for the context/engine key mismatch: loadPurchasingRecommendationContext
+    // used to return `rules` while the engine reads `exclusionRules`, so the spread in the
+    // reorder-analysis route silently ignored rule-based exclusions.
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 20,
+        variant_id: 201,
+        base_sku: "DROP-1",
+        product_name: "Dropship Item",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 30,
+        on_order_pieces: 0,
+        lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 1,
+      },
+      {
+        product_id: 21,
+        variant_id: 211,
+        base_sku: "KEEP-1",
+        product_name: "Kept Item",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 30,
+        on_order_pieces: 0,
+        lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 1,
+      },
+    ]);
+    // The real context loader runs in this test (only db + storage/base are mocked):
+    // db.select().from(reorderExclusionRules) returns the stored rule, and the two
+    // db.execute calls serve the settings-defaults and product-meta queries.
+    mocks.db.select.mockImplementation(() =>
+      selectChain([{ id: 1, field: "category", value: "dropship" }]),
+    );
+    const stringifySql = (query: unknown) => {
+      try {
+        return JSON.stringify(query) ?? "";
+      } catch {
+        return "";
+      }
+    };
+    mocks.db.execute.mockImplementation(async (query: unknown) => {
+      const text = stringifySql(query);
+      if (text.includes("echelon_settings")) {
+        return {
+          rows: [
+            { key: "default_lead_time_days", value: "4" },
+            { key: "default_safety_stock_days", value: "3" },
+          ],
+        };
+      }
+      if (text.includes("reorder_excluded")) {
+        return {
+          rows: [
+            { id: 20, category: "dropship", brand: null, product_type: null, sku: "DROP-1", tags: null, reorder_excluded: false },
+            { id: 21, category: "singles", brand: null, product_type: null, sku: "KEEP-1", tags: null, reorder_excluded: false },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");
+
+    expect(status).toBe(200);
+    expect(body.items.map((item: any) => item.sku)).toEqual(["KEEP-1"]);
+    expect(body.summary.excludedCount).toBe(1);
+    expect(body.skippedItems).toHaveLength(1);
+    expect(body.skippedItems[0]).toMatchObject({
+      productId: 20,
+      sku: "DROP-1",
+      skippedReason: "excluded",
+    });
+  });
+
   it("returns manual reorder approval-policy impact using active candidate score settings", async () => {
     mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({
