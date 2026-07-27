@@ -5,6 +5,7 @@ import {
   createRateTableProductRule,
   deleteRateTableProductRule,
   listProductPolicySelectors,
+  listRateTableProductRuleMembers,
   listRateTableProductRules,
   previewRateTableProductPolicy,
   ProductRatePolicyAdminError,
@@ -53,6 +54,7 @@ const ruleSchema = z.object({
     "fixed",
     "fixed_band",
     "base_plus_per_started_pound",
+    "base_plus_per_additional_unit",
     "surcharge",
     "free_threshold",
   ]),
@@ -61,6 +63,7 @@ const ruleSchema = z.object({
   selector: selectorSchema,
   rateCents: z.number().int().min(0).nullable().default(null),
   perStartedPoundCents: z.number().int().min(0).nullable().default(null),
+  perAdditionalUnitCents: z.number().int().min(0).nullable().default(null),
   thresholdCents: z.number().int().min(0).nullable().default(null),
   bands: z.array(bandSchema).max(100).default([]),
 }).superRefine((rule, context) => {
@@ -69,6 +72,7 @@ const ruleSchema = z.object({
     && (
       rule.rateCents !== null
       || rule.perStartedPoundCents !== null
+      || rule.perAdditionalUnitCents !== null
       || rule.thresholdCents !== null
       || rule.bands.length > 0
     )
@@ -77,6 +81,50 @@ const ruleSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["action"],
       message: "Shipping restrictions cannot include pricing.",
+    });
+  }
+  if (
+    rule.action === "base_plus_per_additional_unit"
+    && (rule.rateCents === null || rule.perAdditionalUnitCents === null)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["perAdditionalUnitCents"],
+      message: "Enter both first-unit and additional-unit amounts.",
+    });
+  }
+  if (
+    rule.action === "base_plus_per_additional_unit"
+    && rule.measurementScope !== "matched_items"
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["measurementScope"],
+      message: "Base plus additional unit must combine matching item quantities.",
+    });
+  }
+  if (
+    rule.action === "base_plus_per_additional_unit"
+    && (
+      rule.perStartedPoundCents !== null
+      || rule.thresholdCents !== null
+      || rule.bands.length > 0
+    )
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["action"],
+      message: "Base plus additional unit cannot include weight or threshold pricing.",
+    });
+  }
+  if (
+    rule.action !== "base_plus_per_additional_unit"
+    && rule.perAdditionalUnitCents !== null
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["perAdditionalUnitCents"],
+      message: "Additional-unit pricing is only valid for base plus additional unit rules.",
     });
   }
 });
@@ -117,6 +165,21 @@ export function registerProductRatePolicyAdminRoutes(app: Express): void {
         return res.json(await listRateTableProductRules(parseId(req.params.id)));
       } catch (error) {
         return sendPolicyError(res, error, "list product shipping rules");
+      }
+    },
+  );
+
+  app.get(
+    "/api/shipping/admin/rate-tables/:id/product-rules/:ruleId/members",
+    requirePermission("settings", "view"),
+    async (req, res) => {
+      try {
+        return res.json(await listRateTableProductRuleMembers(
+          parseId(req.params.id),
+          parseId(req.params.ruleId),
+        ));
+      } catch (error) {
+        return sendPolicyError(res, error, "list product shipping rule members");
       }
     },
   );

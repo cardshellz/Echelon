@@ -45,8 +45,10 @@ import {
   productPolicyRulesKey,
   putJson,
   type ProductPolicyRule,
+  type ProductPolicyRuleMembersResponse,
   type ProductPolicyRulesResponse,
   type ProductPolicySelectorsResponse,
+  type ProductPolicyVariantOption,
   type WarehouseOption,
 } from "./api";
 
@@ -181,8 +183,7 @@ function PolicyRuleList({
                   </Badge>
                 </div>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  {rule.productSetName ?? `${rule.memberVariantIds.length} selected variants`}
-                  {" · "}{rule.memberVariantIds.length} variant{rule.memberVariantIds.length === 1 ? "" : "s"} frozen in this revision
+                  {rule.memberVariantIds.length} selected variant{rule.memberVariantIds.length === 1 ? "" : "s"} in this draft
                 </p>
               </div>
               <div className="flex items-center gap-1">
@@ -218,7 +219,14 @@ function PolicyRuleList({
 }
 
 type SelectorKind = "shipping_group" | "product_line" | "category" | "sioc" | "saved_set" | "manual";
-type Behavior = "free" | "fixed" | "fixed_band" | "base_plus_per_started_pound" | "surcharge" | "free_threshold";
+type Behavior =
+  | "free"
+  | "fixed"
+  | "fixed_band"
+  | "base_plus_per_started_pound"
+  | "base_plus_per_additional_unit"
+  | "surcharge"
+  | "free_threshold";
 
 function RuleDialog({
   open,
@@ -248,12 +256,14 @@ function RuleDialog({
   const [measurementScope, setMeasurementScope] = useState<"matched_items" | "each_item">("matched_items");
   const [rateUsd, setRateUsd] = useState("");
   const [perPoundUsd, setPerPoundUsd] = useState("");
+  const [perAdditionalUnitUsd, setPerAdditionalUnitUsd] = useState("");
   const [thresholdUsd, setThresholdUsd] = useState("");
   const [bands, setBands] = useState<Array<{ maxLb: string; rateUsd: string; openEnded: boolean }>>([
     { maxLb: "1", rateUsd: "", openEnded: false },
     { maxLb: "5", rateUsd: "", openEnded: false },
     { maxLb: "", rateUsd: "", openEnded: true },
   ]);
+  const [knownVariants, setKnownVariants] = useState<ProductPolicyVariantOption[]>([]);
   const [formError, setFormError] = useState<string | null>(null);
   const selectorsUrl = `/api/shipping/admin/product-policy-selectors?search=${encodeURIComponent(search.trim())}`;
   const selectors = useQuery({
@@ -261,18 +271,29 @@ function RuleDialog({
     queryFn: () => getJson<ProductPolicySelectorsResponse>(selectorsUrl),
     enabled: open,
   });
+  const memberDetailsUrl = editingRule
+    ? `${productPolicyRulesKey(draftId)}/${editingRule.id}/members`
+    : null;
+  const memberDetails = useQuery({
+    queryKey: [memberDetailsUrl],
+    queryFn: () => getJson<ProductPolicyRuleMembersResponse>(memberDetailsUrl!),
+    enabled: open && memberDetailsUrl !== null,
+  });
 
   useEffect(() => {
     if (!open) return;
+    const initialSelection = ruleDialogInitialSelection(editingRule);
     setName(editingRule?.name ?? "");
-    setSelectorKind(editingRule?.sourceProductSetId ? "saved_set" : "shipping_group");
-    setSelectorRef(editingRule?.sourceProductSetId ? String(editingRule.sourceProductSetId) : "");
-    setSelectedVariantIds([]);
+    setSelectorKind(initialSelection.selectorKind);
+    setSelectorRef(initialSelection.selectorRef);
+    setSelectedVariantIds(initialSelection.selectedVariantIds);
+    setKnownVariants([]);
     setSearch("");
     setBehavior(editingRule?.action === "block" ? "fixed" : (editingRule?.action ?? "fixed") as Behavior);
     setMeasurementScope(editingRule?.measurementScope === "each_item" ? "each_item" : "matched_items");
     setRateUsd(editingRule?.rateCents == null ? "" : centsToInput(editingRule.rateCents));
     setPerPoundUsd(editingRule?.perStartedPoundCents == null ? "" : centsToInput(editingRule.perStartedPoundCents));
+    setPerAdditionalUnitUsd(editingRule?.perAdditionalUnitCents == null ? "" : centsToInput(editingRule.perAdditionalUnitCents));
     setThresholdUsd(editingRule?.thresholdCents == null ? "" : centsToInput(editingRule.thresholdCents));
     setBands(editingRule?.bands.length
       ? editingRule.bands.map((band) => ({
@@ -287,6 +308,16 @@ function RuleDialog({
         ]);
     setFormError(null);
   }, [editingRule, open]);
+
+  useEffect(() => {
+    if (!open || !memberDetails.data) return;
+    setKnownVariants((current) => mergeVariantOptions(current, memberDetails.data.members));
+  }, [memberDetails.data, open]);
+
+  useEffect(() => {
+    if (!open || !selectors.data) return;
+    setKnownVariants((current) => mergeVariantOptions(current, selectors.data.variants));
+  }, [open, selectors.data]);
 
   const saveMutation = useMutation({
     mutationFn: (payload: unknown) => editingRule
@@ -311,10 +342,24 @@ function RuleDialog({
     return [];
   }, [selectorKind, selectors.data]);
 
+  const visibleVariantOptions = useMemo(
+    () => visibleManualVariantOptions(
+      knownVariants,
+      selectedVariantIds,
+      search,
+    ),
+    [knownVariants, search, selectedVariantIds],
+  );
+
   const submit = () => {
     if (name.trim() === "") return setFormError("Enter a rule name.");
-    const selector = selectorKind === "manual"
-      ? { kind: "manual" as const, variantIds: selectedVariantIds }
+    const preserveSourceSet = selectorKind === "manual"
+      && editingRule?.sourceProductSetId
+      && sameVariantMembership(selectedVariantIds, editingRule.memberVariantIds);
+    const selector = preserveSourceSet
+      ? { kind: "saved_set" as const, productSetId: editingRule.sourceProductSetId }
+      : selectorKind === "manual"
+        ? { kind: "manual" as const, variantIds: selectedVariantIds }
       : selectorKind === "saved_set"
         ? { kind: "saved_set" as const, productSetId: Number(selectorRef) }
         : { kind: selectorKind, ref: selectorRef };
@@ -324,6 +369,7 @@ function RuleDialog({
     const pricing = resolveRulePricing(ruleKind, behavior, {
       rateUsd,
       perPoundUsd,
+      perAdditionalUnitUsd,
       thresholdUsd,
       bands,
     });
@@ -342,11 +388,15 @@ function RuleDialog({
       name: name.trim(),
       kind,
       action,
-      measurementScope: ruleKind === "restriction" ? "matched_items" : measurementScope,
+      measurementScope: ruleKind === "restriction"
+        || behavior === "base_plus_per_additional_unit"
+        ? "matched_items"
+        : measurementScope,
       destinationScope: scopeFromGroup(group),
       selector,
       rateCents: pricing.rateCents,
       perStartedPoundCents: pricing.perStartedPoundCents,
+      perAdditionalUnitCents: pricing.perAdditionalUnitCents,
       thresholdCents: pricing.thresholdCents,
       bands: pricing.bands,
     });
@@ -357,7 +407,11 @@ function RuleDialog({
       <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{editingRule ? "Edit" : "Add"} {ruleKind === "restriction" ? "shipping restriction" : "product exception"}</DialogTitle>
-          <DialogDescription>Applies to {groupName}. Variant membership is frozen when saved.</DialogDescription>
+          <DialogDescription>
+            {editingRule
+              ? `Applies to ${groupName}. Add or remove exact variants, then save this draft revision.`
+              : `Applies to ${groupName}. Saving snapshots the matched variants for this draft revision.`}
+          </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-1.5">
@@ -391,15 +445,59 @@ function RuleDialog({
           </div>
           {selectorKind === "manual" && (
             <div className="space-y-2">
-              <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search SKU or product" />
-              <div className="max-h-52 divide-y overflow-y-auto rounded-md border">
-                {(selectors.data?.variants ?? []).map((variant) => (
-                  <label key={variant.id} className="flex cursor-pointer items-center gap-3 px-3 py-2 text-sm">
-                    <Checkbox checked={selectedVariantIds.includes(variant.id)} onCheckedChange={(checked) => setSelectedVariantIds((current) => checked ? [...current, variant.id] : current.filter((id) => id !== variant.id))} />
-                    <span className="min-w-0"><span className="font-medium">{variant.sku ?? `Variant ${variant.id}`}</span><span className="ml-2 text-muted-foreground">{variant.productName} · {variant.name}</span></span>
-                  </label>
-                ))}
+              <div className="flex items-center justify-between gap-3">
+                <Label>Variants</Label>
+                <Badge variant="outline">
+                  {selectedVariantIds.length} selected
+                </Badge>
               </div>
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search SKU, variant, or product"
+              />
+              <div className="max-h-52 divide-y overflow-y-auto rounded-md border">
+                {memberDetails.isLoading && editingRule ? (
+                  <div className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Loading selected variants...
+                  </div>
+                ) : visibleVariantOptions.options.length === 0 ? (
+                  <p className="px-3 py-4 text-sm text-muted-foreground">
+                    {search.trim() === "" ? "Search the catalog to add variants." : "No matching variants found."}
+                  </p>
+                ) : visibleVariantOptions.options.map((variant) => {
+                  const isSelected = selectedVariantIds.includes(variant.id);
+                  return (
+                    <label key={variant.id} className="flex cursor-pointer items-center gap-3 px-3 py-2 text-sm">
+                      <Checkbox
+                        checked={isSelected}
+                        disabled={!variant.isActive && !isSelected}
+                        onCheckedChange={(checked) => setSelectedVariantIds((current) =>
+                          checked
+                            ? [...new Set([...current, variant.id])]
+                            : current.filter((id) => id !== variant.id))}
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="font-medium">{variant.sku ?? `Variant ${variant.id}`}</span>
+                        <span className="ml-2 text-muted-foreground">{variant.productName} · {variant.name}</span>
+                      </span>
+                      {!variant.isActive && <Badge variant="secondary">Inactive</Badge>}
+                    </label>
+                  );
+                })}
+              </div>
+              {visibleVariantOptions.hiddenCount > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {visibleVariantOptions.hiddenCount} more selected variant{visibleVariantOptions.hiddenCount === 1 ? "" : "s"}.
+                  Search by SKU or product to find and edit them.
+                </p>
+              )}
+              {memberDetails.isError && (
+                <p className="text-sm text-destructive">
+                  Could not load the current variant details: {memberDetails.error.message}
+                </p>
+              )}
             </div>
           )}
 
@@ -415,12 +513,15 @@ function RuleDialog({
                       <SelectItem value="fixed">Fixed charge</SelectItem>
                       <SelectItem value="fixed_band">Weight bands</SelectItem>
                       <SelectItem value="base_plus_per_started_pound">Base + per started lb</SelectItem>
+                      <SelectItem value="base_plus_per_additional_unit">Base + each additional unit</SelectItem>
                       <SelectItem value="surcharge">Add surcharge</SelectItem>
                       <SelectItem value="free_threshold">Free over item subtotal</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
-                {behavior !== "free" && behavior !== "free_threshold" && (
+                {behavior !== "free"
+                  && behavior !== "free_threshold"
+                  && behavior !== "base_plus_per_additional_unit" && (
                   <div className="space-y-1.5">
                     <Label>Measure</Label>
                     <Select value={measurementScope} onValueChange={(value: "matched_items" | "each_item") => setMeasurementScope(value)}>
@@ -433,8 +534,33 @@ function RuleDialog({
                   </div>
                 )}
               </div>
-              {(behavior === "fixed" || behavior === "surcharge" || behavior === "base_plus_per_started_pound") && <MoneyInput label={behavior === "base_plus_per_started_pound" ? "Base charge" : "Amount"} value={rateUsd} onChange={setRateUsd} />}
+              {(behavior === "fixed"
+                || behavior === "surcharge"
+                || behavior === "base_plus_per_started_pound"
+                || behavior === "base_plus_per_additional_unit") && (
+                <MoneyInput
+                  label={behavior === "base_plus_per_started_pound"
+                    ? "Base charge"
+                    : behavior === "base_plus_per_additional_unit"
+                      ? "First matching unit"
+                      : "Amount"}
+                  value={rateUsd}
+                  onChange={setRateUsd}
+                />
+              )}
               {behavior === "base_plus_per_started_pound" && <MoneyInput label="Per started lb" value={perPoundUsd} onChange={setPerPoundUsd} />}
+              {behavior === "base_plus_per_additional_unit" && (
+                <div className="space-y-1.5">
+                  <MoneyInput
+                    label="Each additional matching unit"
+                    value={perAdditionalUnitUsd}
+                    onChange={setPerAdditionalUnitUsd}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Uses the summed cart quantity of the selected variants.
+                  </p>
+                </div>
+              )}
               {behavior === "free_threshold" && <MoneyInput label="Matching-item subtotal threshold" value={thresholdUsd} onChange={setThresholdUsd} />}
               {behavior === "fixed_band" && (
                 <div className="space-y-2">
@@ -618,13 +744,83 @@ function ruleActionLabel(rule: ProductPolicyRule): string {
   if (rule.action === "fixed") return `${usdFromCents(rule.rateCents ?? 0)} fixed`;
   if (rule.action === "fixed_band") return `${rule.bands.length} weight bands`;
   if (rule.action === "base_plus_per_started_pound") return `${usdFromCents(rule.rateCents ?? 0)} + ${usdFromCents(rule.perStartedPoundCents ?? 0)}/lb`;
+  if (rule.action === "base_plus_per_additional_unit") return `${usdFromCents(rule.rateCents ?? 0)} first + ${usdFromCents(rule.perAdditionalUnitCents ?? 0)} each additional`;
   if (rule.action === "surcharge") return `${usdFromCents(rule.rateCents ?? 0)} surcharge`;
   return `Free over ${usdFromCents(rule.thresholdCents ?? 0)}`;
+}
+
+export function ruleDialogInitialSelection(editingRule: ProductPolicyRule | null): {
+  selectorKind: SelectorKind;
+  selectorRef: string;
+  selectedVariantIds: number[];
+} {
+  if (!editingRule) {
+    return {
+      selectorKind: "shipping_group",
+      selectorRef: "",
+      selectedVariantIds: [],
+    };
+  }
+  return {
+    selectorKind: "manual",
+    selectorRef: "",
+    selectedVariantIds: [...editingRule.memberVariantIds],
+  };
+}
+
+export function sameVariantMembership(left: readonly number[], right: readonly number[]): boolean {
+  if (left.length !== right.length) return false;
+  const rightIds = new Set(right);
+  return rightIds.size === right.length && left.every((id) => rightIds.has(id));
+}
+
+export function mergeVariantOptions(
+  current: readonly ProductPolicyVariantOption[],
+  incoming: readonly ProductPolicyVariantOption[],
+): ProductPolicyVariantOption[] {
+  const byId = new Map(current.map((variant) => [variant.id, variant]));
+  for (const variant of incoming) {
+    byId.set(variant.id, variant);
+  }
+  return [...byId.values()];
+}
+
+const MAX_VISIBLE_VARIANT_OPTIONS = 100;
+
+export function visibleManualVariantOptions(
+  variants: readonly ProductPolicyVariantOption[],
+  selectedVariantIds: readonly number[],
+  search: string,
+): { options: ProductPolicyVariantOption[]; hiddenCount: number } {
+  const selected = new Set(selectedVariantIds);
+  const normalizedSearch = search.trim().toLowerCase();
+  const matching = variants.filter((variant) => {
+    if (normalizedSearch === "") return true;
+    return [
+      variant.sku ?? "",
+      variant.name,
+      variant.productName,
+    ].some((value) => value.toLowerCase().includes(normalizedSearch));
+  });
+  matching.sort((left, right) => {
+    const selectedOrder = Number(selected.has(right.id)) - Number(selected.has(left.id));
+    if (selectedOrder !== 0) return selectedOrder;
+    const leftLabel = left.sku ?? `${left.productName} ${left.name}`;
+    const rightLabel = right.sku ?? `${right.productName} ${right.name}`;
+    return leftLabel.localeCompare(rightLabel) || left.id - right.id;
+  });
+  const options = matching.slice(0, MAX_VISIBLE_VARIANT_OPTIONS);
+  const visibleSelectedCount = options.filter((variant) => selected.has(variant.id)).length;
+  return {
+    options,
+    hiddenCount: Math.max(0, selectedVariantIds.length - visibleSelectedCount),
+  };
 }
 
 interface RulePricingInput {
   rateUsd: string;
   perPoundUsd: string;
+  perAdditionalUnitUsd: string;
   thresholdUsd: string;
   bands: Array<{ maxLb: string; rateUsd: string; openEnded: boolean }>;
 }
@@ -634,6 +830,7 @@ type RulePricingResult =
       ok: true;
       rateCents: number | null;
       perStartedPoundCents: number | null;
+      perAdditionalUnitCents: number | null;
       thresholdCents: number | null;
       bands: Array<{ minMeasure: number; maxMeasure: number | null; rateCents: number }>;
     }
@@ -649,6 +846,7 @@ export function resolveRulePricing(
       ok: true,
       rateCents: null,
       perStartedPoundCents: null,
+      perAdditionalUnitCents: null,
       thresholdCents: null,
       bands: [],
     };
@@ -656,6 +854,7 @@ export function resolveRulePricing(
 
   const parsedRate = parseUsd(input.rateUsd);
   const parsedPerPound = parseUsd(input.perPoundUsd);
+  const parsedPerAdditionalUnit = parseUsd(input.perAdditionalUnitUsd);
   const parsedThreshold = parseUsd(input.thresholdUsd);
   const emittedBands = behavior === "fixed_band" ? emitBands(input.bands) : [];
   if ((behavior === "fixed" || behavior === "surcharge") && parsedRate === null) {
@@ -666,6 +865,12 @@ export function resolveRulePricing(
     && (parsedRate === null || parsedPerPound === null)
   ) {
     return { ok: false, message: "Enter valid base and per-pound amounts." };
+  }
+  if (
+    behavior === "base_plus_per_additional_unit"
+    && (parsedRate === null || parsedPerAdditionalUnit === null)
+  ) {
+    return { ok: false, message: "Enter valid first-unit and additional-unit amounts." };
   }
   if (behavior === "free_threshold" && parsedThreshold === null) {
     return { ok: false, message: "Enter a valid free-shipping threshold." };
@@ -682,10 +887,14 @@ export function resolveRulePricing(
     rateCents: behavior === "fixed"
       || behavior === "surcharge"
       || behavior === "base_plus_per_started_pound"
+      || behavior === "base_plus_per_additional_unit"
       ? parsedRate
       : null,
     perStartedPoundCents: behavior === "base_plus_per_started_pound"
       ? parsedPerPound
+      : null,
+    perAdditionalUnitCents: behavior === "base_plus_per_additional_unit"
+      ? parsedPerAdditionalUnit
       : null,
     thresholdCents: behavior === "free_threshold" ? parsedThreshold : null,
     bands: emittedBands ?? [],

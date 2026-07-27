@@ -17,6 +17,7 @@ const { requirePermissionMock, serviceMocks } = vi.hoisted(() => ({
     createRateTableProductRule: vi.fn(),
     deleteRateTableProductRule: vi.fn(),
     listProductPolicySelectors: vi.fn(),
+    listRateTableProductRuleMembers: vi.fn(),
     listRateTableProductRules: vi.fn(),
     previewRateTableProductPolicy: vi.fn(),
     updateRateTableProductRule: vi.fn(),
@@ -65,6 +66,43 @@ describe("product-rate policy admin routes", () => {
       }),
       "operator-1",
     );
+  });
+
+  it("accepts base plus additional-unit pricing with matching quantities combined", async () => {
+    serviceMocks.createRateTableProductRule.mockResolvedValue({ id: 93 });
+    const response = await jsonRequest(`${server.url}/api/shipping/admin/rate-tables/12/product-rules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...validRule(),
+        action: "base_plus_per_additional_unit",
+        rateCents: 1_200,
+        perAdditionalUnitCents: 600,
+      }),
+    });
+
+    expect(response).toEqual({ status: 201, body: { rule: { id: 93 } } });
+    expect(serviceMocks.createRateTableProductRule).toHaveBeenCalledWith(
+      12,
+      expect.objectContaining({
+        action: "base_plus_per_additional_unit",
+        measurementScope: "matched_items",
+        rateCents: 1_200,
+        perAdditionalUnitCents: 600,
+      }),
+      "operator-1",
+    );
+  });
+
+  it("rejects an additional-unit amount on an unrelated action", async () => {
+    const response = await jsonRequest(`${server.url}/api/shipping/admin/rate-tables/12/product-rules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...validRule(), perAdditionalUnitCents: 600 }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(serviceMocks.createRateTableProductRule).not.toHaveBeenCalled();
   });
 
   it("accepts a shipping restriction without a monetary amount", async () => {
@@ -152,6 +190,37 @@ describe("product-rate policy admin routes", () => {
     expect(serviceMocks.listRateTableProductRules).not.toHaveBeenCalled();
   });
 
+  it("loads persisted member details for an editable rule", async () => {
+    serviceMocks.listRateTableProductRuleMembers.mockResolvedValue({
+      members: [{
+        id: 44,
+        sku: "TUFF-BOX-GRD-C25",
+        name: "Case of 25",
+        productName: "Tough Box Box for Graded Slabs",
+        isActive: true,
+      }],
+    });
+
+    const response = await jsonRequest(
+      `${server.url}/api/shipping/admin/rate-tables/12/product-rules/91/members`,
+    );
+
+    expect(response).toEqual({
+      status: 200,
+      body: {
+        members: [{
+          id: 44,
+          sku: "TUFF-BOX-GRD-C25",
+          name: "Case of 25",
+          productName: "Tough Box Box for Graded Slabs",
+          isActive: true,
+        }],
+      },
+    });
+    expect(requirePermissionMock).toHaveBeenCalledWith("settings", "view");
+    expect(serviceMocks.listRateTableProductRuleMembers).toHaveBeenCalledWith(12, 91);
+  });
+
   it("preserves classified application errors", async () => {
     serviceMocks.createRateTableProductRule.mockRejectedValue(new ProductRatePolicyAdminError(
       409,
@@ -188,6 +257,7 @@ function validRule() {
     selector: { kind: "manual", variantIds: [10] },
     rateCents: 1_299,
     perStartedPoundCents: null,
+    perAdditionalUnitCents: null,
     thresholdCents: null,
     bands: [],
   };
