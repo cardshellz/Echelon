@@ -962,7 +962,7 @@ export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<
       FROM oms.webhook_retry_queue q
       WHERE q.provider = 'internal'
         AND q.status = 'dead'
-        AND q.topic IN ('delayed_tracking_push', 'shopify_fulfillment_push')
+        AND q.topic = 'delayed_tracking_push'
         -- Bound the scan: unbounded, this statement measured 68.8s against the
         -- all-time dead backlog (796+ rows joined to the events table) — far too
         -- heavy for a 15-min cadence on the tiny shared pool. Rows older than 30
@@ -999,11 +999,10 @@ export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<
       FROM scoped_candidates c
       JOIN oms.oms_order_events e
         ON e.created_at >= COALESCE(c.dead_at, c.created_at)
-       AND (
-            (c.topic = 'delayed_tracking_push'
-              AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
-         OR (c.topic = 'shopify_fulfillment_push'
-              AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
+       AND e.event_type IN (
+         'tracking_pushed',
+         'shopify_fulfillment_pushed',
+         'shopify_fulfillment_reconciled'
        )
       WHERE (c.oms_order_id IS NULL OR e.order_id = c.oms_order_id)
         AND (
