@@ -20,6 +20,7 @@ interface DebtRow {
   readonly source_inbox_id: number | null;
   readonly shipment_id: number;
   readonly tracking_number: string | null;
+  readonly historical_empty_split_noop: boolean;
   readonly external_order_id: string;
   readonly retry_last_error: string | null;
 }
@@ -166,6 +167,7 @@ function buildShipmentSnapshots(
 ): ShopifyWritebackDebtShipment[] {
   const byShipment = new Map<number, {
     trackingNumber: string | null;
+    historicalEmptySplitNoop: boolean;
     retryIds: Set<number>;
     sourceInboxIds: Set<number>;
     items: ShopifyWritebackDebtItem[];
@@ -177,12 +179,19 @@ function buildShipmentSnapshots(
     if (!shipmentId || !retryId) {
       throw new Error("Shopify writeback retry query returned invalid shipment or retry identity");
     }
-    const existing = byShipment.get(shipmentId) ?? {
+    const prior = byShipment.get(shipmentId);
+    const historicalEmptySplitNoop = row.historical_empty_split_noop === true;
+    const existing = prior ?? {
       trackingNumber: nullableText(row.tracking_number),
+      historicalEmptySplitNoop,
       retryIds: new Set<number>(),
       sourceInboxIds: new Set<number>(),
       items: [],
     };
+    if (prior) {
+      existing.historicalEmptySplitNoop =
+        existing.historicalEmptySplitNoop && historicalEmptySplitNoop;
+    }
     existing.retryIds.add(retryId);
     const sourceInboxId = positiveInteger(row.source_inbox_id);
     if (sourceInboxId) existing.sourceInboxIds.add(sourceInboxId);
@@ -227,6 +236,7 @@ function buildShipmentSnapshots(
     .map(([shipmentId, snapshot]) => Object.freeze({
       shipmentId,
       trackingNumber: snapshot.trackingNumber,
+      historicalEmptySplitNoop: snapshot.historicalEmptySplitNoop,
       retryIds: Object.freeze([...snapshot.retryIds].sort((left, right) => left - right)),
       sourceInboxIds: Object.freeze(
         [...snapshot.sourceInboxIds].sort((left, right) => left - right),
@@ -257,6 +267,32 @@ async function resolveWithExecutor(
       retry.source_inbox_id::int AS source_inbox_id,
       shipment.id::int AS shipment_id,
       NULLIF(BTRIM(shipment.tracking_number), '') AS tracking_number,
+      (
+        shipment.source = 'shipstation_split'
+        AND shipment.status = 'shipped'
+        AND shipment.shipment_purpose = 'customer_fulfillment'
+        AND NULLIF(BTRIM(shipment.tracking_number), '') IS NOT NULL
+        AND retry.last_error LIKE '%no items with positive quantity%'
+        AND NULLIF(BTRIM(shipment.engine_shipment_ref), '') IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipment_items own_item
+          WHERE own_item.shipment_id = shipment.id
+        )
+        AND EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipments sibling
+          JOIN wms.outbound_shipment_items sibling_item
+            ON sibling_item.shipment_id = sibling.id
+          WHERE sibling.order_id = shipment.order_id
+            AND sibling.id <> shipment.id
+            AND sibling.status = 'shipped'
+            AND sibling.shipment_purpose = 'customer_fulfillment'
+            AND sibling.engine_shipment_ref = shipment.engine_shipment_ref
+            AND sibling_item.shipment_item_purpose = 'customer_fulfillment'
+            AND sibling_item.qty > 0
+        )
+      ) AS historical_empty_split_noop,
       oms_order.external_order_id,
       retry.last_error AS retry_last_error
     FROM oms.webhook_retry_queue retry
@@ -383,8 +419,16 @@ async function resolveWithExecutor(
     });
   }
 
+  const historicalEmptySplitNoopShipmentIds = shipments
+    .filter(
+      (shipment) =>
+        shipment.historicalEmptySplitNoop
+        && evaluation.resolvedShipmentIds.includes(shipment.shipmentId),
+    )
+    .map((shipment) => shipment.shipmentId);
   const resolutionMessage =
-    `Superseded by canonical Shopify fulfillment evidence (${input.source}, ${input.mode})`;
+    `Resolved by canonical Shopify evidence or historical empty split classification`
+    + ` (${input.source}, ${input.mode})`;
   const retryResult = await executor.execute(sql`
     UPDATE oms.webhook_retry_queue
     SET status = 'success',
@@ -446,6 +490,7 @@ async function resolveWithExecutor(
         source: input.source,
         evidenceMode: input.mode,
         shipmentIds: evaluation.resolvedShipmentIds,
+        historicalEmptySplitNoopShipmentIds,
         retryIds: evaluation.resolvedRetryIds,
         retryStatusTransition: {
           from: "dead",
