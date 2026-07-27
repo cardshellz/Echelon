@@ -1977,7 +1977,7 @@ window.MOCK_EXTRA = {
      sourcing exception); the note is required only when a flagged line is included. */
   var CHIP_KEYS = ['needs_order', 'order_soon', 'on_order', 'ok', 'stagnant', 'overstock'];
   function freshConfirm() {
-    return { note: '', controls: {}, exceptions: {}, ackCreate: false };
+    return { note: '', controls: {}, exceptions: {} };
   }
   var state = {
     q: '', group: 'none', showExcluded: false, collapsed: {},
@@ -2739,7 +2739,6 @@ window.MOCK_EXTRA = {
     });
     if (cg.po.length && !missing) {
       if (anyFlaggedPo(cg) && c.note.trim().length < 10) missing = 'Decision note needs at least 10 characters';
-      else if (!c.ackCreate) missing = 'Tick “Create these POs as drafts for review”';
     }
     return missing;
   }
@@ -2848,8 +2847,7 @@ window.MOCK_EXTRA = {
       if (anyFl) {
         html += '<div class="callout co-amber" style="margin-top:12px"><div>Approving flagged items does not change automation eligibility &mdash; blocks clear when the cause is fixed (verify the cost, let history build).</div></div>';
       }
-      html += '<label class="ob-ctl" style="margin-top:10px"><input type="checkbox" id="obAckCreate"' + (c.ackCreate ? ' checked' : '') + '>' +
-        '<span><b>Create these POs as drafts for review.</b></span></label>';
+      html += '<div class="tiny muted" style="margin-top:10px">POs are always created as <b>drafts</b> &mdash; nothing goes to a vendor until you send it (or auto-send is unlocked for that vendor on the Automation ladder).</div>';
     }
     if (cg.rfq.length) {
       html += '<div class="ob-sect" style="margin-top:' + (cg.po.length ? '18px' : '2px') + '">RFQ drafts</div>';
@@ -2874,7 +2872,11 @@ window.MOCK_EXTRA = {
       '</div></div>' +
       '<div class="row" style="gap:8px;flex-wrap:wrap">' +
       '<button class="btn btn-outline" id="obBack">&larr; Back</button>' +
-      '<button class="btn btn-primary" id="obConfirm">Confirm &amp; create</button>' +
+      '<button class="btn btn-primary" id="obConfirm">' +
+      (cg.po.length ? 'Create ' + cg.po.length + ' draft PO' + (cg.po.length === 1 ? '' : 's') : '') +
+      (cg.po.length && cg.rfq.length ? ' · ' : '') +
+      (cg.rfq.length ? (cg.po.length ? '' : 'Create ') + cg.rfq.length + ' RFQ' + (cg.rfq.length === 1 ? '' : 's') : '') +
+      '</button>' +
       '</div></div>';
 
     $('#obBody').innerHTML = html;
@@ -3086,11 +3088,6 @@ window.MOCK_EXTRA = {
       var xsku = exc.getAttribute('data-sku');
       if (exc.checked) state.order.confirm.exceptions[xsku] = true;
       else delete state.order.confirm.exceptions[xsku];
-      updateConfirmGate();
-      return;
-    }
-    if (e.target.id === 'obAckCreate') {
-      state.order.confirm.ackCreate = e.target.checked;
       updateConfirmGate();
       return;
     }
