@@ -2,6 +2,9 @@ import { webhookRetryQueue } from "@shared/schema";
 import { eq, lte, and, sql } from "drizzle-orm";
 import { incr } from "../../instrumentation/metrics";
 import { createShipmentForOrder } from "../wms/create-shipment";
+import {
+  movePendingShipmentItemsToLateEditResidual,
+} from "../wms/late-order-shipment-coverage";
 // Stable error code for a deterministic, non-retryable ShipStation push
 // rejection (bad address/total/country, not-pushable status, finalized order).
 // Imported (not string-literal'd) so a rename stays in sync. shipstation.service
@@ -228,6 +231,10 @@ export async function enqueueShipStationRetry(
 export interface RetryShipStationService {
   processShipNotify(resourceUrl: string): Promise<number>;
   pushShipment?(shipmentId: number): Promise<unknown>;
+  appendShipmentItems?(
+    shipmentId: number,
+    shipmentItemIds: readonly number[],
+  ): Promise<{ state: "applied" | "already_applied" | "not_editable"; providerStatus: string }>;
   syncWmsOrderShipStationHoldState?(
     wmsOrderId: number,
     mode: "hold" | "release",
@@ -551,6 +558,61 @@ export async function enqueueShipStationShipmentPushRetry(
     provider: "internal",
     topic: "shipstation_shipment_push",
     payload: { shipmentId },
+    attempts: 0,
+    status: "pending",
+    lastError: message || null,
+    nextRetryAt: new Date(),
+  });
+}
+
+export async function enqueueShippingEngineShipmentAmendRetry(
+  dbArg: any,
+  shipmentId: number,
+  shipmentItemIds: readonly number[],
+  cause?: unknown,
+): Promise<void> {
+  if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+    throw new Error(
+      `enqueueShippingEngineShipmentAmendRetry: shipmentId must be a positive integer (got ${shipmentId})`,
+    );
+  }
+  const normalizedItemIds = Array.from(new Set(shipmentItemIds.map(Number)))
+    .sort((left, right) => left - right);
+  if (
+    normalizedItemIds.length === 0 ||
+    normalizedItemIds.some((value) => !Number.isInteger(value) || value <= 0)
+  ) {
+    throw new Error(
+      "enqueueShippingEngineShipmentAmendRetry: shipmentItemIds must contain positive integers",
+    );
+  }
+
+  const amendmentKey = `${shipmentId}:${normalizedItemIds.join(",")}`;
+  const message =
+    cause instanceof Error
+      ? cause.message
+      : typeof cause === "string"
+        ? cause
+        : cause == null
+          ? ""
+          : String(cause);
+
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "internal",
+    topic: "shipping_engine_shipment_amend",
+    scope: sql`payload->>'amendmentKey' = ${amendmentKey}`,
+  })) {
+    return;
+  }
+
+  await insertWebhookRetryQueueRow(dbArg, {
+    provider: "internal",
+    topic: "shipping_engine_shipment_amend",
+    payload: {
+      shipmentId,
+      shipmentItemIds: normalizedItemIds,
+      amendmentKey,
+    },
     attempts: 0,
     status: "pending",
     lastError: message || null,
@@ -1082,6 +1144,127 @@ export async function dispatchShipStationShipmentPushRetry(
     } else {
       console.warn(
         `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+}
+
+export async function dispatchShippingEngineShipmentAmendRetry(
+  dbArg: any,
+  item: RetryDispatchItem,
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  const payload = item.payload as {
+    shipmentId?: number;
+    shipmentItemIds?: number[];
+    amendmentKey?: string;
+  } | null;
+  const shipmentId = Number(payload?.shipmentId);
+  const shipmentItemIds = Array.isArray(payload?.shipmentItemIds)
+    ? Array.from(new Set(payload.shipmentItemIds.map(Number))).sort(
+        (left, right) => left - right,
+      )
+    : [];
+  const expectedAmendmentKey = `${shipmentId}:${shipmentItemIds.join(",")}`;
+
+  if (
+    !Number.isInteger(shipmentId) ||
+    shipmentId <= 0 ||
+    shipmentItemIds.length === 0 ||
+    shipmentItemIds.some((value) => !Number.isInteger(value) || value <= 0) ||
+    payload?.amendmentKey !== expectedAmendmentKey
+  ) {
+    await markRowDead(
+      dbArg,
+      item,
+      "malformed payload: shipmentId, shipmentItemIds, or amendmentKey invalid",
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipping_engine_shipment_amend payload)`,
+    );
+    return "malformed";
+  }
+
+  const eng = resolveShippingEngine(dbArg);
+  const ssSvc = resolveShipStationService(dbArg);
+  if (
+    (!eng || typeof eng.appendShipmentItems !== "function") &&
+    (!ssSvc || typeof ssSvc.appendShipmentItems !== "function")
+  ) {
+    await keepPending(
+      dbArg,
+      item.id,
+      "shipping engine amendment API is unavailable",
+    );
+    console.warn(
+      `${LOG_PREFIX} Item ${item.id} (shipping_engine_shipment_amend, shipment=${shipmentId}) deferred - engine unavailable`,
+    );
+    return "pending";
+  }
+
+  try {
+    const result = eng && typeof eng.appendShipmentItems === "function"
+      ? await eng.appendShipmentItems({ shipmentId, shipmentItemIds })
+      : await ssSvc!.appendShipmentItems!(shipmentId, shipmentItemIds);
+
+    if (result.state === "not_editable") {
+      if (typeof dbArg?.transaction !== "function") {
+        throw new Error(
+          "database transaction API is required for late-edit residual fallback",
+        );
+      }
+      const moved = await dbArg.transaction(async (tx: any) => {
+        const moveResult = await movePendingShipmentItemsToLateEditResidual(
+          tx,
+          shipmentId,
+          shipmentItemIds,
+          { useXactLock: true },
+        );
+        if (moveResult.nextAction === "push") {
+          await enqueueShipStationShipmentPushRetry(
+            tx,
+            moveResult.residualShipmentId,
+            `provider status ${result.providerStatus} locked original shipment ${shipmentId}`,
+          );
+        } else if (moveResult.nextAction === "amend") {
+          await enqueueShippingEngineShipmentAmendRetry(
+            tx,
+            moveResult.residualShipmentId,
+            moveResult.shipmentItemIds,
+            `provider status ${result.providerStatus} locked original shipment ${shipmentId}; append to existing residual`,
+          );
+        }
+        await markRowSuccess(tx, item);
+        return moveResult;
+      });
+      console.log(
+        `${LOG_PREFIX} Item ${item.id} moved ${moved.shipmentItemIds.length} late item row(s) from locked shipment ${shipmentId} to residual shipment ${moved.residualShipmentId}`,
+      );
+      return "success";
+    }
+
+    await markRowSuccess(dbArg, item);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} amended shipment ${shipmentId} (${result.state}, providerStatus=${result.providerStatus})`,
+    );
+    return "success";
+  } catch (err: any) {
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      {
+        topic: "shipping_engine_shipment_amend",
+        shipmentId,
+      },
+    );
+    if (status === "dead") {
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (shipping_engine_shipment_amend, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (shipping_engine_shipment_amend, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
       );
     }
     return status;
@@ -2000,6 +2183,20 @@ async function processPendingWebhooks(
       } catch (branchErr: any) {
         console.error(
           `${LOG_PREFIX} Item ${item.id} shipstation_shipment_push dispatch threw: ${branchErr?.message || branchErr}`,
+        );
+      }
+      continue;
+    }
+
+    if (
+      item.provider === "internal" &&
+      item.topic === "shipping_engine_shipment_amend"
+    ) {
+      try {
+        await dispatchShippingEngineShipmentAmendRetry(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} shipping_engine_shipment_amend dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;

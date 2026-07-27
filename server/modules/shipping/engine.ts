@@ -19,6 +19,8 @@ import type {
   EngineMarkShippedResult,
   EngineOrderState,
   EngineRef,
+  EngineShipmentItemAppendResult,
+  ShipmentItemAppendPayload,
   ShipmentPushPayload,
   CanonicalShipmentEvent,
 } from "./types";
@@ -33,6 +35,19 @@ export interface ShippingEngine {
    * Idempotent: re-pushing the same shipment updates in place.
    */
   upsertShipment(payload: ShipmentPushPayload): Promise<EnginePushResult>;
+
+  /**
+   * Append newly-authorized items to an existing, provider-editable package.
+   *
+   * The adapter must preserve provider-managed fields, verify every requested
+   * item identity after the write, and return `not_editable` only when the
+   * provider has positively reported a locked/terminal order state. Transport
+   * failures and unknown state must throw so callers retry instead of creating
+   * a duplicate package.
+   */
+  appendShipmentItems(
+    payload: ShipmentItemAppendPayload,
+  ): Promise<EngineShipmentItemAppendResult>;
 
   /**
    * Cancel a shipment in the engine. Returns { alreadyInState: true }

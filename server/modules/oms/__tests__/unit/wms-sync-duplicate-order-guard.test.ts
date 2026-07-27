@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 const WMS_SYNC_SRC = readFileSync(
   resolve(__dirname, "../../wms-sync.service.ts"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 const ORDERS_SCHEMA_SRC = readFileSync(
   resolve(__dirname, "../../../../../shared/schema/orders.schema.ts"),
   "utf8",
