@@ -147,7 +147,13 @@ A full inventory of the live PurchasingView.tsx + server contracts (86 items) de
 
 **API extensions required by the new page:** category/product-line fields on reorder items; per-row inbound ETA; stop stripping `forwardDemandBasis.contributions` (or drawer fetches demand-events); suggested-spend (client-computed acceptable); Overstocked derived client-side (>180d supply, ok status). Accuracy strip pins the 30-day horizon and keeps the trust caveat. Add a UI-contract test for the new page pinning deep-link params + decision-evidence fields (pattern: `demand-planner-ui-contract.test.ts`).
 
-## 14. Open questions (parked)
+## 14. Revision 5 — order semantics and risk-proportional evidence (2026-07-27)
+
+1. **Analysis membership is managed only on Planning Policy (06).** The cockpit's per-row Exclude button (added in rev 4) is removed — sitting next to "Add to order" it read as an order action, and excluding from the page that displays the analysis creates a one-way-door feel. The cockpit keeps the excluded-rows toggle (read-only, with reason labels) plus a "Manage exclusions →" link to 06.
+2. **Order membership is symmetric.** Row action toggles Add to order ↔ Remove; Order Builder lines carry an explicit × that syncs back to the table; empty builder shows an empty state.
+3. **Decision evidence is proportional to risk.** Confirm step splits into "Ready — no active warnings" (no checkboxes; note optional with auto-note `Manual order via Order Builder`) and "Flagged — acknowledge each warning" (per-control checkboxes + ≥10-char note required, as before). The eligibility acknowledgment becomes a passive info line shown only with flagged items. **Server change required at implementation:** relax `validateRecommendationDecisionEvidence` so control-free decisions accept an auto-note and an implicit eligibility flag; keep the strict path whenever `qualityControls` is non-empty. Evidence remains append-only; nothing about the audit trail weakens — only the ceremony where there is no risk to acknowledge.
+
+## 15. Open questions (parked)
 
 - Multi-warehouse dimension (blocked on engine gaining warehouse-scoped demand/supply — out of scope v1).
 - Accuracy trust thresholds (`accuracy_thresholds_not_configured` today) — needed before Stage 4; propose configuring after 60d of cohort data.

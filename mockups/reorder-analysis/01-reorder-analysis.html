@@ -408,6 +408,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
             <button data-g="none" class="on">None</button>
           </div>
           <span class="pg-excl" id="exclToggle"><span class="switch" id="exclSwitch"></span><span id="exclLabel">Show excluded</span></span>
+          <a class="btn btn-ghost btn-sm" href="06-exclusions-policy.html">Manage exclusions &rarr;</a>
         </div>
       </div>
 
@@ -1971,10 +1972,12 @@ window.MOCK_EXTRA = {
      order.adjusted = per-SKU "rounded up" feedback text, cleared on the next edit.
      rev4: order.stage = 'edit' | 'confirm' (two-stage builder, one drawer);
      order.exceedReason = per-SKU override reason for lines above the suggestion;
-     order.confirm = decision evidence (control acks, exception approvals, note, final acks). */
+     order.confirm = decision evidence (control acks, exception approvals, note, final ack).
+     rev5: confirm splits lines into Ready (clean, no checkboxes) vs Flagged (controls or
+     sourcing exception); the note is required only when a flagged line is included. */
   var CHIP_KEYS = ['needs_order', 'order_soon', 'on_order', 'ok', 'stagnant', 'overstock'];
   function freshConfirm() {
-    return { note: '', controls: {}, exceptions: {}, ackAuto: false, ackCreate: false };
+    return { note: '', controls: {}, exceptions: {}, ackCreate: false };
   }
   var state = {
     q: '', group: 'none', showExcluded: false, collapsed: {},
@@ -2229,9 +2232,8 @@ window.MOCK_EXTRA = {
         '<span class="pg-tip pg-tip-r">' + esc(confTipText(it)) + '</span></span></td>' +
       '<td><div class="pg-actions"><button class="btn btn-outline btn-sm act-explain">Explain</button>' +
         (checked
-          ? '<button class="btn btn-ghost btn-sm act-plan pg-cgreen">&#10003; Added</button>'
+          ? '<button class="btn btn-ghost btn-sm act-plan" title="Remove from order"><span class="pg-cmut">&#10003;</span> Added &middot; Remove</button>'
           : '<button class="btn btn-ghost btn-sm act-plan">Add to order</button>') +
-        '<button class="btn btn-ghost btn-sm act-exclude">Exclude</button>' +
       '</div></td>' +
       '</tr>';
   }
@@ -2596,9 +2598,11 @@ window.MOCK_EXTRA = {
             '<div class="pg-subline ob-hint" data-sku="' + it.sku + '" style="max-width:none;text-align:right"></div></td>' +
           '<td class="right">' + money(it.unitCostCents) + '</td>' +
           '<td class="right"><b class="ob-line" data-sku="' + it.sku + '"></b></td>' +
+          /* rev5 — explicit line remove; unchecks the matching table row */
+          '<td style="width:30px;text-align:center;padding-left:2px;padding-right:8px"><button class="btn btn-ghost btn-sm ob-remove" data-sku="' + it.sku + '" title="Remove from order" aria-label="Remove ' + it.sku + ' from order">&times;</button></td>' +
           '</tr>' +
           /* rev4 — inline override-reason row, shown only while pieces exceed the suggestion */
-          '<tr class="ob-exceedrow" data-sku="' + it.sku + '"' + (exceeds ? '' : ' style="display:none"') + '><td colspan="6">' +
+          '<tr class="ob-exceedrow" data-sku="' + it.sku + '"' + (exceeds ? '' : ' style="display:none"') + '><td colspan="7">' +
             '<div class="tiny" style="font-weight:600;color:var(--amber)">Exceeds the recommendation — suggested ' + fmt(it.suggestedPieces || 0) + '</div>' +
             '<input type="text" class="input ob-reason" data-sku="' + it.sku + '" placeholder="Reason for exceeding the recommendation" value="' + attr(state.order.exceedReason[it.sku] || '') + '">' +
             '<div class="tiny ob-reasonhint" data-sku="' + it.sku + '" style="color:var(--red);margin-top:3px' + (reasonValid(it.sku) ? ';display:none' : '') + '">Required — at least 3 characters</div>' +
@@ -2607,7 +2611,7 @@ window.MOCK_EXTRA = {
       return '<div class="pg-obvendor">' +
         '<div class="pg-obvh"><b>' + esc(g.name) + '</b>' +
           (vrec ? '<span class="muted small">' + esc(vrec.terms) + '</span>' : '') + '</div>' +
-        '<table class="pg-mini"><thead><tr><th>SKU</th><th>Product</th><th>Need by</th><th class="right">Pieces</th><th class="right">Unit cost</th><th class="right">Line total</th></tr></thead>' +
+        '<table class="pg-mini"><thead><tr><th>SKU</th><th>Product</th><th>Need by</th><th class="right">Pieces</th><th class="right">Unit cost</th><th class="right">Line total</th><th></th></tr></thead>' +
         '<tbody>' + lines + '</tbody></table>' +
         '<div class="pg-obvfoot">' +
           '<span>Vendor total <b class="ob-vtotal" data-vendor="' + esc(g.name) + '"></b>' +
@@ -2617,6 +2621,8 @@ window.MOCK_EXTRA = {
             '<label><input type="radio" name="obmode-' + esc(g.name) + '" value="rfq"' + (mode === 'rfq' ? ' checked' : '') + '> Request quote</label>' +
           '</span></div></div>';
     }).join('');
+    /* rev5 — every line removed: muted empty state; Continue stays disabled via updateBuilderTotals */
+    if (!groups.length) html = '<div class="muted" style="text-align:center;padding:26px 0">No items &mdash; add SKUs from the table</div>';
     html += '<div class="pg-obgrand">' +
       '<div>Order total <b id="obGrand"></b><div class="tiny muted" id="obGrandSub"></div></div>' +
       '<div class="row" style="gap:8px;flex-wrap:wrap">' +
@@ -2671,7 +2677,9 @@ window.MOCK_EXTRA = {
     $('#obGrand').textContent = money(grand);
     $('#obGrandSub').textContent = itemCount + ' item' + (itemCount === 1 ? '' : 's') + ' · ' +
       groups.length + ' vendor' + (groups.length === 1 ? '' : 's');
-    $('#obSub').textContent = 'Lines grouped by vendor · edit pieces to resize the order';
+    $('#obSub').textContent = itemCount
+      ? 'Lines grouped by vendor · edit pieces to resize the order'
+      : 'Nothing selected';
     var parts = [];
     if (nPo) parts.push(nPo + ' PO' + (nPo === 1 ? '' : 's'));
     if (nRfq) parts.push(nRfq + ' RFQ' + (nRfq === 1 ? '' : 's'));
@@ -2703,8 +2711,18 @@ window.MOCK_EXTRA = {
     return { po: po, rfq: rfq };
   }
 
+  /* rev5 — a PO line is "flagged" when it carries active quality controls or exceeds the
+     suggestion (sourcing exception). Clean lines confirm without checkboxes. */
+  function flaggedLine(it) {
+    var ctls = (X.qualityControls || {})[it.sku] || [];
+    return ctls.length > 0 || (state.order.qty[it.sku] || 0) > (it.suggestedPieces || 0);
+  }
+  function anyFlaggedPo(cg) {
+    return cg.po.some(function (g) { return g.lines.some(flaggedLine); });
+  }
+
   /* first unmet confirm requirement, or null when everything is satisfied.
-     Order: control acks → exception approvals → note length → the two final acks. */
+     Order: control acks → exception approvals → note length (flagged only) → final ack. */
   function confirmMissing() {
     var cg = confirmGroups(), c = state.order.confirm;
     var missing = null;
@@ -2722,8 +2740,7 @@ window.MOCK_EXTRA = {
       });
     });
     if (cg.po.length && !missing) {
-      if (c.note.trim().length < 10) missing = 'Decision note needs at least 10 characters';
-      else if (!c.ackAuto) missing = 'Acknowledge that automatic-purchasing eligibility is unchanged';
+      if (anyFlaggedPo(cg) && c.note.trim().length < 10) missing = 'Decision note needs at least 10 characters';
       else if (!c.ackCreate) missing = 'Tick “Create these POs as drafts for review”';
     }
     return missing;
@@ -2760,46 +2777,74 @@ window.MOCK_EXTRA = {
 
     var html = '';
     if (cg.po.length) {
-      html += '<div class="ob-sect">PO drafts — decision evidence required</div>';
-      html += cg.po.map(function (g) {
-        var vrec = M.vendors.filter(function (v) { return v.name === g.name; })[0];
-        var lines = g.lines.map(function (it) {
-          var qty = state.order.qty[it.sku] || 0;
-          var ctls = (X.qualityControls || {})[it.sku] || [];
-          var ctlHtml = ctls.length
-            ? ctls.map(function (ctl) {
-                var key = it.sku + ':' + ctl.code;
-                return '<label class="ob-ctl"><input type="checkbox" class="ob-ctlck" data-key="' + attr(key) + '"' +
-                  (c.controls[key] ? ' checked' : '') + '>' + sevChip(ctl.severity) +
-                  '<span>' + esc(ctl.label) + '</span></label>';
-              }).join('')
-            : '<div class="muted small" style="padding:3px 0 1px">No active controls</div>';
-          var excHtml = '';
-          if (qty > (it.suggestedPieces || 0)) {
-            excHtml = '<label class="ob-ctl"><input type="checkbox" class="ob-excck" data-sku="' + attr(it.sku) + '"' +
-              (c.exceptions[it.sku] ? ' checked' : '') + '>' +
-              '<span class="badge b-amber" style="padding:1.5px 7px;font-size:10.5px;flex:0 0 auto">Exception</span>' +
-              '<span>Approve this sourcing exception — ' + fmt(qty) + ' pc vs suggested ' + fmt(it.suggestedPieces || 0) +
-              '. Reason: &ldquo;' + esc((state.order.exceedReason[it.sku] || '').trim()) + '&rdquo;</span></label>';
-          }
-          return '<div class="ob-cline">' +
-            '<div class="row" style="justify-content:space-between;gap:10px;align-items:baseline">' +
-            '<span style="min-width:0"><span class="mono" style="font-size:12px;font-weight:700">' + it.sku + '</span> <span class="small">' + esc(it.name) + '</span></span>' +
-            '<span class="small" style="white-space:nowrap;font-variant-numeric:tabular-nums">' + fmt(qty) + ' pc · ' + money(qty * it.unitCostCents) + '</span></div>' +
-            ctlHtml + excHtml + '</div>';
-        }).join('');
-        return '<div class="pg-obvendor">' +
-          '<div class="pg-obvh"><b>' + esc(g.name) + '</b><span class="muted small">' +
-          g.lines.length + ' line' + (g.lines.length === 1 ? '' : 's') + ' · ' + money(g.total) +
-          (vrec ? ' · ' + esc(vrec.terms) : '') + '</span></div>' + lines + '</div>';
-      }).join('');
+      /* rev5 — risk-proportional confirm: clean lines are compact rows (no checkboxes);
+         flagged lines (controls or sourcing exception) keep the rev4 evidence checkboxes */
+      var ready = [], flaggedVendors = [];
+      cg.po.forEach(function (g) {
+        var fl = g.lines.filter(flaggedLine);
+        g.lines.forEach(function (it) {
+          if (!flaggedLine(it)) ready.push({ it: it, vendor: g.name });
+        });
+        if (fl.length) flaggedVendors.push({ name: g.name, lines: fl });
+      });
+      var anyFl = flaggedVendors.length > 0;
 
+      if (ready.length) {
+        html += '<div class="ob-sect">Ready — no active warnings</div>';
+        html += '<div class="pg-obvendor"><div style="padding:4px 12px 8px">' +
+          ready.map(function (r) {
+            var qty = state.order.qty[r.it.sku] || 0;
+            return '<div class="pg-evrow"><span style="min-width:0"><span class="mono" style="font-size:12px;font-weight:700">' + r.it.sku + '</span> <span class="small">' + esc(r.it.name) + '</span> <span class="muted small">· ' + esc(r.vendor) + '</span></span>' +
+              '<span class="small" style="white-space:nowrap;font-variant-numeric:tabular-nums">' + fmt(qty) + ' pc · ' + money(qty * r.it.unitCostCents) + '</span></div>';
+          }).join('') + '</div></div>';
+      }
+
+      if (anyFl) {
+        html += '<div class="ob-sect"' + (ready.length ? ' style="margin-top:14px"' : '') + '>Flagged — acknowledge each warning</div>';
+        html += flaggedVendors.map(function (g) {
+          var vrec = M.vendors.filter(function (v) { return v.name === g.name; })[0];
+          var vt = g.lines.reduce(function (s, it) { return s + (state.order.qty[it.sku] || 0) * it.unitCostCents; }, 0);
+          var lines = g.lines.map(function (it) {
+            var qty = state.order.qty[it.sku] || 0;
+            var ctls = (X.qualityControls || {})[it.sku] || [];
+            var ctlHtml = ctls.map(function (ctl) {
+              var key = it.sku + ':' + ctl.code;
+              return '<label class="ob-ctl"><input type="checkbox" class="ob-ctlck" data-key="' + attr(key) + '"' +
+                (c.controls[key] ? ' checked' : '') + '>' + sevChip(ctl.severity) +
+                '<span>' + esc(ctl.label) + '</span></label>';
+            }).join('');
+            var excHtml = '';
+            if (qty > (it.suggestedPieces || 0)) {
+              excHtml = '<label class="ob-ctl"><input type="checkbox" class="ob-excck" data-sku="' + attr(it.sku) + '"' +
+                (c.exceptions[it.sku] ? ' checked' : '') + '>' +
+                '<span class="badge b-amber" style="padding:1.5px 7px;font-size:10.5px;flex:0 0 auto">Exception</span>' +
+                '<span>Approve this sourcing exception — ' + fmt(qty) + ' pc vs suggested ' + fmt(it.suggestedPieces || 0) +
+                '. Reason: &ldquo;' + esc((state.order.exceedReason[it.sku] || '').trim()) + '&rdquo;</span></label>';
+            }
+            return '<div class="ob-cline">' +
+              '<div class="row" style="justify-content:space-between;gap:10px;align-items:baseline">' +
+              '<span style="min-width:0"><span class="mono" style="font-size:12px;font-weight:700">' + it.sku + '</span> <span class="small">' + esc(it.name) + '</span></span>' +
+              '<span class="small" style="white-space:nowrap;font-variant-numeric:tabular-nums">' + fmt(qty) + ' pc · ' + money(qty * it.unitCostCents) + '</span></div>' +
+              ctlHtml + excHtml + '</div>';
+          }).join('');
+          return '<div class="pg-obvendor">' +
+            '<div class="pg-obvh"><b>' + esc(g.name) + '</b><span class="muted small">' +
+            g.lines.length + ' line' + (g.lines.length === 1 ? '' : 's') + ' · ' + money(vt) +
+            (vrec ? ' · ' + esc(vrec.terms) : '') + '</span></div>' + lines + '</div>';
+        }).join('');
+      }
+
+      /* note: required (>=10, counter) only when a flagged line is included; otherwise
+         optional with an auto-note fallback recorded in the audit trail */
       html += '<div style="margin:14px 0 4px;font-weight:650;font-size:13px">Decision note <span class="muted" style="font-weight:400">· shared across these POs</span></div>' +
-        '<textarea class="input ob-note" id="obNote" rows="3" maxlength="2000" placeholder="Why this order? (min 10 characters)">' + esc(c.note) + '</textarea>' +
-        '<div class="tiny" id="obNoteCount" style="margin-top:3px"></div>';
-      html += '<div class="callout co-amber" style="margin-top:12px"><label class="ob-ctl" style="padding:0">' +
-        '<input type="checkbox" id="obAckAuto"' + (c.ackAuto ? ' checked' : '') + '>' +
-        '<span>I understand these decisions do not change automatic-purchasing eligibility.</span></label></div>';
+        '<textarea class="input ob-note" id="obNote" rows="3" maxlength="2000" placeholder="' +
+        (anyFl ? 'Why this order? (min 10 characters)' : 'Optional note (recorded in the audit trail)') + '">' + esc(c.note) + '</textarea>' +
+        (anyFl
+          ? '<div class="tiny" id="obNoteCount" style="margin-top:3px"></div>'
+          : '<div class="tiny muted" style="margin-top:3px">Left blank, &ldquo;Manual order via Order Builder&rdquo; is recorded.</div>');
+      if (anyFl) {
+        html += '<div class="callout co-amber" style="margin-top:12px"><div>Approving flagged items does not change automation eligibility &mdash; blocks clear when the cause is fixed (verify the cost, let history build).</div></div>';
+      }
       html += '<label class="ob-ctl" style="margin-top:10px"><input type="checkbox" id="obAckCreate"' + (c.ackCreate ? ' checked' : '') + '>' +
         '<span><b>Create these POs as drafts for review.</b></span></label>';
     }
@@ -2897,9 +2942,9 @@ window.MOCK_EXTRA = {
     if (e.target.closest('.act-explain')) {
       openDrawer(it);
     } else if (e.target.closest('.act-plan')) {
-      setChecked(it.sku, true, true);
-    } else if (e.target.closest('.act-exclude')) {
-      toast('Would mark ' + it.sku + ' reorder-excluded — drops from analysis at the next run');
+      /* rev5 — add/remove toggle: mirrors the row checkbox; flash the bar only on add */
+      var on = !state.order.checked[it.sku];
+      setChecked(it.sku, on, on);
     }
   });
 
@@ -3041,11 +3086,6 @@ window.MOCK_EXTRA = {
       updateConfirmGate();
       return;
     }
-    if (e.target.id === 'obAckAuto') {
-      state.order.confirm.ackAuto = e.target.checked;
-      updateConfirmGate();
-      return;
-    }
     if (e.target.id === 'obAckCreate') {
       state.order.confirm.ackCreate = e.target.checked;
       updateConfirmGate();
@@ -3055,6 +3095,15 @@ window.MOCK_EXTRA = {
     if (!r) return;
     state.order.vendorMode[r.name.replace(/^obmode-/, '')] = r.value;
     updateBuilderTotals();
+  });
+
+  /* rev5 — builder line remove (×): uncheck the table row, re-render the builder so an
+     emptied vendor group disappears (or the empty state shows). Delegated: survives re-renders. */
+  $('#obBody').addEventListener('click', function (e) {
+    var rm = e.target.closest('.ob-remove');
+    if (!rm) return;
+    setChecked(rm.getAttribute('data-sku'), false, false); /* re-renders table + order bar */
+    renderBuilder();
   });
 
   $('#btnRefresh').addEventListener('click', function () {
