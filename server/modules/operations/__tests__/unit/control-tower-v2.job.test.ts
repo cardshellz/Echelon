@@ -10,7 +10,7 @@ describe("Control Tower V2 projection job", () => {
       sourceNamespace: "test.invalid_source",
       sourceType: "test_finding",
       projectionVersion: 1,
-      loadRows: async () => [{ id: 1 }],
+      loadPage: async () => ({ rows: [{ id: 1 }], nextCursor: null }),
       projectRow: () => {
         throw new Error("invalid source row");
       },

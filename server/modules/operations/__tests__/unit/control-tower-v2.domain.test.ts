@@ -67,7 +67,7 @@ describe("Control Tower V2 domain", () => {
       sourceNamespace: "test.source",
       sourceType: "test_finding",
       projectionVersion: 1,
-      loadRows: async () => [],
+      loadPage: async () => ({ rows: [], nextCursor: null }),
       projectRow: (row) => {
         if (!row.valid) throw new Error("invalid source row");
         return projectedItem(row.id);
@@ -92,7 +92,7 @@ describe("Control Tower V2 domain", () => {
       sourceNamespace: "test.source",
       sourceType: "test_finding",
       projectionVersion: 1,
-      loadRows: async () => [],
+      loadPage: async () => ({ rows: [], nextCursor: null }),
       projectRow: (row) => projectedItem(row.id),
     };
     const result = projectSourceRows({
@@ -165,18 +165,22 @@ describe("Control Tower V2 domain", () => {
 
   it("loads order-scoped inventory identity through indexed WMS and OMS keys", async () => {
     let queryText = "";
-    const rows = await inventoryIntegritySource.loadRows({
-      query: async (text: string) => {
+    let queryValues: unknown[] | undefined;
+    const page = await inventoryIntegritySource.loadPage({
+      query: async (text: string, values?: unknown[]) => {
         queryText = text;
+        queryValues = values;
         return { rows: [] };
       },
-    });
+    }, new Date("2026-07-10T12:00:00.000Z"), { cursor: null, limit: 100 });
 
-    expect(rows).toEqual([]);
+    expect(page).toEqual({ rows: [], nextCursor: null });
     expect(queryText).toContain("LEFT JOIN LATERAL");
     expect(queryText).toContain("oms_order.external_order_number AS channel_order_number");
     expect(queryText).toContain("oms_order.id = CASE");
     expect(queryText).not.toContain("oms_order.id::text");
+    expect(queryText).toContain('finding.id >');
+    expect(queryValues).toEqual([null, 100]);
   });
 
   it("uses the sales-channel order number for order-scoped inventory findings", () => {
@@ -263,15 +267,15 @@ describe("Control Tower V2 domain", () => {
   it("loads carrier authority gaps from labels, links, and immutable tracking evidence", async () => {
     let queryText = "";
     let queryValues: unknown[] | undefined;
-    const rows = await carrierTrackingSource.loadRows({
+    const page = await carrierTrackingSource.loadPage({
       query: async (text, values) => {
         queryText = text;
         queryValues = values;
         return { rows: [] };
       },
-    }, new Date("2026-07-20T12:00:00.000Z"));
+    }, new Date("2026-07-20T12:00:00.000Z"), { cursor: null, limit: 100 });
 
-    expect(rows).toEqual([]);
+    expect(page).toEqual({ rows: [], nextCursor: null });
     expect(queryText).toContain("wms.shipping_provider_labels");
     expect(queryText).toContain("wms.shipping_provider_label_links");
     expect(queryText).toContain("wms.carrier_tracking_events");
@@ -301,7 +305,8 @@ describe("Control Tower V2 domain", () => {
     expect(queryText).toContain(
       "GREATEST(label.first_observed_at, acceptance_subscription.activated_at)",
     );
-    expect(queryValues).toEqual(["2026-07-20T12:00:00.000Z", 15, 1080]);
+    expect(queryText).toContain("issues.source_key >");
+    expect(queryValues).toEqual(["2026-07-20T12:00:00.000Z", 15, 1080, null, 100]);
   });
 
   it("validates the configurable carrier-acceptance window", () => {

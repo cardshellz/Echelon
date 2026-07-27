@@ -3,11 +3,31 @@ import { randomUUID } from "node:crypto";
 import {
   projectSourceRows,
   type ControlTowerSourceAdapter,
+  type ProjectedControlTowerWorkItem,
   type ProjectionPreview,
   type QueryClient,
 } from "./control-tower-v2.domain";
 
 const PROJECTOR_LOCK_PREFIX = "operations_control_tower_projector:";
+const DEFAULT_SOURCE_PAGE_SIZE = 250;
+const MIN_SOURCE_PAGE_SIZE = 25;
+const MAX_SOURCE_PAGE_SIZE = 1_000;
+const MAX_ERROR_SAMPLES = 10;
+
+type ProjectionScanSummary = Omit<ProjectionPreview, "items">;
+
+export function resolveControlTowerSourcePageSize(
+  rawValue: string | undefined = process.env.CONTROL_TOWER_PROJECTOR_BATCH_SIZE,
+): number {
+  if (rawValue === undefined || rawValue.trim() === "") return DEFAULT_SOURCE_PAGE_SIZE;
+  const parsed = Number(rawValue);
+  if (!Number.isSafeInteger(parsed) || parsed < MIN_SOURCE_PAGE_SIZE || parsed > MAX_SOURCE_PAGE_SIZE) {
+    throw new Error(
+      `CONTROL_TOWER_PROJECTOR_BATCH_SIZE must be an integer from ${MIN_SOURCE_PAGE_SIZE} through ${MAX_SOURCE_PAGE_SIZE}`,
+    );
+  }
+  return parsed;
+}
 
 export interface ProjectionPersistenceSummary {
   runId: string;
@@ -101,30 +121,34 @@ async function finishSourceRun(params: {
   ]);
 }
 
-async function createProjectionStage(client: QueryClient, preview: ProjectionPreview): Promise<void> {
+async function createProjectionStage(client: QueryClient): Promise<void> {
   await client.query(`
     CREATE TEMP TABLE control_tower_projection_stage (
       source_key VARCHAR(200) PRIMARY KEY,
       data JSONB NOT NULL
     ) ON COMMIT DROP
   `);
-  if (preview.items.length === 0) return;
+}
+
+async function appendProjectionStage(
+  client: QueryClient,
+  items: ProjectedControlTowerWorkItem[],
+): Promise<void> {
+  if (items.length === 0) return;
   await client.query(`
     INSERT INTO control_tower_projection_stage (source_key, data)
     SELECT item->>'sourceKey', item
     FROM jsonb_array_elements($1::JSONB) AS staged(item)
-  `, [JSON.stringify(preview.items)]);
+  `, [JSON.stringify(items)]);
 }
 
 async function persistProjectionStage(params: {
   client: QueryClient;
-  preview: ProjectionPreview;
+  preview: ProjectionScanSummary;
   runId: string;
   now: Date;
 }): Promise<{ created: number; updated: number; resolved: number }> {
   const { client, preview, runId, now } = params;
-  await createProjectionStage(client, preview);
-
   await client.query(`
     CREATE TEMP TABLE control_tower_projection_existing ON COMMIT DROP AS
     SELECT work_item.*
@@ -464,14 +488,91 @@ async function persistProjectionStage(params: {
   return { created, updated, resolved };
 }
 
+async function scanControlTowerSource<Row>(params: {
+  client: QueryClient;
+  adapter: ControlTowerSourceAdapter<Row>;
+  now: Date;
+  pageSize: number;
+  onItems?: (items: ProjectedControlTowerWorkItem[]) => Promise<void>;
+}): Promise<ProjectionScanSummary> {
+  if (!Number.isSafeInteger(params.pageSize) || params.pageSize <= 0 || params.pageSize > MAX_SOURCE_PAGE_SIZE) {
+    throw new Error(`Control Tower source page size must be an integer from 1 through ${MAX_SOURCE_PAGE_SIZE}`);
+  }
+
+  let cursor: string | null = null;
+  let rowsScanned = 0;
+  let rowsValid = 0;
+  let rowsFailed = 0;
+  let sourceWatermark: string | null = null;
+  const errors: ProjectionPreview["errors"] = [];
+  const seenCursors = new Set<string>();
+
+  while (true) {
+    const page = await params.adapter.loadPage(params.client, params.now, {
+      cursor,
+      limit: params.pageSize,
+    });
+    if (!Array.isArray(page.rows)) throw new Error(`${params.adapter.name} returned an invalid source page`);
+    if (page.rows.length > params.pageSize) {
+      throw new Error(`${params.adapter.name} returned ${page.rows.length} rows for a ${params.pageSize}-row page`);
+    }
+
+    const projection = projectSourceRows({
+      adapter: params.adapter,
+      rows: page.rows,
+      now: params.now,
+    });
+    await params.onItems?.(projection.items);
+    rowsScanned += projection.rowsScanned;
+    rowsValid += projection.rowsValid;
+    rowsFailed += projection.rowsFailed;
+    if (projection.sourceWatermark !== null
+      && (sourceWatermark === null || projection.sourceWatermark > sourceWatermark)) {
+      sourceWatermark = projection.sourceWatermark;
+    }
+    for (const error of projection.errors) {
+      if (errors.length >= MAX_ERROR_SAMPLES) break;
+      errors.push(error);
+    }
+
+    if (page.nextCursor === null) break;
+    const nextCursor = String(page.nextCursor).trim();
+    if (!nextCursor) throw new Error(`${params.adapter.name} returned an empty next cursor`);
+    if (page.rows.length === 0) throw new Error(`${params.adapter.name} returned a cursor for an empty page`);
+    if (nextCursor === cursor || seenCursors.has(nextCursor)) {
+      throw new Error(`${params.adapter.name} returned a non-advancing source cursor`);
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  return {
+    sourceName: params.adapter.name,
+    sourceNamespace: params.adapter.sourceNamespace,
+    sourceType: params.adapter.sourceType,
+    projectionVersion: params.adapter.projectionVersion,
+    rowsScanned,
+    rowsValid,
+    rowsFailed,
+    completeScan: rowsFailed === 0,
+    sourceWatermark,
+    errors,
+  };
+}
+
 export async function previewControlTowerSource<Row>(params: {
   client: QueryClient;
   adapter: ControlTowerSourceAdapter<Row>;
   now?: Date;
-}): Promise<ProjectionPreview> {
+  pageSize?: number;
+}): Promise<ProjectionScanSummary> {
   const now = params.now ?? new Date();
-  const rows = await params.adapter.loadRows(params.client, now);
-  return projectSourceRows({ adapter: params.adapter, rows, now });
+  return scanControlTowerSource({
+    client: params.client,
+    adapter: params.adapter,
+    now,
+    pageSize: params.pageSize ?? resolveControlTowerSourcePageSize(),
+  });
 }
 
 export async function runControlTowerSourceProjection<Row>(params: {
@@ -479,6 +580,7 @@ export async function runControlTowerSourceProjection<Row>(params: {
   adapter: ControlTowerSourceAdapter<Row>;
   clock?: () => Date;
   idGenerator?: () => string;
+  pageSize?: number;
 }): Promise<ProjectionPersistenceSummary> {
   const clock = params.clock ?? (() => new Date());
   const runId = (params.idGenerator ?? randomUUID)();
@@ -537,8 +639,14 @@ export async function runControlTowerSourceProjection<Row>(params: {
     }
 
     const now = clock();
-    const rows = await params.adapter.loadRows(params.client, now);
-    const preview = projectSourceRows({ adapter: params.adapter, rows, now });
+    await createProjectionStage(params.client);
+    const preview = await scanControlTowerSource({
+      client: params.client,
+      adapter: params.adapter,
+      now,
+      pageSize: params.pageSize ?? resolveControlTowerSourcePageSize(),
+      onItems: (items) => appendProjectionStage(params.client, items),
+    });
     const persisted = await persistProjectionStage({
       client: params.client,
       preview,

@@ -18,7 +18,9 @@ function debtRow() {
     source_inbox_id: 2001,
     shipment_id: 101,
     tracking_number: "TRACK101",
+    historical_empty_split_noop: false,
     external_order_id: "12001",
+    retry_last_error: "historical failure",
   };
 }
 
@@ -80,6 +82,14 @@ describe("resolveShopifyWritebackDebtForOrder", () => {
     });
     expect(transaction).toHaveBeenCalledTimes(1);
 
+    const debtQuery = execute.mock.calls
+      .map(([query]) => queryText(query))
+      .find((text) => text.includes("FROM oms.webhook_retry_queue retry"));
+    expect(debtQuery).toContain("shipment.source = 'shipstation_split'");
+    expect(debtQuery).toContain("shipment.status = 'shipped'");
+    expect(debtQuery).toContain("sibling.status = 'shipped'");
+    expect(debtQuery).toContain("sibling.engine_shipment_ref = shipment.engine_shipment_ref");
+
     const retryUpdate = execute.mock.calls
       .map(([query]) => queryText(query))
       .find((text) => text.includes("UPDATE oms.webhook_retry_queue"));
@@ -96,6 +106,7 @@ describe("resolveShopifyWritebackDebtForOrder", () => {
       .map(([query]) => query)
       .find((query) => queryText(query).includes("INSERT INTO oms.oms_order_events"));
     expect(JSON.stringify(eventCommand)).toContain("retryStatusTransition");
+    expect(JSON.stringify(eventCommand)).toContain("historicalEmptySplitNoopShipmentIds");
     expect(JSON.stringify(eventCommand)).toContain("originalLastError");
   });
 

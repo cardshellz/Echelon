@@ -76,8 +76,22 @@ export interface ControlTowerSourceAdapter<Row = Record<string, unknown>> {
   sourceNamespace: string;
   sourceType: string;
   projectionVersion: number;
-  loadRows: (client: QueryClient, now: Date) => Promise<Row[]>;
+  loadPage: (
+    client: QueryClient,
+    now: Date,
+    page: ControlTowerSourcePageRequest,
+  ) => Promise<ControlTowerSourcePage<Row>>;
   projectRow: (row: Row, now: Date) => ProjectedControlTowerWorkItem;
+}
+
+export interface ControlTowerSourcePageRequest {
+  cursor: string | null;
+  limit: number;
+}
+
+export interface ControlTowerSourcePage<Row> {
+  rows: Row[];
+  nextCursor: string | null;
 }
 
 export interface QueryResult<Row = Record<string, unknown>> {

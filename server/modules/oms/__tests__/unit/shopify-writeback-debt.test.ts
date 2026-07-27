@@ -11,6 +11,7 @@ function shipment(
   return {
     shipmentId: 101,
     trackingNumber: "TRACK-101",
+    historicalEmptySplitNoop: false,
     retryIds: [1001],
     sourceInboxIds: [2001],
     items: [{
@@ -174,6 +175,18 @@ describe("evaluateShopifyWritebackDebt", () => {
       shipmentId: 101,
       reason: "no_eligible_items",
     }]);
+  });
+
+  it("resolves only a zero-item shipment proven to be a historical empty split no-op", () => {
+    const result = evaluateShopifyWritebackDebt([
+      shipment({
+        historicalEmptySplitNoop: true,
+        items: [],
+      }),
+    ], [], "full_snapshot");
+    expect(result.resolvedShipmentIds).toEqual([101]);
+    expect(result.resolvedRetryIds).toEqual([1001]);
+    expect(result.unresolved).toEqual([]);
   });
 
   it("rejects duplicate shipment identities and invalid quantities", () => {
