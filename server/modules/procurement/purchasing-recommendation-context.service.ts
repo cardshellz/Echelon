@@ -20,11 +20,21 @@ export async function loadPurchasingRecommendationDefaults(): Promise<Purchasing
   };
 }
 
-export async function loadPurchasingRecommendationContext(): Promise<{
+/**
+ * Shared context for generatePurchasingRecommendations(). Every key here MUST
+ * match a key of GeneratePurchasingRecommendationsOptions because callers
+ * spread this object directly into the engine options. A mismatched key is
+ * silently dropped by the spread (that bug shipped once: this object used to
+ * expose `rules` while the engine reads `exclusionRules`, so rule-based
+ * exclusions were ignored on every spread path).
+ */
+export interface PurchasingRecommendationContext {
   defaults: PurchasingRecommendationDefaults;
-  rules: PurchasingRecommendationExclusionRule[];
+  exclusionRules: PurchasingRecommendationExclusionRule[];
   productMetaById: Map<number, PurchasingRecommendationProductMeta>;
-}> {
+}
+
+export async function loadPurchasingRecommendationContext(): Promise<PurchasingRecommendationContext> {
   const { products: productsTable, reorderExclusionRules: exclRules } = await import("../../storage/base");
   const [defaults, rules, metaRows] = await Promise.all([
     loadPurchasingRecommendationDefaults(),
@@ -43,7 +53,7 @@ export async function loadPurchasingRecommendationContext(): Promise<{
 
   return {
     defaults,
-    rules: rules as PurchasingRecommendationExclusionRule[],
+    exclusionRules: rules as PurchasingRecommendationExclusionRule[],
     productMetaById,
   };
 }

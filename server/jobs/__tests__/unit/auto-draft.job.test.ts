@@ -146,7 +146,7 @@ describe("auto-draft job", () => {
     mocks.procurement.getReorderAnalysisData.mockResolvedValue(recommendationRows());
     mocks.context.load.mockResolvedValue({
       defaults: { leadTimeDays: 14, safetyStockDays: 7 },
-      rules: [],
+      exclusionRules: [],
       productMetaById: new Map(),
     });
     mocks.handoff.createAutomaticHandoff.mockResolvedValue({

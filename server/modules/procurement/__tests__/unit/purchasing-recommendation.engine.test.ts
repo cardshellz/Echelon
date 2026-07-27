@@ -3,6 +3,8 @@ import {
   generatePurchasingRecommendations,
   passesAutoDraftApprovalPolicy,
 } from "../../purchasing-recommendation.engine";
+// Type-only import: no runtime dependency on the context service (or the db it loads).
+import type { PurchasingRecommendationContext } from "../../purchasing-recommendation-context.service";
 
 describe("purchasing recommendation engine", () => {
   it("produces an explainable actionable recommendation using vendor lead time and per-piece ordering", () => {
@@ -583,6 +585,43 @@ describe("purchasing recommendation engine", () => {
         }),
       ]),
       actionable: false,
+    });
+  });
+
+  it("applies exclusion rules when the loader context shape is spread into the options", () => {
+    // Regression for the context/engine key mismatch: the context service used
+    // to return `rules` while the engine reads `exclusionRules`, so every call
+    // site that spread the loaded context silently dropped rule-based
+    // exclusions. This fixture is typed as the loader's return shape so a key
+    // drift between the two modules fails compilation here.
+    const context: PurchasingRecommendationContext = {
+      defaults: { leadTimeDays: 14, safetyStockDays: 7 },
+      exclusionRules: [{ field: "category", value: "dropship" }],
+      productMetaById: new Map([[20, { sku: "DROP-1", category: "dropship" }]]),
+    };
+    const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): deterministic relative to fixture demand.
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [
+        {
+          product_id: 20,
+          base_sku: "DROP-1",
+          product_name: "Dropship Item",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 30,
+          order_uom_units: 1,
+        },
+      ],
+      ...context,
+    });
+
+    expect(result.items).toEqual([]);
+    expect(result.summary.excludedCount).toBe(1);
+    expect(result.skippedItems[0]).toMatchObject({
+      productId: 20,
+      skippedReason: "excluded",
     });
   });
 
