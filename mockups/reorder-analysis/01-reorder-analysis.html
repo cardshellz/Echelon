@@ -311,6 +311,23 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .pg-obgrand b { font-size: 16px; }
 .btn:disabled { opacity: .55; cursor: default; }
 
+/* rev4 — confidence badge tooltip + order-builder confirm stage */
+.pg-confbadge { position: relative; cursor: help; }
+.pg-confbadge:hover .pg-tip { display: block; }
+.ob-exceedrow td { background: var(--amber-bg); }
+.ob-reason { width: 100%; margin-top: 5px; padding: 5px 9px; font-size: 12.5px; }
+.ob-ctl { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; line-height: 1.45; padding: 4px 0; cursor: pointer; }
+.ob-ctl input[type="checkbox"] { width: 14px; height: 14px; flex: 0 0 14px; margin-top: 2px; accent-color: var(--primary); cursor: pointer; }
+.ob-cline { padding: 9px 12px; border-bottom: 1px dashed var(--border); }
+.ob-cline:last-child { border-bottom: none; }
+.ob-note { width: 100%; resize: vertical; font-family: var(--font); }
+.ob-sect { font-weight: 650; font-size: 13.5px; margin: 2px 0 10px; }
+/* builder line tables: let sub-lines (rounding hint, unverified-cost note) wrap instead of
+   forcing the table wider than the card (overflow:hidden was clipping the last two columns);
+   keep SKUs on one line now that there is room */
+.pg-obvendor .pg-subline { white-space: normal; }
+.pg-obvendor .pg-mini td.mono { white-space: nowrap; }
+
 @media (max-width: 1345px) {
   .pg-scroll { overflow-x: auto; }
   .pg-tablecard { overflow: hidden; }
@@ -430,6 +447,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
             <div class="small muted" id="accWins"></div>
             <button class="btn btn-ghost btn-sm" id="accDetail">Open accuracy detail &rarr;</button>
           </div>
+          <div class="muted" id="accFoot" style="font-size:11.5px;margin-top:8px"></div>
         </div>
       </div>
 
@@ -1897,7 +1915,28 @@ window.MOCK_EXTRA = {
     wape: { historical: 18.4, baseline: 24.1, overlayAdjusted: 17.2 },
     overlayCoveragePct: 62, evaluations: 1842,
     wins: { forecastVsBaselinePct: 61, overlayVsForecastPct: 54 },
-    pipeline: { status: "healthy", snapshotAt: "2026-07-26 02:00", evaluationAt: "2026-07-26 02:04" }
+    pipeline: { status: "healthy", snapshotAt: "2026-07-26 02:00", evaluationAt: "2026-07-26 02:04" },
+    trustNote: "Accuracy trust not yet assessed — evaluation thresholds not configured · 12 legacy evaluations excluded"
+  },
+
+  // ---------- Audit-merge additions (revision 4) ----------
+  // Active quality controls per SKU (the decision endpoint requires acknowledging EVERY
+  // current control before a PO handoff). Empty array = no active controls.
+  qualityControls: {
+    "PKM-PRE-ETB":  [{ code: "demand_acceleration_review", severity: "warn", label: "Short-window demand running hot vs baseline — confirm the surge is real" }],
+    "PKM-151-UPC":  [],
+    "PKM-MEGA-ETB": [
+      { code: "supplier_cost_unverified", severity: "block", label: "Vendor cost unverified — no quote in 365+ days" },
+      { code: "thin_demand_history",      severity: "block", label: "Only 6 days of sales history — forecast is event-driven" }
+    ],
+    "PAN-PRZ-HOB":  []
+  },
+  // Candidate score band per queue SKU (shown in the drawer's outcome step).
+  candidateBands: {
+    "PKM-PRE-ETB":  { score: 84, band: "strong" },
+    "PKM-151-UPC":  { score: 78, band: "strong" },
+    "PKM-MEGA-ETB": { score: 61, band: "review" },
+    "PAN-PRZ-HOB":  { score: 55, band: "watch" }
   }
 };
 </script>
@@ -1929,12 +1968,18 @@ window.MOCK_EXTRA = {
      overlaps Healthy (status ok) — union semantics make the overlap safe.
      Default = the order queue: needs_order + order_soon, ungrouped, severity-sorted.
      order = Order Builder state: checked rows, editable pieces, per-vendor PO/RFQ mode;
-     order.adjusted = per-SKU "rounded up" feedback text, cleared on the next edit. */
+     order.adjusted = per-SKU "rounded up" feedback text, cleared on the next edit.
+     rev4: order.stage = 'edit' | 'confirm' (two-stage builder, one drawer);
+     order.exceedReason = per-SKU override reason for lines above the suggestion;
+     order.confirm = decision evidence (control acks, exception approvals, note, final acks). */
   var CHIP_KEYS = ['needs_order', 'order_soon', 'on_order', 'ok', 'stagnant', 'overstock'];
+  function freshConfirm() {
+    return { note: '', controls: {}, exceptions: {}, ackAuto: false, ackCreate: false };
+  }
   var state = {
     q: '', group: 'none', showExcluded: false, collapsed: {},
     statuses: { needs_order: true, order_soon: true },
-    order: { checked: {}, qty: {}, vendorMode: {}, adjusted: {} }
+    order: { checked: {}, qty: {}, vendorMode: {}, adjusted: {}, stage: 'edit', exceedReason: {}, confirm: freshConfirm() }
   };
   function allOn() { return CHIP_KEYS.every(function (k) { return !!state.statuses[k]; }); }
   function setAllStatuses(on) {
@@ -2114,6 +2159,17 @@ window.MOCK_EXTRA = {
     return '<span class="pg-trend ' + cls + '" title="' + tip + '">' + sym + '</span>';
   }
 
+  /* rev4 — confidence tooltip text, composed from item fields (H3) */
+  function confTipText(it) {
+    var trend = it.trend.charAt(0).toUpperCase() + it.trend.slice(1);
+    var ratio = it.trendRatio >= 99 ? 'new demand' : it.trendRatio.toFixed(2) + 'x';
+    var dq = { normal: 'normal history', thin_history: 'thin history', no_recent_demand: 'no recent demand' }[it.demandQuality] || it.demandQuality;
+    var lts = it.leadTimeSource === 'vendor' ? 'vendor lead time'
+      : it.leadTimeSource === 'override' ? 'manual lead-time override'
+      : 'default lead time';
+    return trend + ' trend (' + ratio + ') · ' + dq + ' · last sale ' + fmt(it.lastSaleDaysAgo) + 'd ago · ' + lts;
+  }
+
   function dosHtml(it) {
     var inf = it.daysOfSupply >= 9999;
     var dos = it.daysOfSupply;
@@ -2169,11 +2225,13 @@ window.MOCK_EXTRA = {
       '<td class="right">' + dosHtml(it) + soonLine + '</td>' +
       '<td class="num">' + rp + '</td>' +
       '<td class="num">' + sug + '</td>' +
-      '<td><span class="badge ' + conf.cls + '">' + conf.label + '</span></td>' +
+      '<td><span class="badge ' + conf.cls + ' pg-confbadge">' + conf.label +
+        '<span class="pg-tip pg-tip-r">' + esc(confTipText(it)) + '</span></span></td>' +
       '<td><div class="pg-actions"><button class="btn btn-outline btn-sm act-explain">Explain</button>' +
         (checked
           ? '<button class="btn btn-ghost btn-sm act-plan pg-cgreen">&#10003; Added</button>'
           : '<button class="btn btn-ghost btn-sm act-plan">Add to order</button>') +
+        '<button class="btn btn-ghost btn-sm act-exclude">Exclude</button>' +
       '</div></td>' +
       '</tr>';
   }
@@ -2247,6 +2305,8 @@ window.MOCK_EXTRA = {
       '<div class="pg-stat"><div class="pg-v">' + a.overlayCoveragePct + '%</div><div class="pg-l">Event coverage</div></div>';
     $('#accWins').textContent = 'Forecast beats naive baseline in ' + a.wins.forecastVsBaselinePct + '% of ' + fmt(a.evaluations) + ' scored SKUs · Events improve it in ' + a.wins.overlayVsForecastPct + '%';
     $('#accPipe').innerHTML = '<span class="pg-dot"></span> Snapshot + evaluation healthy · ' + a.pipeline.evaluationAt.split(' ')[1] + ' UTC';
+    /* rev4 — trust-note footnote under the strip (H5) */
+    $('#accFoot').innerHTML = esc(a.trustNote) + ' · <a class="pg-viewall" href="04-run-report.html">Full detail in Run report &rarr;</a>';
   }
 
   /* ---------- math drawer ---------- */
@@ -2378,14 +2438,33 @@ window.MOCK_EXTRA = {
       }
       gate = '<div class="callout ' + gm[0] + '" style="margin-top:10px"><div><b>' + gm[1] + '</b> — ' + esc(gateText) + '.' + (act.note ? ' ' + esc(act.note) + '.' : '') + soonNote + '</div></div>';
     }
+    /* rev4 — candidate score band badge (omit if absent) + active quality controls (H4) */
+    var band = (X.candidateBands || {})[it.sku];
+    var bandHtml = '';
+    if (band) {
+      var bcls = band.band === 'strong' ? 'b-green' : band.band === 'review' ? 'b-amber' : 'b-gray';
+      bandHtml = '<span class="badge ' + bcls + '" title="Candidate score — how strongly this line qualifies for automated drafting">' +
+        band.band.charAt(0).toUpperCase() + band.band.slice(1) + ' ' + band.score + '</span>';
+    }
+    var qcs = (X.qualityControls || {})[it.sku] || [];
+    var qcHtml = '';
+    if (qcs.length) {
+      qcHtml = '<div style="margin-top:10px">' + qcs.map(function (c) {
+        var sev = c.severity === 'block' ? ['b-red', 'Block'] : ['b-amber', 'Warn'];
+        return '<div class="row" style="gap:7px;align-items:flex-start;padding:3px 0">' +
+          '<span class="badge ' + sev[0] + '" style="padding:1.5px 7px;font-size:10.5px">' + sev[1] + '</span>' +
+          '<span class="small" style="line-height:1.45">' + esc(c.label) + '</span></div>';
+      }).join('') +
+      '<div class="tiny muted" style="margin-top:4px">These must be acknowledged when creating a PO.</div></div>';
+    }
     var btns = '<div class="pg-dfoot">' +
       (it.suggestedPieces > 0
         ? '<button class="btn btn-primary btn-sm" id="dDraft">Draft PO</button><button class="btn btn-outline btn-sm" id="dRfq">Add to RFQ</button>'
         : '') +
       '<a class="btn btn-ghost btn-sm" href="04-run-report.html">View in run report →</a></div>';
     steps.push({ t: 'Outcome & automation gate', b:
-      '<div class="row" style="gap:8px;flex-wrap:wrap"><span class="badge ' + st.cls + '">' + st.label + '</span><span class="badge ' + conf.cls + '">' + conf.label + ' confidence</span></div>' +
-      '<div class="expl" style="margin-top:6px">' + confWhy(it) + '</div>' + gate + btns
+      '<div class="row" style="gap:8px;flex-wrap:wrap"><span class="badge ' + st.cls + '">' + st.label + '</span><span class="badge ' + conf.cls + '">' + conf.label + ' confidence</span>' + bandHtml + '</div>' +
+      '<div class="expl" style="margin-top:6px">' + confWhy(it) + '</div>' + gate + qcHtml + btns
     });
 
     return '<div class="steps">' + steps.map(function (s, i) {
@@ -2482,7 +2561,18 @@ window.MOCK_EXTRA = {
     return max + 1;
   }
 
+  /* rev4 — H1: two-stage builder. One drawer, state.order.stage picks the body. */
   function renderBuilder() {
+    if (state.order.stage === 'confirm') renderConfirm();
+    else renderEdit();
+  }
+
+  function reasonValid(sku) {
+    return (state.order.exceedReason[sku] || '').trim().length >= 3;
+  }
+  function attr(s) { return esc(s).replace(/"/g, '&quot;'); }
+
+  function renderEdit() {
     var groups = builderGroups();
     $('#obHead').innerHTML =
       '<div class="pg-titlebox" style="flex:1">' +
@@ -2495,6 +2585,7 @@ window.MOCK_EXTRA = {
       var lines = g.items.map(function (it) {
         var qty = state.order.qty[it.sku] || 0;
         var uv = UNVERIFIED[it.sku];
+        var exceeds = qty > (it.suggestedPieces || 0);
         return '<tr>' +
           '<td class="mono">' + it.sku + '</td>' +
           '<td><div class="pg-name" style="max-width:150px" title="' + esc(it.name) + '">' + esc(it.name) + '</div>' +
@@ -2505,7 +2596,13 @@ window.MOCK_EXTRA = {
             '<div class="pg-subline ob-hint" data-sku="' + it.sku + '" style="max-width:none;text-align:right"></div></td>' +
           '<td class="right">' + money(it.unitCostCents) + '</td>' +
           '<td class="right"><b class="ob-line" data-sku="' + it.sku + '"></b></td>' +
-          '</tr>';
+          '</tr>' +
+          /* rev4 — inline override-reason row, shown only while pieces exceed the suggestion */
+          '<tr class="ob-exceedrow" data-sku="' + it.sku + '"' + (exceeds ? '' : ' style="display:none"') + '><td colspan="6">' +
+            '<div class="tiny" style="font-weight:600;color:var(--amber)">Exceeds the recommendation — suggested ' + fmt(it.suggestedPieces || 0) + '</div>' +
+            '<input type="text" class="input ob-reason" data-sku="' + it.sku + '" placeholder="Reason for exceeding the recommendation" value="' + attr(state.order.exceedReason[it.sku] || '') + '">' +
+            '<div class="tiny ob-reasonhint" data-sku="' + it.sku + '" style="color:var(--red);margin-top:3px' + (reasonValid(it.sku) ? ';display:none' : '') + '">Required — at least 3 characters</div>' +
+          '</td></tr>';
       }).join('');
       return '<div class="pg-obvendor">' +
         '<div class="pg-obvh"><b>' + esc(g.name) + '</b>' +
@@ -2530,14 +2627,20 @@ window.MOCK_EXTRA = {
     $('#obBody').innerHTML = html;
     $('#obClose').onclick = closeBuilder;
     $('#obKeep').onclick = closeBuilder;
-    $('#obPrimary').onclick = createOrders;
+    $('#obPrimary').onclick = function () {
+      state.order.stage = 'confirm';
+      renderBuilder();
+      $('#obDrawer').scrollTop = 0;
+    };
     updateBuilderTotals();
   }
 
-  /* live recompute of line / vendor / grand totals from builder state (no re-render, keeps focus) */
+  /* live recompute of line / vendor / grand totals from builder state (no re-render, keeps focus).
+     rev4: also toggles per-line override-reason rows and gates Continue on missing reasons. */
   function updateBuilderTotals() {
     var groups = builderGroups();
     var grand = 0, nPo = 0, nRfq = 0, itemCount = 0, anyRfqMode = false;
+    var firstMissingReason = null;
     groups.forEach(function (g) {
       var vt = 0;
       g.items.forEach(function (it) {
@@ -2548,6 +2651,15 @@ window.MOCK_EXTRA = {
         if (el) el.textContent = money(lt);
         var hint = document.querySelector('.ob-hint[data-sku="' + it.sku + '"]');
         if (hint) hint.textContent = state.order.adjusted[it.sku] || '';
+        /* rev4 — exceed check: pieces above the suggestion need a >=3-char reason */
+        var exceeds = qty > (it.suggestedPieces || 0);
+        var exRow = document.querySelector('.ob-exceedrow[data-sku="' + it.sku + '"]');
+        if (exRow) {
+          exRow.style.display = exceeds ? '' : 'none';
+          var rh = exRow.querySelector('.ob-reasonhint');
+          if (rh) rh.style.display = reasonValid(it.sku) ? 'none' : '';
+        }
+        if (exceeds && !reasonValid(it.sku) && !firstMissingReason) firstMissingReason = it.sku;
       });
       grand += vt;
       var vel = document.querySelector('.ob-vtotal[data-vendor="' + g.name + '"]');
@@ -2564,9 +2676,170 @@ window.MOCK_EXTRA = {
     if (nPo) parts.push(nPo + ' PO' + (nPo === 1 ? '' : 's'));
     if (nRfq) parts.push(nRfq + ' RFQ' + (nRfq === 1 ? '' : 's'));
     var btn = $('#obPrimary');
-    btn.textContent = parts.length ? 'Create ' + parts.join(' · ') : 'Nothing to order';
-    btn.disabled = !parts.length;
+    if (!parts.length) {
+      btn.textContent = 'Nothing to order';
+      btn.disabled = true;
+      btn.title = '';
+    } else {
+      btn.textContent = 'Continue → confirm ' + parts.join(' · ');
+      btn.disabled = !!firstMissingReason;
+      btn.title = firstMissingReason
+        ? 'Enter a reason (at least 3 characters) for exceeding the recommendation on ' + firstMissingReason
+        : '';
+    }
     $('#obRfqLink').style.display = anyRfqMode ? '' : 'none';
+  }
+
+  /* rev4 — confirm-stage helpers: vendor groups split by mode, only lines with pieces > 0 */
+  function confirmGroups() {
+    var po = [], rfq = [];
+    builderGroups().forEach(function (g) {
+      var lines = g.items.filter(function (it) { return (state.order.qty[it.sku] || 0) > 0; });
+      if (!lines.length) return;
+      var vt = lines.reduce(function (s, it) { return s + (state.order.qty[it.sku] || 0) * it.unitCostCents; }, 0);
+      var rec = { name: g.name, lines: lines, total: vt };
+      if ((state.order.vendorMode[g.name] || 'po') === 'rfq') rfq.push(rec); else po.push(rec);
+    });
+    return { po: po, rfq: rfq };
+  }
+
+  /* first unmet confirm requirement, or null when everything is satisfied.
+     Order: control acks → exception approvals → note length → the two final acks. */
+  function confirmMissing() {
+    var cg = confirmGroups(), c = state.order.confirm;
+    var missing = null;
+    cg.po.forEach(function (g) {
+      g.lines.forEach(function (it) {
+        ((X.qualityControls || {})[it.sku] || []).forEach(function (ctl) {
+          if (!c.controls[it.sku + ':' + ctl.code] && !missing) {
+            missing = 'Acknowledge “' + ctl.label + '” for ' + it.sku;
+          }
+        });
+        var qty = state.order.qty[it.sku] || 0;
+        if (qty > (it.suggestedPieces || 0) && !c.exceptions[it.sku] && !missing) {
+          missing = 'Approve the sourcing exception for ' + it.sku;
+        }
+      });
+    });
+    if (cg.po.length && !missing) {
+      if (c.note.trim().length < 10) missing = 'Decision note needs at least 10 characters';
+      else if (!c.ackAuto) missing = 'Acknowledge that automatic-purchasing eligibility is unchanged';
+      else if (!c.ackCreate) missing = 'Tick “Create these POs as drafts for review”';
+    }
+    return missing;
+  }
+
+  function updateConfirmGate() {
+    var btn = $('#obConfirm');
+    if (!btn) return;
+    var missing = confirmMissing();
+    btn.disabled = !!missing;
+    btn.title = missing || '';
+    var cnt = $('#obNoteCount');
+    if (cnt) {
+      var c = state.order.confirm;
+      cnt.textContent = c.note.length + ' / 2000';
+      cnt.style.color = c.note.trim().length < 10 ? 'var(--red)' : 'var(--muted)';
+    }
+  }
+
+  function sevChip(severity) {
+    var sev = severity === 'block' ? ['b-red', 'Block'] : ['b-amber', 'Warn'];
+    return '<span class="badge ' + sev[0] + '" style="padding:1.5px 7px;font-size:10.5px;flex:0 0 auto">' + sev[1] + '</span>';
+  }
+
+  function renderConfirm() {
+    var cg = confirmGroups(), c = state.order.confirm;
+    var grand = cg.po.concat(cg.rfq).reduce(function (s, g) { return s + g.total; }, 0);
+    $('#obHead').innerHTML =
+      '<button class="btn btn-ghost btn-sm" id="obBackTop">&larr; Back</button>' +
+      '<div class="pg-titlebox" style="flex:1">' +
+      '<div style="font-weight:700;font-size:14.5px">Confirm order</div>' +
+      '<div class="small muted">Step 2 of 2 · decision evidence before anything is drafted</div></div>' +
+      '<button class="btn btn-ghost btn-sm" id="obClose" aria-label="Close">✕</button>';
+
+    var html = '';
+    if (cg.po.length) {
+      html += '<div class="ob-sect">PO drafts — decision evidence required</div>';
+      html += cg.po.map(function (g) {
+        var vrec = M.vendors.filter(function (v) { return v.name === g.name; })[0];
+        var lines = g.lines.map(function (it) {
+          var qty = state.order.qty[it.sku] || 0;
+          var ctls = (X.qualityControls || {})[it.sku] || [];
+          var ctlHtml = ctls.length
+            ? ctls.map(function (ctl) {
+                var key = it.sku + ':' + ctl.code;
+                return '<label class="ob-ctl"><input type="checkbox" class="ob-ctlck" data-key="' + attr(key) + '"' +
+                  (c.controls[key] ? ' checked' : '') + '>' + sevChip(ctl.severity) +
+                  '<span>' + esc(ctl.label) + '</span></label>';
+              }).join('')
+            : '<div class="muted small" style="padding:3px 0 1px">No active controls</div>';
+          var excHtml = '';
+          if (qty > (it.suggestedPieces || 0)) {
+            excHtml = '<label class="ob-ctl"><input type="checkbox" class="ob-excck" data-sku="' + attr(it.sku) + '"' +
+              (c.exceptions[it.sku] ? ' checked' : '') + '>' +
+              '<span class="badge b-amber" style="padding:1.5px 7px;font-size:10.5px;flex:0 0 auto">Exception</span>' +
+              '<span>Approve this sourcing exception — ' + fmt(qty) + ' pc vs suggested ' + fmt(it.suggestedPieces || 0) +
+              '. Reason: &ldquo;' + esc((state.order.exceedReason[it.sku] || '').trim()) + '&rdquo;</span></label>';
+          }
+          return '<div class="ob-cline">' +
+            '<div class="row" style="justify-content:space-between;gap:10px;align-items:baseline">' +
+            '<span style="min-width:0"><span class="mono" style="font-size:12px;font-weight:700">' + it.sku + '</span> <span class="small">' + esc(it.name) + '</span></span>' +
+            '<span class="small" style="white-space:nowrap;font-variant-numeric:tabular-nums">' + fmt(qty) + ' pc · ' + money(qty * it.unitCostCents) + '</span></div>' +
+            ctlHtml + excHtml + '</div>';
+        }).join('');
+        return '<div class="pg-obvendor">' +
+          '<div class="pg-obvh"><b>' + esc(g.name) + '</b><span class="muted small">' +
+          g.lines.length + ' line' + (g.lines.length === 1 ? '' : 's') + ' · ' + money(g.total) +
+          (vrec ? ' · ' + esc(vrec.terms) : '') + '</span></div>' + lines + '</div>';
+      }).join('');
+
+      html += '<div style="margin:14px 0 4px;font-weight:650;font-size:13px">Decision note <span class="muted" style="font-weight:400">· shared across these POs</span></div>' +
+        '<textarea class="input ob-note" id="obNote" rows="3" maxlength="2000" placeholder="Why this order? (min 10 characters)">' + esc(c.note) + '</textarea>' +
+        '<div class="tiny" id="obNoteCount" style="margin-top:3px"></div>';
+      html += '<div class="callout co-amber" style="margin-top:12px"><label class="ob-ctl" style="padding:0">' +
+        '<input type="checkbox" id="obAckAuto"' + (c.ackAuto ? ' checked' : '') + '>' +
+        '<span>I understand these decisions do not change automatic-purchasing eligibility.</span></label></div>';
+      html += '<label class="ob-ctl" style="margin-top:10px"><input type="checkbox" id="obAckCreate"' + (c.ackCreate ? ' checked' : '') + '>' +
+        '<span><b>Create these POs as drafts for review.</b></span></label>';
+    }
+    if (cg.rfq.length) {
+      html += '<div class="ob-sect" style="margin-top:' + (cg.po.length ? '18px' : '2px') + '">RFQ drafts</div>';
+      html += cg.rfq.map(function (g) {
+        var lines = g.lines.map(function (it) {
+          var qty = state.order.qty[it.sku] || 0;
+          return '<div class="pg-evrow"><span><span class="mono" style="font-size:12px">' + it.sku + '</span> ' + esc(it.name) + '</span>' +
+            '<span style="white-space:nowrap;font-variant-numeric:tabular-nums">' + fmt(qty) + ' pc</span></div>';
+        }).join('');
+        return '<div class="pg-obvendor"><div class="pg-obvh"><b>' + esc(g.name) + '</b><span class="muted small">quote request · ' +
+          g.lines.length + ' line' + (g.lines.length === 1 ? '' : 's') + '</span></div>' +
+          '<div style="padding:4px 12px 8px">' + lines + '</div></div>';
+      }).join('');
+      html += '<div class="muted small" style="margin-top:-6px">No decision evidence needed — quote requests are drafts. Track them in the RFQs tab.</div>';
+    }
+
+    html += '<div class="pg-obgrand">' +
+      '<div>Order total <b>' + money(grand) + '</b><div class="tiny muted">' +
+      (cg.po.length ? cg.po.length + ' PO' + (cg.po.length === 1 ? '' : 's') : '') +
+      (cg.po.length && cg.rfq.length ? ' · ' : '') +
+      (cg.rfq.length ? cg.rfq.length + ' RFQ' + (cg.rfq.length === 1 ? '' : 's') : '') +
+      '</div></div>' +
+      '<div class="row" style="gap:8px;flex-wrap:wrap">' +
+      '<button class="btn btn-outline" id="obBack">&larr; Back</button>' +
+      '<button class="btn btn-primary" id="obConfirm">Confirm &amp; create</button>' +
+      '</div></div>';
+
+    $('#obBody').innerHTML = html;
+    $('#obClose').onclick = closeBuilder;
+    function goBack() {
+      state.order.stage = 'edit';
+      renderBuilder();
+      $('#obDrawer').scrollTop = 0;
+    }
+    $('#obBackTop').onclick = goBack;
+    $('#obBack').onclick = goBack;
+    $('#obConfirm').onclick = createOrders;
+    updateConfirmGate();
   }
 
   function createOrders() {
@@ -2590,9 +2863,15 @@ window.MOCK_EXTRA = {
     if (parts.length) segs.push('Would create ' + parts.join(' · ') + ' · drafts open for review');
     if (rfqs.length) segs.push('RFQ draft' + (rfqs.length === 1 ? '' : 's') + ' created — track in the RFQs tab');
     toast(segs.length ? segs.join(' · ') : 'Nothing to order — set pieces above zero first');
+    /* rev4 — confirm completes the ritual: reset builder state, uncheck rows, close */
+    state.order = { checked: {}, qty: {}, vendorMode: {}, adjusted: {}, stage: 'edit', exceedReason: {}, confirm: freshConfirm() };
+    closeBuilder();
+    renderTable();
+    renderOrderBar(false);
   }
 
   function openBuilder() {
+    state.order.stage = 'edit'; /* selection may have changed while closed — restart at stage 1 */
     renderBuilder();
     $('#obDrawer').classList.add('open');
     $('#overlay').classList.add('open');
@@ -2619,6 +2898,8 @@ window.MOCK_EXTRA = {
       openDrawer(it);
     } else if (e.target.closest('.act-plan')) {
       setChecked(it.sku, true, true);
+    } else if (e.target.closest('.act-exclude')) {
+      toast('Would mark ' + it.sku + ' reorder-excluded — drops from analysis at the next run');
     }
   });
 
@@ -2703,13 +2984,28 @@ window.MOCK_EXTRA = {
      that stays until the next edit. 0 stays allowed and means "skip this line". */
   $('#obBody').addEventListener('input', function (e) {
     var inp = e.target.closest('.ob-qty');
-    if (!inp) return;
-    var sku = inp.getAttribute('data-sku');
-    var v = parseInt(inp.value, 10);
-    state.order.qty[sku] = (isNaN(v) || v < 0) ? 0 : v;
-    delete state.order.adjusted[sku]; /* a new edit clears the "rounded up" note */
-    updateBuilderTotals();
-    renderOrderBar(false);
+    if (inp) {
+      var sku = inp.getAttribute('data-sku');
+      var v = parseInt(inp.value, 10);
+      state.order.qty[sku] = (isNaN(v) || v < 0) ? 0 : v;
+      delete state.order.adjusted[sku]; /* a new edit clears the "rounded up" note */
+      updateBuilderTotals();
+      renderOrderBar(false);
+      return;
+    }
+    /* rev4 — stage-1 override reason: re-check validity + Continue gate as the user types */
+    var rs = e.target.closest('.ob-reason');
+    if (rs) {
+      state.order.exceedReason[rs.getAttribute('data-sku')] = rs.value;
+      updateBuilderTotals();
+      return;
+    }
+    /* rev4 — stage-2 shared decision note: live counter + gate */
+    var nt = e.target.closest('.ob-note');
+    if (nt) {
+      state.order.confirm.note = nt.value;
+      updateConfirmGate();
+    }
   });
   $('#obBody').addEventListener('change', function (e) {
     var inp = e.target.closest('.ob-qty');
@@ -2728,6 +3024,33 @@ window.MOCK_EXTRA = {
       renderOrderBar(false);
       return;
     }
+    /* rev4 — stage-2 evidence checkboxes */
+    var ctl = e.target.closest('.ob-ctlck');
+    if (ctl) {
+      var key = ctl.getAttribute('data-key');
+      if (ctl.checked) state.order.confirm.controls[key] = true;
+      else delete state.order.confirm.controls[key];
+      updateConfirmGate();
+      return;
+    }
+    var exc = e.target.closest('.ob-excck');
+    if (exc) {
+      var xsku = exc.getAttribute('data-sku');
+      if (exc.checked) state.order.confirm.exceptions[xsku] = true;
+      else delete state.order.confirm.exceptions[xsku];
+      updateConfirmGate();
+      return;
+    }
+    if (e.target.id === 'obAckAuto') {
+      state.order.confirm.ackAuto = e.target.checked;
+      updateConfirmGate();
+      return;
+    }
+    if (e.target.id === 'obAckCreate') {
+      state.order.confirm.ackCreate = e.target.checked;
+      updateConfirmGate();
+      return;
+    }
     var r = e.target.closest('input[type="radio"]');
     if (!r) return;
     state.order.vendorMode[r.name.replace(/^obmode-/, '')] = r.value;
@@ -2735,7 +3058,7 @@ window.MOCK_EXTRA = {
   });
 
   $('#btnRefresh').addEventListener('click', function () {
-    toast('Would start a fresh analysis run now — last run #' + X.runReport.runId + ' completed in ' + X.runReport.durationSec + 's');
+    toast('Would recompute now and save run #' + (X.runReport.runId + 1) + ' (manual) — snapshot saved before any drafting.');
   });
   $('#accDetail').addEventListener('click', function () {
     toast('Would open the forecast accuracy detail view');

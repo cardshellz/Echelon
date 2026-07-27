@@ -131,7 +131,23 @@ Implementation mapping: the builder's per-vendor PO path is the existing accepte
 2. **Inventory health leaves the cockpit.** The card was too sparse to do the job and the job is different (aging, turns, idle capital, markdown/liquidation candidates ≠ "what do I order today"). Cockpit keeps only quiet `Stagnant` and `Overstocked` filter chips in the Watching tier plus a clickable Idle-capital KPI. A dedicated **Inventory Health module under the Inventory menu group** is parked as future work.
 3. **Forecast inputs parked as coming-soon.** The 02 surface as designed was tool-first, not task-first; rather than slow the ordering flow, the tab stays in the strip with a "Soon" badge and the page states what's coming (growth adjustments, category events with materialized allocation) and what exists today (per-SKU demand events in the Demand Planner, already feeding recommendations). The §4.1/§4.2 designs remain the implementation reference when this resumes; redesign the page task-first at that point.
 
-## 13. Open questions (parked)
+## 13. Revision 4 — live-page merge audit (2026-07-26)
+
+A full inventory of the live PurchasingView.tsx + server contracts (86 items) decided what survives into the new page. Outcomes, approved by the owner:
+
+**Folded into the cockpit/Order Builder (the binding server contracts):**
+- PO handoff requires a prior `accepted_for_po` decision with note ≥10 chars, `confirmDecision`, `acknowledgeAutomationEligibilityUnchanged`, and `reviewedControlCodes` covering EVERY active quality control (`purchasing-recommendation.routes.ts` `validateRecommendationDecisionEvidence`). The Order Builder's confirm stage collects all of it; replay safety is the accepted-decision unique constraint (409), not the client's Idempotency-Key header (unused by this route).
+- RFQ over-allocation needs `quantityOverrideReason` ≥3 chars + `allocationOverrideApproved` (migration 158 trigger, fail-closed) — builder lines exceeding the suggestion collect both.
+- Deep-link params `reviewQueue / recommendationId / candidateBand / reason / forecastAction` are emitted by six server generators and frozen into persisted notification rows — the new page must honor all five forever; `status` (new) is a free namespace, verified unused server-side.
+- Kept: manual Refresh + run provenance, 30s KPI poll, toast/invalidation discipline, per-row Exclude action, skippedItems rendered under the excluded toggle with reason codes, confidence-factor tooltips, candidate band + quality controls in the drawer's outcome step.
+
+**Moved:** quality-gate rollup, approval-policy impact, held-items triage, review-queue filters → Automation (03); full accuracy detail (cohort selector, per-SKU backtests, evaluate-matured trigger) + decision history → Run report (04); RFQ tracking counts → workbench (05); exclusion rules + forecast policy editor → Planning Policy (06).
+
+**Dropped:** scroll-to-queue CTA, candidate-score spotlight, health-ratio bar, dense one-line provenance string.
+
+**API extensions required by the new page:** category/product-line fields on reorder items; per-row inbound ETA; stop stripping `forwardDemandBasis.contributions` (or drawer fetches demand-events); suggested-spend (client-computed acceptable); Overstocked derived client-side (>180d supply, ok status). Accuracy strip pins the 30-day horizon and keeps the trust caveat. Add a UI-contract test for the new page pinning deep-link params + decision-evidence fields (pattern: `demand-planner-ui-contract.test.ts`).
+
+## 14. Open questions (parked)
 
 - Multi-warehouse dimension (blocked on engine gaining warehouse-scoped demand/supply — out of scope v1).
 - Accuracy trust thresholds (`accuracy_thresholds_not_configured` today) — needed before Stage 4; propose configuring after 60d of cohort data.
