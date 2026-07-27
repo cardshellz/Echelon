@@ -77,7 +77,10 @@ describe("Control Tower V2 projection persistence", () => {
       sourceNamespace: "test.source",
       sourceType: "test_finding",
       projectionVersion: 1,
-      loadRows: async () => [{ id: "1", valid: true }, { id: "2", valid: false }],
+      loadPage: async () => ({
+        rows: [{ id: "1", valid: true }, { id: "2", valid: false }],
+        nextCursor: null,
+      }),
       projectRow: (row) => {
         if (!row.valid) throw new Error("invalid row");
         return item(row.id);
@@ -109,7 +112,7 @@ describe("Control Tower V2 projection persistence", () => {
       sourceNamespace: "test.source",
       sourceType: "test_finding",
       projectionVersion: 1,
-      loadRows: async () => [],
+      loadPage: async () => ({ rows: [], nextCursor: null }),
       projectRow: () => {
         throw new Error("no rows expected");
       },
@@ -132,6 +135,74 @@ describe("Control Tower V2 projection persistence", () => {
     expect(db.statements.some(({ sql }) => sql.startsWith("CREATE TEMP TABLE control_tower_projection_resolved"))).toBe(true);
   });
 
+  it("loads and stages a source in bounded cursor pages", async () => {
+    const db = fakeClient();
+    const loadPage = vi.fn(async (_client, _now, page: { cursor: string | null; limit: number }) => {
+      if (page.cursor === null) {
+        return { rows: [{ id: "1" }, { id: "2" }], nextCursor: "2" };
+      }
+      if (page.cursor === "2") {
+        return { rows: [{ id: "3" }], nextCursor: null };
+      }
+      throw new Error(`unexpected cursor ${page.cursor}`);
+    });
+    const adapter: ControlTowerSourceAdapter<{ id: string }> = {
+      name: "test_source",
+      sourceNamespace: "test.source",
+      sourceType: "test_finding",
+      projectionVersion: 1,
+      loadPage,
+      projectRow: (row) => item(row.id),
+    };
+
+    const result = await runControlTowerSourceProjection({
+      client: db.client,
+      adapter,
+      idGenerator: () => "00000000-0000-0000-0000-000000000004",
+      pageSize: 2,
+      clock: clock(
+        "2026-07-10T12:00:00.000Z",
+        "2026-07-10T12:00:01.000Z",
+        "2026-07-10T12:00:02.000Z",
+      ),
+    });
+
+    expect(result).toMatchObject({ status: "succeeded", completeScan: true, rowsScanned: 3 });
+    expect(loadPage.mock.calls.map((call) => call[2])).toEqual([
+      { cursor: null, limit: 2 },
+      { cursor: "2", limit: 2 },
+    ]);
+    const stageInserts = db.statements.filter(({ sql }) => (
+      sql.startsWith("INSERT INTO control_tower_projection_stage")
+    ));
+    expect(stageInserts).toHaveLength(2);
+    expect(stageInserts.map(({ values }) => JSON.parse(String(values[0])).length)).toEqual([2, 1]);
+  });
+  it("rejects a non-advancing source cursor and rolls back", async () => {
+    const db = fakeClient();
+    const adapter: ControlTowerSourceAdapter<{ id: string }> = {
+      name: "test_source",
+      sourceNamespace: "test.source",
+      sourceType: "test_finding",
+      projectionVersion: 1,
+      loadPage: async (_client, _now, page) => (
+        page.cursor === null
+          ? { rows: [{ id: "1" }], nextCursor: "1" }
+          : { rows: [{ id: "2" }], nextCursor: "1" }
+      ),
+      projectRow: (row) => item(row.id),
+    };
+
+    await expect(runControlTowerSourceProjection({
+      client: db.client,
+      adapter,
+      idGenerator: () => "00000000-0000-0000-0000-000000000005",
+      pageSize: 1,
+      clock: clock("2026-07-10T12:00:00.000Z", "2026-07-10T12:00:01.000Z"),
+    })).rejects.toThrow("non-advancing source cursor");
+
+    expect(db.statements.some(({ sql }) => sql === "ROLLBACK")).toBe(true);
+  });
   it("rolls back projection writes and marks the durable run failed", async () => {
     const db = fakeClient();
     const adapter: ControlTowerSourceAdapter<Record<string, never>> = {
@@ -139,7 +210,7 @@ describe("Control Tower V2 projection persistence", () => {
       sourceNamespace: "test.source",
       sourceType: "test_finding",
       projectionVersion: 1,
-      loadRows: async () => {
+      loadPage: async () => {
         throw new Error("source unavailable");
       },
       projectRow: () => {
