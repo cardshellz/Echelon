@@ -45,6 +45,7 @@ import {
   installShipStationTrackingRawBodyCapture,
   registerShipStationTrackingWebhook,
 } from "./modules/shipping/shipstation-tracking-webhook.routes";
+import { installGlobalJsonBodyParser } from "./modules/shipping-engine/interfaces/http/rate-table-admin-body.middleware";
 import { createDefaultShipStationV2WebhookVerifier } from "./modules/shipping/shipstation-webhook-auth";
 import { createCarrierTrackingProjectionReader } from "./modules/shipping/carrier-tracking-projection.repository";
 import { registerCarrierTrackingProjectionRoutes } from "./modules/shipping/carrier-tracking-projection.routes";
@@ -84,13 +85,7 @@ declare module "http" {
 
 installShipStationTrackingRawBodyCapture(app);
 
-app.use(
-  express.json({
-    verify: (req, _res, buf) => {
-      req.rawBody = buf;
-    },
-  }),
-);
+installGlobalJsonBodyParser(app);
 
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
