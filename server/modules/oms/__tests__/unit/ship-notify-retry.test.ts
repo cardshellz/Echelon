@@ -33,6 +33,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const createShipmentForOrderMock = vi.hoisted(() => vi.fn());
+const movePendingShipmentItemsMock = vi.hoisted(() => vi.fn());
 
 // The worker's top-level `import { db } from "../../db"` would otherwise
 // try to build a real Postgres client at import time and fail on
@@ -55,11 +56,17 @@ vi.mock("../../../wms/create-shipment", () => ({
   createShipmentForOrder: createShipmentForOrderMock,
 }));
 
+vi.mock("../../../wms/late-order-shipment-coverage", () => ({
+  movePendingShipmentItemsToLateEditResidual:
+    movePendingShipmentItemsMock,
+}));
+
 import {
   enqueueShipStationRetry,
   enqueueShipStationHoldSyncRetry,
   enqueueShipStationSortRankSyncRetry,
   enqueueShipStationShipmentPushRetry,
+  enqueueShippingEngineShipmentAmendRetry,
   enqueueOmsWmsSyncRetry,
   enqueueWmsShipmentCreateRetry,
   requeueDeadWebhookRetry,
@@ -67,6 +74,7 @@ import {
   dispatchShipStationHoldSyncRetry,
   dispatchShipStationSortRankSyncRetry,
   dispatchShipStationShipmentPushRetry,
+  dispatchShippingEngineShipmentAmendRetry,
   dispatchOmsWmsSyncRetry,
   dispatchWmsShipmentCreateRetry,
   recordRetryFailure,
@@ -102,12 +110,25 @@ function makeDb(opts: {
   shipStationService?: {
     processShipNotify: (url: string) => Promise<number>;
     pushShipment?: (shipmentId: number) => Promise<unknown>;
+    appendShipmentItems?: (
+      shipmentId: number,
+      shipmentItemIds: number[],
+    ) => Promise<unknown>;
     updateSortRank?: (wmsOrderId: number) => Promise<{ touched: number }>;
     syncWmsOrderShipStationHoldState?: (
       wmsOrderId: number,
       mode: "hold" | "release",
     ) => Promise<{ touched: number }>;
   } | null;
+  shippingEngine?:
+    | {
+        appendShipmentItems: (payload: {
+          shipmentId: number;
+          shipmentItemIds: number[];
+        }) => Promise<unknown>;
+      }
+    | null;
+  transaction?: boolean;
   fulfillmentAuthority?:
     | {
         ensureLegacyShipment: (shipmentId: number, options: any) => Promise<any>;
@@ -165,6 +186,14 @@ function makeDb(opts: {
 
   if (opts.shipStationService !== undefined) {
     db.__shipStationService = opts.shipStationService;
+  }
+  if (opts.shippingEngine !== undefined) {
+    db.__shippingEngine = opts.shippingEngine;
+  }
+  if (opts.transaction) {
+    db.transaction = vi.fn(
+      async (operation: (tx: any) => Promise<any>) => operation(db),
+    );
   }
   if (opts.ebayReplay !== undefined) {
     db.__ebayWebhookReplay = opts.ebayReplay;
@@ -566,6 +595,53 @@ describe("enqueueShipStationShipmentPushRetry", () => {
   });
 });
 
+describe("enqueueShippingEngineShipmentAmendRetry", () => {
+  it("normalizes item ids and inserts one deterministic amendment command", async () => {
+    const { db, inserts } = makeDb();
+
+    await enqueueShippingEngineShipmentAmendRetry(
+      db,
+      300,
+      [42, 11, 42],
+      "late order edit",
+    );
+
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]!.values).toMatchObject({
+      provider: "internal",
+      topic: "shipping_engine_shipment_amend",
+      payload: {
+        shipmentId: 300,
+        shipmentItemIds: [11, 42],
+        amendmentKey: "300:11,42",
+      },
+      status: "pending",
+      attempts: 0,
+      lastError: "late order edit",
+    });
+  });
+
+  it("does not enqueue a duplicate pending amendment command", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [{ id: 42 }] }],
+    });
+
+    await enqueueShippingEngineShipmentAmendRetry(db, 300, [11, 42]);
+
+    expect(inserts).toHaveLength(0);
+  });
+
+  it("rejects empty or invalid item identities", async () => {
+    const { db } = makeDb();
+
+    await expect(
+      enqueueShippingEngineShipmentAmendRetry(db, 300, []),
+    ).rejects.toThrow(/positive integers/);
+    await expect(
+      enqueueShippingEngineShipmentAmendRetry(db, 300, [0]),
+    ).rejects.toThrow(/positive integers/);
+  });
+});
 describe("enqueueShipStationHoldSyncRetry", () => {
   it("inserts an immediately due internal ShipStation hold sync row", async () => {
     const { db, inserts } = makeDb();
@@ -1222,6 +1298,185 @@ describe("dispatchWmsShipmentCreateRetry", () => {
   });
 });
 
+describe("dispatchShippingEngineShipmentAmendRetry", () => {
+  beforeEach(() => {
+    movePendingShipmentItemsMock.mockReset();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("marks the command successful after the provider verifies the appended items", async () => {
+    const appendShipmentItems = vi.fn().mockResolvedValue({
+      state: "applied",
+      providerStatus: "awaiting_shipment",
+    });
+    const { db, updates } = makeDb({
+      shippingEngine: { appendShipmentItems },
+    });
+
+    const outcome = await dispatchShippingEngineShipmentAmendRetry(db, {
+      id: 960,
+      provider: "internal",
+      topic: "shipping_engine_shipment_amend",
+      payload: {
+        shipmentId: 300,
+        shipmentItemIds: [11, 42],
+        amendmentKey: "300:11,42",
+      },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(appendShipmentItems).toHaveBeenCalledWith({
+      shipmentId: 300,
+      shipmentItemIds: [11, 42],
+    });
+    expect(movePendingShipmentItemsMock).not.toHaveBeenCalled();
+    expect(updates.some((update) => update.set.status === "success")).toBe(true);
+  });
+
+  it("atomically moves pending rows to one residual package when the provider order is locked", async () => {
+    const appendShipmentItems = vi.fn().mockResolvedValue({
+      state: "not_editable",
+      providerStatus: "shipped",
+    });
+    movePendingShipmentItemsMock.mockResolvedValue({
+      sourceShipmentId: 300,
+      residualShipmentId: 901,
+      shipmentItemIds: [11, 42],
+      movedQuantity: 2,
+      alreadyMoved: false,
+      nextAction: "push",
+    });
+    const { db, inserts, updates } = makeDb({
+      shippingEngine: { appendShipmentItems },
+      transaction: true,
+    });
+
+    const outcome = await dispatchShippingEngineShipmentAmendRetry(db, {
+      id: 961,
+      provider: "internal",
+      topic: "shipping_engine_shipment_amend",
+      payload: {
+        shipmentId: 300,
+        shipmentItemIds: [42, 11],
+        amendmentKey: "300:11,42",
+      },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(movePendingShipmentItemsMock).toHaveBeenCalledWith(
+      db,
+      300,
+      [11, 42],
+      { useXactLock: true },
+    );
+    expect(inserts.some((insert) =>
+      insert.values.topic === "shipstation_shipment_push" &&
+      insert.values.payload?.shipmentId === 901,
+    )).toBe(true);
+    expect(updates.some((update) => update.set.status === "success")).toBe(true);
+  });
+
+  it("amends an existing queued residual instead of creating another package", async () => {
+    const appendShipmentItems = vi.fn().mockResolvedValue({
+      state: "not_editable",
+      providerStatus: "shipped",
+    });
+    movePendingShipmentItemsMock.mockResolvedValue({
+      sourceShipmentId: 300,
+      residualShipmentId: 901,
+      shipmentItemIds: [11, 42],
+      movedQuantity: 2,
+      alreadyMoved: false,
+      nextAction: "amend",
+    });
+    const { db, inserts } = makeDb({
+      shippingEngine: { appendShipmentItems },
+      transaction: true,
+    });
+
+    const outcome = await dispatchShippingEngineShipmentAmendRetry(db, {
+      id: 964,
+      provider: "internal",
+      topic: "shipping_engine_shipment_amend",
+      payload: {
+        shipmentId: 300,
+        shipmentItemIds: [11, 42],
+        amendmentKey: "300:11,42",
+      },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(inserts.some((insert) =>
+      insert.values.topic === "shipping_engine_shipment_amend" &&
+      insert.values.payload?.shipmentId === 901 &&
+      insert.values.payload?.amendmentKey === "901:11,42",
+    )).toBe(true);
+    expect(inserts.some((insert) =>
+      insert.values.topic === "shipstation_shipment_push",
+    )).toBe(false);
+  });
+  it("keeps transient provider failures retryable without moving package membership", async () => {
+    const appendShipmentItems = vi.fn().mockRejectedValue(
+      new Error("ShipStation timeout"),
+    );
+    const { db, updates } = makeDb({
+      shippingEngine: { appendShipmentItems },
+    });
+
+    const outcome = await dispatchShippingEngineShipmentAmendRetry(db, {
+      id: 962,
+      provider: "internal",
+      topic: "shipping_engine_shipment_amend",
+      payload: {
+        shipmentId: 300,
+        shipmentItemIds: [11],
+        amendmentKey: "300:11",
+      },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(movePendingShipmentItemsMock).not.toHaveBeenCalled();
+    expect(updates[0]!.set).toMatchObject({
+      attempts: 1,
+      status: "pending",
+      lastError: "ShipStation timeout",
+    });
+  });
+
+  it("dead-letters a payload whose amendment key does not match its item ids", async () => {
+    const appendShipmentItems = vi.fn();
+    const { db, updates } = makeDb({
+      shippingEngine: { appendShipmentItems },
+    });
+
+    const outcome = await dispatchShippingEngineShipmentAmendRetry(db, {
+      id: 963,
+      provider: "internal",
+      topic: "shipping_engine_shipment_amend",
+      payload: {
+        shipmentId: 300,
+        shipmentItemIds: [11],
+        amendmentKey: "300:42",
+      },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("malformed");
+    expect(appendShipmentItems).not.toHaveBeenCalled();
+    expect(updates[0]!.set.status).toBe("dead");
+  });
+});
 describe("dispatchShipStationShipmentPushRetry", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => {});

@@ -74,6 +74,21 @@ export const ECHELON_SYNC_SHIPMENT_SOURCE = "echelon_sync";
 export const ECHELON_COMBINED_CHILD_SHIPMENT_SOURCE = "echelon_combined_child";
 
 /**
+ * Residual customer-fulfillment package created only after the shipping
+ * provider positively reports that the original package is no longer
+ * editable. Excluding this source from the primary active-shipment unique
+ * index allows the residual package to coexist with the locked original.
+ */
+export const LATE_ORDER_EDIT_SHIPMENT_SOURCE = "late_order_edit";
+
+export const PROVIDER_MEMBERSHIP_AUTHORITATIVE = "authoritative";
+export const PROVIDER_MEMBERSHIP_PENDING_APPEND = "pending_append";
+
+export type ProviderMembershipState =
+  | typeof PROVIDER_MEMBERSHIP_AUTHORITATIVE
+  | typeof PROVIDER_MEMBERSHIP_PENDING_APPEND;
+
+/**
  * Status marker the helper checks for idempotency. Only a pre-existing
  * 'planned' shipment blocks a new one; shipments that have already
  * advanced to 'queued'/'labeled'/etc. mean the order is past the sync
@@ -81,7 +96,7 @@ export const ECHELON_COMBINED_CHILD_SHIPMENT_SOURCE = "echelon_combined_child";
  */
 const PLANNED_STATUS = "planned";
 
-async function resolveShipmentItemDefaults(
+export async function resolveShipmentItemDefaults(
   db: DbLike,
   orderItemId: number,
 ): Promise<{ productVariantId: number | null; fromLocationId: number | null }> {

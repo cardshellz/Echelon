@@ -19,6 +19,7 @@ import {
   type ShipmentEvent,
 } from "../orders/shipment-rollup";
 import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
+import type { EngineShipmentItemAppendResult } from "../shipping/types";
 import { maybeGetPackInstruction } from "../cartonization/application/wms-pack-plan.service";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
 import { parseProviderAmountCents } from "../shipping/types";
@@ -1680,7 +1681,8 @@ export function createShipStationService(
     const targetItems: any = await executor.execute(sql`
       SELECT osi.id, osi.order_item_id, osi.replacement_for_order_item_id,
              COALESCE(oi.sku, catalog_variant.sku) AS sku,
-             osi.qty, target_shipment.shipment_purpose
+             osi.qty, target_shipment.shipment_purpose,
+             osi.provider_membership_state
       FROM wms.outbound_shipment_items osi
       JOIN wms.outbound_shipments target_shipment
         ON target_shipment.id = osi.shipment_id
@@ -1809,7 +1811,8 @@ export function createShipStationService(
           UPDATE wms.outbound_shipment_items
           SET qty = ${item.qty},
               from_location_id = COALESCE(from_location_id, ${sourceRow.from_location_id}),
-              tracking_id = ${String(shipment.shipmentId)}
+              tracking_id = ${String(shipment.shipmentId)},
+              provider_membership_state = 'authoritative'
           WHERE id = ${item.sourceShipmentItemId}
         `);
         touchedOriginalIds.push(item.sourceShipmentItemId);
@@ -1827,7 +1830,8 @@ export function createShipStationService(
                 from_location_id = ${sourceRow.from_location_id},
                 box_id = ${sourceRow.box_id},
                 weight_oz = ${sourceRow.weight_oz},
-                tracking_id = ${String(shipment.shipmentId)}
+                tracking_id = ${String(shipment.shipmentId)},
+                provider_membership_state = 'authoritative'
             WHERE id = ${existingChild.id}
           `);
           touchedChildIds.push(Number(existingChild.id));
@@ -1859,6 +1863,9 @@ export function createShipStationService(
     if (targetIsOriginal && touchedOriginalIds.length > 0) {
       const touched = new Set(touchedOriginalIds);
       const untouchedIds = (targetItems?.rows ?? [])
+        .filter((row: any) =>
+          String(row.provider_membership_state ?? "authoritative") !== "pending_append"
+        )
         .map((row: any) => Number(row.id))
         .filter((rowId: number) => Number.isInteger(rowId) && rowId > 0 && !touched.has(rowId));
       if (untouchedIds.length > 0) {
@@ -1873,6 +1880,9 @@ export function createShipStationService(
     if (!targetIsOriginal && touchedChildIds.length > 0) {
       const touched = new Set(touchedChildIds);
       const untouchedIds = (targetItems?.rows ?? [])
+        .filter((row: any) =>
+          String(row.provider_membership_state ?? "authoritative") !== "pending_append"
+        )
         .map((row: any) => Number(row.id))
         .filter((rowId: number) => Number.isInteger(rowId) && rowId > 0 && !touched.has(rowId));
       if (untouchedIds.length > 0) {
@@ -4044,6 +4054,204 @@ export function createShipStationService(
     return { updated, skipped };
   }
 
+
+  /**
+   * Append late-authorized WMS lines to an existing ShipStation order without
+   * rebuilding provider-managed package fields from the Echelon snapshot.
+   */
+  async function appendShipmentItems(
+    shipmentId: number,
+    shipmentItemIds: readonly number[],
+  ): Promise<EngineShipmentItemAppendResult> {
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      throw new ShipStationPushError("shipmentId must be a positive integer", {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "shipmentId",
+        value: shipmentId,
+      });
+    }
+
+    const normalizedItemIds = Array.from(new Set(shipmentItemIds))
+      .map((value) => Number(value))
+      .sort((left, right) => left - right);
+    if (
+      normalizedItemIds.length === 0 ||
+      normalizedItemIds.some((value) => !Number.isInteger(value) || value <= 0)
+    ) {
+      throw new ShipStationPushError(
+        "shipmentItemIds must contain positive integers",
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "shipmentItemIds",
+          value: shipmentItemIds,
+        },
+      );
+    }
+
+    const SHIPMENT_PUSH_LOCK_NS = 918407;
+    await db.execute(sql`SELECT pg_advisory_lock(${SHIPMENT_PUSH_LOCK_NS}, ${shipmentId})`);
+    try {
+      const shipmentResult: any = await db.execute(sql`
+        SELECT
+          id,
+          status,
+          held,
+          requires_review,
+          review_reason,
+          shipstation_order_id
+        FROM wms.outbound_shipments
+        WHERE id = ${shipmentId}
+        LIMIT 1
+      `);
+      const shipment = shipmentResult?.rows?.[0];
+      if (!shipment) {
+        throw new ShipStationPushError("shipment not found", {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "shipment",
+          value: null,
+        });
+      }
+      if (shipment.requires_review === true) {
+        throw new ShipStationPushError(
+          `shipment requires review and cannot be amended (${shipment.review_reason ?? "review_required"})`,
+          {
+            code: SS_PUSH_INVALID_SHIPMENT,
+            shipmentId,
+            field: "shipment.requires_review",
+            value: shipment.review_reason ?? true,
+          },
+        );
+      }
+
+      const shipstationOrderId = Number(shipment.shipstation_order_id);
+      if (!Number.isInteger(shipstationOrderId) || shipstationOrderId <= 0) {
+        throw new ShipStationPushError(
+          "shipment has no ShipStation order identity for append",
+          {
+            code: SS_PUSH_INVALID_SHIPMENT,
+            shipmentId,
+            field: "shipment.shipstation_order_id",
+            value: shipment.shipstation_order_id ?? null,
+          },
+        );
+      }
+
+      const itemResult: any = await db.execute(sql`
+        SELECT
+          osi.id,
+          osi.qty,
+          oi.sku,
+          oi.name,
+          COALESCE(oi.paid_price_cents, oi.unit_price_cents, 0)::int AS unit_price_cents
+        FROM wms.outbound_shipment_items osi
+        JOIN wms.order_items oi ON oi.id = osi.order_item_id
+        WHERE osi.shipment_id = ${shipmentId}
+          AND osi.id = ANY(ARRAY[${sql.join(normalizedItemIds.map((id) => sql`${id}`), sql`, `)}]::int[])
+          AND osi.qty > 0
+        ORDER BY osi.id
+      `);
+      const itemRows = itemResult?.rows ?? [];
+      if (itemRows.length !== normalizedItemIds.length) {
+        throw new ShipStationPushError(
+          "one or more shipment items are missing, foreign, or non-positive",
+          {
+            code: SS_PUSH_INVALID_SHIPMENT,
+            shipmentId,
+            field: "shipmentItemIds",
+            value: normalizedItemIds,
+          },
+        );
+      }
+
+      // This read is intentionally strict. A network error or unknown provider
+      // state must throw and retry; only a positive terminal state can trigger
+      // residual-package fallback.
+      const liveOrder = await apiRequest<any>("GET", `/orders/${shipstationOrderId}`);
+      const providerStatus = String(liveOrder?.orderStatus ?? "unknown").toLowerCase();
+      const liveItems = Array.isArray(liveOrder?.items) ? liveOrder.items : [];
+      const existingKeys = new Set(
+        liveItems
+          .map((item: any) => String(item?.lineItemKey ?? "").trim())
+          .filter((value: string) => value.length > 0),
+      );
+      const targetKeys = normalizedItemIds.map((id) => `wms-item-${id}`);
+      const allPresent = targetKeys.every((key) => existingKeys.has(key));
+
+      const editableProviderStatuses = new Set([
+        "awaiting_shipment",
+        "on_hold",
+      ]);
+      const lockedProviderStatuses = new Set(["shipped", "cancelled"]);
+      if (!allPresent && lockedProviderStatuses.has(providerStatus)) {
+        return { state: "not_editable", providerStatus };
+      }
+      if (!allPresent && !editableProviderStatuses.has(providerStatus)) {
+        throw new ShipStationPushError(
+          `ShipStation amendment state is not recognized as editable or terminal (${providerStatus})`,
+          {
+            code: "SS_PUSH_AMENDMENT_STATE_UNKNOWN",
+            shipmentId,
+            field: "orderStatus",
+            value: providerStatus,
+          },
+        );
+      }
+
+      if (!allPresent) {
+        const missingItems = itemRows
+          .filter((row: any) => !existingKeys.has(`wms-item-${Number(row.id)}`))
+          .map((row: any) => ({
+            lineItemKey: `wms-item-${Number(row.id)}`,
+            sku: String(row.sku ?? ""),
+            name: String(row.name ?? ""),
+            quantity: Number(row.qty),
+            unitPrice: Number(row.unit_price_cents) / 100,
+            options: [] as unknown[],
+          }));
+
+        await apiRequest("POST", "/orders/createorder", {
+          ...liveOrder,
+          items: [...liveItems, ...missingItems],
+        });
+
+        const verifiedOrder = await apiRequest<any>("GET", `/orders/${shipstationOrderId}`);
+        const verifiedKeys = new Set(
+          (Array.isArray(verifiedOrder?.items) ? verifiedOrder.items : [])
+            .map((item: any) => String(item?.lineItemKey ?? "").trim())
+            .filter((value: string) => value.length > 0),
+        );
+        const missingAfterWrite = targetKeys.filter((key) => !verifiedKeys.has(key));
+        if (missingAfterWrite.length > 0) {
+          throw new ShipStationPushError(
+            `ShipStation amendment verification failed for ${missingAfterWrite.join(", ")}`,
+            {
+              code: "SS_PUSH_AMENDMENT_VERIFICATION_FAILED",
+              shipmentId,
+              field: "shipmentItemIds",
+              value: normalizedItemIds,
+            },
+          );
+        }
+      }
+
+      await db.execute(sql`
+        UPDATE wms.outbound_shipment_items
+        SET provider_membership_state = 'authoritative'
+        WHERE shipment_id = ${shipmentId}
+          AND id = ANY(ARRAY[${sql.join(normalizedItemIds.map((id) => sql`${id}`), sql`, `)}]::int[])
+      `);
+
+      return {
+        state: allPresent ? "already_applied" : "applied",
+        providerStatus,
+      };
+    } finally {
+      await db.execute(sql`SELECT pg_advisory_unlock(${SHIPMENT_PUSH_LOCK_NS}, ${shipmentId})`);
+    }
+  }
   // -------------------------------------------------------------------------
   // pushShipment — WMS-only reader (Commit 11 — §6 refactor plan).
   // -------------------------------------------------------------------------
@@ -4558,6 +4766,7 @@ export function createShipStationService(
 
   return {
     pushShipment,
+    appendShipmentItems,
     getShipments,
     getShipmentById,
     getOrderById,
