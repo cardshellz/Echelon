@@ -4,6 +4,7 @@ import {
   assignmentLabel,
   buildProgramOverviews,
   effectiveRateTableCoverages,
+  findEditorRateGroup,
   pricingFlowKey,
   pricingFlowLabel,
   productRuleRevisionStatus,
@@ -12,6 +13,7 @@ import {
   type RateTableSummary,
   type RateTablesResponse,
 } from "../pricing-programs/api";
+import type { RateGroup } from "../rate-table-model";
 
 function assignment(overrides: Partial<RateBookAssignment> = {}): RateBookAssignment {
   return {
@@ -76,6 +78,79 @@ describe("rateTableRegionCount", () => {
   it("prefers the corrected region count and supports the legacy state count", () => {
     expect(rateTableRegionCount({ regionCount: 52, stateCount: 50 })).toBe(52);
     expect(rateTableRegionCount({ stateCount: 52 })).toBe(52);
+  });
+});
+
+describe("destination-group editor selection", () => {
+  const group = (
+    id: string,
+    destinationGroupId: number | null,
+    name: string,
+    regions: string[],
+    originWarehouseId: number | null = null,
+  ): RateGroup => ({
+    id,
+    destinationGroupId,
+    destinationGroupLockVersion: 1,
+    name,
+    originWarehouseId,
+    regions,
+    zipEntries: [],
+    availability: "offered",
+    pricingModel: "weight_bands",
+    baseChargeUsd: "",
+    perStartedPoundUsd: "",
+    bands: [],
+  });
+
+  it("selects the clicked persisted group instead of the first editor group", () => {
+    const military = group("military", 11, "Military mail", ["AA", "AE", "AP"]);
+    const hiprak = group("hiprak", 12, "Alaska and Hawaii", ["AK", "HI"]);
+
+    expect(findEditorRateGroup(
+      [military, hiprak],
+      { id: 12, key: "id:12" },
+    )).toBe(hiprak);
+  });
+
+  it("prefers the all-warehouse scope when a group has overrides", () => {
+    const warehouseOverride = group(
+      "warehouse-override",
+      12,
+      "Alaska and Hawaii",
+      ["AK", "HI"],
+      2,
+    );
+    const defaultScope = group(
+      "default",
+      12,
+      "Alaska and Hawaii",
+      ["AK", "HI"],
+    );
+
+    expect(findEditorRateGroup(
+      [warehouseOverride, defaultScope],
+      { id: 12, key: "id:12" },
+    )).toBe(defaultScope);
+  });
+
+  it("uses the stable derived key for a legacy group without a persisted ID", () => {
+    const military = group("military", null, "Military mail", ["AA", "AE", "AP"]);
+    const hiprak = group("hiprak", null, "Alaska and Hawaii", ["AK", "HI"]);
+
+    expect(findEditorRateGroup(
+      [military, hiprak],
+      { id: null, key: "derived:alaska and hawaii|US|AK|,US|HI|" },
+    )).toBe(hiprak);
+  });
+
+  it("returns null when the clicked group is absent from the draft", () => {
+    const military = group("military", 11, "Military mail", ["AA", "AE", "AP"]);
+
+    expect(findEditorRateGroup(
+      [military],
+      { id: 12, key: "id:12" },
+    )).toBeNull();
   });
 });
 

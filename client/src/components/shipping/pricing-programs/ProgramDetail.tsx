@@ -64,8 +64,14 @@ interface ProgramDetailProps {
   warehouses: WarehouseOption[];
   onBack: () => void;
   onViewTable: (tableId: number) => void;
-  onContinueDraft: (draftId: number) => void;
-  onCreateRevision: (sourceTableId: number) => void;
+  onContinueDraft: (
+    draftId: number,
+    destinationGroup?: ProgramDestinationGroup,
+  ) => void;
+  onCreateRevision: (
+    sourceTableId: number,
+    destinationGroup?: ProgramDestinationGroup,
+  ) => void;
   onStartRates: (
     serviceLevelCode: string,
     destinationGroup?: ProgramDestinationGroup,
@@ -463,8 +469,14 @@ function CoverageCell({
   warehouses: WarehouseOption[];
   programRetired: boolean;
   onViewTable: (tableId: number) => void;
-  onContinueDraft: (draftId: number) => void;
-  onCreateRevision: (sourceTableId: number) => void;
+  onContinueDraft: (
+    draftId: number,
+    destinationGroup?: ProgramDestinationGroup,
+  ) => void;
+  onCreateRevision: (
+    sourceTableId: number,
+    destinationGroup?: ProgramDestinationGroup,
+  ) => void;
   onStartRates: (
     serviceLevelCode: string,
     destinationGroup?: ProgramDestinationGroup,
@@ -490,8 +502,8 @@ function CoverageCell({
   }
 
   const edit = () => {
-    if (option.draft) onContinueDraft(option.draft.id);
-    else if (option.active) onCreateRevision(option.active.id);
+    if (option.draft) onContinueDraft(option.draft.id, group);
+    else if (option.active) onCreateRevision(option.active.id, group);
     else onStartRates(option.serviceLevel.code, group);
   };
 
@@ -597,8 +609,14 @@ function AddDestinationGroupButton({
   className,
 }: {
   options: ProgramOptionState[];
-  onContinueDraft: (draftId: number) => void;
-  onCreateRevision: (sourceTableId: number) => void;
+  onContinueDraft: (
+    draftId: number,
+    destinationGroup?: ProgramDestinationGroup,
+  ) => void;
+  onCreateRevision: (
+    sourceTableId: number,
+    destinationGroup?: ProgramDestinationGroup,
+  ) => void;
   onStartRates: (
     serviceLevelCode: string,
     destinationGroup?: ProgramDestinationGroup,

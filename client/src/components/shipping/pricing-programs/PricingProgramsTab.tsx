@@ -58,6 +58,7 @@ import {
   buildProgramOverviews,
   channelLabel,
   formatDate,
+  findEditorRateGroup,
   getJson,
   postJson,
   rateTableRegionCount,
@@ -121,18 +122,36 @@ export function PricingProgramsTab() {
   }, [programs, search, statusFilter, channelFilter]);
 
   /** Resume an existing draft in the editor with its exact saved layout. */
-  const openDraft = async (draftId: number, returnTo: View) => {
+  const openDraft = async (
+    draftId: number,
+    returnTo: View,
+    destinationGroup?: ProgramDestinationGroup,
+  ) => {
     setPreparingEditor(true);
     try {
       const detail = await queryClient.fetchQuery<RateTableDetail>({
         queryKey: [rateTableDetailKey(draftId)],
         queryFn: () => getJson<RateTableDetail>(rateTableDetailKey(draftId)),
       });
-      const groups = groupsFromLayout(detail.rateTable.metadata)
+      let groups = groupsFromLayout(detail.rateTable.metadata)
         ?? groupsFromRows(detail.rows, detail.rateTable.pricingBasis);
       const program = programs.find(
         (item) => item.book.id === detail.rateTable.rateBookId,
       );
+      const destinationGroupTarget = destinationGroup === undefined
+        ? null
+        : { id: destinationGroup.id, key: destinationGroup.key };
+      const targetMissingFromDraft = destinationGroup !== undefined
+        && findEditorRateGroup(groups, destinationGroupTarget) === null;
+      if (targetMissingFromDraft) {
+        groups = [
+          ...groups,
+          editorGroupFromProgramGroup(
+            destinationGroup,
+            detail.rateTable.pricingBasis,
+          ),
+        ];
+      }
       setView({
         kind: "editor",
         returnTo,
@@ -143,6 +162,8 @@ export function PricingProgramsTab() {
           groups,
           lockProgram: true,
           availableDestinationGroups: program?.destinationGroups ?? [],
+          destinationGroupTarget,
+          hasUnsavedInitialChanges: targetMissingFromDraft,
         },
       });
     } catch (error) {
@@ -157,7 +178,11 @@ export function PricingProgramsTab() {
   };
 
   /** Clone a non-draft revision into a fresh editable draft, then open it. */
-  const createRevision = async (sourceTableId: number, returnTo: View) => {
+  const createRevision = async (
+    sourceTableId: number,
+    returnTo: View,
+    destinationGroup?: ProgramDestinationGroup,
+  ) => {
     setPreparingEditor(true);
     try {
       const cloned = await postJson<{ rateTable: { id: number } }>(
@@ -165,7 +190,7 @@ export function PricingProgramsTab() {
         {},
       );
       queryClient.invalidateQueries({ queryKey: [RATE_TABLES_KEY] });
-      await openDraft(cloned.rateTable.id, returnTo);
+      await openDraft(cloned.rateTable.id, returnTo, destinationGroup);
     } catch (error) {
       toast({
         title: "Could not create a revision",
@@ -244,8 +269,10 @@ export function PricingProgramsTab() {
         warehouses={warehouses}
         onBack={() => setView({ kind: "overview" })}
         onViewTable={(tableId) => setView({ kind: "revision", tableId, returnTo: here })}
-        onContinueDraft={(draftId) => openDraft(draftId, here)}
-        onCreateRevision={(sourceTableId) => createRevision(sourceTableId, here)}
+        onContinueDraft={(draftId, destinationGroup) =>
+          openDraft(draftId, here, destinationGroup)}
+        onCreateRevision={(sourceTableId, destinationGroup) =>
+          createRevision(sourceTableId, here, destinationGroup)}
         onStartRates={(serviceLevelCode, destinationGroup) => {
           const serviceLevel = data?.serviceLevels.find(
             (level) => level.code === serviceLevelCode,
@@ -266,6 +293,10 @@ export function PricingProgramsTab() {
                 : null,
               lockProgram: true,
               availableDestinationGroups: program.destinationGroups,
+              destinationGroupTarget: destinationGroup === undefined
+                ? null
+                : { id: destinationGroup.id, key: destinationGroup.key },
+              hasUnsavedInitialChanges: false,
             },
           });
         }}
