@@ -202,6 +202,14 @@ const DEAD_LETTER_REASON_CODE = sql`CASE
   WHEN rq.provider = 'shipstation' AND rq.last_error LIKE '%Negative Inventory Guard%' THEN 'SHIPNOTIFY_NO_INVENTORY'
   WHEN rq.provider = 'shipstation' AND rq.last_error LIKE '%no parseable wms-item lineItemKey%' THEN 'SHIPNOTIFY_UNMAPPED_LINEITEM'
   WHEN rq.provider = 'shipstation' AND rq.last_error LIKE '%shipment not found%' THEN 'SHIPNOTIFY_SHIPMENT_NOT_FOUND'
+  WHEN rq.provider = 'internal'
+    AND rq.topic = 'shopify_fulfillment_push'
+    AND rq.last_error LIKE 'pushShopifyFulfillment: shipment % has no tracking_number'
+    THEN 'SHOPIFY_PUSH_LEGACY_TRACKING_MISSING'
+  WHEN rq.provider = 'internal'
+    AND rq.topic = 'shopify_fulfillment_push'
+    AND rq.last_error LIKE 'pushShopifyFulfillment: Shopify reports remaining quantity that cannot be allocated%'
+    THEN 'SHOPIFY_PUSH_PACKAGE_STATE_CONFLICT'
   WHEN rq.last_error LIKE '%no items with positive quantity%' THEN 'SHOPIFY_PUSH_NO_POSITIVE_QTY'
   WHEN rq.last_error LIKE '%no fulfillment-order line item%' THEN 'SHOPIFY_PUSH_SKU_NOT_ON_FO'
   WHEN rq.last_error LIKE '%fulfillment push returned false%' THEN 'CHANNEL_PUSH_RETURNED_FALSE'
@@ -259,6 +267,8 @@ const DEAD_LETTER_LABELS: Record<string, string> = {
   SHIPNOTIFY_NO_INVENTORY: "Couldn't ship — nothing in stock to deduct",
   SHIPNOTIFY_UNMAPPED_LINEITEM: "Ship update — items didn't match the order",
   SHIPNOTIFY_SHIPMENT_NOT_FOUND: "Ship update — shipment not found",
+  SHOPIFY_PUSH_LEGACY_TRACKING_MISSING: "Historical tracking push needs Shopify verification",
+  SHOPIFY_PUSH_PACKAGE_STATE_CONFLICT: "Shopify package state needs reconciliation",
   SHOPIFY_PUSH_NO_POSITIVE_QTY: "Tracking push — shipment had no items",
   SHOPIFY_PUSH_SKU_NOT_ON_FO: "Tracking push — item not on the order",
   CHANNEL_PUSH_RETURNED_FALSE: "Tracking push — provider did not accept update",
@@ -1016,6 +1026,14 @@ const DEAD_LETTER_REASONS: DeadLetterReasonDef[] = [
   { code: "SHIPNOTIFY_UNSPECIFIED", stage: "shipped", severity: "warning",
     message: "Ship update failed — reason wasn't recorded",
     why: "These older failures didn't save why they failed (from before we captured the detail) — almost all are the same out-of-stock problem from one week in May. Treat them like the no-stock bucket, or clear them if those orders are long settled.",
+    remediation: "INVESTIGATE", replaySafe: false },
+  { code: "SHOPIFY_PUSH_LEGACY_TRACKING_MISSING", stage: "writeback", severity: "warning",
+    message: "Historical shipment needs Shopify verification",
+    why: "An older Echelon shipment row has no tracking identity. The reconciliation worker checks Shopify's exact fulfillment packages and closes this retry only when all affected line quantities are already covered.",
+    remediation: "INVESTIGATE", replaySafe: false },
+  { code: "SHOPIFY_PUSH_PACKAGE_STATE_CONFLICT", stage: "writeback", severity: "warning",
+    message: "Shopify package state needs reconciliation",
+    why: "The original push could not allocate Shopify's remaining quantity. The reconciliation worker imports Shopify's exact packages and closes this retry only when package-line evidence proves the shipment is already covered.",
     remediation: "INVESTIGATE", replaySafe: false },
   { code: "SHOPIFY_PUSH_NO_POSITIVE_QTY", stage: "writeback", severity: "warning",
     message: "Tracking push — the shipment had no items",

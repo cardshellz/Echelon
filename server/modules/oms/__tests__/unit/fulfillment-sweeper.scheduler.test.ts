@@ -356,32 +356,69 @@ describe("fulfillment-sweeper.scheduler", () => {
     });
   });
 
-  it("marks only Shopify fulfillment retry debt and its owned review marker resolved", async () => {
-    const execute = vi.fn(async (query: any) => {
+  it("marks only proven Shopify retry debt and its owned review marker resolved", async () => {
+    const txExecute = vi.fn(async (query: any) => {
       const text = queryText(query);
-      if (text.includes("WITH resolved_retry")) {
-        return { rows: [{ retry_rows_resolved: 2, inbox_rows_resolved: 1 }] };
+      if (text.includes("FROM oms.webhook_retry_queue retry")) {
+        return {
+          rows: [{
+            retry_id: 1001,
+            source_inbox_id: 2001,
+            shipment_id: 44,
+            tracking_number: "TRACK44",
+            external_order_id: "12001",
+          }],
+        };
+      }
+      if (text.includes("FROM wms.outbound_shipment_items shipment_item")) {
+        return {
+          rows: [{
+            shipment_id: 44,
+            legacy_shipment_item_id: 3001,
+            wms_order_item_id: 4001,
+            channel_order_line_id: "9001",
+            quantity_required: 1,
+            direct_evidence_quantity: 1,
+          }],
+        };
+      }
+      if (text.includes("UPDATE oms.webhook_retry_queue")) {
+        return { rows: [{ id: 1001, source_inbox_id: 2001 }] };
+      }
+      if (text.includes("UPDATE oms.webhook_inbox")) {
+        return { rows: [{ id: 2001 }] };
       }
       if (text.includes("UPDATE wms.outbound_shipments")) {
         return { rows: [{ id: 44 }] };
       }
+      if (text.includes("INSERT INTO oms.oms_order_events")) {
+        return { rows: [{ id: 9001 }] };
+      }
       return { rows: [] };
     });
-    const transaction = vi.fn(async (callback: (tx: any) => Promise<any>) => callback({ execute }));
+    const execute = vi.fn(async (query: any) => {
+      if (queryText(query).includes("SELECT oms_order.id::int AS oms_order_id")) {
+        return { rows: [{ oms_order_id: 5001 }] };
+      }
+      return { rows: [] };
+    });
+    const transaction = vi.fn(async (callback: (tx: any) => Promise<any>) =>
+      callback({ execute: txExecute }));
 
-    const result = await resolveRecoveredShopifyWritebackDebt({ transaction }, 44);
+    const result = await resolveRecoveredShopifyWritebackDebt(
+      { execute, transaction },
+      44,
+    );
 
     expect(result).toEqual({
-      retryRowsResolved: 2,
+      retryRowsResolved: 1,
       inboxRowsResolved: 1,
       reviewMarkersCleared: 1,
     });
     expect(transaction).toHaveBeenCalledTimes(1);
-    expect(execute).toHaveBeenCalledTimes(2);
-    expect(queryText(execute.mock.calls[0][0])).toContain("topic = 'shopify_fulfillment_push'");
-    expect(queryText(execute.mock.calls[1][0])).toContain(
-      "review_reason LIKE 'permanent_fulfillment_push_failure:%'",
-    );
+    const transactionSql = txExecute.mock.calls.map(([query]) => queryText(query)).join("\n");
+    expect(transactionSql).toContain("retry.status = 'dead'");
+    expect(transactionSql).toContain("review_reason LIKE");
   });
 
   it("leaves transient provider failure in the canonical command retry state", async () => {

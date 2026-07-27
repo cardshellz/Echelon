@@ -12,6 +12,18 @@ import { findChannelWritebackCandidates } from "./channel-writeback.service";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
 import { processShopifyFulfillmentIngress } from "./shopify-fulfillment-ingress.adapter";
 import { processEbayFulfillmentIngress } from "./ebay-fulfillment-ingress.adapter";
+import {
+  deferShopifyWritebackDebtOrder,
+  findShopifyWritebackDebtOrders,
+  resolveShopifyWritebackDebtForOrder,
+  resolveShopifyWritebackDebtForShipment,
+  type ResolveShopifyWritebackDebtResult,
+  type ShopifyWritebackDebtOrder,
+} from "./shopify-writeback-debt.service";
+import {
+  ShopifyFulfillmentSnapshotReader,
+  type ShopifyFulfillmentSnapshot,
+} from "./shopify-fulfillment-snapshot";
 
 const LOG_PREFIX = "[Fulfillment Sweeper]";
 const OUTBOUND_SWEEP_LIMIT = 500;
@@ -21,6 +33,8 @@ const INBOUND_RECEIPT_RECOVERY_LIMIT = 100;
 const INBOUND_RECEIPT_RECOVERY_MIN_AGE_MINUTES = 5;
 const INBOUND_RECEIPT_RECOVERY_MAX_FAILURES = 5;
 const INBOUND_RECEIPT_RECOVERY_INTERVAL_MS = 60_000;
+const SHOPIFY_WRITEBACK_DEBT_RECOVERY_LIMIT = 25;
+const SHOPIFY_WRITEBACK_DEBT_RETRY_DELAY_MS = 6 * 60 * 60 * 1000;
 const SHIPSTATION_LABEL_RECOVERY_LIMIT = 10;
 const SHIPSTATION_LABEL_RECOVERY_MIN_AGE_MINUTES = 15;
 const SHIPSTATION_LABEL_RECOVERY_MAX_AGE_DAYS = 30;
@@ -243,76 +257,153 @@ export interface RecoveredShopifyWritebackDebtResult {
   reviewMarkersCleared: number;
 }
 
-function nonNegativeCount(value: unknown): number {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
-}
-
 /**
- * Close only the retry/review debt owned by Shopify fulfillment writeback.
- * Other shipment review reasons are intentionally preserved.
+ * Preserve the legacy caller contract while requiring exact canonical package
+ * evidence before retry/review debt is closed.
  */
 export async function resolveRecoveredShopifyWritebackDebt(
   dbArg: any,
   shipmentId: number,
 ): Promise<RecoveredShopifyWritebackDebtResult> {
-  if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
-    throw new Error(`shipmentId must be a positive integer (got ${shipmentId})`);
-  }
+  const result = await resolveShopifyWritebackDebtForShipment(
+    dbArg,
+    shipmentId,
+    "canonical_channel_command_terminal",
+  );
+  return Object.freeze({
+    retryRowsResolved: result.retryRowsResolved,
+    inboxRowsResolved: result.inboxRowsResolved,
+    reviewMarkersCleared: result.reviewMarkersCleared,
+  });
+}
 
-  const resolveInTransaction = async (tx: any): Promise<RecoveredShopifyWritebackDebtResult> => {
-    const retryResult = await tx.execute(sql`
-      WITH resolved_retry AS (
-        UPDATE oms.webhook_retry_queue
-        SET status = 'success',
-            last_error = NULL,
-            updated_at = NOW()
-        WHERE provider = 'internal'
-          AND topic = 'shopify_fulfillment_push'
-          AND payload->>'shipmentId' = ${String(shipmentId)}
-          AND status <> 'success'
-        RETURNING source_inbox_id
-      ), resolved_inbox AS (
-        UPDATE oms.webhook_inbox wi
-        SET status = 'succeeded',
-            last_error = NULL,
-            processed_at = COALESCE(wi.processed_at, NOW()),
-            updated_at = NOW()
-        WHERE wi.id IN (
-          SELECT source_inbox_id
-          FROM resolved_retry
-          WHERE source_inbox_id IS NOT NULL
-        )
-        RETURNING wi.id
-      )
-      SELECT
-        (SELECT COUNT(*)::int FROM resolved_retry) AS retry_rows_resolved,
-        (SELECT COUNT(*)::int FROM resolved_inbox) AS inbox_rows_resolved
-    `);
+export interface ShopifyWritebackDebtRecoveryResult {
+  readonly candidates: number;
+  readonly providerSnapshotsComplete: number;
+  readonly ordersResolved: number;
+  readonly retryRowsResolved: number;
+  readonly reviewRequired: number;
+  readonly failed: number;
+}
 
-    const reviewResult = await tx.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = false,
-          review_reason = NULL,
-          updated_at = NOW()
-      WHERE id = ${shipmentId}
-        AND requires_review = true
-        AND review_reason LIKE 'permanent_fulfillment_push_failure:%'
-      RETURNING id
-    `);
+export interface ShopifyWritebackDebtRecoveryOptions {
+  readonly limit?: number;
+  readonly fetchSnapshot?: (
+    order: ShopifyWritebackDebtOrder,
+  ) => Promise<ShopifyFulfillmentSnapshot>;
+  readonly resolveOrder?: (
+    order: ShopifyWritebackDebtOrder,
+    snapshot: ShopifyFulfillmentSnapshot,
+  ) => Promise<ResolveShopifyWritebackDebtResult>;
+  readonly deferOrder?: (
+    order: ShopifyWritebackDebtOrder,
+    nextRetryAt: Date,
+  ) => Promise<number>;
+  readonly now?: () => Date;
+}
 
-    const retryRow = retryResult?.rows?.[0] ?? {};
-    return {
-      retryRowsResolved: nonNegativeCount(retryRow.retry_rows_resolved),
-      inboxRowsResolved: nonNegativeCount(retryRow.inbox_rows_resolved),
-      reviewMarkersCleared: Array.isArray(reviewResult?.rows) ? reviewResult.rows.length : 0,
-    };
+/**
+ * Reconcile dead internal Shopify writeback debt against a read-only provider
+ * fulfillment snapshot. No shipment, inventory, or fulfillment receipt is
+ * created by this lane.
+ */
+export async function recoverShopifyWritebackDebt(
+  dbArg: any,
+  options: ShopifyWritebackDebtRecoveryOptions = {},
+): Promise<ShopifyWritebackDebtRecoveryResult> {
+  const limit = options.limit ?? SHOPIFY_WRITEBACK_DEBT_RECOVERY_LIMIT;
+  const candidates = await findShopifyWritebackDebtOrders(dbArg, limit);
+  const snapshotReader = options.fetchSnapshot
+    ? null
+    : new ShopifyFulfillmentSnapshotReader();
+  const fetchSnapshot = options.fetchSnapshot
+    ?? ((order: ShopifyWritebackDebtOrder) => snapshotReader!.fetch(order));
+  const resolveOrder = options.resolveOrder
+    ?? ((order: ShopifyWritebackDebtOrder, snapshot: ShopifyFulfillmentSnapshot) =>
+      resolveShopifyWritebackDebtForOrder(dbArg, {
+        omsOrderId: order.id,
+        mode: "full_snapshot",
+        source: "shopify_fulfillment_sweeper",
+        providerSnapshot: snapshot,
+      }));
+  const deferOrder = options.deferOrder
+    ?? ((order: ShopifyWritebackDebtOrder, nextRetryAt: Date) =>
+      deferShopifyWritebackDebtOrder(dbArg, order.id, nextRetryAt));
+  const now = options.now ?? (() => new Date());
+  const nextRetryAt = (): Date => {
+    const current = now();
+    if (!(current instanceof Date) || Number.isNaN(current.getTime())) {
+      throw new Error("Shopify writeback debt recovery clock returned an invalid Date");
+    }
+    return new Date(current.getTime() + SHOPIFY_WRITEBACK_DEBT_RETRY_DELAY_MS);
   };
 
-  if (typeof dbArg?.transaction === "function") {
-    return dbArg.transaction(resolveInTransaction);
+  let providerSnapshotsComplete = 0;
+  let ordersResolved = 0;
+  let retryRowsResolved = 0;
+  let reviewRequired = 0;
+  let failed = 0;
+
+  for (const order of candidates) {
+    try {
+      const snapshot = await fetchSnapshot(order);
+      if (!snapshot.complete) {
+        reviewRequired++;
+        console.warn(JSON.stringify({
+          code: "SHOPIFY_WRITEBACK_DEBT_SNAPSHOT_INCOMPLETE",
+          omsOrderId: order.id,
+          orderNumber: order.external_order_number,
+          deadRetryCount: order.dead_retry_count,
+          incompleteReasons: snapshot.incompleteReasons,
+        }));
+        await deferOrder(order, nextRetryAt());
+        continue;
+      }
+      providerSnapshotsComplete++;
+      const result = await resolveOrder(order, snapshot);
+      retryRowsResolved += result.retryRowsResolved;
+      if (result.retryRowsResolved > 0) ordersResolved++;
+      if (result.unresolved.length > 0) {
+        reviewRequired++;
+        console.warn(JSON.stringify({
+          code: "SHOPIFY_WRITEBACK_DEBT_EVIDENCE_INCOMPLETE",
+          omsOrderId: order.id,
+          orderNumber: order.external_order_number,
+          unresolved: result.unresolved,
+        }));
+        await deferOrder(order, nextRetryAt());
+      }
+    } catch (error) {
+      const record = error as { code?: unknown; message?: unknown };
+      failed++;
+      try {
+        await deferOrder(order, nextRetryAt());
+      } catch (deferError) {
+        console.error(JSON.stringify({
+          code: "SHOPIFY_WRITEBACK_DEBT_DEFERRAL_FAILED",
+          omsOrderId: order.id,
+          orderNumber: order.external_order_number,
+          errorMessage: deferError instanceof Error ? deferError.message : String(deferError),
+        }));
+      }
+      console.error(JSON.stringify({
+        code: "SHOPIFY_WRITEBACK_DEBT_RECOVERY_FAILED",
+        omsOrderId: order.id,
+        orderNumber: order.external_order_number,
+        errorCode: typeof record?.code === "string" ? record.code : null,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      }));
+    }
   }
-  return resolveInTransaction(dbArg);
+
+  return Object.freeze({
+    candidates: candidates.length,
+    providerSnapshotsComplete,
+    ordersResolved,
+    retryRowsResolved,
+    reviewRequired,
+    failed,
+  });
 }
 
 function getReconciler(
@@ -471,6 +562,19 @@ export async function runInboundFulfillmentSweep(
 ) {
   try {
     console.log(`${LOG_PREFIX} Starting inbound fulfillment sweep...`);
+
+    try {
+      const recovery = await recoverShopifyWritebackDebt(dbArg);
+      if (recovery.candidates > 0) {
+        console.log(
+          `${LOG_PREFIX} Shopify writeback debt recovery: ${JSON.stringify(recovery)}`,
+        );
+      }
+    } catch (error) {
+      console.error(
+        `${LOG_PREFIX} Shopify writeback debt recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     // Orders that are paid/active in OMS but NOT shipped in WMS — candidates
     // where someone may have bought a label on the channel directly.

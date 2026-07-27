@@ -265,14 +265,16 @@ describe("oms-flow-reconciliation.service", () => {
     expect(db.execute).toHaveBeenCalledTimes(1);
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("q.status = 'dead'");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain(
-      "q.topic IN ('delayed_tracking_push', 'shopify_fulfillment_push')",
+      "q.topic = 'delayed_tracking_push'",
     );
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain(
       "e.created_at >= COALESCE(c.dead_at, c.created_at)",
     );
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("e.details->>'wmsShipmentId'");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("e.details->>'trackingNumber'");
-    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("e.details->>'shopifyFulfillmentId'");
+    expect(OMS_FLOW_RECONCILIATION_SRC).not.toContain(
+      "q.topic IN ('delayed_tracking_push', 'shopify_fulfillment_push')",
+    );
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain(
       "last_error = 'auto-closed: later OMS fulfillment/tracking event confirmed success'",
     );
