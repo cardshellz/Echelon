@@ -4,6 +4,7 @@ import {
   assignmentLabel,
   buildProgramOverviews,
   countStaleRateTableCoverages,
+  editableProgramDestinationGroups,
   effectiveRateTableCoverages,
   findEditorRateGroup,
   pricingFlowKey,
@@ -11,6 +12,7 @@ import {
   productRuleRevisionStatus,
   rateTableCoveragesForGroup,
   rateTableRegionCount,
+  resolveCoverageCellAction,
   type ProgramDestinationGroup,
   type RateBookAssignment,
   type RateTableCoverage,
@@ -522,5 +524,56 @@ describe("pricing program coverage aggregation", () => {
         .map((group) => group.name)
         .sort(),
     ).toEqual(["Midwest", "Southeast"]);
+
+    const editableGroups = editableProgramDestinationGroups(
+      program!.destinationGroups,
+    );
+    expect(editableGroups).toHaveLength(8);
+    expect(editableGroups.every((group) => group.hasCurrentDefinition)).toBe(true);
+
+    const midwest = program!.destinationGroups.find(
+      (group) => group.name === "Midwest",
+    )!;
+    expect(resolveCoverageCellAction({
+      group: midwest,
+      activeTableId: active.id,
+      draftTableId: draft.id,
+      hasActiveCoverage: true,
+      hasDraftCoverage: false,
+    })).toEqual({ kind: "view_revision", tableId: active.id });
+  });
+});
+
+describe("pricing program coverage card actions", () => {
+  it("keeps current destination groups on the editable workflow", () => {
+    const currentGroup = { hasCurrentDefinition: true };
+
+    expect([
+      resolveCoverageCellAction({
+        group: currentGroup,
+        activeTableId: 301,
+        draftTableId: 302,
+        hasActiveCoverage: true,
+        hasDraftCoverage: true,
+      }),
+      resolveCoverageCellAction({
+        group: currentGroup,
+        activeTableId: 301,
+        draftTableId: null,
+        hasActiveCoverage: true,
+        hasDraftCoverage: false,
+      }),
+      resolveCoverageCellAction({
+        group: currentGroup,
+        activeTableId: null,
+        draftTableId: null,
+        hasActiveCoverage: false,
+        hasDraftCoverage: false,
+      }),
+    ]).toEqual([
+      { kind: "continue_draft", tableId: 302 },
+      { kind: "create_revision", tableId: 301 },
+      { kind: "start_rates" },
+    ]);
   });
 });

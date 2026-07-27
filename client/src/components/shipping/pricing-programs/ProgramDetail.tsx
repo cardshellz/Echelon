@@ -49,6 +49,7 @@ import {
   invalidateShippingAdmin,
   postJson,
   rateTableCoveragesForGroup,
+  resolveCoverageCellAction,
   type EffectiveRateTableCoverage,
   type ProgramDestinationGroup,
   type ProgramOverview,
@@ -508,14 +509,43 @@ function CoverageCell({
     );
   }
 
-  const edit = () => {
-    if (option.draft) onContinueDraft(option.draft.id, group);
-    else if (option.active) onCreateRevision(option.active.id, group);
-    else onStartRates(option.serviceLevel.code, group);
+  const action = resolveCoverageCellAction({
+    group,
+    activeTableId: option.active?.id ?? null,
+    draftTableId: option.draft?.id ?? null,
+    hasActiveCoverage: activeCoverages.length > 0,
+    hasDraftCoverage: draftCoverages.length > 0,
+  });
+  const openCoverage = () => {
+    switch (action.kind) {
+      case "continue_draft":
+        onContinueDraft(action.tableId, group);
+        return;
+      case "create_revision":
+        onCreateRevision(action.tableId, group);
+        return;
+      case "start_rates":
+        onStartRates(option.serviceLevel.code, group);
+        return;
+      case "view_revision":
+        onViewTable(action.tableId);
+        return;
+      case "none":
+        return;
+    }
   };
 
   let state: CoverageState;
-  if (staleDraftCoverageCount > 0) {
+  if (!group.hasCurrentDefinition) {
+    state = {
+      icon: Eye,
+      label: draftCoverages.length > 0
+        ? "Draft revision only"
+        : "Live revision only",
+      detail: "View read-only revision",
+      tone: "neutral",
+    };
+  } else if (staleDraftCoverageCount > 0) {
     state = {
       icon: AlertTriangle,
       label: "Draft uses old group",
@@ -549,11 +579,15 @@ function CoverageCell({
   return (
     <div className="space-y-1">
       <CoverageAction
-        disabled={programRetired}
-        onClick={edit}
+        disabled={
+          action.kind === "none" || (programRetired && group.hasCurrentDefinition)
+        }
+        onClick={openCoverage}
         {...state}
       />
-      {option.active && activeCoverages.length > 0 && (
+      {group.hasCurrentDefinition
+        && option.active
+        && activeCoverages.length > 0 && (
         <button
           type="button"
           onClick={() => onViewTable(option.active!.id)}

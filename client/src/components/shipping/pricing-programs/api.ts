@@ -544,6 +544,44 @@ export interface ProgramDestinationGroup {
   appearsInDraftRevision: boolean;
 }
 
+export function editableProgramDestinationGroups(
+  groups: readonly ProgramDestinationGroup[],
+): ProgramDestinationGroup[] {
+  return groups.filter((group) => group.hasCurrentDefinition);
+}
+
+export type CoverageCellAction =
+  | { kind: "continue_draft"; tableId: number }
+  | { kind: "create_revision"; tableId: number }
+  | { kind: "start_rates" }
+  | { kind: "view_revision"; tableId: number }
+  | { kind: "none" };
+
+export function resolveCoverageCellAction(input: {
+  group: Pick<ProgramDestinationGroup, "hasCurrentDefinition">;
+  activeTableId: number | null;
+  draftTableId: number | null;
+  hasActiveCoverage: boolean;
+  hasDraftCoverage: boolean;
+}): CoverageCellAction {
+  if (!input.group.hasCurrentDefinition) {
+    if (input.hasDraftCoverage && input.draftTableId !== null) {
+      return { kind: "view_revision", tableId: input.draftTableId };
+    }
+    if (input.hasActiveCoverage && input.activeTableId !== null) {
+      return { kind: "view_revision", tableId: input.activeTableId };
+    }
+    return { kind: "none" };
+  }
+  if (input.draftTableId !== null) {
+    return { kind: "continue_draft", tableId: input.draftTableId };
+  }
+  if (input.activeTableId !== null) {
+    return { kind: "create_revision", tableId: input.activeTableId };
+  }
+  return { kind: "start_rates" };
+}
+
 export function rateTableRegionCount(
   coverage: Pick<RateTableSummary, "regionCount" | "stateCount">
     | Pick<RateTableAnalysis["coverage"], "regionCount" | "stateCount">,
