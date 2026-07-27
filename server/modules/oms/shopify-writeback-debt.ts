@@ -11,6 +11,7 @@ export interface ShopifyWritebackDebtItem {
 export interface ShopifyWritebackDebtShipment {
   readonly shipmentId: number;
   readonly trackingNumber: string | null;
+  readonly historicalEmptySplitNoop: boolean;
   readonly retryIds: readonly number[];
   readonly sourceInboxIds: readonly number[];
   readonly items: readonly ShopifyWritebackDebtItem[];
@@ -107,7 +108,11 @@ export function evaluateShopifyWritebackDebt(
 
   for (const shipment of shipments) {
     if (shipment.items.length === 0) {
-      unresolved.set(shipment.shipmentId, "no_eligible_items");
+      if (shipment.historicalEmptySplitNoop) {
+        resolved.add(shipment.shipmentId);
+      } else {
+        unresolved.set(shipment.shipmentId, "no_eligible_items");
+      }
       continue;
     }
     if (shipment.items.every((item) => item.directEvidenceQuantity >= item.quantityRequired)) {
