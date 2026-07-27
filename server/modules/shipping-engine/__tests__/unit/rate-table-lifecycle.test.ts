@@ -6,6 +6,7 @@ import {
   canRetireRateTable,
 } from "../../domain/rate-table-lifecycle";
 import type { RateTableImportRow } from "../../domain/rate-table-import";
+import type { RateCoverageCandidate } from "../../domain/rate-coverage";
 import { US_POSTAL_REGIONS } from "../../domain/us-geography";
 
 function row(overrides: Partial<RateTableImportRow> = {}): RateTableImportRow {
@@ -24,11 +25,55 @@ function row(overrides: Partial<RateTableImportRow> = {}): RateTableImportRow {
   };
 }
 
+function coverage(
+  overrides: Partial<RateCoverageCandidate> = {},
+): RateCoverageCandidate {
+  return {
+    destinationGroupId: 1,
+    destinationGroupLockVersion: 1,
+    name: "Pennsylvania",
+    originWarehouseId: null,
+    availability: "offered",
+    destinations: [{
+      destinationCountry: "US",
+      destinationRegion: "PA",
+      postalPrefix: null,
+    }],
+    ...overrides,
+  };
+}
+
 describe("rate table lifecycle analysis", () => {
   it("blocks an empty table", () => {
     const result = analyzeRateTable([], "shipment_weight");
     expect(result.canActivate).toBe(false);
     expect(result.errors).toContain("The table has no rate rows.");
+  });
+
+  it("permits an explicitly not-offered option with no rate rows", () => {
+    const result = analyzeRateTable(
+      [],
+      "shipment_weight",
+      [coverage({ availability: "not_offered" })],
+    );
+
+    expect(result.canActivate).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("blocks an explicitly offered option with no rate rows", () => {
+    const result = analyzeRateTable(
+      [],
+      "shipment_weight",
+      [coverage()],
+    );
+
+    expect(result.canActivate).toBe(false);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      "The table has no rate rows.",
+      "Pennsylvania is offered but has no rates for US PA.",
+    ]));
   });
 
   it("blocks missing, overlapping, and discontinuous parcel coverage", () => {
@@ -38,9 +83,9 @@ describe("rate table lifecycle analysis", () => {
       row({ minMeasure: 900, maxMeasure: 1200 }),
     ], "shipment_weight");
     expect(result.errors).toEqual(expect.arrayContaining([
-      "PA statewide has no rate from 0g to 99g.",
-      "PA statewide has overlapping bands 100g-500g and 500g-700g.",
-      "PA statewide has no rate from 701g to 899g.",
+      "PA region-wide has no rate from 0g to 99g.",
+      "PA region-wide has overlapping bands 100g-500g and 500g-700g.",
+      "PA region-wide has no rate from 701g to 899g.",
     ]));
   });
 
@@ -60,7 +105,7 @@ describe("rate table lifecycle analysis", () => {
     expect(result.errors[0]).toContain("freight weight ceiling");
   });
 
-  it("blocks ZIP overrides without a statewide fallback", () => {
+  it("blocks ZIP overrides without a region-wide fallback", () => {
     const result = analyzeRateTable([row({ postalPrefix: "191" })], "shipment_weight");
     expect(result.canActivate).toBe(false);
   });
@@ -68,6 +113,7 @@ describe("rate table lifecycle analysis", () => {
   it("warns about uncovered regions but permits activation", () => {
     const result = analyzeRateTable([row()], "shipment_weight");
     expect(result.canActivate).toBe(true);
+    expect(result.coverage.regionCount).toBe(1);
     expect(result.coverage.stateCount).toBe(1);
   });
 
@@ -88,7 +134,7 @@ describe("rate table lifecycle analysis", () => {
     ], "shipment_weight");
 
     expect(result.canActivate).toBe(false);
-    expect(result.errors).toContain("PA statewide has a rate band after its open-ended band.");
+    expect(result.errors).toContain("PA region-wide has a rate band after its open-ended band.");
   });
 
   it("accepts one formula row per destination and rejects mixed schedules", () => {
@@ -102,7 +148,7 @@ describe("rate table lifecycle analysis", () => {
     const mixed = analyzeRateTable([formula, row({ minMeasure: 0, maxMeasure: 1000 })], "shipment_weight");
     expect(mixed.canActivate).toBe(false);
     expect(mixed.errors).toContain(
-      "PA statewide formula pricing must be the only rate row for that destination.",
+      "PA region-wide formula pricing must be the only rate row for that destination.",
     );
   });
 

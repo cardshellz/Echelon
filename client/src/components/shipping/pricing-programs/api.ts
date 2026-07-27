@@ -7,7 +7,16 @@
  */
 
 import type { QueryClient } from "@tanstack/react-query";
-import type { DraftLayout, DraftRow, PricingBasis } from "../rate-table-model";
+import {
+  emitDraftRows,
+  groupDisplayName,
+  groupsFromLayout,
+  type DraftLayout,
+  type DraftRow,
+  type PricingBasis,
+  type RateGroup,
+  type RateGroupAvailability,
+} from "../rate-table-model";
 
 // ---------------------------------------------------------------------------
 // Contract types
@@ -30,6 +39,36 @@ export interface RateBookSummary {
   zoneSetId: number | null;
   metadata: unknown;
   assignments: RateBookAssignment[];
+}
+
+export interface RateCoverageDestination {
+  destinationCountry: string;
+  destinationRegion: string | null;
+  postalPrefix: string | null;
+}
+
+export interface RateBookDestinationGroup {
+  id: number;
+  rateBookId: number;
+  name: string;
+  status: "active" | "retired";
+  sortOrder: number;
+  lockVersion: number;
+  destinations: RateCoverageDestination[];
+}
+
+export interface RateTableCoverage {
+  id: number;
+  rateTableId: number;
+  destinationGroupId: number;
+  originWarehouseId: number | null;
+  availability: RateGroupAvailability;
+  destinationGroupLockVersion: number;
+  destinationGroupName: string;
+  name: string;
+  sortOrder: number;
+  rateRowCount: number;
+  destinations: RateCoverageDestination[];
 }
 
 export interface ServiceLevelOption {
@@ -57,7 +96,10 @@ export interface RateTableSummary {
   metadata: unknown;
   rateBook: RateBookSummary | null;
   serviceLevel: ServiceLevelOption | null;
+  coverages?: RateTableCoverage[];
   rowCount: number;
+  regionCount?: number;
+  /** @deprecated Use regionCount. Retained while older API consumers migrate. */
   stateCount: number;
   zipOverrideCount: number;
   productRuleCount: number;
@@ -71,6 +113,8 @@ export interface RateTableAnalysis {
   warnings: string[];
   coverage: {
     rowCount: number;
+    regionCount?: number;
+    /** @deprecated Use regionCount. Retained while older API consumers migrate. */
     stateCount: number;
     zipOverrideCount: number;
     missingRegions: string[];
@@ -99,12 +143,14 @@ export interface RateTableDetail {
   serviceLevel: ServiceLevelOption | null;
   rateBook: RateBookSummary | null;
   rows: RateTableDetailRow[];
+  coverages?: RateTableCoverage[];
   analysis: RateTableAnalysis;
 }
 
 export interface RateTablesResponse {
   rateBooks: RateBookSummary[];
   serviceLevels: ServiceLevelOption[];
+  destinationGroups?: RateBookDestinationGroup[];
   rateTables: RateTableSummary[];
 }
 
@@ -125,6 +171,8 @@ export interface CsvParseResponse {
 
 export interface SaveDraftResponse {
   rateTable: { id: number; status: string };
+  draftLayout: DraftLayout | null;
+  coverages: RateTableCoverage[];
   rowCount: number;
   warnings: string[];
   analysis: RateTableAnalysis;
@@ -465,13 +513,31 @@ export function productRuleRevisionStatus(
 export interface ProgramOverview {
   book: RateBookSummary;
   options: ProgramOptionState[];
+  destinationGroups: ProgramDestinationGroup[];
   activeAssignments: RateBookAssignment[];
   liveOptionCount: number;
   draftCount: number;
-  /** Coverage of the broadest live option (client cannot union states). */
-  maxLiveStateCount: number;
+  /** Coverage of the broadest live option (client cannot union regions). */
+  maxLiveRegionCount: number;
   totalZipOverrides: number;
   lastTouched: string | null;
+}
+
+export interface ProgramDestinationGroup {
+  key: string;
+  id: number | null;
+  rateBookId: number;
+  name: string;
+  sortOrder: number;
+  lockVersion: number | null;
+  destinations: RateCoverageDestination[];
+}
+
+export function rateTableRegionCount(
+  coverage: Pick<RateTableSummary, "regionCount" | "stateCount">
+    | Pick<RateTableAnalysis["coverage"], "regionCount" | "stateCount">,
+): number {
+  return coverage.regionCount ?? coverage.stateCount;
 }
 
 export function buildProgramOverviews(data: RateTablesResponse): ProgramOverview[] {
@@ -488,6 +554,9 @@ export function buildProgramOverviews(data: RateTablesResponse): ProgramOverview
 
   return data.rateBooks.map((book) => {
     const tables = tablesByBook.get(book.id) ?? [];
+    const persistedGroups = (data.destinationGroups ?? []).filter(
+      (group) => group.rateBookId === book.id && group.status === "active",
+    );
     const options = orderedLevels.map((level) => {
       const forLevel = tables
         .filter((table) => table.serviceLevelId === level.id)
@@ -504,17 +573,189 @@ export function buildProgramOverviews(data: RateTablesResponse): ProgramOverview
       const candidate = table.createdAt > table.effectiveFrom ? table.createdAt : table.effectiveFrom;
       return latest === null || candidate > latest ? candidate : latest;
     }, null);
+    const destinationGroups = mergeProgramDestinationGroups(
+      book.id,
+      persistedGroups,
+      tables,
+    );
     return {
       book,
       options,
+      destinationGroups,
       activeAssignments: book.assignments.filter((assignment) => assignment.isActive),
       liveOptionCount: actives.length,
       draftCount: options.filter((option) => option.draft !== null).length,
-      maxLiveStateCount: actives.reduce((max, table) => Math.max(max, table.stateCount), 0),
+      maxLiveRegionCount: actives.reduce(
+        (max, table) => Math.max(max, rateTableRegionCount(table)),
+        0,
+      ),
       totalZipOverrides: actives.reduce((sum, table) => sum + table.zipOverrideCount, 0),
       lastTouched,
     };
   });
+}
+
+export function effectiveRateTableCoverages(
+  table: RateTableSummary,
+): Array<RateTableCoverage | DerivedRateTableCoverage> {
+  if ((table.coverages?.length ?? 0) > 0) return table.coverages ?? [];
+  const groups = groupsFromLayout(table.metadata);
+  if (groups === null) return [];
+  return groups.map((group, index) => ({
+    id: null,
+    rateTableId: table.id,
+    destinationGroupId: group.destinationGroupId,
+    originWarehouseId: group.originWarehouseId,
+    availability: group.availability,
+    destinationGroupLockVersion: group.destinationGroupLockVersion,
+    destinationGroupName: groupDisplayName(group, index),
+    name: groupDisplayName(group, index),
+    sortOrder: index,
+    rateRowCount: emitDraftRows([group], table.pricingBasis).length,
+    destinations: [
+      ...group.regions.map((region) => ({
+        destinationCountry: "US",
+        destinationRegion: region,
+        postalPrefix: null,
+      })),
+      ...group.zipEntries.flatMap((entry) =>
+        entry.prefixes.map((prefix) => ({
+          destinationCountry: "US",
+          destinationRegion: entry.state,
+          postalPrefix: prefix,
+        }))),
+    ],
+  }));
+}
+
+export function coverageGroupKey(
+  group: Pick<
+    ProgramDestinationGroup,
+    "id" | "name" | "destinations"
+  >,
+): string {
+  if (group.id !== null) return `id:${group.id}`;
+  return `derived:${group.name.trim().toLocaleLowerCase()}|${destinationSignature(group.destinations)}`;
+}
+
+export interface DestinationGroupTarget {
+  id: number | null;
+  key: string;
+}
+
+/**
+ * Resolves the exact editor row for a destination selected in the program
+ * matrix. Persisted IDs are authoritative; the derived key preserves support
+ * for legacy rate tables that predate reusable destination-group records.
+ */
+export function findEditorRateGroup(
+  groups: readonly RateGroup[],
+  target: DestinationGroupTarget | null,
+): RateGroup | null {
+  if (target === null) return groups[0] ?? null;
+
+  if (target.id !== null) {
+    const matchingScopes = groups.filter(
+      (group) => group.destinationGroupId === target.id,
+    );
+    const defaultScope = matchingScopes.find(
+      (group) => group.originWarehouseId === null,
+    );
+    if (defaultScope !== undefined) return defaultScope;
+    if (matchingScopes[0] !== undefined) return matchingScopes[0];
+  }
+
+  return groups.find((group, index) =>
+    coverageGroupKey({
+      id: group.destinationGroupId,
+      name: groupDisplayName(group, index),
+      destinations: rateGroupDestinations(group),
+    }) === target.key) ?? null;
+}
+
+function rateGroupDestinations(
+  group: RateGroup,
+): RateCoverageDestination[] {
+  return [
+    ...group.regions.map((region) => ({
+      destinationCountry: "US",
+      destinationRegion: region,
+      postalPrefix: null,
+    })),
+    ...group.zipEntries.flatMap((entry) =>
+      entry.prefixes.map((prefix) => ({
+        destinationCountry: "US",
+        destinationRegion: entry.state,
+        postalPrefix: prefix,
+      }))),
+  ];
+}
+
+interface DerivedRateTableCoverage
+extends Omit<
+  RateTableCoverage,
+  "id" | "destinationGroupId" | "destinationGroupLockVersion"
+> {
+  id: null;
+  destinationGroupId: number | null;
+  destinationGroupLockVersion: number | null;
+}
+
+function mergeProgramDestinationGroups(
+  rateBookId: number,
+  persisted: readonly RateBookDestinationGroup[],
+  tables: readonly RateTableSummary[],
+): ProgramDestinationGroup[] {
+  const merged = new Map<string, ProgramDestinationGroup>();
+  for (const group of persisted) {
+    const item: ProgramDestinationGroup = {
+      key: `id:${group.id}`,
+      id: group.id,
+      rateBookId,
+      name: group.name,
+      sortOrder: group.sortOrder,
+      lockVersion: group.lockVersion,
+      destinations: group.destinations,
+    };
+    merged.set(item.key, item);
+  }
+  for (const table of tables) {
+    for (const coverage of effectiveRateTableCoverages(table)) {
+      const item: ProgramDestinationGroup = {
+        key: coverageGroupKey({
+          id: coverage.destinationGroupId,
+          name: coverage.destinationGroupName,
+          destinations: coverage.destinations,
+        }),
+        id: coverage.destinationGroupId,
+        rateBookId,
+        name: coverage.destinationGroupName,
+        sortOrder: coverage.sortOrder,
+        lockVersion: coverage.destinationGroupLockVersion,
+        destinations: coverage.destinations,
+      };
+      if (!merged.has(item.key)) merged.set(item.key, item);
+    }
+  }
+  return [...merged.values()].sort(
+    (left, right) =>
+      left.sortOrder - right.sortOrder
+      || left.name.localeCompare(right.name)
+      || left.key.localeCompare(right.key),
+  );
+}
+
+function destinationSignature(
+  destinations: readonly RateCoverageDestination[],
+): string {
+  return [...destinations]
+    .map((destination) => [
+      destination.destinationCountry,
+      destination.destinationRegion ?? "",
+      destination.postalPrefix ?? "",
+    ].join("|"))
+    .sort()
+    .join(",");
 }
 
 export function formatDate(value: string | null): string {

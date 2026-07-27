@@ -2126,14 +2126,16 @@ export function createChannelFulfillmentAuthorityRepository(
         await recalculatePlanLine(tx, planLineId);
       }
 
+      const writebackCandidateItems = materializedCustomerItems.filter(
+        (item) => !input.suppressChannelProviders.includes(item.channelProvider),
+      );
       const lineWritebackEligibility = await findLineWritebackEligibility(
         tx,
-        materializedCustomerItems,
+        writebackCandidateItems,
       );
 
-      const channelEligibleCustomerItems = materializedCustomerItems.filter(
-        (item) => lineWritebackEligibility.get(item.fulfillmentPlanLineId) === true
-          && !input.suppressChannelProviders.includes(item.channelProvider),
+      const channelEligibleCustomerItems = writebackCandidateItems.filter(
+        (item) => lineWritebackEligibility.get(item.fulfillmentPlanLineId) === true,
       );
       if (
         channelEligibleCustomerItems.length > 0

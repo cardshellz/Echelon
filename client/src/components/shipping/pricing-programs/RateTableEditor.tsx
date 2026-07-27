@@ -45,6 +45,7 @@ import {
   defaultBands,
   downloadTextFile,
   emitDraftRows,
+  groupDisplayName,
   groupsFromRows,
   layoutFromGroups,
   newGroup,
@@ -55,9 +56,12 @@ import {
 } from "../rate-table-model";
 import {
   assignmentLabel,
+  findEditorRateGroup,
   invalidateShippingAdmin,
   saveDraft,
+  type DestinationGroupTarget,
   type RateBookSummary,
+  type ProgramDestinationGroup,
   type RateTableAnalysis,
   type RateTableSummary,
   type ServiceLevelOption,
@@ -75,6 +79,12 @@ export interface EditorLaunch {
   groups: RateGroup[] | null;
   /** Launched from a program context: the program select stays fixed. */
   lockProgram: boolean;
+  /** Existing program groups that can be added to this option's manifest. */
+  availableDestinationGroups: ProgramDestinationGroup[];
+  /** Exact destination cell that launched the editor, when applicable. */
+  destinationGroupTarget: DestinationGroupTarget | null;
+  /** True when launch hydration had to add the selected destination group. */
+  hasUnsavedInitialChanges: boolean;
 }
 interface RateTableEditorProps {
   launch: EditorLaunch;
@@ -107,10 +117,15 @@ export function RateTableEditor({
   const [draftId, setDraftId] = useState<number | null>(launch.draftId);
   const [groups, setGroups] = useState<RateGroup[]>(launch.groups ?? []);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(
-    launch.groups?.[0]?.id ?? null,
+    findEditorRateGroup(
+      launch.groups ?? [],
+      launch.destinationGroupTarget,
+    )?.id ?? null,
   );
-  const [dirty, setDirty] = useState(false);
-  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(launch.draftId ? new Date() : null);
+  const [dirty, setDirty] = useState(launch.hasUnsavedInitialChanges);
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(
+    launch.draftId && !launch.hasUnsavedInitialChanges ? new Date() : null,
+  );
   const [serverAnalysis, setServerAnalysis] = useState<RateTableAnalysis | null>(null);
   const [csvOpen, setCsvOpen] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -120,6 +135,9 @@ export function RateTableEditor({
   const pricingBasis: PricingBasis = selectedLevel?.fulfillmentMode === "freight"
     ? "pallet_count"
     : "shipment_weight";
+  const selectedGroup = groups.find(
+    (group) => group.id === selectedGroupId,
+  ) ?? groups[0] ?? null;
 
   // Switching between a parcel and a freight option changes the pricing
   // basis; destinations survive but band values no longer apply.
@@ -185,6 +203,21 @@ export function RateTableEditor({
     }),
     onSuccess: (result) => {
       setDraftId(result.rateTable.id);
+      if (result.draftLayout !== null) {
+        setGroups((current) => current.map((group, index) => {
+          const saved = result.draftLayout?.groups[index];
+          return saved === undefined
+            ? group
+            : {
+                ...group,
+                destinationGroupId: saved.destinationGroupId ?? null,
+                destinationGroupLockVersion:
+                  saved.destinationGroupLockVersion ?? null,
+                name: saved.name,
+                availability: saved.availability ?? "offered",
+              };
+        }));
+      }
       setDirty(false);
       setLastSavedAt(new Date());
       setServerAnalysis(result.analysis);
@@ -249,6 +282,14 @@ export function RateTableEditor({
                 <CircleDashed className="h-3 w-3" />
                 Draft
               </Badge>
+              {step === "rates" && selectedGroup !== null && (
+                <Badge variant="outline">
+                  {groupDisplayName(
+                    selectedGroup,
+                    groups.indexOf(selectedGroup),
+                  )}
+                </Badge>
+              )}
             </div>
             <p className="mt-0.5 text-sm text-muted-foreground">
               {selectedBook ? selectedBook.name : "Choose where these prices are used."}
@@ -264,6 +305,18 @@ export function RateTableEditor({
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {step !== "context" && (
+            <Button
+              size="sm"
+              onClick={handleSaveDraft}
+              disabled={saveMutation.isPending || !contextComplete || !dirty}
+            >
+              {saveMutation.isPending
+                ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                : <Save className="mr-1.5 h-3.5 w-3.5" />}
+              Save draft
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={() => setCsvOpen(true)} disabled={!contextComplete}>
             <Upload className="mr-1.5 h-3.5 w-3.5" />
             Import CSV
@@ -348,9 +401,9 @@ export function RateTableEditor({
           draftId={draftId}
           onSaveDraft={handleSaveDraft}
           savingDraft={saveMutation.isPending}
+          availableDestinationGroups={launch.availableDestinationGroups}
         />
       )}
-
       {step === "review" && draftId !== null && (
         <ReviewStep
           draftId={draftId}

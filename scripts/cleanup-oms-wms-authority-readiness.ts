@@ -9,6 +9,7 @@
  *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --limit=25
  *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --operation=materialized-counter-drift --counter-direction=recorded-above-actual
  *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift --counter-direction=recorded-below-actual --summary-only
+ *   npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift --counter-direction=recorded-above-actual --counter-decrease-safety=zero-authority-zero-actual --summary-only
  */
 
 import crypto from "node:crypto";
@@ -29,12 +30,17 @@ export type MaterializedCounterDirection =
   | "recorded-below-actual"
   | "recorded-above-actual";
 
+export type CounterDecreaseSafety =
+  | "none"
+  | "zero-authority-zero-actual";
+
 interface Flags {
   mode: Mode;
   help: boolean;
   limit: number | null;
   operations: CleanupOperationId[];
   counterDirection: MaterializedCounterDirection;
+  counterDecreaseSafety: CounterDecreaseSafety;
   summaryOnly: boolean;
   operator: string;
 }
@@ -87,6 +93,10 @@ const ALL_COUNTER_DIRECTIONS: MaterializedCounterDirection[] = [
   "recorded-below-actual",
   "recorded-above-actual",
 ];
+const ALL_COUNTER_DECREASE_SAFETIES: CounterDecreaseSafety[] = [
+  "none",
+  "zero-authority-zero-actual",
+];
 
 export const CURRENT_OPEN_WMS_ORDER_FILTER = `
   o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
@@ -120,7 +130,7 @@ export function parseFlags(argv: string[]): Flags {
     throw new Error("Cannot pass both --execute and --dry-run");
   }
 
-  const knownFlag = /^(--help|-h|--execute|--dry-run|--summary-only|--limit=|--operation=|--counter-direction=|--operator=)/;
+  const knownFlag = /^(--help|-h|--execute|--dry-run|--summary-only|--limit=|--operation=|--counter-direction=|--counter-decrease-safety=|--operator=)/;
   const unknown = argv.find((arg) => !knownFlag.test(arg));
   if (unknown) {
     throw new Error(`Unknown flag: ${unknown}`);
@@ -134,14 +144,29 @@ export function parseFlags(argv: string[]): Flags {
 
   const counterDirectionArg = argv.find((arg) => arg.startsWith("--counter-direction="));
   const counterDirection = parseCounterDirection(counterDirectionArg);
+  const counterDecreaseSafetyArg = argv.find(
+    (arg) => arg.startsWith("--counter-decrease-safety="),
+  );
+  const counterDecreaseSafety = parseCounterDecreaseSafety(counterDecreaseSafetyArg);
   if (
     execute &&
     operations.includes("materialized-counter-drift") &&
-    counterDirection !== "recorded-below-actual"
+    counterDirection === "all"
   ) {
     throw new Error(
-      "Execute mode for materialized-counter-drift requires --counter-direction=recorded-below-actual; " +
-      "lowering an over-recorded counter can reopen fulfillment authority and requires a separate reviewed repair",
+      "Execute mode for materialized-counter-drift requires an explicit counter direction",
+    );
+  }
+  if (
+    execute &&
+    operations.includes("materialized-counter-drift") &&
+    counterDirection === "recorded-above-actual" &&
+    counterDecreaseSafety !== "zero-authority-zero-actual"
+  ) {
+    throw new Error(
+      "Execute mode for recorded-above-actual requires " +
+      "--counter-decrease-safety=zero-authority-zero-actual; " +
+      "unrestricted counter decreases can reopen fulfillment authority",
     );
   }
 
@@ -159,6 +184,7 @@ export function parseFlags(argv: string[]): Flags {
     limit,
     operations,
     counterDirection,
+    counterDecreaseSafety,
     summaryOnly,
     operator,
   };
@@ -210,12 +236,26 @@ function parseCounterDirection(
   return direction as MaterializedCounterDirection;
 }
 
+export function parseCounterDecreaseSafety(
+  safetyArg: string | undefined,
+): CounterDecreaseSafety {
+  if (safetyArg == null) return "none";
+  const safety = safetyArg.slice("--counter-decrease-safety=".length).trim();
+  if (!ALL_COUNTER_DECREASE_SAFETIES.includes(safety as CounterDecreaseSafety)) {
+    throw new Error(
+      "--counter-decrease-safety must be none or zero-authority-zero-actual",
+    );
+  }
+  return safety as CounterDecreaseSafety;
+}
+
 function usage(): string {
   return [
     "Usage:",
     "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --limit=25",
     "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --operation=materialized-counter-drift --counter-direction=recorded-above-actual",
     "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift --counter-direction=recorded-below-actual --summary-only",
+    "  npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --operation=materialized-counter-drift --counter-direction=recorded-above-actual --counter-decrease-safety=zero-authority-zero-actual --summary-only",
     "",
     "Flags:",
     "  --dry-run          Classify and print planned repairs. Default.",
@@ -225,7 +265,9 @@ function usage(): string {
     "  --operation=ID     all, orphan-oms-line-refs, nonpositive-shipment-items, materialized-counter-drift.",
     "  --counter-direction=VALUE",
     "                     Materialized-counter cohort: all, recorded-below-actual, or recorded-above-actual.",
-    "                     Execute mode only permits recorded-below-actual because lowering a counter can reopen authority.",
+    "  --counter-decrease-safety=VALUE",
+    "                     Required to execute recorded-above-actual. The only supported policy is",
+    "                     zero-authority-zero-actual, which cannot reopen fulfillment authority.",
     "  --operator=TEXT    Audit operator label. Default script:cleanup-oms-wms-authority-readiness.",
   ].join("\n");
 }
@@ -345,8 +387,15 @@ export function materializedCounterDriftCandidateSql(
   limit: number | null,
   forUpdate = false,
   direction: MaterializedCounterDirection = "all",
+  decreaseSafety: CounterDecreaseSafety = "none",
 ): string {
   const directionPredicate = materializedCounterDirectionPredicate(direction);
+  const safeDecreasePredicate = decreaseSafety === "zero-authority-zero-actual"
+    ? `
+      AND COALESCE(ol.authority_fulfillable_quantity, 0) = 0
+      AND COALESCE(materialized.materialized_quantity, 0) = 0
+    `
+    : "";
   return `
     WITH materialized AS (
       SELECT
@@ -380,6 +429,7 @@ export function materializedCounterDriftCandidateSql(
     FROM oms.oms_order_lines ol
     LEFT JOIN materialized ON materialized.oms_order_line_id = ol.id
     WHERE COALESCE(ol.wms_materialized_quantity, 0) ${directionPredicate} COALESCE(materialized.materialized_quantity, 0)
+      ${safeDecreasePredicate}
     ORDER BY ABS(COALESCE(materialized.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0)) DESC,
              ol.id DESC
     ${limitClause(limit)}
@@ -388,6 +438,28 @@ export function materializedCounterDriftCandidateSql(
 }
 
 export function unsafeMaterializedCounterDecreaseCountSql(): string {
+  return `
+    WITH materialized AS (
+      SELECT
+        oi.oms_order_line_id,
+        SUM(COALESCE(oi.quantity, 0))::int AS materialized_quantity
+      FROM wms.order_items oi
+      WHERE oi.oms_order_line_id IS NOT NULL
+        AND COALESCE(oi.status, '') <> 'cancelled'
+      GROUP BY oi.oms_order_line_id
+    )
+    SELECT COUNT(*)::int AS unsafe_count
+    FROM oms.oms_order_lines ol
+    LEFT JOIN materialized ON materialized.oms_order_line_id = ol.id
+    WHERE COALESCE(ol.wms_materialized_quantity, 0) > COALESCE(materialized.materialized_quantity, 0)
+      AND NOT (
+        COALESCE(ol.authority_fulfillable_quantity, 0) = 0
+        AND COALESCE(materialized.materialized_quantity, 0) = 0
+      )
+  `;
+}
+
+export function materializedCounterDecreaseCountSql(): string {
   return `
     WITH materialized AS (
       SELECT
@@ -479,9 +551,10 @@ async function fetchCounterDriftCandidates(
   limit: number | null,
   forUpdate: boolean,
   direction: MaterializedCounterDirection,
+  decreaseSafety: CounterDecreaseSafety,
 ): Promise<CounterDriftCandidate[]> {
   const result = await client.query(
-    materializedCounterDriftCandidateSql(limit, forUpdate, direction),
+    materializedCounterDriftCandidateSql(limit, forUpdate, direction, decreaseSafety),
   );
   return coerceCandidates<CounterDriftCandidate>(result.rows);
 }
@@ -629,13 +702,16 @@ async function refreshMaterializedCounters(
   flags: Flags,
 ): Promise<OperationResult> {
   const unsafeSkipped = flags.counterDirection === "recorded-below-actual"
-    ? await fetchUnsafeCount(client, unsafeMaterializedCounterDecreaseCountSql())
-    : 0;
+    ? await fetchUnsafeCount(client, materializedCounterDecreaseCountSql())
+    : flags.counterDecreaseSafety === "zero-authority-zero-actual"
+      ? await fetchUnsafeCount(client, unsafeMaterializedCounterDecreaseCountSql())
+      : 0;
   const candidates = await fetchCounterDriftCandidates(
     client,
     flags.limit,
     flags.mode === "execute",
     flags.counterDirection,
+    flags.counterDecreaseSafety,
   );
   printOperationPlan(operation, candidates, unsafeSkipped, flags);
   if (flags.mode === "dry-run" || candidates.length === 0) {
@@ -656,6 +732,15 @@ async function refreshMaterializedCounters(
     id: candidate.sourceId,
     actual_quantity: candidate.actualQuantity,
   }));
+  const updateDirectionPredicate = flags.counterDirection === "recorded-above-actual"
+    ? ">"
+    : "<";
+  const safeDecreasePredicate = flags.counterDirection === "recorded-above-actual"
+    ? `
+       AND COALESCE(ol.authority_fulfillable_quantity, 0) = 0
+       AND input.actual_quantity = 0
+    `
+    : "";
 
   const updateResult = await client.query(`
     WITH materialized AS (
@@ -674,11 +759,12 @@ async function refreshMaterializedCounters(
     UPDATE oms.oms_order_lines ol
        SET wms_materialized_quantity = input.actual_quantity,
            updated_at = $2::timestamptz
-      FROM input
+     FROM input
       LEFT JOIN materialized ON materialized.oms_order_line_id = input.id
      WHERE ol.id = input.id
-       AND COALESCE(ol.wms_materialized_quantity, 0) < input.actual_quantity
+       AND COALESCE(ol.wms_materialized_quantity, 0) ${updateDirectionPredicate} input.actual_quantity
        AND input.actual_quantity = COALESCE(materialized.actual_quantity, 0)
+       ${safeDecreasePredicate}
   `, [JSON.stringify(updateInput), updateTimestamp]);
   assertExpectedRowCount(operation.id, candidates.length, updateResult.rowCount ?? 0);
 
@@ -803,7 +889,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `[OMS/WMS authority cleanup] mode=${flags.mode} operations=${flags.operations.join(",")} counterDirection=${flags.counterDirection} summaryOnly=${flags.summaryOnly} limit=${flags.limit ?? "all"}`,
+    `[OMS/WMS authority cleanup] mode=${flags.mode} operations=${flags.operations.join(",")} counterDirection=${flags.counterDirection} counterDecreaseSafety=${flags.counterDecreaseSafety} summaryOnly=${flags.summaryOnly} limit=${flags.limit ?? "all"}`,
   );
   const summary = await runCleanup(flags);
   console.log(`[OMS/WMS authority cleanup] complete ${JSON.stringify(summary)}`);

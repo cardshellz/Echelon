@@ -43,17 +43,28 @@ import {
 } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { groupsFromLayout, groupsFromRows } from "../rate-table-model";
+import {
+  formatUsRegionCount,
+  groupsFromLayout,
+  groupsFromRows,
+  newGroup,
+  newId,
+  type PricingBasis,
+  type RateGroup,
+} from "../rate-table-model";
 import {
   RATE_TABLES_KEY,
   assignmentLabel,
   buildProgramOverviews,
   channelLabel,
   formatDate,
+  findEditorRateGroup,
   getJson,
   postJson,
+  rateTableRegionCount,
   rateTableDetailKey,
   type ProgramOverview,
+  type ProgramDestinationGroup,
   type RateTableDetail,
   type RateTablesResponse,
   type WarehouseOption,
@@ -111,15 +122,36 @@ export function PricingProgramsTab() {
   }, [programs, search, statusFilter, channelFilter]);
 
   /** Resume an existing draft in the editor with its exact saved layout. */
-  const openDraft = async (draftId: number, returnTo: View) => {
+  const openDraft = async (
+    draftId: number,
+    returnTo: View,
+    destinationGroup?: ProgramDestinationGroup,
+  ) => {
     setPreparingEditor(true);
     try {
       const detail = await queryClient.fetchQuery<RateTableDetail>({
         queryKey: [rateTableDetailKey(draftId)],
         queryFn: () => getJson<RateTableDetail>(rateTableDetailKey(draftId)),
       });
-      const groups = groupsFromLayout(detail.rateTable.metadata)
+      let groups = groupsFromLayout(detail.rateTable.metadata)
         ?? groupsFromRows(detail.rows, detail.rateTable.pricingBasis);
+      const program = programs.find(
+        (item) => item.book.id === detail.rateTable.rateBookId,
+      );
+      const destinationGroupTarget = destinationGroup === undefined
+        ? null
+        : { id: destinationGroup.id, key: destinationGroup.key };
+      const targetMissingFromDraft = destinationGroup !== undefined
+        && findEditorRateGroup(groups, destinationGroupTarget) === null;
+      if (targetMissingFromDraft) {
+        groups = [
+          ...groups,
+          editorGroupFromProgramGroup(
+            destinationGroup,
+            detail.rateTable.pricingBasis,
+          ),
+        ];
+      }
       setView({
         kind: "editor",
         returnTo,
@@ -129,6 +161,9 @@ export function PricingProgramsTab() {
           serviceLevelCode: detail.serviceLevel?.code ?? null,
           groups,
           lockProgram: true,
+          availableDestinationGroups: program?.destinationGroups ?? [],
+          destinationGroupTarget,
+          hasUnsavedInitialChanges: targetMissingFromDraft,
         },
       });
     } catch (error) {
@@ -143,7 +178,11 @@ export function PricingProgramsTab() {
   };
 
   /** Clone a non-draft revision into a fresh editable draft, then open it. */
-  const createRevision = async (sourceTableId: number, returnTo: View) => {
+  const createRevision = async (
+    sourceTableId: number,
+    returnTo: View,
+    destinationGroup?: ProgramDestinationGroup,
+  ) => {
     setPreparingEditor(true);
     try {
       const cloned = await postJson<{ rateTable: { id: number } }>(
@@ -151,7 +190,7 @@ export function PricingProgramsTab() {
         {},
       );
       queryClient.invalidateQueries({ queryKey: [RATE_TABLES_KEY] });
-      await openDraft(cloned.rateTable.id, returnTo);
+      await openDraft(cloned.rateTable.id, returnTo, destinationGroup);
     } catch (error) {
       toast({
         title: "Could not create a revision",
@@ -230,19 +269,37 @@ export function PricingProgramsTab() {
         warehouses={warehouses}
         onBack={() => setView({ kind: "overview" })}
         onViewTable={(tableId) => setView({ kind: "revision", tableId, returnTo: here })}
-        onContinueDraft={(draftId) => openDraft(draftId, here)}
-        onCreateRevision={(sourceTableId) => createRevision(sourceTableId, here)}
-        onStartRates={(serviceLevelCode) => setView({
-          kind: "editor",
-          returnTo: here,
-          launch: {
-            draftId: null,
-            rateBookCode: program.book.code,
-            serviceLevelCode,
-            groups: null,
-            lockProgram: true,
-          },
-        })}
+        onContinueDraft={(draftId, destinationGroup) =>
+          openDraft(draftId, here, destinationGroup)}
+        onCreateRevision={(sourceTableId, destinationGroup) =>
+          createRevision(sourceTableId, here, destinationGroup)}
+        onStartRates={(serviceLevelCode, destinationGroup) => {
+          const serviceLevel = data?.serviceLevels.find(
+            (level) => level.code === serviceLevelCode,
+          );
+          const pricingBasis: PricingBasis =
+            serviceLevel?.fulfillmentMode === "freight"
+              ? "pallet_count"
+              : "shipment_weight";
+          setView({
+            kind: "editor",
+            returnTo: here,
+            launch: {
+              draftId: null,
+              rateBookCode: program.book.code,
+              serviceLevelCode,
+              groups: destinationGroup
+                ? [editorGroupFromProgramGroup(destinationGroup, pricingBasis)]
+                : null,
+              lockProgram: true,
+              availableDestinationGroups: program.destinationGroups,
+              destinationGroupTarget: destinationGroup === undefined
+                ? null
+                : { id: destinationGroup.id, key: destinationGroup.key },
+              hasUnsavedInitialChanges: false,
+            },
+          });
+        }}
       />
     );
   }
@@ -469,7 +526,7 @@ function ProgramRow({ program, onOpen }: { program: ProgramOverview; onOpen: () 
                   </TooltipTrigger>
                   <TooltipContent>
                     {state === "live" && option.active && (
-                      <>Live since {formatDate(option.active.effectiveFrom)} · {option.active.stateCount} states
+                      <>Live since {formatDate(option.active.effectiveFrom)} · {formatUsRegionCount(rateTableRegionCount(option.active))}
                         {option.draft && " · draft in progress"}</>
                     )}
                     {state === "draft" && "Draft in progress — not quoting yet"}
@@ -484,7 +541,7 @@ function ProgramRow({ program, onOpen }: { program: ProgramOverview; onOpen: () 
       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
         {liveOptions.length === 0
           ? "No live rates"
-          : `${program.maxLiveStateCount} states · ${program.totalZipOverrides} ZIP overrides`}
+          : `${formatUsRegionCount(program.maxLiveRegionCount)} · ${program.totalZipOverrides} ZIP overrides`}
       </TableCell>
       <TableCell>{programStatusBadge(book.status)}</TableCell>
       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
@@ -495,6 +552,40 @@ function ProgramRow({ program, onOpen }: { program: ProgramOverview; onOpen: () 
       </TableCell>
     </TableRow>
   );
+}
+
+function editorGroupFromProgramGroup(
+  source: ProgramDestinationGroup,
+  pricingBasis: PricingBasis,
+): RateGroup {
+  const regions = source.destinations
+    .filter((destination) =>
+      destination.destinationCountry === "US"
+      && destination.destinationRegion !== null
+      && destination.postalPrefix === null)
+    .map((destination) => destination.destinationRegion!);
+  const zipByRegion = new Map<string, string[]>();
+  for (const destination of source.destinations) {
+    if (
+      destination.destinationCountry !== "US"
+      || destination.destinationRegion === null
+      || destination.postalPrefix === null
+    ) continue;
+    zipByRegion.set(destination.destinationRegion, [
+      ...(zipByRegion.get(destination.destinationRegion) ?? []),
+      destination.postalPrefix,
+    ]);
+  }
+  return {
+    ...newGroup(pricingBasis, regions, source.name),
+    destinationGroupId: source.id,
+    destinationGroupLockVersion: source.lockVersion,
+    zipEntries: [...zipByRegion].map(([state, prefixes]) => ({
+      id: newId(),
+      state,
+      prefixes,
+    })),
+  };
 }
 
 function ProgramsSkeleton() {

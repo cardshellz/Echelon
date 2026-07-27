@@ -308,19 +308,154 @@ export function buildReadinessChecks(): ReadinessCheck[] {
           WHERE oi.oms_order_line_id IS NOT NULL
             AND ${MATERIALIZED_WMS_ITEM_FILTER}
           GROUP BY oi.oms_order_line_id
+        ),
+        drift AS (
+          SELECT
+            ol.*,
+            COALESCE(materialized.materialized_quantity, 0)::int AS actual_materialized_wms_quantity
+          FROM oms.oms_order_lines ol
+          LEFT JOIN materialized ON materialized.oms_order_line_id = ol.id
+          WHERE COALESCE(ol.wms_materialized_quantity, 0)
+            <> COALESCE(materialized.materialized_quantity, 0)
+        ),
+        adjustment_summary AS (
+          SELECT
+            adjustment.order_line_id,
+            COUNT(*)::int AS adjustment_count,
+            COALESCE(SUM(adjustment.quantity), 0)::int AS adjustment_quantity,
+            BOOL_AND(adjustment.adjustment_type = 'refund') AS refund_only,
+            BOOL_AND(adjustment.restock_policy = 'no_restock') AS no_restock_only,
+            ARRAY_AGG(
+              DISTINCT adjustment.adjustment_type::text
+              ORDER BY adjustment.adjustment_type::text
+            ) AS adjustment_types,
+            ARRAY_AGG(
+              DISTINCT adjustment.restock_policy::text
+              ORDER BY adjustment.restock_policy::text
+            ) AS restock_policies,
+            ARRAY_AGG(
+              DISTINCT adjustment.source::text
+              ORDER BY adjustment.source::text
+            ) AS adjustment_sources
+          FROM oms.order_line_adjustments adjustment
+          JOIN drift ON drift.id = adjustment.order_line_id
+          GROUP BY adjustment.order_line_id
+        ),
+        wms_lineage AS (
+          SELECT
+            oi.oms_order_line_id,
+            COUNT(*)::int AS wms_item_count,
+            COUNT(*) FILTER (
+              WHERE COALESCE(oi.status, '') <> 'cancelled'
+            )::int AS noncancelled_wms_item_count,
+            COALESCE(SUM(oi.quantity), 0)::int AS total_wms_item_quantity,
+            COALESCE(SUM(oi.picked_quantity), 0)::int AS picked_quantity,
+            COALESCE(SUM(oi.fulfilled_quantity), 0)::int AS fulfilled_quantity,
+            ARRAY_AGG(
+              DISTINCT COALESCE(oi.status::text, '')
+              ORDER BY COALESCE(oi.status::text, '')
+            ) AS wms_item_statuses
+          FROM wms.order_items oi
+          JOIN drift ON drift.id = oi.oms_order_line_id
+          GROUP BY oi.oms_order_line_id
+        ),
+        legacy_shipping AS (
+          SELECT
+            oi.oms_order_line_id,
+            COALESCE(SUM(shipment_item.qty) FILTER (
+              WHERE shipment.status = 'shipped'
+                AND shipment.shipment_purpose = 'customer_fulfillment'
+                AND shipment_item.shipment_item_purpose = 'customer_fulfillment'
+            ), 0)::int AS shipped_quantity
+          FROM wms.order_items oi
+          JOIN drift ON drift.id = oi.oms_order_line_id
+          LEFT JOIN wms.outbound_shipment_items shipment_item
+            ON shipment_item.order_item_id = oi.id
+          LEFT JOIN wms.outbound_shipments shipment
+            ON shipment.id = shipment_item.shipment_id
+          GROUP BY oi.oms_order_line_id
+        ),
+        canonical_shipping AS (
+          SELECT
+            plan_line.oms_order_line_id,
+            COALESCE(SUM(physical_item.quantity_shipped) FILTER (
+              WHERE physical.status = 'shipped'
+                AND physical_item.shipment_item_purpose = 'customer_fulfillment'
+            ), 0)::int AS shipped_quantity
+          FROM wms.fulfillment_plan_lines plan_line
+          JOIN drift ON drift.id = plan_line.oms_order_line_id
+          LEFT JOIN wms.physical_shipment_items physical_item
+            ON physical_item.fulfillment_plan_line_id = plan_line.id
+          LEFT JOIN wms.physical_shipments physical
+            ON physical.id = physical_item.physical_shipment_id
+          GROUP BY plan_line.oms_order_line_id
         )
         SELECT
-          ol.order_id AS oms_order_id,
-          ol.id AS oms_order_line_id,
-          ol.sku,
-          COALESCE(ol.wms_materialized_quantity, 0) AS recorded_wms_materialized_quantity,
-          COALESCE(materialized.materialized_quantity, 0) AS actual_materialized_wms_quantity,
-          COALESCE(materialized.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0) AS drift_quantity
-        FROM oms.oms_order_lines ol
-        LEFT JOIN materialized ON materialized.oms_order_line_id = ol.id
-        WHERE COALESCE(ol.wms_materialized_quantity, 0) <> COALESCE(materialized.materialized_quantity, 0)
-        ORDER BY ABS(COALESCE(materialized.materialized_quantity, 0) - COALESCE(ol.wms_materialized_quantity, 0)) DESC,
-                 ol.id DESC
+          drift.order_id AS oms_order_id,
+          oms_order.external_order_number,
+          LOWER(channel.provider) AS channel_provider,
+          oms_order.status AS oms_order_status,
+          oms_order.financial_status,
+          oms_order.fulfillment_status AS oms_fulfillment_status,
+          drift.id AS oms_order_line_id,
+          drift.sku,
+          drift.paid_quantity,
+          drift.authority_fulfillable_quantity,
+          drift.cancelled_quantity,
+          drift.refunded_quantity,
+          drift.authorization_status,
+          drift.fulfillment_status AS line_fulfillment_status,
+          COALESCE(drift.wms_materialized_quantity, 0) AS recorded_wms_materialized_quantity,
+          drift.actual_materialized_wms_quantity,
+          drift.actual_materialized_wms_quantity
+            - COALESCE(drift.wms_materialized_quantity, 0) AS drift_quantity,
+          COALESCE(adjustment.adjustment_count, 0)::int AS adjustment_count,
+          COALESCE(adjustment.adjustment_quantity, 0)::int AS adjustment_quantity,
+          COALESCE(adjustment.adjustment_types, ARRAY[]::text[]) AS adjustment_types,
+          COALESCE(adjustment.restock_policies, ARRAY[]::text[]) AS restock_policies,
+          COALESCE(adjustment.adjustment_sources, ARRAY[]::text[]) AS adjustment_sources,
+          COALESCE(lineage.wms_item_count, 0)::int AS wms_item_count,
+          COALESCE(lineage.noncancelled_wms_item_count, 0)::int AS noncancelled_wms_item_count,
+          COALESCE(lineage.total_wms_item_quantity, 0)::int AS total_wms_item_quantity,
+          COALESCE(lineage.picked_quantity, 0)::int AS picked_quantity,
+          COALESCE(lineage.fulfilled_quantity, 0)::int AS fulfilled_quantity,
+          COALESCE(lineage.wms_item_statuses, ARRAY[]::text[]) AS wms_item_statuses,
+          COALESCE(legacy.shipped_quantity, 0)::int AS legacy_shipped_quantity,
+          COALESCE(canonical.shipped_quantity, 0)::int AS canonical_shipped_quantity,
+          CASE
+            WHEN COALESCE(drift.wms_materialized_quantity, 0)
+              < drift.actual_materialized_wms_quantity
+              THEN 'recorded_below_actual'
+            WHEN COALESCE(drift.authority_fulfillable_quantity, 0) = 0
+              AND drift.actual_materialized_wms_quantity = 0
+              THEN 'zero_authority_zero_actual'
+            WHEN COALESCE(adjustment.adjustment_count, 0) = 1
+              AND COALESCE(adjustment.adjustment_quantity, 0) = drift.paid_quantity
+              AND COALESCE(adjustment.refund_only, false)
+              AND COALESCE(adjustment.no_restock_only, false)
+              THEN 'exact_full_no_restock_refund'
+            WHEN COALESCE(canonical.shipped_quantity, 0) > 0
+              OR COALESCE(legacy.shipped_quantity, 0) > 0
+              THEN 'shipped_evidence_without_active_materialization'
+            WHEN COALESCE(lineage.wms_item_count, 0) > 0
+              AND COALESCE(lineage.noncancelled_wms_item_count, 0) = 0
+              THEN 'cancelled_wms_line_with_positive_authority'
+            WHEN COALESCE(lineage.wms_item_count, 0) = 0
+              THEN 'positive_authority_without_wms_lineage'
+            ELSE 'unsupported_materialization_drift'
+          END AS evidence_classification
+        FROM drift
+        JOIN oms.oms_orders oms_order ON oms_order.id = drift.order_id
+        JOIN channels.channels channel ON channel.id = oms_order.channel_id
+        LEFT JOIN adjustment_summary adjustment ON adjustment.order_line_id = drift.id
+        LEFT JOIN wms_lineage lineage ON lineage.oms_order_line_id = drift.id
+        LEFT JOIN legacy_shipping legacy ON legacy.oms_order_line_id = drift.id
+        LEFT JOIN canonical_shipping canonical ON canonical.oms_order_line_id = drift.id
+        ORDER BY ABS(
+          drift.actual_materialized_wms_quantity
+            - COALESCE(drift.wms_materialized_quantity, 0)
+        ) DESC,
+        drift.id DESC
       `,
     },
     {

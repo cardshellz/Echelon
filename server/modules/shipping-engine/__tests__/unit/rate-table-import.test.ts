@@ -3,7 +3,7 @@ import {
   CENTS_PER_USD,
   GRAMS_PER_POUND,
   findBandOverlaps,
-  findMissingStateDefaults,
+  findMissingRegionDefaults,
   parseRateTableCsv,
   type RateTableImportRow,
 } from "../../domain/rate-table-import";
@@ -84,7 +84,7 @@ describe("parseRateTableCsv", () => {
       "PA,,0,2,2500,189",
     ].join("\n"));
     expect(result.errors.map((error) => error.message)).toEqual([
-      'invalid US state or territory "Atlantis"',
+      'invalid US postal region "Atlantis"',
       "zip_prefix must contain 1 to 5 digits",
       "minimum pallet count must be 1 or greater",
     ]);
@@ -174,11 +174,11 @@ describe("findBandOverlaps", () => {
   });
 });
 
-describe("findMissingStateDefaults", () => {
+describe("findMissingRegionDefaults", () => {
   it("requires ZIP fallbacks in the same warehouse scope", () => {
-    expect(findMissingStateDefaults([row(), row({ postalPrefix: "160" })])).toEqual([]);
-    expect(findMissingStateDefaults([
+    expect(findMissingRegionDefaults([row(), row({ postalPrefix: "160" })])).toEqual([]);
+    expect(findMissingRegionDefaults([
       row({ originWarehouseId: 1, postalPrefix: "160" }),
-    ])).toEqual(["PA at warehouse 1 has a ZIP override but no statewide fallback rate"]);
+    ])).toEqual(["PA at warehouse 1 has a ZIP override but no region-wide fallback rate"]);
   });
 });
