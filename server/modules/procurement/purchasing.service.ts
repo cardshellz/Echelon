@@ -4537,6 +4537,7 @@ export function createPurchasingService(
     "autoCloseOnReconcile",
     "oneClickReceiveStart",
     "useNewPoEditor",
+    "useNewReorderCockpit",
   ] as const;
   type ProcurementSettingKey = typeof PROCUREMENT_SETTING_KEYS[number];
   const PROCUREMENT_SETTING_KEY_SET = new Set<string>(PROCUREMENT_SETTING_KEYS);
@@ -4553,6 +4554,7 @@ export function createPurchasingService(
     autoCloseOnReconcile: true,
     oneClickReceiveStart: true,
     useNewPoEditor: false,
+    useNewReorderCockpit: false,
   };
 
   async function getProcurementSettings(): Promise<Record<ProcurementSettingKey, boolean>> {
@@ -4567,6 +4569,7 @@ export function createPurchasingService(
         autoCloseOnReconcile: warehouseSettingsTable.autoCloseOnReconcile,
         oneClickReceiveStart: warehouseSettingsTable.oneClickReceiveStart,
         useNewPoEditor: warehouseSettingsTable.useNewPoEditor,
+        useNewReorderCockpit: warehouseSettingsTable.useNewReorderCockpit,
       })
       .from(warehouseSettingsTable)
       .where(eq(warehouseSettingsTable.warehouseCode, "DEFAULT"))
@@ -4585,6 +4588,7 @@ export function createPurchasingService(
           autoCloseOnReconcile: warehouseSettingsTable.autoCloseOnReconcile,
           oneClickReceiveStart: warehouseSettingsTable.oneClickReceiveStart,
           useNewPoEditor: warehouseSettingsTable.useNewPoEditor,
+          useNewReorderCockpit: warehouseSettingsTable.useNewReorderCockpit,
         })
         .from(warehouseSettingsTable)
         .limit(1);
@@ -4607,6 +4611,7 @@ export function createPurchasingService(
       autoCloseOnReconcile: warehouseSettingsTable.autoCloseOnReconcile,
       oneClickReceiveStart: warehouseSettingsTable.oneClickReceiveStart,
       useNewPoEditor: warehouseSettingsTable.useNewPoEditor,
+      useNewReorderCockpit: warehouseSettingsTable.useNewReorderCockpit,
     };
     const rows = await tx
       .select(projection)

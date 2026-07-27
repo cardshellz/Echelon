@@ -326,6 +326,9 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   // Feature flag: when true, the "+ New PO" button navigates to the new
   // full-page editor instead of opening the legacy create-PO dialog.
   useNewPoEditor: boolean("use_new_po_editor").notNull().default(false),
+  // Feature flag: when true, /reorder-analysis renders the new read-only
+  // Reorder Engine cockpit instead of the legacy PurchasingView (migration 176).
+  useNewReorderCockpit: boolean("use_new_reorder_cockpit").notNull().default(false),
 
   // NOTE: the SLA order cutoff + timezone moved to warehouse.warehouses (they
   // describe one building's fulfillment clock). The order_cutoff_local /

@@ -1,7 +1,7 @@
 import React from "react";
 import { Switch, Route, useLocation, Redirect } from "wouter";
 import { queryClient } from "./lib/queryClient";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SettingsProvider } from "@/lib/settings";
@@ -49,6 +49,7 @@ import CycleCounts from "@/pages/CycleCounts";
 import Transfers from "@/pages/Transfers";
 import Suppliers from "@/pages/Suppliers";
 import PurchasingView from "@/pages/PurchasingView";
+import ReorderEngine from "@/pages/ReorderEngine";
 import Receiving from "@/pages/Receiving";
 import InventoryHistory from "@/pages/InventoryHistory";
 import Replenishment from "@/pages/Replenishment";
@@ -86,7 +87,33 @@ import VendorDetail from "@/pages/VendorDetail";
 import DemandPlanner from "@/pages/DemandPlanner";
 import NotFound from "@/pages/not-found";
 
-function ProtectedRoute({ 
+// Reorder Engine feature-flag switch (design spec §4.6, PR 2). Reads the
+// procurement settings and renders the new cockpit when `useNewReorderCockpit`
+// is on; the legacy PurchasingView otherwise. Fail-safe: any settings-load
+// error falls back to the legacy page. The legacy page also stays directly
+// reachable at /reorder-analysis/legacy.
+function ReorderAnalysisRoute() {
+  type ProcurementSettings = { useNewReorderCockpit?: boolean; [key: string]: unknown };
+  const { data: procurementSettings, isLoading } = useQuery<ProcurementSettings>({
+    queryKey: ["/api/settings/procurement"],
+    retry: false,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  if (procurementSettings?.useNewReorderCockpit === true) {
+    return <ReorderEngine />;
+  }
+  return <PurchasingView />;
+}
+
+function ProtectedRoute({
   component: Component, 
   allowedRoles 
 }: { 
@@ -392,8 +419,13 @@ function Router() {
         <Route path="/suppliers">
           <ProtectedRoute component={Suppliers} allowedRoles={["admin", "lead"]} />
         </Route>
-        <Route path="/reorder-analysis">
+        {/* Legacy escape hatch: always the old page, flag-independent. MUST be
+            registered before /reorder-analysis (wouter matches in order). */}
+        <Route path="/reorder-analysis/legacy">
           <ProtectedRoute component={PurchasingView} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/reorder-analysis">
+          <ProtectedRoute component={ReorderAnalysisRoute} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/replenishment">
           <ProtectedRoute component={Replenishment} allowedRoles={["admin", "lead"]} />

@@ -29,13 +29,14 @@ type ProcurementSettings = {
   autoCloseOnReconcile: boolean;
   oneClickReceiveStart: boolean;
   useNewPoEditor: boolean;
+  useNewReorderCockpit: boolean;
 };
 
 type SettingMeta = {
   key: keyof ProcurementSettings;
   label: string;
   description: string;
-  category: "Approvals" | "Create & Send" | "Receiving" | "Reconciliation";
+  category: "Approvals" | "Create & Send" | "Receiving" | "Reconciliation" | "Planning";
   active: boolean; // true = consumed today, false = scaffolded for future specs
 };
 
@@ -113,6 +114,14 @@ const SETTING_META: SettingMeta[] = [
     category: "Reconciliation",
     active: false,
   },
+  {
+    key: "useNewReorderCockpit",
+    label: "Use the new Reorder Engine cockpit",
+    description:
+      "Feature flag for the redesigned read-only Reorder Analysis page. When on, /reorder-analysis renders the new cockpit (order-queue chips, grouped table, math drawer). When off, the legacy page renders. The legacy page always remains available at /reorder-analysis/legacy.",
+    category: "Planning",
+    active: true,
+  },
 ];
 
 // Group settings by category for rendering.
@@ -121,6 +130,7 @@ const CATEGORY_ORDER: SettingMeta["category"][] = [
   "Create & Send",
   "Receiving",
   "Reconciliation",
+  "Planning",
 ];
 
 export default function ProcurementSettings() {
