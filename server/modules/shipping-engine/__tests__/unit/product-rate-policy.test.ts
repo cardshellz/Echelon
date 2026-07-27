@@ -23,6 +23,7 @@ function rule(overrides: Partial<ProductRateRule> = {}): ProductRateRule {
     destinationScope: SCOPE,
     rateCents: 1_299,
     perStartedPoundCents: null,
+    perAdditionalUnitCents: null,
     thresholdCents: null,
     memberVariantIds: [10],
     bands: [],
@@ -100,6 +101,78 @@ describe("product shipping policy", () => {
       defaultRateForWeightGrams: () => null,
     });
     expect(result).toMatchObject({ ok: true, totalCents: 798 });
+  });
+
+  it("charges the base once and the additional amount for every later matching unit", () => {
+    const result = evaluateProductRatePolicy({
+      destination: DESTINATION,
+      lines: LINES,
+      rules: [rule({
+        action: "base_plus_per_additional_unit",
+        rateCents: 1_200,
+        perAdditionalUnitCents: 600,
+        memberVariantIds: [10, 20],
+      })],
+      defaultRateForWeightGrams: () => null,
+    });
+
+    expect(result).toMatchObject({ ok: true, totalCents: 2_400 });
+    if (!result.ok) return;
+    expect(result.trace).toEqual([
+      expect.objectContaining({
+        kind: "base_charge",
+        ruleId: 1,
+        amountCents: 2_400,
+        skus: ["CASE-1", "PACK-1"],
+      }),
+    ]);
+  });
+
+  it("charges only the base when exactly one selected unit is present", () => {
+    const result = evaluateProductRatePolicy({
+      destination: DESTINATION,
+      lines: [LINES[0]],
+      rules: [rule({
+        action: "base_plus_per_additional_unit",
+        rateCents: 1_200,
+        perAdditionalUnitCents: 600,
+      })],
+      defaultRateForWeightGrams: () => null,
+    });
+
+    expect(result).toMatchObject({ ok: true, totalCents: 1_200 });
+  });
+
+  it("keeps unmatched products on the destination default schedule", () => {
+    const fallbackWeights: number[] = [];
+    const result = evaluateProductRatePolicy({
+      destination: DESTINATION,
+      lines: LINES,
+      rules: [rule({
+        action: "base_plus_per_additional_unit",
+        rateCents: 1_200,
+        perAdditionalUnitCents: 600,
+        memberVariantIds: [20],
+      })],
+      defaultRateForWeightGrams: (weightGrams) => {
+        fallbackWeights.push(weightGrams);
+        return 599;
+      },
+    });
+
+    expect(result).toMatchObject({ ok: true, totalCents: 2_399 });
+    expect(fallbackWeights).toEqual([9_000]);
+  });
+
+  it("rejects per-additional-unit pricing with per-line measurement", () => {
+    expect(validateProductRateRules([rule({
+      action: "base_plus_per_additional_unit",
+      measurementScope: "each_item",
+      rateCents: 1_200,
+      perAdditionalUnitCents: 600,
+    })])).toEqual([
+      expect.stringContaining("must combine matching item quantities"),
+    ]);
   });
 
   it("makes matching buckets free after the configured item subtotal", () => {

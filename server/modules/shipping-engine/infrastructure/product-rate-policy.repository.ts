@@ -72,6 +72,7 @@ export async function loadProductRateRules(
       destinationScope: rule.destinationScope as ShippingRateRuleDestinationScope,
       rateCents: rule.rateCents,
       perStartedPoundCents: rule.perStartedPoundCents,
+      perAdditionalUnitCents: rule.perAdditionalUnitCents,
       thresholdCents: rule.thresholdCents,
       memberVariantIds: membersByRule.get(rule.id) ?? [],
       bands: bandsByRule.get(rule.id) ?? [],

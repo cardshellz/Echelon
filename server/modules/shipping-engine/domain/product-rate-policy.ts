@@ -12,6 +12,7 @@ export type ProductRateRuleAction =
   | "fixed"
   | "fixed_band"
   | "base_plus_per_started_pound"
+  | "base_plus_per_additional_unit"
   | "surcharge"
   | "free_threshold";
 
@@ -45,6 +46,7 @@ export interface ProductRateRule {
   destinationScope: ProductRateDestinationScope;
   rateCents: number | null;
   perStartedPoundCents: number | null;
+  perAdditionalUnitCents: number | null;
   thresholdCents: number | null;
   memberVariantIds: readonly number[];
   bands: readonly ProductRateRuleBand[];
@@ -100,7 +102,13 @@ interface ChargeBucket {
 
 const ACTIONS_BY_KIND: Record<ProductRateRuleKind, readonly ProductRateRuleAction[]> = {
   restriction: ["block"],
-  base_charge: ["free", "fixed", "fixed_band", "base_plus_per_started_pound"],
+  base_charge: [
+    "free",
+    "fixed",
+    "fixed_band",
+    "base_plus_per_started_pound",
+    "base_plus_per_additional_unit",
+  ],
   adjustment: ["surcharge"],
   threshold: ["free_threshold"],
 };
@@ -301,6 +309,7 @@ export function validateProductRateRules(
       && (
         rule.rateCents !== null
         || rule.perStartedPoundCents !== null
+        || rule.perAdditionalUnitCents !== null
         || rule.thresholdCents !== null
         || rule.bands.length > 0
       )
@@ -321,6 +330,34 @@ export function validateProductRateRules(
       && (!isMoney(rule.rateCents) || !isMoney(rule.perStartedPoundCents))
     ) {
       errors.push(`${rule.name}: enter both base and per-started-pound amounts.`);
+    }
+    if (
+      rule.action === "base_plus_per_additional_unit"
+      && (!isMoney(rule.rateCents) || !isMoney(rule.perAdditionalUnitCents))
+    ) {
+      errors.push(`${rule.name}: enter both first-unit and additional-unit amounts.`);
+    }
+    if (
+      rule.action === "base_plus_per_additional_unit"
+      && rule.measurementScope !== "matched_items"
+    ) {
+      errors.push(`${rule.name}: base plus additional unit must combine matching item quantities.`);
+    }
+    if (
+      rule.action === "base_plus_per_additional_unit"
+      && (
+        rule.perStartedPoundCents !== null
+        || rule.thresholdCents !== null
+        || rule.bands.length > 0
+      )
+    ) {
+      errors.push(`${rule.name}: base plus additional unit cannot include weight or threshold pricing.`);
+    }
+    if (
+      rule.action !== "base_plus_per_additional_unit"
+      && rule.perAdditionalUnitCents !== null
+    ) {
+      errors.push(`${rule.name}: an additional-unit amount is only valid for base plus additional unit pricing.`);
     }
     if (rule.action === "free_threshold" && !isMoney(rule.thresholdCents)) {
       errors.push(`${rule.name}: enter a threshold in cents.`);
@@ -401,9 +438,21 @@ function calculateRuleCharge(
   if (rule.action === "free") return 0;
   if (rule.action === "fixed" || rule.action === "surcharge") {
     if (!isMoney(rule.rateCents)) return null;
-    return rule.measurementScope === "each_item"
-      ? safeMultiply(rule.rateCents, totalQuantity(lines, indexes))
-      : rule.rateCents;
+    if (rule.measurementScope !== "each_item") return rule.rateCents;
+    const quantity = totalQuantity(lines, indexes);
+    return quantity === null ? null : safeMultiply(rule.rateCents, quantity);
+  }
+  if (rule.action === "base_plus_per_additional_unit") {
+    if (!isMoney(rule.rateCents) || !isMoney(rule.perAdditionalUnitCents)) return null;
+    const quantity = totalQuantity(lines, indexes);
+    if (quantity === null || quantity < 1) return null;
+    const additionalCharge = safeMultiply(
+      rule.perAdditionalUnitCents,
+      quantity - 1,
+    );
+    return additionalCharge === null
+      ? null
+      : safeAdd(rule.rateCents, additionalCharge);
   }
   if (rule.action === "fixed_band") {
     if (rule.measurementScope === "each_item") {
@@ -432,7 +481,10 @@ function calculateRuleCharge(
         if (!isWeight(line.unitWeightGrams)) return null;
         const pounds = startedPoundsFromGrams(line.unitWeightGrams);
         if (pounds === null) return null;
-        const unitCharge = rule.rateCents + rule.perStartedPoundCents * pounds;
+        const variableCharge = safeMultiply(rule.perStartedPoundCents, pounds);
+        if (variableCharge === null) return null;
+        const unitCharge = safeAdd(rule.rateCents, variableCharge);
+        if (unitCharge === null) return null;
         const lineCharge = safeMultiply(unitCharge, line.quantity);
         if (lineCharge === null) return null;
         total += lineCharge;
@@ -444,8 +496,10 @@ function calculateRuleCharge(
     if (weight === null) return null;
     const pounds = startedPoundsFromGrams(weight);
     if (pounds === null) return null;
-    const total = rule.rateCents + rule.perStartedPoundCents * pounds;
-    return Number.isSafeInteger(total) ? total : null;
+    const variableCharge = safeMultiply(rule.perStartedPoundCents, pounds);
+    return variableCharge === null
+      ? null
+      : safeAdd(rule.rateCents, variableCharge);
   }
   return null;
 }
@@ -509,12 +563,25 @@ function totalSubtotal(lines: readonly ProductRateLine[], indexes: readonly numb
   return total;
 }
 
-function totalQuantity(lines: readonly ProductRateLine[], indexes: readonly number[]): number {
-  return indexes.reduce((sum, index) => sum + lines[index].quantity, 0);
+function totalQuantity(
+  lines: readonly ProductRateLine[],
+  indexes: readonly number[],
+): number | null {
+  let total = 0;
+  for (const index of indexes) {
+    total += lines[index].quantity;
+    if (!Number.isSafeInteger(total)) return null;
+  }
+  return total;
 }
 
 function safeMultiply(left: number, right: number): number | null {
   const result = left * right;
+  return Number.isSafeInteger(result) ? result : null;
+}
+
+function safeAdd(left: number, right: number): number | null {
+  const result = left + right;
   return Number.isSafeInteger(result) ? result : null;
 }
 

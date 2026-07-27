@@ -794,6 +794,7 @@ export const SHIPPING_RATE_RULE_ACTIONS = [
   "fixed",
   "fixed_band",
   "base_plus_per_started_pound",
+  "base_plus_per_additional_unit",
   "surcharge",
   "free_threshold",
 ] as const;
@@ -827,6 +828,7 @@ export const shippingRateRules = shippingSchema.table("rate_rules", {
   destinationScope: jsonb("destination_scope").$type<ShippingRateRuleDestinationScope>().notNull(),
   rateCents: bigint("rate_cents", { mode: "number" }),
   perStartedPoundCents: bigint("per_started_pound_cents", { mode: "number" }),
+  perAdditionalUnitCents: bigint("per_additional_unit_cents", { mode: "number" }),
   thresholdCents: bigint("threshold_cents", { mode: "number" }),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -837,7 +839,7 @@ export const shippingRateRules = shippingSchema.table("rate_rules", {
     ${table.kind} IN ('restriction', 'base_charge', 'adjustment', 'threshold')
   `),
   check("shipping_rate_rule_action_chk", sql`
-    ${table.action} IN ('block', 'free', 'fixed', 'fixed_band', 'base_plus_per_started_pound', 'surcharge', 'free_threshold')
+    ${table.action} IN ('block', 'free', 'fixed', 'fixed_band', 'base_plus_per_started_pound', 'base_plus_per_additional_unit', 'surcharge', 'free_threshold')
   `),
   check("shipping_rate_rule_measurement_scope_chk", sql`
     ${table.measurementScope} IN ('order', 'matched_items', 'each_item', 'carton')
@@ -845,7 +847,22 @@ export const shippingRateRules = shippingSchema.table("rate_rules", {
   check("shipping_rate_rule_money_chk", sql`
     (${table.rateCents} IS NULL OR ${table.rateCents} >= 0)
     AND (${table.perStartedPoundCents} IS NULL OR ${table.perStartedPoundCents} >= 0)
+    AND (${table.perAdditionalUnitCents} IS NULL OR ${table.perAdditionalUnitCents} >= 0)
     AND (${table.thresholdCents} IS NULL OR ${table.thresholdCents} >= 0)
+  `),
+  check("shipping_rate_rule_additional_unit_chk", sql`
+    (
+      ${table.action} = 'base_plus_per_additional_unit'
+      AND ${table.rateCents} IS NOT NULL
+      AND ${table.perAdditionalUnitCents} IS NOT NULL
+      AND ${table.measurementScope} = 'matched_items'
+      AND ${table.perStartedPoundCents} IS NULL
+      AND ${table.thresholdCents} IS NULL
+    )
+    OR (
+      ${table.action} <> 'base_plus_per_additional_unit'
+      AND ${table.perAdditionalUnitCents} IS NULL
+    )
   `),
 ]);
 

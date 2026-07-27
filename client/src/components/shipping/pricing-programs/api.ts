@@ -225,6 +225,7 @@ export type ProductPolicyRuleAction =
   | "fixed"
   | "fixed_band"
   | "base_plus_per_started_pound"
+  | "base_plus_per_additional_unit"
   | "surcharge"
   | "free_threshold";
 export type ProductPolicyMeasurementScope = "order" | "matched_items" | "each_item" | "carton";
@@ -246,9 +247,18 @@ export interface ProductPolicyRule {
   destinationScope: ProductPolicyDestinationScope;
   rateCents: number | null;
   perStartedPoundCents: number | null;
+  perAdditionalUnitCents: number | null;
   thresholdCents: number | null;
   memberVariantIds: number[];
   bands: Array<{ minMeasure: number; maxMeasure: number | null; rateCents: number }>;
+  isActive: boolean;
+}
+
+export interface ProductPolicyVariantOption {
+  id: number;
+  sku: string | null;
+  name: string;
+  productName: string;
   isActive: boolean;
 }
 
@@ -269,13 +279,11 @@ export interface ProductPolicySelectorsResponse {
     selectorRef: string | null;
     memberCount: number;
   }>;
-  variants: Array<{
-    id: number;
-    sku: string | null;
-    name: string;
-    productName: string;
-    isActive: boolean;
-  }>;
+  variants: ProductPolicyVariantOption[];
+}
+
+export interface ProductPolicyRuleMembersResponse {
+  members: ProductPolicyVariantOption[];
 }
 
 export const RATE_TABLES_KEY = "/api/shipping/admin/rate-tables";

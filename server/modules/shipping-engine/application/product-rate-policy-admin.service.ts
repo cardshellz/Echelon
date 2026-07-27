@@ -51,6 +51,7 @@ export interface ProductRateRuleDraftInput {
   selector: ProductSetSelectorInput;
   rateCents: number | null;
   perStartedPoundCents: number | null;
+  perAdditionalUnitCents: number | null;
   thresholdCents: number | null;
   bands: ProductRateRuleBand[];
 }
@@ -146,6 +147,35 @@ export async function listRateTableProductRules(rateTableId: number) {
   };
 }
 
+export async function listRateTableProductRuleMembers(
+  rateTableId: number,
+  ruleId: number,
+) {
+  const [rule] = await db.select({ id: shippingRateRules.id })
+    .from(shippingRateRules)
+    .where(and(
+      eq(shippingRateRules.id, ruleId),
+      eq(shippingRateRules.rateTableId, rateTableId),
+    ))
+    .limit(1);
+  if (!rule) throw notFound("Shipping rule not found.");
+
+  const members = await db.select({
+    id: productVariants.id,
+    sku: productVariants.sku,
+    name: productVariants.name,
+    productName: products.name,
+    isActive: sql<boolean>`(${productVariants.isActive} AND ${products.isActive})`,
+  })
+    .from(shippingRateRuleMembers)
+    .innerJoin(productVariants, eq(productVariants.id, shippingRateRuleMembers.productVariantId))
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .where(eq(shippingRateRuleMembers.rateRuleId, ruleId))
+    .orderBy(asc(productVariants.sku), asc(productVariants.id));
+
+  return { members };
+}
+
 export async function createRateTableProductRule(
   rateTableId: number,
   input: ProductRateRuleDraftInput,
@@ -165,6 +195,7 @@ export async function createRateTableProductRule(
       destinationScope: input.destinationScope,
       rateCents: input.rateCents,
       perStartedPoundCents: input.perStartedPoundCents,
+      perAdditionalUnitCents: input.perAdditionalUnitCents,
       thresholdCents: input.thresholdCents,
       isActive: true,
     }).returning();
@@ -193,7 +224,12 @@ export async function updateRateTableProductRule(
   return db.transaction(async (tx) => {
     await lockDraftTable(tx, rateTableId);
     const before = await loadRuleSnapshot(tx, rateTableId, ruleId);
-    const { productSetId, variantIds } = await resolveSelector(tx, input.name, input.selector);
+    const { productSetId, variantIds } = await resolveSelector(
+      tx,
+      input.name,
+      input.selector,
+      before.memberVariantIds,
+    );
     const [updated] = await tx.update(shippingRateRules).set({
       sourceProductSetId: productSetId,
       name: input.name,
@@ -203,6 +239,7 @@ export async function updateRateTableProductRule(
       destinationScope: input.destinationScope,
       rateCents: input.rateCents,
       perStartedPoundCents: input.perStartedPoundCents,
+      perAdditionalUnitCents: input.perAdditionalUnitCents,
       thresholdCents: input.thresholdCents,
       updatedAt: new Date(),
     }).where(eq(shippingRateRules.id, ruleId)).returning();
@@ -375,6 +412,7 @@ export async function cloneProductRules(
       destinationScope: mutableDestinationScope(source.destinationScope),
       rateCents: source.rateCents,
       perStartedPoundCents: source.perStartedPoundCents,
+      perAdditionalUnitCents: source.perAdditionalUnitCents,
       thresholdCents: source.thresholdCents,
       isActive: source.isActive,
     }).returning({ id: shippingRateRules.id });
@@ -409,6 +447,7 @@ async function resolveSelector(
   tx: Transaction,
   name: string,
   selector: ProductSetSelectorInput,
+  preservedVariantIds: readonly number[] = [],
 ): Promise<{ productSetId: number; variantIds: number[] }> {
   if (selector.kind === "saved_set") {
     const [set] = await tx.select({ id: shippingProductSets.id })
@@ -424,7 +463,7 @@ async function resolveSelector(
     return { productSetId: set.id, variantIds: members.map((member) => member.id) };
   }
 
-  const variantIds = await resolveVariantIds(tx, selector);
+  const variantIds = await resolveVariantIds(tx, selector, preservedVariantIds);
   if (variantIds.length === 0) throw emptySelectorError();
   const selectorRef = selector.kind === "manual" ? null : selector.ref;
   const selectorHash = createHash("sha256")
@@ -455,27 +494,21 @@ async function resolveSelector(
 async function resolveVariantIds(
   tx: Transaction,
   selector: Exclude<ProductSetSelectorInput, { kind: "saved_set" }>,
+  preservedVariantIds: readonly number[] = [],
 ): Promise<number[]> {
   if (selector.kind === "manual") {
     const ids = [...new Set(selector.variantIds)].sort((left, right) => left - right);
     if (ids.length === 0) return [];
-    const rows = await tx.select({ id: productVariants.id })
+    const rows = await tx.select({
+      id: productVariants.id,
+      variantIsActive: productVariants.isActive,
+      productIsActive: products.isActive,
+    })
       .from(productVariants)
       .innerJoin(products, eq(products.id, productVariants.productId))
-      .where(and(
-        inArray(productVariants.id, ids),
-        eq(productVariants.isActive, true),
-        eq(products.isActive, true),
-      ))
+      .where(inArray(productVariants.id, ids))
       .orderBy(asc(productVariants.id));
-    if (rows.length !== ids.length) {
-      throw new ProductRatePolicyAdminError(
-        400,
-        "SHIPPING_PRODUCT_POLICY_INVALID_VARIANTS",
-        "Every selected variant must exist and be active.",
-      );
-    }
-    return rows.map((row) => row.id);
+    return validateManualVariantSelection(ids, rows, preservedVariantIds);
   }
 
   const base = tx.select({ id: productVariants.id })
@@ -518,6 +551,37 @@ async function resolveVariantIds(
       eq(productVariants.isActive, true),
       eq(products.isActive, true),
     )).orderBy(asc(productVariants.id)).then((rows) => rows.map((row) => row.id));
+}
+
+export function validateManualVariantSelection(
+  requestedIds: readonly number[],
+  rows: ReadonlyArray<{
+    id: number;
+    variantIsActive: boolean;
+    productIsActive: boolean;
+  }>,
+  preservedVariantIds: readonly number[] = [],
+): number[] {
+  if (rows.length !== requestedIds.length) {
+    throw new ProductRatePolicyAdminError(
+      400,
+      "SHIPPING_PRODUCT_POLICY_INVALID_VARIANTS",
+      "Every selected variant must exist.",
+    );
+  }
+
+  const preserved = new Set(preservedVariantIds);
+  const inactiveAddition = rows.find((row) =>
+    (!row.variantIsActive || !row.productIsActive) && !preserved.has(row.id));
+  if (inactiveAddition) {
+    throw new ProductRatePolicyAdminError(
+      400,
+      "SHIPPING_PRODUCT_POLICY_INACTIVE_VARIANT",
+      "Newly selected variants must be active.",
+    );
+  }
+
+  return rows.map((row) => row.id);
 }
 
 async function replaceRuleChildren(
@@ -596,6 +660,7 @@ function productRuleAuditState(rule: LoadedProductRateRule): Record<string, unkn
     destinationScope: rule.destinationScope,
     rateCents: rule.rateCents,
     perStartedPoundCents: rule.perStartedPoundCents,
+    perAdditionalUnitCents: rule.perAdditionalUnitCents,
     thresholdCents: rule.thresholdCents,
     memberVariantIds: [...rule.memberVariantIds],
     bands: rule.bands.map((band) => ({ ...band })),
@@ -656,6 +721,7 @@ async function loadRules(
     destinationScope: rule.destinationScope as ShippingRateRuleDestinationScope,
     rateCents: rule.rateCents,
     perStartedPoundCents: rule.perStartedPoundCents,
+    perAdditionalUnitCents: rule.perAdditionalUnitCents,
     thresholdCents: rule.thresholdCents,
     memberVariantIds: membersByRule.get(rule.id) ?? [],
     bands: bandsByRule.get(rule.id) ?? [],
