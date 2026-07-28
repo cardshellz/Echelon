@@ -10,8 +10,14 @@ import {
   SHIPSTATION_UNMAPPED_PHYSICAL_RULE,
   buildShipStationUnmappedPhysicalIdempotencyKey,
   recordShipStationUnmappedPhysicalException,
+  resolveShipStationUnmappedPhysicalExceptionForProviderEcho,
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "./shipstation-unmapped-physical";
+import {
+  inspectShipStationProviderPackageEcho,
+  reconcileShipStationProviderPackageEcho,
+  type ProviderPackageEchoResult,
+} from "../shipping/provider-package-echo.service";
 
 export interface ShipStationUnmappedLocator {
   exceptionId?: number;
@@ -36,6 +42,12 @@ export interface ShipStationUnmappedReshipAdoptionInput
 }
 
 export interface ShipStationUnmappedVoidedLabelResolutionInput
+  extends ShipStationUnmappedLocator {
+  operator: string;
+  notes?: string;
+}
+
+export interface ShipStationUnmappedProviderEchoResolutionInput
   extends ShipStationUnmappedLocator {
   operator: string;
   notes?: string;
@@ -125,6 +137,7 @@ export interface ShipStationUnmappedPreview {
   externalShipmentRef: string;
   providerShipment: ShipStationShipment;
   providerIdentityRepair: ShipStationProviderIdentityRepair | null;
+  providerPackageEcho: ProviderPackageEchoResult;
   originalPackageIdentityRepair: ShipStationOriginalPackageIdentityRepair | null;
   orderItems: PreviewOrderItem[];
   shipments: PreviewShipment[];
@@ -891,6 +904,13 @@ export async function getShipStationUnmappedPhysicalPreview(
     identityRepair,
     originalPackageIdentityRepair,
   } = resolvedProvider;
+  const providerPackageEcho = await inspectShipStationProviderPackageEcho(db, {
+    providerShipmentId: providerShipment.shipmentId,
+    trackingNumber: providerShipment.trackingNumber,
+    expectedWmsOrderId: context.wmsOrderId,
+    shipmentItems: providerShipment.shipmentItems ?? [],
+    source: "shipstation_unmapped_preview",
+  });
   return {
     exceptionId: context.exceptionId,
     wmsOrderId: context.wmsOrderId,
@@ -900,6 +920,7 @@ export async function getShipStationUnmappedPhysicalPreview(
     externalShipmentRef: context.externalShipmentRef,
     providerShipment,
     providerIdentityRepair: identityRepair,
+    providerPackageEcho,
     originalPackageIdentityRepair,
     orderItems,
     shipments,
@@ -1672,6 +1693,16 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
   if (!String(shipment.shipDate ?? "").trim()) {
     throw new Error("ShipStation shipment has no shipped date");
   }
+  const providerEcho = await inspectShipStationProviderPackageEcho(db, {
+    providerShipmentId: shipment.shipmentId,
+    trackingNumber: shipment.trackingNumber,
+    expectedWmsOrderId: context.wmsOrderId,
+    shipmentItems: shipment.shipmentItems ?? [],
+    source: "shipstation_reship_adoption_guard",
+  });
+  if (providerEcho.status === "matched") {
+    throw new Error("this ShipStation label is another provider record for the existing package; link provider evidence instead");
+  }
   const exceptionId = await ensureException(db, context, shipment);
   const operator = requiredOperator(input.operator);
 
@@ -1717,6 +1748,295 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     providerIdentityRepaired: identityRepair !== null,
     originalPackageIdentityRepaired: originalPackageIdentityRepair !== null,
   };
+}
+
+interface PriorProviderEchoResolution {
+  exceptionId: number;
+  candidateShipmentId: number | null;
+  physicalShipmentId: number;
+  operator: string;
+}
+
+function priorProviderEchoResolutionFromRow(
+  row: any,
+): PriorProviderEchoResolution | null {
+  if (
+    !row
+    || String(row.status) !== "resolved"
+    || String(row.classification) !== "provider_package_echo"
+    || String(row.remediation_action) !== "link_provider_package_echo"
+  ) {
+    return null;
+  }
+  return {
+    exceptionId: positiveInteger(row.id, "exceptionId"),
+    candidateShipmentId: optionalPositiveInteger(row.candidate_shipment_id),
+    physicalShipmentId: positiveInteger(
+      row.physical_shipment_id,
+      "physicalShipmentId",
+    ),
+    operator: String(row.resolved_by ?? "system:unknown"),
+  };
+}
+
+async function loadPriorProviderEchoResolution(
+  db: any,
+  input: ShipStationUnmappedLocator,
+): Promise<PriorProviderEchoResolution | null> {
+  const target = locator(input);
+  const result: any = target.exceptionId > 0
+    ? await db.execute(sql`
+        SELECT
+          id,
+          status,
+          classification,
+          details->>'remediationAction' AS remediation_action,
+          details->>'candidateShipmentId' AS candidate_shipment_id,
+          details->>'physicalShipmentId' AS physical_shipment_id,
+          resolved_by
+        FROM wms.reconciliation_exceptions
+        WHERE id = ${target.exceptionId}
+          AND rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+          AND status = 'resolved'
+          AND classification = 'provider_package_echo'
+          AND details->>'remediationAction' = 'link_provider_package_echo'
+        LIMIT 1
+      `)
+    : await db.execute(sql`
+        SELECT
+          id,
+          status,
+          classification,
+          details->>'remediationAction' AS remediation_action,
+          details->>'candidateShipmentId' AS candidate_shipment_id,
+          details->>'physicalShipmentId' AS physical_shipment_id,
+          resolved_by
+        FROM wms.reconciliation_exceptions
+        WHERE rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+          AND status = 'resolved'
+          AND classification = 'provider_package_echo'
+          AND details->>'remediationAction' = 'link_provider_package_echo'
+          AND (
+            wms_shipment_id = ${target.shipmentId}
+            OR details->>'candidateShipmentId' = ${String(target.shipmentId)}
+          )
+        ORDER BY resolved_at DESC NULLS LAST, id DESC
+        LIMIT 1
+      `);
+  return priorProviderEchoResolutionFromRow(resultRows(result)[0]);
+}
+
+async function retireProviderEchoPreparationShell(
+  tx: any,
+  context: RemediationContext,
+  shipment: ShipStationShipment,
+  echo: ProviderPackageEchoResult,
+): Promise<number | null> {
+  const candidateShipmentId = context.candidateShipmentId;
+  if (
+    candidateShipmentId === null
+    || echo.authoritativeLegacyShipmentIds.includes(candidateShipmentId)
+  ) {
+    return null;
+  }
+  const candidateResult: any = await tx.execute(sql`
+    SELECT
+      id,
+      order_id,
+      status,
+      source,
+      shipment_purpose,
+      external_fulfillment_id,
+      requires_review,
+      review_reason
+    FROM wms.outbound_shipments
+    WHERE id = ${candidateShipmentId}
+    FOR UPDATE
+  `);
+  const candidate = resultRows(candidateResult)[0];
+  if (!candidate) {
+    throw new Error("the provider-echo preparation shipment no longer exists");
+  }
+  if (
+    String(candidate.status) === "cancelled"
+    && String(candidate.review_reason) === "shipstation_provider_echo_reconciled"
+  ) {
+    return candidateShipmentId;
+  }
+  if (
+    Number(candidate.order_id) !== context.wmsOrderId
+    || String(candidate.status) !== "queued"
+    || String(candidate.source) !== "shipstation_reship_adopted"
+    || String(candidate.shipment_purpose) !== "replacement"
+    || String(candidate.external_fulfillment_id) !==
+      `shipstation_shipment:${shipment.shipmentId}`
+    || candidate.requires_review !== true
+    || String(candidate.review_reason) !== "shipstation_reship_adoption_pending"
+  ) {
+    throw new Error("the provider-echo candidate is not an unused remediation preparation shipment");
+  }
+
+  const authorityResult: any = await tx.execute(sql`
+    SELECT
+      (
+        SELECT COUNT(*)
+        FROM inventory.inventory_transactions inventory_tx
+        WHERE inventory_tx.shipment_id = ${candidateShipmentId}
+          AND inventory_tx.transaction_type = 'ship'
+      )::int AS inventory_ship_count,
+      (
+        SELECT COUNT(*)
+        FROM wms.line_fulfillments fulfillment
+        WHERE fulfillment.shipment_id = ${candidateShipmentId}
+      )::int AS line_fulfillment_count,
+      (
+        SELECT COUNT(*)
+        FROM wms.physical_shipments physical
+        WHERE physical.legacy_wms_shipment_id = ${candidateShipmentId}
+      )::int AS physical_header_count,
+      (
+        SELECT COUNT(*)
+        FROM wms.physical_shipment_items physical_item
+        JOIN wms.outbound_shipment_items candidate_item
+          ON candidate_item.id = physical_item.legacy_wms_shipment_item_id
+        WHERE candidate_item.shipment_id = ${candidateShipmentId}
+      )::int AS physical_item_count,
+      (
+        SELECT COUNT(*)
+        FROM oms.channel_fulfillment_receipt_items receipt_item
+        JOIN wms.outbound_shipment_items candidate_item
+          ON candidate_item.id = receipt_item.legacy_wms_shipment_item_id
+        WHERE candidate_item.shipment_id = ${candidateShipmentId}
+      )::int AS channel_receipt_count
+  `);
+  const authority = resultRows(authorityResult)[0] ?? {};
+  const authorityCounts = [
+    "inventory_ship_count",
+    "line_fulfillment_count",
+    "physical_header_count",
+    "physical_item_count",
+    "channel_receipt_count",
+  ].map((field) => Number(authority[field] ?? 0));
+  if (authorityCounts.some((count) => count !== 0)) {
+    throw new Error("the provider-echo candidate already owns fulfillment or inventory authority");
+  }
+
+  const updated: any = await tx.execute(sql`
+    UPDATE wms.outbound_shipments
+    SET status = 'cancelled',
+        cancelled_at = COALESCE(cancelled_at, NOW()),
+        requires_review = false,
+        review_reason = 'shipstation_provider_echo_reconciled',
+        updated_at = NOW()
+    WHERE id = ${candidateShipmentId}
+      AND status = 'queued'
+      AND requires_review = true
+      AND review_reason = 'shipstation_reship_adoption_pending'
+    RETURNING id
+  `);
+  if (resultRows(updated).length !== 1) {
+    throw new Error("the provider-echo preparation shipment changed before cleanup");
+  }
+  return candidateShipmentId;
+}
+
+export async function resolveShipStationUnmappedPhysicalAsProviderEcho(
+  db: any,
+  shipStation: ShipStationService,
+  input: ShipStationUnmappedProviderEchoResolutionInput,
+): Promise<Record<string, unknown>> {
+  const operator = requiredOperator(input.operator);
+  const notes = optionalNotes(input.notes);
+  const priorResolution = await loadPriorProviderEchoResolution(db, input);
+  if (priorResolution) return { changed: false, ...priorResolution };
+
+  const context = await loadContext(db, input);
+  const providerShipmentId = positiveInteger(
+    context.externalShipmentRef,
+    "externalShipmentRef",
+  );
+  const shipment = await shipStation.getShipmentById(providerShipmentId);
+  if (!shipment) {
+    throw new Error(`ShipStation physical shipment ${providerShipmentId} was not found`);
+  }
+  if (shipment.voidDate) {
+    throw new Error("a voided ShipStation label cannot be linked as a provider package echo");
+  }
+  const exceptionId = await ensureException(db, context, shipment);
+
+  return withOptionalTransaction(db, async (tx) => {
+    const exceptionResult: any = await tx.execute(sql`
+      SELECT
+        id,
+        status,
+        classification,
+        details->>'remediationAction' AS remediation_action,
+        details->>'candidateShipmentId' AS candidate_shipment_id,
+        details->>'physicalShipmentId' AS physical_shipment_id,
+        resolved_by
+      FROM wms.reconciliation_exceptions
+      WHERE id = ${exceptionId}
+      FOR UPDATE
+    `);
+    const exceptionRow = resultRows(exceptionResult)[0];
+    if (!exceptionRow) {
+      throw new Error("unmapped ShipStation exception no longer exists");
+    }
+    const concurrentResolution = priorProviderEchoResolutionFromRow(exceptionRow);
+    if (concurrentResolution) {
+      return { changed: false, ...concurrentResolution };
+    }
+    if (!["open", "acknowledged"].includes(String(exceptionRow.status))) {
+      throw new Error("unmapped ShipStation exception changed before it could be resolved");
+    }
+
+    const echo = await reconcileShipStationProviderPackageEcho(tx, {
+      providerShipmentId: shipment.shipmentId,
+      trackingNumber: shipment.trackingNumber,
+      expectedWmsOrderId: context.wmsOrderId,
+      shipmentItems: shipment.shipmentItems ?? [],
+      source: "manual_unmapped_remediation",
+    });
+    if (
+      echo.status !== "matched"
+      || echo.physicalShipmentId === null
+      || echo.wmsOrderId !== context.wmsOrderId
+    ) {
+      throw new Error(`provider package echo is not proven: ${echo.reason}`);
+    }
+
+    const retiredCandidateShipmentId = await retireProviderEchoPreparationShell(
+      tx,
+      context,
+      shipment,
+      echo,
+    );
+    const resolved = await resolveShipStationUnmappedPhysicalExceptionForProviderEcho(
+      tx,
+      {
+        shipment,
+        wmsOrderId: context.wmsOrderId,
+        physicalShipmentId: echo.physicalShipmentId,
+        resolvedBy: operator,
+        candidateShipmentId: context.candidateShipmentId,
+        retiredCandidateShipmentId,
+        notes,
+      },
+    );
+    if (!resolved) {
+      throw new Error("unmapped ShipStation exception changed before it could be resolved");
+    }
+    return {
+      changed: true,
+      exceptionId,
+      candidateShipmentId: context.candidateShipmentId,
+      retiredCandidateShipmentId,
+      physicalShipmentId: echo.physicalShipmentId,
+      shippingProviderLabelId: echo.shippingProviderLabelId,
+      providerLabelLinkInserted: echo.linkInserted,
+      operator,
+    };
+  });
 }
 
 export async function resolveShipStationUnmappedPhysicalAsVoidedLabel(

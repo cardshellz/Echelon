@@ -23,6 +23,7 @@ import { hasPermission } from "../modules/identity";
 import {
   adoptShipStationUnmappedPhysicalAsReship,
   getShipStationUnmappedPhysicalPreview,
+  resolveShipStationUnmappedPhysicalAsProviderEcho,
   resolveShipStationUnmappedPhysicalAsVoidedLabel,
 } from "../modules/oms/shipstation-unmapped-remediation.service";
 
@@ -164,6 +165,45 @@ export function registerOmsRoutes(app: Express) {
         console.error("[OMS Routes] ShipStation voided-label resolution error:", err);
         const message = err?.message || "Failed to resolve ShipStation voided label";
         const status = /positive integer|exactly one|required|does not report/i.test(message)
+          ? 400
+          : /not found/i.test(message)
+            ? 404
+            : /unavailable/i.test(message)
+              ? 503
+              : 409;
+        res.status(status).json({ error: message });
+      }
+    },
+  );
+
+  app.post(
+    "/api/oms/ops/shipstation-unmapped/resolve-provider-echo",
+    requirePermission("operations", "triage"),
+    async (req: Request, res: Response) => {
+      try {
+        const shipStation = getShipStation(req);
+        if (!shipStation) {
+          res.status(503).json({ error: "ShipStation service is unavailable" });
+          return;
+        }
+        const operator =
+          req.session.user?.username ||
+          req.session.user?.displayName ||
+          String(req.session.user?.id || "unknown");
+        res.json(await resolveShipStationUnmappedPhysicalAsProviderEcho(
+          db,
+          shipStation,
+          {
+            exceptionId: req.body?.exceptionId,
+            shipmentId: req.body?.shipmentId,
+            notes: req.body?.notes,
+            operator,
+          },
+        ));
+      } catch (err: any) {
+        console.error("[OMS Routes] ShipStation provider-echo resolution error:", err);
+        const message = err?.message || "Failed to link ShipStation provider evidence";
+        const status = /positive integer|exactly one|required|not proven|provider record/i.test(message)
           ? 400
           : /not found/i.test(message)
             ? 404
