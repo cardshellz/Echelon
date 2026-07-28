@@ -1803,6 +1803,11 @@ describe("ShipStation unmapped physical remediation", () => {
     const allSql = calls.join("\n");
     expect(allSql).toContain("shipstation_provider_echo_reconciled");
     expect(allSql).toContain("link_provider_package_echo");
+    expect(allSql).toContain("FROM wms.shipment_requests shipment_request");
+    expect(allSql).toContain(
+      "FROM wms.shipping_engine_order_requests engine_request",
+    );
+    expect(allSql).not.toContain("physical.legacy_wms_shipment_id");
     expect(allSql).not.toContain("INSERT INTO wms.physical_shipments");
     expect(allSql).not.toContain("INSERT INTO inventory.inventory_transactions");
   });

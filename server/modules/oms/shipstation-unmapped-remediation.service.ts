@@ -1892,7 +1892,21 @@ async function retireProviderEchoPreparationShell(
       (
         SELECT COUNT(*)
         FROM wms.physical_shipments physical
-        WHERE physical.legacy_wms_shipment_id = ${candidateShipmentId}
+        WHERE EXISTS (
+          SELECT 1
+          FROM wms.shipment_requests shipment_request
+          WHERE shipment_request.legacy_wms_shipment_id = ${candidateShipmentId}
+            AND (
+              shipment_request.id = physical.shipment_request_id
+              OR EXISTS (
+                SELECT 1
+                FROM wms.shipping_engine_order_requests engine_request
+                WHERE engine_request.shipping_engine_order_id =
+                      physical.shipping_engine_order_id
+                  AND engine_request.shipment_request_id = shipment_request.id
+              )
+            )
+        )
       )::int AS physical_header_count,
       (
         SELECT COUNT(*)
