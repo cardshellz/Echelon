@@ -218,6 +218,31 @@ describe("quoteShipment", () => {
     }));
   });
 
+  it("forwards explicit manual snapshot persistence to the rate provider", async () => {
+    const observe = vi.fn();
+
+    const result = await quoteShipment({
+      channel: "shopify",
+      ratePurpose: "vendor_fulfillment_charge",
+      originWarehouseId: 1,
+      destination: { country: "US", postalCode: "16066" },
+      lines: [{ sku: "SKU-1", quantity: 1, unitWeightGrams: 200 }],
+      persistSnapshot: true,
+    }, {
+      parcelProvider: weightOnlyParcelProvider,
+      rateProvider: fakeRateProvider(observe),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(observe).toHaveBeenCalledWith(expect.objectContaining({
+      persistSnapshot: true,
+      rateContext: {
+        pricingChannel: "shopify",
+        purpose: "vendor_fulfillment_charge",
+      },
+    }));
+  });
+
   it("forwards the exact pricing program selected by a canonical policy", async () => {
     const observe = vi.fn();
 

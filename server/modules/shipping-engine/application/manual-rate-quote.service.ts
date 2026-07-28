@@ -13,6 +13,13 @@ import {
   type RateQuoteResult,
 } from "./rate-quote.service";
 import {
+  quoteShipment,
+  type ShipmentQuoteRequest,
+  type ShipmentQuoteResult,
+} from "./shipment-quote.service";
+import { localRateTableShippingRateProvider } from "./shipping-rate-provider";
+import { weightOnlyParcelProvider } from "./weight-only-parcel.provider";
+import {
   ECHELON_MANAGED_COUNTRY_CODE,
 } from "../domain/destination-rate-ownership";
 import {
@@ -21,11 +28,20 @@ import {
   type ShippingSalesChannel,
 } from "../domain/shipping-channel";
 import { normalizeUsPostalRegion } from "../domain/us-geography";
+import {
+  loadCatalogShippingFactsBySku,
+  type CatalogShippingFact,
+} from "../infrastructure/catalog-weight.repository";
 
 export type ManualRateQuoteOutcome =
   | "quoted"
   | "no_rate"
   | "rate_book_mismatch";
+
+export interface ManualRateQuoteLineInput {
+  sku: string;
+  quantity: number;
+}
 
 export interface ManualRateQuoteInput {
   expectedRateBookId: number;
@@ -35,8 +51,26 @@ export interface ManualRateQuoteInput {
   destinationCountry: string;
   destinationRegion: string;
   destinationPostalCode: string;
-  billableWeightGrams: number;
+  billableWeightGrams?: number;
+  lines?: readonly ManualRateQuoteLineInput[];
 }
+
+export type ManualRateQuoteTestedShipment =
+  | {
+      basis: "weight";
+      billableWeightGrams: number;
+      lines: [];
+    }
+  | {
+      basis: "catalog_lines";
+      billableWeightGrams: number;
+      lines: Array<{
+        sku: string;
+        productVariantId: number;
+        quantity: number;
+        unitWeightGrams: number;
+      }>;
+    };
 
 export interface ManualRateQuoteResult {
   outcome: ManualRateQuoteOutcome;
@@ -47,21 +81,36 @@ export interface ManualRateQuoteResult {
     region: string;
     postalCode: string;
   };
+  testedShipment: ManualRateQuoteTestedShipment;
   rateBook: RateQuoteResult["rateBook"];
   zone: string | null;
   quotes: RateQuoteLine[];
   warnings: string[];
 }
 
+type QuoteManualCartShipment = (
+  request: ShipmentQuoteRequest,
+) => Promise<ShipmentQuoteResult>;
+
 export interface ManualRateQuoteDependencies {
   quoteShipmentRates: typeof quoteShipmentRates;
+  quoteCartShipment: QuoteManualCartShipment;
+  loadCatalogShippingFactsBySku: typeof loadCatalogShippingFactsBySku;
   now: () => Date;
 }
 
 const DEFAULT_DEPENDENCIES: ManualRateQuoteDependencies = {
   quoteShipmentRates,
+  quoteCartShipment: (request) => quoteShipment(request, {
+    parcelProvider: weightOnlyParcelProvider,
+    rateProvider: localRateTableShippingRateProvider,
+  }),
+  loadCatalogShippingFactsBySku,
   now: () => new Date(),
 };
+
+const MAX_MANUAL_RATE_TEST_LINES = 50;
+const MAX_MANUAL_LINE_QUANTITY = 10_000;
 
 export async function runManualRateQuote(
   input: ManualRateQuoteInput,
@@ -69,7 +118,7 @@ export async function runManualRateQuote(
 ): Promise<ManualRateQuoteResult> {
   assertPositiveInteger(input.expectedRateBookId, "expectedRateBookId");
   assertPositiveInteger(input.originWarehouseId, "originWarehouseId");
-  assertPositiveInteger(input.billableWeightGrams, "billableWeightGrams");
+  assertTestBasis(input);
 
   const country = input.destinationCountry.trim().toUpperCase();
   if (country !== ECHELON_MANAGED_COUNTRY_CODE) {
@@ -119,22 +168,25 @@ export async function runManualRateQuote(
   }
 
   const testedAt = dependencies.now();
-  const quote = await dependencies.quoteShipmentRates({
-    rateContext: {
-      pricingChannel: input.pricingChannel,
-      purpose: input.ratePurpose,
-    },
-    originWarehouseId: input.originWarehouseId,
-    destCountry: country,
-    destRegion: region,
-    destPostal: postalCode,
-    parcels: [{ billableWeightGrams: input.billableWeightGrams }],
-  }, {
-    quotedAt: testedAt,
-    persistSnapshot: true,
-  });
+  const { quote, testedShipment, parcelWarnings } = input.lines
+    ? await quoteCatalogLines({
+        input,
+        country,
+        region,
+        postalCode,
+        testedAt,
+        dependencies,
+      })
+    : await quoteWeight({
+        input,
+        country,
+        region,
+        postalCode,
+        testedAt,
+        dependencies,
+      });
 
-  const warnings = [...quote.warnings];
+  const warnings = [...parcelWarnings, ...quote.warnings];
   let outcome: ManualRateQuoteOutcome;
   if (quote.rateBook !== null && quote.rateBook.id !== input.expectedRateBookId) {
     outcome = "rate_book_mismatch";
@@ -152,10 +204,132 @@ export async function runManualRateQuote(
     testedAt: testedAt.toISOString(),
     rateOwner: "echelon",
     destination: { country, region, postalCode },
+    testedShipment,
     rateBook: quote.rateBook,
     zone: quote.zone,
     quotes: quote.quotes,
     warnings,
+  };
+}
+
+async function quoteWeight(input: {
+  input: ManualRateQuoteInput;
+  country: string;
+  region: string;
+  postalCode: string;
+  testedAt: Date;
+  dependencies: ManualRateQuoteDependencies;
+}): Promise<{
+  quote: RateQuoteResult;
+  testedShipment: ManualRateQuoteTestedShipment;
+  parcelWarnings: string[];
+}> {
+  const billableWeightGrams = input.input.billableWeightGrams;
+  if (billableWeightGrams === undefined) {
+    throw invalidTestBasisError(input.input);
+  }
+  const quote = await input.dependencies.quoteShipmentRates({
+    rateContext: {
+      pricingChannel: input.input.pricingChannel,
+      purpose: input.input.ratePurpose,
+    },
+    originWarehouseId: input.input.originWarehouseId,
+    destCountry: input.country,
+    destRegion: input.region,
+    destPostal: input.postalCode,
+    parcels: [{ billableWeightGrams }],
+  }, {
+    quotedAt: input.testedAt,
+    persistSnapshot: true,
+  });
+  return {
+    quote,
+    testedShipment: {
+      basis: "weight",
+      billableWeightGrams,
+      lines: [],
+    },
+    parcelWarnings: [],
+  };
+}
+
+async function quoteCatalogLines(input: {
+  input: ManualRateQuoteInput;
+  country: string;
+  region: string;
+  postalCode: string;
+  testedAt: Date;
+  dependencies: ManualRateQuoteDependencies;
+}): Promise<{
+  quote: RateQuoteResult;
+  testedShipment: ManualRateQuoteTestedShipment;
+  parcelWarnings: string[];
+}> {
+  const requestedLines = input.input.lines;
+  if (requestedLines === undefined) {
+    throw invalidTestBasisError(input.input);
+  }
+  const normalizedLines = requestedLines.map((line) => ({
+    sku: line.sku.trim(),
+    quantity: line.quantity,
+  }));
+  const factsBySku = await input.dependencies.loadCatalogShippingFactsBySku(
+    normalizedLines.map((line) => line.sku),
+  );
+  assertCatalogFactsComplete(normalizedLines, factsBySku);
+
+  const lines = normalizedLines.map((line) => {
+    const fact = factsBySku.get(line.sku)!;
+    return {
+      sku: line.sku,
+      productVariantId: fact.productVariantId,
+      quantity: line.quantity,
+      unitWeightGrams: fact.weightGrams!,
+      weightSource: "echelon_catalog" as const,
+      shippingGroupCode: fact.shippingGroupCode,
+      shipsInOwnContainer: fact.shipsInOwnContainer,
+    };
+  });
+  const shipmentQuote = await input.dependencies.quoteCartShipment({
+    channel: input.input.pricingChannel,
+    ratePurpose: input.input.ratePurpose,
+    originWarehouseId: input.input.originWarehouseId,
+    destination: {
+      country: input.country,
+      region: input.region,
+      postalCode: input.postalCode,
+    },
+    lines,
+    quotedAt: input.testedAt,
+    persistSnapshot: true,
+  });
+  if (!shipmentQuote.ok) {
+    throw new ManualRateQuoteError(
+      "SHIPPING_RATE_TEST_SHIPMENT_INVALID",
+      "The catalog lines could not be rated.",
+      {
+        reasonCode: shipmentQuote.code,
+        errors: shipmentQuote.errors,
+      },
+    );
+  }
+
+  return {
+    quote: shipmentQuote.rates,
+    testedShipment: {
+      basis: "catalog_lines",
+      billableWeightGrams: shipmentQuote.parcelPlan.parcels.reduce(
+        (sum, parcel) => sum + parcel.billableWeightGrams,
+        0,
+      ),
+      lines: lines.map((line) => ({
+        sku: line.sku,
+        productVariantId: line.productVariantId,
+        quantity: line.quantity,
+        unitWeightGrams: line.unitWeightGrams,
+      })),
+    },
+    parcelWarnings: shipmentQuote.parcelPlan.warnings,
   };
 }
 
@@ -166,6 +340,91 @@ export class ManualRateQuoteError extends Error {
     readonly context: Record<string, unknown>,
   ) {
     super(message);
+  }
+}
+
+function assertTestBasis(input: ManualRateQuoteInput): void {
+  const hasWeight = input.billableWeightGrams !== undefined;
+  const hasLines = input.lines !== undefined;
+  if (hasWeight === hasLines) {
+    throw invalidTestBasisError(input);
+  }
+  if (hasWeight) {
+    assertPositiveInteger(input.billableWeightGrams!, "billableWeightGrams");
+    return;
+  }
+  const lines = input.lines!;
+  if (lines.length === 0 || lines.length > MAX_MANUAL_RATE_TEST_LINES) {
+    throw new ManualRateQuoteError(
+      "SHIPPING_RATE_TEST_INPUT_INVALID",
+      `lines must contain between 1 and ${MAX_MANUAL_RATE_TEST_LINES} items.`,
+      { lineCount: lines.length },
+    );
+  }
+  lines.forEach((line, index) => {
+    const sku = line.sku.trim();
+    if (sku.length === 0 || sku.length > 255) {
+      throw new ManualRateQuoteError(
+        "SHIPPING_RATE_TEST_INPUT_INVALID",
+        "Each test line requires a valid SKU.",
+        { line: index + 1, sku: line.sku },
+      );
+    }
+    if (
+      !Number.isSafeInteger(line.quantity)
+      || line.quantity <= 0
+      || line.quantity > MAX_MANUAL_LINE_QUANTITY
+    ) {
+      throw new ManualRateQuoteError(
+        "SHIPPING_RATE_TEST_INPUT_INVALID",
+        `Line quantity must be between 1 and ${MAX_MANUAL_LINE_QUANTITY}.`,
+        { line: index + 1, quantity: line.quantity },
+      );
+    }
+  });
+}
+
+function invalidTestBasisError(input: ManualRateQuoteInput): ManualRateQuoteError {
+  return new ManualRateQuoteError(
+    "SHIPPING_RATE_TEST_INPUT_INVALID",
+    "Provide either one billable shipment weight or catalog lines, but not both.",
+    {
+      hasBillableWeight: input.billableWeightGrams !== undefined,
+      hasLines: input.lines !== undefined,
+    },
+  );
+}
+
+function assertCatalogFactsComplete(
+  lines: readonly ManualRateQuoteLineInput[],
+  factsBySku: ReadonlyMap<string, CatalogShippingFact>,
+): void {
+  const unknownSkus = [...new Set(
+    lines
+      .map((line) => line.sku)
+      .filter((sku) => !factsBySku.has(sku)),
+  )];
+  if (unknownSkus.length > 0) {
+    throw new ManualRateQuoteError(
+      "SHIPPING_RATE_TEST_SKU_NOT_FOUND",
+      "One or more SKUs do not exist in the Echelon catalog.",
+      { skus: unknownSkus },
+    );
+  }
+  const missingWeightSkus = [...new Set(
+    lines
+      .map((line) => line.sku)
+      .filter((sku) => {
+        const weight = factsBySku.get(sku)?.weightGrams;
+        return !Number.isSafeInteger(weight) || (weight ?? 0) <= 0;
+      }),
+  )];
+  if (missingWeightSkus.length > 0) {
+    throw new ManualRateQuoteError(
+      "SHIPPING_RATE_TEST_SKU_WEIGHT_MISSING",
+      "One or more SKUs are missing a valid Echelon catalog weight.",
+      { skus: missingWeightSkus },
+    );
   }
 }
 

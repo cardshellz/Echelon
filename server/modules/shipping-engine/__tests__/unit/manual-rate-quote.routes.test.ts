@@ -67,6 +67,30 @@ describe("manual shipping-rate quote routes", () => {
     });
   });
 
+  it("passes bounded catalog lines to the application service", async () => {
+    const response = await jsonRequest(`${server.url}/api/shipping/admin/rate-quotes/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...validRequest(),
+        billableWeightGrams: undefined,
+        lines: [{ sku: "PACK-1", quantity: 3 }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(service.input).toEqual({
+      expectedRateBookId: 12,
+      pricingChannel: "shopify",
+      ratePurpose: "customer_checkout",
+      originWarehouseId: 1,
+      destinationCountry: "US",
+      destinationRegion: "PA",
+      destinationPostalCode: "16066",
+      lines: [{ sku: "PACK-1", quantity: 3 }],
+    });
+  });
+
   it("rejects unchecked request fields before calling the application service", async () => {
     const response = await jsonRequest(`${server.url}/api/shipping/admin/rate-quotes/test`, {
       method: "POST",
@@ -133,6 +157,11 @@ function successfulQuote(): ManualRateQuoteResult {
     testedAt: "2026-07-20T15:30:00.000Z",
     rateOwner: "echelon",
     destination: { country: "US", region: "PA", postalCode: "16066" },
+    testedShipment: {
+      basis: "weight",
+      billableWeightGrams: 454,
+      lines: [],
+    },
     rateBook: { id: 12, code: "shopify-retail-default" },
     zone: "PA",
     quotes: [{

@@ -1,6 +1,7 @@
 import {
   getShippingChannelProfile,
   usesRuntimeShippingQuotes,
+  type ShippingRatePurpose,
   type ShippingSalesChannel,
 } from "../domain/shipping-channel";
 import type {
@@ -14,6 +15,8 @@ import type { ShippingRateProvider } from "./shipping-rate-provider";
 
 export interface ShipmentQuoteRequest {
   channel: ShippingSalesChannel;
+  /** Exact assignment purpose. Runtime callers normally use the channel profile default. */
+  ratePurpose?: ShippingRatePurpose;
   /** Exact pricing program selected by an active canonical channel policy. */
   rateBookId?: number;
   originWarehouseId: number;
@@ -25,6 +28,8 @@ export interface ShipmentQuoteRequest {
   lines: readonly ShipmentLineInput[];
   freight?: FreightRatingContext | null;
   quotedAt?: Date;
+  /** Persist the engine quote snapshot. Used by authenticated operator tests. */
+  persistSnapshot?: boolean;
 }
 
 export interface ShipmentQuoteDependencies {
@@ -71,7 +76,7 @@ export async function quoteShipment(
   const rates = await deps.rateProvider.quote({
     rateContext: {
       pricingChannel: request.channel,
-      purpose: profile.ratePurpose,
+      purpose: request.ratePurpose ?? profile.ratePurpose,
     },
     rateBookId: request.rateBookId,
     originWarehouseId: request.originWarehouseId,
@@ -81,6 +86,7 @@ export async function quoteShipment(
     lines: request.lines,
     freight: request.freight,
     quotedAt: request.quotedAt,
+    persistSnapshot: request.persistSnapshot,
   });
 
   return { ok: true, parcelPlan: parcelResult.plan, rates };
