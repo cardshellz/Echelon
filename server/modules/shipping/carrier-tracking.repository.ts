@@ -291,6 +291,7 @@ export interface CarrierTrackingRepository {
     input: {
       parserVersion: string;
       reasonCode: string;
+      details?: Record<string, unknown>;
       createdAt: Date;
     },
   ): Promise<{
@@ -931,7 +932,11 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
             parserVersion: input.parserVersion,
             outcome: "normalized",
             reasonCode: input.reasonCode,
-            details: { eventHash: event.eventHash, payloadHash: event.payloadHash },
+            details: {
+              ...(input.details ?? {}),
+              eventHash: event.eventHash,
+              payloadHash: event.payloadHash,
+            },
             createdAt: input.createdAt,
           },
         );
