@@ -57,7 +57,6 @@ import {
   assignmentLabel,
   buildProgramOverviews,
   channelLabel,
-  editableProgramDestinationGroups,
   formatDate,
   findEditorRateGroup,
   getJson,
@@ -122,26 +121,12 @@ export function PricingProgramsTab() {
     });
   }, [programs, search, statusFilter, channelFilter]);
 
-  const rejectRevisionOnlyGroup = (
-    group: ProgramDestinationGroup | undefined,
-  ): boolean => {
-    if (group === undefined || group.hasCurrentDefinition) return false;
-    toast({
-      title: "Revision-only group is read only",
-      description:
-        "Open its saved revision to review it. Edit a current destination group to change future rates.",
-      variant: "destructive",
-    });
-    return true;
-  };
-
   /** Resume an existing draft in the editor with its exact saved layout. */
   const openDraft = async (
     draftId: number,
     returnTo: View,
     destinationGroup?: ProgramDestinationGroup,
   ) => {
-    if (rejectRevisionOnlyGroup(destinationGroup)) return;
     setPreparingEditor(true);
     try {
       const detail = await queryClient.fetchQuery<RateTableDetail>({
@@ -176,9 +161,7 @@ export function PricingProgramsTab() {
           serviceLevelCode: detail.serviceLevel?.code ?? null,
           groups,
           lockProgram: true,
-          availableDestinationGroups: editableProgramDestinationGroups(
-            program?.destinationGroups ?? [],
-          ),
+          availableDestinationGroups: program?.destinationGroups ?? [],
           destinationGroupTarget,
           hasUnsavedInitialChanges: targetMissingFromDraft,
         },
@@ -200,7 +183,6 @@ export function PricingProgramsTab() {
     returnTo: View,
     destinationGroup?: ProgramDestinationGroup,
   ) => {
-    if (rejectRevisionOnlyGroup(destinationGroup)) return;
     setPreparingEditor(true);
     try {
       const cloned = await postJson<{ rateTable: { id: number } }>(
@@ -292,7 +274,6 @@ export function PricingProgramsTab() {
         onCreateRevision={(sourceTableId, destinationGroup) =>
           createRevision(sourceTableId, here, destinationGroup)}
         onStartRates={(serviceLevelCode, destinationGroup) => {
-          if (rejectRevisionOnlyGroup(destinationGroup)) return;
           const serviceLevel = data?.serviceLevels.find(
             (level) => level.code === serviceLevelCode,
           );
@@ -311,9 +292,7 @@ export function PricingProgramsTab() {
                 ? [editorGroupFromProgramGroup(destinationGroup, pricingBasis)]
                 : null,
               lockProgram: true,
-              availableDestinationGroups: editableProgramDestinationGroups(
-                program.destinationGroups,
-              ),
+              availableDestinationGroups: program.destinationGroups,
               destinationGroupTarget: destinationGroup === undefined
                 ? null
                 : { id: destinationGroup.id, key: destinationGroup.key },
