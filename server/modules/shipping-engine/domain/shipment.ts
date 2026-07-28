@@ -35,6 +35,11 @@ export interface ShipmentParcelPlan {
     version: string;
   };
   strategy: string;
+  /**
+   * Optional customer-rate measure when source unit weights have known storage
+   * precision. Parcel actual and billable weights remain unchanged for audit.
+   */
+  rateSelectionWeightGrams: number | null;
   parcels: ShippingParcelSpec[];
   warnings: string[];
 }

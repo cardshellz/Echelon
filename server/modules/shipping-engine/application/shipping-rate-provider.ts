@@ -19,6 +19,11 @@ export interface ShippingRateProviderRequest {
     region?: string | null;
     postalCode: string;
   };
+  /**
+   * Quantization-safe measure used only for customer rate-band selection.
+   * Parcel billable weights remain the operational parcel record.
+   */
+  rateSelectionWeightGrams?: number | null;
   parcels: readonly ShippingParcelSpec[];
   lines?: readonly ShipmentLineInput[];
   freight?: FreightRatingContext | null;
@@ -45,6 +50,7 @@ export const localRateTableShippingRateProvider: ShippingRateProvider = {
       destCountry: input.destination.country,
       destRegion: input.destination.region,
       destPostal: input.destination.postalCode,
+      rateSelectionWeightGrams: input.rateSelectionWeightGrams,
       parcels: input.parcels.map((parcel) => ({
         billableWeightGrams: parcel.billableWeightGrams,
       })),

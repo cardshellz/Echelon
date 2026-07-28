@@ -68,6 +68,8 @@ export interface RateQuoteRequest {
   destCountry: string;
   destRegion?: string | null;
   destPostal: string;
+  /** Optional quantization-safe customer rate-band measure. */
+  rateSelectionWeightGrams?: number | null;
   parcels: RateQuoteParcel[];
   lines?: readonly ShipmentLineInput[];
   freight?: FreightRatingContext | null;
@@ -178,7 +180,22 @@ export async function quoteShipmentRates(
     (sum, parcel) => sum + Math.max(0, parcel.billableWeightGrams),
     0,
   );
-  const shipmentWeightGrams = request.freight?.totalWeightGrams ?? parcelWeightGrams;
+  const rateSelectionWeightGrams = request.rateSelectionWeightGrams ?? null;
+  if (
+    !request.freight
+    && rateSelectionWeightGrams !== null
+    && (
+      !Number.isSafeInteger(rateSelectionWeightGrams)
+      || rateSelectionWeightGrams <= 0
+      || rateSelectionWeightGrams > Math.ceil(parcelWeightGrams)
+    )
+  ) {
+    warnings.push("rate selection weight must be a positive whole number no greater than parcel weight");
+    return { rateBook, zone, quotes: [], warnings };
+  }
+  const shipmentWeightGrams = request.freight?.totalWeightGrams
+    ?? rateSelectionWeightGrams
+    ?? parcelWeightGrams;
   const selectionInput = {
     destinationCountry: destCountry,
     destinationRegion: destRegion,
@@ -215,6 +232,7 @@ export async function quoteShipmentRates(
           productVariantId: line.productVariantId ?? null,
           quantity: line.quantity,
           unitWeightGrams: line.unitWeightGrams,
+          weightSource: line.weightSource,
           unitPriceCents: line.unitPriceCents ?? null,
         })),
         rules,

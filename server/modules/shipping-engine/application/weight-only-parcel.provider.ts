@@ -2,6 +2,7 @@ import type {
   ShipmentLineInput,
   ShipmentParcelPlanResult,
 } from "../domain/shipment";
+import { sumRateSelectionWeightGrams } from "../domain/weight-measurement";
 import type { ShipmentParcelProvider } from "./shipment-parcel-provider";
 
 export const WEIGHT_ONLY_PARCEL_PROVIDER = {
@@ -24,6 +25,7 @@ export function buildWeightOnlyParcelPlan(
 
   const errors: string[] = [];
   const warnings: string[] = [];
+  const weightedLines: ShipmentLineInput[] = [];
   let totalWeightGrams = 0;
 
   lines.forEach((line, index) => {
@@ -43,6 +45,7 @@ export function buildWeightOnlyParcelPlan(
     if (line.weightSource === "channel_fallback") {
       warnings.push(`${label}: used channel weight because Echelon catalog weight is missing`);
     }
+    weightedLines.push(line);
     totalWeightGrams += line.unitWeightGrams * line.quantity;
   });
 
@@ -55,6 +58,17 @@ export function buildWeightOnlyParcelPlan(
   if (!Number.isSafeInteger(roundedWeightGrams)) {
     return { ok: false, errors: ["shipment weight is outside the supported range"] };
   }
+  const rateSelectionWeightGrams = weightedLines.length === 0
+    ? MINIMUM_RATING_WEIGHT_GRAMS
+    : sumRateSelectionWeightGrams(weightedLines);
+  if (
+    rateSelectionWeightGrams === null
+    || !Number.isSafeInteger(rateSelectionWeightGrams)
+    || rateSelectionWeightGrams <= 0
+    || rateSelectionWeightGrams > roundedWeightGrams
+  ) {
+    return { ok: false, errors: ["shipment rating weight is outside the supported range"] };
+  }
   if (totalWeightGrams === 0) {
     warnings.push("no usable item weights; applied 1g minimum rating weight");
   }
@@ -64,6 +78,7 @@ export function buildWeightOnlyParcelPlan(
     plan: {
       provider: WEIGHT_ONLY_PARCEL_PROVIDER,
       strategy: "single_weight_based_shipment",
+      rateSelectionWeightGrams,
       parcels: [{
         sequence: 1,
         source: "channel_weight",
