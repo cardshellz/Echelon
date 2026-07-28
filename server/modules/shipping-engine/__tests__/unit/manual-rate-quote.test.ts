@@ -212,6 +212,78 @@ describe("runManualRateQuote", () => {
     });
   });
 
+  it("reports an intentional product restriction as a blocked shipment", async () => {
+    const deps = dependencies({
+      loadCatalogShippingFactsBySku: vi.fn(async () => new Map([
+        ["CASE-1", {
+          productVariantId: 20,
+          weightGrams: 5_000,
+          shippingGroupCode: "storage-boxes",
+          shipsInOwnContainer: true,
+        }],
+        ["PACK-1", {
+          productVariantId: 21,
+          weightGrams: 500,
+          shippingGroupCode: "storage-boxes",
+          shipsInOwnContainer: false,
+        }],
+      ])),
+      quoteCartShipment: vi.fn(async () => ({
+        ok: true as const,
+        parcelPlan: {
+          provider: { name: "channel-weight", version: "1.0.0" },
+          strategy: "single_weight_based_shipment",
+          rateSelectionWeightGrams: 5_500,
+          parcels: [{
+            sequence: 1,
+            source: "channel_weight" as const,
+            actualWeightGrams: 5_500,
+            billableWeightGrams: 5_500,
+            dimensions: null,
+            shippingGroupCode: null,
+          }],
+          warnings: [],
+        },
+        rates: {
+          rateBook: { id: 12, code: "shopify-retail-default" },
+          zone: "HI",
+          quotes: [],
+          serviceLevelExclusions: [{
+            serviceLevelId: 1,
+            serviceLevelCode: "standard",
+            displayName: "Standard Shipping",
+            code: "BLOCKED" as const,
+            message: "Storage Box Cases blocks this shipment destination.",
+            ruleId: 44,
+          }],
+          warnings: [
+            "standard: [BLOCKED] Storage Box Cases blocks this shipment destination.",
+            "no active service-level rate covers US HI 96815",
+          ],
+        },
+      })),
+    });
+
+    const result = await runManualRateQuote({
+      ...VALID_INPUT,
+      destinationRegion: "HI",
+      destinationPostalCode: "96815",
+      billableWeightGrams: undefined,
+      lines: [
+        { sku: "CASE-1", quantity: 1 },
+        { sku: "PACK-1", quantity: 1 },
+      ],
+    }, deps);
+
+    expect(result.outcome).toBe("blocked");
+    expect(result.quotes).toEqual([]);
+    expect(result.serviceLevelExclusions).toEqual([expect.objectContaining({
+      code: "BLOCKED",
+      ruleId: 44,
+      message: "Storage Box Cases blocks this shipment destination.",
+    })]);
+  });
+
   it("rejects unknown catalog SKUs before invoking the quote engine", async () => {
     const deps = dependencies();
 

@@ -184,6 +184,7 @@ function successfulQuote(): ManualRateQuoteResult {
       productPolicyApplied: false,
       calculationTrace: [],
     }],
+    serviceLevelExclusions: [],
     warnings: [],
   };
 }
