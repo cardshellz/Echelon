@@ -25,7 +25,9 @@ import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-recon
 import { parseProviderAmountCents } from "../shipping/types";
 import {
   SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON,
+  isExactShipStationPhysicalShipmentReplay,
   recordShipStationUnmappedPhysicalException,
+  resolveShipStationUnmappedPhysicalExceptionForExactReplay,
   resolveShipStationUnmappedPhysicalExceptionForReturnLabel,
   resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
@@ -2697,7 +2699,35 @@ export function createShipStationService(
     authorityContext: ShipmentAuthorityContext,
     allowedSourceShipmentItemIds?: Set<number>,
   ): Promise<ShipNotifyV2Result> {
-    if (event.kind === "shipped") {
+    const isCustomerFulfillmentShipment =
+      String(wmsShipmentRow.shipment_purpose ?? "customer_fulfillment") ===
+        "customer_fulfillment";
+    const exactPhysicalShipmentReplay = isCustomerFulfillmentShipment
+      && event.kind === "shipped"
+      && isExactShipStationPhysicalShipmentReplay({
+        shipment,
+        currentPhysicalShipmentRef: wmsShipmentRow.external_fulfillment_id,
+        currentTrackingNumber: wmsShipmentRow.tracking_number,
+      });
+
+    if (exactPhysicalShipmentReplay) {
+      const exceptionResolved =
+        await resolveShipStationUnmappedPhysicalExceptionForExactReplay(db, {
+          shipment,
+          wmsOrderId: Number(wmsShipmentRow.order_id),
+          wmsShipmentId: Number(wmsShipmentRow.id),
+          currentPhysicalShipmentRef: wmsShipmentRow.external_fulfillment_id,
+          currentTrackingNumber: wmsShipmentRow.tracking_number,
+          resolvedBy: authorityContext.actor,
+        });
+      console.log(
+        `[ShipStation Webhook V2] Exact physical shipment replay ` +
+          `${shipment.shipmentId} matched WMS shipment ${wmsShipmentRow.id}; ` +
+          `provider line remapping skipped, exceptionResolved=${exceptionResolved}.`,
+      );
+    }
+
+    if (event.kind === "shipped" && !exactPhysicalShipmentReplay) {
       try {
         await syncShipmentItemsFromShipStation(
           wmsShipmentRow.id,

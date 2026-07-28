@@ -479,16 +479,31 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(insertCalls.length).toBe(1);
   });
 
-  it("idempotently replays an already-shipped package through canonical authority", async () => {
-    const shipmentPayload = makeShipmentPayload();
+  it("repairs an exact package replay even when its historical provider line key is obsolete", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentItems: [
+        { lineItemKey: "wms-item-8502", sku: "SPORTS-CARD", quantity: 1 },
+      ],
+    });
 
     const mock = makeDb([
-      // shipstation_order_id lookup
+      // The provider physical shipment identity is already canonical.
       {
         rows: [
-          { id: 501, order_id: 42, status: "shipped" },
+          {
+            id: 501,
+            order_id: 42,
+            status: "shipped",
+            external_fulfillment_id: "shipstation_shipment:77777",
+            tracking_number: "1Z12345",
+          },
         ],
       },
+      // The historical provider line key no longer resolves. Exact package
+      // identity must prevent this stale key from creating a fake split.
+      { rows: [] },
+      // Resolve any previously-open unmapped-package exception.
+      { rows: [{ id: 328 }] },
       // markShipmentShipped load-current with SAME tracking + carrier
       {
         rows: [
@@ -518,10 +533,15 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(processed).toBe(1);
 
     const executeSqls = mock.calls.filter((c) => c.tag === "execute");
-    expect(executeSqls.map((c) => c.sqlText).join("\n")).not.toMatch(/UPDATE oms\.oms_order_lines/);
-    expect(executeSqls.map((c) => c.sqlText).join("\n")).not.toMatch(/UPDATE wms\.orders/);
+    const allSql = executeSqls.map((c) => c.sqlText).join("\n");
+    expect(allSql).not.toMatch(/UPDATE oms\.oms_order_lines/);
+    expect(allSql).not.toMatch(/UPDATE wms\.orders/);
+    expect(allSql).not.toMatch(/INSERT INTO wms\.reconciliation_exceptions/);
+    expect(allSql).not.toMatch(/requested_items/);
+    expect(allSql).toContain("resolve_exact_provider_package_replay");
 
-    // No legacy writer is emitted because status/tracking already match.
+    // No duplicate legacy writer is emitted because status/tracking already
+    // match, but canonical projection still gets a repair attempt.
     expect(mock.calls.filter((c) => c.tag === "update")).toHaveLength(0);
     expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
     expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledWith(
