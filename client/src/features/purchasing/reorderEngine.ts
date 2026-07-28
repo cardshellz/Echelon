@@ -204,8 +204,9 @@ export function statusParamToChipKeys(statusParam: string | null | undefined): C
  * The five legacy params emitted by server-side link generators and frozen
  * into persisted notification rows (design spec §13). `recommendationId` is
  * honored natively (scroll + highlight + open drawer); the other four describe
- * the review queue, which lives on the legacy page until the Automation page
- * ships — the cockpit shows a banner linking to /reorder-analysis/legacy.
+ * the review queue, which now lives on the Automation page
+ * (/procurement/automation) — the cockpit shows a banner linking there with
+ * the full original query preserved.
  */
 export const LEGACY_REVIEW_PARAM_KEYS = [
   "reviewQueue",
@@ -221,8 +222,8 @@ export interface ReorderEngineDeepLink {
   chipSelection: ChipKey[] | null;
   /** True when any review-queue legacy param is present → show the banner. */
   hasLegacyReviewParams: boolean;
-  /** Legacy page URL preserving the FULL original query string. */
-  legacyUrl: string;
+  /** Automation page URL preserving the FULL original query string. */
+  automationUrl: string;
 }
 
 export function parseReorderEngineDeepLink(params: URLSearchParams): ReorderEngineDeepLink {
@@ -235,7 +236,7 @@ export function parseReorderEngineDeepLink(params: URLSearchParams): ReorderEngi
     recommendationId,
     chipSelection: statusParamToChipKeys(params.get("status")),
     hasLegacyReviewParams,
-    legacyUrl: `/reorder-analysis/legacy${query ? `?${query}` : ""}`,
+    automationUrl: `/procurement/automation${query ? `?${query}` : ""}`,
   };
 }
 

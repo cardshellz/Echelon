@@ -42,9 +42,13 @@ describe("reorder engine UI contract", () => {
     expect(page).toContain("parseReorderEngineDeepLink");
   });
 
-  it("routes legacy review-queue links to the legacy page with the query preserved", () => {
-    expect(helpers).toContain("/reorder-analysis/legacy");
-    expect(page).toContain("deepLink.legacyUrl");
+  it("routes review-queue links to the Automation page with the query preserved", () => {
+    // The review queue re-homed to /procurement/automation: the cockpit banner
+    // forwards the FULL original query there (frozen server-generated params
+    // keep working), and the legacy escape hatch stays only as a route.
+    expect(helpers).toContain("/procurement/automation");
+    expect(helpers).not.toContain("/reorder-analysis/legacy");
+    expect(page).toContain("deepLink.automationUrl");
     expect(page).toContain("review queue");
   });
 
@@ -127,7 +131,7 @@ describe("reorder engine UI contract", () => {
     expect(page).toContain("skippedReason");
   });
 
-  it("renders the engine tab strip: Analysis active, Demand Planner live, rest inert (PR 5)", () => {
+  it("renders the engine tab strip: Analysis active, Demand Planner + Automation live, rest inert", () => {
     // One in-page strip under the header (rev-1 single-entry nav decision,
     // spec §10.1 / §11): the engine surfaces never present as nav siblings.
     expect(page).toContain('aria-label="Reorder Engine sections"');
@@ -138,18 +142,22 @@ describe("reorder engine UI contract", () => {
     expect(page).toContain('href="/demand-planner"');
     expect(page).toContain("Demand Planner");
     expect(page).not.toContain("Forecast inputs");
-    // …and the target route actually exists, so the one link cannot go dead.
+    // Automation shipped (design surface 03) — the chip is a LIVE link now.
+    expect(page).toContain('href="/procurement/automation"');
+    // …and both target routes actually exist, so no link can go dead.
     expect(app).toContain('path="/demand-planner"');
+    expect(app).toContain('path="/procurement/automation"');
+    expect(app).toMatch(/procurement\/automation"[\s\S]{0,200}component=\{ProcurementAutomation\}/);
     // Unshipped surfaces are inert muted chips with a Soon pill — pinned set,
     // ACTUALLY rendered (the const alone could go stale), aria-disabled, and
-    // NO dead links: the only href in the whole page is the Demand Planner
-    // link.
-    expect(page).toContain('ENGINE_TABS_COMING_SOON = ["Automation", "Runs", "RFQs"]');
+    // NO dead links: the only hrefs in the whole page are Demand Planner and
+    // Automation.
+    expect(page).toContain('ENGINE_TABS_COMING_SOON = ["Runs", "RFQs"]');
     expect(page).toContain("ENGINE_TABS_COMING_SOON.map");
     expect(page).toContain('aria-disabled="true"');
     expect(page).toContain("Soon");
     const hrefs = Array.from(page.matchAll(/href="([^"]+)"/g)).map((match) => match[1]);
-    expect(hrefs).toEqual(["/demand-planner"]);
+    expect(hrefs).toEqual(["/demand-planner", "/procurement/automation"]);
     // The href scan above only sees literal href="…" — ban the two syntaxes
     // that would let a chip become a link while evading it: wouter's `to`
     // alias and computed href={…} expressions.
