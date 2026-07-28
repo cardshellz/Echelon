@@ -936,7 +936,7 @@ function ShipStationPackageClassificationDialog(props: {
     onSuccess: async () => {
       toast({
         title: "Return label resolved",
-        description: "The return label was removed from outbound fulfillment authority.",
+        description: "The return label remains tracked and is excluded from outbound fulfillment authority.",
       });
       await props.onCompleted();
       props.onClose();
@@ -1245,7 +1245,7 @@ function ShipStationPackageClassificationDialog(props: {
                 <div className="font-semibold">What will happen</div>
                 <div className="mt-3 space-y-2 text-sm">
                   <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The label remains recorded as return transport back to the warehouse.</span></div>
-                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>It is removed from outbound package and dispatch authority.</span></div>
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>Its immutable package link remains for audit, while return direction excludes it from outbound dispatch authority.</span></div>
                   <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>Inventory, customer fulfillment, and sales-channel fulfillment remain unchanged.</span></div>
                 </div>
               </section>
