@@ -983,8 +983,17 @@ function changedRecommendationEconomicFields(currentItem: any, acceptedItem: any
   ));
 }
 
+type AcceptedRecommendationHandoffSelection = {
+  recommendationId: string;
+  kind: RecommendationReviewQueueKind;
+  key: string;
+  requestedPieces?: number;
+  quantityOverrideReason?: string;
+  allocationOverrideApproved?: boolean;
+};
+
 function parseAcceptedRecommendationHandoffSelections(body: any):
-  | { selections: Array<{ recommendationId: string; kind: RecommendationReviewQueueKind; key: string }> }
+  | { selections: AcceptedRecommendationHandoffSelection[] }
   | { error: string } {
   const rawItems = Array.isArray(body?.items)
     ? body.items
@@ -1000,7 +1009,7 @@ function parseAcceptedRecommendationHandoffSelections(body: any):
   }
 
   const seen = new Set<string>();
-  const selections: Array<{ recommendationId: string; kind: RecommendationReviewQueueKind; key: string }> = [];
+  const selections: AcceptedRecommendationHandoffSelection[] = [];
   for (const rawItem of rawItems) {
     const recommendationId = typeof rawItem?.recommendationId === "string" ? rawItem.recommendationId.trim() : "";
     const kind = parseReviewQueueKind(rawItem?.kind);
@@ -1011,10 +1020,37 @@ function parseAcceptedRecommendationHandoffSelections(body: any):
       return { error: "items[].kind must be one of: skipped, held_by_policy, quality_review_required" };
     }
 
-    const key = recommendationDecisionKey(recommendationId, kind);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    selections.push({ recommendationId, kind, key });
+    // Order Builder quantity edit (optional). Shape-checks only here; the
+    // exceed-vs-baseline evidence rule is enforced by the handoff service
+    // against the immutable accepted snapshot.
+    const selection: AcceptedRecommendationHandoffSelection = {
+      recommendationId,
+      kind,
+      key: recommendationDecisionKey(recommendationId, kind),
+    };
+    if (rawItem?.requestedPieces !== undefined && rawItem?.requestedPieces !== null) {
+      const requestedPieces = rawItem.requestedPieces;
+      if (typeof requestedPieces !== "number" || !Number.isSafeInteger(requestedPieces) || requestedPieces <= 0) {
+        return { error: "items[].requestedPieces must be a positive integer" };
+      }
+      selection.requestedPieces = requestedPieces;
+    }
+    if (rawItem?.quantityOverrideReason !== undefined && rawItem?.quantityOverrideReason !== null) {
+      if (typeof rawItem.quantityOverrideReason !== "string" || rawItem.quantityOverrideReason.trim().length < 3) {
+        return { error: "items[].quantityOverrideReason must be a string of at least 3 characters" };
+      }
+      selection.quantityOverrideReason = rawItem.quantityOverrideReason.trim();
+    }
+    if (rawItem?.allocationOverrideApproved !== undefined && rawItem?.allocationOverrideApproved !== null) {
+      if (typeof rawItem.allocationOverrideApproved !== "boolean") {
+        return { error: "items[].allocationOverrideApproved must be a boolean" };
+      }
+      selection.allocationOverrideApproved = rawItem.allocationOverrideApproved;
+    }
+
+    if (seen.has(selection.key)) continue;
+    seen.add(selection.key);
+    selections.push(selection);
   }
 
   return { selections };
@@ -1558,7 +1594,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_accepted_decision", item));
             continue;
           }
-          eligible.push({ ...item, handoffItem });
+          eligible.push({ ...item, handoffItem, selection });
         }
 
         if (eligible.length === 0) {
@@ -1574,6 +1610,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           items: eligible.map((item) => {
             const acceptedItem = item.handoffItem;
             const quantity = resolveRecommendationPoQuantity(acceptedItem);
+            const selection: AcceptedRecommendationHandoffSelection = item.selection;
             return {
               acceptedDecisionId: Number(item.decision.id),
               recommendationId: item.recommendationId,
@@ -1581,6 +1618,15 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
               productId: Number(acceptedItem.productId),
               productVariantId: Number(acceptedItem.productVariantId),
               suggestedPieces: quantity.orderQtyPieces,
+              ...(selection.requestedPieces !== undefined
+                ? { requestedPieces: selection.requestedPieces }
+                : {}),
+              ...(selection.quantityOverrideReason !== undefined
+                ? { quantityOverrideReason: selection.quantityOverrideReason }
+                : {}),
+              ...(selection.allocationOverrideApproved !== undefined
+                ? { allocationOverrideApproved: selection.allocationOverrideApproved }
+                : {}),
               orderUomUnits: quantity.orderUomUnits,
               orderUomLabel: acceptedItem.orderUomLabel,
               vendorProductId: Number(acceptedItem.vendorProductId ?? acceptedItem.supplierBasis?.vendorProductId),

@@ -210,6 +210,7 @@ export interface PurchasingRecommendationRawRow {
   vendor_purchase_uom?: string | null;
   vendor_quoted_unit_cost_mills?: number | string | null;
   vendor_pieces_per_purchase_uom?: number | string | null;
+  vendor_pack_size?: number | string | null;
   vendor_moq?: number | string | null;
   vendor_quote_reference?: string | null;
   vendor_quoted_at?: string | Date | null;
@@ -323,6 +324,7 @@ export interface PurchasingRecommendationItem {
     purchaseUom: string | null;
     quotedUnitCostMills: number | null;
     piecesPerPurchaseUom: number | null;
+    packSize: number | null;
     minimumOrderPieces: number | null;
     quoteReference: string | null;
     quotedAt: string | Date | null;
@@ -1894,7 +1896,19 @@ export function generatePurchasingRecommendations(
     // stated a minimum, so the only effective floor is one piece. Invalid
     // stored values are surfaced as a blocking quality control below.
     const effectiveMinimumOrderPieces = minimumOrderPieces ?? 1;
-    const effectiveOrderIncrement = orderUomUnits;
+    // Case rounding is a rule, not a hint (REORDER-ANALYSIS-DESIGN-SPEC §12.1):
+    // whenever a case pack is known, the suggestion rounds UP to a full case
+    // regardless of the quote's pricing basis. The quoted pieces-per-purchase-
+    // UOM is the authoritative case pack; vendor_products.pack_size is the
+    // fallback for per-piece quotes whose vendor still ships in cases. With no
+    // known pack the increment stays one piece.
+    const vendorPackSize = asPositiveSafeIntegerOrNull(row.vendor_pack_size);
+    const effectiveOrderIncrement =
+      supplierQuote.piecesPerPurchaseUom !== null && supplierQuote.piecesPerPurchaseUom > 1
+        ? supplierQuote.piecesPerPurchaseUom
+        : vendorPackSize !== null && vendorPackSize > 1
+          ? vendorPackSize
+          : 1;
     const suggestedOrderPieces = rawOrderQtyPieces > 0
       ? Math.ceil(
         Math.max(rawOrderQtyPieces, effectiveMinimumOrderPieces) / effectiveOrderIncrement,
@@ -2122,6 +2136,7 @@ export function generatePurchasingRecommendations(
         purchaseUom: supplierQuote.purchaseUom,
         quotedUnitCostMills: supplierQuote.quotedUnitCostMills,
         piecesPerPurchaseUom: supplierQuote.piecesPerPurchaseUom,
+        packSize: vendorPackSize,
         minimumOrderPieces,
         quoteReference: row.vendor_quote_reference ?? null,
         quotedAt: row.vendor_quoted_at ?? null,

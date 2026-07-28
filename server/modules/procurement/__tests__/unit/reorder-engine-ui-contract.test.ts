@@ -2,11 +2,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-// UI contract for the Reorder Engine cockpit (PR 2 of the redesign).
-// Pattern follows demand-planner-ui-contract.test.ts: pin the load-bearing
-// strings so a refactor cannot silently drop a frozen server contract —
-// the deep-link params persisted into notification rows, the endpoints the
-// page consumes, the feature-flag key, and the legacy fallback route.
+// UI contract for the Reorder Engine cockpit (PR 2 read-only + PR 3 Order
+// Builder). Pattern follows demand-planner-ui-contract.test.ts: pin the
+// load-bearing strings so a refactor cannot silently drop a frozen server
+// contract — the deep-link params persisted into notification rows, the
+// endpoints the page consumes, the exact mutation set the Order Builder is
+// allowed, the decision-evidence fields, the feature-flag key, and the
+// legacy fallback route.
 
 const page = readFileSync(resolve(process.cwd(), "client/src/pages/ReorderEngine.tsx"), "utf8");
 const helpers = readFileSync(
@@ -42,16 +44,71 @@ describe("reorder engine UI contract", () => {
     expect(page).toContain("review queue");
   });
 
-  it("consumes the purchasing endpoints and only those (read-only cockpit)", () => {
+  it("consumes the purchasing read endpoints", () => {
     expect(page).toContain("/api/purchasing/kpis");
     expect(page).toContain("/api/purchasing/reorder-analysis");
-    expect(page).toContain("/api/purchasing/recommendation-runs"); // manual refresh (POST)
     expect(page).toContain("/api/purchasing/forecast-backtests"); // accuracy strip
     expect(page).toContain("/api/procurement/health/recommendation-pipeline"); // pipeline dot
-    // No ordering actions in PR 2: no decision or PO/RFQ mutations.
-    expect(page).not.toContain("/api/purchasing/recommendation-decisions");
-    expect(page).not.toContain("/api/purchasing/recommendation-accepted-queue");
-    expect(page).not.toContain("create-po");
+    // Order Builder mapping reads: authoritative review-queue kind/controls
+    // for decisions, and saved-run lines for RFQ allocation baselines.
+    expect(page).toContain("/api/purchasing/recommendation-review-queue?limit=100");
+    expect(page).toContain("recommendation-review-queue?recommendationId=");
+    expect(page).toContain('"/api/purchasing/rfq-queue"');
+  });
+
+  it("wires the Order Builder to EXACTLY the allowed mutations (PR 3)", () => {
+    // Every mutation flows through the single postPurchasingCommand seam with
+    // a literal endpoint at the call site — collect them all and pin the set.
+    const commandCalls = Array.from(page.matchAll(/postPurchasingCommand\(\s*"([^"]+)"/g)).map(
+      (match) => match[1],
+    );
+    expect(commandCalls.length).toBeGreaterThanOrEqual(4);
+    expect(new Set(commandCalls)).toEqual(
+      new Set([
+        "/api/purchasing/recommendation-runs", // manual refresh + RFQ snapshot fallback
+        "/api/purchasing/recommendation-decisions", // accepted_for_po per line
+        "/api/purchasing/recommendation-accepted-queue/create-po", // one per vendor group
+        "/api/purchasing/rfq-queue", // one idempotent batch
+      ]),
+    );
+    // …and no mutation exists outside the seam: the only literal HTTP method
+    // in the page is the seam's own POST; no other verb appears at all.
+    expect(page.match(/method: "/g)).toHaveLength(1);
+    expect(page).toContain('method: "POST"');
+    expect(page).not.toMatch(/"(?:PATCH|PUT|DELETE)"/);
+  });
+
+  it("collects the full decision-evidence and override-evidence contracts", () => {
+    // Strict accepted_for_po evidence (validateRecommendationDecisionEvidence):
+    // confirm + eligibility acknowledgment + every current control code.
+    expect(helpers).toContain('decision: "accepted_for_po"');
+    expect(helpers).toContain("confirmDecision: true");
+    expect(helpers).toContain("acknowledgeAutomationEligibilityUnchanged: true");
+    expect(helpers).toContain("reviewedControlCodes");
+    // Quantity-override evidence pairs: PO handoff (migration 177 shape) and
+    // RFQ allocation (migration 158 shape), both keyed off requestedPieces.
+    expect(helpers).toContain("requestedPieces");
+    expect(helpers).toContain("quantityOverrideReason");
+    expect(helpers).toContain("allocationOverrideApproved");
+    // Risk-proportional note: flagged lines demand >=10 chars, clean orders
+    // record the auto-note.
+    expect(helpers).toContain('"Manual order via Order Builder"');
+    // RFQ batches are idempotent from dialog-open.
+    expect(page).toContain("idempotencyKey: rfqIdempotencyKey");
+    expect(page).toContain("crypto.randomUUID()");
+  });
+
+  it("keeps the client PO-handoff batch cap in lockstep with the server schema", () => {
+    // The handoff command accepts at most 25 items; the client must fail an
+    // oversized vendor group BEFORE recording any accepted_for_po decision,
+    // or the acceptances land and the guaranteed-400 handoff strands them.
+    const handoffService = readFileSync(
+      resolve(process.cwd(), "server/modules/procurement/recommendation-po-handoff.service.ts"),
+      "utf8",
+    );
+    expect(handoffService).toContain("items: z.array(handoffItemSchema).min(1).max(25)");
+    expect(helpers).toContain("MAX_PO_HANDOFF_LINES = 25");
+    expect(page).toContain("lines.length > MAX_PO_HANDOFF_LINES");
   });
 
   it("renders engine output without recomputing planning math client-side", () => {

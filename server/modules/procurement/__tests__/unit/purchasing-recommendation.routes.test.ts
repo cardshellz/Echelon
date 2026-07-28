@@ -2102,6 +2102,74 @@ describe("purchasing recommendation routes", () => {
       ],
       skipped: [],
     });
+
+    // Order Builder quantity override (design spec §14): the edited quantity
+    // and its evidence pass through to the handoff service unchanged; the
+    // accepted snapshot's pieces remain the suggestedPieces baseline.
+    mocks.recommendationPoHandoffService.createAcceptedHandoff.mockClear();
+    const override = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/recommendation-accepted-queue/create-po",
+      {
+        items: [{
+          recommendationId: "202:2002:30",
+          kind: "held_by_policy",
+          requestedPieces: 12,
+          quantityOverrideReason: "Vendor price break at 12 pieces",
+          allocationOverrideApproved: true,
+        }],
+      },
+    );
+    expect(override.status, JSON.stringify(override.body)).toBe(201);
+    expect(mocks.recommendationPoHandoffService.createAcceptedHandoff).toHaveBeenCalledWith({
+      actorId: "admin-user",
+      items: [
+        expect.objectContaining({
+          acceptedDecisionId: 91,
+          suggestedPieces: 9,
+          requestedPieces: 12,
+          quantityOverrideReason: "Vendor price break at 12 pieces",
+          allocationOverrideApproved: true,
+        }),
+      ],
+    });
+  });
+
+  it("rejects malformed Order Builder quantity overrides before any handoff work", async () => {
+    server = await startServer(buildApp());
+    const post = (item: Record<string, unknown>) => requestJson(
+      server!.url,
+      "POST",
+      "/api/purchasing/recommendation-accepted-queue/create-po",
+      { items: [{ recommendationId: "202:2002:30", kind: "held_by_policy", ...item }] },
+    );
+
+    expect(await post({ requestedPieces: 0 })).toMatchObject({
+      status: 400,
+      body: { error: "items[].requestedPieces must be a positive integer" },
+    });
+    expect(await post({ requestedPieces: 1.5 })).toMatchObject({
+      status: 400,
+      body: { error: "items[].requestedPieces must be a positive integer" },
+    });
+    expect(await post({ requestedPieces: "12" })).toMatchObject({
+      status: 400,
+      body: { error: "items[].requestedPieces must be a positive integer" },
+    });
+    expect(await post({ requestedPieces: 12, quantityOverrideReason: "ab" })).toMatchObject({
+      status: 400,
+      body: { error: "items[].quantityOverrideReason must be a string of at least 3 characters" },
+    });
+    expect(await post({ requestedPieces: 12, quantityOverrideReason: 42 })).toMatchObject({
+      status: 400,
+      body: { error: "items[].quantityOverrideReason must be a string of at least 3 characters" },
+    });
+    expect(await post({ requestedPieces: 12, quantityOverrideReason: "valid reason", allocationOverrideApproved: "yes" })).toMatchObject({
+      status: 400,
+      body: { error: "items[].allocationOverrideApproved must be a boolean" },
+    });
+    expect(mocks.recommendationPoHandoffService.createAcceptedHandoff).not.toHaveBeenCalled();
   });
 
   it("blocks stale accepted snapshots from draft PO handoff", async () => {

@@ -534,6 +534,205 @@ describe("recommendation PO handoff service", () => {
     });
   });
 
+  // Order Builder quantity override (design spec §14 / migration 177): the
+  // accepted recommendation stays the immutable baseline; the PO line may
+  // carry an edited quantity, with 158-shaped evidence required only above
+  // the baseline.
+  it("hands off an approved quantity above the accepted baseline with full override evidence", async () => {
+    const harness = buildHarness();
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const command = baseCommand();
+    Object.assign(command.items[0], {
+      requestedPieces: 350,
+      quantityOverrideReason: "Vendor price break at 350 pieces",
+      allocationOverrideApproved: true,
+    });
+
+    const result = await service.createAcceptedHandoff(command);
+
+    expect(result.pos[0]).toMatchObject({ subtotalCents: 175, totalCents: 175 });
+    expect(harness.state.lines[0]).toMatchObject({
+      orderQty: 350,
+      unitCostMills: 50,
+      totalProductCostCents: 175,
+      lineTotalCents: 175,
+    });
+    expect(harness.state.handoffs[0]).toMatchObject({
+      acceptedDecisionId: 10,
+      quantityOverrideBaselinePieces: 300,
+      quantityOverrideRequestedPieces: 350,
+      quantityOverrideReason: "Vendor price break at 350 pieces",
+      quantityOverrideApprovedBy: "admin-user",
+      quantityOverrideApprovedAt: NOW,
+    });
+    expect(result.handedOff[0]).toMatchObject({ orderedPieces: 350 });
+    expect(result.decisions[0].recommendationSnapshot).toMatchObject({
+      poHandoff: {
+        acceptedPieces: 300,
+        orderedPieces: 350,
+        quantityOverride: {
+          baselinePieces: 300,
+          requestedPieces: 350,
+          reason: "Vendor price break at 350 pieces",
+          approvedBy: "admin-user",
+          approvedAt: NOW.toISOString(),
+        },
+      },
+    });
+  });
+
+  it("hands off a reduced quantity without override evidence", async () => {
+    const harness = buildHarness();
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const command = baseCommand();
+    Object.assign(command.items[0], { requestedPieces: 200 });
+
+    const result = await service.createAcceptedHandoff(command);
+
+    expect(result.pos[0]).toMatchObject({ subtotalCents: 100, totalCents: 100 });
+    expect(harness.state.lines[0]).toMatchObject({
+      orderQty: 200,
+      totalProductCostCents: 100,
+      lineTotalCents: 100,
+    });
+    expect(harness.state.handoffs[0]).toMatchObject({
+      quantityOverrideBaselinePieces: null,
+      quantityOverrideRequestedPieces: null,
+      quantityOverrideReason: null,
+      quantityOverrideApprovedBy: null,
+      quantityOverrideApprovedAt: null,
+    });
+    expect(result.handedOff[0]).toMatchObject({ orderedPieces: 200 });
+    expect(result.decisions[0].recommendationSnapshot).toMatchObject({
+      poHandoff: { acceptedPieces: 300, orderedPieces: 200, quantityOverride: null },
+    });
+  });
+
+  it("rejects an excess quantity without complete override evidence before any transaction", async () => {
+    const harness = buildHarness();
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    const missingEverything = baseCommand();
+    Object.assign(missingEverything.items[0], { requestedPieces: 350 });
+    await expect(service.createAcceptedHandoff(missingEverything)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_RECOMMENDATION_HANDOFF",
+    } satisfies Partial<RecommendationPoHandoffError>);
+
+    const unapproved = baseCommand();
+    Object.assign(unapproved.items[0], {
+      requestedPieces: 350,
+      quantityOverrideReason: "Vendor price break at 350 pieces",
+      allocationOverrideApproved: false,
+    });
+    await expect(service.createAcceptedHandoff(unapproved)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_RECOMMENDATION_HANDOFF",
+    } satisfies Partial<RecommendationPoHandoffError>);
+
+    expect(harness.transactionCalls).toBe(0);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
+  it("rejects override evidence when the requested quantity does not exceed the baseline", async () => {
+    const harness = buildHarness();
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const command = baseCommand();
+    Object.assign(command.items[0], {
+      requestedPieces: 200,
+      quantityOverrideReason: "Not actually an override",
+      allocationOverrideApproved: true,
+    });
+
+    await expect(service.createAcceptedHandoff(command)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_RECOMMENDATION_HANDOFF",
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.transactionCalls).toBe(0);
+  });
+
+  it("rejects a requested quantity below the supplier minimum order", async () => {
+    const state = baseState();
+    state.vendorProducts[0].moq = 250;
+    ((state.decisions[0].recommendationSnapshot as any).item.supplierBasis as any).minimumOrderPieces = 250;
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const command = baseCommand();
+    Object.assign(command.items[0], { requestedPieces: 200 });
+
+    await expect(service.createAcceptedHandoff(command)).rejects.toMatchObject({
+      statusCode: 409,
+      code: "RECOMMENDATION_VENDOR_MOQ_NOT_MET",
+      context: { vendorProductId: 701, suggestedPieces: 200, minimumOrderPieces: 250 },
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
+  it("enforces the vendor purchase-UOM multiple on overridden quantities", async () => {
+    const buildPerUomState = () => {
+      const state = baseState();
+      const snapshotItem = (state.decisions[0].recommendationSnapshot as any).item;
+      Object.assign(snapshotItem, {
+        estimatedCostMills: 125,
+        estimatedCostCents: 1,
+        pricingBasis: "per_purchase_uom",
+        purchaseUom: "case",
+        quotedUnitCostMills: 12_500,
+        piecesPerPurchaseUom: 100,
+      });
+      Object.assign(state.vendorProducts[0], {
+        unitCostMills: 125,
+        unitCostCents: 1,
+        pricingBasis: "per_purchase_uom",
+        purchaseUom: "case",
+        quotedUnitCostMills: 12_500,
+        piecesPerPurchaseUom: 100,
+      });
+      return state;
+    };
+
+    const brokenHarness = buildHarness(buildPerUomState());
+    const brokenService = createRecommendationPoHandoffService(brokenHarness.repository);
+    const brokenCommand = baseCommand();
+    Object.assign(brokenCommand.items[0], {
+      requestedPieces: 350,
+      quantityOverrideReason: "Half-case attempted",
+      allocationOverrideApproved: true,
+    });
+    await expect(brokenService.createAcceptedHandoff(brokenCommand)).rejects.toMatchObject({
+      statusCode: 409,
+      code: "RECOMMENDATION_PURCHASE_UOM_QUANTITY_MISMATCH",
+      context: { suggestedPieces: 350, piecesPerPurchaseUom: 100 },
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(brokenHarness.state.pos).toHaveLength(0);
+
+    const harness = buildHarness(buildPerUomState());
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const command = baseCommand();
+    Object.assign(command.items[0], {
+      requestedPieces: 400,
+      quantityOverrideReason: "Round up to four full cases",
+      allocationOverrideApproved: true,
+    });
+
+    const result = await service.createAcceptedHandoff(command);
+
+    expect(result.pos[0]).toMatchObject({ subtotalCents: 500, totalCents: 500 });
+    expect(harness.state.lines[0]).toMatchObject({
+      orderQty: 400,
+      purchaseUom: "case",
+      purchaseUomQuantity: 4,
+      piecesPerPurchaseUom: 100,
+      unitCostMills: 125,
+      totalProductCostCents: 500,
+    });
+    expect(harness.state.handoffs[0]).toMatchObject({
+      quantityOverrideBaselinePieces: 300,
+      quantityOverrideRequestedPieces: 400,
+      quantityOverrideApprovedBy: "admin-user",
+    });
+  });
+
   it("creates an automatic PO from a current zero-dollar supplier quote", async () => {
     const state = baseState();
     Object.assign(state.vendorProducts[0], {
@@ -898,6 +1097,11 @@ describe("recommendation PO handoff service", () => {
       kind: "held_by_policy",
       createdBy: "admin-user",
       createdAt: NOW,
+      quantityOverrideBaselinePieces: null,
+      quantityOverrideRequestedPieces: null,
+      quantityOverrideReason: null,
+      quantityOverrideApprovedBy: null,
+      quantityOverrideApprovedAt: null,
     });
     const harness = buildHarness(state);
     const service = createRecommendationPoHandoffService(harness.repository);
