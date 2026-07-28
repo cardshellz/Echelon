@@ -733,6 +733,152 @@ describe("recommendation PO handoff service", () => {
     });
   });
 
+  // Healthy top-off (migration 178): a healthy SKU's accepted baseline is
+  // ZERO pieces. It is orderable only at an explicit requested quantity, which
+  // always exceeds the baseline and therefore always carries the full
+  // override-evidence pair; the supplier MOQ is enforced against the
+  // requested quantity because the baseline itself suggests nothing.
+  const zeroBaselineState = () => {
+    const state = baseState();
+    Object.assign((state.decisions[0].recommendationSnapshot as any).item, {
+      suggestedOrderQty: 0,
+      suggestedOrderPieces: 0,
+    });
+    return state;
+  };
+  const zeroBaselineCommand = () => {
+    const command = baseCommand();
+    Object.assign(command.items[0], { suggestedPieces: 0 });
+    return command;
+  };
+
+  it("hands off a healthy zero-baseline top-off with override evidence from baseline zero", async () => {
+    const harness = buildHarness(zeroBaselineState());
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const command = zeroBaselineCommand();
+    Object.assign(command.items[0], {
+      requestedPieces: 240,
+      quantityOverrideReason: "Top off to reach vendor free-freight threshold",
+      allocationOverrideApproved: true,
+    });
+
+    const result = await service.createAcceptedHandoff(command);
+
+    expect(result.pos[0]).toMatchObject({ subtotalCents: 120, totalCents: 120 });
+    expect(harness.state.lines[0]).toMatchObject({
+      orderQty: 240,
+      unitCostMills: 50,
+      totalProductCostCents: 120,
+      lineTotalCents: 120,
+    });
+    expect(harness.state.handoffs[0]).toMatchObject({
+      acceptedDecisionId: 10,
+      quantityOverrideBaselinePieces: 0,
+      quantityOverrideRequestedPieces: 240,
+      quantityOverrideReason: "Top off to reach vendor free-freight threshold",
+      quantityOverrideApprovedBy: "admin-user",
+      quantityOverrideApprovedAt: NOW,
+    });
+    expect(result.handedOff[0]).toMatchObject({ orderedPieces: 240 });
+    expect(result.decisions[0].recommendationSnapshot).toMatchObject({
+      poHandoff: {
+        acceptedPieces: 0,
+        orderedPieces: 240,
+        quantityOverride: {
+          baselinePieces: 0,
+          requestedPieces: 240,
+          reason: "Top off to reach vendor free-freight threshold",
+          approvedBy: "admin-user",
+          approvedAt: NOW.toISOString(),
+        },
+      },
+    });
+  });
+
+  it("rejects a zero-baseline handoff without an explicit requested quantity", async () => {
+    const harness = buildHarness(zeroBaselineState());
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    await expect(service.createAcceptedHandoff(zeroBaselineCommand())).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_RECOMMENDATION_HANDOFF",
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.transactionCalls).toBe(0);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
+  it("rejects a zero-baseline top-off without complete override evidence", async () => {
+    const harness = buildHarness(zeroBaselineState());
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const command = zeroBaselineCommand();
+    Object.assign(command.items[0], { requestedPieces: 240 });
+
+    await expect(service.createAcceptedHandoff(command)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_RECOMMENDATION_HANDOFF",
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.transactionCalls).toBe(0);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
+  it("enforces the supplier minimum order against the requested top-off quantity", async () => {
+    const buildMoqState = () => {
+      const state = zeroBaselineState();
+      state.vendorProducts[0].moq = 250;
+      ((state.decisions[0].recommendationSnapshot as any).item.supplierBasis as any).minimumOrderPieces = 250;
+      return state;
+    };
+    const belowMoqHarness = buildHarness(buildMoqState());
+    const belowMoqService = createRecommendationPoHandoffService(belowMoqHarness.repository);
+    const belowMoq = zeroBaselineCommand();
+    Object.assign(belowMoq.items[0], {
+      requestedPieces: 240,
+      quantityOverrideReason: "Top off below the vendor minimum",
+      allocationOverrideApproved: true,
+    });
+    await expect(belowMoqService.createAcceptedHandoff(belowMoq)).rejects.toMatchObject({
+      statusCode: 409,
+      code: "RECOMMENDATION_VENDOR_MOQ_NOT_MET",
+      context: { vendorProductId: 701, suggestedPieces: 240, minimumOrderPieces: 250 },
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(belowMoqHarness.state.pos).toHaveLength(0);
+
+    const harness = buildHarness(buildMoqState());
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const atMoq = zeroBaselineCommand();
+    Object.assign(atMoq.items[0], {
+      requestedPieces: 250,
+      quantityOverrideReason: "Top off exactly to the vendor minimum",
+      allocationOverrideApproved: true,
+    });
+
+    const result = await service.createAcceptedHandoff(atMoq);
+
+    expect(harness.state.lines[0]).toMatchObject({ orderQty: 250 });
+    expect(harness.state.handoffs[0]).toMatchObject({
+      quantityOverrideBaselinePieces: 0,
+      quantityOverrideRequestedPieces: 250,
+    });
+    expect(result.handedOff[0]).toMatchObject({ orderedPieces: 250 });
+  });
+
+  it("keeps the automatic writer closed to zero-suggestion items", async () => {
+    const harness = buildHarness(zeroBaselineState());
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const command = automaticCommand();
+    Object.assign(command.items[0], {
+      suggestedOrderQty: 0,
+      suggestedOrderPieces: 0,
+    });
+
+    await expect(service.createAutomaticHandoff(command)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_AUTOMATIC_RECOMMENDATION_HANDOFF",
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.transactionCalls).toBe(0);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
   it("creates an automatic PO from a current zero-dollar supplier quote", async () => {
     const state = baseState();
     Object.assign(state.vendorProducts[0], {
@@ -1382,6 +1528,78 @@ describe("recommendation PO handoff service", () => {
     } satisfies Partial<RecommendationPoHandoffError>);
     expect(harness.lockCalls).toHaveLength(0);
     expect(harness.state.decisions).toHaveLength(1);
+  });
+
+  // Healthy top-off acceptance: a zero-suggestion item with a COMPLETE
+  // supplier basis is acceptable (its MOQ is deferred to the handoff's
+  // requested quantity); the same item without a vendor stays fail-closed.
+  it("accepts a healthy zero-suggestion recommendation with a complete supplier basis", async () => {
+    const harness = buildHarness();
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const healthyItem = {
+      productId: 101,
+      productVariantId: 1001,
+      preferredVendorId: 7,
+      vendorProductId: 701,
+      suggestedOrderQty: 0,
+      suggestedOrderPieces: 0,
+      orderUomUnits: 1,
+      estimatedCostMills: 50,
+      estimatedCostCents: 1,
+      pricingBasis: "per_piece",
+      purchaseUom: null,
+      quotedUnitCostMills: 50,
+      piecesPerPurchaseUom: null,
+      quoteReference: "QUOTE-701",
+      quotedAt: "2026-07-01T12:00:00.000Z",
+      quoteValidUntil: "2026-08-31",
+      supplierBasis: { minimumOrderPieces: 250 },
+      sku: "SKU-101",
+    };
+
+    const created = await service.recordDecision({
+      recommendationId: "101:1001:30",
+      kind: "skipped",
+      decision: "accepted_for_po",
+      status: "active",
+      decisionReason: "not_actionable_status",
+      note: "Top off this healthy SKU to reach the vendor MOQ.",
+      source: "operator",
+      productId: 101,
+      productVariantId: 1001,
+      vendorId: 7,
+      sku: "SKU-101",
+      productName: "Product 101",
+      candidateScore: null,
+      candidateBand: null,
+      recommendationSnapshot: { item: healthyItem },
+      decidedBy: "admin-user",
+    });
+
+    expect(created).toMatchObject({ id: 11, decision: "accepted_for_po", kind: "skipped" });
+
+    const noVendor = { ...healthyItem, preferredVendorId: undefined, vendorProductId: undefined };
+    await expect(service.recordDecision({
+      recommendationId: "101:1001:30",
+      kind: "skipped",
+      decision: "accepted_for_po",
+      status: "active",
+      decisionReason: "not_actionable_status",
+      note: "Healthy but vendor-less; must fail closed.",
+      source: "operator",
+      productId: 101,
+      productVariantId: 1001,
+      vendorId: null,
+      sku: "SKU-101",
+      productName: "Product 101",
+      candidateScore: null,
+      candidateBand: null,
+      recommendationSnapshot: { item: noVendor },
+      decidedBy: "admin-user",
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      code: "ACCEPTED_RECOMMENDATION_ECONOMIC_BASIS_MISSING",
+    } satisfies Partial<RecommendationPoHandoffError>);
   });
 
   it("records system audit identity without writing a nonexistent user foreign key", async () => {

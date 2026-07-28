@@ -971,7 +971,10 @@ function hasCompleteExplicitRecommendationQuote(item: any): boolean {
     Number.isSafeInteger(Number(basis.piecesPerPurchaseUom)) &&
     Number(basis.piecesPerPurchaseUom) > 0 &&
     Number.isSafeInteger(Number(basis.suggestedOrderPieces)) &&
-    Number(basis.suggestedOrderPieces) > 0 &&
+    // Zero-baseline (healthy top-off) rows are trivially case-aligned; the
+    // requested top-off quantity is separately case-checked by the handoff's
+    // normalizeRecommendationSupplierQuote against the live quote.
+    Number(basis.suggestedOrderPieces) >= 0 &&
     Number(basis.suggestedOrderPieces) % Number(basis.piecesPerPurchaseUom) === 0;
 }
 
@@ -1571,12 +1574,38 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_variant", item));
             continue;
           }
-          if (!Number.isFinite(Number(handoffItem.suggestedOrderQty)) || Number(handoffItem.suggestedOrderQty) <= 0) {
+          // Healthy top-off: an accepted zero-suggestion line is orderable
+          // ONLY at an explicit requested quantity (which, exceeding the zero
+          // baseline, carries the full override-evidence pair). Without a
+          // requested quantity there is nothing to order — fail closed.
+          const zeroBaseline = Number(handoffItem.suggestedOrderQty) === 0 &&
+            Number(handoffItem.suggestedOrderPieces) === 0;
+          if (zeroBaseline && selection.requestedPieces === undefined) {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(
+              selection,
+              "zero_baseline_requested_pieces_required",
+              item,
+            ));
+            continue;
+          }
+          if (zeroBaseline && (item.reason?.code === "excluded" || item.reason?.code === "no_vendor")) {
+            // Mirror of the decision-time analyzability gate: if the line
+            // became excluded (or lost its vendor) after acceptance, the
+            // zero-baseline top-off stays fail-closed at handoff too.
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(
+              selection,
+              "zero_baseline_not_analyzable",
+              item,
+              { reason: item.reason?.code },
+            ));
+            continue;
+          }
+          if (!zeroBaseline && (!Number.isFinite(Number(handoffItem.suggestedOrderQty)) || Number(handoffItem.suggestedOrderQty) <= 0)) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "invalid_qty", item));
             continue;
           }
           try {
-            resolveRecommendationPoQuantity(handoffItem);
+            resolveRecommendationPoQuantity(handoffItem, { allowZeroBaseline: zeroBaseline });
           } catch {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "invalid_piece_qty", item));
             continue;
@@ -1609,7 +1638,10 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           actorId: userId,
           items: eligible.map((item) => {
             const acceptedItem = item.handoffItem;
-            const quantity = resolveRecommendationPoQuantity(acceptedItem);
+            const quantity = resolveRecommendationPoQuantity(acceptedItem, {
+              allowZeroBaseline: Number(acceptedItem.suggestedOrderQty) === 0 &&
+                Number(acceptedItem.suggestedOrderPieces) === 0,
+            });
             const selection: AcceptedRecommendationHandoffSelection = item.selection;
             return {
               acceptedDecisionId: Number(item.decision.id),
@@ -1711,6 +1743,29 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       });
       if (evidenceError) {
         return res.status(400).json({ error: evidenceError });
+      }
+      // Healthy top-off acceptance (zero engine suggestion) is only meaningful
+      // for an ANALYZABLE line: the engine produced it with a preferred vendor
+      // and it is not excluded. Excluded / vendor-less rows share the same
+      // "skipped" review-queue kind but stay fail-closed here — accepting a
+      // zero-quantity line for them would create an order the engine never
+      // analyzed. (The handoff service independently re-validates the vendor,
+      // quote, and quantity basis before any PO is written.)
+      if (
+        decision === "accepted_for_po" &&
+        item.suggestedOrderPieces === 0 &&
+        (item.skippedReason === "excluded" || item.skippedReason === "no_vendor" || !item.preferredVendorId)
+      ) {
+        return res.status(409).json({
+          error: "A zero-quantity recommendation can only be accepted for a top-off when it is analyzable (not excluded and preferred-vendor assigned)",
+          code: "ZERO_BASELINE_ACCEPTANCE_NOT_ANALYZABLE",
+          context: {
+            recommendationId: item.recommendationId,
+            kind: item.kind,
+            skippedReason: item.skippedReason,
+            preferredVendorId: item.preferredVendorId,
+          },
+        });
       }
 
       const userId = (req as any).user?.id ?? req.session?.user?.id ?? "SYSTEM";
