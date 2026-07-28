@@ -179,7 +179,7 @@ export interface SaveDraftResponse {
 }
 
 export interface ManualRateQuoteResponse {
-  outcome: "quoted" | "no_rate" | "rate_book_mismatch";
+  outcome: "quoted" | "blocked" | "no_rate" | "rate_book_mismatch";
   testedAt: string;
   rateOwner: "echelon";
   destination: {
@@ -230,6 +230,14 @@ export interface ManualRateQuoteResponse {
       amountCents: number;
       skus: string[];
     }>;
+  }>;
+  serviceLevelExclusions: Array<{
+    serviceLevelId: number;
+    serviceLevelCode: string;
+    displayName: string;
+    code: "BLOCKED" | "INVALID_INPUT" | "INVALID_POLICY" | "NO_RATE";
+    message: string;
+    ruleId: number | null;
   }>;
   warnings: string[];
 }

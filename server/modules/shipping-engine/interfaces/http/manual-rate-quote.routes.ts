@@ -46,7 +46,7 @@ export const manualRateQuoteRequestSchema = z.object({
 });
 
 const manualRateQuoteResponseSchema = z.object({
-  outcome: z.enum(["quoted", "no_rate", "rate_book_mismatch"]),
+  outcome: z.enum(["quoted", "blocked", "no_rate", "rate_book_mismatch"]),
   testedAt: z.string().datetime(),
   rateOwner: z.literal("echelon"),
   destination: z.object({
@@ -98,6 +98,14 @@ const manualRateQuoteResponseSchema = z.object({
       amountCents: z.number().int().min(0),
       skus: z.array(z.string()),
     })),
+  })),
+  serviceLevelExclusions: z.array(z.object({
+    serviceLevelId: z.number().int().positive(),
+    serviceLevelCode: z.string(),
+    displayName: z.string(),
+    code: z.enum(["BLOCKED", "INVALID_INPUT", "INVALID_POLICY", "NO_RATE"]),
+    message: z.string(),
+    ruleId: z.number().int().positive().nullable(),
   })),
   warnings: z.array(z.string()),
 });

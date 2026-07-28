@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  Ban,
+  Check,
   CheckCircle2,
+  ChevronsUpDown,
   Loader2,
   Plus,
   Scale,
@@ -11,6 +14,14 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import {
   Dialog,
   DialogContent,
@@ -21,6 +32,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -37,9 +49,16 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { useDebounce } from "@/hooks/use-debounce";
+import { cn } from "@/lib/utils";
 import { US_POSTAL_REGIONS } from "../rate-table-model";
 import {
+  buildCatalogSkuSearchUrl,
+  normalizeCatalogSkuSearchResults,
+} from "./rate-test-sku-search";
+import {
   assignmentLabel,
+  getJson,
   postJson,
   type ManualRateQuoteResponse,
   type ProgramOverview,
@@ -339,16 +358,15 @@ export function RateTestDialog({
                 <span>Quantity</span>
                 <span className="sr-only">Actions</span>
               </div>
-              {cartLines.map((line) => (
+              {cartLines.map((line, index) => (
                 <div
                   key={line.id}
                   className="grid grid-cols-[minmax(0,1fr)_7rem_2.5rem] items-center gap-2"
                 >
-                  <Input
-                    aria-label="Catalog SKU"
+                  <CatalogSkuTypeahead
+                    ariaLabel={`Catalog SKU for line ${index + 1}`}
                     value={line.sku}
-                    onChange={(event) => updateCartLine(line.id, "sku", event.target.value)}
-                    placeholder="Exact catalog SKU"
+                    onValueChange={(value) => updateCartLine(line.id, "sku", value)}
                   />
                   <Input
                     aria-label={`Quantity for ${line.sku || "catalog line"}`}
@@ -421,25 +439,133 @@ export function RateTestDialog({
   );
 }
 
+function CatalogSkuTypeahead({
+  ariaLabel,
+  value,
+  onValueChange,
+}: {
+  ariaLabel: string;
+  value: string;
+  onValueChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState(value);
+  const debouncedSearch = useDebounce(search, 250);
+  const searchUrl = buildCatalogSkuSearchUrl(debouncedSearch);
+  const optionsQuery = useQuery({
+    queryKey: ["shipping-rate-test-catalog-skus", searchUrl],
+    queryFn: async () => normalizeCatalogSkuSearchResults(await getJson<unknown>(searchUrl!)),
+    enabled: open && searchUrl !== null,
+    staleTime: 30_000,
+  });
+
+  useEffect(() => {
+    if (!open) setSearch(value);
+  }, [open, value]);
+
+  const options = optionsQuery.data ?? [];
+  const emptyMessage = search.trim().length < 2
+    ? "Type at least 2 characters."
+    : optionsQuery.isError
+      ? "Catalog search is unavailable."
+      : "No active catalog SKUs found.";
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (nextOpen) setSearch(value);
+      }}
+    >
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          aria-label={ariaLabel}
+          className="h-10 w-full justify-between px-3 font-normal"
+        >
+          <span className={cn("truncate", value ? "font-mono text-sm" : "text-muted-foreground")}>
+            {value || "Search SKU or variant"}
+          </span>
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+        <Command shouldFilter={false}>
+          <CommandInput
+            value={search}
+            onValueChange={setSearch}
+            placeholder="Search SKU or variant name..."
+            aria-label={`${ariaLabel} search`}
+          />
+          <CommandList>
+            {optionsQuery.isFetching ? (
+              <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Searching catalog
+              </div>
+            ) : (
+              <>
+                <CommandEmpty>{emptyMessage}</CommandEmpty>
+                <CommandGroup>
+                  {options.map((option) => (
+                    <CommandItem
+                      key={option.productVariantId}
+                      value={`${option.sku}:${option.productVariantId}`}
+                      onSelect={() => {
+                        onValueChange(option.sku);
+                        setSearch(option.sku);
+                        setOpen(false);
+                      }}
+                    >
+                      <Check className={cn(
+                        "mr-2 h-4 w-4 shrink-0",
+                        value === option.sku ? "opacity-100" : "opacity-0",
+                      )} />
+                      <div className="min-w-0">
+                        <div className="truncate font-mono text-sm">{option.sku}</div>
+                        <div className="truncate text-xs text-muted-foreground">{option.name}</div>
+                      </div>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              </>
+            )}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function RateTestResult({ result }: { result: ManualRateQuoteResponse }) {
   const quoted = result.outcome === "quoted";
+  const blocked = result.outcome === "blocked";
+  const title = quoted
+    ? "Live rate found"
+    : blocked
+      ? "Shipment blocked"
+      : result.outcome === "rate_book_mismatch"
+        ? "A different program owns this route"
+        : "No live rate found";
   return (
-    <div className={quoted
-      ? "rounded-md border border-emerald-300 bg-emerald-50/60 p-3"
-      : "rounded-md border border-amber-300 bg-amber-50/60 p-3"}
-    >
+    <div className={cn(
+      "rounded-md border p-3",
+      quoted && "border-emerald-300 bg-emerald-50/60",
+      blocked && "border-red-300 bg-red-50/60",
+      !quoted && !blocked && "border-amber-300 bg-amber-50/60",
+    )}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           {quoted
             ? <CheckCircle2 className="h-4 w-4 text-emerald-700" />
-            : <AlertTriangle className="h-4 w-4 text-amber-700" />}
-          <span className="text-sm font-medium">
-            {result.outcome === "quoted"
-              ? "Live rate found"
-              : result.outcome === "rate_book_mismatch"
-                ? "A different program owns this route"
-                : "No live rate found"}
-          </span>
+            : blocked
+              ? <Ban className="h-4 w-4 text-red-700" />
+              : <AlertTriangle className="h-4 w-4 text-amber-700" />}
+          <span className="text-sm font-medium">{title}</span>
         </div>
         <Badge variant="outline">
           {result.destination.region} {result.destination.postalCode}
@@ -467,6 +593,20 @@ function RateTestResult({ result }: { result: ManualRateQuoteResponse }) {
           </div>
         )}
       </div>
+
+      {result.serviceLevelExclusions.length > 0 && (
+        <div className={cn(
+          "mt-3 space-y-2 rounded-md border bg-background/80 p-2.5 text-xs",
+          blocked ? "border-red-200 text-red-900" : "border-amber-200 text-amber-900",
+        )}>
+          {result.serviceLevelExclusions.map((exclusion) => (
+            <div key={`${exclusion.serviceLevelId}-${exclusion.code}`} className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline">{exclusion.displayName}</Badge>
+              <span>{exclusion.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {result.quotes.length > 0 && (
         <div className="mt-3 overflow-hidden rounded-md border bg-background">

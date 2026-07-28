@@ -35,6 +35,7 @@ import {
 
 export type ManualRateQuoteOutcome =
   | "quoted"
+  | "blocked"
   | "no_rate"
   | "rate_book_mismatch";
 
@@ -85,6 +86,7 @@ export interface ManualRateQuoteResult {
   rateBook: RateQuoteResult["rateBook"];
   zone: string | null;
   quotes: RateQuoteLine[];
+  serviceLevelExclusions: NonNullable<RateQuoteResult["serviceLevelExclusions"]>;
   warnings: string[];
 }
 
@@ -187,12 +189,15 @@ export async function runManualRateQuote(
       });
 
   const warnings = [...parcelWarnings, ...quote.warnings];
+  const serviceLevelExclusions = quote.serviceLevelExclusions ?? [];
   let outcome: ManualRateQuoteOutcome;
   if (quote.rateBook !== null && quote.rateBook.id !== input.expectedRateBookId) {
     outcome = "rate_book_mismatch";
     warnings.push(
       `Runtime assignment selected rate book ${quote.rateBook.id}, not expected rate book ${input.expectedRateBookId}.`,
     );
+  } else if (quote.quotes.length === 0 && serviceLevelExclusions.some((item) => item.code === "BLOCKED")) {
+    outcome = "blocked";
   } else if (quote.rateBook === null || quote.quotes.length === 0) {
     outcome = "no_rate";
   } else {
@@ -208,6 +213,7 @@ export async function runManualRateQuote(
     rateBook: quote.rateBook,
     zone: quote.zone,
     quotes: quote.quotes,
+    serviceLevelExclusions,
     warnings,
   };
 }

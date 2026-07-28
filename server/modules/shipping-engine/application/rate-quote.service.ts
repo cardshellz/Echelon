@@ -27,6 +27,7 @@ import {
 } from "../domain/rate-selection";
 import {
   evaluateProductRatePolicy,
+  type ProductRatePolicyResult,
   type ProductRateTraceStep,
 } from "../domain/product-rate-policy";
 import type { ShipmentLineInput } from "../domain/shipment";
@@ -103,11 +104,28 @@ export interface RateQuoteLine {
   calculationTrace: ProductRateTraceStep[];
 }
 
+type ProductRatePolicyFailure = Extract<ProductRatePolicyResult, { ok: false }>;
+
+export interface RateQuoteServiceLevelExclusion {
+  serviceLevelId: number;
+  serviceLevelCode: string;
+  displayName: string;
+  code: ProductRatePolicyFailure["code"];
+  message: string;
+  ruleId: number | null;
+}
+
 export interface RateQuoteResult {
   rateBook: { id: number; code: string } | null;
   zone: string | null;
   quotes: RateQuoteLine[];
   warnings: string[];
+  /**
+   * Structured product-policy decisions that intentionally excluded an
+   * otherwise eligible service level. Optional for backward-compatible
+   * provider adapters; the canonical local engine always populates it.
+   */
+  serviceLevelExclusions?: RateQuoteServiceLevelExclusion[];
 }
 
 export async function quoteShipmentRates(
@@ -116,28 +134,29 @@ export async function quoteShipmentRates(
 ): Promise<RateQuoteResult> {
   const quotedAt = opts.quotedAt ?? new Date();
   const warnings: string[] = [];
+  const serviceLevelExclusions: RateQuoteServiceLevelExclusion[] = [];
 
   const destCountry = request.destCountry.trim().toUpperCase();
   const destRegion = request.destRegion?.trim().toUpperCase() || null;
   const destPostal = request.destPostal.trim().toUpperCase();
   if (!/^[A-Z]{2}$/.test(destCountry)) {
     warnings.push(`destination country ${JSON.stringify(request.destCountry)} is not a 2-letter ISO code`);
-    return { rateBook: null, zone: null, quotes: [], warnings };
+    return { rateBook: null, zone: null, quotes: [], warnings, serviceLevelExclusions };
   }
   if (destRegion === null || !/^[A-Z]{2}$/.test(destRegion)) {
     warnings.push("destination state or region is required to select a rate table");
-    return { rateBook: null, zone: null, quotes: [], warnings };
+    return { rateBook: null, zone: null, quotes: [], warnings, serviceLevelExclusions };
   }
   if (request.parcels.length === 0 && !request.freight) {
     warnings.push("no shipment measure to rate");
-    return { rateBook: null, zone: null, quotes: [], warnings };
+    return { rateBook: null, zone: null, quotes: [], warnings, serviceLevelExclusions };
   }
   if (
     request.freight
     && (!Number.isInteger(request.freight.palletCount) || request.freight.palletCount <= 0)
   ) {
     warnings.push("freight pallet count must be a positive whole number");
-    return { rateBook: null, zone: null, quotes: [], warnings };
+    return { rateBook: null, zone: null, quotes: [], warnings, serviceLevelExclusions };
   }
   if (
     request.freight?.totalWeightGrams !== null
@@ -148,7 +167,7 @@ export async function quoteShipmentRates(
     )
   ) {
     warnings.push("freight total weight must be zero or greater");
-    return { rateBook: null, zone: null, quotes: [], warnings };
+    return { rateBook: null, zone: null, quotes: [], warnings, serviceLevelExclusions };
   }
 
   const rateBook = await resolveRateBook(request, warnings);
@@ -157,7 +176,7 @@ export async function quoteShipmentRates(
       request, destCountry, destPostal, rateBook: null, zone: null,
       quotes: [], quotedAt, warnings, opts,
     });
-    return { rateBook: null, zone: null, quotes: [], warnings };
+    return { rateBook: null, zone: null, quotes: [], warnings, serviceLevelExclusions };
   }
 
   // Zones remain useful for transit observability and later carrier-method
@@ -191,7 +210,7 @@ export async function quoteShipmentRates(
     )
   ) {
     warnings.push("rate selection weight must be a positive whole number no greater than parcel weight");
-    return { rateBook, zone, quotes: [], warnings };
+    return { rateBook, zone, quotes: [], warnings, serviceLevelExclusions };
   }
   const shipmentWeightGrams = request.freight?.totalWeightGrams
     ?? rateSelectionWeightGrams
@@ -246,6 +265,14 @@ export async function quoteShipmentRates(
       });
       calculationTrace = policyResult.trace;
       if (!policyResult.ok) {
+        serviceLevelExclusions.push({
+          serviceLevelId: quote.serviceLevelId,
+          serviceLevelCode: quote.serviceLevelCode,
+          displayName: quote.displayName,
+          code: policyResult.code,
+          message: policyResult.message,
+          ruleId: policyResult.ruleId,
+        });
         warnings.push(`${quote.serviceLevelCode}: [${policyResult.code}] ${policyResult.message}`);
         continue;
       }
@@ -290,6 +317,7 @@ export async function quoteShipmentRates(
     zone,
     quotes,
     warnings,
+    serviceLevelExclusions,
   };
 }
 
