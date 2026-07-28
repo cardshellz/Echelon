@@ -612,3 +612,487 @@ export function skippedReasonLabel(reason: string | null | undefined): string {
   if (!reason) return "Skipped";
   return SKIP_REASON_LABELS[reason] ?? reason.replace(/_/g, " ");
 }
+
+// ---------------------------------------------------------------------------
+// Order Builder (PR 3) — selection state, case rounding, evidence assembly.
+//
+// All functions are pure and never mutate inputs. Quantities are integer
+// pieces; money stays in integer cents/mills (no floating point). Every
+// server-facing rule mirrored here (case increment, override evidence,
+// decision-note minimums) is display-side enforcement only — the server
+// re-validates and stays authoritative.
+// ---------------------------------------------------------------------------
+
+/** Per-line Order Builder state, keyed by recommendationId. */
+export interface OrderLineState {
+  /** Operator-edited pieces (integer >= 0; 0 = skip this line at submit). */
+  pieces: number;
+  /** Reason typed for exceeding/changing the baseline; may be blank until required. */
+  exceedReason: string;
+}
+
+export type OrderSelection = ReadonlyMap<string, OrderLineState>;
+
+/**
+ * Display mirror of the engine's effective order increment
+ * (purchasing-recommendation.engine.ts, spec §12.1): the quoted
+ * pieces-per-purchase-UOM is the case pack; vendor pack_size is the fallback
+ * for per-piece quotes; otherwise a single piece. The engine already rounds
+ * `suggestedOrderPieces` with this rule — the builder only snaps EDITS.
+ */
+export function orderIncrementPieces(basis: {
+  piecesPerPurchaseUom: number | null;
+  packSize?: number | null;
+}): number {
+  if (basis.piecesPerPurchaseUom !== null && basis.piecesPerPurchaseUom > 1) {
+    return basis.piecesPerPurchaseUom;
+  }
+  const packSize = basis.packSize ?? null;
+  if (packSize !== null && packSize > 1) return packSize;
+  return 1;
+}
+
+/**
+ * Case snap on blur: 0 stays 0 ("skip this line"); anything positive rounds
+ * UP to the next full case (design spec §12.1 — full-case rounding is a rule,
+ * not a hint). Invalid/negative input collapses to 0.
+ */
+export function snapPiecesUpToCase(pieces: number, incrementPieces: number): number {
+  if (!Number.isFinite(pieces) || pieces <= 0) return 0;
+  const whole = Math.ceil(pieces);
+  if (!Number.isFinite(incrementPieces) || incrementPieces <= 1) return whole;
+  return Math.ceil(whole / incrementPieces) * incrementPieces;
+}
+
+/** Add ⇄ remove toggle for a row. Adding defaults pieces to the engine suggestion. */
+export function toggleOrderLine(
+  selection: OrderSelection,
+  recommendationId: string,
+  suggestedOrderPieces: number,
+): Map<string, OrderLineState> {
+  const next = new Map(selection);
+  if (next.has(recommendationId)) {
+    next.delete(recommendationId);
+  } else {
+    next.set(recommendationId, {
+      pieces: Math.max(0, Math.floor(suggestedOrderPieces)),
+      exceedReason: "",
+    });
+  }
+  return next;
+}
+
+export function removeOrderLine(
+  selection: OrderSelection,
+  recommendationId: string,
+): Map<string, OrderLineState> {
+  const next = new Map(selection);
+  next.delete(recommendationId);
+  return next;
+}
+
+export function setOrderLinePieces(
+  selection: OrderSelection,
+  recommendationId: string,
+  pieces: number,
+): Map<string, OrderLineState> {
+  const current = selection.get(recommendationId);
+  if (!current) return new Map(selection);
+  const next = new Map(selection);
+  next.set(recommendationId, {
+    ...current,
+    pieces: Number.isFinite(pieces) && pieces > 0 ? Math.floor(pieces) : 0,
+  });
+  return next;
+}
+
+export function setOrderLineExceedReason(
+  selection: OrderSelection,
+  recommendationId: string,
+  exceedReason: string,
+): Map<string, OrderLineState> {
+  const current = selection.get(recommendationId);
+  if (!current) return new Map(selection);
+  const next = new Map(selection);
+  next.set(recommendationId, { ...current, exceedReason });
+  return next;
+}
+
+// ---------------- vendor grouping ----------------
+
+export interface OrderableItem extends SuggestedSpendItem {
+  recommendationId: string;
+  sku: string;
+  preferredVendorId: number | null;
+  preferredVendorName: string | null;
+}
+
+export const NEEDS_SUPPLIER_GROUP_KEY = "needs_supplier";
+
+export function orderBuilderVendorKey(item: {
+  preferredVendorId: number | null;
+}): string {
+  return item.preferredVendorId === null
+    ? NEEDS_SUPPLIER_GROUP_KEY
+    : `vendor:${item.preferredVendorId}`;
+}
+
+export interface OrderBuilderGroup<T> {
+  key: string;
+  vendorId: number;
+  vendorName: string;
+  lines: T[];
+}
+
+/**
+ * Selected lines grouped by preferred vendor, in item order. Lines without a
+ * vendor come back separately — they render in the "Needs supplier" group and
+ * can never be submitted (neither the PO handoff nor the RFQ batch accepts a
+ * line without a vendor).
+ */
+export function orderBuilderGroups<T extends OrderableItem>(
+  items: readonly T[],
+  selection: OrderSelection,
+): { vendorGroups: OrderBuilderGroup<T>[]; needsSupplier: T[] } {
+  const vendorGroups: OrderBuilderGroup<T>[] = [];
+  const byKey = new Map<string, OrderBuilderGroup<T>>();
+  const needsSupplier: T[] = [];
+  for (const item of items) {
+    if (!selection.has(item.recommendationId)) continue;
+    if (item.preferredVendorId === null) {
+      needsSupplier.push(item);
+      continue;
+    }
+    const key = orderBuilderVendorKey(item);
+    let group = byKey.get(key);
+    if (!group) {
+      group = {
+        key,
+        vendorId: item.preferredVendorId,
+        vendorName: item.preferredVendorName ?? `Vendor ${item.preferredVendorId}`,
+        lines: [],
+      };
+      byKey.set(key, group);
+      vendorGroups.push(group);
+    }
+    group.lines.push(item);
+  }
+  return { vendorGroups, needsSupplier };
+}
+
+// ---------------- money (integer cents) ----------------
+
+/** Line value for edited pieces; null when the vendor cost is missing and pieces > 0. */
+export function orderLineValueCents(item: SuggestedSpendItem, pieces: number): number | null {
+  if (pieces <= 0) return 0;
+  const mills = unitCostMills(item);
+  if (mills === null) return null;
+  return computeLineTotalCentsFromMills(mills, pieces);
+}
+
+export interface OrderBarSummary {
+  lineCount: number;
+  totalCents: number;
+  /** Selected lines with pieces > 0 whose supplier cost is unknown (excluded from the total). */
+  missingCostCount: number;
+}
+
+/** Sticky order-bar rollup over the whole selection (submittable or not). */
+export function orderBarSummary(
+  items: readonly OrderableItem[],
+  selection: OrderSelection,
+): OrderBarSummary {
+  let lineCount = 0;
+  let totalCents = 0;
+  let missingCostCount = 0;
+  for (const item of items) {
+    const line = selection.get(item.recommendationId);
+    if (!line) continue;
+    lineCount += 1;
+    const cents = orderLineValueCents(item, line.pieces);
+    if (cents === null) missingCostCount += 1;
+    else totalCents += cents;
+  }
+  return { lineCount, totalCents, missingCostCount };
+}
+
+// ---------------- override evidence rules ----------------
+
+export type VendorOrderMode = "po" | "rfq";
+
+/** Server minimums, mirrored for display gating only (routes re-validate). */
+export const EXCEED_REASON_MIN_LENGTH = 3;
+export const DECISION_NOTE_MIN_LENGTH = 10;
+export const AUTO_DECISION_NOTE = "Manual order via Order Builder";
+/**
+ * Server cap, mirrored: handoffCommandSchema accepts at most 25 items per
+ * create-po call. A vendor group above this must fail BEFORE any decision is
+ * recorded — otherwise the group's acceptances land and the handoff 400s.
+ * Pinned against the server schema by reorder-engine-ui-contract.test.ts.
+ */
+export const MAX_PO_HANDOFF_LINES = 25;
+
+export function exceedsSuggestion(pieces: number, suggestedOrderPieces: number): boolean {
+  return pieces > Math.max(0, suggestedOrderPieces);
+}
+
+export function exceedReasonValid(reason: string): boolean {
+  return reason.trim().length >= EXCEED_REASON_MIN_LENGTH;
+}
+
+/**
+ * RFQ evidence baseline. RFQ batches validate against the SAVED run line's
+ * remaining pieces (recommendedPieces − already-allocated RFQ pieces), not the
+ * live suggestion — use the mapped run value when known, the live suggestion
+ * until the mapping loads.
+ */
+export function rfqBaselinePieces(
+  remainingPieces: number | null | undefined,
+  suggestedOrderPieces: number,
+): number {
+  return remainingPieces ?? Math.max(0, suggestedOrderPieces);
+}
+
+/** RFQ contract: ANY change from the run baseline needs a >=3-char reason (up or down). */
+export function rfqLineNeedsReason(pieces: number, baselinePieces: number): boolean {
+  return pieces !== baselinePieces;
+}
+
+/** RFQ contract: requesting ABOVE the run baseline additionally needs explicit approval. */
+export function rfqLineNeedsApproval(pieces: number, baselinePieces: number): boolean {
+  return pieces > baselinePieces;
+}
+
+/** PO line is flagged when it carries active quality controls or exceeds the suggestion. */
+export function poLineFlagged(
+  controlCount: number,
+  pieces: number,
+  suggestedOrderPieces: number,
+): boolean {
+  return controlCount > 0 || exceedsSuggestion(pieces, suggestedOrderPieces);
+}
+
+/**
+ * Decision note for submission. With flagged lines the operator must type a
+ * real note (server minimum 10 chars); with nothing flagged a blank note falls
+ * back to the auto-note recorded in the audit trail. A 1–9 character note is
+ * never sent — the server would reject it.
+ */
+export function decisionNoteForSubmit(
+  note: string,
+  anyFlagged: boolean,
+): { ok: true; note: string } | { ok: false; error: string } {
+  const trimmed = note.trim();
+  if (trimmed.length >= DECISION_NOTE_MIN_LENGTH) return { ok: true, note: trimmed };
+  if (anyFlagged) {
+    return { ok: false, error: `Decision note needs at least ${DECISION_NOTE_MIN_LENGTH} characters` };
+  }
+  if (trimmed.length === 0) return { ok: true, note: AUTO_DECISION_NOTE };
+  return {
+    ok: false,
+    error: `Decision note needs at least ${DECISION_NOTE_MIN_LENGTH} characters (or leave it blank for the auto-note)`,
+  };
+}
+
+export function controlAckKey(recommendationId: string, controlCode: string): string {
+  return `${recommendationId}:${controlCode}`;
+}
+
+// ---------------- confirm gating ----------------
+
+export interface ConfirmPoLineInput {
+  recommendationId: string;
+  sku: string;
+  pieces: number;
+  suggestedOrderPieces: number;
+  exceedReason: string;
+  controls: ReadonlyArray<{ code: string; label: string }>;
+}
+
+export interface ConfirmRfqLineInput {
+  recommendationId: string;
+  sku: string;
+  pieces: number;
+  baselinePieces: number;
+  exceedReason: string;
+}
+
+/**
+ * First unmet confirm requirement, or null when the order can be created.
+ * Check order mirrors the approved mock: control acknowledgments → sourcing
+ * exception approvals (PO then RFQ) → decision note. The returned sentence is
+ * used verbatim as the disabled button's title.
+ */
+export function firstUnmetConfirmRequirement(input: {
+  poLines: readonly ConfirmPoLineInput[];
+  rfqLines: readonly ConfirmRfqLineInput[];
+  acknowledgedControlKeys: ReadonlySet<string>;
+  approvedExceptionIds: ReadonlySet<string>;
+  note: string;
+}): string | null {
+  for (const line of input.poLines) {
+    for (const control of line.controls) {
+      if (!input.acknowledgedControlKeys.has(controlAckKey(line.recommendationId, control.code))) {
+        return `Acknowledge “${control.label}” for ${line.sku}`;
+      }
+    }
+  }
+  for (const line of input.poLines) {
+    if (!exceedsSuggestion(line.pieces, line.suggestedOrderPieces)) continue;
+    if (!exceedReasonValid(line.exceedReason)) {
+      return `Enter a reason (at least ${EXCEED_REASON_MIN_LENGTH} characters) for exceeding the recommendation on ${line.sku}`;
+    }
+    if (!input.approvedExceptionIds.has(line.recommendationId)) {
+      return `Approve the sourcing exception for ${line.sku}`;
+    }
+  }
+  for (const line of input.rfqLines) {
+    if (rfqLineNeedsReason(line.pieces, line.baselinePieces) && !exceedReasonValid(line.exceedReason)) {
+      return `Enter a reason (at least ${EXCEED_REASON_MIN_LENGTH} characters) for changing the run baseline on ${line.sku}`;
+    }
+    if (rfqLineNeedsApproval(line.pieces, line.baselinePieces) && !input.approvedExceptionIds.has(line.recommendationId)) {
+      return `Approve the sourcing exception for ${line.sku}`;
+    }
+  }
+  const anyFlagged = input.poLines.some((line) =>
+    poLineFlagged(line.controls.length, line.pieces, line.suggestedOrderPieces),
+  );
+  const note = decisionNoteForSubmit(input.note, anyFlagged);
+  if (!note.ok) return note.error;
+  return null;
+}
+
+/** "Create 2 draft POs · 1 RFQ" / "Create 1 draft PO" / "Create 3 RFQs" / "Nothing to order". */
+export function confirmPrimaryLabel(poCount: number, rfqCount: number): string {
+  const parts: string[] = [];
+  if (poCount > 0) parts.push(`${poCount} draft PO${poCount === 1 ? "" : "s"}`);
+  if (rfqCount > 0) parts.push(`${rfqCount} RFQ${rfqCount === 1 ? "" : "s"}`);
+  if (parts.length === 0) return "Nothing to order";
+  return `Create ${parts.join(" · ")}`;
+}
+
+// ---------------- server payload assembly ----------------
+
+export type ReviewQueueKind = "skipped" | "held_by_policy" | "quality_review_required";
+
+/** The review-queue facts a PO decision needs: the entry's kind + its CURRENT control codes. */
+export interface ReviewQueueLineEntry {
+  kind: ReviewQueueKind;
+  controlCodes: readonly string[];
+}
+
+/**
+ * Body for POST /api/purchasing/recommendation-decisions. The strict evidence
+ * contract (validateRecommendationDecisionEvidence) requires confirmDecision,
+ * the eligibility acknowledgment, and reviewedControlCodes covering EVERY
+ * current control — the risk-proportional confirm UI collects the flagged-only
+ * ceremony, but the wire payload always satisfies the full server contract.
+ */
+export function buildAcceptedForPoDecisionBody(
+  recommendationId: string,
+  entry: ReviewQueueLineEntry,
+  note: string,
+): {
+  recommendationId: string;
+  kind: ReviewQueueKind;
+  decision: "accepted_for_po";
+  note: string;
+  confirmDecision: true;
+  acknowledgeAutomationEligibilityUnchanged: true;
+  reviewedControlCodes: string[];
+} {
+  return {
+    recommendationId,
+    kind: entry.kind,
+    decision: "accepted_for_po",
+    note,
+    confirmDecision: true,
+    acknowledgeAutomationEligibilityUnchanged: true,
+    reviewedControlCodes: [...entry.controlCodes],
+  };
+}
+
+/**
+ * One item for POST /api/purchasing/recommendation-accepted-queue/create-po.
+ * Override evidence (reason + approval) is attached ONLY when pieces exceed
+ * the suggestion — the handoff schema rejects evidence on non-exceeding lines
+ * and rejects exceeding lines without both fields.
+ */
+export function buildCreatePoItemBody(input: {
+  recommendationId: string;
+  kind: ReviewQueueKind;
+  pieces: number;
+  suggestedOrderPieces: number;
+  exceedReason: string;
+}): {
+  recommendationId: string;
+  kind: ReviewQueueKind;
+  requestedPieces: number;
+  quantityOverrideReason?: string;
+  allocationOverrideApproved?: true;
+} {
+  const base = {
+    recommendationId: input.recommendationId,
+    kind: input.kind,
+    requestedPieces: input.pieces,
+  };
+  if (!exceedsSuggestion(input.pieces, input.suggestedOrderPieces)) return base;
+  return {
+    ...base,
+    quantityOverrideReason: input.exceedReason.trim(),
+    allocationOverrideApproved: true,
+  };
+}
+
+/**
+ * One line for POST /api/purchasing/rfq-queue, validated against the saved
+ * run line it allocates from. Fail-closed: a line whose collected evidence no
+ * longer satisfies the server baseline (e.g. the mapping refreshed to
+ * different remaining pieces) reports an error instead of inventing evidence.
+ */
+export function buildRfqLineBody(input: {
+  recommendationLineId: number;
+  vendorId: number;
+  pieces: number;
+  remainingPieces: number;
+  exceedReason: string;
+  exceptionApproved: boolean;
+}):
+  | {
+      ok: true;
+      line: {
+        recommendationLineId: number;
+        vendorId: number;
+        requestedPieces: number;
+        quantityOverrideReason: string | null;
+        allocationOverrideApproved: boolean;
+      };
+    }
+  | { ok: false; error: string } {
+  if (input.pieces <= 0) return { ok: false, error: "Pieces must be above zero" };
+  const needsReason = rfqLineNeedsReason(input.pieces, input.remainingPieces);
+  const needsApproval = rfqLineNeedsApproval(input.pieces, input.remainingPieces);
+  if (needsReason && !exceedReasonValid(input.exceedReason)) {
+    return {
+      ok: false,
+      error: `Run baseline is ${input.remainingPieces} pieces — a reason (at least ${EXCEED_REASON_MIN_LENGTH} characters) is required for ${input.pieces}`,
+    };
+  }
+  if (needsApproval && !input.exceptionApproved) {
+    return {
+      ok: false,
+      error: `Run baseline is ${input.remainingPieces} pieces — approve the sourcing exception to request ${input.pieces}`,
+    };
+  }
+  return {
+    ok: true,
+    line: {
+      recommendationLineId: input.recommendationLineId,
+      vendorId: input.vendorId,
+      requestedPieces: input.pieces,
+      quantityOverrideReason: needsReason ? input.exceedReason.trim() : null,
+      // Only meaningful above the baseline; the service rejects a stray true.
+      allocationOverrideApproved: needsApproval,
+    },
+  };
+}

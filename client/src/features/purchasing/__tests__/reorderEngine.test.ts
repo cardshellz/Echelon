@@ -366,3 +366,410 @@ describe("skip reasons", () => {
     expect(skippedReasonLabel(null)).toBe("Skipped");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Order Builder (PR 3)
+// ---------------------------------------------------------------------------
+
+import {
+  AUTO_DECISION_NOTE,
+  NEEDS_SUPPLIER_GROUP_KEY,
+  buildAcceptedForPoDecisionBody,
+  buildCreatePoItemBody,
+  buildRfqLineBody,
+  confirmPrimaryLabel,
+  controlAckKey,
+  decisionNoteForSubmit,
+  exceedReasonValid,
+  exceedsSuggestion,
+  firstUnmetConfirmRequirement,
+  orderBarSummary,
+  orderBuilderGroups,
+  orderIncrementPieces,
+  orderLineValueCents,
+  poLineFlagged,
+  removeOrderLine,
+  rfqBaselinePieces,
+  rfqLineNeedsApproval,
+  rfqLineNeedsReason,
+  setOrderLineExceedReason,
+  setOrderLinePieces,
+  snapPiecesUpToCase,
+  toggleOrderLine,
+  type ConfirmPoLineInput,
+  type ConfirmRfqLineInput,
+  type OrderLineState,
+  type OrderableItem,
+} from "../reorderEngine";
+
+function orderable(overrides: Partial<OrderableItem> = {}): OrderableItem {
+  return {
+    recommendationId: "10:100:30",
+    sku: "PKM-151",
+    preferredVendorId: 7,
+    preferredVendorName: "GTS Distribution",
+    suggestedOrderPieces: 72,
+    estimatedCostMills: 41_250, // $4.125/piece
+    estimatedCostCents: 4_125,
+    ...overrides,
+  };
+}
+
+describe("order builder — case increment + snap-up", () => {
+  it("mirrors the engine's increment rule: quoted case pack, then pack_size, then 1", () => {
+    expect(orderIncrementPieces({ piecesPerPurchaseUom: 36, packSize: 12 })).toBe(36);
+    expect(orderIncrementPieces({ piecesPerPurchaseUom: 1, packSize: 12 })).toBe(12);
+    expect(orderIncrementPieces({ piecesPerPurchaseUom: null, packSize: 12 })).toBe(12);
+    expect(orderIncrementPieces({ piecesPerPurchaseUom: null, packSize: null })).toBe(1);
+    expect(orderIncrementPieces({ piecesPerPurchaseUom: null })).toBe(1);
+  });
+
+  it("snaps edits UP to a full case; zero means skip; garbage collapses to zero", () => {
+    expect(snapPiecesUpToCase(1, 36)).toBe(36);
+    expect(snapPiecesUpToCase(36, 36)).toBe(36);
+    expect(snapPiecesUpToCase(37, 36)).toBe(72);
+    expect(snapPiecesUpToCase(0, 36)).toBe(0);
+    expect(snapPiecesUpToCase(-5, 36)).toBe(0);
+    expect(snapPiecesUpToCase(Number.NaN, 36)).toBe(0);
+    expect(snapPiecesUpToCase(17, 1)).toBe(17);
+  });
+});
+
+describe("order builder — selection transitions (pure, no mutation)", () => {
+  it("toggles a line on with the suggested pieces and off again", () => {
+    const empty = new Map<string, OrderLineState>();
+    const added = toggleOrderLine(empty, "r1", 72);
+    expect(added.get("r1")).toEqual({ pieces: 72, exceedReason: "" });
+    expect(empty.size).toBe(0); // input untouched
+    const removed = toggleOrderLine(added, "r1", 72);
+    expect(removed.has("r1")).toBe(false);
+    expect(added.has("r1")).toBe(true);
+  });
+
+  it("edits pieces and reasons without touching other lines and ignores unknown ids", () => {
+    let selection = toggleOrderLine(new Map(), "r1", 72);
+    selection = toggleOrderLine(selection, "r2", 10);
+    selection = setOrderLinePieces(selection, "r1", 108);
+    selection = setOrderLineExceedReason(selection, "r1", "MOQ top-off");
+    expect(selection.get("r1")).toEqual({ pieces: 108, exceedReason: "MOQ top-off" });
+    expect(selection.get("r2")).toEqual({ pieces: 10, exceedReason: "" });
+    expect(setOrderLinePieces(selection, "ghost", 5).has("ghost")).toBe(false);
+    expect(setOrderLinePieces(selection, "r1", -3).get("r1")!.pieces).toBe(0);
+    expect(removeOrderLine(selection, "r2").has("r2")).toBe(false);
+  });
+});
+
+describe("order builder — vendor grouping", () => {
+  it("groups selected lines by vendor in item order and isolates no-vendor lines", () => {
+    const items = [
+      orderable({ recommendationId: "a", preferredVendorId: 7, preferredVendorName: "GTS" }),
+      orderable({ recommendationId: "b", preferredVendorId: 9, preferredVendorName: "Southern Hobby" }),
+      orderable({ recommendationId: "c", preferredVendorId: 7, preferredVendorName: "GTS" }),
+      orderable({ recommendationId: "d", preferredVendorId: null, preferredVendorName: null }),
+      orderable({ recommendationId: "e", preferredVendorId: 9 }), // not selected
+    ];
+    let selection = new Map<string, OrderLineState>();
+    for (const id of ["a", "b", "c", "d"]) selection = toggleOrderLine(selection, id, 10);
+    const { vendorGroups, needsSupplier } = orderBuilderGroups(items, selection);
+    expect(vendorGroups.map((group) => group.vendorId)).toEqual([7, 9]);
+    expect(vendorGroups[0].lines.map((line) => line.recommendationId)).toEqual(["a", "c"]);
+    expect(needsSupplier.map((line) => line.recommendationId)).toEqual(["d"]);
+    expect(NEEDS_SUPPLIER_GROUP_KEY).toBe("needs_supplier");
+  });
+});
+
+describe("order builder — money (integer cents)", () => {
+  it("prices lines from mills and rolls up the bar summary honestly", () => {
+    const priced = orderable({ recommendationId: "a" });
+    const costless = orderable({
+      recommendationId: "b",
+      sku: "NO-COST",
+      estimatedCostMills: null,
+      estimatedCostCents: null,
+    });
+    expect(orderLineValueCents(priced, 72)).toBe(29_700); // 72 × 4125 mills = 297000 mills → 29700¢
+    expect(orderLineValueCents(priced, 0)).toBe(0);
+    expect(orderLineValueCents(costless, 10)).toBeNull();
+    let selection = toggleOrderLine(new Map(), "a", 72);
+    selection = toggleOrderLine(selection, "b", 10);
+    expect(orderBarSummary([priced, costless], selection)).toEqual({
+      lineCount: 2,
+      totalCents: 29_700,
+      missingCostCount: 1,
+    });
+  });
+});
+
+describe("order builder — override evidence rules", () => {
+  it("flags exceed vs suggestion (PO) and any change vs run baseline (RFQ)", () => {
+    expect(exceedsSuggestion(73, 72)).toBe(true);
+    expect(exceedsSuggestion(72, 72)).toBe(false);
+    expect(exceedsSuggestion(10, 72)).toBe(false);
+    expect(rfqBaselinePieces(40, 72)).toBe(40);
+    expect(rfqBaselinePieces(null, 72)).toBe(72);
+    expect(rfqBaselinePieces(undefined, 72)).toBe(72);
+    // RFQ: reductions ALSO need a reason (server: quantityChanged), approval only above.
+    expect(rfqLineNeedsReason(40, 72)).toBe(true);
+    expect(rfqLineNeedsReason(72, 72)).toBe(false);
+    expect(rfqLineNeedsApproval(73, 72)).toBe(true);
+    expect(rfqLineNeedsApproval(40, 72)).toBe(false);
+    expect(exceedReasonValid("ab")).toBe(false);
+    expect(exceedReasonValid("  MOQ ")).toBe(true);
+  });
+
+  it("marks PO lines flagged on controls or sourcing exceptions", () => {
+    expect(poLineFlagged(1, 72, 72)).toBe(true);
+    expect(poLineFlagged(0, 73, 72)).toBe(true);
+    expect(poLineFlagged(0, 72, 72)).toBe(false);
+  });
+
+  it("resolves the decision note risk-proportionally, never sending a sub-minimum note", () => {
+    expect(decisionNoteForSubmit("", false)).toEqual({ ok: true, note: AUTO_DECISION_NOTE });
+    expect(decisionNoteForSubmit("   ", false)).toEqual({ ok: true, note: AUTO_DECISION_NOTE });
+    expect(decisionNoteForSubmit("Restock for August preorders", true)).toEqual({
+      ok: true,
+      note: "Restock for August preorders",
+    });
+    expect(decisionNoteForSubmit("", true).ok).toBe(false);
+    expect(decisionNoteForSubmit("too short", true).ok).toBe(false); // 9 chars
+    expect(decisionNoteForSubmit("short", false).ok).toBe(false); // 1–9 chars is never sendable
+  });
+});
+
+describe("order builder — confirm gating", () => {
+  const poLine = (overrides: Partial<ConfirmPoLineInput> = {}): ConfirmPoLineInput => ({
+    recommendationId: "r1",
+    sku: "PKM-151",
+    pieces: 72,
+    suggestedOrderPieces: 72,
+    exceedReason: "",
+    controls: [],
+    ...overrides,
+  });
+  const rfqLine = (overrides: Partial<ConfirmRfqLineInput> = {}): ConfirmRfqLineInput => ({
+    recommendationId: "r9",
+    sku: "OP-05",
+    pieces: 100,
+    baselinePieces: 100,
+    exceedReason: "",
+    ...overrides,
+  });
+  const base = {
+    poLines: [] as ConfirmPoLineInput[],
+    rfqLines: [] as ConfirmRfqLineInput[],
+    acknowledgedControlKeys: new Set<string>(),
+    approvedExceptionIds: new Set<string>(),
+    note: "",
+  };
+
+  it("walks requirements in mock order: control acks → exceptions → note", () => {
+    const flagged = poLine({
+      pieces: 108,
+      exceedReason: "Freight break at 108",
+      controls: [{ code: "cost_stale", label: "Vendor cost unverified" }],
+    });
+    expect(firstUnmetConfirmRequirement({ ...base, poLines: [flagged] })).toBe(
+      "Acknowledge “Vendor cost unverified” for PKM-151",
+    );
+    const acked = new Set([controlAckKey("r1", "cost_stale")]);
+    expect(firstUnmetConfirmRequirement({ ...base, poLines: [flagged], acknowledgedControlKeys: acked })).toBe(
+      "Approve the sourcing exception for PKM-151",
+    );
+    const approved = new Set(["r1"]);
+    expect(
+      firstUnmetConfirmRequirement({
+        ...base,
+        poLines: [flagged],
+        acknowledgedControlKeys: acked,
+        approvedExceptionIds: approved,
+      }),
+    ).toBe("Decision note needs at least 10 characters");
+    expect(
+      firstUnmetConfirmRequirement({
+        ...base,
+        poLines: [flagged],
+        acknowledgedControlKeys: acked,
+        approvedExceptionIds: approved,
+        note: "August restock ahead of set rotation",
+      }),
+    ).toBeNull();
+  });
+
+  it("requires a stage-1 reason before the exception approval can even be offered", () => {
+    const exceeding = poLine({ pieces: 108, exceedReason: "" });
+    expect(firstUnmetConfirmRequirement({ ...base, poLines: [exceeding] })).toContain(
+      "Enter a reason (at least 3 characters)",
+    );
+  });
+
+  it("lets clean PO lines through with a blank note (auto-note path)", () => {
+    expect(firstUnmetConfirmRequirement({ ...base, poLines: [poLine()] })).toBeNull();
+  });
+
+  it("gates RFQ lines on the run baseline: reason for any change, approval above", () => {
+    const reduced = rfqLine({ pieces: 60, baselinePieces: 100 });
+    expect(firstUnmetConfirmRequirement({ ...base, rfqLines: [reduced] })).toContain(
+      "changing the run baseline on OP-05",
+    );
+    const above = rfqLine({ pieces: 140, baselinePieces: 100, exceedReason: "Bundle promo" });
+    expect(firstUnmetConfirmRequirement({ ...base, rfqLines: [above] })).toBe(
+      "Approve the sourcing exception for OP-05",
+    );
+    expect(
+      firstUnmetConfirmRequirement({
+        ...base,
+        rfqLines: [above],
+        approvedExceptionIds: new Set(["r9"]),
+      }),
+    ).toBeNull(); // RFQ-only orders need no decision note
+  });
+});
+
+describe("order builder — button label", () => {
+  it("names exactly what will be created", () => {
+    expect(confirmPrimaryLabel(1, 0)).toBe("Create 1 draft PO");
+    expect(confirmPrimaryLabel(2, 0)).toBe("Create 2 draft POs");
+    expect(confirmPrimaryLabel(2, 1)).toBe("Create 2 draft POs · 1 RFQ");
+    expect(confirmPrimaryLabel(0, 3)).toBe("Create 3 RFQs");
+    expect(confirmPrimaryLabel(0, 0)).toBe("Nothing to order");
+  });
+});
+
+describe("order builder — server payload assembly", () => {
+  it("builds the accepted_for_po decision with the FULL strict evidence contract", () => {
+    const body = buildAcceptedForPoDecisionBody(
+      "10:100:30",
+      { kind: "quality_review_required", controlCodes: ["cost_stale", "thin_history"] },
+      "Manual order via Order Builder",
+    );
+    expect(body).toEqual({
+      recommendationId: "10:100:30",
+      kind: "quality_review_required",
+      decision: "accepted_for_po",
+      note: "Manual order via Order Builder",
+      confirmDecision: true,
+      acknowledgeAutomationEligibilityUnchanged: true,
+      reviewedControlCodes: ["cost_stale", "thin_history"],
+    });
+  });
+
+  it("attaches create-po override evidence only above the suggestion", () => {
+    expect(
+      buildCreatePoItemBody({
+        recommendationId: "r1",
+        kind: "held_by_policy",
+        pieces: 72,
+        suggestedOrderPieces: 72,
+        exceedReason: "stale reason from an earlier edit",
+      }),
+    ).toEqual({ recommendationId: "r1", kind: "held_by_policy", requestedPieces: 72 });
+    expect(
+      buildCreatePoItemBody({
+        recommendationId: "r1",
+        kind: "held_by_policy",
+        pieces: 108,
+        suggestedOrderPieces: 72,
+        exceedReason: " Freight break at 108 ",
+      }),
+    ).toEqual({
+      recommendationId: "r1",
+      kind: "held_by_policy",
+      requestedPieces: 108,
+      quantityOverrideReason: "Freight break at 108",
+      allocationOverrideApproved: true,
+    });
+    // Reductions carry NO evidence — the PO handoff schema rejects it.
+    expect(
+      buildCreatePoItemBody({
+        recommendationId: "r1",
+        kind: "skipped",
+        pieces: 36,
+        suggestedOrderPieces: 72,
+        exceedReason: "irrelevant",
+      }),
+    ).toEqual({ recommendationId: "r1", kind: "skipped", requestedPieces: 36 });
+  });
+
+  it("builds RFQ lines against the run baseline and fails closed on missing evidence", () => {
+    const clean = buildRfqLineBody({
+      recommendationLineId: 55,
+      vendorId: 7,
+      pieces: 100,
+      remainingPieces: 100,
+      exceedReason: "",
+      exceptionApproved: false,
+    });
+    expect(clean).toEqual({
+      ok: true,
+      line: {
+        recommendationLineId: 55,
+        vendorId: 7,
+        requestedPieces: 100,
+        quantityOverrideReason: null,
+        allocationOverrideApproved: false,
+      },
+    });
+    const above = buildRfqLineBody({
+      recommendationLineId: 55,
+      vendorId: 7,
+      pieces: 140,
+      remainingPieces: 100,
+      exceedReason: " Bundle promo ",
+      exceptionApproved: true,
+    });
+    expect(above).toEqual({
+      ok: true,
+      line: {
+        recommendationLineId: 55,
+        vendorId: 7,
+        requestedPieces: 140,
+        quantityOverrideReason: "Bundle promo",
+        allocationOverrideApproved: true,
+      },
+    });
+    expect(
+      buildRfqLineBody({
+        recommendationLineId: 55,
+        vendorId: 7,
+        pieces: 140,
+        remainingPieces: 100,
+        exceedReason: "ok",
+        exceptionApproved: true,
+      }).ok,
+    ).toBe(false); // reason too short
+    expect(
+      buildRfqLineBody({
+        recommendationLineId: 55,
+        vendorId: 7,
+        pieces: 140,
+        remainingPieces: 100,
+        exceedReason: "Bundle promo",
+        exceptionApproved: false,
+      }).ok,
+    ).toBe(false); // approval missing
+    expect(
+      buildRfqLineBody({
+        recommendationLineId: 55,
+        vendorId: 7,
+        pieces: 0,
+        remainingPieces: 100,
+        exceedReason: "",
+        exceptionApproved: false,
+      }).ok,
+    ).toBe(false); // zero pieces = skip, never submit
+    // Reduction: reason required, approval NOT sent (service rejects a stray true).
+    const reduced = buildRfqLineBody({
+      recommendationLineId: 55,
+      vendorId: 7,
+      pieces: 60,
+      remainingPieces: 100,
+      exceedReason: "Budget cap",
+      exceptionApproved: false,
+    });
+    expect(reduced.ok).toBe(true);
+    if (reduced.ok) {
+      expect(reduced.line.quantityOverrideReason).toBe("Budget cap");
+      expect(reduced.line.allocationOverrideApproved).toBe(false);
+    }
+  });
+});

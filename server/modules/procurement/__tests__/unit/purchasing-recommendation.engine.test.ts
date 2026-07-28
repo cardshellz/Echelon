@@ -1485,6 +1485,125 @@ describe("purchasing recommendation engine", () => {
     });
   });
 
+  // Case rounding is a rule, not a hint (REORDER-ANALYSIS-DESIGN-SPEC §12
+  // rev 3): whenever a case pack is known — quoted pieces-per-purchase-UOM
+  // first, vendor_products.pack_size as fallback — the suggestion rounds UP
+  // to a full case regardless of pricing basis. Previously only
+  // per_purchase_uom quotes rounded; per-piece quotes fell back to single
+  // pieces even when the vendor shipped in cases.
+  it("rounds every suggestion up to a full case whenever a case pack is known", () => {
+    const baseRow = {
+      total_pieces: 0,
+      total_reserved_pieces: 0,
+      total_outbound_pieces: 60,
+      previous_outbound_pieces: 60,
+      demand_order_count: 12,
+      demand_active_days: 10,
+      latest_demand_at: "2026-05-18T12:00:00.000Z",
+      on_order_pieces: 0,
+      vendor_lead_time_days: 2,
+      safety_stock_days: 1,
+      order_uom_units: 10,
+      estimated_cost_mills: 50,
+      vendor_quoted_at: "2026-05-18T12:00:00.000Z",
+      vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+    };
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [
+        {
+          // NEW behavior: per-piece pricing with a known vendor case pack
+          // rounds up to the full case instead of ordering loose pieces.
+          ...baseRow,
+          product_id: 90,
+          variant_id: 901,
+          vendor_product_id: 9_010,
+          preferred_vendor_id: 90,
+          base_sku: "PER-PIECE-CASE",
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 50,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_pack_size: 24,
+        },
+        {
+          // Unchanged: the quoted purchase-UOM pack stays authoritative and
+          // wins over pack_size when both are present.
+          ...baseRow,
+          product_id: 91,
+          variant_id: 911,
+          vendor_product_id: 9_110,
+          preferred_vendor_id: 91,
+          base_sku: "UOM-CASE",
+          vendor_pricing_basis: "per_purchase_uom",
+          vendor_purchase_uom: "pack",
+          vendor_quoted_unit_cost_mills: 300,
+          vendor_pieces_per_purchase_uom: 6,
+          vendor_pack_size: 24,
+        },
+        {
+          // Unchanged: with no known pack the increment stays one piece.
+          ...baseRow,
+          product_id: 92,
+          variant_id: 921,
+          vendor_product_id: 9_210,
+          preferred_vendor_id: 92,
+          base_sku: "NO-PACK",
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 50,
+          vendor_pieces_per_purchase_uom: null,
+        },
+        {
+          // The MOQ floor still applies before rounding: max(raw 6, MOQ 31)
+          // then up to the next full 24-piece case.
+          ...baseRow,
+          product_id: 93,
+          variant_id: 931,
+          vendor_product_id: 9_310,
+          preferred_vendor_id: 93,
+          base_sku: "PACK-WITH-MOQ",
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 50,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_pack_size: 24,
+          vendor_moq: 31,
+        },
+      ],
+    });
+
+    const bySku = new Map(result.items.map((item) => [item.sku, item]));
+    expect(bySku.get("PER-PIECE-CASE")).toMatchObject({
+      suggestedOrderPieces: 24,
+      suggestedOrderQty: 24,
+      orderUomUnits: 1,
+      orderUomLabel: "pieces",
+      forecastProvenance: expect.objectContaining({ orderUomSource: "base_piece" }),
+      supplierBasis: expect.objectContaining({ packSize: 24, piecesPerPurchaseUom: null }),
+    });
+    expect(bySku.get("UOM-CASE")).toMatchObject({
+      suggestedOrderPieces: 6,
+      suggestedOrderQty: 1,
+      orderUomUnits: 6,
+      orderUomLabel: "pack",
+      supplierBasis: expect.objectContaining({ packSize: 24, piecesPerPurchaseUom: 6 }),
+    });
+    expect(bySku.get("NO-PACK")).toMatchObject({
+      suggestedOrderPieces: 6,
+      suggestedOrderQty: 6,
+      orderUomUnits: 1,
+      supplierBasis: expect.objectContaining({ packSize: null }),
+    });
+    expect(bySku.get("PACK-WITH-MOQ")).toMatchObject({
+      suggestedOrderPieces: 48,
+      suggestedOrderQty: 48,
+      orderUomUnits: 1,
+      supplierBasis: expect.objectContaining({ packSize: 24, minimumOrderPieces: 31 }),
+    });
+  });
+
   it("blocks automation when a stored vendor MOQ is not a positive base-piece integer", () => {
     const result = generatePurchasingRecommendations({
       asOf: "2026-05-20T12:00:00.000Z",

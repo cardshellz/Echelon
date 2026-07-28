@@ -2018,10 +2018,36 @@ export const purchasingRecommendationPoHandoffs = procurementSchema.table("purch
   kind: varchar("kind", { length: 40 }).notNull(),
   createdBy: varchar("created_by", { length: 255 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  // Order Builder quantity-override evidence (migration 177). Populated only
+  // when the handed-off quantity EXCEEDS the accepted recommendation baseline;
+  // reductions carry no evidence (the PO line qty + immutable accepted
+  // snapshot establish the delta). Mirrors migration 158's RFQ shape.
+  quantityOverrideBaselinePieces: integer("quantity_override_baseline_pieces"),
+  quantityOverrideRequestedPieces: integer("quantity_override_requested_pieces"),
+  quantityOverrideReason: text("quantity_override_reason"),
+  quantityOverrideApprovedBy: varchar("quantity_override_approved_by", { length: 255 }),
+  quantityOverrideApprovedAt: timestamp("quantity_override_approved_at"),
 }, (table) => [
   check(
     "purchasing_recommendation_po_handoffs_distinct_decisions_chk",
     sql`${table.acceptedDecisionId} <> ${table.handoffDecisionId}`,
+  ),
+  check(
+    "purch_rec_po_handoff_qty_override_evidence_chk",
+    sql`(
+      ${table.quantityOverrideBaselinePieces} IS NULL
+      AND ${table.quantityOverrideRequestedPieces} IS NULL
+      AND ${table.quantityOverrideReason} IS NULL
+      AND ${table.quantityOverrideApprovedBy} IS NULL
+      AND ${table.quantityOverrideApprovedAt} IS NULL
+    ) OR (
+      ${table.quantityOverrideBaselinePieces} > 0
+      AND ${table.quantityOverrideRequestedPieces} > ${table.quantityOverrideBaselinePieces}
+      AND NULLIF(BTRIM(${table.quantityOverrideReason}), '') IS NOT NULL
+      AND LENGTH(BTRIM(${table.quantityOverrideReason})) >= 3
+      AND NULLIF(BTRIM(${table.quantityOverrideApprovedBy}), '') IS NOT NULL
+      AND ${table.quantityOverrideApprovedAt} IS NOT NULL
+    )`,
   ),
   foreignKey({
     name: "purch_rec_po_handoff_accepted_decision_fk",

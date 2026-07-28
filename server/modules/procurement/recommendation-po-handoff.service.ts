@@ -77,6 +77,13 @@ const handoffItemSchema = z.object({
   productId: positivePostgresInteger,
   productVariantId: positivePostgresInteger,
   suggestedPieces: positivePostgresInteger,
+  // Order Builder quantity edit. Defaults to the accepted recommendation's
+  // pieces; exceeding them requires the migration-158-shaped evidence pair
+  // below (reductions need none). suggestedPieces is verified against the
+  // immutable accepted snapshot before any of this is trusted.
+  requestedPieces: positivePostgresInteger.optional(),
+  quantityOverrideReason: z.string().trim().min(3).max(2_000).optional(),
+  allocationOverrideApproved: z.boolean().optional(),
   orderUomUnits: positivePostgresInteger,
   orderUomLabel: z.string().trim().min(1).max(100),
   vendorId: positivePostgresInteger,
@@ -86,7 +93,31 @@ const handoffItemSchema = z.object({
   candidateScore: z.number().int().min(0).max(100).nullable(),
   candidateBand: nullableBoundedString(40),
   recommendationSnapshot: z.record(z.unknown()),
-}).strict();
+}).strict().superRefine((value, context) => {
+  const requestedPieces = value.requestedPieces ?? value.suggestedPieces;
+  if (requestedPieces > value.suggestedPieces) {
+    if (value.quantityOverrideReason === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "quantityOverrideReason (>= 3 characters) is required when requestedPieces exceeds the accepted recommendation",
+        path: ["quantityOverrideReason"],
+      });
+    }
+    if (value.allocationOverrideApproved !== true) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "allocationOverrideApproved must be true when requestedPieces exceeds the accepted recommendation",
+        path: ["allocationOverrideApproved"],
+      });
+    }
+  } else if (value.quantityOverrideReason !== undefined || value.allocationOverrideApproved === true) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "quantity override evidence is only valid when requestedPieces exceeds the accepted recommendation",
+      path: ["requestedPieces"],
+    });
+  }
+});
 
 const handoffCommandSchema = z.object({
   actorId: z.string().trim().min(1).max(100),
@@ -274,6 +305,13 @@ export interface RecommendationPoHandoffRecord {
   kind: string;
   createdBy: string | null;
   createdAt: Date;
+  // All five are null unless the handed-off quantity exceeded the accepted
+  // baseline; then all five are present (DB CHECK, migration 177).
+  quantityOverrideBaselinePieces: number | null;
+  quantityOverrideRequestedPieces: number | null;
+  quantityOverrideReason: string | null;
+  quantityOverrideApprovedBy: string | null;
+  quantityOverrideApprovedAt: Date | null;
 }
 
 export interface RecommendationAutoDraftRunRecord {
@@ -482,6 +520,7 @@ export interface AcceptedRecommendationPoHandoffResult {
     poId: number;
     poLineId: number;
     poIds: number[];
+    orderedPieces: number;
   }>;
 }
 
@@ -514,6 +553,14 @@ type ResolvedHandoffItem = AcceptedRecommendationPoHandoffItem & {
   vendor: RecommendationVendorRecord;
   product: RecommendationProductRecord;
   variant: RecommendationProductVariantRecord;
+  /** Effective PO-line pieces: the operator's requestedPieces, defaulting to the accepted baseline. */
+  orderPieces: number;
+  /** Present only when orderPieces exceeds the accepted baseline. */
+  quantityOverride: {
+    baselinePieces: number;
+    requestedPieces: number;
+    reason: string;
+  } | null;
   normalizedPricing: NormalizedPoLinePricing;
   unitCostMills: number;
   unitCostCents: number;
@@ -1044,11 +1091,38 @@ function resolveCatalogRows(
       );
     }
 
+    // The accepted snapshot's pieces are the immutable baseline
+    // (assertAcceptedDecisions already proved item.suggestedPieces equals it).
+    // The Order Builder may hand off a different quantity; exceeding the
+    // baseline demands the evidence pair validated at the schema boundary.
+    const baselinePieces = acceptedBasis.suggestedOrderPieces;
+    const orderPieces = item.requestedPieces ?? baselinePieces;
+    if (
+      orderPieces > baselinePieces &&
+      (item.quantityOverrideReason === undefined || item.allocationOverrideApproved !== true)
+    ) {
+      // Unreachable behind the schema check; kept fail-closed because this is
+      // the last gate before financial evidence is written.
+      throw new RecommendationPoHandoffError(
+        "A quantity above the accepted recommendation requires complete override evidence",
+        409,
+        "RECOMMENDATION_QUANTITY_OVERRIDE_EVIDENCE_MISSING",
+        { acceptedDecisionId: acceptedDecision.id, baselinePieces, requestedPieces: orderPieces },
+      );
+    }
+    const quantityOverride = orderPieces > baselinePieces
+      ? {
+        baselinePieces,
+        requestedPieces: orderPieces,
+        reason: item.quantityOverrideReason!,
+      }
+      : null;
+
     const liveMinimumOrderPieces = requireValidSupplierMinimumOrder(vendorProduct);
     assertAcceptedMinimumOrderStillCurrent(
       acceptedBasis.supplierBasis.minimumOrderPieces,
       liveMinimumOrderPieces,
-      item.suggestedPieces,
+      orderPieces,
       vendorProduct.id,
     );
 
@@ -1067,7 +1141,7 @@ function resolveCatalogRows(
 
     let normalizedPricing: NormalizedPoLinePricing;
     try {
-      normalizedPricing = normalizeRecommendationSupplierQuote(liveQuote, item.suggestedPieces);
+      normalizedPricing = normalizeRecommendationSupplierQuote(liveQuote, orderPieces);
     } catch (error) {
       if (error instanceof RecommendationPoHandoffError) throw error;
       throw new RecommendationPoHandoffError(
@@ -1118,6 +1192,8 @@ function resolveCatalogRows(
       vendor,
       product,
       variant,
+      orderPieces,
+      quantityOverride,
       normalizedPricing,
       unitCostMills: normalizedPricing.unitCostMills,
       unitCostCents: normalizedPricing.unitCostCents,
@@ -1267,7 +1343,7 @@ async function persistResolvedHandoffs(
         unitOfMeasure: normalizeUnitOfMeasure(item.orderUomLabel),
         unitsPerUom: item.variant.unitsPerVariant,
         expectedReceiveUnitsPerVariant: item.variant.unitsPerVariant,
-        orderQty: item.suggestedPieces,
+        orderQty: item.orderPieces,
         unitCostCents: item.unitCostCents,
         unitCostMills: item.unitCostMills,
         totalProductCostCents: item.totalProductCostCents,
@@ -1314,6 +1390,17 @@ async function persistResolvedHandoffs(
             poId: po.id,
             poLineId: line.id,
             poNumber: po.poNumber,
+            acceptedPieces: item.suggestedPieces,
+            orderedPieces: item.orderPieces,
+            quantityOverride: item.quantityOverride
+              ? {
+                baselinePieces: item.quantityOverride.baselinePieces,
+                requestedPieces: item.quantityOverride.requestedPieces,
+                reason: item.quantityOverride.reason,
+                approvedBy: options.actorId,
+                approvedAt: options.now.toISOString(),
+              }
+              : null,
           },
         },
         decidedBy: options.actorId,
@@ -1329,6 +1416,11 @@ async function persistResolvedHandoffs(
         kind: item.kind,
         createdBy: auditActor.databaseUserId,
         createdAt: options.now,
+        quantityOverrideBaselinePieces: item.quantityOverride?.baselinePieces ?? null,
+        quantityOverrideRequestedPieces: item.quantityOverride?.requestedPieces ?? null,
+        quantityOverrideReason: item.quantityOverride?.reason ?? null,
+        quantityOverrideApprovedBy: item.quantityOverride ? options.actorId : null,
+        quantityOverrideApprovedAt: item.quantityOverride ? options.now : null,
       });
 
       decisions.push(decision);
@@ -1341,6 +1433,7 @@ async function persistResolvedHandoffs(
         poId: po.id,
         poLineId: line.id,
         poIds: [po.id],
+        orderedPieces: item.orderPieces,
       });
     }
   }

@@ -10,6 +10,10 @@ const automaticMigration = readFileSync(
   join(process.cwd(), "migrations", "132_automatic_recommendation_handoff_provenance.sql"),
   "utf8",
 );
+const quantityOverrideMigration = readFileSync(
+  join(process.cwd(), "migrations", "177_recommendation_po_handoff_quantity_override.sql"),
+  "utf8",
+);
 
 describe("recommendation PO handoff migration", () => {
   it("enforces one handoff per acceptance and exact PO-line ownership", () => {
@@ -33,5 +37,20 @@ describe("recommendation PO handoff migration", () => {
     expect(automaticMigration).toContain("accepted_source IS DISTINCT FROM handoff_source");
     expect(automaticMigration).toContain("accepted_run_id IS DISTINCT FROM handoff_run_id");
     expect(automaticMigration).toContain("automatic recommendation handoffs require an auto-draft run");
+  });
+
+  // Migration 177: Order Builder quantity-override evidence mirrors the
+  // migration-158 RFQ shape — all-null, or fully evidenced for excess only.
+  it("requires all-or-nothing quantity-override evidence on handoffs", () => {
+    expect(quantityOverrideMigration).toContain("quantity_override_baseline_pieces INTEGER");
+    expect(quantityOverrideMigration).toContain("quantity_override_requested_pieces INTEGER");
+    expect(quantityOverrideMigration).toContain("quantity_override_reason TEXT");
+    expect(quantityOverrideMigration).toContain("quantity_override_approved_by VARCHAR(255)");
+    expect(quantityOverrideMigration).toContain("quantity_override_approved_at TIMESTAMP WITHOUT TIME ZONE");
+    expect(quantityOverrideMigration).toContain("purch_rec_po_handoff_qty_override_evidence_chk");
+    expect(quantityOverrideMigration).toContain("quantity_override_requested_pieces > quantity_override_baseline_pieces");
+    expect(quantityOverrideMigration).toContain("LENGTH(BTRIM(quantity_override_reason)) >= 3");
+    expect(quantityOverrideMigration).toContain("NULLIF(BTRIM(quantity_override_approved_by), '') IS NOT NULL");
+    expect(quantityOverrideMigration).toContain("quantity_override_approved_at IS NOT NULL");
   });
 });
