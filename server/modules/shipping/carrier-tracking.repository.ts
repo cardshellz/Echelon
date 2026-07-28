@@ -1356,9 +1356,9 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                   || jsonb_build_object(
                     'returnLabelQuarantine',
                     jsonb_build_object(
-                      'provider', ${observation.provider},
-                      'providerLabelId', ${observation.providerLabelId},
-                      'observedAt', ${observation.observedAt}
+                      'provider', ${observation.provider}::text,
+                      'providerLabelId', ${observation.providerLabelId}::text,
+                      'observedAt', ${observation.observedAt}::timestamptz
                     )
                   ),
                 updated_at = ${observation.observedAt}
