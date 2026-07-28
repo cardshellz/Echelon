@@ -43,9 +43,16 @@ export type ShippingProviderLabelEventType =
   | "label_voided"
   | "label_superseded";
 
-export const CARRIER_TRACKING_PARSER_VERSION = "shipstation-api-track-v1";
+export const CARRIER_TRACKING_PARSER_VERSION = "shipstation-api-track-v2";
 
-const boundedOptionalString = (max: number) => z.string().trim().min(1).max(max).nullish();
+const boundedOptionalString = (max: number) => z.preprocess(
+  (value) => (
+    typeof value === "string" && value.trim().length === 0
+      ? null
+      : value
+  ),
+  z.string().trim().min(1).max(max).nullish(),
+);
 
 const shipStationTrackingHistoryEventSchema = z.object({
   occurred_at: boundedOptionalString(80),

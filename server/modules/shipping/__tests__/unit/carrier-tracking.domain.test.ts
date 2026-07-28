@@ -109,6 +109,47 @@ describe("carrier tracking normalization", () => {
     }), receivedAt).dispatchEvidence).toBe("confirmed");
   });
 
+  it("normalizes blank optional provider metadata without rejecting delivered evidence", () => {
+    const event = normalizeShipStationTrackingWebhook(trackingPayload({
+      status_code: "DE",
+      status_description: "Delivered",
+      actual_delivery_date: "2026-07-20T11:45:00.000Z",
+      label_url: "",
+      events: [{
+        occurred_at: "2026-07-20T11:45:00.000Z",
+        status_code: "DE",
+        event_description: "Delivered",
+        city_locality: " ",
+        state_province: "",
+        postal_code: "",
+        country_code: "",
+      }],
+    }), receivedAt);
+
+    expect(event).toMatchObject({
+      canonicalStatus: "delivered",
+      dispatchEvidence: "confirmed",
+      actualDeliveryAt: new Date("2026-07-20T11:45:00.000Z"),
+      sanitizedPayload: {
+        events: [{
+          cityLocality: null,
+          stateProvince: null,
+          postalCode: null,
+          countryCode: null,
+        }],
+      },
+    });
+  });
+
+  it("keeps required tracking identity and status strict", () => {
+    expect(() => normalizeShipStationTrackingWebhook(trackingPayload({
+      tracking_number: "",
+    }), receivedAt)).toThrow(CarrierTrackingPayloadError);
+    expect(() => normalizeShipStationTrackingWebhook(trackingPayload({
+      status_code: "",
+    }), receivedAt)).toThrow(CarrierTrackingPayloadError);
+  });
+
   it("preserves earlier possession evidence after a later carrier exception", () => {
     const event = normalizeShipStationTrackingWebhook(trackingPayload({
       status_code: "EX",
