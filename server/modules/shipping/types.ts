@@ -117,6 +117,21 @@ export interface EnginePushResult {
   alreadyExisted: boolean;
 }
 
+export interface ShipmentItemAppendPayload {
+  shipmentId: number;
+  shipmentItemIds: readonly number[];
+}
+
+export type EngineShipmentItemAppendState =
+  | "applied"
+  | "already_applied"
+  | "not_editable";
+
+export interface EngineShipmentItemAppendResult {
+  state: EngineShipmentItemAppendState;
+  providerStatus: string;
+}
+
 // ─── Cancel result ──────────────────────────────────────────────────
 
 /**

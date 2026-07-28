@@ -49,6 +49,7 @@ import {
   invalidateShippingAdmin,
   postJson,
   rateTableCoveragesForGroup,
+  resolveCoverageCellAction,
   type EffectiveRateTableCoverage,
   type ProgramDestinationGroup,
   type ProgramOverview,
@@ -268,6 +269,23 @@ export function ProgramDetail({
           )}
         </div>
 
+        {program.liveRevisionOnlyGroups.length > 0 && (
+          <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-amber-950">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              <p className="text-sm font-medium">
+                Working layout differs from live
+              </p>
+              <p className="mt-0.5 text-xs">
+                The live revision still contains{" "}
+                {destinationGroupNameList(program.liveRevisionOnlyGroups)}. The
+                matrix below shows the current editable destination layout. Live
+                checkout rates remain unchanged until you activate a draft.
+              </p>
+            </div>
+          </div>
+        )}
+
         {program.destinationGroups.length === 0 ? (
           <div className="rounded-md border border-dashed p-8 text-center">
             <Globe2 className="mx-auto h-7 w-7 text-muted-foreground/60" />
@@ -314,11 +332,6 @@ export function ProgramDetail({
                     <TableCell className="align-top">
                       <div className="flex flex-wrap items-center gap-2">
                         <div className="text-sm font-medium">{group.name}</div>
-                        {!group.hasCurrentDefinition && (
-                          <Badge variant="outline" className="font-normal">
-                            {revisionOnlyLabel(group)}
-                          </Badge>
-                        )}
                       </div>
                       <div className="mt-0.5 text-xs text-muted-foreground">
                         {destinationGroupSummary(group)}
@@ -508,10 +521,24 @@ function CoverageCell({
     );
   }
 
-  const edit = () => {
-    if (option.draft) onContinueDraft(option.draft.id, group);
-    else if (option.active) onCreateRevision(option.active.id, group);
-    else onStartRates(option.serviceLevel.code, group);
+  const action = resolveCoverageCellAction({
+    activeTableId: option.active?.id ?? null,
+    draftTableId: option.draft?.id ?? null,
+  });
+  const openCoverage = () => {
+    switch (action.kind) {
+      case "continue_draft":
+        onContinueDraft(action.tableId, group);
+        return;
+      case "create_revision":
+        onCreateRevision(action.tableId, group);
+        return;
+      case "start_rates":
+        onStartRates(option.serviceLevel.code, group);
+        return;
+      case "none":
+        return;
+    }
   };
 
   let state: CoverageState;
@@ -549,11 +576,12 @@ function CoverageCell({
   return (
     <div className="space-y-1">
       <CoverageAction
-        disabled={programRetired}
-        onClick={edit}
+        disabled={action.kind === "none" || programRetired}
+        onClick={openCoverage}
         {...state}
       />
-      {option.active && activeCoverages.length > 0 && (
+      {option.active
+        && activeCoverages.length > 0 && (
         <button
           type="button"
           onClick={() => onViewTable(option.active!.id)}
@@ -645,12 +673,15 @@ function AddDestinationGroupButton({
   );
 }
 
-function revisionOnlyLabel(group: ProgramDestinationGroup): string {
-  if (group.appearsInLiveRevision && group.appearsInDraftRevision) {
-    return "Revision only";
-  }
-  if (group.appearsInLiveRevision) return "Live revision only";
-  return "Draft revision only";
+function destinationGroupNameList(
+  groups: readonly ProgramDestinationGroup[],
+): string {
+  const names = groups.map((group) => group.name);
+  if (names.length === 0) return "no historical groups";
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  const finalName = names[names.length - 1];
+  return `${names.slice(0, -1).join(", ")}, and ${finalName}`;
 }
 
 function draftCoverageState(

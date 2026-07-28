@@ -13,11 +13,14 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/const missingLines = omsLines\.filter/);
   });
 
-  it("adds reconciled shippable lines to planned outbound shipments and requeues ShipStation", () => {
-    expect(WMS_SYNC_SRC).toMatch(/plannedShipments = activeShipments\.filter/);
-    expect(WMS_SYNC_SRC).toMatch(/s\.status === "planned"/);
-    expect(WMS_SYNC_SRC).toMatch(/INSERT INTO wms\.outbound_shipment_items/);
-    expect(WMS_SYNC_SRC).toMatch(/WHERE NOT EXISTS \(/);
+  it("routes reconciled lines by package editability without guessing", () => {
+    expect(WMS_SYNC_SRC).toMatch(/selectLateOrderShipmentTarget\(activeShipments\)/);
+    expect(WMS_SYNC_SRC).toMatch(/target\.status === "planned"/);
+    expect(WMS_SYNC_SRC).toMatch(/target\.status === "queued" \|\| target\.status === "on_hold"/);
+    expect(WMS_SYNC_SRC).toMatch(/appendUncoveredItemsToShipment/);
+    expect(WMS_SYNC_SRC).toMatch(/PROVIDER_MEMBERSHIP_PENDING_APPEND/);
+    expect(WMS_SYNC_SRC).toMatch(/enqueueShippingEngineShipmentAmendRetry/);
+    expect(WMS_SYNC_SRC).toMatch(/createLateEditResidualShipment/);
     expect(WMS_SYNC_SRC).toMatch(/enqueueShipStationShipmentPushRetry/);
   });
 
@@ -30,11 +33,13 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/"attach_authorized_line_to_planned_shipment"/);
   });
 
-  it("keeps reconciliation-created shipment work and its audit event in the same transaction", () => {
+  it("keeps coverage, queueing, and audit writes in the same transaction", () => {
     expect(WMS_SYNC_SRC).toMatch(/const created = await db\.transaction/);
     expect(WMS_SYNC_SRC).toMatch(/createShipmentForOrder\([\s\S]*\{ useXactLock: true \}/);
-    expect(WMS_SYNC_SRC).toMatch(/const insertedCount = await db\.transaction/);
-    expect(WMS_SYNC_SRC).toMatch(/await this\.recordWmsReconciliationAuditEvent/);
+    expect(WMS_SYNC_SRC).toMatch(/const coverage = await db\.transaction/);
+    expect(WMS_SYNC_SRC).toMatch(/appendUncoveredItemsToShipment\([\s\S]*useXactLock: true/);
+    expect(WMS_SYNC_SRC).toMatch(/await enqueueShippingEngineShipmentAmendRetry\(\s*tx/);
+    expect(WMS_SYNC_SRC).toMatch(/await this\.recordWmsReconciliationAuditEvent\(\s*tx/);
   });
 
   it("does not reconcile cancelled or refunded OMS orders back into WMS work", () => {

@@ -23,6 +23,8 @@ import type {
   EngineMarkShippedResult,
   EngineOrderState,
   EngineRef,
+  EngineShipmentItemAppendResult,
+  ShipmentItemAppendPayload,
   ShipmentPushPayload,
   CanonicalShipmentEvent,
 } from "../types";
@@ -80,6 +82,10 @@ export function engineRefFromRow(row: {
 export type ShipStationServiceHandle = {
   isConfigured(): boolean;
   pushShipment(shipmentId: number): Promise<{ shipstationOrderId: number; orderKey: string }>;
+  appendShipmentItems(
+    shipmentId: number,
+    shipmentItemIds: readonly number[],
+  ): Promise<EngineShipmentItemAppendResult>;
   cancelOrder(shipstationOrderId: number): Promise<EngineCancelResult>;
   putOrderOnHold(shipstationOrderId: number): Promise<void>;
   releaseOrderFromHold(shipstationOrderId: number): Promise<void>;
@@ -123,6 +129,16 @@ export function createShipStationEngine(
         engineRef: toEngineRef(result.shipstationOrderId, result.orderKey),
         alreadyExisted: !!payload.existingEngineRef,
       };
+    },
+
+
+    async appendShipmentItems(
+      payload: ShipmentItemAppendPayload,
+    ): Promise<EngineShipmentItemAppendResult> {
+      return ss.appendShipmentItems(
+        payload.shipmentId,
+        payload.shipmentItemIds,
+      );
     },
 
     async cancel(engineRef: EngineRef): Promise<EngineCancelResult> {

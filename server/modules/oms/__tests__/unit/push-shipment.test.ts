@@ -564,6 +564,219 @@ function mockFetchQueue(responses: any[]) {
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
+
+describe("appendShipmentItems :: amend existing provider order", () => {
+  beforeEach(() => {
+    process.env.SHIPSTATION_API_KEY = "test-key";
+    process.env.SHIPSTATION_API_SECRET = "test-secret";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    vi.restoreAllMocks();
+  });
+
+  it("preserves provider-managed fields and verifies the appended line identity", async () => {
+    const mock = makeDb([
+      {
+        rows: [{
+          id: 9001,
+          status: "queued",
+          held: false,
+          requires_review: false,
+          review_reason: null,
+          shipstation_order_id: 555000,
+        }],
+      },
+      {
+        rows: [{
+          id: 222,
+          qty: 3,
+          sku: "LATE-CASE",
+          name: "Late case item",
+          unit_price_cents: 1299,
+        }],
+      },
+      { rows: [] },
+    ]);
+    const liveOrder = {
+      orderId: 555000,
+      orderKey: "echelon-wms-shp-9001",
+      orderStatus: "awaiting_shipment",
+      carrierCode: "ups",
+      serviceCode: "ups_ground",
+      packageCode: "package",
+      advancedOptions: { customField1: "rank", storeId: 77 },
+      items: [{
+        lineItemKey: "wms-item-111",
+        sku: "ORIGINAL",
+        name: "Original item",
+        quantity: 1,
+      }],
+    };
+    const verifiedOrder = {
+      ...liveOrder,
+      items: [
+        ...liveOrder.items,
+        {
+          lineItemKey: "wms-item-222",
+          sku: "LATE-CASE",
+          name: "Late case item",
+          quantity: 3,
+        },
+      ],
+    };
+    const fetchMock = mockFetchQueue([
+      liveOrder,
+      { orderId: 555000, orderStatus: "awaiting_shipment" },
+      verifiedOrder,
+    ]);
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db);
+    const result = await svc.appendShipmentItems(9001, [222]);
+
+    expect(result).toEqual({ state: "applied", providerStatus: "awaiting_shipment" });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const postCall = fetchMock.mock.calls.find(([, init]: any) => init?.method === "POST");
+    expect(postCall).toBeDefined();
+    const payload = JSON.parse((postCall as any)[1].body);
+    expect(payload.carrierCode).toBe("ups");
+    expect(payload.serviceCode).toBe("ups_ground");
+    expect(payload.packageCode).toBe("package");
+    expect(payload.advancedOptions).toEqual({ customField1: "rank", storeId: 77 });
+    expect(payload.items.map((item: any) => item.lineItemKey)).toEqual([
+      "wms-item-111",
+      "wms-item-222",
+    ]);
+    expect(payload.items[1]).toMatchObject({
+      sku: "LATE-CASE",
+      quantity: 3,
+      unitPrice: 12.99,
+    });
+  });
+
+  it("is idempotent when the provider already contains every requested line", async () => {
+    const mock = makeDb([
+      {
+        rows: [{
+          id: 9001,
+          status: "queued",
+          held: false,
+          requires_review: false,
+          review_reason: null,
+          shipstation_order_id: 555000,
+        }],
+      },
+      {
+        rows: [{
+          id: 222,
+          qty: 3,
+          sku: "LATE-CASE",
+          name: "Late case item",
+          unit_price_cents: 1299,
+        }],
+      },
+      { rows: [] },
+    ]);
+    const fetchMock = mockFetchQueue([{
+      orderId: 555000,
+      orderStatus: "awaiting_shipment",
+      items: [{ lineItemKey: "wms-item-222", quantity: 3 }],
+    }]);
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db);
+    const result = await svc.appendShipmentItems(9001, [222]);
+
+    expect(result).toEqual({
+      state: "already_applied",
+      providerStatus: "awaiting_shipment",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.some(([, init]: any) => init?.method === "POST")).toBe(false);
+  });
+
+  it("returns not_editable only after ShipStation positively reports a terminal state", async () => {
+    const mock = makeDb([
+      {
+        rows: [{
+          id: 9001,
+          status: "queued",
+          held: false,
+          requires_review: false,
+          review_reason: null,
+          shipstation_order_id: 555000,
+        }],
+      },
+      {
+        rows: [{
+          id: 222,
+          qty: 3,
+          sku: "LATE-CASE",
+          name: "Late case item",
+          unit_price_cents: 1299,
+        }],
+      },
+    ]);
+    const fetchMock = mockFetchQueue([{
+      orderId: 555000,
+      orderStatus: "shipped",
+      items: [{ lineItemKey: "wms-item-111", quantity: 1 }],
+    }]);
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db);
+    const result = await svc.appendShipmentItems(9001, [222]);
+
+    expect(result).toEqual({ state: "not_editable", providerStatus: "shipped" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.some(([, init]: any) => init?.method === "POST")).toBe(false);
+    expect(mock.getCallCount()).toBe(2);
+  });
+  it("retries an unrecognized provider state instead of creating a residual package", async () => {
+    const mock = makeDb([
+      {
+        rows: [{
+          id: 9001,
+          status: "queued",
+          held: false,
+          requires_review: false,
+          review_reason: null,
+          shipstation_order_id: 555000,
+        }],
+      },
+      {
+        rows: [{
+          id: 222,
+          qty: 3,
+          sku: "LATE-CASE",
+          name: "Late case item",
+          unit_price_cents: 1299,
+        }],
+      },
+    ]);
+    const fetchMock = mockFetchQueue([{
+      orderId: 555000,
+      orderStatus: "unknown_future_status",
+      items: [{ lineItemKey: "wms-item-111", quantity: 1 }],
+    }]);
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db);
+    const error = await svc.appendShipmentItems(9001, [222]).catch((err) => err);
+
+    expect(error).toBeInstanceOf(ShipStationPushError);
+    expect(error.context).toMatchObject({
+      code: "SS_PUSH_AMENDMENT_STATE_UNKNOWN",
+      field: "orderStatus",
+      value: "unknown_future_status",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.some(([, init]: any) => init?.method === "POST")).toBe(false);
+    expect(mock.getCallCount()).toBe(2);
+  });
+});
 describe("pushShipment :: happy path", () => {
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";

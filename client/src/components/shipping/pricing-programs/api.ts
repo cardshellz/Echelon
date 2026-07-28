@@ -522,6 +522,7 @@ export interface ProgramOverview {
   book: RateBookSummary;
   options: ProgramOptionState[];
   destinationGroups: ProgramDestinationGroup[];
+  liveRevisionOnlyGroups: ProgramDestinationGroup[];
   activeAssignments: RateBookAssignment[];
   liveOptionCount: number;
   draftCount: number;
@@ -542,6 +543,25 @@ export interface ProgramDestinationGroup {
   hasCurrentDefinition: boolean;
   appearsInLiveRevision: boolean;
   appearsInDraftRevision: boolean;
+}
+
+export type CoverageCellAction =
+  | { kind: "continue_draft"; tableId: number }
+  | { kind: "create_revision"; tableId: number }
+  | { kind: "start_rates" }
+  | { kind: "none" };
+
+export function resolveCoverageCellAction(input: {
+  activeTableId: number | null;
+  draftTableId: number | null;
+}): CoverageCellAction {
+  if (input.draftTableId !== null) {
+    return { kind: "continue_draft", tableId: input.draftTableId };
+  }
+  if (input.activeTableId !== null) {
+    return { kind: "create_revision", tableId: input.activeTableId };
+  }
+  return { kind: "start_rates" };
 }
 
 export function rateTableRegionCount(
@@ -588,15 +608,29 @@ export function buildProgramOverviews(data: RateTablesResponse): ProgramOverview
       const candidate = table.createdAt > table.effectiveFrom ? table.createdAt : table.effectiveFrom;
       return latest === null || candidate > latest ? candidate : latest;
     }, null);
-    const destinationGroups = mergeProgramDestinationGroups(
+    const reconciledDestinationGroups = mergeProgramDestinationGroups(
       book.id,
       persistedGroups,
       currentTables,
     );
+    const currentDestinationGroups = reconciledDestinationGroups.filter(
+      (group) => group.hasCurrentDefinition,
+    );
+    const hasCurrentDestinationLayout = currentDestinationGroups.length > 0;
+    const destinationGroups = hasCurrentDestinationLayout
+      ? currentDestinationGroups
+      : reconciledDestinationGroups;
+    const liveRevisionOnlyGroups = hasCurrentDestinationLayout
+      ? reconciledDestinationGroups.filter(
+          (group) =>
+            !group.hasCurrentDefinition && group.appearsInLiveRevision,
+        )
+      : [];
     return {
       book,
       options,
       destinationGroups,
+      liveRevisionOnlyGroups,
       activeAssignments: book.assignments.filter((assignment) => assignment.isActive),
       liveOptionCount: actives.length,
       draftCount: options.filter((option) => option.draft !== null).length,

@@ -106,6 +106,12 @@ export type CarrierTrackingIngestResult =
   | CarrierTrackingNormalizedIngestResult
   | CarrierTrackingRejectedIngestResult;
 
+export interface CarrierTrackingWebhookReplayContext {
+  operator: string;
+  reason: string;
+  idempotencyKey: string;
+}
+
 export interface CarrierTrackingReconciliationResult {
   hydrationsClaimed: number;
   hydrationsCompleted: number;
@@ -254,6 +260,27 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
     rawPayload: unknown,
     receipt: VerifiedCarrierWebhookReceipt,
   ): Promise<CarrierTrackingIngestResult> {
+    return this.persistVerifiedShipStationWebhook(rawPayload, receipt, null);
+  }
+
+  async replayVerifiedShipStationWebhook(
+    rawPayload: unknown,
+    receipt: VerifiedCarrierWebhookReceipt,
+    context: CarrierTrackingWebhookReplayContext,
+  ): Promise<CarrierTrackingIngestResult> {
+    const replayContext = {
+      operator: requiredAuditText(context.operator, "operator"),
+      reason: requiredAuditText(context.reason, "reason"),
+      idempotencyKey: requiredAuditText(context.idempotencyKey, "idempotencyKey"),
+    };
+    return this.persistVerifiedShipStationWebhook(rawPayload, receipt, replayContext);
+  }
+
+  private async persistVerifiedShipStationWebhook(
+    rawPayload: unknown,
+    receipt: VerifiedCarrierWebhookReceipt,
+    replayContext: CarrierTrackingWebhookReplayContext | null,
+  ): Promise<CarrierTrackingIngestResult> {
     const storedReceipt = await this.dependencies.repository.persistVerifiedWebhookReceipt(receipt);
     let event: NormalizedCarrierTrackingEvent;
     try {
@@ -266,7 +293,10 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         {
           parserVersion: CARRIER_TRACKING_PARSER_VERSION,
           reasonCode: error.code,
-          details: hydrationPreparation.details,
+          details: {
+            ...hydrationPreparation.details,
+            ...(replayContext ? { replay: replayContext } : {}),
+          },
           hydrationRequest: hydrationPreparation.request,
           createdAt: this.dependencies.clock.now(),
         },
@@ -302,6 +332,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       {
         parserVersion: CARRIER_TRACKING_PARSER_VERSION,
         reasonCode: "SHIPSTATION_API_TRACK_NORMALIZED",
+        details: replayContext ? { replay: replayContext } : undefined,
         createdAt: this.dependencies.clock.now(),
       },
     );
@@ -1213,6 +1244,14 @@ function carrierDispatchErrorEvidence(error: unknown): {
     retryable: false,
     context: {},
   };
+}
+
+function requiredAuditText(value: string, field: string): string {
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length > 500) {
+    throw new Error(`${field} must contain between 1 and 500 characters`);
+  }
+  return normalized;
 }
 
 function defaultTrackingSubscriptionLeaseOwner(): string {

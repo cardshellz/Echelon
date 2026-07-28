@@ -321,9 +321,61 @@ describe("CarrierTrackingService", () => {
     expect(repository.persistNormalizedWebhookEvent).toHaveBeenCalledWith(
       301,
       expect.objectContaining({ provider: "shipstation" }),
-      expect.objectContaining({ parserVersion: "shipstation-api-track-v1" }),
+      expect.objectContaining({ parserVersion: "shipstation-api-track-v2" }),
     );
     expect(appendMatchAttempt).not.toHaveBeenCalled();
+  });
+
+  it("appends audited replay metadata through the same immutable ingest path", async () => {
+    const { repository } = repositoryWithCandidates([]);
+    vi.mocked(repository.persistVerifiedWebhookReceipt).mockResolvedValue({ id: 301, inserted: false });
+    const service = new CarrierTrackingService({
+      repository,
+      clock: { now: () => new Date(now) },
+      logger: logger(),
+    });
+
+    const result = await service.replayVerifiedShipStationWebhook(
+      payload(),
+      verifiedReceipt(),
+      {
+        operator: " owner@cardshellz.com ",
+        reason: " parser-v2-repair ",
+        idempotencyKey: " parser-v2-batch-1 ",
+      },
+    );
+
+    expect(result).toMatchObject({ ingestStatus: "normalized", webhookReceiptInserted: false });
+    expect(repository.persistNormalizedWebhookEvent).toHaveBeenCalledWith(
+      301,
+      expect.any(Object),
+      expect.objectContaining({
+        parserVersion: "shipstation-api-track-v2",
+        details: {
+          replay: {
+            operator: "owner@cardshellz.com",
+            reason: "parser-v2-repair",
+            idempotencyKey: "parser-v2-batch-1",
+          },
+        },
+      }),
+    );
+  });
+
+  it("rejects blank replay audit identity before writing", async () => {
+    const { repository } = repositoryWithCandidates([]);
+    const service = new CarrierTrackingService({
+      repository,
+      clock: { now: () => new Date(now) },
+      logger: logger(),
+    });
+
+    await expect(service.replayVerifiedShipStationWebhook(
+      payload(),
+      verifiedReceipt(),
+      { operator: " ", reason: "repair", idempotencyKey: "batch-1" },
+    )).rejects.toThrow("operator must contain between 1 and 500 characters");
+    expect(repository.persistVerifiedWebhookReceipt).not.toHaveBeenCalled();
   });
 
   it("retains authenticated bytes before classifying an unexpected payload for review", async () => {
@@ -356,7 +408,7 @@ describe("CarrierTrackingService", () => {
     expect(repository.persistRejectedWebhookPayload).toHaveBeenCalledWith(
       301,
       expect.objectContaining({
-        parserVersion: "shipstation-api-track-v1",
+        parserVersion: "shipstation-api-track-v2",
         reasonCode: "INVALID_CARRIER_TRACKING_PAYLOAD",
       }),
     );
@@ -392,7 +444,7 @@ describe("CarrierTrackingService", () => {
       hydrationPrepared: true,
     });
     expect(repository.persistRejectedWebhookPayload).toHaveBeenCalledWith(301, {
-      parserVersion: "shipstation-api-track-v1",
+      parserVersion: "shipstation-api-track-v2",
       reasonCode: "SHIPSTATION_TRACKING_DATA_MISSING",
       details: expect.objectContaining({ hydrationDisposition: "scheduled" }),
       hydrationRequest: {

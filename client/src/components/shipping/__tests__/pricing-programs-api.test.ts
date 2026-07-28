@@ -11,6 +11,7 @@ import {
   productRuleRevisionStatus,
   rateTableCoveragesForGroup,
   rateTableRegionCount,
+  resolveCoverageCellAction,
   type ProgramDestinationGroup,
   type RateBookAssignment,
   type RateTableCoverage,
@@ -348,7 +349,7 @@ describe("pricing program coverage aggregation", () => {
     expect(buildProgramOverviews(response)[0]?.destinationGroups).toHaveLength(1);
   });
 
-  it("reconciles legacy live groups with current definitions without hiding live-only coverage", () => {
+  it("uses current group definitions for editing and reports unmatched live groups", () => {
     const southeastRegions = ["AL", "FL", "GA", "KY", "MS", "NC", "SC", "TN"];
     const midwestRegions = [
       "IL", "IN", "IA", "KS", "MI", "MN", "MO", "NE", "ND", "OH", "SD", "WI",
@@ -473,7 +474,10 @@ describe("pricing program coverage aggregation", () => {
 
     const program = buildProgramOverviews(response)[0];
     expect(program).toBeDefined();
-    expect(program!.destinationGroups).toHaveLength(10);
+    expect(program!.destinationGroups).toHaveLength(8);
+    expect(
+      program!.destinationGroups.every((group) => group.hasCurrentDefinition),
+    ).toBe(true);
     for (const sharedName of [
       "Military mail (APO/FPO/DPO)",
       "South Central",
@@ -507,7 +511,7 @@ describe("pricing program coverage aggregation", () => {
       northeast,
     )).toBe(1);
 
-    const southeast = program!.destinationGroups.find(
+    const southeast = program!.liveRevisionOnlyGroups.find(
       (group) => group.name === "Southeast",
     );
     expect(southeast).toMatchObject({
@@ -517,10 +521,94 @@ describe("pricing program coverage aggregation", () => {
       appearsInDraftRevision: false,
     });
     expect(
-      program!.destinationGroups
-        .filter((group) => !group.hasCurrentDefinition)
+      program!.liveRevisionOnlyGroups
         .map((group) => group.name)
         .sort(),
     ).toEqual(["Midwest", "Southeast"]);
+    expect(program!.destinationGroups.some(
+      (group) => ["Midwest", "Southeast"].includes(group.name),
+    )).toBe(false);
+
+    const combined = program!.destinationGroups.find(
+      (group) => group.id === 52,
+    );
+    expect(combined).toBeDefined();
+    expect(resolveCoverageCellAction({
+      activeTableId: active.id,
+      draftTableId: draft.id,
+    })).toEqual({ kind: "continue_draft", tableId: draft.id });
+  });
+
+  it("keeps legacy live groups editable until current group identities exist", () => {
+    const active = rateTable({
+      id: 401,
+      status: "active",
+      metadata: {
+        draftLayout: {
+          version: 1,
+          groups: [legacyLayoutGroup("Legacy Northeast", ["PA"])],
+        },
+      },
+    });
+    const response: RateTablesResponse = {
+      rateBooks: [{
+        id: 21,
+        code: "retail",
+        name: "Retail shipping",
+        status: "active",
+        zoneSetId: null,
+        metadata: null,
+        assignments: [],
+      }],
+      serviceLevels: [{
+        id: 8,
+        code: "standard",
+        displayName: "Standard shipping",
+        description: null,
+        fulfillmentMode: "parcel",
+        promiseMinBusinessDays: 3,
+        promiseMaxBusinessDays: 7,
+        sortOrder: 0,
+        isActive: true,
+      }],
+      destinationGroups: [],
+      rateTables: [active],
+    };
+
+    const program = buildProgramOverviews(response)[0];
+    expect(program?.destinationGroups).toHaveLength(1);
+    expect(program?.destinationGroups[0]).toMatchObject({
+      name: "Legacy Northeast",
+      hasCurrentDefinition: false,
+      appearsInLiveRevision: true,
+    });
+    expect(program?.liveRevisionOnlyGroups).toEqual([]);
+    expect(resolveCoverageCellAction({
+      activeTableId: active.id,
+      draftTableId: null,
+    })).toEqual({ kind: "create_revision", tableId: active.id });
+  });
+});
+
+describe("pricing program coverage card actions", () => {
+  it("keeps current destination groups on the editable workflow", () => {
+    expect([
+      resolveCoverageCellAction({
+        activeTableId: 301,
+        draftTableId: 302,
+      }),
+      resolveCoverageCellAction({
+        activeTableId: 301,
+        draftTableId: null,
+      }),
+      resolveCoverageCellAction({
+        activeTableId: null,
+        draftTableId: null,
+      }),
+    ]).toEqual([
+      { kind: "continue_draft", tableId: 302 },
+      { kind: "create_revision", tableId: 301 },
+      { kind: "start_rates" },
+    ]);
   });
 });

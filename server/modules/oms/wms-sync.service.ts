@@ -34,10 +34,21 @@ import {
 } from "./wms-sync-financials";
 import {
   createShipmentForOrder,
+  PROVIDER_MEMBERSHIP_AUTHORITATIVE,
+  PROVIDER_MEMBERSHIP_PENDING_APPEND,
   linkChildToParentShipment,
   ChildWithoutParentShipmentError,
 } from "../wms/create-shipment";
 import {
+  appendUncoveredItemsToShipment,
+  createLateEditResidualShipment,
+} from "../wms/late-order-shipment-coverage";
+import {
+  selectLateOrderShipmentTarget,
+} from "../wms/late-order-shipment-selection";
+import { deriveReconciledWmsOrderItemStatus } from "../wms/wms-line-reconciliation";
+import {
+  enqueueShippingEngineShipmentAmendRetry,
   enqueueShipStationShipmentPushRetry,
   enqueueShipStationSortRankSyncRetry,
 } from "./webhook-retry.worker";
@@ -98,12 +109,18 @@ function buildOmsWmsOrderScope(omsOrderId: number, fulfillmentPartitionKey: stri
 type WmsReconciliationAutoRepairRule =
   | "materialize_authorized_oms_line"
   | "create_missing_initial_shipment"
-  | "attach_authorized_line_to_planned_shipment";
+  | "attach_authorized_line_to_planned_shipment"
+  | "attach_authorized_line_to_editable_engine_order"
+  | "create_late_edit_residual_shipment";
 
 type WmsReconciliationManualReviewRule =
   | "picked_quantity_exceeds_oms_authority"
   | "edit_removed_picked_wms_item"
-  | "edit_picked_quantity_exceeds_oms_authority";
+  | "edit_picked_quantity_exceeds_oms_authority"
+  | "ambiguous_late_edit_shipment_target"
+  | "late_edit_provider_identity_missing"
+  | "late_edit_shipment_requires_review"
+  | "no_safe_late_edit_shipment_target";
 
 type WmsReconciliationManualReviewSource =
   | "reconcileExistingWmsOrderLines"
@@ -1441,6 +1458,7 @@ export class WmsSyncService {
         sku: wmsOrderItems.sku,
         quantity: wmsOrderItems.quantity,
         pickedQuantity: wmsOrderItems.pickedQuantity,
+        fulfilledQuantity: wmsOrderItems.fulfilledQuantity,
         status: wmsOrderItems.status,
       })
       .from(wmsOrderItems)
@@ -1452,9 +1470,9 @@ export class WmsSyncService {
       (line) => !existingOmsLineIds.has(line.id) && getOmsLineRemainingMaterializableQuantity(line) > 0,
     );
 
-    // Sync cancellations and quantity changes from OMS → WMS.
-    // If an OMS line was removed (quantity zeroed) or edited, update the
-    // WMS item to match — but only if it hasn't been picked yet.
+    // Sync cancellations and quantity changes from OMS to WMS. Reductions
+    // below picked quantity require review; safe edits recalculate line status,
+    // including reopening completed lines when channel authority increases.
     const omsLineById = new Map(omsLines.map((line) => [line.id, line]));
     for (const wmsItem of existingItems) {
       if (!wmsItem.omsOrderLineId) continue;
@@ -1466,19 +1484,9 @@ export class WmsSyncService {
 
       if (omsQty === wmsQty) continue;
 
-      if (wmsItem.status === "pending" || (wmsItem.pickedQuantity ?? 0) === 0) {
-        const updates: Record<string, any> = { quantity: omsQty };
-        if (omsQty <= 0) updates.status = "cancelled";
-        await db
-          .update(wmsOrderItems)
-          .set(updates)
-          .where(eq(wmsOrderItems.id, wmsItem.id));
-        console.log(
-          `[WMS Sync] Reconciled item ${wmsItem.sku} (id ${wmsItem.id}): qty ${wmsQty} → ${omsQty}${omsQty <= 0 ? " (cancelled)" : ""}`,
-        );
-      } else if ((wmsItem.pickedQuantity ?? 0) > 0 && omsQty < (wmsItem.pickedQuantity ?? 0)) {
+      if ((wmsItem.pickedQuantity ?? 0) > 0 && omsQty < (wmsItem.pickedQuantity ?? 0)) {
         console.warn(
-          `[WMS Sync] Item ${wmsItem.sku} (id ${wmsItem.id}): OMS qty reduced to ${omsQty} but ${wmsItem.pickedQuantity} already picked — needs manual review`,
+          `[WMS Sync] Item ${wmsItem.sku} (id ${wmsItem.id}): OMS qty reduced to ${omsQty} but ${wmsItem.pickedQuantity} already picked - needs manual review`,
         );
         await this.recordWmsReconciliationReviewException(db, {
           rule: "picked_quantity_exceeds_oms_authority",
@@ -1492,13 +1500,21 @@ export class WmsSyncService {
           wmsQuantity: wmsQty,
           pickedQuantity: wmsItem.pickedQuantity ?? 0,
         });
-      } else if (omsQty !== wmsQty) {
+      } else {
+        const reconciledStatus = deriveReconciledWmsOrderItemStatus({
+          authorityQuantity: omsQty,
+          pickedQuantity: wmsItem.pickedQuantity ?? 0,
+          fulfilledQuantity: wmsItem.fulfilledQuantity ?? 0,
+        });
         await db
           .update(wmsOrderItems)
-          .set({ quantity: omsQty })
+          .set({
+            quantity: omsQty,
+            status: reconciledStatus,
+          })
           .where(eq(wmsOrderItems.id, wmsItem.id));
         console.log(
-          `[WMS Sync] Reconciled item ${wmsItem.sku} (id ${wmsItem.id}): qty ${wmsQty} → ${omsQty}`,
+          `[WMS Sync] Reconciled item ${wmsItem.sku} (id ${wmsItem.id}): qty ${wmsQty} -> ${omsQty}, status ${wmsItem.status} -> ${reconciledStatus}`,
         );
       }
     }
@@ -1641,7 +1657,7 @@ export class WmsSyncService {
     await db.execute(sql`
       UPDATE wms.orders w
          SET warehouse_status = CASE
-               WHEN w.warehouse_status IN ('cancelled', 'shipped') THEN w.warehouse_status
+               WHEN w.warehouse_status = 'cancelled' THEN w.warehouse_status
                WHEN EXISTS (
                  SELECT 1
                  FROM wms.order_items pending_items
@@ -1686,37 +1702,85 @@ export class WmsSyncService {
       .from(wmsOrders)
       .where(eq(wmsOrders.id, wmsOrderId))
       .limit(1);
-    if (freshWmsState?.warehouseStatus === "shipped" || freshWmsState?.warehouseStatus === "cancelled") {
+    if (freshWmsState?.warehouseStatus === "cancelled") {
       return { insertedItems: insertedItems.length, updatedShipments: 0 };
     }
 
-    // Shipment reconciliation: three cases based on what already exists.
+    // Shipment reconciliation is driven by provider editability, not by an
+    // assumption that every late order edit needs a second package.
     const activeShipments = await db
-      .select({ id: outboundShipments.id, status: outboundShipments.status })
+      .select({
+        id: outboundShipments.id,
+        status: outboundShipments.status,
+        source: outboundShipments.source,
+        shipmentPurpose: outboundShipments.shipmentPurpose,
+        replacesShipmentId: outboundShipments.replacesShipmentId,
+        shippingEngine: outboundShipments.shippingEngine,
+        engineOrderRef: outboundShipments.engineOrderRef,
+        shipstationOrderId: outboundShipments.shipstationOrderId,
+        requiresReview: outboundShipments.requiresReview,
+      })
       .from(outboundShipments)
       .where(and(
         eq(outboundShipments.orderId, wmsOrderId),
         notInArray(outboundShipments.status, ["voided", "cancelled"]),
       ));
 
+    const orderItemIds = shippableShipmentItems.map((item) => item.id);
     let updatedShipments = 0;
+    const recordLateEditReview = async (
+      rule: WmsReconciliationManualReviewRule,
+      summary: string,
+      reviewMessage: string,
+    ) => {
+      const item = shippableShipmentItems[0];
+      const line = omsLines.find((candidate) => candidate.id === item.omsOrderLineId);
+      const existingItem = existingItems.find((candidate) => candidate.id === item.id);
+      await this.recordWmsReconciliationReviewException(db, {
+        rule,
+        source: "reconcileExistingWmsOrderLines",
+        omsOrderId,
+        wmsOrderId,
+        wmsOrderItemId: item.id,
+        omsOrderLineId: item.omsOrderLineId,
+        sku: line?.sku ?? null,
+        omsQuantity: line ? getOmsLineMaterializableQuantity(line) : item.quantity,
+        wmsQuantity: item.quantity,
+        pickedQuantity: existingItem?.pickedQuantity ?? 0,
+        summary,
+        reviewMessage,
+      });
+    };
 
     if (activeShipments.length === 0) {
-      // Case A: No shipment exists at all — initial sync must have crashed
-      // before creating one. Create a new shipment and push it.
       const created = await db.transaction(async (tx: any) => {
         const result = await createShipmentForOrder(
-          tx as any,
+          tx,
           wmsOrderId,
           wmsOrderState?.channelId ?? null,
           shippableShipmentItems.map((item) => ({
             id: item.id,
-            quantity: item.quantity ?? 0,
+            quantity: item.quantity,
             productVariantId: item.productId,
           })),
           { useXactLock: true },
         );
-        if (result.created) {
+        const coverage = await appendUncoveredItemsToShipment(
+          tx,
+          wmsOrderId,
+          result.shipmentId,
+          orderItemIds,
+          {
+            providerMembershipState: PROVIDER_MEMBERSHIP_AUTHORITATIVE,
+            useXactLock: true,
+          },
+        );
+        await enqueueShipStationShipmentPushRetry(
+          tx,
+          result.shipmentId,
+          "WMS line reconciliation created missing initial shipment",
+        );
+        if (result.created || coverage.shipmentItemIds.length > 0) {
           await this.recordWmsReconciliationAuditEvent(
             tx,
             omsOrderId,
@@ -1724,91 +1788,180 @@ export class WmsSyncService {
             {
               wmsOrderId,
               wmsShipmentId: result.shipmentId,
-              itemCount: shippableShipmentItems.length,
-              orderItemIds: shippableShipmentItems.map((item) => item.id),
+              orderItemIds,
+              outboundShipmentItemIds: coverage.shipmentItemIds,
             },
           );
         }
-        return result;
+        return {
+          changed: result.created
+            ? shippableShipmentItems.length
+            : coverage.shipmentItemIds.length,
+        };
       });
-      updatedShipments += shippableShipmentItems.length;
-      try {
-        await enqueueShipStationShipmentPushRetry(
-          db,
-          created.shipmentId,
-          new Error("WMS line reconciliation created shipment (no prior shipment existed)"),
-        );
-      } catch (err: any) {
-        console.error(
-          `[WMS Sync] failed to enqueue ShipStation retry for new shipment ${created.shipmentId}: ${err?.message ?? String(err)}`,
-        );
-      }
-    } else {
-      // Case B/C: Shipment(s) already exist. Add any missing items to
-      // planned shipments (Case B) and re-push. If the shipment is already
-      // queued/labeled/shipped (Case C), it's already in ShipStation — no
-      // duplicate creation needed.
-      const plannedShipments = activeShipments.filter((s) => s.status === "planned");
-      for (const shipment of plannedShipments) {
-        for (const item of shippableShipmentItems) {
-          const line = omsLines.find((candidate) => candidate.id === item.omsOrderLineId);
-          if (!line || line.requiresShipping === false) continue;
-          const insertedCount = await db.transaction(async (tx: any) => {
-            const inserted: any = await tx.execute(sql`
-              INSERT INTO wms.outbound_shipment_items (
-                shipment_id,
-                order_item_id,
-                product_variant_id,
-                qty
-              )
-              SELECT
-                ${shipment.id},
-                ${item.id},
-                ${item.productId},
-                ${item.quantity ?? 0}
-              WHERE NOT EXISTS (
-                SELECT 1
-                FROM wms.outbound_shipment_items
-                WHERE shipment_id = ${shipment.id}
-                  AND order_item_id = ${item.id}
-              )
-              RETURNING id
-            `);
-            const createdRows = inserted?.rows ?? [];
-            if (createdRows.length > 0) {
-              await this.recordWmsReconciliationAuditEvent(
-                tx,
-                omsOrderId,
-                "attach_authorized_line_to_planned_shipment",
-                {
-                  wmsOrderId,
-                  wmsShipmentId: shipment.id,
-                  wmsOrderItemId: item.id,
-                  outboundShipmentItemIds: createdRows.map((row: any) => row.id),
-                  omsOrderLineId: item.omsOrderLineId,
-                  quantity: item.quantity ?? 0,
-                },
-              );
-            }
-            return createdRows.length;
-          });
-          updatedShipments += insertedCount;
-        }
-        try {
-          await enqueueShipStationShipmentPushRetry(
-            db,
-            shipment.id,
-            new Error("WMS line reconciliation added missing shipment item"),
-          );
-        } catch (err: any) {
-          console.error(
-            `[WMS Sync] failed to enqueue ShipStation retry for reconciled shipment ${shipment.id}: ${err?.message ?? String(err)}`,
-          );
-        }
-      }
+      updatedShipments += created.changed;
+      return { insertedItems: insertedItems.length, updatedShipments };
     }
 
-    return { insertedItems: insertedItems.length, updatedShipments };
+    const selection = selectLateOrderShipmentTarget(activeShipments);
+    if (selection.state === "ambiguous") {
+      await recordLateEditReview(
+        "ambiguous_late_edit_shipment_target",
+        `Late order edit for WMS order ${wmsOrderId} has multiple eligible package targets`,
+        `Eligible shipment ids: ${selection.shipmentIds.join(", ")}`,
+      );
+      return { insertedItems: insertedItems.length, updatedShipments: 0 };
+    }
+    if (selection.state === "none") {
+      await recordLateEditReview(
+        "no_safe_late_edit_shipment_target",
+        `Late order edit for WMS order ${wmsOrderId} has no safe customer-fulfillment package target`,
+        `Observed shipment ids: ${activeShipments.map((shipment) => shipment.id).join(", ")}`,
+      );
+      return { insertedItems: insertedItems.length, updatedShipments: 0 };
+    }
+
+    const target = selection.shipment;
+    if (target.requiresReview) {
+      await recordLateEditReview(
+        "late_edit_shipment_requires_review",
+        `Late order edit for WMS order ${wmsOrderId} cannot modify shipment ${target.id} while it requires review`,
+        `Shipment ${target.id} must be resolved before late demand is routed`,
+      );
+      return { insertedItems: insertedItems.length, updatedShipments: 0 };
+    }
+
+    if (target.status === "planned") {
+      const coverage = await db.transaction(async (tx: any) => {
+        const attached = await appendUncoveredItemsToShipment(
+          tx,
+          wmsOrderId,
+          target.id,
+          orderItemIds,
+          {
+            providerMembershipState: PROVIDER_MEMBERSHIP_AUTHORITATIVE,
+            useXactLock: true,
+          },
+        );
+        if (attached.shipmentItemIds.length > 0) {
+          await enqueueShipStationShipmentPushRetry(
+            tx,
+            target.id,
+            "WMS line reconciliation added authorized demand to planned shipment",
+          );
+          await this.recordWmsReconciliationAuditEvent(
+            tx,
+            omsOrderId,
+            "attach_authorized_line_to_planned_shipment",
+            {
+              wmsOrderId,
+              wmsShipmentId: target.id,
+              orderItemIds,
+              outboundShipmentItemIds: attached.shipmentItemIds,
+              addedQuantity: attached.addedQuantity,
+            },
+          );
+        }
+        return attached;
+      });
+      updatedShipments += coverage.shipmentItemIds.length;
+      return { insertedItems: insertedItems.length, updatedShipments };
+    }
+
+    if (target.status === "queued" || target.status === "on_hold") {
+      const hasProviderIdentity = Boolean(
+        (target.shippingEngine && target.engineOrderRef) ||
+        target.shipstationOrderId,
+      );
+      if (!hasProviderIdentity) {
+        await recordLateEditReview(
+          "late_edit_provider_identity_missing",
+          `Late order edit for WMS order ${wmsOrderId} cannot amend shipment ${target.id} without provider identity`,
+          `Shipment ${target.id} status=${target.status} has no engine order reference`,
+        );
+        return { insertedItems: insertedItems.length, updatedShipments: 0 };
+      }
+
+      const coverage = await db.transaction(async (tx: any) => {
+        const attached = await appendUncoveredItemsToShipment(
+          tx,
+          wmsOrderId,
+          target.id,
+          orderItemIds,
+          {
+            providerMembershipState: PROVIDER_MEMBERSHIP_PENDING_APPEND,
+            useXactLock: true,
+          },
+        );
+        if (attached.shipmentItemIds.length > 0) {
+          await enqueueShippingEngineShipmentAmendRetry(
+            tx,
+            target.id,
+            attached.shipmentItemIds,
+            "OMS order edit added authorized demand after shipping-engine push",
+          );
+          await this.recordWmsReconciliationAuditEvent(
+            tx,
+            omsOrderId,
+            "attach_authorized_line_to_editable_engine_order",
+            {
+              wmsOrderId,
+              wmsShipmentId: target.id,
+              orderItemIds,
+              outboundShipmentItemIds: attached.shipmentItemIds,
+              addedQuantity: attached.addedQuantity,
+              providerMembershipState: PROVIDER_MEMBERSHIP_PENDING_APPEND,
+            },
+          );
+        }
+        return attached;
+      });
+      updatedShipments += coverage.shipmentItemIds.length;
+      return { insertedItems: insertedItems.length, updatedShipments };
+    }
+
+    if (["labeled", "shipped", "delivered"].includes(target.status)) {
+      const residual = await db.transaction(async (tx: any) => {
+        const created = await createLateEditResidualShipment(
+          tx,
+          wmsOrderId,
+          wmsOrderState?.channelId ?? null,
+          orderItemIds,
+          { useXactLock: true },
+        );
+        if (created.shipmentItemIds.length > 0) {
+          await enqueueShipStationShipmentPushRetry(
+            tx,
+            created.shipmentId,
+            `late order demand discovered after shipment ${target.id} reached ${target.status}`,
+          );
+          await this.recordWmsReconciliationAuditEvent(
+            tx,
+            omsOrderId,
+            "create_late_edit_residual_shipment",
+            {
+              wmsOrderId,
+              originalWmsShipmentId: target.id,
+              residualWmsShipmentId: created.shipmentId,
+              originalStatus: target.status,
+              orderItemIds,
+              outboundShipmentItemIds: created.shipmentItemIds,
+              addedQuantity: created.addedQuantity,
+            },
+          );
+        }
+        return created;
+      });
+      updatedShipments += residual.shipmentItemIds.length;
+      return { insertedItems: insertedItems.length, updatedShipments };
+    }
+
+    await recordLateEditReview(
+      "no_safe_late_edit_shipment_target",
+      `Late order edit for WMS order ${wmsOrderId} encountered unsupported shipment status ${target.status}`,
+      `Shipment ${target.id} was not modified`,
+    );
+    return { insertedItems: insertedItems.length, updatedShipments: 0 };
   }
 
   /**

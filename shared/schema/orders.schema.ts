@@ -543,6 +543,13 @@ export const outboundShipmentItems = wmsSchema.table("outbound_shipment_items", 
   boxId: varchar("box_id", { length: 100 }), // WMS Cartonization assigned box
   weightOz: integer("weight_oz"), // Actual picked weight
   trackingId: varchar("tracking_id", { length: 200 }), // Package tracking num if split into multiple tracking nums
+  // `pending_append` means local late-edit coverage exists, but the shipping
+  // engine has not yet confirmed that the line belongs to this package.
+  // Inbound shipment processing must not treat an omitted pending row as a
+  // provider/package contradiction.
+  providerMembershipState: varchar("provider_membership_state", { length: 30 })
+    .notNull()
+    .default("authoritative"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
