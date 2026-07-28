@@ -115,12 +115,14 @@ import {
 // Engine tab strip (design spec §10 rev 1: ONE Procurement nav entry, the
 // engine surfaces switch on an in-page strip). "Analysis" is this page;
 // "Demand Planner" links to the live forward-demand surface (/demand-planner,
-// honestly labeled — it is not the parked forecast-inputs design, spec §12.3). The
-// surfaces that have not shipped render as inert muted chips with a "Soon"
-// pill — no dead links (spec §11 nav decision, mockups 03/04/05).
+// honestly labeled — it is not the parked forecast-inputs design, spec §12.3);
+// "Automation" links to the shipped mode/policy + review-queue surface
+// (/procurement/automation, mockup 03). The surfaces that have not shipped
+// render as inert muted chips with a "Soon" pill — no dead links (spec §11
+// nav decision, mockups 04/05).
 // ---------------------------------------------------------------------------
 
-const ENGINE_TABS_COMING_SOON = ["Automation", "Runs", "RFQs"] as const;
+const ENGINE_TABS_COMING_SOON = ["Runs", "RFQs"] as const;
 
 // ---------------------------------------------------------------------------
 // API types — client-side mirror of the engine item fields this page consumes
@@ -1846,6 +1848,12 @@ export default function ReorderEngine() {
           >
             Demand Planner
           </Link>
+          <Link
+            href="/procurement/automation"
+            className="-mb-px border-b-2 border-transparent px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+          >
+            Automation
+          </Link>
           {ENGINE_TABS_COMING_SOON.map((label) => (
             <span
               key={label}
@@ -1861,20 +1869,20 @@ export default function ReorderEngine() {
         </nav>
       </div>
 
-      {/* ---------------- Legacy review-queue deep-link banner ---------------- */}
+      {/* ---------------- Review-queue deep-link banner (→ Automation page) ---------------- */}
       {deepLink.hasLegacyReviewParams && (
         <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
           <Info className="h-4 w-4 flex-none" />
           <span>
-            This link references the review queue — it lives on the legacy page until the Automation page ships.
+            This link references the review queue — it lives on the Automation page.
           </span>
           <Button
             variant="outline"
             size="sm"
             className="h-7 border-blue-300 bg-white text-xs text-blue-800"
-            onClick={() => navigate(deepLink.legacyUrl)}
+            onClick={() => navigate(deepLink.automationUrl)}
           >
-            Open on the legacy page
+            Open the review queue
           </Button>
         </div>
       )}

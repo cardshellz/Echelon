@@ -116,7 +116,7 @@ describe("deep-link parsing", () => {
     expect(link.hasLegacyReviewParams).toBe(false);
   });
 
-  it("flags all four legacy review params and preserves the full query on the legacy URL", () => {
+  it("flags all four legacy review params and preserves the full query on the Automation URL", () => {
     for (const key of ["reviewQueue", "reason", "forecastAction", "candidateBand"]) {
       const link = parseReorderEngineDeepLink(new URLSearchParams(`${key}=x`));
       expect(link.hasLegacyReviewParams).toBe(true);
@@ -125,13 +125,13 @@ describe("deep-link parsing", () => {
       "reviewQueue=skipped&reason=no_vendor&forecastAction=verify_recent_demand&candidateBand=watch&recommendationId=1%3A2%3A3",
     );
     const link = parseReorderEngineDeepLink(params);
-    expect(link.legacyUrl).toBe(`/reorder-analysis/legacy?${params.toString()}`);
+    expect(link.automationUrl).toBe(`/procurement/automation?${params.toString()}`);
   });
 
   it("does not raise the banner for plain or status-only links", () => {
     expect(parseReorderEngineDeepLink(new URLSearchParams("")).hasLegacyReviewParams).toBe(false);
     expect(parseReorderEngineDeepLink(new URLSearchParams("status=ok")).hasLegacyReviewParams).toBe(false);
-    expect(parseReorderEngineDeepLink(new URLSearchParams("")).legacyUrl).toBe("/reorder-analysis/legacy");
+    expect(parseReorderEngineDeepLink(new URLSearchParams("")).automationUrl).toBe("/procurement/automation");
   });
 });
 
