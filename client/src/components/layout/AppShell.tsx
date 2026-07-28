@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { Link, useLocation, useSearch } from "wouter";
+import { useQuery } from "@tanstack/react-query";
 import {
   LayoutDashboard,
   Package,
@@ -102,6 +103,14 @@ function isNavHrefActive(pathname: string, currentHref: string, href: string): b
 
 // --- Navigation structure ---
 
+// Reorder Engine flag wiring (design spec §10 rev 1): Procurement keeps ONE
+// entry for the reorder surface. When the `useNewReorderCockpit` procurement
+// setting is on, that entry reads "Reorder Engine"; off (or on any settings
+// load error) it stays "Reorder Analysis". Same href and icon either way —
+// the route-level switch lives in App.tsx (ReorderAnalysisRoute).
+const REORDER_ANALYSIS_HREF = "/reorder-analysis";
+const REORDER_ENGINE_NAV_LABEL = "Reorder Engine";
+
 const navStructure: NavEntry[] = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/", roles: ["admin", "lead"] },
   { label: "Operations Control Tower", icon: BarChart3, href: "/oms/flow-monitor", roles: ["admin", "lead"] },
@@ -112,7 +121,7 @@ const navStructure: NavEntry[] = [
     children: [
       { label: "Dashboard", icon: LayoutDashboard, href: "/purchasing" },
       { label: "Purchase Orders", icon: FileText, href: "/purchase-orders" },
-      { label: "Reorder Analysis", icon: BarChart3, href: "/reorder-analysis" },
+      { label: "Reorder Analysis", icon: BarChart3, href: REORDER_ANALYSIS_HREF },
       { label: "Demand Planner", icon: TrendingUp, href: "/demand-planner" },
       { label: "Receiving", icon: Truck, href: "/receiving" },
       { label: "Shipments", icon: Ship, href: "/shipments" },
@@ -239,6 +248,35 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
   const currentHref = search ? `${locationPath}?${search}` : locationPath;
   const { user, logout } = useAuth();
 
+  // Reorder Engine flag (see REORDER_ENGINE_NAV_LABEL above). Same query key
+  // as ReorderAnalysisRoute in App.tsx so React Query dedupes the request.
+  // Only fetched for roles that can see the Procurement group — the endpoint
+  // is gated by requirePermission("purchasing", "view") and the label is
+  // invisible to everyone else anyway. Fail-safe: undefined/error → legacy label.
+  type ProcurementSettings = { useNewReorderCockpit?: boolean; [key: string]: unknown };
+  const canSeeProcurementNav = !!user && ["admin", "lead"].includes(user.role);
+  const { data: procurementSettings } = useQuery<ProcurementSettings>({
+    queryKey: ["/api/settings/procurement"],
+    retry: false,
+    enabled: canSeeProcurementNav,
+  });
+  const useNewReorderCockpit = procurementSettings?.useNewReorderCockpit === true;
+
+  // navStructure is static; apply the flag-conditional relabel as a derived
+  // view so the base structure (and the flag-off render) stays byte-identical.
+  const navEntries = useMemo<NavEntry[]>(() => {
+    if (!useNewReorderCockpit) return navStructure;
+    return navStructure.map((entry) => {
+      if (!isNavGroup(entry)) return entry;
+      const children = entry.children.map((child) =>
+        child.href === REORDER_ANALYSIS_HREF
+          ? { ...child, label: REORDER_ENGINE_NAV_LABEL }
+          : child,
+      );
+      return { ...entry, children };
+    });
+  }, [useNewReorderCockpit]);
+
   // Find which group contains the active route
   const getActiveGroupLabel = (pathname: string): string | null => {
     for (const entry of navStructure) {
@@ -300,7 +338,7 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
 
       <ScrollArea className="flex-1 py-2">
         <nav className="space-y-0.5 px-2">
-          {navStructure.map((entry) => {
+          {navEntries.map((entry) => {
             // Top-level role check
             if (!isVisible(entry.roles)) return null;
 

@@ -13,7 +13,7 @@
 // re-validates (case rounding, override evidence).
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useLocation } from "wouter";
+import { Link, useLocation } from "wouter";
 import {
   Activity,
   AlertTriangle,
@@ -110,6 +110,17 @@ import {
   type ReviewQueueLineEntry,
   type VendorOrderMode,
 } from "@/features/purchasing/reorderEngine";
+
+// ---------------------------------------------------------------------------
+// Engine tab strip (design spec §10 rev 1: ONE Procurement nav entry, the
+// engine surfaces switch on an in-page strip). "Analysis" is this page;
+// "Demand Planner" links to the live forward-demand surface (/demand-planner,
+// honestly labeled — it is not the parked forecast-inputs design, spec §12.3). The
+// surfaces that have not shipped render as inert muted chips with a "Soon"
+// pill — no dead links (spec §11 nav decision, mockups 03/04/05).
+// ---------------------------------------------------------------------------
+
+const ENGINE_TABS_COMING_SOON = ["Automation", "Runs", "RFQs"] as const;
 
 // ---------------------------------------------------------------------------
 // API types — client-side mirror of the engine item fields this page consumes
@@ -1787,7 +1798,7 @@ export default function ReorderEngine() {
   return (
     <div className="p-4 md:p-6">
       {/* ---------------- Topbar ---------------- */}
-      <div className="mb-4 flex flex-wrap items-start gap-3">
+      <div className="mb-2 flex flex-wrap items-start gap-3">
         <div className="min-w-0">
           <h1 className="text-xl font-bold md:text-2xl">Reorder Analysis</h1>
           <div className="mt-0.5 text-xs text-zinc-500">
@@ -1817,6 +1828,37 @@ export default function ReorderEngine() {
             Legacy view
           </Button>
         </div>
+      </div>
+
+      {/* ---------------- Engine tab strip (see ENGINE_TABS_COMING_SOON) ---------------- */}
+      {/* Outer div owns horizontal scrolling so narrow viewports scroll the
+          strip instead of squashing/wrapping tab labels; the nav keeps
+          overflow visible so the active tab's -mb-px border overlay is not
+          clipped. w-max + min-w-full: border-b spans max(tabs, container). */}
+      <div className="mb-4 overflow-x-auto">
+        <nav aria-label="Reorder Engine sections" className="flex w-max min-w-full items-center gap-1 whitespace-nowrap border-b">
+          <span aria-current="page" className="-mb-px border-b-2 border-primary px-3 py-1.5 text-sm font-semibold text-primary">
+            Analysis
+          </span>
+          <Link
+            href="/demand-planner"
+            className="-mb-px border-b-2 border-transparent px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+          >
+            Demand Planner
+          </Link>
+          {ENGINE_TABS_COMING_SOON.map((label) => (
+            <span
+              key={label}
+              aria-disabled="true"
+              className="-mb-px flex items-center gap-1.5 border-b-2 border-transparent px-3 py-1.5 text-sm font-medium text-muted-foreground/50"
+            >
+              {label}
+              <span className="rounded-full border border-border px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+                Soon
+              </span>
+            </span>
+          ))}
+        </nav>
       </div>
 
       {/* ---------------- Legacy review-queue deep-link banner ---------------- */}

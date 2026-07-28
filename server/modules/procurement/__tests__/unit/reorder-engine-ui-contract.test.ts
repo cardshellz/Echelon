@@ -16,6 +16,10 @@ const helpers = readFileSync(
   "utf8",
 );
 const app = readFileSync(resolve(process.cwd(), "client/src/App.tsx"), "utf8");
+const appShell = readFileSync(
+  resolve(process.cwd(), "client/src/components/layout/AppShell.tsx"),
+  "utf8",
+);
 const settingsPage = readFileSync(resolve(process.cwd(), "client/src/pages/ProcurementSettings.tsx"), "utf8");
 const service = readFileSync(
   resolve(process.cwd(), "server/modules/procurement/purchasing.service.ts"),
@@ -121,6 +125,65 @@ describe("reorder engine UI contract", () => {
     expect(page).toContain("forecastBlend");
     expect(page).toContain("earliestInboundEta");
     expect(page).toContain("skippedReason");
+  });
+
+  it("renders the engine tab strip: Analysis active, Demand Planner live, rest inert (PR 5)", () => {
+    // One in-page strip under the header (rev-1 single-entry nav decision,
+    // spec §10.1 / §11): the engine surfaces never present as nav siblings.
+    expect(page).toContain('aria-label="Reorder Engine sections"');
+    // Analysis is this page — marked current, not a link.
+    expect(page).toContain('aria-current="page"');
+    // Demand Planner is the live forward-demand surface, linked and honestly
+    // labeled — NOT the parked "Forecast inputs" design (spec §12.3).
+    expect(page).toContain('href="/demand-planner"');
+    expect(page).toContain("Demand Planner");
+    expect(page).not.toContain("Forecast inputs");
+    // …and the target route actually exists, so the one link cannot go dead.
+    expect(app).toContain('path="/demand-planner"');
+    // Unshipped surfaces are inert muted chips with a Soon pill — pinned set,
+    // ACTUALLY rendered (the const alone could go stale), aria-disabled, and
+    // NO dead links: the only href in the whole page is the Demand Planner
+    // link.
+    expect(page).toContain('ENGINE_TABS_COMING_SOON = ["Automation", "Runs", "RFQs"]');
+    expect(page).toContain("ENGINE_TABS_COMING_SOON.map");
+    expect(page).toContain('aria-disabled="true"');
+    expect(page).toContain("Soon");
+    const hrefs = Array.from(page.matchAll(/href="([^"]+)"/g)).map((match) => match[1]);
+    expect(hrefs).toEqual(["/demand-planner"]);
+    // The href scan above only sees literal href="…" — ban the two syntaxes
+    // that would let a chip become a link while evading it: wouter's `to`
+    // alias and computed href={…} expressions.
+    expect(page).not.toMatch(/\bto="/);
+    expect(page).not.toMatch(/\bhref=\{/);
+  });
+
+  it("relabels the single Procurement nav entry when the cockpit flag is on (PR 5)", () => {
+    // AppShell reads the SAME settings query key as the route switch in
+    // App.tsx, so React Query dedupes and the nav label can never disagree
+    // with which page /reorder-analysis actually renders.
+    expect(appShell).toContain('queryKey: ["/api/settings/procurement"]');
+    expect(appShell).toContain("useNewReorderCockpit");
+    // Fail-safe is STRICT: only an explicit `true` from the settings payload
+    // flips the label — undefined data (fetch pending, 401/403, 500, or the
+    // query disabled for roles that can't see Procurement) stays legacy. And
+    // the fetch never fires at all for roles the endpoint would 403.
+    expect(appShell).toContain("procurementSettings?.useNewReorderCockpit === true");
+    expect(appShell).toContain("enabled: canSeeProcurementNav");
+    expect(appShell).toContain("retry: false");
+    // Flag OFF (or settings load error) → the base structure's legacy label,
+    // byte-identical to the pre-flag nav.
+    expect(appShell).toContain(
+      '{ label: "Reorder Analysis", icon: BarChart3, href: REORDER_ANALYSIS_HREF }',
+    );
+    // Flag ON → same href, same icon, relabeled "Reorder Engine".
+    expect(appShell).toContain('REORDER_ANALYSIS_HREF = "/reorder-analysis"');
+    expect(appShell).toContain('REORDER_ENGINE_NAV_LABEL = "Reorder Engine"');
+    expect(appShell).toMatch(
+      /child\.href === REORDER_ANALYSIS_HREF\s*\?\s*\{ \.\.\.child, label: REORDER_ENGINE_NAV_LABEL \}\s*:\s*child/,
+    );
+    // …and the sidebar renders the DERIVED view, not the base structure —
+    // otherwise the relabel logic above could exist but never take effect.
+    expect(appShell).toContain("{navEntries.map((entry) => {");
   });
 
   it("is gated by the useNewReorderCockpit procurement setting end-to-end", () => {
