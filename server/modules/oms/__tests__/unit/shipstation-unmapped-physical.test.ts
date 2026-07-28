@@ -4,7 +4,9 @@ import {
   SHIPSTATION_UNMAPPED_PHYSICAL_RULE,
   buildShipStationUnmappedPhysicalIdempotencyKey,
   buildShipStationUnmappedPhysicalSummary,
+  isExactShipStationPhysicalShipmentReplay,
   recordShipStationUnmappedPhysicalException,
+  resolveShipStationUnmappedPhysicalExceptionForExactReplay,
   resolveShipStationUnmappedPhysicalExceptionForReturnLabel,
   resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
@@ -34,6 +36,51 @@ describe("ShipStation unmapped physical shipment evidence", () => {
       "shipstation_shipment:443121354",
     )).toBe("443121354");
     expect(shipStationShipmentRefFromExternalFulfillmentId("gid://shopify/1")).toBeNull();
+  });
+
+  it("proves an exact replay only from package and normalized tracking identity", () => {
+    const exact = {
+      shipment: {
+        shipmentId: 440619985,
+        trackingNumber: "9434 6502-0621 7239 8854 13",
+        voidDate: null,
+        isReturnLabel: false,
+      },
+      currentPhysicalShipmentRef: "shipstation_shipment:440619985",
+      currentTrackingNumber: "9434650206217239885413",
+    };
+
+    expect(isExactShipStationPhysicalShipmentReplay(exact)).toBe(true);
+    expect(isExactShipStationPhysicalShipmentReplay({
+      ...exact,
+      shipment: { ...exact.shipment, shipmentId: 440619986 },
+    })).toBe(false);
+    expect(isExactShipStationPhysicalShipmentReplay({
+      ...exact,
+      shipment: { ...exact.shipment, trackingNumber: "9434650206217239885999" },
+    })).toBe(false);
+    expect(isExactShipStationPhysicalShipmentReplay({
+      ...exact,
+      shipment: {
+        ...exact.shipment,
+        voidDate: "2026-07-18T00:00:00.000Z",
+      },
+    })).toBe(false);
+    expect(isExactShipStationPhysicalShipmentReplay({
+      ...exact,
+      shipment: { ...exact.shipment, isReturnLabel: true },
+    })).toBe(false);
+  });
+
+  it("fails closed when package or tracking evidence is missing or malformed", () => {
+    expect(isExactShipStationPhysicalShipmentReplay({
+      shipment: {
+        shipmentId: 440619985,
+        trackingNumber: "",
+      },
+      currentPhysicalShipmentRef: "shipstation_shipment:440619985",
+      currentTrackingNumber: "9434650206217239885413",
+    })).toBe(false);
   });
 
   it("explains the blocked decision in operational English", () => {
@@ -124,6 +171,43 @@ describe("ShipStation unmapped physical shipment evidence", () => {
     expect(statement).not.toContain("wms.outbound_shipments");
     expect(statement).not.toContain("inventory.inventory_transactions");
   });
+
+  it("resolves only the matching open exception for an exact package replay", async () => {
+    const execute = vi.fn(async () => ({ rows: [{ id: 328 }] }));
+
+    const changed = await resolveShipStationUnmappedPhysicalExceptionForExactReplay(
+      { execute },
+      {
+        shipment: {
+          shipmentId: 440619985,
+          orderId: 742250001,
+          orderKey: "echelon-wms-shp-4126",
+          orderNumber: "#59175",
+          trackingNumber: "9434650206217239885413",
+          shipmentItems: [
+            { lineItemKey: "wms-item-8502", sku: "SPORTS-CARD", quantity: 1 },
+          ],
+        },
+        wmsOrderId: 204249,
+        wmsShipmentId: 4126,
+        currentPhysicalShipmentRef: "shipstation_shipment:440619985",
+        currentTrackingNumber: "9434650206217239885413",
+        resolvedBy: "system:shipstation_webhook",
+      },
+    );
+
+    expect(changed).toBe(true);
+    expect(execute).toHaveBeenCalledOnce();
+    const statement = sqlText(execute.mock.calls[0][0]);
+    expect(statement).toContain("classification = 'provider_package_echo'");
+    expect(statement).toContain("status = 'resolved'");
+    expect(statement).toContain("resolve_exact_provider_package_replay");
+    expect(statement).toContain("wms_shipment_id");
+    expect(statement).toContain("external_shipment_ref");
+    expect(statement).not.toContain("UPDATE wms.outbound_shipments");
+    expect(statement).not.toContain("inventory.inventory_transactions");
+  });
+
   it("closes the exact exception when a later provider event proves the label was voided", async () => {
     const execute = vi.fn(async () => ({ rows: [{ id: 62 }] }));
 

@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { normalizeTrackingNumber } from "../shipping/carrier-tracking.domain";
 
 export const SHIPSTATION_UNMAPPED_PHYSICAL_RULE =
   "shipstation_unmapped_physical_shipment";
@@ -73,6 +74,49 @@ export function shipStationShipmentRefFromExternalFulfillmentId(
   if (!normalized) return null;
   const match = /^shipstation_shipment:([1-9][0-9]*)$/.exec(normalized);
   return match ? match[1] : null;
+}
+
+function normalizedTrackingReference(value: unknown): string | null {
+  const trackingNumber = nullableExternalRef(value);
+  if (!trackingNumber) return null;
+  try {
+    return normalizeTrackingNumber(trackingNumber);
+  } catch {
+    return null;
+  }
+}
+
+export function isExactShipStationPhysicalShipmentReplay(input: {
+  shipment: ShipStationUnmappedPhysicalEvidence;
+  currentPhysicalShipmentRef: string | null | undefined;
+  currentTrackingNumber: string | null | undefined;
+}): boolean {
+  if (
+    input.shipment.isReturnLabel === true
+    || nullableExternalRef(input.shipment.voidDate) !== null
+  ) {
+    return false;
+  }
+
+  const currentShipmentRef = shipStationShipmentRefFromExternalFulfillmentId(
+    input.currentPhysicalShipmentRef,
+  );
+  const incomingShipmentRef = positiveReference(input.shipment.shipmentId);
+  if (
+    currentShipmentRef === null
+    || incomingShipmentRef === null
+    || currentShipmentRef !== incomingShipmentRef
+  ) {
+    return false;
+  }
+
+  const currentTracking = normalizedTrackingReference(input.currentTrackingNumber);
+  const incomingTracking = normalizedTrackingReference(
+    input.shipment.trackingNumber,
+  );
+  return currentTracking !== null
+    && incomingTracking !== null
+    && currentTracking === incomingTracking;
 }
 
 export function buildShipStationUnmappedPhysicalSummary(
@@ -277,6 +321,74 @@ export async function resolveShipStationUnmappedPhysicalExceptionForReturnLabel(
         updated_at = NOW()
     WHERE rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
       AND idempotency_key = ${buildShipStationUnmappedPhysicalIdempotencyKey(input.shipment)}
+      AND status IN ('open', 'acknowledged')
+    RETURNING id
+  `);
+  return Array.isArray(result?.rows) && result.rows.length > 0;
+}
+
+export async function resolveShipStationUnmappedPhysicalExceptionForExactReplay(
+  db: QueryExecutor,
+  input: {
+    shipment: ShipStationUnmappedPhysicalEvidence;
+    wmsOrderId: number;
+    wmsShipmentId: number;
+    currentPhysicalShipmentRef: string | null | undefined;
+    currentTrackingNumber: string | null | undefined;
+    resolvedBy: string;
+  },
+): Promise<boolean> {
+  const shipmentRef = positiveReference(input.shipment.shipmentId);
+  const resolvedBy = nullableExternalRef(input.resolvedBy);
+  const wmsOrderId = Number(input.wmsOrderId);
+  const wmsShipmentId = Number(input.wmsShipmentId);
+  if (
+    !shipmentRef
+    || !resolvedBy
+    || resolvedBy.length > 120
+    || !Number.isSafeInteger(wmsOrderId)
+    || wmsOrderId <= 0
+    || !Number.isSafeInteger(wmsShipmentId)
+    || wmsShipmentId <= 0
+    || !isExactShipStationPhysicalShipmentReplay(input)
+  ) {
+    return false;
+  }
+
+  const resolution =
+    "ShipStation replayed the same physical shipment and tracking identity. " +
+    "Obsolete provider line keys were ignored; the existing package remained authoritative.";
+  const details = JSON.stringify({
+    remediationAction: "resolve_exact_provider_package_replay",
+    providerShipmentId: Number(shipmentRef),
+    providerOrderId: input.shipment.orderId ?? null,
+    providerOrderKey: input.shipment.orderKey ?? null,
+    providerTrackingNumber: input.shipment.trackingNumber ?? null,
+    wmsShipmentId,
+    currentPhysicalShipmentRef: input.currentPhysicalShipmentRef ?? null,
+    currentTrackingNumber: input.currentTrackingNumber ?? null,
+    lineItemRemapSkipped: true,
+    duplicateInventoryMutationBlocked: true,
+    duplicateCustomerFulfillmentMutationBlocked: true,
+    repairCascadeAllowed: true,
+  });
+  const result: any = await db.execute(sql`
+    UPDATE wms.reconciliation_exceptions
+    SET classification = 'provider_package_echo',
+        status = 'resolved',
+        severity = 'info',
+        details = details || ${details}::jsonb,
+        resolved_at = NOW(),
+        resolved_by = ${resolvedBy},
+        resolution = ${resolution},
+        updated_at = NOW()
+    WHERE rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+      AND idempotency_key = ${buildShipStationUnmappedPhysicalIdempotencyKey(
+        input.shipment,
+      )}
+      AND wms_order_id = ${wmsOrderId}
+      AND wms_shipment_id = ${wmsShipmentId}
+      AND external_shipment_ref = ${shipmentRef}
       AND status IN ('open', 'acknowledged')
     RETURNING id
   `);
