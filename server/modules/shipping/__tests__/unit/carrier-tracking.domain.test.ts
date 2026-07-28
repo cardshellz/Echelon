@@ -286,12 +286,16 @@ describe("shipping-provider label normalization", () => {
       shipDate: "2026-07-27T20:00:00.000Z",
       voidDate: null,
       isReturnLabel: true,
+      shipmentItems: [{ lineItemKey: "wms-item-11013", sku: "SHLZ-BNDR-PSA-BLK-P1" }],
     }, receivedAt);
 
     expect(observation).toMatchObject({
       labelDirection: "return",
       labelStatus: "active",
-      sanitizedPayload: { isReturnLabel: true },
+      sanitizedPayload: {
+        isReturnLabel: true,
+        shipmentItems: [{ lineItemKey: "wms-item-11013" }],
+      },
     });
   });
   it("records an explicitly voided label as voided evidence", () => {

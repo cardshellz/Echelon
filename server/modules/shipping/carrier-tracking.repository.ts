@@ -1340,10 +1340,9 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           .returning({ id: shippingProviderLabelEvents.id });
 
         if (effectiveLabelDirection === "return") {
-          await databaseTx.execute(sql`
-            DELETE FROM wms.shipping_provider_label_links
-            WHERE shipping_provider_label_id = ${shippingProviderLabelId}
-          `);
+          // Provider-label links are immutable provenance. Return direction is
+          // the authority boundary; preserving the links keeps the package and
+          // item lineage available for a future inspected-return workflow.
           await databaseTx.execute(sql`
             UPDATE wms.carrier_dispatch_commands
             SET status = 'review_required',
@@ -1365,14 +1364,6 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                 updated_at = ${observation.observedAt}
             WHERE shipping_provider_label_id = ${shippingProviderLabelId}
               AND status IN ('pending', 'processing', 'retry_scheduled')
-          `);
-          await databaseTx.execute(sql`
-            UPDATE wms.shipping_provider_labels
-            SET last_link_reconciled_at = ${observation.observedAt},
-                next_link_reconcile_at = NULL,
-                link_reconcile_attempts = 0,
-                updated_at = ${observation.observedAt}
-            WHERE id = ${shippingProviderLabelId}
           `);
         }
 
@@ -1412,25 +1403,6 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           "shipping_provider_label_id",
         );
         const currentLabelDirection = labelDirection(labelRow?.label_direction);
-        if (currentLabelDirection === "return") {
-          await databaseTx.execute(sql`
-            DELETE FROM wms.shipping_provider_label_links
-            WHERE shipping_provider_label_id = ${shippingProviderLabelId}
-          `);
-          await databaseTx.execute(sql`
-            UPDATE wms.shipping_provider_labels
-            SET last_link_reconciled_at = ${reconciledAt},
-                next_link_reconcile_at = NULL,
-                link_reconcile_attempts = 0,
-                updated_at = ${reconciledAt}
-            WHERE id = ${shippingProviderLabelId}
-          `);
-          return {
-            shippingProviderLabelId,
-            linksInserted: 0,
-            totalLinks: 0,
-          };
-        }
 
 
         const insertedResult = await databaseTx.execute(sql`
@@ -1608,11 +1580,11 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           SET
             last_link_reconciled_at = ${reconciledAt},
             next_link_reconcile_at = CASE
-              WHEN ${totalLinks}::integer > 0 THEN NULL
+              WHEN ${totalLinks}::integer > 0 OR ${currentLabelDirection}::text = 'return' THEN NULL
               ELSE ${reconciledAt}::timestamptz + INTERVAL '30 minutes'
             END,
             link_reconcile_attempts = CASE
-              WHEN ${totalLinks}::integer > 0 THEN 0
+              WHEN ${totalLinks}::integer > 0 OR ${currentLabelDirection}::text = 'return' THEN 0
               ELSE link_reconcile_attempts + 1
             END,
             updated_at = ${reconciledAt}
@@ -1636,11 +1608,12 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
       const result = await db.execute(sql`
         SELECT label.provider, label.provider_label_id
         FROM wms.shipping_provider_labels AS label
-        WHERE label.label_direction = 'outbound'
-          AND (
-            label.last_link_reconciled_at IS NULL
-            OR label.last_link_reconciled_at < label.last_observed_at
-            OR (
+        WHERE (
+          label.last_link_reconciled_at IS NULL
+          OR label.last_link_reconciled_at < label.last_observed_at
+          OR (
+            label.label_direction = 'outbound'
+            AND (
               NOT EXISTS (
                 SELECT 1
                 FROM wms.shipping_provider_label_links AS link
@@ -1649,6 +1622,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               AND label.next_link_reconcile_at <= ${asOf}
             )
           )
+        )
         ORDER BY
           (label.last_link_reconciled_at IS NULL) DESC,
           COALESCE(label.next_link_reconcile_at, label.first_observed_at),

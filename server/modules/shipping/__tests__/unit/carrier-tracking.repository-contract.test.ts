@@ -267,12 +267,20 @@ describe("carrier tracking repository concurrency contract", () => {
   });
 
 
-  it("makes provider return direction monotonic and excludes returns from outbound dispatch", () => {
+  it("preserves immutable return provenance and excludes returns from outbound dispatch", () => {
     const observationStart = repositorySource.indexOf("async observeProviderLabel(observation)");
     const reconciliationStart = repositorySource.indexOf(
       "async reconcileProviderLabelLinks(provider, providerLabelId, reconciledAt)",
     );
     const observationSource = repositorySource.slice(observationStart, reconciliationStart);
+    const reconciliationEnd = repositorySource.indexOf(
+      "async listUnlinkedProviderLabels",
+      reconciliationStart,
+    );
+    const reconciliationSource = repositorySource.slice(
+      reconciliationStart,
+      reconciliationEnd,
+    );
 
     expect(labelDirectionMigrationSource).toContain(
       "label_direction VARCHAR(20) NOT NULL DEFAULT 'outbound'",
@@ -284,11 +292,22 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(observationSource).toContain(
       'if (effectiveLabelDirection === "return")',
     );
-    expect(observationSource).toContain(
+    expect(repositorySource).not.toContain(
       "DELETE FROM wms.shipping_provider_label_links",
     );
+    expect(reconciliationSource).toContain(
+      "SELECT COUNT(*)::integer AS total_links",
+    );
+    expect(reconciliationSource).toContain("totalLinks,");
+    expect(reconciliationSource).not.toContain(
+      'if (currentLabelDirection === "return")',
+    );
+    expect(reconciliationSource).toContain("provider_item_targets AS");
+    expect(reconciliationSource).toContain(
+      "OR ${currentLabelDirection}::text = 'return'",
+    );
     expect(observationSource).toContain("RETURN_LABEL_NOT_OUTBOUND");
-    expect(repositorySource).toContain("WHERE label.label_direction = 'outbound'");
+    expect(repositorySource).toContain("label.label_direction = 'outbound'");
     expect(repositorySource).toContain(
       "label.id = command.shipping_provider_label_id AND label.label_direction = 'outbound'",
     );

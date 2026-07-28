@@ -93,7 +93,7 @@ describe("Control Tower flow action ownership", () => {
     expect(FLOW_MONITOR_SOURCE).toContain("ShipStation reports a return label");
     expect(FLOW_MONITOR_SOURCE).toContain("Resolve return label");
     expect(FLOW_MONITOR_SOURCE).toContain(
-      "It is removed from outbound package and dispatch authority.",
+      "Its immutable package link remains for audit, while return direction excludes it from outbound dispatch authority.",
     );
   });
 
