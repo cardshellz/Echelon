@@ -1685,6 +1685,190 @@ describe("purchasing recommendation routes", () => {
     expect(mocks.recommendationPoHandoffService.recordDecision).toHaveBeenCalledTimes(1);
   });
 
+  // Healthy top-off (owner use case: reach a vendor MOQ / free-freight
+  // threshold): a healthy, analyzable item is a "skipped" review-queue member
+  // (reason not_actionable_status) with a zero suggestion, and can be
+  // accepted for PO; excluded and vendor-less zero-suggestion items stay
+  // fail-closed at the decision endpoint.
+  it("accepts a healthy zero-suggestion item for a top-off while excluded and vendor-less items stay fail-closed", async () => {
+    const healthyRow = (overrides: Record<string, unknown>) => ({
+      total_pieces: 500,
+      total_reserved_pieces: 0,
+      total_outbound_pieces: 30,
+      previous_outbound_pieces: 30,
+      demand_order_count: 12,
+      demand_active_days: 10,
+      on_order_pieces: 0,
+      open_po_count: 0,
+      earliest_expected: null,
+      lead_time_days: 2,
+      vendor_lead_time_days: 2,
+      safety_stock_days: 1,
+      order_uom_units: 1,
+      order_uom_level: 2,
+      ...overrides,
+    });
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      healthyRow({
+        product_id: 301,
+        variant_id: 3001,
+        base_sku: "HEALTHY-TOPOFF",
+        product_name: "Healthy Topoff",
+        vendor_product_id: 7703,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor",
+        estimated_cost_cents: 1000,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 100000,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_moq: 200,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
+        vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+      }),
+      healthyRow({
+        product_id: 302,
+        variant_id: 3002,
+        base_sku: "HEALTHY-NO-VENDOR",
+        product_name: "Healthy No Vendor",
+      }),
+      healthyRow({
+        product_id: 303,
+        variant_id: 3003,
+        base_sku: "EXCLUDED-HEALTHY",
+        product_name: "Excluded Healthy",
+        vendor_product_id: 7704,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor",
+        estimated_cost_cents: 1000,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 100000,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
+        vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+      }),
+    ]);
+    mocks.db.execute.mockImplementation(async (query: unknown) => {
+      let text = "";
+      try {
+        text = JSON.stringify(query) ?? "";
+      } catch {
+        text = "";
+      }
+      if (text.includes("reorder_excluded")) {
+        return {
+          rows: [
+            { id: 303, category: null, brand: null, product_type: null, sku: "EXCLUDED-HEALTHY", tags: null, reorder_excluded: true },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    server = await startServer(buildApp());
+
+    // Queue membership: all three healthy rows are "skipped" members with a
+    // zero suggestion; only the analyzable one is decision-acceptable.
+    const queue = await requestJson(server.url, "GET", "/api/purchasing/recommendation-review-queue?limit=10");
+    expect(queue.status).toBe(200);
+    const healthyEntry = queue.body.items.find((item: any) => item.sku === "HEALTHY-TOPOFF");
+    expect(healthyEntry).toMatchObject({
+      kind: "skipped",
+      recommendationId: "301:3001:30",
+      reason: { code: "not_actionable_status" },
+      suggestedOrderQty: 0,
+      suggestedOrderPieces: 0,
+      actionable: false,
+      preferredVendorId: 77,
+      vendorProductId: 7703,
+    });
+    expect(queue.body.items.find((item: any) => item.sku === "HEALTHY-NO-VENDOR")).toMatchObject({
+      kind: "skipped",
+      reason: { code: "not_actionable_status" },
+      suggestedOrderPieces: 0,
+      preferredVendorId: null,
+    });
+    expect(queue.body.items.find((item: any) => item.sku === "EXCLUDED-HEALTHY")).toMatchObject({
+      kind: "skipped",
+      reason: { code: "excluded" },
+      suggestedOrderPieces: 0,
+    });
+
+    const controlCodes = healthyEntry.qualityControls.map((control: any) => control.code);
+    const accepted = await requestJson(server.url, "POST", "/api/purchasing/recommendation-decisions", {
+      recommendationId: "301:3001:30",
+      kind: "skipped",
+      decision: "accepted_for_po",
+      note: "Top off this healthy SKU to reach the vendor free-freight threshold.",
+      reviewedControlCodes: controlCodes,
+      acknowledgeAutomationEligibilityUnchanged: true,
+      confirmDecision: true,
+    });
+    expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
+    expect(mocks.recommendationPoHandoffService.recordDecision).toHaveBeenCalledWith(expect.objectContaining({
+      recommendationId: "301:3001:30",
+      kind: "skipped",
+      decision: "accepted_for_po",
+      decisionReason: "not_actionable_status",
+      productId: 301,
+      productVariantId: 3001,
+      vendorId: 77,
+      sku: "HEALTHY-TOPOFF",
+      recommendationSnapshot: expect.objectContaining({
+        item: expect.objectContaining({
+          suggestedOrderQty: 0,
+          suggestedOrderPieces: 0,
+          preferredVendorId: 77,
+          vendorProductId: 7703,
+          pricingBasis: "per_piece",
+          quotedUnitCostMills: 100000,
+        }),
+      }),
+    }));
+
+    // Acknowledge each entry's CURRENT controls so the requests pass the
+    // evidence validator and prove the analyzability gate is what rejects.
+    const controlCodesFor = (sku: string) =>
+      queue.body.items.find((entry: any) => entry.sku === sku).qualityControls.map((control: any) => control.code);
+    const excludedAccept = await requestJson(server.url, "POST", "/api/purchasing/recommendation-decisions", {
+      recommendationId: "303:3003:30",
+      kind: "skipped",
+      decision: "accepted_for_po",
+      note: "Excluded rows must never be orderable through a zero-quantity top-off.",
+      reviewedControlCodes: controlCodesFor("EXCLUDED-HEALTHY"),
+      acknowledgeAutomationEligibilityUnchanged: true,
+      confirmDecision: true,
+    });
+    expect(excludedAccept.status).toBe(409);
+    expect(excludedAccept.body.code).toBe("ZERO_BASELINE_ACCEPTANCE_NOT_ANALYZABLE");
+
+    const noVendorAccept = await requestJson(server.url, "POST", "/api/purchasing/recommendation-decisions", {
+      recommendationId: "302:3002:30",
+      kind: "skipped",
+      decision: "accepted_for_po",
+      note: "Vendor-less rows must never be orderable through a zero-quantity top-off.",
+      reviewedControlCodes: controlCodesFor("HEALTHY-NO-VENDOR"),
+      acknowledgeAutomationEligibilityUnchanged: true,
+      confirmDecision: true,
+    });
+    expect(noVendorAccept.status).toBe(409);
+    expect(noVendorAccept.body.code).toBe("ZERO_BASELINE_ACCEPTANCE_NOT_ANALYZABLE");
+    expect(mocks.recommendationPoHandoffService.recordDecision).toHaveBeenCalledTimes(1);
+
+    // Non-ordering dispositions on excluded rows stay available.
+    const excludedDeferred = await requestJson(server.url, "POST", "/api/purchasing/recommendation-decisions", {
+      recommendationId: "303:3003:30",
+      kind: "skipped",
+      decision: "deferred",
+      note: "Keep the exclusion; revisit next quarter.",
+      reviewedControlCodes: [],
+      confirmDecision: true,
+    });
+    expect(excludedDeferred.status, JSON.stringify(excludedDeferred.body)).toBe(201);
+    expect(mocks.recommendationPoHandoffService.recordDecision).toHaveBeenCalledTimes(2);
+  });
+
   it("returns recent recommendation decision history with operator summary counts", async () => {
     mocks.procurement.getRecentRecommendationDecisions.mockResolvedValue([
       {
@@ -2134,6 +2318,308 @@ describe("purchasing recommendation routes", () => {
         }),
       ],
     });
+  });
+
+  // Healthy top-off handoff: an accepted zero-suggestion line reaches the
+  // handoff service ONLY with an explicit requested quantity (which exceeds
+  // the zero baseline and carries the override-evidence pair); without one it
+  // fails closed before any service call.
+  it("creates a zero-baseline top-off PO handoff at the requested quantity", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 301,
+        variant_id: 3001,
+        base_sku: "HEALTHY-TOPOFF",
+        product_name: "Healthy Topoff",
+        total_pieces: 500,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 30,
+        previous_outbound_pieces: 30,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        earliest_expected: null,
+        lead_time_days: 2,
+        vendor_lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 1,
+        order_uom_level: 2,
+        vendor_product_id: 7703,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor",
+        estimated_cost_cents: 1000,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 100000,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_moq: 200,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
+        vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+      },
+    ]);
+    mocks.procurement.getLatestRecommendationDecisions.mockResolvedValue([
+      {
+        id: 95,
+        recommendationId: "301:3001:30",
+        kind: "skipped",
+        decision: "accepted_for_po",
+        status: "active",
+        sku: "HEALTHY-TOPOFF",
+        productName: "Healthy Topoff",
+        vendorId: 77,
+        decidedAt: "2026-05-22T12:00:00.000Z",
+        recommendationSnapshot: {
+          lookbackDays: 30,
+          item: {
+            productId: 301,
+            productVariantId: 3001,
+            sku: "HEALTHY-TOPOFF",
+            productName: "Healthy Topoff",
+            preferredVendorId: 77,
+            vendorProductId: 7703,
+            suggestedOrderQty: 0,
+            suggestedOrderPieces: 0,
+            orderUomUnits: 1,
+            orderUomLabel: "pieces",
+            preferredVendorName: "Vendor",
+            estimatedCostMills: 100000,
+            estimatedCostCents: 1000,
+            pricingBasis: "per_piece",
+            purchaseUom: null,
+            quotedUnitCostMills: 100000,
+            piecesPerPurchaseUom: null,
+            supplierBasis: {
+              minimumOrderPieces: 200,
+            },
+            quoteReference: null,
+            quotedAt: "2026-05-18T12:00:00.000Z",
+            quoteValidUntil: null,
+          },
+        },
+      },
+    ]);
+    mocks.recommendationPoHandoffService.createAcceptedHandoff.mockResolvedValue({
+      pos: [{ id: 14, poNumber: "PO-20260522-002", vendorId: 77, status: "draft" }],
+      decisions: [{
+        id: 5003,
+        recommendationId: "301:3001:30",
+        kind: "skipped",
+        decision: "po_handoff_created",
+        status: "active",
+      }],
+      handedOff: [{
+        acceptedDecisionId: 95,
+        handoffDecisionId: 5003,
+        recommendationId: "301:3001:30",
+        kind: "skipped",
+        sku: "HEALTHY-TOPOFF",
+        poId: 14,
+        poLineId: 1401,
+        poIds: [14],
+        orderedPieces: 240,
+      }],
+    });
+    server = await startServer(buildApp());
+
+    // Fail-closed: a zero-baseline acceptance without a requested quantity has
+    // nothing to order and must never reach the handoff service.
+    const missingRequested = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/recommendation-accepted-queue/create-po",
+      { items: [{ recommendationId: "301:3001:30", kind: "skipped" }] },
+    );
+    expect(missingRequested).toMatchObject({
+      status: 409,
+      body: {
+        skipped: [{
+          recommendationId: "301:3001:30",
+          kind: "skipped",
+          reason: "zero_baseline_requested_pieces_required",
+        }],
+      },
+    });
+    expect(mocks.recommendationPoHandoffService.createAcceptedHandoff).not.toHaveBeenCalled();
+
+    const { status, body } = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/recommendation-accepted-queue/create-po",
+      {
+        items: [{
+          recommendationId: "301:3001:30",
+          kind: "skipped",
+          requestedPieces: 240,
+          quantityOverrideReason: "Top off to reach vendor free-freight threshold",
+          allocationOverrideApproved: true,
+        }],
+      },
+    );
+
+    expect(status, JSON.stringify(body)).toBe(201);
+    expect(mocks.recommendationPoHandoffService.createAcceptedHandoff).toHaveBeenCalledWith({
+      actorId: "admin-user",
+      items: [
+        expect.objectContaining({
+          acceptedDecisionId: 95,
+          recommendationId: "301:3001:30",
+          kind: "skipped",
+          productId: 301,
+          productVariantId: 3001,
+          suggestedPieces: 0,
+          requestedPieces: 240,
+          quantityOverrideReason: "Top off to reach vendor free-freight threshold",
+          allocationOverrideApproved: true,
+          orderUomUnits: 1,
+          vendorProductId: 7703,
+          vendorId: 77,
+          sku: "HEALTHY-TOPOFF",
+        }),
+      ],
+    });
+    expect(body).toMatchObject({
+      success: true,
+      count: 1,
+      itemsDrafted: 1,
+      handedOff: [
+        {
+          recommendationId: "301:3001:30",
+          kind: "skipped",
+          sku: "HEALTHY-TOPOFF",
+          poId: 14,
+          orderedPieces: 240,
+        },
+      ],
+      skipped: [],
+    });
+  });
+
+  // Handoff-time mirror of the decision-time analyzability gate: if the line
+  // became EXCLUDED after acceptance, the zero-baseline top-off must fail
+  // closed at PO creation even with a requested quantity and full override
+  // evidence — the exclusion outranks the acceptance.
+  it("fails closed at handoff when an accepted zero-baseline line became excluded", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 301,
+        variant_id: 3001,
+        base_sku: "HEALTHY-TOPOFF",
+        product_name: "Healthy Topoff",
+        total_pieces: 500,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 30,
+        previous_outbound_pieces: 30,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        earliest_expected: null,
+        lead_time_days: 2,
+        vendor_lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 1,
+        order_uom_level: 2,
+        vendor_product_id: 7703,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor",
+        estimated_cost_cents: 1000,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 100000,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_moq: 200,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
+        vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+      },
+    ]);
+    // The product was excluded AFTER the acceptance below was recorded.
+    mocks.db.execute.mockImplementation(async (query: unknown) => {
+      let text = "";
+      try {
+        text = JSON.stringify(query) ?? "";
+      } catch {
+        text = "";
+      }
+      if (text.includes("reorder_excluded")) {
+        return {
+          rows: [
+            { id: 301, category: null, brand: null, product_type: null, sku: "HEALTHY-TOPOFF", tags: null, reorder_excluded: true },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    mocks.procurement.getLatestRecommendationDecisions.mockResolvedValue([
+      {
+        id: 95,
+        recommendationId: "301:3001:30",
+        kind: "skipped",
+        decision: "accepted_for_po",
+        status: "active",
+        sku: "HEALTHY-TOPOFF",
+        productName: "Healthy Topoff",
+        vendorId: 77,
+        decidedAt: "2026-05-22T12:00:00.000Z",
+        recommendationSnapshot: {
+          lookbackDays: 30,
+          item: {
+            productId: 301,
+            productVariantId: 3001,
+            sku: "HEALTHY-TOPOFF",
+            productName: "Healthy Topoff",
+            preferredVendorId: 77,
+            vendorProductId: 7703,
+            suggestedOrderQty: 0,
+            suggestedOrderPieces: 0,
+            orderUomUnits: 1,
+            orderUomLabel: "pieces",
+            preferredVendorName: "Vendor",
+            estimatedCostMills: 100000,
+            estimatedCostCents: 1000,
+            pricingBasis: "per_piece",
+            purchaseUom: null,
+            quotedUnitCostMills: 100000,
+            piecesPerPurchaseUom: null,
+            supplierBasis: {
+              minimumOrderPieces: 200,
+            },
+            quoteReference: null,
+            quotedAt: "2026-05-18T12:00:00.000Z",
+            quoteValidUntil: null,
+          },
+        },
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/recommendation-accepted-queue/create-po",
+      {
+        items: [{
+          recommendationId: "301:3001:30",
+          kind: "skipped",
+          requestedPieces: 240,
+          quantityOverrideReason: "Top off to reach vendor free-freight threshold",
+          allocationOverrideApproved: true,
+        }],
+      },
+    );
+
+    expect(status, JSON.stringify(body)).toBe(409);
+    expect(body.skipped).toEqual([
+      expect.objectContaining({
+        recommendationId: "301:3001:30",
+        kind: "skipped",
+        reason: "zero_baseline_not_analyzable",
+        context: { reason: "excluded" },
+      }),
+    ]);
+    expect(mocks.recommendationPoHandoffService.createAcceptedHandoff).not.toHaveBeenCalled();
   });
 
   it("rejects malformed Order Builder quantity overrides before any handoff work", async () => {

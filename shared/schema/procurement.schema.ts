@@ -2018,10 +2018,13 @@ export const purchasingRecommendationPoHandoffs = procurementSchema.table("purch
   kind: varchar("kind", { length: 40 }).notNull(),
   createdBy: varchar("created_by", { length: 255 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-  // Order Builder quantity-override evidence (migration 177). Populated only
-  // when the handed-off quantity EXCEEDS the accepted recommendation baseline;
-  // reductions carry no evidence (the PO line qty + immutable accepted
-  // snapshot establish the delta). Mirrors migration 158's RFQ shape.
+  // Order Builder quantity-override evidence (migrations 177/178). Populated
+  // only when the handed-off quantity EXCEEDS the accepted recommendation
+  // baseline; reductions carry no evidence (the PO line qty + immutable
+  // accepted snapshot establish the delta). Mirrors migration 158's RFQ shape.
+  // The baseline may be ZERO (healthy top-off, migration 178): the engine
+  // suggested nothing and the entire requested quantity is the evidenced
+  // excess.
   quantityOverrideBaselinePieces: integer("quantity_override_baseline_pieces"),
   quantityOverrideRequestedPieces: integer("quantity_override_requested_pieces"),
   quantityOverrideReason: text("quantity_override_reason"),
@@ -2041,7 +2044,7 @@ export const purchasingRecommendationPoHandoffs = procurementSchema.table("purch
       AND ${table.quantityOverrideApprovedBy} IS NULL
       AND ${table.quantityOverrideApprovedAt} IS NULL
     ) OR (
-      ${table.quantityOverrideBaselinePieces} > 0
+      ${table.quantityOverrideBaselinePieces} >= 0
       AND ${table.quantityOverrideRequestedPieces} > ${table.quantityOverrideBaselinePieces}
       AND NULLIF(BTRIM(${table.quantityOverrideReason}), '') IS NOT NULL
       AND LENGTH(BTRIM(${table.quantityOverrideReason})) >= 3

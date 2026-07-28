@@ -14,6 +14,10 @@ const quantityOverrideMigration = readFileSync(
   join(process.cwd(), "migrations", "177_recommendation_po_handoff_quantity_override.sql"),
   "utf8",
 );
+const zeroBaselineMigration = readFileSync(
+  join(process.cwd(), "migrations", "178_recommendation_po_handoff_zero_baseline_topoff.sql"),
+  "utf8",
+);
 
 describe("recommendation PO handoff migration", () => {
   it("enforces one handoff per acceptance and exact PO-line ownership", () => {
@@ -52,5 +56,39 @@ describe("recommendation PO handoff migration", () => {
     expect(quantityOverrideMigration).toContain("LENGTH(BTRIM(quantity_override_reason)) >= 3");
     expect(quantityOverrideMigration).toContain("NULLIF(BTRIM(quantity_override_approved_by), '') IS NOT NULL");
     expect(quantityOverrideMigration).toContain("quantity_override_approved_at IS NOT NULL");
+  });
+
+  // Migration 178: healthy top-offs — the baseline floor relaxes to >= 0 so a
+  // zero-suggestion acceptance can carry override evidence; every other
+  // evidence rule from 177 is re-stated verbatim in the swapped constraint.
+  it("allows a zero override baseline while keeping the excess-only evidence rules", () => {
+    expect(zeroBaselineMigration).toContain(
+      "DROP CONSTRAINT IF EXISTS purch_rec_po_handoff_qty_override_evidence_chk",
+    );
+    expect(zeroBaselineMigration).toContain("purch_rec_po_handoff_qty_override_evidence_chk");
+    expect(zeroBaselineMigration).toContain("quantity_override_baseline_pieces >= 0");
+    expect(zeroBaselineMigration).not.toContain("quantity_override_baseline_pieces > 0");
+    expect(zeroBaselineMigration).toContain("quantity_override_requested_pieces > quantity_override_baseline_pieces");
+    expect(zeroBaselineMigration).toContain("LENGTH(BTRIM(quantity_override_reason)) >= 3");
+    expect(zeroBaselineMigration).toContain("NULLIF(BTRIM(quantity_override_approved_by), '') IS NOT NULL");
+    expect(zeroBaselineMigration).toContain("quantity_override_approved_at IS NOT NULL");
+  });
+
+  // The Drizzle table definition must agree with migration 178: a schema-first
+  // regeneration that re-tightened the baseline floor to > 0 would make
+  // zero-baseline (healthy top-off) override evidence unrepresentable again.
+  it("keeps the shared Drizzle CHECK in lockstep with migration 178", () => {
+    const sharedSchema = readFileSync(
+      join(process.cwd(), "shared", "schema", "procurement.schema.ts"),
+      "utf8",
+    );
+    const checkStart = sharedSchema.indexOf("purch_rec_po_handoff_qty_override_evidence_chk");
+    expect(checkStart).toBeGreaterThan(-1);
+    const checkBody = sharedSchema.slice(checkStart, checkStart + 800);
+    expect(checkBody).toContain("quantityOverrideBaselinePieces} >= 0");
+    expect(checkBody).not.toContain("quantityOverrideBaselinePieces} > 0");
+    expect(checkBody).toContain(
+      "quantityOverrideRequestedPieces} > ${table.quantityOverrideBaselinePieces}",
+    );
   });
 });
