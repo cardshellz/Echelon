@@ -50,6 +50,7 @@ import Transfers from "@/pages/Transfers";
 import Suppliers from "@/pages/Suppliers";
 import PurchasingView from "@/pages/PurchasingView";
 import ReorderEngine from "@/pages/ReorderEngine";
+import ProcurementAutomation from "@/pages/ProcurementAutomation";
 import Receiving from "@/pages/Receiving";
 import InventoryHistory from "@/pages/InventoryHistory";
 import Replenishment from "@/pages/Replenishment";
@@ -426,6 +427,11 @@ function Router() {
         </Route>
         <Route path="/reorder-analysis">
           <ProtectedRoute component={ReorderAnalysisRoute} allowedRoles={["admin", "lead"]} />
+        </Route>
+        {/* Automation page (design surface 03): mode/policy settings +
+            recommendation review queue + auto-draft runs. */}
+        <Route path="/procurement/automation">
+          <ProtectedRoute component={ProcurementAutomation} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/replenishment">
           <ProtectedRoute component={Replenishment} allowedRoles={["admin", "lead"]} />
