@@ -117,12 +117,13 @@ import {
 // "Demand Planner" links to the live forward-demand surface (/demand-planner,
 // honestly labeled — it is not the parked forecast-inputs design, spec §12.3);
 // "Automation" links to the shipped mode/policy + review-queue surface
-// (/procurement/automation, mockup 03). The surfaces that have not shipped
+// (/procurement/automation, mockup 03); "Runs" links to the shipped run-report
+// surface (/procurement/runs, mockup 04). The surfaces that have not shipped
 // render as inert muted chips with a "Soon" pill — no dead links (spec §11
-// nav decision, mockups 04/05).
+// nav decision, mockup 05).
 // ---------------------------------------------------------------------------
 
-const ENGINE_TABS_COMING_SOON = ["Runs", "RFQs"] as const;
+const ENGINE_TABS_COMING_SOON = ["RFQs"] as const;
 
 // ---------------------------------------------------------------------------
 // API types — client-side mirror of the engine item fields this page consumes
@@ -1853,6 +1854,12 @@ export default function ReorderEngine() {
             className="-mb-px border-b-2 border-transparent px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:border-border hover:text-foreground"
           >
             Automation
+          </Link>
+          <Link
+            href="/procurement/runs"
+            className="-mb-px border-b-2 border-transparent px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+          >
+            Runs
           </Link>
           {ENGINE_TABS_COMING_SOON.map((label) => (
             <span

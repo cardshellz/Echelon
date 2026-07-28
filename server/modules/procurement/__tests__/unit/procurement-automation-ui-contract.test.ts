@@ -10,15 +10,16 @@ import { describe, expect, it } from "vitest";
 // fields the audited dialog submits, and the honest automation ladder (only
 // the two real server-side modes are switchable).
 
-const page = readFileSync(
-  resolve(process.cwd(), "client/src/pages/ProcurementAutomation.tsx"),
-  "utf8",
-);
-const app = readFileSync(resolve(process.cwd(), "client/src/App.tsx"), "utf8");
-const routes = readFileSync(
-  resolve(process.cwd(), "server/modules/procurement/purchasing-recommendation.routes.ts"),
-  "utf8",
-);
+// The needles below pin source CONTENT, not checkout line-ending flavor —
+// normalize CRLF so a core.autocrlf=true (Windows) checkout matches the same
+// bytes CI's LF checkout sees. Without this, the one multi-line needle (the
+// candidate-band precedence expression) fails locally on CRLF checkouts.
+const readSource = (relativePath: string): string =>
+  readFileSync(resolve(process.cwd(), relativePath), "utf8").replace(/\r\n/g, "\n");
+
+const page = readSource("client/src/pages/ProcurementAutomation.tsx");
+const app = readSource("client/src/App.tsx");
+const routes = readSource("server/modules/procurement/purchasing-recommendation.routes.ts");
 
 describe("procurement automation UI contract", () => {
   it("is registered at /procurement/automation for admin/lead", () => {
@@ -134,7 +135,9 @@ describe("procurement automation UI contract", () => {
     expect(page).toContain('aria-current="page"');
     expect(page).toContain('href="/reorder-analysis"');
     expect(page).toContain('href="/demand-planner"');
-    expect(page).toContain('ENGINE_TABS_COMING_SOON = ["Runs", "RFQs"]');
+    // Runs shipped (design surface 04) — live link; only RFQs remains Soon.
+    expect(page).toContain('href="/procurement/runs"');
+    expect(page).toContain('ENGINE_TABS_COMING_SOON = ["RFQs"]');
     expect(page).toContain('aria-disabled="true"');
   });
 
