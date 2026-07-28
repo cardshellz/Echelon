@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
+  Plus,
+  Scale,
+  ShoppingCart,
+  Trash2,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -28,6 +36,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { US_POSTAL_REGIONS } from "../rate-table-model";
 import {
   assignmentLabel,
@@ -55,7 +64,16 @@ interface RateTestPayload {
     region: string;
     postalCode: string;
   };
-  billableWeightGrams: number;
+  billableWeightGrams?: number;
+  lines?: Array<{ sku: string; quantity: number }>;
+}
+
+type RateTestBasis = "weight" | "catalog_lines";
+
+interface RateTestLineDraft {
+  id: number;
+  sku: string;
+  quantity: string;
 }
 
 export function RateTestDialog({
@@ -70,6 +88,11 @@ export function RateTestDialog({
   const [region, setRegion] = useState("PA");
   const [postalCode, setPostalCode] = useState("");
   const [weightPounds, setWeightPounds] = useState("1");
+  const [testBasis, setTestBasis] = useState<RateTestBasis>("weight");
+  const [cartLines, setCartLines] = useState<RateTestLineDraft[]>([
+    { id: 0, sku: "", quantity: "1" },
+  ]);
+  const [nextLineId, setNextLineId] = useState(1);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [result, setResult] = useState<ManualRateQuoteResponse | null>(null);
   const initialAssignment = assignments[0] ?? null;
@@ -88,6 +111,9 @@ export function RateTestDialog({
     setRegion("PA");
     setPostalCode("");
     setWeightPounds("1");
+    setTestBasis("weight");
+    setCartLines([{ id: 0, sku: "", quantity: "1" }]);
+    setNextLineId(1);
     setValidationError(null);
     setResult(null);
   }, [open, program.book.id, resetAssignmentId, resetWarehouseId]);
@@ -121,25 +147,62 @@ export function RateTestDialog({
       setValidationError("Enter a five-digit United States ZIP code.");
       return;
     }
-    const numericWeight = Number(weightPounds);
-    if (!Number.isFinite(numericWeight) || numericWeight <= 0) {
-      setValidationError("Shipment weight must be greater than zero.");
-      return;
-    }
-    const billableWeightGrams = Math.ceil(numericWeight * 453.59237);
-    setValidationError(null);
-    quoteMutation.mutate({
+    const basePayload = {
       expectedRateBookId: program.book.id,
       pricingChannel: selectedAssignment.pricingChannel,
       ratePurpose: selectedAssignment.ratePurpose,
       originWarehouseId: parsedWarehouseId,
       destination: {
-        country: "US",
+        country: "US" as const,
         region,
         postalCode: postalCode.trim(),
       },
-      billableWeightGrams,
-    });
+    };
+    if (testBasis === "weight") {
+      const numericWeight = Number(weightPounds);
+      if (!Number.isFinite(numericWeight) || numericWeight <= 0) {
+        setValidationError("Shipment weight must be greater than zero.");
+        return;
+      }
+      const billableWeightGrams = Math.ceil(numericWeight * 453.59237);
+      setValidationError(null);
+      quoteMutation.mutate({ ...basePayload, billableWeightGrams });
+      return;
+    }
+
+    const lines: Array<{ sku: string; quantity: number }> = [];
+    const seenSkus = new Set<string>();
+    for (const [index, line] of cartLines.entries()) {
+      const sku = line.sku.trim();
+      if (!sku) {
+        setValidationError(`Line ${index + 1} requires a SKU.`);
+        return;
+      }
+      if (seenSkus.has(sku)) {
+        setValidationError(`Combine duplicate SKU ${sku} into one line.`);
+        return;
+      }
+      const quantity = Number(line.quantity);
+      if (!Number.isSafeInteger(quantity) || quantity <= 0 || quantity > 10_000) {
+        setValidationError(`Line ${index + 1} quantity must be between 1 and 10,000.`);
+        return;
+      }
+      seenSkus.add(sku);
+      lines.push({ sku, quantity });
+    }
+    setValidationError(null);
+    quoteMutation.mutate({ ...basePayload, lines });
+  };
+
+  const updateCartLine = (
+    id: number,
+    field: "sku" | "quantity",
+    value: string,
+  ) => {
+    setCartLines((current) => current.map((line) =>
+      line.id === id ? { ...line, [field]: value } : line
+    ));
+    setResult(null);
   };
 
   const warehouseLocked = selectedAssignment?.originWarehouseId !== null
@@ -147,14 +210,39 @@ export function RateTestDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Test live US rates</DialogTitle>
           <DialogDescription>
-            Run the active production assignment for one warehouse, destination, and shipment weight.
+            Run the active production assignment for one warehouse and destination.
             The result is saved in quote history as a manual test.
           </DialogDescription>
         </DialogHeader>
+
+        <div className="space-y-1.5">
+          <Label>Test basis</Label>
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            value={testBasis}
+            onValueChange={(value) => {
+              if (!value) return;
+              setTestBasis(value as RateTestBasis);
+              setValidationError(null);
+              setResult(null);
+            }}
+            className="grid w-full grid-cols-2 rounded-md bg-muted/50 p-1"
+          >
+            <ToggleGroupItem value="weight" className="gap-2">
+              <Scale className="h-4 w-4" />
+              Shipment weight
+            </ToggleGroupItem>
+            <ToggleGroupItem value="catalog_lines" className="gap-2">
+              <ShoppingCart className="h-4 w-4" />
+              Catalog lines
+            </ToggleGroupItem>
+          </ToggleGroup>
+        </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
@@ -230,19 +318,83 @@ export function RateTestDialog({
             />
           </div>
 
-          <div className="space-y-1.5 sm:col-span-2 sm:max-w-[calc(50%-0.5rem)]">
-            <Label htmlFor="rate-test-weight">Shipment weight (lb)</Label>
-            <Input
-              id="rate-test-weight"
-              inputMode="decimal"
-              value={weightPounds}
-              onChange={(event) => {
-                setWeightPounds(event.target.value);
-                setResult(null);
-              }}
-              placeholder="1.00"
-            />
-          </div>
+          {testBasis === "weight" ? (
+            <div className="space-y-1.5 sm:col-span-2 sm:max-w-[calc(50%-0.5rem)]">
+              <Label htmlFor="rate-test-weight">Shipment weight (lb)</Label>
+              <Input
+                id="rate-test-weight"
+                inputMode="decimal"
+                value={weightPounds}
+                onChange={(event) => {
+                  setWeightPounds(event.target.value);
+                  setResult(null);
+                }}
+                placeholder="1.00"
+              />
+            </div>
+          ) : (
+            <div className="space-y-2 sm:col-span-2">
+              <div className="grid grid-cols-[minmax(0,1fr)_7rem_2.5rem] gap-2 px-1 text-xs font-medium text-muted-foreground">
+                <span>SKU</span>
+                <span>Quantity</span>
+                <span className="sr-only">Actions</span>
+              </div>
+              {cartLines.map((line) => (
+                <div
+                  key={line.id}
+                  className="grid grid-cols-[minmax(0,1fr)_7rem_2.5rem] items-center gap-2"
+                >
+                  <Input
+                    aria-label="Catalog SKU"
+                    value={line.sku}
+                    onChange={(event) => updateCartLine(line.id, "sku", event.target.value)}
+                    placeholder="Exact catalog SKU"
+                  />
+                  <Input
+                    aria-label={`Quantity for ${line.sku || "catalog line"}`}
+                    inputMode="numeric"
+                    value={line.quantity}
+                    onChange={(event) => updateCartLine(
+                      line.id,
+                      "quantity",
+                      event.target.value.replace(/\D/g, "").slice(0, 5),
+                    )}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    title="Remove line"
+                    aria-label="Remove catalog line"
+                    disabled={cartLines.length === 1}
+                    onClick={() => {
+                      setCartLines((current) => current.filter((item) => item.id !== line.id));
+                      setResult(null);
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={cartLines.length >= 50}
+                onClick={() => {
+                  setCartLines((current) => [
+                    ...current,
+                    { id: nextLineId, sku: "", quantity: "1" },
+                  ]);
+                  setNextLineId((current) => current + 1);
+                  setResult(null);
+                }}
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                Add line
+              </Button>
+            </div>
+          )}
         </div>
 
         {validationError && (
@@ -292,6 +444,28 @@ function RateTestResult({ result }: { result: ManualRateQuoteResponse }) {
         <Badge variant="outline">
           {result.destination.region} {result.destination.postalCode}
         </Badge>
+      </div>
+
+      <div className="mt-3 border-t pt-3 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span>
+            Rated weight: <strong className="text-foreground">
+              {formatWeight(result.testedShipment.billableWeightGrams)}
+            </strong>
+          </span>
+          {result.testedShipment.basis === "catalog_lines" && (
+            <span>{result.testedShipment.lines.length} catalog line(s)</span>
+          )}
+        </div>
+        {result.testedShipment.basis === "catalog_lines" && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {result.testedShipment.lines.map((line) => (
+              <Badge key={`${line.productVariantId}-${line.sku}`} variant="outline">
+                {line.sku} x {line.quantity}, {formatWeight(line.unitWeightGrams)} each
+              </Badge>
+            ))}
+          </div>
+        )}
       </div>
 
       {result.quotes.length > 0 && (
@@ -362,4 +536,8 @@ function formatCurrencyFromCents(cents: number, currency: string): string {
   const whole = Math.floor(cents / 100);
   const fraction = String(cents % 100).padStart(2, "0");
   return `${currency.toUpperCase()} ${whole}.${fraction}`;
+}
+
+function formatWeight(grams: number): string {
+  return `${(grams / 453.59237).toFixed(2)} lb (${grams.toLocaleString()} g)`;
 }

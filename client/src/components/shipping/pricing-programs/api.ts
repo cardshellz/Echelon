@@ -187,6 +187,22 @@ export interface ManualRateQuoteResponse {
     region: string;
     postalCode: string;
   };
+  testedShipment:
+    | {
+        basis: "weight";
+        billableWeightGrams: number;
+        lines: [];
+      }
+    | {
+        basis: "catalog_lines";
+        billableWeightGrams: number;
+        lines: Array<{
+          sku: string;
+          productVariantId: number;
+          quantity: number;
+          unitWeightGrams: number;
+        }>;
+      };
   rateBook: { id: number; code: string } | null;
   zone: string | null;
   quotes: Array<{

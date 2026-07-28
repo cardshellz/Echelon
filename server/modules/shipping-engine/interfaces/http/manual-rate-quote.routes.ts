@@ -16,6 +16,11 @@ const DEFAULT_DEPENDENCIES: ManualRateQuoteRouteDependencies = {
   runManualRateQuote,
 };
 
+const manualRateQuoteLineSchema = z.object({
+  sku: z.string().trim().min(1).max(255),
+  quantity: z.number().int().min(1).max(10_000),
+}).strict();
+
 export const manualRateQuoteRequestSchema = z.object({
   expectedRateBookId: z.number().int().positive(),
   pricingChannel: z.enum(["shopify", "internal", "ebay", "dropship"]),
@@ -26,8 +31,19 @@ export const manualRateQuoteRequestSchema = z.object({
     region: z.string().trim().min(2).max(100),
     postalCode: z.string().trim().min(5).max(10),
   }).strict(),
-  billableWeightGrams: z.number().int().positive(),
-}).strict();
+  billableWeightGrams: z.number().int().positive().optional(),
+  lines: z.array(manualRateQuoteLineSchema).min(1).max(50).optional(),
+}).strict().superRefine((value, context) => {
+  const hasWeight = value.billableWeightGrams !== undefined;
+  const hasLines = value.lines !== undefined;
+  if (hasWeight === hasLines) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["billableWeightGrams"],
+      message: "Provide either billableWeightGrams or lines, but not both.",
+    });
+  }
+});
 
 const manualRateQuoteResponseSchema = z.object({
   outcome: z.enum(["quoted", "no_rate", "rate_book_mismatch"]),
@@ -38,6 +54,23 @@ const manualRateQuoteResponseSchema = z.object({
     region: z.string().length(2),
     postalCode: z.string().length(5),
   }),
+  testedShipment: z.discriminatedUnion("basis", [
+    z.object({
+      basis: z.literal("weight"),
+      billableWeightGrams: z.number().int().positive(),
+      lines: z.tuple([]),
+    }),
+    z.object({
+      basis: z.literal("catalog_lines"),
+      billableWeightGrams: z.number().int().positive(),
+      lines: z.array(z.object({
+        sku: z.string().min(1),
+        productVariantId: z.number().int().positive(),
+        quantity: z.number().int().positive(),
+        unitWeightGrams: z.number().int().positive(),
+      })),
+    }),
+  ]),
   rateBook: z.object({ id: z.number().int().positive(), code: z.string() }).nullable(),
   zone: z.string().nullable(),
   quotes: z.array(z.object({
@@ -97,7 +130,14 @@ export function registerManualRateQuoteRoutes(
           destinationCountry: parsed.data.destination.country,
           destinationRegion: parsed.data.destination.region,
           destinationPostalCode: parsed.data.destination.postalCode,
-          billableWeightGrams: parsed.data.billableWeightGrams,
+          ...(parsed.data.billableWeightGrams !== undefined
+            ? { billableWeightGrams: parsed.data.billableWeightGrams }
+            : {}),
+          ...(parsed.data.lines !== undefined
+            ? {
+                lines: parsed.data.lines.map((line) => ({ ...line })),
+              }
+            : {}),
         });
         return res.json(manualRateQuoteResponseSchema.parse(result));
       } catch (error) {
