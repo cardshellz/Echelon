@@ -51,6 +51,7 @@ import Suppliers from "@/pages/Suppliers";
 import PurchasingView from "@/pages/PurchasingView";
 import ReorderEngine from "@/pages/ReorderEngine";
 import ProcurementAutomation from "@/pages/ProcurementAutomation";
+import ProcurementRuns from "@/pages/ProcurementRuns";
 import Receiving from "@/pages/Receiving";
 import InventoryHistory from "@/pages/InventoryHistory";
 import Replenishment from "@/pages/Replenishment";
@@ -432,6 +433,11 @@ function Router() {
             recommendation review queue + auto-draft runs. */}
         <Route path="/procurement/automation">
           <ProtectedRoute component={ProcurementAutomation} allowedRoles={["admin", "lead"]} />
+        </Route>
+        {/* Run report page (design surface 04): read-only auto-draft run
+            reports, decision history, and forecast accuracy. */}
+        <Route path="/procurement/runs">
+          <ProtectedRoute component={ProcurementRuns} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/replenishment">
           <ProtectedRoute component={Replenishment} allowedRoles={["admin", "lead"]} />

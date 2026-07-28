@@ -144,20 +144,24 @@ describe("reorder engine UI contract", () => {
     expect(page).not.toContain("Forecast inputs");
     // Automation shipped (design surface 03) — the chip is a LIVE link now.
     expect(page).toContain('href="/procurement/automation"');
-    // …and both target routes actually exist, so no link can go dead.
+    // Runs shipped (design surface 04) — the chip is a LIVE link now.
+    expect(page).toContain('href="/procurement/runs"');
+    // …and all target routes actually exist, so no link can go dead.
     expect(app).toContain('path="/demand-planner"');
     expect(app).toContain('path="/procurement/automation"');
     expect(app).toMatch(/procurement\/automation"[\s\S]{0,200}component=\{ProcurementAutomation\}/);
+    expect(app).toContain('path="/procurement/runs"');
+    expect(app).toMatch(/procurement\/runs"[\s\S]{0,200}component=\{ProcurementRuns\}/);
     // Unshipped surfaces are inert muted chips with a Soon pill — pinned set,
     // ACTUALLY rendered (the const alone could go stale), aria-disabled, and
-    // NO dead links: the only hrefs in the whole page are Demand Planner and
-    // Automation.
-    expect(page).toContain('ENGINE_TABS_COMING_SOON = ["Runs", "RFQs"]');
+    // NO dead links: the only hrefs in the whole page are Demand Planner,
+    // Automation, and Runs.
+    expect(page).toContain('ENGINE_TABS_COMING_SOON = ["RFQs"]');
     expect(page).toContain("ENGINE_TABS_COMING_SOON.map");
     expect(page).toContain('aria-disabled="true"');
     expect(page).toContain("Soon");
     const hrefs = Array.from(page.matchAll(/href="([^"]+)"/g)).map((match) => match[1]);
-    expect(hrefs).toEqual(["/demand-planner", "/procurement/automation"]);
+    expect(hrefs).toEqual(["/demand-planner", "/procurement/automation", "/procurement/runs"]);
     // The href scan above only sees literal href="…" — ban the two syntaxes
     // that would let a chip become a link while evading it: wouter's `to`
     // alias and computed href={…} expressions.
