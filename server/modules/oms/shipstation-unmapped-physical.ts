@@ -225,3 +225,83 @@ export async function resolveShipStationUnmappedPhysicalExceptionForVoidedLabel(
   `);
   return Array.isArray(result?.rows) && result.rows.length > 0;
 }
+
+export async function resolveShipStationUnmappedPhysicalExceptionForProviderEcho(
+  db: QueryExecutor,
+  input: {
+    shipment: ShipStationUnmappedPhysicalEvidence;
+    wmsOrderId: number;
+    physicalShipmentId: number;
+    resolvedBy: string;
+    candidateShipmentId?: number | null;
+    retiredCandidateShipmentId?: number | null;
+    notes?: string | null;
+  },
+): Promise<boolean> {
+  const shipmentRef = positiveReference(input.shipment.shipmentId);
+  const resolvedBy = nullableExternalRef(input.resolvedBy);
+  const wmsOrderId = Number(input.wmsOrderId);
+  const physicalShipmentId = Number(input.physicalShipmentId);
+  const candidateShipmentRef = input.candidateShipmentId == null
+    ? null
+    : positiveReference(input.candidateShipmentId);
+  const retiredCandidateShipmentRef = input.retiredCandidateShipmentId == null
+    ? null
+    : positiveReference(input.retiredCandidateShipmentId);
+  if (
+    !shipmentRef
+    || !resolvedBy
+    || resolvedBy.length > 120
+    || !Number.isSafeInteger(wmsOrderId)
+    || wmsOrderId <= 0
+    || !Number.isSafeInteger(physicalShipmentId)
+    || physicalShipmentId <= 0
+    || (input.candidateShipmentId != null && !candidateShipmentRef)
+    || (
+      input.retiredCandidateShipmentId != null
+      && !retiredCandidateShipmentRef
+    )
+  ) {
+    return false;
+  }
+
+  const resolution =
+    "The ShipStation label and an existing canonical package have the same " +
+    "tracking identity and exact WMS line quantities. They are two provider " +
+    "records for one physical package; no inventory or fulfillment was repeated.";
+  const details = JSON.stringify({
+    remediationAction: "link_provider_package_echo",
+    remediationNotes: nullableExternalRef(input.notes),
+    providerShipmentId: Number(shipmentRef),
+    providerOrderId: input.shipment.orderId ?? null,
+    providerOrderKey: input.shipment.orderKey ?? null,
+    providerTrackingNumber: input.shipment.trackingNumber ?? null,
+    physicalShipmentId,
+    candidateShipmentId: candidateShipmentRef
+      ? Number(candidateShipmentRef)
+      : null,
+    retiredCandidateShipmentId: retiredCandidateShipmentRef
+      ? Number(retiredCandidateShipmentRef)
+      : null,
+    fulfillmentMutationBlocked: true,
+    inventoryMutationBlocked: true,
+    channelWritebackBlocked: true,
+  });
+  const result: any = await db.execute(sql`
+    UPDATE wms.reconciliation_exceptions
+    SET classification = 'provider_package_echo',
+        status = 'resolved',
+        severity = 'info',
+        details = details || ${details}::jsonb,
+        resolved_at = NOW(),
+        resolved_by = ${resolvedBy},
+        resolution = ${resolution},
+        updated_at = NOW()
+    WHERE rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+      AND wms_order_id = ${wmsOrderId}
+      AND external_shipment_ref = ${shipmentRef}
+      AND status IN ('open', 'acknowledged')
+    RETURNING id
+  `);
+  return Array.isArray(result?.rows) && result.rows.length > 0;
+}

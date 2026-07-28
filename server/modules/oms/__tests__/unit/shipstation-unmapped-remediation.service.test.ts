@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   adoptShipStationUnmappedPhysicalAsReship,
   getShipStationUnmappedPhysicalPreview,
+  resolveShipStationUnmappedPhysicalAsProviderEcho,
   resolveShipStationUnmappedPhysicalAsVoidedLabel,
 } from "../../shipstation-unmapped-remediation.service";
 
@@ -1616,5 +1617,198 @@ describe("ShipStation unmapped physical remediation", () => {
     )).rejects.toThrow("already owns WMS or inventory authority");
     expect(calls.join("\n")).not.toContain("UPDATE wms.outbound_shipments");
     expect(calls.join("\n")).not.toContain("UPDATE wms.reconciliation_exceptions");
+  });
+
+  it("blocks replacement adoption when ShipStation exactly echoes an existing package", async () => {
+    const echoShipment = {
+      ...providerShipment,
+      trackingNumber: "1Z-ECHO",
+      shipmentItems: [{
+        sku: "SKU-A",
+        name: "Card",
+        quantity: 1,
+        lineItemKey: "wms-item-501",
+      }],
+    };
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return {
+            rows: [{
+              ...contextRow,
+              tracking_number: "1Z-ECHO",
+              authority_tracking_number: "1Z-ECHO",
+            }],
+          };
+        }
+        if (text.includes("FROM wms.outbound_shipment_items AS source_item")) {
+          return {
+            rows: [{ id: 501, order_item_id: 101, qty: 1, order_id: 42 }],
+          };
+        }
+        if (text.includes("FROM wms.physical_shipments AS physical")) {
+          return {
+            rows: [{
+              physical_shipment_id: 881,
+              wms_order_item_id: 101,
+              quantity_shipped: 1,
+              shipment_item_purpose: "customer_fulfillment",
+              legacy_wms_shipment_id: 10,
+            }],
+          };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    await expect(adoptShipStationUnmappedPhysicalAsReship(
+      db,
+      shipStation({ getShipmentById: vi.fn(async () => echoShipment) }),
+      {
+        exceptionId: 77,
+        operator: "ops:test",
+        originalShipmentId: 10,
+        reason: "misdelivery",
+        lineMappings: [{
+          evidenceSource: "shipstation",
+          providerItemIndex: 0,
+          orderItemId: 101,
+          quantity: 1,
+        }],
+      },
+    )).rejects.toThrow(
+      "this ShipStation label is another provider record for the existing package",
+    );
+    const allSql = db.execute.mock.calls
+      .map(([query]: [any]) => queryText(query))
+      .join("\n");
+    expect(allSql).not.toContain("INSERT INTO wms.outbound_shipments");
+    expect(allSql).not.toContain("INSERT INTO inventory.inventory_transactions");
+  });
+
+  it("links an exact provider echo and retires only an unused preparation shell", async () => {
+    const echoShipment = {
+      ...providerShipment,
+      trackingNumber: "1Z-ECHO",
+      shipmentItems: [{
+        sku: "SKU-A",
+        name: "Card",
+        quantity: 1,
+        lineItemKey: "wms-item-501",
+      }],
+    };
+    const calls: string[] = [];
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        calls.push(text);
+        if (
+          text.includes("details->>'remediationAction' AS remediation_action")
+          && !text.includes("FOR UPDATE")
+        ) return { rows: [] };
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return {
+            rows: [{
+              ...contextRow,
+              tracking_number: "1Z-ECHO",
+              authority_tracking_number: "1Z-ECHO",
+            }],
+          };
+        }
+        if (text.includes("FROM wms.reconciliation_exceptions") && text.includes("FOR UPDATE")) {
+          return {
+            rows: [{
+              id: 77,
+              status: "open",
+              classification: "manual_review",
+              remediation_action: null,
+            }],
+          };
+        }
+        if (text.includes("FROM wms.outbound_shipment_items AS source_item")) {
+          return {
+            rows: [{ id: 501, order_item_id: 101, qty: 1, order_id: 42 }],
+          };
+        }
+        if (text.includes("FROM wms.physical_shipments AS physical")) {
+          return {
+            rows: [{
+              physical_shipment_id: 881,
+              wms_order_item_id: 101,
+              quantity_shipped: 1,
+              shipment_item_purpose: "customer_fulfillment",
+              legacy_wms_shipment_id: 10,
+            }],
+          };
+        }
+        if (text.includes("FROM wms.shipping_provider_labels")) {
+          return { rows: [{ id: 700, label_status: "active" }] };
+        }
+        if (text.includes("INSERT INTO wms.shipping_provider_label_links")) {
+          return { rows: [{ id: 701 }] };
+        }
+        if (text.includes("UPDATE wms.shipping_provider_labels")) {
+          return { rows: [] };
+        }
+        if (text.includes("FROM wms.outbound_shipments") && text.includes("FOR UPDATE")) {
+          return {
+            rows: [{
+              id: 20,
+              order_id: 42,
+              status: "queued",
+              source: "shipstation_reship_adopted",
+              shipment_purpose: "replacement",
+              external_fulfillment_id: "shipstation_shipment:900",
+              requires_review: true,
+              review_reason: "shipstation_reship_adoption_pending",
+            }],
+          };
+        }
+        if (text.includes("AS inventory_ship_count")) {
+          return {
+            rows: [{
+              inventory_ship_count: 0,
+              line_fulfillment_count: 0,
+              physical_header_count: 0,
+              physical_item_count: 0,
+              channel_receipt_count: 0,
+            }],
+          };
+        }
+        if (text.includes("UPDATE wms.outbound_shipments")) {
+          return { rows: [{ id: 20 }] };
+        }
+        if (text.includes("UPDATE wms.reconciliation_exceptions")) {
+          return { rows: [{ id: 77 }] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    await expect(resolveShipStationUnmappedPhysicalAsProviderEcho(
+      db,
+      shipStation({ getShipmentById: vi.fn(async () => echoShipment) }),
+      { exceptionId: 77, operator: "ops:test" },
+    )).resolves.toMatchObject({
+      changed: true,
+      exceptionId: 77,
+      candidateShipmentId: 20,
+      retiredCandidateShipmentId: 20,
+      physicalShipmentId: 881,
+      shippingProviderLabelId: 700,
+      providerLabelLinkInserted: true,
+    });
+    const allSql = calls.join("\n");
+    expect(allSql).toContain("shipstation_provider_echo_reconciled");
+    expect(allSql).toContain("link_provider_package_echo");
+    expect(allSql).toContain("FROM wms.shipment_requests shipment_request");
+    expect(allSql).toContain(
+      "FROM wms.shipping_engine_order_requests engine_request",
+    );
+    expect(allSql).not.toContain("physical.legacy_wms_shipment_id");
+    expect(allSql).not.toContain("INSERT INTO wms.physical_shipments");
+    expect(allSql).not.toContain("INSERT INTO inventory.inventory_transactions");
   });
 });
