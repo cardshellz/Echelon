@@ -76,7 +76,10 @@ const handoffItemSchema = z.object({
   kind: z.enum(recommendationKinds),
   productId: positivePostgresInteger,
   productVariantId: positivePostgresInteger,
-  suggestedPieces: positivePostgresInteger,
+  // Zero is a valid baseline: a healthy SKU accepted for a manual top-off has
+  // no engine suggestion, so its accepted baseline is 0 pieces and every
+  // requested quantity exceeds it (requiring the evidence pair below).
+  suggestedPieces: nonnegativePostgresInteger,
   // Order Builder quantity edit. Defaults to the accepted recommendation's
   // pieces; exceeding them requires the migration-158-shaped evidence pair
   // below (reductions need none). suggestedPieces is verified against the
@@ -94,6 +97,15 @@ const handoffItemSchema = z.object({
   candidateBand: nullableBoundedString(40),
   recommendationSnapshot: z.record(z.unknown()),
 }).strict().superRefine((value, context) => {
+  // A zero-baseline acceptance is ONLY orderable as an explicit top-off: a
+  // zero-piece PO line must never be written, so requestedPieces is required.
+  if (value.suggestedPieces === 0 && value.requestedPieces === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "requestedPieces is required when the accepted recommendation baseline is zero",
+      path: ["requestedPieces"],
+    });
+  }
   const requestedPieces = value.requestedPieces ?? value.suggestedPieces;
   if (requestedPieces > value.suggestedPieces) {
     if (value.quantityOverrideReason === undefined) {
@@ -194,8 +206,12 @@ const acceptedRecommendationEconomicBasisSchema = z.object({
   productVariantId: positivePostgresInteger,
   preferredVendorId: positivePostgresInteger,
   vendorProductId: positivePostgresInteger,
-  suggestedOrderQty: positivePostgresInteger,
-  suggestedOrderPieces: positivePostgresInteger,
+  // Zero-quantity acceptance is valid for healthy top-offs: the engine
+  // produced the line with a complete supplier basis but suggested nothing.
+  // The vendor, product, variant, and quote fields stay strictly required —
+  // a line without an analyzable supplier basis still cannot be accepted.
+  suggestedOrderQty: nonnegativePostgresInteger,
+  suggestedOrderPieces: nonnegativePostgresInteger,
   orderUomUnits: positivePostgresInteger,
   estimatedCostMills: nonnegativeSafeInteger.nullable(),
   estimatedCostCents: nonnegativeSafeInteger.nullable(),
@@ -231,7 +247,11 @@ const acceptedRecommendationEconomicBasisSchema = z.object({
       path: ["suggestedOrderPieces"],
     });
   }
+  // A zero baseline defers the MOQ to the handoff: the requested top-off
+  // quantity is checked against the supplier minimum by
+  // assertAcceptedMinimumOrderStillCurrent (which validates orderPieces).
   if (
+    value.suggestedOrderPieces > 0 &&
     value.supplierBasis.minimumOrderPieces !== null &&
     value.suggestedOrderPieces < value.supplierBasis.minimumOrderPieces
   ) {
@@ -306,7 +326,8 @@ export interface RecommendationPoHandoffRecord {
   createdBy: string | null;
   createdAt: Date;
   // All five are null unless the handed-off quantity exceeded the accepted
-  // baseline; then all five are present (DB CHECK, migration 177).
+  // baseline; then all five are present (DB CHECK, migrations 177/178 — the
+  // baseline may be 0 for healthy top-offs, the excess rule is unchanged).
   quantityOverrideBaselinePieces: number | null;
   quantityOverrideRequestedPieces: number | null;
   quantityOverrideReason: string | null;
@@ -1097,6 +1118,17 @@ function resolveCatalogRows(
     // baseline demands the evidence pair validated at the schema boundary.
     const baselinePieces = acceptedBasis.suggestedOrderPieces;
     const orderPieces = item.requestedPieces ?? baselinePieces;
+    if (orderPieces <= 0) {
+      // Unreachable behind the schema (a zero baseline demands
+      // requestedPieces, which must be positive); kept fail-closed because a
+      // zero-piece PO line must never be written.
+      throw new RecommendationPoHandoffError(
+        "A purchase order line requires a positive piece quantity",
+        409,
+        "RECOMMENDATION_ORDER_PIECES_INVALID",
+        { acceptedDecisionId: acceptedDecision.id, baselinePieces, orderPieces },
+      );
+    }
     if (
       orderPieces > baselinePieces &&
       (item.quantityOverrideReason === undefined || item.allocationOverrideApproved !== true)
