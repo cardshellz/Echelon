@@ -241,6 +241,7 @@ function buildCartonSnapshotParcelPlan(
       version: input.cartonizationProvider.version,
     },
     strategy: "dropship_legacy_quote_cartons",
+    rateSelectionWeightGrams: null,
     parcels: input.packages.map((carton) => ({
       sequence: carton.packageSequence,
       source: "cartonization",

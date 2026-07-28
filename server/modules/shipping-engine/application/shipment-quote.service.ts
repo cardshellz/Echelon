@@ -76,6 +76,7 @@ export async function quoteShipment(
     rateBookId: request.rateBookId,
     originWarehouseId: request.originWarehouseId,
     destination: request.destination,
+    rateSelectionWeightGrams: parcelResult.plan.rateSelectionWeightGrams,
     parcels: parcelResult.plan.parcels,
     lines: request.lines,
     freight: request.freight,

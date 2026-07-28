@@ -132,6 +132,36 @@ describe("weight-only parcel provider", () => {
       "SHOPIFY-FALLBACK: used channel weight because Echelon catalog weight is missing",
     ]);
   });
+
+  it("preserves parcel weight while rating two rounded one-pound units at 907 grams", () => {
+    const result = buildWeightOnlyParcelPlan([{
+      sku: "ONE-POUND",
+      quantity: 2,
+      unitWeightGrams: 454,
+      weightSource: "channel_fallback",
+    }]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.rateSelectionWeightGrams).toBe(907);
+    expect(result.plan.parcels[0]).toMatchObject({
+      actualWeightGrams: 908,
+      billableWeightGrams: 908,
+    });
+  });
+
+  it("does not move one genuinely heavier unit below the two-pound boundary", () => {
+    const result = buildWeightOnlyParcelPlan([{
+      sku: "OVER-TWO-POUNDS",
+      quantity: 1,
+      unitWeightGrams: 908,
+      weightSource: "channel_fallback",
+    }]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.rateSelectionWeightGrams).toBe(908);
+  });
 });
 
 describe("quoteShipment", () => {
@@ -183,6 +213,7 @@ describe("quoteShipment", () => {
       },
       originWarehouseId: 1,
       destination: { country: "US", postalCode: "16066" },
+      rateSelectionWeightGrams: 400,
       parcels: [expect.objectContaining({ billableWeightGrams: 400 })],
     }));
   });

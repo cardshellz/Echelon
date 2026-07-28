@@ -53,6 +53,29 @@ describe("product shipping policy", () => {
     ]);
   });
 
+  it("rates repeated rounded unit weights without crossing the intended band", () => {
+    const fallbackWeights: number[] = [];
+    const result = evaluateProductRatePolicy({
+      destination: DESTINATION,
+      lines: [{
+        sku: "ONE-POUND",
+        productVariantId: 30,
+        quantity: 2,
+        unitWeightGrams: 454,
+        weightSource: "channel_fallback",
+        unitPriceCents: 100,
+      }],
+      rules: [rule()],
+      defaultRateForWeightGrams: (grams) => {
+        fallbackWeights.push(grams);
+        return grams <= 907 ? 999 : 1_099;
+      },
+    });
+
+    expect(result).toMatchObject({ ok: true, totalCents: 999 });
+    expect(fallbackWeights).toEqual([907]);
+  });
+
   it("blocks before calculating a customer charge", () => {
     const result = evaluateProductRatePolicy({
       destination: DESTINATION,

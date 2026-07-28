@@ -1,4 +1,6 @@
 import { startedPoundsFromGrams } from "./rate-selection";
+import type { ShipmentWeightSource } from "./shipment";
+import { sumRateSelectionWeightGrams } from "./weight-measurement";
 
 export type ProductRateRuleKind =
   | "restriction"
@@ -58,6 +60,7 @@ export interface ProductRateLine {
   productVariantId: number | null;
   quantity: number;
   unitWeightGrams: number | null;
+  weightSource?: ShipmentWeightSource;
   unitPriceCents: number | null;
 }
 
@@ -538,16 +541,7 @@ function rateForBand(bands: readonly ProductRateRuleBand[], measure: number): nu
 }
 
 function totalWeight(lines: readonly ProductRateLine[], indexes: readonly number[]): number | null {
-  let total = 0;
-  for (const index of indexes) {
-    const line = lines[index];
-    if (!isWeight(line.unitWeightGrams)) return null;
-    const lineWeight = safeMultiply(line.unitWeightGrams, line.quantity);
-    if (lineWeight === null) return null;
-    total += lineWeight;
-    if (!Number.isSafeInteger(total)) return null;
-  }
-  return total;
+  return sumRateSelectionWeightGrams(indexes.map((index) => lines[index]));
 }
 
 function totalSubtotal(lines: readonly ProductRateLine[], indexes: readonly number[]): number | null {
