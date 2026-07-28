@@ -307,6 +307,15 @@ describe("carrier tracking repository concurrency contract", () => {
       "OR ${currentLabelDirection}::text = 'return'",
     );
     expect(observationSource).toContain("RETURN_LABEL_NOT_OUTBOUND");
+    expect(observationSource).toContain(
+      "'provider', ${observation.provider}::text",
+    );
+    expect(observationSource).toContain(
+      "'providerLabelId', ${observation.providerLabelId}::text",
+    );
+    expect(observationSource).toContain(
+      "'observedAt', ${observation.observedAt}::timestamptz",
+    );
     expect(repositorySource).toContain("label.label_direction = 'outbound'");
     expect(repositorySource).toContain(
       "label.id = command.shipping_provider_label_id AND label.label_direction = 'outbound'",

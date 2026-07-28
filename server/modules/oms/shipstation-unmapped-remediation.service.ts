@@ -2170,9 +2170,9 @@ export async function resolveShipStationUnmappedPhysicalAsReturnLabel(
     throw new Error("ShipStation does not report this provider label as a return label");
   }
 
-  // The observation transaction makes direction monotonic, removes outbound
-  // links, and quarantines any unsent outbound dispatch command before the
-  // operator-facing exception is closed.
+  // The observation transaction makes direction monotonic, preserves immutable
+  // provider-label lineage, and quarantines any unsent outbound dispatch command
+  // before the operator-facing exception is closed.
   await shipStation.observeProviderLabels([shipment]);
 
   return withOptionalTransaction(db, async (tx) => {
