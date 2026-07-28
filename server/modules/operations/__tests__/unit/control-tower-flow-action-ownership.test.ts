@@ -86,6 +86,16 @@ describe("Control Tower flow action ownership", () => {
     );
   });
 
+  it("links exact provider-package echoes without inventory adjustment authority", () => {
+    expect(OMS_ROUTES_SOURCE).toMatch(
+      /shipstation-unmapped\/resolve-provider-echo"[\s\S]{0,180}requirePermission\("operations", "triage"\)/,
+    );
+    expect(FLOW_MONITOR_SOURCE).toContain("Link provider evidence");
+    expect(FLOW_MONITOR_SOURCE).toContain(
+      "Inventory, customer fulfillment, and sales-channel fulfillment remain unchanged.",
+    );
+  });
+
   it("keeps replacement inventory lineage outside customer fulfillment authority", () => {
     expect(REPLACEMENT_MIGRATION_SOURCE).toContain("shipment_purpose");
     expect(REPLACEMENT_MIGRATION_SOURCE).toContain("replaces_shipment_id");
