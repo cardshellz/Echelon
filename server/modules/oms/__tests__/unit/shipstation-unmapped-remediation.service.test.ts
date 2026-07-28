@@ -4,6 +4,7 @@ import {
   adoptShipStationUnmappedPhysicalAsReship,
   getShipStationUnmappedPhysicalPreview,
   resolveShipStationUnmappedPhysicalAsProviderEcho,
+  resolveShipStationUnmappedPhysicalAsReturnLabel,
   resolveShipStationUnmappedPhysicalAsVoidedLabel,
 } from "../../shipstation-unmapped-remediation.service";
 
@@ -139,6 +140,7 @@ function shipStation(overrides: Record<string, unknown> = {}) {
     getShipments: vi.fn(async () => [providerShipment]),
     getOrderByNumber: vi.fn(),
     processManualShipmentNotification: vi.fn(async () => ({ processed: true })),
+    observeProviderLabels: vi.fn(async () => undefined),
     ...overrides,
   } as any;
 }
@@ -1810,5 +1812,76 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(allSql).not.toContain("physical.legacy_wms_shipment_id");
     expect(allSql).not.toContain("INSERT INTO wms.physical_shipments");
     expect(allSql).not.toContain("INSERT INTO inventory.inventory_transactions");
+  });
+
+  it("classifies a live ShipStation return label without outbound or inventory mutation", async () => {
+    const calls: string[] = [];
+    const returnShipment = {
+      ...providerShipment,
+      shipmentId: 448076377,
+      orderId: 765185209,
+      orderKey: "echelon-wms-shp-10374",
+      orderNumber: "#60580",
+      trackingNumber: "9434650206217258521132",
+      isReturnLabel: true,
+    };
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        calls.push(text);
+        if (
+          text.includes("details->>'remediationAction' AS remediation_action")
+          && text.includes("LIMIT 1")
+          && !text.includes("FOR UPDATE")
+        ) {
+          return { rows: [] };
+        }
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [{
+            ...contextRow,
+            exception_id: 572,
+            wms_order_id: 205770,
+            order_number: "#60580",
+            authority_shipment_id: 10374,
+            candidate_shipment_id: null,
+            external_shipment_ref: "448076377",
+            tracking_number: "9434650206217258521132",
+            authority_tracking_number: "9434650206217256802059",
+          }] };
+        }
+        if (text.includes("FROM wms.reconciliation_exceptions") && text.includes("FOR UPDATE")) {
+          return { rows: [{
+            id: 572,
+            status: "open",
+            classification: "manual_review",
+            remediation_action: null,
+          }] };
+        }
+        if (text.includes("UPDATE wms.reconciliation_exceptions")) {
+          return { rows: [{ id: 572 }] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const service = shipStation({
+      getShipmentById: vi.fn(async () => returnShipment),
+    });
+
+    await expect(resolveShipStationUnmappedPhysicalAsReturnLabel(
+      db,
+      service,
+      { exceptionId: 572, operator: "ops:test" },
+    )).resolves.toMatchObject({
+      changed: true,
+      exceptionId: 572,
+      providerShipmentId: 448076377,
+    });
+
+    expect(service.observeProviderLabels).toHaveBeenCalledWith([returnShipment]);
+    const allSql = calls.join("\n");
+    expect(allSql).toContain("classification = 'provider_return_label'");
+    expect(allSql).not.toContain("UPDATE wms.outbound_shipments");
+    expect(allSql).not.toContain("inventory.inventory_transactions");
   });
 });

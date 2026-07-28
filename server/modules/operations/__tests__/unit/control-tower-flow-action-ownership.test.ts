@@ -86,6 +86,17 @@ describe("Control Tower flow action ownership", () => {
     );
   });
 
+  it("uses triage-only authority for provider-declared return labels", () => {
+    expect(OMS_ROUTES_SOURCE).toMatch(
+      /shipstation-unmapped\/resolve-return-label"[\s\S]{0,180}requirePermission\("operations", "triage"\)/,
+    );
+    expect(FLOW_MONITOR_SOURCE).toContain("ShipStation reports a return label");
+    expect(FLOW_MONITOR_SOURCE).toContain("Resolve return label");
+    expect(FLOW_MONITOR_SOURCE).toContain(
+      "It is removed from outbound package and dispatch authority.",
+    );
+  });
+
   it("links exact provider-package echoes without inventory adjustment authority", () => {
     expect(OMS_ROUTES_SOURCE).toMatch(
       /shipstation-unmapped\/resolve-provider-echo"[\s\S]{0,180}requirePermission\("operations", "triage"\)/,

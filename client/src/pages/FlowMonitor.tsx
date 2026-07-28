@@ -341,6 +341,7 @@ interface ShipStationUnmappedPreview {
     serviceCode: string;
     shipDate: string;
     voidDate: string | null;
+    isReturnLabel?: boolean;
     shipmentItems?: Array<{
       sku: string;
       name?: string;
@@ -676,6 +677,7 @@ function ShipStationPackageClassificationDialog(props: {
     String(item.sku ?? "").trim().length > 0 && Number.isSafeInteger(Number(item.quantity)) && Number(item.quantity) > 0
   )), [rawProviderItems]);
   const providerItemsMissing = rawProviderItems.length === 0;
+  const providerReturnLabel = preview?.providerShipment.isReturnLabel === true;
   const providerVoided = Boolean(preview?.providerShipment.voidDate);
   const providerEchoMatched = preview?.providerPackageEcho.status === "matched";
   const providerEvidenceValid = (providerItemsMissing || (
@@ -798,6 +800,7 @@ function ShipStationPackageClassificationDialog(props: {
     && mappingsComplete
     && positiveFlowId(originalShipmentId) !== null
     && (isCatalogConcession || reason.length > 0);
+  const returnLabelResolutionValid = props.canTriage && providerReturnLabel;
   const voidResolutionValid = props.canTriage && providerVoided;
   const providerEchoResolutionValid = props.canTriage && providerEchoMatched;
 
@@ -913,6 +916,40 @@ function ShipStationPackageClassificationDialog(props: {
     },
   });
 
+  const returnLabelResolutionMutation = useMutation({
+    mutationFn: async () => {
+      if (!props.target || !preview) {
+        throw new Error("Return-label evidence is unavailable");
+      }
+      const body: Record<string, unknown> = {
+        ...("exceptionId" in props.target ? { exceptionId: props.target.exceptionId } : {}),
+        ...("shipmentId" in props.target ? { shipmentId: props.target.shipmentId } : {}),
+        notes: notes.trim() || undefined,
+      };
+      const response = await apiRequest(
+        "POST",
+        "/api/oms/ops/shipstation-unmapped/resolve-return-label",
+        body,
+      );
+      return response.json() as Promise<ShipStationPackageClassificationResponse>;
+    },
+    onSuccess: async () => {
+      toast({
+        title: "Return label resolved",
+        description: "The return label was removed from outbound fulfillment authority.",
+      });
+      await props.onCompleted();
+      props.onClose();
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Could not resolve return label",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   return (
     <Dialog open={props.target !== null} onOpenChange={(open) => { if (!open) props.onClose(); }}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
@@ -940,35 +977,39 @@ function ShipStationPackageClassificationDialog(props: {
                 <PackageCheck className="mt-0.5 h-5 w-5 shrink-0 text-blue-700" />
                 <div>
                   <div className="font-medium">
-                    {providerEchoMatched
-                      ? "ShipStation confirms the package already recorded"
-                      : providerVoided
-                        ? "ShipStation reports a voided label"
-                        : "An additional package needs classification"}
+                    {providerReturnLabel
+                      ? "ShipStation reports a return label"
+                      : providerEchoMatched
+                        ? "ShipStation confirms the package already recorded"
+                        : providerVoided
+                          ? "ShipStation reports a voided label"
+                          : "An additional package needs classification"}
                   </div>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    {providerEchoMatched
-                      ? "The tracking number and exact WMS line quantities match an existing canonical package."
-                      : providerVoided
-                      ? "This label is historical provider evidence, not proof that another package left the warehouse."
-                      : providerItemsMissing
-                      ? "ShipStation did not list the package contents. Confirm whether ordered items or different/free items were sent."
-                      : "Confirm which original package it replaces and why the replacement was sent."}
+                    {providerReturnLabel
+                      ? "This label moves a package back to the warehouse. It is not another outbound customer shipment."
+                      : providerEchoMatched
+                        ? "The tracking number and exact WMS line quantities match an existing canonical package."
+                        : providerVoided
+                        ? "This label is historical provider evidence, not proof that another package left the warehouse."
+                        : providerItemsMissing
+                        ? "ShipStation did not list the package contents. Confirm whether ordered items or different/free items were sent."
+                        : "Confirm which original package it replaces and why the replacement was sent."}
                   </p>
                 </div>
               </div>
 
               <div className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
                 <div className="border-t pt-3">
-                  <div className="text-xs font-semibold uppercase text-muted-foreground">Original package</div>
+                  <div className="text-xs font-semibold uppercase text-muted-foreground">{providerReturnLabel ? "Outbound customer package" : "Original package"}</div>
                   <div className="mt-1 break-all font-medium">{selectedOriginalTracking || "Select below"}</div>
                   {selectedOriginalShipment && <div className="mt-1 text-xs text-muted-foreground">Shipment {selectedOriginalShipment.id}</div>}
                 </div>
                 <div className="border-t pt-3">
-                  <div className="text-xs font-semibold uppercase text-muted-foreground">Additional provider label</div>
+                  <div className="text-xs font-semibold uppercase text-muted-foreground">{providerReturnLabel ? "Return label" : "Additional provider label"}</div>
                   <div className="mt-1 break-all font-medium">{preview.providerShipment.trackingNumber || "Tracking unavailable"}</div>
                   <div className="mt-1 text-xs text-muted-foreground">
-                    Shipped {formatTimestamp(preview.providerShipment.shipDate)}{replacementServiceLabel ? ` via ${replacementServiceLabel}` : ""}
+                    {providerReturnLabel ? "Created" : "Shipped"} {formatTimestamp(preview.providerShipment.shipDate)}{replacementServiceLabel ? ` via ${replacementServiceLabel}` : ""}
                   </div>
                   {preview.providerShipment.voidDate && (
                     <div className="mt-1 text-xs font-medium text-amber-800">
@@ -979,15 +1020,17 @@ function ShipStationPackageClassificationDialog(props: {
               </div>
 
               <p className="mt-4 border-t pt-3 text-sm text-muted-foreground">
-                {providerEchoMatched
-                  ? "Echelon will link ShipStation to the package already recorded. No new package, inventory deduction, customer fulfillment, or sales-channel update is created."
-                  : providerVoided
-                  ? "Resolving this as a voided label closes the exception only. The original package remains authoritative, and no inventory, fulfillment, or channel state changes."
-                  : "Echelon will keep these as two separate packages and deduct inventory only for the items confirmed below. The customer order will remain fulfilled once."}
+                {providerReturnLabel
+                  ? "Resolving this records the label as return transport only. No outbound package, inventory deduction, customer fulfillment, or sales-channel update is created."
+                  : providerEchoMatched
+                    ? "Echelon will link ShipStation to the package already recorded. No new package, inventory deduction, customer fulfillment, or sales-channel update is created."
+                    : providerVoided
+                    ? "Resolving this as a voided label closes the exception only. The original package remains authoritative, and no inventory, fulfillment, or channel state changes."
+                    : "Echelon will keep these as two separate packages and deduct inventory only for the items confirmed below. The customer order will remain fulfilled once."}
               </p>
             </section>
 
-            <section className={cn("grid gap-4 border-t pt-4 sm:grid-cols-2", (providerVoided || providerEchoMatched) && "hidden")}>
+            <section className={cn("grid gap-4 border-t pt-4 sm:grid-cols-2", (providerReturnLabel || providerVoided || providerEchoMatched) && "hidden")}>
               <div className="space-y-2">
                 <Label>Which package was replaced?</Label>
                 {validOriginalShipments.length === 1 && selectedOriginalShipment ? (
@@ -1033,9 +1076,9 @@ function ShipStationPackageClassificationDialog(props: {
                 )}
               </div>
             </section>
-            {!providerVoided && !providerEchoMatched && validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No shipped original package is available for this replacement.</p>}
+            {!providerReturnLabel && !providerVoided && !providerEchoMatched && validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No shipped original package is available for this replacement.</p>}
 
-            <section className={cn("border-t pt-4", (providerVoided || providerEchoMatched) && "hidden")}>
+            <section className={cn("border-t pt-4", (providerReturnLabel || providerVoided || providerEchoMatched) && "hidden")}>
               <div className="font-semibold">What was sent?</div>
               {providerItemsMissing && (
                 <ToggleGroup
@@ -1197,6 +1240,17 @@ function ShipStationPackageClassificationDialog(props: {
               {!providerItemsMissing && providerItems.length !== rawProviderItems.length && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because one or more ShipStation package lines are invalid.</p>}
             </section>
 
+            {providerReturnLabel && (
+              <section className="border-t pt-4">
+                <div className="font-semibold">What will happen</div>
+                <div className="mt-3 space-y-2 text-sm">
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The label remains recorded as return transport back to the warehouse.</span></div>
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>It is removed from outbound package and dispatch authority.</span></div>
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>Inventory, customer fulfillment, and sales-channel fulfillment remain unchanged.</span></div>
+                </div>
+              </section>
+            )}
+
             {providerEchoMatched && (
               <section className="border-t pt-4">
                 <div className="font-semibold">What will happen</div>
@@ -1208,7 +1262,7 @@ function ShipStationPackageClassificationDialog(props: {
               </section>
             )}
 
-            <section className={cn("border-t pt-4", (providerVoided || providerEchoMatched) && "hidden")}>
+            <section className={cn("border-t pt-4", (providerReturnLabel || providerVoided || providerEchoMatched) && "hidden")}>
               <div className="font-semibold">What will happen</div>
               <div className="mt-3 space-y-2 text-sm">
                 <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The original package stays under tracking {selectedOriginalTracking || "shown above"}.</span></div>
@@ -1220,12 +1274,13 @@ function ShipStationPackageClassificationDialog(props: {
             <section className="border-t pt-4">
               <div className="space-y-2">
                 <Label htmlFor="shipstation-remediation-notes">Notes (optional)</Label>
-                <Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder={providerEchoMatched ? "Add context about why both systems recorded this package." : providerVoided ? "Add context about why the unused label was created or voided." : "Add any useful context for the audit trail."} />
+                <Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder={providerReturnLabel ? "Add context about the return label if useful." : providerEchoMatched ? "Add context about why both systems recorded this package." : providerVoided ? "Add context about why the unused label was created or voided." : "Add any useful context for the audit trail."} />
               </div>
             </section>
+            {providerReturnLabel && !props.canTriage && <p className="text-xs text-amber-800">Operations triage permission is required to resolve this return label.</p>}
             {providerVoided && !props.canTriage && <p className="text-xs text-amber-800">Operations triage permission is required to resolve this label.</p>}
             {providerEchoMatched && !props.canTriage && <p className="text-xs text-amber-800">Operations triage permission is required to link this provider evidence.</p>}
-            {!providerVoided && !providerEchoMatched && !props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to record this shipment.</p>}
+            {!providerReturnLabel && !providerVoided && !providerEchoMatched && !props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to record this shipment.</p>}
           </div>
         ) : null}
 
@@ -1234,25 +1289,27 @@ function ShipStationPackageClassificationDialog(props: {
           <Button
             disabled={
               !preview
-              || (
-                providerEchoMatched
+              || (providerReturnLabel
+                ? !returnLabelResolutionValid
+                : providerEchoMatched
                   ? !providerEchoResolutionValid
                   : providerVoided
                     ? !voidResolutionValid
-                    : !actionValid
-              )
+                    : !actionValid)
               || mutation.isPending
               || voidResolutionMutation.isPending
               || providerEchoResolutionMutation.isPending
+              || returnLabelResolutionMutation.isPending
             }
             onClick={() => {
-              if (providerEchoMatched) providerEchoResolutionMutation.mutate();
+              if (providerReturnLabel) returnLabelResolutionMutation.mutate();
+              else if (providerEchoMatched) providerEchoResolutionMutation.mutate();
               else if (providerVoided) voidResolutionMutation.mutate();
               else mutation.mutate();
             }}
           >
-            {(mutation.isPending || voidResolutionMutation.isPending || providerEchoResolutionMutation.isPending) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {providerEchoMatched ? "Link provider evidence" : providerVoided ? "Resolve as voided label" : "Record shipment"}
+            {(mutation.isPending || voidResolutionMutation.isPending || providerEchoResolutionMutation.isPending || returnLabelResolutionMutation.isPending) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            {providerReturnLabel ? "Resolve return label" : providerEchoMatched ? "Link provider evidence" : providerVoided ? "Resolve as voided label" : "Record shipment"}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -19,6 +19,7 @@ export interface ShipStationUnmappedPhysicalEvidence {
   serviceCode?: string | null;
   shipDate?: string | null;
   voidDate?: string | null;
+  isReturnLabel?: boolean | null;
   shipmentItems?: Array<{
     orderItemId?: number | null;
     lineItemKey?: string | null;
@@ -91,6 +92,9 @@ export async function recordShipStationUnmappedPhysicalException(
   db: QueryExecutor,
   input: RecordShipStationUnmappedPhysicalInput,
 ): Promise<void> {
+  if (input.shipment.isReturnLabel === true) {
+    return;
+  }
   const shipmentRef = positiveReference(input.shipment.shipmentId);
   const orderRef = nullableExternalRef(input.shipment.orderId);
   const idempotencyKey = buildShipStationUnmappedPhysicalIdempotencyKey(
@@ -115,6 +119,7 @@ export async function recordShipStationUnmappedPhysicalException(
     serviceCode: input.shipment.serviceCode ?? null,
     shipDate: input.shipment.shipDate ?? null,
     voidDate: input.shipment.voidDate ?? null,
+    isReturnLabel: false,
     shipmentItems: Array.isArray(input.shipment.shipmentItems)
       ? input.shipment.shipmentItems.map((item) => ({
           orderItemId: item.orderItemId ?? null,
@@ -211,6 +216,58 @@ export async function resolveShipStationUnmappedPhysicalExceptionForVoidedLabel(
   const result: any = await db.execute(sql`
     UPDATE wms.reconciliation_exceptions
     SET classification = 'provider_voided_label',
+        status = 'resolved',
+        severity = 'info',
+        details = details || ${details}::jsonb,
+        resolved_at = NOW(),
+        resolved_by = ${resolvedBy},
+        resolution = ${resolution},
+        updated_at = NOW()
+    WHERE rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+      AND idempotency_key = ${buildShipStationUnmappedPhysicalIdempotencyKey(input.shipment)}
+      AND status IN ('open', 'acknowledged')
+    RETURNING id
+  `);
+  return Array.isArray(result?.rows) && result.rows.length > 0;
+}
+
+export async function resolveShipStationUnmappedPhysicalExceptionForReturnLabel(
+  db: QueryExecutor,
+  input: {
+    shipment: ShipStationUnmappedPhysicalEvidence;
+    resolvedBy: string;
+    notes?: string | null;
+  },
+): Promise<boolean> {
+  const shipmentRef = positiveReference(input.shipment.shipmentId);
+  const resolvedBy = nullableExternalRef(input.resolvedBy);
+  if (
+    !shipmentRef
+    || input.shipment.isReturnLabel !== true
+    || !resolvedBy
+    || resolvedBy.length > 120
+  ) {
+    return false;
+  }
+
+  const resolution =
+    "ShipStation confirmed that this provider label is return transport. " +
+    "No outbound WMS shipment, inventory, customer fulfillment, or channel fulfillment state changed.";
+  const details = JSON.stringify({
+    remediationAction: "resolve_return_label",
+    remediationNotes: nullableExternalRef(input.notes),
+    providerShipmentId: Number(shipmentRef),
+    providerOrderId: input.shipment.orderId ?? null,
+    providerOrderKey: input.shipment.orderKey ?? null,
+    providerTrackingNumber: input.shipment.trackingNumber ?? null,
+    isReturnLabel: true,
+    fulfillmentMutationBlocked: true,
+    inventoryMutationBlocked: true,
+    channelWritebackBlocked: true,
+  });
+  const result: any = await db.execute(sql`
+    UPDATE wms.reconciliation_exceptions
+    SET classification = 'provider_return_label',
         status = 'resolved',
         severity = 'info',
         details = details || ${details}::jsonb,

@@ -318,6 +318,7 @@ export const shippingProviderLabels = wmsSchema.table("shipping_provider_labels"
   trackingNumber: varchar("tracking_number", { length: 200 }).notNull(),
   normalizedTrackingNumber: varchar("normalized_tracking_number", { length: 200 }).notNull(),
   labelStatus: varchar("label_status", { length: 30 }).notNull().default("unknown"),
+  labelDirection: varchar("label_direction", { length: 20 }).notNull().default("outbound"),
   carrier: varchar("carrier", { length: 100 }),
   serviceCode: varchar("service_code", { length: 100 }),
   labelCreatedAt: timestamp("label_created_at", { withTimezone: true }),
@@ -336,6 +337,8 @@ export const shippingProviderLabels = wmsSchema.table("shipping_provider_labels"
     .on(table.provider, table.providerLabelId),
   index("idx_shipping_provider_labels_tracking").on(table.provider, table.normalizedTrackingNumber),
   index("idx_shipping_provider_labels_status_observed").on(table.labelStatus, table.firstObservedAt),
+  index("idx_shipping_provider_labels_direction_status")
+    .on(table.labelDirection, table.labelStatus, table.firstObservedAt),
   index("idx_shipping_provider_labels_link_reconcile")
     .on(table.nextLinkReconcileAt, table.lastLinkReconciledAt),
 ]);

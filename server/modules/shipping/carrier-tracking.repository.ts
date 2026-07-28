@@ -28,6 +28,7 @@ import {
   CarrierTrackingMatchResolution,
   NormalizedCarrierTrackingEvent,
   NormalizedShippingProviderLabelObservation,
+  type ShippingProviderLabelDirection,
   VerifiedCarrierWebhookReceipt,
 } from "./carrier-tracking.domain";
 import type { ShipStationTrackingHydrationRequest } from "./shipstation-tracking-events.client";
@@ -667,6 +668,11 @@ function labelStatus(value: unknown): CarrierTrackingMatchCandidate["labelStatus
   }
   return "unknown";
 }
+function labelDirection(value: unknown): ShippingProviderLabelDirection {
+  if (value === "outbound" || value === "return") return value;
+  throw new Error("Invalid label_direction returned by carrier tracking repository");
+}
+
 
 function nonNegativeInteger(value: unknown, field: string): number {
   const parsed = Number(value);
@@ -690,6 +696,7 @@ function candidateFromRow(row: Record<string, unknown>): CarrierTrackingMatchCan
     providerLabelId: requiredString(row.provider_label_id, "provider_label_id"),
     labelStatus: labelStatus(row.label_status),
     linkCount: nonNegativeInteger(row.link_count, "link_count"),
+    labelDirection: labelDirection(row.label_direction),
     orderNumbers: stringArray(row.order_numbers),
     carrier: stringOrNull(row.carrier),
     serviceCode: stringOrNull(row.service_code),
@@ -752,6 +759,7 @@ function candidateEvidence(candidate: CarrierTrackingMatchCandidate): Record<str
     providerLabelId: candidate.providerLabelId,
     labelStatus: candidate.labelStatus,
     linkCount: candidate.linkCount,
+    labelDirection: candidate.labelDirection,
     orderNumbers: candidate.orderNumbers,
   };
 }
@@ -1232,6 +1240,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
             id: shippingProviderLabels.id,
             normalizedTrackingNumber: shippingProviderLabels.normalizedTrackingNumber,
             labelStatus: shippingProviderLabels.labelStatus,
+            labelDirection: shippingProviderLabels.labelDirection,
             providerOrderId: shippingProviderLabels.providerOrderId,
             providerOrderKey: shippingProviderLabels.providerOrderKey,
             carrier: shippingProviderLabels.carrier,
@@ -1248,8 +1257,12 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
 
         let shippingProviderLabelId: number;
         let labelInserted = false;
+        let effectiveLabelDirection = observation.labelDirection;
         if (existing[0]) {
           assertStableShippingProviderLabelIdentity(existing[0], observation);
+          effectiveLabelDirection = existing[0].labelDirection === "return"
+            ? "return"
+            : observation.labelDirection;
           const [updated] = await databaseTx
             .update(shippingProviderLabels)
             .set({
@@ -1260,12 +1273,16 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                 || existing[0].labelStatus === "superseded"
                 ? existing[0].labelStatus
                 : observation.labelStatus,
+              labelDirection: effectiveLabelDirection,
               carrier: observation.carrier ?? existing[0].carrier,
               serviceCode: observation.serviceCode ?? existing[0].serviceCode,
               labelCreatedAt: observation.labelCreatedAt ?? existing[0].labelCreatedAt,
               voidedAt: observation.voidedAt ?? existing[0].voidedAt,
               lastObservedAt: observation.observedAt,
-              metadata: { authorityMode: "carrier_dispatch_cutover" },
+              metadata: {
+                authorityMode: "carrier_dispatch_cutover",
+                labelDirection: effectiveLabelDirection,
+              },
               updatedAt: observation.observedAt,
             })
             .where(eq(shippingProviderLabels.id, existing[0].id))
@@ -1282,6 +1299,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               trackingNumber: observation.trackingNumber,
               normalizedTrackingNumber: observation.normalizedTrackingNumber,
               labelStatus: observation.labelStatus,
+              labelDirection: effectiveLabelDirection,
               carrier: observation.carrier,
               serviceCode: observation.serviceCode,
               labelCreatedAt: observation.labelCreatedAt,
@@ -1289,7 +1307,10 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               firstObservedAt: observation.observedAt,
               lastObservedAt: observation.observedAt,
               source: "shipstation_shipment_observation",
-              metadata: { authorityMode: "carrier_dispatch_cutover" },
+              metadata: {
+                authorityMode: "carrier_dispatch_cutover",
+                labelDirection: effectiveLabelDirection,
+              },
               createdAt: observation.observedAt,
               updatedAt: observation.observedAt,
             })
@@ -1318,6 +1339,43 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           })
           .returning({ id: shippingProviderLabelEvents.id });
 
+        if (effectiveLabelDirection === "return") {
+          await databaseTx.execute(sql`
+            DELETE FROM wms.shipping_provider_label_links
+            WHERE shipping_provider_label_id = ${shippingProviderLabelId}
+          `);
+          await databaseTx.execute(sql`
+            UPDATE wms.carrier_dispatch_commands
+            SET status = 'review_required',
+                next_attempt_at = NULL,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                succeeded_at = NULL,
+                last_error_code = 'RETURN_LABEL_NOT_OUTBOUND',
+                last_error_message = 'Provider confirmed this label is return transport and cannot authorize outbound fulfillment',
+                result_evidence = COALESCE(result_evidence, '{}'::jsonb)
+                  || jsonb_build_object(
+                    'returnLabelQuarantine',
+                    jsonb_build_object(
+                      'provider', ${observation.provider},
+                      'providerLabelId', ${observation.providerLabelId},
+                      'observedAt', ${observation.observedAt}
+                    )
+                  ),
+                updated_at = ${observation.observedAt}
+            WHERE shipping_provider_label_id = ${shippingProviderLabelId}
+              AND status IN ('pending', 'processing', 'retry_scheduled')
+          `);
+          await databaseTx.execute(sql`
+            UPDATE wms.shipping_provider_labels
+            SET last_link_reconciled_at = ${observation.observedAt},
+                next_link_reconcile_at = NULL,
+                link_reconcile_attempts = 0,
+                updated_at = ${observation.observedAt}
+            WHERE id = ${shippingProviderLabelId}
+          `);
+        }
+
         return {
           shippingProviderLabelId,
           labelInserted,
@@ -1342,7 +1400,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))
         `);
         const labelResult = await databaseTx.execute(sql`
-          SELECT id
+          SELECT id, label_direction
           FROM wms.shipping_provider_labels
           WHERE provider = ${normalizedProvider}
             AND provider_label_id = ${normalizedProviderLabelId}
@@ -1353,6 +1411,27 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           labelRow?.id,
           "shipping_provider_label_id",
         );
+        const currentLabelDirection = labelDirection(labelRow?.label_direction);
+        if (currentLabelDirection === "return") {
+          await databaseTx.execute(sql`
+            DELETE FROM wms.shipping_provider_label_links
+            WHERE shipping_provider_label_id = ${shippingProviderLabelId}
+          `);
+          await databaseTx.execute(sql`
+            UPDATE wms.shipping_provider_labels
+            SET last_link_reconciled_at = ${reconciledAt},
+                next_link_reconcile_at = NULL,
+                link_reconcile_attempts = 0,
+                updated_at = ${reconciledAt}
+            WHERE id = ${shippingProviderLabelId}
+          `);
+          return {
+            shippingProviderLabelId,
+            linksInserted: 0,
+            totalLinks: 0,
+          };
+        }
+
 
         const insertedResult = await databaseTx.execute(sql`
           WITH label AS (
@@ -1557,15 +1636,18 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
       const result = await db.execute(sql`
         SELECT label.provider, label.provider_label_id
         FROM wms.shipping_provider_labels AS label
-        WHERE label.last_link_reconciled_at IS NULL
-          OR label.last_link_reconciled_at < label.last_observed_at
-          OR (
-            NOT EXISTS (
-              SELECT 1
-              FROM wms.shipping_provider_label_links AS link
-              WHERE link.shipping_provider_label_id = label.id
+        WHERE label.label_direction = 'outbound'
+          AND (
+            label.last_link_reconciled_at IS NULL
+            OR label.last_link_reconciled_at < label.last_observed_at
+            OR (
+              NOT EXISTS (
+                SELECT 1
+                FROM wms.shipping_provider_label_links AS link
+                WHERE link.shipping_provider_label_id = label.id
+              )
+              AND label.next_link_reconcile_at <= ${asOf}
             )
-            AND label.next_link_reconcile_at <= ${asOf}
           )
         ORDER BY
           (label.last_link_reconciled_at IS NULL) DESC,
@@ -2203,6 +2285,8 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
         WITH due AS (
           SELECT command.id
           FROM wms.carrier_dispatch_commands AS command
+          JOIN wms.shipping_provider_labels AS label
+            ON label.id = command.shipping_provider_label_id AND label.label_direction = 'outbound'
           WHERE command.status = 'pending'
              OR (
                command.status = 'retry_scheduled'
@@ -2460,6 +2544,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               SELECT
                 label.id AS shipping_provider_label_id,
                 label.provider_label_id,
+                label.label_direction,
                 label.label_status,
                 label.carrier,
                 label.service_code,
@@ -2490,6 +2575,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               GROUP BY
                 label.id,
                 label.provider_label_id,
+                label.label_direction,
                 label.label_status,
                 label.carrier,
                 label.service_code
@@ -2550,7 +2636,8 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           async markEventReconciled(eventId, matchAttemptId, resolution, reconciledAt) {
             const matchedWithoutLineage =
               resolution.status === "matched"
-              && (resolution.selectedCandidate?.linkCount ?? 0) === 0;
+              && resolution.selectedCandidate?.labelDirection === "outbound"
+              && (resolution.selectedCandidate.linkCount ?? 0) === 0;
             const nextReconcileAt =
               ["unmatched", "ambiguous", "review"].includes(resolution.status)
               || matchedWithoutLineage
@@ -2588,6 +2675,19 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
             dispatchOccurredAt,
             createdAt,
           ) {
+            const labelResult = await databaseTx.execute(sql`
+              SELECT label_direction
+              FROM wms.shipping_provider_labels
+              WHERE id = ${shippingProviderLabelId}
+              FOR UPDATE
+            `);
+            const currentLabelDirection = labelDirection(
+              resultRows(labelResult)[0]?.label_direction,
+            );
+            if (currentLabelDirection !== "outbound") {
+              throw new Error("Return labels cannot enqueue outbound carrier dispatch commands");
+            }
+
             const commandKey =
               `carrier-dispatch:shipping-provider-label:${shippingProviderLabelId}`;
             const inserted = await databaseTx

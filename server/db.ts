@@ -197,7 +197,10 @@ export async function runStartupMigrations(): Promise<void> {
               'safe_auto_repair',
               'manual_review',
               'hard_block',
-              'historical_ignore'
+              'historical_ignore',
+              'provider_voided_label',
+              'provider_package_echo',
+              'provider_return_label'
             )),
           CONSTRAINT wms_reconciliation_exceptions_status_chk
             CHECK (status IN ('open', 'acknowledged', 'resolved', 'ignored')),

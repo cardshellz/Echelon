@@ -168,6 +168,41 @@ describe("ShipStation provider package echo", () => {
     expect(allSql).not.toContain("INSERT INTO inventory.inventory_transactions");
   });
 
+  it("refuses to link a return label to outbound package authority", async () => {
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.outbound_shipment_items AS source_item")) {
+          return { rows: sourceRows };
+        }
+        if (text.includes("FROM wms.physical_shipments AS physical")) {
+          return { rows: physicalRows(881) };
+        }
+        if (text.includes("FROM wms.shipping_provider_labels")) {
+          return {
+            rows: [{
+              id: 700,
+              label_status: "active",
+              label_direction: "return",
+            }],
+          };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    await expect(reconcileShipStationProviderPackageEcho(db, input)).resolves.toMatchObject({
+      status: "no_match",
+      reason: "provider_return_label",
+      physicalShipmentId: null,
+      linkInserted: false,
+    });
+
+    const allSql = db.execute.mock.calls.map(([query]: [any]) => queryText(query)).join("\n");
+    expect(allSql).not.toContain("INSERT INTO wms.shipping_provider_label_links");
+  });
+
   it("does not touch provider linkage for non-authoritative ShipStation lines", async () => {
     const db = { execute: vi.fn() };
     const result = await reconcileShipStationProviderPackageEcho(db, {

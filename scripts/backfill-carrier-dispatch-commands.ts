@@ -187,6 +187,7 @@ export async function loadCarrierDispatchBackfillCandidates(
         ON context.shipping_provider_label_id = label.id
       WHERE event.dispatch_evidence = 'confirmed'
         AND label.label_status IN ('active', 'unknown')
+        AND label.label_direction = 'outbound'
         AND CARDINALITY(context.order_numbers) > 0
         AND (
           $1::text IS NULL
@@ -271,6 +272,7 @@ export async function enqueueCarrierDispatchBackfillCommand(
       ON event.id = $2::bigint
     WHERE label.id = $1::bigint
       AND label.label_status IN ('active', 'unknown')
+      AND label.label_direction = 'outbound'
       AND event.dispatch_evidence = 'confirmed'
       AND EXISTS (
         SELECT 1

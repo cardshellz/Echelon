@@ -38,6 +38,7 @@ export type CarrierTrackingMatchStatus =
   | "review";
 
 export type ShippingProviderLabelStatus = "active" | "voided" | "superseded" | "unknown";
+export type ShippingProviderLabelDirection = "outbound" | "return";
 export type ShippingProviderLabelEventType =
   | "label_observed"
   | "label_voided"
@@ -210,6 +211,7 @@ export interface NormalizedShippingProviderLabelObservation {
   trackingNumber: string;
   normalizedTrackingNumber: string;
   labelStatus: ShippingProviderLabelStatus;
+  labelDirection: ShippingProviderLabelDirection;
   eventType: ShippingProviderLabelEventType;
   carrier: string | null;
   serviceCode: string | null;
@@ -235,6 +237,7 @@ const shipStationLabelObservationSchema = z.object({
   // optional item cannot prevent us from observing the label itself; the
   // sanitizer below accepts only exact Echelon-owned line-item identities.
   shipmentItems: z.array(z.unknown()).max(500).optional(),
+  isReturnLabel: z.boolean().default(false),
 }).passthrough();
 
 interface SanitizedShipStationShipmentItemIdentity {
@@ -262,6 +265,7 @@ export interface CarrierTrackingMatchCandidate {
   shippingProviderLabelId: number;
   providerLabelId: string;
   labelStatus: ShippingProviderLabelStatus;
+  labelDirection: ShippingProviderLabelDirection;
   linkCount: number;
   orderNumbers: string[];
   carrier: string | null;
@@ -580,6 +584,7 @@ export function normalizeShipStationLabelObservation(
   const shipDate = parseProviderTimestamp(shipment.shipDate, "shipDate");
   const voidedAt = parseProviderTimestamp(shipment.voidDate, "voidDate");
   const labelStatus: ShippingProviderLabelStatus = voidedAt ? "voided" : "active";
+  const labelDirection: ShippingProviderLabelDirection = shipment.isReturnLabel ? "return" : "outbound";
   const eventType: ShippingProviderLabelEventType = voidedAt
     ? "label_voided"
     : "label_observed";
@@ -595,6 +600,7 @@ export function normalizeShipStationLabelObservation(
     serviceCode: nullableString(shipment.serviceCode),
     shipDate: nullableString(shipment.shipDate),
     voidDate: nullableString(shipment.voidDate),
+    isReturnLabel: shipment.isReturnLabel,
     shipmentItems,
   };
   const eventIdentity = {
@@ -610,6 +616,7 @@ export function normalizeShipStationLabelObservation(
     providerOrderKey: nullableString(shipment.orderKey),
     trackingNumber,
     normalizedTrackingNumber,
+    labelDirection,
     labelStatus,
     eventType,
     carrier: nullableCarrierCode(shipment.carrierCode),
@@ -645,6 +652,9 @@ function mergeCandidate(
     shippingProviderLabelId: existing.shippingProviderLabelId,
     providerLabelId: existing.providerLabelId,
     labelStatus: status,
+    labelDirection: existing.labelDirection === "return" || incoming.labelDirection === "return"
+      ? "return"
+      : "outbound",
     linkCount: Math.max(existing.linkCount, incoming.linkCount),
     orderNumbers: [...new Set([...existing.orderNumbers, ...incoming.orderNumbers])].sort(),
     carrier: prefer(existing.carrier, incoming.carrier),
@@ -695,6 +705,7 @@ export function resolveCarrierTrackingMatch(
     candidates: candidates.map((candidate) => ({
       identity: candidateIdentity(candidate),
       labelStatus: candidate.labelStatus,
+      labelDirection: candidate.labelDirection,
       shippingProviderLabelId: candidate.shippingProviderLabelId,
       providerLabelId: candidate.providerLabelId,
       linkCount: candidate.linkCount,

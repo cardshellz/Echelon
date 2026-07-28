@@ -47,6 +47,19 @@ const historicalRepairMigrationSource = readFileSync(
   ),
   "utf8",
 );
+const labelDirectionMigrationSource = readFileSync(
+  join(
+    here,
+    "..",
+    "..",
+    "..",
+    "..",
+    "..",
+    "migrations",
+    "0603_shipping_provider_label_direction.sql",
+  ),
+  "utf8",
+);
 
 describe("carrier tracking repository concurrency contract", () => {
   it("serializes provider-label observation on tracking identity before label identity", () => {
@@ -253,6 +266,33 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(projectionUpdate).toBeGreaterThan(attemptInsert);
   });
 
+
+  it("makes provider return direction monotonic and excludes returns from outbound dispatch", () => {
+    const observationStart = repositorySource.indexOf("async observeProviderLabel(observation)");
+    const reconciliationStart = repositorySource.indexOf(
+      "async reconcileProviderLabelLinks(provider, providerLabelId, reconciledAt)",
+    );
+    const observationSource = repositorySource.slice(observationStart, reconciliationStart);
+
+    expect(labelDirectionMigrationSource).toContain(
+      "label_direction VARCHAR(20) NOT NULL DEFAULT 'outbound'",
+    );
+    expect(labelDirectionMigrationSource).toContain("provider_return_label");
+    expect(observationSource).toContain(
+      'existing[0].labelDirection === "return"',
+    );
+    expect(observationSource).toContain(
+      'if (effectiveLabelDirection === "return")',
+    );
+    expect(observationSource).toContain(
+      "DELETE FROM wms.shipping_provider_label_links",
+    );
+    expect(observationSource).toContain("RETURN_LABEL_NOT_OUTBOUND");
+    expect(repositorySource).toContain("WHERE label.label_direction = 'outbound'");
+    expect(repositorySource).toContain(
+      "label.id = command.shipping_provider_label_id AND label.label_direction = 'outbound'",
+    );
+  });
   it("enqueues one dispatch command per immutable provider label", () => {
     const enqueueStart = repositorySource.indexOf("async enqueueDispatchCommand(");
     const transactionEnd = repositorySource.indexOf(

@@ -205,6 +205,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         providerLabelId: observation.providerLabelId,
         trackingSuffix: trackingSuffix(observation.normalizedTrackingNumber),
         labelStatus: observation.labelStatus,
+        labelDirection: observation.labelDirection,
         labelInserted: result.labelInserted,
         eventInserted: result.eventInserted,
       },
@@ -956,6 +957,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         event.dispatchEvidence === "confirmed"
         && resolution.status === "matched"
         && selectedCandidate !== null
+        && selectedCandidate.labelDirection === "outbound"
         && selectedCandidate.linkCount > 0
         && match.shippingProviderLabelId !== null
           ? await transaction.enqueueDispatchCommand(

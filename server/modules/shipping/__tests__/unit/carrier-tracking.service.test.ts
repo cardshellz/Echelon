@@ -537,6 +537,7 @@ describe("CarrierTrackingService", () => {
     const { repository, enqueueDispatchCommand } = repositoryWithCandidates([{
       shippingProviderLabelId: 10,
       providerLabelId: "442000001",
+      labelDirection: "outbound",
       labelStatus: "active",
       linkCount: 1,
       orderNumbers: ["#60001"],
@@ -677,6 +678,7 @@ describe("CarrierTrackingService", () => {
     const { repository, enqueueDispatchCommand } = repositoryWithCandidates([{
       shippingProviderLabelId: 10,
       providerLabelId: "442000001",
+      labelDirection: "outbound",
       labelStatus: "active",
       linkCount: 2,
       orderNumbers: ["#60001"],
@@ -707,10 +709,40 @@ describe("CarrierTrackingService", () => {
     );
   });
 
+
+  it("never creates outbound dispatch authority from a matched return label", async () => {
+    const { repository, enqueueDispatchCommand } = repositoryWithCandidates([{
+      shippingProviderLabelId: 10,
+      providerLabelId: "448076377",
+      labelDirection: "return",
+      labelStatus: "active",
+      linkCount: 0,
+      orderNumbers: ["#60580"],
+      carrier: "stamps_com",
+      serviceCode: "usps_ground_advantage",
+    }]);
+    const service = new CarrierTrackingService({
+      repository,
+      clock: { now: () => new Date(now) },
+      logger: logger(),
+    });
+
+    vi.mocked(repository.listEventsPendingReconciliation).mockResolvedValue([
+      normalizeShipStationTrackingWebhook(payload(), now),
+    ]);
+
+    await expect(service.reconcileUnresolved(25)).resolves.toMatchObject({
+      scanned: 1,
+      matched: 1,
+      unresolved: 0,
+    });
+    expect(enqueueDispatchCommand).not.toHaveBeenCalled();
+  });
   it("does not enqueue dispatch for carrier evidence that does not prove possession", async () => {
     const { repository, enqueueDispatchCommand } = repositoryWithCandidates([{
       shippingProviderLabelId: 10,
       providerLabelId: "442000001",
+      labelDirection: "outbound",
       labelStatus: "active",
       linkCount: 1,
       orderNumbers: ["#60001"],
@@ -965,6 +997,7 @@ describe("CarrierTrackingService", () => {
     const { repository } = repositoryWithCandidates([{
       shippingProviderLabelId: 10,
       providerLabelId: "442000001",
+      labelDirection: "outbound",
       labelStatus: "active",
       linkCount: 1,
       orderNumbers: ["#60001"],

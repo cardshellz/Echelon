@@ -5,6 +5,7 @@ import {
   buildShipStationUnmappedPhysicalIdempotencyKey,
   buildShipStationUnmappedPhysicalSummary,
   recordShipStationUnmappedPhysicalException,
+  resolveShipStationUnmappedPhysicalExceptionForReturnLabel,
   resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "../../shipstation-unmapped-physical";
@@ -74,6 +75,55 @@ describe("ShipStation unmapped physical shipment evidence", () => {
     expect(statement).toContain("summary = EXCLUDED.summary");
   });
 
+
+  it("does not create an outbound split exception for a provider-declared return label", async () => {
+    const execute = vi.fn();
+
+    await recordShipStationUnmappedPhysicalException({ execute }, {
+      shipment: {
+        shipmentId: 448076377,
+        orderId: 765185209,
+        orderKey: "echelon-wms-shp-10374",
+        orderNumber: "#60580",
+        trackingNumber: "9434650206217258521132",
+        isReturnLabel: true,
+      },
+      wmsOrderId: 205770,
+      wmsShipmentId: 10374,
+      blockedReason: "distinct_physical_shipment_after_terminal_fulfillment",
+    });
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("resolves a return label without changing outbound shipment, inventory, or channel authority", async () => {
+    const execute = vi.fn(async () => ({ rows: [{ id: 572 }] }));
+
+    const changed = await resolveShipStationUnmappedPhysicalExceptionForReturnLabel(
+      { execute },
+      {
+        shipment: {
+          shipmentId: 448076377,
+          orderId: 765185209,
+          orderKey: "echelon-wms-shp-10374",
+          orderNumber: "#60580",
+          trackingNumber: "9434650206217258521132",
+          isReturnLabel: true,
+        },
+        resolvedBy: "ops:test",
+      },
+    );
+
+    expect(changed).toBe(true);
+    expect(execute).toHaveBeenCalledOnce();
+    const statement = sqlText(execute.mock.calls[0][0]);
+    expect(statement).toContain("classification = 'provider_return_label'");
+    expect(statement).toContain("status = 'resolved'");
+    expect(statement).toContain("resolve_return_label");
+    expect(statement).toContain("fulfillmentMutationBlocked");
+    expect(statement).not.toContain("wms.outbound_shipments");
+    expect(statement).not.toContain("inventory.inventory_transactions");
+  });
   it("closes the exact exception when a later provider event proves the label was voided", async () => {
     const execute = vi.fn(async () => ({ rows: [{ id: 62 }] }));
 
