@@ -26,6 +26,7 @@ import { parseProviderAmountCents } from "../shipping/types";
 import {
   SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON,
   recordShipStationUnmappedPhysicalException,
+  resolveShipStationUnmappedPhysicalExceptionForReturnLabel,
   resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "./shipstation-unmapped-physical";
@@ -768,6 +769,7 @@ export interface ShipStationShipment {
   shipDate: string;
   voidDate: string | null;
   shipmentCost: number;
+  isReturnLabel?: boolean;
   // Populated only when caller passes includeShipmentItems=true on the
   // GET /shipments query string. Used by the parity check to compare
   // per-shipment line items for split orders.
@@ -3325,6 +3327,13 @@ export function createShipStationService(
     for (const shipment of shipments) {
       try {
         await observeProviderLabel(shipment);
+        if (shipment.isReturnLabel === true) {
+          await resolveShipStationUnmappedPhysicalExceptionForReturnLabel(db, {
+            shipment,
+            resolvedBy: "system:shipstation_notify",
+            notes: "Automatically classified from ShipStation return-label direction.",
+          });
+        }
         observed += 1;
       } catch (err: any) {
         failures.push({
@@ -3439,6 +3448,19 @@ export function createShipStationService(
             commandId: input.commandId,
             providerLabelId: input.providerLabelId,
             voidDate: shipment.voidDate,
+          },
+        },
+      );
+    }
+    if (shipment.isReturnLabel === true) {
+      throw new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_RETURN_LABEL_NOT_OUTBOUND",
+        "Carrier possession matched a ShipStation return label, which cannot authorize outbound fulfillment",
+        {
+          retryable: false,
+          context: {
+            commandId: input.commandId,
+            providerLabelId: input.providerLabelId,
           },
         },
       );

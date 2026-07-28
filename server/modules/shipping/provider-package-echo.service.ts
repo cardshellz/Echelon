@@ -32,6 +32,7 @@ export interface ProviderPackageEchoResult {
     | "invalid_provider_identity"
     | "provider_lines_not_authoritative"
     | "provider_line_quantity_mismatch"
+    | "provider_return_label"
     | "no_matching_physical_package"
     | "multiple_matching_physical_packages"
     | "provider_label_not_observed";
@@ -304,7 +305,7 @@ export async function reconcileShipStationProviderPackageEcho(
       return inspected;
     }
     const labelResult: any = await tx.execute(sql`
-      SELECT id, label_status
+      SELECT id, label_status, label_direction
       FROM wms.shipping_provider_labels
       WHERE provider = 'shipstation'
         AND provider_label_id = ${String(providerShipmentId)}
@@ -313,6 +314,9 @@ export async function reconcileShipStationProviderPackageEcho(
     const labelRows = resultRows(labelResult);
     if (labelRows.length !== 1 || String(labelRows[0].label_status) === "voided") {
       return noMatch("provider_label_not_observed");
+    }
+    if (String(labelRows[0].label_direction) === "return") {
+      return noMatch("provider_return_label");
     }
     const shippingProviderLabelId = requiredPositiveInteger(
       labelRows[0].id,

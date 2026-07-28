@@ -11,6 +11,7 @@ import {
   buildShipStationUnmappedPhysicalIdempotencyKey,
   recordShipStationUnmappedPhysicalException,
   resolveShipStationUnmappedPhysicalExceptionForProviderEcho,
+  resolveShipStationUnmappedPhysicalExceptionForReturnLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "./shipstation-unmapped-physical";
 import {
@@ -47,6 +48,12 @@ export interface ShipStationUnmappedVoidedLabelResolutionInput
   notes?: string;
 }
 
+export interface ShipStationUnmappedReturnLabelResolutionInput
+  extends ShipStationUnmappedLocator {
+  operator: string;
+  notes?: string;
+}
+
 export interface ShipStationUnmappedProviderEchoResolutionInput
   extends ShipStationUnmappedLocator {
   operator: string;
@@ -72,6 +79,12 @@ interface VoidedLabelResolution {
   providerShipmentId: number | null;
   providerVoidDate: string | null;
 }
+interface ReturnLabelResolution {
+  exceptionId: number;
+  operator: string;
+  providerShipmentId: number | null;
+}
+
 
 export interface ShipStationProviderIdentityRepair {
   supersededCandidateShipmentId: number;
@@ -280,6 +293,61 @@ async function loadPriorVoidedLabelResolution(
         LIMIT 1
       `);
   return voidedLabelResolutionFromRow(resultRows(result)[0]);
+}
+
+function returnLabelResolutionFromRow(row: any): ReturnLabelResolution | null {
+  if (
+    !row
+    || String(row.status) !== "resolved"
+    || String(row.classification) !== "provider_return_label"
+    || String(row.remediation_action) !== "resolve_return_label"
+  ) {
+    return null;
+  }
+  return {
+    exceptionId: positiveInteger(row.id, "exceptionId"),
+    operator: String(row.resolved_by ?? "system:unknown"),
+    providerShipmentId: optionalPositiveInteger(row.provider_shipment_id),
+  };
+}
+
+async function loadPriorReturnLabelResolution(
+  db: any,
+  input: ShipStationUnmappedLocator,
+): Promise<ReturnLabelResolution | null> {
+  const target = locator(input);
+  const result: any = target.exceptionId > 0
+    ? await db.execute(sql`
+        SELECT
+          id,
+          status,
+          classification,
+          details->>'remediationAction' AS remediation_action,
+          details->>'providerShipmentId' AS provider_shipment_id,
+          resolved_by
+        FROM wms.reconciliation_exceptions
+        WHERE id = ${target.exceptionId}
+          AND rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+        LIMIT 1
+      `)
+    : await db.execute(sql`
+        SELECT
+          id,
+          status,
+          classification,
+          details->>'remediationAction' AS remediation_action,
+          details->>'providerShipmentId' AS provider_shipment_id,
+          resolved_by
+        FROM wms.reconciliation_exceptions
+        WHERE rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+          AND status = 'resolved'
+          AND classification = 'provider_return_label'
+          AND details->>'remediationAction' = 'resolve_return_label'
+          AND wms_shipment_id = ${target.shipmentId}
+        ORDER BY resolved_at DESC NULLS LAST, id DESC
+        LIMIT 1
+      `);
+  return returnLabelResolutionFromRow(resultRows(result)[0]);
 }
 
 async function withOptionalTransaction<T>(
@@ -904,13 +972,23 @@ export async function getShipStationUnmappedPhysicalPreview(
     identityRepair,
     originalPackageIdentityRepair,
   } = resolvedProvider;
-  const providerPackageEcho = await inspectShipStationProviderPackageEcho(db, {
-    providerShipmentId: providerShipment.shipmentId,
-    trackingNumber: providerShipment.trackingNumber,
-    expectedWmsOrderId: context.wmsOrderId,
-    shipmentItems: providerShipment.shipmentItems ?? [],
-    source: "shipstation_unmapped_preview",
-  });
+  const providerPackageEcho: ProviderPackageEchoResult = providerShipment.isReturnLabel === true
+    ? {
+        status: "no_match",
+        reason: "provider_return_label",
+        physicalShipmentId: null,
+        wmsOrderId: null,
+        authoritativeLegacyShipmentIds: [],
+        shippingProviderLabelId: null,
+        linkInserted: false,
+      }
+    : await inspectShipStationProviderPackageEcho(db, {
+        providerShipmentId: providerShipment.shipmentId,
+        trackingNumber: providerShipment.trackingNumber,
+        expectedWmsOrderId: context.wmsOrderId,
+        shipmentItems: providerShipment.shipmentItems ?? [],
+        source: "shipstation_unmapped_preview",
+      });
   return {
     exceptionId: context.exceptionId,
     wmsOrderId: context.wmsOrderId,
@@ -1690,6 +1768,9 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
   if (shipment.voidDate) {
     throw new Error("a voided ShipStation shipment cannot be adopted as a reship");
   }
+  if (shipment.isReturnLabel === true) {
+    throw new Error("a ShipStation return label cannot be adopted as an outbound reship");
+  }
   if (!String(shipment.shipDate ?? "").trim()) {
     throw new Error("ShipStation shipment has no shipped date");
   }
@@ -1976,6 +2057,9 @@ export async function resolveShipStationUnmappedPhysicalAsProviderEcho(
   if (shipment.voidDate) {
     throw new Error("a voided ShipStation label cannot be linked as a provider package echo");
   }
+  if (shipment.isReturnLabel === true) {
+    throw new Error("a ShipStation return label cannot be linked as an outbound provider package echo");
+  }
   const exceptionId = await ensureException(db, context, shipment);
 
   return withOptionalTransaction(db, async (tx) => {
@@ -2048,6 +2132,81 @@ export async function resolveShipStationUnmappedPhysicalAsProviderEcho(
       physicalShipmentId: echo.physicalShipmentId,
       shippingProviderLabelId: echo.shippingProviderLabelId,
       providerLabelLinkInserted: echo.linkInserted,
+      operator,
+    };
+  });
+}
+
+export async function resolveShipStationUnmappedPhysicalAsReturnLabel(
+  db: any,
+  shipStation: ShipStationService,
+  input: ShipStationUnmappedReturnLabelResolutionInput,
+): Promise<Record<string, unknown>> {
+  const operator = requiredOperator(input.operator);
+  const notes = optionalNotes(input.notes);
+  const priorResolution = await loadPriorReturnLabelResolution(db, input);
+  if (priorResolution) return { changed: false, ...priorResolution };
+
+  let context: RemediationContext;
+  try {
+    context = await loadContext(db, input);
+  } catch (contextError) {
+    const concurrentResolution = await loadPriorReturnLabelResolution(db, input);
+    if (concurrentResolution) return { changed: false, ...concurrentResolution };
+    throw contextError;
+  }
+  if (context.exceptionId === null) {
+    throw new Error("return-label remediation requires an existing reconciliation exception");
+  }
+  const providerShipmentId = positiveInteger(
+    context.externalShipmentRef,
+    "externalShipmentRef",
+  );
+  const shipment = await shipStation.getShipmentById(providerShipmentId);
+  if (!shipment) {
+    throw new Error(`ShipStation physical shipment ${providerShipmentId} was not found`);
+  }
+  if (shipment.isReturnLabel !== true) {
+    throw new Error("ShipStation does not report this provider label as a return label");
+  }
+
+  // The observation transaction makes direction monotonic, removes outbound
+  // links, and quarantines any unsent outbound dispatch command before the
+  // operator-facing exception is closed.
+  await shipStation.observeProviderLabels([shipment]);
+
+  return withOptionalTransaction(db, async (tx) => {
+    const exceptionResult: any = await tx.execute(sql`
+      SELECT
+        id,
+        status,
+        classification,
+        details->>'remediationAction' AS remediation_action,
+        details->>'providerShipmentId' AS provider_shipment_id,
+        resolved_by
+      FROM wms.reconciliation_exceptions
+      WHERE id = ${context.exceptionId}
+      FOR UPDATE
+    `);
+    const exceptionRow = resultRows(exceptionResult)[0];
+    if (!exceptionRow) throw new Error("unmapped ShipStation exception no longer exists");
+    const concurrentResolution = returnLabelResolutionFromRow(exceptionRow);
+    if (concurrentResolution) return { changed: false, ...concurrentResolution };
+    if (!["open", "acknowledged"].includes(String(exceptionRow.status))) {
+      throw new Error("unmapped ShipStation exception changed before it could be resolved");
+    }
+
+    const resolved = await resolveShipStationUnmappedPhysicalExceptionForReturnLabel(
+      tx,
+      { shipment, resolvedBy: operator, notes },
+    );
+    if (!resolved) {
+      throw new Error("unmapped ShipStation exception changed before it could be resolved");
+    }
+    return {
+      changed: true,
+      exceptionId: context.exceptionId,
+      providerShipmentId,
       operator,
     };
   });

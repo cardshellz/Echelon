@@ -24,6 +24,7 @@ import {
   adoptShipStationUnmappedPhysicalAsReship,
   getShipStationUnmappedPhysicalPreview,
   resolveShipStationUnmappedPhysicalAsProviderEcho,
+  resolveShipStationUnmappedPhysicalAsReturnLabel,
   resolveShipStationUnmappedPhysicalAsVoidedLabel,
 } from "../modules/oms/shipstation-unmapped-remediation.service";
 
@@ -129,6 +130,45 @@ export function registerOmsRoutes(app: Express) {
           ? 400
           : /not found/i.test(message)
             ? 404
+            : /unavailable/i.test(message)
+              ? 503
+              : 409;
+        res.status(status).json({ error: message });
+      }
+    },
+  );
+
+  app.post(
+    "/api/oms/ops/shipstation-unmapped/resolve-return-label",
+    requirePermission("operations", "triage"),
+    async (req: Request, res: Response) => {
+      try {
+        const shipStation = getShipStation(req);
+        if (!shipStation) {
+          res.status(503).json({ error: "ShipStation service is unavailable" });
+          return;
+        }
+        const operator =
+          req.session.user?.username ||
+          req.session.user?.displayName ||
+          String(req.session.user?.id || "unknown");
+        res.json(await resolveShipStationUnmappedPhysicalAsReturnLabel(
+          db,
+          shipStation,
+          {
+            exceptionId: req.body?.exceptionId,
+            shipmentId: req.body?.shipmentId,
+            operator,
+            notes: req.body?.notes,
+          },
+        ));
+      } catch (err: any) {
+        console.error("[OMS Routes] ShipStation return-label resolution error:", err);
+        const message = err?.message || "Failed to resolve ShipStation return label";
+        const status = /positive integer|exactly one|required/i.test(message)
+          ? 400
+          : /permission denied/i.test(message)
+            ? 403
             : /unavailable/i.test(message)
               ? 503
               : 409;

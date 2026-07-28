@@ -37,6 +37,7 @@ function candidate(overrides: Partial<CarrierTrackingMatchCandidate> = {}): Carr
   return {
     shippingProviderLabelId: 10,
     providerLabelId: "label-1",
+    labelDirection: "outbound",
     labelStatus: "active",
     linkCount: 1,
     orderNumbers: ["#60001"],
@@ -274,6 +275,25 @@ describe("shipping-provider label normalization", () => {
     });
   });
 
+
+  it("preserves provider-declared return direction without changing label status", () => {
+    const observation = normalizeShipStationLabelObservation({
+      shipmentId: 448_076_377,
+      orderId: 765_185_209,
+      orderKey: "echelon-wms-shp-10374",
+      trackingNumber: "9434650206217258521132",
+      carrierCode: "stamps_com",
+      shipDate: "2026-07-27T20:00:00.000Z",
+      voidDate: null,
+      isReturnLabel: true,
+    }, receivedAt);
+
+    expect(observation).toMatchObject({
+      labelDirection: "return",
+      labelStatus: "active",
+      sanitizedPayload: { isReturnLabel: true },
+    });
+  });
   it("records an explicitly voided label as voided evidence", () => {
     const observation = normalizeShipStationLabelObservation({
       shipmentId: 442_000_001,
