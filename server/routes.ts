@@ -64,6 +64,7 @@ import { registerShadowAdminRoutes } from "./modules/shipping-engine/interfaces/
 import { registerPackingRoutes } from "./modules/shipping-engine/interfaces/http/packing.routes";
 import { registerRateTableAdminRoutes } from "./modules/shipping-engine/interfaces/http/rate-table-admin.routes";
 import { registerRateBookAdminRoutes } from "./modules/shipping-engine/interfaces/http/rate-book-admin.routes";
+import { registerRateProgramCloneRoutes } from "./modules/shipping-engine/interfaces/http/rate-program-clone.routes";
 import { registerProductRatePolicyAdminRoutes } from "./modules/shipping-engine/interfaces/http/product-rate-policy-admin.routes";
 import { registerManualRateQuoteRoutes } from "./modules/shipping-engine/interfaces/http/manual-rate-quote.routes";
 import { registerChannelShippingPolicyAdminRoutes } from "./modules/shipping-engine/interfaces/http/channel-shipping-policy-admin.routes";
@@ -99,6 +100,7 @@ export async function registerRoutes(
   registerPackingRoutes(app);
   registerRateTableAdminRoutes(app);
   registerRateBookAdminRoutes(app);
+  registerRateProgramCloneRoutes(app);
   registerProductRatePolicyAdminRoutes(app);
   registerChannelShippingPolicyAdminRoutes(app);
   registerManualRateQuoteRoutes(app);

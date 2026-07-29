@@ -376,6 +376,21 @@ export function postJson<T>(url: string, body: unknown): Promise<T> {
   });
 }
 
+export function postIdempotentJson<T>(
+  url: string,
+  body: unknown,
+  idempotencyKey: string,
+): Promise<T> {
+  return request<T>(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": idempotencyKey,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
 export function putJson<T>(url: string, body: unknown): Promise<T> {
   return request<T>(url, {
     method: "PUT",
@@ -542,6 +557,22 @@ export function productRuleRevisionStatus(
   };
 }
 
+export interface CopyRateProgramResponse {
+  sourceRateBook: { id: number; name: string };
+  targetRateBook: { id: number; name: string };
+  createdDrafts: Array<{
+    id: number;
+    sourceRateTableId: number;
+    serviceLevelId: number;
+    serviceLevelCode: string;
+    serviceLevelName: string;
+    rowCount: number;
+    coverageCount: number;
+  }>;
+  assignmentsCopied: false;
+  liveRatesChanged: false;
+}
+
 export interface ProgramOverview {
   book: RateBookSummary;
   options: ProgramOptionState[];
@@ -595,6 +626,25 @@ export function rateTableRegionCount(
   return coverage.regionCount ?? coverage.stateCount;
 }
 
+export function rateCopySourceOptions(
+  programs: readonly ProgramOverview[],
+  targetRateBookId: number,
+): ProgramOverview[] {
+  return programs
+    .filter((program) =>
+      program.book.id !== targetRateBookId
+      && program.book.status === "active"
+      && program.liveOptionCount > 0)
+    .sort((left, right) => left.book.name.localeCompare(right.book.name));
+}
+
+export function rateProgramCopyConflicts(
+  target: ProgramOverview,
+): string[] {
+  return target.options
+    .filter((option) => option.active !== null || option.draft !== null)
+    .map((option) => option.serviceLevel.displayName);
+}
 export function buildProgramOverviews(data: RateTablesResponse): ProgramOverview[] {
   const tablesByBook = new Map<number, RateTableSummary[]>();
   for (const table of data.rateTables) {

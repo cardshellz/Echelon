@@ -266,6 +266,7 @@ export function PricingProgramsTab() {
     return (
       <ProgramDetail
         program={program}
+        programs={programs}
         warehouses={warehouses}
         onBack={() => setView({ kind: "overview" })}
         onViewTable={(tableId) => setView({ kind: "revision", tableId, returnTo: here })}
