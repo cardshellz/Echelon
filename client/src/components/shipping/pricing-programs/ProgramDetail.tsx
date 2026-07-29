@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleOff,
+  Copy,
   Eye,
   FilePenLine,
   Globe2,
@@ -56,12 +57,14 @@ import {
   type ProgramOptionState,
   type WarehouseOption,
 } from "./api";
+import { CopyProgramRatesDialog } from "./CopyProgramRatesDialog";
 import { ProgramFormDialog } from "./ProgramFormDialog";
 import { RateTestDialog } from "./RateTestDialog";
 import { programStatusBadge, revisionStatusBadge } from "./status";
 
 interface ProgramDetailProps {
   program: ProgramOverview;
+  programs: ProgramOverview[];
   warehouses: WarehouseOption[];
   onBack: () => void;
   onViewTable: (tableId: number) => void;
@@ -81,6 +84,7 @@ interface ProgramDetailProps {
 
 export function ProgramDetail({
   program,
+  programs,
   warehouses,
   onBack,
   onViewTable,
@@ -91,6 +95,7 @@ export function ProgramDetail({
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [editOpen, setEditOpen] = useState(false);
+  const [copyOpen, setCopyOpen] = useState(false);
   const [rateTestOpen, setRateTestOpen] = useState(false);
   const [confirmRetire, setConfirmRetire] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -188,6 +193,14 @@ export function ProgramDetail({
             >
               <Calculator className="mr-1.5 h-3.5 w-3.5" />
               Test live rates
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCopyOpen(true)}
+            >
+              <Copy className="mr-1.5 h-3.5 w-3.5" />
+              Copy rates
             </Button>
             <Button
               variant="outline"
@@ -435,6 +448,12 @@ export function ProgramDetail({
         warehouses={warehouses}
         program={book}
         onSaved={() => undefined}
+      />
+      <CopyProgramRatesDialog
+        open={copyOpen}
+        onOpenChange={setCopyOpen}
+        targetProgram={program}
+        programs={programs}
       />
       <RateTestDialog
         open={rateTestOpen}
