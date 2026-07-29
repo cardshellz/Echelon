@@ -18,6 +18,10 @@ function queryText(query: any): string {
     .join("");
 }
 
+function isExactLegacyPackageQuery(text: string): boolean {
+  return text.includes("FROM wms.shipping_provider_labels AS label");
+}
+
 const providerShipment = {
   shipmentId: 900,
   orderId: 700,
@@ -150,6 +154,9 @@ describe("ShipStation unmapped physical remediation", () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.reconciliation_exceptions exception")) {
           return { rows: [contextRow] };
         }
@@ -221,6 +228,9 @@ describe("ShipStation unmapped physical remediation", () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.reconciliation_exceptions exception")) {
           return { rows: [staleContext] };
         }
@@ -279,6 +289,9 @@ describe("ShipStation unmapped physical remediation", () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.reconciliation_exceptions exception")) {
           return { rows: [crossedContextRow] };
         }
@@ -333,6 +346,9 @@ describe("ShipStation unmapped physical remediation", () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.reconciliation_exceptions exception")) {
           return { rows: [crossedContextRow] };
         }
@@ -368,6 +384,9 @@ describe("ShipStation unmapped physical remediation", () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.reconciliation_exceptions exception")) {
           return { rows: [{
             ...contextRow,
@@ -412,6 +431,9 @@ describe("ShipStation unmapped physical remediation", () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.reconciliation_exceptions exception")) {
           return { rows: [historicalSplitContextRow] };
         }
@@ -479,6 +501,9 @@ describe("ShipStation unmapped physical remediation", () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.reconciliation_exceptions exception")) {
           return { rows: [historicalSplitContextRow] };
         }
@@ -992,6 +1017,9 @@ describe("ShipStation unmapped physical remediation", () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.reconciliation_exceptions exception")) {
           return { rows: [{
             ...contextRow,
@@ -1017,7 +1045,7 @@ describe("ShipStation unmapped physical remediation", () => {
       reason: "carrier_replacement",
       lineMappings: [],
     })).rejects.toThrow("confirm at least one item that was physically sent");
-    expect(db.execute).toHaveBeenCalledTimes(2);
+    expect(db.execute).toHaveBeenCalledTimes(3);
   });
 
   it("atomically repairs crossed legacy identities before adopting the active reship", async () => {
@@ -1644,6 +1672,9 @@ describe("ShipStation unmapped physical remediation", () => {
             }],
           };
         }
+        if (text.includes("FROM wms.shipping_provider_labels AS label")) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.outbound_shipment_items AS source_item")) {
           return {
             rows: [{ id: 501, order_item_id: 101, qty: 1, order_id: 42 }],
@@ -1728,6 +1759,9 @@ describe("ShipStation unmapped physical remediation", () => {
               remediation_action: null,
             }],
           };
+        }
+        if (text.includes("FROM wms.shipping_provider_labels AS label")) {
+          return { rows: [] };
         }
         if (text.includes("FROM wms.outbound_shipment_items AS source_item")) {
           return {

@@ -7,6 +7,7 @@ import {
   isExactShipStationPhysicalShipmentReplay,
   recordShipStationUnmappedPhysicalException,
   resolveShipStationUnmappedPhysicalExceptionForExactReplay,
+  resolveShipStationUnmappedPhysicalExceptionForProviderEcho,
   resolveShipStationUnmappedPhysicalExceptionForReturnLabel,
   resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
@@ -204,6 +205,37 @@ describe("ShipStation unmapped physical shipment evidence", () => {
     expect(statement).toContain("resolve_exact_provider_package_replay");
     expect(statement).toContain("wms_shipment_id");
     expect(statement).toContain("external_shipment_ref");
+    expect(statement).not.toContain("UPDATE wms.outbound_shipments");
+    expect(statement).not.toContain("inventory.inventory_transactions");
+  });
+
+  it("resolves an exact historical provider echo from legacy shipment authority", async () => {
+    const execute = vi.fn(async () => ({ rows: [{ id: 328 }] }));
+
+    const changed = await resolveShipStationUnmappedPhysicalExceptionForProviderEcho(
+      { execute },
+      {
+        shipment: {
+          shipmentId: 440619985,
+          orderId: 742250001,
+          orderKey: "echelon-wms-shp-4126",
+          orderNumber: "#59175",
+          trackingNumber: "9434650206217239885413",
+        },
+        wmsOrderId: 204249,
+        physicalShipmentId: null,
+        authoritativeLegacyShipmentIds: [4126],
+        candidateShipmentId: 4126,
+        resolvedBy: "ops:test",
+      },
+    );
+
+    expect(changed).toBe(true);
+    expect(execute).toHaveBeenCalledOnce();
+    const statement = sqlText(execute.mock.calls[0][0]);
+    expect(statement).toContain("classification = 'provider_package_echo'");
+    expect(statement).toContain("status = 'resolved'");
+    expect(statement).toContain("link_provider_package_echo");
     expect(statement).not.toContain("UPDATE wms.outbound_shipments");
     expect(statement).not.toContain("inventory.inventory_transactions");
   });

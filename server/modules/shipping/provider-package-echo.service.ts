@@ -29,6 +29,7 @@ export interface ProviderPackageEchoResult {
   status: ProviderPackageEchoStatus;
   reason:
     | "exact_tracking_and_line_authority"
+    | "exact_provider_and_legacy_package_identity"
     | "invalid_provider_identity"
     | "provider_lines_not_authoritative"
     | "provider_line_quantity_mismatch"
@@ -121,6 +122,89 @@ function noMatch(
   };
 }
 
+async function inspectExactLegacyProviderPackageIdentity(
+  db: QueryExecutor,
+  input: {
+    providerShipmentId: number;
+    normalizedTracking: string;
+    expectedWmsOrderId: number | null;
+  },
+): Promise<ProviderPackageEchoResult | null> {
+  const result: any = await db.execute(sql`
+    SELECT DISTINCT
+      label.id AS shipping_provider_label_id,
+      legacy_shipment.id AS legacy_wms_shipment_id,
+      legacy_shipment.order_id AS wms_order_id
+    FROM wms.shipping_provider_labels AS label
+    JOIN wms.shipping_provider_label_links AS label_link
+      ON label_link.shipping_provider_label_id = label.id
+     AND label_link.legacy_wms_shipment_id IS NOT NULL
+    JOIN wms.outbound_shipments AS legacy_shipment
+      ON legacy_shipment.id = label_link.legacy_wms_shipment_id
+    WHERE label.provider = 'shipstation'
+      AND label.provider_label_id = ${String(input.providerShipmentId)}
+      AND label.label_direction = 'outbound'
+      AND label.label_status IN ('active', 'unknown')
+      AND label.voided_at IS NULL
+      AND label.normalized_tracking_number = ${input.normalizedTracking}
+      AND legacy_shipment.status = 'shipped'
+      AND legacy_shipment.external_fulfillment_id =
+        ${`shipstation_shipment:${input.providerShipmentId}`}
+      AND UPPER(
+        REGEXP_REPLACE(
+          COALESCE(legacy_shipment.tracking_number, ''),
+          '[^A-Za-z0-9]',
+          '',
+          'g'
+        )
+      ) = ${input.normalizedTracking}
+    ORDER BY legacy_shipment.id
+  `);
+  const rows = resultRows(result);
+  if (rows.length === 0) return null;
+
+  const wmsOrderIds = new Set(rows.map((row) => Number(row.wms_order_id)));
+  const legacyWmsShipmentIds = [
+    ...new Set(rows.map((row) => Number(row.legacy_wms_shipment_id))),
+  ].sort((left, right) => left - right);
+  const shippingProviderLabelIds = new Set(
+    rows.map((row) => Number(row.shipping_provider_label_id)),
+  );
+  if (
+    wmsOrderIds.size !== 1
+    || legacyWmsShipmentIds.some(
+      (id) => !Number.isSafeInteger(id) || id <= 0,
+    )
+    || shippingProviderLabelIds.size !== 1
+  ) {
+    return {
+      ...noMatch("multiple_matching_physical_packages"),
+      status: "ambiguous",
+    };
+  }
+  const [wmsOrderId] = wmsOrderIds;
+  if (
+    !Number.isSafeInteger(wmsOrderId)
+    || wmsOrderId <= 0
+    || (
+      input.expectedWmsOrderId !== null
+      && wmsOrderId !== input.expectedWmsOrderId
+    )
+  ) {
+    return noMatch("provider_lines_not_authoritative");
+  }
+
+  return {
+    status: "matched",
+    reason: "exact_provider_and_legacy_package_identity",
+    physicalShipmentId: null,
+    wmsOrderId,
+    authoritativeLegacyShipmentIds: legacyWmsShipmentIds,
+    shippingProviderLabelId: [...shippingProviderLabelIds][0],
+    linkInserted: false,
+  };
+}
+
 export async function inspectShipStationProviderPackageEcho(
   db: QueryExecutor,
   input: ShipStationProviderPackageEchoInput,
@@ -135,6 +219,16 @@ export async function inspectShipStationProviderPackageEcho(
   } catch {
     return noMatch("invalid_provider_identity");
   }
+
+  const exactLegacyPackage = await inspectExactLegacyProviderPackageIdentity(
+    db,
+    {
+      providerShipmentId: input.providerShipmentId,
+      normalizedTracking,
+      expectedWmsOrderId,
+    },
+  );
+  if (exactLegacyPackage !== null) return exactLegacyPackage;
 
   const providerLines = parseProviderLines(input.shipmentItems);
   if (!providerLines) return noMatch("provider_lines_not_authoritative");
@@ -301,7 +395,7 @@ export async function reconcileShipStationProviderPackageEcho(
   }
   const work = async (tx: QueryExecutor): Promise<ProviderPackageEchoResult> => {
     const inspected = await inspectShipStationProviderPackageEcho(tx, input);
-    if (inspected.status !== "matched" || inspected.physicalShipmentId === null) {
+    if (inspected.status !== "matched") {
       return inspected;
     }
     const labelResult: any = await tx.execute(sql`
@@ -322,31 +416,43 @@ export async function reconcileShipStationProviderPackageEcho(
       labelRows[0].id,
       "shippingProviderLabelId",
     );
-    const inserted: any = await tx.execute(sql`
-      INSERT INTO wms.shipping_provider_label_links (
-        shipping_provider_label_id,
-        physical_shipment_id,
-        source,
-        metadata,
-        created_at,
-        updated_at
-      )
-      VALUES (
-        ${shippingProviderLabelId},
-        ${inspected.physicalShipmentId},
-        'cross_provider_package_echo',
-        ${JSON.stringify({
+    if (
+      inspected.shippingProviderLabelId !== null
+      && inspected.shippingProviderLabelId !== shippingProviderLabelId
+    ) {
+      return noMatch("provider_label_not_observed");
+    }
+    let linkInserted = false;
+    if (inspected.physicalShipmentId !== null) {
+      const inserted: any = await tx.execute(sql`
+        INSERT INTO wms.shipping_provider_label_links (
+          shipping_provider_label_id,
+          physical_shipment_id,
           source,
-          provider: "shipstation",
-          providerShipmentId,
-          proof: inspected.reason,
-        })}::jsonb,
-        NOW(),
-        NOW()
-      )
-      ON CONFLICT DO NOTHING
-      RETURNING id
-    `);
+          metadata,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          ${shippingProviderLabelId},
+          ${inspected.physicalShipmentId},
+          'cross_provider_package_echo',
+          ${JSON.stringify({
+            source,
+            provider: "shipstation",
+            providerShipmentId,
+            proof: inspected.reason,
+          })}::jsonb,
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT DO NOTHING
+        RETURNING id
+      `);
+      linkInserted = resultRows(inserted).length === 1;
+    } else if (inspected.authoritativeLegacyShipmentIds.length === 0) {
+      return noMatch("no_matching_physical_package");
+    }
     await tx.execute(sql`
       UPDATE wms.shipping_provider_labels
       SET last_link_reconciled_at = NOW(),
@@ -358,7 +464,7 @@ export async function reconcileShipStationProviderPackageEcho(
     return {
       ...inspected,
       shippingProviderLabelId,
-      linkInserted: resultRows(inserted).length === 1,
+      linkInserted,
     };
   };
   return typeof db.transaction === "function" ? db.transaction(work) : work(db);

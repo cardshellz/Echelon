@@ -1834,8 +1834,28 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
 interface PriorProviderEchoResolution {
   exceptionId: number;
   candidateShipmentId: number | null;
-  physicalShipmentId: number;
+  physicalShipmentId: number | null;
+  authoritativeLegacyShipmentIds: number[];
   operator: string;
+}
+
+function positiveIntegerArray(value: unknown): number[] {
+  let candidate = value;
+  if (typeof candidate === "string") {
+    try {
+      candidate = JSON.parse(candidate);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(candidate)) return [];
+  return [
+    ...new Set(
+      candidate
+        .map((id) => Number(id))
+        .filter((id) => Number.isSafeInteger(id) && id > 0),
+    ),
+  ].sort((left, right) => left - right);
 }
 
 function priorProviderEchoResolutionFromRow(
@@ -1849,13 +1869,18 @@ function priorProviderEchoResolutionFromRow(
   ) {
     return null;
   }
+  const physicalShipmentId = optionalPositiveInteger(row.physical_shipment_id);
+  const authoritativeLegacyShipmentIds = positiveIntegerArray(
+    row.authoritative_legacy_shipment_ids,
+  );
+  if (physicalShipmentId === null && authoritativeLegacyShipmentIds.length === 0) {
+    return null;
+  }
   return {
     exceptionId: positiveInteger(row.id, "exceptionId"),
     candidateShipmentId: optionalPositiveInteger(row.candidate_shipment_id),
-    physicalShipmentId: positiveInteger(
-      row.physical_shipment_id,
-      "physicalShipmentId",
-    ),
+    physicalShipmentId,
+    authoritativeLegacyShipmentIds,
     operator: String(row.resolved_by ?? "system:unknown"),
   };
 }
@@ -1874,6 +1899,8 @@ async function loadPriorProviderEchoResolution(
           details->>'remediationAction' AS remediation_action,
           details->>'candidateShipmentId' AS candidate_shipment_id,
           details->>'physicalShipmentId' AS physical_shipment_id,
+          details->'authoritativeLegacyShipmentIds'
+            AS authoritative_legacy_shipment_ids,
           resolved_by
         FROM wms.reconciliation_exceptions
         WHERE id = ${target.exceptionId}
@@ -1891,6 +1918,8 @@ async function loadPriorProviderEchoResolution(
           details->>'remediationAction' AS remediation_action,
           details->>'candidateShipmentId' AS candidate_shipment_id,
           details->>'physicalShipmentId' AS physical_shipment_id,
+          details->'authoritativeLegacyShipmentIds'
+            AS authoritative_legacy_shipment_ids,
           resolved_by
         FROM wms.reconciliation_exceptions
         WHERE rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
@@ -2071,6 +2100,8 @@ export async function resolveShipStationUnmappedPhysicalAsProviderEcho(
         details->>'remediationAction' AS remediation_action,
         details->>'candidateShipmentId' AS candidate_shipment_id,
         details->>'physicalShipmentId' AS physical_shipment_id,
+        details->'authoritativeLegacyShipmentIds'
+          AS authoritative_legacy_shipment_ids,
         resolved_by
       FROM wms.reconciliation_exceptions
       WHERE id = ${exceptionId}
@@ -2097,8 +2128,11 @@ export async function resolveShipStationUnmappedPhysicalAsProviderEcho(
     });
     if (
       echo.status !== "matched"
-      || echo.physicalShipmentId === null
       || echo.wmsOrderId !== context.wmsOrderId
+      || (
+        echo.physicalShipmentId === null
+        && echo.authoritativeLegacyShipmentIds.length === 0
+      )
     ) {
       throw new Error(`provider package echo is not proven: ${echo.reason}`);
     }
@@ -2115,6 +2149,8 @@ export async function resolveShipStationUnmappedPhysicalAsProviderEcho(
         shipment,
         wmsOrderId: context.wmsOrderId,
         physicalShipmentId: echo.physicalShipmentId,
+        authoritativeLegacyShipmentIds:
+          echo.authoritativeLegacyShipmentIds,
         resolvedBy: operator,
         candidateShipmentId: context.candidateShipmentId,
         retiredCandidateShipmentId,
@@ -2130,6 +2166,8 @@ export async function resolveShipStationUnmappedPhysicalAsProviderEcho(
       candidateShipmentId: context.candidateShipmentId,
       retiredCandidateShipmentId,
       physicalShipmentId: echo.physicalShipmentId,
+      authoritativeLegacyShipmentIds:
+        echo.authoritativeLegacyShipmentIds,
       shippingProviderLabelId: echo.shippingProviderLabelId,
       providerLabelLinkInserted: echo.linkInserted,
       operator,

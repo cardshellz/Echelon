@@ -680,6 +680,11 @@ function ShipStationPackageClassificationDialog(props: {
   const providerReturnLabel = preview?.providerShipment.isReturnLabel === true;
   const providerVoided = Boolean(preview?.providerShipment.voidDate);
   const providerEchoMatched = preview?.providerPackageEcho.status === "matched";
+  const providerEchoPackageLabel = preview?.providerPackageEcho.physicalShipmentId != null
+    ? `canonical physical package ${preview.providerPackageEcho.physicalShipmentId}`
+    : preview?.providerPackageEcho.authoritativeLegacyShipmentIds.length === 1
+      ? `WMS shipment ${preview.providerPackageEcho.authoritativeLegacyShipmentIds[0]}`
+      : "the existing WMS package";
   const providerEvidenceValid = (providerItemsMissing || (
     providerItems.length > 0 && providerItems.length === rawProviderItems.length
   ))
@@ -989,7 +994,7 @@ function ShipStationPackageClassificationDialog(props: {
                     {providerReturnLabel
                       ? "This label moves a package back to the warehouse. It is not another outbound customer shipment."
                       : providerEchoMatched
-                        ? "The tracking number and exact WMS line quantities match an existing canonical package."
+                        ? "The provider shipment and tracking number match an existing WMS package."
                         : providerVoided
                         ? "This label is historical provider evidence, not proof that another package left the warehouse."
                         : providerItemsMissing
@@ -1255,7 +1260,7 @@ function ShipStationPackageClassificationDialog(props: {
               <section className="border-t pt-4">
                 <div className="font-semibold">What will happen</div>
                 <div className="mt-3 space-y-2 text-sm">
-                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>ShipStation is linked to canonical physical package {preview.providerPackageEcho.physicalShipmentId}.</span></div>
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>ShipStation is linked to {providerEchoPackageLabel}.</span></div>
                   <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The failed replacement preparation is retired if it has no posted authority.</span></div>
                   <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>Inventory, customer fulfillment, and sales-channel fulfillment remain unchanged.</span></div>
                 </div>
