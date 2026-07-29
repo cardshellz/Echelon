@@ -78,7 +78,7 @@ describe("D-LEDGER: item status conditional on deduction success", () => {
   it("status assignment references deductResult.success", () => {
     const statusBlock = PICKING_SRC.substring(
       PICKING_SRC.indexOf("D-LEDGER"),
-      PICKING_SRC.indexOf(".update(orderItems)"),
+      PICKING_SRC.indexOf("const updatedItem = await persistWmsOrderItemPickProgress"),
     );
     expect(statusBlock).toContain("deductResult.success");
     expect(statusBlock).toContain("beforeItem.status");
@@ -96,7 +96,7 @@ describe("D-LEDGER: item status conditional on deduction success", () => {
     const dLedgerPos = PICKING_SRC.indexOf("D-LEDGER");
     const updateBlock = PICKING_SRC.substring(
       dLedgerPos,
-      PICKING_SRC.indexOf(".update(orderItems)", dLedgerPos),
+      PICKING_SRC.indexOf("const updatedItem = await persistWmsOrderItemPickProgress", dLedgerPos),
     );
     expect(updateBlock).toContain("if (deductResult.success)");
   });

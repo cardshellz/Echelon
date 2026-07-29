@@ -748,12 +748,7 @@
     "modules/wms"
   ],
   "wms.order_items": [
-    "modules/catalog",
-    "modules/inventory",
-    "modules/oms",
-    "modules/orders",
-    "modules/wms",
-    "server/routes/diagnostics.ts"
+    "modules/wms"
   ],
   "wms.orders": [
     "modules/oms",

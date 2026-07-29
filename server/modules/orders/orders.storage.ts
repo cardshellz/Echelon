@@ -19,6 +19,17 @@ import { cancelStaleShipmentsIfFullyCovered, recomputeOrderStatusFromShipments }
 import { transitionOrderStatus, completeOrder } from "./order-status-core";
 import { completeWmsOrderAndRelease, type ReservationReleaser } from "./cancel-wms-order";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
+import {
+  completePendingNonShippingWmsOrderItems,
+  finalizePhysicallyCompleteWmsOrderItems,
+  incrementWmsOrderItemFulfilledQuantityByShopifyLineId,
+  insertWmsOrderItems,
+  persistWmsOrderItemPickProgress,
+  resetUnstartedWmsOrderItems,
+  setWmsOrderItemHoldState,
+  setWmsOrderItemLocation,
+  syncWmsOrderItemsFulfilledFromOms,
+} from "../wms/order-item-commands";
 
 // Injected at boot (server/index.ts) so the pick-queue self-heal can release
 // leftover reservations when it completes an order — the storage layer cannot
@@ -733,7 +744,10 @@ export const orderMethods: IOrderStorage = {
             if (result.transitioned) {
               const nonShippablePending = items.filter(i => i.requiresShipping !== 1 && i.status === "pending");
               for (const item of nonShippablePending) {
-                await db.execute(sql`UPDATE wms.order_items SET status = 'completed' WHERE id = ${item.id}`);
+                await persistWmsOrderItemPickProgress(db, {
+                  itemId: item.id,
+                  status: "completed" as ItemStatus,
+                });
                 item.status = "completed";
               }
               order.warehouseStatus = fixedStatus;
@@ -857,7 +871,7 @@ export const orderMethods: IOrderStorage = {
             orderId: newOrder.id,
           };
         });
-        await tx.insert(orderItems).values(itemsWithOrderId);
+        await insertWmsOrderItems(tx, itemsWithOrderId as InsertOrderItem[]);
       }
 
       return newOrder;
@@ -1011,10 +1025,7 @@ export const orderMethods: IOrderStorage = {
       .returning();
     
     if (resetProgress) {
-      await db
-        .update(orderItems)
-        .set({ status: "pending" as ItemStatus, pickedQuantity: 0, shortReason: null })
-        .where(eq(orderItems.orderId, orderId));
+      await resetUnstartedWmsOrderItems(db, orderId);
     }
     
     return result[0] || null;
@@ -1035,11 +1046,10 @@ export const orderMethods: IOrderStorage = {
       }
       // Still cascade item completion for shipped-family transitions.
       if (warehouseStatus === "shipped" || warehouseStatus === "partially_shipped") {
-        await db.execute(sql`
-          UPDATE wms.order_items SET status = 'completed'
-          WHERE order_id = ${orderId}
-            AND status NOT IN ('completed', 'short')
-        `);
+        await finalizePhysicallyCompleteWmsOrderItems(db, {
+          orderId,
+          cancelled: false,
+        });
       }
       const [updated] = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
       return updated || null;
@@ -1059,11 +1069,10 @@ export const orderMethods: IOrderStorage = {
       .returning();
 
     if (status === "completed" || status === "cancelled") {
-      await db.execute(sql`
-        UPDATE wms.order_items SET status = 'completed'
-        WHERE order_id = ${orderId}
-          AND status NOT IN ('completed', 'short')
-      `);
+      await finalizePhysicallyCompleteWmsOrderItems(db, {
+        orderId,
+        cancelled: status === "cancelled",
+      });
     }
 
     if (status === "cancelled") {
@@ -1124,29 +1133,23 @@ export const orderMethods: IOrderStorage = {
     shortReason?: string,
     expectedCurrentStatus?: ItemStatus,
   ): Promise<OrderItem | null> {
-    const updates: any = { status };
-    if (pickedQty !== undefined) updates.pickedQuantity = pickedQty;
-    if (shortReason !== undefined) updates.shortReason = shortReason;
-    if (status === "completed") {
-      updates.pickedAt = new Date();
-    } else if (status === "pending") {
-      updates.pickedAt = null;
-    }
-
-    // For "completed" transitions: no WHERE guard on status — the already_picked check above
-    // prevents actual double-completes. Using a guard here causes false status_conflict errors
-    // when concurrent reads/writes occur during the final unit pick.
-    const condition = (expectedCurrentStatus && status !== "completed")
-      ? and(eq(orderItems.id, itemId), eq(orderItems.status, expectedCurrentStatus))
-      : eq(orderItems.id, itemId);
-
-    const result = await db
-      .update(orderItems)
-      .set(updates)
-      .where(condition)
-      .returning();
-
-    return result[0] || null;
+    // Completed transitions are idempotent; non-completed transitions retain the
+    // caller's optimistic status guard.
+    return persistWmsOrderItemPickProgress(db, {
+      itemId,
+      status,
+      pickedQuantity: pickedQty,
+      shortReason,
+      pickedAt: status === "completed"
+        ? new Date()
+        : status === "pending"
+          ? null
+          : undefined,
+      expectedCurrentStatus:
+        expectedCurrentStatus && status !== "completed"
+          ? expectedCurrentStatus
+          : undefined,
+    });
   },
 
   async updateOrderItemLocation(
@@ -1156,13 +1159,13 @@ export const orderMethods: IOrderStorage = {
     barcode: string | null,
     imageUrl: string | null
   ): Promise<OrderItem | null> {
-    const result = await db
-      .update(orderItems)
-      .set({ location, zone, barcode, imageUrl })
-      .where(eq(orderItems.id, itemId))
-      .returning();
-    
-    return result[0] || null;
+    return setWmsOrderItemLocation(db, {
+      itemId,
+      location,
+      zone,
+      barcode,
+      imageUrl,
+    });
   },
 
   async updateOrderProgress(orderId: number, postPickStatus: string = "ready_to_ship"): Promise<Order | null> {
@@ -1193,7 +1196,10 @@ export const orderMethods: IOrderStorage = {
       
       const nonShippablePending = items.filter(item => item.requiresShipping !== 1 && item.status === "pending");
       for (const item of nonShippablePending) {
-        await db.update(orderItems).set({ status: "completed" }).where(eq(orderItems.id, item.id));
+        await persistWmsOrderItemPickProgress(db, {
+          itemId: item.id,
+          status: "completed" as ItemStatus,
+        });
       }
     }
     
@@ -1230,21 +1236,18 @@ export const orderMethods: IOrderStorage = {
   // can be withheld from shipping while the rest of the order ships. Writes the
   // intent only; the shipping behaviour (split + skip push) is P2.
   async holdOrderItem(itemId: number, reason: string): Promise<OrderItem | null> {
-    const result = await db
-      .update(orderItems)
-      .set({ onHold: true, holdReason: reason.slice(0, 200) })
-      .where(eq(orderItems.id, itemId))
-      .returning();
-    return result[0] || null;
+    return setWmsOrderItemHoldState(db, {
+      itemId,
+      onHold: true,
+      reason,
+    });
   },
 
   async releaseOrderItem(itemId: number): Promise<OrderItem | null> {
-    const result = await db
-      .update(orderItems)
-      .set({ onHold: false, holdReason: null })
-      .where(eq(orderItems.id, itemId))
-      .returning();
-    return result[0] || null;
+    return setWmsOrderItemHoldState(db, {
+      itemId,
+      onHold: false,
+    });
   },
 
   async setOrderPriority(orderId: number, priority: number | "reset"): Promise<Order | null> {
@@ -1268,21 +1271,10 @@ export const orderMethods: IOrderStorage = {
   },
 
   async updateItemFulfilledQuantity(shopifyLineItemId: number, additionalQty: number): Promise<OrderItem | null> {
-    const item = await this.getOrderItemByShopifyLineId(shopifyLineItemId);
-    if (!item) return null;
-    
-    const newFulfilledQty = Math.min(
-      item.quantity, 
-      (item.fulfilledQuantity || 0) + additionalQty
-    );
-    
-    const result = await db
-      .update(orderItems)
-      .set({ fulfilledQuantity: newFulfilledQty })
-      .where(eq(orderItems.shopifyLineItemId, String(shopifyLineItemId)))
-      .returning();
-    
-    return result[0] || null;
+    return incrementWmsOrderItemFulfilledQuantityByShopifyLineId(db, {
+      shopifyLineItemId: String(shopifyLineItemId),
+      additionalQuantity: additionalQty,
+    });
   },
 
   async areAllItemsFulfilled(orderId: number): Promise<boolean> {
@@ -1450,42 +1442,7 @@ export const orderMethods: IOrderStorage = {
         AND o.warehouse_status != 'completed'
     `);
 
-    // 2. Update wms.order_items to 'completed' with full picked_quantity where OMS line item is fulfilled
-    await db.execute(sql`
-      UPDATE wms.order_items oi SET
-        status = 'completed',
-        picked_quantity = oi.quantity,
-        fulfilled_quantity = oi.quantity
-      FROM oms_order_lines ol
-      WHERE oi.source_item_id = ol.external_line_item_id
-        AND ol.fulfillment_status = 'fulfilled'
-        AND oi.status != 'completed'
-    `);
-
-    // 3. Also update items where the parent ORDER is fulfilled in OMS
-    await db.execute(sql`
-      UPDATE wms.order_items oi SET
-        status = 'completed',
-        picked_quantity = oi.quantity,
-        fulfilled_quantity = oi.quantity
-      FROM wms.orders o
-      INNER JOIN oms.oms_orders oms ON o.order_number = oms.external_order_number
-      WHERE oi.order_id = o.id
-        AND (oms.fulfillment_status = 'fulfilled' OR oms.status = 'shipped')
-        AND oi.status != 'completed'
-    `);
-
-    // 4. Handle partial fulfillments - update items individually from OMS line items
-    await db.execute(sql`
-      UPDATE wms.order_items oi SET
-        status = 'completed',
-        picked_quantity = oi.quantity,
-        fulfilled_quantity = oi.quantity
-      FROM oms_order_lines ol
-      WHERE oi.source_item_id = ol.external_line_item_id
-        AND ol.fulfillment_status = 'fulfilled'
-        AND oi.status = 'pending'
-    `);
+    await syncWmsOrderItemsFulfilledFromOms(db);
   },
 
   async backfillOrdersFromOms(): Promise<{ updated: number }> {
@@ -1639,11 +1596,7 @@ export const orderMethods: IOrderStorage = {
   },
 
   async completeNonShippableItems(orderId: number): Promise<void> {
-    await db.execute(sql`
-      UPDATE wms.order_items
-      SET status = 'completed'
-      WHERE order_id = ${orderId} AND requires_shipping = 0 AND status = 'pending'
-    `);
+    await completePendingNonShippingWmsOrderItems(db, orderId);
   },
 
   async getOrdersWithShipments(since: Date | null): Promise<{ order: Order; shipment: any | null }[]> {

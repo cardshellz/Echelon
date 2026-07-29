@@ -17,7 +17,7 @@ const SHIPSTATION_SRC = readFileSync(
   "utf8",
 );
 const PROJECTION_SRC = readFileSync(
-  fileURLToPath(new URL("../../channel-fulfillment-projection.repository.ts", import.meta.url)),
+  fileURLToPath(new URL("../../../wms/channel-fulfillment-projection.repository.ts", import.meta.url)),
   "utf8",
 );
 

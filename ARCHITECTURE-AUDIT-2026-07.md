@@ -31,6 +31,8 @@ state has a single writer.**
 - **41 of 211 tables are multi-writer.** `wms.order_items` has **7 writing modules** (45 sites),
   `wms.outbound_shipments` **6 modules** (47 sites, 21 touching `status`), `inventory.inventory_levels`
   **6 modules**, `wms.orders` **5 modules** (48 sites), `oms.oms_orders` **5 modules**.
+> **Remediation update (2026-07-29):** The counts above are the original audit snapshot. `wms.order_items` has now been collapsed to the WMS owner: Catalog, Inventory, OMS, Orders, and diagnostics invoke WMS commands instead of writing the table. `server/__tests__/unit/writer-ratchet.test.ts` permanently requires both live topology and the committed baseline to equal `["modules/wms"]`, so regenerating the general baseline cannot re-authorize an outside writer.
+
 - **83 write sites live directly in route/controller files** (15 files) — including hard DELETEs of
   WMS orders (`server/routes/diagnostics.ts:73,130`) and raw INSERTs of `status='shipped'` shipments
   (`server/routes/shopify.routes.ts:412`).

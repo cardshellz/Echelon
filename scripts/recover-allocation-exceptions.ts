@@ -17,6 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import pg from "pg";
+import { recoverCompletedWmsOrderItemPickState } from "../server/modules/wms/order-item-maintenance-commands";
 
 type CliOptions = {
   execute: boolean;
@@ -530,16 +531,17 @@ async function recoverCompletedPickLedger(
   const transactionId = txResult.rows[0]?.id;
   if (!transactionId) throw new Error(`Failed to create pick transaction for exception ${current.exception_id}`);
 
-  await client.query(`
-    UPDATE wms.order_items
-    SET
-      location = $1,
-      zone = COALESCE($2, 'U'),
-      status = 'completed',
-      picked_quantity = GREATEST(picked_quantity, $3),
-      picked_at = COALESCE(picked_at, NOW())
-    WHERE id = $4
-  `, [location.code, location.zone, qty, current.order_item_id]);
+  const updatedOrderItems = await recoverCompletedWmsOrderItemPickState(client, {
+    itemId: current.order_item_id,
+    locationCode: location.code,
+    zone: location.zone,
+    pickedQuantity: qty,
+  });
+  if (updatedOrderItems !== 1) {
+    throw new Error(
+      `Expected one WMS order item for allocation exception ${current.exception_id}; updated ${updatedOrderItems}`,
+    );
+  }
 
   await client.query(`
     UPDATE wms.outbound_shipment_items osi

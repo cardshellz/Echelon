@@ -4,6 +4,10 @@ import { describe, expect, it } from "vitest";
 
 const ROUTES_SRC = readFileSync(resolve(__dirname, "../../picking.routes.ts"), "utf8");
 const STORAGE_SRC = readFileSync(resolve(__dirname, "../../orders.storage.ts"), "utf8");
+const ORDER_ITEM_COMMANDS_SRC = readFileSync(
+  resolve(__dirname, "../../../wms/order-item-commands.ts"),
+  "utf8",
+);
 const SPLIT_SRC = readFileSync(resolve(__dirname, "../../../wms/line-item-hold.ts"), "utf8");
 const SHIPSTATION_SRC = readFileSync(resolve(__dirname, "../../../oms/shipstation.service.ts"), "utf8");
 const PICKING_SRC = readFileSync(resolve(__dirname, "../../picking.use-cases.ts"), "utf8");
@@ -31,11 +35,14 @@ describe("line-item hold (P1)", () => {
     expect(ROUTES_SRC).toMatch(/fulfilledQuantity \?\? 0\) > 0/);
   });
 
-  it("storage sets the per-line on_hold flag + reason on hold and clears them on release", () => {
+  it("delegates hold state changes to the WMS-owned order-item command", () => {
     expect(STORAGE_SRC).toMatch(/holdOrderItem\(itemId: number, reason: string\)/);
-    expect(STORAGE_SRC).toMatch(/onHold: true, holdReason: reason\.slice\(0, 200\)/);
+    expect(STORAGE_SRC).toMatch(/setWmsOrderItemHoldState\(db, \{[\s\S]*onHold: true/);
     expect(STORAGE_SRC).toMatch(/releaseOrderItem\(itemId: number\)/);
-    expect(STORAGE_SRC).toMatch(/onHold: false, holdReason: null/);
+    expect(STORAGE_SRC).toMatch(/setWmsOrderItemHoldState\(db, \{[\s\S]*onHold: false/);
+    expect(ORDER_ITEM_COMMANDS_SRC).toMatch(
+      /\.set\(\{ onHold: args\.onHold, holdReason: reason \}\)/,
+    );
   });
 
   it("returns the per-line hold state to the order API so the UI can render it", () => {

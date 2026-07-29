@@ -16,6 +16,7 @@ describe("cleanup-oms-wms-authority-readiness", () => {
       operations: [
         "orphan-oms-line-refs",
         "nonpositive-shipment-items",
+        "reopened-fully-picked-lines",
         "materialized-counter-drift",
       ],
       counterDirection: "all",
@@ -111,13 +112,14 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     expect(() => chunkForAuditInsert(values, 0)).toThrow(/positive integer/);
   });
 
-  it("defines the three cleanup operations proven by the readiness audit output", async () => {
+  it("defines the cleanup operations proven by readiness evidence", async () => {
     const { buildCleanupOperations } = await loadCleanupModule();
     const operations = buildCleanupOperations();
 
     expect(operations.map((operation: any) => operation.id)).toEqual([
       "orphan-oms-line-refs",
       "nonpositive-shipment-items",
+      "reopened-fully-picked-lines",
       "materialized-counter-drift",
     ]);
     expect(operations.every((operation: any) => operation.reason.length > 0)).toBe(true);
@@ -159,6 +161,32 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     const unsafeSql = nonpositiveShipmentItemsUnsafeCountSql();
     expect(unsafeSql).toContain("AND NOT");
     expect(unsafeSql).toContain("s.status IN ('shipped', 'cancelled', 'voided', 'returned', 'lost')");
+  });
+
+  it("selects only fully picked shippable lines that were reopened", async () => {
+    const { reopenedFullyPickedLinesCandidateSql } = await loadCleanupModule();
+    const sql = reopenedFullyPickedLinesCandidateSql(25, true);
+
+    expect(sql).toContain("COALESCE(oi.requires_shipping, 0) = 1");
+    expect(sql).toContain("COALESCE(oi.quantity, 0) > 0");
+    expect(sql).toContain("COALESCE(oi.picked_quantity, 0) >= oi.quantity");
+    expect(sql).toContain("COALESCE(oi.status, '') IN ('pending', 'in_progress')");
+    expect(sql).toContain("jsonb_build_object('status', 'completed')");
+    expect(sql).toContain("FOR UPDATE OF oi");
+  });
+
+  it("defines a database guard against fully picked active lines", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const migration = fs.readFileSync(
+      path.resolve(process.cwd(), "migrations/179_wms_fully_picked_status_guard.sql"),
+      "utf8",
+    );
+
+    expect(migration).toContain("wms_order_items_fully_picked_status_chk");
+    expect(migration).toContain("COALESCE(picked_quantity, 0) < COALESCE(quantity, 0)");
+    expect(migration).toContain("COALESCE(status, '') NOT IN ('pending', 'in_progress')");
+    expect(migration).toContain("NOT VALID");
   });
 
   it("uses cumulative non-cancelled authority consumption for materialized counter drift", async () => {
@@ -260,10 +288,10 @@ describe("cleanup-oms-wms-authority-readiness", () => {
       source.indexOf("async function deleteNonpositiveShipmentItems"),
     );
     expect(clearFn.indexOf("insertAuditRows")).toBeGreaterThan(-1);
-    expect(clearFn.indexOf("UPDATE wms.order_items")).toBeGreaterThan(clearFn.indexOf("insertAuditRows"));
+    expect(clearFn.indexOf("clearHistoricalOrphanOmsLineReferences")).toBeGreaterThan(
+      clearFn.indexOf("insertAuditRows"),
+    );
     expect(clearFn).toContain("assertExpectedRowCount");
-    expect(clearFn).toContain("AND NOT EXISTS");
-    expect(clearFn).toContain("WHERE ol.id = oi.oms_order_line_id");
 
     const deleteFn = source.slice(
       source.indexOf("async function deleteNonpositiveShipmentItems"),
@@ -273,6 +301,16 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     expect(deleteFn.indexOf("DELETE FROM wms.outbound_shipment_items")).toBeGreaterThan(deleteFn.indexOf("insertAuditRows"));
     expect(deleteFn).toContain("assertExpectedRowCount");
     expect(deleteFn).toContain("COALESCE(si.qty, 0) <= 0");
+
+    const reopenedFn = source.slice(
+      source.indexOf("async function closeReopenedFullyPickedLines"),
+      source.indexOf("async function refreshMaterializedCounters"),
+    );
+    expect(reopenedFn.indexOf("insertAuditRows")).toBeGreaterThan(-1);
+    expect(reopenedFn.indexOf("closeReopenedFullyPickedWmsOrderItems")).toBeGreaterThan(
+      reopenedFn.indexOf("insertAuditRows"),
+    );
+    expect(reopenedFn).toContain("assertExpectedRowCount");
 
     const counterFn = source.slice(
       source.indexOf("async function refreshMaterializedCounters"),

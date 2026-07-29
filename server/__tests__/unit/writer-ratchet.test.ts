@@ -30,6 +30,15 @@ describe("writer-ratchet (P2.1)", () => {
     readFileSync(join(repoRoot, "scripts/writer-ratchet/baseline.json"), "utf8"),
   );
   const { writers: current } = scanWriterTopology(repoRoot);
+  const { writers: currentIncludingScripts } = scanWriterTopology(repoRoot, {
+    roots: ["server", "scripts"],
+  });
+
+  it("wms.order_items has exactly one owning writer across runtime and operational scripts", () => {
+    expect(current["wms.order_items"]).toEqual(["modules/wms"]);
+    expect(currentIncludingScripts["wms.order_items"]).toEqual(["modules/wms"]);
+    expect(baseline["wms.order_items"]).toEqual(["modules/wms"]);
+  });
 
   it("no table gains a writer that is not in the baseline", () => {
     const added: string[] = [];

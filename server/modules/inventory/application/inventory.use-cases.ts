@@ -9,6 +9,7 @@ import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { IntegrityError, ValidationError } from "../../../../shared/errors";
 import { resolveCost } from "../cost-resolver";
 import { centsToMills } from "../../../../shared/utils/money";
+import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-item-commands";
 
 export class FreezeViolationError extends Error {
   code = "LOCATION_FROZEN";
@@ -960,22 +961,12 @@ export class InventoryUseCases {
       // bin. Only fully un-started lines (picked_quantity = 0, status 'pending')
       // on live orders are moved; mid-pick lines were rejected above.
       if (reservedToMove > 0) {
-        const repoint = await tx.execute(sql`
-          UPDATE wms.order_items AS oi
-          SET location = ${toLoc.code}, zone = ${toLoc.zone ?? "U"}
-          FROM wms.orders o, catalog.product_variants pv
-          WHERE oi.order_id = o.id
-            AND UPPER(pv.sku) = UPPER(oi.sku)
-            AND pv.id = ${params.productVariantId}
-            AND UPPER(oi.location) = UPPER(${fromLoc.code})
-            AND oi.requires_shipping = 1
-            AND oi.status = 'pending'
-            AND oi.picked_quantity = 0
-            -- 'completed' orders have no pickable lines left to re-point
-            AND o.warehouse_status NOT IN ('shipped', 'cancelled', 'completed')
-          RETURNING oi.id
-        `);
-        orderItemsRepointed = repoint.rows.length;
+        orderItemsRepointed = await repointPendingWmsOrderItemsForInventoryTransfer(tx, {
+          productVariantId: params.productVariantId,
+          fromLocationCode: fromLoc.code,
+          toLocationCode: toLoc.code,
+          toZone: toLoc.zone ?? "U",
+        });
       }
 
       if (this.lotService) {

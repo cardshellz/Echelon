@@ -1,9 +1,8 @@
 /**
  * Backfill the picker-facing bin onto OPEN order items after a bin assignment.
  *
- * Lives in modules/orders because wms.order_items is THIS module's table
- * (writer-ratchet P2.1); the warehouse module's bin-assignment paths call it
- * as a public API.
+ * This compatibility facade lives in modules/orders for existing callers.
+ * The mutation itself is owned and enforced by modules/wms.
  *
  * Why: wms-sync snapshots the primary bin onto wms.order_items.location at
  * order-sync time ("UNASSIGNED" when no setup exists). Assigning a bin later
@@ -27,7 +26,8 @@
  * tx rolls back after we stamped: the gun shows a bin whose setup row didn't
  * commit — the picker's bin scan then auto-heals setup via resolve-allocation.)
  */
-import { db, sql } from "../../storage/base";
+import { db } from "../../storage/base";
+import { backfillUnassignedWmsOrderItemBin } from "../wms/order-item-commands";
 
 type ExecutorLike = Pick<typeof db, "execute">;
 
@@ -43,17 +43,11 @@ export async function backfillOpenOrderItemBinAssignment(params: {
     if (!sku) return 0;
     const zone = (params.zone || code.split("-")[0] || "U").trim().toUpperCase();
 
-    const result: any = await tx.execute(sql`
-      UPDATE wms.order_items oi
-      SET location = ${code}, zone = ${zone}
-      FROM wms.orders o
-      WHERE o.id = oi.order_id
-        AND (oi.location IS NULL OR oi.location IN ('UNASSIGNED', 'U'))
-        AND oi.picked_quantity < oi.quantity
-        AND o.warehouse_status NOT IN ('shipped', 'cancelled', 'completed')
-        AND UPPER(oi.sku) = ${sku}
-    `);
-    const updated = Number(result?.rowCount ?? 0);
+    const updated = await backfillUnassignedWmsOrderItemBin(tx as any, {
+      sku,
+      locationCode: code,
+      zone,
+    });
     if (updated > 0) {
       console.log(
         `[BinAssignment] Backfilled ${updated} open order item(s) to bin ${code} for SKU ${sku}`,

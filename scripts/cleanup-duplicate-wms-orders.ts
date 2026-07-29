@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Pool, type PoolClient } from "pg";
+import { cancelUnstartedWmsOrderItemsForRetiredOrder } from "../server/modules/wms/order-item-maintenance-commands";
 
 type Mode = "dry-run" | "execute";
 
@@ -524,14 +525,10 @@ async function retireDuplicate(client: PoolClient, plan: GroupPlan, decision: Ro
         AND status IN ('planned', 'queued', 'labeled', 'on_hold')
     `, [row.wms_order_id]);
 
-    await client.query(`
-      UPDATE wms.order_items
-      SET status = 'cancelled'
-      WHERE order_id = $1
-        AND COALESCE(picked_quantity, 0) = 0
-        AND COALESCE(fulfilled_quantity, 0) = 0
-        AND status NOT IN ('completed', 'cancelled')
-    `, [row.wms_order_id]);
+    await cancelUnstartedWmsOrderItemsForRetiredOrder(
+      client,
+      row.wms_order_id,
+    );
 
     await client.query(`
       UPDATE wms.orders
