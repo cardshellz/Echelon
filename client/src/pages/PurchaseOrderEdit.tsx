@@ -2761,7 +2761,7 @@ function ProductLineTableRow({
             </PopoverTrigger>
             <PopoverContent
               align="end"
-              className="w-[min(42rem,calc(100vw-2rem))] max-h-[80vh] overflow-y-auto p-5"
+              className="w-[min(42rem,calc(100vw-2rem))] max-h-[min(80vh,var(--radix-popover-content-available-height))] overflow-y-scroll overscroll-contain p-5 [scrollbar-gutter:stable]"
             >
               <div className="space-y-5">
                 <div>

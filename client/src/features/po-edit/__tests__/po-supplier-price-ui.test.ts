@@ -38,4 +38,13 @@ describe("PO supplier-price capture UI", () => {
     expect(quickCreate).toContain('line.pricingSource === "manual"');
     expect(quickCreate).toContain('line.pricing.basis !== "extended_total"');
   });
+
+  it("keeps the full vendor quote editor scrollable within the available viewport", () => {
+    expect(fullEditor).toContain(
+      "max-h-[min(80vh,var(--radix-popover-content-available-height))]",
+    );
+    expect(fullEditor).toContain("overflow-y-scroll");
+    expect(fullEditor).toContain("overscroll-contain");
+    expect(fullEditor).toContain("[scrollbar-gutter:stable]");
+  });
 });
