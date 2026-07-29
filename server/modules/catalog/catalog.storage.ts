@@ -11,7 +11,6 @@ import {
   outboundShipments,
   outboundShipmentItems,
   warehouseLocations,
-  orderItems,
   pickingLogs,
   orderItemFinancials,
   inventoryTransactions,
@@ -23,6 +22,7 @@ import {
   sql,
 } from "../../storage/base";
 import { OPEN_SHIPMENT_STATUSES } from "@shared/enums/order-status";
+import { renameWmsOrderItemSku } from "../wms/order-item-commands";
 import type {
   Product,
   InsertProduct,
@@ -455,7 +455,7 @@ export const productMethods: IProductStorage = {
     await executor.update(productLocations).set({ sku: newSku, updatedAt: now }).where(eq(productLocations.productVariantId, variantId));
 
     // Tables without productVariantId FK — match by old SKU string
-    await executor.update(orderItems).set({ sku: newSku }).where(eq(orderItems.sku, oldSku));
+    await renameWmsOrderItemSku(executor, { oldSku, newSku });
     await executor.update(pickingLogs).set({ sku: newSku }).where(eq(pickingLogs.sku, oldSku));
     await executor.update(orderItemFinancials).set({ sku: newSku }).where(eq(orderItemFinancials.sku, oldSku));
   },

@@ -1,7 +1,7 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { sql } from "drizzle-orm";
 import * as dotenv from "dotenv";
+import { repairDanglingCompletedWmsOrderItems } from "../../server/modules/wms/order-item-maintenance-commands";
 
 // Load environment variables
 dotenv.config();
@@ -26,13 +26,10 @@ async function runBackfill() {
   try {
     console.log("Running backfill for dangling 0/x completed line items...");
     
-    // Extracted from original server/index.ts boot sequence
-    const fixRes = await db.execute(
-      sql`UPDATE wms.order_items SET picked_quantity = quantity, fulfilled_quantity = quantity WHERE status = 'completed' AND quantity > 0 AND picked_quantity = 0`
-    );
+    const repaired = await repairDanglingCompletedWmsOrderItems(db as any);
     
-    if ((fixRes as any).rowCount > 0) {
-      console.log(`[Success] Fixed ${(fixRes as any).rowCount} dangling 0/x completed line items.`);
+    if (repaired > 0) {
+      console.log(`[Success] Fixed ${repaired} dangling 0/x completed line items.`);
     } else {
       console.log("[Notice] No dangling order items found. Script executed successfully.");
     }

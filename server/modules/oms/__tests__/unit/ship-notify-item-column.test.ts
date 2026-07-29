@@ -16,7 +16,7 @@ const SS_SRC = readFileSync(
   "utf-8",
 );
 const PROJECTION_SRC = readFileSync(
-  resolve(__dirname, "../../channel-fulfillment-projection.repository.ts"),
+  resolve(__dirname, "../../../wms/channel-fulfillment-projection.repository.ts"),
   "utf-8",
 );
 

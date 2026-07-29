@@ -6,6 +6,10 @@ const WMS_SYNC_SRC = readFileSync(
   resolve(__dirname, "../../wms-sync.service.ts"),
   "utf8",
 );
+const ORDER_ITEM_COMMANDS_SRC = readFileSync(
+  resolve(__dirname, "../../../wms/order-item-commands.ts"),
+  "utf8",
+);
 
 describe("wms-sync existing order reconciliation", () => {
   it("does not return before reconciling missing WMS lines", () => {
@@ -140,13 +144,23 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.orders w[\s\S]*if \(shippableShipmentItems\.length === 0\)/);
   });
 
-  it("refreshes existing WMS item pricing from OMS lines before ShipStation push", () => {
-    expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.order_items oi/);
-    expect(WMS_SYNC_SRC).toMatch(/unit_price_cents = COALESCE\(ol\.paid_price_cents, 0\)/);
-    expect(WMS_SYNC_SRC).toMatch(/paid_price_cents = COALESCE\(ol\.paid_price_cents, 0\)/);
-    expect(WMS_SYNC_SRC).toMatch(/total_price_cents = COALESCE\(ol\.total_price_cents, 0\)/);
-    expect(WMS_SYNC_SRC).toMatch(/oi\.oms_order_line_id = ol\.id/);
-    const orderItemsPriceUpdate = WMS_SYNC_SRC.match(/UPDATE wms\.order_items oi[\s\S]*?AND ol\.order_id = \$\{omsOrderId\}/)?.[0] ?? "";
+  it("refreshes existing WMS item pricing through the WMS-owned command", () => {
+    expect(WMS_SYNC_SRC).toMatch(/refreshWmsOrderItemFinancialSnapshotsFromOms\(db/);
+    expect(ORDER_ITEM_COMMANDS_SRC).toMatch(/UPDATE wms\.order_items oi/);
+    expect(ORDER_ITEM_COMMANDS_SRC).toMatch(
+      /unit_price_cents = COALESCE\(ol\.paid_price_cents, 0\)/,
+    );
+    expect(ORDER_ITEM_COMMANDS_SRC).toMatch(
+      /paid_price_cents = COALESCE\(ol\.paid_price_cents, 0\)/,
+    );
+    expect(ORDER_ITEM_COMMANDS_SRC).toMatch(
+      /total_price_cents = COALESCE\(ol\.total_price_cents, 0\)/,
+    );
+    expect(ORDER_ITEM_COMMANDS_SRC).toMatch(/oi\.oms_order_line_id = ol\.id/);
+    const orderItemsPriceUpdate =
+      ORDER_ITEM_COMMANDS_SRC.match(
+        /UPDATE wms\.order_items oi[\s\S]*?AND ol\.order_id = \$\{args\.omsOrderId\}/,
+      )?.[0] ?? "";
     expect(orderItemsPriceUpdate).not.toContain("updated_at");
   });
 

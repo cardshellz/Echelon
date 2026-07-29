@@ -46,7 +46,13 @@ import {
 import {
   selectLateOrderShipmentTarget,
 } from "../wms/late-order-shipment-selection";
-import { deriveReconciledWmsOrderItemStatus } from "../wms/wms-line-reconciliation";
+import {
+  insertWmsOrderItems,
+  reconcileWmsOrderItemAuthority,
+  refreshWmsOrderItemFinancialSnapshotsFromOms,
+  replaceUnstartedWmsOrderItemsForRepair,
+  updateWmsOrderItemCatalogSnapshot,
+} from "../wms/order-item-commands";
 import {
   enqueueShippingEngineShipmentAmendRetry,
   enqueueShipStationShipmentPushRetry,
@@ -1501,18 +1507,12 @@ export class WmsSyncService {
           pickedQuantity: wmsItem.pickedQuantity ?? 0,
         });
       } else {
-        const reconciledStatus = deriveReconciledWmsOrderItemStatus({
+        const reconciled = await reconcileWmsOrderItemAuthority(db, {
+          itemId: wmsItem.id,
+          orderId: wmsOrderId,
           authorityQuantity: omsQty,
-          pickedQuantity: wmsItem.pickedQuantity ?? 0,
-          fulfilledQuantity: wmsItem.fulfilledQuantity ?? 0,
         });
-        await db
-          .update(wmsOrderItems)
-          .set({
-            quantity: omsQty,
-            status: reconciledStatus,
-          })
-          .where(eq(wmsOrderItems.id, wmsItem.id));
+        const reconciledStatus = reconciled.status;
         console.log(
           `[WMS Sync] Reconciled item ${wmsItem.sku} (id ${wmsItem.id}): qty ${wmsQty} -> ${omsQty}, status ${wmsItem.status} -> ${reconciledStatus}`,
         );
@@ -1555,16 +1555,7 @@ export class WmsSyncService {
           wmsOrderId,
         );
 
-        const [created] = await tx
-          .insert(wmsOrderItems)
-          .values(itemToInsert as any)
-          .returning({
-            id: wmsOrderItems.id,
-            omsOrderLineId: wmsOrderItems.omsOrderLineId,
-            productId: wmsOrderItems.productId,
-            quantity: wmsOrderItems.quantity,
-            requiresShipping: wmsOrderItems.requiresShipping,
-          });
+        const [created] = await insertWmsOrderItems(tx, [itemToInsert]);
 
         if (created) {
           await this.incrementOmsLineMaterializedQuantities(tx, [created]);
@@ -1591,16 +1582,10 @@ export class WmsSyncService {
       }
     }
 
-    await db.execute(sql`
-      UPDATE wms.order_items oi
-         SET unit_price_cents = COALESCE(ol.paid_price_cents, 0),
-             paid_price_cents = COALESCE(ol.paid_price_cents, 0),
-             total_price_cents = COALESCE(ol.total_price_cents, 0)
-        FROM oms.oms_order_lines ol
-       WHERE oi.order_id = ${wmsOrderId}
-         AND oi.oms_order_line_id = ol.id
-         AND ol.order_id = ${omsOrderId}
-    `);
+    await refreshWmsOrderItemFinancialSnapshotsFromOms(db, {
+      wmsOrderId,
+      omsOrderId,
+    });
 
     const orphanItemResult = await db.execute<{
       id: number;
@@ -2044,10 +2029,11 @@ export class WmsSyncService {
 
       if (wasRemoved) {
         if (wmsItem.status === "pending") {
-          await db
-            .update(wmsOrderItems)
-            .set({ status: "cancelled" as any, quantity: 0 })
-            .where(eq(wmsOrderItems.id, wmsItem.id));
+          await reconcileWmsOrderItemAuthority(db, {
+            itemId: wmsItem.id,
+            orderId: wmsOrderId,
+            authorityQuantity: 0,
+          });
           changes.push(`Cancelled pending item ${wmsItem.sku} (removed from order)`);
           result.removed++;
         } else if (wmsItem.status === "completed" || wmsItem.pickedQuantity > 0) {
@@ -2097,10 +2083,10 @@ export class WmsSyncService {
         }
 
         if (Object.keys(updates).length > 0) {
-          await db
-            .update(wmsOrderItems)
-            .set(updates)
-            .where(eq(wmsOrderItems.id, wmsItem.id));
+          await updateWmsOrderItemCatalogSnapshot(db, {
+            itemId: wmsItem.id,
+            ...updates,
+          });
           changes.push(`Updated fields for ${wmsItem.sku}: ${Object.keys(updates).join(", ")}`);
           result.updated++;
         }
@@ -2130,10 +2116,12 @@ export class WmsSyncService {
           updates.status = "cancelled";
         }
 
-        await db
-          .update(wmsOrderItems)
-          .set(updates)
-          .where(eq(wmsOrderItems.id, wmsItem.id));
+        await reconcileWmsOrderItemAuthority(db, {
+          itemId: wmsItem.id,
+          orderId: wmsOrderId,
+          authorityQuantity: omsQty,
+          catalogSnapshot: updates,
+        });
         changes.push(
           `${wmsItem.sku}: qty ${wmsQty} → ${omsQty}${omsQty <= 0 ? " (cancelled)" : ""}`,
         );
@@ -2161,20 +2149,22 @@ export class WmsSyncService {
           });
         } else if (omsQty > wmsQty) {
           // Qty increased — update qty, mark pending so picker picks the rest
-          await db
-            .update(wmsOrderItems)
-            .set({ quantity: omsQty, status: "pending" as any })
-            .where(eq(wmsOrderItems.id, wmsItem.id));
+          await reconcileWmsOrderItemAuthority(db, {
+            itemId: wmsItem.id,
+            orderId: wmsOrderId,
+            authorityQuantity: omsQty,
+          });
           changes.push(
             `${wmsItem.sku}: qty ${wmsQty} → ${omsQty} (${wmsItem.pickedQuantity} already picked, more picks needed)`,
           );
           result.updated++;
         } else {
           // Qty decreased but still >= picked — update qty
-          await db
-            .update(wmsOrderItems)
-            .set({ quantity: omsQty })
-            .where(eq(wmsOrderItems.id, wmsItem.id));
+          await reconcileWmsOrderItemAuthority(db, {
+            itemId: wmsItem.id,
+            orderId: wmsOrderId,
+            authorityQuantity: omsQty,
+          });
           changes.push(`${wmsItem.sku}: qty ${wmsQty} → ${omsQty}`);
           result.updated++;
         }
@@ -2222,7 +2212,7 @@ export class WmsSyncService {
           remainingQuantity,
           wmsOrderId,
         );
-        await tx.insert(wmsOrderItems).values(itemToInsert as any);
+        await insertWmsOrderItems(tx, [itemToInsert]);
         await this.incrementOmsLineMaterializedQuantities(tx, [itemToInsert]);
         return { sku: itemToInsert.sku, quantity: remainingQuantity };
       });
@@ -2672,17 +2662,8 @@ export class WmsSyncService {
           throw new Error(`OMS order ${omsOrderId} has no line items`);
         }
 
-        // 3. Delete existing WMS order items
-        await tx.delete(wmsOrderItems).where(eq(wmsOrderItems.orderId, wmsOrderId));
-        await tx.execute(sql`
-          UPDATE oms.oms_order_lines
-             SET wms_materialized_quantity = 0,
-                 updated_at = NOW()
-           WHERE order_id = ${omsOrderId}
-        `);
-
-        // 4. Re-create items from OMS authority. This is a destructive repair path,
-        // so authority consumption starts from zero after the delete above.
+        // 3. Re-create items from OMS authority. The WMS command refuses this
+        // destructive repair after pick, fulfillment, or shipment progress exists.
         const rebuiltItems: InsertWmsOrderItem[] = [];
         for (const line of lockedOmsLines) {
           const materializableQuantity = getOmsLineMaterializableQuantity(line);
@@ -2697,8 +2678,17 @@ export class WmsSyncService {
           );
         }
 
+        await replaceUnstartedWmsOrderItemsForRepair(tx, {
+          orderId: wmsOrderId,
+          items: rebuiltItems,
+        });
+        await tx.execute(sql`
+          UPDATE oms.oms_order_lines
+             SET wms_materialized_quantity = 0,
+                 updated_at = NOW()
+           WHERE order_id = ${omsOrderId}
+        `);
         if (rebuiltItems.length > 0) {
-          await tx.insert(wmsOrderItems).values(rebuiltItems as any);
           await this.incrementOmsLineMaterializedQuantities(tx, rebuiltItems);
         }
 

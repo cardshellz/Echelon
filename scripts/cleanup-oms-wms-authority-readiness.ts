@@ -17,6 +17,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Pool, type PoolClient } from "pg";
+import {
+  clearHistoricalOrphanOmsLineReferences,
+  closeReopenedFullyPickedWmsOrderItems,
+} from "../server/modules/wms/order-item-maintenance-commands";
 
 type Mode = "dry-run" | "execute";
 
@@ -696,23 +700,10 @@ async function clearOrphanOmsLineRefs(
 
   await insertAuditRows(client, { runId, operation, candidates, operator: flags.operator });
   const ids = candidates.map((candidate) => candidate.sourceId);
-  const updateResult = await client.query(`
-    UPDATE wms.order_items oi
-       SET oms_order_line_id = NULL
-      FROM wms.orders o
-     WHERE oi.id = ANY($1::int[])
-       AND o.id = oi.order_id
-       AND oi.oms_order_line_id IS NOT NULL
-       AND NOT EXISTS (
-         SELECT 1
-         FROM oms.oms_order_lines ol
-         WHERE ol.id = oi.oms_order_line_id
-       )
-       AND ${SAFE_HISTORICAL_ORPHAN_ORDER_FILTER}
-  `, [ids]);
-  assertExpectedRowCount(operation.id, candidates.length, updateResult.rowCount ?? 0);
+  const updatedCount = await clearHistoricalOrphanOmsLineReferences(client, ids);
+  assertExpectedRowCount(operation.id, candidates.length, updatedCount);
 
-  return resultFor(operation.id, candidates.length, unsafeSkipped, updateResult.rowCount ?? 0);
+  return resultFor(operation.id, candidates.length, unsafeSkipped, updatedCount);
 }
 
 async function deleteNonpositiveShipmentItems(
@@ -762,18 +753,10 @@ async function closeReopenedFullyPickedLines(
 
   await insertAuditRows(client, { runId, operation, candidates, operator: flags.operator });
   const ids = candidates.map((candidate) => candidate.sourceId);
-  const updateResult = await client.query(`
-    UPDATE wms.order_items oi
-       SET status = 'completed'
-     WHERE oi.id = ANY($1::int[])
-       AND COALESCE(oi.requires_shipping, 0) = 1
-       AND COALESCE(oi.quantity, 0) > 0
-       AND COALESCE(oi.picked_quantity, 0) >= oi.quantity
-       AND COALESCE(oi.status, '') IN ('pending', 'in_progress')
-  `, [ids]);
-  assertExpectedRowCount(operation.id, candidates.length, updateResult.rowCount ?? 0);
+  const updatedCount = await closeReopenedFullyPickedWmsOrderItems(client, ids);
+  assertExpectedRowCount(operation.id, candidates.length, updatedCount);
 
-  return resultFor(operation.id, candidates.length, 0, updateResult.rowCount ?? 0);
+  return resultFor(operation.id, candidates.length, 0, updatedCount);
 }
 
 async function refreshMaterializedCounters(

@@ -8,6 +8,7 @@ import {
   inventoryLevels, inventoryTransactions, adjustmentReasons,
   channelFeeds, productVariants, warehouseLocations, productLocations,
 } from "../../../storage/base";
+import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-item-commands";
 
 export interface IInventoryStorage {
   getAllInventoryLevels(): Promise<InventoryLevel[]>;
@@ -394,22 +395,12 @@ export function createInventoryMethods(
         .where(eq(warehouseLocations.id, toLocationId))
         .limit(1);
       if (fromLoc && toLoc) {
-        const repoint = await tx.execute(sql`
-          UPDATE wms.order_items AS oi
-          SET location = ${toLoc.code}, zone = ${toLoc.zone ?? "U"}
-          FROM wms.orders o, catalog.product_variants pv
-          WHERE oi.order_id = o.id
-            AND UPPER(pv.sku) = UPPER(oi.sku)
-            AND pv.id = ${productVariantId}
-            AND UPPER(oi.location) = UPPER(${fromLoc.code})
-            AND oi.requires_shipping = 1
-            AND oi.status = 'pending'
-            AND oi.picked_quantity = 0
-            -- 'completed' orders have no pickable lines left to re-point
-            AND o.warehouse_status NOT IN ('shipped', 'cancelled', 'completed')
-          RETURNING oi.id
-        `);
-        repointed = repoint.rows.length;
+        repointed = await repointPendingWmsOrderItemsForInventoryTransfer(tx, {
+          productVariantId,
+          fromLocationCode: fromLoc.code,
+          toLocationCode: toLoc.code,
+          toZone: toLoc.zone ?? "U",
+        });
       }
     }
 

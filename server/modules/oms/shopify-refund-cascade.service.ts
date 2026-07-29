@@ -14,6 +14,7 @@ import {
 } from "../orders/shipment-rollup";
 import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
 import { recordOmsWmsAuthorityCleanupAudit } from "../wms/oms-wms-authority-cleanup-audit.repository";
+import { applyRefundAuthorityToWmsOrderItem } from "../wms/order-item-commands";
 
 const REFUND_LOCK_NAMESPACE = 918413;
 
@@ -408,6 +409,8 @@ async function applyWmsLineState(
       wi.picked_quantity,
       wi.fulfilled_quantity,
       wi.status,
+      wi.short_reason,
+      wi.on_hold,
       COALESCE(wi.requires_shipping, 1) <> 0 AS requires_shipping
     FROM wms.order_items wi
     JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
@@ -463,64 +466,28 @@ async function applyWmsLineState(
     if (!adjustment) continue;
 
     const authorityFulfillableQuantity = authorityByLineId.get(omsOrderLineId) ?? 0;
-    const quantity = Number(row.quantity ?? 0);
-    const pickedQuantity = Number(row.picked_quantity ?? 0);
-    const fulfilledQuantity = Number(row.fulfilled_quantity ?? 0);
-    const status = String(row.status ?? "pending");
-    const physicalFloor = Math.max(pickedQuantity, fulfilledQuantity);
-    const refundAfterPick = pickedQuantity > authorityFulfillableQuantity && pickedQuantity > fulfilledQuantity;
-    const preserveHistoricalQuantity = status === "completed" || status === "short";
-    const nextQuantity = preserveHistoricalQuantity
-      ? quantity
-      : Math.max(authorityFulfillableQuantity, physicalFloor);
-    let nextStatus = status;
-    let nextShortReason: string | null = null;
-    let nextOnHold = false;
-
-    if (refundAfterPick) {
-      nextStatus = "short";
-      nextShortReason = "refund_after_pick";
-      nextOnHold = true;
-    } else if (fulfilledQuantity > authorityFulfillableQuantity) {
-      // Physical fulfillment is historical fact. Keep the WMS line terminal while
-      // the OMS authority records that no further units may be fulfilled.
-      nextStatus = "completed";
-    } else if (
-      authorityFulfillableQuantity === 0 &&
-      pickedQuantity === 0 &&
-      fulfilledQuantity === 0 &&
-      status !== "short" &&
-      status !== "completed"
-    ) {
-      nextStatus = "cancelled";
-    }
-
-    const manualReviewReason = refundAfterPick
-      ? "refund_after_pick"
-      : adjustment.restockPolicy === "unknown"
-        ? "refund_unknown_restock_policy"
-        : null;
-
-    const rowChanged =
-      nextQuantity !== quantity ||
-      nextStatus !== status ||
-      nextShortReason !== null ||
-      nextOnHold;
-    if (rowChanged) {
-      await tx.execute(sql`
-        UPDATE wms.order_items
-        SET quantity = ${nextQuantity},
-            status = ${nextStatus},
-            short_reason = CASE
-              WHEN ${nextShortReason}::text IS NOT NULL THEN ${nextShortReason}
-              ELSE short_reason
-            END,
-            on_hold = CASE WHEN ${nextOnHold} THEN true ELSE on_hold END
-        WHERE id = ${Number(row.id)}
-          AND order_id = ${args.wmsOrderId}
-      `);
-      changed++;
-    }
+    const transition = await applyRefundAuthorityToWmsOrderItem(tx, {
+      current: {
+        id: Number(row.id),
+        orderId: args.wmsOrderId,
+        quantity: Number(row.quantity ?? 0),
+        pickedQuantity: Number(row.picked_quantity ?? 0),
+        fulfilledQuantity: Number(row.fulfilled_quantity ?? 0),
+        status: String(row.status ?? "pending"),
+        shortReason: row.short_reason == null ? null : String(row.short_reason),
+        onHold: Boolean(row.on_hold),
+      },
+      authorityFulfillableQuantity,
+      restockPolicy: adjustment.restockPolicy,
+    });
+    if (transition.changed) changed++;
+    const {
+      quantity: nextQuantity,
+      pickedQuantity,
+      fulfilledQuantity,
+      status: nextStatus,
+    } = transition.item;
+    const manualReviewReason = transition.manualReviewReason;
 
     const item: WmsItemState = {
       id: Number(row.id),

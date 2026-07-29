@@ -24,6 +24,10 @@ import {
   ensurePackPlan,
   isWmsCartonizationShadowEnabled,
 } from "../cartonization";
+import {
+  persistWmsOrderItemPickProgress,
+  setWmsOrderItemLocation,
+} from "../wms/order-item-commands";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -796,14 +800,11 @@ export class PickingUseCases {
         }
       }
 
-      const [updatedItem] = await tx
-        .update(orderItems)
-        .set({
-          location: location.code,
-          zone,
-        })
-        .where(eq(orderItems.id, item.id))
-        .returning();
+      const updatedItem = await setWmsOrderItemLocation(tx, {
+        itemId: item.id,
+        location: location.code,
+        zone,
+      });
 
       const [exception] = await tx.insert(allocationExceptions).values({
         orderId: item.orderId,
@@ -1266,11 +1267,13 @@ export class PickingUseCases {
           if (shortReason !== undefined) updates.shortReason = shortReason;
         }
 
-        const [updatedItem] = await tx
-          .update(orderItems)
-          .set(updates)
-          .where(eq(orderItems.id, itemId))
-          .returning();
+        const updatedItem = await persistWmsOrderItemPickProgress(tx, {
+          itemId,
+          status: updates.status as ItemStatus,
+          pickedQuantity: updates.pickedQuantity,
+          shortReason: updates.shortReason,
+          pickedAt: updates.pickedAt,
+        });
 
         return {
           item: updatedItem as OrderItem,
@@ -2296,11 +2299,12 @@ export class PickingUseCases {
         itemUpdates.pickedAt = null;
       }
 
-      const [updatedItem] = await tx
-        .update(orderItems)
-        .set(itemUpdates)
-        .where(eq(orderItems.id, itemId))
-        .returning();
+      const updatedItem = await persistWmsOrderItemPickProgress(tx, {
+        itemId,
+        status: itemUpdates.status as ItemStatus,
+        pickedQuantity: itemUpdates.pickedQuantity,
+        pickedAt: itemUpdates.pickedAt,
+      });
 
       const siblingItems = await tx
         .select()

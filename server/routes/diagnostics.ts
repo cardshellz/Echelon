@@ -3,6 +3,7 @@ import { db } from "../db";
 import { sql } from "drizzle-orm";
 import { backfillMemberTiers } from "../modules/oms/member-tier-enrichment";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
+import { deleteDuplicateShopifyWmsOrderItems } from "../modules/wms/order-item-commands";
 
 import { requireAuth, requireInternalApiKey } from "./middleware";
 
@@ -50,24 +51,7 @@ export function registerDiagnosticsRoutes(app: Express) {
       `);
 
       // Second: delete order_items
-      const itemsResult = await db.execute(sql`
-        DELETE FROM wms.order_items 
-        WHERE order_id IN (
-          SELECT id FROM (
-            SELECT 
-              id,
-              REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '') as normalized_id,
-              ROW_NUMBER() OVER (
-                PARTITION BY REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '')
-                ORDER BY created_at ASC
-              ) as rn
-            FROM wms.orders
-            WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
-          ) t
-          WHERE rn > 1 AND normalized_id != ''
-        )
-        RETURNING id
-      `);
+      const deletedItemIds = await deleteDuplicateShopifyWmsOrderItems(db, true);
 
       const ordersResult = await db.execute(sql`
         DELETE FROM wms.orders 
@@ -91,7 +75,7 @@ export function registerDiagnosticsRoutes(app: Express) {
       res.json({
         success: true,
         deletedTransactions: transactionsResult.rows.length,
-        deletedItems: itemsResult.rows.length,
+        deletedItems: deletedItemIds.length,
         deletedOrders: ordersResult.rows.length,
       });
     } catch (error: any) {
@@ -111,19 +95,7 @@ export function registerDiagnosticsRoutes(app: Express) {
       }
 
       // Delete order items first (foreign key constraint)
-      const itemsResult = await db.execute(sql`
-        DELETE FROM wms.order_items 
-        WHERE order_id IN (
-          SELECT id FROM (
-            SELECT id, 
-              ROW_NUMBER() OVER (PARTITION BY shopify_order_id ORDER BY created_at ASC) as rn
-            FROM wms.orders
-            WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
-          ) t
-          WHERE rn > 1
-        )
-        RETURNING id
-      `);
+      const deletedItemIds = await deleteDuplicateShopifyWmsOrderItems(db, false);
 
       // Delete duplicate orders (keep earliest)
       const ordersResult = await db.execute(sql`
@@ -142,7 +114,7 @@ export function registerDiagnosticsRoutes(app: Express) {
 
       res.json({
         success: true,
-        deletedItems: itemsResult.rows.length,
+        deletedItems: deletedItemIds.length,
         deletedOrders: ordersResult.rows.length,
       });
     } catch (error: any) {

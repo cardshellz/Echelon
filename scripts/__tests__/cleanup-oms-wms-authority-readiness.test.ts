@@ -288,10 +288,10 @@ describe("cleanup-oms-wms-authority-readiness", () => {
       source.indexOf("async function deleteNonpositiveShipmentItems"),
     );
     expect(clearFn.indexOf("insertAuditRows")).toBeGreaterThan(-1);
-    expect(clearFn.indexOf("UPDATE wms.order_items")).toBeGreaterThan(clearFn.indexOf("insertAuditRows"));
+    expect(clearFn.indexOf("clearHistoricalOrphanOmsLineReferences")).toBeGreaterThan(
+      clearFn.indexOf("insertAuditRows"),
+    );
     expect(clearFn).toContain("assertExpectedRowCount");
-    expect(clearFn).toContain("AND NOT EXISTS");
-    expect(clearFn).toContain("WHERE ol.id = oi.oms_order_line_id");
 
     const deleteFn = source.slice(
       source.indexOf("async function deleteNonpositiveShipmentItems"),
@@ -307,8 +307,9 @@ describe("cleanup-oms-wms-authority-readiness", () => {
       source.indexOf("async function refreshMaterializedCounters"),
     );
     expect(reopenedFn.indexOf("insertAuditRows")).toBeGreaterThan(-1);
-    expect(reopenedFn.indexOf("UPDATE wms.order_items")).toBeGreaterThan(reopenedFn.indexOf("insertAuditRows"));
-    expect(reopenedFn).toContain("COALESCE(oi.picked_quantity, 0) >= oi.quantity");
+    expect(reopenedFn.indexOf("closeReopenedFullyPickedWmsOrderItems")).toBeGreaterThan(
+      reopenedFn.indexOf("insertAuditRows"),
+    );
     expect(reopenedFn).toContain("assertExpectedRowCount");
 
     const counterFn = source.slice(

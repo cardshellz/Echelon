@@ -1,5 +1,9 @@
 import { db } from "../server/db";
 import { sql } from "drizzle-orm";
+import {
+  prepareLegacyWmsOrderItemSchema,
+  replicateLegacyWmsOrderItems,
+} from "../server/modules/wms/order-item-maintenance-commands";
 
 async function run() {
   console.log("Starting WMS Full Cutover...");
@@ -28,22 +32,7 @@ async function run() {
     `);
 
     console.log("2. Injecting matching legacy columns into wms.order_items...");
-    await db.execute(sql`
-      DO $$
-      BEGIN
-        IF EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_schema='wms' AND table_name='order_items' AND column_name='wms_order_id'
-        ) THEN 
-          ALTER TABLE wms.order_items RENAME COLUMN wms_order_id TO order_id;
-        END IF;
-      END $$;
-    `);
-    await db.execute(sql`
-      ALTER TABLE wms.order_items
-      ADD COLUMN IF NOT EXISTS shopify_line_item_id varchar(50),
-      ADD COLUMN IF NOT EXISTS source_item_id varchar(100);
-    `);
+    await prepareLegacyWmsOrderItemSchema(db as any);
 
     console.log("3. Replicating wms.orders data...");
     await db.execute(sql`
@@ -69,17 +58,7 @@ async function run() {
     `);
 
     console.log("4. Replicating wms.order_items data...");
-    await db.execute(sql`
-      INSERT INTO wms.order_items (
-        id, order_id, product_id, sku, name, image_url, barcode, quantity, picked_quantity, fulfilled_quantity, 
-        status, location, zone, short_reason, picked_at, requires_shipping, shopify_line_item_id, source_item_id
-      )
-      SELECT 
-        id, order_id, product_id, sku, name, image_url, barcode, quantity, picked_quantity, fulfilled_quantity, 
-        status, location, zone, short_reason, picked_at, requires_shipping, shopify_line_item_id, source_item_id
-      FROM public.order_items
-      ON CONFLICT (id) DO NOTHING;
-    `);
+    await replicateLegacyWmsOrderItems(db as any);
 
     console.log("5. Updating orders.storage.ts Raw SQL to target wms schema...");
     const fs = require('fs');
