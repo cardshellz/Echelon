@@ -400,7 +400,8 @@ export async function resolveShipStationUnmappedPhysicalExceptionForProviderEcho
   input: {
     shipment: ShipStationUnmappedPhysicalEvidence;
     wmsOrderId: number;
-    physicalShipmentId: number;
+    physicalShipmentId?: number | null;
+    authoritativeLegacyShipmentIds?: readonly number[];
     resolvedBy: string;
     candidateShipmentId?: number | null;
     retiredCandidateShipmentId?: number | null;
@@ -410,7 +411,14 @@ export async function resolveShipStationUnmappedPhysicalExceptionForProviderEcho
   const shipmentRef = positiveReference(input.shipment.shipmentId);
   const resolvedBy = nullableExternalRef(input.resolvedBy);
   const wmsOrderId = Number(input.wmsOrderId);
-  const physicalShipmentId = Number(input.physicalShipmentId);
+  const physicalShipmentId = input.physicalShipmentId == null
+    ? null
+    : Number(input.physicalShipmentId);
+  const authoritativeLegacyShipmentIds = [
+    ...new Set(
+      (input.authoritativeLegacyShipmentIds ?? []).map((id) => Number(id)),
+    ),
+  ].sort((left, right) => left - right);
   const candidateShipmentRef = input.candidateShipmentId == null
     ? null
     : positiveReference(input.candidateShipmentId);
@@ -423,8 +431,17 @@ export async function resolveShipStationUnmappedPhysicalExceptionForProviderEcho
     || resolvedBy.length > 120
     || !Number.isSafeInteger(wmsOrderId)
     || wmsOrderId <= 0
-    || !Number.isSafeInteger(physicalShipmentId)
-    || physicalShipmentId <= 0
+    || (
+      physicalShipmentId !== null
+      && (!Number.isSafeInteger(physicalShipmentId) || physicalShipmentId <= 0)
+    )
+    || authoritativeLegacyShipmentIds.some(
+      (id) => !Number.isSafeInteger(id) || id <= 0,
+    )
+    || (
+      physicalShipmentId === null
+      && authoritativeLegacyShipmentIds.length === 0
+    )
     || (input.candidateShipmentId != null && !candidateShipmentRef)
     || (
       input.retiredCandidateShipmentId != null
@@ -435,9 +452,9 @@ export async function resolveShipStationUnmappedPhysicalExceptionForProviderEcho
   }
 
   const resolution =
-    "The ShipStation label and an existing canonical package have the same " +
-    "tracking identity and exact WMS line quantities. They are two provider " +
-    "records for one physical package; no inventory or fulfillment was repeated.";
+    "The ShipStation label and an existing WMS package have the same provider " +
+    "shipment and tracking identity. The existing package remained authoritative; " +
+    "no inventory or fulfillment was repeated.";
   const details = JSON.stringify({
     remediationAction: "link_provider_package_echo",
     remediationNotes: nullableExternalRef(input.notes),
@@ -446,6 +463,7 @@ export async function resolveShipStationUnmappedPhysicalExceptionForProviderEcho
     providerOrderKey: input.shipment.orderKey ?? null,
     providerTrackingNumber: input.shipment.trackingNumber ?? null,
     physicalShipmentId,
+    authoritativeLegacyShipmentIds,
     candidateShipmentId: candidateShipmentRef
       ? Number(candidateShipmentRef)
       : null,

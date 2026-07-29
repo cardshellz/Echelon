@@ -15,6 +15,10 @@ function queryText(query: any): string {
     .join("");
 }
 
+function isExactLegacyPackageQuery(text: string): boolean {
+  return text.includes("FROM wms.shipping_provider_labels AS label");
+}
+
 const input = {
   providerShipmentId: 448105575,
   trackingNumber: "9400 1502 0621 7792 9280 44",
@@ -55,6 +59,9 @@ describe("ShipStation provider package echo", () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.outbound_shipment_items AS source_item")) {
           return { rows: sourceRows };
         }
@@ -80,6 +87,9 @@ describe("ShipStation provider package echo", () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.outbound_shipment_items AS source_item")) {
           return { rows: sourceRows };
         }
@@ -99,13 +109,16 @@ describe("ShipStation provider package echo", () => {
       status: "no_match",
       reason: "provider_line_quantity_mismatch",
     });
-    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(db.execute).toHaveBeenCalledTimes(2);
   });
 
   it("requires operator review when more than one canonical package has the same proof", async () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.outbound_shipment_items AS source_item")) {
           return { rows: sourceRows };
         }
@@ -129,6 +142,9 @@ describe("ShipStation provider package echo", () => {
       transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.outbound_shipment_items AS source_item")) {
           return { rows: sourceRows };
         }
@@ -173,6 +189,9 @@ describe("ShipStation provider package echo", () => {
       transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
         if (text.includes("FROM wms.outbound_shipment_items AS source_item")) {
           return { rows: sourceRows };
         }
@@ -204,7 +223,15 @@ describe("ShipStation provider package echo", () => {
   });
 
   it("does not touch provider linkage for non-authoritative ShipStation lines", async () => {
-    const db = { execute: vi.fn() };
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
     const result = await reconcileShipStationProviderPackageEcho(db, {
       ...input,
       shipmentItems: [{ lineItemKey: null, quantity: 1 }],
@@ -214,6 +241,92 @@ describe("ShipStation provider package echo", () => {
       status: "no_match",
       reason: "provider_lines_not_authoritative",
     });
-    expect(db.execute).not.toHaveBeenCalled();
+    expect(db.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("matches an exact historical provider package before obsolete line keys are parsed", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return {
+            rows: [{
+              shipping_provider_label_id: 2788,
+              legacy_wms_shipment_id: 4126,
+              wms_order_id: 204249,
+            }],
+          };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    await expect(inspectShipStationProviderPackageEcho(db, {
+      providerShipmentId: 440619985,
+      trackingNumber: "9434650206217239885413",
+      expectedWmsOrderId: 204249,
+      shipmentItems: [{ lineItemKey: "wms-item-8502", quantity: 1 }],
+      source: "unit_test",
+    })).resolves.toEqual({
+      status: "matched",
+      reason: "exact_provider_and_legacy_package_identity",
+      physicalShipmentId: null,
+      wmsOrderId: 204249,
+      authoritativeLegacyShipmentIds: [4126],
+      shippingProviderLabelId: 2788,
+      linkInserted: false,
+    });
+    expect(db.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconciles an exact historical package without creating duplicate authority", async () => {
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return {
+            rows: [{
+              shipping_provider_label_id: 2788,
+              legacy_wms_shipment_id: 4126,
+              wms_order_id: 204249,
+            }],
+          };
+        }
+        if (text.includes("FROM wms.shipping_provider_labels")) {
+          return {
+            rows: [{
+              id: 2788,
+              label_status: "active",
+              label_direction: "outbound",
+            }],
+          };
+        }
+        if (text.includes("UPDATE wms.shipping_provider_labels")) {
+          return { rows: [] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    await expect(reconcileShipStationProviderPackageEcho(db, {
+      providerShipmentId: 440619985,
+      trackingNumber: "9434650206217239885413",
+      expectedWmsOrderId: 204249,
+      shipmentItems: [{ lineItemKey: "wms-item-8502", quantity: 1 }],
+      source: "unit_test",
+    })).resolves.toMatchObject({
+      status: "matched",
+      reason: "exact_provider_and_legacy_package_identity",
+      physicalShipmentId: null,
+      authoritativeLegacyShipmentIds: [4126],
+      shippingProviderLabelId: 2788,
+      linkInserted: false,
+    });
+
+    const allSql = db.execute.mock.calls.map(([query]: [any]) => queryText(query)).join("\n");
+    expect(allSql).not.toContain("INSERT INTO wms.shipping_provider_label_links");
+    expect(allSql).not.toContain("INSERT INTO wms.physical_shipments");
+    expect(allSql).not.toContain("INSERT INTO inventory.inventory_transactions");
   });
 });
