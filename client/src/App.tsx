@@ -52,6 +52,7 @@ import PurchasingView from "@/pages/PurchasingView";
 import ReorderEngine from "@/pages/ReorderEngine";
 import ProcurementAutomation from "@/pages/ProcurementAutomation";
 import ProcurementRuns from "@/pages/ProcurementRuns";
+import ProcurementRfqs from "@/pages/ProcurementRfqs";
 import Receiving from "@/pages/Receiving";
 import InventoryHistory from "@/pages/InventoryHistory";
 import Replenishment from "@/pages/Replenishment";
@@ -438,6 +439,12 @@ function Router() {
             reports, decision history, and forecast accuracy. */}
         <Route path="/procurement/runs">
           <ProtectedRoute component={ProcurementRuns} allowedRoles={["admin", "lead"]} />
+        </Route>
+        {/* RFQ workbench (design surface 05): read-only tracking of quote
+            requests created from the Order Builder + the sourcing
+            requirement queue. */}
+        <Route path="/procurement/rfqs">
+          <ProtectedRoute component={ProcurementRfqs} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/replenishment">
           <ProtectedRoute component={Replenishment} allowedRoles={["admin", "lead"]} />

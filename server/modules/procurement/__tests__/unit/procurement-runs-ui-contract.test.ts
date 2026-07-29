@@ -135,22 +135,25 @@ describe("procurement runs UI contract", () => {
   });
 
   it("renders its own engine tab strip with Runs current — and the strips agree across pages", () => {
-    // This page: Analysis / Demand Planner / Automation live, Runs current,
-    // RFQs the ONLY remaining Soon chip.
+    // This page: Analysis / Demand Planner / Automation / RFQs live, Runs
+    // current. All five surfaces have shipped, so the coming-soon chip
+    // mechanism is gone entirely.
     expect(page).toContain('aria-label="Reorder Engine sections"');
     expect(page).toContain('aria-current="page"');
     expect(page).toContain('href="/reorder-analysis"');
     expect(page).toContain('href="/demand-planner"');
     expect(page).toContain('href="/procurement/automation"');
-    expect(page).toContain('ENGINE_TABS_COMING_SOON = ["RFQs"]');
-    expect(page).toContain("ENGINE_TABS_COMING_SOON.map");
-    expect(page).toContain('aria-disabled="true"');
-    expect(page).toContain("Soon");
-    // Sibling pages: the Runs chip flipped to a LIVE link everywhere, and no
-    // page still lists Runs as coming soon.
+    expect(page).toContain('href="/procurement/rfqs"');
+    expect(page).not.toContain("ENGINE_TABS_COMING_SOON");
+    expect(page).not.toContain("aria-disabled");
+    // Sibling pages: the Runs and RFQs chips are LIVE links everywhere, and
+    // no page still carries a Soon chip. (The RFQ workbench contract suite
+    // pins the full four-page strip agreement including its own strip.)
     expect(reorderEnginePage).toContain('href="/procurement/runs"');
-    expect(reorderEnginePage).toContain('ENGINE_TABS_COMING_SOON = ["RFQs"]');
+    expect(reorderEnginePage).toContain('href="/procurement/rfqs"');
+    expect(reorderEnginePage).not.toContain("ENGINE_TABS_COMING_SOON");
     expect(automationPage).toContain('href="/procurement/runs"');
-    expect(automationPage).toContain('ENGINE_TABS_COMING_SOON = ["RFQs"]');
+    expect(automationPage).toContain('href="/procurement/rfqs"');
+    expect(automationPage).not.toContain("ENGINE_TABS_COMING_SOON");
   });
 });

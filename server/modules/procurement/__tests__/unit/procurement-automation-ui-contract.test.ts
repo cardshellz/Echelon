@@ -135,10 +135,13 @@ describe("procurement automation UI contract", () => {
     expect(page).toContain('aria-current="page"');
     expect(page).toContain('href="/reorder-analysis"');
     expect(page).toContain('href="/demand-planner"');
-    // Runs shipped (design surface 04) — live link; only RFQs remains Soon.
+    // Runs shipped (design surface 04) — live link.
     expect(page).toContain('href="/procurement/runs"');
-    expect(page).toContain('ENGINE_TABS_COMING_SOON = ["RFQs"]');
-    expect(page).toContain('aria-disabled="true"');
+    // RFQs shipped (design surface 05) — the LAST Soon chip is a live link,
+    // and the coming-soon chip mechanism is gone entirely.
+    expect(page).toContain('href="/procurement/rfqs"');
+    expect(page).not.toContain("ENGINE_TABS_COMING_SOON");
+    expect(page).not.toContain("aria-disabled");
   });
 
   it("ports the approval-policy impact + quality-gate rollup fields", () => {
