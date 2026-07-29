@@ -116,6 +116,7 @@ function selectChain(rows: any[]) {
     where: vi.fn(() => chain),
     orderBy: vi.fn(() => chain),
     innerJoin: vi.fn(() => chain),
+    leftJoin: vi.fn(() => chain),
     limit: vi.fn().mockResolvedValue(rows),
     then: (resolve: (value: any[]) => unknown, reject?: (reason: unknown) => unknown) =>
       Promise.resolve(rows).then(resolve, reject),
@@ -135,6 +136,7 @@ describe("purchasing recommendation routes", () => {
         where: vi.fn(() => chain),
         orderBy: vi.fn(() => chain),
         innerJoin: vi.fn(() => chain),
+        leftJoin: vi.fn(() => chain),
         limit: vi.fn().mockResolvedValue([]),
         then: (resolve: (value: any[]) => unknown) => Promise.resolve([]).then(resolve),
       };
@@ -914,6 +916,87 @@ describe("purchasing recommendation routes", () => {
 
     expect(status).toBe(201);
     expect(mocks.purchasingService.createRfqBatch.mock.calls[0][0].lines[0].allocationOverrideApproved).toBe(false);
+  });
+
+  it("lists created RFQs newest-first with joined lines and vendor names", async () => {
+    const createdAt = new Date("2026-07-21T10:00:00.000Z");
+    mocks.db.select
+      .mockReturnValueOnce(selectChain([{
+        id: 42,
+        rfqNumber: "RFQ-2026-0042",
+        vendorId: 77,
+        status: "draft",
+        requestNote: "Quote delivered pricing",
+        currency: "USD",
+        responseDueDate: "2026-07-30",
+        createdBy: "buyer-17",
+        createdAt,
+        updatedAt: createdAt,
+        sentAt: null,
+        respondedAt: null,
+        cancelledAt: null,
+      }]))
+      .mockReturnValueOnce(selectChain([{
+        id: 501,
+        rfqId: 42,
+        recommendationLineId: 11,
+        recommendationRunId: 3,
+        vendorProductId: 44,
+        vendorSku: "SUP-302",
+        sku: "SKU-RED",
+        productName: "Red Card Shell",
+        status: "draft",
+        requestedPieces: 96,
+        recommendedPieces: 96,
+        purchaseUom: null,
+        piecesPerPurchaseUom: null,
+        quantityOverrideReason: null,
+        allocationOverrideReason: null,
+        allocationOverrideApprovedBy: null,
+        allocationOverrideApprovedAt: null,
+        allocationOverrideBaselinePieces: null,
+        allocationOverrideExcessPieces: null,
+        quotedPieces: null,
+        quotedUnitCostMills: null,
+        quoteReference: null,
+        quoteValidUntil: null,
+        quotedAt: null,
+      }]))
+      .mockReturnValueOnce(selectChain([{ id: 77, name: "Supplier 77" }]));
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/rfqs?limit=10");
+
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ limit: 10, count: 1, statusCounts: { draft: 1 } });
+    expect(body.rfqs[0]).toMatchObject({
+      rfqNumber: "RFQ-2026-0042",
+      status: "draft",
+      vendorName: "Supplier 77",
+      responseDueDate: "2026-07-30",
+      lineCount: 1,
+      requestedPiecesTotal: 96,
+    });
+    expect(body.rfqs[0].lines[0]).toMatchObject({
+      sku: "SKU-RED",
+      productName: "Red Card Shell",
+      vendorSku: "SUP-302",
+      requestedPieces: 96,
+      status: "draft",
+    });
+  });
+
+  it("caps the RFQ list limit and returns an empty page without extra queries", async () => {
+    const headerChain = selectChain([]);
+    mocks.db.select.mockReturnValueOnce(headerChain);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/rfqs?limit=99999");
+
+    expect(status).toBe(200);
+    expect(headerChain.limit).toHaveBeenCalledWith(100);
+    expect(body).toMatchObject({ limit: 100, count: 0, statusCounts: {}, rfqs: [] });
+    expect(mocks.db.select).toHaveBeenCalledTimes(1);
   });
 
   it("returns live forecast input gap diagnostics with actionable samples", async () => {

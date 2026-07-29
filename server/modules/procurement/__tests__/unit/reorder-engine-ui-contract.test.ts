@@ -131,7 +131,7 @@ describe("reorder engine UI contract", () => {
     expect(page).toContain("skippedReason");
   });
 
-  it("renders the engine tab strip: Analysis active, Demand Planner + Automation live, rest inert", () => {
+  it("renders the engine tab strip: Analysis active, every sibling surface live", () => {
     // One in-page strip under the header (rev-1 single-entry nav decision,
     // spec §10.1 / §11): the engine surfaces never present as nav siblings.
     expect(page).toContain('aria-label="Reorder Engine sections"');
@@ -146,25 +146,31 @@ describe("reorder engine UI contract", () => {
     expect(page).toContain('href="/procurement/automation"');
     // Runs shipped (design surface 04) — the chip is a LIVE link now.
     expect(page).toContain('href="/procurement/runs"');
+    // RFQs shipped (design surface 05) — the LAST Soon chip is a LIVE link.
+    expect(page).toContain('href="/procurement/rfqs"');
     // …and all target routes actually exist, so no link can go dead.
     expect(app).toContain('path="/demand-planner"');
     expect(app).toContain('path="/procurement/automation"');
     expect(app).toMatch(/procurement\/automation"[\s\S]{0,200}component=\{ProcurementAutomation\}/);
     expect(app).toContain('path="/procurement/runs"');
     expect(app).toMatch(/procurement\/runs"[\s\S]{0,200}component=\{ProcurementRuns\}/);
-    // Unshipped surfaces are inert muted chips with a Soon pill — pinned set,
-    // ACTUALLY rendered (the const alone could go stale), aria-disabled, and
-    // NO dead links: the only hrefs in the whole page are Demand Planner,
-    // Automation, and Runs.
-    expect(page).toContain('ENGINE_TABS_COMING_SOON = ["RFQs"]');
-    expect(page).toContain("ENGINE_TABS_COMING_SOON.map");
-    expect(page).toContain('aria-disabled="true"');
-    expect(page).toContain("Soon");
+    expect(app).toContain('path="/procurement/rfqs"');
+    expect(app).toMatch(/procurement\/rfqs"[\s\S]{0,200}component=\{ProcurementRfqs\}/);
+    // All five surfaces have shipped, so the coming-soon chip mechanism is
+    // GONE — no inert aria-disabled chips — and NO dead links: the only hrefs
+    // in the whole page are the four sibling surfaces.
+    expect(page).not.toContain("ENGINE_TABS_COMING_SOON");
+    expect(page).not.toContain("aria-disabled");
     const hrefs = Array.from(page.matchAll(/href="([^"]+)"/g)).map((match) => match[1]);
-    expect(hrefs).toEqual(["/demand-planner", "/procurement/automation", "/procurement/runs"]);
+    expect(hrefs).toEqual([
+      "/demand-planner",
+      "/procurement/automation",
+      "/procurement/runs",
+      "/procurement/rfqs",
+    ]);
     // The href scan above only sees literal href="…" — ban the two syntaxes
-    // that would let a chip become a link while evading it: wouter's `to`
-    // alias and computed href={…} expressions.
+    // that would let a link evade it: wouter's `to` alias and computed
+    // href={…} expressions.
     expect(page).not.toMatch(/\bto="/);
     expect(page).not.toMatch(/\bhref=\{/);
   });

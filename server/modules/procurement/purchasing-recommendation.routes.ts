@@ -41,7 +41,11 @@ import {
   vendors as vendorsTable,
 } from "@shared/schema";
 import { buildPurchaseRecommendationRunInput } from "./purchase-recommendation-snapshot.service";
-import { buildPurchasingRfqQueue, purchasingSkuAllocationKey } from "./purchasing-rfq.service";
+import {
+  buildPurchasingRfqQueue,
+  listRequestForQuotes,
+  purchasingSkuAllocationKey,
+} from "./purchasing-rfq.service";
 import {
   normalizePurchasingForecastPolicy,
   type PurchasingForecastPolicy,
@@ -1366,6 +1370,24 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         });
       }
       res.status(500).json({ error: "Failed to create RFQ drafts" });
+    }
+  });
+
+  // Read-only RFQ tracking list (workbench, design surface 05,
+  // /procurement/rfqs). Lists created request_for_quotes drafts newest-first
+  // with joined lines; the query logic lives in listRequestForQuotes
+  // (purchasing-rfq.service.ts). Deliberately has NO mutation counterpart:
+  // RFQ creation is the Order Builder's POST /api/purchasing/rfq-queue above,
+  // and the post-draft lifecycle (send / quote capture / award / PO
+  // conversion) is not built server-side yet
+  // (docs/PURCHASING-HARDENING-HANDOFF-2026-07-19.md).
+  app.get("/api/purchasing/rfqs", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const result = await listRequestForQuotes(db, { limit: req.query.limit });
+      res.json(result);
+    } catch (error) {
+      console.error("Error fetching purchasing RFQ list:", error);
+      res.status(500).json({ error: "Failed to fetch RFQs" });
     }
   });
 

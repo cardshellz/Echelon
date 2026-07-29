@@ -72,11 +72,10 @@ import { reorderAnalysisSearchParams } from "@/features/purchasing/reorderAnalys
 
 // ---------------------------------------------------------------------------
 // Engine tab strip — same rev-1 single-entry strip as ReorderEngine.tsx with
-// "Automation" as the current page. "Runs" links to the shipped run-report
-// surface (/procurement/runs, mockup 04); only RFQs remains an inert Soon chip.
+// "Automation" as the current page. All five engine surfaces have shipped
+// ("RFQs" → /procurement/rfqs, mockup 05), so the strip carries no "Soon"
+// chips anymore.
 // ---------------------------------------------------------------------------
-
-const ENGINE_TABS_COMING_SOON = ["RFQs"] as const;
 
 // ---------------------------------------------------------------------------
 // API types — client-side mirrors of the real server responses.
@@ -990,18 +989,12 @@ export default function ProcurementAutomation() {
           >
             Runs
           </Link>
-          {ENGINE_TABS_COMING_SOON.map((label) => (
-            <span
-              key={label}
-              aria-disabled="true"
-              className="-mb-px flex items-center gap-1.5 border-b-2 border-transparent px-3 py-1.5 text-sm font-medium text-muted-foreground/50"
-            >
-              {label}
-              <span className="rounded-full border border-border px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/60">
-                Soon
-              </span>
-            </span>
-          ))}
+          <Link
+            href="/procurement/rfqs"
+            className="-mb-px border-b-2 border-transparent px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+          >
+            RFQs
+          </Link>
         </nav>
       </div>
 
