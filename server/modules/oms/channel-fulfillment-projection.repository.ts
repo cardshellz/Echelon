@@ -64,11 +64,20 @@ export function createChannelFulfillmentProjector(db: any): ChannelFulfillmentPr
         SET fulfilled_quantity = LEAST(order_item.quantity, shipped.shipped_quantity),
             picked_quantity = LEAST(
               order_item.quantity,
-              GREATEST(order_item.picked_quantity, shipped.shipped_quantity)
+              GREATEST(
+                COALESCE(order_item.picked_quantity, 0),
+                COALESCE(shipped.shipped_quantity, 0)
+              )
             ),
             status = CASE
-              WHEN shipped.shipped_quantity >= order_item.quantity THEN 'completed'
-              WHEN shipped.shipped_quantity > 0 THEN 'in_progress'
+              WHEN GREATEST(
+                COALESCE(order_item.picked_quantity, 0),
+                COALESCE(shipped.shipped_quantity, 0)
+              ) >= order_item.quantity THEN 'completed'
+              WHEN GREATEST(
+                COALESCE(order_item.picked_quantity, 0),
+                COALESCE(shipped.shipped_quantity, 0)
+              ) > 0 THEN 'in_progress'
               ELSE order_item.status
             END,
             picked_at = CASE

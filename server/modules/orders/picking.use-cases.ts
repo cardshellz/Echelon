@@ -1066,13 +1066,18 @@ export class PickingUseCases {
       return { success: false, error: "order_not_pickable", message };
     }
 
-    // Prevent double-pick — if already completed, treat as success (idempotent)
-    if (status === "completed" && beforeItem.status === "completed") {
-      console.log(`[Pick] Item ${itemId} already completed — returning success (idempotent)`);
+    const currentPickedQuantity = beforeItem.pickedQuantity || 0;
+
+    // A fully picked quantity is terminal pick authority even if a stale writer
+    // left the materialized status active. Never deduct inventory a second time.
+    if (
+      status === "completed" &&
+      (beforeItem.status === "completed" || currentPickedQuantity >= beforeItem.quantity)
+    ) {
+      console.log(`[Pick] Item ${itemId} is already fully picked - returning success (idempotent)`);
       return { success: true, item: beforeItem as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
     }
 
-    const currentPickedQuantity = beforeItem.pickedQuantity || 0;
     let requestedPickedQuantity: number | undefined;
 
     // Validate pickedQuantity bounds

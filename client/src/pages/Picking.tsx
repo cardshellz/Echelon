@@ -57,6 +57,7 @@ import {
   scanCouldStillMatchItem,
   scanMatchesItem,
 } from "@/lib/picking-scan";
+import { derivePickerLineProgress } from "@/lib/picking-progress";
 import type { Order, OrderItem, ItemStatus } from "@shared/schema";
 
 type ReplenPrediction = {
@@ -863,17 +864,20 @@ export default function Picking() {
     memberPlanColor: (order as any).memberPlanColor,
     items: order.items
       .map((item): PickItem => {
-        const fulfilled = Math.max(0, item.fulfilledQuantity || 0);
-        const remainingQty = Math.max(0, item.quantity - fulfilled);
-        const pickedRemaining = Math.min(item.pickedQuantity || 0, remainingQty);
+        const progress = derivePickerLineProgress({
+          quantity: item.quantity,
+          pickedQuantity: item.pickedQuantity || 0,
+          fulfilledQuantity: item.fulfilledQuantity || 0,
+          status: item.status as PickItem["status"],
+        });
         return {
           id: item.id,
           sku: item.sku,
           name: item.name,
           location: item.location,
-          qty: remainingQty,
-          picked: pickedRemaining,
-          status: remainingQty <= 0 ? "completed" : item.status as "pending" | "in_progress" | "completed" | "short",
+          qty: progress.targetQuantity,
+          picked: progress.pickedQuantity,
+          status: progress.status,
           orderId: order.orderNumber,
           image: item.imageUrl || "",
           barcode: item.barcode || undefined,
@@ -1139,18 +1143,21 @@ export default function Picking() {
     const applyToPickItem = (item: PickItem): PickItem => {
       if (item.id !== updatedItem.id) return item;
 
-      const fulfilled = Math.max(0, updatedItem.fulfilledQuantity || 0);
-      const remainingQty = Math.max(0, updatedItem.quantity - fulfilled);
-      const pickedRemaining = Math.min(updatedItem.pickedQuantity || 0, remainingQty);
+      const progress = derivePickerLineProgress({
+        quantity: updatedItem.quantity,
+        pickedQuantity: updatedItem.pickedQuantity || 0,
+        fulfilledQuantity: updatedItem.fulfilledQuantity || 0,
+        status: updatedItem.status as PickItem["status"],
+      });
 
       return {
         ...item,
         sku: updatedItem.sku,
         name: updatedItem.name,
         location: updatedItem.location,
-        qty: remainingQty,
-        picked: pickedRemaining,
-        status: remainingQty <= 0 ? "completed" : updatedItem.status as PickItem["status"],
+        qty: progress.targetQuantity,
+        picked: progress.pickedQuantity,
+        status: progress.status,
         image: updatedItem.imageUrl || item.image,
         barcode: updatedItem.barcode || item.barcode,
         replenPrediction: updatedItem.replenPrediction ?? item.replenPrediction ?? null,

@@ -23,6 +23,7 @@ type Mode = "dry-run" | "execute";
 export type CleanupOperationId =
   | "orphan-oms-line-refs"
   | "nonpositive-shipment-items"
+  | "reopened-fully-picked-lines"
   | "materialized-counter-drift";
 
 export type MaterializedCounterDirection =
@@ -86,6 +87,7 @@ const AUDIT_INSERT_BATCH_SIZE = 500;
 const ALL_OPERATION_IDS: CleanupOperationId[] = [
   "orphan-oms-line-refs",
   "nonpositive-shipment-items",
+  "reopened-fully-picked-lines",
   "materialized-counter-drift",
 ];
 const ALL_COUNTER_DIRECTIONS: MaterializedCounterDirection[] = [
@@ -262,7 +264,7 @@ function usage(): string {
     "  --execute          Apply repairs transactionally with audit snapshots.",
     "  --summary-only     Print operation totals without one line per candidate.",
     "  --limit=N|all      Max candidates per operation. Default 100.",
-    "  --operation=ID     all, orphan-oms-line-refs, nonpositive-shipment-items, materialized-counter-drift.",
+    "  --operation=ID     all, orphan-oms-line-refs, nonpositive-shipment-items, reopened-fully-picked-lines, materialized-counter-drift.",
     "  --counter-direction=VALUE",
     "                     Materialized-counter cohort: all, recorded-below-actual, or recorded-above-actual.",
     "  --counter-decrease-safety=VALUE",
@@ -287,6 +289,13 @@ export function buildCleanupOperations(): CleanupOperationDefinition[] {
       sourceTable: "wms.outbound_shipment_items",
       action: "delete",
       reason: "zero/non-positive shipment item removed before qty > 0 constraint; row carries no physical quantity",
+    },
+    {
+      id: "reopened-fully-picked-lines",
+      description: "Close shippable WMS lines whose picked quantity already reached the authorized quantity.",
+      sourceTable: "wms.order_items",
+      action: "update",
+      reason: "fully picked WMS line restored to completed after a downstream projection reopened its materialized status",
     },
     {
       id: "materialized-counter-drift",
@@ -372,6 +381,37 @@ export function nonpositiveShipmentItemsUnsafeCountSql(): string {
     JOIN wms.outbound_shipments s ON s.id = si.shipment_id
     WHERE COALESCE(si.qty, 0) <= 0
       AND NOT ${SAFE_NONPOSITIVE_SHIPMENT_STATUS_FILTER}
+  `;
+}
+
+export function reopenedFullyPickedLinesCandidateSql(
+  limit: number | null,
+  forUpdate = false,
+): string {
+  return `
+    SELECT
+      oi.id::int AS source_id,
+      to_jsonb(oi) AS before_row,
+      to_jsonb(oi) || jsonb_build_object('status', 'completed') AS after_row,
+      jsonb_build_object(
+        'wms_order_id', o.id,
+        'order_number', o.order_number,
+        'warehouse_status', o.warehouse_status,
+        'sku', oi.sku,
+        'quantity', oi.quantity,
+        'picked_quantity', oi.picked_quantity,
+        'fulfilled_quantity', oi.fulfilled_quantity,
+        'item_status', oi.status
+      ) AS summary
+    FROM wms.order_items oi
+    JOIN wms.orders o ON o.id = oi.order_id
+    WHERE COALESCE(oi.requires_shipping, 0) = 1
+      AND COALESCE(oi.quantity, 0) > 0
+      AND COALESCE(oi.picked_quantity, 0) >= oi.quantity
+      AND COALESCE(oi.status, '') IN ('pending', 'in_progress')
+    ORDER BY oi.id
+    ${limitClause(limit)}
+    ${forUpdate ? "FOR UPDATE OF oi" : ""}
   `;
 }
 
@@ -546,6 +586,15 @@ async function fetchNonpositiveShipmentCandidates(client: PoolClient, limit: num
   return coerceCandidates(result.rows);
 }
 
+async function fetchReopenedFullyPickedCandidates(
+  client: PoolClient,
+  limit: number | null,
+  forUpdate: boolean,
+): Promise<CleanupCandidate[]> {
+  const result = await client.query(reopenedFullyPickedLinesCandidateSql(limit, forUpdate));
+  return coerceCandidates(result.rows);
+}
+
 async function fetchCounterDriftCandidates(
   client: PoolClient,
   limit: number | null,
@@ -695,6 +744,38 @@ async function deleteNonpositiveShipmentItems(
   return resultFor(operation.id, candidates.length, unsafeSkipped, deleteResult.rowCount ?? 0);
 }
 
+async function closeReopenedFullyPickedLines(
+  client: PoolClient,
+  runId: string,
+  operation: CleanupOperationDefinition,
+  flags: Flags,
+): Promise<OperationResult> {
+  const candidates = await fetchReopenedFullyPickedCandidates(
+    client,
+    flags.limit,
+    flags.mode === "execute",
+  );
+  printOperationPlan(operation, candidates, 0, flags);
+  if (flags.mode === "dry-run" || candidates.length === 0) {
+    return resultFor(operation.id, candidates.length, 0, 0);
+  }
+
+  await insertAuditRows(client, { runId, operation, candidates, operator: flags.operator });
+  const ids = candidates.map((candidate) => candidate.sourceId);
+  const updateResult = await client.query(`
+    UPDATE wms.order_items oi
+       SET status = 'completed'
+     WHERE oi.id = ANY($1::int[])
+       AND COALESCE(oi.requires_shipping, 0) = 1
+       AND COALESCE(oi.quantity, 0) > 0
+       AND COALESCE(oi.picked_quantity, 0) >= oi.quantity
+       AND COALESCE(oi.status, '') IN ('pending', 'in_progress')
+  `, [ids]);
+  assertExpectedRowCount(operation.id, candidates.length, updateResult.rowCount ?? 0);
+
+  return resultFor(operation.id, candidates.length, 0, updateResult.rowCount ?? 0);
+}
+
 async function refreshMaterializedCounters(
   client: PoolClient,
   runId: string,
@@ -829,6 +910,8 @@ async function runOperation(
       result = await clearOrphanOmsLineRefs(client, runId, operation, flags);
     } else if (operation.id === "nonpositive-shipment-items") {
       result = await deleteNonpositiveShipmentItems(client, runId, operation, flags);
+    } else if (operation.id === "reopened-fully-picked-lines") {
+      result = await closeReopenedFullyPickedLines(client, runId, operation, flags);
     } else {
       result = await refreshMaterializedCounters(client, runId, operation, flags);
     }

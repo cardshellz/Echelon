@@ -239,6 +239,21 @@ function expectPickCommandRejectedLog(
 }
 
 describe("PickingUseCases pick progress validation", () => {
+  it("treats a fully picked line with stale active status as idempotently complete", async () => {
+    const beforeItem = makeItem({ status: "in_progress", pickedQuantity: 2, quantity: 2 });
+    const { service, storage } = makePickNoopHarness(beforeItem);
+
+    const result = await service.pickItem(beforeItem.id, {
+      status: "completed",
+      pickedQuantity: 1,
+      pickMethod: "pick_all",
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({ success: true, item: beforeItem });
+    expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
+    expect(storage.createPickingLog).not.toHaveBeenCalled();
+  });
   it("rejects a pending pick request that does not change quantity or status", async () => {
     const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 1 });
     const { service, storage } = makePickNoopHarness(beforeItem);
