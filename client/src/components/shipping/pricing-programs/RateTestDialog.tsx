@@ -314,7 +314,7 @@ export function RateTestDialog({
               setResult(null);
             }}>
               <SelectTrigger id="rate-test-region"><SelectValue /></SelectTrigger>
-              <SelectContent>
+              <SelectContent className="max-h-72">
                 {US_POSTAL_REGIONS.map(([code, name]) => (
                   <SelectItem key={code} value={code}>{name} ({code})</SelectItem>
                 ))}
