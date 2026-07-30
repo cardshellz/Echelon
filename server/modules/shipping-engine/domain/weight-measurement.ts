@@ -1,9 +1,23 @@
 import type { ShipmentWeightSource } from "./shipment";
 
+export const MINIMUM_RATE_SELECTION_WEIGHT_GRAMS = 1;
+
 export interface UnitWeightMeasurement {
   quantity: number;
   unitWeightGrams: number | null;
   weightSource?: ShipmentWeightSource;
+}
+
+/**
+ * Applies the checkout-safe floor used when every shippable line lacks weight.
+ * Missing catalog data may reduce quote accuracy, but it must not suppress an
+ * otherwise eligible shipping option.
+ */
+export function applyMinimumRateSelectionWeightGrams(
+  weightGrams: number,
+): number | null {
+  if (!Number.isSafeInteger(weightGrams) || weightGrams < 0) return null;
+  return Math.max(MINIMUM_RATE_SELECTION_WEIGHT_GRAMS, weightGrams);
 }
 
 /**

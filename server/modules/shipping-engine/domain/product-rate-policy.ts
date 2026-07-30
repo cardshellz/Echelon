@@ -462,8 +462,7 @@ function calculateRuleCharge(
       let total = 0;
       for (const index of indexes) {
         const line = lines[index];
-        if (!isWeight(line.unitWeightGrams)) return null;
-        const rate = rateForBand(rule.bands, line.unitWeightGrams);
+        const rate = rateForBand(rule.bands, line.unitWeightGrams ?? 0);
         if (rate === null) return null;
         const lineTotal = safeMultiply(rate, line.quantity);
         if (lineTotal === null) return null;
@@ -481,8 +480,7 @@ function calculateRuleCharge(
       let total = 0;
       for (const index of indexes) {
         const line = lines[index];
-        if (!isWeight(line.unitWeightGrams)) return null;
-        const pounds = startedPoundsFromGrams(line.unitWeightGrams);
+        const pounds = startedPoundsFromGrams(line.unitWeightGrams ?? 0);
         if (pounds === null) return null;
         const variableCharge = safeMultiply(rule.perStartedPoundCents, pounds);
         if (variableCharge === null) return null;
@@ -541,7 +539,13 @@ function rateForBand(bands: readonly ProductRateRuleBand[], measure: number): nu
 }
 
 function totalWeight(lines: readonly ProductRateLine[], indexes: readonly number[]): number | null {
-  return sumRateSelectionWeightGrams(indexes.map((index) => lines[index]));
+  const weightedLines = indexes.flatMap((index) => {
+    const line = lines[index];
+    return line.unitWeightGrams === null ? [] : [line];
+  });
+  return weightedLines.length === 0
+    ? 0
+    : sumRateSelectionWeightGrams(weightedLines);
 }
 
 function totalSubtotal(lines: readonly ProductRateLine[], indexes: readonly number[]): number | null {

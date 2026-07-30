@@ -240,14 +240,72 @@ describe("product shipping policy", () => {
     expect(fallbackWeights).toEqual([1_000]);
   });
 
-  it("fails closed when destination-default items have missing weight", () => {
+  it("rates an all-missing destination-default bucket at zero contribution", () => {
+    const fallbackWeights: number[] = [];
     const result = evaluateProductRatePolicy({
       destination: DESTINATION,
       lines: [{ ...LINES[1], unitWeightGrams: null }],
       rules: [rule()],
-      defaultRateForWeightGrams: () => 599,
+      defaultRateForWeightGrams: (grams) => {
+        fallbackWeights.push(grams);
+        return 599;
+      },
     });
-    expect(result).toMatchObject({ ok: false, code: "NO_RATE" });
+    expect(result).toMatchObject({ ok: true, totalCents: 599 });
+    expect(fallbackWeights).toEqual([0]);
+  });
+
+  it("rates known destination-default weight when another item is missing weight", () => {
+    const fallbackWeights: number[] = [];
+    const result = evaluateProductRatePolicy({
+      destination: DESTINATION,
+      lines: [
+        { ...LINES[0], productVariantId: 30 },
+        { ...LINES[1], productVariantId: 40, unitWeightGrams: null },
+      ],
+      rules: [rule()],
+      defaultRateForWeightGrams: (grams) => {
+        fallbackWeights.push(grams);
+        return 899;
+      },
+    });
+    expect(result).toMatchObject({ ok: true, totalCents: 899 });
+    expect(fallbackWeights).toEqual([9_000]);
+  });
+
+  it("uses the zero-weight band for a missing each-item weight", () => {
+    const result = evaluateProductRatePolicy({
+      destination: DESTINATION,
+      lines: [{ ...LINES[1], unitWeightGrams: null }],
+      rules: [rule({
+        action: "fixed_band",
+        measurementScope: "each_item",
+        memberVariantIds: [20],
+        rateCents: null,
+        bands: [
+          { minMeasure: 0, maxMeasure: 500, rateCents: 399 },
+          { minMeasure: 501, maxMeasure: null, rateCents: 699 },
+        ],
+      })],
+      defaultRateForWeightGrams: () => null,
+    });
+    expect(result).toMatchObject({ ok: true, totalCents: 798 });
+  });
+
+  it("charges only the base for a missing each-item weight", () => {
+    const result = evaluateProductRatePolicy({
+      destination: DESTINATION,
+      lines: [{ ...LINES[1], unitWeightGrams: null }],
+      rules: [rule({
+        action: "base_plus_per_started_pound",
+        measurementScope: "each_item",
+        memberVariantIds: [20],
+        rateCents: 899,
+        perStartedPoundCents: 180,
+      })],
+      defaultRateForWeightGrams: () => null,
+    });
+    expect(result).toMatchObject({ ok: true, totalCents: 1_798 });
   });
 
   it("fails closed when a free-shipping threshold cannot read item value", () => {
