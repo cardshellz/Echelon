@@ -715,7 +715,9 @@ heroku run "npx tsx scripts/configure-shipstation-tracking-webhook.ts --execute"
 
 Configuring the global `track` webhook is necessary but is not enough for existing labels. Each active `(carrier_code, tracking_number)` tuple must also be enrolled through `POST /v2/tracking/start`; the provider confirms enrollment only with HTTP 204. Echelon performs that enrollment through the leased subscription state machine above. It never guesses a carrier from tracking-number syntax.
 
-The five-minute reconciliation scheduler first hydrates missing webhook payloads, then prepares and enrolls at most 25 due subscriptions per sweep. Provider work uses row leases, append-only attempt ledgers, deterministic retry, and a batch lease long enough to cover the bounded serialized request workload. Existing labels can be inspected and enrolled with the bounded operator command:
+The five-minute reconciliation scheduler first hydrates missing webhook payloads, then reconciles provider-label links. Webhooks and active tracking subscriptions remain the low-latency path. Because ShipStation can accept a label-specific tracking lookup while rejecting account-level tracking subscription access, every linked unresolved outbound ShipStation label also enters a leased exact-label polling fallback. The fallback calls only `GET /v2/labels/{label_id}/track`, validates the requested label identity, appends the returned snapshot through the same immutable carrier-event matcher, and lets the existing dispatch command own inventory and channel fulfillment. It never writes fulfillment directly. Confirmed evidence completes the poll; pre-transit evidence is retried on an adaptive schedule; bounded provider failures remain visible for review.
+
+Subscription and exact-label provider work both use row leases, append-only attempt ledgers, deterministic retry, and bounded batches. Existing labels can be inspected and enrolled with the bounded operator command:
 
 ```powershell
 heroku run "npx tsx scripts/enroll-shipstation-carrier-tracking.ts --dry-run" -a cardshellz-echelon

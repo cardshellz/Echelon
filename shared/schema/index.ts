@@ -18,3 +18,4 @@ export * from "./audit.schema";
 export * from "./fulfillment.schema";
 export * from "./shipping.schema";
 export * from "./operations.schema";
+export * from "./carrier-tracking-label-poll.schema";

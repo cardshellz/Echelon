@@ -11,6 +11,7 @@ import {
 } from "./carrier-tracking.domain";
 import type {
   CarrierTrackingRepository,
+  ClaimedCarrierTrackingLabelPoll,
   ClaimedCarrierTrackingWebhookHydration,
   ClaimedCarrierTrackingSubscription,
   ShippingProviderLabelLinkResult,
@@ -28,11 +29,13 @@ import {
   type ShipStationTrackingSubscriptionsClient,
 } from "./shipstation-tracking-subscriptions.client";
 import {
+  createShipStationLabelTrackingRequest,
   createShipStationTrackingHydrationRequest,
   isRetryableTrackingEventsError,
   parseShipStationTrackingResourceUrl,
   ShipStationTrackingEventsError,
   trackingEventsErrorEvidence,
+  type ShipStationLabelTrackingRequest,
   type ShipStationTrackingEventsClient,
   type ShipStationTrackingIdentity,
   type ShipStationTrackingHydrationRequest,
@@ -49,6 +52,10 @@ const SUBSCRIPTION_MAX_CONSECUTIVE_FAILURES = 8;
 const HYDRATION_RETRY_BASE_MS = 5 * 60 * 1_000;
 const HYDRATION_RETRY_MAX_MS = 6 * 60 * 60 * 1_000;
 const HYDRATION_MAX_CONSECUTIVE_FAILURES = 8;
+const DEFAULT_LABEL_POLL_BATCH_LIMIT = 25;
+const LABEL_POLL_RETRY_BASE_MS = 5 * 60 * 1_000;
+const LABEL_POLL_RETRY_MAX_MS = 6 * 60 * 60 * 1_000;
+const LABEL_POLL_MAX_CONSECUTIVE_FAILURES = 8;
 const DEFAULT_DISPATCH_BATCH_LIMIT = 25;
 const DISPATCH_BATCH_LEASE_MS = 10 * 60 * 1_000;
 const DISPATCH_RETRY_BASE_MS = 5 * 60 * 1_000;
@@ -125,6 +132,15 @@ export interface CarrierTrackingReconciliationResult {
   subscriptionsRetryScheduled: number;
   subscriptionsReviewRequired: number;
   subscriptionClientConfigured: boolean;
+  labelPollsPrepared: number;
+  labelPollsCompletedFromExistingEvidence: number;
+  labelPollsRetired: number;
+  labelPollsClaimed: number;
+  labelPollsConfirmed: number;
+  labelPollsWaiting: number;
+  labelPollsRetryScheduled: number;
+  labelPollsReviewRequired: number;
+  labelPollClientConfigured: boolean;
   labelsScanned: number;
   labelsLinked: number;
   scanned: number;
@@ -170,6 +186,20 @@ export type CarrierTrackingSubscriptionSweepResult = Pick<
   | "errors"
 >;
 
+export type CarrierTrackingLabelPollSweepResult = Pick<
+  CarrierTrackingReconciliationResult,
+  | "labelPollsPrepared"
+  | "labelPollsCompletedFromExistingEvidence"
+  | "labelPollsRetired"
+  | "labelPollsClaimed"
+  | "labelPollsConfirmed"
+  | "labelPollsWaiting"
+  | "labelPollsRetryScheduled"
+  | "labelPollsReviewRequired"
+  | "labelPollClientConfigured"
+  | "errors"
+>;
+
 export interface ShippingProviderLabelObserver {
   observeShipStationLabel(rawShipment: unknown): Promise<StoredShippingProviderLabelObservation>;
 }
@@ -184,6 +214,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       subscriptionLeaseOwner?: string;
       trackingEventsClient?: ShipStationTrackingEventsClient;
       hydrationLeaseOwner?: string;
+      labelPollLeaseOwner?: string;
       dispatchAuthority?: CarrierDispatchAuthority;
       dispatchLeaseOwner?: string;
     },
@@ -394,6 +425,17 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
     const summary: CarrierTrackingReconciliationResult = {
       ...hydrationSummary,
       ...subscriptionSummary,
+      labelPollsPrepared: 0,
+      labelPollsCompletedFromExistingEvidence: 0,
+      labelPollsRetired: 0,
+      labelPollsClaimed: 0,
+      labelPollsConfirmed: 0,
+      labelPollsWaiting: 0,
+      labelPollsRetryScheduled: 0,
+      labelPollsReviewRequired: 0,
+      labelPollClientConfigured: Boolean(
+        this.dependencies.trackingEventsClient?.getLabelTrackingSnapshot,
+      ),
       labelsScanned: labels.length,
       labelsLinked: 0,
       scanned: events.length,
@@ -429,6 +471,21 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         });
       }
     }
+
+    const labelPollSummary = await this.pollShipStationLabels(
+      Math.min(limit, DEFAULT_LABEL_POLL_BATCH_LIMIT),
+    );
+    summary.labelPollsPrepared = labelPollSummary.labelPollsPrepared;
+    summary.labelPollsCompletedFromExistingEvidence =
+      labelPollSummary.labelPollsCompletedFromExistingEvidence;
+    summary.labelPollsRetired = labelPollSummary.labelPollsRetired;
+    summary.labelPollsClaimed = labelPollSummary.labelPollsClaimed;
+    summary.labelPollsConfirmed = labelPollSummary.labelPollsConfirmed;
+    summary.labelPollsWaiting = labelPollSummary.labelPollsWaiting;
+    summary.labelPollsRetryScheduled = labelPollSummary.labelPollsRetryScheduled;
+    summary.labelPollsReviewRequired = labelPollSummary.labelPollsReviewRequired;
+    summary.labelPollClientConfigured = labelPollSummary.labelPollClientConfigured;
+    summary.errors += labelPollSummary.errors;
 
     for (const event of events) {
       try {
@@ -612,6 +669,205 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
             attemptNumber: command.attemptNumber,
             attemptedOutcome: requestedOutcome,
             authorityErrorCode: errorCode,
+            finalizationError: finalizationError instanceof Error
+              ? finalizationError.message
+              : String(finalizationError),
+          },
+        });
+      }
+    }
+
+    return summary;
+  }
+
+  async pollShipStationLabels(
+    limit: number = DEFAULT_LABEL_POLL_BATCH_LIMIT,
+  ): Promise<CarrierTrackingLabelPollSweepResult> {
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
+      throw new Error("Label-tracking poll limit must be an integer between 1 and 100");
+    }
+    const client = this.dependencies.trackingEventsClient;
+    const summary: CarrierTrackingLabelPollSweepResult = {
+      labelPollsPrepared: 0,
+      labelPollsCompletedFromExistingEvidence: 0,
+      labelPollsRetired: 0,
+      labelPollsClaimed: 0,
+      labelPollsConfirmed: 0,
+      labelPollsWaiting: 0,
+      labelPollsRetryScheduled: 0,
+      labelPollsReviewRequired: 0,
+      labelPollClientConfigured: Boolean(
+        client?.isConfigured() && client.getLabelTrackingSnapshot,
+      ),
+      errors: 0,
+    };
+    if (!client?.isConfigured() || !client.getLabelTrackingSnapshot) return summary;
+
+    const asOf = this.dependencies.clock.now();
+    const prepared = await this.dependencies.repository.prepareLabelTrackingPolls(
+      limit,
+      asOf,
+    );
+    summary.labelPollsPrepared = prepared.inserted;
+    summary.labelPollsCompletedFromExistingEvidence = prepared.completed;
+    summary.labelPollsRetired = prepared.retired;
+
+    const leaseOwner = this.dependencies.labelPollLeaseOwner?.trim()
+      || defaultLabelTrackingPollLeaseOwner();
+    const polls = await this.dependencies.repository.claimLabelTrackingPolls(
+      limit,
+      asOf,
+      leaseOwner,
+      new Date(asOf.getTime() + PROVIDER_BATCH_LEASE_MS),
+    );
+    summary.labelPollsClaimed = polls.length;
+
+    for (const poll of polls) {
+      const request = createShipStationLabelTrackingRequest({
+        providerLabelId: poll.providerLabelId,
+        carrierCode: poll.carrierCode,
+        trackingNumber: poll.trackingNumber,
+      });
+      let result: CarrierTrackingNormalizedIngestResult | null = null;
+      let event: NormalizedCarrierTrackingEvent | null = null;
+      let providerError: unknown = null;
+      try {
+        const snapshot = await client.getLabelTrackingSnapshot(request);
+        event = normalizeTrackingSnapshot(
+          snapshot.payload,
+          request,
+          this.dependencies.clock.now(),
+        );
+        result = await this.persistAndMatch(event);
+      } catch (error) {
+        providerError = error;
+      }
+
+      const completedAt = this.dependencies.clock.now();
+      if (event && result) {
+        const confirmed = event.dispatchEvidence === "confirmed";
+        const nextAttemptAt = confirmed
+          ? null
+          : new Date(
+              completedAt.getTime() + labelPollWaitingDelayMs(poll.attemptNumber),
+            );
+        try {
+          const finalized =
+            await this.dependencies.repository.finalizeLabelTrackingPollAttempt({
+              shippingProviderLabelId: poll.shippingProviderLabelId,
+              attemptNumber: poll.attemptNumber,
+              leaseOwner: poll.leaseOwner,
+              outcome: confirmed ? "confirmed" : "waiting",
+              httpStatus: 200,
+              carrierTrackingEventId: result.eventId,
+              dispatchEvidence: event.dispatchEvidence,
+              errorCode: null,
+              errorMessage: null,
+              requestEvidence: labelPollRequestEvidence(poll, request),
+              responseEvidence: {
+                httpStatus: 200,
+                eventHash: event.eventHash,
+                payloadHash: event.payloadHash,
+                providerStatusCode: event.providerStatusCode,
+                dispatchEvidence: event.dispatchEvidence,
+                matchStatus: result.matchStatus,
+                dispatchCommandId: result.dispatchCommandId,
+              },
+              startedAt: poll.startedAt,
+              completedAt,
+              nextAttemptAt,
+            });
+          if (finalized.outcome === "confirmed") summary.labelPollsConfirmed += 1;
+          else summary.labelPollsWaiting += 1;
+          this.logLabelPollResult(
+            confirmed
+              ? "CARRIER_TRACKING_LABEL_POLL_CONFIRMED"
+              : "CARRIER_TRACKING_LABEL_POLL_WAITING",
+            poll,
+            {
+              attemptNumber: poll.attemptNumber,
+              eventId: result.eventId,
+              eventInserted: result.eventInserted,
+              dispatchEvidence: event.dispatchEvidence,
+              matchStatus: result.matchStatus,
+              nextAttemptAt: nextAttemptAt?.toISOString() ?? null,
+              replayedAttempt: !finalized.inserted,
+            },
+          );
+        } catch (finalizationError) {
+          summary.errors += 1;
+          this.dependencies.logger.error({
+            code: "CARRIER_TRACKING_LABEL_POLL_FINALIZATION_FAILED",
+            message: "A successful exact-label tracking poll could not be finalized.",
+            context: {
+              shippingProviderLabelId: poll.shippingProviderLabelId,
+              providerLabelId: poll.providerLabelId,
+              attemptNumber: poll.attemptNumber,
+              finalizationError: finalizationError instanceof Error
+                ? finalizationError.message
+                : String(finalizationError),
+            },
+          });
+        }
+        continue;
+      }
+
+      const evidence = trackingEventsErrorEvidence(providerError);
+      const nextFailureCount = poll.consecutiveFailureCount + 1;
+      const retryable = isRetryableTrackingEventsError(providerError)
+        && nextFailureCount < LABEL_POLL_MAX_CONSECUTIVE_FAILURES;
+      const nextAttemptAt = retryable
+        ? new Date(
+            completedAt.getTime() + labelPollRetryDelayMs(nextFailureCount),
+          )
+        : null;
+      try {
+        const finalized =
+          await this.dependencies.repository.finalizeLabelTrackingPollAttempt({
+            shippingProviderLabelId: poll.shippingProviderLabelId,
+            attemptNumber: poll.attemptNumber,
+            leaseOwner: poll.leaseOwner,
+            outcome: retryable ? "retry_scheduled" : "review_required",
+            httpStatus: evidence.httpStatus,
+            carrierTrackingEventId: null,
+            dispatchEvidence: null,
+            errorCode: evidence.code,
+            errorMessage: evidence.message,
+            requestEvidence: labelPollRequestEvidence(poll, request),
+            responseEvidence: evidence.details,
+            startedAt: poll.startedAt,
+            completedAt,
+            nextAttemptAt,
+          });
+        if (finalized.outcome === "retry_scheduled") {
+          summary.labelPollsRetryScheduled += 1;
+        } else {
+          summary.labelPollsReviewRequired += 1;
+        }
+        this.logLabelPollResult(
+          retryable
+            ? "CARRIER_TRACKING_LABEL_POLL_RETRY_SCHEDULED"
+            : "CARRIER_TRACKING_LABEL_POLL_REVIEW_REQUIRED",
+          poll,
+          {
+            attemptNumber: poll.attemptNumber,
+            errorCode: evidence.code,
+            httpStatus: evidence.httpStatus,
+            nextAttemptAt: nextAttemptAt?.toISOString() ?? null,
+            replayedAttempt: !finalized.inserted,
+          },
+          "warn",
+        );
+      } catch (finalizationError) {
+        summary.errors += 1;
+        this.dependencies.logger.error({
+          code: "CARRIER_TRACKING_LABEL_POLL_FINALIZATION_FAILED",
+          message: "A failed exact-label tracking poll could not be finalized.",
+          context: {
+            shippingProviderLabelId: poll.shippingProviderLabelId,
+            providerLabelId: poll.providerLabelId,
+            attemptNumber: poll.attemptNumber,
+            providerErrorCode: evidence.code,
             finalizationError: finalizationError instanceof Error
               ? finalizationError.message
               : String(finalizationError),
@@ -1018,6 +1274,25 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
     else this.dependencies.logger.warn(logEvent);
   }
 
+  private logLabelPollResult(
+    code: string,
+    poll: ClaimedCarrierTrackingLabelPoll,
+    context: Record<string, unknown>,
+    level: "info" | "warn" = "info",
+  ): void {
+    this.dependencies.logger[level]({
+      code,
+      message: "Exact ShipStation label tracking evidence was processed.",
+      context: {
+        shippingProviderLabelId: poll.shippingProviderLabelId,
+        providerLabelId: poll.providerLabelId,
+        carrierCode: poll.carrierCode,
+        trackingSuffix: trackingSuffix(poll.normalizedTrackingNumber),
+        ...context,
+      },
+    });
+  }
+
   private logTrackingSubscriptionResult(
     code: string,
     subscription: ClaimedCarrierTrackingSubscription,
@@ -1081,15 +1356,33 @@ function trackingSuffix(normalizedTrackingNumber: string): string {
 
 function normalizeTrackingSnapshot(
   payload: Record<string, unknown>,
-  request: ShipStationTrackingHydrationRequest,
+  request: ShipStationTrackingHydrationRequest | ShipStationLabelTrackingRequest,
   observedAt: Date,
 ): NormalizedCarrierTrackingEvent {
   let event: NormalizedCarrierTrackingEvent;
+  const providerLabelId = "providerLabelId" in request
+    ? request.providerLabelId
+    : null;
+  const returnedProviderLabelId = normalizedResponseProviderLabelId(payload.label_id);
+  if (providerLabelId !== null
+      && returnedProviderLabelId !== null
+      && returnedProviderLabelId !== providerLabelId) {
+    throw new ShipStationTrackingEventsError(
+      "INVALID_RESPONSE",
+      "ShipStation label tracking response returned a different provider label identity",
+      {
+        requestedProviderLabelId: providerLabelId,
+        returnedProviderLabelId,
+      },
+    );
+  }
   try {
     event = normalizeShipStationTrackingWebhook({
       resource_type: "API_TRACK",
       resource_url: request.resourceUrl,
-      data: payload,
+      data: providerLabelId
+        ? { ...payload, label_id: providerLabelId }
+        : payload,
     }, observedAt);
   } catch (error) {
     if (!(error instanceof CarrierTrackingPayloadError)) throw error;
@@ -1102,6 +1395,7 @@ function normalizeTrackingSnapshot(
   if (
     event.normalizedTrackingNumber !== request.normalizedTrackingNumber
     || event.carrier !== request.carrierCode
+    || (providerLabelId !== null && event.providerLabelId !== providerLabelId)
   ) {
     throw new ShipStationTrackingEventsError(
       "INVALID_RESPONSE",
@@ -1111,10 +1405,60 @@ function normalizeTrackingSnapshot(
         returnedTrackingSuffix: trackingSuffix(event.normalizedTrackingNumber),
         requestedCarrierCode: request.carrierCode,
         returnedCarrierCode: event.carrier,
+        requestedProviderLabelId: providerLabelId,
+        returnedProviderLabelId: event.providerLabelId,
       },
     );
   }
   return event;
+}
+
+function normalizedResponseProviderLabelId(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" && typeof value !== "number") {
+    throw new ShipStationTrackingEventsError(
+      "INVALID_RESPONSE",
+      "ShipStation label tracking response contains an invalid provider label identity",
+    );
+  }
+  const normalized = String(value).trim().replace(/^se-/i, "");
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(normalized)) {
+    throw new ShipStationTrackingEventsError(
+      "INVALID_RESPONSE",
+      "ShipStation label tracking response contains an invalid provider label identity",
+    );
+  }
+  return normalized;
+}
+
+function labelPollRequestEvidence(
+  poll: ClaimedCarrierTrackingLabelPoll,
+  request: ShipStationLabelTrackingRequest,
+): Record<string, unknown> {
+  const resourceUrl = new URL(request.resourceUrl);
+  return {
+    shippingProviderLabelId: poll.shippingProviderLabelId,
+    providerLabelId: poll.providerLabelId,
+    resourceOrigin: resourceUrl.origin,
+    resourcePath: resourceUrl.pathname,
+    carrierCode: poll.carrierCode,
+    trackingNumber: poll.trackingNumber,
+  };
+}
+
+function labelPollWaitingDelayMs(attemptNumber: number): number {
+  if (attemptNumber <= 8) return 15 * 60 * 1_000;
+  if (attemptNumber <= 20) return 30 * 60 * 1_000;
+  if (attemptNumber <= 44) return 60 * 60 * 1_000;
+  return 6 * 60 * 60 * 1_000;
+}
+
+function labelPollRetryDelayMs(consecutiveFailureCount: number): number {
+  const exponent = Math.max(0, Math.min(consecutiveFailureCount - 1, 6));
+  return Math.min(
+    LABEL_POLL_RETRY_BASE_MS * (2 ** exponent),
+    LABEL_POLL_RETRY_MAX_MS,
+  );
 }
 
 function trackingSubscriptionRequestEvidence(
@@ -1264,6 +1608,11 @@ function defaultTrackingSubscriptionLeaseOwner(): string {
 function defaultCarrierDispatchLeaseOwner(): string {
   const runtime = process.env.DYNO?.trim() || process.env.HOSTNAME?.trim() || "local";
   return `carrier-dispatch:${runtime}:${process.pid}`.slice(0, 150);
+}
+
+function defaultLabelTrackingPollLeaseOwner(): string {
+  const runtime = process.env.DYNO?.trim() || process.env.HOSTNAME?.trim() || "local";
+  return `carrier-label-poll:${runtime}:${process.pid}`.slice(0, 200);
 }
 
 function defaultTrackingHydrationLeaseOwner(): string {
