@@ -665,8 +665,17 @@ function classifyRecommendation(input: {
   reorderPoint: number;
   onOrderPieces: number;
   effectiveSupply: number;
+  forwardDemandPieces: number;
 }): PurchasingRecommendationStatus {
-  if (input.available <= 0) return "stockout";
+  // Queue truth (PR feat/reorder-queue-truth): zero available is only a
+  // STOCKOUT when there is demand to miss — observed sales velocity
+  // (avgDailyUsage > 0) or committed forward demand (event pieces > 0).
+  // A never-sold, never-stocked SKU has nothing to run out of; classifying
+  // it as a stockout flooded the order queue and every status-keyed KPI
+  // with rows no operator can act on. Without a demand signal the row
+  // falls through to the existing ladder (no_movement when usage is zero).
+  const hasDemandSignal = input.avgDailyUsage > 0 || input.forwardDemandPieces > 0;
+  if (input.available <= 0 && hasDemandSignal) return "stockout";
   if (input.avgDailyUsage === 0) return "no_movement";
   if (
     input.available <= input.reorderPoint &&
@@ -1923,6 +1932,9 @@ export function generatePurchasingRecommendations(
       reorderPoint: adjustedReorderPoint,
       onOrderPieces,
       effectiveSupply,
+      // Committed demand-event pieces count as a demand signal for the
+      // zero-stock stockout guard even when observed velocity is zero.
+      forwardDemandPieces,
     });
     const supplierCycleDiagnostics = buildSupplierCycleDiagnostics({
       available,

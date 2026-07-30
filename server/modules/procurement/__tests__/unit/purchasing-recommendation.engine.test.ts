@@ -1061,7 +1061,11 @@ describe("purchasing recommendation engine", () => {
     });
 
     expect(result.items[0]).toMatchObject({
-      skippedReason: "zero_suggested_quantity",
+      // Queue truth (PR feat/reorder-queue-truth): this zero-stock row has no
+      // blended velocity and no forward demand, so it now classifies as
+      // no_movement instead of stockout — the skip ladder therefore resolves
+      // not_actionable_status before it ever reaches the zero-quantity check.
+      skippedReason: "not_actionable_status",
       demandBasis: {
         demandQuality: "no_recent_demand",
         latestDemandAt: null,
@@ -1642,6 +1646,113 @@ describe("purchasing recommendation engine", () => {
         expect.objectContaining({ code: "invalid_supplier_minimum_order", severity: "block" }),
       ]),
     });
+  });
+
+  // Queue truth (PR feat/reorder-queue-truth): zero available only classifies
+  // as a stockout when there is demand to miss — observed velocity or
+  // committed forward demand. A never-sold, never-stocked SKU is stagnant.
+  it("classifies zero stock with zero demand as no_movement, never stockout", () => {
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [{
+        product_id: 90,
+        variant_id: 901,
+        base_sku: "NEVER-SOLD",
+        product_name: "Never Sold Never Stocked",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 0,
+        previous_outbound_pieces: 0,
+        demand_order_count: 0,
+        demand_active_days: 0,
+        latest_demand_at: null,
+        on_order_pieces: 0,
+        vendor_lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+      }],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      status: "no_movement",
+      suggestedOrderPieces: 0,
+      actionable: false,
+      // The skip ladder resolves before the zero-quantity check now that the
+      // status is no longer an actionable stockout.
+      skippedReason: "not_actionable_status",
+    });
+    expect(result.summary).toMatchObject({
+      outOfStock: 0,
+      noMovement: 1,
+      actionableCount: 0,
+    });
+  });
+
+  it("keeps zero stock with real sales velocity classified as a stockout", () => {
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [{
+        product_id: 91,
+        variant_id: 911,
+        base_sku: "VELOCITY-STOCKOUT",
+        product_name: "Velocity Stockout",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 30,
+        previous_outbound_pieces: 30,
+        demand_order_count: 10,
+        demand_active_days: 8,
+        latest_demand_at: "2026-05-18T12:00:00.000Z",
+        on_order_pieces: 0,
+        vendor_lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        preferred_vendor_id: 91,
+      }],
+    });
+
+    expect(result.items[0]).toMatchObject({ status: "stockout" });
+    expect(result.items[0].suggestedOrderPieces).toBeGreaterThan(0);
+    expect(result.summary).toMatchObject({ outOfStock: 1, noMovement: 0 });
+  });
+
+  it("treats committed forward demand as a demand signal for the zero-stock stockout guard", () => {
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [{
+        product_id: 92,
+        variant_id: 921,
+        base_sku: "EVENT-ONLY-STOCKOUT",
+        product_name: "Event Only Stockout",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 0,
+        previous_outbound_pieces: 0,
+        demand_order_count: 0,
+        demand_active_days: 0,
+        latest_demand_at: null,
+        on_order_pieces: 0,
+        vendor_lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        preferred_vendor_id: 92,
+        // Zero velocity, but a demand event commits 40 pieces inside the
+        // horizon: running at zero stock IS a stockout against that demand.
+        forward_demand_pieces: 40,
+        forward_demand_raw_pieces: 40,
+        forward_demand_event_count: 1,
+      }],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      status: "stockout",
+      forwardDemandBasis: expect.objectContaining({ forwardDemandPieces: 40 }),
+    });
+    expect(result.items[0].suggestedOrderPieces).toBeGreaterThan(0);
+    expect(result.summary).toMatchObject({ outOfStock: 1, noMovement: 0 });
   });
 });
 

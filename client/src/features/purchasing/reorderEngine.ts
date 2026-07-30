@@ -42,10 +42,32 @@ export interface SuggestedSpendItem {
   estimatedCostCents: number | null;
   /**
    * Engine skip reason. The engine dual-lists non-excluded skipped rows
-   * (no_vendor, already_on_order, …) in BOTH `items` and `skippedItems`;
-   * their Suggested cell renders "—", so spend aggregation must ignore them.
+   * (no_vendor, already_on_order, …) in BOTH `items` and `skippedItems`.
+   * Queue truth (PR feat/reorder-queue-truth): `no_vendor` rows have REAL
+   * demand — the skip ladder only assigns no_vendor to actionable-status rows
+   * with a positive suggestion — so they render and aggregate as first-class
+   * order-queue rows (their spend lands under the missing-cost qualifier).
+   * Every OTHER skip reason still renders "—" and is excluded from spend.
    */
   skippedReason?: string | null;
+}
+
+/**
+ * True for the engine's dual-listed "real demand, no vendor mapping" rows.
+ * Needing to order is the fact; the missing vendor mapping is app hygiene —
+ * these rows are order-queue members, not skipped rows.
+ */
+export function isVendorGapRow(item: { skippedReason?: string | null }): boolean {
+  return item.skippedReason === "no_vendor";
+}
+
+/**
+ * True when a row gets the muted "skipped" table treatment (grey row, dashed
+ * cells). Vendor-gap rows are deliberately NOT display-skipped — they show
+ * their true engine status plus an honest "No vendor yet" badge.
+ */
+export function isDisplaySkipped(item: { skippedReason?: string | null }): boolean {
+  return item.skippedReason !== null && item.skippedReason !== undefined && !isVendorGapRow(item);
 }
 
 export interface GroupableItem extends SuggestedSpendItem {
@@ -330,15 +352,18 @@ export interface SuggestedSpendSummary {
  * engine suggests ordering. Client-side per design spec §13 ("suggested-spend
  * (client-computed acceptable)"). Items without a usable cost are counted but
  * contribute $0 — the count is surfaced so the KPI is honest about coverage.
- * Skipped rows (the engine dual-lists them in `items`) never count: their
- * table row renders "—", so the KPI must not disagree with the table.
+ * Display-skipped rows (the engine dual-lists them in `items`) never count:
+ * their table row renders "—", so the KPI must not disagree with the table.
+ * Vendor-gap (no_vendor) rows DO count — the table shows their suggestion,
+ * and having no vendor almost always means no cost, so they surface through
+ * the existing missing-cost qualifier (PR feat/reorder-queue-truth).
  */
 export function computeSuggestedSpend(items: readonly SuggestedSpendItem[]): SuggestedSpendSummary {
   let totalCents = 0;
   let skuCount = 0;
   let missingCostCount = 0;
   for (const item of items) {
-    if (item.skippedReason) continue;
+    if (isDisplaySkipped(item)) continue;
     if (item.suggestedOrderPieces <= 0) continue;
     skuCount += 1;
     const cents = suggestedValueCents(item);
@@ -395,16 +420,19 @@ export function computeGroupRollup<T extends GroupableItem>(items: readonly T[])
   let suggestedCents = 0;
   let onHandCents = 0;
   for (const item of items) {
-    const skipped = item.skippedReason !== null && item.skippedReason !== undefined;
+    // Vendor-gap (no_vendor) rows are NOT display-skipped: their demand is
+    // real, so they count toward below-RP and suggested $ like any active row
+    // (PR feat/reorder-queue-truth).
+    const skipped = isDisplaySkipped(item);
     if (
       !skipped &&
       item.currentSupply.effectiveSupplyPieces < item.forwardDemandBasis.adjustedReorderPoint
     ) {
       belowReorderPointCount += 1;
     }
-    // Skipped rows render "—" in the Suggested column, so their (possibly
-    // positive) engine suggestion must not inflate the group's suggested $.
-    // On-hand value is real stock regardless, so it always counts.
+    // Display-skipped rows render "—" in the Suggested column, so their
+    // (possibly positive) engine suggestion must not inflate the group's
+    // suggested $. On-hand value is real stock regardless, so it always counts.
     if (!skipped) suggestedCents += suggestedValueCents(item) ?? 0;
     onHandCents += availableValueCents(item);
   }
@@ -747,9 +775,11 @@ export interface OrderBuilderGroup<T> {
 
 /**
  * Selected lines grouped by preferred vendor, in item order. Lines without a
- * vendor come back separately — they render in the "Needs supplier" group and
- * can never be submitted (neither the PO handoff nor the RFQ batch accepts a
- * line without a vendor).
+ * vendor come back separately — they render in the "Needs supplier" group,
+ * which is actionable (PR feat/reorder-queue-truth): assigning a vendor there
+ * (optionally with a unit cost) moves the line into that vendor's group. Pass
+ * items through `applyStagedVendors` first so client-staged assignments group
+ * correctly before the server mapping exists.
  */
 export function orderBuilderGroups<T extends OrderableItem>(
   items: readonly T[],
@@ -779,6 +809,157 @@ export function orderBuilderGroups<T extends OrderableItem>(
     group.lines.push(item);
   }
   return { vendorGroups, needsSupplier };
+}
+
+// ---------------- inline vendor assignment (PR feat/reorder-queue-truth) ----------------
+
+/**
+ * Client-staged vendor choice for a line whose server mapping does not exist
+ * yet. Staged WITHOUT a cost, the assignment persists when the quote request
+ * is submitted: createRfqBatch (purchasing.service.ts) creates the preferred
+ * vendor_products mapping with honest null costs as part of RFQ creation.
+ * Staged assignments never unlock the PO path — no mapping means no quote.
+ */
+export interface StagedVendorAssignment {
+  vendorId: number;
+  vendorName: string;
+}
+
+export type StagedVendorMap = ReadonlyMap<string, StagedVendorAssignment>;
+
+/**
+ * Overlay staged vendor choices onto items that have no server-side preferred
+ * vendor, so `orderBuilderGroups` places them under the chosen vendor. Items
+ * that already carry a server vendor are never overridden; inputs are never
+ * mutated.
+ */
+export function applyStagedVendors<T extends OrderableItem>(
+  items: readonly T[],
+  staged: StagedVendorMap,
+): T[] {
+  return items.map((item) => {
+    if (item.preferredVendorId !== null) return item;
+    const assignment = staged.get(item.recommendationId);
+    if (!assignment) return item;
+    return {
+      ...item,
+      preferredVendorId: assignment.vendorId,
+      preferredVendorName: assignment.vendorName,
+    };
+  });
+}
+
+/** The supplier-quote fields the PO-eligibility mirror needs. */
+export interface SupplierQuoteFields {
+  pricingBasis: string;
+  purchaseUom: string | null;
+  quotedUnitCostMills?: number | null;
+  piecesPerPurchaseUom: number | null;
+  quotedAt?: string | Date | null;
+}
+
+/**
+ * Display-side mirror of the PO handoff's quote gate,
+ * hasCompleteExplicitRecommendationQuote (purchasing-recommendation.routes.ts):
+ * quotedAt must be set, and the pricing basis must be an explicit per-piece
+ * quote (no UOM fields) or a per-purchase-UOM quote whose case pack divides
+ * the suggested pieces. Anything else — notably `legacy_unknown` mappings and
+ * costless RFQ-created mappings — is skipped at handoff with
+ * `supplier_quote_basis_review_required`. Display gating only; the server
+ * re-validates against the accepted snapshot.
+ */
+export function hasPoEligibleSupplierQuote(item: {
+  suggestedOrderPieces: number;
+  supplierBasis?: SupplierQuoteFields | null;
+}): boolean {
+  const basis = item.supplierBasis;
+  if (!basis || !basis.quotedAt) return false;
+  const quotedMills = basis.quotedUnitCostMills;
+  const hasQuotedCost =
+    typeof quotedMills === "number" && Number.isSafeInteger(quotedMills) && quotedMills >= 0;
+  if (basis.pricingBasis === "per_piece") {
+    return hasQuotedCost && basis.purchaseUom === null && basis.piecesPerPurchaseUom === null;
+  }
+  if (basis.pricingBasis !== "per_purchase_uom") return false;
+  return (
+    typeof basis.purchaseUom === "string" &&
+    basis.purchaseUom.trim().length > 0 &&
+    hasQuotedCost &&
+    typeof basis.piecesPerPurchaseUom === "number" &&
+    Number.isSafeInteger(basis.piecesPerPurchaseUom) &&
+    basis.piecesPerPurchaseUom > 0 &&
+    Number.isSafeInteger(item.suggestedOrderPieces) &&
+    item.suggestedOrderPieces >= 0 &&
+    item.suggestedOrderPieces % basis.piecesPerPurchaseUom === 0
+  );
+}
+
+/**
+ * Effective order mode for a vendor group. A group with NO PO-eligible line
+ * cannot produce a PO — the handoff would skip every line with
+ * `supplier_quote_basis_review_required` — so the PO radio is disabled and
+ * the group is forced onto the quote-request path regardless of any stored
+ * choice.
+ */
+export function effectiveVendorMode(
+  stored: VendorOrderMode | undefined,
+  groupHasPoEligibleLine: boolean,
+): VendorOrderMode {
+  if (!groupHasPoEligibleLine) return "rfq";
+  return stored ?? "po";
+}
+
+/**
+ * Parse an operator-typed dollar amount ("4.125") into integer mills without
+ * floating-point money math: digits are split on the decimal point and the
+ * fraction is right-padded to 4 places. Returns null for anything that is not
+ * a plain POSITIVE dollar amount with at most 4 decimal places. Zero is
+ * rejected on purpose: this parser feeds the inline vendor+cost save, where a
+ * $0 "confirmed quote" would be fake money data — the costless path is the
+ * quote request, not a zero-priced mapping.
+ */
+export function parseUnitCostDollarsToMills(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d{1,9}(\.\d{1,4})?$/.test(trimmed)) return null;
+  const [dollars, fraction = ""] = trimmed.split(".");
+  const mills = Number(dollars) * 10_000 + Number(fraction.padEnd(4, "0"));
+  return Number.isSafeInteger(mills) && mills > 0 ? mills : null;
+}
+
+/**
+ * Body for POST /api/vendor-products/upsert — the vendor+cost assignment save.
+ * The upsert (over plain create) is deliberate: it demotes any competing
+ * preferred mapping transactionally instead of tripping the one-active-
+ * preferred unique index, and it is keyed on the same
+ * (vendor, product, variant) identity the analysis' preferred-vendor lateral
+ * matches first. The endpoint REQUIRES a price, so this body is only built
+ * when the operator typed a cost — a costless assignment goes through the
+ * quote-request path instead (createRfqBatch persists the costless mapping).
+ * Per-piece basis with quotedAt=now makes the mapping PO-eligible under
+ * hasCompleteExplicitRecommendationQuote.
+ */
+export function buildVendorAssignmentBody(input: {
+  vendorId: number;
+  productId: number;
+  productVariantId: number;
+  unitCostMills: number;
+  quotedAtIso: string;
+}): {
+  vendorId: number;
+  productId: number;
+  productVariantId: number;
+  isPreferred: true;
+  pricing: { basis: "per_piece"; quantityPieces: 1; unitCostMills: number };
+  quotedAt: string;
+} {
+  return {
+    vendorId: input.vendorId,
+    productId: input.productId,
+    productVariantId: input.productVariantId,
+    isPreferred: true,
+    pricing: { basis: "per_piece", quantityPieces: 1, unitCostMills: input.unitCostMills },
+    quotedAt: input.quotedAtIso,
+  };
 }
 
 // ---------------- money (integer cents) ----------------
