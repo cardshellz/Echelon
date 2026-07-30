@@ -644,6 +644,10 @@ export function createHistoricalShipStationSplitRepairRepository(
       values.push(flags.providerShipmentId);
       postFilters.push(`matched.provider_shipment_id = $${values.length}`);
     }
+    if (flags.afterProviderShipmentId !== null) {
+      values.push(flags.afterProviderShipmentId);
+      postFilters.push(`matched.provider_shipment_id > $${values.length}`);
+    }
     let limit = "";
     if (flags.limit !== null) {
       values.push(flags.limit);

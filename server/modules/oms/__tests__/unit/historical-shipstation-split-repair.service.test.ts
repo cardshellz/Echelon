@@ -37,11 +37,14 @@ function flags(overrides: Partial<HistoricalSplitRepairFlags> = {}): HistoricalS
     mode: "dry-run",
     limit: 25,
     providerShipmentId: null,
+    afterProviderShipmentId: null,
     confirmCount: null,
     operator: null,
     reason: null,
     idempotencyKey: null,
+    concurrency: 1,
     delayMs: 0,
+    progressEvery: 1,
     json: true,
     ...overrides,
   };
@@ -281,4 +284,101 @@ describe("historical ShipStation split repair", () => {
     expect(deps.inspectPackages).not.toHaveBeenCalled();
     expect(deps.applyComponent).not.toHaveBeenCalled();
   });
+
+  it("bounds provider lookups and emits aggregate progress", async () => {
+    const candidates = [candidate(442730040), candidate(442730041), candidate(442730042)];
+    let active = 0;
+    let maxActive = 0;
+    const progress = vi.fn();
+    const deps = dependencies({
+      loadRetryCandidates: vi.fn(async () => candidates),
+      lookupProviderShipment: vi.fn(async (providerShipmentId) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active -= 1;
+        return providerShipment({ shipmentId: providerShipmentId });
+      }),
+      progress,
+    });
+    const summary = await runHistoricalShipStationSplitRepair(flags({
+      concurrency: 2,
+      progressEvery: 1,
+    }), deps);
+    expect(summary).toMatchObject({
+      candidates: 3,
+      providerLookupsProcessed: 3,
+      providerPackagesLoaded: 3,
+      stoppedEarlyReason: null,
+    });
+    expect(maxActive).toBe(2);
+    expect(progress).toHaveBeenCalled();
+    expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({
+      processed: 3,
+      total: 3,
+    }));
+  });
+
+  it("never advances the resume checkpoint past an unfinished lower provider id", async () => {
+    const candidates = [candidate(442730040), candidate(442730041), candidate(442730042)];
+    let releaseFirst!: () => void;
+    const firstLookup = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const progress = vi.fn();
+    const deps = dependencies({
+      loadRetryCandidates: vi.fn(async () => candidates),
+      lookupProviderShipment: vi.fn(async (providerShipmentId) => {
+        if (providerShipmentId === 442730040) await firstLookup;
+        return providerShipment({ shipmentId: providerShipmentId });
+      }),
+      progress,
+    });
+    const run = runHistoricalShipStationSplitRepair(flags({
+      concurrency: 2,
+      progressEvery: 1,
+    }), deps);
+    await vi.waitFor(() => {
+      expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+        processed: 2,
+        completedThroughProviderShipmentId: null,
+      }));
+    });
+    releaseFirst();
+    await expect(run).resolves.toMatchObject({ providerLookupsProcessed: 3 });
+    expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({
+      completedThroughProviderShipmentId: 442730042,
+    }));
+  });
+
+  it("performs no mutation when the provider circuit stops a selected execute cohort", async () => {
+    const candidates = [candidate(442730040), candidate(442730041), candidate(442730042)];
+    let stoppedEarlyReason: string | null = null;
+    const deps = dependencies({
+      loadRetryCandidates: vi.fn(async () => candidates),
+      lookupProviderShipment: vi.fn(async (providerShipmentId) => {
+        stoppedEarlyReason = "ShipStation rate-limit breaker opened";
+        return providerShipment({ shipmentId: providerShipmentId });
+      }),
+      providerLookupState: () => ({ rateLimitResponses: 20, stoppedEarlyReason }),
+    });
+    const summary = await runHistoricalShipStationSplitRepair(flags({
+      mode: "execute",
+      confirmCount: 3,
+      operator: "owner@cardshellz.com",
+      reason: "historical repair",
+      idempotencyKey: "historical-repair-circuit-stop",
+      concurrency: 1,
+    }), deps);
+    expect(summary).toMatchObject({
+      candidates: 3,
+      providerLookupsProcessed: 1,
+      stoppedEarlyReason: "ShipStation rate-limit breaker opened",
+      repaired: 0,
+    });
+    expect(deps.applyComponent).not.toHaveBeenCalled();
+    expect(deps.finalizeNonOutboundPackage).not.toHaveBeenCalled();
+    expect(deps.finalizeRepairedPackage).not.toHaveBeenCalled();
+  });
+
 });

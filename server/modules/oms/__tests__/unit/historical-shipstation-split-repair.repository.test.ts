@@ -4,7 +4,10 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { createHistoricalShipStationSplitRepairRepository } from "../../historical-shipstation-split-repair.repository";
-import type { HistoricalSplitRepairPackagePlan } from "../../historical-shipstation-split-repair.service";
+import type {
+  HistoricalSplitRepairFlags,
+  HistoricalSplitRepairPackagePlan,
+} from "../../historical-shipstation-split-repair.service";
 
 const source = fs.readFileSync(
   path.resolve(process.cwd(), "server/modules/oms/historical-shipstation-split-repair.repository.ts"),
@@ -58,6 +61,35 @@ describe("historical ShipStation split repair repository guards", () => {
     expect(source).toContain("retry.topic = 'SHIP_NOTIFY'");
     expect(source).toContain("retry.status = 'dead'");
     expect(source).toContain("uq_outbound_shipments_active_");
+  });
+
+  it("supports an explicit provider shipment resume cursor", () => {
+    expect(source).toContain("flags.afterProviderShipmentId !== null");
+    expect(source).toContain("matched.provider_shipment_id >");
+  });
+
+  it("binds the resume cursor and limit as PostgreSQL parameters", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const repository = createHistoricalShipStationSplitRepairRepository({ query } as any);
+    const flags: HistoricalSplitRepairFlags = {
+      mode: "dry-run",
+      limit: 25,
+      providerShipmentId: null,
+      afterProviderShipmentId: 440000000,
+      confirmCount: null,
+      operator: null,
+      reason: null,
+      idempotencyKey: null,
+      concurrency: 2,
+      delayMs: 250,
+      progressEvery: 10,
+      json: true,
+    };
+    await repository.loadRetryCandidates(flags);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringMatching(/matched\.provider_shipment_id > \$1[\s\S]*LIMIT \$2/),
+      [440000000, 25],
+    );
   });
 
   it("serializes each affected WMS order and locks source rows", () => {

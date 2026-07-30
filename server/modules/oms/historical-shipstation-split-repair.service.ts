@@ -79,12 +79,31 @@ export interface HistoricalSplitRepairFlags {
   readonly mode: HistoricalSplitRepairMode;
   readonly limit: number | null;
   readonly providerShipmentId: number | null;
+  readonly afterProviderShipmentId: number | null;
   readonly confirmCount: number | null;
   readonly operator: string | null;
   readonly reason: string | null;
   readonly idempotencyKey: string | null;
+  readonly concurrency: number;
   readonly delayMs: number;
+  readonly progressEvery: number;
   readonly json: boolean;
+}
+
+export interface HistoricalSplitProviderLookupState {
+  readonly rateLimitResponses: number;
+  readonly stoppedEarlyReason: string | null;
+}
+
+export interface HistoricalSplitRepairProgress {
+  readonly runId: string;
+  readonly processed: number;
+  readonly total: number;
+  readonly completedThroughProviderShipmentId: number | null;
+  readonly loaded: number;
+  readonly failed: number;
+  readonly rateLimitResponses: number;
+  readonly elapsedMs: number;
 }
 
 export interface HistoricalSplitRepairDependencies {
@@ -125,6 +144,8 @@ export interface HistoricalSplitRepairDependencies {
   ): Promise<void>;
   sleep(milliseconds: number): Promise<void>;
   now(): Date;
+  providerLookupState?(): HistoricalSplitProviderLookupState;
+  progress?(progress: HistoricalSplitRepairProgress): void;
   log?(message: string): void;
 }
 
@@ -140,6 +161,7 @@ export interface HistoricalSplitRepairSummary {
   readonly mode: HistoricalSplitRepairMode;
   readonly runId: string;
   readonly candidates: number;
+  readonly providerLookupsProcessed: number;
   readonly providerPackagesLoaded: number;
   readonly alreadyCanonical: number;
   readonly repairable: number;
@@ -152,8 +174,16 @@ export interface HistoricalSplitRepairSummary {
   readonly returnLabels: number;
   readonly providerMissing: number;
   readonly invalidProviderEvidence: number;
+  readonly rateLimitResponses: number;
+  readonly stoppedEarlyReason: string | null;
   readonly unsafe: number;
   readonly failures: readonly HistoricalSplitRepairFailure[];
+}
+
+interface HistoricalSplitProviderLookupOutcome {
+  readonly candidate: HistoricalSplitRetryCandidate;
+  readonly shipment: ShipStationShipment | null;
+  readonly failure: HistoricalSplitRepairFailure | null;
 }
 
 function requiredText(
@@ -378,7 +408,15 @@ export async function runHistoricalShipStationSplitRepair(
 
   const activePackages: HistoricalSplitRepairPackagePlan[] = [];
   const failures: HistoricalSplitRepairFailure[] = [];
+  const lookupOutcomes = new Array<HistoricalSplitProviderLookupOutcome | undefined>(
+    candidates.length,
+  );
+  const lookupStartedAt = dependencies.now().getTime();
+  let nextLookupIndex = 0;
+  let completedThroughIndex = -1;
+  let providerLookupsProcessed = 0;
   let providerPackagesLoaded = 0;
+  let providerLookupFailures = 0;
   let voided = 0;
   let returnLabels = 0;
   let providerMissing = 0;
@@ -387,23 +425,88 @@ export async function runHistoricalShipStationSplitRepair(
   if (!flags.json) {
     log(
       `[Historical ShipStation split repair] mode=${flags.mode} ` +
-        `candidates=${candidates.length} limit=${flags.limit ?? "all"}`,
+        `candidates=${candidates.length} limit=${flags.limit ?? "all"} ` +
+        `concurrency=${flags.concurrency} progressEvery=${flags.progressEvery}`,
     );
   }
 
-  for (let index = 0; index < candidates.length; index += 1) {
-    const candidate = candidates[index];
-    let shipment: ShipStationShipment | null;
-    try {
-      shipment = await dependencies.lookupProviderShipment(
-        candidate.providerShipmentId,
-      );
-    } catch (error) {
-      failures.push(failure(
-        [candidate.providerShipmentId],
-        "PROVIDER_LOOKUP_FAILED",
-        error,
-      ));
+  const lookupState = (): HistoricalSplitProviderLookupState =>
+    dependencies.providerLookupState?.() ?? Object.freeze({
+      rateLimitResponses: 0,
+      stoppedEarlyReason: null,
+    });
+  const shouldPrintProgress = (processed: number): boolean =>
+    flags.progressEvery > 0 && (
+      processed % flags.progressEvery === 0
+      || processed === candidates.length
+      || lookupState().stoppedEarlyReason !== null
+    );
+  const worker = async (): Promise<void> => {
+    while (true) {
+      if (lookupState().stoppedEarlyReason !== null) return;
+      const index = nextLookupIndex;
+      nextLookupIndex += 1;
+      if (index >= candidates.length) return;
+
+      const candidate = candidates[index];
+      let shipment: ShipStationShipment | null = null;
+      let lookupFailure: HistoricalSplitRepairFailure | null = null;
+      try {
+        shipment = await dependencies.lookupProviderShipment(
+          candidate.providerShipmentId,
+        );
+      } catch (error) {
+        lookupFailure = failure(
+          [candidate.providerShipmentId],
+          "PROVIDER_LOOKUP_FAILED",
+          error,
+        );
+      }
+      lookupOutcomes[index] = Object.freeze({
+        candidate,
+        shipment,
+        failure: lookupFailure,
+      });
+      providerLookupsProcessed += 1;
+      while (lookupOutcomes[completedThroughIndex + 1] !== undefined) {
+        completedThroughIndex += 1;
+      }
+      if (shipment) providerPackagesLoaded += 1;
+      if (lookupFailure) providerLookupFailures += 1;
+
+      if (dependencies.progress && shouldPrintProgress(providerLookupsProcessed)) {
+        const state = lookupState();
+        dependencies.progress(Object.freeze({
+          runId,
+          processed: providerLookupsProcessed,
+          total: candidates.length,
+          completedThroughProviderShipmentId:
+            candidates[completedThroughIndex]?.providerShipmentId ?? null,
+          loaded: providerPackagesLoaded,
+          failed: providerLookupFailures,
+          rateLimitResponses: state.rateLimitResponses,
+          elapsedMs: Math.max(0, dependencies.now().getTime() - lookupStartedAt),
+        }));
+      }
+      if (lookupState().stoppedEarlyReason !== null) return;
+      if (flags.delayMs > 0 && providerLookupsProcessed < candidates.length) {
+        await dependencies.sleep(flags.delayMs);
+      }
+    }
+  };
+
+  const workerCount = Math.min(flags.concurrency, candidates.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  const providerLookupState = lookupState();
+  const mutationAllowed = audit !== null
+    && providerLookupState.stoppedEarlyReason === null
+    && providerLookupsProcessed === candidates.length;
+
+  for (const outcome of lookupOutcomes) {
+    if (!outcome) continue;
+    const { candidate, shipment, failure: lookupFailure } = outcome;
+    if (lookupFailure) {
+      failures.push(lookupFailure);
       continue;
     }
     if (!shipment) {
@@ -417,7 +520,6 @@ export async function runHistoricalShipStationSplitRepair(
       ));
       continue;
     }
-    providerPackagesLoaded += 1;
 
     const disposition = shipment.isReturnLabel === true
       ? "return_label"
@@ -427,7 +529,7 @@ export async function runHistoricalShipStationSplitRepair(
     if (disposition) {
       if (disposition === "voided") voided += 1;
       else returnLabels += 1;
-      if (audit) {
+      if (mutationAllowed && audit) {
         try {
           await dependencies.finalizeNonOutboundPackage(
             candidate,
@@ -459,10 +561,6 @@ export async function runHistoricalShipStationSplitRepair(
         ));
       }
     }
-
-    if (index < candidates.length - 1 && flags.delayMs > 0) {
-      await dependencies.sleep(flags.delayMs);
-    }
   }
 
   let inspection: HistoricalSplitInspection = Object.freeze({
@@ -480,7 +578,7 @@ export async function runHistoricalShipStationSplitRepair(
   let dispatchConfirmed = 0;
   let dispatchCommandsCreated = 0;
   let trackingDeferred = 0;
-  if (audit) {
+  if (mutationAllowed && audit) {
     for (const canonical of inspection.alreadyCanonical) {
       try {
         await dependencies.finalizeRepairedPackage(
@@ -572,6 +670,7 @@ export async function runHistoricalShipStationSplitRepair(
     mode: flags.mode,
     runId,
     candidates: candidates.length,
+    providerLookupsProcessed,
     providerPackagesLoaded,
     alreadyCanonical: inspection.alreadyCanonical.length,
     repairable,
@@ -584,6 +683,8 @@ export async function runHistoricalShipStationSplitRepair(
     returnLabels,
     providerMissing,
     invalidProviderEvidence,
+    rateLimitResponses: providerLookupState.rateLimitResponses,
+    stoppedEarlyReason: providerLookupState.stoppedEarlyReason,
     unsafe: inspection.unsafe.length,
     failures: Object.freeze(failures),
   });
