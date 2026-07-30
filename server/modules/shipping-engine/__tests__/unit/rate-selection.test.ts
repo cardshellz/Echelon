@@ -212,6 +212,8 @@ describe("startedPoundsFromGrams", () => {
     [454, 1],
     [907, 2],
     [908, 3],
+    [23_133, 51],
+    [23_134, 52],
   ])("maps %i grams to %i started pounds", (grams, pounds) => {
     expect(startedPoundsFromGrams(grams)).toBe(pounds);
   });

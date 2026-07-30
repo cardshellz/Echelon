@@ -56,6 +56,7 @@ import {
   buildCatalogSkuSearchUrl,
   normalizeCatalogSkuSearchResults,
 } from "./rate-test-sku-search";
+import { poundsToRateTestGrams } from "./rate-test-weight";
 import {
   assignmentLabel,
   getJson,
@@ -183,7 +184,13 @@ export function RateTestDialog({
         setValidationError("Shipment weight must be greater than zero.");
         return;
       }
-      const billableWeightGrams = Math.ceil(numericWeight * 453.59237);
+      const billableWeightGrams = poundsToRateTestGrams(numericWeight);
+      if (billableWeightGrams === null) {
+        setValidationError(
+          "Shipment weight must convert to a positive whole number of grams within supported limits.",
+        );
+        return;
+      }
       setValidationError(null);
       quoteMutation.mutate({ ...basePayload, billableWeightGrams });
       return;
