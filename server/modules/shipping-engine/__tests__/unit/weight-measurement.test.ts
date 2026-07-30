@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { sumRateSelectionWeightGrams } from "../../domain/weight-measurement";
+import {
+  applyMinimumRateSelectionWeightGrams,
+  sumRateSelectionWeightGrams,
+} from "../../domain/weight-measurement";
 
 describe("shipping rating weight measurement", () => {
+  it("uses a one-gram floor only when the rated contribution is zero", () => {
+    expect(applyMinimumRateSelectionWeightGrams(0)).toBe(1);
+    expect(applyMinimumRateSelectionWeightGrams(907)).toBe(907);
+    expect(applyMinimumRateSelectionWeightGrams(-1)).toBeNull();
+    expect(applyMinimumRateSelectionWeightGrams(1.5)).toBeNull();
+  });
+
   it.each([
     [1, 454],
     [2, 907],

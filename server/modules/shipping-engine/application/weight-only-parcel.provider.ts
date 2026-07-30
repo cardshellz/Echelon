@@ -2,15 +2,16 @@ import type {
   ShipmentLineInput,
   ShipmentParcelPlanResult,
 } from "../domain/shipment";
-import { sumRateSelectionWeightGrams } from "../domain/weight-measurement";
+import {
+  MINIMUM_RATE_SELECTION_WEIGHT_GRAMS,
+  sumRateSelectionWeightGrams,
+} from "../domain/weight-measurement";
 import type { ShipmentParcelProvider } from "./shipment-parcel-provider";
 
 export const WEIGHT_ONLY_PARCEL_PROVIDER = {
   name: "channel-weight",
   version: "1.0.0",
 } as const;
-
-const MINIMUM_RATING_WEIGHT_GRAMS = 1;
 
 /**
  * Initial strategy: rate one shipment from already-resolved item weights. It
@@ -52,14 +53,14 @@ export function buildWeightOnlyParcelPlan(
   if (errors.length > 0) return { ok: false, errors };
 
   const roundedWeightGrams = Math.max(
-    MINIMUM_RATING_WEIGHT_GRAMS,
+    MINIMUM_RATE_SELECTION_WEIGHT_GRAMS,
     Math.ceil(totalWeightGrams),
   );
   if (!Number.isSafeInteger(roundedWeightGrams)) {
     return { ok: false, errors: ["shipment weight is outside the supported range"] };
   }
   const rateSelectionWeightGrams = weightedLines.length === 0
-    ? MINIMUM_RATING_WEIGHT_GRAMS
+    ? MINIMUM_RATE_SELECTION_WEIGHT_GRAMS
     : sumRateSelectionWeightGrams(weightedLines);
   if (
     rateSelectionWeightGrams === null

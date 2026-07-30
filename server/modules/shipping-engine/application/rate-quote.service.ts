@@ -31,6 +31,7 @@ import {
   type ProductRateTraceStep,
 } from "../domain/product-rate-policy";
 import type { ShipmentLineInput } from "../domain/shipment";
+import { applyMinimumRateSelectionWeightGrams } from "../domain/weight-measurement";
 import { selectRateBookAssignment } from "../domain/rate-book";
 import type { ShippingRateContext } from "../domain/shipping-channel";
 import { resolveZone, type ZoneRule } from "../domain/zones";
@@ -256,10 +257,12 @@ export async function quoteShipmentRates(
         })),
         rules,
         defaultRateForWeightGrams: (weightGrams) => {
-          if (weightGrams === 0) return 0;
+          const rateSelectionWeightGrams =
+            applyMinimumRateSelectionWeightGrams(weightGrams);
+          if (rateSelectionWeightGrams === null) return null;
           return selectServiceLevelRates(tableRows, {
             ...selectionInput,
-            shipmentWeightGrams: weightGrams,
+            shipmentWeightGrams: rateSelectionWeightGrams,
           })[0]?.rateCents ?? null;
         },
       });
