@@ -1804,6 +1804,206 @@ describe("processShipNotify V2 :: combined/merged shipment recovery (source inva
 // ─── Duplicate orderKey repair (merged from main; adoption is now the
 //     read-only resolveShipmentByOrderKey path — no INSERT fallback) ──
 
+describe("processShipNotify V2 :: active combined package", () => {
+  beforeEach(() => {
+    process.env.SHIPSTATION_API_KEY = "test-key";
+    process.env.SHIPSTATION_API_SECRET = "test-secret";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    vi.restoreAllMocks();
+  });
+
+  it("resolves an active parent package spanning multiple WMS orders before single-order splitting", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 448879362,
+      orderId: 768275615,
+      orderKey: "echelon-wms-shp-501",
+      orderNumber: "#60943",
+      trackingNumber: "1Z16D13WYW18265554",
+      shipmentItems: [
+        {
+          lineItemKey: "wms-item-601",
+          sku: "SHLZ-MAG-35PT-SLV-B25",
+          quantity: 2,
+        },
+        {
+          lineItemKey: "wms-item-602",
+          sku: "GLV-MAG-35PT-P50",
+          quantity: 2,
+        },
+      ],
+    });
+    const mock = makeDb([
+      // No prior WMS row is linked to this provider physical shipment.
+      { rows: [] },
+      // The provider orderKey points at the surviving active parent.
+      {
+        rows: [{
+          id: 501,
+          order_id: 42,
+          channel_id: 36,
+          source: "echelon_sync",
+          status: "queued",
+          shipstation_order_id: 768275615,
+          shipstation_order_key: "echelon-wms-shp-501",
+          external_fulfillment_id: null,
+          tracking_number: null,
+          shipment_purpose: "customer_fulfillment",
+        }],
+      },
+      // The package contains the parent's item plus a foreign WMS item key.
+      { rows: [{ id: 601, qty: 2 }] },
+      // Strict provider-line ownership preflight.
+      {
+        rows: [
+          { source_shipment_item_id: 601, wms_order_id: 42 },
+          { source_shipment_item_id: 602, wms_order_id: 43 },
+        ],
+      },
+      // Resolve one live WMS shipment for each owning order.
+      {
+        rows: [{
+          id: 501,
+          order_id: 42,
+          source: "echelon_sync",
+          status: "queued",
+          shipstation_order_id: 768275615,
+          external_fulfillment_id: null,
+          tracking_number: null,
+          shipment_purpose: "customer_fulfillment",
+        }],
+      },
+      {
+        rows: [{
+          id: 502,
+          order_id: 43,
+          source: "echelon_sync",
+          status: "queued",
+          shipstation_order_id: 768298375,
+          external_fulfillment_id: null,
+          tracking_number: null,
+          shipment_purpose: "customer_fulfillment",
+        }],
+      },
+      // Apply the package's first provider line to WMS shipment 501.
+      {
+        rows: [{
+          id: 601,
+          order_item_id: 1001,
+          replacement_for_order_item_id: null,
+          sku: "SHLZ-MAG-35PT-SLV-B25",
+          qty: 2,
+          shipment_purpose: "customer_fulfillment",
+          provider_membership_state: "authoritative",
+        }],
+      },
+      {
+        rows: [{
+          id: 601,
+          order_item_id: 1001,
+          product_variant_id: 2001,
+          from_location_id: 3001,
+          box_id: null,
+          weight_oz: 4,
+        }],
+      },
+      { rows: [] },
+      {
+        rows: [{
+          id: 501,
+          order_id: 42,
+          status: "queued",
+          tracking_number: null,
+          carrier: null,
+          tracking_url: null,
+          service_code: null,
+          carrier_cost_cents: null,
+          carrier_cost_source: null,
+          carrier_cost_recorded_at: null,
+        }],
+      },
+      { rows: [] },
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
+      // Apply the package's second provider line to WMS shipment 502.
+      {
+        rows: [{
+          id: 602,
+          order_item_id: 1002,
+          replacement_for_order_item_id: null,
+          sku: "GLV-MAG-35PT-P50",
+          qty: 2,
+          shipment_purpose: "customer_fulfillment",
+          provider_membership_state: "authoritative",
+        }],
+      },
+      {
+        rows: [{
+          id: 602,
+          order_item_id: 1002,
+          product_variant_id: 2002,
+          from_location_id: 3002,
+          box_id: null,
+          weight_oz: 5,
+        }],
+      },
+      { rows: [] },
+      {
+        rows: [{
+          id: 502,
+          order_id: 43,
+          status: "queued",
+          tracking_number: null,
+          carrier: null,
+          tracking_url: null,
+          service_code: null,
+          carrier_cost_cents: null,
+          carrier_cost_source: null,
+          carrier_cost_recorded_at: null,
+        }],
+      },
+      { rows: [] },
+      { rows: [{ oms_fulfillment_order_id: "10000" }] },
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
+    ]);
+
+    const processed = await processTestShipment(mock, shipmentPayload);
+
+    expect(processed).toBe(1);
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledTimes(1);
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        legacyWmsShipmentIds: [501, 502],
+        shippingProvider: "shipstation",
+        providerPhysicalShipmentId: "448879362",
+        providerOrderId: "768275615",
+        trackingNumber: "1Z16D13WYW18265554",
+        legacyHeaderPolicy: "aggregate_projection",
+      }),
+      { executeImmediately: false },
+    );
+
+    const executeSqls = mock.calls
+      .filter((call) => call.tag === "execute")
+      .map((call) => call.sqlText);
+    expect(
+      executeSqls.some((text) => text.includes("source_shipment_item_id")),
+    ).toBe(true);
+    expect(
+      executeSqls.some((text) =>
+        text.includes("INSERT INTO wms.outbound_shipments")
+      ),
+    ).toBe(false);
+    expect(
+      executeSqls.some((text) =>
+        text.includes("WHERE shipstation_order_id")
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("processShipNotify V2 :: duplicate orderKey repair", () => {
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";

@@ -42,8 +42,9 @@ export function usage(): string {
     "  --idempotency-key=TEXT    Required in execute mode and reused only for the same batch.",
     "  --json                    Print machine-readable output.",
     "",
-    "Supported cohorts: aggregate_package_identity_conflict,",
-    "immutable_command_request_conflict, legacy_outbound_shipment_identity_conflict.",
+    "Supported cohorts: active_combined_package_resolution,",
+    "aggregate_package_identity_conflict, immutable_command_request_conflict,",
+    "legacy_outbound_shipment_identity_conflict.",
     "Unresolved package-resolution reviews are intentionally excluded.",
     "",
     "Only known historical carrier-dispatch failures with confirmed carrier",
@@ -132,6 +133,7 @@ function textFlag(argv: string[], prefix: string): string | null {
 }
 
 const REPAIR_COHORTS = new Set<HistoricalCarrierDispatchRepairCohort>([
+  "active_combined_package_resolution",
   "aggregate_package_identity_conflict",
   "immutable_command_request_conflict",
   "legacy_outbound_shipment_identity_conflict",

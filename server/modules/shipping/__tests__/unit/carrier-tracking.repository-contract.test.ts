@@ -227,6 +227,10 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(requeueSource).toContain("FOR UPDATE OF command SKIP LOCKED");
     expect(requeueSource).toContain("rerun dry-run");
     expect(requeueSource).toContain('eq(carrierDispatchCommands.status, "review_required")');
+    expect(repositorySource).toContain("active_combined_package_resolution");
+    expect(repositorySource).toContain(
+      "does not have [0-9]+ units available for physical split",
+    );
     expect(auditInsert).toBeGreaterThan(-1);
     expect(projectionUpdate).toBeGreaterThan(auditInsert);
     expect(historicalRepairMigrationSource).toContain(

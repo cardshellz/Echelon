@@ -236,6 +236,7 @@ export interface RequeueReviewedCarrierDispatchCommandsResult {
 }
 
 export type HistoricalCarrierDispatchRepairCohort =
+  | "active_combined_package_resolution"
   | "aggregate_package_identity_conflict"
   | "immutable_command_request_conflict"
   | "package_resolution_retry"
@@ -514,6 +515,7 @@ function requiredRecord(value: unknown, field: string): Record<string, unknown> 
 }
 
 const HISTORICAL_CARRIER_DISPATCH_REPAIR_COHORTS = [
+  "active_combined_package_resolution",
   "aggregate_package_identity_conflict",
   "immutable_command_request_conflict",
   "package_resolution_retry",
@@ -540,6 +542,10 @@ function historicalCarrierDispatchRepairCohortSql() {
             'PACKAGE_IDENTITY_CONFLICT'
         )
         THEN 'aggregate_package_identity_conflict'
+      WHEN command.last_error_code = 'CARRIER_DISPATCH_APPLICATION_FAILED'
+        AND NULLIF(BTRIM(command.result_evidence ->> 'sourceMessage'), '') ~
+          '^WMS shipment item [0-9]+ does not have [0-9]+ units available for physical split [0-9]+$'
+        THEN 'active_combined_package_resolution'
       WHEN command.last_error_code = 'COMMAND_REQUEST_CONFLICT'
         OR (
           command.last_error_code = 'CARRIER_DISPATCH_APPLICATION_FAILED'
@@ -575,6 +581,7 @@ function historicalCarrierDispatchRepairEligibilitySql(
       WHERE link.shipping_provider_label_id = label.id
     )
     AND ${repairCohort} IN (
+      'active_combined_package_resolution',
       'aggregate_package_identity_conflict',
       'immutable_command_request_conflict',
       'legacy_outbound_shipment_identity_conflict'
