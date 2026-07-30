@@ -708,6 +708,12 @@
   "wms.carrier_tracking_events": [
     "modules/shipping"
   ],
+  "wms.carrier_tracking_label_poll_attempts": [
+    "modules/shipping"
+  ],
+  "wms.carrier_tracking_label_polls": [
+    "modules/shipping"
+  ],
   "wms.carrier_tracking_reconciliation_state": [
     "modules/shipping"
   ],

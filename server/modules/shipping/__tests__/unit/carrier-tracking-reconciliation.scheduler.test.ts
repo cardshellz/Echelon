@@ -15,6 +15,15 @@ const emptyResult = {
   subscriptionsRetryScheduled: 0,
   subscriptionsReviewRequired: 0,
   subscriptionClientConfigured: false,
+  labelPollsPrepared: 0,
+  labelPollsCompletedFromExistingEvidence: 0,
+  labelPollsRetired: 0,
+  labelPollsClaimed: 0,
+  labelPollsConfirmed: 0,
+  labelPollsWaiting: 0,
+  labelPollsRetryScheduled: 0,
+  labelPollsReviewRequired: 0,
+  labelPollClientConfigured: false,
   labelsScanned: 0,
   labelsLinked: 0,
   scanned: 0,
@@ -50,6 +59,36 @@ describe("carrier tracking reconciliation scheduler", () => {
 
     expect(reconcileUnresolved).toHaveBeenCalledOnce();
     expect(reconcileUnresolved).toHaveBeenCalledWith(25);
+    handle.stop();
+  });
+
+  it("logs exact-label polling work even when no other reconciliation work occurs", async () => {
+    vi.useFakeTimers();
+    const info = vi.fn();
+    const reconcileUnresolved = vi.fn().mockResolvedValue({
+      ...emptyResult,
+      labelPollsPrepared: 1,
+      labelPollsClaimed: 1,
+      labelPollsConfirmed: 1,
+      labelPollClientConfigured: true,
+    });
+    const handle = startCarrierTrackingReconciliationScheduler(
+      { reconcileUnresolved },
+      { info, warn: vi.fn(), error: vi.fn() },
+      { initialDelayMs: 100, intervalMs: 1_000, batchLimit: 25 },
+    );
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({
+      code: "CARRIER_TRACKING_RECONCILIATION_COMPLETED",
+      context: expect.objectContaining({
+        labelPollsPrepared: 1,
+        labelPollsClaimed: 1,
+        labelPollsConfirmed: 1,
+        labelPollClientConfigured: true,
+      }),
+    }));
     handle.stop();
   });
 

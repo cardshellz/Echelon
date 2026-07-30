@@ -35,6 +35,10 @@ export function startCarrierTrackingReconciliationScheduler(
           || result.subscriptionsPrepared > 0
           || result.subscriptionLabelLinksPrepared > 0
           || result.subscriptionsClaimed > 0
+          || result.labelPollsPrepared > 0
+          || result.labelPollsCompletedFromExistingEvidence > 0
+          || result.labelPollsRetired > 0
+          || result.labelPollsClaimed > 0
           || result.labelsScanned > 0
           || result.scanned > 0
           || result.dispatchCommandsClaimed > 0
@@ -55,6 +59,16 @@ export function startCarrierTrackingReconciliationScheduler(
             subscriptionsRetryScheduled: result.subscriptionsRetryScheduled,
             subscriptionsReviewRequired: result.subscriptionsReviewRequired,
             subscriptionClientConfigured: result.subscriptionClientConfigured,
+            labelPollsPrepared: result.labelPollsPrepared,
+            labelPollsCompletedFromExistingEvidence:
+              result.labelPollsCompletedFromExistingEvidence,
+            labelPollsRetired: result.labelPollsRetired,
+            labelPollsClaimed: result.labelPollsClaimed,
+            labelPollsConfirmed: result.labelPollsConfirmed,
+            labelPollsWaiting: result.labelPollsWaiting,
+            labelPollsRetryScheduled: result.labelPollsRetryScheduled,
+            labelPollsReviewRequired: result.labelPollsReviewRequired,
+            labelPollClientConfigured: result.labelPollClientConfigured,
             labelsScanned: result.labelsScanned,
             labelsLinked: result.labelsLinked,
             scanned: result.scanned,

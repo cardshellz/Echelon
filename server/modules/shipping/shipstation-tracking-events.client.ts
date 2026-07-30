@@ -25,6 +25,18 @@ export interface ShipStationTrackingIdentity {
   trackingNumber: string;
 }
 
+export interface ShipStationLabelTrackingIdentity {
+  providerLabelId: string;
+  carrierCode: string;
+  trackingNumber: string;
+}
+
+export interface ShipStationLabelTrackingRequest
+  extends ShipStationLabelTrackingIdentity {
+  resourceUrl: string;
+  normalizedTrackingNumber: string;
+}
+
 export interface ShipStationTrackingSnapshotResult {
   httpStatus: 200;
   payload: Record<string, unknown>;
@@ -34,6 +46,9 @@ export interface ShipStationTrackingEventsClient {
   isConfigured(): boolean;
   getTrackingSnapshot(
     input: ShipStationTrackingHydrationRequest,
+  ): Promise<ShipStationTrackingSnapshotResult>;
+  getLabelTrackingSnapshot?(
+    input: ShipStationLabelTrackingRequest,
   ): Promise<ShipStationTrackingSnapshotResult>;
 }
 
@@ -163,6 +178,37 @@ export function createShipStationTrackingHydrationRequest(
   return parseShipStationTrackingResourceUrl(resourceUrl.toString(), baseUrl);
 }
 
+export function createShipStationLabelTrackingRequest(
+  input: ShipStationLabelTrackingIdentity,
+  configuredBaseUrl: string = SHIPSTATION_TRACKING_API_BASE_URL,
+): ShipStationLabelTrackingRequest {
+  const baseUrl = normalizeShipStationTrackingApiBaseUrl(configuredBaseUrl);
+  const providerLabelId = normalizeProviderLabelId(input.providerLabelId);
+  const carrierCode = input.carrierCode.trim().toLowerCase();
+  const trackingNumber = input.trackingNumber.trim();
+  if (!/^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(carrierCode) || carrierCode.length > 100) {
+    throw new ShipStationTrackingEventsError(
+      "INVALID_RESOURCE_URL",
+      "ShipStation label tracking identity contains an invalid carrier code",
+      { carrierCode },
+    );
+  }
+  if (!trackingNumber || trackingNumber.length > 200) {
+    throw new ShipStationTrackingEventsError(
+      "INVALID_RESOURCE_URL",
+      "ShipStation label tracking identity contains an invalid tracking number",
+    );
+  }
+
+  return {
+    providerLabelId,
+    carrierCode,
+    trackingNumber,
+    normalizedTrackingNumber: normalizeTrackingNumber(trackingNumber),
+    resourceUrl: `${baseUrl}/labels/se-${encodeURIComponent(providerLabelId)}/track`,
+  };
+}
+
 export function createShipStationTrackingEventsClient(
   config: ShipStationTrackingEventsClientConfig = {},
 ): ShipStationTrackingEventsClient {
@@ -216,6 +262,80 @@ export function createShipStationTrackingEventsClient(
     return reservation;
   };
 
+  const requestSnapshot = async (
+    requestUrl: string,
+    context: Record<string, unknown>,
+  ): Promise<ShipStationTrackingSnapshotResult> => {
+    await reserveRequestStart();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+    let response: Response;
+    let responseText: string;
+    let responseStatus: number | null = null;
+    try {
+      response = await fetchImpl(requestUrl, {
+        method: "GET",
+        headers: { "API-Key": apiKey },
+        signal: controller.signal,
+      });
+      responseStatus = response.status;
+      responseText = await readBoundedResponseText(response, MAX_RESPONSE_BYTES);
+    } catch (error) {
+      if (error instanceof ShipStationTrackingResponseReadError) {
+        throw new ShipStationTrackingEventsError(
+          "INVALID_RESPONSE",
+          error.message,
+          {
+            ...context,
+            responseBytes: error.responseBytes,
+            maxResponseBytes: error.maxResponseBytes,
+          },
+        );
+      }
+      const timedOut = error instanceof Error && error.name === "AbortError";
+      throw new ShipStationTrackingEventsError(
+        timedOut ? "TIMEOUT" : "NETWORK",
+        timedOut
+          ? `ShipStation tracking request timed out after ${requestTimeoutMs}ms`
+          : `ShipStation tracking request failed: ${error instanceof Error ? error.message : String(error)}`,
+        { ...context, status: responseStatus },
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (response.status !== 200) {
+      throw new ShipStationTrackingEventsError(
+        "HTTP",
+        `ShipStation tracking request returned HTTP ${response.status}`,
+        {
+          ...context,
+          status: response.status,
+          responseBody: responseText.slice(0, 500),
+        },
+      );
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      throw new ShipStationTrackingEventsError(
+        "INVALID_RESPONSE",
+        "ShipStation tracking request returned invalid JSON",
+        { ...context, status: response.status, responseBody: responseText.slice(0, 500) },
+      );
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new ShipStationTrackingEventsError(
+        "INVALID_RESPONSE",
+        "ShipStation tracking request returned a non-object payload",
+        { ...context, status: response.status },
+      );
+    }
+    return { httpStatus: 200, payload: payload as Record<string, unknown> };
+  };
+
   return {
     isConfigured: () => apiKey.length > 0,
 
@@ -244,80 +364,40 @@ export function createShipStationTrackingEventsClient(
         carrier_code: validated.carrierCode,
         tracking_number: validated.trackingNumber,
       });
-      const requestUrl = `${baseUrlText}/tracking?${query.toString()}`;
-      await reserveRequestStart();
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
-      let response: Response;
-      let responseText: string;
-      let responseStatus: number | null = null;
-      try {
-        response = await fetchImpl(requestUrl, {
-          method: "GET",
-          headers: { "API-Key": apiKey },
-          signal: controller.signal,
-        });
-        responseStatus = response.status;
-        responseText = await readBoundedResponseText(response, MAX_RESPONSE_BYTES);
-      } catch (error) {
-        if (error instanceof ShipStationTrackingResponseReadError) {
-          throw new ShipStationTrackingEventsError(
-            "INVALID_RESPONSE",
-            error.message,
-            {
-              responseBytes: error.responseBytes,
-              maxResponseBytes: error.maxResponseBytes,
-              carrierCode: input.carrierCode,
-              trackingSuffix: input.normalizedTrackingNumber.slice(-6),
-            },
-          );
-        }
-        const timedOut = error instanceof Error && error.name === "AbortError";
-        throw new ShipStationTrackingEventsError(
-          timedOut ? "TIMEOUT" : "NETWORK",
-          timedOut
-            ? `ShipStation tracking hydration timed out after ${requestTimeoutMs}ms`
-            : `ShipStation tracking hydration failed: ${error instanceof Error ? error.message : String(error)}`,
-          {
-            status: responseStatus,
-            carrierCode: input.carrierCode,
-            trackingSuffix: input.normalizedTrackingNumber.slice(-6),
-          },
-        );
-      } finally {
-        clearTimeout(timer);
-      }
-      if (response.status !== 200) {
-        throw new ShipStationTrackingEventsError(
-          "HTTP",
-          `ShipStation tracking hydration returned HTTP ${response.status}`,
-          {
-            status: response.status,
-            responseBody: responseText.slice(0, 500),
-            carrierCode: input.carrierCode,
-            trackingSuffix: input.normalizedTrackingNumber.slice(-6),
-          },
-        );
-      }
+      return requestSnapshot(`${baseUrlText}/tracking?${query.toString()}`, {
+        carrierCode: input.carrierCode,
+        trackingSuffix: input.normalizedTrackingNumber.slice(-6),
+      });
+    },
 
-      let payload: unknown;
-      try {
-        payload = JSON.parse(responseText);
-      } catch {
+    async getLabelTrackingSnapshot(input): Promise<ShipStationTrackingSnapshotResult> {
+      if (!apiKey) {
         throw new ShipStationTrackingEventsError(
-          "INVALID_RESPONSE",
-          "ShipStation tracking hydration returned invalid JSON",
-          { status: response.status, responseBody: responseText.slice(0, 500) },
+          "CONFIGURATION",
+          "SHIPSTATION_V2_API_KEY is required to fetch label tracking evidence",
         );
       }
-      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      const expected = createShipStationLabelTrackingRequest(input, baseUrlText);
+      if (expected.resourceUrl !== input.resourceUrl
+          || expected.providerLabelId !== input.providerLabelId
+          || expected.carrierCode !== input.carrierCode
+          || expected.normalizedTrackingNumber !== input.normalizedTrackingNumber) {
         throw new ShipStationTrackingEventsError(
-          "INVALID_RESPONSE",
-          "ShipStation tracking hydration returned a non-object payload",
-          { status: response.status },
+          "INVALID_RESOURCE_URL",
+          "Stored ShipStation label identity does not match its tracking resource URL",
+          {
+            providerLabelIdMatches: expected.providerLabelId === input.providerLabelId,
+            carrierCodeMatches: expected.carrierCode === input.carrierCode,
+            trackingNumberMatches:
+              expected.normalizedTrackingNumber === input.normalizedTrackingNumber,
+          },
         );
       }
-      return { httpStatus: 200, payload: payload as Record<string, unknown> };
+      return requestSnapshot(expected.resourceUrl, {
+        providerLabelId: expected.providerLabelId,
+        carrierCode: expected.carrierCode,
+        trackingSuffix: expected.normalizedTrackingNumber.slice(-6),
+      });
     },
   };
 }
@@ -327,7 +407,20 @@ export function isRetryableTrackingEventsError(error: unknown): boolean {
   if (error.code === "TIMEOUT" || error.code === "NETWORK") return true;
   if (error.code !== "HTTP") return false;
   const status = Number(error.context.status);
+  const responseBody = String(error.context.responseBody ?? "").toLowerCase();
+  if (status === 400 && responseBody.includes("temporarily unavailable")) return true;
   return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function normalizeProviderLabelId(value: string): string {
+  const normalized = value.trim().replace(/^se-/i, "");
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(normalized)) {
+    throw new ShipStationTrackingEventsError(
+      "INVALID_RESOURCE_URL",
+      "ShipStation provider label id is invalid",
+    );
+  }
+  return normalized;
 }
 
 export function trackingEventsErrorEvidence(error: unknown): {

@@ -285,11 +285,16 @@ describe("Control Tower V2 domain", () => {
     expect(queryText).toContain("wms.carrier_tracking_subscriptions");
     expect(queryText).toContain("wms.carrier_tracking_subscription_labels");
     expect(queryText).toContain("wms.carrier_tracking_subscription_attempts");
+    expect(queryText).toContain("wms.carrier_tracking_label_polls");
+    expect(queryText).toContain("wms.carrier_tracking_label_poll_attempts");
     expect(queryText).toContain("subscription_response_evidence");
+    expect(queryText).toContain("label_poll_response_evidence");
     expect(queryText).toContain("wms.carrier_dispatch_commands");
     expect(queryText).toContain("carrier_tracking_carrier_missing");
     expect(queryText).toContain("carrier_tracking_subscription_not_active");
     expect(queryText).toContain("carrier_tracking_subscription_review");
+    expect(queryText).toContain("carrier_tracking_label_poll_review");
+    expect(queryText).toContain("carrier_tracking_label_poll_stalled");
     expect(queryText).toContain("voided_label_carrier_movement");
     expect(queryText).toContain("carrier_acceptance_overdue");
     expect(queryText).toContain("carrier_tracking_receipt_missing");
@@ -300,10 +305,11 @@ describe("Control Tower V2 domain", () => {
     expect(queryText).toContain("carrier_dispatch_command_review");
     expect(queryText).toContain("carrier_dispatch_retry_overdue");
     expect(queryText).toContain("acceptance_subscription.activated_at");
+    expect(queryText).toContain("acceptance_poll.created_at");
     expect(queryText).toContain("latest_confirmed_label_event");
     expect(queryText).toContain("JOIN latest_confirmed_label_event AS confirmed");
     expect(queryText).toContain(
-      "GREATEST(label.first_observed_at, acceptance_subscription.activated_at)",
+      "acceptance_poll.poll_status IN ('pending', 'processing', 'waiting', 'retry', 'complete')",
     );
     expect(queryText).toContain("issues.source_key >");
     expect(queryValues).toEqual(["2026-07-20T12:00:00.000Z", 15, 1080, null, 100]);
@@ -405,6 +411,51 @@ describe("Control Tower V2 domain", () => {
       subscriptionResponseEvidence: {
         responseBody: "Invalid carrier_code",
       },
+    });
+  });
+
+  it("projects an exhausted exact-label poll as an actionable review issue", () => {
+    const item = carrierTrackingSource.projectRow({
+      source_key: "label:13:poll_review",
+      issue_code: "carrier_tracking_label_poll_review",
+      label_id: 13,
+      event_id: null,
+      receipt_id: null,
+      provider: "shipstation",
+      provider_label_id: "448530246",
+      tracking_number: "9434650106151112859195",
+      label_status: "active",
+      link_count: 1,
+      wms_order_id: 206_955,
+      order_number: "#60822",
+      order_numbers: ["#60822"],
+      provider_status_code: null,
+      canonical_status: null,
+      dispatch_evidence: null,
+      match_status: "review",
+      reason_code: "SHIPSTATION_LABEL_TRACK_HTTP",
+      label_poll_status: "review",
+      label_poll_http_status: 401,
+      label_poll_last_error_message: "ShipStation label tracking returned HTTP 401",
+      label_poll_response_evidence: { status: 401 },
+      first_seen_at: "2026-07-28T20:00:00.000Z",
+      last_seen_at: "2026-07-28T20:05:00.000Z",
+    }, new Date("2026-07-29T12:00:00.000Z"));
+
+    expect(item).toMatchObject({
+      code: "carrier_tracking_label_poll_review",
+      entityType: "shipping_provider_label",
+      entityId: "13",
+      entityRef: "Order #60822 / 9434650106151112859195",
+      severity: "high",
+      urgency: "overdue",
+    });
+    expect(item.actualState).toContain("label poll review");
+    expect(item.actualState).toContain("label poll HTTP 401");
+    expect(item.evidenceSummary).toMatchObject({
+      labelPollStatus: "review",
+      labelPollHttpStatus: 401,
+      labelPollLastErrorMessage: "ShipStation label tracking returned HTTP 401",
     });
   });
 

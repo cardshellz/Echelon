@@ -140,6 +140,48 @@ export interface ClaimedCarrierTrackingSubscription {
   leaseExpiresAt: Date;
 }
 
+export interface CarrierTrackingLabelPollPreparationResult {
+  inserted: number;
+  completed: number;
+  retired: number;
+}
+
+export interface ClaimedCarrierTrackingLabelPoll {
+  shippingProviderLabelId: number;
+  providerLabelId: string;
+  carrierCode: string;
+  trackingNumber: string;
+  normalizedTrackingNumber: string;
+  attemptNumber: number;
+  consecutiveFailureCount: number;
+  startedAt: Date;
+  leaseOwner: string;
+  leaseExpiresAt: Date;
+}
+
+export interface FinalizeCarrierTrackingLabelPollAttemptInput {
+  shippingProviderLabelId: number;
+  attemptNumber: number;
+  leaseOwner: string;
+  outcome: "confirmed" | "waiting" | "retry_scheduled" | "review_required";
+  httpStatus: number | null;
+  carrierTrackingEventId: number | null;
+  dispatchEvidence: CarrierDispatchEvidence | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  requestEvidence: Record<string, unknown>;
+  responseEvidence: Record<string, unknown>;
+  startedAt: Date;
+  completedAt: Date;
+  nextAttemptAt: Date | null;
+}
+
+export interface StoredCarrierTrackingLabelPollAttempt {
+  id: number;
+  inserted: boolean;
+  outcome: FinalizeCarrierTrackingLabelPollAttemptInput["outcome"];
+}
+
 export interface FinalizeCarrierTrackingSubscriptionAttemptInput {
   subscriptionId: number;
   attemptNumber: number;
@@ -330,6 +372,19 @@ export interface CarrierTrackingRepository {
     limit: number,
     asOf: Date,
   ): Promise<UnlinkedShippingProviderLabel[]>;
+  prepareLabelTrackingPolls(
+    limit: number,
+    asOf: Date,
+  ): Promise<CarrierTrackingLabelPollPreparationResult>;
+  claimLabelTrackingPolls(
+    limit: number,
+    asOf: Date,
+    leaseOwner: string,
+    leaseExpiresAt: Date,
+  ): Promise<ClaimedCarrierTrackingLabelPoll[]>;
+  finalizeLabelTrackingPollAttempt(
+    input: FinalizeCarrierTrackingLabelPollAttemptInput,
+  ): Promise<StoredCarrierTrackingLabelPollAttempt>;
   prepareTrackingSubscriptions(
     limit: number,
     asOf: Date,
@@ -1633,6 +1688,405 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
         provider: requiredString(row.provider, "provider"),
         providerLabelId: requiredString(row.provider_label_id, "provider_label_id"),
       }));
+    },
+
+    async prepareLabelTrackingPolls(limit, asOf) {
+      if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 500) {
+        throw new Error("Label-tracking poll preparation limit must be an integer between 1 and 500");
+      }
+      if (Number.isNaN(asOf.getTime())) {
+        throw new Error("Label-tracking poll preparation asOf must be a valid timestamp");
+      }
+
+      return db.transaction(async (databaseTx: any) => {
+        const completedResult = await databaseTx.execute(sql`
+          UPDATE wms.carrier_tracking_label_polls AS poll
+          SET
+            poll_status = 'complete',
+            next_attempt_at = NULL,
+            confirmed_at = command.dispatch_occurred_at,
+            last_event_id = command.carrier_tracking_event_id,
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            last_error_code = NULL,
+            last_error_message = NULL,
+            updated_at = ${asOf}
+          FROM wms.carrier_dispatch_commands AS command
+          WHERE command.shipping_provider_label_id = poll.shipping_provider_label_id
+            AND poll.poll_status <> 'complete'
+          RETURNING poll.shipping_provider_label_id
+        `);
+
+        const retiredResult = await databaseTx.execute(sql`
+          UPDATE wms.carrier_tracking_label_polls AS poll
+          SET
+            poll_status = 'retired',
+            next_attempt_at = NULL,
+            confirmed_at = NULL,
+            last_event_id = NULL,
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            last_error_code = 'LABEL_POLL_NO_LONGER_ELIGIBLE',
+            last_error_message =
+              'Provider label is no longer eligible for exact-label tracking polling',
+            updated_at = ${asOf}
+          FROM wms.shipping_provider_labels AS label
+          WHERE label.id = poll.shipping_provider_label_id
+            AND (
+              poll.poll_status IN ('pending', 'waiting', 'retry')
+              OR (
+                poll.poll_status = 'processing'
+                AND poll.lease_expires_at <= ${asOf}
+              )
+            )
+            AND (
+              label.provider <> 'shipstation'
+              OR label.label_direction <> 'outbound'
+              OR label.label_status NOT IN ('active', 'unknown')
+              OR NOT EXISTS (
+                SELECT 1
+                FROM wms.shipping_provider_label_links AS link
+                JOIN wms.outbound_shipments AS legacy
+                  ON legacy.id = link.legacy_wms_shipment_id
+                  AND legacy.status IN ('planned', 'queued', 'labeled', 'on_hold')
+                WHERE link.shipping_provider_label_id = label.id
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM wms.physical_shipments AS physical
+                WHERE physical.provider = label.provider
+                  AND physical.provider_physical_shipment_id IN (
+                    label.provider_label_id,
+                    label.provider || '_shipment:' || label.provider_label_id,
+                    'shipstation_shipment:' || label.provider_label_id
+                  )
+              )
+            )
+          RETURNING poll.shipping_provider_label_id
+        `);
+
+        const insertedResult = await databaseTx.execute(sql`
+          WITH candidates AS (
+            SELECT label.id
+            FROM wms.shipping_provider_labels AS label
+            WHERE label.provider = 'shipstation'
+              AND label.label_direction = 'outbound'
+              AND label.label_status IN ('active', 'unknown')
+              AND NULLIF(BTRIM(label.provider_label_id), '') IS NOT NULL
+              AND NULLIF(BTRIM(label.carrier), '') IS NOT NULL
+              AND NULLIF(BTRIM(label.tracking_number), '') IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM wms.shipping_provider_label_links AS link
+                JOIN wms.outbound_shipments AS legacy
+                  ON legacy.id = link.legacy_wms_shipment_id
+                  AND legacy.status IN ('planned', 'queued', 'labeled', 'on_hold')
+                WHERE link.shipping_provider_label_id = label.id
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM wms.carrier_dispatch_commands AS command
+                WHERE command.shipping_provider_label_id = label.id
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM wms.physical_shipments AS physical
+                WHERE physical.provider = label.provider
+                  AND physical.provider_physical_shipment_id IN (
+                    label.provider_label_id,
+                    label.provider || '_shipment:' || label.provider_label_id,
+                    'shipstation_shipment:' || label.provider_label_id
+                  )
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM wms.carrier_tracking_label_polls AS poll
+                WHERE poll.shipping_provider_label_id = label.id
+              )
+            ORDER BY COALESCE(label.label_created_at, label.last_observed_at) DESC, label.id DESC
+            LIMIT ${limit}
+          )
+          INSERT INTO wms.carrier_tracking_label_polls (
+            shipping_provider_label_id,
+            poll_status,
+            attempt_count,
+            consecutive_failure_count,
+            next_attempt_at,
+            metadata,
+            created_at,
+            updated_at
+          )
+          SELECT
+            candidate.id,
+            'pending',
+            0,
+            0,
+            ${asOf},
+            jsonb_build_object(
+              'pollSource', 'shipstation_exact_label_tracking',
+              'authority', 'carrier_tracking'
+            ),
+            ${asOf},
+            ${asOf}
+          FROM candidates AS candidate
+          ON CONFLICT (shipping_provider_label_id) DO NOTHING
+          RETURNING shipping_provider_label_id
+        `);
+
+        return {
+          inserted: resultRows(insertedResult).length,
+          completed: resultRows(completedResult).length,
+          retired: resultRows(retiredResult).length,
+        };
+      });
+    },
+
+    async claimLabelTrackingPolls(limit, asOf, leaseOwner, leaseExpiresAt) {
+      if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
+        throw new Error("Label-tracking poll claim limit must be an integer between 1 and 100");
+      }
+      if (Number.isNaN(asOf.getTime()) || Number.isNaN(leaseExpiresAt.getTime())) {
+        throw new Error("Label-tracking poll claim timestamps must be valid");
+      }
+      if (leaseExpiresAt.getTime() <= asOf.getTime()) {
+        throw new Error("Label-tracking poll lease must expire after asOf");
+      }
+      const normalizedLeaseOwner = leaseOwner.trim();
+      if (!normalizedLeaseOwner || normalizedLeaseOwner.length > 200) {
+        throw new Error("Label-tracking poll leaseOwner must contain 1 through 200 characters");
+      }
+
+      const result = await db.execute(sql`
+        WITH due AS (
+          SELECT poll.shipping_provider_label_id
+          FROM wms.carrier_tracking_label_polls AS poll
+          JOIN wms.shipping_provider_labels AS label
+            ON label.id = poll.shipping_provider_label_id
+          WHERE (
+            (
+              poll.poll_status IN ('pending', 'waiting', 'retry')
+              AND poll.next_attempt_at <= ${asOf}
+            )
+            OR (
+              poll.poll_status = 'processing'
+              AND poll.lease_expires_at <= ${asOf}
+            )
+          )
+            AND label.provider = 'shipstation'
+            AND label.label_direction = 'outbound'
+            AND label.label_status IN ('active', 'unknown')
+            AND EXISTS (
+              SELECT 1
+              FROM wms.shipping_provider_label_links AS link
+              JOIN wms.outbound_shipments AS legacy
+                ON legacy.id = link.legacy_wms_shipment_id
+                AND legacy.status IN ('planned', 'queued', 'labeled', 'on_hold')
+              WHERE link.shipping_provider_label_id = label.id
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM wms.carrier_dispatch_commands AS command
+              WHERE command.shipping_provider_label_id = label.id
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM wms.physical_shipments AS physical
+              WHERE physical.provider = label.provider
+                AND physical.provider_physical_shipment_id IN (
+                  label.provider_label_id,
+                  label.provider || '_shipment:' || label.provider_label_id,
+                  'shipstation_shipment:' || label.provider_label_id
+                )
+            )
+          ORDER BY
+            CASE WHEN poll.poll_status = 'processing' THEN 0 ELSE 1 END,
+            COALESCE(label.label_created_at, label.last_observed_at) DESC,
+            poll.shipping_provider_label_id DESC
+          FOR UPDATE OF poll SKIP LOCKED
+          LIMIT ${limit}
+        )
+        UPDATE wms.carrier_tracking_label_polls AS poll
+        SET
+          poll_status = 'processing',
+          attempt_count = CASE
+            WHEN poll.poll_status = 'processing' THEN GREATEST(poll.attempt_count, 1)
+            ELSE poll.attempt_count + 1
+          END,
+          next_attempt_at = NULL,
+          last_attempt_at = ${asOf},
+          lease_owner = ${normalizedLeaseOwner},
+          lease_expires_at = ${leaseExpiresAt},
+          updated_at = ${asOf}
+        FROM due, wms.shipping_provider_labels AS label
+        WHERE poll.shipping_provider_label_id = due.shipping_provider_label_id
+          AND label.id = poll.shipping_provider_label_id
+        RETURNING
+          poll.shipping_provider_label_id,
+          label.provider_label_id,
+          LOWER(BTRIM(label.carrier)) AS carrier_code,
+          label.tracking_number,
+          label.normalized_tracking_number,
+          poll.attempt_count,
+          poll.consecutive_failure_count,
+          poll.last_attempt_at,
+          poll.lease_owner,
+          poll.lease_expires_at
+      `);
+      return resultRows(result).map((row) => ({
+        shippingProviderLabelId: requiredId(
+          row.shipping_provider_label_id,
+          "shipping_provider_label_id",
+        ),
+        providerLabelId: requiredString(row.provider_label_id, "provider_label_id"),
+        carrierCode: requiredString(row.carrier_code, "carrier_code"),
+        trackingNumber: requiredString(row.tracking_number, "tracking_number"),
+        normalizedTrackingNumber: requiredString(
+          row.normalized_tracking_number,
+          "normalized_tracking_number",
+        ),
+        attemptNumber: requiredId(row.attempt_count, "attempt_count"),
+        consecutiveFailureCount: nonnegativeInteger(
+          row.consecutive_failure_count,
+          "consecutive_failure_count",
+        ),
+        startedAt: requiredDate(row.last_attempt_at, "last_attempt_at"),
+        leaseOwner: requiredString(row.lease_owner, "lease_owner"),
+        leaseExpiresAt: requiredDate(row.lease_expires_at, "lease_expires_at"),
+      }));
+    },
+
+    async finalizeLabelTrackingPollAttempt(input) {
+      if (Number.isNaN(input.startedAt.getTime())
+          || Number.isNaN(input.completedAt.getTime())
+          || (input.nextAttemptAt && Number.isNaN(input.nextAttemptAt.getTime()))) {
+        throw new Error("Label-tracking poll finalization timestamps must be valid");
+      }
+      if (input.completedAt.getTime() < input.startedAt.getTime()) {
+        throw new Error("Label-tracking poll attempt cannot complete before it starts");
+      }
+      if (input.outcome === "waiting" || input.outcome === "retry_scheduled") {
+        if (!input.nextAttemptAt) {
+          throw new Error("Waiting and retryable label polls require nextAttemptAt");
+        }
+      } else if (input.nextAttemptAt) {
+        throw new Error("Completed and review label polls cannot set nextAttemptAt");
+      }
+      const providerSucceeded = input.outcome === "confirmed" || input.outcome === "waiting";
+      if (providerSucceeded !== (
+        input.httpStatus === 200
+        && input.carrierTrackingEventId !== null
+        && input.dispatchEvidence !== null
+        && input.errorCode === null
+        && input.errorMessage === null
+      )) {
+        throw new Error("Label-tracking poll finalization evidence does not match its outcome");
+      }
+      if (!providerSucceeded && (!input.errorCode || !input.errorMessage)) {
+        throw new Error("Failed label-tracking polls require an error code and message");
+      }
+
+      return db.transaction(async (databaseTx: any) => {
+        const existingResult = await databaseTx.execute(sql`
+          SELECT id, attempt_outcome
+          FROM wms.carrier_tracking_label_poll_attempts
+          WHERE shipping_provider_label_id = ${input.shippingProviderLabelId}
+            AND attempt_number = ${input.attemptNumber}
+          LIMIT 1
+        `);
+        const existing = resultRows(existingResult)[0];
+        if (existing) {
+          return {
+            id: requiredId(existing.id, "carrier_tracking_label_poll_attempt_id"),
+            inserted: false,
+            outcome: requiredString(
+              existing.attempt_outcome,
+              "attempt_outcome",
+            ) as StoredCarrierTrackingLabelPollAttempt["outcome"],
+          };
+        }
+
+        const stateResult = await databaseTx.execute(sql`
+          SELECT poll_status, attempt_count, lease_owner
+          FROM wms.carrier_tracking_label_polls
+          WHERE shipping_provider_label_id = ${input.shippingProviderLabelId}
+          FOR UPDATE
+        `);
+        const state = resultRows(stateResult)[0];
+        if (!state) throw new Error("Label-tracking poll no longer exists");
+        if (state.poll_status !== "processing"
+            || state.lease_owner !== input.leaseOwner
+            || Number(state.attempt_count) !== input.attemptNumber) {
+          throw new Error("Label-tracking poll lease was lost before finalization");
+        }
+
+        const attemptResult = await databaseTx.execute(sql`
+          INSERT INTO wms.carrier_tracking_label_poll_attempts (
+            shipping_provider_label_id,
+            attempt_number,
+            attempt_outcome,
+            http_status,
+            carrier_tracking_event_id,
+            dispatch_evidence,
+            error_code,
+            error_message,
+            request_evidence,
+            response_evidence,
+            started_at,
+            completed_at,
+            created_at
+          ) VALUES (
+            ${input.shippingProviderLabelId},
+            ${input.attemptNumber},
+            ${input.outcome},
+            ${input.httpStatus},
+            ${input.carrierTrackingEventId},
+            ${input.dispatchEvidence},
+            ${input.errorCode},
+            ${input.errorMessage},
+            ${input.requestEvidence},
+            ${input.responseEvidence},
+            ${input.startedAt},
+            ${input.completedAt},
+            ${input.completedAt}
+          )
+          RETURNING id
+        `);
+        const attemptId = requiredId(
+          resultRows(attemptResult)[0]?.id,
+          "carrier_tracking_label_poll_attempt_id",
+        );
+        const pollStatus = input.outcome === "confirmed"
+          ? "complete"
+          : input.outcome === "waiting"
+            ? "waiting"
+            : input.outcome === "retry_scheduled"
+              ? "retry"
+              : "review";
+
+        await databaseTx.execute(sql`
+          UPDATE wms.carrier_tracking_label_polls
+          SET
+            poll_status = ${pollStatus},
+            consecutive_failure_count = CASE
+              WHEN ${providerSucceeded}::boolean THEN 0
+              ELSE consecutive_failure_count + 1
+            END,
+            next_attempt_at = ${input.nextAttemptAt},
+            confirmed_at = CASE
+              WHEN ${input.outcome}::text = 'confirmed' THEN ${input.completedAt}
+              ELSE NULL
+            END,
+            last_event_id = ${input.carrierTrackingEventId},
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            last_error_code = ${input.errorCode},
+            last_error_message = ${input.errorMessage},
+            updated_at = ${input.completedAt}
+          WHERE shipping_provider_label_id = ${input.shippingProviderLabelId}
+        `);
+
+        return { id: attemptId, inserted: true, outcome: input.outcome };
+      });
     },
 
     async prepareTrackingSubscriptions(limit, asOf) {

@@ -865,15 +865,27 @@ const CARRIER_EVIDENCE_CONTENT: Record<string, {
     severity: "high",
   },
   carrier_tracking_subscription_not_active: {
-    title: "Carrier tracking subscription is not active",
-    expected: "Every observed provider label with a carrier and tracking number must have an active carrier-tracking subscription.",
-    action: "Inspect the subscription status and last provider error. Transient failures retry automatically; correct configuration or provider availability before replaying a permanent failure.",
+    title: "Carrier tracking observation is not configured",
+    expected: "Every observed provider label with a carrier and tracking number must use either an active carrier-tracking subscription or the exact-label polling fallback.",
+    action: "Inspect the provider label link and tracking scheduler. A valid linked ShipStation label is enrolled in exact-label polling automatically.",
     severity: "medium",
   },
   carrier_tracking_subscription_review: {
     title: "Carrier tracking subscription requires review",
-    expected: "The tracking provider must accept every valid carrier and tracking-number subscription or return an actionable permanent error.",
-    action: "Review the retained carrier code, tracking number, and provider response. Correct the provider/carrier configuration, then explicitly requeue the subscription.",
+    expected: "A failed tracking subscription must be replaced by the exact-label polling fallback or retain an actionable permanent error.",
+    action: "Review the provider response and confirm the exact-label polling fallback was prepared for this label before requeueing the subscription.",
+    severity: "high",
+  },
+  carrier_tracking_label_poll_review: {
+    title: "Carrier tracking fallback requires review",
+    expected: "Every linked ShipStation label must remain observable through either an active tracking subscription or the exact-label polling fallback.",
+    action: "Review the retained exact-label poll error. Correct credentials, label identity, or provider availability before explicitly requeueing the poll.",
+    severity: "high",
+  },
+  carrier_tracking_label_poll_stalled: {
+    title: "Carrier tracking fallback is stalled",
+    expected: "Every due exact-label poll must be claimed and completed within the bounded scheduler window.",
+    action: "Check the carrier tracking reconciliation scheduler and the retained poll lease or retry time. Restore the failed dependency; the poll remains safe to retry.",
     severity: "high",
   },
   carrier_tracking_unmatched: {
@@ -1114,6 +1126,31 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
           subscription_label.created_at DESC,
           subscription_label.id DESC
       ),
+      latest_label_poll AS (
+        SELECT
+          poll.shipping_provider_label_id,
+          poll.poll_status,
+          poll.next_attempt_at,
+          poll.lease_expires_at,
+          poll.last_error_code,
+          poll.last_error_message,
+          poll.confirmed_at,
+          poll.last_attempt_at,
+          poll.created_at,
+          poll.updated_at,
+          latest_attempt.http_status,
+          latest_attempt.response_evidence
+        FROM wms.carrier_tracking_label_polls AS poll
+        LEFT JOIN LATERAL (
+          SELECT
+            attempt.http_status,
+            attempt.response_evidence
+          FROM wms.carrier_tracking_label_poll_attempts AS attempt
+          WHERE attempt.shipping_provider_label_id = poll.shipping_provider_label_id
+          ORDER BY attempt.attempt_number DESC, attempt.id DESC
+          LIMIT 1
+        ) AS latest_attempt ON TRUE
+      ),
       issues AS (
         SELECT
           'label:' || label.id || ':unlinked' AS source_key,
@@ -1200,7 +1237,10 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
         FROM label_context AS label
         LEFT JOIN latest_label_subscription AS subscription
           ON subscription.shipping_provider_label_id = label.id
+        LEFT JOIN latest_label_poll AS poll
+          ON poll.shipping_provider_label_id = label.id
         WHERE NULLIF(BTRIM(label.carrier), '') IS NOT NULL
+          AND poll.shipping_provider_label_id IS NULL
           AND label.label_status IN ('active', 'unknown')
           AND (
             subscription.subscription_id IS NULL
@@ -1238,8 +1278,81 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
         FROM label_context AS label
         JOIN latest_label_subscription AS subscription
           ON subscription.shipping_provider_label_id = label.id
+        LEFT JOIN latest_label_poll AS poll
+          ON poll.shipping_provider_label_id = label.id
         WHERE subscription.subscription_status = 'review'
+          AND poll.shipping_provider_label_id IS NULL
           AND label.label_status IN ('active', 'unknown')
+
+        UNION ALL
+
+        SELECT
+          'label:' || label.id || ':poll_review' AS source_key,
+          'carrier_tracking_label_poll_review' AS issue_code,
+          label.id AS label_id,
+          NULL::bigint AS event_id,
+          NULL::bigint AS receipt_id,
+          label.provider,
+          label.provider_label_id,
+          label.tracking_number,
+          label.label_status,
+          label.link_count,
+          label.wms_order_id,
+          label.order_number,
+          label.order_numbers,
+          NULL::text AS provider_status_code,
+          NULL::text AS canonical_status,
+          NULL::text AS dispatch_evidence,
+          poll.poll_status AS match_status,
+          poll.last_error_code AS reason_code,
+          poll.created_at AS first_seen_at,
+          poll.updated_at AS last_seen_at
+        FROM label_context AS label
+        JOIN latest_label_poll AS poll
+          ON poll.shipping_provider_label_id = label.id
+        WHERE poll.poll_status = 'review'
+          AND label.label_status IN ('active', 'unknown')
+
+        UNION ALL
+
+        SELECT
+          'label:' || label.id || ':poll_stalled' AS source_key,
+          'carrier_tracking_label_poll_stalled' AS issue_code,
+          label.id AS label_id,
+          NULL::bigint AS event_id,
+          NULL::bigint AS receipt_id,
+          label.provider,
+          label.provider_label_id,
+          label.tracking_number,
+          label.label_status,
+          label.link_count,
+          label.wms_order_id,
+          label.order_number,
+          label.order_numbers,
+          NULL::text AS provider_status_code,
+          NULL::text AS canonical_status,
+          NULL::text AS dispatch_evidence,
+          poll.poll_status AS match_status,
+          CASE
+            WHEN poll.poll_status = 'processing' THEN 'label_poll_lease_expired'
+            ELSE 'label_poll_due_overdue'
+          END AS reason_code,
+          COALESCE(poll.last_attempt_at, poll.created_at) AS first_seen_at,
+          poll.updated_at AS last_seen_at
+        FROM label_context AS label
+        JOIN latest_label_poll AS poll
+          ON poll.shipping_provider_label_id = label.id
+        WHERE label.label_status IN ('active', 'unknown')
+          AND (
+            (
+              poll.poll_status IN ('pending', 'waiting', 'retry')
+              AND poll.next_attempt_at <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+            )
+            OR (
+              poll.poll_status = 'processing'
+              AND poll.lease_expires_at <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+            )
+          )
 
         UNION ALL
 
@@ -1584,18 +1697,42 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
           latest.dispatch_evidence,
           latest.match_status,
           latest.reason_code,
-          GREATEST(label.first_observed_at, acceptance_subscription.activated_at) AS first_seen_at,
-          COALESCE(latest.received_at, label.last_observed_at) AS last_seen_at
+          GREATEST(
+            label.first_observed_at,
+            COALESCE(
+              CASE
+                WHEN acceptance_subscription.subscription_status = 'active'
+                THEN acceptance_subscription.activated_at
+              END,
+              acceptance_poll.created_at,
+              label.first_observed_at
+            )
+          ) AS first_seen_at,
+          COALESCE(latest.received_at, acceptance_poll.updated_at, label.last_observed_at) AS last_seen_at
         FROM label_context AS label
         LEFT JOIN latest_label_event AS latest
           ON latest.shipping_provider_label_id = label.id
-        JOIN latest_label_subscription AS acceptance_subscription
+        LEFT JOIN latest_label_subscription AS acceptance_subscription
           ON acceptance_subscription.shipping_provider_label_id = label.id
-         AND acceptance_subscription.subscription_status = 'active'
+        LEFT JOIN latest_label_poll AS acceptance_poll
+          ON acceptance_poll.shipping_provider_label_id = label.id
         WHERE label.label_status IN ('active', 'unknown')
           AND label.link_count > 0
-          AND GREATEST(label.first_observed_at, acceptance_subscription.activated_at)
-            <= $1::timestamptz - ($3::integer * INTERVAL '1 minute')
+          AND (
+            acceptance_subscription.subscription_status = 'active'
+            OR acceptance_poll.poll_status IN ('pending', 'processing', 'waiting', 'retry', 'complete')
+          )
+          AND GREATEST(
+            label.first_observed_at,
+            COALESCE(
+              CASE
+                WHEN acceptance_subscription.subscription_status = 'active'
+                THEN acceptance_subscription.activated_at
+              END,
+              acceptance_poll.created_at,
+              label.first_observed_at
+            )
+          ) <= $1::timestamptz - ($3::integer * INTERVAL '1 minute')
           AND NOT EXISTS (
             SELECT 1
             FROM latest_confirmed_label_event AS confirmed
@@ -1607,13 +1744,23 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
         subscription.carrier_code AS subscription_carrier_code,
         subscription.last_error_message AS subscription_last_error_message,
         subscription.http_status AS subscription_http_status,
-        subscription.response_evidence AS subscription_response_evidence
+        subscription.response_evidence AS subscription_response_evidence,
+        poll.poll_status AS label_poll_status,
+        poll.last_error_message AS label_poll_last_error_message,
+        poll.http_status AS label_poll_http_status,
+        poll.response_evidence AS label_poll_response_evidence
       FROM issues
       LEFT JOIN latest_label_subscription AS subscription
         ON subscription.shipping_provider_label_id = issues.label_id
        AND issues.issue_code IN (
          'carrier_tracking_subscription_not_active',
          'carrier_tracking_subscription_review'
+       )
+      LEFT JOIN latest_label_poll AS poll
+        ON poll.shipping_provider_label_id = issues.label_id
+       AND issues.issue_code IN (
+         'carrier_tracking_label_poll_review',
+         'carrier_tracking_label_poll_stalled'
        )
       WHERE $4::TEXT IS NULL OR issues.source_key > $4::TEXT
       ORDER BY issues.source_key
@@ -1664,6 +1811,13 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
       stringOrNull(row.subscription_last_error_message)
         ? `error ${row.subscription_last_error_message}`
         : null,
+      stringOrNull(row.label_poll_status) ? `label poll ${row.label_poll_status}` : null,
+      row.label_poll_http_status == null
+        ? null
+        : `label poll HTTP ${row.label_poll_http_status}`,
+      stringOrNull(row.label_poll_last_error_message)
+        ? `label poll error ${row.label_poll_last_error_message}`
+        : null,
     ].filter(Boolean).join(", ");
     const summary = `${content.title}${orderNumber ? ` for ${orderNumber}` : ""}${trackingNumber ? ` (${trackingNumber})` : ""}.`;
     const primaryHref = wmsOrderId
@@ -1701,6 +1855,8 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
         || code === "carrier_tracking_payload_rejected"
         || code === "carrier_tracking_receipt_unparsed"
         || code === "carrier_tracking_hydration_review"
+        || code === "carrier_tracking_label_poll_review"
+        || code === "carrier_tracking_label_poll_stalled"
         || code === "carrier_dispatch_command_review"
         || code === "carrier_dispatch_retry_overdue"
         ? "overdue"
@@ -1737,6 +1893,10 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
         subscriptionHttpStatus: row.subscription_http_status,
         subscriptionLastErrorMessage: row.subscription_last_error_message,
         subscriptionResponseEvidence: row.subscription_response_evidence,
+        labelPollStatus: row.label_poll_status,
+        labelPollHttpStatus: row.label_poll_http_status,
+        labelPollLastErrorMessage: row.label_poll_last_error_message,
+        labelPollResponseEvidence: row.label_poll_response_evidence,
       },
       detailLocator: {
         sourceTable: dispatchCommandId
