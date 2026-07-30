@@ -32,6 +32,9 @@ describe("historical carrier-dispatch repair", () => {
     expect(() => parseFlags(["--cohort=package_resolution_retry"])).toThrow(
       /Unsupported --cohort/,
     );
+    expect(
+      parseFlags(["--cohort=active_combined_package_resolution"]).cohort,
+    ).toBe("active_combined_package_resolution");
   });
 
   it("requires exact confirmation and audit fields in execute mode", () => {

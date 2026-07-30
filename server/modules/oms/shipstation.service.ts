@@ -1215,6 +1215,7 @@ export function createShipStationService(
     fallback: boolean;
     handled: boolean;
     matchedByPhysicalIdentity: boolean;
+    combinedOwnership: ShipStationShipmentItemOwnership | null;
   }> {
     const externalFulfillmentId = shipStationShipmentExternalFulfillmentId(
       shipment.shipmentId,
@@ -1236,6 +1237,7 @@ export function createShipStationService(
           fallback: false,
           handled: false,
           matchedByPhysicalIdentity: true,
+          combinedOwnership: null,
         };
       }
     }
@@ -1252,6 +1254,7 @@ export function createShipStationService(
         fallback: false,
         handled: resolved.handled,
         matchedByPhysicalIdentity: false,
+        combinedOwnership: resolved.combinedOwnership ?? null,
       };
     }
 
@@ -1278,6 +1281,7 @@ export function createShipStationService(
           fallback: false,
           handled: resolved.handled,
           matchedByPhysicalIdentity: false,
+          combinedOwnership: resolved.combinedOwnership ?? null,
         };
       }
     }
@@ -1287,6 +1291,7 @@ export function createShipStationService(
       fallback: true,
       handled: false,
       matchedByPhysicalIdentity: false,
+      combinedOwnership: null,
     };
   }
 
@@ -1313,7 +1318,11 @@ export function createShipStationService(
     shipmentId: number,
     shipment: ShipStationShipment,
     externalFulfillmentId: string | null,
-  ): Promise<{ row: any | null; handled: boolean }> {
+  ): Promise<{
+    row: any | null;
+    handled: boolean;
+    combinedOwnership?: ShipStationShipmentItemOwnership;
+  }> {
     const parentResult: any = await db.execute(sql`
       SELECT id, order_id, channel_id, status, shipstation_order_id,
              shipstation_order_key, external_fulfillment_id,
@@ -1460,11 +1469,26 @@ export function createShipStationService(
         WHERE shipment_id = ${parent.id}
           AND qty > 0
       `);
-      const parentItems = (parentItemsResult?.rows ?? []).map((row: any) => ({
+      const parentItems: Array<{ id: number; qty: number }> =
+        (parentItemsResult?.rows ?? []).map((row: any) => ({
         id: Number(row.id),
         qty: Number(row.qty),
       }));
       isPartialPackage = !hasSameShipmentItemSet(parentItems, parsedShipStationItems);
+      const parentItemIds = new Set(parentItems.map((item) => item.id));
+      const containsForeignShipmentItem = parsedShipStationItems.some(
+        (item) => !parentItemIds.has(item.sourceShipmentItemId),
+      );
+      if (isPartialPackage && containsForeignShipmentItem) {
+        const ownership = await loadShipStationShipmentItemOwnership(shipment);
+        if (ownership && ownership.sourceIdsByOrder.size > 1) {
+          return {
+            row: null,
+            handled: false,
+            combinedOwnership: ownership,
+          };
+        }
+      }
     }
 
     if (!isPartialPackage) {
@@ -1918,29 +1942,22 @@ export function createShipStationService(
     await syncItems(db);
   }
 
-  async function resolveCombinedShipmentGroupsFromShipStationItems(
-    resolvedShipmentRow: any,
-    shipment: ShipStationShipment,
-  ): Promise<Array<{ row: any; sourceShipmentItemIds: Set<number> }>> {
-    const ssItems = Array.isArray(shipment.shipmentItems)
-      ? shipment.shipmentItems
-      : [];
-    const sourceShipmentItemIds = Array.from(
-      new Set(
-        ssItems
-          .map((item) => parseWmsShipmentItemLineKey(item.lineItemKey))
-          .filter((id): id is number =>
-            id !== null && Number.isInteger(id) && id > 0
-          ),
-      ),
-    );
+  interface ShipStationShipmentItemOwnership {
+    sourceShipmentItemIds: number[];
+    sourceIdsByOrder: Map<number, Set<number>>;
+  }
 
-    if (sourceShipmentItemIds.length === 0) {
-      return resolvedShipmentRow
-        ? [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }]
-        : [];
+  async function loadShipStationShipmentItemOwnership(
+    shipment: ShipStationShipment,
+  ): Promise<ShipStationShipmentItemOwnership | null> {
+    const parsedItems = parsePositiveWmsShipmentItemsFromShipStation(shipment);
+    if (!parsedItems || parsedItems.length === 0) {
+      return null;
     }
 
+    const sourceShipmentItemIds = parsedItems.map(
+      (item) => item.sourceShipmentItemId,
+    );
     const sourceItemList = sql.join(
       sourceShipmentItemIds.map((id) => sql`${id}`),
       sql`, `,
@@ -1958,12 +1975,7 @@ export function createShipStationService(
       wms_order_id: number;
     }> = sourceRowsResult?.rows ?? [];
 
-    if (sourceRows.length === 0) {
-      return resolvedShipmentRow
-        ? [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }]
-        : [];
-    }
-
+    const resolvedSourceIds = new Set<number>();
     const sourceIdsByOrder = new Map<number, Set<number>>();
     for (const row of sourceRows) {
       const wmsOrderId = Number(row.wms_order_id);
@@ -1974,14 +1986,43 @@ export function createShipStationService(
         !Number.isInteger(sourceShipmentItemId) ||
         sourceShipmentItemId <= 0
       ) {
-        continue;
+        return null;
       }
+      resolvedSourceIds.add(sourceShipmentItemId);
       if (!sourceIdsByOrder.has(wmsOrderId)) {
         sourceIdsByOrder.set(wmsOrderId, new Set());
       }
       sourceIdsByOrder.get(wmsOrderId)!.add(sourceShipmentItemId);
     }
 
+    // Provider line ownership is authoritative only when every positive
+    // wms-item key resolves. Partial ownership must remain on the existing
+    // single-order/quarantine path rather than guessing that a package is
+    // combined.
+    if (
+      resolvedSourceIds.size !== sourceShipmentItemIds.length ||
+      sourceShipmentItemIds.some((id) => !resolvedSourceIds.has(id))
+    ) {
+      return null;
+    }
+
+    return { sourceShipmentItemIds, sourceIdsByOrder };
+  }
+
+  async function resolveCombinedShipmentGroupsFromShipStationItems(
+    resolvedShipmentRow: any,
+    shipment: ShipStationShipment,
+    ownership?: ShipStationShipmentItemOwnership | null,
+  ): Promise<Array<{ row: any; sourceShipmentItemIds: Set<number> }>> {
+    const resolvedOwnership =
+      ownership ?? await loadShipStationShipmentItemOwnership(shipment);
+    if (!resolvedOwnership) {
+      return resolvedShipmentRow
+        ? [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }]
+        : [];
+    }
+
+    const { sourceShipmentItemIds, sourceIdsByOrder } = resolvedOwnership;
     // With a resolved anchor shipment and a single owning order this is the
     // ordinary (non-combined) case — keep the already-resolved row. When there
     // is NO anchor (recovery path: the orderKey pointed at a cancelled/voided
@@ -2006,7 +2047,10 @@ export function createShipStationService(
       // fall into the create-synthetic-child path below and land the shipped
       // event + tracking + marketplace push on a live row, not a dead one.
       const existing: any = await db.execute(sql`
-        SELECT id, order_id, status, shipstation_order_id
+        SELECT id, order_id, source, status, shipstation_order_id,
+               external_fulfillment_id, tracking_number,
+               requires_review, review_reason, shipment_purpose,
+               replaces_shipment_id, replacement_reason
         FROM wms.outbound_shipments
         WHERE order_id = ${wmsOrderId}
           AND status NOT IN ('cancelled', 'voided')
@@ -2084,6 +2128,113 @@ export function createShipStationService(
     return resolvedShipmentRow
       ? [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set(sourceShipmentItemIds) }]
       : [];
+  }
+
+  async function processMultiOrderShippedPackageBeforeSingleParentResolution(
+    shipment: ShipStationShipment,
+    event: Extract<ShipmentEvent, { kind: "shipped" }>,
+    authorityContext: ShipmentAuthorityContext,
+    ownership: ShipStationShipmentItemOwnership,
+  ): Promise<ShipNotifyV2Result> {
+    if (ownership.sourceIdsByOrder.size <= 1) {
+      throw new Error(
+        `ShipStation shipment ${shipment.shipmentId} does not span multiple WMS orders`,
+      );
+    }
+
+    const shipmentGroups =
+      await resolveCombinedShipmentGroupsFromShipStationItems(
+        null,
+        shipment,
+        ownership,
+      );
+    const resolvedOrderIds = new Set(
+      shipmentGroups.map((group) => Number(group.row?.order_id)),
+    );
+    const everyOwningOrderResolved =
+      shipmentGroups.length === ownership.sourceIdsByOrder.size &&
+      [...ownership.sourceIdsByOrder.keys()].every((orderId) =>
+        resolvedOrderIds.has(orderId)
+      );
+    if (!everyOwningOrderResolved) {
+      throw new ShipStationUnmappedItemsError(
+        `ShipStation shipment ${shipment.shipmentId} spans ` +
+          `${ownership.sourceIdsByOrder.size} WMS orders, but only ` +
+          `${shipmentGroups.length} live shipment groups resolved`,
+      );
+    }
+
+    const incomingPhysicalShipmentRef =
+      shipStationShipmentRefFromExternalFulfillmentId(
+        shipStationShipmentExternalFulfillmentId(shipment.shipmentId),
+      );
+    const incomingTracking = String(shipment.trackingNumber ?? "").trim();
+    for (const group of shipmentGroups) {
+      const row = group.row;
+      const status = String(row.status ?? "");
+      if (["returned", "lost"].includes(status)) {
+        await recordShipStationUnmappedPhysicalException(db, {
+          shipment,
+          wmsOrderId: Number(row.order_id),
+          wmsShipmentId: Number(row.id),
+          blockedReason: "combined_package_resolved_to_terminal_shipment",
+          currentPhysicalShipmentRef: row.external_fulfillment_id ?? null,
+          currentTrackingNumber: row.tracking_number ?? null,
+        });
+        return { processed: false, fallback: false, handled: true };
+      }
+      if (status !== "shipped") {
+        continue;
+      }
+
+      const currentPhysicalShipmentRef =
+        shipStationShipmentRefFromExternalFulfillmentId(
+          row.external_fulfillment_id,
+        );
+      const currentTracking = String(row.tracking_number ?? "").trim();
+      const samePhysicalShipment = currentPhysicalShipmentRef !== null &&
+        incomingPhysicalShipmentRef !== null &&
+        currentPhysicalShipmentRef === incomingPhysicalShipmentRef;
+      const safeLegacyTrackingRepair = currentPhysicalShipmentRef === null &&
+        currentTracking.length > 0 &&
+        incomingTracking.length > 0 &&
+        currentTracking === incomingTracking;
+      if (!samePhysicalShipment && !safeLegacyTrackingRepair) {
+        await recordShipStationUnmappedPhysicalException(db, {
+          shipment,
+          wmsOrderId: Number(row.order_id),
+          wmsShipmentId: Number(row.id),
+          blockedReason: "distinct_combined_package_after_terminal_fulfillment",
+          currentPhysicalShipmentRef: row.external_fulfillment_id ?? null,
+          currentTrackingNumber: row.tracking_number ?? null,
+        });
+        return { processed: false, fallback: false, handled: true };
+      }
+    }
+
+    console.warn(
+      `[ShipStation Webhook V2] Resolving ShipStation shipment ` +
+        `${shipment.shipmentId} as one physical package spanning ` +
+        `${shipmentGroups.length} active WMS orders before single-order split resolution.`,
+    );
+    const groupResults: ShipNotifyV2Result[] = [];
+    for (const group of shipmentGroups) {
+      groupResults.push(
+        await applyShipNotifyV2EventToResolvedShipment(
+          group.row,
+          shipment,
+          event,
+          authorityContext,
+          group.sourceShipmentItemIds,
+        ),
+      );
+    }
+    return finalizeCanonicalShipNotifyPackage(
+      shipment,
+      event,
+      groupResults,
+      authorityContext,
+    );
   }
 
   async function loadValidatedInventoryShipmentItems(
@@ -2519,7 +2670,16 @@ export function createShipStationService(
       }
     }
 
+
     const resolved = await resolveWmsShipmentForShipNotify(shipment);
+    if (event.kind === "shipped" && resolved.combinedOwnership) {
+      return processMultiOrderShippedPackageBeforeSingleParentResolution(
+        shipment,
+        event,
+        authorityContext,
+        resolved.combinedOwnership,
+      );
+    }
     const wmsShipmentRow: any = resolved.row;
     if (!wmsShipmentRow) {
       // The orderKey resolved to no LIVE shipment (fallback === false means we
