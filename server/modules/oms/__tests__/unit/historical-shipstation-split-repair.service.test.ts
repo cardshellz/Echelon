@@ -148,6 +148,24 @@ describe("historical ShipStation split repair", () => {
     )).toEqual([[10, 11, 12], [20]]);
   });
 
+  it("groups different source item rows from one aggregate shipment atomically", () => {
+    const components = buildHistoricalSplitRepairComponents(
+      [
+        packagePlan(10, [1]),
+        packagePlan(11, [2]),
+        packagePlan(20, [9]),
+      ],
+      new Map([
+        [1, 100],
+        [2, 100],
+        [9, 200],
+      ]),
+    );
+    expect(components.map((component) =>
+      component.packages.map((plan) => plan.providerPackage.providerShipmentId)
+    )).toEqual([[10, 11], [20]]);
+  });
+
   it("performs no persistence during dry-run", async () => {
     const deps = dependencies();
     const summary = await runHistoricalShipStationSplitRepair(flags(), deps);
@@ -180,6 +198,7 @@ describe("historical ShipStation split repair", () => {
       idempotencyKey: "historical-repair-1",
     }), deps);
     expect(summary).toMatchObject({
+      reshaped: 1,
       repaired: 1,
       providerLabelsLinked: 1,
       dispatchConfirmed: 1,

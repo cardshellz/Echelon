@@ -336,6 +336,21 @@ function buildTargetPlansForPackage(
   });
 }
 
+function targetOrderItemIdentityCollision(target: TargetPlan): string | null {
+  const sourceIdsByOrderItem = new Map<number, Set<number>>();
+  for (const item of target.expectedSourceItems) {
+    if (item.source.order_item_id === null) continue;
+    const sourceIds = sourceIdsByOrderItem.get(item.source.order_item_id) ?? new Set<number>();
+    sourceIds.add(item.sourceShipmentItemId);
+    sourceIdsByOrderItem.set(item.source.order_item_id, sourceIds);
+  }
+  const collisions = [...sourceIdsByOrderItem.entries()]
+    .filter(([, sourceIds]) => sourceIds.size > 1)
+    .map(([orderItemId, sourceIds]) =>
+      `order item ${orderItemId} is represented by source shipment items ${[...sourceIds].sort((a, b) => a - b).join(", ")}`
+    );
+  return collisions.length > 0 ? collisions.join("; ") : null;
+}
 async function loadExactExistingTargets(
   executor: QueryExecutor,
   plan: HistoricalSplitRepairPackagePlan,
@@ -363,42 +378,83 @@ async function loadExactExistingTargets(
   }
   return Object.freeze(targets);
 }
-async function resolveOrCreateTarget(
-  client: PoolClient,
+function validateExistingTarget(
+  row: Record<string, unknown>,
   target: TargetPlan,
-  audit: HistoricalSplitRepairAudit,
-): Promise<number> {
-  const existing = await client.query(
+): number {
+  const id = asPositiveInteger(row.id, "target shipment id");
+  if (
+    Number(row.order_id) !== target.orderId
+    || String(row.status) !== "shipped"
+    || String(row.tracking_number ?? "") !== target.providerPackage.trackingNumber
+    || (row.external_fulfillment_id != null
+      && String(row.external_fulfillment_id) !== target.identity)
+  ) {
+    throw repairError(
+      "TARGET_PACKAGE_IDENTITY_CONFLICT",
+      `Existing WMS shipment ${id} conflicts with provider package ${target.providerPackage.providerShipmentId}`,
+    );
+  }
+  return id;
+}
+
+async function loadPreferredExistingTarget(
+  executor: QueryExecutor,
+  target: TargetPlan,
+  lock: boolean,
+): Promise<Record<string, unknown> | null> {
+  const exact = await executor.query(
     `SELECT id, order_id, status::text AS status, external_fulfillment_id,
             tracking_number
      FROM wms.outbound_shipments
      WHERE external_fulfillment_id = $1
-        OR (order_id = $2 AND status = 'shipped' AND tracking_number = $3)
-     ORDER BY CASE WHEN external_fulfillment_id = $1 THEN 0 ELSE 1 END, id
-     FOR UPDATE`,
-    [target.identity, target.orderId, target.providerPackage.trackingNumber],
+     ORDER BY id
+     ${lock ? "FOR UPDATE" : ""}`,
+    [target.identity],
   );
-  const matches = rowsOf<Record<string, unknown>>(existing);
-  if (matches.length > 1) {
+  const exactMatches = rowsOf<Record<string, unknown>>(exact);
+  if (exactMatches.length > 1) {
+    throw repairError(
+      "TARGET_PACKAGE_IDENTITY_AMBIGUOUS",
+      `Multiple exact WMS package identities match provider package ${target.providerPackage.providerShipmentId} order ${target.orderId}`,
+    );
+  }
+  if (exactMatches.length === 1) {
+    validateExistingTarget(exactMatches[0], target);
+    return exactMatches[0];
+  }
+
+  const fallback = await executor.query(
+    `SELECT id, order_id, status::text AS status, external_fulfillment_id,
+            tracking_number
+     FROM wms.outbound_shipments
+     WHERE order_id = $1 AND status = 'shipped' AND tracking_number = $2
+     ORDER BY id
+     ${lock ? "FOR UPDATE" : ""}`,
+    [target.orderId, target.providerPackage.trackingNumber],
+  );
+  const fallbackMatches = rowsOf<Record<string, unknown>>(fallback);
+  if (fallbackMatches.length > 1) {
     throw repairError(
       "TARGET_PACKAGE_IDENTITY_AMBIGUOUS",
       `Multiple WMS shipments match provider package ${target.providerPackage.providerShipmentId} order ${target.orderId}`,
     );
   }
-  if (matches.length === 1) {
-    const row = matches[0];
-    const id = asPositiveInteger(row.id, "target shipment id");
-    if (
-      Number(row.order_id) !== target.orderId
-      || String(row.status) !== "shipped"
-      || String(row.tracking_number ?? "") !== target.providerPackage.trackingNumber
-      || (row.external_fulfillment_id != null && String(row.external_fulfillment_id) !== target.identity)
-    ) {
-      throw repairError(
-        "TARGET_PACKAGE_IDENTITY_CONFLICT",
-        `Existing WMS shipment ${id} conflicts with provider package ${target.providerPackage.providerShipmentId}`,
-      );
-    }
+  if (fallbackMatches.length === 1) {
+    validateExistingTarget(fallbackMatches[0], target);
+    return fallbackMatches[0];
+  }
+  return null;
+}
+
+async function resolveOrCreateTarget(
+  client: PoolClient,
+  target: TargetPlan,
+  audit: HistoricalSplitRepairAudit,
+): Promise<number> {
+  const existing = await loadPreferredExistingTarget(client, target, true);
+  if (existing) {
+    const id = validateExistingTarget(existing, target);
     await client.query(
       `UPDATE wms.outbound_shipments
        SET external_fulfillment_id = COALESCE(external_fulfillment_id, $2),
@@ -583,7 +639,7 @@ async function resolveExceptions(
          details = details || jsonb_build_object(
            'historicalSplitRepair', jsonb_build_object(
              'runId', $2, 'providerShipmentId', $1,
-             'physicalShipmentId', $3, 'idempotencyKey', $4,
+             'physicalShipmentId', $3::bigint, 'idempotencyKey', $4,
              'resolvedAt', $5
            )
          ),
@@ -611,7 +667,7 @@ async function insertAuditEvents(
      SELECT oms_order.id, 'historical_shipstation_split_repaired',
        jsonb_build_object(
          'runId', $2, 'providerShipmentId', $3,
-         'physicalShipmentId', $4, 'disposition', $5,
+         'physicalShipmentId', $4::bigint, 'disposition', $5,
          'operator', $6, 'reason', $7, 'idempotencyKey', $8,
          'wmsOrderId', wms_order.id
        ), $9
@@ -751,14 +807,14 @@ export function createHistoricalShipStationSplitRepairRepository(
         }
       }
 
-      if (errors.length === 0 && canonicalSourceIds.length > 0) {
+      if (errors.length === 0) {
         const existingTargets = await loadExactExistingTargets(pool, plan, sourceRows);
-        if (existingTargets === null) {
+        if (existingTargets !== null) {
+          resumedProviderIds.add(providerId);
+        } else if (canonicalSourceIds.length > 0) {
           errors.push(
             `source WMS shipment items ${canonicalSourceIds.join(", ")} already belong to another canonical package and this provider package has no exact resumable legacy target`,
           );
-        } else {
-          resumedProviderIds.add(providerId);
         }
       }
 
@@ -770,7 +826,13 @@ export function createHistoricalShipStationSplitRepairRepository(
     }
 
     const safeComponents: HistoricalSplitRepairComponent[] = [];
-    for (const component of buildHistoricalSplitRepairComponents(validPlans)) {
+    const sourceShipmentIdByItem = new Map(
+      [...sourceRows].map(([sourceItemId, source]) => [sourceItemId, source.shipment_id]),
+    );
+    for (const component of buildHistoricalSplitRepairComponents(
+      validPlans,
+      sourceShipmentIdByItem,
+    )) {
       const resumedCount = component.packages.filter((plan) =>
         resumedProviderIds.has(plan.providerPackage.providerShipmentId)
       ).length;
@@ -786,6 +848,37 @@ export function createHistoricalShipStationSplitRepairRepository(
         safeComponents.push(component);
         continue;
       }
+
+      let identityPreflightFailed = false;
+      for (const plan of component.packages) {
+        for (const target of buildTargetPlansForPackage(plan, sourceRows)) {
+          const orderItemCollision = targetOrderItemIdentityCollision(target);
+          if (orderItemCollision !== null) {
+            unsafe.push(immutableFailure(
+              [plan.providerPackage.providerShipmentId],
+              "TARGET_ORDER_ITEM_IDENTITY_COLLISION",
+              `Provider package ${plan.providerPackage.providerShipmentId} cannot satisfy the one-row-per-order-item invariant: ${orderItemCollision}`,
+            ));
+            identityPreflightFailed = true;
+            continue;
+          }
+          try {
+            await loadPreferredExistingTarget(pool, target, false);
+          } catch (error) {
+            const code = error && typeof error === "object"
+              && typeof (error as { code?: unknown }).code === "string"
+              ? String((error as { code: string }).code)
+              : "TARGET_PACKAGE_IDENTITY_PREFLIGHT_FAILED";
+            unsafe.push(immutableFailure(
+              [plan.providerPackage.providerShipmentId],
+              code,
+              error instanceof Error ? error.message : String(error),
+            ));
+            identityPreflightFailed = true;
+          }
+        }
+      }
+      if (identityPreflightFailed) continue;
 
       const requiredBySource = new Map<number, number>();
       for (const plan of component.packages) {
