@@ -319,6 +319,37 @@ const DEFAULT_CHECKOUT_RATE_DEPENDENCIES: CheckoutRateDependencies = {
   persistSnapshot: persistCheckoutSnapshot,
 };
 
+export interface CheckoutRatePreviewResult {
+  rates: ShopifyRate[];
+  disposition: CheckoutRateDisposition;
+  warnings: string[];
+}
+
+/**
+ * Reuses the production checkout quote path for authenticated storefront
+ * previews without writing synthetic checkout snapshots. The actual Shopify
+ * callback remains the only source of checkout calibration snapshots.
+ */
+export async function computeCheckoutRatePreview(
+  body: unknown,
+  dependencies: CheckoutRateDependencies = DEFAULT_CHECKOUT_RATE_DEPENDENCIES,
+): Promise<CheckoutRatePreviewResult> {
+  const capture: { snapshot: PersistCheckoutSnapshotInput | null } = { snapshot: null };
+  const rates = await computeCheckoutRates(body, {
+    ...dependencies,
+    persistSnapshot: async (input) => {
+      capture.snapshot = input;
+    },
+  });
+  const snapshot = capture.snapshot;
+
+  return {
+    rates,
+    disposition: snapshot?.disposition ?? "echelon_quote_unavailable",
+    warnings: snapshot?.warnings ?? ["The checkout quote pipeline did not report an outcome."],
+  };
+}
+
 export async function computeCheckoutRates(
   body: unknown,
   dependencies: CheckoutRateDependencies = DEFAULT_CHECKOUT_RATE_DEPENDENCIES,
