@@ -294,7 +294,7 @@ describe("historical ShipStation split repair repository guards", () => {
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 
-  it("types nullable audit identities before finalizing mapped packages", async () => {
+  it("types every audit parameter before finalizing mapped packages", async () => {
     const client = {
       query: vi.fn(async (sql: string) => {
         if (sql.includes("UPDATE oms.webhook_retry_queue")) return { rows: [{ id: 115755 }] };
@@ -322,8 +322,14 @@ describe("historical ShipStation split repair repository guards", () => {
       occurredAt: new Date("2026-07-31T12:00:00.000Z"),
     });
     const sql = client.query.mock.calls.map(([statement]) => statement).join("\n");
+    expect(sql).toContain("next_retry_at = $3::timestamptz");
+    expect(sql).toContain("'providerShipmentId', $2::bigint");
+    expect(sql).toContain("'runId', $2::text, 'providerShipmentId', $1::bigint");
     expect(sql).toContain("'physicalShipmentId', $3::bigint");
+    expect(sql).toContain("'runId', $2::text, 'providerShipmentId', $3::bigint");
     expect(sql).toContain("'physicalShipmentId', $4::bigint");
+    expect(sql).toContain("'idempotencyKey', $8::text");
+    expect(sql).toContain("$9::timestamptz");
     expect(client.release).toHaveBeenCalledTimes(1);
   });
   it("blocks a rerun when canonical source lineage has no exact persisted target", async () => {
