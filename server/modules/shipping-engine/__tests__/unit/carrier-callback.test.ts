@@ -7,12 +7,45 @@ import type {
   RuntimeChannelShippingResolution,
 } from "../../application/channel-shipping-policy-runtime.service";
 import {
+  computeCheckoutRatePreview,
   computeCheckoutRates,
   isCallbackTokenAuthorized,
   mapQuotesToShopifyRates,
   parseShopifyRateRequest,
   type CheckoutRateDependencies,
 } from "../../interfaces/http/carrier-callback.routes";
+
+describe("computeCheckoutRatePreview", () => {
+  it("returns the checkout disposition without writing a checkout snapshot", async () => {
+    const persistSnapshot = vi.fn(async () => undefined);
+    const dependencies: CheckoutRateDependencies = {
+      originWarehouseId: vi.fn(() => 1),
+      rolloutPolicy: vi.fn(() => parseCheckoutRateRolloutPolicy({ mode: "live" })),
+      loadCatalogWeightsBySku: vi.fn(async () => new Map([
+        ["SLV-100", 120],
+        ["CASE-9", 2_500],
+      ])),
+      resolveChannelShipping: vi.fn(async () =>
+        canonicalRouting("engine_quoted")),
+      quoteShipment: vi.fn(async () => ({
+        ok: false as const,
+        code: "INVALID_SHIPMENT" as const,
+        errors: ["intentional preview quote failure"],
+      })),
+      loadDeliveryEstimates: vi.fn(async () => new Map()),
+      persistSnapshot,
+    };
+
+    const result = await computeCheckoutRatePreview(shopifyBody(), dependencies);
+
+    expect(result).toEqual({
+      rates: [],
+      disposition: "echelon_quote_unavailable",
+      warnings: ["intentional preview quote failure"],
+    });
+    expect(persistSnapshot).not.toHaveBeenCalled();
+  });
+});
 
 describe("isCallbackTokenAuthorized", () => {
   it("requires the exact configured token", () => {

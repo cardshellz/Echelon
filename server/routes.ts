@@ -68,6 +68,7 @@ import { registerRateProgramCloneRoutes } from "./modules/shipping-engine/interf
 import { registerProductRatePolicyAdminRoutes } from "./modules/shipping-engine/interfaces/http/product-rate-policy-admin.routes";
 import { registerManualRateQuoteRoutes } from "./modules/shipping-engine/interfaces/http/manual-rate-quote.routes";
 import { registerChannelShippingPolicyAdminRoutes } from "./modules/shipping-engine/interfaces/http/channel-shipping-policy-admin.routes";
+import { registerStorefrontRatePreviewRoutes } from "./modules/shipping-engine/interfaces/http/storefront-rate-preview.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -104,6 +105,7 @@ export async function registerRoutes(
   registerProductRatePolicyAdminRoutes(app);
   registerChannelShippingPolicyAdminRoutes(app);
   registerManualRateQuoteRoutes(app);
+  registerStorefrontRatePreviewRoutes(app);
   registerOutboundShipmentRoutes(app);
   registerDropshipAdminOmsChannelConfigRoutes(app);
   registerDropshipAdminWorkerOpsRoutes(app);
