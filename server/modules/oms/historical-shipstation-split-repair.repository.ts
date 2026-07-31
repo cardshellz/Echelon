@@ -602,16 +602,16 @@ async function resolveRetryRows(
   if (retryIds.length === 0) return;
   const updated = await client.query(
     `UPDATE oms.webhook_retry_queue
-     SET status = 'success', next_retry_at = $3,
+     SET status = 'success', next_retry_at = $3::timestamptz,
          payload = payload || jsonb_build_object(
            'historicalSplitRepair', jsonb_build_object(
-             'runId', $4, 'operator', $5, 'reason', $6,
-             'idempotencyKey', $7, 'providerShipmentId', $2,
-             'disposition', $8, 'previousLastError', last_error,
-             'resolvedAt', $3
+             'runId', $4::text, 'operator', $5::text, 'reason', $6::text,
+             'idempotencyKey', $7::text, 'providerShipmentId', $2::bigint,
+             'disposition', $8::text, 'previousLastError', last_error,
+             'resolvedAt', $3::timestamptz
            )
          ),
-         last_error = NULL, updated_at = $3
+         last_error = NULL, updated_at = $3::timestamptz
      WHERE id = ANY($1::int[]) AND provider = 'shipstation'
        AND topic = 'SHIP_NOTIFY' AND status = 'dead'
        AND last_error ~ $9 RETURNING id`,
@@ -638,12 +638,12 @@ async function resolveExceptions(
      SET classification = 'safe_auto_repair', status = 'resolved', severity = 'info',
          details = details || jsonb_build_object(
            'historicalSplitRepair', jsonb_build_object(
-             'runId', $2, 'providerShipmentId', $1,
-             'physicalShipmentId', $3::bigint, 'idempotencyKey', $4,
-             'resolvedAt', $5
+             'runId', $2::text, 'providerShipmentId', $1::bigint,
+             'physicalShipmentId', $3::bigint, 'idempotencyKey', $4::text,
+             'resolvedAt', $5::timestamptz
            )
          ),
-         resolved_at = $5, resolved_by = $6, resolution = $7, updated_at = $5
+         resolved_at = $5::timestamptz, resolved_by = $6::text, resolution = $7::text, updated_at = $5::timestamptz
      WHERE external_system = 'shipstation'
        AND external_shipment_ref = $1::text
        AND rule = ANY($8::text[])
@@ -666,11 +666,11 @@ async function insertAuditEvents(
     `INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
      SELECT oms_order.id, 'historical_shipstation_split_repaired',
        jsonb_build_object(
-         'runId', $2, 'providerShipmentId', $3,
-         'physicalShipmentId', $4::bigint, 'disposition', $5,
-         'operator', $6, 'reason', $7, 'idempotencyKey', $8,
+         'runId', $2::text, 'providerShipmentId', $3::bigint,
+         'physicalShipmentId', $4::bigint, 'disposition', $5::text,
+         'operator', $6::text, 'reason', $7::text, 'idempotencyKey', $8::text,
          'wmsOrderId', wms_order.id
-       ), $9
+       ), $9::timestamptz
      FROM wms.orders AS wms_order
      JOIN oms.oms_orders AS oms_order
        ON wms_order.oms_fulfillment_order_id ~ '^[0-9]+$'
@@ -680,7 +680,7 @@ async function insertAuditEvents(
          SELECT 1 FROM oms.oms_order_events AS existing
          WHERE existing.order_id = oms_order.id
            AND existing.event_type = 'historical_shipstation_split_repaired'
-           AND existing.details->>'idempotencyKey' = $8
+           AND existing.details->>'idempotencyKey' = $8::text
            AND existing.details->>'providerShipmentId' = $3::text
        )`,
     [wmsOrderIds, audit.runId, providerShipmentId, physicalShipmentId,
