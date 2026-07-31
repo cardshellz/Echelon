@@ -165,6 +165,7 @@ export interface HistoricalSplitRepairSummary {
   readonly providerPackagesLoaded: number;
   readonly alreadyCanonical: number;
   readonly repairable: number;
+  readonly reshaped: number;
   readonly repaired: number;
   readonly providerLabelsLinked: number;
   readonly dispatchConfirmed: number;
@@ -308,6 +309,7 @@ export function parseHistoricalProviderPackage(
 
 export function buildHistoricalSplitRepairComponents(
   packages: readonly HistoricalSplitRepairPackagePlan[],
+  sourceShipmentIdByItem: ReadonlyMap<number, number> = new Map(),
 ): readonly HistoricalSplitRepairComponent[] {
   const packageById = new Map(
     packages.map((candidate) => [
@@ -316,6 +318,7 @@ export function buildHistoricalSplitRepairComponents(
     ]),
   );
   const packageIdsBySourceItem = new Map<number, Set<number>>();
+  const packageIdsBySourceShipment = new Map<number, Set<number>>();
   for (const candidate of packages) {
     for (const item of candidate.providerPackage.items) {
       if (!packageIdsBySourceItem.has(item.sourceShipmentItemId)) {
@@ -324,6 +327,15 @@ export function buildHistoricalSplitRepairComponents(
       packageIdsBySourceItem
         .get(item.sourceShipmentItemId)!
         .add(candidate.providerPackage.providerShipmentId);
+      const sourceShipmentId = sourceShipmentIdByItem.get(item.sourceShipmentItemId);
+      if (sourceShipmentId !== undefined) {
+        if (!packageIdsBySourceShipment.has(sourceShipmentId)) {
+          packageIdsBySourceShipment.set(sourceShipmentId, new Set());
+        }
+        packageIdsBySourceShipment
+          .get(sourceShipmentId)!
+          .add(candidate.providerPackage.providerShipmentId);
+      }
     }
   }
 
@@ -344,6 +356,12 @@ export function buildHistoricalSplitRepairComponents(
       for (const item of current.providerPackage.items) {
         for (const linkedId of packageIdsBySourceItem.get(item.sourceShipmentItemId) ?? []) {
           if (!visited.has(linkedId)) queue.push(linkedId);
+        }
+        const sourceShipmentId = sourceShipmentIdByItem.get(item.sourceShipmentItemId);
+        if (sourceShipmentId !== undefined) {
+          for (const linkedId of packageIdsBySourceShipment.get(sourceShipmentId) ?? []) {
+            if (!visited.has(linkedId)) queue.push(linkedId);
+          }
         }
       }
     }
@@ -574,6 +592,7 @@ export async function runHistoricalShipStationSplitRepair(
   }
 
   let repaired = 0;
+  let reshaped = 0;
   let providerLabelsLinked = 0;
   let dispatchConfirmed = 0;
   let dispatchCommandsCreated = 0;
@@ -600,6 +619,7 @@ export async function runHistoricalShipStationSplitRepair(
       let appliedPackages: readonly HistoricalSplitAppliedPackage[];
       try {
         appliedPackages = await dependencies.applyComponent(component, audit);
+        reshaped += appliedPackages.length;
       } catch (error) {
         failures.push(failure(
           component.packages.map(
@@ -674,6 +694,7 @@ export async function runHistoricalShipStationSplitRepair(
     providerPackagesLoaded,
     alreadyCanonical: inspection.alreadyCanonical.length,
     repairable,
+    reshaped,
     repaired,
     providerLabelsLinked,
     dispatchConfirmed,
