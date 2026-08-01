@@ -63,6 +63,7 @@ interface TargetAllocation {
   quantity: number;
   orderId: number;
   targetShipmentId: number;
+  exactBeforeApply: boolean;
 }
 
 interface TargetPlan {
@@ -76,6 +77,8 @@ interface TargetPlan {
     source: SourceItemRow;
   }>;
   targetShipmentId: number | null;
+  exactBeforeApply: boolean;
+  retiredDuplicateShipmentId: number | null;
 }
 
 export interface HistoricalShipStationSplitRepairRepository {
@@ -306,6 +309,73 @@ async function exactTargetMembership(
   return mapsEqual(actual, expected);
 }
 
+async function targetContainsExpectedMembership(
+  executor: QueryExecutor,
+  target: TargetPlan,
+  shipmentId: number,
+): Promise<boolean> {
+  const result = await executor.query(
+    `SELECT order_item_id, replacement_for_order_item_id,
+            shipment_item_purpose, product_variant_id, qty
+     FROM wms.outbound_shipment_items
+     WHERE shipment_id = $1
+     ORDER BY id`,
+    [shipmentId],
+  );
+  const actual = new Map<string, number>();
+  for (const row of rowsOf<Record<string, unknown>>(result)) {
+    addQuantity(
+      actual,
+      expectedMembershipKey({
+        order_item_id:
+          row.order_item_id == null ? null : Number(row.order_item_id),
+        replacement_for_order_item_id:
+          row.replacement_for_order_item_id == null
+            ? null
+            : Number(row.replacement_for_order_item_id),
+        shipment_item_purpose: String(row.shipment_item_purpose ?? ""),
+        product_variant_id:
+          row.product_variant_id == null
+            ? null
+            : Number(row.product_variant_id),
+      }),
+      Number(row.qty),
+    );
+  }
+  const expected = new Map<string, number>();
+  for (const item of target.expectedSourceItems) {
+    addQuantity(expected, expectedMembershipKey(item.source), item.quantity);
+  }
+  return [...expected].every(
+    ([key, quantity]) => (actual.get(key) ?? 0) >= quantity,
+  );
+}
+
+async function shipmentItemsHaveCanonicalEvidence(
+  executor: QueryExecutor,
+  shipmentId: number,
+): Promise<boolean> {
+  const result = await executor.query(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM wms.outbound_shipment_items AS item
+       JOIN wms.physical_shipment_items AS physical_item
+         ON physical_item.legacy_wms_shipment_item_id = item.id
+       WHERE item.shipment_id = $1
+     ) OR EXISTS (
+       SELECT 1
+       FROM wms.outbound_shipment_items AS item
+       JOIN oms.channel_fulfillment_receipt_items AS receipt_item
+         ON receipt_item.legacy_wms_shipment_item_id = item.id
+       WHERE item.shipment_id = $1
+     ) AS has_canonical_evidence`,
+    [shipmentId],
+  );
+  return (
+    rowsOf<Record<string, unknown>>(result)[0]?.has_canonical_evidence === true
+  );
+}
+
 function buildTargetPlansForPackage(
   plan: HistoricalSplitRepairPackagePlan,
   sources: ReadonlyMap<number, SourceItemRow>,
@@ -332,6 +402,8 @@ function buildTargetPlansForPackage(
       ),
       expectedSourceItems,
       targetShipmentId: null,
+      exactBeforeApply: false,
+      retiredDuplicateShipmentId: null,
     };
   });
 }
@@ -420,8 +492,86 @@ async function loadPreferredExistingTarget(
     );
   }
   if (exactMatches.length === 1) {
-    validateExistingTarget(exactMatches[0], target);
-    return exactMatches[0];
+    const exactRow = exactMatches[0];
+    const staleId = asPositiveInteger(exactRow.id, "stale target shipment id");
+    const status = String(exactRow.status ?? "");
+    const recoverableStatus = status === "voided" || status === "cancelled";
+    const recoverableIdentity =
+      Number(exactRow.order_id) === target.orderId &&
+      String(exactRow.external_fulfillment_id ?? "") === target.identity &&
+      String(exactRow.tracking_number ?? "") ===
+        target.providerPackage.trackingNumber;
+    if (!recoverableStatus || !recoverableIdentity) {
+      validateExistingTarget(exactRow, target);
+      return exactRow;
+    }
+
+    target.targetShipmentId = staleId;
+    const staleMembershipExact = await exactTargetMembership(executor, target);
+    target.targetShipmentId = null;
+    if (!staleMembershipExact) {
+      throw repairError(
+        "TARGET_PACKAGE_IDENTITY_CONFLICT",
+        `Retired WMS shipment ${staleId} conflicts with provider package ${target.providerPackage.providerShipmentId}`,
+      );
+    }
+    if (await shipmentItemsHaveCanonicalEvidence(executor, staleId)) {
+      throw repairError(
+        "TARGET_RETIRED_DUPLICATE_CANONICAL_EVIDENCE",
+        `Retired WMS shipment ${staleId} has canonical fulfillment evidence and cannot surrender provider identity`,
+      );
+    }
+
+    const sourceShipmentIds = [
+      ...new Set(
+        target.expectedSourceItems.map((item) => item.source.shipment_id),
+      ),
+    ];
+    if (sourceShipmentIds.length !== 1) {
+      throw repairError(
+        "TARGET_RETIRED_DUPLICATE_SOURCE_AMBIGUOUS",
+        `Provider package ${target.providerPackage.providerShipmentId} spans multiple source WMS shipments and cannot adopt a retired identity automatically`,
+      );
+    }
+    const sourceTargetResult = await executor.query(
+      `SELECT id, order_id, status::text AS status, external_fulfillment_id,
+              tracking_number
+       FROM wms.outbound_shipments
+       WHERE id = $1 AND order_id = $2 AND status = 'shipped'
+         AND tracking_number = $3
+       ${lock ? "FOR UPDATE" : ""}`,
+      [
+        sourceShipmentIds[0],
+        target.orderId,
+        target.providerPackage.trackingNumber,
+      ],
+    );
+    const sourceTargets = rowsOf<Record<string, unknown>>(sourceTargetResult);
+    if (sourceTargets.length !== 1) {
+      throw repairError(
+        "TARGET_RETIRED_DUPLICATE_SOURCE_MISSING",
+        `Provider package ${target.providerPackage.providerShipmentId} has no unique shipped aggregate source package to adopt`,
+      );
+    }
+    validateExistingTarget(sourceTargets[0], target);
+    const sourceTargetId = asPositiveInteger(
+      sourceTargets[0].id,
+      "source target shipment id",
+    );
+    if (
+      !(await targetContainsExpectedMembership(
+        executor,
+        target,
+        sourceTargetId,
+      ))
+    ) {
+      throw repairError(
+        "TARGET_RETIRED_DUPLICATE_SOURCE_MEMBERSHIP_MISMATCH",
+        `Source WMS shipment ${sourceTargetId} does not contain provider package ${target.providerPackage.providerShipmentId}`,
+      );
+    }
+    target.retiredDuplicateShipmentId = staleId;
+    return sourceTargets[0];
   }
 
   const fallback = await executor.query(
@@ -446,7 +596,6 @@ async function loadPreferredExistingTarget(
   }
   return null;
 }
-
 async function resolveOrCreateTarget(
   client: PoolClient,
   target: TargetPlan,
@@ -455,6 +604,48 @@ async function resolveOrCreateTarget(
   const existing = await loadPreferredExistingTarget(client, target, true);
   if (existing) {
     const id = validateExistingTarget(existing, target);
+    target.targetShipmentId = id;
+    target.exactBeforeApply = await exactTargetMembership(client, target);
+    if (target.retiredDuplicateShipmentId !== null) {
+      const retiredIdentity = `historical_retired:shipstation:${target.providerPackage.providerShipmentId}:shipment:${target.retiredDuplicateShipmentId}`;
+      const retired = await client.query(
+        `UPDATE wms.outbound_shipments
+         SET external_fulfillment_id = $2,
+             requires_review = false,
+             review_reason = 'historical_provider_identity_duplicate_retired',
+             updated_at = $4
+         WHERE id = $1
+           AND external_fulfillment_id = $3
+           AND status IN ('voided', 'cancelled')
+           AND NOT EXISTS (
+             SELECT 1
+             FROM wms.outbound_shipment_items AS item
+             JOIN wms.physical_shipment_items AS physical_item
+               ON physical_item.legacy_wms_shipment_item_id = item.id
+             WHERE item.shipment_id = wms.outbound_shipments.id
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM wms.outbound_shipment_items AS item
+             JOIN oms.channel_fulfillment_receipt_items AS receipt_item
+               ON receipt_item.legacy_wms_shipment_item_id = item.id
+             WHERE item.shipment_id = wms.outbound_shipments.id
+           )
+         RETURNING id`,
+        [
+          target.retiredDuplicateShipmentId,
+          retiredIdentity,
+          target.identity,
+          audit.occurredAt,
+        ],
+      );
+      if (rowsOf(retired).length !== 1) {
+        throw repairError(
+          "TARGET_RETIRED_DUPLICATE_CHANGED",
+          `Retired WMS shipment ${target.retiredDuplicateShipmentId} changed after inspection`,
+        );
+      }
+    }
     await client.query(
       `UPDATE wms.outbound_shipments
        SET external_fulfillment_id = COALESCE(external_fulfillment_id, $2),
@@ -491,6 +682,7 @@ async function resolveOrCreateTarget(
      target.providerPackage.providerOrderId, target.providerPackage.providerOrderKey,
      audit.occurredAt],
   );
+  target.exactBeforeApply = false;
   return asPositiveInteger(rowsOf<Record<string, unknown>>(inserted)[0]?.id, "inserted shipment id");
 }
 
@@ -589,6 +781,207 @@ async function applySourceAllocations(
   );
   if (rowsOf(moved).length !== 1) {
     throw repairError("SOURCE_ITEM_MOVE_FAILED", `WMS shipment item ${source.id} could not be moved atomically`);
+  }
+}
+
+async function replaceExactTargetCopyWithSource(
+  client: PoolClient,
+  source: SourceItemRow,
+  target: TargetAllocation,
+  archiveShipmentId: number,
+): Promise<void> {
+  const copiedResult = await client.query(
+    `SELECT item.id,
+            EXISTS (
+              SELECT 1 FROM wms.physical_shipment_items AS physical_item
+              WHERE physical_item.legacy_wms_shipment_item_id = item.id
+            ) OR EXISTS (
+              SELECT 1 FROM oms.channel_fulfillment_receipt_items AS receipt_item
+              WHERE receipt_item.legacy_wms_shipment_item_id = item.id
+            ) AS has_canonical_evidence
+     FROM wms.outbound_shipment_items AS item
+     WHERE item.shipment_id = $1
+       AND item.id <> $2
+       AND item.order_item_id IS NOT DISTINCT FROM $3
+       AND item.replacement_for_order_item_id IS NOT DISTINCT FROM $4
+       AND item.shipment_item_purpose = $5
+       AND item.product_variant_id IS NOT DISTINCT FROM $6
+       AND item.qty = $7
+     ORDER BY item.id
+     FOR UPDATE`,
+    [
+      target.targetShipmentId,
+      source.id,
+      source.order_item_id,
+      source.replacement_for_order_item_id,
+      source.shipment_item_purpose,
+      source.product_variant_id,
+      target.quantity,
+    ],
+  );
+  const copiedRows = rowsOf<Record<string, unknown>>(copiedResult);
+  if (
+    copiedRows.length !== 1 ||
+    copiedRows[0].has_canonical_evidence === true
+  ) {
+    throw repairError(
+      "EXACT_TARGET_COPY_NOT_REPLACEABLE",
+      `Provider package ${target.providerShipmentId} does not have one replaceable historical copy for source item ${source.id}`,
+    );
+  }
+  const archiveCollision = await client.query(
+    `SELECT id
+     FROM wms.outbound_shipment_items
+     WHERE shipment_id = $1
+       AND order_item_id IS NOT DISTINCT FROM $2
+       AND replacement_for_order_item_id IS NOT DISTINCT FROM $3
+       AND shipment_item_purpose = $4
+       AND product_variant_id IS NOT DISTINCT FROM $5
+     LIMIT 1
+     FOR UPDATE`,
+    [
+      archiveShipmentId,
+      source.order_item_id,
+      source.replacement_for_order_item_id,
+      source.shipment_item_purpose,
+      source.product_variant_id,
+    ],
+  );
+  if (rowsOf(archiveCollision).length > 0) {
+    throw repairError(
+      "RETIRED_DUPLICATE_ARCHIVE_COLLISION",
+      `Retired WMS shipment ${archiveShipmentId} already contains source item identity ${source.id}`,
+    );
+  }
+  const displaced = await client.query(
+    `UPDATE wms.outbound_shipment_items
+     SET shipment_id = $2
+     WHERE id = $1 AND shipment_id = $3
+     RETURNING id`,
+    [
+      asPositiveInteger(copiedRows[0].id, "copied target item id"),
+      archiveShipmentId,
+      target.targetShipmentId,
+    ],
+  );
+  if (rowsOf(displaced).length !== 1) {
+    throw repairError(
+      "EXACT_TARGET_COPY_ARCHIVE_FAILED",
+      `Historical copy for provider package ${target.providerShipmentId} changed during repair`,
+    );
+  }
+  const moved = await client.query(
+    `UPDATE wms.outbound_shipment_items
+     SET shipment_id = $2, qty = $3, tracking_id = $4,
+         provider_membership_state = 'authoritative'
+     WHERE id = $1 AND shipment_id = $5 AND qty = $6
+     RETURNING id`,
+    [
+      source.id,
+      target.targetShipmentId,
+      target.quantity,
+      String(target.providerShipmentId),
+      source.shipment_id,
+      source.qty,
+    ],
+  );
+  if (rowsOf(moved).length !== 1) {
+    throw repairError(
+      "SOURCE_ITEM_EXACT_TARGET_ADOPTION_FAILED",
+      `Source WMS shipment item ${source.id} could not replace its historical split copy atomically`,
+    );
+  }
+}
+
+async function applySourceAllocationsWithPersistedTargets(
+  client: PoolClient,
+  source: SourceItemRow,
+  allocations: readonly TargetAllocation[],
+  archiveShipmentId: number | null,
+): Promise<void> {
+  const sorted = [...allocations].sort(
+    (left, right) =>
+      left.providerShipmentId - right.providerShipmentId ||
+      left.targetShipmentId - right.targetShipmentId,
+  );
+  const exactResident = sorted.find(
+    (allocation) =>
+      allocation.exactBeforeApply &&
+      allocation.targetShipmentId === source.shipment_id,
+  );
+  const mutable = sorted.filter((allocation) => !allocation.exactBeforeApply);
+  const fixedNonresident = sorted.filter(
+    (allocation) =>
+      allocation.exactBeforeApply &&
+      allocation.targetShipmentId !== source.shipment_id,
+  );
+  if (exactResident) {
+    if (mutable.length > 0) {
+      throw repairError(
+        "EXACT_RESIDENT_SOURCE_HAS_PENDING_ALLOCATIONS",
+        `Source WMS shipment item ${source.id} is already exact in provider package ${exactResident.providerShipmentId} but also has pending package allocations`,
+      );
+    }
+    return;
+  }
+
+  const fixedQuantity = fixedNonresident.reduce(
+    (sum, allocation) => sum + allocation.quantity,
+    0,
+  );
+  if (fixedQuantity > source.qty) {
+    throw repairError(
+      "PERSISTED_TARGET_QUANTITY_EXCEEDED",
+      `Exact persisted split packages already contain ${fixedQuantity} units from source item ${source.id}, but the source has only ${source.qty}`,
+    );
+  }
+  if (fixedQuantity === 0) {
+    await applySourceAllocations(client, source, mutable);
+    return;
+  }
+
+  const remainingQuantity = source.qty - fixedQuantity;
+  if (remainingQuantity === 0 && mutable.length > 0) {
+    throw repairError(
+      "PERSISTED_TARGETS_CONSUME_SOURCE_QUANTITY",
+      `Exact persisted split packages already consume all units from source item ${source.id}, but additional package allocations remain`,
+    );
+  }
+  if (remainingQuantity === 0 && mutable.length === 0) {
+    if (archiveShipmentId === null) {
+      throw repairError(
+        "RETIRED_DUPLICATE_ARCHIVE_REQUIRED",
+        `Source WMS shipment item ${source.id} needs a retired duplicate archive before exact split targets can be adopted`,
+      );
+    }
+    await replaceExactTargetCopyWithSource(
+      client,
+      source,
+      fixedNonresident[0],
+      archiveShipmentId,
+    );
+    return;
+  }
+
+  const reduced = await client.query(
+    `UPDATE wms.outbound_shipment_items
+     SET qty = $2
+     WHERE id = $1 AND shipment_id = $3 AND qty = $4 AND $2 > 0
+     RETURNING id`,
+    [source.id, remainingQuantity, source.shipment_id, source.qty],
+  );
+  if (rowsOf(reduced).length !== 1) {
+    throw repairError(
+      "SOURCE_ITEM_PERSISTED_TARGET_REDUCTION_FAILED",
+      `Source WMS shipment item ${source.id} could not subtract exact persisted split quantities atomically`,
+    );
+  }
+  if (mutable.length > 0) {
+    await applySourceAllocations(
+      client,
+      { ...source, qty: remainingQuantity },
+      mutable,
+    );
   }
 }
 
@@ -836,14 +1229,6 @@ export function createHistoricalShipStationSplitRepairRepository(
       const resumedCount = component.packages.filter((plan) =>
         resumedProviderIds.has(plan.providerPackage.providerShipmentId)
       ).length;
-      if (resumedCount > 0 && resumedCount !== component.packages.length) {
-        unsafe.push(immutableFailure(
-          component.packages.map((plan) => plan.providerPackage.providerShipmentId),
-          "PARTIAL_COMPONENT_RESUME_AMBIGUOUS",
-          "A connected package component mixes already-reshaped and unreshaped provider packages; automatic mutation is blocked.",
-        ));
-        continue;
-      }
       if (resumedCount === component.packages.length) {
         safeComponents.push(component);
         continue;
@@ -951,6 +1336,25 @@ export function createHistoricalShipStationSplitRepairRepository(
         target.targetShipmentId = await resolveOrCreateTarget(client, target, audit);
       }
 
+      const retiredDuplicateShipmentByOrder = new Map<number, number>();
+      for (const target of targets) {
+        if (target.retiredDuplicateShipmentId === null) continue;
+        const existingArchiveId = retiredDuplicateShipmentByOrder.get(target.orderId);
+        if (
+          existingArchiveId !== undefined
+          && existingArchiveId !== target.retiredDuplicateShipmentId
+        ) {
+          throw repairError(
+            "MULTIPLE_RETIRED_DUPLICATE_ARCHIVES",
+            `Order ${target.orderId} has multiple retired duplicate archives in component ${component.componentKey}`,
+          );
+        }
+        retiredDuplicateShipmentByOrder.set(
+          target.orderId,
+          target.retiredDuplicateShipmentId,
+        );
+      }
+
       const allTargetsExact = (
         await Promise.all(targets.map((target) => exactTargetMembership(client, target)))
       ).every(Boolean);
@@ -965,12 +1369,19 @@ export function createHistoricalShipStationSplitRepairRepository(
               quantity: expected.quantity,
               orderId: target.orderId,
               targetShipmentId: target.targetShipmentId!,
+              exactBeforeApply: target.exactBeforeApply,
             });
             allocationsBySource.set(expected.sourceShipmentItemId, existing);
           }
         }
         for (const sourceId of [...allocationsBySource.keys()].sort((a, b) => a - b)) {
-          await applySourceAllocations(client, sources.get(sourceId)!, allocationsBySource.get(sourceId)!);
+          const source = sources.get(sourceId)!;
+          await applySourceAllocationsWithPersistedTargets(
+            client,
+            source,
+            allocationsBySource.get(sourceId)!,
+            retiredDuplicateShipmentByOrder.get(source.order_id) ?? null,
+          );
         }
       }
 

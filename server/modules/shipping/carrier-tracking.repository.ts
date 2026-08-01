@@ -1494,7 +1494,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                END
              )
           ),
-          legacy_targets AS (
+          legacy_identity_targets AS (
             SELECT DISTINCT
               label.id AS shipping_provider_label_id,
               NULL::bigint AS shipment_request_id,
@@ -1513,11 +1513,35 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                   ELSE label.provider_label_id
                 END
               )
-              OR legacy.id = CASE
+              OR (
+                label.provider = 'shipstation'
+                AND STRPOS(
+                  legacy.external_fulfillment_id,
+                  'shipstation_combined:' || label.provider_label_id || ':order:'
+                ) = 1
+              )
+          ),
+          legacy_order_key_targets AS (
+            SELECT DISTINCT
+              label.id AS shipping_provider_label_id,
+              NULL::bigint AS shipment_request_id,
+              NULL::bigint AS shipping_engine_order_id,
+              NULL::bigint AS physical_shipment_id,
+              legacy.id AS legacy_wms_shipment_id,
+              'legacy_provider_order_key'::text AS source
+            FROM label
+            JOIN wms.outbound_shipments AS legacy
+              ON legacy.id = CASE
                 WHEN label.provider_order_key ~ '^echelon-wms-shp-[1-9][0-9]*$'
                 THEN substring(label.provider_order_key FROM '([1-9][0-9]*)$')::integer
                 ELSE NULL
               END
+            WHERE NOT EXISTS (SELECT 1 FROM legacy_identity_targets)
+          ),
+          legacy_targets AS (
+            SELECT * FROM legacy_identity_targets
+            UNION ALL
+            SELECT * FROM legacy_order_key_targets
           ),
           provider_item_targets AS (
             SELECT DISTINCT
@@ -1543,6 +1567,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                 THEN substring(provider_item->>'lineItemKey' FROM '^wms-item-([1-9][0-9]*)$')::integer
                 ELSE NULL
               END
+            WHERE NOT EXISTS (SELECT 1 FROM legacy_identity_targets)
           ),
           request_targets AS (
             SELECT DISTINCT
