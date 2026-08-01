@@ -37,6 +37,27 @@ function packagePlan(
   };
 }
 
+function partialResumePlans(): readonly HistoricalSplitRepairPackagePlan[] {
+  const plan = (
+    providerShipmentId: number,
+    trackingNumber: string,
+    sourceShipmentItemId: number,
+  ): HistoricalSplitRepairPackagePlan => {
+    const base = packagePlan(providerShipmentId, [sourceShipmentItemId]);
+    return {
+      ...base,
+      providerPackage: {
+        ...base.providerPackage,
+        trackingNumber,
+      },
+    };
+  };
+  return Object.freeze([
+    plan(442730042, "TRACK-A", 9001),
+    plan(442730043, "TRACK-B", 9002),
+    plan(442730044, "TRACK-C", 9002),
+  ]);
+}
 function sourceRow(overrides: Record<string, unknown> = {}) {
   return {
     id: 9001,
@@ -235,6 +256,228 @@ describe("historical ShipStation split repair repository guards", () => {
     ]);
   });
 
+  it("accepts a partially resumed component only when a retired exact duplicate can surrender identity safely", async () => {
+    const query = vi.fn(
+      async (sql: string, params: readonly unknown[] = []) => {
+        if (sql.includes("FROM wms.physical_shipments AS physical"))
+          return { rows: [] };
+        if (
+          sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")
+        ) {
+          return {
+            rows: [
+              sourceRow({
+                id: 9001,
+                shipment_id: 7001,
+                order_item_id: 3001,
+                qty: 1,
+                tracking_number: "TRACK-A",
+                external_fulfillment_id: null,
+                canonical_physical_shipment_id: null,
+              }),
+              sourceRow({
+                id: 9002,
+                shipment_id: 7001,
+                order_item_id: 3002,
+                qty: 2,
+                tracking_number: "TRACK-A",
+                external_fulfillment_id: null,
+                canonical_physical_shipment_id: null,
+              }),
+            ],
+          };
+        }
+        if (sql.includes("WHERE external_fulfillment_id = $1")) {
+          const identity = String(params[0]);
+          if (identity.endsWith("442730042")) {
+            return {
+              rows: [
+                {
+                  id: 7101,
+                  order_id: 8001,
+                  status: "voided",
+                  external_fulfillment_id: identity,
+                  tracking_number: "TRACK-A",
+                },
+              ],
+            };
+          }
+          if (identity.endsWith("442730043")) {
+            return {
+              rows: [
+                {
+                  id: 7102,
+                  order_id: 8001,
+                  status: "shipped",
+                  external_fulfillment_id: identity,
+                  tracking_number: "TRACK-B",
+                },
+              ],
+            };
+          }
+          return {
+            rows: [
+              {
+                id: 7103,
+                order_id: 8001,
+                status: "shipped",
+                external_fulfillment_id: identity,
+                tracking_number: "TRACK-C",
+              },
+            ],
+          };
+        }
+        if (sql.includes("AS has_canonical_evidence")) {
+          return { rows: [{ has_canonical_evidence: false }] };
+        }
+        if (
+          sql.includes("WHERE id = $1 AND order_id = $2 AND status = 'shipped'")
+        ) {
+          return {
+            rows: [
+              {
+                id: 7001,
+                order_id: 8001,
+                status: "shipped",
+                external_fulfillment_id: null,
+                tracking_number: "TRACK-A",
+              },
+            ],
+          };
+        }
+        if (sql.includes("WHERE shipment_id = $1")) {
+          const shipmentId = Number(params[0]);
+          if (shipmentId === 7001) {
+            return {
+              rows: [
+                {
+                  order_item_id: 3001,
+                  replacement_for_order_item_id: null,
+                  shipment_item_purpose: "customer_fulfillment",
+                  product_variant_id: 4001,
+                  qty: 1,
+                },
+                {
+                  order_item_id: 3002,
+                  replacement_for_order_item_id: null,
+                  shipment_item_purpose: "customer_fulfillment",
+                  product_variant_id: 4001,
+                  qty: 2,
+                },
+              ],
+            };
+          }
+          return {
+            rows: [
+              {
+                order_item_id: shipmentId === 7101 ? 3001 : 3002,
+                replacement_for_order_item_id: null,
+                shipment_item_purpose: "customer_fulfillment",
+                product_variant_id: 4001,
+                qty: 1,
+              },
+            ],
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    );
+    const repository = createHistoricalShipStationSplitRepairRepository({
+      query,
+    } as any);
+    const result = await repository.inspectPackages(partialResumePlans());
+    expect(result.unsafe).toEqual([]);
+    expect(result.repairableComponents).toHaveLength(1);
+    expect(result.repairableComponents[0].packages).toHaveLength(3);
+  });
+
+  it("rejects a retired duplicate that already has canonical fulfillment evidence", async () => {
+    const query = vi.fn(
+      async (sql: string, params: readonly unknown[] = []) => {
+        if (sql.includes("FROM wms.physical_shipments AS physical"))
+          return { rows: [] };
+        if (
+          sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")
+        ) {
+          return {
+            rows: [
+              sourceRow({
+                id: 9001,
+                shipment_id: 7001,
+                order_item_id: 3001,
+                qty: 1,
+                tracking_number: "TRACK-A",
+                external_fulfillment_id: null,
+                canonical_physical_shipment_id: null,
+              }),
+              sourceRow({
+                id: 9002,
+                shipment_id: 7001,
+                order_item_id: 3002,
+                qty: 2,
+                tracking_number: "TRACK-A",
+                external_fulfillment_id: null,
+                canonical_physical_shipment_id: null,
+              }),
+            ],
+          };
+        }
+        if (sql.includes("WHERE external_fulfillment_id = $1")) {
+          const identity = String(params[0]);
+          const suffix = Number(identity.split(":").at(-1));
+          return {
+            rows: [
+              {
+                id:
+                  suffix === 442730042
+                    ? 7101
+                    : suffix === 442730043
+                      ? 7102
+                      : 7103,
+                order_id: 8001,
+                status: suffix === 442730042 ? "voided" : "shipped",
+                external_fulfillment_id: identity,
+                tracking_number:
+                  suffix === 442730042
+                    ? "TRACK-A"
+                    : suffix === 442730043
+                      ? "TRACK-B"
+                      : "TRACK-C",
+              },
+            ],
+          };
+        }
+        if (sql.includes("AS has_canonical_evidence")) {
+          return { rows: [{ has_canonical_evidence: true }] };
+        }
+        if (sql.includes("WHERE shipment_id = $1")) {
+          const shipmentId = Number(params[0]);
+          return {
+            rows: [
+              {
+                order_item_id: shipmentId === 7101 ? 3001 : 3002,
+                replacement_for_order_item_id: null,
+                shipment_item_purpose: "customer_fulfillment",
+                product_variant_id: 4001,
+                qty: 1,
+              },
+            ],
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    );
+    const repository = createHistoricalShipStationSplitRepairRepository({
+      query,
+    } as any);
+    const result = await repository.inspectPackages(partialResumePlans());
+    expect(result.repairableComponents).toEqual([]);
+    expect(result.unsafe).toContainEqual(
+      expect.objectContaining({
+        code: "TARGET_RETIRED_DUPLICATE_CANONICAL_EVIDENCE",
+      }),
+    );
+  });
   it("prefers an exact package identity over a stale order-and-tracking fallback", async () => {
     let fallbackQueried = false;
     const client = {
@@ -294,6 +537,340 @@ describe("historical ShipStation split repair repository guards", () => {
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 
+  it("reuses exact split targets and moves original lineage without duplicating fulfillment quantity", async () => {
+    interface ShipmentState {
+      id: number;
+      orderId: number;
+      status: string;
+      externalId: string | null;
+      tracking: string;
+    }
+    interface ItemState {
+      id: number;
+      shipmentId: number;
+      orderItemId: number;
+      quantity: number;
+      trackingId: string | null;
+    }
+    const shipments = new Map<number, ShipmentState>([
+      [
+        7001,
+        {
+          id: 7001,
+          orderId: 8001,
+          status: "shipped",
+          externalId: null,
+          tracking: "TRACK-A",
+        },
+      ],
+      [
+        7101,
+        {
+          id: 7101,
+          orderId: 8001,
+          status: "voided",
+          externalId: "shipstation_shipment:442730042",
+          tracking: "TRACK-A",
+        },
+      ],
+      [
+        7102,
+        {
+          id: 7102,
+          orderId: 8001,
+          status: "shipped",
+          externalId: "shipstation_shipment:442730043",
+          tracking: "TRACK-B",
+        },
+      ],
+      [
+        7103,
+        {
+          id: 7103,
+          orderId: 8001,
+          status: "shipped",
+          externalId: "shipstation_shipment:442730044",
+          tracking: "TRACK-C",
+        },
+      ],
+    ]);
+    const items = new Map<number, ItemState>([
+      [
+        9001,
+        {
+          id: 9001,
+          shipmentId: 7001,
+          orderItemId: 3001,
+          quantity: 1,
+          trackingId: null,
+        },
+      ],
+      [
+        9002,
+        {
+          id: 9002,
+          shipmentId: 7001,
+          orderItemId: 3002,
+          quantity: 2,
+          trackingId: null,
+        },
+      ],
+      [
+        9101,
+        {
+          id: 9101,
+          shipmentId: 7101,
+          orderItemId: 3001,
+          quantity: 1,
+          trackingId: "442730042",
+        },
+      ],
+      [
+        9201,
+        {
+          id: 9201,
+          shipmentId: 7102,
+          orderItemId: 3002,
+          quantity: 1,
+          trackingId: "442730043",
+        },
+      ],
+      [
+        9301,
+        {
+          id: 9301,
+          shipmentId: 7103,
+          orderItemId: 3002,
+          quantity: 1,
+          trackingId: "442730044",
+        },
+      ],
+    ]);
+    const membershipRows = (shipmentId: number) =>
+      [...items.values()]
+        .filter((item) => item.shipmentId === shipmentId)
+        .sort((left, right) => left.id - right.id)
+        .map((item) => ({
+          order_item_id: item.orderItemId,
+          replacement_for_order_item_id: null,
+          shipment_item_purpose: "customer_fulfillment",
+          product_variant_id: 4001,
+          qty: item.quantity,
+        }));
+    const client = {
+      query: vi.fn(async (sql: string, params: readonly unknown[] = []) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK")
+          return { rows: [] };
+        if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
+        if (
+          sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")
+        ) {
+          return {
+            rows: (params[0] as number[]).map((id) => {
+              const item = items.get(id)!;
+              const shipment = shipments.get(item.shipmentId)!;
+              return sourceRow({
+                id: item.id,
+                shipment_id: item.shipmentId,
+                order_id: shipment.orderId,
+                shipment_status: shipment.status,
+                shipment_source: "echelon_sync",
+                external_fulfillment_id: shipment.externalId,
+                tracking_number: shipment.tracking,
+                order_item_id: item.orderItemId,
+                qty: item.quantity,
+                tracking_id: item.trackingId,
+                canonical_physical_shipment_id: null,
+              });
+            }),
+          };
+        }
+        if (sql.includes("WHERE external_fulfillment_id = $1")) {
+          return {
+            rows: [...shipments.values()]
+              .filter((shipment) => shipment.externalId === String(params[0]))
+              .map((shipment) => ({
+                id: shipment.id,
+                order_id: shipment.orderId,
+                status: shipment.status,
+                external_fulfillment_id: shipment.externalId,
+                tracking_number: shipment.tracking,
+              })),
+          };
+        }
+        if (
+          sql.includes("AS has_canonical_evidence") &&
+          sql.includes("SELECT item.id")
+        ) {
+          const targetShipmentId = Number(params[0]);
+          const sourceItemId = Number(params[1]);
+          const orderItemId = Number(params[2]);
+          const quantity = Number(params[6]);
+          return {
+            rows: [...items.values()]
+              .filter(
+                (item) =>
+                  item.shipmentId === targetShipmentId &&
+                  item.id !== sourceItemId &&
+                  item.orderItemId === orderItemId &&
+                  item.quantity === quantity,
+              )
+              .map((item) => ({ id: item.id, has_canonical_evidence: false })),
+          };
+        }
+        if (sql.includes("AS has_canonical_evidence")) {
+          return { rows: [{ has_canonical_evidence: false }] };
+        }
+        if (
+          sql.includes("WHERE id = $1 AND order_id = $2 AND status = 'shipped'")
+        ) {
+          const shipment = shipments.get(Number(params[0]));
+          if (
+            !shipment ||
+            shipment.status !== "shipped" ||
+            shipment.orderId !== Number(params[1]) ||
+            shipment.tracking !== String(params[2])
+          )
+            return { rows: [] };
+          return {
+            rows: [
+              {
+                id: shipment.id,
+                order_id: shipment.orderId,
+                status: shipment.status,
+                external_fulfillment_id: shipment.externalId,
+                tracking_number: shipment.tracking,
+              },
+            ],
+          };
+        }
+        if (
+          sql.includes("SELECT order_item_id, replacement_for_order_item_id")
+        ) {
+          return { rows: membershipRows(Number(params[0])) };
+        }
+        if (sql.includes("SET external_fulfillment_id = $2,")) {
+          const shipment = shipments.get(Number(params[0]))!;
+          if (
+            shipment.externalId !== String(params[2]) ||
+            !["voided", "cancelled"].includes(shipment.status)
+          )
+            return { rows: [] };
+          shipment.externalId = String(params[1]);
+          return { rows: [{ id: shipment.id }] };
+        }
+        if (sql.includes("SET external_fulfillment_id = COALESCE")) {
+          const shipment = shipments.get(Number(params[0]))!;
+          shipment.externalId ??= String(params[1]);
+          return { rows: [] };
+        }
+        if (
+          sql.includes("LIMIT 1") &&
+          sql.includes("FROM wms.outbound_shipment_items")
+        ) {
+          const archiveShipmentId = Number(params[0]);
+          const orderItemId = Number(params[1]);
+          const collision = [...items.values()].find(
+            (item) =>
+              item.shipmentId === archiveShipmentId &&
+              item.orderItemId === orderItemId,
+          );
+          return { rows: collision ? [{ id: collision.id }] : [] };
+        }
+        if (sql.includes("SET shipment_id = $2, qty = $3")) {
+          const item = items.get(Number(params[0]))!;
+          if (
+            item.shipmentId !== Number(params[4]) ||
+            item.quantity !== Number(params[5])
+          ) {
+            return { rows: [] };
+          }
+          item.shipmentId = Number(params[1]);
+          item.quantity = Number(params[2]);
+          item.trackingId = String(params[3]);
+          return { rows: [{ id: item.id }] };
+        }
+        if (
+          sql.includes("SET shipment_id = $2") &&
+          sql.includes("WHERE id = $1 AND shipment_id = $3")
+        ) {
+          const item = items.get(Number(params[0]))!;
+          if (item.shipmentId !== Number(params[2])) return { rows: [] };
+          item.shipmentId = Number(params[1]);
+          return { rows: [{ id: item.id }] };
+        }
+        if (sql.includes("SET qty = $2, tracking_id = $3")) {
+          const item = items.get(Number(params[0]))!;
+          item.quantity = Number(params[1]);
+          item.trackingId = String(params[2]);
+          return { rows: [] };
+        }
+        if (sql.includes("SET status = 'cancelled'")) return { rows: [] };
+        if (sql.includes("INSERT INTO wms.outbound_shipment_items")) {
+          throw new Error("Exact persisted targets must not be copied again");
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const repository = createHistoricalShipStationSplitRepairRepository({
+      connect: vi.fn(async () => client),
+    } as any);
+    const result = await repository.applyComponent(
+      {
+        componentKey: "partial-resume",
+        packages: partialResumePlans(),
+      },
+      {
+        runId: "run-1",
+        operator: "owner@cardshellz.com",
+        reason: "repair exact historical split targets",
+        idempotencyKey: "partial-resume-1",
+        occurredAt: new Date("2026-07-31T12:00:00.000Z"),
+      },
+    );
+
+    expect(result).toEqual([
+      {
+        providerShipmentId: 442730042,
+        legacyWmsShipmentIds: [7001],
+        wmsOrderIds: [8001],
+      },
+      {
+        providerShipmentId: 442730043,
+        legacyWmsShipmentIds: [7102],
+        wmsOrderIds: [8001],
+      },
+      {
+        providerShipmentId: 442730044,
+        legacyWmsShipmentIds: [7103],
+        wmsOrderIds: [8001],
+      },
+    ]);
+    expect(shipments.get(7001)?.externalId).toBe(
+      "shipstation_shipment:442730042",
+    );
+    expect(shipments.get(7101)?.externalId).toBe(
+      "historical_retired:shipstation:442730042:shipment:7101",
+    );
+    expect(items.get(9001)).toMatchObject({
+      shipmentId: 7001,
+      quantity: 1,
+      trackingId: "442730042",
+    });
+    expect(items.get(9002)).toMatchObject({
+      shipmentId: 7102,
+      quantity: 1,
+      trackingId: "442730043",
+    });
+    expect(items.get(9201)).toMatchObject({ shipmentId: 7101, quantity: 1 });
+    expect(items.get(9301)).toMatchObject({
+      shipmentId: 7103,
+      quantity: 1,
+      trackingId: "442730044",
+    });
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
   it("types every audit parameter before finalizing mapped packages", async () => {
     const client = {
       query: vi.fn(async (sql: string) => {
@@ -348,12 +925,14 @@ describe("historical ShipStation split repair repository guards", () => {
       expect.objectContaining({ code: "SOURCE_PACKAGE_LINEAGE_UNSAFE" }),
     ]);
   });
-  it("supports interrupted reruns only when every persisted target exactly matches provider membership", () => {
+  it("resumes persisted targets only through exact membership and audited partial allocation", () => {
     expect(source).toContain("loadExactExistingTargets");
-    expect(source).toContain("PARTIAL_COMPONENT_RESUME_AMBIGUOUS");
     expect(source).toContain("exactTargetMembership");
+    expect(source).toContain("applySourceAllocationsWithPersistedTargets");
+    expect(source).toContain("TARGET_RETIRED_DUPLICATE_CANONICAL_EVIDENCE");
+    expect(source).toContain("PERSISTED_TARGETS_CONSUME_SOURCE_QUANTITY");
+    expect(source).not.toContain("PARTIAL_COMPONENT_RESUME_AMBIGUOUS");
   });
-
   it("keeps carrier movement as the only fulfillment authority", () => {
     expect(source).toContain("provider_label_mapped_awaiting_dispatch");
     expect(source).not.toContain("INSERT INTO oms.channel_fulfillment_pushes");

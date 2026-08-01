@@ -84,7 +84,7 @@ describe("carrier tracking repository concurrency contract", () => {
       "label.updated_at > state.last_reconciled_at",
     );
     expect(repositorySource).toMatch(
-      /\.onConflictDoUpdate\(\{\s+target: carrierTrackingReconciliationState\.carrierTrackingEventId/,
+      /\.onConflictDoUpdate\(\{\s+target:\s+carrierTrackingReconciliationState\.carrierTrackingEventId/,
     );
   });
 
@@ -138,6 +138,23 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(reconciliationSource).toContain("'^wms-item-[1-9][0-9]*$'");
     expect(reconciliationSource).toContain("JOIN wms.outbound_shipment_items AS source_item");
     expect(reconciliationSource).toContain("'provider_line_item_identity'::text AS source");
+  });
+
+  it("prefers exact package identities over stale provider order and line-item fallbacks", () => {
+    const reconciliationStart = repositorySource.indexOf(
+      "async reconcileProviderLabelLinks(provider, providerLabelId, reconciledAt)",
+    );
+    const reconciliationSource = repositorySource.slice(reconciliationStart);
+
+    expect(reconciliationSource).toContain("legacy_identity_targets AS");
+    expect(reconciliationSource).toContain("legacy_order_key_targets AS");
+    expect(reconciliationSource).toContain(
+      "'shipstation_combined:' || label.provider_label_id || ':order:'",
+    );
+    expect(reconciliationSource).toContain(
+      "WHERE NOT EXISTS (SELECT 1 FROM legacy_identity_targets)",
+    );
+    expect(reconciliationSource).toContain("legacy_targets AS");
   });
 
   it("keeps delayed link reconciliation arithmetic in timestamptz", () => {
