@@ -717,7 +717,7 @@ async function loadPolicy(
   };
 }
 
-async function loadDestinationScopes(
+export async function loadDestinationScopes(
   executor: Executor,
   ids?: readonly number[],
 ): Promise<ShippingDestinationScopeSummary[]> {
