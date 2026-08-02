@@ -1307,11 +1307,11 @@ export function createHistoricalShipStationSplitRepairRepository(
     const postFilters: string[] = [];
     if (flags.providerShipmentId !== null) {
       values.push(flags.providerShipmentId);
-      postFilters.push(`matched.provider_shipment_id = $${values.length}`);
+      postFilters.push(`grouped.provider_shipment_id = $${values.length}`);
     }
     if (flags.afterProviderShipmentId !== null) {
       values.push(flags.afterProviderShipmentId);
-      postFilters.push(`matched.provider_shipment_id > $${values.length}`);
+      postFilters.push(`grouped.provider_shipment_id > $${values.length}`);
     }
     let limit = "";
     if (flags.limit !== null) {
@@ -1331,14 +1331,77 @@ export function createHistoricalShipStationSplitRepairRepository(
            AND retry.status = 'dead'
            AND retry.last_error ~
              'shipment [0-9]+: duplicate key value violates unique constraint "${FAILURE_INDEX_PATTERN}"'
+       ), grouped AS (
+         SELECT matched.provider_shipment_id,
+                ARRAY_AGG(matched.retry_id ORDER BY matched.retry_id) AS retry_ids
+         FROM matched
+         GROUP BY matched.provider_shipment_id
+       ), selected AS (
+         SELECT grouped.provider_shipment_id, grouped.retry_ids
+         FROM grouped
+         ${postFilters.length > 0 ? `WHERE ${postFilters.join(" AND ")}` : ""}
+         ORDER BY grouped.provider_shipment_id
+         ${limit}
+       ), source_aggregates AS (
+         SELECT DISTINCT selected.provider_shipment_id,
+                aggregate_shipment.id AS aggregate_shipment_id
+         FROM selected
+         JOIN wms.shipping_provider_labels AS selected_label
+           ON selected_label.provider = 'shipstation'
+          AND selected_label.provider_label_id = selected.provider_shipment_id::text
+         JOIN wms.shipping_provider_label_links AS aggregate_link
+           ON aggregate_link.shipping_provider_label_id = selected_label.id
+          AND aggregate_link.legacy_wms_shipment_id IS NOT NULL
+         JOIN wms.outbound_shipments AS aggregate_shipment
+           ON aggregate_shipment.id = aggregate_link.legacy_wms_shipment_id
+         WHERE selected_label.label_direction = 'outbound'
+           AND selected_label.label_status IN ('active', 'unknown')
+           AND selected_label.voided_at IS NULL
+           AND aggregate_shipment.status = 'shipped'
+           AND aggregate_shipment.shipment_purpose = 'customer_fulfillment'
+           AND COALESCE(aggregate_shipment.source, '') <> 'shipstation_split'
+       ), sibling_candidates AS (
+         SELECT DISTINCT sibling_label.provider_label_id::bigint AS provider_shipment_id
+         FROM source_aggregates AS aggregate
+         JOIN wms.shipping_provider_label_links AS sibling_aggregate_link
+           ON sibling_aggregate_link.legacy_wms_shipment_id = aggregate.aggregate_shipment_id
+         JOIN wms.shipping_provider_labels AS sibling_label
+           ON sibling_label.id = sibling_aggregate_link.shipping_provider_label_id
+         WHERE sibling_label.provider = 'shipstation'
+           AND sibling_label.provider_label_id ~ '^[0-9]+$'
+           AND sibling_label.label_direction = 'outbound'
+           AND sibling_label.label_status IN ('active', 'unknown')
+           AND sibling_label.voided_at IS NULL
+           AND EXISTS (
+             SELECT 1
+             FROM wms.shipping_provider_label_links AS sibling_target_link
+             JOIN wms.outbound_shipments AS sibling_target
+               ON sibling_target.id = sibling_target_link.legacy_wms_shipment_id
+             WHERE sibling_target_link.shipping_provider_label_id = sibling_label.id
+               AND sibling_target.id <> aggregate.aggregate_shipment_id
+               AND sibling_target.source = 'shipstation_split'
+               AND sibling_target.status IN ('shipped', 'queued', 'voided', 'cancelled')
+               AND sibling_target.shipment_purpose = 'customer_fulfillment'
+               AND sibling_target.external_fulfillment_id =
+                 'shipstation_shipment:' || sibling_label.provider_label_id
+           )
+       ), expanded AS (
+         SELECT selected.provider_shipment_id, selected.retry_ids
+         FROM selected
+         UNION ALL
+         SELECT sibling.provider_shipment_id, ARRAY[]::integer[] AS retry_ids
+         FROM sibling_candidates AS sibling
        )
-       SELECT matched.provider_shipment_id,
-              ARRAY_AGG(matched.retry_id ORDER BY matched.retry_id) AS retry_ids
-       FROM matched
-       ${postFilters.length > 0 ? `WHERE ${postFilters.join(" AND ")}` : ""}
-       GROUP BY matched.provider_shipment_id
-       ORDER BY matched.provider_shipment_id
-       ${limit}`,
+       SELECT expanded.provider_shipment_id,
+              COALESCE(
+                ARRAY_AGG(DISTINCT retry_id ORDER BY retry_id)
+                  FILTER (WHERE retry_id IS NOT NULL),
+                ARRAY[]::integer[]
+              ) AS retry_ids
+       FROM expanded
+       LEFT JOIN LATERAL UNNEST(expanded.retry_ids) AS retry_row(retry_id) ON TRUE
+       GROUP BY expanded.provider_shipment_id
+       ORDER BY expanded.provider_shipment_id`,
       values,
     );
     return Object.freeze(rowsOf<Record<string, unknown>>(result).map((row) => Object.freeze({

@@ -92,7 +92,7 @@ describe("historical ShipStation split repair repository guards", () => {
 
   it("supports an explicit provider shipment resume cursor", () => {
     expect(source).toContain("flags.afterProviderShipmentId !== null");
-    expect(source).toContain("matched.provider_shipment_id >");
+    expect(source).toContain("grouped.provider_shipment_id >");
   });
 
   it("binds the resume cursor and limit as PostgreSQL parameters", async () => {
@@ -114,9 +114,51 @@ describe("historical ShipStation split repair repository guards", () => {
     };
     await repository.loadRetryCandidates(flags);
     expect(query).toHaveBeenCalledWith(
-      expect.stringMatching(/matched\.provider_shipment_id > \$1[\s\S]*LIMIT \$2/),
+      expect.stringMatching(/grouped\.provider_shipment_id > \$1[\s\S]*LIMIT \$2/),
       [440000000, 25],
     );
+  });
+
+  it("expands one failed package into its proven active sibling split cohort", async () => {
+    const query = vi.fn(async (sql: string) => {
+      expect(sql).toContain("source_aggregates AS");
+      expect(sql).toContain("sibling_candidates AS");
+      expect(sql).toContain("aggregate_shipment.status = 'shipped'");
+      expect(sql).toContain("COALESCE(aggregate_shipment.source, '') <> 'shipstation_split'");
+      expect(sql).toContain("sibling_label.label_direction = 'outbound'");
+      expect(sql).toContain("sibling_label.label_status IN ('active', 'unknown')");
+      expect(sql).toContain("sibling_label.voided_at IS NULL");
+      expect(sql).toContain("sibling_target.source = 'shipstation_split'");
+      expect(sql).toContain("sibling_target.external_fulfillment_id =");
+      return {
+        rows: [
+          { provider_shipment_id: "443963753", retry_ids: [115757] },
+          { provider_shipment_id: "443964641", retry_ids: [] },
+          { provider_shipment_id: "443965277", retry_ids: [] },
+        ],
+      };
+    });
+    const repository = createHistoricalShipStationSplitRepairRepository({ query } as any);
+    const flags: HistoricalSplitRepairFlags = {
+      mode: "dry-run",
+      limit: null,
+      providerShipmentId: 443963753,
+      afterProviderShipmentId: null,
+      confirmCount: null,
+      operator: null,
+      reason: null,
+      idempotencyKey: null,
+      concurrency: 1,
+      delayMs: 0,
+      progressEvery: 1,
+      json: true,
+    };
+
+    await expect(repository.loadRetryCandidates(flags)).resolves.toEqual([
+      { providerShipmentId: 443963753, retryIds: [115757] },
+      { providerShipmentId: 443964641, retryIds: [] },
+      { providerShipmentId: 443965277, retryIds: [] },
+    ]);
   });
 
   it("serializes each affected WMS order and locks source rows", () => {
