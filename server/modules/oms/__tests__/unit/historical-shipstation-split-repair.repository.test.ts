@@ -537,7 +537,16 @@ describe("historical ShipStation split repair repository guards", () => {
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 
-  it("reuses exact split targets and moves original lineage without duplicating fulfillment quantity", async () => {
+  it.each([
+    {
+      name: "reuses a retired archive while moving original lineage into exact split targets",
+      preexistingArchive: true,
+    },
+    {
+      name: "creates a deterministic audit archive when exact split copies have no retired archive",
+      preexistingArchive: false,
+    },
+  ])("$name", async ({ preexistingArchive }) => {
     interface ShipmentState {
       id: number;
       orderId: number;
@@ -594,6 +603,10 @@ describe("historical ShipStation split repair repository guards", () => {
         },
       ],
     ]);
+    if (!preexistingArchive) {
+      shipments.delete(7101);
+      shipments.get(7001)!.externalId = "shipstation_shipment:442730042";
+    }
     const items = new Map<number, ItemState>([
       [
         9001,
@@ -646,6 +659,7 @@ describe("historical ShipStation split repair repository guards", () => {
         },
       ],
     ]);
+    if (!preexistingArchive) items.delete(9101);
     const membershipRows = (shipmentId: number) =>
       [...items.values()]
         .filter((item) => item.shipmentId === shipmentId)
@@ -684,6 +698,37 @@ describe("historical ShipStation split repair repository guards", () => {
               });
             }),
           };
+        }
+        if (
+          sql.includes("WHERE order_id = $1 AND external_fulfillment_id = $2")
+        ) {
+          const archive = [...shipments.values()].find(
+            (shipment) =>
+              shipment.orderId === Number(params[0]) &&
+              shipment.externalId === String(params[1]),
+          );
+          return {
+            rows: archive
+              ? [{
+                  id: archive.id,
+                  status: archive.status,
+                  source: "historical_ss_split_repair",
+                  tracking_number: archive.tracking,
+                  shipment_purpose: "customer_fulfillment",
+                  review_reason: "historical_split_duplicate_archive",
+                }]
+              : [],
+          };
+        }
+        if (
+          sql.includes("INSERT INTO wms.outbound_shipments") &&
+          sql.includes("'cancelled'")
+        ) {
+          shipments.set(7200, {
+            id: 7200, orderId: Number(params[0]), status: "cancelled",
+            externalId: String(params[2]), tracking: "",
+          });
+          return { rows: [{ id: 7200 }] };
         }
         if (sql.includes("WHERE external_fulfillment_id = $1")) {
           return {
@@ -850,9 +895,18 @@ describe("historical ShipStation split repair repository guards", () => {
     expect(shipments.get(7001)?.externalId).toBe(
       "shipstation_shipment:442730042",
     );
-    expect(shipments.get(7101)?.externalId).toBe(
-      "historical_retired:shipstation:442730042:shipment:7101",
-    );
+    if (preexistingArchive) {
+      expect(shipments.get(7101)?.externalId).toBe(
+        "historical_retired:shipstation:442730042:shipment:7101",
+      );
+    } else {
+      expect(shipments.get(7200)).toMatchObject({
+        orderId: 8001,
+        status: "cancelled",
+        externalId: "historical_split_duplicate_archive:order:8001",
+        tracking: "",
+      });
+    }
     expect(items.get(9001)).toMatchObject({
       shipmentId: 7001,
       quantity: 1,
@@ -863,7 +917,10 @@ describe("historical ShipStation split repair repository guards", () => {
       quantity: 1,
       trackingId: "442730043",
     });
-    expect(items.get(9201)).toMatchObject({ shipmentId: 7101, quantity: 1 });
+    expect(items.get(9201)).toMatchObject({
+      shipmentId: preexistingArchive ? 7101 : 7200,
+      quantity: 1,
+    });
     expect(items.get(9301)).toMatchObject({
       shipmentId: 7103,
       quantity: 1,
