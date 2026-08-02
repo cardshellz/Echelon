@@ -68,6 +68,10 @@ jobs:
         run: >-
           npx vitest run
           server/modules/procurement/__tests__/integration/po-email-outbox.integration.test.ts
+      - name: PO lifecycle timestamp PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/po-lifecycle-timestamp.integration.test.ts
       - name: Historical PO supplier evidence PostgreSQL guarantees
         run: >-
           npx vitest run

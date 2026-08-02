@@ -66,6 +66,11 @@ import {
   type PoLifecycleCommand,
 } from "./purchase-order-lifecycle.service";
 import {
+  millisecondTransactionTimestamp,
+  nextPurchaseOrderUpdatedAt,
+  purchaseOrderUpdatedAtMatchesApplicationVersion,
+} from "./purchase-order-lifecycle-version";
+import {
   buildPoCloseChange,
   buildPoCloseShortChange,
   buildPoCloseShortLinePatch,
@@ -1274,13 +1279,15 @@ export function createPurchasingService(
       conditions.push(eq(purchaseOrdersTable.physicalStatus, po.physicalStatus));
     }
     if (po.updatedAt != null) {
-      conditions.push(eq(purchaseOrdersTable.updatedAt, po.updatedAt));
+      conditions.push(purchaseOrderUpdatedAtMatchesApplicationVersion(po.updatedAt));
     }
     const rows = await tx
       .update(purchaseOrdersTable)
       .set({
         ...patch,
-        updatedAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
+        updatedAt: po.updatedAt == null
+          ? millisecondTransactionTimestamp()
+          : nextPurchaseOrderUpdatedAt(po.updatedAt),
       })
       .where(and(...conditions))
       .returning();
@@ -5867,6 +5874,8 @@ export function createPurchasingService(
           lineCount: resolvedLines.length,
           createdBy: userId ?? null,
           updatedBy: userId ?? null,
+          createdAt: millisecondTransactionTimestamp(),
+          updatedAt: millisecondTransactionTimestamp(),
         })
         .returning();
 
