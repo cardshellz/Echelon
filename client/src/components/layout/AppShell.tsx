@@ -631,7 +631,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className="flex-1 overflow-auto bg-muted/20">
+        <main
+          className="flex-1 overflow-auto bg-muted/20"
+          data-app-scroll-container
+        >
           {children}
         </main>
       </div>

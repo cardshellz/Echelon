@@ -22,7 +22,7 @@
 // Everything else (line totals, PO totals) stays in cents. Floats are never
 // used for currency.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type WheelEvent } from "react";
 import {
   dollarsToCents,
   dollarsToMills,
@@ -110,6 +110,10 @@ import {
   canUseFullPurchaseOrderEditor,
   isImmutableRecommendationPurchaseOrder,
 } from "@/features/po-edit/purchase-order-editability";
+import {
+  APP_SCROLL_CONTAINER_SELECTOR,
+  shouldChainQuoteWheelToPage,
+} from "@/features/po-edit/po-quote-scroll";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -647,6 +651,28 @@ function pricingSourceLabel(source: PricingSource | null): string {
   if (source === "recommendation") return "Purchasing recommendation";
   if (source === "legacy") return "Legacy line";
   return "Manual vendor quote";
+}
+
+function handleVendorQuoteWheel(event: WheelEvent<HTMLDivElement>): void {
+  if (event.defaultPrevented || event.ctrlKey) return;
+
+  const pageScrollContainer = document.querySelector<HTMLElement>(
+    APP_SCROLL_CONTAINER_SELECTOR,
+  );
+  if (!pageScrollContainer) return;
+
+  if (
+    !shouldChainQuoteWheelToPage(
+      event.currentTarget,
+      pageScrollContainer,
+      event.deltaY,
+    )
+  ) {
+    return;
+  }
+
+  event.preventDefault();
+  pageScrollContainer.scrollTop += event.deltaY;
 }
 
 export function isExplicitVendorQuoteBasis(value: unknown): boolean {
@@ -2761,6 +2787,7 @@ function ProductLineTableRow({
             </PopoverTrigger>
             <PopoverContent
               align="end"
+              onWheel={handleVendorQuoteWheel}
               className="w-[min(42rem,calc(100vw-2rem))] max-h-[min(80vh,var(--radix-popover-content-available-height))] overflow-y-scroll overscroll-contain p-5 [scrollbar-gutter:stable]"
             >
               <div className="space-y-5">
