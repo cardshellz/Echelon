@@ -4,9 +4,19 @@ import type {
   RateCoverageDestination,
 } from "../domain/rate-coverage";
 
+export interface DestinationScopeRecord {
+  id: number;
+  name: string;
+  status: "draft" | "active" | "retired";
+  lockVersion: number;
+  destinations: RateCoverageDestination[];
+}
+
 export interface RateBookDestinationGroupRecord {
   id: number;
   rateBookId: number;
+  sourceDestinationScopeId: number | null;
+  sourceDestinationScopeLockVersion: number | null;
   name: string;
   status: "active" | "retired";
   sortOrder: number;
@@ -19,6 +29,8 @@ export interface RateTableCoverageRecord extends RateCoverageCandidate {
   rateTableId: number;
   destinationGroupId: number;
   destinationGroupLockVersion: number;
+  sourceDestinationScopeId: number | null;
+  sourceDestinationScopeLockVersion: number | null;
   destinationGroupName: string;
   sortOrder: number;
   rateRowCount: number;
@@ -27,25 +39,34 @@ export interface RateTableCoverageRecord extends RateCoverageCandidate {
 export interface DraftRateCoverageGroup extends RateCoverageCandidate {
   destinationGroupId: number | null;
   destinationGroupLockVersion: number | null;
+  sourceDestinationScopeId: number | null;
+  sourceDestinationScopeLockVersion: number | null;
   sortOrder: number;
 }
 
 export interface SavedRateCoverageGroup extends DraftRateCoverageGroup {
   destinationGroupId: number;
   destinationGroupLockVersion: number;
+  sourceDestinationScopeId: number;
+  sourceDestinationScopeLockVersion: number;
   name: string;
 }
 
 export interface RateCoverageAdminTransaction {
+  getDestinationScopeForUpdate(
+    destinationScopeId: number,
+  ): Promise<DestinationScopeRecord | null>;
   getDestinationGroupForUpdate(
     destinationGroupId: number,
   ): Promise<RateBookDestinationGroupRecord | null>;
-  findActiveDestinationGroupByName(
+  findActiveDestinationGroupByScope(
     rateBookId: number,
-    name: string,
+    destinationScopeId: number,
   ): Promise<RateBookDestinationGroupRecord | null>;
   insertDestinationGroup(input: {
     rateBookId: number;
+    sourceDestinationScopeId: number;
+    sourceDestinationScopeLockVersion: number;
     name: string;
     sortOrder: number;
     actor: string;
@@ -55,6 +76,8 @@ export interface RateCoverageAdminTransaction {
   updateDestinationGroup(input: {
     destinationGroupId: number;
     expectedLockVersion: number;
+    sourceDestinationScopeId: number;
+    sourceDestinationScopeLockVersion: number;
     name: string;
     sortOrder: number;
     now: Date;
@@ -133,10 +156,14 @@ export async function saveRateCoverageManifest(
       persistedById.set(persisted.id, persisted);
     }
 
+    assertLinkedDestinationGroup(persisted);
     savedGroups.push({
       ...normalized,
       destinationGroupId: persisted.id,
       destinationGroupLockVersion: persisted.lockVersion,
+      sourceDestinationScopeId: persisted.sourceDestinationScopeId,
+      sourceDestinationScopeLockVersion:
+        persisted.sourceDestinationScopeLockVersion,
       name: persisted.name,
       destinations: persisted.destinations,
     });
@@ -179,29 +206,42 @@ async function resolveOrCreateDestinationGroup(
   input: SaveRateCoverageManifestInput,
   group: DraftRateCoverageGroup,
 ): Promise<RateBookDestinationGroupRecord> {
-  const existing = await tx.findActiveDestinationGroupByName(
+  const scope = await loadCanonicalScope(tx, group);
+  const existing = await tx.findActiveDestinationGroupByScope(
     input.rateBookId,
-    group.name,
+    scope.id,
   );
   if (existing !== null) {
-    if (!sameDestinations(existing.destinations, group.destinations)) {
-      throw new RateCoverageAdminError(
-        409,
-        "SHIPPING_ADMIN_DESTINATION_GROUP_NAME_CONFLICT",
-        `${group.name} already exists in this pricing program with different destinations.`,
-        ["Choose a different name or open the existing destination group."],
-      );
+    const unchanged = existing.sourceDestinationScopeLockVersion === scope.lockVersion
+      && existing.name === scope.name
+      && existing.sortOrder === group.sortOrder
+      && sameDestinations(existing.destinations, scope.destinations);
+    if (unchanged) return existing;
+    const updated = await tx.updateDestinationGroup({
+      destinationGroupId: existing.id,
+      expectedLockVersion: existing.lockVersion,
+      sourceDestinationScopeId: scope.id,
+      sourceDestinationScopeLockVersion: scope.lockVersion,
+      name: scope.name,
+      sortOrder: group.sortOrder,
+      now: input.now,
+      destinations: scope.destinations,
+    });
+    if (updated === null) {
+      throw destinationGroupChanged(existing.name);
     }
-    return existing;
+    return updated;
   }
 
   return tx.insertDestinationGroup({
     rateBookId: input.rateBookId,
-    name: group.name,
+    sourceDestinationScopeId: scope.id,
+    sourceDestinationScopeLockVersion: scope.lockVersion,
+    name: scope.name,
     sortOrder: group.sortOrder,
     actor: input.actor,
     now: input.now,
-    destinations: group.destinations,
+    destinations: scope.destinations,
   });
 }
 
@@ -216,45 +256,132 @@ async function updateExistingDestinationGroup(
     || existing.rateBookId !== input.rateBookId
     || existing.status !== "active"
   ) {
+    throw destinationGroupChanged(group.name);
+  }
+  const sourceAwareGroup = group.sourceDestinationScopeId === null
+    && group.sourceDestinationScopeLockVersion === null
+    && existing.sourceDestinationScopeId !== null
+    && existing.sourceDestinationScopeLockVersion !== null
+    ? {
+        ...group,
+        sourceDestinationScopeId: existing.sourceDestinationScopeId,
+        sourceDestinationScopeLockVersion:
+          existing.sourceDestinationScopeLockVersion,
+      }
+    : group;
+  const scope = await loadCanonicalScope(tx, sourceAwareGroup);
+  if (
+    existing.sourceDestinationScopeId !== null
+    && existing.sourceDestinationScopeId !== scope.id
+  ) {
     throw new RateCoverageAdminError(
       409,
-      "SHIPPING_ADMIN_DESTINATION_GROUP_CHANGED",
-      `${group.name} is no longer an active destination group in this pricing program.`,
+      "SHIPPING_ADMIN_DESTINATION_SCOPE_SOURCE_CHANGED",
+      `${existing.name} belongs to a different destination scope.`,
+      ["Add the intended destination scope as a new pricing configuration."],
     );
   }
 
-  const changed = existing.name !== group.name
+  const changed = existing.sourceDestinationScopeId !== scope.id
+    || existing.sourceDestinationScopeLockVersion !== scope.lockVersion
+    || existing.name !== scope.name
     || existing.sortOrder !== group.sortOrder
-    || !sameDestinations(existing.destinations, group.destinations);
+    || !sameDestinations(existing.destinations, scope.destinations);
   if (!changed) return existing;
 
   if (
     group.destinationGroupLockVersion === null
     || group.destinationGroupLockVersion !== existing.lockVersion
   ) {
-    throw new RateCoverageAdminError(
-      409,
-      "SHIPPING_ADMIN_DESTINATION_GROUP_CHANGED",
-      `${existing.name} changed after this editor was opened. Refresh before saving.`,
-    );
+    throw destinationGroupChanged(existing.name);
   }
 
   const updated = await tx.updateDestinationGroup({
     destinationGroupId: existing.id,
     expectedLockVersion: existing.lockVersion,
-    name: group.name,
+    sourceDestinationScopeId: scope.id,
+    sourceDestinationScopeLockVersion: scope.lockVersion,
+    name: scope.name,
     sortOrder: group.sortOrder,
     now: input.now,
-    destinations: group.destinations,
+    destinations: scope.destinations,
   });
   if (updated === null) {
-    throw new RateCoverageAdminError(
-      409,
-      "SHIPPING_ADMIN_DESTINATION_GROUP_CHANGED",
-      `${existing.name} changed after this editor was opened. Refresh before saving.`,
-    );
+    throw destinationGroupChanged(existing.name);
   }
   return updated;
+}
+
+async function loadCanonicalScope(
+  tx: RateCoverageAdminTransaction,
+  group: DraftRateCoverageGroup,
+): Promise<DestinationScopeRecord> {
+  if (
+    group.sourceDestinationScopeId === null
+    || group.sourceDestinationScopeLockVersion === null
+  ) {
+    throw new RateCoverageAdminError(
+      400,
+      "SHIPPING_ADMIN_DESTINATION_SCOPE_REQUIRED",
+      "Every pricing destination must come from the destination library.",
+    );
+  }
+  const scope = await tx.getDestinationScopeForUpdate(
+    group.sourceDestinationScopeId,
+  );
+  if (scope === null || scope.status !== "active") {
+    throw new RateCoverageAdminError(
+      409,
+      "SHIPPING_ADMIN_DESTINATION_SCOPE_NOT_ACTIVE",
+      `${group.name} is no longer an active destination scope.`,
+    );
+  }
+  if (scope.lockVersion !== group.sourceDestinationScopeLockVersion) {
+    throw new RateCoverageAdminError(
+      409,
+      "SHIPPING_ADMIN_DESTINATION_SCOPE_CHANGED",
+      `${scope.name} changed after this editor was opened.`,
+      ["Review and use the current destination definition before saving."],
+    );
+  }
+  if (
+    scope.name !== group.name
+    || !sameDestinations(scope.destinations, group.destinations)
+  ) {
+    throw new RateCoverageAdminError(
+      409,
+      "SHIPPING_ADMIN_DESTINATION_SCOPE_MISMATCH",
+      `${scope.name} does not match the submitted destination snapshot.`,
+      ["Reload the destination library before saving."],
+    );
+  }
+  return scope;
+}
+
+function assertLinkedDestinationGroup(
+  group: RateBookDestinationGroupRecord,
+): asserts group is RateBookDestinationGroupRecord & {
+  sourceDestinationScopeId: number;
+  sourceDestinationScopeLockVersion: number;
+} {
+  if (
+    group.sourceDestinationScopeId === null
+    || group.sourceDestinationScopeLockVersion === null
+  ) {
+    throw new RateCoverageAdminError(
+      500,
+      "SHIPPING_ADMIN_DESTINATION_SCOPE_LINK_MISSING",
+      `${group.name} was saved without a canonical destination scope.`,
+    );
+  }
+}
+
+function destinationGroupChanged(name: string): RateCoverageAdminError {
+  return new RateCoverageAdminError(
+    409,
+    "SHIPPING_ADMIN_DESTINATION_GROUP_CHANGED",
+    `${name} changed after this editor was opened. Refresh before saving.`,
+  );
 }
 
 function normalizeDraftGroup(group: DraftRateCoverageGroup): DraftRateCoverageGroup {
@@ -290,9 +417,15 @@ function assertConsistentDestinationGroupDefinitions(
       || group.destinationGroupLockVersion === null
       || existing.destinationGroupLockVersion
         === group.destinationGroupLockVersion;
+    const sameSource = existing.sourceDestinationScopeId
+      === group.sourceDestinationScopeId;
+    const sameSourceVersion = existing.sourceDestinationScopeLockVersion
+      === group.sourceDestinationScopeLockVersion;
     if (
       sameName
       && sameVersion
+      && sameSource
+      && sameSourceVersion
       && sameDestinations(existing.destinations, group.destinations)
     ) {
       continue;
@@ -310,9 +443,12 @@ function assertConsistentDestinationGroupDefinitions(
 }
 
 function draftIdentityKey(group: DraftRateCoverageGroup): string {
-  return group.destinationGroupId === null
-    ? `name:${group.name.toLocaleLowerCase()}`
-    : `id:${group.destinationGroupId}`;
+  if (group.destinationGroupId !== null) {
+    return `id:${group.destinationGroupId}`;
+  }
+  return group.sourceDestinationScopeId === null
+    ? `unlinked:${group.name.toLocaleLowerCase()}`
+    : `scope:${group.sourceDestinationScopeId}`;
 }
 
 function normalizeDestinations(
@@ -377,6 +513,8 @@ function auditCoverageState(
     destinationGroupId: coverage.destinationGroupId,
     destinationGroupLockVersion: coverage.destinationGroupLockVersion,
     destinationGroupName: coverage.destinationGroupName,
+    sourceDestinationScopeId: coverage.sourceDestinationScopeId,
+    sourceDestinationScopeLockVersion: coverage.sourceDestinationScopeLockVersion,
     originWarehouseId: coverage.originWarehouseId,
     availability: coverage.availability,
     destinations: coverage.destinations,

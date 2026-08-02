@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AuditLogPayload } from "../../../../infrastructure/auditLogger";
 import {
   saveRateCoverageManifest,
+  type DestinationScopeRecord,
   type DraftRateCoverageGroup,
   type RateBookDestinationGroupRecord,
   type RateCoverageAdminTransaction,
@@ -17,6 +18,8 @@ function draftGroup(
   return {
     destinationGroupId: null,
     destinationGroupLockVersion: null,
+    sourceDestinationScopeId: 101,
+    sourceDestinationScopeLockVersion: 1,
     name: " Pennsylvania ",
     originWarehouseId: null,
     availability: "offered",
@@ -45,6 +48,8 @@ describe("saveRateCoverageManifest", () => {
     expect(result.groups[0]).toMatchObject({
       destinationGroupId: 1,
       destinationGroupLockVersion: 1,
+      sourceDestinationScopeId: 101,
+      sourceDestinationScopeLockVersion: 1,
       name: "Pennsylvania",
       availability: "offered",
       destinations: [{
@@ -62,14 +67,14 @@ describe("saveRateCoverageManifest", () => {
     ]);
   });
 
-  it("reuses an existing same-name group only when geography is identical", async () => {
+  it("reuses the existing pricing group for the same canonical scope", async () => {
     const tx = new FakeTransaction();
     tx.groups.set(7, persistedGroup());
 
     const result = await saveRateCoverageManifest(tx, {
       rateBookId: 10,
       rateTableId: 20,
-      groups: [draftGroup({ name: "PENNSYLVANIA" })],
+      groups: [draftGroup()],
       actor: "operator-1",
       now: NOW,
     });
@@ -78,7 +83,7 @@ describe("saveRateCoverageManifest", () => {
     expect(tx.insertCalls).toBe(0);
   });
 
-  it("rejects reuse of a same-name group with different geography", async () => {
+  it("rejects a submitted geography that differs from its canonical scope", async () => {
     const tx = new FakeTransaction();
     tx.groups.set(7, persistedGroup());
 
@@ -96,7 +101,7 @@ describe("saveRateCoverageManifest", () => {
       now: NOW,
     })).rejects.toMatchObject({
       status: 409,
-      code: "SHIPPING_ADMIN_DESTINATION_GROUP_NAME_CONFLICT",
+      code: "SHIPPING_ADMIN_DESTINATION_SCOPE_MISMATCH",
     });
     expect(tx.coverages).toEqual([]);
   });
@@ -111,7 +116,7 @@ describe("saveRateCoverageManifest", () => {
       groups: [draftGroup({
         destinationGroupId: 7,
         destinationGroupLockVersion: 2,
-        name: "Pennsylvania updated",
+        sortOrder: 1,
       })],
       actor: "operator-1",
       now: NOW,
@@ -132,7 +137,7 @@ describe("saveRateCoverageManifest", () => {
       groups: [draftGroup({
         destinationGroupId: 7,
         destinationGroupLockVersion: 3,
-        name: "Pennsylvania retail",
+        sortOrder: 4,
       })],
       actor: "operator-1",
       now: NOW,
@@ -141,7 +146,8 @@ describe("saveRateCoverageManifest", () => {
     expect(result.groups[0]).toMatchObject({
       destinationGroupId: 7,
       destinationGroupLockVersion: 4,
-      name: "Pennsylvania retail",
+      name: "Pennsylvania",
+      sortOrder: 4,
     });
   });
 
@@ -186,13 +192,13 @@ describe("saveRateCoverageManifest", () => {
         draftGroup({
           destinationGroupId: 7,
           destinationGroupLockVersion: 3,
-          name: "Pennsylvania retail",
+          name: "Pennsylvania",
           sortOrder: 0,
         }),
         draftGroup({
           destinationGroupId: 7,
           destinationGroupLockVersion: 3,
-          name: "PENNSYLVANIA RETAIL",
+          name: "Pennsylvania",
           originWarehouseId: 7,
           sortOrder: 1,
         }),
@@ -244,6 +250,85 @@ describe("saveRateCoverageManifest", () => {
     expect(tx.replaceCalls).toBe(0);
   });
 
+  it("rejects an unlinked destination for a new pricing group", async () => {
+    const tx = new FakeTransaction();
+
+    await expect(saveRateCoverageManifest(tx, {
+      rateBookId: 10,
+      rateTableId: 20,
+      groups: [draftGroup({
+        sourceDestinationScopeId: null,
+        sourceDestinationScopeLockVersion: null,
+      })],
+      actor: "operator-1",
+      now: NOW,
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "SHIPPING_ADMIN_DESTINATION_SCOPE_REQUIRED",
+    });
+    expect(tx.insertCalls).toBe(0);
+    expect(tx.replaceCalls).toBe(0);
+  });
+
+  it("rejects a retired canonical destination scope", async () => {
+    const tx = new FakeTransaction();
+    tx.scopes.set(101, destinationScope({ status: "retired" }));
+
+    await expect(saveRateCoverageManifest(tx, {
+      rateBookId: 10,
+      rateTableId: 20,
+      groups: [draftGroup()],
+      actor: "operator-1",
+      now: NOW,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "SHIPPING_ADMIN_DESTINATION_SCOPE_NOT_ACTIVE",
+    });
+    expect(tx.replaceCalls).toBe(0);
+  });
+
+  it("rejects a stale canonical destination scope version", async () => {
+    const tx = new FakeTransaction();
+    tx.scopes.set(101, destinationScope({ lockVersion: 2 }));
+
+    await expect(saveRateCoverageManifest(tx, {
+      rateBookId: 10,
+      rateTableId: 20,
+      groups: [draftGroup()],
+      actor: "operator-1",
+      now: NOW,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "SHIPPING_ADMIN_DESTINATION_SCOPE_CHANGED",
+    });
+    expect(tx.replaceCalls).toBe(0);
+  });
+
+  it("hydrates a migrated scope link for a pre-v3 existing draft", async () => {
+    const tx = new FakeTransaction();
+    tx.groups.set(7, persistedGroup());
+
+    const result = await saveRateCoverageManifest(tx, {
+      rateBookId: 10,
+      rateTableId: 20,
+      groups: [draftGroup({
+        destinationGroupId: 7,
+        destinationGroupLockVersion: 1,
+        sourceDestinationScopeId: null,
+        sourceDestinationScopeLockVersion: null,
+      })],
+      actor: "operator-1",
+      now: NOW,
+    });
+
+    expect(result.groups[0]).toMatchObject({
+      destinationGroupId: 7,
+      sourceDestinationScopeId: 101,
+      sourceDestinationScopeLockVersion: 1,
+    });
+    expect(tx.updateCalls).toBe(0);
+  });
+
   it("rejects duplicate configurations for one group and warehouse scope", async () => {
     const tx = new FakeTransaction();
 
@@ -265,6 +350,9 @@ describe("saveRateCoverageManifest", () => {
 });
 
 class FakeTransaction implements RateCoverageAdminTransaction {
+  readonly scopes = new Map<number, DestinationScopeRecord>([
+    [101, destinationScope()],
+  ]);
   readonly groups = new Map<number, RateBookDestinationGroupRecord>();
   readonly audits: AuditLogPayload[] = [];
   coverages: RateTableCoverageRecord[] = [];
@@ -274,26 +362,33 @@ class FakeTransaction implements RateCoverageAdminTransaction {
   private nextGroupId = 1;
   private nextCoverageId = 1;
 
-  async getDestinationGroupForUpdate(
-    destinationGroupId: number,
+  async getDestinationScopeForUpdate(
+    destinationScopeId: number,
+  ): Promise<DestinationScopeRecord | null> {
+    return this.scopes.get(destinationScopeId) ?? null;
+  }
+
+  async getDestinationGroupForUpdate(    destinationGroupId: number,
   ): Promise<RateBookDestinationGroupRecord | null> {
     return this.groups.get(destinationGroupId) ?? null;
   }
 
-  async findActiveDestinationGroupByName(
+  async findActiveDestinationGroupByScope(
     rateBookId: number,
-    name: string,
+    destinationScopeId: number,
   ): Promise<RateBookDestinationGroupRecord | null> {
     return [...this.groups.values()].find(
       (group) =>
         group.rateBookId === rateBookId
         && group.status === "active"
-        && group.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
+        && group.sourceDestinationScopeId === destinationScopeId,
     ) ?? null;
   }
 
   async insertDestinationGroup(input: {
     rateBookId: number;
+    sourceDestinationScopeId: number;
+    sourceDestinationScopeLockVersion: number;
     name: string;
     sortOrder: number;
     actor: string;
@@ -306,6 +401,9 @@ class FakeTransaction implements RateCoverageAdminTransaction {
     const group: RateBookDestinationGroupRecord = {
       id,
       rateBookId: input.rateBookId,
+      sourceDestinationScopeId: input.sourceDestinationScopeId,
+      sourceDestinationScopeLockVersion:
+        input.sourceDestinationScopeLockVersion,
       name: input.name,
       status: "active",
       sortOrder: input.sortOrder,
@@ -319,6 +417,8 @@ class FakeTransaction implements RateCoverageAdminTransaction {
   async updateDestinationGroup(input: {
     destinationGroupId: number;
     expectedLockVersion: number;
+    sourceDestinationScopeId: number;
+    sourceDestinationScopeLockVersion: number;
     name: string;
     sortOrder: number;
     now: Date;
@@ -332,6 +432,9 @@ class FakeTransaction implements RateCoverageAdminTransaction {
     ) return null;
     const updated: RateBookDestinationGroupRecord = {
       ...existing,
+      sourceDestinationScopeId: input.sourceDestinationScopeId,
+      sourceDestinationScopeLockVersion:
+        input.sourceDestinationScopeLockVersion,
       name: input.name,
       sortOrder: input.sortOrder,
       lockVersion: existing.lockVersion + 1,
@@ -380,9 +483,28 @@ function persistedGroup(
   return {
     id: 7,
     rateBookId: 10,
+    sourceDestinationScopeId: 101,
+    sourceDestinationScopeLockVersion: 1,
     name: "Pennsylvania",
     status: "active",
     sortOrder: 0,
+    lockVersion: 1,
+    destinations: [{
+      destinationCountry: "US",
+      destinationRegion: "PA",
+      postalPrefix: null,
+    }],
+    ...overrides,
+  };
+}
+
+function destinationScope(
+  overrides: Partial<DestinationScopeRecord> = {},
+): DestinationScopeRecord {
+  return {
+    id: 101,
+    name: "Pennsylvania",
+    status: "active",
     lockVersion: 1,
     destinations: [{
       destinationCountry: "US",

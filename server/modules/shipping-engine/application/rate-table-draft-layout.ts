@@ -11,6 +11,10 @@ export const draftLayoutGroupSchema = z.object({
   destinationGroupId: z.number().int().positive().nullable().optional(),
   destinationGroupLockVersion:
     z.number().int().positive().nullable().optional(),
+  sourceDestinationScopeId:
+    z.number().int().positive().nullable().optional(),
+  sourceDestinationScopeLockVersion:
+    z.number().int().positive().nullable().optional(),
   name: z.string().trim().max(120),
   originWarehouseId: z.number().int().positive().nullable(),
   regions: z.array(z.string().trim().length(2)).max(60),
@@ -34,7 +38,7 @@ export const draftLayoutGroupSchema = z.object({
 });
 
 export const draftLayoutSchema = z.object({
-  version: z.union([z.literal(1), z.literal(2)]),
+  version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   groups: z.array(draftLayoutGroupSchema).max(100),
 });
 
@@ -65,6 +69,9 @@ export function coverageGroupsFromDraftLayout(
     destinationGroupLockVersion: options.clearDestinationGroupIdentity
       ? null
       : group.destinationGroupLockVersion ?? null,
+    sourceDestinationScopeId: group.sourceDestinationScopeId ?? null,
+    sourceDestinationScopeLockVersion:
+      group.sourceDestinationScopeLockVersion ?? null,
     name: destinationGroupName(group, index),
     originWarehouseId: group.originWarehouseId,
     availability: group.availability,
@@ -85,12 +92,15 @@ export function layoutWithSavedGroupIdentities(
     );
   }
   return {
-    version: 2,
+    version: 3,
     groups: layout.groups.map((group, index) => ({
       ...group,
       destinationGroupId: savedGroups[index].destinationGroupId,
       destinationGroupLockVersion:
         savedGroups[index].destinationGroupLockVersion,
+      sourceDestinationScopeId: savedGroups[index].sourceDestinationScopeId,
+      sourceDestinationScopeLockVersion:
+        savedGroups[index].sourceDestinationScopeLockVersion,
       name: savedGroups[index].name,
       availability: savedGroups[index].availability,
     })),
