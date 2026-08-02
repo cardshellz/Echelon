@@ -23,6 +23,7 @@ import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { PricingProgramsTab } from "@/components/shipping/pricing-programs/PricingProgramsTab";
 import { ChannelRoutingTab } from "@/components/shipping/channel-routing/ChannelRoutingTab";
+import { DestinationScopesTab } from "@/components/shipping/channel-routing/DestinationScopesTab";
 import {
   Archive,
   Box,
@@ -1281,6 +1282,7 @@ export default function ShippingSettings() {
         <TabsList>
           <TabsTrigger value="boxes">Box catalog</TabsTrigger>
           <TabsTrigger value="packing-attrs">Packing attributes</TabsTrigger>
+          <TabsTrigger value="destinations">Destinations</TabsTrigger>
           <TabsTrigger value="pricing-programs">Pricing programs</TabsTrigger>
           <TabsTrigger value="channel-routing">Channel routing</TabsTrigger>
         </TabsList>
@@ -1289,6 +1291,9 @@ export default function ShippingSettings() {
         </TabsContent>
         <TabsContent value="packing-attrs" className="mt-4">
           <PackingAttributesTab />
+        </TabsContent>
+        <TabsContent value="destinations" className="mt-4">
+          <DestinationScopesTab />
         </TabsContent>
         <TabsContent value="pricing-programs" className="mt-4">
           <PricingProgramsTab />

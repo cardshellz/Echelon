@@ -14,7 +14,6 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table,
   TableBody,
@@ -27,7 +26,6 @@ import {
   CHANNEL_ROUTING_KEY,
   loadChannelRouting,
 } from "./api";
-import { DeliveryRegionsPanel } from "./DeliveryRegionsPanel";
 import { PolicyEditorDialog } from "./PolicyEditorDialog";
 
 interface EditorSelection {
@@ -76,41 +74,35 @@ export function ChannelRoutingTab() {
 
   return (
     <>
-      <Tabs defaultValue="channels" className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="channels">Channels</TabsTrigger>
-          <TabsTrigger value="delivery-regions">Delivery regions</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="channels" className="space-y-3">
-          <Alert>
-            <CircleAlert className="h-4 w-4" />
-            <AlertTitle>Configuration and shadow testing only</AlertTitle>
-            <AlertDescription>
+      <div className="space-y-3">
+        <Alert>
+          <CircleAlert className="h-4 w-4" />
+          <AlertTitle>Configuration and shadow testing only</AlertTitle>
+          <AlertDescription>
               Quote traffic still uses existing channel routing until a later,
               separately controlled cutover.
-            </AlertDescription>
-          </Alert>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">Channel routing</h2>
-              <p className="text-sm text-muted-foreground">
+          </AlertDescription>
+        </Alert>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Channel routing</h2>
+            <p className="text-sm text-muted-foreground">
                 Rate ownership and destination eligibility by channel.
-              </p>
-            </div>
-            <div className="relative w-full sm:w-72">
-              <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search channels"
-                className="pl-9"
-              />
-            </div>
+            </p>
           </div>
+          <div className="relative w-full sm:w-72">
+            <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search channels"
+              className="pl-9"
+            />
+          </div>
+        </div>
 
-          <div className="overflow-x-auto border">
-            <Table className="min-w-[56rem]">
+        <div className="overflow-x-auto border">
+          <Table className="min-w-[56rem]">
               <TableHeader>
                 <TableRow>
                   <TableHead>Channel</TableHead>
@@ -167,14 +159,9 @@ export function ChannelRoutingTab() {
                   </TableRow>
                 ))}
               </TableBody>
-            </Table>
-          </div>
-        </TabsContent>
-
-        <TabsContent value="delivery-regions">
-          <DeliveryRegionsPanel scopes={data.destinationScopes} />
-        </TabsContent>
-      </Tabs>
+          </Table>
+        </div>
+      </div>
 
       {editor && (
         <PolicyEditorDialog

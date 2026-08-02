@@ -7,6 +7,7 @@
  */
 
 import type { QueryClient } from "@tanstack/react-query";
+import type { ShippingDestinationScopeSummary } from "@shared/types/shipping-channel-routing";
 import {
   emitDraftRows,
   groupDisplayName,
@@ -54,6 +55,8 @@ export interface RateBookDestinationGroup {
   status: "active" | "retired";
   sortOrder: number;
   lockVersion: number;
+  sourceDestinationScopeId: number | null;
+  sourceDestinationScopeLockVersion: number | null;
   destinations: RateCoverageDestination[];
 }
 
@@ -151,6 +154,7 @@ export interface RateTablesResponse {
   rateBooks: RateBookSummary[];
   serviceLevels: ServiceLevelOption[];
   destinationGroups?: RateBookDestinationGroup[];
+  destinationScopes?: ShippingDestinationScopeSummary[];
   rateTables: RateTableSummary[];
 }
 
@@ -594,6 +598,8 @@ export interface ProgramDestinationGroup {
   name: string;
   sortOrder: number;
   lockVersion: number | null;
+  sourceDestinationScopeId: number | null;
+  sourceDestinationScopeLockVersion: number | null;
   destinations: RateCoverageDestination[];
   hasCurrentDefinition: boolean;
   appearsInLiveRevision: boolean;
@@ -843,6 +849,9 @@ function mergeProgramDestinationGroups(
       name: group.name,
       sortOrder: group.sortOrder,
       lockVersion: group.lockVersion,
+      sourceDestinationScopeId: group.sourceDestinationScopeId,
+      sourceDestinationScopeLockVersion:
+        group.sourceDestinationScopeLockVersion,
       destinations: group.destinations,
       hasCurrentDefinition: true,
       appearsInLiveRevision: false,
@@ -880,6 +889,8 @@ function mergeProgramDestinationGroups(
         name: coverage.destinationGroupName,
         sortOrder: coverage.sortOrder,
         lockVersion: coverage.destinationGroupLockVersion,
+        sourceDestinationScopeId: null,
+        sourceDestinationScopeLockVersion: null,
         destinations: coverage.destinations,
         hasCurrentDefinition: false,
         appearsInLiveRevision: table.status === "active",

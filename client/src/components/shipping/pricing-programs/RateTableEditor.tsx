@@ -6,6 +6,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ShippingDestinationScopeSummary } from "@shared/types/shipping-channel-routing";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -48,7 +49,6 @@ import {
   groupDisplayName,
   groupsFromRows,
   layoutFromGroups,
-  newGroup,
   serializeRowsToCsv,
   validateRateGroups,
   type PricingBasis,
@@ -81,6 +81,8 @@ export interface EditorLaunch {
   lockProgram: boolean;
   /** Existing program groups that can be added to this option's manifest. */
   availableDestinationGroups: ProgramDestinationGroup[];
+  /** Canonical reusable destination scopes available to every pricing program. */
+  availableDestinationScopes: ShippingDestinationScopeSummary[];
   /** Exact destination cell that launched the editor, when applicable. */
   destinationGroupTarget: DestinationGroupTarget | null;
   /** True when launch hydration had to add the selected destination group. */
@@ -378,13 +380,6 @@ export function RateTableEditor({
           onSelectLevel={(code) => {
             setServiceLevelCode(code);
             setDirty(true);
-            if (groups.length === 0) {
-              const level = serviceLevels.find((item) => item.code === code);
-              const basis: PricingBasis = level?.fulfillmentMode === "freight" ? "pallet_count" : "shipment_weight";
-              const seeded = [newGroup(basis)];
-              setGroups(seeded);
-              setSelectedGroupId(seeded[0].id);
-            }
           }}
         />
       )}
@@ -402,6 +397,7 @@ export function RateTableEditor({
           onSaveDraft={handleSaveDraft}
           savingDraft={saveMutation.isPending}
           availableDestinationGroups={launch.availableDestinationGroups}
+          availableDestinationScopes={launch.availableDestinationScopes}
         />
       )}
       {step === "review" && draftId !== null && (
