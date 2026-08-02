@@ -652,69 +652,18 @@ async function resolveOrCreateTarget(
 ): Promise<number> {
   const existing = await loadPreferredExistingTarget(client, target, true);
   if (existing) {
-    let resolvedExisting = existing;
-    if (target.providerStateRecovery !== null) {
-      const recovery = target.providerStateRecovery;
-      const recovered = await client.query(
-        `UPDATE wms.outbound_shipments AS shipment
-         SET status = 'shipped',
-             carrier = $2, service_code = $3, tracking_number = $4, shipped_at = $5,
-             tracking_url = NULL,
-             shipping_engine = 'shipstation', engine_order_ref = $6,
-             engine_shipment_ref = $7, shipstation_order_id = $8,
-             shipstation_order_key = $9, requires_review = false,
-             review_reason = NULL, cancelled_at = NULL, voided_at = NULL,
-             voided_reason = NULL, held = false, held_at = NULL,
-             on_hold_reason = NULL, updated_at = $10
-         WHERE shipment.id = $1
-           AND shipment.order_id = $11
-           AND shipment.external_fulfillment_id = $12
-           AND shipment.status::text = $13
-           AND shipment.tracking_number IS NOT DISTINCT FROM $14::varchar
-           AND shipment.status IN ('queued', 'voided', 'cancelled')
-           AND NOT EXISTS (
-             SELECT 1
-             FROM wms.outbound_shipment_items AS item
-             JOIN wms.physical_shipment_items AS physical_item
-               ON physical_item.legacy_wms_shipment_item_id = item.id
-             WHERE item.shipment_id = shipment.id
-           )
-           AND NOT EXISTS (
-             SELECT 1
-             FROM wms.outbound_shipment_items AS item
-             JOIN oms.channel_fulfillment_receipt_items AS receipt_item
-               ON receipt_item.legacy_wms_shipment_item_id = item.id
-             WHERE item.shipment_id = shipment.id
-           )
-         RETURNING shipment.id, shipment.order_id, shipment.status::text AS status,
-                   shipment.external_fulfillment_id, shipment.tracking_number`,
-        [
-          recovery.shipmentId,
-          target.providerPackage.carrierCode,
-          target.providerPackage.serviceCode,
-          target.providerPackage.trackingNumber,
-          target.providerPackage.shippedAt,
-          String(target.providerPackage.providerOrderId),
-          String(target.providerPackage.providerShipmentId),
-          target.providerPackage.providerOrderId,
-          target.providerPackage.providerOrderKey,
-          audit.occurredAt,
-          target.orderId,
-          target.identity,
-          recovery.expectedStatus,
-          recovery.expectedTrackingNumber,
-        ],
+    const id = target.providerStateRecovery === null
+      ? validateExistingTarget(existing, target)
+      : asPositiveInteger(existing.id, "provider-state recovery target shipment id");
+    if (
+      target.providerStateRecovery !== null
+      && id !== target.providerStateRecovery.shipmentId
+    ) {
+      throw repairError(
+        "TARGET_PROVIDER_STATE_CHANGED",
+        `WMS shipment ${target.providerStateRecovery.shipmentId} changed after provider-state recovery was proven`,
       );
-      const recoveredRows = rowsOf<Record<string, unknown>>(recovered);
-      if (recoveredRows.length !== 1) {
-        throw repairError(
-          "TARGET_PROVIDER_STATE_CHANGED",
-          `WMS shipment ${recovery.shipmentId} changed after provider-state recovery was proven`,
-        );
-      }
-      resolvedExisting = recoveredRows[0];
     }
-    const id = validateExistingTarget(resolvedExisting, target);
     target.targetShipmentId = id;
     target.exactBeforeApply = await exactTargetMembership(client, target);
     if (target.retiredDuplicateShipmentId !== null) {
@@ -797,6 +746,91 @@ async function resolveOrCreateTarget(
   return asPositiveInteger(rowsOf<Record<string, unknown>>(inserted)[0]?.id, "inserted shipment id");
 }
 
+async function activateRecoveredProviderTarget(
+  client: PoolClient,
+  target: TargetPlan,
+  audit: HistoricalSplitRepairAudit,
+): Promise<void> {
+  const recovery = target.providerStateRecovery;
+  if (recovery === null) return;
+
+  const collisions = await client.query(
+    `SELECT shipment.id
+     FROM wms.outbound_shipments AS shipment
+     WHERE shipment.order_id = $1
+       AND shipment.status = 'shipped'
+       AND shipment.tracking_number = $2
+       AND shipment.id <> $3
+     ORDER BY shipment.id
+     FOR UPDATE`,
+    [target.orderId, target.providerPackage.trackingNumber, recovery.shipmentId],
+  );
+  const collisionIds = rowsOf<Record<string, unknown>>(collisions).map((row) =>
+    asPositiveInteger(row.id, "provider-state tracking collision shipment id")
+  );
+  if (collisionIds.length > 0) {
+    throw repairError(
+      "TARGET_PROVIDER_STATE_TRACKING_COLLISION",
+      `WMS shipment ${recovery.shipmentId} cannot be activated while shipped shipment(s) ${collisionIds.join(", ")} still own order ${target.orderId} tracking ${target.providerPackage.trackingNumber}`,
+    );
+  }
+
+  const recovered = await client.query(
+    `UPDATE wms.outbound_shipments AS shipment
+     SET status = 'shipped',
+         carrier = $2, service_code = $3, tracking_number = $4, shipped_at = $5,
+         tracking_url = NULL,
+         shipping_engine = 'shipstation', engine_order_ref = $6,
+         engine_shipment_ref = $7, shipstation_order_id = $8,
+         shipstation_order_key = $9, requires_review = false,
+         review_reason = NULL, cancelled_at = NULL, voided_at = NULL,
+         voided_reason = NULL, held = false, held_at = NULL,
+         on_hold_reason = NULL, updated_at = $10
+     WHERE shipment.id = $1
+       AND shipment.order_id = $11
+       AND shipment.external_fulfillment_id = $12
+       AND shipment.status::text = $13
+       AND shipment.tracking_number IS NOT DISTINCT FROM $14::varchar
+       AND shipment.status IN ('queued', 'voided', 'cancelled')
+       AND NOT EXISTS (
+         SELECT 1
+         FROM wms.outbound_shipment_items AS item
+         JOIN wms.physical_shipment_items AS physical_item
+           ON physical_item.legacy_wms_shipment_item_id = item.id
+         WHERE item.shipment_id = shipment.id
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM wms.outbound_shipment_items AS item
+         JOIN oms.channel_fulfillment_receipt_items AS receipt_item
+           ON receipt_item.legacy_wms_shipment_item_id = item.id
+         WHERE item.shipment_id = shipment.id
+       )
+     RETURNING shipment.id`,
+    [
+      recovery.shipmentId,
+      target.providerPackage.carrierCode,
+      target.providerPackage.serviceCode,
+      target.providerPackage.trackingNumber,
+      target.providerPackage.shippedAt,
+      String(target.providerPackage.providerOrderId),
+      String(target.providerPackage.providerShipmentId),
+      target.providerPackage.providerOrderId,
+      target.providerPackage.providerOrderKey,
+      audit.occurredAt,
+      target.orderId,
+      target.identity,
+      recovery.expectedStatus,
+      recovery.expectedTrackingNumber,
+    ],
+  );
+  if (rowsOf(recovered).length !== 1) {
+    throw repairError(
+      "TARGET_PROVIDER_STATE_CHANGED",
+      `WMS shipment ${recovery.shipmentId} changed after provider-state recovery was proven`,
+    );
+  }
+}
 async function insertCopiedAllocation(
   client: PoolClient,
   sourceItemId: number,
@@ -1610,6 +1644,10 @@ export function createHistoricalShipStationSplitRepairRepository(
            )`,
         [sourceShipmentIds, targetIds, audit.occurredAt],
       );
+
+      for (const target of targets) {
+        await activateRecoveredProviderTarget(client, target, audit);
+      }
 
       const applied = component.packages.map((plan) => {
         const packageTargets = targets.filter((target) =>
