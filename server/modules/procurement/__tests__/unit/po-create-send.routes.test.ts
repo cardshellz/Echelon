@@ -301,6 +301,32 @@ describe("POST /api/purchase-orders (dual-mode)", () => {
     expect(body.pdf.pdf_placeholder).toBe(true);
     expect(body.status).toBe("sent");
   });
+
+  it("returns the created draft when the follow-up send fails", async () => {
+    purchasing.createPurchaseOrderWithLines.mockResolvedValue({
+      id: 8,
+      poNumber: "PO-2",
+      status: "draft",
+    });
+    purchasing.sendPurchaseOrder.mockRejectedValue(
+      new Error("Purchase order changed during the lifecycle transition"),
+    );
+
+    const { status, body } = await jsonRequest(server.url, "POST", "/api/purchase-orders", {
+      vendor_id: 1,
+      lines: [{ product_variant_id: 10, quantity_ordered: 3, unit_cost_cents: 250 }],
+      advance_to_sent: true,
+    });
+
+    expect(status).toBe(201);
+    expect(body).toEqual({
+      po: { id: 8, poNumber: "PO-2", status: "draft" },
+      status: "draft",
+      sendError: "Purchase order changed during the lifecycle transition",
+    });
+    expect(purchasing.createPurchaseOrderWithLines).toHaveBeenCalledTimes(1);
+    expect(purchasing.sendPurchaseOrder).toHaveBeenCalledWith(8, "test-user");
+  });
 });
 
 describe("PUT /api/purchase-orders/:id/draft", () => {

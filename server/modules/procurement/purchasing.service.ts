@@ -66,6 +66,11 @@ import {
   type PoLifecycleCommand,
 } from "./purchase-order-lifecycle.service";
 import {
+  millisecondTransactionTimestamp,
+  nextPurchaseOrderUpdatedAt,
+  purchaseOrderUpdatedAtMatchesApplicationVersion,
+} from "./purchase-order-lifecycle-version";
+import {
   buildPoCloseChange,
   buildPoCloseShortChange,
   buildPoCloseShortLinePatch,
@@ -1274,13 +1279,15 @@ export function createPurchasingService(
       conditions.push(eq(purchaseOrdersTable.physicalStatus, po.physicalStatus));
     }
     if (po.updatedAt != null) {
-      conditions.push(eq(purchaseOrdersTable.updatedAt, po.updatedAt));
+      conditions.push(purchaseOrderUpdatedAtMatchesApplicationVersion(po.updatedAt));
     }
     const rows = await tx
       .update(purchaseOrdersTable)
       .set({
         ...patch,
-        updatedAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
+        updatedAt: po.updatedAt == null
+          ? millisecondTransactionTimestamp()
+          : nextPurchaseOrderUpdatedAt(po.updatedAt),
       })
       .where(and(...conditions))
       .returning();
@@ -1660,7 +1667,7 @@ export function createPurchasingService(
       eq(purchaseOrdersTable.financialStatus, "unbilled"),
     ];
     if (po.updatedAt != null) {
-      conditions.push(eq(purchaseOrdersTable.updatedAt, po.updatedAt));
+      conditions.push(purchaseOrderUpdatedAtMatchesApplicationVersion(po.updatedAt));
     }
     return conditions;
   }
@@ -1694,7 +1701,9 @@ export function createPurchasingService(
         .set({
           ...change.patch,
           ...(userId ? { updatedBy: userId } : {}),
-          updatedAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
+          updatedAt: po.updatedAt == null
+            ? millisecondTransactionTimestamp()
+            : nextPurchaseOrderUpdatedAt(po.updatedAt),
         })
         .where(and(...cleanDraftHeaderCasConditions(po)))
         .returning();
@@ -1798,14 +1807,16 @@ export function createPurchasingService(
         conditions.push(eq(purchaseOrdersTable.physicalStatus, po.physicalStatus));
       }
       if (po.updatedAt != null) {
-        conditions.push(eq(purchaseOrdersTable.updatedAt, po.updatedAt));
+        conditions.push(purchaseOrderUpdatedAtMatchesApplicationVersion(po.updatedAt));
       }
       const updatedRows = await tx
         .update(purchaseOrdersTable)
         .set({
           ...patch,
           ...(userId ? { updatedBy: userId } : {}),
-          updatedAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
+          updatedAt: po.updatedAt == null
+            ? millisecondTransactionTimestamp()
+            : nextPurchaseOrderUpdatedAt(po.updatedAt),
         })
         .where(and(...conditions))
         .returning();
@@ -2038,7 +2049,9 @@ export function createPurchasingService(
             lineCount: lines.length,
             receivedLineCount,
             ...(userId ? { updatedBy: userId } : {}),
-            updatedAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
+            updatedAt: po.updatedAt == null
+              ? millisecondTransactionTimestamp()
+              : nextPurchaseOrderUpdatedAt(po.updatedAt),
           })
           .where(and(...cleanDraftHeaderCasConditions(po)))
           .returning();
@@ -5867,6 +5880,8 @@ export function createPurchasingService(
           lineCount: resolvedLines.length,
           createdBy: userId ?? null,
           updatedBy: userId ?? null,
+          createdAt: millisecondTransactionTimestamp(),
+          updatedAt: millisecondTransactionTimestamp(),
         })
         .returning();
 
@@ -6235,7 +6250,7 @@ export function createPurchasingService(
           eq(purchaseOrdersTable.status, "draft"),
           eq(purchaseOrdersTable.physicalStatus, "draft"),
           eq(purchaseOrdersTable.financialStatus, "unbilled"),
-          eq(purchaseOrdersTable.updatedAt, currentPo.updatedAt),
+          purchaseOrderUpdatedAtMatchesApplicationVersion(currentPo.updatedAt),
         ))
         .returning();
       const updatedPo = updatedHeaders[0];

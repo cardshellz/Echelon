@@ -527,7 +527,20 @@ export function registerPurchaseOrderRoutes(app: Express) {
           return res.status(201).json({ po: created });
         }
 
-        const sendResult = await purchasing.sendPurchaseOrder(created.id, userId);
+        let sendResult: Awaited<ReturnType<typeof purchasing.sendPurchaseOrder>>;
+        try {
+          sendResult = await purchasing.sendPurchaseOrder(created.id, userId);
+        } catch (sendError: any) {
+          console.error("[POST /api/purchase-orders] PO created but send failed", {
+            purchaseOrderId: created.id,
+            error: sendError?.message,
+          });
+          return res.status(201).json({
+            po: created,
+            status: created.status ?? "draft",
+            sendError: sendError?.message || "Failed to send purchase order",
+          });
+        }
         return res.status(201).json({
           po: sendResult.po,
           status: sendResult.status,
