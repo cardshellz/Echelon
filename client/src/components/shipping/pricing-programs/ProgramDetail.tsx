@@ -493,7 +493,7 @@ export function ProgramDetail({
   );
 }
 
-function CoverageCell({
+export function CoverageCell({
   group,
   option,
   warehouses,
@@ -521,6 +521,7 @@ function CoverageCell({
     destinationGroup?: ProgramDestinationGroup,
   ) => void;
 }) {
+  const [confirmCreateRevision, setConfirmCreateRevision] = useState(false);
   const activeCoverages = rateTableCoveragesForGroup(option.active, group);
   const draftCoverages = rateTableCoveragesForGroup(option.draft, group);
   const staleActiveCoverageCount = countStaleRateTableCoverages(
@@ -544,13 +545,13 @@ function CoverageCell({
     activeTableId: option.active?.id ?? null,
     draftTableId: option.draft?.id ?? null,
   });
-  const openCoverage = () => {
+  const editCoverage = () => {
     switch (action.kind) {
       case "continue_draft":
         onContinueDraft(action.tableId, group);
         return;
       case "create_revision":
-        onCreateRevision(action.tableId, group);
+        setConfirmCreateRevision(true);
         return;
       case "start_rates":
         onStartRates(option.serviceLevel.code, group);
@@ -559,6 +560,13 @@ function CoverageCell({
         return;
     }
   };
+
+  const editActionLabel = action.kind === "continue_draft"
+    ? "Continue editing"
+    : action.kind === "create_revision"
+      ? "Edit rates"
+      : "Set up rates";
+  const EditActionIcon = action.kind === "start_rates" ? Plus : FilePenLine;
 
   let state: CoverageState;
   if (staleDraftCoverageCount > 0) {
@@ -594,22 +602,65 @@ function CoverageCell({
 
   return (
     <div className="space-y-1">
-      <CoverageAction
-        disabled={action.kind === "none" || programRetired}
-        onClick={openCoverage}
-        {...state}
-      />
-      {option.active
-        && activeCoverages.length > 0 && (
-        <button
-          type="button"
-          onClick={() => onViewTable(option.active!.id)}
-          className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
-        >
-          <Eye className="h-3 w-3" />
-          View live revision
-        </button>
-      )}
+      <CoverageStatus {...state} />
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {option.active && activeCoverages.length > 0 && (
+          <button
+            type="button"
+            onClick={() => onViewTable(option.active!.id)}
+            className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+          >
+            <Eye className="h-3 w-3" />
+            View live revision
+          </button>
+        )}
+        {option.draft && draftCoverages.length > 0 && (
+          <button
+            type="button"
+            onClick={() => onViewTable(option.draft!.id)}
+            className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+          >
+            <Eye className="h-3 w-3" />
+            View draft revision
+          </button>
+        )}
+        {!programRetired && action.kind !== "none" && (
+          <button
+            type="button"
+            onClick={editCoverage}
+            className="flex items-center gap-1 text-[11px] font-medium text-foreground hover:underline"
+          >
+            <EditActionIcon className="h-3 w-3" />
+            {editActionLabel}
+          </button>
+        )}
+      </div>
+      <AlertDialog open={confirmCreateRevision} onOpenChange={setConfirmCreateRevision}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Create a {option.serviceLevel.displayName} draft?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This copies the entire live {option.serviceLevel.displayName} revision,
+              including every destination group, into an editable draft. Live checkout
+              remains unchanged until the draft is reviewed and activated.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              onClick={() => {
+                if (action.kind !== "create_revision") return;
+                setConfirmCreateRevision(false);
+                onCreateRevision(action.tableId, group);
+              }}
+            >
+              Create draft
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -621,17 +672,12 @@ interface CoverageState {
   tone: "active" | "draft" | "warning" | "neutral" | "unconfigured";
 }
 
-function CoverageAction({
-  disabled,
-  onClick,
+function CoverageStatus({
   icon: Icon,
   label,
   detail,
   tone,
-}: CoverageState & {
-  disabled: boolean;
-  onClick: () => void;
-}) {
+}: CoverageState) {
   const toneClasses = {
     active: "border-emerald-300 bg-emerald-50 text-emerald-900",
     draft: "border-amber-300 bg-amber-50 text-amber-900",
@@ -640,18 +686,16 @@ function CoverageAction({
     unconfigured: "border-dashed text-muted-foreground",
   }[tone];
   return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className={`w-full rounded-md border px-3 py-2 text-left transition-colors ${toneClasses} disabled:cursor-default disabled:opacity-70`}
+    <div
+      role="status"
+      className={`w-full rounded-md border px-3 py-2 text-left ${toneClasses}`}
     >
       <span className="flex items-center gap-1.5 text-xs font-medium">
         <Icon className="h-3.5 w-3.5" />
         {label}
       </span>
       <span className="mt-0.5 block text-[11px] opacity-75">{detail}</span>
-    </button>
+    </div>
   );
 }
 
