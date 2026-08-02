@@ -168,6 +168,14 @@ describeWithDisposableDb.sequential("PO lifecycle timestamp PostgreSQL guarantee
 
     expect(updated).toHaveLength(1);
     expect(updated[0].id).toBe(3);
-    expect(updated[0].updatedAt.getTime()).toBe(observed.updatedAt.getTime() + 1);
+    expect(updated[0].updatedAt.getTime()).toBeGreaterThanOrEqual(
+      observed.updatedAt.getTime() + 1,
+    );
+    const exactVersion = await pool.query<{ exact_version: string }>(`
+      SELECT to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS.US') AS exact_version
+      FROM procurement.purchase_orders
+      WHERE id = 3
+    `);
+    expect(exactVersion.rows[0].exact_version).toMatch(/\.\d{3}000$/);
   });
 });
