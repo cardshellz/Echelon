@@ -23,6 +23,8 @@ const UNMAPPED_RULES = Object.freeze([
   "shipstation_unmapped_physical_shipment",
   "ship_notify_no_match",
 ]);
+const HISTORICAL_SPLIT_DUPLICATE_ARCHIVE_REASON =
+  "historical_split_duplicate_archive";
 
 type QueryExecutor = Pick<Pool, "query"> | Pick<PoolClient, "query">;
 
@@ -893,11 +895,79 @@ async function replaceExactTargetCopyWithSource(
   }
 }
 
+async function resolveOrCreateDuplicateArchive(
+  client: PoolClient,
+  source: SourceItemRow,
+  audit: HistoricalSplitRepairAudit,
+): Promise<number> {
+  const archiveIdentity =
+    `historical_split_duplicate_archive:order:${source.order_id}`;
+  const existing = await client.query(
+    `SELECT id, status::text AS status, source, tracking_number,
+            shipment_purpose, review_reason
+     FROM wms.outbound_shipments
+     WHERE order_id = $1 AND external_fulfillment_id = $2
+     ORDER BY id
+     FOR UPDATE`,
+    [source.order_id, archiveIdentity],
+  );
+  const existingRows = rowsOf<Record<string, unknown>>(existing);
+  if (existingRows.length > 1) {
+    throw repairError(
+      "DUPLICATE_ARCHIVE_IDENTITY_AMBIGUOUS",
+      `Order ${source.order_id} has multiple historical split duplicate archives`,
+    );
+  }
+  if (existingRows.length === 1) {
+    const row = existingRows[0];
+    if (
+      String(row.status ?? "") !== "cancelled"
+      || String(row.source ?? "") !== HISTORICAL_SPLIT_REPAIR_SOURCE
+      || String(row.tracking_number ?? "").trim() !== ""
+      || String(row.shipment_purpose ?? "") !== "customer_fulfillment"
+      || String(row.review_reason ?? "") !==
+        HISTORICAL_SPLIT_DUPLICATE_ARCHIVE_REASON
+    ) {
+      throw repairError(
+        "DUPLICATE_ARCHIVE_IDENTITY_CONFLICT",
+        `Order ${source.order_id} has a conflicting historical split duplicate archive`,
+      );
+    }
+    return asPositiveInteger(row.id, "historical split duplicate archive id");
+  }
+
+  const inserted = await client.query(
+    `INSERT INTO wms.outbound_shipments (
+       order_id, channel_id, external_fulfillment_id, source, status,
+       shipping_engine, shipment_purpose, requires_review, review_reason,
+       cancelled_at, created_at, updated_at
+     ) VALUES (
+       $1, $2, $3, $4, 'cancelled',
+       'shipstation', 'customer_fulfillment', false, $5,
+       $6, $6, $6
+     )
+     RETURNING id`,
+    [
+      source.order_id,
+      source.channel_id,
+      archiveIdentity,
+      HISTORICAL_SPLIT_REPAIR_SOURCE,
+      HISTORICAL_SPLIT_DUPLICATE_ARCHIVE_REASON,
+      audit.occurredAt,
+    ],
+  );
+  return asPositiveInteger(
+    rowsOf<Record<string, unknown>>(inserted)[0]?.id,
+    "inserted historical split duplicate archive id",
+  );
+}
+
 async function applySourceAllocationsWithPersistedTargets(
   client: PoolClient,
   source: SourceItemRow,
   allocations: readonly TargetAllocation[],
-  archiveShipmentId: number | null,
+  archiveShipmentByOrder: Map<number, number>,
+  audit: HistoricalSplitRepairAudit,
 ): Promise<void> {
   const sorted = [...allocations].sort(
     (left, right) =>
@@ -948,11 +1018,14 @@ async function applySourceAllocationsWithPersistedTargets(
     );
   }
   if (remainingQuantity === 0 && mutable.length === 0) {
-    if (archiveShipmentId === null) {
-      throw repairError(
-        "RETIRED_DUPLICATE_ARCHIVE_REQUIRED",
-        `Source WMS shipment item ${source.id} needs a retired duplicate archive before exact split targets can be adopted`,
+    let archiveShipmentId = archiveShipmentByOrder.get(source.order_id);
+    if (archiveShipmentId === undefined) {
+      archiveShipmentId = await resolveOrCreateDuplicateArchive(
+        client,
+        source,
+        audit,
       );
+      archiveShipmentByOrder.set(source.order_id, archiveShipmentId);
     }
     await replaceExactTargetCopyWithSource(
       client,
@@ -1380,7 +1453,8 @@ export function createHistoricalShipStationSplitRepairRepository(
             client,
             source,
             allocationsBySource.get(sourceId)!,
-            retiredDuplicateShipmentByOrder.get(source.order_id) ?? null,
+            retiredDuplicateShipmentByOrder,
+            audit,
           );
         }
       }
