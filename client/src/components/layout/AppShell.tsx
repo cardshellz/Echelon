@@ -632,7 +632,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         </header>
 
         <main
-          className="flex-1 overflow-auto bg-muted/20"
+          className="min-h-0 flex-1 overflow-auto bg-muted/20"
           data-app-scroll-container
         >
           {children}

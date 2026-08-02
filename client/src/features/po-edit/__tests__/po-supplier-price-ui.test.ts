@@ -48,15 +48,19 @@ describe("PO supplier-price capture UI", () => {
 
   it("keeps the full vendor quote editor scrollable within the available viewport", () => {
     expect(fullEditor).toContain(
-      "max-h-[min(80vh,var(--radix-popover-content-available-height))]",
+      "collisionPadding={VENDOR_QUOTE_VIEWPORT_MARGIN_PX}",
     );
-    expect(fullEditor).toContain("overflow-y-scroll");
+    expect(fullEditor).toContain(
+      "max-h-[min(calc(100dvh-2rem),var(--radix-popover-content-available-height))]",
+    );
+    expect(fullEditor).toContain("overflow-y-auto");
     expect(fullEditor).toContain("overscroll-contain");
     expect(fullEditor).toContain("[scrollbar-gutter:stable]");
   });
 
   it("chains exhausted quote-editor wheel input into the application page", () => {
     expect(appShell).toContain("data-app-scroll-container");
+    expect(appShell).toContain("min-h-0 flex-1 overflow-auto");
     expect(fullEditor).toContain("onWheel={handleVendorQuoteWheel}");
     expect(fullEditor).toContain("shouldChainQuoteWheelToPage");
   });

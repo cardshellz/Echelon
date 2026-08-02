@@ -653,6 +653,8 @@ function pricingSourceLabel(source: PricingSource | null): string {
   return "Manual vendor quote";
 }
 
+const VENDOR_QUOTE_VIEWPORT_MARGIN_PX = 16;
+
 function handleVendorQuoteWheel(event: WheelEvent<HTMLDivElement>): void {
   if (event.defaultPrevented || event.ctrlKey) return;
 
@@ -2787,8 +2789,9 @@ function ProductLineTableRow({
             </PopoverTrigger>
             <PopoverContent
               align="end"
+              collisionPadding={VENDOR_QUOTE_VIEWPORT_MARGIN_PX}
               onWheel={handleVendorQuoteWheel}
-              className="w-[min(42rem,calc(100vw-2rem))] max-h-[min(80vh,var(--radix-popover-content-available-height))] overflow-y-scroll overscroll-contain p-5 [scrollbar-gutter:stable]"
+              className="w-[min(42rem,calc(100vw-2rem))] max-h-[min(calc(100dvh-2rem),var(--radix-popover-content-available-height))] overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable]"
             >
               <div className="space-y-5">
                 <div>
