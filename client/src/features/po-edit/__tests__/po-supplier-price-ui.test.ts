@@ -10,6 +10,13 @@ describe("PO supplier-price capture UI", () => {
   const fullEditor = page("PurchaseOrderEdit.tsx");
   const quickCreate = page("PurchaseOrders.tsx");
   const detail = page("PurchaseOrderDetail.tsx");
+  const appShell = readFileSync(
+    join(
+      process.cwd(),
+      "client/src/components/layout/AppShell.tsx",
+    ),
+    "utf8",
+  );
 
   it("uses the same explicit line-level supplier-price action on every PO surface", () => {
     for (const source of [fullEditor, quickCreate, detail]) {
@@ -46,5 +53,11 @@ describe("PO supplier-price capture UI", () => {
     expect(fullEditor).toContain("overflow-y-scroll");
     expect(fullEditor).toContain("overscroll-contain");
     expect(fullEditor).toContain("[scrollbar-gutter:stable]");
+  });
+
+  it("chains exhausted quote-editor wheel input into the application page", () => {
+    expect(appShell).toContain("data-app-scroll-container");
+    expect(fullEditor).toContain("onWheel={handleVendorQuoteWheel}");
+    expect(fullEditor).toContain("shouldChainQuoteWheelToPage");
   });
 });
