@@ -917,13 +917,38 @@ describe("historical ShipStation split repair repository guards", () => {
           return { rows: [{ has_canonical_evidence: false }] };
         }
         if (
+          sql.includes("FROM wms.outbound_shipments AS shipment") &&
+          sql.includes("shipment.tracking_number = $2") &&
+          sql.includes("shipment.id <> $3")
+        ) {
+          return {
+            rows: [...shipments.values()]
+              .filter(
+                (shipment) =>
+                  shipment.orderId === Number(params[0]) &&
+                  shipment.status === "shipped" &&
+                  shipment.tracking === String(params[1]) &&
+                  shipment.id !== Number(params[2]),
+              )
+              .map((shipment) => ({ id: shipment.id })),
+          };
+        }
+        if (
           sql.includes("UPDATE wms.outbound_shipments AS shipment") &&
           sql.includes("SET status = 'shipped'")
         ) {
           const shipment = shipments.get(Number(params[0]));
           const expectedTracking = params[13] == null ? null : String(params[13]);
+          const trackingCollision = [...shipments.values()].some(
+            (candidate) =>
+              candidate.id !== shipment?.id &&
+              candidate.orderId === shipment?.orderId &&
+              candidate.status === "shipped" &&
+              candidate.tracking === String(params[3]),
+          );
           if (
             !shipment ||
+            trackingCollision ||
             shipment.orderId !== Number(params[10]) ||
             shipment.externalId !== String(params[11]) ||
             shipment.status !== String(params[12]) ||
@@ -1027,7 +1052,25 @@ describe("historical ShipStation split repair repository guards", () => {
           item.trackingId = String(params[2]);
           return { rows: [] };
         }
-        if (sql.includes("SET status = 'cancelled'")) return { rows: [] };
+        if (
+          sql.includes("SET status = 'cancelled'") &&
+          sql.includes("historical_aggregate_repartitioned")
+        ) {
+          const sourceShipmentIds = params[0] as number[];
+          const targetShipmentIds = new Set(params[1] as number[]);
+          for (const shipmentId of sourceShipmentIds) {
+            const shipment = shipments.get(shipmentId);
+            if (
+              shipment &&
+              !targetShipmentIds.has(shipmentId) &&
+              shipment.status === "shipped" &&
+              ![...items.values()].some((item) => item.shipmentId === shipmentId)
+            ) {
+              shipment.status = "cancelled";
+            }
+          }
+          return { rows: [] };
+        }
         if (sql.includes("INSERT INTO wms.outbound_shipment_items")) {
           throw new Error("Exact persisted targets must not be copied again");
         }
