@@ -55,6 +55,9 @@ import {
   loadRateTableCoverages,
   PostgresRateCoverageAdminTransaction,
 } from "../../infrastructure/rate-coverage.repository";
+import {
+  loadDestinationScopes,
+} from "../../infrastructure/channel-shipping-policy.repository";
 import { persistAuditEvent } from "../../../../infrastructure/auditLogger";
 
 const INITIAL_RATE_TABLE_SERVICE_LEVEL_CODE = "standard";
@@ -144,6 +147,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
           assignments,
           serviceLevels,
           destinationGroups,
+          destinationScopes,
         ] = await Promise.all([
           db.select().from(shippingRateTables)
             .orderBy(desc(shippingRateTables.effectiveFrom), desc(shippingRateTables.id)),
@@ -187,6 +191,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
           db.select().from(shippingServiceLevels)
             .orderBy(asc(shippingServiceLevels.sortOrder), asc(shippingServiceLevels.id)),
           loadRateBookDestinationGroups(),
+          loadDestinationScopes(db),
         ]);
         const coverageManifests = await loadRateTableCoverages(
           db,
@@ -218,6 +223,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
           rateBooks: hydratedBooks,
           serviceLevels,
           destinationGroups,
+          destinationScopes,
           rateTables: tables.map((table) => ({
             ...table,
             rateBook: bookById.get(table.rateBookId) ?? null,

@@ -183,6 +183,9 @@ implements RateProgramCloneRepository {
       ? sourceCoverages.map((coverage): DraftRateCoverageGroup => ({
           destinationGroupId: null,
           destinationGroupLockVersion: null,
+          sourceDestinationScopeId: coverage.sourceDestinationScopeId,
+          sourceDestinationScopeLockVersion:
+            coverage.sourceDestinationScopeLockVersion,
           name: coverage.destinationGroupName,
           originWarehouseId: coverage.originWarehouseId,
           availability: coverage.availability,

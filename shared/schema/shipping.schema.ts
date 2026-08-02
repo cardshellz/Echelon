@@ -293,6 +293,7 @@ export const shippingRateBookDestinationGroups = shippingSchema.table(
       .references(() => shippingRateBooks.id, { onDelete: "cascade" }),
     sourceDestinationScopeId: integer("source_destination_scope_id")
       .references(() => shippingDestinationScopes.id, { onDelete: "restrict" }),
+    sourceDestinationScopeLockVersion: integer("source_destination_scope_lock_version"),
     name: varchar("name", { length: 160 }).notNull(),
     status: varchar("status", { length: 20 }).notNull().default("active"),
     sortOrder: integer("sort_order").notNull().default(0),
@@ -307,6 +308,11 @@ export const shippingRateBookDestinationGroups = shippingSchema.table(
       .where(sql`${table.status} = 'active'`),
     index("shipping_rate_book_destination_group_book_idx")
       .on(table.rateBookId, table.status, table.sortOrder, table.id),
+    uniqueIndex("shipping_rate_book_destination_group_scope_idx")
+      .on(table.rateBookId, table.sourceDestinationScopeId)
+      .where(sql`${table.status} = 'active' AND ${table.sourceDestinationScopeId} IS NOT NULL`),
+    index("shipping_rate_book_destination_group_source_idx")
+      .on(table.sourceDestinationScopeId, table.status),
     check("shipping_rate_book_destination_group_name_chk", sql`
       ${table.name} = btrim(${table.name}) AND ${table.name} <> ''
     `),
@@ -315,6 +321,16 @@ export const shippingRateBookDestinationGroups = shippingSchema.table(
     `),
     check("shipping_rate_book_destination_group_sort_chk", sql`${table.sortOrder} >= 0`),
     check("shipping_rate_book_destination_group_lock_chk", sql`${table.lockVersion} > 0`),
+    check("shipping_rate_book_destination_group_source_version_chk", sql`
+      (
+        ${table.sourceDestinationScopeId} IS NULL
+        AND ${table.sourceDestinationScopeLockVersion} IS NULL
+      )
+      OR (
+        ${table.sourceDestinationScopeId} IS NOT NULL
+        AND ${table.sourceDestinationScopeLockVersion} > 0
+      )
+    `),
     check("shipping_rate_book_destination_group_actor_chk", sql`
       ${table.createdBy} = btrim(${table.createdBy}) AND ${table.createdBy} <> ''
     `),
@@ -652,6 +668,10 @@ export const shippingRateTableCoverages = shippingSchema.table(
     destinationGroupId: integer("destination_group_id")
       .notNull()
       .references(() => shippingRateBookDestinationGroups.id, { onDelete: "restrict" }),
+    sourceDestinationScopeId: integer("source_destination_scope_id")
+      .references(() => shippingDestinationScopes.id, { onDelete: "restrict" }),
+    sourceDestinationScopeLockVersion:
+      integer("source_destination_scope_lock_version"),
     originWarehouseId: integer("origin_warehouse_id")
       .references(() => warehouses.id, { onDelete: "restrict" }),
     availability: varchar("availability", { length: 20 })
@@ -676,6 +696,20 @@ export const shippingRateTableCoverages = shippingSchema.table(
     check("shipping_rate_table_coverage_group_version_chk", sql`
       ${table.destinationGroupLockVersion} > 0
     `),
+    check("shipping_rate_table_coverage_source_version_chk", sql`
+      (
+        ${table.sourceDestinationScopeId} IS NULL
+        AND ${table.sourceDestinationScopeLockVersion} IS NULL
+      )
+      OR (
+        ${table.sourceDestinationScopeId} IS NOT NULL
+        AND ${table.sourceDestinationScopeLockVersion} > 0
+      )
+    `),
+    index("shipping_rate_table_coverage_source_idx").on(
+      table.sourceDestinationScopeId,
+      table.sourceDestinationScopeLockVersion,
+    ),
     check("shipping_rate_table_coverage_name_chk", sql`
       ${table.destinationGroupName} = btrim(${table.destinationGroupName})
       AND ${table.destinationGroupName} <> ''
