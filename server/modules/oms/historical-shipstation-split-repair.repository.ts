@@ -25,6 +25,11 @@ const UNMAPPED_RULES = Object.freeze([
 ]);
 const HISTORICAL_SPLIT_DUPLICATE_ARCHIVE_REASON =
   "historical_split_duplicate_archive";
+const RECOVERABLE_PROVIDER_STATE_STATUSES = new Set([
+  "queued",
+  "voided",
+  "cancelled",
+]);
 
 type QueryExecutor = Pick<Pool, "query"> | Pick<PoolClient, "query">;
 
@@ -81,6 +86,11 @@ interface TargetPlan {
   targetShipmentId: number | null;
   exactBeforeApply: boolean;
   retiredDuplicateShipmentId: number | null;
+  providerStateRecovery: {
+    shipmentId: number;
+    expectedStatus: string;
+    expectedTrackingNumber: string | null;
+  } | null;
 }
 
 export interface HistoricalShipStationSplitRepairRepository {
@@ -283,6 +293,7 @@ async function loadCanonicalRows(
 async function exactTargetMembership(
   executor: QueryExecutor,
   target: TargetPlan,
+  lock = false,
 ): Promise<boolean> {
   if (!target.targetShipmentId) return false;
   const result = await executor.query(
@@ -290,7 +301,8 @@ async function exactTargetMembership(
             shipment_item_purpose, product_variant_id, qty
      FROM wms.outbound_shipment_items
      WHERE shipment_id = $1
-     ORDER BY id`,
+     ORDER BY id
+     ${lock ? "FOR UPDATE" : ""}`,
     [target.targetShipmentId],
   );
   const actual = new Map<string, number>();
@@ -406,6 +418,7 @@ function buildTargetPlansForPackage(
       targetShipmentId: null,
       exactBeforeApply: false,
       retiredDuplicateShipmentId: null,
+      providerStateRecovery: null,
     };
   });
 }
@@ -497,6 +510,40 @@ async function loadPreferredExistingTarget(
     const exactRow = exactMatches[0];
     const staleId = asPositiveInteger(exactRow.id, "stale target shipment id");
     const status = String(exactRow.status ?? "");
+    const exactOrderIdentity =
+      Number(exactRow.order_id) === target.orderId &&
+      String(exactRow.external_fulfillment_id ?? "") === target.identity;
+    const expectedTrackingNumber =
+      exactRow.tracking_number == null ? null : String(exactRow.tracking_number);
+    const trackingMatches =
+      expectedTrackingNumber === target.providerPackage.trackingNumber;
+    const providerStateNeedsRecovery =
+      exactOrderIdentity &&
+      RECOVERABLE_PROVIDER_STATE_STATUSES.has(status) &&
+      (status === "queued" || !trackingMatches);
+    if (providerStateNeedsRecovery) {
+      target.targetShipmentId = staleId;
+      const membershipExact = await exactTargetMembership(executor, target, lock);
+      target.targetShipmentId = null;
+      if (!membershipExact) {
+        throw repairError(
+          "TARGET_PACKAGE_IDENTITY_CONFLICT",
+          `WMS shipment ${staleId} has provider identity ${target.identity} but does not exactly match provider package membership`,
+        );
+      }
+      if (await shipmentItemsHaveCanonicalEvidence(executor, staleId)) {
+        throw repairError(
+          "TARGET_PROVIDER_STATE_CANONICAL_EVIDENCE",
+          `WMS shipment ${staleId} has canonical fulfillment evidence and cannot be reactivated from provider state`,
+        );
+      }
+      target.providerStateRecovery = {
+        shipmentId: staleId,
+        expectedStatus: status,
+        expectedTrackingNumber,
+      };
+      return exactRow;
+    }
     const recoverableStatus = status === "voided" || status === "cancelled";
     const recoverableIdentity =
       Number(exactRow.order_id) === target.orderId &&
@@ -605,7 +652,69 @@ async function resolveOrCreateTarget(
 ): Promise<number> {
   const existing = await loadPreferredExistingTarget(client, target, true);
   if (existing) {
-    const id = validateExistingTarget(existing, target);
+    let resolvedExisting = existing;
+    if (target.providerStateRecovery !== null) {
+      const recovery = target.providerStateRecovery;
+      const recovered = await client.query(
+        `UPDATE wms.outbound_shipments AS shipment
+         SET status = 'shipped',
+             carrier = $2, service_code = $3, tracking_number = $4, shipped_at = $5,
+             tracking_url = NULL,
+             shipping_engine = 'shipstation', engine_order_ref = $6,
+             engine_shipment_ref = $7, shipstation_order_id = $8,
+             shipstation_order_key = $9, requires_review = false,
+             review_reason = NULL, cancelled_at = NULL, voided_at = NULL,
+             voided_reason = NULL, held = false, held_at = NULL,
+             on_hold_reason = NULL, updated_at = $10
+         WHERE shipment.id = $1
+           AND shipment.order_id = $11
+           AND shipment.external_fulfillment_id = $12
+           AND shipment.status::text = $13
+           AND shipment.tracking_number IS NOT DISTINCT FROM $14::varchar
+           AND shipment.status IN ('queued', 'voided', 'cancelled')
+           AND NOT EXISTS (
+             SELECT 1
+             FROM wms.outbound_shipment_items AS item
+             JOIN wms.physical_shipment_items AS physical_item
+               ON physical_item.legacy_wms_shipment_item_id = item.id
+             WHERE item.shipment_id = shipment.id
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM wms.outbound_shipment_items AS item
+             JOIN oms.channel_fulfillment_receipt_items AS receipt_item
+               ON receipt_item.legacy_wms_shipment_item_id = item.id
+             WHERE item.shipment_id = shipment.id
+           )
+         RETURNING shipment.id, shipment.order_id, shipment.status::text AS status,
+                   shipment.external_fulfillment_id, shipment.tracking_number`,
+        [
+          recovery.shipmentId,
+          target.providerPackage.carrierCode,
+          target.providerPackage.serviceCode,
+          target.providerPackage.trackingNumber,
+          target.providerPackage.shippedAt,
+          String(target.providerPackage.providerOrderId),
+          String(target.providerPackage.providerShipmentId),
+          target.providerPackage.providerOrderId,
+          target.providerPackage.providerOrderKey,
+          audit.occurredAt,
+          target.orderId,
+          target.identity,
+          recovery.expectedStatus,
+          recovery.expectedTrackingNumber,
+        ],
+      );
+      const recoveredRows = rowsOf<Record<string, unknown>>(recovered);
+      if (recoveredRows.length !== 1) {
+        throw repairError(
+          "TARGET_PROVIDER_STATE_CHANGED",
+          `WMS shipment ${recovery.shipmentId} changed after provider-state recovery was proven`,
+        );
+      }
+      resolvedExisting = recoveredRows[0];
+    }
+    const id = validateExistingTarget(resolvedExisting, target);
     target.targetShipmentId = id;
     target.exactBeforeApply = await exactTargetMembership(client, target);
     if (target.retiredDuplicateShipmentId !== null) {
@@ -1308,6 +1417,7 @@ export function createHistoricalShipStationSplitRepairRepository(
       }
 
       let identityPreflightFailed = false;
+      const recoveredSourceItemIds = new Set<number>();
       for (const plan of component.packages) {
         for (const target of buildTargetPlansForPackage(plan, sourceRows)) {
           const orderItemCollision = targetOrderItemIdentityCollision(target);
@@ -1322,6 +1432,13 @@ export function createHistoricalShipStationSplitRepairRepository(
           }
           try {
             await loadPreferredExistingTarget(pool, target, false);
+            if (target.providerStateRecovery !== null) {
+              for (const expected of target.expectedSourceItems) {
+                recoveredSourceItemIds.add(
+                  expected.sourceShipmentItemId,
+                );
+              }
+            }
           } catch (error) {
             const code = error && typeof error === "object"
               && typeof (error as { code?: unknown }).code === "string"
@@ -1353,7 +1470,13 @@ export function createHistoricalShipStationSplitRepairRepository(
             `provider packages require ${required} units from WMS shipment item ${sourceId}, but only ${source.qty} remain`,
           );
         }
-        if (required < source.qty && (!source.external_fulfillment_id || !source.tracking_number)) {
+        if (required < source.qty && recoveredSourceItemIds.has(sourceId)) {
+          conflicts.push(
+            `provider-state recovery would leave ${source.qty - required} units on WMS shipment item ${sourceId} without current provider membership proof`,
+          );
+        } else if (
+          required < source.qty && (!source.external_fulfillment_id || !source.tracking_number)
+        ) {
           conflicts.push(
             `WMS shipment item ${sourceId} would leave ${source.qty - required} units without stable residual package identity`,
           );
@@ -1431,7 +1554,10 @@ export function createHistoricalShipStationSplitRepairRepository(
       const allTargetsExact = (
         await Promise.all(targets.map((target) => exactTargetMembership(client, target)))
       ).every(Boolean);
-      if (!allTargetsExact) {
+      const hasProviderStateRecovery = targets.some(
+        (target) => target.providerStateRecovery !== null,
+      );
+      if (hasProviderStateRecovery || !allTargetsExact) {
         const allocationsBySource = new Map<number, TargetAllocation[]>();
         for (const target of targets) {
           for (const expected of target.expectedSourceItems) {
