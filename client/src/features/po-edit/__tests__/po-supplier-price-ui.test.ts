@@ -64,4 +64,16 @@ describe("PO supplier-price capture UI", () => {
     expect(fullEditor).toContain("onWheel={handleVendorQuoteWheel}");
     expect(fullEditor).toContain("shouldChainQuoteWheelToPage");
   });
+
+  it("keeps quote edits local until the operator explicitly applies them", () => {
+    expect(fullEditor).toContain("onOpenChange={handleQuotePopoverOpenChange}");
+    expect(fullEditor).toContain("value={quoteEditorPricing}");
+    expect(fullEditor).toContain("onChange={updateQuoteEditorPricing}");
+    expect(fullEditor).toContain("Changes are not added to the purchase order until you apply them.");
+    expect(fullEditor).toContain("Cannot apply: {quoteEditorError}");
+    expect(fullEditor).toContain("onClick={applyQuoteEditorDraft}");
+    expect(fullEditor).toContain('"Apply quote"');
+    expect(fullEditor).toContain('"Update quote"');
+    expect(fullEditor).toContain("Cancel");
+  });
 });

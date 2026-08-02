@@ -2531,6 +2531,74 @@ type ProductLineTableRowProps = {
   setPopoverOpen: (b: boolean) => void;
 };
 
+export type VendorQuoteEditorDraft = {
+  pricing: PoLinePricingEditorDraft;
+  metadata: PoLineQuoteMetadataDraft;
+  pricingSource: PricingSource | null;
+  catalogWrite: LineDraft["catalogWrite"];
+};
+
+export function createVendorQuoteEditorDraft(
+  line: Pick<
+    LineDraft,
+    | "pricingSource"
+    | "quoteReference"
+    | "quotedAt"
+    | "quoteValidUntil"
+    | "catalogWrite"
+  >,
+  pricing: PoLinePricingEditorDraft,
+): VendorQuoteEditorDraft {
+  return {
+    pricing: { ...pricing },
+    metadata: poLineQuoteMetadataDraft(line),
+    pricingSource: line.pricingSource,
+    catalogWrite: line.catalogWrite ? { ...line.catalogWrite } : undefined,
+  };
+}
+
+export function vendorQuoteEditorDraftError(
+  draft: VendorQuoteEditorDraft,
+): string | null {
+  return evaluatePoLinePricingDraft(draft.pricing).error ??
+    evaluatePoLineQuoteMetadataDraft(draft.metadata).error ??
+    (draft.catalogWrite && !draft.metadata.quotedAt
+      ? "Enter a quote date before updating the reusable supplier price."
+      : null);
+}
+
+export function vendorQuoteEditorLinePatch(
+  line: Pick<
+    LineDraft,
+    | "hasExplicitPricing"
+    | "quoteReference"
+    | "quotedAt"
+    | "quoteValidUntil"
+  >,
+  draft: VendorQuoteEditorDraft,
+): Partial<LineDraft> | null {
+  if (vendorQuoteEditorDraftError(draft)) return null;
+
+  const originalMetadata = poLineQuoteMetadataDraft(line);
+  const metadataChanged =
+    draft.metadata.quoteReference !== originalMetadata.quoteReference ||
+    draft.metadata.quotedAt !== originalMetadata.quotedAt ||
+    draft.metadata.quoteValidUntil !== originalMetadata.quoteValidUntil;
+
+  return {
+    ...normalizedPricingPatch(
+      draft.pricing,
+      draft.pricingSource ?? undefined,
+    ),
+    ...(metadataChanged
+      ? quoteMetadataEditorLinePatch(line, draft.metadata)
+      : {}),
+    catalogWrite: draft.pricing.basis === "extended_total"
+      ? undefined
+      : draft.catalogWrite,
+  };
+}
+
 function ProductLineTableRow({
   line,
   idx,
@@ -2549,6 +2617,8 @@ function ProductLineTableRow({
   const inCatalog = catalogQuery.data?.inCatalog ?? [];
   const outOfCatalog = catalogQuery.data?.outOfCatalog ?? [];
   const [quotePopoverOpen, setQuotePopoverOpen] = useState(false);
+  const [quoteEditorDraft, setQuoteEditorDraft] =
+    useState<VendorQuoteEditorDraft | null>(null);
   const pricingDraft =
     line.pricingDraft ??
     createEmptyPoLinePricingDraft({ quantityPieces: String(line.orderQty || 1) });
@@ -2556,6 +2626,13 @@ function ProductLineTableRow({
   const activeNormalizedPricing = line.hasExplicitPricing
     ? pricingEvaluation.normalized
     : null;
+  const quoteEditorViewDraft =
+    quoteEditorDraft ?? createVendorQuoteEditorDraft(line, pricingDraft);
+  const quoteEditorPricing = quoteEditorViewDraft.pricing;
+  const quoteEditorMetadata = quoteEditorViewDraft.metadata;
+  const quoteEditorPricingEvaluation =
+    evaluatePoLinePricingDraft(quoteEditorPricing);
+  const quoteEditorError = vendorQuoteEditorDraftError(quoteEditorViewDraft);
 
   // Product economics come from the quote normalizer; packaging remains an
   // independent exact-cent addition.
@@ -2581,6 +2658,69 @@ function ProductLineTableRow({
 
   const hasError = Boolean(error);
   const hasProduct = Boolean(line.productId);
+
+  function handleQuotePopoverOpenChange(open: boolean): void {
+    if (open) {
+      setQuoteEditorDraft(createVendorQuoteEditorDraft(line, pricingDraft));
+    } else {
+      setQuoteEditorDraft(null);
+    }
+    setQuotePopoverOpen(open);
+  }
+
+  function updateQuoteEditorPricing(next: PoLinePricingEditorDraft): void {
+    setQuoteEditorDraft((current) => current
+      ? {
+          ...current,
+          pricing: next,
+          pricingSource: "manual",
+          ...(next.basis === "extended_total"
+            ? { catalogWrite: undefined }
+            : {}),
+        }
+      : current);
+  }
+
+  function updateQuoteEditorMetadata(next: PoLineQuoteMetadataDraft): void {
+    setQuoteEditorDraft((current) => current
+      ? { ...current, metadata: next, pricingSource: "manual" }
+      : current);
+  }
+
+  function updateQuoteEditorCatalogWrite(enabled: boolean): void {
+    setQuoteEditorDraft((current) => current
+      ? {
+          ...current,
+          pricingSource: "manual",
+          catalogWrite: enabled
+            ? {
+                mode: "upsert",
+                ...(current.catalogWrite?.setPreferred
+                  ? { setPreferred: true }
+                  : {}),
+              }
+            : undefined,
+        }
+      : current);
+  }
+
+  function updateQuoteEditorPreferredSupplier(preferred: boolean): void {
+    setQuoteEditorDraft((current) => current
+      ? {
+          ...current,
+          pricingSource: "manual",
+          catalogWrite: { mode: "upsert", setPreferred: preferred },
+        }
+      : current);
+  }
+
+  function applyQuoteEditorDraft(): void {
+    if (!quoteEditorDraft || quoteEditorError) return;
+    const patch = vendorQuoteEditorLinePatch(line, quoteEditorDraft);
+    if (!patch) return;
+    onChange(patch);
+    handleQuotePopoverOpenChange(false);
+  }
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -2764,7 +2904,10 @@ function ProductLineTableRow({
 
         {/* Vendor quote cell */}
         <TableCell className="px-3 py-3">
-          <Popover open={quotePopoverOpen} onOpenChange={setQuotePopoverOpen}>
+          <Popover
+            open={quotePopoverOpen}
+            onOpenChange={handleQuotePopoverOpenChange}
+          >
             <PopoverTrigger asChild>
               <button
                 type="button"
@@ -2804,30 +2947,14 @@ function ProductLineTableRow({
                 {line.preserveLegacyPricing && (
                   <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 space-y-2">
                     <p>
-                      This legacy line has no recorded quote basis. It will remain unchanged unless you confirm or edit this pricing.
+                      This legacy line has no recorded quote basis. Review the values below, then select Update quote to confirm them.
                     </p>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      disabled={!pricingEvaluation.normalized}
-                      onClick={() => onChange(normalizedPricingPatch(pricingDraft, "manual"))}
-                    >
-                      Confirm as price per item
-                    </Button>
                   </div>
                 )}
 
                 <PoLinePricingEditor
-                  value={pricingDraft}
-                  onChange={(next) =>
-                    onChange({
-                      ...normalizedPricingPatch(next, "manual"),
-                      ...(next.basis === "extended_total"
-                        ? { catalogWrite: undefined }
-                        : {}),
-                    })
-                  }
+                  value={quoteEditorPricing}
+                  onChange={updateQuoteEditorPricing}
                   receiveConfiguration={{
                     label: line.productName || line.sku || "Selected product",
                     unitsPerVariant: expectedReceiveUnits,
@@ -2838,17 +2965,17 @@ function ProductLineTableRow({
                   <div className="space-y-2">
                     <Label>Pricing source</Label>
                     <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
-                      {pricingSourceLabel(line.pricingSource)}
+                      {pricingSourceLabel(quoteEditorDraft?.pricingSource ?? line.pricingSource)}
                     </div>
                   </div>
-                  {line.hasExplicitPricing ? (
+                  {quoteEditorPricingEvaluation.normalized ? (
                     <PoLineQuoteMetadataEditor
-                      value={poLineQuoteMetadataDraft(line)}
-                      onChange={(next) => onChange(quoteMetadataEditorLinePatch(line, next))}
+                      value={quoteEditorMetadata}
+                      onChange={updateQuoteEditorMetadata}
                     />
                   ) : (
                     <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-                      Confirm the vendor quote basis and amount before adding quote reference or validity details.
+                      Enter a valid vendor quote before adding quote reference or validity details.
                     </p>
                   )}
                 </div>
@@ -2858,22 +2985,15 @@ function ProductLineTableRow({
                     <Checkbox
                       id={`supplier-price-${line.clientId}`}
                       checked={
-                        !!line.catalogWrite &&
-                        pricingDraft.basis !== "extended_total"
+                        !!quoteEditorDraft?.catalogWrite &&
+                        quoteEditorPricing.basis !== "extended_total"
                       }
                       onCheckedChange={(value) =>
-                        onChange(
-                          value === true
-                            ? {
-                                catalogWrite: { mode: "upsert" },
-                                pricingSource: "manual",
-                              }
-                            : { catalogWrite: undefined },
-                        )
+                        updateQuoteEditorCatalogWrite(value === true)
                       }
                       disabled={
-                        !line.hasExplicitPricing ||
-                        pricingDraft.basis === "extended_total"
+                        !quoteEditorPricingEvaluation.normalized ||
+                        quoteEditorPricing.basis === "extended_total"
                       }
                     />
                     <label
@@ -2883,9 +3003,9 @@ function ProductLineTableRow({
                       Update supplier price with this quote
                     </label>
                   </div>
-                  {line.catalogWrite && pricingDraft.basis !== "extended_total" && (
+                  {quoteEditorDraft?.catalogWrite && quoteEditorPricing.basis !== "extended_total" && (
                     <>
-                      {!line.quotedAt && (
+                      {!quoteEditorMetadata.quotedAt && (
                         <p className="text-xs text-amber-700 ml-6" role="alert">
                           Enter a quote date to save this reusable supplier price.
                         </p>
@@ -2893,14 +3013,9 @@ function ProductLineTableRow({
                       <div className="flex items-center gap-2 ml-6">
                         <Checkbox
                           id={`preferred-supplier-${line.clientId}`}
-                          checked={line.catalogWrite.setPreferred === true}
+                          checked={quoteEditorDraft.catalogWrite.setPreferred === true}
                           onCheckedChange={(value) =>
-                            onChange({
-                              catalogWrite: {
-                                mode: "upsert",
-                                setPreferred: value === true,
-                              },
-                            })
+                            updateQuoteEditorPreferredSupplier(value === true)
                           }
                         />
                         <label
@@ -2912,11 +3027,41 @@ function ProductLineTableRow({
                       </div>
                     </>
                   )}
-                  {pricingDraft.basis === "extended_total" && (
+                  {quoteEditorPricing.basis === "extended_total" && (
                     <p className="text-xs text-muted-foreground ml-6">
                       A quantity-specific total remains on this PO and cannot become a reusable supplier price.
                     </p>
                   )}
+                </div>
+
+                <div className="sticky bottom-0 z-10 -mx-5 -mb-5 flex flex-col gap-3 border-t bg-popover/95 p-4 backdrop-blur sm:flex-row sm:items-center sm:justify-between">
+                  {quoteEditorError ? (
+                    <p className="text-sm text-amber-700" role="alert">
+                      Cannot apply: {quoteEditorError}
+                    </p>
+                  ) : (
+                    <p className="text-sm text-muted-foreground" role="status">
+                      Changes are not added to the purchase order until you apply them.
+                    </p>
+                  )}
+                  <div className="flex shrink-0 justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => handleQuotePopoverOpenChange(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      disabled={!quoteEditorDraft || Boolean(quoteEditorError)}
+                      onClick={applyQuoteEditorDraft}
+                    >
+                      {line.hasExplicitPricing || line.preserveLegacyPricing
+                        ? "Update quote"
+                        : "Apply quote"}
+                    </Button>
+                  </div>
                 </div>
               </div>
             </PopoverContent>

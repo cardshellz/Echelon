@@ -220,13 +220,16 @@ function requiredMoney(
   decimalPlaces: 2 | 4,
   label: string,
 ): number {
+  const normalizedValue = /^\.\d+$/.test(value) ? `0${value}` : value;
   const pattern = decimalPlaces === 4
     ? /^\d+(?:\.\d{0,4})?$/
     : /^\d+(?:\.\d{0,2})?$/;
-  if (!value || !pattern.test(value)) {
+  if (!value || !pattern.test(normalizedValue)) {
     throw new Error(`${label} must be a dollar amount with up to ${decimalPlaces} decimal places.`);
   }
-  return decimalPlaces === 4 ? dollarsToMills(value) : dollarsToCents(value);
+  return decimalPlaces === 4
+    ? dollarsToMills(normalizedValue)
+    : dollarsToCents(normalizedValue);
 }
 
 export function evaluatePoLinePricingDraft(

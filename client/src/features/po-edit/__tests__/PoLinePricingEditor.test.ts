@@ -26,6 +26,19 @@ describe("PO line pricing editor conversion", () => {
     expect(result.normalized?.totalProductCostCents).toBe(31_584);
   });
 
+  it("normalizes a leading-decimal per-piece quote without floating-point math", () => {
+    const result = evaluatePoLinePricingDraft(
+      createEmptyPoLinePricingDraft({
+        quantityPieces: "1",
+        unitPriceDollars: ".0394",
+      }),
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.pricing).toMatchObject({ unitCostMills: 394 });
+    expect(result.normalized?.totalProductCostCents).toBe(4);
+  });
+
   it("keeps purchase UOM pricing separate from receiving configuration", () => {
     const result = evaluatePoLinePricingDraft(
       createEmptyPoLinePricingDraft({

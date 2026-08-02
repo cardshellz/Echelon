@@ -2,14 +2,27 @@ import { describe, expect, it } from "vitest";
 
 import {
   catalogReceiveConfiguration,
+  createVendorQuoteEditorDraft,
   isExplicitVendorQuoteBasis,
   poLineQuoteMetadataError,
   quoteMetadataEditorLinePatch,
   quoteMetadataOnlyLinePatch,
   resolvePreloadCatalogPricingIdentity,
+  vendorQuoteEditorDraftError,
+  vendorQuoteEditorLinePatch,
 } from "../../../pages/PurchaseOrderEdit";
+import { createEmptyPoLinePricingDraft } from "../PoLinePricingEditor";
 
 describe("PurchaseOrderEdit catalog identity", () => {
+  const quoteLine = {
+    hasExplicitPricing: false,
+    pricingSource: "manual" as const,
+    quoteReference: null,
+    quotedAt: null,
+    quoteValidUntil: null,
+    catalogWrite: undefined,
+  };
+
   it("keeps legacy preload economics unconfirmed", () => {
     expect(isExplicitVendorQuoteBasis("legacy_unknown")).toBe(false);
     expect(isExplicitVendorQuoteBasis(null)).toBe(false);
@@ -79,6 +92,64 @@ describe("PurchaseOrderEdit catalog identity", () => {
       expectedReceiveVariantId: 22,
       expectedReceiveUnitsPerVariant: 6,
     });
+  });
+
+  it("does not mutate the purchase-order line before a valid quote draft is applied", () => {
+    const draft = createVendorQuoteEditorDraft(
+      quoteLine,
+      createEmptyPoLinePricingDraft({
+        quantityPieces: "1",
+        unitPriceDollars: ".0394",
+      }),
+    );
+    draft.metadata.quoteReference = "Invoice No.JB260609-V06";
+
+    expect(quoteLine.quoteReference).toBeNull();
+    expect(vendorQuoteEditorDraftError(draft)).toBeNull();
+    expect(vendorQuoteEditorLinePatch(quoteLine, draft)).toMatchObject({
+      pricingDraft: {
+        quantityPieces: "1",
+        unitPriceDollars: ".0394",
+      },
+      orderQty: 1,
+      unitCostMills: 394,
+      totalProductCostCents: 4,
+      hasExplicitPricing: true,
+      preserveLegacyPricing: false,
+      pricingSource: "manual",
+      quoteReference: "Invoice No.JB260609-V06",
+    });
+  });
+
+  it("blocks Apply with an actionable message while the quote draft is invalid", () => {
+    const draft = createVendorQuoteEditorDraft(
+      quoteLine,
+      createEmptyPoLinePricingDraft({
+        quantityPieces: "1",
+        unitPriceDollars: ".",
+      }),
+    );
+
+    expect(vendorQuoteEditorDraftError(draft)).toBe(
+      "Price per piece must be a dollar amount with up to 4 decimal places.",
+    );
+    expect(vendorQuoteEditorLinePatch(quoteLine, draft)).toBeNull();
+  });
+
+  it("requires a quote date before applying a reusable supplier-price update", () => {
+    const draft = createVendorQuoteEditorDraft(
+      quoteLine,
+      createEmptyPoLinePricingDraft({
+        quantityPieces: "1",
+        unitPriceDollars: "0.0394",
+      }),
+    );
+    draft.catalogWrite = { mode: "upsert" };
+
+    expect(vendorQuoteEditorDraftError(draft)).toBe(
+      "Enter a quote date before updating the reusable supplier price.",
+    );
+    expect(vendorQuoteEditorLinePatch(quoteLine, draft)).toBeNull();
   });
 
   it("retains the preload vendor-product id for trusted catalog provenance", () => {
