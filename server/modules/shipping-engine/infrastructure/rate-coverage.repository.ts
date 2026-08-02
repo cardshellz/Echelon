@@ -6,6 +6,8 @@ import {
   sql,
 } from "drizzle-orm";
 import {
+  shippingDestinationScopeMembers,
+  shippingDestinationScopes,
   shippingRateBookDestinationGroupMembers,
   shippingRateBookDestinationGroups,
   shippingRateTableCoverageDestinations,
@@ -18,6 +20,7 @@ import {
   type AuditLogPayload,
 } from "../../../infrastructure/auditLogger";
 import type {
+  DestinationScopeRecord,
   RateBookDestinationGroupRecord,
   RateCoverageAdminTransaction,
   RateTableCoverageRecord,
@@ -34,6 +37,18 @@ export class PostgresRateCoverageAdminTransaction
 implements RateCoverageAdminTransaction {
   constructor(private readonly tx: Transaction) {}
 
+  async getDestinationScopeForUpdate(
+    destinationScopeId: number,
+  ): Promise<DestinationScopeRecord | null> {
+    await this.tx.execute(sql`
+      SELECT id
+      FROM shipping.destination_scopes
+      WHERE id = ${destinationScopeId}
+      FOR SHARE
+    `);
+    return loadDestinationScope(this.tx, destinationScopeId);
+  }
+
   async getDestinationGroupForUpdate(
     destinationGroupId: number,
   ): Promise<RateBookDestinationGroupRecord | null> {
@@ -46,9 +61,9 @@ implements RateCoverageAdminTransaction {
     return loadDestinationGroup(this.tx, destinationGroupId);
   }
 
-  async findActiveDestinationGroupByName(
+  async findActiveDestinationGroupByScope(
     rateBookId: number,
-    name: string,
+    destinationScopeId: number,
   ): Promise<RateBookDestinationGroupRecord | null> {
     const [group] = await this.tx
       .select({ id: shippingRateBookDestinationGroups.id })
@@ -56,7 +71,10 @@ implements RateCoverageAdminTransaction {
       .where(and(
         eq(shippingRateBookDestinationGroups.rateBookId, rateBookId),
         eq(shippingRateBookDestinationGroups.status, "active"),
-        sql`lower(${shippingRateBookDestinationGroups.name}) = lower(${name})`,
+        eq(
+          shippingRateBookDestinationGroups.sourceDestinationScopeId,
+          destinationScopeId,
+        ),
       ))
       .limit(1);
     if (!group) return null;
@@ -65,6 +83,8 @@ implements RateCoverageAdminTransaction {
 
   async insertDestinationGroup(input: {
     rateBookId: number;
+    sourceDestinationScopeId: number;
+    sourceDestinationScopeLockVersion: number;
     name: string;
     sortOrder: number;
     actor: string;
@@ -75,6 +95,9 @@ implements RateCoverageAdminTransaction {
       .insert(shippingRateBookDestinationGroups)
       .values({
         rateBookId: input.rateBookId,
+        sourceDestinationScopeId: input.sourceDestinationScopeId,
+        sourceDestinationScopeLockVersion:
+          input.sourceDestinationScopeLockVersion,
         name: input.name,
         status: "active",
         sortOrder: input.sortOrder,
@@ -95,6 +118,8 @@ implements RateCoverageAdminTransaction {
   async updateDestinationGroup(input: {
     destinationGroupId: number;
     expectedLockVersion: number;
+    sourceDestinationScopeId: number;
+    sourceDestinationScopeLockVersion: number;
     name: string;
     sortOrder: number;
     now: Date;
@@ -103,6 +128,9 @@ implements RateCoverageAdminTransaction {
     const [updated] = await this.tx
       .update(shippingRateBookDestinationGroups)
       .set({
+        sourceDestinationScopeId: input.sourceDestinationScopeId,
+        sourceDestinationScopeLockVersion:
+          input.sourceDestinationScopeLockVersion,
         name: input.name,
         sortOrder: input.sortOrder,
         lockVersion: sql`${shippingRateBookDestinationGroups.lockVersion} + 1`,
@@ -153,6 +181,9 @@ implements RateCoverageAdminTransaction {
         .values({
           rateTableId: input.rateTableId,
           destinationGroupId: group.destinationGroupId,
+          sourceDestinationScopeId: group.sourceDestinationScopeId,
+          sourceDestinationScopeLockVersion:
+            group.sourceDestinationScopeLockVersion,
           originWarehouseId: group.originWarehouseId,
           availability: group.availability,
           destinationGroupLockVersion:
@@ -185,6 +216,10 @@ export async function loadRateBookDestinationGroups(
     .select({
       id: shippingRateBookDestinationGroups.id,
       rateBookId: shippingRateBookDestinationGroups.rateBookId,
+      sourceDestinationScopeId:
+        shippingRateBookDestinationGroups.sourceDestinationScopeId,
+      sourceDestinationScopeLockVersion:
+        shippingRateBookDestinationGroups.sourceDestinationScopeLockVersion,
       name: shippingRateBookDestinationGroups.name,
       status: shippingRateBookDestinationGroups.status,
       sortOrder: shippingRateBookDestinationGroups.sortOrder,
@@ -244,6 +279,10 @@ export async function loadRateTableCoverages(
       id: shippingRateTableCoverages.id,
       rateTableId: shippingRateTableCoverages.rateTableId,
       destinationGroupId: shippingRateTableCoverages.destinationGroupId,
+      sourceDestinationScopeId:
+        shippingRateTableCoverages.sourceDestinationScopeId,
+      sourceDestinationScopeLockVersion:
+        shippingRateTableCoverages.sourceDestinationScopeLockVersion,
       originWarehouseId: shippingRateTableCoverages.originWarehouseId,
       availability: shippingRateTableCoverages.availability,
       destinationGroupLockVersion:
@@ -356,6 +395,9 @@ export async function cloneRateTableCoverages(
       .values({
         rateTableId: targetRateTableId,
         destinationGroupId: coverage.destinationGroupId,
+        sourceDestinationScopeId: coverage.sourceDestinationScopeId,
+        sourceDestinationScopeLockVersion:
+          coverage.sourceDestinationScopeLockVersion,
         originWarehouseId: coverage.originWarehouseId,
         availability: coverage.availability,
         destinationGroupLockVersion: coverage.destinationGroupLockVersion,
@@ -372,6 +414,47 @@ export async function cloneRateTableCoverages(
   return source.length;
 }
 
+async function loadDestinationScope(
+  executor: Executor,
+  destinationScopeId: number,
+): Promise<DestinationScopeRecord | null> {
+  const [scope] = await executor
+    .select({
+      id: shippingDestinationScopes.id,
+      name: shippingDestinationScopes.name,
+      status: shippingDestinationScopes.status,
+      lockVersion: shippingDestinationScopes.lockVersion,
+    })
+    .from(shippingDestinationScopes)
+    .where(eq(shippingDestinationScopes.id, destinationScopeId))
+    .limit(1);
+  if (!scope) return null;
+
+  const destinations = await executor
+    .select({
+      destinationCountry:
+        shippingDestinationScopeMembers.destinationCountry,
+      destinationRegion:
+        shippingDestinationScopeMembers.destinationRegion,
+      postalPrefix: shippingDestinationScopeMembers.postalPrefix,
+    })
+    .from(shippingDestinationScopeMembers)
+    .where(eq(
+      shippingDestinationScopeMembers.destinationScopeId,
+      destinationScopeId,
+    ))
+    .orderBy(
+      asc(shippingDestinationScopeMembers.destinationCountry),
+      asc(shippingDestinationScopeMembers.destinationRegion),
+      asc(shippingDestinationScopeMembers.postalPrefix),
+    );
+  return {
+    ...scope,
+    status: scope.status as DestinationScopeRecord["status"],
+    destinations,
+  };
+}
+
 async function loadDestinationGroup(
   executor: Executor,
   destinationGroupId: number,
@@ -380,6 +463,10 @@ async function loadDestinationGroup(
     .select({
       id: shippingRateBookDestinationGroups.id,
       rateBookId: shippingRateBookDestinationGroups.rateBookId,
+      sourceDestinationScopeId:
+        shippingRateBookDestinationGroups.sourceDestinationScopeId,
+      sourceDestinationScopeLockVersion:
+        shippingRateBookDestinationGroups.sourceDestinationScopeLockVersion,
       name: shippingRateBookDestinationGroups.name,
       status: shippingRateBookDestinationGroups.status,
       sortOrder: shippingRateBookDestinationGroups.sortOrder,
