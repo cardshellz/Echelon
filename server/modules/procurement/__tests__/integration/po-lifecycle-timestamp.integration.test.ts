@@ -49,6 +49,7 @@ describeWithDisposableDb.sequential("PO lifecycle timestamp PostgreSQL guarantee
         id INTEGER PRIMARY KEY,
         status VARCHAR(20) NOT NULL,
         physical_status VARCHAR(30) NOT NULL,
+        financial_status VARCHAR(30) NOT NULL DEFAULT 'unbilled',
         updated_at TIMESTAMP NOT NULL
       );
     `);
@@ -131,5 +132,42 @@ describeWithDisposableDb.sequential("PO lifecycle timestamp PostgreSQL guarantee
       .returning({ id: purchaseOrders.id });
 
     expect(updated).toEqual([]);
+  });
+
+  it("applies a draft edit against a microsecond database version", async () => {
+    await pool.query(`
+      INSERT INTO procurement.purchase_orders (id, status, physical_status, updated_at)
+      VALUES (3, 'draft', 'draft', TIMESTAMP '2026-08-02 15:47:55.211798')
+    `);
+    const db = drizzle(pool);
+    const [observed] = await db
+      .select({
+        id: purchaseOrders.id,
+        status: purchaseOrders.status,
+        physicalStatus: purchaseOrders.physicalStatus,
+        financialStatus: purchaseOrders.financialStatus,
+        updatedAt: purchaseOrders.updatedAt,
+      })
+      .from(purchaseOrders)
+      .where(eq(purchaseOrders.id, 3));
+
+    const updated = await db
+      .update(purchaseOrders)
+      .set({ updatedAt: nextPurchaseOrderUpdatedAt(observed.updatedAt) })
+      .where(and(
+        eq(purchaseOrders.id, observed.id),
+        eq(purchaseOrders.status, "draft"),
+        eq(purchaseOrders.physicalStatus, "draft"),
+        eq(purchaseOrders.financialStatus, "unbilled"),
+        purchaseOrderUpdatedAtMatchesApplicationVersion(observed.updatedAt),
+      ))
+      .returning({
+        id: purchaseOrders.id,
+        updatedAt: purchaseOrders.updatedAt,
+      });
+
+    expect(updated).toHaveLength(1);
+    expect(updated[0].id).toBe(3);
+    expect(updated[0].updatedAt.getTime()).toBe(observed.updatedAt.getTime() + 1);
   });
 });
