@@ -69,6 +69,7 @@ import { registerProductRatePolicyAdminRoutes } from "./modules/shipping-engine/
 import { registerManualRateQuoteRoutes } from "./modules/shipping-engine/interfaces/http/manual-rate-quote.routes";
 import { registerChannelShippingPolicyAdminRoutes } from "./modules/shipping-engine/interfaces/http/channel-shipping-policy-admin.routes";
 import { registerStorefrontRatePreviewRoutes } from "./modules/shipping-engine/interfaces/http/storefront-rate-preview.routes";
+import { registerDestinationScopeReaderRoutes } from "./modules/shipping-engine/interfaces/http/destination-scope-reader.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -106,6 +107,7 @@ export async function registerRoutes(
   registerChannelShippingPolicyAdminRoutes(app);
   registerManualRateQuoteRoutes(app);
   registerStorefrontRatePreviewRoutes(app);
+  registerDestinationScopeReaderRoutes(app);
   registerOutboundShipmentRoutes(app);
   registerDropshipAdminOmsChannelConfigRoutes(app);
   registerDropshipAdminWorkerOpsRoutes(app);
