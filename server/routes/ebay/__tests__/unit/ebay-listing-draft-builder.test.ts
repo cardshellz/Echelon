@@ -87,6 +87,90 @@ describe("buildEbayRouteListingDraft", () => {
     expect(draft.itemGroup?.payload.variesBy.aspectsImageVariesBy).toEqual([]);
   });
 
+  it("retains an inactive sold SKU in the variation group without updating its offer", () => {
+    const draft = buildEbayRouteListingDraft({
+      productId: 33,
+      product: {
+        name: "Aramalope Envelope Single Pocket",
+        sku: "ARM-ENV-SGL",
+        description: "<p>Envelope</p>",
+      },
+      variants: [
+        {
+          id: 67,
+          sku: "ARM-ENV-SGL-C700",
+          name: "Case of 700",
+          option1_value: "Case of 700",
+          price_cents: null,
+          weight_grams: null,
+          isListed: false,
+        },
+        {
+          id: 66,
+          sku: "ARM-ENV-SGL-P50",
+          name: "Pack of 50",
+          option1_value: "Pack of 50",
+          price_cents: 1034,
+          weight_grams: 500,
+          isListed: true,
+        },
+        {
+          id: 438,
+          sku: "ARM-ENV-SGL-C750",
+          name: "Case of 750",
+          option1_value: "Case of 750",
+          price_cents: 11499,
+          weight_grams: 7500,
+          isListed: true,
+        },
+      ],
+      effectiveImageUrls: ["https://cdn.example.test/envelope.jpg"],
+      aspects: { Brand: ["Cardshellz"], Type: ["Envelope"] },
+      isMultiVariant: true,
+      variationAspectName: "Pack Size",
+      variantPrices: new Map([
+        [67, 0],
+        [66, 1034],
+        [438, 11499],
+      ]),
+      atpByVariantId: new Map([
+        [67, 900],
+        [66, 7610],
+        [438, 507],
+      ]),
+      marketplaceId: "EBAY_US",
+      ebayBrowseCategoryId: "183438",
+      effectivePolicies: {
+        fulfillmentPolicyId: "fulfillment-policy",
+        returnPolicyId: "return-policy",
+        paymentPolicyId: "payment-policy",
+      },
+      storeCategoryNames: ["Armalopes"],
+      merchantLocationKey: "card-shellz-hq",
+      retainUnlistedVariantsInGroup: true,
+    });
+
+    expect(draft.inventoryItems.map((item) => item.sku)).toEqual([
+      "ARM-ENV-SGL-P50",
+      "ARM-ENV-SGL-C750",
+    ]);
+    expect(draft.offers.map((offer) => offer.sku)).toEqual([
+      "ARM-ENV-SGL-P50",
+      "ARM-ENV-SGL-C750",
+    ]);
+    expect((draft.itemGroup?.payload as any).variantSKUs).toEqual([
+      "ARM-ENV-SGL-C700",
+      "ARM-ENV-SGL-P50",
+      "ARM-ENV-SGL-C750",
+    ]);
+    expect(draft.inventoryItems).not.toContainEqual(
+      expect.objectContaining({ sku: "ARM-ENV-SGL-C700" }),
+    );
+    expect(draft.offers).not.toContainEqual(
+      expect.objectContaining({ sku: "ARM-ENV-SGL-C700" }),
+    );
+  });
+
   it("rejects missing eBay offer prices before building marketplace payloads", () => {
     expect(() => buildEbayRouteListingDraft({
       productId: 232,

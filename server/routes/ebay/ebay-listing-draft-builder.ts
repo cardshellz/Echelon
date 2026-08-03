@@ -33,6 +33,7 @@ interface EbayRouteVariantInput {
   ebay_fulfillment_policy_override?: string | null;
   ebay_return_policy_override?: string | null;
   ebay_payment_policy_override?: string | null;
+  isListed?: boolean;
 }
 
 interface EbayRoutePoliciesInput {
@@ -56,6 +57,7 @@ interface EbayRouteListingDraftInput {
   effectivePolicies: EbayRoutePoliciesInput;
   storeCategoryNames: string[];
   merchantLocationKey: string;
+  retainUnlistedVariantsInGroup?: boolean;
 }
 
 const ebayListingBuilder = new EbayListingBuilder();
@@ -76,14 +78,17 @@ export function buildEbayRouteListingDraft(
     if (!sku) continue;
 
     const variantId = normalizeRequiredPositiveInteger(routeVariant.id, `Invalid eBay variant id for SKU ${sku}.`);
+    const isListed = routeVariant.isListed !== false;
     const priceCents = normalizeCents(input.variantPrices.get(variantId) ?? routeVariant.price_cents);
-    if (priceCents === null || !isValidEbayFixedPriceCents(priceCents)) {
+    if (isListed && (priceCents === null || !isValidEbayFixedPriceCents(priceCents))) {
       throw new Error(
         `eBay listing price is required and must be at least ${formatEbayMinimumPrice()} for SKU ${sku}.`,
       );
     }
 
-    const availableQty = Math.max(0, input.atpByVariantId.get(variantId) ?? 0);
+    const availableQty = isListed
+      ? Math.max(0, input.atpByVariantId.get(variantId) ?? 0)
+      : 0;
     const variationValue = routeVariant.option1_value || routeVariant.name || sku;
     availableQuantityByVariantId.set(variantId, availableQty);
     variationValueByVariantId.set(variantId, variationValue);
@@ -103,7 +108,7 @@ export function buildEbayRouteListingDraft(
       weightGrams: normalizePackageWeightGrams(routeVariant),
       priceCents,
       compareAtPriceCents: normalizeCents(routeVariant.compare_at_price_cents),
-      isListed: true,
+      isListed,
       externalVariantId: null,
       externalInventoryItemId: null,
     });
@@ -148,6 +153,7 @@ export function buildEbayRouteListingDraft(
     itemGroupKey: groupKey,
     itemGroupAspects: input.aspects,
     includeVariantSkusInGroup: true,
+    retainUnlistedVariantsInGroup: input.retainUnlistedVariantsInGroup === true,
     includeEmptyAspectsImageVariesBy: true,
     includeOfferListingDescription: false,
     includeOfferTax: false,

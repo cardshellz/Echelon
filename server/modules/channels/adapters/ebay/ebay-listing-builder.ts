@@ -81,6 +81,12 @@ export interface EbayListingBuildOptions {
   itemGroupKey?: string;
   itemGroupAspects?: Record<string, string[]>;
   includeVariantSkusInGroup?: boolean;
+  /**
+   * Preserve unlisted variants as members of an existing eBay variation group.
+   * Their inventory items and offers are intentionally not updated by this
+   * draft; availability synchronization keeps those retained SKUs at zero.
+   */
+  retainUnlistedVariantsInGroup?: boolean;
   includeEmptyAspectsImageVariesBy?: boolean;
   includeOfferListingDescription?: boolean;
   includeOfferTax?: boolean;
@@ -179,16 +185,18 @@ export class EbayListingBuilder {
     config: EbayListingConfig,
     options: EbayListingBuildOptions = {},
   ): BuiltItemGroup | null {
-    const activeVariants = listing.variants.filter(
-      (v) => v.isListed && v.sku,
+    const groupVariants = listing.variants.filter(
+      (variant) =>
+        variant.sku &&
+        (variant.isListed || options.retainUnlistedVariantsInGroup === true),
     );
 
     // Single variant — no group needed
-    if (activeVariants.length <= 1) return null;
+    if (groupVariants.length <= 1) return null;
 
     // Determine variation aspect name and values
     const { aspectName, aspectValues } =
-      this.extractVariationAspect(activeVariants, options);
+      this.extractVariationAspect(groupVariants, options);
 
     const title =
       this.formatTitle(config.channelOverrides?.titleOverride || listing.title, options);
@@ -227,7 +235,7 @@ export class EbayListingBuilder {
       },
     };
     if (options.includeVariantSkusInGroup) {
-      payload.variantSKUs = activeVariants.map((variant) => variant.sku!).filter(Boolean);
+      payload.variantSKUs = groupVariants.map((variant) => variant.sku!).filter(Boolean);
     }
 
     return {

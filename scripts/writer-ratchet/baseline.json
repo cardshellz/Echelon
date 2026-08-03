@@ -86,6 +86,9 @@
   "channels.channel_sync_log": [
     "modules/channels"
   ],
+  "channels.channel_variant_availability_sync": [
+    "modules/channels"
+  ],
   "channels.channel_variant_overrides": [
     "modules/channels",
     "server/routes/ebay/ebay-listing-state.ts"
