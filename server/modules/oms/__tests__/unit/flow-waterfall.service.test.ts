@@ -54,6 +54,35 @@ describe("getFlowWaterfall", () => {
     expect(FLOW_WATERFALL_SRC).toContain("sla: { breached: slaBreached, sample: [] }");
   });
 
+  it("keeps the OMS primary key indexable when correlating WMS orders", () => {
+    expect(FLOW_WATERFALL_SRC).toContain("wmsOmsOrderLinkSql");
+    expect(FLOW_WATERFALL_SRC).not.toContain("oo.id::text");
+    expect(FLOW_WATERFALL_SRC).not.toContain("wo.source_table_id = oo.id::text");
+  });
+
+  it("identifies the monitor query when a snapshot statement times out", async () => {
+    const execute = vi.fn(async (query: any) => {
+      const text = JSON.stringify(query);
+      if (
+        text.includes("warehouse_status IN ('ready','in_progress','ready_to_ship')")
+        && text.includes("NOT EXISTS")
+      ) {
+        throw Object.assign(new Error("canceling statement due to statement timeout"), {
+          code: "57014",
+        });
+      }
+      return { rows: [{ count: 0 }] };
+    });
+    const db = { transaction: async (fn: (tx: any) => any) => fn({ execute }) };
+
+    await expect(getFlowWaterfall(db)).rejects.toMatchObject({
+      code: "57014",
+      message: expect.stringContaining(
+        'Control Tower flow query "issue:WMS_READY_WITHOUT_SHIPMENT" failed',
+      ),
+    });
+  });
+
   it("surfaces physical orders from any channel that did not reach OMS", () => {
     const start = FLOW_WATERFALL_SRC.indexOf('code: "CHANNEL_ORDER_MISSING_OMS"');
     const end = FLOW_WATERFALL_SRC.indexOf("\n  },", start);

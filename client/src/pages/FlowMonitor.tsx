@@ -60,6 +60,7 @@ import {
   resolveFlowReplayAction,
   type FlowReplayAction,
 } from "@/lib/control-tower-flow-actions";
+import { flowSnapshotIsCurrent } from "@/lib/control-tower-flow-snapshot";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 
@@ -1494,6 +1495,7 @@ export default function FlowMonitor() {
       queryClient.invalidateQueries({ queryKey: ["operations-control-tower-v2-group"] }),
       queryClient.invalidateQueries({ queryKey: ["operations-control-tower-v2-detail"] }),
       queryClient.invalidateQueries({ queryKey: ["operations-control-tower-v2-sources"] }),
+      queryClient.invalidateQueries({ queryKey: ["operations-control-tower-v2-flow-overview"] }),
     ]);
   };
 
@@ -1927,7 +1929,9 @@ function FlowOverview(props: {
   canAdjustInventory: boolean;
 }) {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const snapshot = props.data?.snapshot ?? null;
+  const snapshotIsCurrent = flowSnapshotIsCurrent(props.data);
   const [selectedStageKey, setSelectedStageKey] = useState<string | null>(null);
   const [selectedIssueCode, setSelectedIssueCode] = useState<string | null>(null);
   const [unmappedTarget, setUnmappedTarget] = useState<ShipStationUnmappedTarget | null>(null);
@@ -2016,7 +2020,10 @@ function FlowOverview(props: {
           : action.successTitle,
         description: retryDescription,
       });
-      await bucketQuery.refetch();
+      await Promise.all([
+        bucketQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["operations-control-tower-v2-flow-overview"] }),
+      ]);
     },
     onError: (error: Error) => {
       toast({
@@ -2061,6 +2068,20 @@ function FlowOverview(props: {
           </Badge>
         )}
       </div>
+      {snapshot && props.data && !snapshotIsCurrent && (
+        <div className="mb-3 flex gap-3 border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <div className="font-medium">Showing the last successful scan, not current issue counts.</div>
+            <div className="mt-0.5 text-xs text-amber-800">
+              The background refresh is {humanize(props.data.status).toLowerCase()}.
+              {props.data.lastAttempt?.errorMessage ? ` ${props.data.lastAttempt.errorMessage}` : ""}
+              {props.data.lastAttempt?.completedAt ? ` Last attempted ${formatTimestamp(props.data.lastAttempt.completedAt)}.` : ""}
+              {" "}Open an issue type to query its live evidence.
+            </div>
+          </div>
+        </div>
+      )}
 
       {props.loading ? (
         <div className="grid gap-2 md:grid-cols-6">
@@ -2093,11 +2114,14 @@ function FlowOverview(props: {
                   <div className="mt-2 text-2xl font-semibold tabular-nums">{stage.count.toLocaleString()}</div>
                   {gap !== null && <div className="mt-1 text-xs text-orange-700">{gap.toLocaleString()} not yet advanced</div>}
                   {stage.issues.length > 0 ? (
-                    <div className="mt-2 text-xs font-medium text-red-700">
+                    <div className={cn("mt-2 text-xs font-medium", snapshotIsCurrent ? "text-red-700" : "text-amber-800")}>
+                      {snapshotIsCurrent ? "" : "Last scan: "}
                       {stage.issues.length.toLocaleString()} exception type{stage.issues.length === 1 ? "" : "s"} · {stage.monitorMatches.toLocaleString()} monitor matches
                     </div>
                   ) : (
-                    <div className="mt-2 text-xs text-emerald-700">No open exceptions</div>
+                    <div className={cn("mt-2 text-xs", snapshotIsCurrent ? "text-emerald-700" : "text-muted-foreground")}>
+                      {snapshotIsCurrent ? "No open exceptions" : "No exceptions in the last scan"}
+                    </div>
                   )}
                   {index < stages.length - 1 && <ArrowRight className="absolute -right-2.5 top-1/2 z-10 hidden h-5 w-5 -translate-y-1/2 bg-background text-muted-foreground md:block" />}
                 </button>
@@ -2162,10 +2186,12 @@ function FlowOverview(props: {
       <Dialog open={selectedStage !== null} onOpenChange={(open) => { if (!open) closeStage(); }}>
         <DialogContent className="max-h-[92vh] overflow-hidden p-0 sm:max-w-5xl">
           <DialogHeader className="border-b px-5 py-4 text-left">
-            <DialogTitle>{selectedStage?.label} exceptions</DialogTitle>
+            <DialogTitle>{selectedStage?.label} {snapshotIsCurrent ? "exceptions" : "last scan"}</DialogTitle>
             <DialogDescription>
               {selectedStage
-                ? `${selectedStage.issues.length.toLocaleString()} root cause${selectedStage.issues.length === 1 ? "" : "s"} · ${selectedStage.monitorMatches.toLocaleString()} snapshot matches in the last ${snapshot?.windowDays ?? 30} days`
+                ? snapshotIsCurrent
+                  ? `${selectedStage.issues.length.toLocaleString()} root cause${selectedStage.issues.length === 1 ? "" : "s"} · ${selectedStage.monitorMatches.toLocaleString()} snapshot matches in the last ${snapshot?.windowDays ?? 30} days`
+                  : `${selectedStage.issues.length.toLocaleString()} issue type${selectedStage.issues.length === 1 ? "" : "s"} from the last successful scan; select one to load current evidence`
                 : "Order-flow exceptions"}
             </DialogDescription>
           </DialogHeader>
@@ -2183,8 +2209,12 @@ function FlowOverview(props: {
                     )}
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <Badge variant="outline" className={cn("text-[10px] uppercase", flowSeverityClass(issue.severity))}>{issue.severity}</Badge>
-                      <span className="text-sm font-semibold tabular-nums">{issue.count.toLocaleString()}</span>
+                      <Badge variant="outline" className={cn("text-[10px] uppercase", snapshotIsCurrent && flowSeverityClass(issue.severity))}>
+                        {snapshotIsCurrent ? issue.severity : "Last scan"}
+                      </Badge>
+                      <span className="text-sm font-semibold tabular-nums">
+                        {snapshotIsCurrent ? issue.count.toLocaleString() : `Last scan ${issue.count.toLocaleString()}`}
+                      </span>
                     </div>
                     <div className="mt-2 text-sm font-medium leading-snug">{issue.message}</div>
                     <div className="mt-1 font-mono text-[11px] text-muted-foreground">{issue.code}</div>
@@ -2198,7 +2228,9 @@ function FlowOverview(props: {
                 <div className="space-y-5 p-5">
                   <section>
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className={cn("text-[10px] uppercase", flowSeverityClass(selectedIssue.severity))}>{selectedIssue.severity}</Badge>
+                      <Badge variant="outline" className={cn("text-[10px] uppercase", snapshotIsCurrent && flowSeverityClass(selectedIssue.severity))}>
+                        {snapshotIsCurrent ? selectedIssue.severity : "Historical"}
+                      </Badge>
                       <Badge variant="outline">{humanize(selectedIssue.kind)}</Badge>
                       <Badge variant="secondary">{humanize(selectedIssue.remediation)}</Badge>
                     </div>
@@ -2255,7 +2287,7 @@ function FlowOverview(props: {
                         <p className="mt-1 text-xs text-muted-foreground">Up to 50 current records from this exact monitor condition.</p>
                       </div>
                       <span className="text-right text-xs tabular-nums text-muted-foreground">
-                        Live {bucketQuery.data?.rows.length.toLocaleString() ?? "-"} · snapshot {selectedIssue.count.toLocaleString()}
+                        Live {bucketQuery.data?.rows.length.toLocaleString() ?? "-"} · {snapshotIsCurrent ? "snapshot" : "last scan"} {selectedIssue.count.toLocaleString()}
                       </span>
                     </div>
 
@@ -2349,8 +2381,10 @@ function FlowOverview(props: {
                       </div>
                     ) : (
                       <div className="border bg-muted/20 p-4 text-sm text-muted-foreground">
-                        No records currently match this condition. Successful replays have cleared from the live list;
-                        the snapshot count updates on the next background refresh, normally within five minutes.
+                        No records currently match this condition.
+                        {snapshotIsCurrent
+                          ? " Successful replays have cleared from the live list; the snapshot count updates on the next background refresh, normally within five minutes."
+                          : " The count shown on the left belongs to the last successful scan and is not an active alert."}
                       </div>
                     )}
                   </section>

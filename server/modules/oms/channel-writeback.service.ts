@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { wmsOmsOrderLinkSql } from "./oms-wms-order-link.sql";
 
 const DEFAULT_WINDOW_DAYS = 30;
 const MAX_WINDOW_DAYS = 365;
@@ -230,10 +231,11 @@ function shippedChannelShipmentsCte(
         ) AS dead_retry
       FROM wms.outbound_shipments os
       JOIN wms.orders wo ON wo.id = os.order_id
-      JOIN oms.oms_orders oo ON (
-           (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
-        OR (wo.source_table_id = oo.id::text)
-      )
+      JOIN oms.oms_orders oo ON ${wmsOmsOrderLinkSql(sql`oo.id`, {
+        source: sql`wo.source`,
+        omsFulfillmentOrderId: sql`wo.oms_fulfillment_order_id`,
+        legacySourceTableId: sql`wo.source_table_id`,
+      })}
       JOIN channels.channels c ON c.id = oo.channel_id
       LEFT JOIN LATERAL (
         SELECT 'v2|' || COALESCE(
