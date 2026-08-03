@@ -105,6 +105,18 @@ describe("channel-writeback.service", () => {
     expect(execute).toHaveBeenCalledTimes(1);
   });
 
+  it("joins WMS orders through a typed OMS id so the OMS primary key stays indexable", async () => {
+    const execute = vi.fn(async () => ({ rows: [] }));
+
+    await getChannelWritebackHealth({ execute }, { windowDays: 30, sampleLimit: 25 });
+
+    const text = JSON.stringify(execute.mock.calls[0]?.[0]);
+    expect(text).toContain("wo.oms_fulfillment_order_id");
+    expect(text).toContain("::bigint");
+    expect(text).not.toContain("oo.id::text");
+    expect(text).toContain("LENGTH");
+  });
+
   it("supports unbounded historical convergence and recognizes reconciled Shopify evidence", async () => {
     const execute = vi.fn(async () => ({ rows: [] }));
 

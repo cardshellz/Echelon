@@ -35,6 +35,7 @@ import {
   SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON,
   SHIPSTATION_UNMAPPED_PHYSICAL_RULE,
 } from "./shipstation-unmapped-physical";
+import { wmsOmsOrderLinkSql } from "./oms-wms-order-link.sql";
 
 const DEFAULT_WINDOW_DAYS = 30;
 const MAX_WINDOW_DAYS = 365;
@@ -154,7 +155,16 @@ interface FlowIssueDef {
 
 // The soft OMS↔WMS correlation (no FK): join on the fulfillment-order id or the
 // source_table_id. Used by several issue queries — keep aliases oo / wo.
-const LINK = sql`((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text))`;
+const LINK = wmsOmsOrderLinkSql(sql`oo.id`, {
+  source: sql`wo.source`,
+  omsFulfillmentOrderId: sql`wo.oms_fulfillment_order_id`,
+  legacySourceTableId: sql`wo.source_table_id`,
+});
+const CANDIDATE_LINK = wmsOmsOrderLinkSql(sql`oo.id`, {
+  source: sql`candidate.source`,
+  omsFulfillmentOrderId: sql`candidate.oms_fulfillment_order_id`,
+  legacySourceTableId: sql`candidate.source_table_id`,
+});
 const PHYSICAL_OMS_ORDER = sql`EXISTS (
   SELECT 1
   FROM oms.oms_order_lines physical_line
@@ -477,7 +487,7 @@ const BASE_ISSUES: FlowIssueDef[] = [
     message: "Paid orders haven't reached the warehouse",
     why: "The customer paid but the order never made it to the warehouse to be picked. Re-send it to the warehouse — it's safe to re-run.",
     remediation: "REPLAY_AFTER_FIX", replaySafe: true,
-    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.status NOT IN ('cancelled','shipped') AND oo.financial_status IN ('paid','partially_paid') AND oo.ordered_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text))`,
+    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.status NOT IN ('cancelled','shipped') AND oo.financial_status IN ('paid','partially_paid') AND oo.ordered_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo WHERE ${LINK})`,
     sample: (win: any) => sql`
       SELECT oo.id AS oms_order_id,
              oo.external_order_number AS order_number,
@@ -503,8 +513,7 @@ const BASE_ISSUES: FlowIssueDef[] = [
         AND NOT EXISTS (
           SELECT 1
           FROM wms.orders wo
-          WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
-             OR (wo.source_table_id = oo.id::text)
+          WHERE ${LINK}
         )
       ORDER BY oo.ordered_at DESC
       LIMIT 50
@@ -594,8 +603,8 @@ const BASE_ISSUES: FlowIssueDef[] = [
     message: "Ready orders have no shipment",
     why: "The warehouse marked these ready to ship but there's no shipment to print a label for. Re-create the shipment so it can go out.",
     remediation: "REPLAY_AFTER_FIX", replaySafe: false,
-    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM wms.orders wo WHERE wo.warehouse_status IN ('ready','in_progress','ready_to_ship') AND wo.created_at > ${win} AND EXISTS (SELECT 1 FROM wms.order_items oi WHERE oi.order_id = wo.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(oi.quantity,0) > COALESCE(oi.fulfilled_quantity,0)) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text)) AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded')) AND NOT EXISTS (SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id AND os.status <> 'voided')`,
-    sample: (win: any) => sql`SELECT wo.order_number, wo.warehouse_status, wo.created_at AS at FROM wms.orders wo WHERE wo.warehouse_status IN ('ready','in_progress','ready_to_ship') AND wo.created_at > ${win} AND EXISTS (SELECT 1 FROM wms.order_items oi WHERE oi.order_id = wo.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(oi.quantity,0) > COALESCE(oi.fulfilled_quantity,0)) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text)) AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded')) AND NOT EXISTS (SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id AND os.status <> 'voided') ORDER BY wo.created_at DESC LIMIT 50`,
+    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM wms.orders wo WHERE wo.warehouse_status IN ('ready','in_progress','ready_to_ship') AND wo.created_at > ${win} AND EXISTS (SELECT 1 FROM wms.order_items oi WHERE oi.order_id = wo.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(oi.quantity,0) > COALESCE(oi.fulfilled_quantity,0)) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ${LINK} AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded')) AND NOT EXISTS (SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id AND os.status <> 'voided')`,
+    sample: (win: any) => sql`SELECT wo.order_number, wo.warehouse_status, wo.created_at AS at FROM wms.orders wo WHERE wo.warehouse_status IN ('ready','in_progress','ready_to_ship') AND wo.created_at > ${win} AND EXISTS (SELECT 1 FROM wms.order_items oi WHERE oi.order_id = wo.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(oi.quantity,0) > COALESCE(oi.fulfilled_quantity,0)) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ${LINK} AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded')) AND NOT EXISTS (SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id AND os.status <> 'voided') ORDER BY wo.created_at DESC LIMIT 50`,
   },
   {
     code: "SHIPMENT_REQUIRES_REVIEW", kind: "stuck", stage: "wms_fulfill", severity: "warning",
@@ -638,8 +647,8 @@ const BASE_ISSUES: FlowIssueDef[] = [
     message: "Shipments not sent to the shipping app",
     why: "These shipments should have been handed to the shipping app by now but weren't, so no label exists. Re-send them to the shipping app.",
     remediation: "REQUEUE", replaySafe: true,
-    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.status IN ('planned','queued') AND os.created_at < NOW() - INTERVAL '15 minutes' AND os.engine_order_ref IS NULL AND COALESCE(os.requires_review, false) = false AND COALESCE(os.held, false) = false AND wo.warehouse_status NOT IN ('cancelled','shipped') AND EXISTS (SELECT 1 FROM wms.outbound_shipment_items osi JOIN wms.order_items oi ON oi.id = osi.order_item_id WHERE osi.shipment_id = os.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(osi.qty,0) > 0) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text)) AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded'))`,
-    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.status, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.status IN ('planned','queued') AND os.created_at < NOW() - INTERVAL '15 minutes' AND os.engine_order_ref IS NULL AND COALESCE(os.requires_review, false) = false AND COALESCE(os.held, false) = false AND wo.warehouse_status NOT IN ('cancelled','shipped') AND EXISTS (SELECT 1 FROM wms.outbound_shipment_items osi JOIN wms.order_items oi ON oi.id = osi.order_item_id WHERE osi.shipment_id = os.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(osi.qty,0) > 0) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text)) AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded')) ORDER BY os.created_at ASC LIMIT 50`,
+    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.status IN ('planned','queued') AND os.created_at < NOW() - INTERVAL '15 minutes' AND os.engine_order_ref IS NULL AND COALESCE(os.requires_review, false) = false AND COALESCE(os.held, false) = false AND wo.warehouse_status NOT IN ('cancelled','shipped') AND EXISTS (SELECT 1 FROM wms.outbound_shipment_items osi JOIN wms.order_items oi ON oi.id = osi.order_item_id WHERE osi.shipment_id = os.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(osi.qty,0) > 0) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ${LINK} AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded'))`,
+    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.status, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.status IN ('planned','queued') AND os.created_at < NOW() - INTERVAL '15 minutes' AND os.engine_order_ref IS NULL AND COALESCE(os.requires_review, false) = false AND COALESCE(os.held, false) = false AND wo.warehouse_status NOT IN ('cancelled','shipped') AND EXISTS (SELECT 1 FROM wms.outbound_shipment_items osi JOIN wms.order_items oi ON oi.id = osi.order_item_id WHERE osi.shipment_id = os.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(osi.qty,0) > 0) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ${LINK} AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded')) ORDER BY os.created_at ASC LIMIT 50`,
   },
   {
     code: "UNMAPPED_ENGINE_SPLIT", kind: "duplicate", stage: "engine_push", severity: "warning",
@@ -763,8 +772,8 @@ const BASE_ISSUES: FlowIssueDef[] = [
     message: "Cancelled orders that were actually paid & shipped",
     why: "The order shows cancelled, but the customer paid and the items shipped — so it has dropped out of the active orders view (a “lost order”). Restore it to shipped, unless there was a genuine refund or cancellation.",
     remediation: "MANUAL_REVIEW", replaySafe: false,
-    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.status = 'cancelled' AND oo.cancelled_at IS NULL AND oo.financial_status = 'paid' AND oo.ordered_at > ${win} AND EXISTS (SELECT 1 FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR wo.source_table_id = oo.id::text) AND os.status IN ('shipped','returned','lost'))`,
-    sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, oo.status, oo.financial_status, oo.fulfillment_status, oo.ordered_at AS at FROM oms.oms_orders oo WHERE oo.status = 'cancelled' AND oo.cancelled_at IS NULL AND oo.financial_status = 'paid' AND oo.ordered_at > ${win} AND EXISTS (SELECT 1 FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR wo.source_table_id = oo.id::text) AND os.status IN ('shipped','returned','lost')) ORDER BY oo.ordered_at DESC LIMIT 50`,
+    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.status = 'cancelled' AND oo.cancelled_at IS NULL AND oo.financial_status = 'paid' AND oo.ordered_at > ${win} AND EXISTS (SELECT 1 FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ${LINK} AND os.status IN ('shipped','returned','lost'))`,
+    sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, oo.status, oo.financial_status, oo.fulfillment_status, oo.ordered_at AS at FROM oms.oms_orders oo WHERE oo.status = 'cancelled' AND oo.cancelled_at IS NULL AND oo.financial_status = 'paid' AND oo.ordered_at > ${win} AND EXISTS (SELECT 1 FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ${LINK} AND os.status IN ('shipped','returned','lost')) ORDER BY oo.ordered_at DESC LIMIT 50`,
   },
   {
     code: "SHIPMENT_SHIPPED_AT_WRONG_STATUS", kind: "contradiction", stage: "shipped", severity: "warning",
@@ -1194,6 +1203,24 @@ function rows(r: any): any[] {
   return Array.isArray(r?.rows) ? r.rows : [];
 }
 
+async function withFlowQueryContext<T>(label: string, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    const candidate = error as { code?: unknown; message?: unknown };
+    const causeMessage = String(candidate?.message ?? error ?? "Unknown query failure")
+      .replace(/\s+/g, " ")
+      .trim();
+    const contextual = new Error(`Control Tower flow query "${label}" failed: ${causeMessage}`) as Error & {
+      code?: string;
+      cause?: unknown;
+    };
+    if (candidate?.code != null) contextual.code = String(candidate.code);
+    contextual.cause = error;
+    throw contextual;
+  }
+}
+
 async function getPaidReplayActivity(tx: any, win: any): Promise<FlowReplayActivity[]> {
   const result = await tx.execute(sql`
     WITH latest_replays AS (
@@ -1240,8 +1267,7 @@ async function getPaidReplayActivity(tx: any, win: any): Promise<FlowReplayActiv
     LEFT JOIN LATERAL (
       SELECT candidate.id, candidate.warehouse_status
       FROM wms.orders candidate
-      WHERE (candidate.source = 'oms' AND candidate.oms_fulfillment_order_id = oo.id::text)
-         OR candidate.source_table_id = oo.id::text
+      WHERE ${CANDIDATE_LINK}
       ORDER BY candidate.id DESC
       LIMIT 1
     ) wo ON TRUE
@@ -1387,7 +1413,9 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
     const bc: Record<string, number> = {};
     const allIssues: FlowIssue[] = [];
     for (const def of FLOW_ISSUES) {
-      const count = def.kind === "queue_failure" ? (dlMap[def.code] ?? 0) : num(await tx.execute(def.count(win)));
+      const count = def.kind === "queue_failure"
+        ? (dlMap[def.code] ?? 0)
+        : num(await withFlowQueryContext(`issue:${def.code}`, () => tx.execute(def.count(win))));
       bc[def.code] = count;
       allIssues.push({
         code: def.code, kind: def.kind, severity: def.severity, stage: def.stage,
@@ -1396,10 +1424,12 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
       });
     }
     const issues = allIssues.filter((i) => i.count > 0);
-    const channelWriteback = await getChannelWritebackHealth(tx, {
-      windowDays,
-      sampleLimit: 50,
-    });
+    const channelWriteback = await withFlowQueryContext("channel_writeback_health", () => (
+      getChannelWritebackHealth(tx, {
+        windowDays,
+        sampleLimit: 50,
+      })
+    ));
     const counts = issues.reduce((a, i) => { (a as any)[i.severity] += i.count; return a; }, { critical: 0, warning: 0, info: 0 });
 
     // ---- dead-letter reason breakdown for the sidebar (from the same grouped pass) ----
