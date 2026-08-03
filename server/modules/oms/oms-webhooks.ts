@@ -17,7 +17,7 @@ import type { Request, Response, Express } from "express";
 import * as crypto from "crypto";
 import { sql, eq, and, ilike } from "drizzle-orm";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
-import { omsOrders, omsOrderLines, omsOrderEvents, productVariants, channelConnections, webhookRetryQueue } from "@shared/schema";
+import { omsOrders, omsOrderLines, omsOrderEvents, productVariants, channelConnections } from "@shared/schema";
 import { db } from "../../db";
 import { pushToMissionControl } from "./mc-push";
 import { enrichOrderWithMemberTier } from "./member-tier-enrichment";
@@ -44,6 +44,7 @@ import rateLimit from "express-rate-limit";
 import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
 import {
   buildShopifyWebhookInboxInput,
+  enqueueWebhookInboxRetry,
   markWebhookFailed,
   markWebhookProcessing,
   markWebhookSucceeded,
@@ -842,7 +843,7 @@ export function registerOmsWebhooks(
     // retry worker can mirror the terminal outcome (succeeded/dead) onto the
     // inbox. Without it, the inbox row stays 'failed' forever even after a
     // successful retry, and ops dashboards report a permanent false positive.
-    await db.insert(webhookRetryQueue).values({
+    await enqueueWebhookInboxRetry(db, {
       provider: args.provider,
       topic: args.topic,
       payload: args.payload,

@@ -411,6 +411,9 @@ export const webhookRetryQueue = omsSchema.table("webhook_retry_queue", {
 }, (table) => {
   return {
     statusNextRetryIdx: index("idx_webhook_retry_queue_status_next_retry").on(table.status, table.nextRetryAt).where(sql`status = 'pending'`),
+    pendingSourceInboxUnique: uniqueIndex("uq_webhook_retry_pending_source_inbox")
+      .on(table.sourceInboxId)
+      .where(sql`status = 'pending' AND source_inbox_id IS NOT NULL`),
   };
 });
 

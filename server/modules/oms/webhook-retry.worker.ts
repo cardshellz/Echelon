@@ -809,13 +809,27 @@ function findPgErrorLike(error: unknown): {
   return null;
 }
 
+function isPendingSourceInboxUniqueViolation(error: unknown): boolean {
+  const pgError = findPgErrorLike(error);
+  if (!pgError || pgError.code !== "23505") return false;
+
+  const constraint =
+    typeof pgError.constraint === "string"
+      ? pgError.constraint
+      : typeof pgError.constraint_name === "string"
+        ? pgError.constraint_name
+        : null;
+
+  return constraint === "uq_webhook_retry_pending_source_inbox";
+}
+
 export interface WebhookRetryRequeueResult {
   retryQueueId: number;
   provider: string;
   topic: string;
   previousStatus: string;
+  reusedPending: boolean;
 }
-
 export async function requeueDeadWebhookRetry(
   dbArg: any,
   retryQueueId: number,
@@ -825,17 +839,51 @@ export async function requeueDeadWebhookRetry(
     throw new Error(`webhook retry id must be a positive integer (got ${retryQueueId})`);
   }
 
-  const result = await dbArg.execute(sql`
-    UPDATE oms.webhook_retry_queue
-    SET status = 'pending',
-        attempts = 0,
-        next_retry_at = NOW(),
-        last_error = ${`manual requeue by ${operator || "unknown"}`},
-        updated_at = NOW()
-    WHERE id = ${retryQueueId}
-      AND status = 'dead'
-    RETURNING id, provider, topic, 'dead'::text AS previous_status
-  `);
+  let result: any;
+  try {
+    result = await dbArg.execute(sql`
+      UPDATE oms.webhook_retry_queue
+      SET status = 'pending',
+          attempts = 0,
+          next_retry_at = NOW(),
+          last_error = ${`manual requeue by ${operator || "unknown"}`},
+          updated_at = NOW()
+      WHERE id = ${retryQueueId}
+        AND status = 'dead'
+      RETURNING id, provider, topic, 'dead'::text AS previous_status
+    `);
+  } catch (error) {
+    if (!isPendingSourceInboxUniqueViolation(error)) throw error;
+
+    const existingPending = await dbArg.execute(sql`
+      SELECT
+        pending.id,
+        pending.provider,
+        pending.topic,
+        target.status::text AS previous_status
+      FROM oms.webhook_retry_queue target
+      JOIN oms.webhook_retry_queue pending
+        ON pending.source_inbox_id = target.source_inbox_id
+       AND pending.status = 'pending'
+       AND pending.id <> target.id
+      WHERE target.id = ${retryQueueId}
+        AND target.source_inbox_id IS NOT NULL
+      ORDER BY pending.id
+      LIMIT 1
+    `);
+    const pendingRow = Array.isArray(existingPending?.rows)
+      ? existingPending.rows[0]
+      : null;
+    if (!pendingRow) throw error;
+
+    return {
+      retryQueueId: Number(pendingRow.id),
+      provider: String(pendingRow.provider),
+      topic: String(pendingRow.topic),
+      previousStatus: String(pendingRow.previous_status),
+      reusedPending: true,
+    };
+  }
 
   const row = Array.isArray(result?.rows) ? result.rows[0] : null;
   if (!row) {
@@ -857,6 +905,7 @@ export async function requeueDeadWebhookRetry(
     provider: String(row.provider),
     topic: String(row.topic),
     previousStatus: String(row.previous_status),
+    reusedPending: false,
   };
 }
 

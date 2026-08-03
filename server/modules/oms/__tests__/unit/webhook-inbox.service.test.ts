@@ -8,6 +8,7 @@ import {
   buildWebhookIdempotencyKey,
   markWebhookFailed,
   markWebhookProcessing,
+  enqueueWebhookInboxRetry,
   markWebhookSucceeded,
   enqueueWebhookInboxReplay,
   recordWebhookReceived,
@@ -150,6 +151,26 @@ describe("webhook-inbox.service", () => {
     await markWebhookFailed(db, 10, new Error("boom"));
 
     expect(db.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("upserts one pending retry for a webhook inbox event", async () => {
+    const db = {
+      execute: vi.fn(async () => ({ rows: [{ id: 77 }] })),
+    };
+
+    await expect(enqueueWebhookInboxRetry(db, {
+      provider: "shopify",
+      topic: "refunds/create",
+      payload: { id: 1037568999583 },
+      sourceInboxId: 94646,
+      lastError: "reservation release failed",
+    })).resolves.toBe(77);
+
+    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(WEBHOOK_INBOX_SERVICE_SRC).toContain("ON CONFLICT (source_inbox_id)");
+    expect(WEBHOOK_INBOX_SERVICE_SRC).toContain(
+      "WHERE status = 'pending' AND source_inbox_id IS NOT NULL",
+    );
   });
 
   it("queues an immediate retry for a failed Shopify OMS inbox row", async () => {

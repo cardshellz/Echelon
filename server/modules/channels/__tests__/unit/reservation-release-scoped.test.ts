@@ -190,7 +190,7 @@ function makeLineReleaseDb(args: {
     execute: vi.fn(async (query: any) => {
       const text = queryText(query);
       if (text.includes("FROM wms.order_items oi")) {
-        return { rows: [{ order_item_id: 700, sku: "SKU-A", product_variant_id: 9, product_id: 3 }] };
+        return { rows: [{ order_item_id: 700, sku: "SKU-A", product_variant_id: 9, catalog_product_id: 3 }] };
       }
       if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
       if (text.includes("reference_type = 'shopify_refund'")) {
@@ -220,9 +220,12 @@ function makeLineReleaseDb(args: {
       throw new Error(`Unexpected line release query: ${text}`);
     }),
   };
-  return {
+  const db: any = {
     transaction: vi.fn(async (callback: (transaction: any) => Promise<unknown>) => callback(tx)),
-  } as any;
+  };
+  db.__lineReleaseExecute = tx.execute;
+  return db;
+
 }
 
 describe("releaseOrderItemReservation - refund-event scoped", () => {
@@ -239,6 +242,12 @@ describe("releaseOrderItemReservation - refund-event scoped", () => {
       reason: "Shopify line refund refund-123",
       userId: "system:shopify_refund",
     });
+
+    const itemLookup = db.__lineReleaseExecute.mock.calls
+      .map(([query]: [unknown]) => queryText(query))
+      .find((text: string) => text.includes("FROM wms.order_items oi"));
+    expect(itemLookup).toContain("pv.id = oi.product_id");
+    expect(itemLookup).not.toContain("pv.sku = oi.sku");
 
     expect(result).toMatchObject({
       requestedQuantity: 2,

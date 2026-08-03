@@ -148,6 +148,59 @@ interface InternalRefundResult {
   warnings: string[];
 }
 
+function deriveRefundEventReservationReleaseQuantity(args: {
+  line: OmsLineStateRow;
+  adjustment: ShopifyRefundLineAdjustment;
+  pickedQuantity: number;
+  fulfilledQuantity: number;
+}): number {
+  if (args.adjustment.restockPolicy === "return") return 0;
+
+  const paidQuantity = Math.max(0, Number(args.line.paid_quantity ?? 0));
+  const cancelledQuantity = Math.max(0, Number(args.line.cancelled_quantity ?? 0));
+  const cumulativeCancelQuantity = Math.max(
+    0,
+    Number(args.line.refund_cancel_quantity ?? 0),
+  );
+  const cumulativeOtherQuantity = Math.max(
+    0,
+    Number(args.line.refund_other_quantity ?? 0),
+  );
+  const currentCancelQuantity = args.adjustment.restockPolicy === "cancel"
+    ? args.adjustment.quantity
+    : 0;
+  const currentOtherQuantity = args.adjustment.restockPolicy === "cancel"
+    ? 0
+    : args.adjustment.quantity;
+  const previousCancelQuantity = Math.max(
+    cumulativeCancelQuantity - currentCancelQuantity,
+    0,
+  );
+  const previousOtherQuantity = Math.max(
+    cumulativeOtherQuantity - currentOtherQuantity,
+    0,
+  );
+  const authorityBeforeEvent = Math.max(
+    paidQuantity - Math.max(cancelledQuantity, previousCancelQuantity) - previousOtherQuantity,
+    0,
+  );
+  const authorityAfterEvent = Math.max(
+    paidQuantity - Math.max(cancelledQuantity, cumulativeCancelQuantity) - cumulativeOtherQuantity,
+    0,
+  );
+  const eventAuthorityReduction = Math.max(
+    authorityBeforeEvent - authorityAfterEvent,
+    0,
+  );
+  const physicalProgress = Math.max(
+    Math.max(0, args.pickedQuantity),
+    Math.max(0, args.fulfilledQuantity),
+  );
+  const unconsumedPaidQuantity = Math.max(paidQuantity - physicalProgress, 0);
+
+  return Math.min(eventAuthorityReduction, unconsumedPaidQuantity);
+}
+
 function rowsOf<T>(result: any): T[] {
   return Array.isArray(result?.rows) ? result.rows as T[] : [];
 }
@@ -395,6 +448,9 @@ async function applyWmsLineState(
   const authorityByLineId = new Map(
     args.authorityLines.map((line) => [Number(line.id), Number(line.authority_fulfillable_quantity)]),
   );
+  const authorityLineById = new Map(
+    args.authorityLines.map((line) => [Number(line.id), line]),
+  );
   const adjustmentByExternalId = new Map(
     args.adjustments.map((adjustment) => [adjustment.externalLineItemId, adjustment]),
   );
@@ -404,6 +460,7 @@ async function applyWmsLineState(
     SELECT
       wi.id,
       wi.oms_order_line_id,
+      wi.product_id,
       ol.external_line_item_id,
       wi.quantity,
       wi.picked_quantity,
@@ -502,7 +559,24 @@ async function applyWmsLineState(
       manualReviewReason,
     };
     items.push(item);
-    releaseTargets.push({ orderItemId: item.id, quantity: adjustment.quantity });
+    const authorityLine = authorityLineById.get(omsOrderLineId);
+    const productVariantId = row.product_id == null ? null : Number(row.product_id);
+    if (
+      authorityLine &&
+      item.requiresShipping &&
+      Number.isInteger(productVariantId) &&
+      productVariantId! > 0
+    ) {
+      const releaseQuantity = deriveRefundEventReservationReleaseQuantity({
+        line: authorityLine,
+        adjustment,
+        pickedQuantity,
+        fulfilledQuantity,
+      });
+      if (releaseQuantity > 0) {
+        releaseTargets.push({ orderItemId: item.id, quantity: releaseQuantity });
+      }
+    }
   }
 
   if (changed > 0) {
@@ -1325,6 +1399,7 @@ export async function applyShopifyRefundCascade(
 }
 
 export const __test__ = {
+  deriveRefundEventReservationReleaseQuantity,
   applyInternalRefundState,
   createExpectedReturn,
   reconcileActiveShipmentItems,
