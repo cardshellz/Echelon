@@ -99,6 +99,8 @@ export function ProgramDetail({
   const [rateTestOpen, setRateTestOpen] = useState(false);
   const [confirmRetire, setConfirmRetire] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [pendingDestinationGroupDraft, setPendingDestinationGroupDraft] =
+    useState<PendingRateDraft | null>(null);
 
   const { book, options, activeAssignments } = program;
   const retired = book.status === "retired";
@@ -276,7 +278,11 @@ export function ProgramDetail({
             <AddDestinationGroupButton
               options={options}
               onContinueDraft={onContinueDraft}
-              onCreateRevision={onCreateRevision}
+              onRequestCreateRevision={(sourceTableId, serviceLevelName) =>
+                setPendingDestinationGroupDraft({
+                  sourceTableId,
+                  serviceLevelName,
+                })}
               onStartRates={onStartRates}
             />
           )}
@@ -312,7 +318,11 @@ export function ProgramDetail({
                 className="mt-4"
                 options={options}
                 onContinueDraft={onContinueDraft}
-                onCreateRevision={onCreateRevision}
+                onRequestCreateRevision={(sourceTableId, serviceLevelName) =>
+                  setPendingDestinationGroupDraft({
+                    sourceTableId,
+                    serviceLevelName,
+                  })}
                 onStartRates={onStartRates}
               />
             )}
@@ -460,6 +470,22 @@ export function ProgramDetail({
         onOpenChange={setRateTestOpen}
         program={program}
         warehouses={warehouses}
+      />
+
+      <CreateRateDraftDialog
+        open={pendingDestinationGroupDraft !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDestinationGroupDraft(null);
+        }}
+        serviceLevelName={
+          pendingDestinationGroupDraft?.serviceLevelName ?? "shipping option"
+        }
+        onConfirm={() => {
+          if (pendingDestinationGroupDraft === null) return;
+          const { sourceTableId } = pendingDestinationGroupDraft;
+          setPendingDestinationGroupDraft(null);
+          onCreateRevision(sourceTableId);
+        }}
       />
 
       <AlertDialog open={confirmRetire} onOpenChange={setConfirmRetire}>
@@ -635,32 +661,16 @@ export function CoverageCell({
           </button>
         )}
       </div>
-      <AlertDialog open={confirmCreateRevision} onOpenChange={setConfirmCreateRevision}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Create a {option.serviceLevel.displayName} draft?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              This copies the entire live {option.serviceLevel.displayName} revision,
-              including every destination group, into an editable draft. Live checkout
-              remains unchanged until the draft is reviewed and activated.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <Button
-              onClick={() => {
-                if (action.kind !== "create_revision") return;
-                setConfirmCreateRevision(false);
-                onCreateRevision(action.tableId, group);
-              }}
-            >
-              Create draft
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <CreateRateDraftDialog
+        open={confirmCreateRevision}
+        onOpenChange={setConfirmCreateRevision}
+        serviceLevelName={option.serviceLevel.displayName}
+        onConfirm={() => {
+          if (action.kind !== "create_revision") return;
+          setConfirmCreateRevision(false);
+          onCreateRevision(action.tableId, group);
+        }}
+      />
     </div>
   );
 }
@@ -699,10 +709,48 @@ function CoverageStatus({
   );
 }
 
-function AddDestinationGroupButton({
+interface PendingRateDraft {
+  sourceTableId: number;
+  serviceLevelName: string;
+}
+
+function CreateRateDraftDialog({
+  open,
+  onOpenChange,
+  serviceLevelName,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  serviceLevelName: string;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            Create a {serviceLevelName} draft?
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            This copies the entire live {serviceLevelName} revision, including
+            every destination group, into an editable draft. Live checkout
+            remains unchanged until the draft is reviewed and activated.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <Button onClick={onConfirm}>Create draft</Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+export function AddDestinationGroupButton({
   options,
   onContinueDraft,
-  onCreateRevision,
+  onRequestCreateRevision,
   onStartRates,
   className,
 }: {
@@ -711,9 +759,9 @@ function AddDestinationGroupButton({
     draftId: number,
     destinationGroup?: ProgramDestinationGroup,
   ) => void;
-  onCreateRevision: (
+  onRequestCreateRevision: (
     sourceTableId: number,
-    destinationGroup?: ProgramDestinationGroup,
+    serviceLevelName: string,
   ) => void;
   onStartRates: (
     serviceLevelCode: string,
@@ -725,7 +773,12 @@ function AddDestinationGroupButton({
   if (option === null) return null;
   const open = () => {
     if (option.draft) onContinueDraft(option.draft.id);
-    else if (option.active) onCreateRevision(option.active.id);
+    else if (option.active) {
+      onRequestCreateRevision(
+        option.active.id,
+        option.serviceLevel.displayName,
+      );
+    }
     else onStartRates(option.serviceLevel.code);
   };
   return (
