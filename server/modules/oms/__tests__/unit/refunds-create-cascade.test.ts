@@ -32,6 +32,7 @@ import {
   applyShopifyRefundCascade,
   reconcilePersistedShopifyRefundAuthority,
   RefundsCreateBadPayloadError,
+  __test__ as refundCascadeTest,
 } from "../../shopify-refund-cascade.service";
 
 const NOW = new Date("2026-07-10T16:00:00.000Z");
@@ -109,10 +110,129 @@ function helpers(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
+describe("refund-event reservation release calculation", () => {
+  it("does not release outbound reservation for fulfilled units being returned", () => {
+    const quantity = refundCascadeTest.deriveRefundEventReservationReleaseQuantity({
+      line: omsLine({
+        paid_quantity: 1,
+        refund_other_quantity: 1,
+      }),
+      adjustment: {
+        externalLineItemId: "441680952",
+        quantity: 1,
+        restockPolicy: "return",
+        raw: {},
+      },
+      pickedQuantity: 1,
+      fulfilledQuantity: 1,
+    });
+
+    expect(quantity).toBe(0);
+  });
+
+  it("does not double-release a quantity already removed by cancellation authority", () => {
+    const quantity = refundCascadeTest.deriveRefundEventReservationReleaseQuantity({
+      line: omsLine({
+        paid_quantity: 1,
+        cancelled_quantity: 1,
+        refund_cancel_quantity: 1,
+      }),
+      adjustment: {
+        externalLineItemId: "441680952",
+        quantity: 1,
+        restockPolicy: "cancel",
+        raw: {},
+      },
+      pickedQuantity: 0,
+      fulfilledQuantity: 0,
+    });
+
+    expect(quantity).toBe(0);
+  });
+
+  it("caps release at paid quantity not already consumed by physical progress", () => {
+    const quantity = refundCascadeTest.deriveRefundEventReservationReleaseQuantity({
+      line: omsLine({
+        paid_quantity: 5,
+        refund_other_quantity: 5,
+      }),
+      adjustment: {
+        externalLineItemId: "441680952",
+        quantity: 5,
+        restockPolicy: "no_restock",
+        raw: {},
+      },
+      pickedQuantity: 2,
+      fulfilledQuantity: 0,
+    });
+
+    expect(quantity).toBe(3);
+  });
+});
+
 describe("applyShopifyRefundCascade", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     markShipmentCancelled.mockResolvedValue({ wmsOrderId: 204464, changed: true });
+  });
+
+  it("does not invoke inventory reservation release for a non-catalog line", async () => {
+    const originalLine = omsLine({
+      channel_observed_quantity: 1,
+      paid_quantity: 1,
+      authority_fulfillable_quantity: 1,
+    });
+    const finalLine = omsLine({
+      channel_observed_quantity: 1,
+      paid_quantity: 1,
+      authority_fulfillable_quantity: 0,
+      refunded_quantity: 1,
+      authorization_status: "refunded",
+      refund_other_quantity: 1,
+    });
+    const mock = makeDb((text) => {
+      if (text.includes("FROM wms.orders") && text.includes("ORDER BY id")) return { rows: [{ id: 42 }] };
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.oms_order_lines ol") && text.includes("FOR UPDATE OF ol")) return { rows: [originalLine] };
+      if (text.includes("INSERT INTO oms.order_line_adjustments")) return { rows: [{ id: 1 }] };
+      if (text.includes("LEFT JOIN oms.order_line_adjustments")) return { rows: [finalLine] };
+      if (text.includes("UPDATE oms.oms_order_lines")) return { rows: [] };
+      if (text.includes("FROM wms.order_items wi") && text.includes("FOR UPDATE OF wi")) {
+        return { rows: [{
+          id: 700,
+          oms_order_line_id: 110466,
+          product_id: null,
+          external_line_item_id: "441680952",
+          quantity: 1,
+          picked_quantity: 0,
+          fulfilled_quantity: 0,
+          status: "pending",
+          requires_shipping: true,
+        }] };
+      }
+      if (text.includes("UPDATE wms.order_items")) return { rows: [] };
+      if (text.includes("UPDATE wms.orders o")) return { rows: [] };
+      if (text.includes("wms_materialized_quantity = COALESCE(materialized.quantity, 0)")) return { rows: [] };
+      if (text.includes("FROM wms.outbound_shipment_items si") && text.includes("FOR UPDATE OF si, os")) return { rows: [] };
+      if (text.includes("FROM wms.outbound_shipments os") && text.includes("terminal_provider_sibling")) return { rows: [] };
+      throw new Error(`Unexpected SQL in non-catalog refund test: ${text}`);
+    });
+    const serviceHelpers = helpers();
+
+    const result = await applyShopifyRefundCascade(
+      mock.db,
+      refundPayload({
+        refund_line_items: [{ line_item_id: 441680952, quantity: 1, restock_type: "no_restock" }],
+      }),
+      serviceHelpers,
+      { channelId: 36, sourceInboxId: 94646, now: NOW },
+    );
+
+    expect(result).toMatchObject({
+      outcome: "line_dispositions_applied",
+      releasedReservationQuantity: 0,
+    });
+    expect(serviceHelpers.releaseOrderItemReservation).not.toHaveBeenCalled();
   });
 
   it("repairs #60037 as a no-restock line disposition without inventing a return", async () => {
@@ -136,6 +256,7 @@ describe("applyShopifyRefundCascade", () => {
             oms_order_line_id: 110466,
             external_line_item_id: "441680952",
             quantity: 25,
+            product_id: 9,
             picked_quantity: 0,
             fulfilled_quantity: 0,
             status: "short",
@@ -241,6 +362,7 @@ describe("applyShopifyRefundCascade", () => {
           oms_order_line_id: 12,
           external_line_item_id: "12",
           quantity: 1,
+          product_id: 9,
           picked_quantity: 1,
           fulfilled_quantity: 1,
           status: "completed",
@@ -276,6 +398,7 @@ describe("applyShopifyRefundCascade", () => {
     });
     expect(mock.calls.some((text) => text.includes("INSERT INTO wms.returns") && text.includes("source_event_key"))).toBe(true);
     expect(mock.calls.some((text) => text.includes("INSERT INTO wms.return_items") && text.includes("expected_qty"))).toBe(true);
+    expect(serviceHelpers.releaseOrderItemReservation).not.toHaveBeenCalled();
   });
 
   it("is idempotent when the same no-restock refund is replayed", async () => {
@@ -296,6 +419,7 @@ describe("applyShopifyRefundCascade", () => {
           id: 312850,
           oms_order_line_id: 110466,
           external_line_item_id: "441680952",
+          product_id: 9,
           quantity: 25,
           picked_quantity: 0,
           fulfilled_quantity: 0,
@@ -351,6 +475,7 @@ describe("applyShopifyRefundCascade", () => {
           id: 501,
           oms_order_line_id: 110466,
           external_line_item_id: "441680952",
+          product_id: 9,
           quantity: 25,
           picked_quantity: 0,
           fulfilled_quantity: 0,
@@ -521,6 +646,7 @@ describe("reconcilePersistedShopifyRefundAuthority", () => {
             id: 312850,
             oms_order_line_id: 110466,
             external_line_item_id: "441680952",
+            product_id: 9,
             quantity: 5,
             picked_quantity: 0,
             fulfilled_quantity: 0,

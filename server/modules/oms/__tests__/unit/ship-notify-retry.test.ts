@@ -781,8 +781,37 @@ describe("requeueDeadWebhookRetry", () => {
       provider: "internal",
       topic: "delayed_tracking_push",
       previousStatus: "dead",
+      reusedPending: false,
     });
     expect(db.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses an existing pending retry for the same webhook inbox event", async () => {
+    const { db } = makeDb();
+    db.execute
+      .mockRejectedValueOnce({
+        code: "23505",
+        constraint: "uq_webhook_retry_pending_source_inbox",
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 88,
+          provider: "shopify",
+          topic: "refunds/create",
+          previous_status: "dead",
+        }],
+      });
+
+    const result = await requeueDeadWebhookRetry(db, 99, "ops");
+
+    expect(result).toEqual({
+      retryQueueId: 88,
+      provider: "shopify",
+      topic: "refunds/create",
+      previousStatus: "dead",
+      reusedPending: true,
+    });
+    expect(db.execute).toHaveBeenCalledTimes(2);
   });
 
   it("returns not found when no retry row exists", async () => {

@@ -29,6 +29,15 @@ export interface WebhookInboxReplayResult {
   previousStatus: WebhookInboxStatus;
 }
 
+export interface WebhookInboxRetryInput {
+  provider: string;
+  topic: string;
+  payload: unknown;
+  sourceInboxId: number;
+  lastError: string;
+  nextRetryAt?: Date;
+}
+
 const REPLAYABLE_SHOPIFY_OMS_TOPICS = new Set([
   "orders/paid",
   "orders/updated",
@@ -217,6 +226,56 @@ export async function markWebhookFailed(db: any, inboxId: number, error: unknown
   `);
 }
 
+export async function enqueueWebhookInboxRetry(
+  db: any,
+  input: WebhookInboxRetryInput,
+): Promise<number> {
+  if (!Number.isInteger(input.sourceInboxId) || input.sourceInboxId <= 0) {
+    throw new Error(
+      `sourceInboxId must be a positive integer (got ${input.sourceInboxId})`,
+    );
+  }
+  const provider = input.provider.trim();
+  const topic = input.topic.trim();
+  if (!provider || !topic) {
+    throw new Error("provider and topic are required for webhook inbox retry");
+  }
+
+  const result = await db.execute(sql`
+    INSERT INTO oms.webhook_retry_queue (
+      provider,
+      topic,
+      payload,
+      source_inbox_id,
+      attempts,
+      last_error,
+      next_retry_at,
+      status
+    )
+    VALUES (
+      ${provider},
+      ${topic},
+      ${JSON.stringify(input.payload)}::jsonb,
+      ${input.sourceInboxId},
+      0,
+      ${input.lastError},
+      COALESCE(${input.nextRetryAt ?? null}::timestamptz, NOW()),
+      'pending'
+    )
+    ON CONFLICT (source_inbox_id)
+      WHERE status = 'pending' AND source_inbox_id IS NOT NULL
+    DO UPDATE SET
+      last_error = EXCLUDED.last_error,
+      next_retry_at = LEAST(oms.webhook_retry_queue.next_retry_at, EXCLUDED.next_retry_at),
+      updated_at = NOW()
+    RETURNING id
+  `);
+  const retry = firstRow<{ id: number }>(result);
+  if (!retry) {
+    throw new Error(`failed to enqueue retry for webhook inbox row ${input.sourceInboxId}`);
+  }
+  return Number(retry.id);
+}
 export async function enqueueWebhookInboxReplay(
   db: any,
   inboxId: number,
@@ -252,33 +311,13 @@ export async function enqueueWebhookInboxReplay(
 
   const runReplay = async (tx: any): Promise<{ id: number }> => {
     const reason = `manual replay from webhook_inbox ${inboxId} by ${operator || "unknown"}`;
-    const retryResult = await tx.execute(sql`
-      INSERT INTO oms.webhook_retry_queue (
-        provider,
-        topic,
-        payload,
-        source_inbox_id,
-        attempts,
-        last_error,
-        next_retry_at,
-        status
-      )
-      VALUES (
-        ${inbox.provider},
-        ${inbox.topic},
-        ${JSON.stringify(inbox.payload)}::jsonb,
-        ${inboxId},
-        0,
-        ${reason},
-        NOW(),
-        'pending'
-      )
-      RETURNING id
-    `);
-    const retry = firstRow<{ id: number }>(retryResult);
-    if (!retry) {
-      throw new Error(`failed to enqueue replay for webhook inbox row ${inboxId}`);
-    }
+    const retryId = await enqueueWebhookInboxRetry(tx, {
+      provider: inbox.provider,
+      topic: inbox.topic,
+      payload: inbox.payload,
+      sourceInboxId: inboxId,
+      lastError: reason,
+    });
 
     await tx.execute(sql`
       UPDATE oms.webhook_inbox
@@ -288,7 +327,7 @@ export async function enqueueWebhookInboxReplay(
       WHERE id = ${inboxId}
     `);
 
-    return retry;
+    return { id: retryId };
   };
 
   const retry = typeof db.transaction === "function"

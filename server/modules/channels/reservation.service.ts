@@ -573,26 +573,34 @@ class ReservationService {
         SELECT
           oi.id AS order_item_id,
           oi.sku,
-          pv.id AS product_variant_id,
-          pv.product_id
+          oi.product_id AS product_variant_id,
+          pv.product_id AS catalog_product_id
         FROM wms.order_items oi
-        JOIN catalog.product_variants pv ON pv.sku = oi.sku
+        LEFT JOIN catalog.product_variants pv ON pv.id = oi.product_id
         WHERE oi.id = ${params.orderItemId}
           AND oi.order_id = ${params.orderId}
         FOR UPDATE OF oi
       `);
       const itemRows = itemResult?.rows ?? [];
-      if (itemRows.length !== 1) {
+      if (itemRows.length === 0) {
         throw new Error(
-          itemRows.length === 0
-            ? `WMS order item ${params.orderItemId} does not belong to order ${params.orderId} or has no catalog variant`
-            : `WMS order item ${params.orderItemId} SKU resolves to multiple catalog variants`,
+          `WMS order item ${params.orderItemId} does not belong to order ${params.orderId}`,
         );
       }
 
       const item = itemRows[0];
+      if (item.product_variant_id == null) {
+        throw new Error(
+          `WMS order item ${params.orderItemId} has no persisted catalog variant identity`,
+        );
+      }
+      if (item.catalog_product_id == null) {
+        throw new Error(
+          `Catalog variant ${item.product_variant_id} for WMS order item ${params.orderItemId} no longer exists`,
+        );
+      }
       const productVariantId = Number(item.product_variant_id);
-      const productId = Number(item.product_id);
+      const productId = Number(item.catalog_product_id);
       await tx.execute(sql`SELECT pg_advisory_xact_lock(${RESERVATION_LOCK_NS}, ${productId})`);
 
       const priorEventResult: any = await tx.execute(sql`
