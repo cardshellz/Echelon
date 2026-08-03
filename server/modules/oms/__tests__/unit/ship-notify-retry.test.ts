@@ -211,6 +211,14 @@ function makeDb(opts: {
   };
 }
 
+function sqlText(query: any): string {
+  return (query?.queryChunks ?? [])
+    .map((chunk: any) =>
+      typeof chunk === "string" ? chunk : chunk?.value?.join?.("") ?? "",
+    )
+    .join("");
+}
+
 function postgresUniqueViolation(
   constraint: string,
   field: "constraint" | "constraint_name" = "constraint",
@@ -584,6 +592,42 @@ describe("enqueueShipStationShipmentPushRetry", () => {
     expect(inserts).toHaveLength(0);
   });
 
+  it("allows the exact-provider sweeper to reopen only an exhausted handoff", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [
+        { rows: [] },
+        { rows: [{ review_reason: "shipstation_push_retry_exhausted" }] },
+      ],
+    });
+
+    await enqueueShipStationShipmentPushRetry(
+      db,
+      300,
+      "exact provider order observed",
+      { allowExhaustedRecovery: true },
+    );
+
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]!.values.payload).toEqual({ shipmentId: 300 });
+  });
+
+  it("does not let exact-provider recovery bypass an unrelated review reason", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [
+        { rows: [] },
+        { rows: [{ review_reason: "permanent_push_failure: invalid address" }] },
+      ],
+    });
+
+    await enqueueShipStationShipmentPushRetry(
+      db,
+      300,
+      "exact provider order observed",
+      { allowExhaustedRecovery: true },
+    );
+
+    expect(inserts).toHaveLength(0);
+  });
   it("rejects invalid shipment ids", async () => {
     const { db, inserts } = makeDb();
 
@@ -1586,6 +1630,31 @@ describe("dispatchShipStationShipmentPushRetry", () => {
     // exactly one execute (the requires_review stamp) should have fired before
     // the inbox mirror; assert at least the stamp ran.
     expect(executes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("atomically flags a shipment for review when transient handoff retries are exhausted", async () => {
+    const pushShipment = vi.fn().mockRejectedValue(
+      new Error("ShipStation timeout after provider uncertainty"),
+    );
+    const { db, updates, executes } = makeDb({
+      shipStationService: { processShipNotify: vi.fn(), pushShipment },
+      transaction: true,
+    });
+
+    const outcome = await dispatchShipStationShipmentPushRetry(db, {
+      id: 955,
+      provider: "internal",
+      topic: "shipstation_shipment_push",
+      payload: { shipmentId: 300 },
+      attempts: 4,
+    });
+
+    expect(outcome).toBe("dead");
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(updates[0]!.set).toMatchObject({ attempts: 5, status: "dead" });
+    expect(executes.map(sqlText).join("\n")).toMatch(
+      /shipstation_push_retry_exhausted/,
+    );
   });
 
   it("does NOT permanently-fail a transient (non-SS_PUSH_INVALID_SHIPMENT) error", async () => {

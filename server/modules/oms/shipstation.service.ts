@@ -40,6 +40,11 @@ import {
   type ConfirmCarrierDispatchInput,
   type ConfirmCarrierDispatchResult,
 } from "../shipping/carrier-dispatch-authority";
+import {
+  adoptProvenShipStationOrder,
+  proveShipStationOrderAdoption,
+  resolveShipStationHandoffCommands,
+} from "./shipstation-order-adoption";
 
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
@@ -1086,14 +1091,29 @@ export function createShipStationService(
   // Get order by orderKey
   // -------------------------------------------------------------------------
 
-  async function getOrderByKey(orderKey: string): Promise<any> {
+  async function getOrderByKey(
+    orderKey: string,
+    orderNumber: string,
+  ): Promise<any> {
     const result = await apiRequest<{ orders: any[] }>(
       "GET",
-      `/orders?orderKey=${encodeURIComponent(orderKey)}`,
+      `/orders?orderNumber=${encodeURIComponent(orderNumber)}`,
     );
-    return result.orders?.[0] || null;
+    const exactMatches = (result.orders ?? []).filter(
+      (order) => String(order?.orderKey ?? "") === orderKey,
+    );
+    if (exactMatches.length > 1) {
+      throw new ShipStationPushError(
+        `ShipStation returned ${exactMatches.length} orders for exact key ${orderKey}`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          field: "provider.orderKey",
+          value: orderKey,
+        },
+      );
+    }
+    return exactMatches[0] ?? null;
   }
-
   // -------------------------------------------------------------------------
   // Get order by orderNumber
   // -------------------------------------------------------------------------
@@ -4896,32 +4916,69 @@ export function createShipStationService(
       }
     }
 
-    // HARDENED: If no local SS orderId was found, query ShipStation by
-    // orderKey before creating. This closes the duplicate-push gap: if a
-    // prior push succeeded at the API level but the DB write-back failed,
-    // SS already has an order for this key. Without this check, the retry
-    // sends a CREATE and SS may create a second order (their orderKey
-    // upsert is not atomic). By discovering the existing SS order here, we
-    // convert the CREATE into an UPDATE — fully idempotent.
+    // If a prior push succeeded remotely but local linkage did not commit, the
+    // retry must adopt that exact provider order instead of sending another
+    // create/update request. ShipStation V1 ignores orderKey as a query filter,
+    // so query by supported orderNumber and filter the exact key locally.
     if (!ssOrderIdForPayload) {
-      try {
-        const existingSsOrder = await getOrderByKey(orderKey);
-        if (existingSsOrder?.orderId) {
-          ssOrderIdForPayload = existingSsOrder.orderId;
-          console.warn(
-            `[ShipStation] pushShipment ${shipmentId}: no local SS orderId but SS already has order ` +
-              `${existingSsOrder.orderId} for key ${orderKey} — adopting to prevent duplicate`,
+      // Lookup failures are retryable and deliberately do not fall through to
+      // CREATE because the previous request may already exist in ShipStation.
+      const existingSsOrder = await getOrderByKey(orderKey, orderNumber);
+      if (existingSsOrder) {
+        const proof = proveShipStationOrderAdoption(
+          {
+            shipmentId,
+            wmsOrderId: orderRow.id,
+            orderNumber,
+            items: itemRows.map((item) => ({
+              lineItemKey: `wms-item-${item.id}`,
+              quantity: item.qty,
+            })),
+          },
+          existingSsOrder,
+        );
+        if (!proof.matched) {
+          throw new ShipStationPushError(
+            `ShipStation order ${existingSsOrder.orderId ?? "unknown"} cannot be adopted for shipment ${shipmentId}: ${proof.reason}`,
+            {
+              code: SS_PUSH_INVALID_SHIPMENT,
+              shipmentId,
+              field: "provider_order_identity",
+              value: proof.reason,
+            },
           );
         }
-      } catch (err: any) {
-        // Non-blocking: if the lookup fails, proceed with CREATE.
-        // SS's own orderKey dedup is the last line of defense.
-        console.warn(
-          `[ShipStation] pushShipment ${shipmentId}: orderKey pre-check failed (${err?.message}) — proceeding with create`,
+
+        const adoption = await db.transaction((tx: any) =>
+          adoptProvenShipStationOrder(tx, {
+            shipmentId,
+            providerOrderId: proof.providerOrderId,
+            orderKey: proof.orderKey,
+          }),
         );
+        if (adoption.state !== "linked") {
+          throw new ShipStationPushError(
+            `ShipStation order ${proof.providerOrderId} adoption failed for shipment ${shipmentId}: ${adoption.state}`,
+            {
+              code: SS_PUSH_INVALID_SHIPMENT,
+              shipmentId,
+              field: "provider_order_linkage",
+              value: adoption,
+            },
+          );
+        }
+
+        await recomputeOrderStatusFromShipments(db, adoption.wmsOrderId);
+        console.warn(
+          `[ShipStation] pushShipment ${shipmentId}: adopted exact existing SS order ` +
+            `${proof.providerOrderId} for key ${proof.orderKey}; no provider write was repeated`,
+        );
+        return {
+          shipstationOrderId: proof.providerOrderId,
+          orderKey: proof.orderKey,
+        };
       }
     }
-
     if (ssOrderIdForPayload) {
       payload.orderId = ssOrderIdForPayload;
       console.log(
@@ -4939,31 +4996,38 @@ export function createShipStationService(
     // Write both the legacy SS columns (back-compat) and the engine-
     // agnostic triple (C9) in a single atomic UPDATE.
     const now = new Date();
-    await db.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET shipstation_order_id = ${result.orderId},
-          shipstation_order_key = ${orderKey},
-          shipping_engine = 'shipstation',
-          engine_order_ref = ${String(result.orderId)},
-          engine_shipment_ref = ${orderKey},
-          status = 'queued',
-          voided_at = NULL,
-          voided_reason = NULL,
-          updated_at = ${now}
-      WHERE id = ${shipmentId}
-    `);
-
-    if (opts.overrideReview) {
-      // The operator explicitly resolved the review by re-pushing; clear the
-      // flag so the shipment leaves the SHIPMENT_REQUIRES_REVIEW bucket
-      // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md P2).
-      await db.execute(sql`
+    await db.transaction(async (tx: any) => {
+      await tx.execute(sql`
         UPDATE wms.outbound_shipments
-        SET requires_review = false, review_reason = NULL, updated_at = ${now}
-        WHERE id = ${shipmentId} AND requires_review = true
+        SET shipstation_order_id = ${result.orderId},
+            shipstation_order_key = ${orderKey},
+            shipping_engine = 'shipstation',
+            engine_order_ref = ${String(result.orderId)},
+            engine_shipment_ref = ${orderKey},
+            status = 'queued',
+            voided_at = NULL,
+            voided_reason = NULL,
+            updated_at = ${now}
+        WHERE id = ${shipmentId}
       `);
-    }
 
+      await resolveShipStationHandoffCommands(
+        tx,
+        shipmentId,
+        "provider handoff persisted",
+      );
+
+      if (opts.overrideReview) {
+        // The operator explicitly resolved the review by re-pushing; clear the
+        // flag so the shipment leaves the SHIPMENT_REQUIRES_REVIEW bucket
+        // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md P2).
+        await tx.execute(sql`
+          UPDATE wms.outbound_shipments
+          SET requires_review = false, review_reason = NULL, updated_at = ${now}
+          WHERE id = ${shipmentId} AND requires_review = true
+        `);
+      }
+    });
     await recomputeOrderStatusFromShipments(db, shipmentRow.order_id);
 
     console.log(

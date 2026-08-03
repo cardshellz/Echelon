@@ -18,4 +18,18 @@ describe("wms-sync.service :: shippable item gates", () => {
     expect(WMS_SYNC_SRC).toMatch(/requiresShipping: wmsOrderItems\.requiresShipping/);
     expect(WMS_SYNC_SRC).toMatch(/\.filter\(\(i: any\) => i\.requiresShipping !== 0\)/);
   });
+
+  it("persists the ShipStation handoff command inside the WMS create transaction", () => {
+    expect(WMS_SYNC_SRC).toMatch(
+      /await enqueueShipStationShipmentPushRetry\(\s*tx,\s*shipmentIdForPush,\s*"initial shipping-engine handoff",\s*\)/,
+    );
+    const enqueueIndex = WMS_SYNC_SRC.search(
+      /await enqueueShipStationShipmentPushRetry\(\s*tx,\s*shipmentIdForPush,\s*"initial shipping-engine handoff"/,
+    );
+    const transactionReturnIndex = WMS_SYNC_SRC.indexOf(
+      "return { newWmsOrder, shipmentIdForPush",
+    );
+    expect(enqueueIndex).toBeGreaterThan(0);
+    expect(transactionReturnIndex).toBeGreaterThan(enqueueIndex);
+  });
 });

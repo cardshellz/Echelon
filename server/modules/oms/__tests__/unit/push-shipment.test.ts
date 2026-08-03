@@ -463,7 +463,12 @@ interface DbCall {
   // this unit test and keeps the mock trivial.
 }
 
-function makeDb(scripted: Array<any>) {
+function makeDb(
+  scripted: Array<any>,
+  options: {
+    executeOverride?: (sqlText: string) => any | undefined;
+  } = {},
+) {
   const calls: DbCall[] = [];
   const remaining = [...scripted];
 
@@ -501,6 +506,16 @@ function makeDb(scripted: Array<any>) {
     if (/advisory_(lock|unlock)/i.test(text)) {
       return { rows: [] };
     }
+    const override = options.executeOverride?.(text);
+    if (override !== undefined) {
+      calls.push({ kind: "execute" });
+      return override;
+    }
+    // Handoff command closure is infrastructure bookkeeping. It must not
+    // consume order-based fixture rows or change existing domain call counts.
+    if (/UPDATE oms\.webhook_retry_queue/i.test(text)) {
+      return { rows: [] };
+    }
     calls.push({ kind: "execute" });
     if (remaining.length === 0) {
       return { rows: [] };
@@ -508,7 +523,11 @@ function makeDb(scripted: Array<any>) {
     const next = remaining.shift();
     return next;
   });
-  return { db: { execute, select }, execute, getCallCount: () => calls.length };
+  const db: any = { execute, select };
+  db.transaction = vi.fn(async (operation: (tx: any) => Promise<any>) =>
+    operation(db),
+  );
+  return { db, execute, getCallCount: () => calls.length };
 }
 
 function mockFetchOnceOk(json: any) {
@@ -820,7 +839,7 @@ describe("pushShipment :: happy path", () => {
     // then shipment-rollup order + shipment status reads.
     expect(mock.getCallCount()).toBe(10);
 
-    // Two fetch calls: GET orderKey pre-check + POST /orders/createorder.
+    // Two fetch calls: GET exact-order pre-check + POST /orders/createorder.
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const postCall = fetchMock.mock.calls.find(([, i]: any) => i?.method === "POST")!;
     const [url, init] = postCall as any;
@@ -851,6 +870,55 @@ describe("pushShipment :: happy path", () => {
     expect(payload.customerEmail).toBe(orderRow.customer_email);
   });
 
+  it("adopts an exact existing provider order without repeating a provider write", async () => {
+    const shipmentRow = okShipment();
+    const orderRow = okOrder();
+    const items = [okItem()];
+    const mock = makeDb(
+      [
+        { rows: [shipmentRow] },
+        { rows: [orderRow] },
+        { rows: [{ non_shipping_total_cents: 0 }] },
+        { rows: items },
+        { rows: [{ order_shippable_qty: 2, shipment_shippable_qty: 2 }] },
+      ],
+      {
+        executeOverride: (text) =>
+          /UPDATE wms\.outbound_shipments[\s\S]*RETURNING order_id/i.test(text)
+            ? { rows: [{ order_id: orderRow.id }] }
+            : undefined,
+      },
+    );
+
+    const fetchMock = mockFetchOnceOk({
+      orders: [{
+        orderId: 770729188,
+        orderNumber: orderRow.order_number,
+        orderKey: `echelon-wms-shp-${shipmentRow.id}`,
+        orderStatus: "awaiting_shipment",
+        advancedOptions: {
+          customField2: `wms_order_id:${orderRow.id}|shipment_id:${shipmentRow.id}`,
+        },
+        items: [{
+          lineItemKey: `wms-item-${items[0].id}`,
+          quantity: items[0].qty,
+        }],
+      }],
+    });
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db);
+    await expect(svc.pushShipment(shipmentRow.id)).resolves.toEqual({
+      shipstationOrderId: 770729188,
+      orderKey: `echelon-wms-shp-${shipmentRow.id}`,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]![0])).toContain(
+      `/orders?orderNumber=${encodeURIComponent(orderRow.order_number)}`,
+    );
+    expect(fetchMock.mock.calls.some(([, init]: any) => init?.method === "POST")).toBe(false);
+  });
   it("uses a stable placeholder email when WMS has no customer email", async () => {
     const shipmentRow = okShipment();
     const orderRow = okOrder({ customer_email: null });
@@ -1172,7 +1240,11 @@ describe("pushShipment :: sibling-shipment dedup", () => {
       return { rows: [] };
     });
 
-    return { db: { execute, select }, execute, select };
+    const db: any = { execute, select };
+    db.transaction = vi.fn(async (operation: (tx: any) => Promise<any>) =>
+      operation(db),
+    );
+    return { db, execute, select };
   }
 
   it("adopts a sibling shipment's SS order id + key instead of creating a second SS order", async () => {
@@ -1606,7 +1678,23 @@ describe("pushShipment :: error cases", () => {
       { rows: [{ non_shipping_total_cents: 0 }] },
       { rows: [okItem()] },
     ]);
-    globalThis.fetch = mockFetchOnce500() as any;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ orders: [] }),
+        text: async () => JSON.stringify({ orders: [] }),
+        headers: new Map<string, string>() as any,
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => ({}),
+        text: async () => "boom",
+        headers: new Map<string, string>() as any,
+      });
+    globalThis.fetch = fetchMock as any;
 
     const svc = createShipStationService(mock.db);
     await expect(svc.pushShipment(okShipment().id)).rejects.toThrow(

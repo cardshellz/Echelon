@@ -1010,6 +1010,18 @@ export class WmsSyncService {
                 throw err;
               }
             }
+
+            if (shipmentIdForPush !== null) {
+              // Transactional outbox: the provider handoff command commits with
+              // the shipment. A process restart after ShipStation accepts the
+              // order can no longer leave a planned shipment with no retryable
+              // command. Failure to persist this command aborts the WMS create.
+              await enqueueShipStationShipmentPushRetry(
+                tx,
+                shipmentIdForPush,
+                "initial shipping-engine handoff",
+              );
+            }
           }
         }
 
