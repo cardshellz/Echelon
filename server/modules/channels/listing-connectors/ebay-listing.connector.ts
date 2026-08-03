@@ -68,6 +68,7 @@ export interface EbayExistingListingSyncResult {
 export interface EbayListingStatusInspection {
   inventoryItemExists: boolean;
   hasActiveOffer: boolean;
+  availableQuantity: number | null;
 }
 
 interface EbayMarketplaceListingConnectorOptions {
@@ -156,14 +157,6 @@ export class EbayMarketplaceListingConnector {
     const policyChangedVariantIds: number[] = [];
     let itemGroupUpdated = false;
 
-    if (input.draft.itemGroup) {
-      await input.client.createOrReplaceInventoryItemGroup(
-        input.draft.itemGroup.groupKey,
-        input.draft.itemGroup.payload,
-      );
-      itemGroupUpdated = true;
-    }
-
     for (const item of input.draft.inventoryItems) {
       await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
       updatedInventorySkus.push(item.sku);
@@ -185,6 +178,18 @@ export class EbayMarketplaceListingConnector {
       await input.client.updateOffer(existingOffer.offerId, offer.payload);
       updatedOfferIds[offer.variantId] = existingOffer.offerId;
       await this.delay(this.offerDelayMs);
+    }
+
+    // eBay requires the inventory item and offer for a newly-added variation
+    // to exist before that SKU is added to an active inventory item group.
+    // Do not replace group membership when any sellable offer is missing;
+    // doing so can partially rewrite an active multi-variation listing.
+    if (input.draft.itemGroup && missingOfferVariantIds.length === 0) {
+      await input.client.createOrReplaceInventoryItemGroup(
+        input.draft.itemGroup.groupKey,
+        input.draft.itemGroup.payload,
+      );
+      itemGroupUpdated = true;
     }
 
     return {
@@ -212,15 +217,23 @@ export class EbayMarketplaceListingConnector {
   }): Promise<EbayListingStatusInspection> {
     const inventoryItem = await input.client.getInventoryItem(input.sku);
     if (!inventoryItem) {
-      return { inventoryItemExists: false, hasActiveOffer: false };
+      return { inventoryItemExists: false, hasActiveOffer: false, availableQuantity: null };
     }
 
     const offers = await input.client.getOffers(input.sku, input.marketplaceId);
-    const hasActiveOffer = offers.offers.some((offer) => {
+    const activeOffers = offers.offers.filter((offer) => {
       const status = (offer as EbayOffer & { status?: string }).status;
       return status === "PUBLISHED" || status === "ACTIVE";
     });
-    return { inventoryItemExists: true, hasActiveOffer };
+    const quantities = activeOffers
+      .map((offer) => offer.availableQuantity)
+      .filter((quantity): quantity is number => Number.isSafeInteger(quantity) && quantity >= 0);
+    const availableQuantity = quantities.length > 0 ? Math.max(...quantities) : 0;
+    return {
+      inventoryItemExists: true,
+      hasActiveOffer: activeOffers.length > 0,
+      availableQuantity,
+    };
   }
 
   private async resolveExternalProductId(input: {

@@ -1114,6 +1114,9 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             pv.name AS variant_name,
             pv.price_cents,
             pv.weight_grams,
+            pv.is_active AS variant_is_active,
+            pv.ebay_listing_excluded AS variant_excluded,
+            cvo.is_listed AS variant_override_is_listed,
             cvo.weight_override AS channel_weight_override,
             pv.option1_name,
             pv.option1_value,
@@ -1125,6 +1128,10 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             p.sku AS product_sku,
             p.description AS product_description,
             p.brand AS product_brand,
+            p.is_active AS product_is_active,
+            p.ebay_listing_excluded AS product_excluded,
+            cpo.is_listed AS product_override_is_listed,
+            COALESCE(ecm.listing_enabled, TRUE) AS type_listing_enabled,
             p.product_type,
             p.ebay_browse_category_id,
             p.ebay_fulfillment_policy_override AS product_fulfillment_override,
@@ -1135,9 +1142,13 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           JOIN catalog.products p ON p.id = pv.product_id
           LEFT JOIN channels.channel_variant_overrides cvo
             ON cvo.product_variant_id = pv.id AND cvo.channel_id = cl.channel_id
+          LEFT JOIN channels.channel_product_overrides cpo
+            ON cpo.product_id = p.id AND cpo.channel_id = cl.channel_id
+          LEFT JOIN ebay_category_mappings ecm
+            ON ecm.product_type_slug = p.product_type AND ecm.channel_id = cl.channel_id
           WHERE cl.channel_id = $1
             AND (
-              cl.sync_status = 'synced'
+              cl.sync_status IN ('synced', 'pending')
               OR (
                 cl.sync_status = 'error'
                 AND (
@@ -1281,7 +1292,20 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
               ebay_fulfillment_policy_override: variant.variant_fulfillment_override,
               ebay_return_policy_override: variant.variant_return_override,
               ebay_payment_policy_override: variant.variant_payment_override,
+              isListed:
+                product.product_is_active === true &&
+                variant.variant_is_active === true &&
+                isVariantEffectivelyListed({
+                  productExcluded: product.product_excluded === true,
+                  productOverrideIsListed: product.product_override_is_listed,
+                  typeListingEnabled: product.type_listing_enabled,
+                  variantExcluded: variant.variant_excluded === true,
+                  variantOverrideIsListed: variant.variant_override_is_listed,
+                }),
             }));
+            const sellableVariantIds = new Set(
+              routeVariants.filter((variant) => variant.isListed).map((variant) => variant.id),
+            );
 
             const variantPrices: Map<number, number> = new Map();
             for (const variant of variants) {
@@ -1292,9 +1316,12 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
                 variant.variant_id,
                 variant.price_cents,
               );
-              const newQty = Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0);
+              const isSellable = sellableVariantIds.has(variant.variant_id);
+              const newQty = isSellable
+                ? Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0)
+                : 0;
               variantPrices.set(variant.variant_id, newPriceCents);
-              if (newPriceCents !== (variant.last_synced_price || 0)) productPriceChanged = true;
+              if (isSellable && newPriceCents !== (variant.last_synced_price || 0)) productPriceChanged = true;
               if (newQty !== (variant.last_synced_qty || 0)) productQtyChanged = true;
             }
 
@@ -1313,6 +1340,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
               effectivePolicies,
               storeCategoryNames,
               merchantLocationKey,
+              retainUnlistedVariantsInGroup: true,
             });
 
             try {
@@ -1341,7 +1369,9 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
                 }
 
                 const newPriceCents = variantPrices.get(variant.variant_id) ?? variant.price_cents ?? 0;
-                const newQty = Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0);
+                const newQty = sellableVariantIds.has(variant.variant_id)
+                  ? Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0)
+                  : 0;
                 await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.variant_id, {
                   lastSyncedPrice: newPriceCents,
                   lastSyncedQty: newQty,
@@ -1429,7 +1459,8 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
         const listingsResult = await client.query(`
           SELECT cl.id, cl.product_variant_id, cl.external_product_id, cl.external_variant_id,
                  cl.external_sku, cl.sync_status,
-                 pv.sku AS variant_sku, p.name AS product_name
+                 pv.sku AS variant_sku, pv.is_active AS variant_is_active,
+                 p.name AS product_name
           FROM channels.channel_listings cl
           LEFT JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
           LEFT JOIN catalog.products p ON p.id = pv.product_id
@@ -1438,13 +1469,14 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
 
         const listings = listingsResult.rows;
         if (listings.length === 0) {
-          res.json({ checked: 0, active: 0, ended: 0, deleted: 0, errors: 0 });
+          res.json({ checked: 0, active: 0, ended: 0, deleted: 0, quantityDrift: 0, errors: 0 });
           return;
         }
 
         let active = 0;
         let ended = 0;
         let deleted = 0;
+        let quantityDrift = 0;
         let errors = 0;
         const changes: Array<{ id: number; sku: string; product: string; oldStatus: string; newStatus: string }> = [];
 
@@ -1476,6 +1508,41 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             }
 
             if (inspection.hasActiveOffer) {
+              if (listing.variant_is_active === false && (inspection.availableQuantity ?? 0) > 0) {
+                await client.query(`
+                  INSERT INTO channels.channel_variant_availability_sync (
+                    channel_id,
+                    product_variant_id,
+                    desired_active,
+                    revision,
+                    status,
+                    attempt_count,
+                    next_attempt_at,
+                    created_at,
+                    updated_at
+                  ) VALUES ($1, $2, FALSE, 1, 'pending', 0, NOW(), NOW(), NOW())
+                  ON CONFLICT (channel_id, product_variant_id)
+                  DO UPDATE SET
+                    desired_active = FALSE,
+                    revision = channels.channel_variant_availability_sync.revision + 1,
+                    status = 'pending',
+                    attempt_count = 0,
+                    next_attempt_at = NOW(),
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    completed_at = NULL,
+                    last_error = NULL,
+                    updated_at = NOW()
+                `, [EBAY_CHANNEL_ID, listing.product_variant_id]);
+                quantityDrift++;
+                changes.push({
+                  id: listing.id,
+                  sku,
+                  product: listing.product_name || "Unknown",
+                  oldStatus: `inactive with eBay quantity ${inspection.availableQuantity}`,
+                  newStatus: "availability repair queued",
+                });
+              }
               active++;
             } else {
               // Offer ended/withdrawn
@@ -1499,9 +1566,9 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
         if (changes.length > 0) {
           console.log(`[eBay Reconcile] Status changes:`, changes.map((c) => `${c.sku}: ${c.oldStatus} → ${c.newStatus}`).join(", "));
         }
-        console.log(`[eBay Reconcile] Complete: checked=${listings.length} active=${active} ended=${ended} deleted=${deleted} errors=${errors}`);
+        console.log(`[eBay Reconcile] Complete: checked=${listings.length} active=${active} ended=${ended} deleted=${deleted} quantityDrift=${quantityDrift} errors=${errors}`);
 
-        res.json({ checked: listings.length, active, ended, deleted, errors, changes });
+        res.json({ checked: listings.length, active, ended, deleted, quantityDrift, errors, changes });
       } finally {
         client.release();
       }

@@ -26,6 +26,7 @@ import { startOmsFlowReconciliationScheduler } from "./modules/oms/oms-flow-reco
 import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
 import { startControlTowerProjectionScheduler } from "./modules/operations/control-tower-v2.scheduler";
 import { startPoEmailOutboxWorker } from "./modules/procurement/po-email-outbox.worker";
+import { startVariantAvailabilitySyncWorker } from "./modules/channels/variant-availability-sync.worker";
 import { startFinancialCommandRetentionWorker } from "./platform/commands/financial-command-retention.worker";
 import {
   startWebhookRetryWorker,
@@ -808,6 +809,16 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
           "scheduler",
           "Channel fulfillment command worker",
           "CHANNEL_FULFILLMENT_COMMAND_WORKER_DISABLED",
+        );
+      }
+
+      if (!schedulersDisabled("VARIANT_AVAILABILITY_SYNC_WORKER_DISABLED")) {
+        startVariantAvailabilitySyncWorker(services.variantAvailabilitySync);
+      } else {
+        logSchedulerDisabled(
+          "scheduler",
+          "Variant availability sync worker",
+          "VARIANT_AVAILABILITY_SYNC_WORKER_DISABLED",
         );
       }
 

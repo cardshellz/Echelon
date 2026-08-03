@@ -1805,7 +1805,7 @@ export default function ProductDetail() {
       queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
       const msg = data.archived.inventoryTransferred > 0
         ? `Archived: transferred ${data.archived.inventoryTransferred} units, ${data.archived.variants} variants deactivated`
-        : `Archived: ${data.archived.variants} variants, ${data.archived.inventoryCleared} inventory rows cleared`;
+        : `Archived: ${data.archived.variants} variants deactivated, ${data.archived.inventoryPreserved} inventory units preserved`;
       toast({ title: msg });
       setArchiveDialogOpen(false);
       setArchiveDeps(null);
@@ -4113,7 +4113,7 @@ export default function ProductDetail() {
           </DialogHeader>
           <div className="space-y-4 py-2">
             <p className="text-sm text-muted-foreground">
-              Archiving <span className="font-mono font-medium text-foreground">{product?.sku}</span> will deactivate the product and all its variants, clear bin assignments, and deactivate channel feeds and replen rules.
+              Archiving <span className="font-mono font-medium text-foreground">{product?.sku}</span> will deactivate the product, its variants, channel feeds, and replenishment rules. Inventory, bin assignments, and channel listing identities are preserved.
             </p>
 
             {archiveScanning ? (
@@ -4243,7 +4243,7 @@ export default function ProductDetail() {
                         onClick={() => { setTransferMode(false); setTransferTargetVariant(null); }}
                       >
                         <Archive className="h-3.5 w-3.5 mr-1.5" />
-                        Force Archive
+                        Keep Inventory & Archive
                       </Button>
                     </div>
 
@@ -4330,7 +4330,7 @@ export default function ProductDetail() {
                       </div>
                     ) : (
                       <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-400 p-2 rounded">
-                        Force-archiving will zero out all inventory and log adjustment transactions. Units will not be transferred.
+                        Inventory and bin assignments will remain on this SKU. Its marketplace availability will be set to zero until the SKU is reactivated.
                       </p>
                     )}
                   </div>
@@ -4366,7 +4366,7 @@ export default function ProductDetail() {
                 ) : transferMode && transferTargetVariant ? (
                   <><ArrowRightLeft className="h-4 w-4 mr-2" />Transfer & Archive</>
                 ) : archiveDeps.blocked ? (
-                  <><Archive className="h-4 w-4 mr-2" />Force Archive</>
+                  <><Archive className="h-4 w-4 mr-2" />Keep Inventory & Archive</>
                 ) : (
                   <><Archive className="h-4 w-4 mr-2" />Archive Product</>
                 )}
@@ -4390,7 +4390,7 @@ export default function ProductDetail() {
           </DialogHeader>
           <div className="space-y-4 py-2">
             <p className="text-sm text-muted-foreground">
-              Archiving <span className="font-mono font-medium text-foreground">{archiveVariant?.sku}</span> will deactivate the variant, clear its bin assignments, and deactivate channel feeds.
+              Archiving <span className="font-mono font-medium text-foreground">{archiveVariant?.sku}</span> will deactivate the variant and its channel feeds. Inventory, bin assignments, and channel listing identities are preserved.
             </p>
 
             {variantArchiveScanning ? (
@@ -4507,7 +4507,7 @@ export default function ProductDetail() {
                         onClick={() => { setVariantTransferMode(false); setVariantTransferTarget(null); }}
                       >
                         <Archive className="h-3.5 w-3.5 mr-1.5" />
-                        Force Archive
+                        Keep Inventory & Archive
                       </Button>
                     </div>
 
@@ -4591,7 +4591,7 @@ export default function ProductDetail() {
                       </div>
                     ) : (
                       <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-400 p-2 rounded">
-                        Force-archiving will zero out all inventory and log adjustment transactions. Units will not be transferred.
+                        Inventory and bin assignments will remain on this SKU. Its marketplace availability will be set to zero until the SKU is reactivated.
                       </p>
                     )}
                   </div>
@@ -4626,7 +4626,7 @@ export default function ProductDetail() {
                 ) : variantTransferMode && variantTransferTarget ? (
                   <><ArrowRightLeft className="h-4 w-4 mr-2" />Transfer & Archive</>
                 ) : variantArchiveDeps.blocked ? (
-                  <><Archive className="h-4 w-4 mr-2" />Force Archive</>
+                  <><Archive className="h-4 w-4 mr-2" />Keep Inventory & Archive</>
                 ) : (
                   <><Archive className="h-4 w-4 mr-2" />Archive Variant</>
                 )}

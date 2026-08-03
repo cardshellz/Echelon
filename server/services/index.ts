@@ -102,6 +102,7 @@ import {
   MANUAL_CHANNEL_SHIPPING_CAPABILITY_DECLARATION,
 } from "../modules/channels/channel-shipping-capability.registry";
 import { createEchelonSyncOrchestrator } from "../modules/channels/echelon-sync-orchestrator.service";
+import { createVariantAvailabilitySyncService } from "../modules/channels/variant-availability-sync.service";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
 export function createServices(db: any) {
@@ -227,6 +228,10 @@ export function createServices(db: any) {
   const echelonOrchestrator = createEchelonSyncOrchestrator(
     db, allocationEngine, sourceLockService, adapterRegistry, channelProductPush, atp,
   );
+  const variantAvailabilitySync = createVariantAvailabilitySyncService({
+    allocationEngine,
+    adapterRegistry,
+  });
 
   // Wire orchestrator into legacy channelSync so event-driven syncs
   // respect channel_allocation_rules (fixed/share/mirror modes).
@@ -415,6 +420,7 @@ export function createServices(db: any) {
     syncSettings,
     channelShippingCapabilities,
     echelonOrchestrator,
+    variantAvailabilitySync,
     oms,
     fulfillmentPush,
     channelFulfillmentAuthority,

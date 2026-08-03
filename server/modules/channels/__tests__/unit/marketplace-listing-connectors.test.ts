@@ -255,7 +255,7 @@ describe("marketplace listing connectors", () => {
     expect(client.createOffer).not.toHaveBeenCalled();
     expect(client.publishOffer).not.toHaveBeenCalled();
     expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
-    expect(calls).toEqual(["put_group", "put_inventory", "get_offers", "update_offer"]);
+    expect(calls).toEqual(["put_inventory", "get_offers", "update_offer", "put_group"]);
     expect(client.updateOffer).toHaveBeenCalledWith(
       "offer-1",
       expect.objectContaining({ offerId: "offer-1" }),
@@ -268,6 +268,26 @@ describe("marketplace listing connectors", () => {
       missingOfferVariantIds: [],
       policyChangedVariantIds: [10],
       itemGroupUpdated: true,
+    });
+
+    vi.mocked(client.getOffers).mockResolvedValueOnce({ offers: [] });
+    vi.mocked(client.createOrReplaceInventoryItemGroup).mockClear();
+
+    const missingOfferResult = await connector.syncExistingListing({
+      client,
+      draft: {
+        productId: 1,
+        marketplaceId: "EBAY_US",
+        inventoryItems,
+        offers,
+        itemGroup,
+      },
+    });
+
+    expect(client.createOrReplaceInventoryItemGroup).not.toHaveBeenCalled();
+    expect(missingOfferResult).toMatchObject({
+      missingOfferVariantIds: [10],
+      itemGroupUpdated: false,
     });
   });
 
@@ -315,11 +335,11 @@ describe("marketplace listing connectors", () => {
     const connector = new EbayMarketplaceListingConnector();
 
     await expect(connector.inspectListingStatus({ client, sku: "MISSING", marketplaceId: "EBAY_US" }))
-      .resolves.toEqual({ inventoryItemExists: false, hasActiveOffer: false });
+      .resolves.toEqual({ inventoryItemExists: false, hasActiveOffer: false, availableQuantity: null });
     await expect(connector.inspectListingStatus({ client, sku: "ENDED", marketplaceId: "EBAY_US" }))
-      .resolves.toEqual({ inventoryItemExists: true, hasActiveOffer: false });
+      .resolves.toEqual({ inventoryItemExists: true, hasActiveOffer: false, availableQuantity: 0 });
     await expect(connector.inspectListingStatus({ client, sku: "ACTIVE", marketplaceId: "EBAY_US" }))
-      .resolves.toEqual({ inventoryItemExists: true, hasActiveOffer: true });
+      .resolves.toEqual({ inventoryItemExists: true, hasActiveOffer: true, availableQuantity: 1 });
   });
 
   it("pushes Shopify productSet listings through the shared connector", async () => {
