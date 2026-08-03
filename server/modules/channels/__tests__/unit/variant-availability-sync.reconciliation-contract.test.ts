@@ -11,7 +11,8 @@ describe("eBay inactive-quantity drift reconciliation", () => {
 
     expect(route).toContain("pv.is_active AS variant_is_active");
     expect(route).toContain("inspection.availableQuantity ?? 0");
-    expect(route).toContain("INSERT INTO channels.channel_variant_availability_sync");
+    expect(route).toContain("queueVariantAvailabilityRepair({");
+    expect(route).not.toContain("INSERT INTO channels.channel_variant_availability_sync");
     expect(route).toContain("newStatus: \"availability repair queued\"");
     expect(route).toContain("quantityDrift");
   });

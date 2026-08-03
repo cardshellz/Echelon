@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const repository = vi.hoisted(() => ({
   claimVariantAvailabilitySyncs: vi.fn(),
+  enqueueVariantAvailabilitySync: vi.fn(),
   loadVariantAvailabilityContext: vi.fn(),
   markVariantAvailabilityFailed: vi.fn(),
   markVariantAvailabilitySynced: vi.fn(),
@@ -13,7 +14,10 @@ vi.mock("../../variant-availability-sync.repository", async (importOriginal) => 
   ...repository,
 }));
 
-import { createVariantAvailabilitySyncService } from "../../variant-availability-sync.service";
+import {
+  createVariantAvailabilitySyncService,
+  queueVariantAvailabilityRepair,
+} from "../../variant-availability-sync.service";
 
 const CLAIM = {
   channelId: 67,
@@ -78,6 +82,30 @@ describe("variant availability sync service", () => {
     repository.markVariantAvailabilitySynced.mockResolvedValue(true);
     repository.markVariantAvailabilityFailed.mockResolvedValue("retryable");
     repository.supersedeAvailabilityClaim.mockResolvedValue(undefined);
+  });
+
+  it("routes reconciliation repairs through the owning repository", async () => {
+    const dbPool = {} as never;
+
+    await expect(queueVariantAvailabilityRepair({
+      channelId: 67,
+      productVariantId: 438,
+    }, { dbPool })).resolves.toBeUndefined();
+
+    expect(repository.enqueueVariantAvailabilitySync).toHaveBeenCalledWith(dbPool, {
+      channelId: 67,
+      productVariantId: 438,
+      desiredActive: false,
+    });
+  });
+
+  it("rejects invalid repair identifiers before calling the repository", async () => {
+    await expect(queueVariantAvailabilityRepair({
+      channelId: 67,
+      productVariantId: -1,
+    }, { dbPool: {} as never })).rejects.toThrow("productVariantId must be a positive safe integer");
+
+    expect(repository.enqueueVariantAvailabilitySync).not.toHaveBeenCalled();
   });
 
   it("pushes only the inactive variant to zero and does not calculate ATP", async () => {

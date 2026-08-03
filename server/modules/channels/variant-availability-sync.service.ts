@@ -6,6 +6,7 @@ import type {
 import { resolveVariantAvailabilityTarget } from "./variant-availability-sync.domain";
 import {
   claimVariantAvailabilitySyncs,
+  enqueueVariantAvailabilitySync,
   loadVariantAvailabilityContext,
   markVariantAvailabilityFailed,
   markVariantAvailabilitySynced,
@@ -46,11 +47,32 @@ export interface VariantAvailabilityBatchResult {
   superseded: number;
 }
 
+export interface QueueVariantAvailabilityRepairInput {
+  channelId: number;
+  productVariantId: number;
+}
+
 function requirePositiveInteger(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new Error(`${field} must be a positive safe integer`);
   }
   return value;
+}
+
+export async function queueVariantAvailabilityRepair(
+  input: QueueVariantAvailabilityRepairInput,
+  dependencies: { dbPool?: SqlPool } = {},
+): Promise<void> {
+  const channelId = requirePositiveInteger(input.channelId, "channelId");
+  const productVariantId = requirePositiveInteger(input.productVariantId, "productVariantId");
+  await enqueueVariantAvailabilitySync(
+    dependencies.dbPool ?? (pool as unknown as SqlPool),
+    {
+      channelId,
+      productVariantId,
+      desiredActive: false,
+    },
+  );
 }
 
 async function processClaim(

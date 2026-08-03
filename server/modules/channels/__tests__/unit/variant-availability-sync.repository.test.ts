@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   claimVariantAvailabilitySyncs,
+  enqueueVariantAvailabilitySync,
   markVariantAvailabilityFailed,
   type ClaimedVariantAvailabilitySync,
   type SqlClient,
@@ -17,6 +18,35 @@ const CLAIM: ClaimedVariantAvailabilitySync = {
 };
 
 describe("variant availability sync repository", () => {
+  it("atomically enqueues the requested desired state", async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+    const pool = { query } as unknown as SqlPool;
+
+    await expect(enqueueVariantAvailabilitySync(pool, {
+      channelId: 67,
+      productVariantId: 438,
+      desiredActive: false,
+    })).resolves.toBeUndefined();
+
+    expect(query).toHaveBeenCalledOnce();
+    expect(query.mock.calls[0][0]).toContain("INSERT INTO channels.channel_variant_availability_sync");
+    expect(query.mock.calls[0][0]).toContain("ON CONFLICT (channel_id, product_variant_id)");
+    expect(query.mock.calls[0][0]).toContain("revision = channels.channel_variant_availability_sync.revision + 1");
+    expect(query.mock.calls[0][1]).toEqual([67, 438, false]);
+  });
+
+  it("rejects invalid enqueue identifiers before writing", async () => {
+    const query = vi.fn();
+    const pool = { query } as unknown as SqlPool;
+
+    await expect(enqueueVariantAvailabilitySync(pool, {
+      channelId: 0,
+      productVariantId: 438,
+      desiredActive: false,
+    })).rejects.toThrow("channelId must be a positive safe integer");
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it("claims due work with a transaction, lease, and SKIP LOCKED", async () => {
     const query = vi.fn()
       .mockResolvedValueOnce({ rows: [], rowCount: null })

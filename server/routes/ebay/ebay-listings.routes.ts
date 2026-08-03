@@ -17,6 +17,7 @@ import { createInventoryAtpService } from "../../modules/inventory/atp.service";
 import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, syncActiveListings, triggerPricingRuleSync, delay } from "./ebay-sync-helpers";
 import { isProductEffectivelyListed, isVariantEffectivelyListed } from "./ebay-listing-state";
 import { EbayMarketplaceListingConnector } from "../../modules/channels/listing-connectors/ebay-listing.connector";
+import { queueVariantAvailabilityRepair } from "../../modules/channels/variant-availability-sync.service";
 import {
   buildEbayRouteListingDraft,
   isValidEbayFixedPriceCents,
@@ -1509,31 +1510,10 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
 
             if (inspection.hasActiveOffer) {
               if (listing.variant_is_active === false && (inspection.availableQuantity ?? 0) > 0) {
-                await client.query(`
-                  INSERT INTO channels.channel_variant_availability_sync (
-                    channel_id,
-                    product_variant_id,
-                    desired_active,
-                    revision,
-                    status,
-                    attempt_count,
-                    next_attempt_at,
-                    created_at,
-                    updated_at
-                  ) VALUES ($1, $2, FALSE, 1, 'pending', 0, NOW(), NOW(), NOW())
-                  ON CONFLICT (channel_id, product_variant_id)
-                  DO UPDATE SET
-                    desired_active = FALSE,
-                    revision = channels.channel_variant_availability_sync.revision + 1,
-                    status = 'pending',
-                    attempt_count = 0,
-                    next_attempt_at = NOW(),
-                    lease_token = NULL,
-                    lease_expires_at = NULL,
-                    completed_at = NULL,
-                    last_error = NULL,
-                    updated_at = NOW()
-                `, [EBAY_CHANNEL_ID, listing.product_variant_id]);
+                await queueVariantAvailabilityRepair({
+                  channelId: EBAY_CHANNEL_ID,
+                  productVariantId: listing.product_variant_id,
+                });
                 quantityDrift++;
                 changes.push({
                   id: listing.id,

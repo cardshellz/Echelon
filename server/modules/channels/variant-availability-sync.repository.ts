@@ -90,6 +90,12 @@ interface ContextRow {
   previous_quantity: number | null;
 }
 
+export interface EnqueueVariantAvailabilitySyncInput {
+  channelId: number;
+  productVariantId: number;
+  desiredActive: boolean;
+}
+
 function toPositiveInteger(value: string | number, field: string): number {
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
@@ -102,6 +108,43 @@ function requireAffectedRow(result: SqlQueryResult, action: string): void {
   if (result.rowCount !== 1) {
     throw new Error(`${action} lost its availability-sync lease or revision`);
   }
+}
+
+export async function enqueueVariantAvailabilitySync(
+  dbPool: SqlQueryable,
+  input: EnqueueVariantAvailabilitySyncInput,
+): Promise<void> {
+  const channelId = toPositiveInteger(input.channelId, "channelId");
+  const productVariantId = toPositiveInteger(input.productVariantId, "productVariantId");
+  if (typeof input.desiredActive !== "boolean") {
+    throw new Error("desiredActive must be a boolean");
+  }
+
+  await dbPool.query(`
+    INSERT INTO channels.channel_variant_availability_sync (
+      channel_id,
+      product_variant_id,
+      desired_active,
+      revision,
+      status,
+      attempt_count,
+      next_attempt_at,
+      created_at,
+      updated_at
+    ) VALUES ($1, $2, $3, 1, 'pending', 0, transaction_timestamp(), transaction_timestamp(), transaction_timestamp())
+    ON CONFLICT (channel_id, product_variant_id)
+    DO UPDATE SET
+      desired_active = EXCLUDED.desired_active,
+      revision = channels.channel_variant_availability_sync.revision + 1,
+      status = 'pending',
+      attempt_count = 0,
+      next_attempt_at = transaction_timestamp(),
+      lease_token = NULL,
+      lease_expires_at = NULL,
+      completed_at = NULL,
+      last_error = NULL,
+      updated_at = transaction_timestamp()
+  `, [channelId, productVariantId, input.desiredActive]);
 }
 
 export async function claimVariantAvailabilitySyncs(
