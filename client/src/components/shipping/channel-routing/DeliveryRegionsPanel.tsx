@@ -77,7 +77,7 @@ export function DeliveryRegionsPanel({
         });
       }
       if (input.lockVersion === null) {
-        throw new Error("Delivery-region version is missing.");
+        throw new Error("Destination version is missing.");
       }
       return updateDeliveryRegion({
         scopeId: input.id,
@@ -90,11 +90,11 @@ export function DeliveryRegionsPanel({
     onSuccess: () => {
       setForm(null);
       void queryClient.invalidateQueries({ queryKey: [CHANNEL_ROUTING_KEY] });
-      toast({ title: "Delivery region saved" });
+      toast({ title: "Destination saved" });
     },
     onError: (error) => {
       toast({
-        title: "Delivery region was not saved",
+        title: "Destination was not saved",
         description: error instanceof Error ? error.message : undefined,
         variant: "destructive",
       });
@@ -105,11 +105,11 @@ export function DeliveryRegionsPanel({
     onSuccess: () => {
       setRetiring(null);
       void queryClient.invalidateQueries({ queryKey: [CHANNEL_ROUTING_KEY] });
-      toast({ title: "Delivery region retired" });
+      toast({ title: "Destination retired" });
     },
     onError: (error) => {
       toast({
-        title: "Delivery region was not retired",
+        title: "Destination was not retired",
         description: error instanceof Error ? error.message : undefined,
         variant: "destructive",
       });
@@ -120,14 +120,14 @@ export function DeliveryRegionsPanel({
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold">Delivery regions</h2>
+          <h2 className="text-lg font-semibold">Destinations</h2>
           <p className="text-sm text-muted-foreground">
-            Reusable country, state, and postal coverage.
+            Reusable country, state, and postal coverage shared by pricing, channels, and membership benefits.
           </p>
         </div>
         <Button onClick={() => setForm(emptyForm())}>
           <Plus className="mr-2 h-4 w-4" />
-          New region
+          New destination
         </Button>
       </div>
 
@@ -146,7 +146,7 @@ export function DeliveryRegionsPanel({
             {scopes.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={5} className="h-28 text-center text-muted-foreground">
-                  No delivery regions have been created.
+                  No destinations have been created.
                 </TableCell>
               </TableRow>
             ) : scopes.map((scope) => (
@@ -174,7 +174,7 @@ export function DeliveryRegionsPanel({
                         <Button
                           variant="ghost"
                           size="icon"
-                          title="Edit delivery region"
+                          title="Edit destination"
                           onClick={() => setForm(formFromScope(scope))}
                         >
                           <Pencil className="h-4 w-4" />
@@ -182,7 +182,7 @@ export function DeliveryRegionsPanel({
                         <Button
                           variant="ghost"
                           size="icon"
-                          title="Retire delivery region"
+                          title="Retire destination"
                           onClick={() => setRetiring(scope)}
                         >
                           <Archive className="h-4 w-4" />
@@ -214,10 +214,10 @@ export function DeliveryRegionsPanel({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Retire this delivery region?</AlertDialogTitle>
+            <AlertDialogTitle>Retire this destination?</AlertDialogTitle>
             <AlertDialogDescription>
               Existing active policies keep their frozen destination coverage.
-              New drafts cannot select this region.
+              New drafts cannot select this destination.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -238,7 +238,7 @@ export function DeliveryRegionsPanel({
               {retireMutation.isPending && (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               )}
-              Retire region
+              Retire destination
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -286,7 +286,7 @@ function RegionEditorDialog({
       <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
-            {form?.id === null ? "New delivery region" : "Edit delivery region"}
+            {form?.id === null ? "New destination" : "Edit destination"}
           </DialogTitle>
           <DialogDescription>
             Country is required. State and postal prefix narrow that country.
@@ -416,7 +416,7 @@ function RegionEditorDialog({
             ) : (
               <Save className="mr-2 h-4 w-4" />
             )}
-            Save region
+            Save destination
           </Button>
         </DialogFooter>
       </DialogContent>

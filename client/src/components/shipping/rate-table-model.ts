@@ -171,6 +171,9 @@ export interface RateGroup {
   /** Stable program-level identity once the group has been saved. */
   destinationGroupId: number | null;
   destinationGroupLockVersion: number | null;
+  /** Canonical destination-library identity and immutable editor snapshot. */
+  sourceDestinationScopeId: number | null;
+  sourceDestinationScopeLockVersion: number | null;
   /** Operator-facing label, e.g. "Contiguous US" or "Alaska and Hawaii". */
   name: string;
   originWarehouseId: number | null;
@@ -224,6 +227,8 @@ export function newGroup(
     id: newId(),
     destinationGroupId: null,
     destinationGroupLockVersion: null,
+    sourceDestinationScopeId: null,
+    sourceDestinationScopeLockVersion: null,
     name,
     originWarehouseId: null,
     regions,
@@ -263,6 +268,9 @@ export function replaceRateGroupAndPropagateIdentity(
       ...group,
       destinationGroupId: next.destinationGroupId,
       destinationGroupLockVersion: next.destinationGroupLockVersion,
+      sourceDestinationScopeId: next.sourceDestinationScopeId,
+      sourceDestinationScopeLockVersion:
+        next.sourceDestinationScopeLockVersion,
       name: next.name,
       regions: [...next.regions],
       zipEntries: next.zipEntries.map((entry) => ({
@@ -313,6 +321,8 @@ function destinationGroupIdentitySignature(group: RateGroup): string {
   return JSON.stringify({
     destinationGroupId: group.destinationGroupId,
     destinationGroupLockVersion: group.destinationGroupLockVersion,
+    sourceDestinationScopeId: group.sourceDestinationScopeId,
+    sourceDestinationScopeLockVersion: group.sourceDestinationScopeLockVersion,
     name: group.name,
     regions: [...new Set(group.regions)].sort(),
     zipEntries: group.zipEntries
@@ -766,6 +776,8 @@ export function groupsFromRows(
     id: newId(),
     destinationGroupId: null,
     destinationGroupLockVersion: null,
+    sourceDestinationScopeId: null,
+    sourceDestinationScopeLockVersion: null,
     name: "",
     availability: "offered" as const,
     ...group,
@@ -777,10 +789,12 @@ export function groupsFromRows(
 // ---------------------------------------------------------------------------
 
 export interface DraftLayout {
-  version: 2;
+  version: 3;
   groups: Array<{
     destinationGroupId: number | null;
     destinationGroupLockVersion: number | null;
+    sourceDestinationScopeId: number | null;
+    sourceDestinationScopeLockVersion: number | null;
     name: string;
     originWarehouseId: number | null;
     regions: string[];
@@ -800,10 +814,13 @@ export interface DraftLayout {
 
 export function layoutFromGroups(groups: RateGroup[]): DraftLayout {
   return {
-    version: 2,
+    version: 3,
     groups: groups.map((group, index) => ({
       destinationGroupId: group.destinationGroupId,
       destinationGroupLockVersion: group.destinationGroupLockVersion,
+      sourceDestinationScopeId: group.sourceDestinationScopeId,
+      sourceDestinationScopeLockVersion:
+        group.sourceDestinationScopeLockVersion,
       name: groupDisplayName(group, index).slice(0, 120),
       originWarehouseId: group.originWarehouseId,
       regions: [...group.regions],
@@ -834,7 +851,7 @@ export function groupsFromLayout(metadata: unknown): RateGroup[] | null {
     version?: unknown;
     groups?: Array<Partial<DraftLayout["groups"][number]>>;
   };
-  if (typed.version !== 1 && typed.version !== 2) return null;
+  if (typed.version !== 1 && typed.version !== 2 && typed.version !== 3) return null;
   if (!Array.isArray(typed.groups)) return null;
   try {
     return typed.groups.map((group) => ({
@@ -845,6 +862,13 @@ export function groupsFromLayout(metadata: unknown): RateGroup[] | null {
       destinationGroupLockVersion: typeof group.destinationGroupLockVersion === "number"
         ? group.destinationGroupLockVersion
         : null,
+      sourceDestinationScopeId: typeof group.sourceDestinationScopeId === "number"
+        ? group.sourceDestinationScopeId
+        : null,
+      sourceDestinationScopeLockVersion:
+        typeof group.sourceDestinationScopeLockVersion === "number"
+          ? group.sourceDestinationScopeLockVersion
+          : null,
       name: typeof group.name === "string" ? group.name : "",
       originWarehouseId: typeof group.originWarehouseId === "number" ? group.originWarehouseId : null,
       regions: Array.isArray(group.regions)

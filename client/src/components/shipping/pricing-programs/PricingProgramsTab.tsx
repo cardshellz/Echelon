@@ -138,6 +138,10 @@ export function PricingProgramsTab() {
       const program = programs.find(
         (item) => item.book.id === detail.rateTable.rateBookId,
       );
+      groups = hydrateCanonicalScopeIdentity(
+        groups,
+        program?.destinationGroups ?? [],
+      );
       const destinationGroupTarget = destinationGroup === undefined
         ? null
         : { id: destinationGroup.id, key: destinationGroup.key };
@@ -162,6 +166,7 @@ export function PricingProgramsTab() {
           groups,
           lockProgram: true,
           availableDestinationGroups: program?.destinationGroups ?? [],
+          availableDestinationScopes: data?.destinationScopes ?? [],
           destinationGroupTarget,
           hasUnsavedInitialChanges: targetMissingFromDraft,
         },
@@ -294,6 +299,7 @@ export function PricingProgramsTab() {
                 : null,
               lockProgram: true,
               availableDestinationGroups: program.destinationGroups,
+              availableDestinationScopes: data?.destinationScopes ?? [],
               destinationGroupTarget: destinationGroup === undefined
                 ? null
                 : { id: destinationGroup.id, key: destinationGroup.key },
@@ -581,12 +587,46 @@ function editorGroupFromProgramGroup(
     ...newGroup(pricingBasis, regions, source.name),
     destinationGroupId: source.id,
     destinationGroupLockVersion: source.lockVersion,
+    sourceDestinationScopeId: source.sourceDestinationScopeId,
+    sourceDestinationScopeLockVersion: source.sourceDestinationScopeLockVersion,
     zipEntries: [...zipByRegion].map(([state, prefixes]) => ({
       id: newId(),
       state,
       prefixes,
     })),
   };
+}
+
+function hydrateCanonicalScopeIdentity(
+  groups: RateGroup[],
+  programGroups: ProgramDestinationGroup[],
+): RateGroup[] {
+  const programGroupsById = new Map(
+    programGroups.flatMap((group) => group.id === null ? [] : [[group.id, group] as const]),
+  );
+  return groups.map((group) => {
+    if (
+      group.sourceDestinationScopeId !== null
+      || group.sourceDestinationScopeLockVersion !== null
+      || group.destinationGroupId === null
+    ) {
+      return group;
+    }
+    const programGroup = programGroupsById.get(group.destinationGroupId);
+    if (
+      programGroup === undefined
+      || programGroup.sourceDestinationScopeId === null
+      || programGroup.sourceDestinationScopeLockVersion === null
+    ) {
+      return group;
+    }
+    return {
+      ...group,
+      sourceDestinationScopeId: programGroup.sourceDestinationScopeId,
+      sourceDestinationScopeLockVersion:
+        programGroup.sourceDestinationScopeLockVersion,
+    };
+  });
 }
 
 function ProgramsSkeleton() {
