@@ -176,6 +176,48 @@ describe("historical ShipStation split repair", () => {
     expect(deps.finalizeRepairedPackage).not.toHaveBeenCalled();
   });
 
+  it("reports canonical sibling packages used as allocation support", async () => {
+    const repairPlan = packagePlan(10, [1]);
+    const supportPlan = packagePlan(11, [2]);
+    const canonicalSupport = Object.freeze({
+      packagePlan: supportPlan,
+      applied: Object.freeze({
+        providerShipmentId: 11,
+        legacyWmsShipmentIds: Object.freeze([7102]),
+        wmsOrderIds: Object.freeze([8001]),
+      }),
+      materialized: Object.freeze({
+        physicalShipmentId: 9002,
+        channelCommandCount: 1,
+      }),
+    });
+    const deps = dependencies({
+      inspectPackages: vi.fn(async () => ({
+        alreadyCanonical: Object.freeze([canonicalSupport]),
+        repairableComponents: Object.freeze([
+          Object.freeze({
+            componentKey: "10",
+            packages: Object.freeze([repairPlan]),
+            canonicalSupports: Object.freeze([canonicalSupport]),
+          }),
+        ]),
+        unsafe: Object.freeze([]),
+      })),
+    });
+
+    const summary = await runHistoricalShipStationSplitRepair(
+      flags(),
+      deps,
+    );
+
+    expect(summary).toMatchObject({
+      alreadyCanonical: 1,
+      canonicalSupports: 1,
+      repairable: 1,
+      repaired: 0,
+    });
+  });
+
   it("rejects execute when the selected cohort changed", async () => {
     const deps = dependencies();
     await expect(runHistoricalShipStationSplitRepair(flags({

@@ -247,7 +247,7 @@ async function loadSourceRows(
 }
 
 async function loadCanonicalRows(
-  pool: Pool,
+  pool: QueryExecutor,
   providerShipmentIds: readonly number[],
 ): Promise<Map<number, CanonicalRow>> {
   if (providerShipmentIds.length === 0) return new Map();
@@ -442,6 +442,7 @@ async function loadExactExistingTargets(
   executor: QueryExecutor,
   plan: HistoricalSplitRepairPackagePlan,
   sources: ReadonlyMap<number, SourceItemRow>,
+  lock = false,
 ): Promise<readonly TargetPlan[] | null> {
   const targets = buildTargetPlansForPackage(plan, sources);
   for (const target of targets) {
@@ -449,7 +450,8 @@ async function loadExactExistingTargets(
       `SELECT id, order_id, status::text AS status, tracking_number
        FROM wms.outbound_shipments
        WHERE external_fulfillment_id = $1
-       ORDER BY id`,
+       ORDER BY id
+       ${lock ? "FOR UPDATE" : ""}`,
       [target.identity],
     );
     const matches = rowsOf<Record<string, unknown>>(existing);
@@ -461,9 +463,66 @@ async function loadExactExistingTargets(
       || String(row.tracking_number ?? "") !== target.providerPackage.trackingNumber
     ) return null;
     target.targetShipmentId = asPositiveInteger(row.id, "existing target shipment id");
-    if (!(await exactTargetMembership(executor, target))) return null;
+    if (!(await exactTargetMembership(executor, target, lock))) return null;
   }
   return Object.freeze(targets);
+}
+
+async function loadCanonicalSupportTargets(
+  client: PoolClient,
+  support: HistoricalSplitCanonicalPackage,
+  sources: ReadonlyMap<number, SourceItemRow>,
+): Promise<readonly TargetPlan[]> {
+  const providerShipmentId =
+    support.packagePlan.providerPackage.providerShipmentId;
+  const currentCanonical = (
+    await loadCanonicalRows(client, [providerShipmentId])
+  ).get(providerShipmentId);
+  if (
+    currentCanonical === undefined
+    || currentCanonical.physical_shipment_id !==
+      support.materialized.physicalShipmentId
+    || (
+      currentCanonical.tracking_number !== null
+      && currentCanonical.tracking_number !==
+        support.packagePlan.providerPackage.trackingNumber
+    )
+  ) {
+    throw repairError(
+      "CANONICAL_SUPPORT_CHANGED",
+      `Canonical support for provider package ${providerShipmentId} changed after inspection`,
+    );
+  }
+
+  const targets = await loadExactExistingTargets(
+    client,
+    support.packagePlan,
+    sources,
+    true,
+  );
+  if (targets === null) {
+    throw repairError(
+      "CANONICAL_SUPPORT_TARGET_CHANGED",
+      `Canonical support for provider package ${providerShipmentId} no longer has exact WMS package membership`,
+    );
+  }
+  const canonicalLegacyShipmentIds = new Set(
+    currentCanonical.legacy_wms_shipment_ids,
+  );
+  if (
+    targets.some(
+      (target) =>
+        target.targetShipmentId === null
+        || !canonicalLegacyShipmentIds.has(target.targetShipmentId),
+    )
+  ) {
+    throw repairError(
+      "CANONICAL_SUPPORT_LINEAGE_CHANGED",
+      `Canonical provider package ${providerShipmentId} no longer links every exact WMS target`,
+    );
+  }
+  for (const target of targets) target.exactBeforeApply = true;
+  return targets;
 }
 function validateExistingTarget(
   row: Record<string, unknown>,
@@ -929,12 +988,16 @@ async function applySourceAllocations(
   }
 }
 
-async function replaceExactTargetCopyWithSource(
+interface ExactTargetCopyEvidence {
+  readonly id: number;
+  readonly hasCanonicalEvidence: boolean;
+}
+
+async function loadExactTargetCopyEvidence(
   client: PoolClient,
   source: SourceItemRow,
   target: TargetAllocation,
-  archiveShipmentId: number,
-): Promise<void> {
+): Promise<ExactTargetCopyEvidence> {
   const copiedResult = await client.query(
     `SELECT item.id,
             EXISTS (
@@ -965,13 +1028,29 @@ async function replaceExactTargetCopyWithSource(
     ],
   );
   const copiedRows = rowsOf<Record<string, unknown>>(copiedResult);
-  if (
-    copiedRows.length !== 1 ||
-    copiedRows[0].has_canonical_evidence === true
-  ) {
+  if (copiedRows.length !== 1) {
+    throw repairError(
+      "EXACT_TARGET_COPY_NOT_UNIQUE",
+      `Provider package ${target.providerShipmentId} does not have one exact historical copy for source item ${source.id}`,
+    );
+  }
+  return Object.freeze({
+    id: asPositiveInteger(copiedRows[0].id, "exact target copy id"),
+    hasCanonicalEvidence: copiedRows[0].has_canonical_evidence === true,
+  });
+}
+
+async function replaceExactTargetCopyWithSource(
+  client: PoolClient,
+  source: SourceItemRow,
+  target: TargetAllocation,
+  copied: ExactTargetCopyEvidence,
+  archiveShipmentId: number,
+): Promise<void> {
+  if (copied.hasCanonicalEvidence) {
     throw repairError(
       "EXACT_TARGET_COPY_NOT_REPLACEABLE",
-      `Provider package ${target.providerShipmentId} does not have one replaceable historical copy for source item ${source.id}`,
+      `Provider package ${target.providerShipmentId} has canonical evidence on its historical copy for source item ${source.id}`,
     );
   }
   const archiveCollision = await client.query(
@@ -1004,7 +1083,7 @@ async function replaceExactTargetCopyWithSource(
      WHERE id = $1 AND shipment_id = $3
      RETURNING id`,
     [
-      asPositiveInteger(copiedRows[0].id, "copied target item id"),
+      copied.id,
       archiveShipmentId,
       target.targetShipmentId,
     ],
@@ -1034,6 +1113,76 @@ async function replaceExactTargetCopyWithSource(
     throw repairError(
       "SOURCE_ITEM_EXACT_TARGET_ADOPTION_FAILED",
       `Source WMS shipment item ${source.id} could not replace its historical split copy atomically`,
+    );
+  }
+}
+
+async function archiveCanonicalDuplicateSource(
+  client: PoolClient,
+  source: SourceItemRow,
+  archiveShipmentId: number,
+): Promise<void> {
+  const evidenceResult = await client.query(
+    `SELECT item.id,
+            EXISTS (
+              SELECT 1 FROM wms.physical_shipment_items AS physical_item
+              WHERE physical_item.legacy_wms_shipment_item_id = item.id
+            ) OR EXISTS (
+              SELECT 1 FROM oms.channel_fulfillment_receipt_items AS receipt_item
+              WHERE receipt_item.legacy_wms_shipment_item_id = item.id
+            ) AS has_canonical_evidence
+     FROM wms.outbound_shipment_items AS item
+     WHERE item.id = $1 AND item.shipment_id = $2 AND item.qty = $3
+     FOR UPDATE OF item`,
+    [source.id, source.shipment_id, source.qty],
+  );
+  const evidenceRows = rowsOf<Record<string, unknown>>(evidenceResult);
+  if (
+    evidenceRows.length !== 1
+    || evidenceRows[0].has_canonical_evidence === true
+  ) {
+    throw repairError(
+      "DUPLICATE_SOURCE_HAS_CANONICAL_EVIDENCE",
+      `Aggregate source item ${source.id} cannot be archived because it changed or has canonical fulfillment evidence`,
+    );
+  }
+
+  const archiveCollision = await client.query(
+    `SELECT id
+     FROM wms.outbound_shipment_items
+     WHERE shipment_id = $1
+       AND order_item_id IS NOT DISTINCT FROM $2
+       AND replacement_for_order_item_id IS NOT DISTINCT FROM $3
+       AND shipment_item_purpose = $4
+       AND product_variant_id IS NOT DISTINCT FROM $5
+     LIMIT 1
+     FOR UPDATE`,
+    [
+      archiveShipmentId,
+      source.order_item_id,
+      source.replacement_for_order_item_id,
+      source.shipment_item_purpose,
+      source.product_variant_id,
+    ],
+  );
+  if (rowsOf(archiveCollision).length > 0) {
+    throw repairError(
+      "DUPLICATE_SOURCE_ARCHIVE_COLLISION",
+      `Retired WMS shipment ${archiveShipmentId} already contains source item identity ${source.id}`,
+    );
+  }
+
+  const archived = await client.query(
+    `UPDATE wms.outbound_shipment_items
+     SET shipment_id = $2
+     WHERE id = $1 AND shipment_id = $3 AND qty = $4
+     RETURNING id`,
+    [source.id, archiveShipmentId, source.shipment_id, source.qty],
+  );
+  if (rowsOf(archived).length !== 1) {
+    throw repairError(
+      "DUPLICATE_SOURCE_ARCHIVE_FAILED",
+      `Aggregate source item ${source.id} changed before it could be archived`,
     );
   }
 }
@@ -1170,10 +1319,24 @@ async function applySourceAllocationsWithPersistedTargets(
       );
       archiveShipmentByOrder.set(source.order_id, archiveShipmentId);
     }
+    const copyEvidence: ExactTargetCopyEvidence[] = [];
+    for (const allocation of fixedNonresident) {
+      copyEvidence.push(
+        await loadExactTargetCopyEvidence(client, source, allocation),
+      );
+    }
+    const replaceableIndex = copyEvidence.findIndex(
+      (evidence) => !evidence.hasCanonicalEvidence,
+    );
+    if (replaceableIndex < 0) {
+      await archiveCanonicalDuplicateSource(client, source, archiveShipmentId);
+      return;
+    }
     await replaceExactTargetCopyWithSource(
       client,
       source,
-      fixedNonresident[0],
+      fixedNonresident[replaceableIndex],
+      copyEvidence[replaceableIndex],
       archiveShipmentId,
     );
     return;
@@ -1423,6 +1586,12 @@ export function createHistoricalShipStationSplitRepairRepository(
     const validPlans: HistoricalSplitRepairPackagePlan[] = [];
     const resumedProviderIds = new Set<number>();
     const unsafe: HistoricalSplitRepairFailure[] = [];
+    const canonicalPackageByProviderId = new Map<
+      number,
+      HistoricalSplitCanonicalPackage
+    >();
+    const canonicalProviderIdsBySourceShipmentId = new Map<number, Set<number>>();
+    const exactCanonicalSupportProviderIds = new Set<number>();
 
     for (const plan of packages) {
       const providerId = plan.providerPackage.providerShipmentId;
@@ -1442,7 +1611,7 @@ export function createHistoricalShipStationSplitRepairRepository(
           ));
           continue;
         }
-        alreadyCanonical.push(Object.freeze({
+        const canonicalPackage = Object.freeze({
           packagePlan: plan,
           applied: Object.freeze({
             providerShipmentId: providerId,
@@ -1453,7 +1622,39 @@ export function createHistoricalShipStationSplitRepairRepository(
             physicalShipmentId: canonical.physical_shipment_id,
             channelCommandCount: canonical.channel_command_count,
           }),
-        }));
+        });
+        alreadyCanonical.push(canonicalPackage);
+        canonicalPackageByProviderId.set(providerId, canonicalPackage);
+        const canonicalSources = plan.providerPackage.items
+          .map((item) => sourceRows.get(item.sourceShipmentItemId))
+          .filter((source): source is SourceItemRow => source !== undefined);
+        for (const source of canonicalSources) {
+          const providerIdsForSource =
+            canonicalProviderIdsBySourceShipmentId.get(source.shipment_id)
+              ?? new Set<number>();
+          providerIdsForSource.add(providerId);
+          canonicalProviderIdsBySourceShipmentId.set(
+            source.shipment_id,
+            providerIdsForSource,
+          );
+        }
+        if (canonicalSources.length === plan.providerPackage.items.length) {
+          const existingTargets = await loadExactExistingTargets(
+            pool,
+            plan,
+            sourceRows,
+          );
+          const canonicalLegacyShipmentIds = new Set(
+            canonical.legacy_wms_shipment_ids,
+          );
+          if (
+            existingTargets !== null
+            && existingTargets.every((target) =>
+              target.targetShipmentId !== null
+              && canonicalLegacyShipmentIds.has(target.targetShipmentId)
+            )
+          ) exactCanonicalSupportProviderIds.add(providerId);
+        }
         continue;
       }
 
@@ -1505,17 +1706,57 @@ export function createHistoricalShipStationSplitRepairRepository(
       validPlans,
       sourceShipmentIdByItem,
     )) {
-      const resumedCount = component.packages.filter((plan) =>
+      const componentSourceShipmentIds = new Set(
+        component.packages.flatMap((plan) =>
+          plan.providerPackage.items.map((item) =>
+            sourceRows.get(item.sourceShipmentItemId)!.shipment_id
+          )
+        ),
+      );
+      const relatedCanonicalProviderIds = new Set<number>();
+      for (const sourceShipmentId of componentSourceShipmentIds) {
+        for (
+          const providerId of
+            canonicalProviderIdsBySourceShipmentId.get(sourceShipmentId) ?? []
+        ) relatedCanonicalProviderIds.add(providerId);
+      }
+      const unsupportedCanonicalProviderIds = [
+        ...relatedCanonicalProviderIds,
+      ].filter((providerId) =>
+        !exactCanonicalSupportProviderIds.has(providerId)
+      );
+      if (unsupportedCanonicalProviderIds.length > 0) {
+        unsafe.push(immutableFailure(
+          [
+            ...component.packages.map(
+              (plan) => plan.providerPackage.providerShipmentId,
+            ),
+            ...unsupportedCanonicalProviderIds,
+          ],
+          "CANONICAL_SIBLING_SUPPORT_NOT_EXACT",
+          `Canonical sibling package(s) ${unsupportedCanonicalProviderIds.join(", ")} share aggregate source quantities but do not have exact canonical WMS target lineage`,
+        ));
+        continue;
+      }
+      const canonicalSupports = [...relatedCanonicalProviderIds]
+        .sort((left, right) => left - right)
+        .map((providerId) => canonicalPackageByProviderId.get(providerId)!);
+      const supportedComponent: HistoricalSplitRepairComponent = Object.freeze({
+        componentKey: component.componentKey,
+        packages: component.packages,
+        canonicalSupports: Object.freeze(canonicalSupports),
+      });
+      const resumedCount = supportedComponent.packages.filter((plan) =>
         resumedProviderIds.has(plan.providerPackage.providerShipmentId)
       ).length;
-      if (resumedCount === component.packages.length) {
-        safeComponents.push(component);
+      if (resumedCount === supportedComponent.packages.length) {
+        safeComponents.push(supportedComponent);
         continue;
       }
 
       let identityPreflightFailed = false;
       const recoveredSourceItemIds = new Set<number>();
-      for (const plan of component.packages) {
+      for (const plan of supportedComponent.packages) {
         for (const target of buildTargetPlansForPackage(plan, sourceRows)) {
           const orderItemCollision = targetOrderItemIdentityCollision(target);
           if (orderItemCollision !== null) {
@@ -1553,7 +1794,11 @@ export function createHistoricalShipStationSplitRepairRepository(
       if (identityPreflightFailed) continue;
 
       const requiredBySource = new Map<number, number>();
-      for (const plan of component.packages) {
+      const allocationPackages = [
+        ...supportedComponent.packages,
+        ...canonicalSupports.map((support) => support.packagePlan),
+      ];
+      for (const plan of allocationPackages) {
         for (const item of plan.providerPackage.items) {
           requiredBySource.set(item.sourceShipmentItemId,
             (requiredBySource.get(item.sourceShipmentItemId) ?? 0) + item.quantity);
@@ -1581,11 +1826,13 @@ export function createHistoricalShipStationSplitRepairRepository(
       }
       if (conflicts.length > 0) {
         unsafe.push(immutableFailure(
-          component.packages.map((plan) => plan.providerPackage.providerShipmentId),
+          allocationPackages.map(
+            (plan) => plan.providerPackage.providerShipmentId,
+          ),
           "COMPONENT_QUANTITY_PROOF_FAILED", conflicts.join("; "),
         ));
       } else {
-        safeComponents.push(component);
+        safeComponents.push(supportedComponent);
       }
     }
 
@@ -1602,8 +1849,15 @@ export function createHistoricalShipStationSplitRepairRepository(
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const sourceIds = [...new Set(component.packages.flatMap((plan) =>
-        plan.providerPackage.items.map((item) => item.sourceShipmentItemId)
+      const canonicalSupports = component.canonicalSupports ?? [];
+      const allocationPlans = [
+        ...component.packages,
+        ...canonicalSupports.map((support) => support.packagePlan),
+      ];
+      const sourceIds = [...new Set(allocationPlans.flatMap((plan) =>
+        plan.providerPackage.items.map(
+          (item) => item.sourceShipmentItemId,
+        )
       ))].sort((left, right) => left - right);
       const sources = await loadSourceRows(client, sourceIds, true);
       if (sources.size !== sourceIds.length) {
@@ -1618,19 +1872,31 @@ export function createHistoricalShipStationSplitRepairRepository(
         await client.query("SELECT pg_advisory_xact_lock(918406, $1)", [orderId]);
       }
 
-      const targets = component.packages.flatMap((plan) =>
+      const repairTargets = component.packages.flatMap((plan) =>
         buildTargetPlansForPackage(plan, sources)
       );
-      targets.sort((left, right) =>
+      repairTargets.sort((left, right) =>
         left.providerPackage.providerShipmentId - right.providerPackage.providerShipmentId
         || left.orderId - right.orderId
       );
-      for (const target of targets) {
+      for (const target of repairTargets) {
         target.targetShipmentId = await resolveOrCreateTarget(client, target, audit);
       }
+      const supportingTargets: TargetPlan[] = [];
+      for (const support of canonicalSupports) {
+        supportingTargets.push(
+          ...await loadCanonicalSupportTargets(client, support, sources),
+        );
+      }
+      const targets = [...repairTargets, ...supportingTargets].sort(
+        (left, right) =>
+          left.providerPackage.providerShipmentId
+            - right.providerPackage.providerShipmentId
+          || left.orderId - right.orderId,
+      );
 
       const retiredDuplicateShipmentByOrder = new Map<number, number>();
-      for (const target of targets) {
+      for (const target of repairTargets) {
         if (target.retiredDuplicateShipmentId === null) continue;
         const existingArchiveId = retiredDuplicateShipmentByOrder.get(target.orderId);
         if (
@@ -1648,9 +1914,12 @@ export function createHistoricalShipStationSplitRepairRepository(
         );
       }
 
-      const allTargetsExact = (
-        await Promise.all(targets.map((target) => exactTargetMembership(client, target)))
-      ).every(Boolean);
+      let allTargetsExact = true;
+      for (const target of targets) {
+        if (!(await exactTargetMembership(client, target))) {
+          allTargetsExact = false;
+        }
+      }
       const hasProviderStateRecovery = targets.some(
         (target) => target.providerStateRecovery !== null,
       );
@@ -1708,12 +1977,12 @@ export function createHistoricalShipStationSplitRepairRepository(
         [sourceShipmentIds, targetIds, audit.occurredAt],
       );
 
-      for (const target of targets) {
+      for (const target of repairTargets) {
         await activateRecoveredProviderTarget(client, target, audit);
       }
 
       const applied = component.packages.map((plan) => {
-        const packageTargets = targets.filter((target) =>
+        const packageTargets = repairTargets.filter((target) =>
           target.providerPackage.providerShipmentId === plan.providerPackage.providerShipmentId
         );
         return Object.freeze({

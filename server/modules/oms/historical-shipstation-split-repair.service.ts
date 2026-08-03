@@ -37,6 +37,7 @@ export interface HistoricalSplitRepairPackagePlan {
 export interface HistoricalSplitRepairComponent {
   readonly componentKey: string;
   readonly packages: readonly HistoricalSplitRepairPackagePlan[];
+  readonly canonicalSupports?: readonly HistoricalSplitCanonicalPackage[];
 }
 
 export interface HistoricalSplitCanonicalPackage {
@@ -164,6 +165,7 @@ export interface HistoricalSplitRepairSummary {
   readonly providerLookupsProcessed: number;
   readonly providerPackagesLoaded: number;
   readonly alreadyCanonical: number;
+  readonly canonicalSupports: number;
   readonly repairable: number;
   readonly reshaped: number;
   readonly repaired: number;
@@ -374,6 +376,7 @@ export function buildHistoricalSplitRepairComponents(
         .map((candidate) => candidate.providerPackage.providerShipmentId)
         .join(","),
       packages: Object.freeze(componentPackages),
+      canonicalSupports: Object.freeze([]),
     }));
   }
   return Object.freeze(components);
@@ -686,6 +689,13 @@ export async function runHistoricalShipStationSplitRepair(
     (count, component) => count + component.packages.length,
     0,
   );
+  const canonicalSupports = new Set(
+    inspection.repairableComponents.flatMap((component) =>
+      (component.canonicalSupports ?? []).map(
+        (support) => support.packagePlan.providerPackage.providerShipmentId,
+      )
+    ),
+  ).size;
   return Object.freeze({
     mode: flags.mode,
     runId,
@@ -693,6 +703,7 @@ export async function runHistoricalShipStationSplitRepair(
     providerLookupsProcessed,
     providerPackagesLoaded,
     alreadyCanonical: inspection.alreadyCanonical.length,
+    canonicalSupports,
     repairable,
     reshaped,
     repaired,
