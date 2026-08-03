@@ -1,8 +1,11 @@
 import * as React from "react";
-import { createElement } from "react";
+import { createElement, isValidElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { CoverageCell } from "../pricing-programs/ProgramDetail";
+import {
+  AddDestinationGroupButton,
+  CoverageCell,
+} from "../pricing-programs/ProgramDetail";
 import type {
   ProgramDestinationGroup,
   ProgramOptionState,
@@ -127,5 +130,83 @@ describe("pricing program coverage cell", () => {
     expect(html).toContain("Not configured");
     expect(html).toContain("Set up rates");
     expect(html).not.toContain("View live revision");
+  });
+});
+
+describe("add destination group", () => {
+  function clickAddDestinationGroup(
+    option: ProgramOptionState,
+    callbacks: {
+      onContinueDraft: ReturnType<typeof vi.fn>;
+      onRequestCreateRevision: ReturnType<typeof vi.fn>;
+      onStartRates: ReturnType<typeof vi.fn>;
+    },
+  ): void {
+    const button = AddDestinationGroupButton({
+      options: [option],
+      ...callbacks,
+    });
+    if (!isValidElement<{ onClick: () => void }>(button)) {
+      throw new Error("Expected Add destination group button to render.");
+    }
+    button.props.onClick();
+  }
+
+  it("requests confirmation before cloning an active revision", () => {
+    const active = rateTable(101, "active");
+    const callbacks = {
+      onContinueDraft: vi.fn(),
+      onRequestCreateRevision: vi.fn(),
+      onStartRates: vi.fn(),
+    };
+
+    clickAddDestinationGroup(
+      { serviceLevel, active, draft: null, history: [active] },
+      callbacks,
+    );
+
+    expect(callbacks.onRequestCreateRevision).toHaveBeenCalledOnce();
+    expect(callbacks.onRequestCreateRevision).toHaveBeenCalledWith(
+      active.id,
+      serviceLevel.displayName,
+    );
+    expect(callbacks.onContinueDraft).not.toHaveBeenCalled();
+    expect(callbacks.onStartRates).not.toHaveBeenCalled();
+  });
+
+  it("opens an existing draft without requesting another revision", () => {
+    const active = rateTable(101, "active");
+    const draft = rateTable(102, "draft");
+    const callbacks = {
+      onContinueDraft: vi.fn(),
+      onRequestCreateRevision: vi.fn(),
+      onStartRates: vi.fn(),
+    };
+
+    clickAddDestinationGroup(
+      { serviceLevel, active, draft, history: [draft, active] },
+      callbacks,
+    );
+
+    expect(callbacks.onContinueDraft).toHaveBeenCalledWith(draft.id);
+    expect(callbacks.onRequestCreateRevision).not.toHaveBeenCalled();
+    expect(callbacks.onStartRates).not.toHaveBeenCalled();
+  });
+
+  it("starts unsaved setup when no revision exists", () => {
+    const callbacks = {
+      onContinueDraft: vi.fn(),
+      onRequestCreateRevision: vi.fn(),
+      onStartRates: vi.fn(),
+    };
+
+    clickAddDestinationGroup(
+      { serviceLevel, active: null, draft: null, history: [] },
+      callbacks,
+    );
+
+    expect(callbacks.onStartRates).toHaveBeenCalledWith(serviceLevel.code);
+    expect(callbacks.onContinueDraft).not.toHaveBeenCalled();
+    expect(callbacks.onRequestCreateRevision).not.toHaveBeenCalled();
   });
 });
