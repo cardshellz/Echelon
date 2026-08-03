@@ -1,5 +1,6 @@
 import { db } from "../../../server/db";
 import { sql } from "drizzle-orm";
+import { enqueueShipStationShipmentPushRetry } from "./webhook-retry.worker";
 
 interface ShipStationQueueOrder {
   orderId?: number | null;
@@ -148,6 +149,33 @@ function isCanonicalShipStationOrder(
     && incomingOrderId === shipStationOrderId;
 }
 
+async function enqueueMissingShipStationLinkRecovery(
+  order: ShipStationQueueOrder,
+  shipmentId: number,
+  shipStationOrderId: number | null,
+): Promise<boolean> {
+  if (shipStationOrderId !== null) {
+    return false;
+  }
+
+  const observedOrderId = Number(order.orderId);
+  if (!Number.isSafeInteger(observedOrderId) || observedOrderId <= 0) {
+    return false;
+  }
+
+  await enqueueShipStationShipmentPushRetry(
+    db,
+    shipmentId,
+    `sweeper observed unlinked ShipStation order ${observedOrderId}`,
+    { allowExhaustedRecovery: true },
+  );
+  console.warn(
+    `[ShipStation Sweeper] Queued exact-identity recovery for WMS shipment ${shipmentId}; ` +
+      `ShipStation order ${observedOrderId} has key ${String(order.orderKey ?? "")}.`,
+  );
+  return true;
+}
+
 async function clearResolvedQueueReviewFlags(
   activeCanonicalShipmentIds: Set<number>,
 ): Promise<void> {
@@ -266,6 +294,13 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
         if (wmsShipmentId) {
           const finality = await getWmsShipmentFinality(wmsShipmentId);
           if (!isCanonicalShipStationOrder(order, finality.shipStationOrderId)) {
+            if (await enqueueMissingShipStationLinkRecovery(
+              order,
+              wmsShipmentId,
+              finality.shipStationOrderId,
+            )) {
+              continue;
+            }
             console.log(
               `[ShipStation Sweeper] Ignored additional SS order ${order.orderId} ` +
                 `for WMS shipment ${wmsShipmentId}; canonical SS order is ` +
@@ -370,6 +405,13 @@ async function flagAwaitingPaymentOrdersForReview(
       if (wmsShipmentId) {
         const finality = await getWmsShipmentFinality(wmsShipmentId);
         if (!isCanonicalShipStationOrder(order, finality.shipStationOrderId)) {
+          if (await enqueueMissingShipStationLinkRecovery(
+            order,
+            wmsShipmentId,
+            finality.shipStationOrderId,
+          )) {
+            continue;
+          }
           console.log(
             `[ShipStation Sweeper] Ignored additional awaiting_payment SS order ` +
               `${order.orderId} for WMS shipment ${wmsShipmentId}; canonical SS order is ` +

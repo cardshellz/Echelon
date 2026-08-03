@@ -7,9 +7,18 @@ import {
   vi,
 } from "vitest";
 
-const mockDb = vi.hoisted(() => ({
-  execute: vi.fn(),
-}));
+const mockDb = vi.hoisted(() => {
+  const insertedValues: any[] = [];
+  return {
+    execute: vi.fn(),
+    insert: vi.fn(() => ({
+      values: vi.fn(async (values: any) => {
+        insertedValues.push(values);
+      }),
+    })),
+    insertedValues,
+  };
+});
 
 vi.mock("../../../../db", () => ({
   db: mockDb,
@@ -40,6 +49,8 @@ function expectNoShipStationMutation(fetchMock: ReturnType<typeof vi.fn>) {
 describe("sweepShipStationQueue", () => {
   beforeEach(() => {
     mockDb.execute.mockReset();
+    mockDb.insert.mockClear();
+    mockDb.insertedValues.splice(0);
   });
 
   afterEach(() => {
@@ -196,6 +207,56 @@ describe("sweepShipStationQueue", () => {
     expect(eventSql).toMatch(/WHERE NOT EXISTS/);
   });
 
+  it("queues exact-identity recovery when ShipStation exists but local linkage is missing", async () => {
+    mockDb.execute
+      .mockResolvedValueOnce({
+        rows: [{
+          shipment_status: "planned",
+          warehouse_status: "ready",
+          shipstation_order_id: null,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          page: 1,
+          pages: 1,
+          orders: [{
+            orderId: 770729188,
+            orderNumber: "#61191",
+            orderKey: "echelon-wms-shp-14866",
+            orderStatus: "awaiting_shipment",
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ page: 1, pages: 1, orders: [] }),
+      });
+    globalThis.fetch = fetchMock as any;
+
+    await sweepShipStationQueue("api-key", "api-secret");
+
+    expect(mockDb.insertedValues).toContainEqual(
+      expect.objectContaining({
+        provider: "internal",
+        topic: "shipstation_shipment_push",
+        payload: { shipmentId: 14866 },
+        status: "pending",
+      }),
+    );
+    const allSql = mockDb.execute.mock.calls
+      .map(([query]) => sqlText(query))
+      .join("\n");
+    expect(allSql).not.toMatch(/SET requires_review = true/);
+    expectNoShipStationMutation(fetchMock);
+  });
   it("does not flag a replacement order that merely reuses the WMS order key", async () => {
     mockDb.execute
       .mockResolvedValueOnce({

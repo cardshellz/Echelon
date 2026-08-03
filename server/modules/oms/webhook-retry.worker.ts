@@ -506,6 +506,7 @@ export async function enqueueShipStationShipmentPushRetry(
   dbArg: any,
   shipmentId: number,
   cause?: unknown,
+  options: { allowExhaustedRecovery?: boolean } = {},
 ): Promise<void> {
   if (
     typeof shipmentId !== "number" ||
@@ -545,11 +546,18 @@ export async function enqueueShipStationShipmentPushRetry(
   // The operator must fix the data + clear requires_review to re-enter the pipeline.
   if (typeof dbArg?.execute === "function") {
     const flagged = await dbArg.execute(sql`
-      SELECT 1 FROM wms.outbound_shipments
+      SELECT review_reason FROM wms.outbound_shipments
       WHERE id = ${shipmentId} AND requires_review = true
       LIMIT 1
     `);
-    if ((flagged?.rows?.length ?? 0) > 0) {
+    const flaggedRow = flagged?.rows?.[0];
+    if (
+      flaggedRow &&
+      !(
+        options.allowExhaustedRecovery === true &&
+        flaggedRow.review_reason === "shipstation_push_retry_exhausted"
+      )
+    ) {
       return;
     }
   }
@@ -1071,6 +1079,53 @@ export async function dispatchWmsShipmentCreateRetry(
   }
 }
 
+async function flagShipStationPushRetryExhausted(
+  dbArg: any,
+  shipmentId: number,
+): Promise<void> {
+  await dbArg.execute(sql`
+    UPDATE wms.outbound_shipments
+    SET requires_review = true,
+        review_reason = CASE
+          WHEN review_reason IS NULL
+            OR review_reason = 'inventory_deduction_missing_item_data'
+          THEN 'shipstation_push_retry_exhausted'
+          ELSE review_reason
+        END,
+        updated_at = NOW()
+    WHERE id = ${shipmentId}
+      AND status NOT IN ('shipped', 'cancelled', 'voided')
+  `);
+}
+
+async function recordShipStationPushRetryFailure(
+  dbArg: any,
+  item: RetryDispatchItem,
+  shipmentId: number,
+  reason: string,
+): Promise<{ attempts: number; status: "dead" | "pending"; nextRetryAt: Date }> {
+  const record = async (writer: any) => {
+    const result = await recordRetryFailure(
+      writer,
+      item,
+      reason,
+      { topic: "shipstation_shipment_push", shipmentId },
+    );
+    if (result.status === "dead") {
+      await flagShipStationPushRetryExhausted(writer, shipmentId);
+    }
+    return result;
+  };
+
+  if (
+    item.attempts + 1 >= MAX_ATTEMPTS &&
+    typeof dbArg?.transaction === "function"
+  ) {
+    return dbArg.transaction(record);
+  }
+  return record(dbArg);
+}
+
 export async function dispatchShipStationShipmentPushRetry(
   dbArg: any,
   item: RetryDispatchItem,
@@ -1131,11 +1186,11 @@ export async function dispatchShipStationShipmentPushRetry(
       );
       return "dead";
     }
-    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+    const { status, attempts, nextRetryAt } = await recordShipStationPushRetryFailure(
       dbArg,
       item,
+      shipmentId,
       err?.message || String(err),
-      { topic: "shipstation_shipment_push", shipmentId },
     );
     if (status === "dead") {
       console.error(
