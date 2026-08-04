@@ -21,6 +21,7 @@ import {
 import {
   resolveChannelListingPrice,
 } from "../../modules/channels/channel-pricing-resolver";
+import { isVariantSellable } from "./ebay-listing-state-core";
 
 export { applyPricingRule } from "../../modules/channels/channel-pricing-resolver";
 
@@ -244,7 +245,9 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
     offerDelayMs: 200,
   });
 
-  // Build the filter clause for active listings
+  // Build the filter clause for active listings. Do not filter variants by
+  // catalog or eBay listing state here: sold variants must remain in an
+  // existing variation group even when they are no longer sellable.
   const conditions = [
     eq(channelListings.channelId, EBAY_CHANNEL_ID),
     or(
@@ -258,10 +261,10 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
         ),
       ),
     ),
+    eq(products.isActive, true),
     sql`COALESCE(${products.ebayListingExcluded}, false) = false`,
-    sql`COALESCE(${productVariants.ebayListingExcluded}, false) = false`,
     sql`COALESCE(${channelProductOverrides.isListed}, 1) <> 0`,
-    sql`COALESCE(${channelVariantOverrides.isListed}, 1) <> 0`,
+    sql`COALESCE(${ebayCategoryMappings.listingEnabled}, true) = true`,
   ];
 
   if (filter?.productIds && filter.productIds.length > 0) {
@@ -288,6 +291,9 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
     variant_name: productVariants.name,
     price_cents: productVariants.priceCents,
     variant_weight_grams: productVariants.weightGrams,
+    variant_is_active: productVariants.isActive,
+    variant_excluded: productVariants.ebayListingExcluded,
+    variant_override_is_listed: channelVariantOverrides.isListed,
     variant_weight_override: channelVariantOverrides.weightOverride,
     option1_name: productVariants.option1Name,
     option1_value: productVariants.option1Value,
@@ -299,6 +305,10 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
     product_sku: products.sku,
     product_description: products.description,
     product_brand: products.brand,
+    product_is_active: products.isActive,
+    product_excluded: products.ebayListingExcluded,
+    product_override_is_listed: channelProductOverrides.isListed,
+    type_listing_enabled: ebayCategoryMappings.listingEnabled,
     product_type: products.productType,
     ebay_browse_category_id: products.ebayBrowseCategoryId,
     product_fulfillment_override: products.ebayFulfillmentPolicyOverride,
@@ -320,6 +330,13 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
       and(
         eq(channelVariantOverrides.channelId, channelListings.channelId),
         eq(channelVariantOverrides.productVariantId, productVariants.id),
+      ),
+    )
+    .leftJoin(
+      ebayCategoryMappings,
+      and(
+        eq(ebayCategoryMappings.channelId, channelListings.channelId),
+        eq(ebayCategoryMappings.productTypeSlug, products.productType),
       ),
     )
     .where(and(...conditions))
@@ -461,7 +478,19 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
         ebay_fulfillment_policy_override: variant.variant_fulfillment_override,
         ebay_return_policy_override: variant.variant_return_override,
         ebay_payment_policy_override: variant.variant_payment_override,
+        isListed: isVariantSellable({
+          productActive: product.product_is_active,
+          variantActive: variant.variant_is_active,
+          productExcluded: product.product_excluded === true,
+          productOverrideIsListed: product.product_override_is_listed,
+          typeListingEnabled: product.type_listing_enabled,
+          variantExcluded: variant.variant_excluded === true,
+          variantOverrideIsListed: variant.variant_override_is_listed,
+        }),
       }));
+      const sellableVariantIds = new Set(
+        routeVariants.filter((variant) => variant.isListed).map((variant) => variant.id),
+      );
 
       const variantPrices: Map<number, number> = new Map();
       const variantChangeState = new Map<number, { priceChanged: boolean; qtyChanged: boolean }>();
@@ -473,10 +502,13 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
           variant.variant_id,
           variant.price_cents,
         );
-        const newQty = Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0);
+        const isSellable = sellableVariantIds.has(variant.variant_id);
+        const newQty = isSellable
+          ? Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0)
+          : 0;
         variantPrices.set(variant.variant_id, newPriceCents);
         variantChangeState.set(variant.variant_id, {
-          priceChanged: newPriceCents !== (variant.last_synced_price || 0),
+          priceChanged: isSellable && newPriceCents !== (variant.last_synced_price || 0),
           qtyChanged: newQty !== (variant.last_synced_qty || 0),
         });
       }
@@ -496,6 +528,7 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
         effectivePolicies,
         storeCategoryNames,
         merchantLocationKey,
+        retainUnlistedVariantsInGroup: true,
       });
 
       const syncResult = await listingConnector.syncExistingListing({
@@ -516,7 +549,9 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
         const sku = variant.variant_sku;
         const changes = variantChangeState.get(variant.variant_id) ?? { priceChanged: false, qtyChanged: false };
         const newPriceCents = variantPrices.get(variant.variant_id) ?? variant.price_cents ?? 0;
-        const newQty = Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0);
+        const newQty = sellableVariantIds.has(variant.variant_id)
+          ? Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0)
+          : 0;
         const policyChanged = policyChangedVariantIds.has(variant.variant_id);
 
         if (missingOfferVariantIds.has(variant.variant_id)) {

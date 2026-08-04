@@ -12,7 +12,9 @@ import { createEbayRouteListingLifecycleClient } from "./ebay-listing-connector-
 export {
   isProductEffectivelyListed,
   isVariantEffectivelyListed,
+  isVariantSellable,
   type EffectiveListingInput,
+  type VariantSellabilityInput,
 } from "./ebay-listing-state-core";
 
 type DbLike = typeof db;
