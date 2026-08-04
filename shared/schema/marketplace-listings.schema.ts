@@ -92,6 +92,16 @@ export const marketplaceListingActorTypeEnum = [
 export type MarketplaceListingActorType =
   (typeof marketplaceListingActorTypeEnum)[number];
 
+export const marketplaceProviderIdentityRoleEnum = [
+  "publication_key",
+  "listing_id",
+  "variant_id",
+  "offer_id",
+  "inventory_item_id",
+] as const;
+export type MarketplaceProviderIdentityRole =
+  (typeof marketplaceProviderIdentityRoleEnum)[number];
+
 export const marketplaceListingScopes = marketplaceSchema.table(
   "listing_scopes",
   {
@@ -452,6 +462,293 @@ export const marketplaceListingPublicationMembers = marketplaceSchema.table(
     check(
       "listing_publication_members_time_chk",
       sql`${table.updatedAt} >= ${table.createdAt}`,
+    ),
+  ],
+);
+
+export const marketplaceProviderAccounts = marketplaceSchema.table(
+  "provider_accounts",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    ownerKind: varchar("owner_kind", { length: 20 }).notNull(),
+    channelId: integer("channel_id").references(() => channels.id, {
+      onDelete: "restrict",
+    }),
+    storeConnectionId: integer("store_connection_id").references(
+      () => dropshipStoreConnections.id,
+      { onDelete: "restrict" },
+    ),
+    provider: varchar("provider", { length: 40 }).notNull(),
+    accountNamespace: varchar("account_namespace", { length: 100 }).notNull(),
+    externalAccountId: varchar("external_account_id", {
+      length: 255,
+    }).notNull(),
+    identityScheme: varchar("identity_scheme", { length: 50 }).notNull(),
+    externalDisplayNameSnapshot: varchar("external_display_name_snapshot", {
+      length: 255,
+    }),
+    evidenceHash: varchar("evidence_hash", { length: 64 }).notNull(),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }).notNull(),
+    verifiedByType: varchar("verified_by_type", { length: 20 }).notNull(),
+    verifiedById: varchar("verified_by_id", { length: 255 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    unique("provider_accounts_global_identity_uq").on(
+      table.provider,
+      table.accountNamespace,
+      table.externalAccountId,
+    ),
+    uniqueIndex("provider_accounts_channel_owner_uidx")
+      .on(table.channelId, table.provider, table.accountNamespace)
+      .where(sql`${table.channelId} IS NOT NULL`),
+    uniqueIndex("provider_accounts_dropship_owner_uidx")
+      .on(table.storeConnectionId, table.provider, table.accountNamespace)
+      .where(sql`${table.storeConnectionId} IS NOT NULL`),
+    check(
+      "provider_accounts_owner_chk",
+      sql`(
+          ${table.ownerKind} = 'channel'
+          AND ${table.channelId} IS NOT NULL
+          AND ${table.storeConnectionId} IS NULL
+        ) OR (
+          ${table.ownerKind} = 'dropship'
+          AND ${table.channelId} IS NULL
+          AND ${table.storeConnectionId} IS NOT NULL
+        )`,
+    ),
+    check(
+      "provider_accounts_provider_chk",
+      sql`${table.provider} = lower(btrim(${table.provider}))
+        AND ${table.provider} ~ '^[a-z][a-z0-9_-]{0,39}$'`,
+    ),
+    check(
+      "provider_accounts_identity_chk",
+      sql`${table.accountNamespace} = btrim(${table.accountNamespace})
+        AND ${table.accountNamespace} <> ''
+        AND ${table.externalAccountId} = btrim(${table.externalAccountId})
+        AND ${table.externalAccountId} <> ''
+        AND ${table.identityScheme} = 'provider_user_id'`,
+    ),
+    check(
+      "provider_accounts_evidence_chk",
+      sql`${table.evidenceHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "provider_accounts_actor_chk",
+      sql`${table.verifiedByType} IN ('user','service','system')
+        AND ${table.verifiedById} = btrim(${table.verifiedById})
+        AND ${table.verifiedById} <> ''`,
+    ),
+  ],
+);
+
+export const marketplaceListingScopeProviderAccounts = marketplaceSchema.table(
+  "listing_scope_provider_accounts",
+  {
+    scopeId: bigint("scope_id", { mode: "number" })
+      .primaryKey()
+      .references(() => marketplaceListingScopes.id, { onDelete: "restrict" }),
+    providerAccountId: bigint("provider_account_id", { mode: "number" })
+      .notNull()
+      .references(() => marketplaceProviderAccounts.id, {
+        onDelete: "restrict",
+      }),
+    boundByType: varchar("bound_by_type", { length: 20 }).notNull(),
+    boundById: varchar("bound_by_id", { length: 255 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    unique("listing_scope_provider_accounts_scope_account_uq").on(
+      table.scopeId,
+      table.providerAccountId,
+    ),
+    index("listing_scope_provider_accounts_account_idx").on(
+      table.providerAccountId,
+      table.scopeId,
+    ),
+    check(
+      "listing_scope_provider_accounts_actor_chk",
+      sql`${table.boundByType} IN ('user','service','system')
+        AND ${table.boundById} = btrim(${table.boundById})
+        AND ${table.boundById} <> ''`,
+    ),
+  ],
+);
+
+export const marketplaceProviderIdentityClaims = marketplaceSchema.table(
+  "provider_identity_claims",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    providerAccountId: bigint("provider_account_id", { mode: "number" })
+      .notNull()
+      .references(() => marketplaceProviderAccounts.id, {
+        onDelete: "restrict",
+      }),
+    scopeId: bigint("scope_id", { mode: "number" }).notNull(),
+    publicationId: bigint("publication_id", { mode: "number" }).notNull(),
+    memberId: bigint("member_id", { mode: "number" }).references(
+      () => marketplaceListingPublicationMembers.id,
+      { onDelete: "restrict" },
+    ),
+    identityRole: varchar("identity_role", { length: 30 }).notNull(),
+    identityNamespace: varchar("identity_namespace", { length: 160 }).notNull(),
+    externalId: varchar("external_id", { length: 255 }).notNull(),
+    createdByType: varchar("created_by_type", { length: 20 }).notNull(),
+    createdById: varchar("created_by_id", { length: 255 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.scopeId, table.providerAccountId],
+      foreignColumns: [
+        marketplaceListingScopeProviderAccounts.scopeId,
+        marketplaceListingScopeProviderAccounts.providerAccountId,
+      ],
+      name: "provider_identity_claims_scope_account_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.publicationId, table.scopeId],
+      foreignColumns: [
+        marketplaceListingPublications.id,
+        marketplaceListingPublications.scopeId,
+      ],
+      name: "provider_identity_claims_publication_scope_fk",
+    }).onDelete("restrict"),
+    unique("provider_identity_claims_account_identity_uq").on(
+      table.providerAccountId,
+      table.identityNamespace,
+      table.externalId,
+    ),
+    uniqueIndex("provider_identity_claims_publication_role_uidx")
+      .on(table.providerAccountId, table.publicationId, table.identityRole)
+      .where(sql`${table.memberId} IS NULL`),
+    uniqueIndex("provider_identity_claims_member_role_uidx")
+      .on(table.providerAccountId, table.memberId, table.identityRole)
+      .where(sql`${table.memberId} IS NOT NULL`),
+    index("provider_identity_claims_publication_idx").on(
+      table.publicationId,
+      table.id,
+    ),
+    check(
+      "provider_identity_claims_role_chk",
+      sql`${table.identityRole} IN (
+        'publication_key','listing_id','variant_id','offer_id','inventory_item_id'
+      )`,
+    ),
+    check(
+      "provider_identity_claims_subject_chk",
+      sql`(
+          ${table.identityRole} IN ('publication_key','listing_id')
+          AND ${table.memberId} IS NULL
+        ) OR (
+          ${table.identityRole} IN ('variant_id','offer_id','inventory_item_id')
+          AND ${table.memberId} IS NOT NULL
+        )`,
+    ),
+    check(
+      "provider_identity_claims_identity_chk",
+      sql`${table.identityNamespace} = btrim(${table.identityNamespace})
+        AND ${table.identityNamespace} <> ''
+        AND ${table.externalId} = btrim(${table.externalId})
+        AND ${table.externalId} <> ''`,
+    ),
+    check(
+      "provider_identity_claims_actor_chk",
+      sql`${table.createdByType} IN ('user','service','system')
+        AND ${table.createdById} = btrim(${table.createdById})
+        AND ${table.createdById} <> ''`,
+    ),
+  ],
+);
+
+export const marketplaceListingRegistrations = marketplaceSchema.table(
+  "listing_registrations",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    scopeId: bigint("scope_id", { mode: "number" }).notNull(),
+    providerAccountId: bigint("provider_account_id", {
+      mode: "number",
+    }).notNull(),
+    publicationId: bigint("publication_id", { mode: "number" }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    observationHash: varchar("observation_hash", { length: 64 }).notNull(),
+    desiredStateHash: varchar("desired_state_hash", { length: 64 }).notNull(),
+    evidence: jsonb("evidence").notNull().default({}),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+    registeredAt: timestamp("registered_at", { withTimezone: true }).notNull(),
+    registeredByType: varchar("registered_by_type", { length: 20 }).notNull(),
+    registeredById: varchar("registered_by_id", { length: 255 }).notNull(),
+    correlationId: varchar("correlation_id", { length: 100 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.scopeId, table.providerAccountId],
+      foreignColumns: [
+        marketplaceListingScopeProviderAccounts.scopeId,
+        marketplaceListingScopeProviderAccounts.providerAccountId,
+      ],
+      name: "listing_registrations_scope_account_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.publicationId, table.scopeId],
+      foreignColumns: [
+        marketplaceListingPublications.id,
+        marketplaceListingPublications.scopeId,
+      ],
+      name: "listing_registrations_publication_scope_fk",
+    }).onDelete("restrict"),
+    unique("listing_registrations_scope_uq").on(table.scopeId),
+    unique("listing_registrations_publication_uq").on(table.publicationId),
+    unique("listing_registrations_scope_idem_uq").on(
+      table.scopeId,
+      table.idempotencyKey,
+    ),
+    index("listing_registrations_account_idx").on(
+      table.providerAccountId,
+      table.createdAt,
+    ),
+    check(
+      "listing_registrations_idempotency_chk",
+      sql`${table.idempotencyKey} = btrim(${table.idempotencyKey})
+        AND ${table.idempotencyKey} <> ''`,
+    ),
+    check(
+      "listing_registrations_hash_chk",
+      sql`${table.requestHash} ~ '^[0-9a-f]{64}$'
+        AND ${table.observationHash} ~ '^[0-9a-f]{64}$'
+        AND ${table.desiredStateHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "listing_registrations_evidence_chk",
+      sql`jsonb_typeof(${table.evidence}) = 'object'`,
+    ),
+    check(
+      "listing_registrations_actor_chk",
+      sql`${table.registeredByType} IN ('user','service','system')
+        AND ${table.registeredById} = btrim(${table.registeredById})
+        AND ${table.registeredById} <> ''`,
+    ),
+    check(
+      "listing_registrations_time_chk",
+      sql`${table.registeredAt} >= ${table.observedAt}
+        AND ${table.createdAt} >= ${table.registeredAt}`,
     ),
   ],
 );
@@ -947,6 +1244,19 @@ export const insertMarketplaceListingPublicationMemberSchema =
   createInsertSchema(marketplaceListingPublicationMembers).omit(
     generatedColumns,
   );
+export const insertMarketplaceProviderAccountSchema = createInsertSchema(
+  marketplaceProviderAccounts,
+).omit({ id: true, createdAt: true });
+export const insertMarketplaceListingScopeProviderAccountSchema =
+  createInsertSchema(marketplaceListingScopeProviderAccounts).omit(
+    createdAtColumn,
+  );
+export const insertMarketplaceProviderIdentityClaimSchema = createInsertSchema(
+  marketplaceProviderIdentityClaims,
+).omit({ id: true, createdAt: true });
+export const insertMarketplaceListingRegistrationSchema = createInsertSchema(
+  marketplaceListingRegistrations,
+).omit({ id: true, createdAt: true });
 export const insertMarketplaceListingReplacementOperationSchema =
   createInsertSchema(marketplaceListingReplacementOperations).omit(
     generatedColumns,
@@ -969,6 +1279,14 @@ export type MarketplaceListingPublication =
   typeof marketplaceListingPublications.$inferSelect;
 export type MarketplaceListingPublicationMember =
   typeof marketplaceListingPublicationMembers.$inferSelect;
+export type MarketplaceProviderAccount =
+  typeof marketplaceProviderAccounts.$inferSelect;
+export type MarketplaceListingScopeProviderAccount =
+  typeof marketplaceListingScopeProviderAccounts.$inferSelect;
+export type MarketplaceProviderIdentityClaim =
+  typeof marketplaceProviderIdentityClaims.$inferSelect;
+export type MarketplaceListingRegistration =
+  typeof marketplaceListingRegistrations.$inferSelect;
 export type MarketplaceListingReplacementOperation =
   typeof marketplaceListingReplacementOperations.$inferSelect;
 export type MarketplaceListingReplacementStep =
@@ -986,6 +1304,14 @@ export type NewMarketplaceListingPublication =
   typeof marketplaceListingPublications.$inferInsert;
 export type NewMarketplaceListingPublicationMember =
   typeof marketplaceListingPublicationMembers.$inferInsert;
+export type NewMarketplaceProviderAccount =
+  typeof marketplaceProviderAccounts.$inferInsert;
+export type NewMarketplaceListingScopeProviderAccount =
+  typeof marketplaceListingScopeProviderAccounts.$inferInsert;
+export type NewMarketplaceProviderIdentityClaim =
+  typeof marketplaceProviderIdentityClaims.$inferInsert;
+export type NewMarketplaceListingRegistration =
+  typeof marketplaceListingRegistrations.$inferInsert;
 export type NewMarketplaceListingReplacementOperation =
   typeof marketplaceListingReplacementOperations.$inferInsert;
 export type NewMarketplaceListingReplacementStep =

@@ -81,7 +81,11 @@ export class MarketplaceListingRegistrationService {
 
     const accountClaim = await this.claimProviderAccount(plan);
     const registeredAt = this.clock.now();
-    assertValidRegistrationTime(registeredAt, plan.observedAt);
+    assertValidRegistrationTime(
+      registeredAt,
+      plan.observedAt,
+      accountClaim.verifiedAt,
+    );
     try {
       const result = listingRegistrationResultSchema.parse(
         await this.repository.registerOrReplay({
@@ -114,6 +118,7 @@ export class MarketplaceListingRegistrationService {
       const observationValue = await this.observer.observeExistingPublication({
         owner: input.owner,
         locator: input.locator,
+        memberCandidates: snapshot.memberCandidates,
       });
       const observation =
         marketplaceObservedListingPublicationSchema.parse(observationValue);
@@ -243,11 +248,15 @@ function assertResultMatchesPlan(
 function assertValidRegistrationTime(
   registeredAt: Date,
   observedAt: Date,
+  accountVerifiedAt: Date,
 ): void {
   if (
     !(registeredAt instanceof Date) ||
     Number.isNaN(registeredAt.getTime()) ||
-    registeredAt.getTime() < observedAt.getTime()
+    !(accountVerifiedAt instanceof Date) ||
+    Number.isNaN(accountVerifiedAt.getTime()) ||
+    accountVerifiedAt.getTime() < observedAt.getTime() ||
+    registeredAt.getTime() < accountVerifiedAt.getTime()
   ) {
     throw new MarketplaceListingRegistrationError(
       "MARKETPLACE_LISTING_REGISTRATION_CLOCK_INVALID",

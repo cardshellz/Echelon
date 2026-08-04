@@ -1,6 +1,7 @@
 import type {
   ListingRegistrationLocator,
   ListingRegistrationPlan,
+  ListingRegistrationVariantCandidate,
   MarketplaceProviderAccountObservation,
 } from "../domain/listing-registration-plan";
 import type {
@@ -28,6 +29,7 @@ export interface MarketplaceListingRegistrationOwnerReader {
 export interface ObserveMarketplaceListingInput {
   readonly owner: ListingOwnerRef;
   readonly locator: ListingRegistrationLocator;
+  readonly memberCandidates: readonly ListingRegistrationVariantCandidate[];
 }
 
 /** Read-only provider boundary. Preview and confirmation both use this port. */

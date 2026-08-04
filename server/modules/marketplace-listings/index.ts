@@ -10,3 +10,4 @@ export * from "./domain/lifecycle";
 export * from "./domain/listing-registration-plan";
 export * from "./domain/listing-replacement-plan";
 export * from "./domain/registration-errors";
+export * from "./infrastructure/pg-listing-registration.repository";
