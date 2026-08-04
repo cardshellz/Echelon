@@ -8,6 +8,7 @@ import {
   timestamp,
   uniqueIndex,
   varchar,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -292,6 +293,8 @@ export const physicalShipmentItems = wmsSchema.table("physical_shipment_items", 
   legacyWmsShipmentItemId: integer("legacy_wms_shipment_item_id").references(() => outboundShipmentItems.id, { onDelete: "restrict" }),
   shipmentItemPurpose: varchar("shipment_item_purpose", { length: 30 }).notNull().default("customer_fulfillment"),
   replacementForOrderItemId: integer("replacement_for_order_item_id").references(() => orderItems.id, { onDelete: "restrict" }),
+  correctionForPhysicalShipmentItemId: bigint("correction_for_physical_shipment_item_id", { mode: "number" })
+    .references((): AnyPgColumn => physicalShipmentItems.id, { onDelete: "restrict" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
   sku: varchar("sku", { length: 100 }).notNull(),
   quantityShipped: integer("quantity_shipped").notNull(),
@@ -307,6 +310,9 @@ export const physicalShipmentItems = wmsSchema.table("physical_shipment_items", 
   index("idx_physical_shipment_items_replacement_line")
     .on(table.replacementForOrderItemId)
     .where(sql`${table.replacementForOrderItemId} IS NOT NULL`),
+  index("idx_physical_shipment_items_correction_source")
+    .on(table.correctionForPhysicalShipmentItemId)
+    .where(sql`${table.correctionForPhysicalShipmentItemId} IS NOT NULL`),
 ]);
 
 export const shippingProviderLabels = wmsSchema.table("shipping_provider_labels", {

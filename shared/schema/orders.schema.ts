@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, pgSchema } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, pgSchema, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -534,6 +534,11 @@ export const outboundShipmentItems = wmsSchema.table("outbound_shipment_items", 
   // Replacement lineage deliberately does not use order_item_id, because that
   // column feeds customer-fulfillment projections throughout OMS/WMS.
   replacementForOrderItemId: integer("replacement_for_order_item_id").references(() => orderItems.id, { onDelete: "restrict" }),
+  // Omission corrections physically send an item that the original package
+  // already consumed from inventory and fulfilled. Exact source-line lineage
+  // prevents the corrective package from moving either authority twice.
+  correctionForShipmentItemId: integer("correction_for_shipment_item_id")
+    .references((): AnyPgColumn => outboundShipmentItems.id, { onDelete: "restrict" }),
   // Physical lines can fulfill an order, replace an ordered line, or record a
   // different/free concession SKU that was never part of the customer order.
   shipmentItemPurpose: varchar("shipment_item_purpose", { length: 30 }).notNull().default("customer_fulfillment"),

@@ -18,6 +18,10 @@ const REPLACEMENT_MIGRATION_SOURCE = readFileSync(
   resolve(__dirname, "../../../../../migrations/0587_shipment_replacement_authority.sql"),
   "utf8",
 );
+const OMISSION_CORRECTION_MIGRATION_SOURCE = readFileSync(
+  resolve(__dirname, "../../../../../migrations/183_omission_correction_shipment_item_authority.sql"),
+  "utf8",
+);
 const SHIPMENT_ROLLUP_SOURCE = readFileSync(
   resolve(__dirname, "../../../orders/shipment-rollup.ts"),
   "utf8",
@@ -121,6 +125,34 @@ describe("Control Tower flow action ownership", () => {
     expect(SHIPMENT_ROLLUP_SOURCE).toContain(
       "COALESCE(shipment_purpose, 'customer_fulfillment') = 'customer_fulfillment'",
     );
+  });
+  it("classifies an original packing omission without repeating inventory or fulfillment authority", () => {
+    expect(FLOW_MONITOR_SOURCE).toContain('value="packing_omission"');
+    expect(FLOW_MONITOR_SOURCE).toContain("Item was missing from original box");
+    expect(FLOW_MONITOR_SOURCE).toContain("Missing from original box - already deducted");
+    expect(FLOW_MONITOR_SOURCE).toContain('lineDisposition: manualLineDispositions');
+    expect(FLOW_MONITOR_SOURCE).toContain('lineDisposition: providerLineDispositions');
+    expect(FLOW_MONITOR_SOURCE).toContain('value === "packing_omission"');
+
+    expect(OMISSION_CORRECTION_MIGRATION_SOURCE).toContain(
+      "correction_for_shipment_item_id",
+    );
+    expect(OMISSION_CORRECTION_MIGRATION_SOURCE).toContain(
+      "correction_for_physical_shipment_item_id",
+    );
+    expect(OMISSION_CORRECTION_MIGRATION_SOURCE).toContain(
+      "shipment_item_purpose = 'omission_correction'",
+    );
+    expect(OMISSION_CORRECTION_MIGRATION_SOURCE).toContain(
+      "outbound_shipment_items_omission_inventory_proof_chk",
+    );
+    expect(OMISSION_CORRECTION_MIGRATION_SOURCE).toContain(
+      "outbound_shipment_items_omission_source_ambiguity_chk",
+    );
+    expect(OMISSION_CORRECTION_MIGRATION_SOURCE).toContain(
+      "trg_enforce_physical_shipment_item_correction_lineage",
+    );
+    expect(OMISSION_CORRECTION_MIGRATION_SOURCE).toContain("ON DELETE RESTRICT");
   });
   it("supports operator-confirmed mixed replacement contents without discarding provider evidence", () => {
     expect(FLOW_MONITOR_SOURCE).toContain('contentsAuthority: actualContentsMode ? "operator" : "provider"');

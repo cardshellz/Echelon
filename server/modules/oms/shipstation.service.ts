@@ -2322,6 +2322,10 @@ export function createShipStationService(
         ON target_shipment.id = osi.shipment_id
       WHERE osi.shipment_id = ${shipmentId}
         AND osi.qty > 0
+        -- An omission correction points back to inventory already consumed by
+        -- the original customer-fulfillment package. It is physical package
+        -- evidence only and must never post a second inventory movement.
+        AND osi.shipment_item_purpose <> 'omission_correction'
     `);
     const rows = (itemsResult.rows as any[]).map((item) => {
       const pickLoc = item.pick_location_id ?? null;

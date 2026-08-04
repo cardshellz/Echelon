@@ -989,6 +989,66 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(mock.calls.filter((call) => call.tag === "insert")).toHaveLength(0);
   });
 
+  it("records an omission-correction package without a second inventory or fulfillment write", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7006,
+      orderId: 555006,
+      orderKey: "echelon-wms-reship-9006",
+      trackingNumber: "1Z-OMISSION-CORRECTION",
+      shipmentItems: [
+        { lineItemKey: null, sku: "SKU-A", quantity: 1 },
+      ],
+    });
+    const inventoryCore = {
+      recordShipment: vi.fn(async () => undefined),
+    };
+    const mock = makeDb([
+      {
+        rows: [{
+          id: 9006,
+          order_id: 42,
+          source: "shipstation_reship_adopted",
+          status: "shipped",
+          shipment_purpose: "replacement",
+          replaces_shipment_id: 501,
+          replacement_reason: "packing_omission",
+          external_fulfillment_id: "shipstation_shipment:7006",
+          tracking_number: "1Z-OMISSION-CORRECTION",
+        }],
+      },
+      // loadValidatedInventoryShipmentItems excludes omission corrections.
+      { rows: [] },
+      // Clear any stale inventory review marker.
+      { rows: [] },
+      {
+        rows: [{
+          id: 9006,
+          order_id: 42,
+          status: "shipped",
+          tracking_number: "1Z-OMISSION-CORRECTION",
+          carrier: "UPS",
+          service_code: "ups_ground",
+          carrier_cost_cents: 0,
+        }],
+      },
+      { rows: [{ id: 42, warehouse_status: "shipped", completed_at: SHIP_DATE }] },
+      { rows: [{ status: "shipped" }, { status: "shipped" }] },
+      { rows: [] },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
+
+    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
+
+    expect(processed).toBe(1);
+    expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
+    const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
+    expect(sqlText).toContain("osi.shipment_item_purpose <> 'omission_correction'");
+    expect(sqlText).not.toMatch(/UPDATE oms\.oms_orders/);
+    expect(sqlText).not.toMatch(/UPDATE oms\.oms_order_lines/);
+    expect(mock.calls.filter((call) => call.tag === "update")).toHaveLength(0);
+    expect(mock.calls.filter((call) => call.tag === "insert")).toHaveLength(0);
+  });
   it("deducts an off-order concession item without changing order fulfillment", async () => {
     const shipmentPayload = makeShipmentPayload({
       shipmentId: 7005,
