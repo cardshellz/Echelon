@@ -10,6 +10,8 @@ export * from "./dropship-listing-dtos";
 export * from "./dropship-listing-preview-service";
 export * from "./dropship-listing-push-worker-service";
 export * from "./dropship-marketplace-listing-provider";
+export * from "./dropship-marketplace-registration-account-claimer";
+export * from "./dropship-marketplace-registration-owner-reader";
 export * from "./dropship-marketplace-listing-push-provider";
 export * from "./dropship-marketplace-order-cancellation-provider";
 export * from "./dropship-marketplace-tracking-provider";

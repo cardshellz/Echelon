@@ -350,10 +350,19 @@
     "modules/orders",
     "modules/procurement"
   ],
+  "marketplace.channel_listing_scopes": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.dropship_listing_scopes": [
+    "modules/marketplace-listings"
+  ],
   "marketplace.listing_publication_members": [
     "modules/marketplace-listings"
   ],
   "marketplace.listing_publications": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_registrations": [
     "modules/marketplace-listings"
   ],
   "marketplace.listing_replacement_events": [
@@ -363,6 +372,18 @@
     "modules/marketplace-listings"
   ],
   "marketplace.listing_replacement_steps": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_scope_provider_accounts": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_scopes": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.provider_accounts": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.provider_identity_claims": [
     "modules/marketplace-listings"
   ],
   "membership.member_current_membership": [

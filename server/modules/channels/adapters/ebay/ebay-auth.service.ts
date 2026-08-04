@@ -11,19 +11,25 @@
  * We must persist the new refresh token immediately or lose access.
  */
 
-import { eq, and } from "drizzle-orm";
+import { eq, and, isNull, or } from "drizzle-orm";
+import { z } from "zod";
 import { ebayOauthTokens } from "@shared/schema";
+import { persistAuditEvent } from "../../../../infrastructure/auditLogger";
 import type { EbayTokenResponse } from "./ebay-types";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type DrizzleDb = {
+type DrizzleExecutor = {
   select: (...args: any[]) => any;
   insert: (...args: any[]) => any;
   update: (...args: any[]) => any;
   delete: (...args: any[]) => any;
+};
+
+type DrizzleDb = DrizzleExecutor & {
+  transaction?: <T>(callback: (tx: DrizzleExecutor) => Promise<T>) => Promise<T>;
 };
 
 export interface EbayAuthConfig {
@@ -38,6 +44,73 @@ interface TokenRecord {
   accessTokenExpiresAt: Date;
   refreshToken: string;
   refreshTokenExpiresAt: Date | null;
+  externalAccountId: string | null;
+  externalAccountDisplayName: string | null;
+  externalAccountIdentityScheme: string | null;
+  externalAccountVerifiedAt: Date | null;
+}
+
+export interface EbayObservedProviderAccount {
+  readonly externalAccountId: string;
+  readonly externalAccountDisplayName: string | null;
+  readonly externalAccountIdentityScheme: "provider_user_id";
+  readonly externalAccountVerifiedAt: Date;
+}
+
+export interface EbayProviderAccountClaimOutcome {
+  readonly kind: "claimed" | "replay";
+  readonly account: EbayObservedProviderAccount;
+}
+
+export interface EbayProviderAccountClaimAuditContext {
+  readonly idempotencyKey: string;
+  readonly observationHash: string;
+  readonly requestedBy: {
+    readonly type: "user" | "service" | "system";
+    readonly id: string;
+  };
+  readonly correlationId: string | null;
+}
+
+export interface EbayAuthDependencies {
+  readonly fetch?: typeof fetch;
+  readonly now?: () => Date;
+}
+
+export class EbayProviderAccountIdentityConflictError extends Error {
+  readonly code = "EBAY_PROVIDER_ACCOUNT_IDENTITY_CONFLICT";
+
+  constructor(
+    readonly context: {
+      channelId: number;
+      environment: "sandbox" | "production";
+      persistedExternalAccountId: string;
+      observedExternalAccountId: string;
+    },
+  ) {
+    super(
+      `eBay channel ${context.channelId} is already bound to provider account ` +
+        `${context.persistedExternalAccountId}; observed ${context.observedExternalAccountId}`,
+    );
+    this.name = "EbayProviderAccountIdentityConflictError";
+  }
+}
+
+export class EbayProviderAccountIdentityNotPersistedError extends Error {
+  readonly code = "EBAY_PROVIDER_ACCOUNT_IDENTITY_NOT_PERSISTED";
+
+  constructor(
+    readonly context: {
+      channelId: number;
+      environment: "sandbox" | "production";
+    },
+  ) {
+    super(
+      `No eBay OAuth token row exists for channel ${context.channelId} in ` +
+        `${context.environment}; provider account identity cannot be claimed`,
+    );
+    this.name = "EbayProviderAccountIdentityNotPersistedError";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -53,6 +126,28 @@ const CONSENT_URLS = {
   sandbox: "https://auth.sandbox.ebay.com/oauth2/authorize",
   production: "https://auth.ebay.com/oauth2/authorize",
 } as const;
+
+const API_URLS = {
+  sandbox: "https://api.sandbox.ebay.com",
+  production: "https://api.ebay.com",
+} as const;
+
+const EBAY_PROVIDER_ACCOUNT_IDENTITY_SCHEME = "provider_user_id" as const;
+
+const ebayIdentityResponseSchema = z.object({
+  userId: z.string().trim().min(1),
+  username: z.string().trim().min(1).nullable().optional(),
+}).passthrough();
+
+const ebayProviderAccountClaimAuditContextSchema = z.object({
+  idempotencyKey: z.string().trim().min(1).max(200),
+  observationHash: z.string().regex(/^[a-f0-9]{64}$/),
+  requestedBy: z.object({
+    type: z.enum(["user", "service", "system"]),
+    id: z.string().trim().min(1).max(255),
+  }).strict(),
+  correlationId: z.string().trim().min(1).max(100).nullable(),
+}).strict();
 
 /** Refresh access token 5 minutes before actual expiry */
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
@@ -75,11 +170,17 @@ const DEFAULT_SCOPES = [
 
 export class EbayAuthService {
   private refreshPromise: Promise<string> | null = null;
+  private readonly fetchFn: typeof fetch;
+  private readonly now: () => Date;
 
   constructor(
     private readonly db: DrizzleDb,
     private readonly config: EbayAuthConfig,
-  ) {}
+    dependencies: EbayAuthDependencies = {},
+  ) {
+    this.fetchFn = dependencies.fetch ?? fetch;
+    this.now = dependencies.now ?? (() => new Date());
+  }
 
   /**
    * Get a valid access token for the given channel.
@@ -96,7 +197,7 @@ export class EbayAuthService {
     }
 
     // Check if access token is still valid (with buffer)
-    const now = new Date();
+    const now = this.now();
     const expiresAt = new Date(token.accessTokenExpiresAt);
     if (expiresAt.getTime() - now.getTime() > TOKEN_REFRESH_BUFFER_MS) {
       return token.accessToken;
@@ -148,7 +249,7 @@ export class EbayAuthService {
       `${this.config.clientId}:${this.config.clientSecret}`,
     ).toString("base64");
 
-    const response = await fetch(tokenUrl, {
+    const response = await this.fetchFn(tokenUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -173,7 +274,10 @@ export class EbayAuthService {
     }
 
     const tokenData: EbayTokenResponse = await response.json();
-    await this.persistTokens(channelId, tokenData);
+    const observedAccount = await this.observeProviderAccount(
+      tokenData.access_token,
+    );
+    await this.persistTokens(channelId, tokenData, undefined, observedAccount);
 
     console.log(
       `[EbayAuth] Successfully exchanged authorization code for channel ${channelId}`,
@@ -210,7 +314,7 @@ export class EbayAuthService {
 
     console.log(`[EbayAuth] Refreshing access token for channel ${channelId}`);
 
-    const response = await fetch(tokenUrl, {
+    const response = await this.fetchFn(tokenUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -257,8 +361,9 @@ export class EbayAuthService {
     channelId: number,
     tokenData: EbayTokenResponse,
     previousRefreshToken?: string,
+    observedAccount?: EbayObservedProviderAccount,
   ): Promise<void> {
-    const now = new Date();
+    const now = this.now();
     const accessTokenExpiresAt = new Date(
       now.getTime() + tokenData.expires_in * 1000,
     );
@@ -273,6 +378,14 @@ export class EbayAuthService {
       ? new Date(now.getTime() + tokenData.refresh_token_expires_in * 1000)
       : null;
 
+    const identityValues = observedAccount
+      ? {
+          externalAccountId: observedAccount.externalAccountId,
+          externalAccountDisplayName: observedAccount.externalAccountDisplayName,
+          externalAccountIdentityScheme: observedAccount.externalAccountIdentityScheme,
+          externalAccountVerifiedAt: observedAccount.externalAccountVerifiedAt,
+        }
+      : {};
     const values = {
       channelId,
       environment: this.config.environment,
@@ -283,20 +396,64 @@ export class EbayAuthService {
       scopes: DEFAULT_SCOPES,
       lastRefreshedAt: now,
       updatedAt: now,
+      ...identityValues,
     };
 
     // Upsert: insert or update on conflict (channelId + environment)
     const existing = await this.getStoredToken(channelId);
     if (existing) {
-      await this.db
+      if (
+        observedAccount &&
+        existing.externalAccountId &&
+        existing.externalAccountId !== observedAccount.externalAccountId
+      ) {
+        throw new EbayProviderAccountIdentityConflictError({
+          channelId,
+          environment: this.config.environment,
+          persistedExternalAccountId: existing.externalAccountId,
+          observedExternalAccountId: observedAccount.externalAccountId,
+        });
+      }
+
+      const update = this.db
         .update(ebayOauthTokens)
-        .set(values)
-        .where(
-          and(
+        .set(values);
+      const where = observedAccount
+        ? and(
             eq(ebayOauthTokens.channelId, channelId),
             eq(ebayOauthTokens.environment, this.config.environment),
-          ),
-        );
+            or(
+              isNull(ebayOauthTokens.externalAccountId),
+              eq(
+                ebayOauthTokens.externalAccountId,
+                observedAccount.externalAccountId,
+              ),
+            ),
+          )
+        : and(
+            eq(ebayOauthTokens.channelId, channelId),
+            eq(ebayOauthTokens.environment, this.config.environment),
+          );
+      const result = observedAccount
+        ? await update.where(where).returning({
+            externalAccountId: ebayOauthTokens.externalAccountId,
+          })
+        : await update.where(where);
+      if (observedAccount && !result[0]) {
+        const current = await this.getStoredToken(channelId);
+        if (current?.externalAccountId) {
+          throw new EbayProviderAccountIdentityConflictError({
+            channelId,
+            environment: this.config.environment,
+            persistedExternalAccountId: current.externalAccountId,
+            observedExternalAccountId: observedAccount.externalAccountId,
+          });
+        }
+        throw new EbayProviderAccountIdentityNotPersistedError({
+          channelId,
+          environment: this.config.environment,
+        });
+      }
     } else {
       await this.db.insert(ebayOauthTokens).values({
         ...values,
@@ -305,8 +462,12 @@ export class EbayAuthService {
     }
   }
 
-  private async getStoredToken(channelId: number): Promise<TokenRecord | null> {
-    const [row] = await this.db
+  private async getStoredToken(
+    channelId: number,
+    executor: DrizzleExecutor = this.db,
+    lockForUpdate = false,
+  ): Promise<TokenRecord | null> {
+    const query = executor
       .select()
       .from(ebayOauthTokens)
       .where(
@@ -316,6 +477,7 @@ export class EbayAuthService {
         ),
       )
       .limit(1);
+    const [row] = lockForUpdate ? await query.for("update") : await query;
 
     if (!row) return null;
 
@@ -324,7 +486,233 @@ export class EbayAuthService {
       accessTokenExpiresAt: row.accessTokenExpiresAt,
       refreshToken: row.refreshToken,
       refreshTokenExpiresAt: row.refreshTokenExpiresAt,
+      externalAccountId: row.externalAccountId ?? null,
+      externalAccountDisplayName: row.externalAccountDisplayName ?? null,
+      externalAccountIdentityScheme: row.externalAccountIdentityScheme ?? null,
+      externalAccountVerifiedAt: row.externalAccountVerifiedAt ?? null,
     };
+  }
+  getEnvironment(): "sandbox" | "production" {
+    return this.config.environment;
+  }
+
+  /**
+   * Read the immutable eBay account identity represented by an access token.
+   * This method never persists the observation.
+   */
+  async observeProviderAccount(
+    accessToken: string,
+  ): Promise<EbayObservedProviderAccount> {
+    if (!accessToken.trim()) {
+      throw new Error("eBay provider account observation requires an access token");
+    }
+
+    const response = await this.fetchFn(
+      `${API_URLS[this.config.environment]}/commerce/identity/v1/user/`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      },
+    );
+    if (!response.ok) {
+      const rawBody = await response.text();
+      throw new Error(
+        `eBay identity observation failed (${response.status}): ` +
+          rawBody.substring(0, 300),
+      );
+    }
+
+    const parsed = ebayIdentityResponseSchema.safeParse(await response.json());
+    if (!parsed.success) {
+      throw new Error(
+        `eBay identity response did not contain a valid immutable userId: ` +
+          parsed.error.issues.map((issue) => issue.message).join("; "),
+      );
+    }
+
+    return {
+      externalAccountId: parsed.data.userId,
+      externalAccountDisplayName: parsed.data.username ?? null,
+      externalAccountIdentityScheme: EBAY_PROVIDER_ACCOUNT_IDENTITY_SCHEME,
+      externalAccountVerifiedAt: this.now(),
+    };
+  }
+
+  /**
+   * Durably claim a provider account observed during registration confirmation.
+   * The conditional update makes first claim and same-account refresh idempotent
+   * while rejecting concurrent or later attempts to bind a different account.
+   */
+  async claimObservedProviderAccount(
+    channelId: number,
+    observedAccount: EbayObservedProviderAccount,
+    auditContext: EbayProviderAccountClaimAuditContext,
+  ): Promise<EbayProviderAccountClaimOutcome> {
+    const parsed = ebayIdentityResponseSchema.safeParse({
+      userId: observedAccount.externalAccountId,
+      username: observedAccount.externalAccountDisplayName,
+    });
+    if (!parsed.success) {
+      throw new Error("Cannot claim an eBay provider account without a valid userId");
+    }
+    if (
+      observedAccount.externalAccountIdentityScheme !==
+      EBAY_PROVIDER_ACCOUNT_IDENTITY_SCHEME
+    ) {
+      throw new Error(
+        `Unsupported eBay provider account identity scheme: ` +
+          observedAccount.externalAccountIdentityScheme,
+      );
+    }
+    const observedVerifiedAt = new Date(
+      observedAccount.externalAccountVerifiedAt.getTime(),
+    );
+    if (Number.isNaN(observedVerifiedAt.getTime())) {
+      throw new Error(
+        "Cannot claim an eBay provider account with an invalid verification timestamp",
+      );
+    }
+    const parsedAudit = ebayProviderAccountClaimAuditContextSchema.parse(auditContext);
+    if (!this.db.transaction) {
+      throw new Error(
+        "eBay provider account claims require transaction-capable persistence",
+      );
+    }
+
+    const outcome = await this.db.transaction(async (tx) => {
+      const existing = await this.getStoredToken(channelId, tx, true);
+      if (!existing) {
+        throw new EbayProviderAccountIdentityNotPersistedError({
+          channelId,
+          environment: this.config.environment,
+        });
+      }
+      if (
+        existing.externalAccountId &&
+        existing.externalAccountId !== parsed.data.userId
+      ) {
+        throw new EbayProviderAccountIdentityConflictError({
+          channelId,
+          environment: this.config.environment,
+          persistedExternalAccountId: existing.externalAccountId,
+          observedExternalAccountId: parsed.data.userId,
+        });
+      }
+
+      const kind = existing.externalAccountId === null ? "claimed" : "replay";
+      const verifiedAt = existing.externalAccountVerifiedAt
+        && existing.externalAccountVerifiedAt > observedVerifiedAt
+        ? existing.externalAccountVerifiedAt
+        : observedVerifiedAt;
+      const updatedAt = this.now();
+      if (!(updatedAt instanceof Date) || Number.isNaN(updatedAt.getTime())) {
+        throw new Error("eBay auth clock returned an invalid timestamp");
+      }
+      const updated = await tx
+        .update(ebayOauthTokens)
+        .set({
+          externalAccountId: parsed.data.userId,
+          externalAccountDisplayName: parsed.data.username ?? null,
+          externalAccountIdentityScheme: EBAY_PROVIDER_ACCOUNT_IDENTITY_SCHEME,
+          externalAccountVerifiedAt: verifiedAt,
+          updatedAt,
+        })
+        .where(
+          and(
+            eq(ebayOauthTokens.channelId, channelId),
+            eq(ebayOauthTokens.environment, this.config.environment),
+            or(
+              isNull(ebayOauthTokens.externalAccountId),
+              eq(ebayOauthTokens.externalAccountId, parsed.data.userId),
+            ),
+          ),
+        )
+        .returning({
+          externalAccountId: ebayOauthTokens.externalAccountId,
+          externalAccountDisplayName: ebayOauthTokens.externalAccountDisplayName,
+          externalAccountVerifiedAt: ebayOauthTokens.externalAccountVerifiedAt,
+        });
+
+      if (!updated[0]) {
+        const current = await this.getStoredToken(channelId, tx);
+        if (current?.externalAccountId) {
+          throw new EbayProviderAccountIdentityConflictError({
+            channelId,
+            environment: this.config.environment,
+            persistedExternalAccountId: current.externalAccountId,
+            observedExternalAccountId: parsed.data.userId,
+          });
+        }
+        throw new EbayProviderAccountIdentityNotPersistedError({
+          channelId,
+          environment: this.config.environment,
+        });
+      }
+
+      await persistAuditEvent(tx, {
+        actor: `${parsedAudit.requestedBy.type}:${parsedAudit.requestedBy.id}`,
+        action: "channels.ebay.provider_account_identity_claimed",
+        target: `channel:${channelId}`,
+        changes: {
+          before: {
+            externalAccountId: existing.externalAccountId,
+            externalAccountDisplayName: existing.externalAccountDisplayName,
+            externalAccountIdentityScheme: existing.externalAccountIdentityScheme,
+            externalAccountVerifiedAt:
+              existing.externalAccountVerifiedAt?.toISOString() ?? null,
+          },
+          after: {
+            externalAccountId: updated[0].externalAccountId,
+            externalAccountDisplayName:
+              updated[0].externalAccountDisplayName ?? null,
+            externalAccountIdentityScheme:
+              EBAY_PROVIDER_ACCOUNT_IDENTITY_SCHEME,
+            externalAccountVerifiedAt:
+              updated[0].externalAccountVerifiedAt?.toISOString() ?? null,
+          },
+        },
+        context: {
+          classification: "durable_provider_account_observation",
+          kind,
+          environment: this.config.environment,
+          idempotencyKey: parsedAudit.idempotencyKey,
+          observationHash: parsedAudit.observationHash,
+          correlationId: parsedAudit.correlationId,
+        },
+      }, {
+        timestamp: verifiedAt,
+        emitStructuredLog: false,
+      });
+
+      return {
+        kind,
+        account: {
+          externalAccountId: updated[0].externalAccountId,
+          externalAccountDisplayName:
+            updated[0].externalAccountDisplayName ?? null,
+          externalAccountIdentityScheme:
+            EBAY_PROVIDER_ACCOUNT_IDENTITY_SCHEME,
+          externalAccountVerifiedAt:
+            updated[0].externalAccountVerifiedAt ?? verifiedAt,
+        },
+      } satisfies EbayProviderAccountClaimOutcome;
+    });
+
+    console.info(JSON.stringify({
+      event: "ebay_provider_account_identity_claimed",
+      classification: "durable_provider_account_observation",
+      kind: outcome.kind,
+      channelId,
+      environment: this.config.environment,
+      externalAccountId: outcome.account.externalAccountId,
+      verifiedAt: outcome.account.externalAccountVerifiedAt.toISOString(),
+      idempotencyKey: parsedAudit.idempotencyKey,
+      correlationId: parsedAudit.correlationId,
+    }));
+    return outcome;
   }
 }
 
@@ -343,9 +731,15 @@ export function createEbayAuthConfig(): EbayAuthConfig {
     );
   }
 
-  const environment = (process.env.EBAY_ENVIRONMENT || "production") as
-    | "sandbox"
-    | "production";
+  const configuredEnvironment = (
+    process.env.EBAY_ENVIRONMENT?.trim() || "production"
+  ).toLowerCase();
+  if (
+    configuredEnvironment !== "sandbox"
+    && configuredEnvironment !== "production"
+  ) {
+    throw new Error("EBAY_ENVIRONMENT must be sandbox or production.");
+  }
 
-  return { clientId, clientSecret, ruName, environment };
+  return { clientId, clientSecret, ruName, environment: configuredEnvironment };
 }

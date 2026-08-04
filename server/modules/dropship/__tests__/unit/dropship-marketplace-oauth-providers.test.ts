@@ -98,6 +98,8 @@ describe("EbayDropshipOAuthProvider", () => {
     expect(result).toMatchObject({
       accessToken: "ebay-access-token",
       refreshToken: "ebay-refresh-token",
+      providerEnvironment: "sandbox",
+      externalAccountIdentityScheme: "provider_user_id",
       externalAccountId: "seller-account-123",
       externalDisplayName: "marzcards",
       tokenMetadata: {
@@ -157,6 +159,42 @@ describe("EbayDropshipOAuthProvider", () => {
         storeName: null,
         storeUrl: null,
         storeUrlPath: null,
+      },
+    });
+  });
+
+  it("rejects eBay OAuth identity responses that contain a username but no stable userId", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "ebay-access-token",
+        refresh_token: "ebay-refresh-token",
+        expires_in: 3600,
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        username: "seller-login",
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        name: "marzcards",
+      }), { status: 200 }));
+    const provider = new EbayDropshipOAuthProvider({
+      clientId: "ebay-key",
+      clientSecret: "ebay-secret",
+      ruName: "Cardshellz_Cardshellz-dropship-oauth",
+      environment: "sandbox",
+    });
+
+    await expect(provider.exchangeCode({
+      code: "auth-code",
+      shopDomain: null,
+      query: {
+        code: "auth-code",
+        state: "signed-state",
+      },
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_STABLE_ACCOUNT_ID_REQUIRED",
+      context: {
+        hasUsername: true,
+        retryable: false,
       },
     });
   });

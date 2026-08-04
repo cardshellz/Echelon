@@ -3,6 +3,7 @@ import { pool as defaultPool } from "../../../db";
 import type {
   DropshipAdminStoreConnectionListItem,
   DropshipAdminStoreConnectionListResult,
+  DropshipObservedProviderAccountClaimResult,
   DropshipStoreConnectionProfile,
   DropshipStoreConnectionRepository,
   DropshipStoreConnectionSetupCheck,
@@ -22,6 +23,9 @@ interface StoreConnectionRow {
   vendor_id: number;
   platform: DropshipSupportedStorePlatform;
   external_account_id: string | null;
+  provider_environment: string | null;
+  external_account_identity_scheme: string | null;
+  external_account_verified_at: Date | null;
   external_display_name: string | null;
   shop_domain: string | null;
   access_token_ref: string | null;
@@ -74,6 +78,10 @@ interface CountRow {
   count: string | number;
 }
 
+interface BooleanRow {
+  value: boolean;
+}
+
 const ACTIVE_STORE_CONNECTION_STATUSES = [...dropshipActiveStoreConnectionStatuses];
 
 export class PgDropshipStoreConnectionRepository implements DropshipStoreConnectionRepository {
@@ -83,7 +91,9 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     const client = await this.dbPool.connect();
     try {
       const result = await client.query<StoreConnectionRow>(
-        `SELECT id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+        `SELECT id, vendor_id, platform, external_account_id, provider_environment,
+                external_account_identity_scheme, external_account_verified_at,
+                external_display_name, shop_domain,
                 access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
                 disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
                 last_inventory_sync_at, config, created_at, updated_at
@@ -102,8 +112,10 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     const filters = buildAdminStoreConnectionFilters(input);
     const offset = (input.page - 1) * input.limit;
     const result = await this.dbPool.query<AdminStoreConnectionRow>(
-      `SELECT sc.id, sc.vendor_id, sc.platform, sc.external_account_id, sc.external_display_name,
-              sc.shop_domain, sc.access_token_ref, sc.refresh_token_ref, sc.token_expires_at,
+      `SELECT sc.id, sc.vendor_id, sc.platform, sc.external_account_id, sc.provider_environment,
+              sc.external_account_identity_scheme, sc.external_account_verified_at,
+              sc.external_display_name, sc.shop_domain, sc.access_token_ref,
+              sc.refresh_token_ref, sc.token_expires_at,
               sc.status, sc.setup_status, sc.disconnect_reason, sc.disconnected_at,
               sc.grace_ends_at, sc.last_sync_at, sc.last_order_sync_at, sc.last_inventory_sync_at,
               sc.config, sc.created_at, sc.updated_at,
@@ -170,10 +182,22 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     }
   }
 
+  async isMarketplaceIdentityBound(storeConnectionId: number): Promise<boolean> {
+    const client = await this.dbPool.connect();
+    try {
+      return await isMarketplaceIdentityBoundWithClient(client, storeConnectionId);
+    } finally {
+      client.release();
+    }
+  }
+
   async connectStore(input: {
     vendorId: number;
     platform: DropshipSupportedStorePlatform;
     externalAccountId: string | null;
+    providerEnvironment: string;
+    externalAccountIdentityScheme: string;
+    externalAccountVerifiedAt: Date;
     externalDisplayName: string | null;
     shopDomain: string | null;
     accessTokenRef: string;
@@ -181,6 +205,7 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     tokenExpiresAt: Date | null;
     tokenRecords: DropshipStoreConnectionTokenRecord[];
     config: Record<string, unknown>;
+    oauthIntent: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0]["oauthIntent"];
     connectedAt: Date;
   }): Promise<DropshipStoreConnectionProfile> {
     const client = await this.dbPool.connect();
@@ -196,6 +221,14 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
           "Dropship store connection limit has been reached.",
           { vendorId: input.vendorId, activeConnectionCount: activeCount },
         );
+      }
+
+      if (
+        existing
+        && hasProviderIdentityChanged(existing, input)
+        && await isMarketplaceIdentityBoundWithClient(client, existing.id)
+      ) {
+        throw marketplaceIdentityBoundMutationError(existing, input);
       }
 
       const connection = existing
@@ -226,6 +259,109 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
 
       await client.query("COMMIT");
       return connection;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async claimObservedProviderAccount(
+    input: Parameters<DropshipStoreConnectionRepository["claimObservedProviderAccount"]>[0],
+  ): Promise<DropshipObservedProviderAccountClaimResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await findConnectionByIdAnyVendorForUpdate(client, input.storeConnectionId);
+      if (!existing) {
+        throw new DropshipError(
+          "DROPSHIP_STORE_CONNECTION_NOT_FOUND",
+          "Dropship store connection was not found.",
+          { storeConnectionId: input.storeConnectionId },
+        );
+      }
+
+      const isBound = await isMarketplaceIdentityBoundWithClient(client, input.storeConnectionId);
+      const exactIdentity = existing.platform === input.platform
+        && existing.provider_environment === input.providerEnvironment
+        && existing.external_account_id === input.externalAccountId
+        && existing.external_account_identity_scheme === input.externalAccountIdentityScheme;
+      if (isBound && !exactIdentity) {
+        throw new DropshipError(
+          "DROPSHIP_STORE_MARKETPLACE_IDENTITY_BOUND",
+          "This store connection is already registered to marketplace listings and its seller identity cannot be changed.",
+          providerIdentityConflictContext(existing, input, true),
+        );
+      }
+
+      const legacyIdentity = existing.external_account_identity_scheme === null
+        || existing.external_account_identity_scheme === "legacy_username";
+      if (!exactIdentity && !legacyIdentity) {
+        throw new DropshipError(
+          "DROPSHIP_STORE_IDENTITY_CLAIM_CONFLICT",
+          "The observed marketplace seller identity conflicts with the stable identity already stored for this connection.",
+          providerIdentityConflictContext(existing, input, isBound),
+        );
+      }
+      const verifiedThroughObservation = exactIdentity
+        && existing.external_account_verified_at !== null
+        && existing.external_account_verified_at.getTime()
+          >= input.observedAt.getTime();
+      if (verifiedThroughObservation) {
+        await client.query("COMMIT");
+        return { connection: mapStoreConnectionRow(existing), claimed: false };
+      }
+
+      const result = await client.query<StoreConnectionRow>(
+        `UPDATE dropship.dropship_store_connections
+         SET external_account_id = $2,
+             provider_environment = $3,
+             external_account_identity_scheme = $4,
+             external_account_verified_at = $5,
+             updated_at = GREATEST(updated_at, $5)
+         WHERE id = $1
+         RETURNING id, vendor_id, platform, external_account_id, provider_environment,
+                   external_account_identity_scheme, external_account_verified_at,
+                   external_display_name, shop_domain,
+                   access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
+                   disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
+                   last_inventory_sync_at, config, created_at, updated_at`,
+        [
+          input.storeConnectionId,
+          input.externalAccountId,
+          input.providerEnvironment,
+          input.externalAccountIdentityScheme,
+          input.observedAt,
+        ],
+      );
+      const updated = requiredRow(result.rows[0], "Observed provider account claim did not return a store connection.");
+      await recordAuditEvent(client, {
+        vendorId: updated.vendor_id,
+        storeConnectionId: updated.id,
+        eventType: exactIdentity
+          ? "store_connection_provider_account_verified"
+          : "store_connection_provider_account_claimed",
+        actor: input.actor,
+        payload: {
+          classification: exactIdentity
+            ? "durable_owner_identity_verification_refresh"
+            : "durable_owner_identity_claim",
+          previousProviderEnvironment: existing.provider_environment,
+          providerEnvironment: updated.provider_environment,
+          previousExternalAccountId: existing.external_account_id,
+          externalAccountId: updated.external_account_id,
+          previousIdentityScheme: existing.external_account_identity_scheme,
+          identityScheme: updated.external_account_identity_scheme,
+          marketplaceIdentityBound: isBound,
+          idempotencyKey: input.idempotencyKey,
+          observationHash: input.observationHash,
+          correlationId: input.correlationId,
+        },
+        occurredAt: input.observedAt,
+      });
+      await client.query("COMMIT");
+      return { connection: mapStoreConnectionRow(updated), claimed: true };
     } catch (error) {
       await rollbackQuietly(client);
       throw error;
@@ -415,7 +551,9 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
              grace_ends_at = $5,
              updated_at = $4
          WHERE id = $1 AND vendor_id = $2
-         RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+         RETURNING id, vendor_id, platform, external_account_id, provider_environment,
+                   external_account_identity_scheme, external_account_verified_at,
+                   external_display_name, shop_domain,
                    access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
                    disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
                    last_inventory_sync_at, config, created_at, updated_at`,
@@ -500,7 +638,9 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
              grace_ends_at = $4,
              updated_at = $3
          WHERE id = $1
-         RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+         RETURNING id, vendor_id, platform, external_account_id, provider_environment,
+                   external_account_identity_scheme, external_account_verified_at,
+                   external_display_name, shop_domain,
                    access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
                    disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
                    last_inventory_sync_at, config, created_at, updated_at`,
@@ -572,7 +712,9 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
          SET config = $2::jsonb,
              updated_at = $3
          WHERE id = $1
-         RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+         RETURNING id, vendor_id, platform, external_account_id, provider_environment,
+                   external_account_identity_scheme, external_account_verified_at,
+                   external_display_name, shop_domain,
                    access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
                    disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
                    last_inventory_sync_at, config, created_at, updated_at`,
@@ -670,6 +812,20 @@ async function hasReconnectableConnectionWithClient(
   return Number(result.rows[0]?.count ?? 0) > 0;
 }
 
+async function isMarketplaceIdentityBoundWithClient(
+  client: PoolClient,
+  storeConnectionId: number,
+): Promise<boolean> {
+  const result = await client.query<BooleanRow>(
+    `SELECT EXISTS (
+       SELECT 1 FROM marketplace.dropship_listing_scopes
+       WHERE store_connection_id = $1
+     ) AS value`,
+    [storeConnectionId],
+  );
+  return result.rows[0]?.value === true;
+}
+
 function buildAdminStoreConnectionFilters(input: Parameters<DropshipStoreConnectionRepository["listForAdmin"]>[0]): {
   whereSql: string;
   params: unknown[];
@@ -714,7 +870,9 @@ async function findReusableConnection(
   shopDomain: string | null,
 ): Promise<StoreConnectionRow | null> {
   const result = await client.query<StoreConnectionRow>(
-    `SELECT id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+    `SELECT id, vendor_id, platform, external_account_id, provider_environment,
+            external_account_identity_scheme, external_account_verified_at,
+            external_display_name, shop_domain,
             access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
             disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
             last_inventory_sync_at, config, created_at, updated_at
@@ -751,7 +909,9 @@ async function findConnectionByIdForUpdate(
   storeConnectionId: number,
 ): Promise<StoreConnectionRow | null> {
   const result = await client.query<StoreConnectionRow>(
-    `SELECT id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+    `SELECT id, vendor_id, platform, external_account_id, provider_environment,
+            external_account_identity_scheme, external_account_verified_at,
+            external_display_name, shop_domain,
             access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
             disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
             last_inventory_sync_at, config, created_at, updated_at
@@ -781,7 +941,9 @@ async function findConnectionByIdAnyVendorForUpdate(
   storeConnectionId: number,
 ): Promise<StoreConnectionRow | null> {
   const result = await client.query<StoreConnectionRow>(
-    `SELECT id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+    `SELECT id, vendor_id, platform, external_account_id, provider_environment,
+            external_account_identity_scheme, external_account_verified_at,
+            external_display_name, shop_domain,
             access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
             disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
             last_inventory_sync_at, config, created_at, updated_at
@@ -799,12 +961,16 @@ async function insertConnection(
 ): Promise<DropshipStoreConnectionProfile> {
   const result = await client.query<StoreConnectionRow>(
     `INSERT INTO dropship.dropship_store_connections
-       (vendor_id, platform, external_account_id, external_display_name, shop_domain,
+       (vendor_id, platform, external_account_id, provider_environment,
+        external_account_identity_scheme, external_account_verified_at,
+        external_display_name, shop_domain,
         access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
         disconnect_reason, disconnected_at, grace_ends_at, config, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'connected', 'pending',
-             NULL, NULL, NULL, $9::jsonb, $10, $10)
-     RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'connected', 'pending',
+             NULL, NULL, NULL, $12::jsonb, $13, $13)
+     RETURNING id, vendor_id, platform, external_account_id, provider_environment,
+               external_account_identity_scheme, external_account_verified_at,
+               external_display_name, shop_domain,
                access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
                disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
                last_inventory_sync_at, config, created_at, updated_at`,
@@ -812,6 +978,9 @@ async function insertConnection(
       input.vendorId,
       input.platform,
       input.externalAccountId,
+      input.providerEnvironment,
+      input.externalAccountIdentityScheme,
+      input.externalAccountVerifiedAt,
       input.externalDisplayName,
       input.shopDomain,
       input.accessTokenRef,
@@ -832,27 +1001,35 @@ async function updateConnection(
   const result = await client.query<StoreConnectionRow>(
     `UPDATE dropship.dropship_store_connections
      SET external_account_id = $3,
-         external_display_name = $4,
-         shop_domain = $5,
-         access_token_ref = $6,
-         refresh_token_ref = $7,
-         token_expires_at = $8,
+         provider_environment = $4,
+         external_account_identity_scheme = $5,
+         external_account_verified_at = $6,
+         external_display_name = $7,
+         shop_domain = $8,
+         access_token_ref = $9,
+         refresh_token_ref = $10,
+         token_expires_at = $11,
          status = 'connected',
          setup_status = 'pending',
          disconnect_reason = NULL,
          disconnected_at = NULL,
          grace_ends_at = NULL,
-         config = COALESCE(config, '{}'::jsonb) || $9::jsonb,
-         updated_at = $10
+         config = COALESCE(config, '{}'::jsonb) || $12::jsonb,
+         updated_at = $13
      WHERE id = $1 AND vendor_id = $2
-     RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+     RETURNING id, vendor_id, platform, external_account_id, provider_environment,
                access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
+               external_account_identity_scheme, external_account_verified_at,
+               external_display_name, shop_domain,
                disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
                last_inventory_sync_at, config, created_at, updated_at`,
     [
       storeConnectionId,
       input.vendorId,
       input.externalAccountId,
+      input.providerEnvironment,
+      input.externalAccountIdentityScheme,
+      input.externalAccountVerifiedAt,
       input.externalDisplayName,
       input.shopDomain,
       input.accessTokenRef,
@@ -879,7 +1056,9 @@ async function updateStoreSetupStatus(
      SET setup_status = $3,
          updated_at = $4
      WHERE id = $1 AND vendor_id = $2
-     RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+     RETURNING id, vendor_id, platform, external_account_id, provider_environment,
+               external_account_identity_scheme, external_account_verified_at,
+               external_display_name, shop_domain,
                access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
                disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
                last_inventory_sync_at, config, created_at, updated_at`,
@@ -984,7 +1163,7 @@ async function recordAuditEvent(
     storeConnectionId: number;
     eventType: string;
     actor?: {
-      actorType: "vendor" | "admin" | "system";
+      actorType: "vendor" | "admin" | "user" | "service" | "system";
       actorId?: string;
     };
     severity?: "info" | "warning" | "error";
@@ -1036,6 +1215,9 @@ function mapStoreConnectionRow(row: StoreConnectionRow): DropshipStoreConnection
     vendorId: row.vendor_id,
     platform: row.platform,
     externalAccountId: row.external_account_id,
+    providerEnvironment: row.provider_environment,
+    externalAccountIdentityScheme: row.external_account_identity_scheme,
+    externalAccountVerifiedAt: row.external_account_verified_at,
     externalDisplayName: row.external_display_name,
     shopDomain: row.shop_domain,
     status: row.status,
@@ -1116,6 +1298,56 @@ function readOrderProcessingDefaultWarehouseId(config: Record<string, unknown>):
   }
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function hasProviderIdentityChanged(
+  existing: StoreConnectionRow,
+  input: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0],
+): boolean {
+  return existing.platform !== input.platform
+    || existing.provider_environment !== input.providerEnvironment
+    || existing.external_account_id !== input.externalAccountId
+    || existing.external_account_identity_scheme !== input.externalAccountIdentityScheme;
+}
+
+function marketplaceIdentityBoundMutationError(
+  existing: StoreConnectionRow,
+  input: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0],
+): DropshipError {
+  return new DropshipError(
+    "DROPSHIP_STORE_MARKETPLACE_IDENTITY_BOUND",
+    "This store connection is registered to marketplace listings and cannot be changed to a different seller account.",
+    {
+      storeConnectionId: existing.id,
+      oauthIntent: input.oauthIntent,
+      ...providerIdentityConflictContext(existing, input, true),
+    },
+  );
+}
+
+function providerIdentityConflictContext(
+  existing: StoreConnectionRow,
+  requested: {
+    platform: DropshipSupportedStorePlatform;
+    providerEnvironment: string;
+    externalAccountId: string | null;
+    externalAccountIdentityScheme: string;
+  },
+  marketplaceIdentityBound: boolean,
+): Record<string, unknown> {
+  return {
+    storeConnectionId: existing.id,
+    currentPlatform: existing.platform,
+    requestedPlatform: requested.platform,
+    currentProviderEnvironment: existing.provider_environment,
+    requestedProviderEnvironment: requested.providerEnvironment,
+    currentExternalAccountId: existing.external_account_id,
+    requestedExternalAccountId: requested.externalAccountId,
+    currentIdentityScheme: existing.external_account_identity_scheme,
+    requestedIdentityScheme: requested.externalAccountIdentityScheme,
+    marketplaceIdentityBound,
+    retryable: false,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

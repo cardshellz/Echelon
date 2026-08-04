@@ -174,6 +174,9 @@ describe("PgDropshipStoreConnectionRepository", () => {
       vendorId: 10,
       platform: "ebay",
       externalAccountId: "external-ebay",
+      providerEnvironment: "sandbox",
+      externalAccountIdentityScheme: "provider_user_id",
+      externalAccountVerifiedAt: now,
       externalDisplayName: "External ebay",
       shopDomain: null,
       accessTokenRef: "new-access-ref",
@@ -184,12 +187,13 @@ describe("PgDropshipStoreConnectionRepository", () => {
         tokenMetadata: { scope: "new" },
         connectedByMemberId: "member-1",
       },
+      oauthIntent: "refresh_connection",
       connectedAt: now,
     });
 
     const updateCall = queries.find((entry) => entry.sql.includes("UPDATE dropship.dropship_store_connections"));
-    expect(updateCall?.sql).toContain("config = COALESCE(config, '{}'::jsonb) || $9::jsonb");
-    expect(updateCall?.params[8]).toBe(JSON.stringify({
+    expect(updateCall?.sql).toContain("config = COALESCE(config, '{}'::jsonb) || $12::jsonb");
+    expect(updateCall?.params[11]).toBe(JSON.stringify({
       tokenMetadata: { scope: "new" },
       connectedByMemberId: "member-1",
     }));
@@ -461,9 +465,18 @@ describe("DropshipStoreConnectionService", () => {
 
     expect(result.connection).toMatchObject({
       storeConnectionId: 21,
+      providerEnvironment: "test",
+      externalAccountIdentityScheme: "provider_user_id",
+      externalAccountVerifiedAt: now,
       status: "connected",
       hasAccessToken: true,
       hasRefreshToken: true,
+    });
+    expect(repository.lastConnectInput).toMatchObject({
+      oauthIntent: "refresh_connection",
+      externalAccountId: "external-ebay",
+      providerEnvironment: "test",
+      externalAccountIdentityScheme: "provider_user_id",
     });
   });
 
@@ -481,6 +494,7 @@ describe("DropshipStoreConnectionService", () => {
       returnTo: "/dropship/settings",
       intent: "change_store",
     };
+    ebayOAuthProvider.externalAccountId = "replacement-ebay";
 
     const result = await service.completeOAuthCallback({
       state: "signed",
@@ -491,7 +505,7 @@ describe("DropshipStoreConnectionService", () => {
     expect(result.connection).toMatchObject({
       storeConnectionId: 21,
       status: "connected",
-      externalAccountId: "external-ebay",
+      externalAccountId: "replacement-ebay",
       hasAccessToken: true,
       hasRefreshToken: true,
     });
@@ -527,6 +541,103 @@ describe("DropshipStoreConnectionService", () => {
       platform: "ebay",
     })).rejects.toMatchObject({
       code: "DROPSHIP_STORE_OAUTH_ACCOUNT_MISMATCH",
+    });
+
+    expect(repository.lastConnectInput).toBeNull();
+  });
+
+  it("rejects refresh OAuth when eBay returns a different provider environment", async () => {
+    repository.connections = [makeConnection({
+      storeConnectionId: 21,
+      platform: "ebay",
+      status: "connected",
+      providerEnvironment: "production",
+    })];
+    ebayOAuthProvider.providerEnvironment = "sandbox";
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+      intent: "refresh_connection",
+    };
+
+    await expect(service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_OAUTH_ENVIRONMENT_MISMATCH",
+    });
+
+    expect(repository.lastConnectInput).toBeNull();
+  });
+
+  it("rejects refresh OAuth when eBay returns a different stable identity scheme", async () => {
+    repository.connections = [makeConnection({
+      storeConnectionId: 21,
+      platform: "ebay",
+      status: "connected",
+      externalAccountIdentityScheme: "provider_user_id",
+    })];
+    ebayOAuthProvider.externalAccountIdentityScheme = "different_scheme";
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+      intent: "refresh_connection",
+    };
+
+    await expect(service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_OAUTH_IDENTITY_SCHEME_MISMATCH",
+    });
+
+    expect(repository.lastConnectInput).toBeNull();
+  });
+
+  it("rejects changing a marketplace-bound store connection to another seller", async () => {
+    repository.connections = [makeConnection({
+      storeConnectionId: 21,
+      platform: "ebay",
+      status: "connected",
+      externalAccountId: "external-ebay",
+    })];
+    repository.marketplaceIdentityBound = true;
+    ebayOAuthProvider.externalAccountId = "different-ebay";
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+      intent: "change_store",
+    };
+
+    await expect(service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_MARKETPLACE_IDENTITY_BOUND",
     });
 
     expect(repository.lastConnectInput).toBeNull();
@@ -823,6 +934,8 @@ class FakeStateSigner implements DropshipOAuthStateSigner {
 class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
   authorizationCalls: Array<Parameters<DropshipMarketplaceOAuthProvider["createAuthorizationUrl"]>[0]> = [];
   externalAccountId: string | null = null;
+  providerEnvironment = "test";
+  externalAccountIdentityScheme = "provider_user_id";
   exchangeCalls: Array<{
     code: string;
     shopDomain: string | null;
@@ -856,6 +969,8 @@ class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
       refreshToken: this.platform === "ebay" ? "refresh-token" : null,
       accessTokenExpiresAt: new Date(now.getTime() + 3600000),
       externalAccountId: this.externalAccountId ?? `external-${this.platform}`,
+      providerEnvironment: this.providerEnvironment,
+      externalAccountIdentityScheme: this.externalAccountIdentityScheme,
       externalDisplayName: `External ${this.platform}`,
     };
   }
@@ -913,6 +1028,7 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
   lastAdminDisconnectInput: Parameters<DropshipStoreConnectionRepository["disconnectStoreForAdmin"]>[0] | null = null;
   lastListForAdminInput: Parameters<DropshipStoreConnectionRepository["listForAdmin"]>[0] | null = null;
   lastOrderProcessingConfigInput: Parameters<DropshipStoreConnectionRepository["updateOrderProcessingConfig"]>[0] | null = null;
+  marketplaceIdentityBound = false;
 
   async listByVendorId(): Promise<DropshipStoreConnectionProfile[]> {
     return this.connections;
@@ -961,6 +1077,36 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     ));
   }
 
+  async isMarketplaceIdentityBound(): Promise<boolean> {
+    return this.marketplaceIdentityBound;
+  }
+
+  async claimObservedProviderAccount(
+    input: Parameters<DropshipStoreConnectionRepository["claimObservedProviderAccount"]>[0],
+  ): ReturnType<DropshipStoreConnectionRepository["claimObservedProviderAccount"]> {
+    const existing = this.connections.find(
+      (connection) => connection.storeConnectionId === input.storeConnectionId,
+    );
+    if (!existing) throw new Error("missing fake connection");
+    const exactIdentity = existing.platform === input.platform
+      && existing.providerEnvironment === input.providerEnvironment
+      && existing.externalAccountId === input.externalAccountId
+      && existing.externalAccountIdentityScheme === input.externalAccountIdentityScheme;
+    if (exactIdentity && existing.externalAccountVerifiedAt !== null) {
+      return { connection: existing, claimed: false };
+    }
+    const updated = makeConnection({
+      ...existing,
+      providerEnvironment: input.providerEnvironment,
+      externalAccountId: input.externalAccountId,
+      externalAccountIdentityScheme: input.externalAccountIdentityScheme,
+      externalAccountVerifiedAt: input.observedAt,
+      updatedAt: input.observedAt,
+    });
+    this.connections = [updated];
+    return { connection: updated, claimed: true };
+  }
+
   async connectStore(input: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0]): Promise<DropshipStoreConnectionProfile> {
     this.lastConnectInput = input;
     const existing = this.connections.find((connection) => (
@@ -973,6 +1119,9 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
       vendorId: input.vendorId,
       platform: input.platform,
       externalAccountId: input.externalAccountId,
+      providerEnvironment: input.providerEnvironment,
+      externalAccountIdentityScheme: input.externalAccountIdentityScheme,
+      externalAccountVerifiedAt: input.externalAccountVerifiedAt,
       externalDisplayName: input.externalDisplayName,
       shopDomain: input.shopDomain,
       status: "connected",
@@ -1111,6 +1260,9 @@ function makeStoreConnectionRow(overrides: Record<string, unknown> = {}) {
     vendor_id: 10,
     platform: "ebay",
     external_account_id: "external-ebay",
+    provider_environment: "sandbox",
+    external_account_identity_scheme: "provider_user_id",
+    external_account_verified_at: now,
     external_display_name: "External ebay",
     shop_domain: null,
     access_token_ref: "access-ref",
@@ -1137,6 +1289,9 @@ function makeConnection(overrides: Partial<DropshipStoreConnectionProfile> = {})
     vendorId: 10,
     platform: "ebay",
     externalAccountId: "external-ebay",
+    providerEnvironment: "test",
+    externalAccountIdentityScheme: "provider_user_id",
+    externalAccountVerifiedAt: now,
     externalDisplayName: "External ebay",
     shopDomain: null,
     status: "connected",

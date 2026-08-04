@@ -23,6 +23,9 @@ export interface DropshipMarketplaceStoreCredentials {
   status: string;
   shopDomain: string | null;
   externalAccountId: string | null;
+  providerEnvironment: string | null;
+  externalAccountIdentityScheme: string | null;
+  externalAccountVerifiedAt: Date | null;
   externalDisplayName: string | null;
   config: Record<string, unknown>;
   accessToken: string;
@@ -82,6 +85,9 @@ interface StoreConnectionCredentialRow {
   vendor_id: number;
   platform: DropshipSourcePlatform;
   external_account_id: string | null;
+  provider_environment: string | null;
+  external_account_identity_scheme: string | null;
+  external_account_verified_at: Date | null;
   external_display_name: string | null;
   shop_domain: string | null;
   access_token_ref: string | null;
@@ -359,8 +365,9 @@ async function loadConnection(
   forUpdate = false,
 ): Promise<StoreConnectionCredentialRow> {
   const result = await client.query<StoreConnectionCredentialRow>(
-    `SELECT id, vendor_id, platform, external_account_id, external_display_name,
-            shop_domain, access_token_ref, refresh_token_ref, token_expires_at,
+    `SELECT id, vendor_id, platform, external_account_id, provider_environment,
+            external_account_identity_scheme, external_account_verified_at,
+            external_display_name, shop_domain, access_token_ref, refresh_token_ref, token_expires_at,
             status, config
      FROM dropship.dropship_store_connections
      WHERE id = $1
@@ -398,8 +405,9 @@ async function loadConnectionForHealthUpdate(
   },
 ): Promise<StoreConnectionCredentialRow> {
   const result = await client.query<StoreConnectionCredentialRow>(
-    `SELECT id, vendor_id, platform, external_account_id, external_display_name,
-            shop_domain, access_token_ref, refresh_token_ref, token_expires_at,
+    `SELECT id, vendor_id, platform, external_account_id, provider_environment,
+            external_account_identity_scheme, external_account_verified_at,
+            external_display_name, shop_domain, access_token_ref, refresh_token_ref, token_expires_at,
             status, config
      FROM dropship.dropship_store_connections
      WHERE id = $1
@@ -581,6 +589,9 @@ function mapCredentials(input: {
     status: input.connection.status,
     shopDomain: input.connection.shop_domain,
     externalAccountId: input.connection.external_account_id,
+    providerEnvironment: input.connection.provider_environment,
+    externalAccountIdentityScheme: input.connection.external_account_identity_scheme,
+    externalAccountVerifiedAt: input.connection.external_account_verified_at,
     externalDisplayName: input.connection.external_display_name,
     config: input.connection.config ?? {},
     accessToken,

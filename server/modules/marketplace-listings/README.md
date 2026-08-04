@@ -1,10 +1,47 @@
-# Marketplace listing replacement
+# Marketplace listings
 
 This module owns the provider-neutral `marketplace.*` publication-generation and
 replacement-operation state. Channels and Dropship retain ownership of their
-configuration. Stage 1 consumes their owner snapshots through the reader port in
-`application/ports.ts`; provider adapters and execution ports belong to a later
-stage.
+configuration and credentials.
+
+## Stage 2A registration boundary
+
+Stage 2A adds a safe import path for an existing live marketplace listing:
+
+- preview validates the complete owner variant snapshot before invoking the
+  read-only provider observer;
+- the observer receives that validated candidate set and must not re-read owner
+  state;
+- observed archived/inactive and zero-quantity variants remain included;
+- every unobserved local variant remains in the immutable snapshot as excluded
+  with reason `not_in_observed_publication`;
+- confirmation checks replay before any owner/provider call, then re-observes
+  and requires the user-confirmed observation hash;
+- confirmation next invokes the owner-owned stable-account claimer. That
+  durable, idempotent owner identity claim may remain if the marketplace
+  transaction later fails;
+- only stable `provider_user_id` evidence is accepted; mutable usernames are
+  display snapshots, never identity keys;
+- one bounded transaction locks owner and account identity, revalidates every
+  catalog variant, creates or locks an empty scope, writes planned members,
+  stages identities, inserts claims, activates generation 1, and appends the
+  immutable receipt; and
+- publication-key, listing, variant, offer, and inventory-item identities stay
+  distinct and unique within their provider-account namespace.
+
+Registration does not create, revise, publish, end, or otherwise mutate an
+external marketplace listing. It imports only a provider-confirmed live listing
+into a new or empty local scope. Owner account claiming and marketplace state
+persistence are intentionally separate durable boundaries.
+
+The repository exposes request-keyed replay plus bounded, owner-scoped current
+status reads. Authenticated Channel and Dropship HTTP routes expose the same
+provider-neutral preview, confirm, and status contracts while owner modules
+retain credentials and catalog authority. The Channel eBay listing feed reads
+the durable status instead of treating browser-session state as proof of a
+registration. Dropship uses the same backend boundary; a Dropship admin launcher
+requires a view that exposes the store connection, product, and external listing
+identity together.
 
 ## Stage 1 boundary
 
@@ -18,11 +55,10 @@ Stage 1 provides:
   operation/publication final-state consistency; and
 - owner-scoped replay for both Channel and Dropship owners.
 
-Stage 1 does **not** register existing live listings, call a marketplace, change
-inventory, retire a listing, expose an HTTP route, or render an admin UI. The
-planning repository requires a previously registered listing scope and active
-source publication. It creates the durable plan only; it does not expose a
-transition executor.
+Stage 1 by itself does **not** register existing live listings or call a
+marketplace. Its planning repository requires the active publication created by
+registration. It creates a durable replacement plan only; it does not execute
+external transitions.
 
 A `failed` publication means that generation never became Echelon's active
 generation. It does not, by itself, claim that a provider artifact is absent or
@@ -34,25 +70,18 @@ Uncertain external state belongs in
 
 ## Required later stages
 
-1. Add owner-owned registration/read adapters that establish a listing scope
-   and observed active publication without writing Channels or Dropship tables
-   from this module. Before registration is enabled, add an account-qualified,
-   serialized claim registry for provider listing/group/member identities; the
-   Stage 1 publication indexes are generation/scope guards, not proof of
-   account-wide ownership. Registration must also lock the owner row and the
-   owner API must prevent its provider identity from changing while a scope is
-   bound.
-2. Add a provider execution contract and an eBay adapter shared by Channel and
+1. Add a provider execution contract and an eBay adapter shared by Channel and
    Dropship owners. Prove provider-specific sequencing, retry, verification,
    and compensation behavior before enabling execution. The executor must use
    compare-and-set writes with the current lease token and explicitly lock the
    operation before any step update; triggers validate state but cannot prove
    that a caller possessed the lease or impose row-lock order before the update
    statement begins.
-3. Add the internal admin workflow for preview, confirmation, progress,
-   recovery, and audit evidence.
-4. Enable production execution only after disposable-PostgreSQL concurrency
-   tests and provider sandbox tests cover partial failures and retries.
+2. Add the internal replacement workflow for progress, recovery, and execution
+   audit evidence.
+3. Enable production replacement execution only after disposable-PostgreSQL
+   concurrency tests and provider sandbox tests cover partial failures and
+   retries.
 
 Provider calls must remain outside the domain and PostgreSQL repository. Every
 transition writer must lock in this order: scope, operation, publication or
