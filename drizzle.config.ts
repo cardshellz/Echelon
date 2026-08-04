@@ -38,5 +38,6 @@ export default defineConfig({
     "identity",
     "shipping",
     "shopify",
+    "marketplace",
   ],
 });
