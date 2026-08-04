@@ -173,7 +173,9 @@ export const productVariants = catalogSchema.table("product_variants", {
   dropshipEligible: boolean("dropship_eligible").default(false), // Whether variant is eligible for dropship vendors
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("product_variants_id_product_uidx").on(table.id, table.productId),
+]);
 
 export const insertProductVariantSchema = createInsertSchema(productVariants).omit({
   id: true,
