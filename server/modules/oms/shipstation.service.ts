@@ -3520,13 +3520,31 @@ export function createShipStationService(
     return observer;
   }
 
+  async function hydrateReturnLabelDirection(
+    shipment: ShipStationShipment,
+  ): Promise<ShipStationShipment> {
+    if (typeof shipment.isReturnLabel === "boolean") return shipment;
+
+    const shipmentId = Number(shipment.shipmentId);
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      throw new Error("ShipStation shipment is missing isReturnLabel and a valid shipmentId");
+    }
+
+    const detailedShipment = await getShipmentById(shipmentId);
+    if (!detailedShipment || typeof detailedShipment.isReturnLabel !== "boolean") {
+      throw new Error(`ShipStation shipment ${shipmentId} did not provide return-label direction`);
+    }
+    return detailedShipment;
+  }
+
   async function observeProviderLabel(shipment: ShipStationShipment): Promise<void> {
     await requireProviderLabelObserver().observeShipStationLabel(shipment);
   }
 
   async function observeProviderLabels(shipments: ShipStationShipment[]): Promise<void> {
     for (const shipment of shipments) {
-      await observeProviderLabel(shipment);
+      const detailedShipment = await hydrateReturnLabelDirection(shipment);
+      await observeProviderLabel(detailedShipment);
     }
   }
 
@@ -3546,10 +3564,11 @@ export function createShipStationService(
 
     for (const shipment of shipments) {
       try {
-        await observeProviderLabel(shipment);
-        if (shipment.isReturnLabel === true) {
+        const detailedShipment = await hydrateReturnLabelDirection(shipment);
+        await observeProviderLabel(detailedShipment);
+        if (detailedShipment.isReturnLabel === true) {
           await resolveShipStationUnmappedPhysicalExceptionForReturnLabel(db, {
-            shipment,
+            shipment: detailedShipment,
             resolvedBy: "system:shipstation_notify",
             notes: "Automatically classified from ShipStation return-label direction.",
           });

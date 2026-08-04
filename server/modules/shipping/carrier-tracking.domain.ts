@@ -38,7 +38,7 @@ export type CarrierTrackingMatchStatus =
   | "review";
 
 export type ShippingProviderLabelStatus = "active" | "voided" | "superseded" | "unknown";
-export type ShippingProviderLabelDirection = "outbound" | "return";
+export type ShippingProviderLabelDirection = "outbound" | "return" | "unknown";
 export type ShippingProviderLabelEventType =
   | "label_observed"
   | "label_voided"
@@ -237,7 +237,9 @@ const shipStationLabelObservationSchema = z.object({
   // optional item cannot prevent us from observing the label itself; the
   // sanitizer below accepts only exact Echelon-owned line-item identities.
   shipmentItems: z.array(z.unknown()).max(500).optional(),
-  isReturnLabel: z.boolean().default(false),
+  // A list response can omit this field. Missing direction must never be
+  // treated as outbound authority; callers hydrate the shipment detail first.
+  isReturnLabel: z.boolean().optional(),
 }).passthrough();
 
 interface SanitizedShipStationShipmentItemIdentity {
@@ -584,7 +586,11 @@ export function normalizeShipStationLabelObservation(
   const shipDate = parseProviderTimestamp(shipment.shipDate, "shipDate");
   const voidedAt = parseProviderTimestamp(shipment.voidDate, "voidDate");
   const labelStatus: ShippingProviderLabelStatus = voidedAt ? "voided" : "active";
-  const labelDirection: ShippingProviderLabelDirection = shipment.isReturnLabel ? "return" : "outbound";
+  const labelDirection: ShippingProviderLabelDirection = shipment.isReturnLabel === true
+    ? "return"
+    : shipment.isReturnLabel === false
+      ? "outbound"
+      : "unknown";
   const eventType: ShippingProviderLabelEventType = voidedAt
     ? "label_voided"
     : "label_observed";
@@ -654,7 +660,9 @@ function mergeCandidate(
     labelStatus: status,
     labelDirection: existing.labelDirection === "return" || incoming.labelDirection === "return"
       ? "return"
-      : "outbound",
+      : existing.labelDirection === "outbound" || incoming.labelDirection === "outbound"
+        ? "outbound"
+        : "unknown",
     linkCount: Math.max(existing.linkCount, incoming.linkCount),
     orderNumbers: [...new Set([...existing.orderNumbers, ...incoming.orderNumbers])].sort(),
     carrier: prefer(existing.carrier, incoming.carrier),
