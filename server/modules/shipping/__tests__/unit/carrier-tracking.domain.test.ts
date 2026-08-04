@@ -298,6 +298,25 @@ describe("shipping-provider label normalization", () => {
       },
     });
   });
+  it("keeps omitted return-label direction non-dispatchable", () => {
+    const observation = normalizeShipStationLabelObservation({
+      shipmentId: 448_490_235,
+      orderId: 768_182_356,
+      trackingNumber: "9434650206217259597839",
+      carrierCode: "stamps_com",
+      shipDate: "2026-07-25T20:00:00.000Z",
+      voidDate: null,
+      shipmentItems: [{ lineItemKey: "wms-item-311485", quantity: 1 }],
+    }, receivedAt);
+
+    expect(observation).toMatchObject({
+      labelDirection: "unknown",
+      labelStatus: "active",
+      sanitizedPayload: {
+        isReturnLabel: undefined,
+      },
+    });
+  });
   it("records an explicitly voided label as voided evidence", () => {
     const observation = normalizeShipStationLabelObservation({
       shipmentId: 442_000_001,

@@ -731,7 +731,7 @@ function labelStatus(value: unknown): CarrierTrackingMatchCandidate["labelStatus
   return "unknown";
 }
 function labelDirection(value: unknown): ShippingProviderLabelDirection {
-  if (value === "outbound" || value === "return") return value;
+  if (value === "outbound" || value === "return" || value === "unknown") return value;
   throw new Error("Invalid label_direction returned by carrier tracking repository");
 }
 
@@ -1324,7 +1324,11 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           assertStableShippingProviderLabelIdentity(existing[0], observation);
           effectiveLabelDirection = existing[0].labelDirection === "return"
             ? "return"
-            : observation.labelDirection;
+            : observation.labelDirection === "return"
+              ? "return"
+              : observation.labelDirection === "outbound"
+                ? "outbound"
+                : existing[0].labelDirection;
           const [updated] = await databaseTx
             .update(shippingProviderLabels)
             .set({

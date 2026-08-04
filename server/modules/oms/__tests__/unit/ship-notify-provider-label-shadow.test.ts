@@ -10,7 +10,7 @@ describe("SHIP_NOTIFY provider-label authority boundary", () => {
   it("records every fetched label without invoking the shipment transition", () => {
     const processShipNotify = source.indexOf("async function processShipNotify(resourceUrl");
     const loopStart = source.indexOf("for (const shipment of shipments)", processShipNotify);
-    const observe = source.indexOf("await observeProviderLabel(shipment)", loopStart);
+    const observe = source.indexOf("await observeProviderLabel(detailedShipment)", loopStart);
     const functionEnd = source.indexOf("\n  async function confirmDispatch(", loopStart);
     const process = source.indexOf("processShipmentNotification(", loopStart);
 
