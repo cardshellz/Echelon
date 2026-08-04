@@ -10,6 +10,7 @@ import type {
 } from "../domain/listing-replacement-plan";
 import type {
   ListingRegistrationReceipt,
+  ListingRegistrationStatus,
   ListingRegistrationResult,
   ProviderAccountClaimResult,
 } from "./registration-dtos";
@@ -74,6 +75,14 @@ export interface PersistListingRegistrationInput {
 }
 
 export interface MarketplaceListingRegistrationRepository {
+  findCurrentRegistration(
+    owner: ListingOwnerRef,
+  ): Promise<ListingRegistrationStatus | null>;
+
+  findCurrentRegistrations(
+    owners: readonly ListingOwnerRef[],
+  ): Promise<readonly ListingRegistrationStatus[]>;
+
   findReplay(
     lookup: ListingRegistrationReplayLookup,
   ): Promise<ListingRegistrationReceipt | null>;

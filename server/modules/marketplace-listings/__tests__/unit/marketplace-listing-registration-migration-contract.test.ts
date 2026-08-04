@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 const migrationSql = readFileSync(
   resolve(
     process.cwd(),
-    "migrations/0608_marketplace_listing_registration.sql",
+    "migrations/0609_marketplace_listing_registration.sql",
   ),
   "utf8",
 );
@@ -34,7 +34,8 @@ describe("marketplace listing registration migration contract", () => {
       "ALTER TABLE ebay.ebay_oauth_tokens ADD COLUMN external_account_id VARCHAR(255)",
     );
     expectSql("ADD COLUMN external_account_identity_scheme VARCHAR(50)");
-    expectSql("ADD COLUMN external_account_verified_at TIMESTAMP");
+    expectSql("ADD COLUMN external_account_verified_at TIMESTAMPTZ");
+    expectSql("environment IN ('sandbox', 'production')");
     expectSql(
       "ALTER TABLE dropship.dropship_store_connections ADD COLUMN provider_environment VARCHAR(30)",
     );
@@ -42,6 +43,9 @@ describe("marketplace listing registration migration contract", () => {
     expectSql("ADD COLUMN external_account_verified_at TIMESTAMPTZ");
     expectSql("external_account_identity_scheme = 'provider_user_id'");
     expectSql("identity_scheme = 'provider_user_id'");
+    expectSql(
+      "lower(platform) <> 'ebay' OR provider_environment IN ('sandbox', 'production')",
+    );
     expect(compactMigration).not.toMatch(/identity_scheme\s*=\s*'username'/i);
   });
 
@@ -66,6 +70,10 @@ describe("marketplace listing registration migration contract", () => {
     expectSql(
       "CREATE TRIGGER provider_accounts_owner_verified_guard BEFORE INSERT ON marketplace.provider_accounts",
     );
+    expectSql("token.external_account_verified_at = NEW.verified_at");
+    expectSql("connection.external_account_verified_at = NEW.verified_at");
+    expectSql("FOR UPDATE OF token");
+    expectSql("FOR UPDATE;");
     expectSql(
       "CREATE TRIGGER listing_scope_provider_accounts_guard BEFORE INSERT ON marketplace.listing_scope_provider_accounts",
     );
@@ -116,5 +124,7 @@ describe("marketplace listing registration migration contract", () => {
     );
     expectSql("Registered eBay token stable account identity is immutable");
     expectSql("Registered Dropship stable account identity is immutable");
+    expectSql("NEW.vendor_id, NEW.platform, NEW.provider_environment");
+    expectSql("OLD.vendor_id, OLD.platform, OLD.provider_environment");
   });
 });

@@ -173,6 +173,20 @@ export const listingRegistrationReceiptSchema = z
     "Registration cannot precede the provider observation.",
   );
 
+export const listingRegistrationStatusSchema = z
+  .object({
+    status: z.literal("registered"),
+    productId: positivePostgresIntegerSchema,
+    registrationId: positiveSafeIntegerSchema,
+    scopeId: positiveSafeIntegerSchema,
+    providerAccountId: positiveSafeIntegerSchema,
+    publicationId: positiveSafeIntegerSchema,
+    providerPublicationKey: nullableTrimmedText(255),
+    externalListingId: trimmedText(255),
+    registeredAt: z.date(),
+  })
+  .strict();
+
 export const listingRegistrationResultSchema = z.discriminatedUnion("kind", [
   z
     .object({
@@ -211,6 +225,9 @@ export type ListingRegistrationReceipt = z.infer<
 >;
 export type ListingRegistrationResult = z.infer<
   typeof listingRegistrationResultSchema
+>;
+export type ListingRegistrationStatus = z.infer<
+  typeof listingRegistrationStatusSchema
 >;
 export type ProviderAccountClaimResult = z.infer<
   typeof providerAccountClaimResultSchema

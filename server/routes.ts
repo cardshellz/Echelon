@@ -33,6 +33,8 @@ import { registerSubscriptionWebhookRoutes } from "./modules/subscriptions/subsc
 import { registerSubscriptionRoutes } from "./modules/subscriptions/subscription.routes";
 import { registerDiagnosticsRoutes } from "./routes/diagnostics";
 import { registerPickPriorityRoutes } from "./routes/pick-priority.routes";
+import { createMarketplaceListingRegistrationResolverFromEnv } from "./marketplace-listing-registration.composition";
+import { registerMarketplaceListingRegistrationRoutes } from "./modules/marketplace-listings/interfaces/http/listing-registration.routes";
 import { registerDropshipAuthRoutes } from "./modules/dropship/interfaces/http/dropship-auth.routes";
 import { registerDropshipAdminCatalogRoutes } from "./modules/dropship/interfaces/http/dropship-admin-catalog.routes";
 import { registerDropshipAdminStoreConnectionRoutes } from "./modules/dropship/interfaces/http/dropship-admin-store-connection.routes";
@@ -135,6 +137,10 @@ export async function registerRoutes(
   registerInventoryRoutes(app);
   registerReplenishmentRoutes(app);
   registerChannelRoutes(app);
+  registerMarketplaceListingRegistrationRoutes(
+    app,
+    createMarketplaceListingRegistrationResolverFromEnv(),
+  );
   registerSettingsRoutes(app);
   registerPickZoneRoutes(app);
   registerPurchasingRoutes(app);

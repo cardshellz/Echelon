@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import type {
   ConfirmListingRegistrationInput,
   ListingRegistrationReceipt,
+  ListingRegistrationStatus,
 } from "../../application/registration-dtos";
 import { MarketplaceListingRegistrationService } from "../../application/listing-registration.service";
 import { buildListingRegistrationRequestHash } from "../../domain/listing-registration-plan";
+import type { ListingOwnerRef } from "../../domain/listing-replacement-plan";
 import type {
   MarketplaceListingProviderAccountClaim,
   MarketplaceListingProviderAccountClaimer,
@@ -17,6 +19,109 @@ import type {
 } from "../../application/registration-ports";
 
 describe("MarketplaceListingRegistrationService", () => {
+  it("validates an owner before loading current registration status", async () => {
+    const repository = new FakeRepository();
+    const service = createService(
+      new FakeOwnerReader(ownerSnapshot()),
+      new FakeObserver(observation()),
+      new FakeClaimer(),
+      repository,
+    );
+
+    await expect(
+      service.getCurrentRegistrationStatus({
+        ...command().owner,
+        productId: 0,
+      } as ListingOwnerRef),
+    ).rejects.toMatchObject({
+      code: "MARKETPLACE_LISTING_REGISTRATION_REQUEST_INVALID",
+    });
+    expect(repository.statusCalls).toBe(0);
+  });
+
+  it("returns the strict persisted current registration status", async () => {
+    const repository = new FakeRepository();
+    repository.status = registrationStatus();
+    const service = createService(
+      new FakeOwnerReader(ownerSnapshot()),
+      new FakeObserver(observation()),
+      new FakeClaimer(),
+      repository,
+    );
+
+    await expect(
+      service.getCurrentRegistrationStatus(command().owner),
+    ).resolves.toEqual(repository.status);
+    expect(repository.statusCalls).toBe(1);
+  });
+
+  it("returns null when no persisted registration exists for the owner", async () => {
+    const repository = new FakeRepository();
+    const service = createService(
+      new FakeOwnerReader(ownerSnapshot()),
+      new FakeObserver(observation()),
+      new FakeClaimer(),
+      repository,
+    );
+
+    await expect(
+      service.getCurrentRegistrationStatus(command().owner),
+    ).resolves.toBeNull();
+    expect(repository.statusCalls).toBe(1);
+  });
+
+  it("loads and sorts one-owner registration statuses in one repository call", async () => {
+    const repository = new FakeRepository();
+    repository.statuses = [
+      { ...registrationStatus(), productId: 44 },
+      registrationStatus(),
+    ];
+    const service = createService(
+      new FakeOwnerReader(ownerSnapshot()),
+      new FakeObserver(observation()),
+      new FakeClaimer(),
+      repository,
+    );
+    const owners = [
+      { ...command().owner, productId: 44 },
+      command().owner,
+    ];
+
+    await expect(service.getCurrentRegistrationStatuses(owners)).resolves.toEqual([
+      registrationStatus(),
+      { ...registrationStatus(), productId: 44 },
+    ]);
+    expect(repository.batchStatusCalls).toBe(1);
+  });
+
+  it("rejects mixed-owner or duplicate-product status batches", async () => {
+    const repository = new FakeRepository();
+    const service = createService(
+      new FakeOwnerReader(ownerSnapshot()),
+      new FakeObserver(observation()),
+      new FakeClaimer(),
+      repository,
+    );
+
+    await expect(
+      service.getCurrentRegistrationStatuses([
+        command().owner,
+        { ...command().owner, channelId: 8, productId: 44 },
+      ]),
+    ).rejects.toMatchObject({
+      code: "MARKETPLACE_LISTING_REGISTRATION_REQUEST_INVALID",
+    });
+    await expect(
+      service.getCurrentRegistrationStatuses([
+        command().owner,
+        command().owner,
+      ]),
+    ).rejects.toMatchObject({
+      code: "MARKETPLACE_LISTING_REGISTRATION_REQUEST_INVALID",
+    });
+    expect(repository.batchStatusCalls).toBe(0);
+  });
+
   it("validates the owner snapshot before making a provider call", async () => {
     const ownerReader = new FakeOwnerReader({ invalid: true });
     const observer = new FakeObserver(observation());
@@ -191,11 +296,23 @@ class FakeClaimer implements MarketplaceListingProviderAccountClaimer {
 }
 
 class FakeRepository implements MarketplaceListingRegistrationRepository {
+  statusCalls = 0;
+  batchStatusCalls = 0;
   replayCalls = 0;
   registerCalls = 0;
+  status: ListingRegistrationStatus | null = null;
+  statuses: readonly ListingRegistrationStatus[] = [];
   replay: ListingRegistrationReceipt | null = null;
   failure: Error | null = null;
   constructor(private readonly callOrder: string[] = []) {}
+  async findCurrentRegistration(): Promise<ListingRegistrationStatus | null> {
+    this.statusCalls += 1;
+    return this.status;
+  }
+  async findCurrentRegistrations(): Promise<readonly ListingRegistrationStatus[]> {
+    this.batchStatusCalls += 1;
+    return this.statuses;
+  }
   async findReplay(): Promise<ListingRegistrationReceipt | null> {
     this.replayCalls += 1;
     return this.replay;
@@ -330,6 +447,20 @@ function receipt(): ListingRegistrationReceipt {
     observationHash: "b".repeat(64),
     desiredStateHash: "c".repeat(64),
     observedAt: new Date("2026-08-04T12:00:00.000Z"),
+    registeredAt: new Date("2026-08-04T12:00:02.000Z"),
+  };
+}
+
+function registrationStatus(): ListingRegistrationStatus {
+  return {
+    status: "registered",
+    productId: 33,
+    registrationId: 100,
+    scopeId: 200,
+    providerAccountId: 300,
+    publicationId: 401,
+    providerPublicationKey: "ARM-ENV-SGL-V3",
+    externalListingId: "listing-456",
     registeredAt: new Date("2026-08-04T12:00:02.000Z"),
   };
 }

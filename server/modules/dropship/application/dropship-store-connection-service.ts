@@ -38,6 +38,9 @@ export interface DropshipStoreConnectionProfile {
   vendorId: number;
   platform: DropshipSupportedStorePlatform;
   externalAccountId: string | null;
+  providerEnvironment: string | null;
+  externalAccountIdentityScheme: string | null;
+  externalAccountVerifiedAt: Date | null;
   externalDisplayName: string | null;
   shopDomain: string | null;
   status: DropshipStoreConnectionLifecycleStatus;
@@ -60,6 +63,11 @@ export interface DropshipStoreConnectionProfile {
 export interface DropshipStoreConnectionOrderProcessingConfig {
   defaultWarehouseId: number | null;
 }
+export interface DropshipObservedProviderAccountClaimResult {
+  connection: DropshipStoreConnectionProfile;
+  claimed: boolean;
+}
+
 
 export interface DropshipStoreConnectionSetupCheck {
   checkKey: string;
@@ -120,6 +128,8 @@ export interface DropshipStoreConnectionTokenGrant {
   refreshToken: string | null;
   accessTokenExpiresAt: Date | null;
   externalAccountId: string | null;
+  providerEnvironment: string;
+  externalAccountIdentityScheme: string;
   externalDisplayName: string | null;
   tokenMetadata?: Record<string, unknown>;
 }
@@ -206,10 +216,14 @@ export interface DropshipStoreConnectionRepository {
     vendorId: number;
     platform: DropshipSupportedStorePlatform;
   }): Promise<boolean>;
+  isMarketplaceIdentityBound(storeConnectionId: number): Promise<boolean>;
   connectStore(input: {
     vendorId: number;
     platform: DropshipSupportedStorePlatform;
     externalAccountId: string | null;
+    providerEnvironment: string;
+    externalAccountIdentityScheme: string;
+    externalAccountVerifiedAt: Date;
     externalDisplayName: string | null;
     shopDomain: string | null;
     accessTokenRef: string;
@@ -217,8 +231,24 @@ export interface DropshipStoreConnectionRepository {
     tokenExpiresAt: Date | null;
     tokenRecords: DropshipStoreConnectionTokenRecord[];
     config: Record<string, unknown>;
+    oauthIntent: DropshipStoreOAuthIntent;
     connectedAt: Date;
   }): Promise<DropshipStoreConnectionProfile>;
+  claimObservedProviderAccount(input: {
+    storeConnectionId: number;
+    platform: DropshipSupportedStorePlatform;
+    providerEnvironment: string;
+    externalAccountId: string;
+    externalAccountIdentityScheme: "provider_user_id";
+    observedAt: Date;
+    idempotencyKey: string;
+    observationHash: string;
+    correlationId: string | null;
+    actor: {
+      actorType: "user" | "service" | "system";
+      actorId: string;
+    };
+  }): Promise<DropshipObservedProviderAccountClaimResult>;
   recordPostConnectSetupSucceeded(input: {
     vendorId: number;
     storeConnectionId: number;
@@ -305,6 +335,57 @@ export class DropshipStoreConnectionService {
     return this.deps.repository.listForAdmin(parsed);
   }
 
+  async claimObservedProviderAccount(input: {
+    storeConnectionId: number;
+    platform: DropshipSupportedStorePlatform;
+    providerEnvironment: string;
+    externalAccountId: string;
+    externalAccountIdentityScheme: "provider_user_id";
+    observedAt: Date;
+    idempotencyKey: string;
+    observationHash: string;
+    correlationId: string | null;
+    actor: {
+      actorType: "user" | "service" | "system";
+      actorId: string;
+    };
+  }): Promise<DropshipObservedProviderAccountClaimResult> {
+    if (!Number.isSafeInteger(input.storeConnectionId) || input.storeConnectionId <= 0) {
+      throw new DropshipError("DROPSHIP_STORE_IDENTITY_CLAIM_INVALID", "Store connection ID must be a positive integer.");
+    }
+    const platform = assertDropshipStorePlatform(input.platform);
+    const providerEnvironment = requireIdentityText(input.providerEnvironment, "providerEnvironment", 30);
+    const externalAccountId = requireIdentityText(input.externalAccountId, "externalAccountId", 255);
+    const actorId = requireIdentityText(input.actor.actorId, "actor.id", 255);
+    if (input.externalAccountIdentityScheme !== "provider_user_id" || Number.isNaN(input.observedAt.getTime())) {
+      throw new DropshipError(
+        "DROPSHIP_STORE_IDENTITY_CLAIM_INVALID",
+        "Observed provider account identity is invalid.",
+      );
+    }
+    const idempotencyKey = requireIdentityText(input.idempotencyKey, "idempotencyKey", 200);
+    const observationHash = input.observationHash.trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(observationHash)) {
+      throw new DropshipError(
+        "DROPSHIP_STORE_IDENTITY_CLAIM_INVALID",
+        "observationHash must be a lowercase SHA-256 value.",
+      );
+    }
+    const correlationId = input.correlationId === null
+      ? null
+      : requireIdentityText(input.correlationId, "correlationId", 100);
+    return this.deps.repository.claimObservedProviderAccount({
+      ...input,
+      platform,
+      providerEnvironment,
+      externalAccountId,
+      actor: { ...input.actor, actorId },
+      idempotencyKey,
+      observationHash,
+      correlationId,
+    });
+  }
+
   async startOAuth(memberId: string, input: {
     platform: DropshipSupportedStorePlatform;
     intent?: DropshipStoreOAuthIntent;
@@ -379,7 +460,7 @@ export class DropshipStoreConnectionService {
       platform,
       intent,
     });
-    const refreshTargetConnection = intent === "refresh_connection"
+    const targetConnection = intent === "refresh_connection" || intent === "change_store"
       ? await this.loadOAuthTargetConnection({
           vendorId: vendor.vendorId,
           platform,
@@ -394,9 +475,17 @@ export class DropshipStoreConnectionService {
     assertOAuthGrantMatchesIntent({
       intent,
       platform,
-      targetConnection: refreshTargetConnection,
+      targetConnection,
       grant,
     });
+    if (
+      intent === "change_store"
+      && targetConnection
+      && hasProviderIdentityDrift({ platform, targetConnection, grant })
+      && await this.deps.repository.isMarketplaceIdentityBound(targetConnection.storeConnectionId)
+    ) {
+      throw marketplaceIdentityBoundError(targetConnection, grant);
+    }
     const tokenRecords = [
       this.deps.tokenCipher.seal({
         tokenKind: "access",
@@ -420,6 +509,9 @@ export class DropshipStoreConnectionService {
       vendorId: vendor.vendorId,
       platform,
       externalAccountId: grant.externalAccountId,
+      providerEnvironment: grant.providerEnvironment,
+      externalAccountIdentityScheme: grant.externalAccountIdentityScheme,
+      externalAccountVerifiedAt: now,
       externalDisplayName: grant.externalDisplayName,
       shopDomain: state.shopDomain,
       accessTokenRef: tokenRecords[0].tokenRef,
@@ -431,6 +523,7 @@ export class DropshipStoreConnectionService {
         connectedByMemberId: vendor.memberId,
         oauthIntent: intent,
       },
+      oauthIntent: intent,
       connectedAt: now,
     });
 
@@ -882,11 +975,38 @@ function assertOAuthGrantMatchesIntent(input: {
   targetConnection: DropshipStoreConnectionProfile | null;
   grant: DropshipStoreConnectionTokenGrant;
 }): void {
-  if (input.intent !== "refresh_connection" || !input.targetConnection?.externalAccountId) {
+  if (input.intent !== "refresh_connection" || !input.targetConnection) {
     return;
   }
 
-  if (input.grant.externalAccountId !== input.targetConnection.externalAccountId) {
+  if (input.targetConnection.platform !== input.platform) {
+    throw new DropshipError(
+      "DROPSHIP_STORE_OAUTH_PLATFORM_MISMATCH",
+      "The authorized marketplace platform did not match the store connection being refreshed.",
+      {
+        expectedPlatform: input.targetConnection.platform,
+        actualPlatform: input.platform,
+      },
+    );
+  }
+  if (
+    input.targetConnection.providerEnvironment !== null
+    && input.grant.providerEnvironment !== input.targetConnection.providerEnvironment
+  ) {
+    throw new DropshipError(
+      "DROPSHIP_STORE_OAUTH_ENVIRONMENT_MISMATCH",
+      "The authorized marketplace environment did not match the store connection being refreshed.",
+      {
+        platform: input.platform,
+        expectedProviderEnvironment: input.targetConnection.providerEnvironment,
+        actualProviderEnvironment: input.grant.providerEnvironment,
+      },
+    );
+  }
+  if (
+    input.targetConnection.externalAccountId !== null
+    && input.grant.externalAccountId !== input.targetConnection.externalAccountId
+  ) {
     throw new DropshipError(
       "DROPSHIP_STORE_OAUTH_ACCOUNT_MISMATCH",
       "The authorized marketplace account did not match the store connection being refreshed.",
@@ -897,6 +1017,65 @@ function assertOAuthGrantMatchesIntent(input: {
       },
     );
   }
+  if (
+    input.targetConnection.externalAccountIdentityScheme !== null
+    && input.targetConnection.externalAccountIdentityScheme !== "legacy_username"
+    && input.grant.externalAccountIdentityScheme !== input.targetConnection.externalAccountIdentityScheme
+  ) {
+    throw new DropshipError(
+      "DROPSHIP_STORE_OAUTH_IDENTITY_SCHEME_MISMATCH",
+      "The authorized marketplace identity scheme did not match the store connection being refreshed.",
+      {
+        platform: input.platform,
+        expectedIdentityScheme: input.targetConnection.externalAccountIdentityScheme,
+        actualIdentityScheme: input.grant.externalAccountIdentityScheme,
+      },
+    );
+  }
+}
+
+function hasProviderIdentityDrift(input: {
+  platform: DropshipSupportedStorePlatform;
+  targetConnection: DropshipStoreConnectionProfile;
+  grant: DropshipStoreConnectionTokenGrant;
+}): boolean {
+  return input.targetConnection.platform !== input.platform
+    || input.targetConnection.providerEnvironment !== input.grant.providerEnvironment
+    || input.targetConnection.externalAccountId !== input.grant.externalAccountId
+    || input.targetConnection.externalAccountIdentityScheme !== input.grant.externalAccountIdentityScheme;
+}
+
+function marketplaceIdentityBoundError(
+  connection: DropshipStoreConnectionProfile,
+  grant: DropshipStoreConnectionTokenGrant,
+): DropshipError {
+  return new DropshipError(
+    "DROPSHIP_STORE_MARKETPLACE_IDENTITY_BOUND",
+    "This store connection is registered to marketplace listings and cannot be changed to a different seller account. Create a separate store connection after removing or migrating those registrations.",
+    {
+      storeConnectionId: connection.storeConnectionId,
+      platform: connection.platform,
+      currentProviderEnvironment: connection.providerEnvironment,
+      requestedProviderEnvironment: grant.providerEnvironment,
+      currentExternalAccountId: connection.externalAccountId,
+      requestedExternalAccountId: grant.externalAccountId,
+      currentIdentityScheme: connection.externalAccountIdentityScheme,
+      requestedIdentityScheme: grant.externalAccountIdentityScheme,
+      retryable: false,
+    },
+  );
+}
+
+function requireIdentityText(value: string, field: string, maxLength: number): string {
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length > maxLength) {
+    throw new DropshipError(
+      "DROPSHIP_STORE_IDENTITY_CLAIM_INVALID",
+      `${field} must contain between 1 and ${maxLength} characters.`,
+      { field },
+    );
+  }
+  return normalized;
 }
 
 function parseListForAdminInput(input: unknown): ListDropshipAdminStoreConnectionsInput {

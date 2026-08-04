@@ -6,9 +6,134 @@ import {
   buildListingRegistrationPlan,
   type ListingRegistrationPlan,
 } from "../../domain/listing-registration-plan";
+import type { ListingOwnerRef } from "../../domain/listing-replacement-plan";
 import { PgMarketplaceListingRegistrationRepository } from "../../infrastructure/pg-listing-registration.repository";
 
 describe("PgMarketplaceListingRegistrationRepository", () => {
+  it("loads the current active publication and registration receipt for a Channel owner", async () => {
+    const owner = persistenceInput().plan.owner;
+    const poolQuery = vi.fn(async () => result([currentStatusRow(owner)]));
+    const repository = new PgMarketplaceListingRegistrationRepository({
+      query: poolQuery,
+    } as unknown as Pool);
+
+    await expect(repository.findCurrentRegistration(owner)).resolves.toEqual({
+      status: "registered",
+      productId: 33,
+      registrationId: 40,
+      scopeId: 10,
+      providerAccountId: 20,
+      publicationId: 31,
+      providerPublicationKey: "ARM-ENV-SGL-V3",
+      externalListingId: "listing-456",
+      registeredAt: new Date("2026-08-04T12:00:02.000Z"),
+    });
+    const [sql, params] = poolQuery.mock.calls[0] ?? [];
+    expect(sql).toContain("marketplace.channel_listing_scopes");
+    expect(sql).toContain("publication.status = 'active'");
+    expect(params).toEqual(["channel", "ebay", "EBAY_US", 7, [33]]);
+  });
+
+  it("uses the same provider-neutral status contract for a Dropship owner", async () => {
+    const owner: ListingOwnerRef = {
+      kind: "dropship",
+      storeConnectionId: 19,
+      productId: 33,
+      provider: "ebay",
+      marketplaceId: "EBAY_US",
+    };
+    const poolQuery = vi.fn(async () => result([currentStatusRow(owner)]));
+    const repository = new PgMarketplaceListingRegistrationRepository({
+      query: poolQuery,
+    } as unknown as Pool);
+
+    await expect(
+      repository.findCurrentRegistration(owner),
+    ).resolves.toMatchObject({ status: "registered", publicationId: 31 });
+    const [sql, params] = poolQuery.mock.calls[0] ?? [];
+    expect(sql).toContain("marketplace.dropship_listing_scopes");
+    expect(params).toEqual(["dropship", "ebay", "EBAY_US", 19, [33]]);
+  });
+
+  it("loads multiple product statuses with one owner-scoped query", async () => {
+    const firstOwner = persistenceInput().plan.owner;
+    const secondOwner = { ...firstOwner, productId: 44 };
+    const poolQuery = vi.fn(async () =>
+      result([
+        currentStatusRow(secondOwner),
+        currentStatusRow(firstOwner),
+      ]),
+    );
+    const repository = new PgMarketplaceListingRegistrationRepository({
+      query: poolQuery,
+    } as unknown as Pool);
+
+    await expect(
+      repository.findCurrentRegistrations([firstOwner, secondOwner]),
+    ).resolves.toEqual([
+      expect.objectContaining({ productId: 44 }),
+      expect.objectContaining({ productId: 33 }),
+    ]);
+    expect(poolQuery).toHaveBeenCalledTimes(1);
+    const [sql, params] = poolQuery.mock.calls[0] ?? [];
+    expect(sql).toContain("scope.product_id = ANY($5::INTEGER[])");
+    expect(params).toEqual([
+      "channel", "ebay", "EBAY_US", 7, [33, 44],
+    ]);
+  });
+
+  it("returns null when the owner has no registration receipt", async () => {
+    const owner = persistenceInput().plan.owner;
+    const row = currentStatusRow(owner);
+    const poolQuery = vi
+      .fn()
+      .mockResolvedValueOnce(result([]))
+      .mockResolvedValueOnce(result([{ ...row, registration_id: null }]));
+    const repository = new PgMarketplaceListingRegistrationRepository({
+      query: poolQuery,
+    } as unknown as Pool);
+
+    await expect(repository.findCurrentRegistration(owner)).resolves.toBeNull();
+    await expect(repository.findCurrentRegistration(owner)).resolves.toBeNull();
+  });
+
+  it("rejects multiple current registration rows as database contract drift", async () => {
+    const owner = persistenceInput().plan.owner;
+    const row = currentStatusRow(owner);
+    const repository = new PgMarketplaceListingRegistrationRepository({
+      query: vi.fn(async () => result([row, row])),
+    } as unknown as Pool);
+
+    await expect(repository.findCurrentRegistration(owner)).rejects.toMatchObject(
+      {
+        code: "MARKETPLACE_LISTING_REGISTRATION_DATABASE_CONTRACT_ERROR",
+      },
+    );
+  });
+
+  it("rejects a receipt whose current active publication or account link is incomplete", async () => {
+    const owner = persistenceInput().plan.owner;
+    const row = currentStatusRow(owner);
+    const repository = new PgMarketplaceListingRegistrationRepository({
+      query: vi.fn(async () =>
+        result([
+          {
+            ...row,
+            publication_id: null,
+            publication_scope_id: null,
+            publication_status: null,
+          },
+        ]),
+      ),
+    } as unknown as Pool);
+
+    await expect(repository.findCurrentRegistration(owner)).rejects.toMatchObject(
+      {
+        code: "MARKETPLACE_LISTING_REGISTRATION_DATABASE_CONTRACT_ERROR",
+      },
+    );
+  });
+
   it("imports an observed listing in one transaction after owner and global identity locks", async () => {
     const input = persistenceInput();
     const queries: string[] = [];
@@ -47,6 +172,44 @@ describe("PgMarketplaceListingRegistrationRepository", () => {
     );
     expect(queries.at(-1)).toContain("COMMIT");
     expect(client.release).toHaveBeenCalledWith(false);
+  });
+
+  it("rejects owner identity evidence re-verified after the account claim", async () => {
+    const input = persistenceInput();
+    const release = vi.fn();
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql.startsWith("SET LOCAL")) return result([]);
+      if (sql.includes("FROM channels.channels")) {
+        return result([{ id: 7, provider: "ebay" }]);
+      }
+      if (sql.includes("FROM ebay.ebay_oauth_tokens")) {
+        return result([
+          {
+            external_account_id: "provider-user-123",
+            external_account_identity_scheme: "provider_user_id",
+            external_account_verified_at: new Date(
+              input.accountClaim.verifiedAt.getTime() + 1,
+            ),
+          },
+        ]);
+      }
+      if (sql === "ROLLBACK") return result([]);
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+    const repository = new PgMarketplaceListingRegistrationRepository({
+      connect: vi.fn(async () => ({ query, release }) as unknown as PoolClient),
+    } as unknown as Pool);
+
+    await expect(repository.registerOrReplay(input)).rejects.toMatchObject({
+      code: "MARKETPLACE_LISTING_REGISTRATION_OWNER_CHANGED",
+    });
+    expect(query).toHaveBeenCalledWith("ROLLBACK");
+    expect(
+      query.mock.calls.some(([sql]) =>
+        String(sql).includes("INSERT INTO marketplace.listing_scopes"),
+      ),
+    ).toBe(false);
+    expect(release).toHaveBeenCalledWith(false);
   });
 
   it("uses owner-scoped replay without opening a transaction", async () => {
@@ -337,6 +500,37 @@ function receiptRow(plan: ListingRegistrationPlan) {
     desired_state_hash: plan.desiredStateHash,
     observed_at: plan.observedAt,
     registered_at: new Date("2026-08-04T12:00:02.000Z"),
+  };
+}
+
+function currentStatusRow(owner: ListingOwnerRef) {
+  return {
+    scope_id: 10,
+    scope_owner_kind: owner.kind,
+    scope_provider: owner.provider,
+    scope_marketplace_id: owner.marketplaceId,
+    scope_product_id: owner.productId,
+    channel_id: owner.kind === "channel" ? owner.channelId : null,
+    store_connection_id:
+      owner.kind === "dropship" ? owner.storeConnectionId : null,
+    registration_id: 40,
+    registration_scope_id: 10,
+    registration_provider_account_id: 20,
+    registered_publication_id: 30,
+    registered_at: new Date("2026-08-04T12:00:02.000Z"),
+    publication_id: 31,
+    publication_scope_id: 10,
+    publication_status: "active",
+    provider_publication_key: "ARM-ENV-SGL-V3",
+    external_listing_id: "listing-456",
+    scope_provider_account_id: 20,
+    provider_account_id: 20,
+    account_owner_kind: owner.kind,
+    account_channel_id: owner.kind === "channel" ? owner.channelId : null,
+    account_store_connection_id:
+      owner.kind === "dropship" ? owner.storeConnectionId : null,
+    account_provider: owner.provider,
+    account_identity_scheme: "provider_user_id",
   };
 }
 

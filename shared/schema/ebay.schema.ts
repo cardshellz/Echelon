@@ -33,6 +33,13 @@ export const ebayOauthTokens = ebaySchema.table("ebay_oauth_tokens", {
   refreshToken: text("refresh_token").notNull(),
   refreshTokenExpiresAt: timestamp("refresh_token_expires_at"), // ~18 months from issuance
   scopes: text("scopes"), // Space-separated OAuth scopes
+  // Stable identity of the eBay account represented by these credentials.
+  // `externalAccountId` must contain only Identity API `userId`; username is
+  // mutable and is retained separately for display purposes.
+  externalAccountId: varchar("external_account_id", { length: 255 }),
+  externalAccountDisplayName: varchar("external_account_display_name", { length: 255 }),
+  externalAccountIdentityScheme: varchar("external_account_identity_scheme", { length: 50 }),
+  externalAccountVerifiedAt: timestamp("external_account_verified_at", { withTimezone: true }),
   lastRefreshedAt: timestamp("last_refreshed_at").defaultNow(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

@@ -70,6 +70,11 @@ import { EbayCategoryPicker } from "@/components/ebay/EbayCategoryPicker";
 import { AspectEditor } from "@/components/ebay/AspectEditor";
 import { PushProgressModal } from "@/components/ebay/PushProgressModal";
 import { SyncProgressModal } from "@/components/ebay/SyncProgressModal";
+import { MarketplaceListingRegistrationDialog } from "@/components/marketplace/MarketplaceListingRegistrationDialog";
+import {
+  fetchChannelEbayMarketplaceListingRegistrationStatuses,
+  type MarketplaceListingRegistrationStatus,
+} from "@/lib/marketplace-listing-registration-status";
 
 // ============================================================================
 // Types
@@ -86,6 +91,7 @@ interface ChannelConfig {
     environment: string;
   } | null;
   config: {
+    marketplaceId: string;
     merchantLocationKey: string | null;
     fulfillmentPolicyId: string | null;
     returnPolicyId: string | null;
@@ -377,6 +383,69 @@ export default function EbayChannelPage() {
     enabled: !!config?.connected,
   });
 
+  const registrationStatusProductIds = useMemo(
+    () => [...new Set(
+      (feedData?.feed ?? [])
+        .filter((item) => item.externalListingId && item.status !== "deleted")
+        .map((item) => item.id),
+    )].sort((left, right) => left - right),
+    [feedData?.feed],
+  );
+  const registrationStatusQueryInput = useMemo(() => {
+    const channelId = config?.channel?.id;
+    const marketplaceId = config?.config.marketplaceId?.trim();
+    if (!config?.connected || !channelId || !marketplaceId || registrationStatusProductIds.length === 0) {
+      return null;
+    }
+    return {
+      channelId,
+      marketplaceId,
+      productIds: registrationStatusProductIds,
+    };
+  }, [
+    config?.channel?.id,
+    config?.config.marketplaceId,
+    config?.connected,
+    registrationStatusProductIds,
+  ]);
+  const registrationStatusQueryKey = useMemo(
+    () => [
+      "marketplace-listing-registration-status",
+      "channel",
+      "ebay",
+      registrationStatusQueryInput?.channelId ?? null,
+      registrationStatusQueryInput?.marketplaceId ?? null,
+      registrationStatusQueryInput?.productIds.join(",") ?? null,
+    ] as const,
+    [registrationStatusQueryInput],
+  );
+  const {
+    data: registrationStatuses = [],
+    isLoading: registrationStatusesLoading,
+    isFetching: registrationStatusesFetching,
+    error: registrationStatusesError,
+  } = useQuery<readonly MarketplaceListingRegistrationStatus[]>({
+    queryKey: registrationStatusQueryKey,
+    enabled: registrationStatusQueryInput !== null,
+    queryFn: async () => registrationStatusQueryInput
+      ? fetchChannelEbayMarketplaceListingRegistrationStatuses(registrationStatusQueryInput)
+      : [],
+  });
+  const registrationStatusConfigurationUnavailable =
+    registrationStatusProductIds.length > 0
+    && registrationStatusQueryInput === null
+    && !configLoading
+    && !feedLoading;
+  const registrationStatusByProductId = useMemo(
+    () => new Map(
+      registrationStatuses.map((status) => [
+        status.productId,
+        status,
+      ]),
+    ),
+    [registrationStatuses],
+  );
+
   // ---- Pricing rules ----
   const { data: pricingRulesData, isLoading: pricingRulesLoading } = useQuery<{ rules: PricingRule[] }>({
     queryKey: ["/api/ebay/pricing-rules"],
@@ -421,6 +490,29 @@ export default function EbayChannelPage() {
   const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "ended" | "errors">("all");
   const [feedSearch, setFeedSearch] = useState("");
   const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
+  const [registrationTarget, setRegistrationTarget] = useState<FeedItem | null>(null);
+  const registrationOwner = useMemo(() => {
+    const marketplaceId = config?.config.marketplaceId?.trim();
+    if (!registrationTarget || !config?.channel || !marketplaceId) return null;
+    return {
+      kind: "channel" as const,
+      channelId: config.channel.id,
+      productId: registrationTarget.id,
+      marketplaceId,
+    };
+  }, [config?.channel, config?.config.marketplaceId, registrationTarget]);
+  const handleRegistrationComplete = useCallback(() => {
+    if (registrationStatusQueryInput) {
+      void queryClient.invalidateQueries({
+        queryKey: registrationStatusQueryKey,
+        exact: true,
+      });
+    }
+    toast({
+      title: "Listing baseline registered",
+      description: "The live eBay listing is now recorded for safe replacement planning.",
+    });
+  }, [queryClient, registrationStatusQueryInput, registrationStatusQueryKey, toast]);
 
   // Location form
   const [locationForm, setLocationForm] = useState({
@@ -1726,6 +1818,16 @@ export default function EbayChannelPage() {
                 </div>
               </div>
 
+              {(registrationStatusesError || registrationStatusConfigurationUnavailable) && (
+                <div className="mb-3 flex items-start gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-800 dark:bg-red-950/20 dark:text-red-300">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div>
+                    <p className="font-medium">Listing baseline status is unavailable</p>
+                    <p className="mt-0.5 text-xs">Registration controls are disabled because Echelon could not verify the stored baseline state. Refresh the page or try again later.</p>
+                  </div>
+                </div>
+              )}
+
               {/* Feed Table — Mobile-first: card layout on mobile, table on sm+ */}
               <div className="border rounded-lg overflow-x-hidden">
                 {/* Desktop table header — hidden on mobile */}
@@ -1747,6 +1849,37 @@ export default function EbayChannelPage() {
                       const hasVariants = item.variants && item.variants.length > 0;
                       const allIncluded = item.includedVariantCount === item.variantCount;
                       const someExcluded = item.includedVariantCount < item.variantCount && item.includedVariantCount > 0;
+                      const registrationStatus = registrationStatusByProductId.get(item.id) ?? null;
+                      const registrationMatchesCurrentListing =
+                        registrationStatus?.externalListingId === item.externalListingId;
+                      const registrationConflictsWithCurrentListing =
+                        registrationStatus !== null && !registrationMatchesCurrentListing;
+                      const registrationStatusUnavailable = registrationStatusQueryInput === null
+                        || registrationStatusesError !== null;
+                      const registrationStatusChecking = !registrationStatusUnavailable
+                        && (registrationStatusesLoading || registrationStatusesFetching);
+                      const registrationControlDisabled = registrationStatusUnavailable
+                        || registrationStatusChecking || registrationStatus !== null;
+                      const registrationControlTitle = registrationStatusUnavailable
+                        ? "Stored listing baseline status is unavailable"
+                        : registrationStatusChecking
+                          ? "Checking the stored listing baseline status"
+                          : registrationMatchesCurrentListing
+                            ? "This live eBay listing is registered as the controlled baseline"
+                            : registrationConflictsWithCurrentListing
+                              ? "A different eBay listing is already registered for this product"
+                              : "Review and register the live eBay listing baseline";
+                      const registrationControlLabel = registrationStatusUnavailable
+                        ? "Unavailable"
+                        : registrationStatusChecking
+                          ? "Checking"
+                          : registrationMatchesCurrentListing
+                            ? "Registered"
+                            : registrationConflictsWithCurrentListing ? "Baseline mismatch" : "Baseline";
+                      const registrationIconClass = registrationMatchesCurrentListing
+                        ? "text-green-600"
+                        : registrationConflictsWithCurrentListing ? "text-amber-600" : "";
+
 
                       return (
                         <React.Fragment key={item.id}>
@@ -1895,6 +2028,28 @@ export default function EbayChannelPage() {
                               {item.status === "excluded" && (
                                 <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
                               )}
+                              {item.externalListingId && item.status !== "deleted" && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="min-h-[44px] px-3 text-xs"
+                                  disabled={registrationControlDisabled}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setRegistrationTarget(item);
+                                  }}
+                                  title={registrationControlTitle}
+                                >
+                                  {registrationStatusChecking ? (
+                                    <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                                  ) : registrationStatusUnavailable ? (
+                                    <AlertCircle className="h-4 w-4 mr-1 text-red-600" />
+                                  ) : (
+                                    <ShieldCheck className={`h-4 w-4 mr-1 ${registrationIconClass}`} />
+                                  )}
+                                  {registrationControlLabel}
+                                </Button>
+                              )}
                             </div>
                             {/* Error message inline on mobile */}
                             {item.syncError && (item.status === "error") && (
@@ -2021,6 +2176,28 @@ export default function EbayChannelPage() {
                                 )}
                                 {item.status === "excluded" && (
                                   <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
+                                )}
+                                {item.externalListingId && item.status !== "deleted" && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                    disabled={registrationControlDisabled}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setRegistrationTarget(item);
+                                    }}
+                                    title={registrationControlTitle}
+                                    aria-label={registrationControlTitle}
+                                  >
+                                    {registrationStatusChecking ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : registrationStatusUnavailable ? (
+                                      <AlertCircle className="h-3.5 w-3.5 text-red-600" />
+                                    ) : (
+                                      <ShieldCheck className={`h-3.5 w-3.5 ${registrationIconClass}`} />
+                                    )}
+                                  </Button>
                                 )}
                               </div>
                               {/* Error message inline — desktop */}
@@ -2514,6 +2691,19 @@ export default function EbayChannelPage() {
       />
 
       {/* Sync Progress Modal (SSE-based) */}
+      {registrationTarget && registrationOwner && registrationTarget.externalListingId && (
+        <MarketplaceListingRegistrationDialog
+          open
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) setRegistrationTarget(null);
+          }}
+          owner={registrationOwner}
+          productName={registrationTarget.name}
+          externalListingId={registrationTarget.externalListingId}
+          onRegistered={handleRegistrationComplete}
+        />
+      )}
+
       <SyncProgressModal
         open={syncModalOpen}
         onClose={() => setSyncModalOpen(false)}

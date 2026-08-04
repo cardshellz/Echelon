@@ -128,6 +128,8 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
       refreshToken,
       accessTokenExpiresAt,
       externalAccountId: identity.accountId,
+      providerEnvironment: this.config.environment,
+      externalAccountIdentityScheme: "provider_user_id",
       externalDisplayName: store.storeName ?? identity.displayName,
       tokenMetadata: {
         environment: this.config.environment,
@@ -149,14 +151,25 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
       },
     });
     if (!response.ok) {
-      return { accountId: null, displayName: null };
+      throw new DropshipError(
+        "DROPSHIP_EBAY_STABLE_ACCOUNT_ID_REQUIRED",
+        "eBay did not return the stable provider user ID required to identify this seller account.",
+        { status: response.status, retryable: response.status >= 500 },
+      );
     }
 
     const identity = await response.json() as Record<string, unknown>;
     const username = optionalString(identity.username);
     const userId = optionalString(identity.userId);
+    if (!userId) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_STABLE_ACCOUNT_ID_REQUIRED",
+        "eBay did not return the stable provider user ID required to identify this seller account.",
+        { hasUsername: username !== null, retryable: false },
+      );
+    }
     return {
-      accountId: userId ?? username,
+      accountId: userId,
       displayName: username ?? userId,
     };
   }
@@ -269,6 +282,8 @@ export class ShopifyDropshipOAuthProvider implements DropshipMarketplaceOAuthPro
       refreshToken: null,
       accessTokenExpiresAt: null,
       externalAccountId: shopDomain,
+      providerEnvironment: "production",
+      externalAccountIdentityScheme: "shop_domain",
       externalDisplayName: shopDomain,
       tokenMetadata: {
         provider: "shopify",

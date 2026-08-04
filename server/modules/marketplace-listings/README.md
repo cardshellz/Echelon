@@ -34,9 +34,14 @@ external marketplace listing. It imports only a provider-confirmed live listing
 into a new or empty local scope. Owner account claiming and marketplace state
 persistence are intentionally separate durable boundaries.
 
-The repository exposes request-keyed replay, not an owner-keyed current-status
-query. A persisted status reader and GET route are warranted before UI state is
-expected to survive a page reload; they are not part of this command boundary.
+The repository exposes request-keyed replay plus bounded, owner-scoped current
+status reads. Authenticated Channel and Dropship HTTP routes expose the same
+provider-neutral preview, confirm, and status contracts while owner modules
+retain credentials and catalog authority. The Channel eBay listing feed reads
+the durable status instead of treating browser-session state as proof of a
+registration. Dropship uses the same backend boundary; a Dropship admin launcher
+requires a view that exposes the store connection, product, and external listing
+identity together.
 
 ## Stage 1 boundary
 

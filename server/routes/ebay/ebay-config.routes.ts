@@ -143,6 +143,9 @@ export const router = express.Router();
             environment: tokenRow.environment,
           } : null,
           config: {
+            marketplaceId: typeof metadata.marketplaceId === "string" && metadata.marketplaceId.trim()
+              ? metadata.marketplaceId.trim()
+              : "EBAY_US",
             merchantLocationKey: metadata.merchantLocationKey || null,
             fulfillmentPolicyId: metadata.fulfillmentPolicyId || null,
             returnPolicyId: metadata.returnPolicyId || null,

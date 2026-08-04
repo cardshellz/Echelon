@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import {
   buildListingRegistrationPlan,
   buildListingRegistrationRequestHash,
@@ -10,15 +12,18 @@ import {
   confirmListingRegistrationInputSchema,
   listingRegistrationOwnerSnapshotSchema,
   listingRegistrationReceiptSchema,
+  listingRegistrationStatusSchema,
   listingRegistrationResultSchema,
   marketplaceObservedListingPublicationSchema,
   previewListingRegistrationInputSchema,
   providerAccountClaimResultSchema,
   type ConfirmListingRegistrationInput,
   type ListingRegistrationResult,
+  type ListingRegistrationStatus,
   type PreviewListingRegistrationInput,
   type ProviderAccountClaimResult,
 } from "./registration-dtos";
+import { listingOwnerRefSchema } from "./dtos";
 import type {
   MarketplaceListingProviderAccountClaimer,
   MarketplaceListingRegistrationClock,
@@ -26,6 +31,8 @@ import type {
   MarketplaceListingRegistrationOwnerReader,
   MarketplaceListingRegistrationRepository,
 } from "./registration-ports";
+
+const MAX_REGISTRATION_STATUS_BATCH = 500;
 
 export class MarketplaceListingRegistrationService {
   constructor(
@@ -35,6 +42,69 @@ export class MarketplaceListingRegistrationService {
     private readonly repository: MarketplaceListingRegistrationRepository,
     private readonly clock: MarketplaceListingRegistrationClock,
   ) {}
+
+  async getCurrentRegistrationStatus(
+    owner: ListingOwnerRef,
+  ): Promise<ListingRegistrationStatus | null> {
+    const parsedOwner = parseBoundary(
+      listingOwnerRefSchema,
+      owner,
+      "MARKETPLACE_LISTING_REGISTRATION_REQUEST_INVALID",
+      "Listing registration owner is invalid.",
+    );
+    try {
+      const status = await this.repository.findCurrentRegistration(parsedOwner);
+      if (status === null) return null;
+      return listingRegistrationStatusSchema.parse(status);
+    } catch (error) {
+      throw classifyBoundaryError(
+        error,
+        "MARKETPLACE_LISTING_REGISTRATION_STATUS_LOOKUP_FAILED",
+        "Current marketplace listing registration status could not be loaded.",
+        {
+          ownerKind: parsedOwner.kind,
+          productId: parsedOwner.productId,
+        },
+      );
+    }
+  }
+
+  async getCurrentRegistrationStatuses(
+    owners: readonly ListingOwnerRef[],
+  ): Promise<readonly ListingRegistrationStatus[]> {
+    const parsedOwners = parseBoundary(
+      z.array(listingOwnerRefSchema).max(MAX_REGISTRATION_STATUS_BATCH),
+      owners,
+      "MARKETPLACE_LISTING_REGISTRATION_REQUEST_INVALID",
+      "Listing registration status batch is invalid.",
+    );
+    if (parsedOwners.length === 0) return [];
+    assertOneOwnerStatusBatch(parsedOwners);
+    try {
+      const statuses = z
+        .array(listingRegistrationStatusSchema)
+        .max(MAX_REGISTRATION_STATUS_BATCH)
+        .parse(
+          await this.repository.findCurrentRegistrations(parsedOwners),
+        );
+      assertStatusBatchMatchesOwners(statuses, parsedOwners);
+      return [...statuses].sort(
+        (left, right) => left.productId - right.productId,
+      );
+    } catch (error) {
+      const firstOwner = parsedOwners[0];
+      throw classifyBoundaryError(
+        error,
+        "MARKETPLACE_LISTING_REGISTRATION_STATUS_LOOKUP_FAILED",
+        "Current marketplace listing registration statuses could not be loaded.",
+        {
+          ownerKind: firstOwner.kind,
+          ownerId: ownerIdentity(firstOwner),
+          productCount: parsedOwners.length,
+        },
+      );
+    }
+  }
 
   async preview(
     input: PreviewListingRegistrationInput,
@@ -196,6 +266,64 @@ export class MarketplaceListingRegistrationService {
       );
     }
   }
+}
+
+function assertOneOwnerStatusBatch(owners: readonly ListingOwnerRef[]): void {
+  const firstOwner = owners[0];
+  const ownerKey = statusBatchOwnerKey(firstOwner);
+  const productIds = new Set<number>();
+  for (const owner of owners) {
+    if (statusBatchOwnerKey(owner) !== ownerKey) {
+      throw new MarketplaceListingRegistrationError(
+        "MARKETPLACE_LISTING_REGISTRATION_REQUEST_INVALID",
+        "A registration status batch must contain products for exactly one marketplace owner.",
+      );
+    }
+    if (productIds.has(owner.productId)) {
+      throw new MarketplaceListingRegistrationError(
+        "MARKETPLACE_LISTING_REGISTRATION_REQUEST_INVALID",
+        "A registration status batch cannot contain duplicate product IDs.",
+        { productId: owner.productId },
+      );
+    }
+    productIds.add(owner.productId);
+  }
+}
+
+function assertStatusBatchMatchesOwners(
+  statuses: readonly ListingRegistrationStatus[],
+  owners: readonly ListingOwnerRef[],
+): void {
+  const requestedProductIds = new Set(owners.map((owner) => owner.productId));
+  const returnedProductIds = new Set<number>();
+  for (const status of statuses) {
+    if (
+      !requestedProductIds.has(status.productId) ||
+      returnedProductIds.has(status.productId)
+    ) {
+      throw new MarketplaceListingRegistrationError(
+        "MARKETPLACE_LISTING_REGISTRATION_STATUS_CONTRACT_INVALID",
+        "Registration repository status results do not match the requested products.",
+        { productId: status.productId },
+      );
+    }
+    returnedProductIds.add(status.productId);
+  }
+}
+
+function statusBatchOwnerKey(owner: ListingOwnerRef): string {
+  return [
+    owner.kind,
+    ownerIdentity(owner),
+    owner.provider,
+    owner.marketplaceId,
+  ].join(":");
+}
+
+function ownerIdentity(owner: ListingOwnerRef): number {
+  return owner.kind === "channel"
+    ? owner.channelId
+    : owner.storeConnectionId;
 }
 
 function assertAccountClaimMatchesPlan(

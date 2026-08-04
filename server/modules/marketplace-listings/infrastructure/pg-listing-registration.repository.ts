@@ -4,8 +4,10 @@ import { pool as defaultPool } from "../../../db";
 import {
   listingRegistrationReceiptSchema,
   listingRegistrationResultSchema,
+  listingRegistrationStatusSchema,
   type ListingRegistrationReceipt,
   type ListingRegistrationResult,
+  type ListingRegistrationStatus,
 } from "../application/registration-dtos";
 import type {
   ListingRegistrationReplayLookup,
@@ -30,6 +32,33 @@ interface RegistrationRow extends QueryResultRow {
   desired_state_hash: string;
   observed_at: Date | string;
   registered_at: Date | string;
+}
+
+interface CurrentRegistrationStatusRow extends QueryResultRow {
+  scope_id: string | number;
+  scope_owner_kind: string;
+  scope_provider: string;
+  scope_marketplace_id: string;
+  scope_product_id: number;
+  channel_id: number | null;
+  store_connection_id: number | null;
+  registration_id: string | number | null;
+  registration_scope_id: string | number | null;
+  registration_provider_account_id: string | number | null;
+  registered_publication_id: string | number | null;
+  registered_at: Date | string | null;
+  publication_id: string | number | null;
+  publication_scope_id: string | number | null;
+  publication_status: string | null;
+  provider_publication_key: string | null;
+  external_listing_id: string | null;
+  scope_provider_account_id: string | number | null;
+  provider_account_id: string | number | null;
+  account_owner_kind: string | null;
+  account_channel_id: number | null;
+  account_store_connection_id: number | null;
+  account_provider: string | null;
+  account_identity_scheme: string | null;
 }
 
 interface ChannelRow extends QueryResultRow {
@@ -105,6 +134,51 @@ type RollbackResult =
 
 export class PgMarketplaceListingRegistrationRepository implements MarketplaceListingRegistrationRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
+
+  async findCurrentRegistration(
+    owner: ListingOwnerRef,
+  ): Promise<ListingRegistrationStatus | null> {
+    const statuses = await this.findCurrentRegistrations([owner]);
+    return statuses[0] ?? null;
+  }
+
+  async findCurrentRegistrations(
+    owners: readonly ListingOwnerRef[],
+  ): Promise<readonly ListingRegistrationStatus[]> {
+    if (owners.length === 0) return [];
+    const ownerByProductId = validateRepositoryOwnerBatch(owners);
+    const firstOwner = owners[0];
+    try {
+      const result = await this.dbPool.query<CurrentRegistrationStatusRow>(
+        currentRegistrationStatusesSql(firstOwner),
+        currentRegistrationStatusesParams(firstOwner, [
+          ...ownerByProductId.keys(),
+        ]),
+      );
+      const seenProductIds = new Set<number>();
+      const statuses: ListingRegistrationStatus[] = [];
+      for (const row of result.rows) {
+        const productId = toSafeInteger(
+          row.scope_product_id,
+          "registration_status.scope_product_id",
+        );
+        const owner = ownerByProductId.get(productId);
+        if (!owner || seenProductIds.has(productId)) {
+          throw databaseContractError(
+            "Owner-scoped current registration lookup returned an unexpected or duplicate product row.",
+          );
+        }
+        seenProductIds.add(productId);
+        assertScopeMatchesOwner(mapStatusScope(row), owner);
+        if (row.registration_id !== null) {
+          statuses.push(mapCurrentRegistrationStatus(row, owner));
+        }
+      }
+      return statuses;
+    } catch (error) {
+      throw classifyStatusLookupError(error, firstOwner);
+    }
+  }
 
   async findReplay(
     lookup: ListingRegistrationReplayLookup,
@@ -272,7 +346,12 @@ async function lockAndValidateOwner(
       [owner.channelId, providerAccount.accountNamespace],
     );
     const token = tokenResult.rows[0];
-    assertStableOwnerIdentity(token, providerAccount.externalAccountId, owner);
+    assertStableOwnerIdentity(
+      token,
+      providerAccount.externalAccountId,
+      input.accountClaim.verifiedAt,
+      owner,
+    );
     return;
   }
 
@@ -303,6 +382,7 @@ async function lockAndValidateOwner(
   assertStableOwnerIdentity(
     connection,
     providerAccount.externalAccountId,
+    input.accountClaim.verifiedAt,
     owner,
   );
 }
@@ -310,6 +390,7 @@ async function lockAndValidateOwner(
 function assertStableOwnerIdentity(
   row: EbayTokenRow | DropshipConnectionRow | undefined,
   externalAccountId: string,
+  expectedVerifiedAt: Date,
   owner: ListingOwnerRef,
 ): void {
   const databaseVerifiedAt = row?.external_account_verified_at;
@@ -325,7 +406,16 @@ function assertStableOwnerIdentity(
       "Owner stable provider_user_id evidence is missing or changed.",
     );
   }
-  toDate(databaseVerifiedAt, "owner.external_account_verified_at");
+  const parsedVerifiedAt = toDate(
+    databaseVerifiedAt,
+    "owner.external_account_verified_at",
+  );
+  if (parsedVerifiedAt.getTime() !== expectedVerifiedAt.getTime()) {
+    throw ownerChanged(
+      owner,
+      "Owner stable provider_user_id evidence was re-verified after the account claim.",
+    );
+  }
 }
 
 async function lockProviderAccountIdentity(
@@ -931,6 +1021,181 @@ function requiredMemberIdByVariantId(
   return memberId;
 }
 
+function currentRegistrationStatusesSql(owner: ListingOwnerRef): string {
+  const binding =
+    owner.kind === "channel"
+      ? `JOIN marketplace.channel_listing_scopes AS owner_binding
+           ON owner_binding.scope_id = scope.id
+          AND owner_binding.product_id = scope.product_id
+          AND owner_binding.marketplace_id = scope.marketplace_id`
+      : `JOIN marketplace.dropship_listing_scopes AS owner_binding
+           ON owner_binding.scope_id = scope.id
+          AND owner_binding.product_id = scope.product_id
+          AND owner_binding.marketplace_id = scope.marketplace_id`;
+  const ownerPredicate =
+    owner.kind === "channel"
+      ? "owner_binding.channel_id = $4"
+      : "owner_binding.store_connection_id = $4";
+  const ownerColumns =
+    owner.kind === "channel"
+      ? "owner_binding.channel_id AS channel_id, NULL::INTEGER AS store_connection_id"
+      : "NULL::INTEGER AS channel_id, owner_binding.store_connection_id AS store_connection_id";
+  return `SELECT
+      scope.id AS scope_id,
+      scope.owner_kind AS scope_owner_kind,
+      scope.provider AS scope_provider,
+      scope.marketplace_id AS scope_marketplace_id,
+      scope.product_id AS scope_product_id,
+      ${ownerColumns},
+      registration.id AS registration_id,
+      registration.scope_id AS registration_scope_id,
+      registration.provider_account_id AS registration_provider_account_id,
+      registration.publication_id AS registered_publication_id,
+      registration.registered_at,
+      publication.id AS publication_id,
+      publication.scope_id AS publication_scope_id,
+      publication.status AS publication_status,
+      publication.provider_publication_key,
+      publication.external_listing_id,
+      scope_account.provider_account_id AS scope_provider_account_id,
+      account.id AS provider_account_id,
+      account.owner_kind AS account_owner_kind,
+      account.channel_id AS account_channel_id,
+      account.store_connection_id AS account_store_connection_id,
+      account.provider AS account_provider,
+      account.identity_scheme AS account_identity_scheme
+    FROM marketplace.listing_scopes AS scope
+    ${binding}
+    LEFT JOIN marketplace.listing_registrations AS registration
+      ON registration.scope_id = scope.id
+    LEFT JOIN marketplace.listing_publications AS publication
+      ON publication.scope_id = scope.id
+     AND publication.status = 'active'
+    LEFT JOIN marketplace.listing_scope_provider_accounts AS scope_account
+      ON scope_account.scope_id = scope.id
+    LEFT JOIN marketplace.provider_accounts AS account
+      ON account.id = scope_account.provider_account_id
+    WHERE scope.owner_kind = $1
+      AND scope.provider = $2
+      AND scope.marketplace_id = $3
+      AND ${ownerPredicate}
+      AND scope.product_id = ANY($5::INTEGER[])
+    ORDER BY scope.id, registration.id, publication.id, account.id`;
+}
+
+function currentRegistrationStatusesParams(
+  owner: ListingOwnerRef,
+  productIds: readonly number[],
+): unknown[] {
+  return [
+    owner.kind,
+    owner.provider,
+    owner.marketplaceId,
+    ownerId(owner),
+    productIds,
+  ];
+}
+
+function validateRepositoryOwnerBatch(
+  owners: readonly ListingOwnerRef[],
+): ReadonlyMap<number, ListingOwnerRef> {
+  const firstOwner = owners[0];
+  const firstOwnerId = ownerId(firstOwner);
+  const ownerByProductId = new Map<number, ListingOwnerRef>();
+  for (const owner of owners) {
+    if (
+      owner.kind !== firstOwner.kind ||
+      ownerId(owner) !== firstOwnerId ||
+      owner.provider !== firstOwner.provider ||
+      owner.marketplaceId !== firstOwner.marketplaceId ||
+      ownerByProductId.has(owner.productId)
+    ) {
+      throw databaseContractError(
+        "Registration status batch must contain distinct products for one marketplace owner.",
+      );
+    }
+    ownerByProductId.set(owner.productId, owner);
+  }
+  return ownerByProductId;
+}
+
+function mapStatusScope(row: CurrentRegistrationStatusRow): ScopeRow {
+  return {
+    id: row.scope_id,
+    owner_kind: row.scope_owner_kind,
+    provider: row.scope_provider,
+    marketplace_id: row.scope_marketplace_id,
+    product_id: row.scope_product_id,
+    channel_id: row.channel_id,
+    store_connection_id: row.store_connection_id,
+  };
+}
+
+function mapCurrentRegistrationStatus(
+  row: CurrentRegistrationStatusRow,
+  owner: ListingOwnerRef,
+): ListingRegistrationStatus {
+  const scopeId = toSafeInteger(row.scope_id, "registration_status.scope_id");
+  const registrationId = toRequiredStatusId(
+    row.registration_id,
+    "registration_status.registration_id",
+  );
+  const registrationScopeId = toRequiredStatusId(
+    row.registration_scope_id,
+    "registration_status.registration_scope_id",
+  );
+  const registrationAccountId = toRequiredStatusId(
+    row.registration_provider_account_id,
+    "registration_status.registration_provider_account_id",
+  );
+  toRequiredStatusId(
+    row.registered_publication_id,
+    "registration_status.registered_publication_id",
+  );
+  const publicationId = toRequiredStatusId(
+    row.publication_id,
+    "registration_status.publication_id",
+  );
+  const publicationScopeId = toRequiredStatusId(
+    row.publication_scope_id,
+    "registration_status.publication_scope_id",
+  );
+  const scopeAccountId = toRequiredStatusId(
+    row.scope_provider_account_id,
+    "registration_status.scope_provider_account_id",
+  );
+  const providerAccountId = toRequiredStatusId(
+    row.provider_account_id,
+    "registration_status.provider_account_id",
+  );
+  if (
+    registrationScopeId !== scopeId ||
+    publicationScopeId !== scopeId ||
+    registrationAccountId !== scopeAccountId ||
+    scopeAccountId !== providerAccountId ||
+    row.publication_status !== "active"
+  ) {
+    throw databaseContractError(
+      "Current registration scope, publication, receipt, and account links disagree.",
+    );
+  }
+  assertStatusAccountMatchesOwner(row, owner);
+  return listingRegistrationStatusSchema.parse({
+    status: "registered",
+    productId: owner.productId,
+    registrationId,
+    scopeId,
+    providerAccountId,
+    publicationId,
+    providerPublicationKey: row.provider_publication_key,
+    externalListingId: row.external_listing_id,
+    registeredAt: toRequiredStatusDate(
+      row.registered_at,
+      "registration_status.registered_at",
+    ),
+  });
+}
+
 function registrationSelectSql(): string {
   return `SELECT
     id,
@@ -1054,6 +1319,38 @@ function assertScopeMatchesOwner(
   }
 }
 
+function assertStatusAccountMatchesOwner(
+  row: CurrentRegistrationStatusRow,
+  owner: ListingOwnerRef,
+): void {
+  const mismatch =
+    row.account_owner_kind !== owner.kind ||
+    row.account_provider !== owner.provider ||
+    row.account_identity_scheme !== "provider_user_id" ||
+    (owner.kind === "channel"
+      ? row.account_channel_id !== owner.channelId ||
+        row.account_store_connection_id !== null
+      : row.account_store_connection_id !== owner.storeConnectionId ||
+        row.account_channel_id !== null);
+  if (mismatch) {
+    throw databaseContractError(
+      "Current registration provider account no longer matches its owner.",
+    );
+  }
+}
+
+function toRequiredStatusId(
+  value: string | number | null,
+  field: string,
+): number {
+  if (value === null || value === undefined) {
+    throw databaseContractError(
+      "A registered scope is missing a required publication, receipt, or account link.",
+    );
+  }
+  return toSafeInteger(value, field);
+}
+
 function assertProviderAccountMatchesOwner(
   account: ProviderAccountRow,
   owner: ListingOwnerRef,
@@ -1154,6 +1451,25 @@ function classifyReplayError(
     {
       ownerKind: lookup.owner.kind,
       productId: lookup.owner.productId,
+      postgresCode: metadata.code,
+      constraint: metadata.constraint,
+    },
+    { cause: error },
+  );
+}
+
+function classifyStatusLookupError(
+  error: unknown,
+  owner: ListingOwnerRef,
+): MarketplaceListingRegistrationError {
+  if (error instanceof MarketplaceListingRegistrationError) return error;
+  const metadata = postgresMetadata(error);
+  return new MarketplaceListingRegistrationError(
+    "MARKETPLACE_LISTING_REGISTRATION_DATABASE_ERROR",
+    "Current registration status lookup failed.",
+    {
+      ownerKind: owner.kind,
+      productId: owner.productId,
       postgresCode: metadata.code,
       constraint: metadata.constraint,
     },
@@ -1300,4 +1616,16 @@ function toDate(value: Date | string, field: string): Date {
     );
   }
   return parsed;
+}
+
+function toRequiredStatusDate(
+  value: Date | string | null,
+  field: string,
+): Date {
+  if (value === null || value === undefined) {
+    throw databaseContractError(
+      "A registered scope is missing its registration timestamp.",
+    );
+  }
+  return toDate(value, field);
 }

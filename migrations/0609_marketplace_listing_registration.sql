@@ -2,13 +2,14 @@ ALTER TABLE ebay.ebay_oauth_tokens
   ADD COLUMN external_account_id VARCHAR(255),
   ADD COLUMN external_account_display_name VARCHAR(255),
   ADD COLUMN external_account_identity_scheme VARCHAR(50),
-  ADD COLUMN external_account_verified_at TIMESTAMP;
+  ADD COLUMN external_account_verified_at TIMESTAMPTZ;
 
 ALTER TABLE ebay.ebay_oauth_tokens
   ADD CONSTRAINT ebay_oauth_tokens_stable_identity_chk CHECK (
     external_account_identity_scheme IS NULL
     OR (
       external_account_identity_scheme = 'provider_user_id'
+      AND environment IN ('sandbox', 'production')
       AND external_account_id IS NOT NULL
       AND external_account_id = btrim(external_account_id)
       AND external_account_id <> ''
@@ -30,6 +31,10 @@ ALTER TABLE dropship.dropship_store_connections
     external_account_identity_scheme IS NULL
     OR (
       external_account_identity_scheme = 'provider_user_id'
+      AND (
+        lower(platform) <> 'ebay'
+        OR provider_environment IN ('sandbox', 'production')
+      )
       AND provider_environment IS NOT NULL
       AND provider_environment = btrim(provider_environment)
       AND provider_environment <> ''
@@ -264,7 +269,7 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 DECLARE
-  owner_verified BOOLEAN;
+  owner_verified BOOLEAN := FALSE;
 BEGIN
   IF NEW.identity_scheme IS DISTINCT FROM 'provider_user_id' THEN
     RAISE EXCEPTION 'Provider account registration requires provider_user_id identity'
@@ -272,33 +277,33 @@ BEGIN
   END IF;
 
   IF NEW.owner_kind = 'channel' THEN
-    SELECT EXISTS (
-      SELECT 1
-      FROM ebay.ebay_oauth_tokens AS token
-      JOIN channels.channels AS channel ON channel.id = token.channel_id
-      WHERE token.channel_id = NEW.channel_id
-        AND lower(channel.provider) = NEW.provider
-        AND token.environment = NEW.account_namespace
-        AND token.external_account_id = NEW.external_account_id
-        AND token.external_account_identity_scheme = 'provider_user_id'
-        AND token.external_account_verified_at IS NOT NULL
-    ) INTO owner_verified;
+    SELECT token.external_account_verified_at = NEW.verified_at
+      INTO owner_verified
+    FROM ebay.ebay_oauth_tokens AS token
+    JOIN channels.channels AS channel ON channel.id = token.channel_id
+    WHERE token.channel_id = NEW.channel_id
+      AND lower(channel.provider) = NEW.provider
+      AND token.environment = NEW.account_namespace
+      AND token.external_account_id = NEW.external_account_id
+      AND token.external_account_identity_scheme = 'provider_user_id'
+      AND token.external_account_verified_at IS NOT NULL
+    FOR UPDATE OF token;
   ELSIF NEW.owner_kind = 'dropship' THEN
-    SELECT EXISTS (
-      SELECT 1
-      FROM dropship.dropship_store_connections AS connection
-      WHERE connection.id = NEW.store_connection_id
-        AND lower(connection.platform) = NEW.provider
-        AND connection.provider_environment = NEW.account_namespace
-        AND connection.external_account_id = NEW.external_account_id
-        AND connection.external_account_identity_scheme = 'provider_user_id'
-        AND connection.external_account_verified_at IS NOT NULL
-    ) INTO owner_verified;
+    SELECT connection.external_account_verified_at = NEW.verified_at
+      INTO owner_verified
+    FROM dropship.dropship_store_connections AS connection
+    WHERE connection.id = NEW.store_connection_id
+      AND lower(connection.platform) = NEW.provider
+      AND connection.provider_environment = NEW.account_namespace
+      AND connection.external_account_id = NEW.external_account_id
+      AND connection.external_account_identity_scheme = 'provider_user_id'
+      AND connection.external_account_verified_at IS NOT NULL
+    FOR UPDATE;
   ELSE
     owner_verified := FALSE;
   END IF;
 
-  IF NOT owner_verified THEN
+  IF owner_verified IS DISTINCT FROM TRUE THEN
     RAISE EXCEPTION 'Provider account owner does not contain matching stable provider_user_id evidence'
       USING ERRCODE = '23514';
   END IF;
@@ -676,11 +681,13 @@ BEGIN
   IF bound_account.id IS NOT NULL AND (
     TG_OP = 'DELETE'
     OR ROW(
+      NEW.vendor_id,
       NEW.platform,
       NEW.provider_environment,
       NEW.external_account_id,
       NEW.external_account_identity_scheme
     ) IS DISTINCT FROM ROW(
+      OLD.vendor_id,
       OLD.platform,
       OLD.provider_environment,
       OLD.external_account_id,
