@@ -417,6 +417,8 @@ interface ShipStationPackageClassificationResponse {
   originalPackageIdentityRepaired?: boolean;
 }
 
+type CorrectiveOrderedLineDisposition = "replacement" | "omission_correction";
+
 interface ReplacementCatalogItem {
   productVariantId: number;
   sku: string;
@@ -636,8 +638,10 @@ function ShipStationPackageClassificationDialog(props: {
   const [notes, setNotes] = useState("");
   const [originalShipmentId, setOriginalShipmentId] = useState("");
   const [lineMappings, setLineMappings] = useState<Record<number, string>>({});
+  const [providerLineDispositions, setProviderLineDispositions] = useState<Record<number, CorrectiveOrderedLineDisposition>>({});
   const [manualLineSelections, setManualLineSelections] = useState<Record<number, boolean>>({});
   const [manualLineQuantities, setManualLineQuantities] = useState<Record<number, string>>({});
+  const [manualLineDispositions, setManualLineDispositions] = useState<Record<number, CorrectiveOrderedLineDisposition>>({});
   const [itemMode, setItemMode] = useState<"provider" | "actual">("provider");
   const [catalogSearchInput, setCatalogSearchInput] = useState("");
   const [catalogSearch, setCatalogSearch] = useState("");
@@ -698,8 +702,10 @@ function ShipStationPackageClassificationDialog(props: {
     setNotes("");
     setOriginalShipmentId("");
     setLineMappings({});
+    setProviderLineDispositions({});
     setManualLineSelections({});
     setManualLineQuantities({});
+    setManualLineDispositions({});
     setItemMode("provider");
     setCatalogSearchInput("");
     setCatalogSearch("");
@@ -720,13 +726,16 @@ function ShipStationPackageClassificationDialog(props: {
     if (!preview) return;
     setItemMode(providerItems.length === 0 ? "actual" : "provider");
     const defaults: Record<number, string> = {};
+    const dispositionDefaults: Record<number, CorrectiveOrderedLineDisposition> = {};
     providerItems.forEach((item, index) => {
       const matches = preview.orderItems.filter(
         (orderItem) => orderItem.sku.trim().toUpperCase() === item.sku.trim().toUpperCase(),
       );
       defaults[index] = matches.length === 1 ? String(matches[0].id) : "";
+      dispositionDefaults[index] = "replacement";
     });
     setLineMappings(defaults);
+    setProviderLineDispositions(dispositionDefaults);
   }, [preview, providerItems]);
 
   const validOriginalShipments = useMemo(() => (preview?.shipments ?? []).filter((shipment) => (
@@ -765,11 +774,14 @@ function ShipStationPackageClassificationDialog(props: {
 
   useEffect(() => {
     const quantities: Record<number, string> = {};
+    const dispositions: Record<number, CorrectiveOrderedLineDisposition> = {};
     for (const item of selectedOriginalShipment?.items ?? []) {
       quantities[item.orderItemId] = String(item.quantity);
+      dispositions[item.orderItemId] = "replacement";
     }
     setManualLineSelections({});
     setManualLineQuantities(quantities);
+    setManualLineDispositions(dispositions);
   }, [selectedOriginalShipment]);
 
   const providerMappingsComplete = providerItems.length > 0 && providerItems.every((item, index) => {
@@ -799,6 +811,21 @@ function ShipStationPackageClassificationDialog(props: {
     )
     : [];
   const hasCatalogConcessions = actualContentsMode && catalogItems.length > 0;
+  const hasOmissionCorrections = actualContentsMode
+    ? selectedManualItems.some(
+      (item) => manualLineDispositions[item.orderItemId] === "omission_correction",
+    )
+    : providerItems.some(
+      (_item, index) => providerLineDispositions[index] === "omission_correction",
+    );
+  const hasInventoryMovingOrderedItems = actualContentsMode
+    ? selectedManualItems.some(
+      (item) => (manualLineDispositions[item.orderItemId] ?? "replacement") === "replacement",
+    )
+    : providerItems.some(
+      (_item, index) => (providerLineDispositions[index] ?? "replacement") === "replacement",
+    );
+  const hasInventoryMovingContents = hasCatalogConcessions || hasInventoryMovingOrderedItems;
   const actualMappingsComplete = (selectedManualItems.length > 0 || catalogItems.length > 0)
     && manualMappingsComplete
     && (catalogItems.length === 0 || catalogMappingsComplete);
@@ -830,6 +857,7 @@ function ShipStationPackageClassificationDialog(props: {
               evidenceSource: "original_wms",
               orderItemId: item.orderItemId,
               quantity: Number(manualLineQuantities[item.orderItemId]),
+              lineDisposition: manualLineDispositions[item.orderItemId] ?? "replacement",
             })),
             ...catalogItems.map((item) => ({
               evidenceSource: "catalog",
@@ -842,6 +870,7 @@ function ShipStationPackageClassificationDialog(props: {
             providerItemIndex,
             orderItemId: Number(lineMappings[providerItemIndex]),
             quantity: Number(item.quantity),
+            lineDisposition: providerLineDispositions[providerItemIndex] ?? "replacement",
           })),
       };
       const response = await apiRequest("POST", "/api/oms/ops/shipstation-unmapped/adopt-reship", body);
@@ -849,10 +878,14 @@ function ShipStationPackageClassificationDialog(props: {
     },
     onSuccess: async (result) => {
       toast({
-        title: hasCatalogConcessions ? "Replacement contents recorded" : "Replacement recorded",
-        description: hasCatalogConcessions
-          ? "Inventory was deducted for the confirmed replacement and courtesy items without repeating customer fulfillment."
-          : "Inventory was deducted for the confirmed replacement items without repeating customer fulfillment.",
+        title: hasOmissionCorrections ? "Corrective package recorded" : hasCatalogConcessions ? "Replacement contents recorded" : "Replacement recorded",
+        description: hasOmissionCorrections
+          ? hasInventoryMovingContents
+            ? "Inventory moved only for replacement or courtesy lines. Missing-from-box lines reused the original inventory posting."
+            : "The missing items and tracking were recorded without a second inventory deduction or fulfillment update."
+          : hasCatalogConcessions
+            ? "Inventory was deducted for the confirmed replacement and courtesy items without repeating customer fulfillment."
+            : "Inventory was deducted for the confirmed replacement items without repeating customer fulfillment.",
       });
       await props.onCompleted();
       props.onClose();
@@ -1038,13 +1071,13 @@ function ShipStationPackageClassificationDialog(props: {
                     ? "Echelon will link ShipStation to the package already recorded. No new package, inventory deduction, customer fulfillment, or sales-channel update is created."
                     : providerVoided
                     ? "Resolving this as a voided label closes the exception only. The original package remains authoritative, and no inventory, fulfillment, or channel state changes."
-                    : "Echelon will keep these as two separate packages and deduct inventory only for the items confirmed below. The customer order will remain fulfilled once."}
+                    : "Echelon will keep these as two separate packages. Replacement and courtesy lines deduct inventory; lines missing from the original box reuse the original deduction. Customer and sales-channel fulfillment remain counted once."}
               </p>
             </section>
 
             <section className={cn("grid gap-4 border-t pt-4 sm:grid-cols-2", (providerReturnLabel || providerVoided || providerEchoMatched) && "hidden")}>
               <div className="space-y-2">
-                <Label>Which package was replaced?</Label>
+                <Label>Which original package is this correcting?</Label>
                 {validOriginalShipments.length === 1 && selectedOriginalShipment ? (
                   <div className="border-y py-3 text-sm">
                     <div className="break-all font-medium">{selectedOriginalTracking || humanize(selectedOriginalShipment.status)}</div>
@@ -1064,7 +1097,20 @@ function ShipStationPackageClassificationDialog(props: {
               </div>
               <div className="space-y-2">
                 <Label>Why was it sent?</Label>
-                <Select value={reason} onValueChange={setReason}>
+                <Select
+                  value={reason}
+                  onValueChange={(value) => {
+                    setReason(value);
+                    if (value === "packing_omission") {
+                      setManualLineDispositions(Object.fromEntries(
+                        selectedManualItems.map((item) => [item.orderItemId, "omission_correction"]),
+                      ) as Record<number, CorrectiveOrderedLineDisposition>);
+                      setProviderLineDispositions(Object.fromEntries(
+                        providerItems.map((_item, index) => [index, "omission_correction"]),
+                      ) as Record<number, CorrectiveOrderedLineDisposition>);
+                    }
+                  }}
+                >
                   <SelectTrigger><SelectValue placeholder="Select a reason" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="lost">Lost in transit</SelectItem>
@@ -1072,6 +1118,7 @@ function ShipStationPackageClassificationDialog(props: {
                     <SelectItem value="misdelivery">Delivered incorrectly</SelectItem>
                     <SelectItem value="carrier_replacement">Carrier-issued replacement</SelectItem>
                     <SelectItem value="concession">Courtesy replacement or free item</SelectItem>
+                    <SelectItem value="packing_omission">Item was missing from original box</SelectItem>
                     <SelectItem value="other">Other</SelectItem>
                   </SelectContent>
                 </Select>
@@ -1125,16 +1172,16 @@ function ShipStationPackageClassificationDialog(props: {
                   )}
 
                   <div>
-                    <div className="text-sm font-medium">Ordered items resent</div>
+                    <div className="text-sm font-medium">Ordered items sent again</div>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      Select only ordered items that were physically included in this package.
+                      Select each ordered item in this package, then identify whether it consumes replacement inventory or corrects an item missing from the original box.
                     </p>
                     {selectedOriginalShipment ? (
                       <div className="mt-2 divide-y border-y">
                         {selectedOriginalShipment.items.map((item) => {
                           const checked = manualLineSelections[item.orderItemId] === true;
                           return (
-                            <div key={item.orderItemId} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px] sm:items-center">
+                            <div key={item.orderItemId} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px_minmax(220px,1fr)] sm:items-end">
                               <label className="flex min-w-0 cursor-pointer items-start gap-3 text-sm">
                                 <Checkbox
                                   className="mt-0.5"
@@ -1152,9 +1199,9 @@ function ShipStationPackageClassificationDialog(props: {
                                 </span>
                               </label>
                               <div className="space-y-1">
-                                <Label className="text-xs text-muted-foreground">Quantity resent</Label>
+                                <Label className="text-xs text-muted-foreground">Quantity sent</Label>
                                 <Input
-                                  aria-label={"Quantity resent for " + item.sku}
+                                  aria-label={"Quantity sent for " + item.sku}
                                   type="number"
                                   min={1}
                                   max={item.quantity}
@@ -1165,6 +1212,29 @@ function ShipStationPackageClassificationDialog(props: {
                                     [item.orderItemId]: event.target.value,
                                   }))}
                                 />
+                              </div>
+                              <div className="space-y-1">
+                                <Label className="text-xs text-muted-foreground">How should inventory be handled?</Label>
+                                <Select
+                                  disabled={!checked}
+                                  value={manualLineDispositions[item.orderItemId] ?? "replacement"}
+                                  onValueChange={(value) => {
+                                    if (value === "replacement" || value === "omission_correction") {
+                                      setManualLineDispositions((current) => ({
+                                        ...current,
+                                        [item.orderItemId]: value,
+                                      }));
+                                    }
+                                  }}
+                                >
+                                  <SelectTrigger aria-label={"Inventory handling for " + item.sku}>
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="replacement">Replacement - deduct inventory</SelectItem>
+                                    <SelectItem value="omission_correction">Missing from original box - already deducted</SelectItem>
+                                  </SelectContent>
+                                </Select>
                               </div>
                             </div>
                           );
@@ -1267,24 +1337,46 @@ function ShipStationPackageClassificationDialog(props: {
                       (orderItem) => orderItem.sku.trim().toUpperCase() === item.sku.trim().toUpperCase(),
                     );
                     return (
-                      <div key={item.sku + "-" + index} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(260px,1fr)] sm:items-center">
+                      <div key={item.sku + "-" + index} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(220px,1fr)_minmax(220px,1fr)] sm:items-end">
                         <div className="min-w-0 text-sm">
                           <div className="font-medium">{item.name || item.sku}</div>
                           <div className="mt-1 truncate text-xs text-muted-foreground">{item.sku} - Quantity {item.quantity}</div>
                         </div>
-                        <Select
-                          value={lineMappings[index] || ""}
-                          onValueChange={(value) => setLineMappings((current) => ({ ...current, [index]: value }))}
-                        >
-                          <SelectTrigger><SelectValue placeholder="Match to original item" /></SelectTrigger>
-                          <SelectContent>
-                            {matchingLines.map((orderItem) => (
-                              <SelectItem key={orderItem.id} value={String(orderItem.id)}>
-                                {orderItem.sku} - {orderItem.quantity} originally shipped
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <div className="space-y-1">
+                          <Label className="text-xs text-muted-foreground">Original ordered item</Label>
+                          <Select
+                            value={lineMappings[index] || ""}
+                            onValueChange={(value) => setLineMappings((current) => ({ ...current, [index]: value }))}
+                          >
+                            <SelectTrigger><SelectValue placeholder="Match to original item" /></SelectTrigger>
+                            <SelectContent>
+                              {matchingLines.map((orderItem) => (
+                                <SelectItem key={orderItem.id} value={String(orderItem.id)}>
+                                  {orderItem.sku} - {orderItem.quantity} originally shipped
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs text-muted-foreground">How should inventory be handled?</Label>
+                          <Select
+                            value={providerLineDispositions[index] ?? "replacement"}
+                            onValueChange={(value) => {
+                              if (value === "replacement" || value === "omission_correction") {
+                                setProviderLineDispositions((current) => ({ ...current, [index]: value }));
+                              }
+                            }}
+                          >
+                            <SelectTrigger aria-label={"Inventory handling for " + item.sku}>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="replacement">Replacement - deduct inventory</SelectItem>
+                              <SelectItem value="omission_correction">Missing from original box - already deducted</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
                       </div>
                     );
                   })}
@@ -1325,18 +1417,18 @@ function ShipStationPackageClassificationDialog(props: {
               <div className="font-semibold">What will happen</div>
               <div className="mt-3 space-y-2 text-sm">
                 <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The original package stays under tracking {selectedOriginalTracking || "shown above"}.</span></div>
-                <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The replacement package is recorded under tracking {preview.providerShipment.trackingNumber}.</span></div>
+                <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The corrective package is recorded under tracking {preview.providerShipment.trackingNumber}.</span></div>
                 {actualContentsMode && !providerItemsMissing && (
                   <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>ShipStation's reported item list remains provider evidence; the confirmed actual contents control inventory.</span></div>
                 )}
-                {selectedManualItems.length > 0 && (
-                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The selected ordered replacement quantities are deducted without repeating customer fulfillment.</span></div>
+                {hasInventoryMovingOrderedItems && (
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>Lines marked as replacements deduct inventory without repeating customer fulfillment.</span></div>
+                )}
+                {hasOmissionCorrections && (
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>Lines missing from the original box keep their original inventory deduction and are not fulfilled a second time.</span></div>
                 )}
                 {catalogItems.length > 0 && (
                   <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The selected courtesy catalog quantities are deducted without adding them to the customer order.</span></div>
-                )}
-                {!actualContentsMode && (
-                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The ShipStation-matched replacement quantities are deducted without repeating customer fulfillment.</span></div>
                 )}
               </div>
             </section>

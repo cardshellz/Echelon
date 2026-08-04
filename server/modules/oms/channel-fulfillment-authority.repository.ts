@@ -191,6 +191,7 @@ interface LegacyPackageRow {
   shipment_item_purpose: string | null;
   order_item_id: number | null;
   replacement_for_order_item_id: number | null;
+  correction_for_shipment_item_id: number | null;
   product_variant_id: number | null;
   sku: string | null;
   quantity_shipped: number | null;
@@ -1228,6 +1229,7 @@ async function materializeNonCustomerItems(
     const quantity = asPositiveInteger(row.quantity_shipped);
     const sku = normalizedNullable(row.sku);
     const purpose = normalizedNullable(row.shipment_item_purpose);
+    const productVariantId = asPositiveInteger(row.product_variant_id);
     if (!legacyItemId || !quantity || !sku || !purpose) {
       throw new FulfillmentAuthorityError(
         "OMS_LINEAGE_MISSING",
@@ -1242,9 +1244,61 @@ async function materializeNonCustomerItems(
         { legacyShipmentItemId: legacyItemId },
       );
     }
+    if (!["replacement", "concession", "omission_correction"].includes(purpose)) {
+      throw new FulfillmentAuthorityError(
+        "OMS_LINEAGE_MISSING",
+        `Non-customer physical item ${legacyItemId} has unsupported purpose ${purpose}`,
+        { legacyShipmentItemId: legacyItemId, purpose },
+      );
+    }
 
-    const existing = firstRow<{ id: number; physical_shipment_id: number; quantity_shipped: number }>(await tx.execute(sql`
-      SELECT id, physical_shipment_id, quantity_shipped
+    let correctionForPhysicalShipmentItemId: number | null = null;
+    if (purpose === "omission_correction") {
+      const correctionForLegacyShipmentItemId = asPositiveInteger(
+        row.correction_for_shipment_item_id,
+      );
+      if (!correctionForLegacyShipmentItemId || !productVariantId) {
+        throw new FulfillmentAuthorityError(
+          "OMS_LINEAGE_MISSING",
+          `Omission correction item ${legacyItemId} lacks exact original package lineage`,
+          { legacyShipmentItemId: legacyItemId },
+        );
+      }
+      const source = firstRow<{
+        id: number;
+        shipment_item_purpose: string;
+        product_variant_id: number;
+        quantity_shipped: number;
+      }>(await tx.execute(sql`
+        SELECT id, shipment_item_purpose, product_variant_id, quantity_shipped
+        FROM wms.physical_shipment_items
+        WHERE legacy_wms_shipment_item_id = ${correctionForLegacyShipmentItemId}
+        FOR UPDATE
+      `));
+      if (
+        !source
+        || String(source.shipment_item_purpose) !== "customer_fulfillment"
+        || Number(source.product_variant_id) !== productVariantId
+        || Number(source.quantity_shipped) < quantity
+      ) {
+        throw new FulfillmentAuthorityError(
+          "OMS_LINEAGE_MISSING",
+          `Omission correction item ${legacyItemId} has no compatible canonical source line`,
+          { legacyShipmentItemId: legacyItemId, correctionForLegacyShipmentItemId },
+        );
+      }
+      correctionForPhysicalShipmentItemId = Number(source.id);
+    }
+
+    const existing = firstRow<{
+      id: number;
+      physical_shipment_id: number;
+      shipment_item_purpose: string;
+      correction_for_physical_shipment_item_id: number | null;
+      quantity_shipped: number;
+    }>(await tx.execute(sql`
+      SELECT id, physical_shipment_id, shipment_item_purpose,
+             correction_for_physical_shipment_item_id, quantity_shipped
       FROM wms.physical_shipment_items
       WHERE legacy_wms_shipment_item_id = ${legacyItemId}
       FOR UPDATE
@@ -1252,6 +1306,9 @@ async function materializeNonCustomerItems(
     if (existing) {
       if (
         Number(existing.physical_shipment_id) !== physicalShipmentId
+        || String(existing.shipment_item_purpose) !== purpose
+        || (asPositiveInteger(existing.correction_for_physical_shipment_item_id) ?? null)
+          !== correctionForPhysicalShipmentItemId
         || Number(existing.quantity_shipped) !== quantity
       ) {
         throw new FulfillmentAuthorityError(
@@ -1273,6 +1330,7 @@ async function materializeNonCustomerItems(
         legacy_wms_shipment_item_id,
         shipment_item_purpose,
         replacement_for_order_item_id,
+        correction_for_physical_shipment_item_id,
         product_variant_id,
         sku,
         quantity_shipped,
@@ -1282,7 +1340,8 @@ async function materializeNonCustomerItems(
         ${legacyItemId},
         ${purpose},
         ${asPositiveInteger(row.replacement_for_order_item_id)},
-        ${asPositiveInteger(row.product_variant_id)},
+        ${correctionForPhysicalShipmentItemId},
+        ${productVariantId},
         ${sku},
         ${quantity},
         NOW()
@@ -2021,6 +2080,7 @@ export function createChannelFulfillmentAuthorityRepository(
           shipment_item.shipment_item_purpose,
           shipment_item.order_item_id,
           shipment_item.replacement_for_order_item_id,
+          shipment_item.correction_for_shipment_item_id,
           shipment_item.product_variant_id,
           COALESCE(order_item.sku, replacement_item.sku, variant.sku) AS sku,
           shipment_item.qty::int AS quantity_shipped,

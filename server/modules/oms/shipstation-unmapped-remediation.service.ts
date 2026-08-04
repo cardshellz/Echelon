@@ -25,12 +25,15 @@ export interface ShipStationUnmappedLocator {
   shipmentId?: number;
 }
 
+export type ShipStationOrderedLineDisposition = "replacement" | "omission_correction";
+
 export interface ShipStationUnmappedLineMapping {
   providerItemIndex?: number;
   orderItemId?: number;
   productVariantId?: number;
   quantity: number;
   evidenceSource?: "shipstation" | "original_wms" | "catalog";
+  lineDisposition?: ShipStationOrderedLineDisposition;
 }
 
 export type ShipStationPackageContentsAuthority = "provider" | "operator";
@@ -162,12 +165,13 @@ export interface ShipStationUnmappedPreview {
 interface PreparedLine {
   providerItemIndex: number | null;
   evidenceSource: "shipstation" | "original_wms" | "catalog";
-  shipmentItemPurpose: "replacement" | "concession";
+  shipmentItemPurpose: "replacement" | "concession" | "omission_correction";
   orderItemId: number | null;
+  correctionForShipmentItemId: number | null;
   sku: string;
   quantity: number;
   productVariantId: number;
-  fromLocationId: number;
+  fromLocationId: number | null;
 }
 
 const RESHIP_REASONS = new Set([
@@ -176,6 +180,7 @@ const RESHIP_REASONS = new Set([
   "misdelivery",
   "carrier_replacement",
   "concession",
+  "packing_omission",
   "other",
 ]);
 const VOIDABLE_UNUSED_LABEL_STATUSES = new Set([
@@ -217,6 +222,19 @@ function optionalNotes(value: unknown): string | null {
   if (!normalized) return null;
   if (normalized.length > 1_000) throw new Error("notes cannot exceed 1000 characters");
   return normalized;
+}
+
+function orderedLineDisposition(
+  value: unknown,
+  defaultDisposition: ShipStationOrderedLineDisposition = "replacement",
+): ShipStationOrderedLineDisposition {
+  if (value === undefined || value === null || value === "") {
+    return defaultDisposition;
+  }
+  if (value === "replacement" || value === "omission_correction") {
+    return value;
+  }
+  throw new Error("lineDisposition must be replacement or omission_correction");
 }
 
 function normalizeSku(value: unknown): string {
@@ -1023,9 +1041,11 @@ function resolveLineMappings(
   orderItems: PreviewOrderItem[],
   requested: ShipStationUnmappedLineMapping[] | undefined,
   contentsAuthority: ShipStationPackageContentsAuthority,
+  defaultOrderedLineDisposition: ShipStationOrderedLineDisposition,
 ): Array<{
   providerItemIndex: number | null;
   evidenceSource: "shipstation" | "original_wms" | "catalog";
+  lineDisposition: ShipStationOrderedLineDisposition | null;
   orderItemId: number | null;
   productVariantId: number | null;
   sku: string;
@@ -1043,6 +1063,9 @@ function resolveLineMappings(
       }
       const quantity = positiveInteger(mapping.quantity, "quantity");
       if (mapping.evidenceSource === "catalog") {
+        if (mapping.lineDisposition !== undefined) {
+          throw new Error("catalog items cannot claim an ordered-line disposition");
+        }
         const productVariantId = positiveInteger(mapping.productVariantId, "productVariantId");
         const key = `catalog:${productVariantId}`;
         if (seenLines.has(key)) throw new Error("each catalog item can be confirmed only once");
@@ -1050,6 +1073,7 @@ function resolveLineMappings(
         return {
           providerItemIndex: null,
           evidenceSource: "catalog" as const,
+          lineDisposition: null,
           orderItemId: null,
           productVariantId,
           sku: "",
@@ -1070,6 +1094,10 @@ function resolveLineMappings(
       return {
         providerItemIndex: null,
         evidenceSource: "original_wms" as const,
+        lineDisposition: orderedLineDisposition(
+          mapping.lineDisposition,
+          defaultOrderedLineDisposition,
+        ),
         orderItemId,
         productVariantId: null,
         sku: orderItem.sku,
@@ -1113,9 +1141,13 @@ function resolveLineMappings(
       throw new Error(`mapped quantity for SKU ${providerItem.sku} must equal provider quantity`);
     }
     if (mapping.evidenceSource === "catalog") {
+      if (mapping.lineDisposition !== undefined) {
+        throw new Error("catalog items cannot claim an ordered-line disposition");
+      }
       return {
         providerItemIndex,
         evidenceSource: "catalog" as const,
+        lineDisposition: null,
         orderItemId: null,
         productVariantId: positiveInteger(mapping.productVariantId, "productVariantId"),
         sku: String(providerItem.sku),
@@ -1134,6 +1166,10 @@ function resolveLineMappings(
     return {
       providerItemIndex,
       evidenceSource: "shipstation" as const,
+      lineDisposition: orderedLineDisposition(
+          mapping.lineDisposition,
+          defaultOrderedLineDisposition,
+        ),
       orderItemId,
       productVariantId: null,
       sku: orderItem.sku,
@@ -1155,10 +1191,12 @@ async function prepareLines(
     orderItems,
     input.lineMappings,
     contentsAuthority,
+    input.reason === "packing_omission" ? "omission_correction" : "replacement",
   );
   const originalShipmentId = positiveInteger(input.originalShipmentId, "originalShipmentId");
   const prepared: PreparedLine[] = [];
   const replacementQuantityByOrderItem = new Map<number, number>();
+  const correctionQuantityBySourceItem = new Map<number, number>();
 
   for (const mapping of mappings) {
     if (mapping.evidenceSource === "catalog") {
@@ -1214,6 +1252,7 @@ async function prepareLines(
         evidenceSource: "catalog",
         shipmentItemPurpose: "concession",
         orderItemId: null,
+        correctionForShipmentItemId: null,
         sku,
         quantity: mapping.quantity,
         productVariantId,
@@ -1227,6 +1266,7 @@ async function prepareLines(
       SELECT
         order_item.id AS order_item_id,
         order_item.sku,
+        source_item.source_shipment_item_id,
         source_item.product_variant_id,
         COALESCE(
           source_item.from_location_id,
@@ -1248,20 +1288,52 @@ async function prepareLines(
             LIMIT 1
           )
         ) AS from_location_id,
-        source_item.qty AS source_quantity
+        source_item.qty AS source_quantity,
+        source_item.shipment_item_purpose AS source_item_purpose,
+        source_item.source_shipment_status,
+        (
+          SELECT COUNT(*)::int
+          FROM wms.outbound_shipment_items candidate_source_item
+          WHERE candidate_source_item.shipment_id = ${originalShipmentId}
+            AND candidate_source_item.order_item_id = order_item.id
+            AND candidate_source_item.shipment_item_purpose = 'customer_fulfillment'
+        ) AS source_candidate_count,
+        (
+          SELECT COALESCE(SUM(ABS(inventory_tx.variant_qty_delta)), 0)::int
+          FROM inventory.inventory_transactions inventory_tx
+          WHERE inventory_tx.transaction_type = 'ship'
+            AND inventory_tx.shipment_id = ${originalShipmentId}
+            AND inventory_tx.order_item_id = order_item.id
+            AND inventory_tx.product_variant_id = source_item.product_variant_id
+            AND inventory_tx.voided_at IS NULL
+        ) AS source_inventory_shipped_quantity,
+        (
+          SELECT COALESCE(SUM(correction_item.qty), 0)::int
+          FROM wms.outbound_shipment_items correction_item
+          JOIN wms.outbound_shipments correction_shipment
+            ON correction_shipment.id = correction_item.shipment_id
+          WHERE correction_item.shipment_item_purpose = 'omission_correction'
+            AND correction_item.correction_for_shipment_item_id = source_item.source_shipment_item_id
+            AND correction_shipment.status NOT IN ('cancelled', 'voided')
+            AND correction_shipment.external_fulfillment_id
+                IS DISTINCT FROM ${`shipstation_shipment:${context.externalShipmentRef}`}
+        ) AS existing_correction_quantity
       FROM wms.order_items order_item
       JOIN LATERAL (
-        SELECT shipment_item.product_variant_id,
+        SELECT shipment_item.id AS source_shipment_item_id,
+               shipment_item.product_variant_id,
                shipment_item.from_location_id,
-               shipment_item.qty
+               shipment_item.qty,
+               shipment_item.shipment_item_purpose,
+               source_shipment.status AS source_shipment_status
         FROM wms.outbound_shipment_items shipment_item
         JOIN wms.outbound_shipments source_shipment
           ON source_shipment.id = shipment_item.shipment_id
         WHERE shipment_item.order_item_id = order_item.id
           AND source_shipment.order_id = ${context.wmsOrderId}
-          AND (${originalShipmentId}::int IS NULL OR source_shipment.id = ${originalShipmentId})
+          AND source_shipment.id = ${originalShipmentId}
         ORDER BY
-          CASE WHEN source_shipment.id = ${originalShipmentId} THEN 0 ELSE 1 END,
+          CASE WHEN shipment_item.shipment_item_purpose = 'customer_fulfillment' THEN 0 ELSE 1 END,
           COALESCE(source_shipment.shipped_at, source_shipment.created_at) DESC,
           shipment_item.id DESC
         LIMIT 1
@@ -1274,21 +1346,66 @@ async function prepareLines(
     if (!source) {
       throw new Error(`WMS line ${orderItemId} has no shipment-item authority to copy`);
     }
+    const productVariantId = optionalPositiveInteger(source.product_variant_id);
+    if (productVariantId === null) {
+      throw new Error(`SKU ${mapping.sku} has no provable inventory variant`);
+    }
+
+    if ((mapping.lineDisposition ?? "replacement") === "omission_correction") {
+      const sourceShipmentItemId = positiveInteger(
+        source.source_shipment_item_id,
+        "sourceShipmentItemId",
+      );
+      if (Number(source.source_candidate_count) !== 1) {
+        throw new Error(`SKU ${mapping.sku} has ambiguous original package-line authority`);
+      }
+      if (String(source.source_item_purpose) !== "customer_fulfillment") {
+        throw new Error(`SKU ${mapping.sku} is not tied to an original customer-fulfillment line`);
+      }
+      if (!["shipped", "returned", "lost"].includes(String(source.source_shipment_status))) {
+        throw new Error(`SKU ${mapping.sku} cannot correct a package that has not physically shipped`);
+      }
+      const sourceQuantity = Number(source.source_quantity);
+      const correctionQuantity =
+        Number(source.existing_correction_quantity ?? 0)
+        + (correctionQuantityBySourceItem.get(sourceShipmentItemId) ?? 0)
+        + mapping.quantity;
+      if (correctionQuantity > sourceQuantity) {
+        throw new Error(`omission-correction quantity for SKU ${mapping.sku} exceeds the original package line`);
+      }
+      if (Number(source.source_inventory_shipped_quantity ?? 0) < sourceQuantity) {
+        throw new Error(`SKU ${mapping.sku} has no complete original inventory shipment posting`);
+      }
+      correctionQuantityBySourceItem.set(
+        sourceShipmentItemId,
+        (correctionQuantityBySourceItem.get(sourceShipmentItemId) ?? 0) + mapping.quantity,
+      );
+      prepared.push({
+        ...mapping,
+        shipmentItemPurpose: "omission_correction",
+        orderItemId: null,
+        correctionForShipmentItemId: sourceShipmentItemId,
+        productVariantId,
+        fromLocationId: null,
+      });
+      continue;
+    }
+
     const replacementQuantity =
       (replacementQuantityByOrderItem.get(orderItemId) ?? 0) + mapping.quantity;
     if (Number(source.source_quantity) < replacementQuantity) {
       throw new Error(`replacement quantity for SKU ${mapping.sku} exceeds the original shipment`);
     }
     replacementQuantityByOrderItem.set(orderItemId, replacementQuantity);
-    const productVariantId = optionalPositiveInteger(source.product_variant_id);
     const fromLocationId = optionalPositiveInteger(source.from_location_id);
-    if (productVariantId === null || fromLocationId === null) {
+    if (fromLocationId === null) {
       throw new Error(`SKU ${mapping.sku} has no provable inventory variant/location`);
     }
     prepared.push({
       ...mapping,
       shipmentItemPurpose: "replacement",
       orderItemId,
+      correctionForShipmentItemId: null,
       productVariantId,
       fromLocationId,
     });
@@ -1329,7 +1446,9 @@ function aggregatePreparedLines(lines: PreparedLine[]): PreparedLine[] {
   for (const line of lines) {
     const key = line.shipmentItemPurpose === "concession"
       ? `concession:${line.productVariantId}`
-      : `replacement:${line.orderItemId}`;
+      : line.shipmentItemPurpose === "omission_correction"
+        ? `omission_correction:${line.correctionForShipmentItemId}`
+        : `replacement:${line.orderItemId}`;
     const existing = byAuthority.get(key);
     if (!existing) {
       byAuthority.set(key, { ...line });
@@ -1678,9 +1797,12 @@ async function prepareMappedShipment(
     for (const line of aggregatePreparedLines(lines)) {
       const authorityPredicate = line.shipmentItemPurpose === "concession"
         ? sql`shipment_item_purpose = 'concession' AND product_variant_id = ${line.productVariantId}`
-        : sql`replacement_for_order_item_id = ${line.orderItemId}`;
+        : line.shipmentItemPurpose === "omission_correction"
+          ? sql`correction_for_shipment_item_id = ${line.correctionForShipmentItemId}`
+          : sql`replacement_for_order_item_id = ${line.orderItemId}`;
       const existingLineResult: any = await tx.execute(sql`
-        SELECT id, order_item_id, replacement_for_order_item_id, shipment_item_purpose,
+        SELECT id, order_item_id, replacement_for_order_item_id,
+               correction_for_shipment_item_id, shipment_item_purpose,
                product_variant_id, qty, from_location_id
         FROM wms.outbound_shipment_items
         WHERE shipment_id = ${candidateShipmentId}
@@ -1692,23 +1814,31 @@ async function prepareMappedShipment(
         const same =
           Number(existingLine.product_variant_id) === line.productVariantId &&
           Number(existingLine.qty) === line.quantity &&
-          Number(existingLine.from_location_id) === line.fromLocationId &&
+          optionalPositiveInteger(existingLine.from_location_id) === line.fromLocationId &&
           String(existingLine.shipment_item_purpose) === line.shipmentItemPurpose &&
           (line.shipmentItemPurpose === "concession"
             ? existingLine.replacement_for_order_item_id == null
-            : Number(existingLine.replacement_for_order_item_id) === line.orderItemId);
+              && existingLine.correction_for_shipment_item_id == null
+            : line.shipmentItemPurpose === "omission_correction"
+              ? existingLine.replacement_for_order_item_id == null
+                && Number(existingLine.correction_for_shipment_item_id) === line.correctionForShipmentItemId
+              : Number(existingLine.replacement_for_order_item_id) === line.orderItemId
+                && existingLine.correction_for_shipment_item_id == null);
         if (!same) throw new Error(`existing mapped line for SKU ${line.sku} differs from this request`);
         continue;
       }
       await tx.execute(sql`
         INSERT INTO wms.outbound_shipment_items (
           shipment_id, order_item_id, replacement_for_order_item_id,
+          correction_for_shipment_item_id,
           shipment_item_purpose, product_variant_id, qty,
           from_location_id, tracking_id, created_at
         )
         VALUES (
           ${candidateShipmentId}, NULL,
-          ${line.orderItemId}, ${line.shipmentItemPurpose}, ${line.productVariantId},
+          ${line.shipmentItemPurpose === "replacement" ? line.orderItemId : null},
+          ${line.correctionForShipmentItemId},
+          ${line.shipmentItemPurpose}, ${line.productVariantId},
           ${line.quantity}, ${line.fromLocationId}, ${context.externalShipmentRef}, NOW()
         )
       `);
@@ -1730,9 +1860,19 @@ async function finishMappedShipment(
 ): Promise<void> {
   const operator = requiredOperator(input.operator);
   const hasConcessionItem = lines.some((line) => line.shipmentItemPurpose === "concession");
-  const resolution = hasConcessionItem
-    ? "Operator confirmed replacement package contents that include a different or free physical item. Inventory moved for the confirmed contents; customer demand, fulfillment, and channel fulfillment were not repeated."
-    : "Operator authorized the provider package as a replacement shipment. Inventory moved; customer fulfillment and channel fulfillment were not repeated.";
+  const hasOmissionCorrection = lines.some(
+    (line) => line.shipmentItemPurpose === "omission_correction",
+  );
+  const hasInventoryMovingItem = lines.some(
+    (line) => line.shipmentItemPurpose !== "omission_correction",
+  );
+  const resolution = hasOmissionCorrection
+    ? hasInventoryMovingItem
+      ? "Operator confirmed a mixed corrective package. Replacement or concession lines moved inventory; omission-correction lines reused the original package inventory authority. Customer demand, fulfillment, and channel fulfillment were not repeated."
+      : "Operator confirmed items missing from the original box. The corrective package was recorded without moving inventory or repeating customer or channel fulfillment."
+    : hasConcessionItem
+      ? "Operator confirmed replacement package contents that include a different or free physical item. Inventory moved for the confirmed contents; customer demand, fulfillment, and channel fulfillment were not repeated."
+      : "Operator authorized the provider package as a replacement shipment. Inventory moved; customer fulfillment and channel fulfillment were not repeated.";
   const details = JSON.stringify({
     remediationAction: "adopt_reship",
     remediationReason: input.reason,
@@ -1755,6 +1895,7 @@ async function finishMappedShipment(
       evidenceSource: line.evidenceSource,
       shipmentItemPurpose: line.shipmentItemPurpose,
       orderItemId: line.orderItemId,
+      correctionForShipmentItemId: line.correctionForShipmentItemId,
       sku: line.sku,
       quantity: line.quantity,
       productVariantId: line.productVariantId,
