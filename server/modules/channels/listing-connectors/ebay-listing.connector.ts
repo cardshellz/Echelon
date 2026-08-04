@@ -77,6 +77,11 @@ interface EbayMarketplaceListingConnectorOptions {
   offerDelayMs?: number;
 }
 
+interface ResolvedPushOffer {
+  offer: BuiltOffer;
+  existingOfferId: string | null;
+}
+
 export class EbayMarketplaceListingConnector {
   private readonly delay: (ms: number) => Promise<void>;
   private readonly inventoryDelayMs: number;
@@ -94,36 +99,51 @@ export class EbayMarketplaceListingConnector {
   }): Promise<EbayListingConnectorResult> {
     validateDraft(input.draft);
 
-    for (const item of input.draft.inventoryItems) {
-      await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
-      await this.delay(this.inventoryDelayMs);
-    }
-
+    const resolvedOffers: ResolvedPushOffer[] = [];
     const offerIdsByVariantId: Record<number, string> = {};
     let firstListingId: string | undefined;
 
     for (const offer of input.draft.offers) {
-      let offerId = input.draft.existingOfferIdsByVariantId?.[offer.variantId] ?? null;
-      if (!offerId) {
+      let existingOfferId = input.draft.existingOfferIdsByVariantId?.[offer.variantId] ?? null;
+      if (!existingOfferId) {
         const existingOffers = await input.client.getOffers(offer.sku, input.draft.marketplaceId);
         const existingOffer = existingOffers.offers[0];
-        offerId = existingOffer?.offerId ?? null;
+        existingOfferId = existingOffer?.offerId ?? null;
         if (existingOffer?.listingId && !firstListingId) {
           firstListingId = existingOffer.listingId;
         }
       }
 
-      if (offerId) {
-        offer.payload.offerId = offerId;
-        await input.client.updateOffer(offerId, offer.payload);
-      } else {
-        offerId = await input.client.createOffer(offer.payload);
-        if (input.draft.updateOfferAfterCreate) {
-          offer.payload.offerId = offerId;
-          await input.client.updateOffer(offerId, offer.payload);
-        }
-      }
+      resolvedOffers.push({ offer, existingOfferId });
+    }
 
+    // eBay validates an inventory item against any offer already associated with
+    // the SKU. Repair existing offer policies first so a deleted policy cannot
+    // prevent the subsequent inventory replacement.
+    for (const { offer, existingOfferId } of resolvedOffers) {
+      if (!existingOfferId) continue;
+
+      await input.client.updateOffer(
+        existingOfferId,
+        withOfferId(offer.payload, existingOfferId),
+      );
+      offerIdsByVariantId[offer.variantId] = existingOfferId;
+      await this.delay(this.offerDelayMs);
+    }
+
+    for (const item of input.draft.inventoryItems) {
+      await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
+      await this.delay(this.inventoryDelayMs);
+    }
+
+    // A genuinely new offer still requires its inventory item to exist first.
+    for (const { offer, existingOfferId } of resolvedOffers) {
+      if (existingOfferId) continue;
+
+      const offerId = await input.client.createOffer(offer.payload);
+      if (input.draft.updateOfferAfterCreate) {
+        await input.client.updateOffer(offerId, withOfferId(offer.payload, offerId));
+      }
       offerIdsByVariantId[offer.variantId] = offerId;
       await this.delay(this.offerDelayMs);
     }
@@ -157,12 +177,6 @@ export class EbayMarketplaceListingConnector {
     const policyChangedVariantIds: number[] = [];
     let itemGroupUpdated = false;
 
-    for (const item of input.draft.inventoryItems) {
-      await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
-      updatedInventorySkus.push(item.sku);
-      await this.delay(this.inventoryDelayMs);
-    }
-
     for (const offer of input.draft.offers) {
       const existingOffers = await input.client.getOffers(offer.sku, input.draft.marketplaceId);
       const existingOffer = existingOffers.offers[0];
@@ -174,10 +188,18 @@ export class EbayMarketplaceListingConnector {
       if (listingPoliciesChanged(existingOffer.listingPolicies, offer.payload.listingPolicies)) {
         policyChangedVariantIds.push(offer.variantId);
       }
-      offer.payload.offerId = existingOffer.offerId;
-      await input.client.updateOffer(existingOffer.offerId, offer.payload);
+      await input.client.updateOffer(
+        existingOffer.offerId,
+        withOfferId(offer.payload, existingOffer.offerId),
+      );
       updatedOfferIds[offer.variantId] = existingOffer.offerId;
       await this.delay(this.offerDelayMs);
+    }
+
+    for (const item of input.draft.inventoryItems) {
+      await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
+      updatedInventorySkus.push(item.sku);
+      await this.delay(this.inventoryDelayMs);
     }
 
     // eBay requires the inventory item and offer for a newly-added variation
@@ -297,6 +319,10 @@ function validateMaintenanceDraft(
 
 function firstValue(record: Record<number, string>): string | undefined {
   return Object.values(record)[0];
+}
+
+function withOfferId(offer: EbayOffer, offerId: string): EbayOffer {
+  return { ...offer, offerId };
 }
 
 function listingPoliciesChanged(

@@ -84,7 +84,7 @@ describe("marketplace listing connectors", () => {
       },
     });
 
-    expect(calls).toEqual(["put_inventory", "get_offers", "create_offer", "publish_offer"]);
+    expect(calls).toEqual(["get_offers", "put_inventory", "create_offer", "publish_offer"]);
     expect(result).toMatchObject({
       productId: 1,
       status: "created",
@@ -95,16 +95,41 @@ describe("marketplace listing connectors", () => {
   });
 
   it("uses known eBay offer ids without probing the marketplace", async () => {
+    const calls: string[] = [];
     const client: EbayListingConnectorClient = {
       getInventoryItem: vi.fn(async () => null),
-      createOrReplaceInventoryItem: vi.fn(async () => undefined),
+      createOrReplaceInventoryItem: vi.fn(async () => {
+        calls.push("put_inventory");
+      }),
       getOffers: vi.fn(async () => ({ offers: [] })),
       createOffer: vi.fn(async () => "new-offer"),
-      updateOffer: vi.fn(async () => undefined),
+      updateOffer: vi.fn(async () => {
+        calls.push("update_offer");
+      }),
       createOrReplaceInventoryItemGroup: vi.fn(async () => undefined),
       publishOffer: vi.fn(async () => ({ listingId: "listing-1" })),
       publishOfferByInventoryItemGroup: vi.fn(async () => ({ listingId: "listing-group" })),
     };
+    const knownOffers: BuiltOffer[] = [
+      {
+        sku: "SKU-1",
+        variantId: 10,
+        payload: {
+          sku: "SKU-1",
+          marketplaceId: "EBAY_US",
+          format: "FIXED_PRICE",
+          availableQuantity: 1,
+          categoryId: "123",
+          listingPolicies: {
+            fulfillmentPolicyId: "fulfillment",
+            paymentPolicyId: "payment",
+            returnPolicyId: "return",
+          },
+          merchantLocationKey: "warehouse",
+          pricingSummary: { price: { value: "9.99", currency: "USD" } },
+        } satisfies EbayOffer,
+      },
+    ];
 
     const connector = new EbayMarketplaceListingConnector();
     await connector.pushListing({
@@ -122,26 +147,7 @@ describe("marketplace listing connectors", () => {
             } satisfies Omit<EbayInventoryItem, "sku">,
           },
         ],
-        offers: [
-          {
-            sku: "SKU-1",
-            variantId: 10,
-            payload: {
-              sku: "SKU-1",
-              marketplaceId: "EBAY_US",
-              format: "FIXED_PRICE",
-              availableQuantity: 1,
-              categoryId: "123",
-              listingPolicies: {
-                fulfillmentPolicyId: "fulfillment",
-                paymentPolicyId: "payment",
-                returnPolicyId: "return",
-              },
-              merchantLocationKey: "warehouse",
-              pricingSummary: { price: { value: "9.99", currency: "USD" } },
-            } satisfies EbayOffer,
-          },
-        ],
+        offers: knownOffers,
         itemGroup: null,
         publishMode: "stage",
         hasExistingExternalIds: true,
@@ -152,10 +158,12 @@ describe("marketplace listing connectors", () => {
 
     expect(client.getOffers).not.toHaveBeenCalled();
     expect(client.createOffer).not.toHaveBeenCalled();
+    expect(calls).toEqual(["update_offer", "put_inventory"]);
     expect(client.updateOffer).toHaveBeenCalledWith(
       "known-offer",
       expect.objectContaining({ offerId: "known-offer" }),
     );
+    expect(knownOffers[0].payload).not.toHaveProperty("offerId");
   });
 
   it("syncs existing eBay listings by updating inventory, existing offers, and item groups", async () => {
@@ -255,12 +263,13 @@ describe("marketplace listing connectors", () => {
     expect(client.createOffer).not.toHaveBeenCalled();
     expect(client.publishOffer).not.toHaveBeenCalled();
     expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
-    expect(calls).toEqual(["put_inventory", "get_offers", "update_offer", "put_group"]);
+    expect(calls).toEqual(["get_offers", "update_offer", "put_inventory", "put_group"]);
     expect(client.updateOffer).toHaveBeenCalledWith(
       "offer-1",
       expect.objectContaining({ offerId: "offer-1" }),
     );
     expect(client.createOrReplaceInventoryItemGroup).toHaveBeenCalledWith("GROUP-1", itemGroup.payload);
+    expect(offers[0].payload).not.toHaveProperty("offerId");
     expect(result).toMatchObject({
       productId: 1,
       updatedInventorySkus: ["SKU-1"],
