@@ -249,7 +249,7 @@ export function buildCandidateQuery(flags: Flags): { text: string; values: unkno
               AND physical_item.shipment_item_purpose = 'customer_fulfillment'
           ), 0)::int AS shipped_quantity
         FROM wms.fulfillment_plan_lines plan_line
-        LEFT JOIN wms.physical_shipment_items physical_item
+        LEFT JOIN wms.effective_physical_shipment_items physical_item
           ON physical_item.fulfillment_plan_line_id = plan_line.id
         LEFT JOIN wms.physical_shipments physical
           ON physical.id = physical_item.physical_shipment_id

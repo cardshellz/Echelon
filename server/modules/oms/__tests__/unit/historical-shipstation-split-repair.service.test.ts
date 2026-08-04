@@ -218,6 +218,31 @@ describe("historical ShipStation split repair", () => {
     });
   });
 
+  it("reports canonical physical packages corrected by a repair cohort", async () => {
+    const repairPlan = packagePlan(10, [1]);
+    const deps = dependencies({
+      inspectPackages: vi.fn(async () => ({
+        alreadyCanonical: Object.freeze([]),
+        repairableComponents: Object.freeze([
+          Object.freeze({
+            componentKey: "10",
+            packages: Object.freeze([repairPlan]),
+            canonicalSupports: Object.freeze([]),
+            canonicalCorrections: Object.freeze([{
+              providerShipmentId: 10,
+              physicalShipmentId: 9001,
+            }]),
+          }),
+        ]),
+        unsafe: Object.freeze([]),
+      })),
+    });
+
+    const summary = await runHistoricalShipStationSplitRepair(flags(), deps);
+
+    expect(summary.canonicalCorrections).toBe(1);
+  });
+
   it("rejects execute when the selected cohort changed", async () => {
     const deps = dependencies();
     await expect(runHistoricalShipStationSplitRepair(flags({

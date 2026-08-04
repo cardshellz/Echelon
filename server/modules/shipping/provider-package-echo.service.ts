@@ -296,7 +296,7 @@ export async function inspectShipStationProviderPackageEcho(
       physical_item.shipment_item_purpose,
       legacy_item.shipment_id AS legacy_wms_shipment_id
     FROM wms.physical_shipments AS physical
-    JOIN wms.physical_shipment_items AS physical_item
+    JOIN wms.effective_physical_shipment_items AS physical_item
       ON physical_item.physical_shipment_id = physical.id
     LEFT JOIN wms.outbound_shipment_items AS legacy_item
       ON legacy_item.id = physical_item.legacy_wms_shipment_item_id

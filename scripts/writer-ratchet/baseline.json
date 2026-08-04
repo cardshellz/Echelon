@@ -778,6 +778,9 @@
     "modules/wms",
     "server/index.ts"
   ],
+  "wms.physical_shipment_item_quantity_adjustments": [
+    "modules/oms"
+  ],
   "wms.physical_shipment_items": [
     "modules/oms"
   ],

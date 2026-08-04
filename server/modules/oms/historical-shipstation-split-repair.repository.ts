@@ -4,6 +4,7 @@ import {
   buildHistoricalSplitRepairComponents,
   HISTORICAL_SPLIT_REPAIR_SOURCE,
   type HistoricalSplitAppliedPackage,
+  type HistoricalSplitCanonicalCorrection,
   type HistoricalSplitCanonicalPackage,
   type HistoricalSplitInspection,
   type HistoricalSplitProviderPackage,
@@ -53,6 +54,8 @@ interface SourceItemRow {
   weight_oz: number | null;
   provider_membership_state: string;
   canonical_physical_shipment_id: number | null;
+  canonical_physical_shipment_item_id: number | null;
+  canonical_quantity_shipped: number | null;
 }
 
 interface CanonicalRow {
@@ -213,6 +216,13 @@ function parseSourceRow(raw: Record<string, unknown>): SourceItemRow {
     canonical_physical_shipment_id: raw.canonical_physical_shipment_id == null
       ? null
       : Number(raw.canonical_physical_shipment_id),
+    canonical_physical_shipment_item_id:
+      raw.canonical_physical_shipment_item_id == null
+        ? null
+        : Number(raw.canonical_physical_shipment_item_id),
+    canonical_quantity_shipped: raw.canonical_quantity_shipped == null
+      ? null
+      : Number(raw.canonical_quantity_shipped),
   };
 }
 
@@ -230,10 +240,12 @@ async function loadSourceRows(
        item.shipment_item_purpose, item.product_variant_id, item.qty,
        item.from_location_id, item.box_id, item.weight_oz,
        item.provider_membership_state,
-       physical_item.physical_shipment_id AS canonical_physical_shipment_id
+       physical_item.physical_shipment_id AS canonical_physical_shipment_id,
+       physical_item.id AS canonical_physical_shipment_item_id,
+       physical_item.quantity_shipped AS canonical_quantity_shipped
      FROM wms.outbound_shipment_items AS item
      JOIN wms.outbound_shipments AS shipment ON shipment.id = item.shipment_id
-     LEFT JOIN wms.physical_shipment_items AS physical_item
+     LEFT JOIN wms.effective_physical_shipment_items AS physical_item
        ON physical_item.legacy_wms_shipment_item_id = item.id
      WHERE item.id = ANY($1::int[])
      ORDER BY item.id
@@ -263,7 +275,7 @@ async function loadCanonicalRows(
      FROM wms.physical_shipments AS physical
      LEFT JOIN wms.shipping_provider_label_links AS label_link
        ON label_link.physical_shipment_id = physical.id
-     LEFT JOIN wms.physical_shipment_items AS physical_item
+     LEFT JOIN wms.effective_physical_shipment_items AS physical_item
        ON physical_item.physical_shipment_id = physical.id
      LEFT JOIN wms.outbound_shipment_items AS legacy_item
        ON legacy_item.id = physical_item.legacy_wms_shipment_item_id
@@ -290,6 +302,71 @@ async function loadCanonicalRows(
     }];
   }));
 }
+interface CanonicalPhysicalItemMembership {
+  readonly physicalShipmentItemId: number;
+  readonly sourceShipmentItemId: number | null;
+  readonly quantity: number;
+}
+
+async function loadCanonicalPhysicalMemberships(
+  executor: QueryExecutor,
+  physicalShipmentIds: readonly number[],
+): Promise<Map<number, readonly CanonicalPhysicalItemMembership[]>> {
+  if (physicalShipmentIds.length === 0) return new Map();
+  const result = await executor.query(
+    `SELECT item.id, item.physical_shipment_id,
+            item.legacy_wms_shipment_item_id, item.quantity_shipped
+     FROM wms.effective_physical_shipment_items AS item
+     WHERE item.physical_shipment_id = ANY($1::bigint[])
+     ORDER BY item.physical_shipment_id, item.id`,
+    [physicalShipmentIds],
+  );
+  const memberships = new Map<number, CanonicalPhysicalItemMembership[]>();
+  for (const raw of rowsOf<Record<string, unknown>>(result)) {
+    const physicalShipmentId = asPositiveInteger(
+      raw.physical_shipment_id,
+      "physical shipment id",
+    );
+    const rows = memberships.get(physicalShipmentId) ?? [];
+    rows.push(Object.freeze({
+      physicalShipmentItemId: asPositiveInteger(
+        raw.id,
+        "physical shipment item id",
+      ),
+      sourceShipmentItemId: raw.legacy_wms_shipment_item_id == null
+        ? null
+        : asPositiveInteger(
+            raw.legacy_wms_shipment_item_id,
+            "legacy WMS shipment item id",
+          ),
+      quantity: asPositiveInteger(raw.quantity_shipped, "physical item quantity"),
+    }));
+    memberships.set(physicalShipmentId, rows);
+  }
+  return new Map(
+    [...memberships].map(([physicalShipmentId, rows]) => [
+      physicalShipmentId,
+      Object.freeze(rows),
+    ]),
+  );
+}
+
+function canonicalPhysicalMembershipMatchesPlan(
+  plan: HistoricalSplitRepairPackagePlan,
+  membership: readonly CanonicalPhysicalItemMembership[],
+): boolean {
+  if (membership.some((item) => item.sourceShipmentItemId === null)) return false;
+  const actual = new Map<string, number>();
+  for (const item of membership) {
+    addQuantity(actual, String(item.sourceShipmentItemId), item.quantity);
+  }
+  const expected = new Map<string, number>();
+  for (const item of plan.providerPackage.items) {
+    addQuantity(expected, String(item.sourceShipmentItemId), item.quantity);
+  }
+  return mapsEqual(actual, expected);
+}
+
 async function exactTargetMembership(
   executor: QueryExecutor,
   target: TargetPlan,
@@ -373,7 +450,7 @@ async function shipmentItemsHaveCanonicalEvidence(
     `SELECT EXISTS (
        SELECT 1
        FROM wms.outbound_shipment_items AS item
-       JOIN wms.physical_shipment_items AS physical_item
+       JOIN wms.effective_physical_shipment_items AS physical_item
          ON physical_item.legacy_wms_shipment_item_id = item.id
        WHERE item.shipment_id = $1
      ) OR EXISTS (
@@ -739,7 +816,7 @@ async function resolveOrCreateTarget(
            AND NOT EXISTS (
              SELECT 1
              FROM wms.outbound_shipment_items AS item
-             JOIN wms.physical_shipment_items AS physical_item
+             JOIN wms.effective_physical_shipment_items AS physical_item
                ON physical_item.legacy_wms_shipment_item_id = item.id
              WHERE item.shipment_id = wms.outbound_shipments.id
            )
@@ -854,7 +931,7 @@ async function activateRecoveredProviderTarget(
        AND NOT EXISTS (
          SELECT 1
          FROM wms.outbound_shipment_items AS item
-         JOIN wms.physical_shipment_items AS physical_item
+         JOIN wms.effective_physical_shipment_items AS physical_item
            ON physical_item.legacy_wms_shipment_item_id = item.id
          WHERE item.shipment_id = shipment.id
        )
@@ -1001,7 +1078,7 @@ async function loadExactTargetCopyEvidence(
   const copiedResult = await client.query(
     `SELECT item.id,
             EXISTS (
-              SELECT 1 FROM wms.physical_shipment_items AS physical_item
+              SELECT 1 FROM wms.effective_physical_shipment_items AS physical_item
               WHERE physical_item.legacy_wms_shipment_item_id = item.id
             ) OR EXISTS (
               SELECT 1 FROM oms.channel_fulfillment_receipt_items AS receipt_item
@@ -1121,26 +1198,32 @@ async function archiveCanonicalDuplicateSource(
   client: PoolClient,
   source: SourceItemRow,
   archiveShipmentId: number,
+  allowHistoricalReceiptEvidence = false,
 ): Promise<void> {
   const evidenceResult = await client.query(
     `SELECT item.id,
             EXISTS (
-              SELECT 1 FROM wms.physical_shipment_items AS physical_item
+              SELECT 1 FROM wms.effective_physical_shipment_items AS physical_item
               WHERE physical_item.legacy_wms_shipment_item_id = item.id
-            ) OR EXISTS (
+            ) AS has_effective_physical_evidence,
+            EXISTS (
               SELECT 1 FROM oms.channel_fulfillment_receipt_items AS receipt_item
               WHERE receipt_item.legacy_wms_shipment_item_id = item.id
-            ) AS has_canonical_evidence
+            ) AS has_receipt_evidence
      FROM wms.outbound_shipment_items AS item
      WHERE item.id = $1 AND item.shipment_id = $2 AND item.qty = $3
      FOR UPDATE OF item`,
     [source.id, source.shipment_id, source.qty],
   );
   const evidenceRows = rowsOf<Record<string, unknown>>(evidenceResult);
-  if (
-    evidenceRows.length !== 1
-    || evidenceRows[0].has_canonical_evidence === true
-  ) {
+  const evidence = evidenceRows[0];
+  const hasBlockingEvidence = evidenceRows.length !== 1
+    || evidence?.has_effective_physical_evidence === true
+    || (
+      evidence?.has_receipt_evidence === true
+      && !allowHistoricalReceiptEvidence
+    );
+  if (hasBlockingEvidence) {
     throw repairError(
       "DUPLICATE_SOURCE_HAS_CANONICAL_EVIDENCE",
       `Aggregate source item ${source.id} cannot be archived because it changed or has canonical fulfillment evidence`,
@@ -1260,6 +1343,7 @@ async function applySourceAllocationsWithPersistedTargets(
   allocations: readonly TargetAllocation[],
   archiveShipmentByOrder: Map<number, number>,
   audit: HistoricalSplitRepairAudit,
+  allowHistoricalReceiptEvidence = false,
 ): Promise<void> {
   const sorted = [...allocations].sort(
     (left, right) =>
@@ -1329,7 +1413,12 @@ async function applySourceAllocationsWithPersistedTargets(
       (evidence) => !evidence.hasCanonicalEvidence,
     );
     if (replaceableIndex < 0) {
-      await archiveCanonicalDuplicateSource(client, source, archiveShipmentId);
+      await archiveCanonicalDuplicateSource(
+        client,
+        source,
+        archiveShipmentId,
+        allowHistoricalReceiptEvidence,
+      );
       return;
     }
     await replaceExactTargetCopyWithSource(
@@ -1362,6 +1451,146 @@ async function applySourceAllocationsWithPersistedTargets(
       mutable,
     );
   }
+}
+
+async function applyCanonicalPhysicalQuantityCorrection(
+  client: PoolClient,
+  source: SourceItemRow,
+  correction: HistoricalSplitCanonicalCorrection,
+  allocations: readonly TargetAllocation[],
+  archiveShipmentByOrder: Map<number, number>,
+  audit: HistoricalSplitRepairAudit,
+): Promise<void> {
+  if (
+    source.canonical_physical_shipment_id !== correction.physicalShipmentId
+    || source.canonical_physical_shipment_item_id === null
+    || source.canonical_quantity_shipped === null
+  ) {
+    throw repairError(
+      "CANONICAL_CORRECTION_SOURCE_CHANGED",
+      `Source WMS shipment item ${source.id} no longer belongs to canonical physical shipment ${correction.physicalShipmentId}`,
+    );
+  }
+
+  const residentAllocations = allocations.filter(
+    (allocation) => allocation.targetShipmentId === source.shipment_id,
+  );
+  if (residentAllocations.length > 1) {
+    throw repairError(
+      "CANONICAL_CORRECTION_RESIDENT_AMBIGUOUS",
+      `Source WMS shipment item ${source.id} has multiple resident provider allocations`,
+    );
+  }
+  const resident = residentAllocations[0] ?? null;
+  if (
+    resident !== null
+    && resident.providerShipmentId !== correction.providerShipmentId
+  ) {
+    throw repairError(
+      "CANONICAL_CORRECTION_PROVIDER_MISMATCH",
+      `Canonical physical shipment ${correction.physicalShipmentId} belongs to provider package ${correction.providerShipmentId}, not resident package ${resident.providerShipmentId}`,
+    );
+  }
+  const desiredCanonicalQuantity = resident?.quantity ?? 0;
+  const expectedDelta = desiredCanonicalQuantity
+    - source.canonical_quantity_shipped;
+  if (expectedDelta > 0) {
+    throw repairError(
+      "CANONICAL_CORRECTION_WOULD_INCREASE_QUANTITY",
+      `Canonical physical shipment item ${source.canonical_physical_shipment_item_id} has ${source.canonical_quantity_shipped} units but provider evidence requires ${desiredCanonicalQuantity}`,
+    );
+  }
+
+  const locked = await client.query(
+    `SELECT item.id, item.physical_shipment_id,
+            item.legacy_wms_shipment_item_id, item.quantity_shipped,
+            adjustment.quantity_delta
+     FROM wms.physical_shipment_items AS item
+     LEFT JOIN wms.physical_shipment_item_quantity_adjustments AS adjustment
+       ON adjustment.physical_shipment_item_id = item.id
+     WHERE item.id = $1
+     FOR UPDATE OF item`,
+    [source.canonical_physical_shipment_item_id],
+  );
+  const rows = rowsOf<Record<string, unknown>>(locked);
+  if (rows.length !== 1) {
+    throw repairError(
+      "CANONICAL_CORRECTION_ITEM_MISSING",
+      `Canonical physical shipment item ${source.canonical_physical_shipment_item_id} is missing`,
+    );
+  }
+  const row = rows[0];
+  if (
+    Number(row.physical_shipment_id) !== correction.physicalShipmentId
+    || Number(row.legacy_wms_shipment_item_id) !== source.id
+    || Number(row.quantity_shipped) !== source.canonical_quantity_shipped
+  ) {
+    throw repairError(
+      "CANONICAL_CORRECTION_ITEM_CHANGED",
+      `Canonical physical shipment item ${source.canonical_physical_shipment_item_id} changed after inspection`,
+    );
+  }
+
+  if (expectedDelta < 0) {
+    if (row.quantity_delta == null) {
+      const inserted = await client.query(
+        `INSERT INTO wms.physical_shipment_item_quantity_adjustments (
+           physical_shipment_item_id, quantity_delta, adjustment_kind,
+           repair_run_id, idempotency_key, operator, reason, metadata,
+           created_at
+         ) VALUES (
+           $1, $2, 'historical_provider_package_repartition',
+           $3::uuid, $4, $5, $6,
+           jsonb_build_object(
+             'providerShipmentId', $7::bigint,
+             'sourceWmsShipmentItemId', $8::bigint,
+             'previousQuantity', $9::integer,
+             'effectiveQuantity', $10::integer
+           ),
+           $11::timestamptz
+         )
+         RETURNING id`,
+        [
+          source.canonical_physical_shipment_item_id,
+          expectedDelta,
+          audit.runId,
+          audit.idempotencyKey,
+          audit.operator,
+          audit.reason,
+          correction.providerShipmentId,
+          source.id,
+          source.canonical_quantity_shipped,
+          desiredCanonicalQuantity,
+          audit.occurredAt,
+        ],
+      );
+      if (rowsOf(inserted).length !== 1) {
+        throw repairError(
+          "CANONICAL_CORRECTION_INSERT_FAILED",
+          `Canonical physical shipment item ${source.canonical_physical_shipment_item_id} was not corrected`,
+        );
+      }
+    } else if (Number(row.quantity_delta) !== expectedDelta) {
+      throw repairError(
+        "CANONICAL_CORRECTION_CONFLICT",
+        `Canonical physical shipment item ${source.canonical_physical_shipment_item_id} already has correction ${row.quantity_delta}, expected ${expectedDelta}`,
+      );
+    }
+  } else if (row.quantity_delta != null) {
+    throw repairError(
+      "CANONICAL_CORRECTION_UNEXPECTED",
+      `Canonical physical shipment item ${source.canonical_physical_shipment_item_id} already has an unexpected correction`,
+    );
+  }
+
+  await applySourceAllocationsWithPersistedTargets(
+    client,
+    source,
+    allocations,
+    archiveShipmentByOrder,
+    audit,
+    true,
+  );
 }
 
 async function resolveRetryRows(
@@ -1482,7 +1711,7 @@ export function createHistoricalShipStationSplitRepairRepository(
       limit = `LIMIT $${values.length}`;
     }
     const result = await pool.query(
-      `WITH matched AS (
+      `WITH retry_matches AS (
          SELECT retry.id AS retry_id,
            (REGEXP_MATCH(
              retry.last_error,
@@ -1494,9 +1723,26 @@ export function createHistoricalShipStationSplitRepairRepository(
            AND retry.status = 'dead'
            AND retry.last_error ~
              'shipment [0-9]+: duplicate key value violates unique constraint "${FAILURE_INDEX_PATTERN}"'
+       ), exception_matches AS (
+         SELECT NULL::integer AS retry_id,
+                exception.external_shipment_ref::bigint AS provider_shipment_id
+         FROM wms.reconciliation_exceptions AS exception
+         WHERE exception.external_system = 'shipstation'
+           AND exception.rule = ANY(ARRAY['shipstation_unmapped_physical_shipment',
+                                                'ship_notify_no_match']::text[])
+           AND exception.status IN ('open', 'acknowledged')
+           AND exception.external_shipment_ref ~ '^[1-9][0-9]*$'
+       ), matched AS (
+         SELECT retry_id, provider_shipment_id FROM retry_matches
+         UNION ALL
+         SELECT retry_id, provider_shipment_id FROM exception_matches
        ), grouped AS (
          SELECT matched.provider_shipment_id,
-                ARRAY_AGG(matched.retry_id ORDER BY matched.retry_id) AS retry_ids
+                COALESCE(
+                  ARRAY_AGG(matched.retry_id ORDER BY matched.retry_id)
+                    FILTER (WHERE matched.retry_id IS NOT NULL),
+                  ARRAY[]::integer[]
+                ) AS retry_ids
          FROM matched
          GROUP BY matched.provider_shipment_id
        ), selected AS (
@@ -1535,19 +1781,6 @@ export function createHistoricalShipStationSplitRepairRepository(
            AND sibling_label.label_direction = 'outbound'
            AND sibling_label.label_status IN ('active', 'unknown')
            AND sibling_label.voided_at IS NULL
-           AND EXISTS (
-             SELECT 1
-             FROM wms.shipping_provider_label_links AS sibling_target_link
-             JOIN wms.outbound_shipments AS sibling_target
-               ON sibling_target.id = sibling_target_link.legacy_wms_shipment_id
-             WHERE sibling_target_link.shipping_provider_label_id = sibling_label.id
-               AND sibling_target.id <> aggregate.aggregate_shipment_id
-               AND sibling_target.source = 'shipstation_split'
-               AND sibling_target.status IN ('shipped', 'queued', 'voided', 'cancelled')
-               AND sibling_target.shipment_purpose = 'customer_fulfillment'
-               AND sibling_target.external_fulfillment_id =
-                 'shipstation_shipment:' || sibling_label.provider_label_id
-           )
        ), expanded AS (
          SELECT selected.provider_shipment_id, selected.retry_ids
          FROM selected
@@ -1576,8 +1809,14 @@ export function createHistoricalShipStationSplitRepairRepository(
   async function inspectPackages(
     packages: readonly HistoricalSplitRepairPackagePlan[],
   ): Promise<HistoricalSplitInspection> {
-    const providerIds = packages.map((plan) => plan.providerPackage.providerShipmentId);
+    const providerIds = packages.map((plan) =>
+      plan.providerPackage.providerShipmentId
+    );
     const canonicalRows = await loadCanonicalRows(pool, providerIds);
+    const canonicalMemberships = await loadCanonicalPhysicalMemberships(
+      pool,
+      [...canonicalRows.values()].map((row) => row.physical_shipment_id),
+    );
     const sourceItemIds = [...new Set(packages.flatMap((plan) =>
       plan.providerPackage.items.map((item) => item.sourceShipmentItemId)
     ))].sort((left, right) => left - right);
@@ -1591,31 +1830,79 @@ export function createHistoricalShipStationSplitRepairRepository(
       HistoricalSplitCanonicalPackage
     >();
     const canonicalProviderIdsBySourceShipmentId = new Map<number, Set<number>>();
-    const exactCanonicalSupportProviderIds = new Set<number>();
+    const canonicalCorrectionByProviderId = new Map<
+      number,
+      HistoricalSplitCanonicalCorrection
+    >();
 
     for (const plan of packages) {
       const providerId = plan.providerPackage.providerShipmentId;
       const canonical = canonicalRows.get(providerId);
+      const errors: string[] = [];
+      for (const item of plan.providerPackage.items) {
+        const itemSource = sourceRows.get(item.sourceShipmentItemId);
+        if (!itemSource) {
+          errors.push(
+            `source WMS shipment item ${item.sourceShipmentItemId} is missing`,
+          );
+          continue;
+        }
+        if (itemSource.shipment_status !== "shipped") {
+          errors.push(
+            `source WMS shipment ${itemSource.shipment_id} is ${itemSource.shipment_status}, not shipped`,
+          );
+        }
+        if (itemSource.shipment_item_purpose !== "customer_fulfillment") {
+          errors.push(
+            `source WMS shipment item ${itemSource.id} purpose is ${itemSource.shipment_item_purpose}`,
+          );
+        }
+        if (!Number.isSafeInteger(itemSource.qty) || itemSource.qty <= 0) {
+          errors.push(
+            `source WMS shipment item ${itemSource.id} has invalid quantity ${itemSource.qty}`,
+          );
+        }
+      }
+
       if (canonical) {
-        if (canonical.tracking_number && canonical.tracking_number !== plan.providerPackage.trackingNumber) {
+        if (
+          canonical.tracking_number
+          && canonical.tracking_number !== plan.providerPackage.trackingNumber
+        ) {
           unsafe.push(immutableFailure(
-            [providerId], "CANONICAL_TRACKING_CONFLICT",
+            [providerId],
+            "CANONICAL_TRACKING_CONFLICT",
             `Canonical physical shipment ${canonical.physical_shipment_id} has tracking ${canonical.tracking_number}, not ${plan.providerPackage.trackingNumber}`,
           ));
           continue;
         }
-        if (canonical.legacy_wms_shipment_ids.length === 0 || canonical.wms_order_ids.length === 0) {
+        if (
+          canonical.legacy_wms_shipment_ids.length === 0
+          || canonical.wms_order_ids.length === 0
+        ) {
           unsafe.push(immutableFailure(
-            [providerId], "CANONICAL_LEGACY_LINK_MISSING",
+            [providerId],
+            "CANONICAL_LEGACY_LINK_MISSING",
             `Canonical physical shipment ${canonical.physical_shipment_id} lacks legacy WMS package lineage`,
           ));
           continue;
         }
+        if (errors.length > 0) {
+          unsafe.push(immutableFailure(
+            [providerId],
+            "SOURCE_PACKAGE_LINEAGE_UNSAFE",
+            errors.join("; "),
+          ));
+          continue;
+        }
+
         const canonicalPackage = Object.freeze({
           packagePlan: plan,
           applied: Object.freeze({
             providerShipmentId: providerId,
-            legacyWmsShipmentIds: Object.freeze(canonical.legacy_wms_shipment_ids),
+            legacyWmsShipmentIds: Object.freeze(
+              canonical.legacy_wms_shipment_ids,
+            ),
             wmsOrderIds: Object.freeze(canonical.wms_order_ids),
           }),
           materialized: Object.freeze({
@@ -1623,76 +1910,67 @@ export function createHistoricalShipStationSplitRepairRepository(
             channelCommandCount: canonical.channel_command_count,
           }),
         });
-        alreadyCanonical.push(canonicalPackage);
-        canonicalPackageByProviderId.set(providerId, canonicalPackage);
-        const canonicalSources = plan.providerPackage.items
-          .map((item) => sourceRows.get(item.sourceShipmentItemId))
-          .filter((source): source is SourceItemRow => source !== undefined);
-        for (const source of canonicalSources) {
-          const providerIdsForSource =
-            canonicalProviderIdsBySourceShipmentId.get(source.shipment_id)
-              ?? new Set<number>();
-          providerIdsForSource.add(providerId);
-          canonicalProviderIdsBySourceShipmentId.set(
-            source.shipment_id,
-            providerIdsForSource,
+        const existingTargets = await loadExactExistingTargets(
+          pool,
+          plan,
+          sourceRows,
+        );
+        const canonicalLegacyShipmentIds = new Set(
+          canonical.legacy_wms_shipment_ids,
+        );
+        const lineageExact = existingTargets !== null
+          && existingTargets.every((target) =>
+            target.targetShipmentId !== null
+            && canonicalLegacyShipmentIds.has(target.targetShipmentId)
           );
+        const membershipExact = canonicalPhysicalMembershipMatchesPlan(
+          plan,
+          canonicalMemberships.get(canonical.physical_shipment_id) ?? [],
+        );
+        if (lineageExact && membershipExact) {
+          alreadyCanonical.push(canonicalPackage);
+          canonicalPackageByProviderId.set(providerId, canonicalPackage);
+          const canonicalSources = plan.providerPackage.items.map((item) =>
+            sourceRows.get(item.sourceShipmentItemId)!
+          );
+          for (const canonicalSource of canonicalSources) {
+            const providerIdsForSource =
+              canonicalProviderIdsBySourceShipmentId.get(
+                canonicalSource.shipment_id,
+              ) ?? new Set<number>();
+            providerIdsForSource.add(providerId);
+            canonicalProviderIdsBySourceShipmentId.set(
+              canonicalSource.shipment_id,
+              providerIdsForSource,
+            );
+          }
+          continue;
         }
-        if (canonicalSources.length === plan.providerPackage.items.length) {
-          const existingTargets = await loadExactExistingTargets(
-            pool,
-            plan,
-            sourceRows,
-          );
-          const canonicalLegacyShipmentIds = new Set(
-            canonical.legacy_wms_shipment_ids,
-          );
-          if (
-            existingTargets !== null
-            && existingTargets.every((target) =>
-              target.targetShipmentId !== null
-              && canonicalLegacyShipmentIds.has(target.targetShipmentId)
-            )
-          ) exactCanonicalSupportProviderIds.add(providerId);
-        }
+
+        canonicalCorrectionByProviderId.set(providerId, Object.freeze({
+          providerShipmentId: providerId,
+          physicalShipmentId: canonical.physical_shipment_id,
+        }));
+        validPlans.push(plan);
         continue;
       }
 
-      const errors: string[] = [];
-      const canonicalSourceIds: number[] = [];
-      for (const item of plan.providerPackage.items) {
-        const source = sourceRows.get(item.sourceShipmentItemId);
-        if (!source) {
-          errors.push(`source WMS shipment item ${item.sourceShipmentItemId} is missing`);
-          continue;
-        }
-        if (source.shipment_status !== "shipped") {
-          errors.push(`source WMS shipment ${source.shipment_id} is ${source.shipment_status}, not shipped`);
-        }
-        if (source.shipment_item_purpose !== "customer_fulfillment") {
-          errors.push(`source WMS shipment item ${source.id} purpose is ${source.shipment_item_purpose}`);
-        }
-        if (!Number.isSafeInteger(source.qty) || source.qty <= 0) {
-          errors.push(`source WMS shipment item ${source.id} has invalid quantity ${source.qty}`);
-        }
-        if (source.canonical_physical_shipment_id !== null) {
-          canonicalSourceIds.push(source.id);
-        }
+      const existingTargets = await loadExactExistingTargets(
+        pool,
+        plan,
+        sourceRows,
+      );
+      if (existingTargets !== null) {
+        resumedProviderIds.add(providerId);
+        validPlans.push(plan);
+        continue;
       }
-
-      if (errors.length === 0) {
-        const existingTargets = await loadExactExistingTargets(pool, plan, sourceRows);
-        if (existingTargets !== null) {
-          resumedProviderIds.add(providerId);
-        } else if (canonicalSourceIds.length > 0) {
-          errors.push(
-            `source WMS shipment items ${canonicalSourceIds.join(", ")} already belong to another canonical package and this provider package has no exact resumable legacy target`,
-          );
-        }
-      }
-
       if (errors.length > 0) {
-        unsafe.push(immutableFailure([providerId], "SOURCE_PACKAGE_LINEAGE_UNSAFE", errors.join("; ")));
+        unsafe.push(immutableFailure(
+          [providerId],
+          "SOURCE_PACKAGE_LINEAGE_UNSAFE",
+          errors.join("; "),
+        ));
       } else {
         validPlans.push(plan);
       }
@@ -1700,17 +1978,21 @@ export function createHistoricalShipStationSplitRepairRepository(
 
     const safeComponents: HistoricalSplitRepairComponent[] = [];
     const sourceShipmentIdByItem = new Map(
-      [...sourceRows].map(([sourceItemId, source]) => [sourceItemId, source.shipment_id]),
+      [...sourceRows].map(([sourceItemId, itemSource]) => [
+        sourceItemId,
+        itemSource.shipment_id,
+      ]),
     );
     for (const component of buildHistoricalSplitRepairComponents(
       validPlans,
       sourceShipmentIdByItem,
     )) {
+      const componentSourceIds = new Set(component.packages.flatMap((plan) =>
+        plan.providerPackage.items.map((item) => item.sourceShipmentItemId)
+      ));
       const componentSourceShipmentIds = new Set(
-        component.packages.flatMap((plan) =>
-          plan.providerPackage.items.map((item) =>
-            sourceRows.get(item.sourceShipmentItemId)!.shipment_id
-          )
+        [...componentSourceIds].map((sourceId) =>
+          sourceRows.get(sourceId)!.shipment_id
         ),
       );
       const relatedCanonicalProviderIds = new Set<number>();
@@ -1720,36 +2002,72 @@ export function createHistoricalShipStationSplitRepairRepository(
             canonicalProviderIdsBySourceShipmentId.get(sourceShipmentId) ?? []
         ) relatedCanonicalProviderIds.add(providerId);
       }
-      const unsupportedCanonicalProviderIds = [
-        ...relatedCanonicalProviderIds,
-      ].filter((providerId) =>
-        !exactCanonicalSupportProviderIds.has(providerId)
-      );
-      if (unsupportedCanonicalProviderIds.length > 0) {
-        unsafe.push(immutableFailure(
-          [
-            ...component.packages.map(
-              (plan) => plan.providerPackage.providerShipmentId,
-            ),
-            ...unsupportedCanonicalProviderIds,
-          ],
-          "CANONICAL_SIBLING_SUPPORT_NOT_EXACT",
-          `Canonical sibling package(s) ${unsupportedCanonicalProviderIds.join(", ")} share aggregate source quantities but do not have exact canonical WMS target lineage`,
-        ));
-        continue;
-      }
       const canonicalSupports = [...relatedCanonicalProviderIds]
         .sort((left, right) => left - right)
         .map((providerId) => canonicalPackageByProviderId.get(providerId)!);
+      const canonicalCorrections = component.packages
+        .map((plan) => canonicalCorrectionByProviderId.get(
+          plan.providerPackage.providerShipmentId,
+        ))
+        .filter((correction): correction is HistoricalSplitCanonicalCorrection =>
+          correction !== undefined
+        );
+      const correctedPhysicalIds = new Set(
+        canonicalCorrections.map((correction) => correction.physicalShipmentId),
+      );
+      const supportedPhysicalIds = new Set(
+        canonicalSupports.map((support) =>
+          support.materialized.physicalShipmentId
+        ),
+      );
+      const pendingSourceIds = new Set(
+        component.packages
+          .filter((plan) =>
+            !resumedProviderIds.has(
+              plan.providerPackage.providerShipmentId,
+            )
+          )
+          .flatMap((plan) =>
+            plan.providerPackage.items.map((item) =>
+              item.sourceShipmentItemId
+            )
+          ),
+      );
+      const foreignCanonicalSources = [...pendingSourceIds]
+        .map((sourceId) => sourceRows.get(sourceId)!)
+        .filter((itemSource) =>
+          itemSource.canonical_physical_shipment_id !== null
+          && !correctedPhysicalIds.has(
+            itemSource.canonical_physical_shipment_id,
+          )
+          && !supportedPhysicalIds.has(
+            itemSource.canonical_physical_shipment_id,
+          )
+        );
+      if (foreignCanonicalSources.length > 0) {
+        unsafe.push(immutableFailure(
+          component.packages.map((plan) =>
+            plan.providerPackage.providerShipmentId
+          ),
+          "SOURCE_PACKAGE_LINEAGE_UNSAFE",
+          `source WMS shipment items ${foreignCanonicalSources.map((itemSource) => itemSource.id).join(", ")} belong to canonical packages outside the proven sibling cohort`,
+        ));
+        continue;
+      }
+
       const supportedComponent: HistoricalSplitRepairComponent = Object.freeze({
         componentKey: component.componentKey,
         packages: component.packages,
         canonicalSupports: Object.freeze(canonicalSupports),
+        canonicalCorrections: Object.freeze(canonicalCorrections),
       });
       const resumedCount = supportedComponent.packages.filter((plan) =>
         resumedProviderIds.has(plan.providerPackage.providerShipmentId)
       ).length;
-      if (resumedCount === supportedComponent.packages.length) {
+      if (
+        resumedCount === supportedComponent.packages.length
+        && canonicalCorrections.length === 0
+      ) {
         safeComponents.push(supportedComponent);
         continue;
       }
@@ -1772,9 +2090,7 @@ export function createHistoricalShipStationSplitRepairRepository(
             await loadPreferredExistingTarget(pool, target, false);
             if (target.providerStateRecovery !== null) {
               for (const expected of target.expectedSourceItems) {
-                recoveredSourceItemIds.add(
-                  expected.sourceShipmentItemId,
-                );
+                recoveredSourceItemIds.add(expected.sourceShipmentItemId);
               }
             }
           } catch (error) {
@@ -1800,36 +2116,66 @@ export function createHistoricalShipStationSplitRepairRepository(
       ];
       for (const plan of allocationPackages) {
         for (const item of plan.providerPackage.items) {
-          requiredBySource.set(item.sourceShipmentItemId,
-            (requiredBySource.get(item.sourceShipmentItemId) ?? 0) + item.quantity);
+          requiredBySource.set(
+            item.sourceShipmentItemId,
+            (requiredBySource.get(item.sourceShipmentItemId) ?? 0)
+              + item.quantity,
+          );
         }
       }
       const conflicts: string[] = [];
       for (const [sourceId, required] of requiredBySource) {
-        const source = sourceRows.get(sourceId)!;
-        if (required > source.qty) {
+        const itemSource = sourceRows.get(sourceId)!;
+        if (required > itemSource.qty) {
           conflicts.push(
-            `provider packages require ${required} units from WMS shipment item ${sourceId}, but only ${source.qty} remain`,
+            `provider packages require ${required} units from WMS shipment item ${sourceId}, but only ${itemSource.qty} remain`,
           );
         }
-        if (required < source.qty && recoveredSourceItemIds.has(sourceId)) {
-          conflicts.push(
-            `provider-state recovery would leave ${source.qty - required} units on WMS shipment item ${sourceId} without current provider membership proof`,
-          );
-        } else if (
-          required < source.qty && (!source.external_fulfillment_id || !source.tracking_number)
+        if (
+          itemSource.canonical_physical_shipment_id !== null
+          && correctedPhysicalIds.has(
+            itemSource.canonical_physical_shipment_id,
+          )
+          && required !== itemSource.qty
         ) {
           conflicts.push(
-            `WMS shipment item ${sourceId} would leave ${source.qty - required} units without stable residual package identity`,
+            `canonical aggregate correction requires exact allocation of all ${itemSource.qty} units from WMS shipment item ${sourceId}, but provider packages prove ${required}`,
           );
+        } else if (required < itemSource.qty && recoveredSourceItemIds.has(sourceId)) {
+          conflicts.push(
+            `provider-state recovery would leave ${itemSource.qty - required} units on WMS shipment item ${sourceId} without current provider membership proof`,
+          );
+        } else if (
+          required < itemSource.qty
+          && (!itemSource.external_fulfillment_id || !itemSource.tracking_number)
+        ) {
+          conflicts.push(
+            `WMS shipment item ${sourceId} would leave ${itemSource.qty - required} units without stable residual package identity`,
+          );
+        }
+      }
+      for (const correction of canonicalCorrections) {
+        for (
+          const membership of
+            canonicalMemberships.get(correction.physicalShipmentId) ?? []
+        ) {
+          if (
+            membership.sourceShipmentItemId === null
+            || !requiredBySource.has(membership.sourceShipmentItemId)
+          ) {
+            conflicts.push(
+              `canonical physical shipment ${correction.physicalShipmentId} contains item ${membership.physicalShipmentItemId} without complete provider sibling allocation proof`,
+            );
+          }
         }
       }
       if (conflicts.length > 0) {
         unsafe.push(immutableFailure(
-          allocationPackages.map(
-            (plan) => plan.providerPackage.providerShipmentId,
+          allocationPackages.map((plan) =>
+            plan.providerPackage.providerShipmentId
           ),
-          "COMPONENT_QUANTITY_PROOF_FAILED", conflicts.join("; "),
+          "COMPONENT_QUANTITY_PROOF_FAILED",
+          conflicts.join("; "),
         ));
       } else {
         safeComponents.push(supportedComponent);
@@ -1850,6 +2196,13 @@ export function createHistoricalShipStationSplitRepairRepository(
     try {
       await client.query("BEGIN");
       const canonicalSupports = component.canonicalSupports ?? [];
+      const canonicalCorrections = component.canonicalCorrections ?? [];
+      const correctionByPhysicalShipmentId = new Map(
+        canonicalCorrections.map((correction) => [
+          correction.physicalShipmentId,
+          correction,
+        ]),
+      );
       const allocationPlans = [
         ...component.packages,
         ...canonicalSupports.map((support) => support.packagePlan),
@@ -1923,7 +2276,11 @@ export function createHistoricalShipStationSplitRepairRepository(
       const hasProviderStateRecovery = targets.some(
         (target) => target.providerStateRecovery !== null,
       );
-      if (hasProviderStateRecovery || !allTargetsExact) {
+      if (
+        hasProviderStateRecovery
+        || !allTargetsExact
+        || canonicalCorrections.length > 0
+      ) {
         const allocationsBySource = new Map<number, TargetAllocation[]>();
         for (const target of targets) {
           for (const expected of target.expectedSourceItems) {
@@ -1941,13 +2298,29 @@ export function createHistoricalShipStationSplitRepairRepository(
         }
         for (const sourceId of [...allocationsBySource.keys()].sort((a, b) => a - b)) {
           const source = sources.get(sourceId)!;
-          await applySourceAllocationsWithPersistedTargets(
-            client,
-            source,
-            allocationsBySource.get(sourceId)!,
-            retiredDuplicateShipmentByOrder,
-            audit,
-          );
+          const correction = source.canonical_physical_shipment_id === null
+            ? undefined
+            : correctionByPhysicalShipmentId.get(
+                source.canonical_physical_shipment_id,
+              );
+          if (correction) {
+            await applyCanonicalPhysicalQuantityCorrection(
+              client,
+              source,
+              correction,
+              allocationsBySource.get(sourceId)!,
+              retiredDuplicateShipmentByOrder,
+              audit,
+            );
+          } else {
+            await applySourceAllocationsWithPersistedTargets(
+              client,
+              source,
+              allocationsBySource.get(sourceId)!,
+              retiredDuplicateShipmentByOrder,
+              audit,
+            );
+          }
         }
       }
 
@@ -1957,6 +2330,37 @@ export function createHistoricalShipStationSplitRepairRepository(
             "TARGET_PACKAGE_MEMBERSHIP_MISMATCH",
             `WMS shipment ${target.targetShipmentId} does not exactly match provider package ${target.providerPackage.providerShipmentId}`,
           );
+        }
+      }
+      if (canonicalCorrections.length > 0) {
+        const correctedMemberships = await loadCanonicalPhysicalMemberships(
+          client,
+          canonicalCorrections.map((correction) =>
+            correction.physicalShipmentId
+          ),
+        );
+        const packageByProviderShipmentId = new Map(
+          component.packages.map((plan) => [
+            plan.providerPackage.providerShipmentId,
+            plan,
+          ]),
+        );
+        for (const correction of canonicalCorrections) {
+          const plan = packageByProviderShipmentId.get(
+            correction.providerShipmentId,
+          );
+          if (
+            !plan
+            || !canonicalPhysicalMembershipMatchesPlan(
+              plan,
+              correctedMemberships.get(correction.physicalShipmentId) ?? [],
+            )
+          ) {
+            throw repairError(
+              "CANONICAL_CORRECTION_MEMBERSHIP_MISMATCH",
+              `Canonical physical shipment ${correction.physicalShipmentId} does not exactly match provider package ${correction.providerShipmentId} after correction`,
+            );
+          }
         }
       }
 
