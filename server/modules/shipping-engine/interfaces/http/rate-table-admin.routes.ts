@@ -735,18 +735,39 @@ export function registerRateTableAdminRoutes(app: Express): void {
     requirePermission("settings", "edit"),
     async (req, res) => {
       try {
+        const actor = auditActor(req);
         const id = parseTableId(req.params.id);
-        const [current] = await db.select({ status: shippingRateTables.status })
-          .from(shippingRateTables).where(eq(shippingRateTables.id, id)).limit(1);
-        if (!current) throw notFoundError();
-        if (!canDeleteRateTable(current.status)) throw draftRequiredError("Only a draft rate table can be deleted.");
-        const [deleted] = await db.delete(shippingRateTables)
-          .where(and(eq(shippingRateTables.id, id), eq(shippingRateTables.status, "draft")))
-          .returning({ id: shippingRateTables.id });
-        if (!deleted) throw changedError();
+        await db.transaction(async (tx) => {
+          const [current] = await tx.select().from(shippingRateTables)
+            .where(eq(shippingRateTables.id, id)).limit(1);
+          if (!current) return;
+          if (!canDeleteRateTable(current.status)) {
+            throw draftRequiredError("Only a draft rate table can be discarded.");
+          }
+          const [rowCount] = await tx.select({
+            value: sql<number>`count(*)::int`,
+          }).from(shippingRateTableRows)
+            .where(eq(shippingRateTableRows.rateTableId, id));
+          const [deleted] = await tx.delete(shippingRateTables)
+            .where(and(
+              eq(shippingRateTables.id, id),
+              eq(shippingRateTables.status, "draft"),
+            ))
+            .returning({ id: shippingRateTables.id });
+          if (!deleted) return;
+          await persistAuditEvent(tx, {
+            actor,
+            action: "shipping.rate_table_draft.discarded",
+            target: `shipping.rate_tables:${id}`,
+            changes: {
+              before: rateTableAuditState(current, rowCount?.value ?? 0),
+              after: null,
+            },
+          }, { timestamp: new Date() });
+        });
         return res.status(204).send();
       } catch (error) {
-        return sendRateTableAdminError(res, error, "delete rate table draft");
+        return sendRateTableAdminError(res, error, "discard rate table draft");
       }
     },
   );

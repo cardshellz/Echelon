@@ -16,7 +16,6 @@ import {
   Info,
   Loader2,
   Rocket,
-  Trash2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -54,6 +53,7 @@ import {
   type RateTableSummary,
   type ServiceLevelOption,
 } from "./api";
+import { DiscardRateTableDraftButton } from "./DiscardRateTableDraftButton";
 
 interface ReviewStepProps {
   draftId: number;
@@ -66,6 +66,7 @@ interface ReviewStepProps {
   activeTable: RateTableSummary | null;
   onJumpToGroup: (groupId: string) => void;
   onActivated: () => void;
+  onDiscarded: () => void;
 }
 
 export function ReviewStep({
@@ -79,6 +80,7 @@ export function ReviewStep({
   activeTable,
   onJumpToGroup,
   onActivated,
+  onDiscarded,
 }: ReviewStepProps) {
   const { toast } = useToast();
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -330,7 +332,10 @@ export function ReviewStep({
       </section>
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
-        <DeleteDraftButton draftId={draftId} onDeleted={onActivated} />
+        <DiscardRateTableDraftButton
+          draftId={draftId}
+          onDiscarded={onDiscarded}
+        />
         <Button
           size="lg"
           disabled={blockingErrors.length > 0 || activateMutation.isPending || analysis === null}
@@ -386,58 +391,5 @@ function Stat({ label, value }: { label: string; value: string }) {
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-0.5 text-base font-semibold tabular-nums">{value}</div>
     </div>
-  );
-}
-
-function DeleteDraftButton({ draftId, onDeleted }: { draftId: number; onDeleted: () => void }) {
-  const { toast } = useToast();
-  const [open, setOpen] = useState(false);
-  const deleteMutation = useMutation({
-    mutationFn: async () => {
-      const response = await fetch(`/api/shipping/admin/rate-tables/${draftId}`, {
-        method: "DELETE",
-        credentials: "include",
-      });
-      if (!response.ok) throw new Error(`Could not delete the draft (${response.status}).`);
-    },
-    onSuccess: () => {
-      toast({ title: "Draft deleted", description: "Live quoting was never affected." });
-      setOpen(false);
-      onDeleted();
-    },
-    onError: (error: Error) => {
-      toast({ title: "Delete failed", description: error.message, variant: "destructive" });
-    },
-  });
-
-  return (
-    <>
-      <Button variant="ghost" className="text-destructive hover:text-destructive" onClick={() => setOpen(true)}>
-        <Trash2 className="mr-2 h-4 w-4" />
-        Delete draft
-      </Button>
-      <AlertDialog open={open} onOpenChange={setOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete this draft?</AlertDialogTitle>
-            <AlertDialogDescription>
-              The draft and its rate rows are permanently removed. The live revision, if any,
-              keeps quoting unchanged.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteMutation.isPending}>Keep draft</AlertDialogCancel>
-            <Button
-              variant="destructive"
-              onClick={() => deleteMutation.mutate()}
-              disabled={deleteMutation.isPending}
-            >
-              {deleteMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Delete draft
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </>
   );
 }

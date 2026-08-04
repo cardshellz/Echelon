@@ -17,6 +17,7 @@ import {
   CircleDashed,
   Download,
   Loader2,
+  RotateCcw,
   Save,
   Upload,
 } from "lucide-react";
@@ -69,7 +70,14 @@ import {
 } from "./api";
 import { CsvImportDialog } from "./CsvImportDialog";
 import { DestinationGroupsPanel } from "./DestinationGroupsPanel";
+import { DiscardRateTableDraftButton } from "./DiscardRateTableDraftButton";
 import { ReviewStep } from "./ReviewStep";
+import {
+  cloneRateGroups,
+  groupsWithSavedLayout,
+  initialDraftDirtyState,
+  shouldSaveBeforeReview,
+} from "./draft-editor-state";
 
 export interface EditorLaunch {
   draftId: number | null;
@@ -77,6 +85,8 @@ export interface EditorLaunch {
   serviceLevelCode: string | null;
   /** Hydrated groups when resuming a draft or cloning a revision. */
   groups: RateGroup[] | null;
+  /** Exact persisted snapshot used when resetting browser-only edits. */
+  savedGroups: RateGroup[] | null;
   /** Launched from a program context: the program select stays fixed. */
   lockProgram: boolean;
   /** Existing program groups that can be added to this option's manifest. */
@@ -87,6 +97,8 @@ export interface EditorLaunch {
   destinationGroupTarget: DestinationGroupTarget | null;
   /** True when launch hydration had to add the selected destination group. */
   hasUnsavedInitialChanges: boolean;
+  /** Validation generated from the exact persisted draft, when one exists. */
+  analysis: RateTableAnalysis | null;
 }
 interface RateTableEditorProps {
   launch: EditorLaunch;
@@ -115,20 +127,31 @@ export function RateTableEditor({
     launch.rateBookCode && launch.serviceLevelCode ? "rates" : "context",
   );
   const [rateBookCode, setRateBookCode] = useState(launch.rateBookCode ?? "");
+  const [savedRateBookCode, setSavedRateBookCode] = useState(launch.rateBookCode ?? "");
   const [serviceLevelCode, setServiceLevelCode] = useState(launch.serviceLevelCode ?? "");
+  const [savedServiceLevelCode, setSavedServiceLevelCode] = useState(
+    launch.serviceLevelCode ?? "",
+  );
   const [draftId, setDraftId] = useState<number | null>(launch.draftId);
-  const [groups, setGroups] = useState<RateGroup[]>(launch.groups ?? []);
+  const [groups, setGroups] = useState<RateGroup[]>(
+    cloneRateGroups(launch.groups ?? []),
+  );
+  const [savedGroups, setSavedGroups] = useState<RateGroup[]>(
+    cloneRateGroups(launch.savedGroups ?? launch.groups ?? []),
+  );
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(
     findEditorRateGroup(
       launch.groups ?? [],
       launch.destinationGroupTarget,
     )?.id ?? null,
   );
-  const [dirty, setDirty] = useState(launch.hasUnsavedInitialChanges);
-  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(
-    launch.draftId && !launch.hasUnsavedInitialChanges ? new Date() : null,
-  );
-  const [serverAnalysis, setServerAnalysis] = useState<RateTableAnalysis | null>(null);
+  const [dirty, setDirty] = useState(initialDraftDirtyState({
+    draftId: launch.draftId,
+    hasUnsavedInitialChanges: launch.hasUnsavedInitialChanges,
+  }));
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
+  const [serverAnalysis, setServerAnalysis] = useState<RateTableAnalysis | null>(launch.analysis);
+  const [savedAnalysis, setSavedAnalysis] = useState<RateTableAnalysis | null>(launch.analysis);
   const [csvOpen, setCsvOpen] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
 
@@ -204,25 +227,16 @@ export function RateTableEditor({
       allowIncomplete: true,
     }),
     onSuccess: (result) => {
+      const saved = groupsWithSavedLayout(groups, result.draftLayout);
       setDraftId(result.rateTable.id);
-      if (result.draftLayout !== null) {
-        setGroups((current) => current.map((group, index) => {
-          const saved = result.draftLayout?.groups[index];
-          return saved === undefined
-            ? group
-            : {
-                ...group,
-                destinationGroupId: saved.destinationGroupId ?? null,
-                destinationGroupLockVersion:
-                  saved.destinationGroupLockVersion ?? null,
-                name: saved.name,
-                availability: saved.availability ?? "offered",
-              };
-        }));
-      }
+      setGroups(cloneRateGroups(saved));
+      setSavedGroups(cloneRateGroups(saved));
+      setSavedRateBookCode(rateBookCode);
+      setSavedServiceLevelCode(serviceLevelCode);
       setDirty(false);
       setLastSavedAt(new Date());
       setServerAnalysis(result.analysis);
+      setSavedAnalysis(result.analysis);
       invalidateShippingAdmin(queryClient);
     },
     onError: (error: Error) => {
@@ -237,7 +251,14 @@ export function RateTableEditor({
   };
 
   const handleReview = () => {
-    // Review always reflects the just-saved server truth.
+    if (!shouldSaveBeforeReview({
+      draftId,
+      dirty,
+      hasServerAnalysis: serverAnalysis !== null,
+    })) {
+      setStep("review");
+      return;
+    }
     saveMutation.mutate(undefined, {
       onSuccess: () => setStep("review"),
     });
@@ -246,6 +267,26 @@ export function RateTableEditor({
   const handleExit = () => {
     if (dirty) setConfirmDiscard(true);
     else onExit();
+  };
+
+  const handleResetUnsavedChanges = () => {
+    const restoredGroups = cloneRateGroups(savedGroups);
+    const restoredLevel = serviceLevels.find(
+      (level) => level.code === savedServiceLevelCode,
+    ) ?? null;
+    previousBasis.current = restoredLevel?.fulfillmentMode === "freight"
+      ? "pallet_count"
+      : "shipment_weight";
+    setRateBookCode(savedRateBookCode);
+    setServiceLevelCode(savedServiceLevelCode);
+    setGroups(restoredGroups);
+    setSelectedGroupId((current) => (
+      current !== null && restoredGroups.some((group) => group.id === current)
+        ? current
+        : restoredGroups[0]?.id ?? null
+    ));
+    setDirty(draftId === null);
+    setServerAnalysis(savedAnalysis);
   };
 
   const handleExportCsv = () => {
@@ -302,6 +343,8 @@ export function RateTableEditor({
                   ? "Unsaved changes"
                   : lastSavedAt
                     ? `Saved ${lastSavedAt.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`
+                    : draftId !== null
+                      ? "Draft saved"
                     : "Not saved yet"}
             </p>
           </div>
@@ -418,6 +461,7 @@ export function RateTableEditor({
             invalidateShippingAdmin(queryClient);
             onExit();
           }}
+          onDiscarded={onExit}
         />
       )}
       {step === "review" && draftId === null && (
@@ -446,12 +490,28 @@ export function RateTableEditor({
             )}
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" onClick={handleExit}>Cancel</Button>
+            <Button variant="ghost" onClick={handleExit}>Close editor</Button>
+            {dirty && (
+              <Button
+                variant="outline"
+                onClick={handleResetUnsavedChanges}
+                disabled={saveMutation.isPending}
+              >
+                <RotateCcw className="mr-2 h-4 w-4" />
+                Reset unsaved edits
+              </Button>
+            )}
+            {draftId !== null && (
+              <DiscardRateTableDraftButton
+                draftId={draftId}
+                onDiscarded={onExit}
+              />
+            )}
             {step !== "context" && (
               <Button
                 variant="outline"
                 onClick={handleSaveDraft}
-                disabled={saveMutation.isPending || !contextComplete}
+                disabled={saveMutation.isPending || !contextComplete || !dirty}
               >
                 {saveMutation.isPending
                   ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -505,8 +565,8 @@ export function RateTableEditor({
           <AlertDialogHeader>
             <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
             <AlertDialogDescription>
-              You have unsaved changes. Save the draft to keep them, or discard and leave —
-              live quoting is unaffected either way.
+              These browser edits have not been saved. You can save them to the working
+              draft or discard only these unsaved edits and close. Live rates are unaffected.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -529,10 +589,11 @@ export function RateTableEditor({
             <AlertDialogAction
               onClick={() => {
                 setConfirmDiscard(false);
+                handleResetUnsavedChanges();
                 onExit();
               }}
             >
-              Discard changes
+              Discard unsaved edits and close
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
