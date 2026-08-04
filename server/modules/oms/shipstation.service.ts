@@ -2879,9 +2879,12 @@ export function createShipStationService(
     authorityContext: ShipmentAuthorityContext,
     allowedSourceShipmentItemIds?: Set<number>,
   ): Promise<ShipNotifyV2Result> {
+    const shipmentPurpose = String(
+      wmsShipmentRow.shipment_purpose ?? "customer_fulfillment",
+    );
     const isCustomerFulfillmentShipment =
-      String(wmsShipmentRow.shipment_purpose ?? "customer_fulfillment") ===
-        "customer_fulfillment";
+      shipmentPurpose === "customer_fulfillment";
+    const isReplacementShipment = shipmentPurpose === "replacement";
     const exactPhysicalShipmentReplay = isCustomerFulfillmentShipment
       && event.kind === "shipped"
       && isExactShipStationPhysicalShipmentReplay({
@@ -2907,7 +2910,11 @@ export function createShipStationService(
       );
     }
 
-    if (event.kind === "shipped" && !exactPhysicalShipmentReplay) {
+    if (
+      event.kind === "shipped"
+      && !exactPhysicalShipmentReplay
+      && !isReplacementShipment
+    ) {
       try {
         await syncShipmentItemsFromShipStation(
           wmsShipmentRow.id,
@@ -2967,8 +2974,7 @@ export function createShipStationService(
       );
     }
 
-    const isReplacementShipment =
-      String(wmsShipmentRow.shipment_purpose ?? "customer_fulfillment") === "replacement";
+
     if (isReplacementShipment) {
       if (event.kind === "shipped" && inventoryCore) {
         await recordInventoryForShipment(

@@ -122,4 +122,14 @@ describe("Control Tower flow action ownership", () => {
       "COALESCE(shipment_purpose, 'customer_fulfillment') = 'customer_fulfillment'",
     );
   });
+  it("supports operator-confirmed mixed replacement contents without discarding provider evidence", () => {
+    expect(FLOW_MONITOR_SOURCE).toContain('contentsAuthority: actualContentsMode ? "operator" : "provider"');
+    expect(FLOW_MONITOR_SOURCE).toContain("Use ShipStation contents");
+    expect(FLOW_MONITOR_SOURCE).toContain("Confirm actual contents");
+    expect(FLOW_MONITOR_SOURCE).toContain("ShipStation reported");
+    expect(FLOW_MONITOR_SOURCE).toContain("...selectedManualItems.map");
+    expect(FLOW_MONITOR_SOURCE).toContain("...catalogItems.map");
+    expect(FLOW_MONITOR_SOURCE).toContain("Courtesy replacement or free item");
+    expect(OMS_ROUTES_SOURCE).toContain("contentsAuthority: req.body?.contentsAuthority");
+  });
 });

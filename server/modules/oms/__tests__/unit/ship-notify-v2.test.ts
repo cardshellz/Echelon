@@ -919,7 +919,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       orderKey: "echelon-wms-reship-9004",
       trackingNumber: "1Z-REPLACEMENT",
       shipmentItems: [
-        { lineItemKey: null, sku: "SKU-A", quantity: 1 },
+        { lineItemKey: null, sku: "SHIPSTATION-STALE-SKU", quantity: 1 },
       ],
     });
     const inventoryCore = {
@@ -939,27 +939,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           tracking_number: "1Z-REPLACEMENT",
         }],
       },
-      {
-        rows: [{
-          id: 91004,
-          order_item_id: null,
-          replacement_for_order_item_id: 30001,
-          sku: "SKU-A",
-          qty: 1,
-          shipment_purpose: "replacement",
-        }],
-      },
-      {
-        rows: [{
-          id: 91004,
-          order_item_id: null,
-          product_variant_id: 40001,
-          from_location_id: 50001,
-          box_id: null,
-          weight_oz: 4,
-        }],
-      },
-      { rows: [] },
+
       {
         rows: [{
           id: 91004,
@@ -1002,6 +982,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     }));
     const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
     expect(sqlText).toContain("replacement_for_order_item_id");
+    expect(sqlText).not.toContain("osi.provider_membership_state");
     expect(sqlText).not.toMatch(/UPDATE oms\.oms_orders/);
     expect(sqlText).not.toMatch(/UPDATE oms\.oms_order_lines/);
     expect(mock.calls.filter((call) => call.tag === "update")).toHaveLength(0);
@@ -1035,27 +1016,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           tracking_number: "1Z-CONCESSION",
         }],
       },
-      {
-        rows: [{
-          id: 91005,
-          order_item_id: null,
-          replacement_for_order_item_id: null,
-          sku: "FREE-SKU",
-          qty: 1,
-          shipment_purpose: "replacement",
-        }],
-      },
-      {
-        rows: [{
-          id: 91005,
-          order_item_id: null,
-          product_variant_id: 40002,
-          from_location_id: 50001,
-          box_id: null,
-          weight_oz: 4,
-        }],
-      },
-      { rows: [] },
+
       {
         rows: [{
           id: 91005,
@@ -1100,6 +1061,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       releaseReservation: false,
     }));
     const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
+    expect(sqlText).not.toContain("osi.provider_membership_state");
     expect(sqlText).not.toMatch(/UPDATE oms\.oms_orders/);
     expect(sqlText).not.toMatch(/UPDATE oms\.oms_order_lines/);
     expect(mock.calls.filter((call) => call.tag === "update")).toHaveLength(0);

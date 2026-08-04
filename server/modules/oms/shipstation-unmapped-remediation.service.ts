@@ -33,12 +33,15 @@ export interface ShipStationUnmappedLineMapping {
   evidenceSource?: "shipstation" | "original_wms" | "catalog";
 }
 
+export type ShipStationPackageContentsAuthority = "provider" | "operator";
+
 export interface ShipStationUnmappedReshipAdoptionInput
   extends ShipStationUnmappedLocator {
   operator: string;
   originalShipmentId: number;
   reason: string;
   notes?: string;
+  contentsAuthority?: ShipStationPackageContentsAuthority;
   lineMappings: ShipStationUnmappedLineMapping[];
 }
 
@@ -1005,10 +1008,21 @@ export async function getShipStationUnmappedPhysicalPreview(
   };
 }
 
+function resolveContentsAuthority(
+  shipment: ShipStationShipment,
+  requested: ShipStationPackageContentsAuthority | undefined,
+): ShipStationPackageContentsAuthority {
+  if (requested !== undefined && requested !== "provider" && requested !== "operator") {
+    throw new Error("contentsAuthority must be provider or operator");
+  }
+  return requested ?? ((shipment.shipmentItems ?? []).length === 0 ? "operator" : "provider");
+}
+
 function resolveLineMappings(
   shipment: ShipStationShipment,
   orderItems: PreviewOrderItem[],
   requested: ShipStationUnmappedLineMapping[] | undefined,
+  contentsAuthority: ShipStationPackageContentsAuthority,
 ): Array<{
   providerItemIndex: number | null;
   evidenceSource: "shipstation" | "original_wms" | "catalog";
@@ -1018,12 +1032,15 @@ function resolveLineMappings(
   quantity: number;
 }> {
   const items: ShipStationShipmentItem[] = shipment.shipmentItems ?? [];
-  if (items.length === 0) {
+  if (contentsAuthority === "operator") {
     if (!Array.isArray(requested) || requested.length === 0) {
       throw new Error("confirm at least one item that was physically sent");
     }
     const seenLines = new Set<string>();
     return requested.map((mapping) => {
+      if (mapping.providerItemIndex !== undefined && mapping.providerItemIndex !== null) {
+        throw new Error("operator-confirmed package lines cannot claim ShipStation item authority");
+      }
       const quantity = positiveInteger(mapping.quantity, "quantity");
       if (mapping.evidenceSource === "catalog") {
         const productVariantId = positiveInteger(mapping.productVariantId, "productVariantId");
@@ -1040,7 +1057,7 @@ function resolveLineMappings(
         };
       }
       if (mapping.evidenceSource !== "original_wms") {
-        throw new Error("empty ShipStation packages require an ordered item or catalog item confirmation");
+        throw new Error("operator-confirmed packages require an ordered item or catalog item confirmation");
       }
       const orderItemId = positiveInteger(mapping.orderItemId, "orderItemId");
       const key = `order:${orderItemId}`;
@@ -1059,6 +1076,9 @@ function resolveLineMappings(
         quantity,
       };
     });
+  }
+  if (items.length === 0) {
+    throw new Error("ShipStation package contents are unavailable; confirm the actual contents instead");
   }
   if (items.some((item) => (
     normalizeSku(item.sku).length === 0 ||
@@ -1128,8 +1148,14 @@ async function prepareLines(
   shipment: ShipStationShipment,
   orderItems: PreviewOrderItem[],
   input: ShipStationUnmappedReshipAdoptionInput,
+  contentsAuthority: ShipStationPackageContentsAuthority,
 ): Promise<PreparedLine[]> {
-  const mappings = resolveLineMappings(shipment, orderItems, input.lineMappings);
+  const mappings = resolveLineMappings(
+    shipment,
+    orderItems,
+    input.lineMappings,
+    contentsAuthority,
+  );
   const originalShipmentId = positiveInteger(input.originalShipmentId, "originalShipmentId");
   const prepared: PreparedLine[] = [];
   const replacementQuantityByOrderItem = new Map<number, number>();
@@ -1698,13 +1724,14 @@ async function finishMappedShipment(
   input: ShipStationUnmappedReshipAdoptionInput,
   shipment: ShipStationShipment,
   lines: PreparedLine[],
+  contentsAuthority: ShipStationPackageContentsAuthority,
   identityRepair: ShipStationProviderIdentityRepair | null,
   originalPackageIdentityRepair: ShipStationOriginalPackageIdentityRepair | null,
 ): Promise<void> {
   const operator = requiredOperator(input.operator);
   const hasConcessionItem = lines.some((line) => line.shipmentItemPurpose === "concession");
   const resolution = hasConcessionItem
-    ? "Operator recorded a different or free physical item against the shipment. Inventory moved; customer demand, fulfillment, and channel fulfillment were not changed."
+    ? "Operator confirmed replacement package contents that include a different or free physical item. Inventory moved for the confirmed contents; customer demand, fulfillment, and channel fulfillment were not repeated."
     : "Operator authorized the provider package as a replacement shipment. Inventory moved; customer fulfillment and channel fulfillment were not repeated.";
   const details = JSON.stringify({
     remediationAction: "adopt_reship",
@@ -1713,6 +1740,14 @@ async function finishMappedShipment(
     originalShipmentId: input.originalShipmentId ?? null,
     candidateShipmentId,
     providerShipmentId: shipment.shipmentId,
+    contentsAuthority,
+    providerReportedItems: (shipment.shipmentItems ?? []).map((item) => ({
+      orderItemId: item.orderItemId ?? null,
+      lineItemKey: item.lineItemKey ?? null,
+      sku: item.sku,
+      name: item.name ?? null,
+      quantity: item.quantity,
+    })),
     providerIdentityRepair: identityRepair,
     originalPackageIdentityRepair,
     lineMappings: lines.map((line) => ({
@@ -1788,7 +1823,15 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
   const operator = requiredOperator(input.operator);
 
   const orderItems = await loadOrderItems(db, context.wmsOrderId);
-  const lines = await prepareLines(db, context, shipment, orderItems, input);
+  const contentsAuthority = resolveContentsAuthority(shipment, input.contentsAuthority);
+  const lines = await prepareLines(
+    db,
+    context,
+    shipment,
+    orderItems,
+    input,
+    contentsAuthority,
+  );
   const candidateShipmentId = await prepareMappedShipment(
     db,
     context,
@@ -1818,6 +1861,7 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     input,
     shipment,
     lines,
+    contentsAuthority,
     identityRepair,
     originalPackageIdentityRepair,
   );
