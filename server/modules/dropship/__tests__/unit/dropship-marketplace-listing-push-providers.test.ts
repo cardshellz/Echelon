@@ -55,8 +55,8 @@ describe("dropship marketplace listing push providers", () => {
   it("creates an eBay staged offer without publishing when listing mode is draft_first", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([
-      emptyResponse(),
       jsonResponse({ offers: [] }),
+      emptyResponse(),
       jsonResponse({ offerId: "offer-101" }),
       emptyResponse(),
     ]);
@@ -73,8 +73,8 @@ describe("dropship marketplace listing push providers", () => {
       externalOfferId: "offer-101",
       rawResult: { published: false },
     });
-    expect(fetcher.calls.map((call) => call.init.method)).toEqual(["PUT", "GET", "POST", "PUT"]);
-    const inventoryBody = JSON.parse(String(fetcher.calls[0]?.init.body));
+    expect(fetcher.calls.map((call) => call.init.method)).toEqual(["GET", "PUT", "POST", "PUT"]);
+    const inventoryBody = JSON.parse(String(fetcher.calls[1]?.init.body));
     expect(inventoryBody).toMatchObject({
       product: {
         title: "Toploader",
@@ -100,8 +100,8 @@ describe("dropship marketplace listing push providers", () => {
   it("publishes an eBay offer when listing mode is live", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([
-      emptyResponse(),
       jsonResponse({ offers: [{ offerId: "offer-101" }] }),
+      emptyResponse(),
       emptyResponse(),
       jsonResponse({ listingId: "listing-101" }),
     ]);
