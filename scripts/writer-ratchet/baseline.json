@@ -350,6 +350,21 @@
     "modules/orders",
     "modules/procurement"
   ],
+  "marketplace.listing_publication_members": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_publications": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_replacement_events": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_replacement_operations": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_replacement_steps": [
+    "modules/marketplace-listings"
+  ],
   "membership.member_current_membership": [
     "modules/subscriptions"
   ],

@@ -272,6 +272,7 @@ for write primitives (invariant guards + advisory locks + transactions).
 | `inventory.*` (levels, ledger, lots, reservations) | `modules/inventory` | `inventoryCore.*` + `reserveForOrder/releaseForOrder` (order-scoped, idempotent) |
 | `catalog.*` | `modules/catalog` | `catalogApi.*` (channels backfill + eBay routes migrate) |
 | `channels.*` (config, feeds, listings, sync log) | `modules/channels` | `channelsApi.*` (dropship config migrates) |
+| `marketplace.*` (listing scopes, publication generations, replacement operations) | `modules/marketplace-listings` | typed planning/lifecycle APIs; owner snapshot readers now, provider adapters in the execution stage |
 | `procurement.*` | `modules/procurement` | costs flow OUT via `inventoryCore.finalizeLotLandedCost` + `cogsService` |
 | `dropship.*` | `modules/dropship` | intake converges via `omsApi.ingestOrder` (tx-composable) |
 | `membership.*` | shellz-club app (external) | read-only here (runbook Phase 2+) |
