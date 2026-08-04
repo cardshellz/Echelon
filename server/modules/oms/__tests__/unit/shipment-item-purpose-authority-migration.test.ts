@@ -10,6 +10,14 @@ const MIGRATION_SOURCE = readFileSync(
   "utf8",
 );
 
+const PURPOSE_CONSTRAINT_REPAIR_SOURCE = readFileSync(
+  resolve(
+    __dirname,
+    "../../../../../migrations/0608_expand_outbound_shipment_item_purpose_constraint.sql",
+  ),
+  "utf8",
+);
+
 describe("outbound shipment item purpose authority migration", () => {
   it("replaces the obsolete all-lines-require-order-item constraint", () => {
     expect(MIGRATION_SOURCE).toContain(
@@ -41,6 +49,18 @@ describe("outbound shipment item purpose authority migration", () => {
     );
     expect(MIGRATION_SOURCE).toMatch(
       /replacement_for_order_item_id,\r?\n\s+shipment_item_purpose,\r?\n\s+product_variant_id,/,
+    );
+  });
+
+  it("keeps the coarse purpose constraint aligned with omission correction authority", () => {
+    expect(PURPOSE_CONSTRAINT_REPAIR_SOURCE).toContain(
+      "DROP CONSTRAINT IF EXISTS outbound_shipment_items_purpose_chk",
+    );
+    expect(PURPOSE_CONSTRAINT_REPAIR_SOURCE).toMatch(
+      /ADD CONSTRAINT outbound_shipment_items_purpose_chk[\s\S]*'customer_fulfillment'[\s\S]*'replacement'[\s\S]*'concession'[\s\S]*'omission_correction'[\s\S]*'unclassified'/,
+    );
+    expect(PURPOSE_CONSTRAINT_REPAIR_SOURCE).toContain(
+      "VALIDATE CONSTRAINT outbound_shipment_items_purpose_chk",
     );
   });
 });
