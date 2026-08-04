@@ -53,14 +53,14 @@ export async function projectPhysicalShipmentToWms(
   await transaction.execute(sql`
     WITH affected AS (
       SELECT DISTINCT item.wms_order_item_id
-      FROM wms.physical_shipment_items item
+      FROM wms.effective_physical_shipment_items item
       WHERE item.physical_shipment_id = ${physicalShipmentId}
         AND item.shipment_item_purpose = 'customer_fulfillment'
         AND item.wms_order_item_id IS NOT NULL
     ), shipped AS (
       SELECT item.wms_order_item_id,
              SUM(item.quantity_shipped)::int AS shipped_quantity
-      FROM wms.physical_shipment_items item
+      FROM wms.effective_physical_shipment_items item
       JOIN wms.physical_shipments package ON package.id = item.physical_shipment_id
       WHERE item.wms_order_item_id IN (SELECT wms_order_item_id FROM affected)
         AND item.shipment_item_purpose = 'customer_fulfillment'
@@ -98,7 +98,7 @@ export async function projectPhysicalShipmentToWms(
   await transaction.execute(sql`
     WITH affected_orders AS (
       SELECT DISTINCT order_item.order_id
-      FROM wms.physical_shipment_items physical_item
+      FROM wms.effective_physical_shipment_items physical_item
       JOIN wms.order_items order_item ON order_item.id = physical_item.wms_order_item_id
       WHERE physical_item.physical_shipment_id = ${physicalShipmentId}
         AND physical_item.shipment_item_purpose = 'customer_fulfillment'

@@ -1315,7 +1315,7 @@ async function recalculatePlanLine(tx: any, fulfillmentPlanLineId: number): Prom
 
   const aggregate = firstRow<{ calculated_quantity_shipped: number }>(await tx.execute(sql`
     SELECT COALESCE(SUM(item.quantity_shipped), 0)::int AS calculated_quantity_shipped
-    FROM wms.physical_shipment_items AS item
+    FROM wms.effective_physical_shipment_items AS item
     WHERE item.fulfillment_plan_line_id = ${fulfillmentPlanLineId}
       AND item.shipment_item_purpose = 'customer_fulfillment'
   `));
@@ -1366,7 +1366,7 @@ async function findLineWritebackEligibility(
   for (const [fulfillmentPlanLineId, item] of uniqueLines) {
     const aggregate = firstRow<{ shipped_quantity: number }>(await tx.execute(sql`
       SELECT COALESCE(SUM(quantity_shipped), 0)::int AS shipped_quantity
-      FROM wms.physical_shipment_items
+      FROM wms.effective_physical_shipment_items
       WHERE fulfillment_plan_line_id = ${fulfillmentPlanLineId}
         AND shipment_item_purpose = 'customer_fulfillment'
     `));

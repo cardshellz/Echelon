@@ -79,15 +79,20 @@ function sourceRow(overrides: Record<string, unknown> = {}) {
     weight_oz: null,
     provider_membership_state: "authoritative",
     canonical_physical_shipment_id: 6001,
+    canonical_physical_shipment_item_id: 6101,
+    canonical_quantity_shipped: 1,
     ...overrides,
   };
 }
 describe("historical ShipStation split repair repository guards", () => {
-  it("selects only the proven historical uniqueness-failure cohort", () => {
+  it("selects retry failures and open reconciliation exceptions for the proven historical cohort", () => {
     expect(source).toContain("retry.provider = 'shipstation'");
     expect(source).toContain("retry.topic = 'SHIP_NOTIFY'");
     expect(source).toContain("retry.status = 'dead'");
     expect(source).toContain("uq_outbound_shipments_active_");
+    expect(source).toContain("exception_matches AS");
+    expect(source).toContain("shipstation_unmapped_physical_shipment");
+    expect(source).toContain("exception.status IN ('open', 'acknowledged')");
   });
 
   it("supports an explicit provider shipment resume cursor", () => {
@@ -128,8 +133,8 @@ describe("historical ShipStation split repair repository guards", () => {
       expect(sql).toContain("sibling_label.label_direction = 'outbound'");
       expect(sql).toContain("sibling_label.label_status IN ('active', 'unknown')");
       expect(sql).toContain("sibling_label.voided_at IS NULL");
-      expect(sql).toContain("sibling_target.source = 'shipstation_split'");
-      expect(sql).toContain("sibling_target.external_fulfillment_id =");
+      expect(sql).toContain("exception_matches AS");
+      expect(sql).not.toContain("sibling_target.source = 'shipstation_split'");
       return {
         rows: [
           { provider_shipment_id: "443963753", retry_ids: [115757] },
@@ -178,10 +183,22 @@ describe("historical ShipStation split repair repository guards", () => {
     expect(source).not.toContain("INSERT INTO oms.channel_fulfillment_pushes");
   });
 
+  it("uses append-only quantity corrections for over-attributed canonical packages", () => {
+    expect(source).toContain(
+      "INSERT INTO wms.physical_shipment_item_quantity_adjustments",
+    );
+    expect(source).toContain("historical_provider_package_repartition");
+    expect(source).toContain("CANONICAL_CORRECTION_MEMBERSHIP_MISMATCH");
+    expect(source).toContain("FROM wms.effective_physical_shipment_items");
+    expect(source).not.toMatch(
+      /(?:UPDATE|DELETE FROM) wms\.physical_shipment_items/i,
+    );
+  });
+
   it("accepts an interrupted rerun only when its persisted target is an exact match", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM wms.physical_shipments AS physical")) return { rows: [] };
-      if (sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")) {
+      if (sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")) {
         return { rows: [sourceRow()] };
       }
       if (sql.includes("WHERE external_fulfillment_id = $1")) {
@@ -207,7 +224,7 @@ describe("historical ShipStation split repair repository guards", () => {
   it("recognizes a fully reshaped noncanonical target as resumable", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM wms.physical_shipments AS physical")) return { rows: [] };
-      if (sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")) {
+      if (sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")) {
         return { rows: [sourceRow({ canonical_physical_shipment_id: null })] };
       }
       if (sql.includes("WHERE external_fulfillment_id = $1")) {
@@ -242,7 +259,7 @@ describe("historical ShipStation split repair repository guards", () => {
           if (sql.includes("FROM wms.physical_shipments AS physical"))
             return { rows: [] };
           if (
-            sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")
+            sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")
           ) {
             return {
               rows: [sourceRow({ canonical_physical_shipment_id: null })],
@@ -291,7 +308,7 @@ describe("historical ShipStation split repair repository guards", () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM wms.physical_shipments AS physical"))
         return { rows: [] };
-      if (sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")) {
+      if (sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")) {
         return {
           rows: [sourceRow({
             qty: 2,
@@ -339,7 +356,7 @@ describe("historical ShipStation split repair repository guards", () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM wms.physical_shipments AS physical"))
         return { rows: [] };
-      if (sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")) {
+      if (sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")) {
         return { rows: [sourceRow({ canonical_physical_shipment_id: null })] };
       }
       if (sql.includes("WHERE external_fulfillment_id = $1")) {
@@ -376,7 +393,7 @@ describe("historical ShipStation split repair repository guards", () => {
   it("groups sibling source rows from one aggregate shipment into one component", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM wms.physical_shipments AS physical")) return { rows: [] };
-      if (sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")) {
+      if (sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")) {
         return { rows: [
           sourceRow({ id: 9001, shipment_id: 7001, order_item_id: 3001, canonical_physical_shipment_id: null }),
           sourceRow({ id: 9002, shipment_id: 7001, order_item_id: 3002, canonical_physical_shipment_id: null }),
@@ -401,7 +418,7 @@ describe("historical ShipStation split repair repository guards", () => {
   it("reports fallback target ambiguity during dry-run", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM wms.physical_shipments AS physical")) return { rows: [] };
-      if (sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")) {
+      if (sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")) {
         return { rows: [sourceRow({ canonical_physical_shipment_id: null })] };
       }
       if (sql.includes("WHERE external_fulfillment_id = $1")) return { rows: [] };
@@ -424,7 +441,7 @@ describe("historical ShipStation split repair repository guards", () => {
   it("reports duplicate order-item source rows during dry-run", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM wms.physical_shipments AS physical")) return { rows: [] };
-      if (sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")) {
+      if (sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")) {
         return { rows: [
           sourceRow({ id: 9001, order_item_id: 3001, canonical_physical_shipment_id: null }),
           sourceRow({ id: 9002, order_item_id: 3001, canonical_physical_shipment_id: null }),
@@ -447,7 +464,7 @@ describe("historical ShipStation split repair repository guards", () => {
         if (sql.includes("FROM wms.physical_shipments AS physical"))
           return { rows: [] };
         if (
-          sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")
+          sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")
         ) {
           return {
             rows: [
@@ -603,7 +620,28 @@ describe("historical ShipStation split repair repository guards", () => {
           };
         }
         if (
-          sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")
+          sql.includes("FROM wms.effective_physical_shipment_items AS item")
+          && sql.includes("physical_shipment_id = ANY")
+        ) {
+          return {
+            rows: [
+              {
+                id: 6102,
+                physical_shipment_id: 6002,
+                legacy_wms_shipment_item_id: 9002,
+                quantity_shipped: 1,
+              },
+              {
+                id: 6103,
+                physical_shipment_id: 6003,
+                legacy_wms_shipment_item_id: 9002,
+                quantity_shipped: 1,
+              },
+            ],
+          };
+        }
+        if (
+          sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")
         ) {
           return {
             rows: [
@@ -691,13 +729,141 @@ describe("historical ShipStation split repair repository guards", () => {
     )).toEqual([442730043, 442730044]);
   });
 
+  it("classifies a fully proven over-attributed canonical package as one atomic correction cohort", async () => {
+    const first = packagePlan(442730042, [9001]);
+    const secondBase = packagePlan(442730043, [9002]);
+    const plans = [
+      {
+        ...first,
+        providerPackage: {
+          ...first.providerPackage,
+          trackingNumber: "TRACK-A",
+        },
+      },
+      {
+        ...secondBase,
+        providerPackage: {
+          ...secondBase.providerPackage,
+          trackingNumber: "TRACK-B",
+        },
+      },
+    ];
+    const query = vi.fn(async (sql: string, params: readonly unknown[] = []) => {
+      if (sql.includes("FROM wms.physical_shipments AS physical")) {
+        return { rows: [{
+          provider_physical_shipment_id: "442730042",
+          physical_shipment_id: 6001,
+          tracking_number: "TRACK-A",
+          legacy_wms_shipment_ids: [7001],
+          wms_order_ids: [8001],
+          channel_command_count: 1,
+        }] };
+      }
+      if (
+        sql.includes("FROM wms.effective_physical_shipment_items AS item")
+        && sql.includes("physical_shipment_id = ANY")
+      ) {
+        return { rows: [
+          {
+            id: 6101,
+            physical_shipment_id: 6001,
+            legacy_wms_shipment_item_id: 9001,
+            quantity_shipped: 1,
+          },
+          {
+            id: 6102,
+            physical_shipment_id: 6001,
+            legacy_wms_shipment_item_id: 9002,
+            quantity_shipped: 1,
+          },
+        ] };
+      }
+      if (
+        sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")
+      ) {
+        return { rows: [
+          sourceRow({
+            id: 9001,
+            shipment_id: 7001,
+            order_item_id: 3001,
+            tracking_number: "TRACK-A",
+            external_fulfillment_id: "shipstation_shipment:442730042",
+            canonical_physical_shipment_id: 6001,
+            canonical_physical_shipment_item_id: 6101,
+            canonical_quantity_shipped: 1,
+          }),
+          sourceRow({
+            id: 9002,
+            shipment_id: 7001,
+            order_item_id: 3002,
+            tracking_number: "TRACK-A",
+            external_fulfillment_id: "shipstation_shipment:442730042",
+            canonical_physical_shipment_id: 6001,
+            canonical_physical_shipment_item_id: 6102,
+            canonical_quantity_shipped: 1,
+          }),
+        ] };
+      }
+      if (sql.includes("WHERE external_fulfillment_id = $1")) {
+        return String(params[0]).endsWith("442730042")
+          ? { rows: [{
+              id: 7001,
+              order_id: 8001,
+              status: "shipped",
+              external_fulfillment_id: "shipstation_shipment:442730042",
+              tracking_number: "TRACK-A",
+            }] }
+          : { rows: [] };
+      }
+      if (sql.includes("WHERE shipment_id = $1")) {
+        return { rows: [
+          {
+            order_item_id: 3001,
+            replacement_for_order_item_id: null,
+            shipment_item_purpose: "customer_fulfillment",
+            product_variant_id: 4001,
+            qty: 1,
+          },
+          {
+            order_item_id: 3002,
+            replacement_for_order_item_id: null,
+            shipment_item_purpose: "customer_fulfillment",
+            product_variant_id: 4001,
+            qty: 1,
+          },
+        ] };
+      }
+      if (
+        sql.includes("WHERE order_id = $1")
+        && sql.includes("status = 'shipped'")
+        && sql.includes("tracking_number = $2")
+      ) return { rows: [] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const repository = createHistoricalShipStationSplitRepairRepository({
+      query,
+    } as any);
+
+    const result = await repository.inspectPackages(plans);
+
+    expect(result.unsafe).toEqual([]);
+    expect(result.repairableComponents).toHaveLength(1);
+    expect(result.repairableComponents[0].packages.map((plan) =>
+      plan.providerPackage.providerShipmentId
+    )).toEqual([442730042, 442730043]);
+    expect(result.repairableComponents[0].canonicalCorrections).toEqual([{
+      providerShipmentId: 442730042,
+      physicalShipmentId: 6001,
+    }]);
+  });
+
   it("rejects a retired duplicate that already has canonical fulfillment evidence", async () => {
     const query = vi.fn(
       async (sql: string, params: readonly unknown[] = []) => {
         if (sql.includes("FROM wms.physical_shipments AS physical"))
           return { rows: [] };
         if (
-          sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")
+          sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")
         ) {
           return {
             rows: [
@@ -783,7 +949,7 @@ describe("historical ShipStation split repair repository guards", () => {
     const client = {
       query: vi.fn(async (sql: string) => {
         if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
-        if (sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")) {
+        if (sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")) {
           return { rows: [sourceRow({ canonical_physical_shipment_id: null })] };
         }
         if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
@@ -834,6 +1000,189 @@ describe("historical ShipStation split repair repository guards", () => {
       wmsOrderIds: [8001],
     }]);
     expect(fallbackQueried).toBe(false);
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("atomically corrects an over-attributed canonical package and moves the sibling line", async () => {
+    const firstBase = packagePlan(442730042, [9001]);
+    const secondBase = packagePlan(442730043, [9002]);
+    const plans = [
+      {
+        ...firstBase,
+        providerPackage: {
+          ...firstBase.providerPackage,
+          trackingNumber: "TRACK-A",
+        },
+      },
+      {
+        ...secondBase,
+        providerPackage: {
+          ...secondBase.providerPackage,
+          trackingNumber: "TRACK-B",
+        },
+      },
+    ];
+    const items = new Map([
+      [9001, { shipmentId: 7001, orderItemId: 3001, trackingId: null }],
+      [9002, { shipmentId: 7001, orderItemId: 3002, trackingId: null }],
+    ]);
+    let correctionInserted = false;
+    const membershipRows = (shipmentId: number) =>
+      [...items.entries()]
+        .filter(([, item]) => item.shipmentId === shipmentId)
+        .map(([, item]) => ({
+          order_item_id: item.orderItemId,
+          replacement_for_order_item_id: null,
+          shipment_item_purpose: "customer_fulfillment",
+          product_variant_id: 4001,
+          qty: 1,
+        }));
+    const client = {
+      query: vi.fn(async (sql: string, params: readonly unknown[] = []) => {
+        if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [] };
+        if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
+        if (
+          sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")
+          && sql.includes("FOR UPDATE OF item, shipment")
+        ) {
+          return { rows: [
+            sourceRow({
+              id: 9001,
+              shipment_id: items.get(9001)!.shipmentId,
+              order_item_id: 3001,
+              tracking_number: "TRACK-A",
+              external_fulfillment_id: "shipstation_shipment:442730042",
+              canonical_physical_shipment_id: 6001,
+              canonical_physical_shipment_item_id: 6101,
+              canonical_quantity_shipped: 1,
+            }),
+            sourceRow({
+              id: 9002,
+              shipment_id: items.get(9002)!.shipmentId,
+              order_item_id: 3002,
+              tracking_number: "TRACK-A",
+              external_fulfillment_id: "shipstation_shipment:442730042",
+              canonical_physical_shipment_id: 6001,
+              canonical_physical_shipment_item_id: 6102,
+              canonical_quantity_shipped: 1,
+            }),
+          ] };
+        }
+        if (sql.includes("WHERE external_fulfillment_id = $1")) {
+          return String(params[0]).endsWith("442730042")
+            ? { rows: [{
+                id: 7001,
+                order_id: 8001,
+                status: "shipped",
+                external_fulfillment_id: "shipstation_shipment:442730042",
+                tracking_number: "TRACK-A",
+              }] }
+            : { rows: [] };
+        }
+        if (
+          sql.includes("WHERE order_id = $1 AND status = 'shipped'")
+          && sql.includes("tracking_number = $2")
+        ) return { rows: [] };
+        if (sql.includes("INSERT INTO wms.outbound_shipments")) {
+          return { rows: [{ id: 7102 }] };
+        }
+        if (sql.includes("SET external_fulfillment_id = COALESCE")) {
+          return { rows: [] };
+        }
+        if (
+          sql.includes("SELECT order_item_id, replacement_for_order_item_id")
+          && sql.includes("WHERE shipment_id = $1")
+        ) return { rows: membershipRows(Number(params[0])) };
+        if (
+          sql.includes("FROM wms.physical_shipment_items AS item")
+          && sql.includes("LEFT JOIN wms.physical_shipment_item_quantity_adjustments")
+        ) {
+          const physicalItemId = Number(params[0]);
+          return { rows: [{
+            id: physicalItemId,
+            physical_shipment_id: 6001,
+            legacy_wms_shipment_item_id: physicalItemId === 6101 ? 9001 : 9002,
+            quantity_shipped: 1,
+            quantity_delta: null,
+          }] };
+        }
+        if (sql.includes("INSERT INTO wms.physical_shipment_item_quantity_adjustments")) {
+          expect(params[0]).toBe(6102);
+          expect(params[1]).toBe(-1);
+          correctionInserted = true;
+          return { rows: [{ id: 1 }] };
+        }
+        if (sql.includes("SET qty = $2, tracking_id = $3")) {
+          items.get(Number(params[0]))!.trackingId = String(params[2]);
+          return { rows: [] };
+        }
+        if (
+          sql.includes("SET shipment_id = $2, qty = $3, tracking_id = $4")
+        ) {
+          const item = items.get(Number(params[0]))!;
+          item.shipmentId = Number(params[1]);
+          item.trackingId = String(params[3]);
+          return { rows: [{ id: Number(params[0]) }] };
+        }
+        if (
+          sql.includes("FROM wms.effective_physical_shipment_items AS item")
+          && sql.includes("physical_shipment_id = ANY")
+        ) {
+          return { rows: [{
+            id: 6101,
+            physical_shipment_id: 6001,
+            legacy_wms_shipment_item_id: 9001,
+            quantity_shipped: 1,
+          }] };
+        }
+        if (
+          sql.includes("SET status = 'cancelled'")
+          && sql.includes("historical_aggregate_repartitioned")
+        ) return { rows: [] };
+        throw new Error(`Unexpected SQL: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const repository = createHistoricalShipStationSplitRepairRepository({
+      connect: vi.fn(async () => client),
+    } as any);
+
+    const result = await repository.applyComponent({
+      componentKey: "aggregate-correction",
+      packages: plans,
+      canonicalCorrections: [{
+        providerShipmentId: 442730042,
+        physicalShipmentId: 6001,
+      }],
+    }, {
+      runId: "00000000-0000-4000-8000-000000000001",
+      operator: "owner@cardshellz.com",
+      reason: "repair over-attributed historical package",
+      idempotencyKey: "aggregate-correction-1",
+      occurredAt: new Date("2026-08-03T12:00:00.000Z"),
+    });
+
+    expect(correctionInserted).toBe(true);
+    expect(items.get(9001)).toMatchObject({
+      shipmentId: 7001,
+      trackingId: "442730042",
+    });
+    expect(items.get(9002)).toMatchObject({
+      shipmentId: 7102,
+      trackingId: "442730043",
+    });
+    expect(result).toEqual([
+      {
+        providerShipmentId: 442730042,
+        legacyWmsShipmentIds: [7001],
+        wmsOrderIds: [8001],
+      },
+      {
+        providerShipmentId: 442730043,
+        legacyWmsShipmentIds: [7102],
+        wmsOrderIds: [8001],
+      },
+    ]);
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 
@@ -1018,7 +1367,7 @@ describe("historical ShipStation split repair repository guards", () => {
           };
         }
         if (
-          sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")
+          sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")
         ) {
           return {
             rows: (params[0] as number[]).map((id) => {
@@ -1455,7 +1804,7 @@ describe("historical ShipStation split repair repository guards", () => {
   it("blocks a rerun when canonical source lineage has no exact persisted target", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM wms.physical_shipments AS physical")) return { rows: [] };
-      if (sql.includes("LEFT JOIN wms.physical_shipment_items AS physical_item")) {
+      if (sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")) {
         return { rows: [sourceRow()] };
       }
       if (sql.includes("WHERE external_fulfillment_id = $1")) return { rows: [] };

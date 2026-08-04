@@ -79,7 +79,7 @@ describe("channel fulfillment authority service", () => {
       /FROM wms\.fulfillment_plan_lines AS line[\s\S]*FOR UPDATE OF line/,
     );
     expect(recalculateSource).toMatch(
-      /SUM\(item\.quantity_shipped\)[\s\S]*FROM wms\.physical_shipment_items AS item/,
+      /SUM\(item\.quantity_shipped\)[\s\S]*FROM wms\.effective_physical_shipment_items AS item/,
     );
     expect(recalculateSource).not.toMatch(/GROUP BY[\s\S]*FOR UPDATE/);
     expect(repositorySource).toContain(

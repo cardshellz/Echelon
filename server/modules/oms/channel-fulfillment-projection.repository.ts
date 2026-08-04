@@ -34,7 +34,7 @@ export function createChannelFulfillmentProjector(db: any): ChannelFulfillmentPr
       await tx.execute(sql`
         WITH affected_lines AS (
           SELECT DISTINCT plan_line.oms_order_line_id
-          FROM wms.physical_shipment_items physical_item
+          FROM wms.effective_physical_shipment_items physical_item
           JOIN wms.fulfillment_plan_lines plan_line
             ON plan_line.id = physical_item.fulfillment_plan_line_id
           WHERE physical_item.physical_shipment_id = ${physicalShipmentId}
@@ -43,7 +43,7 @@ export function createChannelFulfillmentProjector(db: any): ChannelFulfillmentPr
           SELECT
             plan_line.oms_order_line_id,
             SUM(physical_item.quantity_shipped)::int AS shipped_quantity
-          FROM wms.physical_shipment_items physical_item
+          FROM wms.effective_physical_shipment_items physical_item
           JOIN wms.physical_shipments package ON package.id = physical_item.physical_shipment_id
           JOIN wms.fulfillment_plan_lines plan_line
             ON plan_line.id = physical_item.fulfillment_plan_line_id
@@ -67,7 +67,7 @@ export function createChannelFulfillmentProjector(db: any): ChannelFulfillmentPr
       await tx.execute(sql`
         WITH affected_orders AS (
           SELECT DISTINCT oms_line.order_id
-          FROM wms.physical_shipment_items physical_item
+          FROM wms.effective_physical_shipment_items physical_item
           JOIN wms.fulfillment_plan_lines plan_line
             ON plan_line.id = physical_item.fulfillment_plan_line_id
           JOIN oms.oms_order_lines oms_line ON oms_line.id = plan_line.oms_order_line_id
@@ -98,7 +98,7 @@ export function createChannelFulfillmentProjector(db: any): ChannelFulfillmentPr
             COALESCE(amendment.tracking_number, package.tracking_number) AS tracking_number,
             COALESCE(amendment.carrier, package.carrier) AS carrier,
             COALESCE(amendment.occurred_at, package.ship_date, package.created_at) AS shipped_at
-          FROM wms.physical_shipment_items physical_item
+          FROM wms.effective_physical_shipment_items physical_item
           JOIN wms.physical_shipments package ON package.id = physical_item.physical_shipment_id
           JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id = physical_item.fulfillment_plan_line_id
           JOIN oms.oms_order_lines oms_line ON oms_line.id = plan_line.oms_order_line_id

@@ -33,7 +33,7 @@ describe("canonical channel fulfillment projector", () => {
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(execute).toHaveBeenCalledTimes(5);
     const statements = execute.mock.calls.map(([query]) => sqlText(query));
-    expect(statements[1]).toContain("FROM wms.physical_shipment_items");
+    expect(statements[1]).toContain("FROM wms.effective_physical_shipment_items");
     expect(statements[1]).toContain("package.status = 'shipped'");
     expect(statements[1]).toMatch(
       /GREATEST\(\s+COALESCE\(order_item\.picked_quantity, 0\),\s+COALESCE\(shipped\.shipped_quantity, 0\)\s+\) >= order_item\.quantity/,

@@ -119,7 +119,7 @@ describe("D-NOMATCH: no-match SHIP_NOTIFY surfacing", () => {
 
 describe("D-FULLQTY: canonical idempotent quantity projection", () => {
   it("derives fulfilled_quantity from canonical physical shipment items", () => {
-    expect(PROJECTION_SRC).toContain("FROM wms.physical_shipment_items item");
+    expect(PROJECTION_SRC).toContain("FROM wms.effective_physical_shipment_items item");
     expect(PROJECTION_SRC).toContain("SUM(item.quantity_shipped)::int AS shipped_quantity");
     expect(PROJECTION_SRC).not.toContain("FROM wms.outbound_shipment_items");
     expect(PROJECTION_SRC).not.toContain("COALESCE(fulfilled_quantity, 0) +");

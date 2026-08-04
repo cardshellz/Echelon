@@ -214,7 +214,7 @@ export function buildCandidateQuery(flags: BackfillFlags): CandidateQuery {
             AND COALESCE(NULLIF(LOWER(BTRIM(oms_line.fulfillment_provider)), ''), LOWER(channel.provider)) = LOWER(channel.provider)
             AND NOT EXISTS (
               SELECT 1
-              FROM wms.physical_shipment_items physical_item
+              FROM wms.effective_physical_shipment_items physical_item
               JOIN wms.physical_shipments physical_package
                 ON physical_package.id = physical_item.physical_shipment_id
               JOIN oms.channel_fulfillment_push_items command_item
@@ -249,7 +249,7 @@ export function buildCandidateQuery(flags: BackfillFlags): CandidateQuery {
             AND COALESCE(NULLIF(LOWER(BTRIM(oms_line.fulfillment_provider)), ''), LOWER(channel.provider)) = LOWER(channel.provider)
             AND NOT EXISTS (
               SELECT 1
-              FROM wms.physical_shipment_items physical_item
+              FROM wms.effective_physical_shipment_items physical_item
               JOIN wms.physical_shipments physical_package
                 ON physical_package.id = physical_item.physical_shipment_id
               JOIN oms.channel_fulfillment_push_items command_item

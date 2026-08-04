@@ -695,7 +695,7 @@ async function findExistingCanonicalPackage(
       item.legacy_wms_shipment_item_id,
       legacy_item.shipment_id AS legacy_wms_shipment_id
     FROM wms.physical_shipments physical
-    JOIN wms.physical_shipment_items item ON item.physical_shipment_id = physical.id
+    JOIN wms.effective_physical_shipment_items item ON item.physical_shipment_id = physical.id
     LEFT JOIN wms.outbound_shipment_items legacy_item
       ON legacy_item.id = item.legacy_wms_shipment_item_id
     JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id = item.fulfillment_plan_line_id
@@ -739,7 +739,7 @@ async function findExistingCanonicalPackageByTracking(
       item.legacy_wms_shipment_item_id,
       legacy_item.shipment_id AS legacy_wms_shipment_id
     FROM wms.physical_shipments physical
-    JOIN wms.physical_shipment_items item ON item.physical_shipment_id = physical.id
+    JOIN wms.effective_physical_shipment_items item ON item.physical_shipment_id = physical.id
     LEFT JOIN wms.outbound_shipment_items legacy_item
       ON legacy_item.id = item.legacy_wms_shipment_item_id
     JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id = item.fulfillment_plan_line_id
@@ -1639,7 +1639,7 @@ export function createChannelFulfillmentIngressRepository(
         });
         legacyWmsShipmentIds = rowsOf<{ legacy_shipment_id: number }>(await tx.execute(sql`
           SELECT DISTINCT shipment_item.shipment_id AS legacy_shipment_id
-          FROM wms.physical_shipment_items physical_item
+          FROM wms.effective_physical_shipment_items physical_item
           JOIN wms.outbound_shipment_items shipment_item
             ON shipment_item.id = physical_item.legacy_wms_shipment_item_id
           WHERE physical_item.physical_shipment_id = ${physicalShipmentId}
@@ -1777,7 +1777,7 @@ export function createChannelFulfillmentIngressRepository(
       await tx.execute(sql`
         UPDATE oms.channel_fulfillment_receipt_items receipt_item
         SET physical_shipment_item_id = physical_item.id
-        FROM wms.physical_shipment_items physical_item
+        FROM wms.effective_physical_shipment_items physical_item
         WHERE receipt_item.receipt_id = ${receiptId}
           AND receipt_item.legacy_wms_shipment_item_id = physical_item.legacy_wms_shipment_item_id
           AND physical_item.physical_shipment_id = ${physicalShipmentId}

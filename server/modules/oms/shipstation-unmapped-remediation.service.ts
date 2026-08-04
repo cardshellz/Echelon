@@ -2020,7 +2020,7 @@ async function retireProviderEchoPreparationShell(
       )::int AS physical_header_count,
       (
         SELECT COUNT(*)
-        FROM wms.physical_shipment_items physical_item
+        FROM wms.effective_physical_shipment_items physical_item
         JOIN wms.outbound_shipment_items candidate_item
           ON candidate_item.id = physical_item.legacy_wms_shipment_item_id
         WHERE candidate_item.shipment_id = ${candidateShipmentId}
