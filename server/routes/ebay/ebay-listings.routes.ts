@@ -15,7 +15,11 @@ import {
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { createInventoryAtpService } from "../../modules/inventory/atp.service";
 import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, syncActiveListings, triggerPricingRuleSync, delay } from "./ebay-sync-helpers";
-import { isProductEffectivelyListed, isVariantEffectivelyListed } from "./ebay-listing-state";
+import {
+  isProductEffectivelyListed,
+  isVariantEffectivelyListed,
+  isVariantSellable,
+} from "./ebay-listing-state";
 import { EbayMarketplaceListingConnector } from "../../modules/channels/listing-connectors/ebay-listing.connector";
 import { queueVariantAvailabilityRepair } from "../../modules/channels/variant-availability-sync.service";
 import {
@@ -1293,16 +1297,15 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
               ebay_fulfillment_policy_override: variant.variant_fulfillment_override,
               ebay_return_policy_override: variant.variant_return_override,
               ebay_payment_policy_override: variant.variant_payment_override,
-              isListed:
-                product.product_is_active === true &&
-                variant.variant_is_active === true &&
-                isVariantEffectivelyListed({
-                  productExcluded: product.product_excluded === true,
-                  productOverrideIsListed: product.product_override_is_listed,
-                  typeListingEnabled: product.type_listing_enabled,
-                  variantExcluded: variant.variant_excluded === true,
-                  variantOverrideIsListed: variant.variant_override_is_listed,
-                }),
+              isListed: isVariantSellable({
+                productActive: product.product_is_active,
+                variantActive: variant.variant_is_active,
+                productExcluded: product.product_excluded === true,
+                productOverrideIsListed: product.product_override_is_listed,
+                typeListingEnabled: product.type_listing_enabled,
+                variantExcluded: variant.variant_excluded === true,
+                variantOverrideIsListed: variant.variant_override_is_listed,
+              }),
             }));
             const sellableVariantIds = new Set(
               routeVariants.filter((variant) => variant.isListed).map((variant) => variant.id),
