@@ -638,7 +638,7 @@ function ShipStationPackageClassificationDialog(props: {
   const [lineMappings, setLineMappings] = useState<Record<number, string>>({});
   const [manualLineSelections, setManualLineSelections] = useState<Record<number, boolean>>({});
   const [manualLineQuantities, setManualLineQuantities] = useState<Record<number, string>>({});
-  const [itemMode, setItemMode] = useState<"ordered" | "catalog">("ordered");
+  const [itemMode, setItemMode] = useState<"provider" | "actual">("provider");
   const [catalogSearchInput, setCatalogSearchInput] = useState("");
   const [catalogSearch, setCatalogSearch] = useState("");
   const [catalogItems, setCatalogItems] = useState<ReplacementCatalogItem[]>([]);
@@ -668,7 +668,7 @@ function ShipStationPackageClassificationDialog(props: {
       if (!response.ok) throw new Error("Could not search the catalog");
       return response.json();
     },
-    enabled: Boolean(props.target && itemMode === "catalog" && catalogSearch.length >= 2),
+    enabled: Boolean(props.target && itemMode === "actual" && catalogSearch.length >= 2),
   });
   const rawProviderItems = useMemo(
     () => preview?.providerShipment.shipmentItems ?? [],
@@ -678,6 +678,7 @@ function ShipStationPackageClassificationDialog(props: {
     String(item.sku ?? "").trim().length > 0 && Number.isSafeInteger(Number(item.quantity)) && Number(item.quantity) > 0
   )), [rawProviderItems]);
   const providerItemsMissing = rawProviderItems.length === 0;
+  const actualContentsMode = providerItemsMissing || itemMode === "actual";
   const providerReturnLabel = preview?.providerShipment.isReturnLabel === true;
   const providerVoided = Boolean(preview?.providerShipment.voidDate);
   const providerEchoMatched = preview?.providerPackageEcho.status === "matched";
@@ -686,7 +687,7 @@ function ShipStationPackageClassificationDialog(props: {
     : preview?.providerPackageEcho.authoritativeLegacyShipmentIds.length === 1
       ? `WMS shipment ${preview.providerPackageEcho.authoritativeLegacyShipmentIds[0]}`
       : "the existing WMS package";
-  const providerEvidenceValid = (providerItemsMissing || (
+  const providerEvidenceValid = (actualContentsMode || (
     providerItems.length > 0 && providerItems.length === rawProviderItems.length
   ))
     && Boolean(preview?.providerShipment.shipDate)
@@ -699,7 +700,7 @@ function ShipStationPackageClassificationDialog(props: {
     setLineMappings({});
     setManualLineSelections({});
     setManualLineQuantities({});
-    setItemMode("ordered");
+    setItemMode("provider");
     setCatalogSearchInput("");
     setCatalogSearch("");
     setCatalogItems([]);
@@ -707,7 +708,7 @@ function ShipStationPackageClassificationDialog(props: {
 
   useEffect(() => {
     const nextSearch = catalogSearchInput.trim();
-    if (itemMode !== "catalog" || nextSearch.length < 2) {
+    if (itemMode !== "actual" || nextSearch.length < 2) {
       setCatalogSearch("");
       return;
     }
@@ -717,6 +718,7 @@ function ShipStationPackageClassificationDialog(props: {
 
   useEffect(() => {
     if (!preview) return;
+    setItemMode(providerItems.length === 0 ? "actual" : "provider");
     const defaults: Record<number, string> = {};
     providerItems.forEach((item, index) => {
       const matches = preview.orderItems.filter(
@@ -762,14 +764,13 @@ function ShipStationPackageClassificationDialog(props: {
     : "";
 
   useEffect(() => {
-    if (!providerItemsMissing) return;
     const quantities: Record<number, string> = {};
     for (const item of selectedOriginalShipment?.items ?? []) {
       quantities[item.orderItemId] = String(item.quantity);
     }
     setManualLineSelections({});
     setManualLineQuantities(quantities);
-  }, [providerItemsMissing, selectedOriginalShipment]);
+  }, [selectedOriginalShipment]);
 
   const providerMappingsComplete = providerItems.length > 0 && providerItems.every((item, index) => {
     const orderItemId = positiveFlowId(lineMappings[index]);
@@ -783,7 +784,7 @@ function ShipStationPackageClassificationDialog(props: {
       (item) => manualLineSelections[item.orderItemId] === true,
     )
   ), [manualLineSelections, selectedOriginalShipment]);
-  const manualMappingsComplete = selectedManualItems.length > 0 && selectedManualItems.every((item) => {
+  const manualMappingsComplete = selectedManualItems.every((item) => {
     const quantity = Number(manualLineQuantities[item.orderItemId]);
     return Number.isSafeInteger(quantity) && quantity > 0 && quantity <= item.quantity;
   });
@@ -797,15 +798,18 @@ function ShipStationPackageClassificationDialog(props: {
       (result) => !catalogItems.some((item) => item.productVariantId === result.productVariantId),
     )
     : [];
-  const isCatalogConcession = providerItemsMissing && itemMode === "catalog";
-  const mappingsComplete = providerItemsMissing
-    ? (isCatalogConcession ? catalogMappingsComplete : manualMappingsComplete)
+  const hasCatalogConcessions = actualContentsMode && catalogItems.length > 0;
+  const actualMappingsComplete = (selectedManualItems.length > 0 || catalogItems.length > 0)
+    && manualMappingsComplete
+    && (catalogItems.length === 0 || catalogMappingsComplete);
+  const mappingsComplete = actualContentsMode
+    ? actualMappingsComplete
     : providerMappingsComplete;
   const actionValid = props.canAdjustInventory
     && providerEvidenceValid
     && mappingsComplete
     && positiveFlowId(originalShipmentId) !== null
-    && (isCatalogConcession || reason.length > 0);
+    && reason.length > 0;
   const returnLabelResolutionValid = props.canTriage && providerReturnLabel;
   const voidResolutionValid = props.canTriage && providerVoided;
   const providerEchoResolutionValid = props.canTriage && providerEchoMatched;
@@ -817,20 +821,22 @@ function ShipStationPackageClassificationDialog(props: {
         ...("exceptionId" in props.target ? { exceptionId: props.target.exceptionId } : {}),
         ...("shipmentId" in props.target ? { shipmentId: props.target.shipmentId } : {}),
         originalShipmentId: Number(originalShipmentId),
-        reason: isCatalogConcession ? "concession" : reason,
+        reason,
         notes: notes.trim() || undefined,
-        lineMappings: isCatalogConcession
-          ? catalogItems.map((item) => ({
-            evidenceSource: "catalog",
-            productVariantId: item.productVariantId,
-            quantity: Number(item.quantity),
-          }))
-          : providerItemsMissing
-          ? selectedManualItems.map((item) => ({
-            evidenceSource: "original_wms",
-            orderItemId: item.orderItemId,
-            quantity: Number(manualLineQuantities[item.orderItemId]),
-          }))
+        contentsAuthority: actualContentsMode ? "operator" : "provider",
+        lineMappings: actualContentsMode
+          ? [
+            ...selectedManualItems.map((item) => ({
+              evidenceSource: "original_wms",
+              orderItemId: item.orderItemId,
+              quantity: Number(manualLineQuantities[item.orderItemId]),
+            })),
+            ...catalogItems.map((item) => ({
+              evidenceSource: "catalog",
+              productVariantId: item.productVariantId,
+              quantity: Number(item.quantity),
+            })),
+          ]
           : providerItems.map((item, providerItemIndex) => ({
             evidenceSource: "shipstation",
             providerItemIndex,
@@ -843,10 +849,10 @@ function ShipStationPackageClassificationDialog(props: {
     },
     onSuccess: async (result) => {
       toast({
-        title: isCatalogConcession ? "Different or free item recorded" : "Replacement recorded",
-        description: isCatalogConcession
-          ? "Inventory was deducted without changing the customer order."
-          : "Inventory was deducted for the confirmed replacement items.",
+        title: hasCatalogConcessions ? "Replacement contents recorded" : "Replacement recorded",
+        description: hasCatalogConcessions
+          ? "Inventory was deducted for the confirmed replacement and courtesy items without repeating customer fulfillment."
+          : "Inventory was deducted for the confirmed replacement items without repeating customer fulfillment.",
       });
       await props.onCompleted();
       props.onClose();
@@ -999,8 +1005,8 @@ function ShipStationPackageClassificationDialog(props: {
                         : providerVoided
                         ? "This label is historical provider evidence, not proof that another package left the warehouse."
                         : providerItemsMissing
-                        ? "ShipStation did not list the package contents. Confirm whether ordered items or different/free items were sent."
-                        : "Confirm which original package it replaces and why the replacement was sent."}
+                        ? "ShipStation did not list the package contents. Confirm the actual items that were sent."
+                        : "Use ShipStation contents when they are accurate, or confirm the actual box contents when they differ."}
                   </p>
                 </div>
               </div>
@@ -1057,65 +1063,124 @@ function ShipStationPackageClassificationDialog(props: {
                 )}
               </div>
               <div className="space-y-2">
-                {isCatalogConcession ? (
-                  <>
-                    <Label>How it will be recorded</Label>
-                    <div className="border-y py-3 text-sm">
-                      <div className="font-medium">Different or free item</div>
-                      <div className="mt-1 text-xs text-muted-foreground">No item is added to the customer order.</div>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <Label>Why was it replaced?</Label>
-                    <Select value={reason} onValueChange={setReason}>
-                      <SelectTrigger><SelectValue placeholder="Select a reason" /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="lost">Lost in transit</SelectItem>
-                        <SelectItem value="damaged">Arrived damaged</SelectItem>
-                        <SelectItem value="misdelivery">Delivered incorrectly</SelectItem>
-                        <SelectItem value="carrier_replacement">Carrier-issued replacement</SelectItem>
-                        <SelectItem value="other">Other</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </>
-                )}
+                <Label>Why was it sent?</Label>
+                <Select value={reason} onValueChange={setReason}>
+                  <SelectTrigger><SelectValue placeholder="Select a reason" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="lost">Lost in transit</SelectItem>
+                    <SelectItem value="damaged">Arrived damaged</SelectItem>
+                    <SelectItem value="misdelivery">Delivered incorrectly</SelectItem>
+                    <SelectItem value="carrier_replacement">Carrier-issued replacement</SelectItem>
+                    <SelectItem value="concession">Courtesy replacement or free item</SelectItem>
+                    <SelectItem value="other">Other</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </section>
             {!providerReturnLabel && !providerVoided && !providerEchoMatched && validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No shipped original package is available for this replacement.</p>}
 
             <section className={cn("border-t pt-4", (providerReturnLabel || providerVoided || providerEchoMatched) && "hidden")}>
               <div className="font-semibold">What was sent?</div>
-              {providerItemsMissing && (
+              {!providerItemsMissing && (
                 <ToggleGroup
                   type="single"
                   value={itemMode}
                   onValueChange={(value) => {
-                    if (value === "ordered" || value === "catalog") setItemMode(value);
+                    if (value === "provider" || value === "actual") setItemMode(value);
                   }}
                   variant="outline"
                   className="mt-3 grid w-full grid-cols-2"
-                  aria-label="Choose the type of items sent"
+                  aria-label="Choose package contents authority"
                 >
-                  <ToggleGroupItem value="ordered" className="h-auto min-h-10 px-3 py-2 text-center text-sm">
-                    Ordered items resent
+                  <ToggleGroupItem value="provider" className="h-auto min-h-10 px-3 py-2 text-center text-sm">
+                    Use ShipStation contents
                   </ToggleGroupItem>
-                  <ToggleGroupItem value="catalog" className="h-auto min-h-10 px-3 py-2 text-center text-sm">
-                    Different or free items
+                  <ToggleGroupItem value="actual" className="h-auto min-h-10 px-3 py-2 text-center text-sm">
+                    Confirm actual contents
                   </ToggleGroupItem>
                 </ToggleGroup>
               )}
-              <p className="mt-1 text-sm text-muted-foreground">
-                {isCatalogConcession
-                  ? "Select the actual catalog items and quantities that physically left inventory."
-                  : providerItemsMissing
-                    ? "Check each ordered item that was physically resent and confirm its quantity."
-                  : "Confirm that each replacement item matches the original order item."}
+              <p className="mt-2 text-sm text-muted-foreground">
+                {actualContentsMode
+                  ? "Confirm every ordered replacement and courtesy item that physically left inventory."
+                  : "Match each ShipStation item to the original ordered item."}
               </p>
-              {providerItemsMissing ? (
-                isCatalogConcession ? (
-                  <div className="mt-3 space-y-4">
-                    <div className="relative">
+
+              {actualContentsMode ? (
+                <div className="mt-4 space-y-5">
+                  {!providerItemsMissing && (
+                    <div className="border border-amber-200 bg-amber-50 p-3">
+                      <div className="text-sm font-medium text-amber-950">ShipStation reported</div>
+                      <div className="mt-2 space-y-1 text-sm text-amber-900">
+                        {rawProviderItems.map((item, index) => (
+                          <div key={item.sku + "-" + index}>
+                            {item.name || item.sku || "Unnamed item"} - Quantity {item.quantity}
+                          </div>
+                        ))}
+                      </div>
+                      <p className="mt-2 text-xs text-amber-800">
+                        This remains provider evidence. The confirmed contents below become inventory authority.
+                      </p>
+                    </div>
+                  )}
+
+                  <div>
+                    <div className="text-sm font-medium">Ordered items resent</div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Select only ordered items that were physically included in this package.
+                    </p>
+                    {selectedOriginalShipment ? (
+                      <div className="mt-2 divide-y border-y">
+                        {selectedOriginalShipment.items.map((item) => {
+                          const checked = manualLineSelections[item.orderItemId] === true;
+                          return (
+                            <div key={item.orderItemId} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px] sm:items-center">
+                              <label className="flex min-w-0 cursor-pointer items-start gap-3 text-sm">
+                                <Checkbox
+                                  className="mt-0.5"
+                                  checked={checked}
+                                  onCheckedChange={(value) => setManualLineSelections((current) => ({
+                                    ...current,
+                                    [item.orderItemId]: value === true,
+                                  }))}
+                                />
+                                <span className="min-w-0">
+                                  <span className="font-medium">{item.name}</span>
+                                  <span className="mt-1 block truncate text-xs text-muted-foreground">
+                                    {item.sku} - Up to {item.quantity}
+                                  </span>
+                                </span>
+                              </label>
+                              <div className="space-y-1">
+                                <Label className="text-xs text-muted-foreground">Quantity resent</Label>
+                                <Input
+                                  aria-label={"Quantity resent for " + item.sku}
+                                  type="number"
+                                  min={1}
+                                  max={item.quantity}
+                                  disabled={!checked}
+                                  value={manualLineQuantities[item.orderItemId] ?? ""}
+                                  onChange={(event) => setManualLineQuantities((current) => ({
+                                    ...current,
+                                    [item.orderItemId]: event.target.value,
+                                  }))}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-sm text-muted-foreground">Select the original package above to see its items.</p>
+                    )}
+                  </div>
+
+                  <div>
+                    <div className="text-sm font-medium">Different or free items</div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Add any courtesy or substitute catalog SKU that was physically included.
+                    </p>
+                    <div className="relative mt-2">
                       <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
                       <Input
                         className="pl-9 pr-9"
@@ -1128,13 +1193,15 @@ function ShipStationPackageClassificationDialog(props: {
                     </div>
 
                     {catalogSearchQuery.isError && (
-                      <p className="text-sm text-red-800">{catalogSearchQuery.error instanceof Error ? catalogSearchQuery.error.message : "Could not search the catalog"}</p>
+                      <p className="mt-2 text-sm text-red-800">
+                        {catalogSearchQuery.error instanceof Error ? catalogSearchQuery.error.message : "Could not search the catalog"}
+                      </p>
                     )}
                     {catalogSearchReady && !catalogSearchQuery.isFetching && (catalogSearchQuery.data ?? []).length === 0 && (
-                      <p className="text-sm text-muted-foreground">No catalog items match "{catalogSearch}".</p>
+                      <p className="mt-2 text-sm text-muted-foreground">No catalog items match "{catalogSearch}".</p>
                     )}
                     {availableCatalogResults.length > 0 && (
-                      <div className="divide-y border-y">
+                      <div className="mt-2 divide-y border-y">
                         {availableCatalogResults.map((result) => (
                           <div key={result.productVariantId} className="flex items-center gap-3 py-3">
                             <div className="min-w-0 flex-1 text-sm">
@@ -1155,73 +1222,44 @@ function ShipStationPackageClassificationDialog(props: {
                       </div>
                     )}
 
-                    <div>
-                      <div className="text-sm font-medium">Items to deduct</div>
-                      {catalogItems.length === 0 ? (
-                        <p className="mt-2 text-sm text-muted-foreground">Search for and add each different or free item that was sent.</p>
-                      ) : (
-                        <div className="mt-2 divide-y border-y">
-                          {catalogItems.map((item) => (
-                            <div key={item.productVariantId} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px_40px] sm:items-end">
-                              <div className="min-w-0 text-sm">
-                                <div className="truncate font-medium">{item.name}</div>
-                                <div className="mt-1 truncate text-xs text-muted-foreground">{item.sku}</div>
-                              </div>
-                              <div className="space-y-1">
-                                <Label className="text-xs text-muted-foreground">Quantity sent</Label>
-                                <Input
-                                  type="number"
-                                  min={1}
-                                  value={item.quantity}
-                                  aria-label={`Quantity sent for ${item.sku}`}
-                                  onChange={(event) => setCatalogItems((current) => current.map((currentItem) => (
-                                    currentItem.productVariantId === item.productVariantId
-                                      ? { ...currentItem, quantity: event.target.value }
-                                      : currentItem
-                                  )))}
-                                />
-                              </div>
-                              <Button
-                                type="button"
-                                size="icon"
-                                variant="ghost"
-                                aria-label={`Remove ${item.sku}`}
-                                title={`Remove ${item.sku}`}
-                                onClick={() => setCatalogItems((current) => current.filter((currentItem) => currentItem.productVariantId !== item.productVariantId))}
-                              >
-                                <X className="h-4 w-4" />
-                              </Button>
+                    {catalogItems.length > 0 && (
+                      <div className="mt-3 divide-y border-y">
+                        {catalogItems.map((item) => (
+                          <div key={item.productVariantId} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px_40px] sm:items-end">
+                            <div className="min-w-0 text-sm">
+                              <div className="truncate font-medium">{item.name}</div>
+                              <div className="mt-1 truncate text-xs text-muted-foreground">{item.sku}</div>
                             </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="mt-3 space-y-3">
-                    {selectedOriginalShipment ? (
-                      <div className="divide-y border-y">
-                        {selectedOriginalShipment.items.map((item) => {
-                        const checked = manualLineSelections[item.orderItemId] === true;
-                        return (
-                          <div key={item.orderItemId} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px] sm:items-center">
-                            <label className="flex min-w-0 cursor-pointer items-start gap-3 text-sm">
-                              <Checkbox className="mt-0.5" checked={checked} onCheckedChange={(value) => setManualLineSelections((current) => ({ ...current, [item.orderItemId]: value === true }))} />
-                              <span className="min-w-0"><span className="font-medium">{item.name}</span><span className="mt-1 block truncate text-xs text-muted-foreground">{item.sku} - Up to {item.quantity}</span></span>
-                            </label>
                             <div className="space-y-1">
-                              <Label className="text-xs text-muted-foreground">Quantity resent</Label>
-                              <Input aria-label={`Quantity resent for ${item.sku}`} type="number" min={1} max={item.quantity} disabled={!checked} value={manualLineQuantities[item.orderItemId] ?? ""} onChange={(event) => setManualLineQuantities((current) => ({ ...current, [item.orderItemId]: event.target.value }))} />
+                              <Label className="text-xs text-muted-foreground">Quantity sent</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                value={item.quantity}
+                                aria-label={"Quantity sent for " + item.sku}
+                                onChange={(event) => setCatalogItems((current) => current.map((currentItem) => (
+                                  currentItem.productVariantId === item.productVariantId
+                                    ? { ...currentItem, quantity: event.target.value }
+                                    : currentItem
+                                )))}
+                              />
                             </div>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              aria-label={"Remove " + item.sku}
+                              title={"Remove " + item.sku}
+                              onClick={() => setCatalogItems((current) => current.filter((currentItem) => currentItem.productVariantId !== item.productVariantId))}
+                            >
+                              <X className="h-4 w-4" />
+                            </Button>
                           </div>
-                        );
-                        })}
+                        ))}
                       </div>
-                    ) : (
-                      <p className="text-sm text-muted-foreground">Select the original package above to see its items.</p>
                     )}
                   </div>
-                )
+                </div>
               ) : (
                 <div className="mt-3 divide-y border-y">
                   {providerItems.map((item, index) => {
@@ -1229,12 +1267,22 @@ function ShipStationPackageClassificationDialog(props: {
                       (orderItem) => orderItem.sku.trim().toUpperCase() === item.sku.trim().toUpperCase(),
                     );
                     return (
-                      <div key={`${item.sku}-${index}`} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(260px,1fr)] sm:items-center">
-                        <div className="min-w-0 text-sm"><div className="font-medium">{item.name || item.sku}</div><div className="mt-1 truncate text-xs text-muted-foreground">{item.sku} - Quantity {item.quantity}</div></div>
-                        <Select value={lineMappings[index] || ""} onValueChange={(value) => setLineMappings((current) => ({ ...current, [index]: value }))}>
+                      <div key={item.sku + "-" + index} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(260px,1fr)] sm:items-center">
+                        <div className="min-w-0 text-sm">
+                          <div className="font-medium">{item.name || item.sku}</div>
+                          <div className="mt-1 truncate text-xs text-muted-foreground">{item.sku} - Quantity {item.quantity}</div>
+                        </div>
+                        <Select
+                          value={lineMappings[index] || ""}
+                          onValueChange={(value) => setLineMappings((current) => ({ ...current, [index]: value }))}
+                        >
                           <SelectTrigger><SelectValue placeholder="Match to original item" /></SelectTrigger>
                           <SelectContent>
-                            {matchingLines.map((orderItem) => <SelectItem key={orderItem.id} value={String(orderItem.id)}>{orderItem.sku} - {orderItem.quantity} originally shipped</SelectItem>)}
+                            {matchingLines.map((orderItem) => (
+                              <SelectItem key={orderItem.id} value={String(orderItem.id)}>
+                                {orderItem.sku} - {orderItem.quantity} originally shipped
+                              </SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                       </div>
@@ -1242,10 +1290,15 @@ function ShipStationPackageClassificationDialog(props: {
                   })}
                 </div>
               )}
-              {!preview.providerShipment.shipDate && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because ShipStation has no shipped date.</p>}
-              {!providerItemsMissing && providerItems.length !== rawProviderItems.length && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because one or more ShipStation package lines are invalid.</p>}
+              {!preview.providerShipment.shipDate && (
+                <p className="mt-2 text-sm text-red-800">This package cannot be recorded because ShipStation has no shipped date.</p>
+              )}
+              {!actualContentsMode && providerItems.length !== rawProviderItems.length && (
+                <p className="mt-2 text-sm text-red-800">
+                  ShipStation package lines are invalid. Confirm the actual contents instead.
+                </p>
+              )}
             </section>
-
             {providerReturnLabel && (
               <section className="border-t pt-4">
                 <div className="font-semibold">What will happen</div>
@@ -1272,11 +1325,21 @@ function ShipStationPackageClassificationDialog(props: {
               <div className="font-semibold">What will happen</div>
               <div className="mt-3 space-y-2 text-sm">
                 <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The original package stays under tracking {selectedOriginalTracking || "shown above"}.</span></div>
-                <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The {isCatalogConcession ? "different or free item shipment" : "replacement"} is recorded under tracking {preview.providerShipment.trackingNumber}.</span></div>
-                <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>{isCatalogConcession ? "Only the selected catalog quantities are deducted; no items are added to the order." : "Only the checked quantities are deducted from inventory; customer fulfillment is not increased."}</span></div>
+                <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The replacement package is recorded under tracking {preview.providerShipment.trackingNumber}.</span></div>
+                {actualContentsMode && !providerItemsMissing && (
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>ShipStation's reported item list remains provider evidence; the confirmed actual contents control inventory.</span></div>
+                )}
+                {selectedManualItems.length > 0 && (
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The selected ordered replacement quantities are deducted without repeating customer fulfillment.</span></div>
+                )}
+                {catalogItems.length > 0 && (
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The selected courtesy catalog quantities are deducted without adding them to the customer order.</span></div>
+                )}
+                {!actualContentsMode && (
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The ShipStation-matched replacement quantities are deducted without repeating customer fulfillment.</span></div>
+                )}
               </div>
             </section>
-
             <section className="border-t pt-4">
               <div className="space-y-2">
                 <Label htmlFor="shipstation-remediation-notes">Notes (optional)</Label>

@@ -280,13 +280,14 @@ export function registerOmsRoutes(app: Express) {
           originalShipmentId: req.body?.originalShipmentId,
           reason: req.body?.reason,
           notes: req.body?.notes,
+          contentsAuthority: req.body?.contentsAuthority,
           lineMappings: req.body?.lineMappings,
           operator,
         }));
       } catch (err: any) {
         console.error("[OMS Routes] ShipStation reship adoption error:", err);
         const message = err?.message || "Failed to adopt ShipStation reship";
-        const status = /positive integer|exactly one|required|valid|must equal|does not match/i.test(message)
+        const status = /positive integer|exactly one|required|valid|must be|must equal|confirm at least one|operator-confirmed|actual contents|does not match/i.test(message)
           ? 400
           : /not found/i.test(message)
             ? 404
