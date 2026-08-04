@@ -58,6 +58,7 @@ import {
   type WarehouseOption,
 } from "./api";
 import { CopyProgramRatesDialog } from "./CopyProgramRatesDialog";
+import { DiscardRateTableDraftButton } from "./DiscardRateTableDraftButton";
 import { ProgramFormDialog } from "./ProgramFormDialog";
 import { RateTestDialog } from "./RateTestDialog";
 import { programStatusBadge, revisionStatusBadge } from "./status";
@@ -116,6 +117,7 @@ export function ProgramDetail({
       (assignment) => assignment.originWarehouseName ?? "All warehouses",
     ),
   )];
+  const draftOptions = options.filter((option) => option.draft !== null);
 
   const retireMutation = useMutation({
     mutationFn: () =>
@@ -260,6 +262,39 @@ export function ProgramDetail({
               <p className="mt-1 text-xs text-muted-foreground">
                 Echelon returns no competing international rate.
               </p>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {draftOptions.length > 0 && (
+        <section className="rounded-md border border-amber-300 bg-amber-50 p-3">
+          <div className="flex items-start gap-2">
+            <FilePenLine className="mt-0.5 h-4 w-4 shrink-0 text-amber-800" />
+            <div className="min-w-0 flex-1">
+              <h3 className="text-sm font-semibold text-amber-950">Working drafts</h3>
+              <p className="mt-0.5 text-xs text-amber-900">
+                Saved drafts do not affect live checkout. Continue one to edit or activate it,
+                or discard it to restore the program to its live-only state.
+              </p>
+              <div className="mt-2 space-y-2">
+                {draftOptions.map((option) => (
+                  <div
+                    key={option.draft!.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded border border-amber-200 bg-background px-3 py-2"
+                  >
+                    <span className="text-sm font-medium">
+                      {option.serviceLevel.displayName}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" variant="outline" onClick={() => onContinueDraft(option.draft!.id)}>
+                        Continue editing
+                      </Button>
+                      <DiscardRateTableDraftButton draftId={option.draft!.id} size="sm" />
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         </section>

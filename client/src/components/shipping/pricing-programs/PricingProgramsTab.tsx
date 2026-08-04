@@ -142,6 +142,7 @@ export function PricingProgramsTab() {
         groups,
         program?.destinationGroups ?? [],
       );
+      const savedGroups = groups;
       const destinationGroupTarget = destinationGroup === undefined
         ? null
         : { id: destinationGroup.id, key: destinationGroup.key };
@@ -164,11 +165,13 @@ export function PricingProgramsTab() {
           rateBookCode: detail.rateBook?.code ?? null,
           serviceLevelCode: detail.serviceLevel?.code ?? null,
           groups,
+          savedGroups,
           lockProgram: true,
           availableDestinationGroups: program?.destinationGroups ?? [],
           availableDestinationScopes: data?.destinationScopes ?? [],
           destinationGroupTarget,
           hasUnsavedInitialChanges: targetMissingFromDraft,
+          analysis: detail.analysis,
         },
       });
     } catch (error) {
@@ -287,6 +290,9 @@ export function PricingProgramsTab() {
             serviceLevel?.fulfillmentMode === "freight"
               ? "pallet_count"
               : "shipment_weight";
+          const initialGroups = destinationGroup
+            ? [editorGroupFromProgramGroup(destinationGroup, pricingBasis)]
+            : null;
           setView({
             kind: "editor",
             returnTo: here,
@@ -294,9 +300,8 @@ export function PricingProgramsTab() {
               draftId: null,
               rateBookCode: program.book.code,
               serviceLevelCode,
-              groups: destinationGroup
-                ? [editorGroupFromProgramGroup(destinationGroup, pricingBasis)]
-                : null,
+              groups: initialGroups,
+              savedGroups: initialGroups,
               lockProgram: true,
               availableDestinationGroups: program.destinationGroups,
               availableDestinationScopes: data?.destinationScopes ?? [],
@@ -304,6 +309,7 @@ export function PricingProgramsTab() {
                 ? null
                 : { id: destinationGroup.id, key: destinationGroup.key },
               hasUnsavedInitialChanges: false,
+              analysis: null,
             },
           });
         }}

@@ -445,6 +445,13 @@ export function saveDraft(input: SaveDraftInput): Promise<SaveDraftResponse> {
     : putJson<SaveDraftResponse>(`/api/shipping/admin/rate-tables/${input.draftId}`, payload);
 }
 
+export function discardRateTableDraft(draftId: number): Promise<void> {
+  if (!Number.isInteger(draftId) || draftId <= 0) {
+    return Promise.reject(new Error("A valid draft ID is required."));
+  }
+  return deleteJson(`/api/shipping/admin/rate-tables/${draftId}`);
+}
+
 // ---------------------------------------------------------------------------
 // Business labels (spec §14: operators never see machine keys)
 // ---------------------------------------------------------------------------
