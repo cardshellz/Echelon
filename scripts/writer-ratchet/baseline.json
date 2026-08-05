@@ -189,6 +189,12 @@
   "dropship.dropship_rate_tables": [
     "modules/dropship"
   ],
+  "dropship.dropship_return_fee_schedule": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_return_policies": [
+    "modules/dropship"
+  ],
   "dropship.dropship_return_policy_config": [
     "modules/dropship"
   ],

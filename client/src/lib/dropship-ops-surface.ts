@@ -1984,6 +1984,92 @@ export interface DropshipAdminReturnPolicyResponse {
   policy: DropshipReturnPolicyConfig | null;
 }
 
+// Hierarchical return policies (migration 186; build spec B1).
+export type DropshipReturnFeeType = "restocking_fee" | "processing_fee" | "return_shipping_fee";
+export type DropshipReturnFeeAmountType = "flat_cents" | "percent";
+
+export interface DropshipReturnPolicyVersion {
+  policyId: number;
+  version: number;
+  returnWindowDays: number;
+  vendorId: number | null;
+  storeConnectionId: number | null;
+  priority: number;
+  isActive: boolean;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DropshipReturnFeeScheduleRecord {
+  feeId: number;
+  version: number;
+  feeType: DropshipReturnFeeType;
+  faultCategory: DropshipReturnFaultCategory;
+  amountType: DropshipReturnFeeAmountType;
+  amount: number;
+  vendorId: number | null;
+  storeConnectionId: number | null;
+  priority: number;
+  isActive: boolean;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DropshipAdminReturnPolicyListResponse {
+  items: DropshipReturnPolicyVersion[];
+}
+
+export interface DropshipAdminReturnFeeListResponse {
+  items: DropshipReturnFeeScheduleRecord[];
+}
+
+export interface DropshipAdminEffectiveReturnPolicyResponse {
+  policy: DropshipReturnPolicyVersion | null;
+}
+
+export interface DropshipAdminEffectiveReturnFeesResponse {
+  fees: {
+    restockingFee: DropshipReturnFeeScheduleRecord | null;
+    processingFee: DropshipReturnFeeScheduleRecord | null;
+    returnShippingFee: DropshipReturnFeeScheduleRecord | null;
+  };
+}
+
+export interface DropshipAdminReturnPolicyVersionInput {
+  returnWindowDays: number;
+  vendorId?: number | null;
+  storeConnectionId?: number | null;
+  priority?: number;
+  effectiveFrom?: string;
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminReturnFeeVersionInput {
+  feeType: DropshipReturnFeeType;
+  faultCategory: DropshipReturnFaultCategory;
+  amountType: DropshipReturnFeeAmountType;
+  amount: number;
+  vendorId?: number | null;
+  storeConnectionId?: number | null;
+  priority?: number;
+  effectiveFrom?: string;
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminReturnPolicyVersionResponse {
+  policy: DropshipReturnPolicyVersion;
+  idempotentReplay: boolean;
+}
+
+export interface DropshipAdminReturnFeeVersionResponse {
+  fee: DropshipReturnFeeScheduleRecord;
+  idempotentReplay: boolean;
+}
+
 export interface DropshipAdminReturnPolicyInput {
   name: string;
   returnWindowDays: number;
@@ -2453,6 +2539,47 @@ export function buildAdminReturnsUrl(input: {
 
 export function buildAdminReturnPolicyUrl(): string {
   return "/api/dropship/admin/returns/policy";
+}
+
+export function buildAdminReturnPoliciesUrl(input: { includeInactive?: boolean } = {}): string {
+  const params = new URLSearchParams();
+  if (input.includeInactive) params.set("includeInactive", "true");
+  const query = params.toString();
+  return query ? `/api/dropship/admin/return-policies?${query}` : "/api/dropship/admin/return-policies";
+}
+
+export function buildAdminReturnFeesUrl(input: { includeInactive?: boolean } = {}): string {
+  const params = new URLSearchParams();
+  if (input.includeInactive) params.set("includeInactive", "true");
+  const query = params.toString();
+  return query
+    ? `/api/dropship/admin/return-policies/fee-schedule?${query}`
+    : "/api/dropship/admin/return-policies/fee-schedule";
+}
+
+export function buildAdminEffectiveReturnPolicyUrl(input: {
+  vendorId?: number | null;
+  storeConnectionId?: number | null;
+}): string {
+  const params = new URLSearchParams();
+  if (input.vendorId != null) params.set("vendorId", String(input.vendorId));
+  if (input.storeConnectionId != null) params.set("storeConnectionId", String(input.storeConnectionId));
+  const query = params.toString();
+  return query
+    ? `/api/dropship/admin/return-policies/effective?${query}`
+    : "/api/dropship/admin/return-policies/effective";
+}
+
+export function buildAdminEffectiveReturnFeesUrl(input: {
+  vendorId?: number | null;
+  storeConnectionId?: number | null;
+  faultCategory: DropshipReturnFaultCategory;
+}): string {
+  const params = new URLSearchParams();
+  if (input.vendorId != null) params.set("vendorId", String(input.vendorId));
+  if (input.storeConnectionId != null) params.set("storeConnectionId", String(input.storeConnectionId));
+  params.set("faultCategory", input.faultCategory);
+  return `/api/dropship/admin/return-policies/fee-schedule/effective?${params.toString()}`;
 }
 
 export function buildAdminDogfoodReadinessUrl(input: {

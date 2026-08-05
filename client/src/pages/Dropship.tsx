@@ -76,6 +76,10 @@ import {
   buildAdminReturnInspectionInput,
   buildAdminReturnPolicyInput,
   buildAdminReturnPolicyUrl,
+  buildAdminReturnPoliciesUrl,
+  buildAdminReturnFeesUrl,
+  buildAdminEffectiveReturnPolicyUrl,
+  buildAdminEffectiveReturnFeesUrl,
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
   buildAdminShippingConfigUrl,
@@ -142,6 +146,16 @@ import {
   type DropshipAdminReturnInspectionResponse,
   type DropshipAdminReturnPolicyCreateResponse,
   type DropshipAdminReturnPolicyResponse,
+  type DropshipAdminReturnPolicyListResponse,
+  type DropshipAdminReturnFeeListResponse,
+  type DropshipAdminEffectiveReturnPolicyResponse,
+  type DropshipAdminEffectiveReturnFeesResponse,
+  type DropshipReturnPolicyVersion,
+  type DropshipReturnFeeScheduleRecord,
+  type DropshipReturnFeeType,
+  type DropshipReturnFeeAmountType,
+  type DropshipAdminReturnPolicyVersionResponse,
+  type DropshipAdminReturnFeeVersionResponse,
   type DropshipAdminReturnStatusUpdateResponse,
   type DropshipAdminShippingConfigResponse,
   type CarrierProtectionAssignmentConfig,
@@ -224,6 +238,7 @@ type DropshipOpsTabValue =
   | "tracking-pushes"
   | "notifications"
   | "returns"
+  | "return-policies"
   | "audit";
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
 type CatalogExposureActionFilter = DropshipAdminCatalogExposureRuleInput["action"];
@@ -304,6 +319,7 @@ const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
   "tracking-pushes",
   "notifications",
   "returns",
+  "return-policies",
   "audit",
 ]);
 
@@ -936,6 +952,10 @@ export default function Dropship() {
 
           <TabsContent value="returns" className="m-0">
             <ReturnOpsTab />
+          </TabsContent>
+
+          <TabsContent value="return-policies" className="m-0">
+            <ReturnPoliciesTab />
           </TabsContent>
 
           <TabsContent value="audit" className="m-0 space-y-4">
@@ -1760,6 +1780,559 @@ function NotificationOpsTab() {
         summary={notificationEventsQuery.data?.summary ?? []}
         total={notificationEventsQuery.data?.total ?? 0}
       />
+    </div>
+  );
+}
+
+interface ReturnPolicyVersionFormState {
+  returnWindowDays: string;
+  vendorId: string;
+  storeConnectionId: string;
+  priority: string;
+}
+
+interface ReturnFeeVersionFormState {
+  feeType: DropshipReturnFeeType;
+  faultCategory: DropshipReturnFaultCategory;
+  amountType: DropshipReturnFeeAmountType;
+  amount: string;
+  vendorId: string;
+  storeConnectionId: string;
+  priority: string;
+}
+
+const emptyReturnPolicyVersionForm: ReturnPolicyVersionFormState = {
+  returnWindowDays: "30",
+  vendorId: "",
+  storeConnectionId: "",
+  priority: "0",
+};
+
+const emptyReturnFeeVersionForm: ReturnFeeVersionFormState = {
+  feeType: "restocking_fee",
+  faultCategory: "vendor",
+  amountType: "flat_cents",
+  amount: "0",
+  vendorId: "",
+  storeConnectionId: "",
+  priority: "0",
+};
+
+type ReturnPolicySectionKey = "policies" | "fees" | "effective";
+
+function returnPolicyScopeLabel(row: { vendorId: number | null; storeConnectionId: number | null }): string {
+  if (row.vendorId !== null && row.storeConnectionId !== null) return `Vendor #${row.vendorId} + store #${row.storeConnectionId}`;
+  if (row.vendorId !== null) return `Vendor #${row.vendorId}`;
+  if (row.storeConnectionId !== null) return `Store #${row.storeConnectionId}`;
+  return "Global";
+}
+
+function ReturnPoliciesTab() {
+  const queryClient = useQueryClient();
+  const [activeSection, setActiveSection] = useState<ReturnPolicySectionKey>("policies");
+  const [policyForm, setPolicyForm] = useState<ReturnPolicyVersionFormState>(emptyReturnPolicyVersionForm);
+  const [feeForm, setFeeForm] = useState<ReturnFeeVersionFormState>(emptyReturnFeeVersionForm);
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [effectiveVendorId, setEffectiveVendorId] = useState("");
+  const [effectiveStoreConnectionId, setEffectiveStoreConnectionId] = useState("");
+  const [effectiveFaultCategory, setEffectiveFaultCategory] = useState<DropshipReturnFaultCategory>("vendor");
+
+  const policiesUrl = useMemo(() => buildAdminReturnPoliciesUrl({ includeInactive: true }), []);
+  const feesUrl = useMemo(() => buildAdminReturnFeesUrl({ includeInactive: true }), []);
+  const policiesQuery = useQuery<DropshipAdminReturnPolicyListResponse>({
+    queryKey: [policiesUrl],
+    queryFn: () => fetchJson<DropshipAdminReturnPolicyListResponse>(policiesUrl),
+  });
+  const feesQuery = useQuery<DropshipAdminReturnFeeListResponse>({
+    queryKey: [feesUrl],
+    queryFn: () => fetchJson<DropshipAdminReturnFeeListResponse>(feesUrl),
+  });
+
+  const effectiveVendor = effectiveVendorId.trim() ? Number(effectiveVendorId) : null;
+  const effectiveStore = effectiveStoreConnectionId.trim() ? Number(effectiveStoreConnectionId) : null;
+  const effectiveLookupReady =
+    (effectiveVendorId.trim() === "" || Number.isInteger(effectiveVendor)) &&
+    (effectiveStoreConnectionId.trim() === "" || Number.isInteger(effectiveStore));
+  const effectivePolicyUrl = useMemo(
+    () => buildAdminEffectiveReturnPolicyUrl({ vendorId: effectiveVendor, storeConnectionId: effectiveStore }),
+    [effectiveVendor, effectiveStore],
+  );
+  const effectiveFeesUrl = useMemo(
+    () => buildAdminEffectiveReturnFeesUrl({
+      vendorId: effectiveVendor,
+      storeConnectionId: effectiveStore,
+      faultCategory: effectiveFaultCategory,
+    }),
+    [effectiveVendor, effectiveStore, effectiveFaultCategory],
+  );
+  const effectivePolicyQuery = useQuery<DropshipAdminEffectiveReturnPolicyResponse>({
+    queryKey: [effectivePolicyUrl],
+    queryFn: () => fetchJson<DropshipAdminEffectiveReturnPolicyResponse>(effectivePolicyUrl),
+    enabled: activeSection === "effective" && effectiveLookupReady,
+  });
+  const effectiveFeesQuery = useQuery<DropshipAdminEffectiveReturnFeesResponse>({
+    queryKey: [effectiveFeesUrl],
+    queryFn: () => fetchJson<DropshipAdminEffectiveReturnFeesResponse>(effectiveFeesUrl),
+    enabled: activeSection === "effective" && effectiveLookupReady,
+  });
+
+  const policies = policiesQuery.data?.items ?? [];
+  const fees = feesQuery.data?.items ?? [];
+
+  async function runPolicyAction(action: string, task: () => Promise<void>) {
+    setPendingAction(action);
+    setError("");
+    setMessage("");
+    try {
+      await task();
+      await Promise.all([
+        policiesQuery.refetch(),
+        feesQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Return policy save failed.");
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function savePolicyVersion() {
+    const returnWindowDays = Number(policyForm.returnWindowDays);
+    if (!Number.isInteger(returnWindowDays) || returnWindowDays <= 0 || returnWindowDays > 365) {
+      setError("Return window must be an integer between 1 and 365 days.");
+      return;
+    }
+    const vendorId = policyForm.vendorId.trim() ? Number(policyForm.vendorId) : null;
+    const storeConnectionId = policyForm.storeConnectionId.trim() ? Number(policyForm.storeConnectionId) : null;
+    if (storeConnectionId !== null && vendorId === null) {
+      setError("Store-scoped policies require a vendor id (store connections belong to vendors).");
+      return;
+    }
+    await runPolicyAction("policy-create", async () => {
+      await postJson<DropshipAdminReturnPolicyVersionResponse>("/api/dropship/admin/return-policies", {
+        returnWindowDays,
+        vendorId,
+        storeConnectionId,
+        priority: Number(policyForm.priority) || 0,
+        idempotencyKey: createDropshipIdempotencyKey("return-policy-version"),
+      });
+      setMessage(`Return policy version created (${returnWindowDays}d window, ${returnPolicyScopeLabel({ vendorId, storeConnectionId })}).`);
+      setPolicyForm(emptyReturnPolicyVersionForm);
+    });
+  }
+
+  async function saveFeeVersion() {
+    const amount = Number(feeForm.amount);
+    if (!Number.isFinite(amount) || amount < 0) {
+      setError("Fee amount must be a non-negative number.");
+      return;
+    }
+    if (feeForm.amountType === "flat_cents" && !Number.isInteger(amount)) {
+      setError("Flat-cent fee amounts must be integer cents.");
+      return;
+    }
+    if (feeForm.amountType === "percent" && amount > 100) {
+      setError("Percent fee amounts must be between 0 and 100.");
+      return;
+    }
+    const vendorId = feeForm.vendorId.trim() ? Number(feeForm.vendorId) : null;
+    const storeConnectionId = feeForm.storeConnectionId.trim() ? Number(feeForm.storeConnectionId) : null;
+    if (storeConnectionId !== null && vendorId === null) {
+      setError("Store-scoped fee rows require a vendor id (store connections belong to vendors).");
+      return;
+    }
+    await runPolicyAction("fee-create", async () => {
+      await postJson<DropshipAdminReturnFeeVersionResponse>("/api/dropship/admin/return-policies/fee-schedule", {
+        feeType: feeForm.feeType,
+        faultCategory: feeForm.faultCategory,
+        amountType: feeForm.amountType,
+        amount,
+        vendorId,
+        storeConnectionId,
+        priority: Number(feeForm.priority) || 0,
+        idempotencyKey: createDropshipIdempotencyKey("return-fee-version"),
+      });
+      setMessage(`Fee schedule version created (${feeForm.feeType} / ${feeForm.faultCategory}).`);
+      setFeeForm(emptyReturnFeeVersionForm);
+    });
+  }
+
+  async function deactivatePolicy(policy: DropshipReturnPolicyVersion) {
+    await runPolicyAction(`policy-deactivate-${policy.policyId}`, async () => {
+      await postJson<DropshipAdminReturnPolicyVersionResponse>(
+        `/api/dropship/admin/return-policies/${policy.policyId}/deactivate`,
+        { idempotencyKey: createDropshipIdempotencyKey(`return-policy-deactivate-${policy.policyId}`) },
+      );
+      setMessage(`Policy #${policy.policyId} deactivated.`);
+    });
+  }
+
+  async function deactivateFee(fee: DropshipReturnFeeScheduleRecord) {
+    await runPolicyAction(`fee-deactivate-${fee.feeId}`, async () => {
+      await postJson<DropshipAdminReturnFeeVersionResponse>(
+        `/api/dropship/admin/return-policies/fee-schedule/${fee.feeId}/deactivate`,
+        { idempotencyKey: createDropshipIdempotencyKey(`return-fee-deactivate-${fee.feeId}`) },
+      );
+      setMessage(`Fee row #${fee.feeId} deactivated.`);
+    });
+  }
+
+  const sections: Array<{ key: ReturnPolicySectionKey; label: string }> = [
+    { key: "policies", label: "Return window policies" },
+    { key: "fees", label: "Fee schedule" },
+    { key: "effective", label: "Effective readout" },
+  ];
+
+  return (
+    <div className="space-y-5">
+      {(policiesQuery.error || feesQuery.error || error) && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {error || queryErrorMessage(policiesQuery.error ?? feesQuery.error, "Unable to load return policies.")}
+          </AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
+        </Alert>
+      )}
+      <Tabs
+        value={activeSection}
+        onValueChange={(value) => setActiveSection(value as ReturnPolicySectionKey)}
+        className="space-y-5"
+      >
+        <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto rounded-md border bg-muted/50 p-1">
+          {sections.map((section) => (
+            <TabsTrigger key={section.key} value={section.key} className="shrink-0 px-4 py-2">
+              {section.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+
+        <TabsContent value="policies" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <section className="rounded-md border bg-card p-4">
+              <PanelHeader
+                title="New policy version"
+                detail="Versioned + immutable once effective. Most specific scope wins: vendor+store > vendor > store > global."
+              />
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <ShippingInput
+                  label="Return window (days)"
+                  type="number"
+                  value={policyForm.returnWindowDays}
+                  onChange={(value) => setPolicyForm((current) => ({ ...current, returnWindowDays: value }))}
+                />
+                <ShippingInput
+                  label="Priority"
+                  type="number"
+                  value={policyForm.priority}
+                  onChange={(value) => setPolicyForm((current) => ({ ...current, priority: value }))}
+                />
+                <ShippingInput
+                  label="Vendor id"
+                  placeholder="Blank = global/store scope"
+                  value={policyForm.vendorId}
+                  onChange={(value) => setPolicyForm((current) => ({ ...current, vendorId: value }))}
+                />
+                <ShippingInput
+                  label="Store connection id"
+                  placeholder="Optional"
+                  value={policyForm.storeConnectionId}
+                  onChange={(value) => setPolicyForm((current) => ({ ...current, storeConnectionId: value }))}
+                />
+              </div>
+              <Button
+                className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                disabled={pendingAction === "policy-create"}
+                onClick={savePolicyVersion}
+              >
+                <Save className="h-4 w-4" />
+                Create policy version
+              </Button>
+            </section>
+            <section className="rounded-md border bg-card p-4">
+              <PanelHeader title="Policy versions" detail={`${policies.length} row(s) loaded (including inactive).`} />
+              <div className="mt-4 overflow-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Scope</TableHead>
+                      <TableHead>Version</TableHead>
+                      <TableHead>Window</TableHead>
+                      <TableHead>Priority</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Effective</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {policies.map((policy) => (
+                      <TableRow key={policy.policyId}>
+                        <TableCell>{returnPolicyScopeLabel(policy)}</TableCell>
+                        <TableCell>v{policy.version}</TableCell>
+                        <TableCell>{policy.returnWindowDays}d</TableCell>
+                        <TableCell>{policy.priority}</TableCell>
+                        <TableCell>
+                          <Badge variant={policy.isActive ? "default" : "outline"}>
+                            {policy.isActive ? "Active" : "Inactive"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {formatDateTime(policy.effectiveFrom)}
+                          {policy.effectiveTo ? ` → ${formatDateTime(policy.effectiveTo)}` : ""}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {policy.isActive && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={pendingAction === `policy-deactivate-${policy.policyId}`}
+                              onClick={() => deactivatePolicy(policy)}
+                            >
+                              Deactivate
+                            </Button>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {policies.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
+                          {policiesQuery.isLoading ? "Loading policies…" : "No return policy rows."}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </section>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="fees" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <section className="rounded-md border bg-card p-4">
+              <PanelHeader
+                title="New fee version"
+                detail="return_shipping_fee rows encode WHO PAYS per fault (amount ignored — label cost comes from channel evidence)."
+              />
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <label className="space-y-1 text-sm">
+                  <span className="text-muted-foreground">Fee type</span>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2"
+                    value={feeForm.feeType}
+                    onChange={(event) => setFeeForm((current) => ({ ...current, feeType: event.target.value as DropshipReturnFeeType }))}
+                  >
+                    <option value="restocking_fee">Restocking fee</option>
+                    <option value="processing_fee">Processing fee</option>
+                    <option value="return_shipping_fee">Return shipping (who pays)</option>
+                  </select>
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="text-muted-foreground">Fault category</span>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2"
+                    value={feeForm.faultCategory}
+                    onChange={(event) => setFeeForm((current) => ({ ...current, faultCategory: event.target.value as DropshipReturnFaultCategory }))}
+                  >
+                    <option value="card_shellz">Card Shellz</option>
+                    <option value="vendor">Vendor</option>
+                    <option value="customer">Customer</option>
+                    <option value="marketplace">Marketplace</option>
+                    <option value="carrier">Carrier</option>
+                  </select>
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="text-muted-foreground">Amount type</span>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2"
+                    value={feeForm.amountType}
+                    onChange={(event) => setFeeForm((current) => ({ ...current, amountType: event.target.value as DropshipReturnFeeAmountType }))}
+                  >
+                    <option value="flat_cents">Flat cents</option>
+                    <option value="percent">Percent of credit</option>
+                  </select>
+                </label>
+                <ShippingInput
+                  label={feeForm.amountType === "percent" ? "Amount (%)" : "Amount (cents)"}
+                  type="number"
+                  value={feeForm.amount}
+                  onChange={(value) => setFeeForm((current) => ({ ...current, amount: value }))}
+                />
+                <ShippingInput
+                  label="Priority"
+                  type="number"
+                  value={feeForm.priority}
+                  onChange={(value) => setFeeForm((current) => ({ ...current, priority: value }))}
+                />
+                <ShippingInput
+                  label="Vendor id"
+                  placeholder="Blank = global/store scope"
+                  value={feeForm.vendorId}
+                  onChange={(value) => setFeeForm((current) => ({ ...current, vendorId: value }))}
+                />
+                <ShippingInput
+                  label="Store connection id"
+                  placeholder="Optional"
+                  value={feeForm.storeConnectionId}
+                  onChange={(value) => setFeeForm((current) => ({ ...current, storeConnectionId: value }))}
+                />
+              </div>
+              <Button
+                className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                disabled={pendingAction === "fee-create"}
+                onClick={saveFeeVersion}
+              >
+                <Save className="h-4 w-4" />
+                Create fee version
+              </Button>
+            </section>
+            <section className="rounded-md border bg-card p-4">
+              <PanelHeader title="Fee schedule rows" detail={`${fees.length} row(s) loaded (including inactive).`} />
+              <div className="mt-4 overflow-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Type</TableHead>
+                      <TableHead>Fault</TableHead>
+                      <TableHead>Amount</TableHead>
+                      <TableHead>Scope</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {fees.map((fee) => (
+                      <TableRow key={fee.feeId}>
+                        <TableCell>{formatStatus(fee.feeType)} v{fee.version}</TableCell>
+                        <TableCell>{formatStatus(fee.faultCategory)}</TableCell>
+                        <TableCell>
+                          {fee.feeType === "return_shipping_fee"
+                            ? "Vendor pays"
+                            : fee.amountType === "percent"
+                              ? `${fee.amount}%`
+                              : formatCents(fee.amount)}
+                        </TableCell>
+                        <TableCell>{returnPolicyScopeLabel(fee)}</TableCell>
+                        <TableCell>
+                          <Badge variant={fee.isActive ? "default" : "outline"}>
+                            {fee.isActive ? "Active" : "Inactive"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {fee.isActive && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={pendingAction === `fee-deactivate-${fee.feeId}`}
+                              onClick={() => deactivateFee(fee)}
+                            >
+                              Deactivate
+                            </Button>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {fees.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
+                          {feesQuery.isLoading ? "Loading fee schedule…" : "No fee schedule rows."}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </section>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="effective" className="m-0">
+          <section className="rounded-md border bg-card p-4">
+            <PanelHeader
+              title="Effective policy readout"
+              detail="Resolve the window + fees that would apply for a vendor/store pair. Blank ids resolve the global policy."
+            />
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              <ShippingInput
+                label="Vendor id"
+                placeholder="Blank = global"
+                value={effectiveVendorId}
+                onChange={setEffectiveVendorId}
+              />
+              <ShippingInput
+                label="Store connection id"
+                placeholder="Blank = none"
+                value={effectiveStoreConnectionId}
+                onChange={setEffectiveStoreConnectionId}
+              />
+              <label className="space-y-1 text-sm">
+                <span className="text-muted-foreground">Fault category</span>
+                <select
+                  className="w-full rounded-md border bg-background px-3 py-2"
+                  value={effectiveFaultCategory}
+                  onChange={(event) => setEffectiveFaultCategory(event.target.value as DropshipReturnFaultCategory)}
+                >
+                  <option value="card_shellz">Card Shellz</option>
+                  <option value="vendor">Vendor</option>
+                  <option value="customer">Customer</option>
+                  <option value="marketplace">Marketplace</option>
+                  <option value="carrier">Carrier</option>
+                </select>
+              </label>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <div className="rounded-md border p-3">
+                <div className="text-xs uppercase text-muted-foreground">Resolved return window</div>
+                <div className="mt-1 text-lg font-semibold">
+                  {effectivePolicyQuery.data?.policy
+                    ? `${effectivePolicyQuery.data.policy.returnWindowDays} days`
+                    : "No policy resolved"}
+                </div>
+                {effectivePolicyQuery.data?.policy && (
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {returnPolicyScopeLabel(effectivePolicyQuery.data.policy)} · v{effectivePolicyQuery.data.policy.version}
+                  </div>
+                )}
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs uppercase text-muted-foreground">Resolved fees ({formatStatus(effectiveFaultCategory)})</div>
+                <div className="mt-1 space-y-1 text-sm">
+                  <div>
+                    Restocking:{" "}
+                    {effectiveFeesQuery.data?.fees.restockingFee
+                      ? effectiveFeesQuery.data.fees.restockingFee.amountType === "percent"
+                        ? `${effectiveFeesQuery.data.fees.restockingFee.amount}%`
+                        : formatCents(effectiveFeesQuery.data.fees.restockingFee.amount)
+                      : "none"}
+                  </div>
+                  <div>
+                    Processing:{" "}
+                    {effectiveFeesQuery.data?.fees.processingFee
+                      ? effectiveFeesQuery.data.fees.processingFee.amountType === "percent"
+                        ? `${effectiveFeesQuery.data.fees.processingFee.amount}%`
+                        : formatCents(effectiveFeesQuery.data.fees.processingFee.amount)
+                      : "none"}
+                  </div>
+                  <div>
+                    Return shipping:{" "}
+                    {effectiveFeesQuery.data?.fees.returnShippingFee ? "vendor pays" : "absorbed (no row)"}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
