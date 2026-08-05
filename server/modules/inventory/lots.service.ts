@@ -23,6 +23,7 @@ import {
 import type { InventoryLot, InsertInventoryLot } from "@shared/schema";
 import { resolveCost } from "./cost-resolver";
 import { millsToCents, centsToMills } from "@shared/utils/money";
+import { IntegrityError } from "../../../shared/errors";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -321,10 +322,15 @@ export class InventoryLotService {
     qty: number;
     orderId: number;
     orderItemId?: number;
+    // Replacement packages consume a second physical unit but must not write a
+    // second customer-order COGS row. They also may not consume another order's
+    // reservation while finding live stock.
+    recordOrderItemCosts?: boolean;
+    allowReservedStock?: boolean;
   }): Promise<Array<{ lotId: number; qty: number; unitCostCents: number }>> {
     // Idempotency: if COGS rows already exist for this order item, this is a
     // retry — return the existing allocations without double-writing.
-    if (params.orderItemId) {
+    if (params.recordOrderItemCosts !== false && params.orderItemId) {
       const existing = await this.db
         .select({
           inventoryLotId: orderItemCosts.inventoryLotId,
@@ -368,8 +374,10 @@ export class InventoryLotService {
     for (const lot of lots) {
       if (remaining <= 0) break;
 
-      // Prefer reserved qty, then unreserved on-hand
-      const reservedAvailable = lot.qtyReserved;
+      // Normal picks consume this order's reservation first. System replacement
+      // picks have no reservation of their own, so they may use unreserved stock
+      // only and can never steal a reservation held by another order.
+      const reservedAvailable = params.allowReservedStock === false ? 0 : lot.qtyReserved;
       const unreservedAvailable = lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked;
       const totalPickable = reservedAvailable + Math.max(0, unreservedAvailable);
       if (totalPickable <= 0) continue;
@@ -380,7 +388,7 @@ export class InventoryLotService {
       pickUpdates.push({ lotId: lot.id, take, fromReserved });
 
       // Record cost for this lot allocation
-      if (params.orderItemId) {
+      if (params.recordOrderItemCosts !== false && params.orderItemId) {
         // COGS in MILLS (lot.unitCostMills mirrors the lot's total per-variant-unit
         // cost). cents columns are derived mirrors (half-up), so the period COGS stays
         // exact when summed in mills (take × per-unit-mills, rounded once at display).
@@ -401,6 +409,13 @@ export class InventoryLotService {
 
       costAllocations.push({ lotId: lot.id, qty: take, unitCostCents: lot.unitCostCents });
       remaining -= take;
+    }
+
+    if (remaining > 0) {
+      throw new IntegrityError(
+        `Insufficient FIFO lot inventory for variant ${params.productVariantId} at location ${params.warehouseLocationId}: ` +
+        `required ${params.qty}, available ${params.qty - remaining}.`,
+      );
     }
 
     if (pickUpdates.length > 0) {

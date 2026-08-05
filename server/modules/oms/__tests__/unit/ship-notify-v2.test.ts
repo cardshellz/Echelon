@@ -952,6 +952,10 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       ],
     });
     const inventoryCore = {
+      recordReplacementShipmentFromAvailableInventory: vi.fn(async () => ({
+        warehouseLocationId: 50001,
+        alreadyRecorded: false,
+      })),
       recordShipment: vi.fn(async () => undefined),
     };
     const mock = makeDb([
@@ -978,6 +982,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           product_variant_id: 40001,
           qty: 1,
           pick_location_id: 50001,
+          warehouse_id: 1,
           shipment_purpose: "replacement",
         }],
       },
@@ -993,6 +998,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           carrier_cost_cents: 0,
         }],
       },
+      { rows: [] },
       { rows: [{ id: 42, warehouse_status: "shipped", completed_at: SHIP_DATE }] },
       { rows: [{ status: "lost" }, { status: "shipped" }] },
       { rows: [] },
@@ -1003,18 +1009,21 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
 
     expect(processed).toBe(1);
-    expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
+    expect(inventoryCore.recordReplacementShipmentFromAvailableInventory).toHaveBeenCalledWith(expect.objectContaining({
+      productVariantId: 40001,
+      warehouseId: 1,
       orderItemId: 30001,
       qty: 1,
-      shipmentId: "9004",
-      deductFromOnHandOnly: true,
+      shipmentId: 9004,
+      shipmentItemId: 91004,
     }));
+    expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
     const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
     expect(sqlText).toContain("replacement_for_order_item_id");
     expect(sqlText).not.toContain("osi.provider_membership_state");
     expect(sqlText).not.toMatch(/UPDATE oms\.oms_orders/);
     expect(sqlText).not.toMatch(/UPDATE oms\.oms_order_lines/);
-    expect(mock.calls.filter((call) => call.tag === "update")).toHaveLength(0);
+    expect(sqlText).toMatch(/UPDATE wms\.outbound_shipment_items[\s\S]*SET from_location_id/);
     expect(mock.calls.filter((call) => call.tag === "insert")).toHaveLength(0);
   });
 
@@ -1089,6 +1098,10 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       ],
     });
     const inventoryCore = {
+      recordReplacementShipmentFromAvailableInventory: vi.fn(async () => ({
+        warehouseLocationId: 50001,
+        alreadyRecorded: false,
+      })),
       recordShipment: vi.fn(async () => undefined),
     };
     const mock = makeDb([
@@ -1116,6 +1129,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           product_variant_id: 40002,
           qty: 1,
           pick_location_id: 50001,
+          warehouse_id: 1,
           shipment_purpose: "replacement",
         }],
       },
@@ -1131,6 +1145,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           carrier_cost_cents: 0,
         }],
       },
+      { rows: [] },
       { rows: [{ id: 42, warehouse_status: "shipped", completed_at: SHIP_DATE }] },
       { rows: [{ status: "shipped" }, { status: "shipped" }] },
       { rows: [] },
@@ -1141,19 +1156,20 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
 
     expect(processed).toBe(1);
-    expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
+    expect(inventoryCore.recordReplacementShipmentFromAvailableInventory).toHaveBeenCalledWith(expect.objectContaining({
+      productVariantId: 40002,
+      warehouseId: 1,
       orderItemId: null,
       shipmentItemId: 91005,
       qty: 1,
-      shipmentId: "9005",
-      deductFromOnHandOnly: true,
-      releaseReservation: false,
+      shipmentId: 9005,
     }));
+    expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
     const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
     expect(sqlText).not.toContain("osi.provider_membership_state");
     expect(sqlText).not.toMatch(/UPDATE oms\.oms_orders/);
     expect(sqlText).not.toMatch(/UPDATE oms\.oms_order_lines/);
-    expect(mock.calls.filter((call) => call.tag === "update")).toHaveLength(0);
+    expect(sqlText).toMatch(/UPDATE wms\.outbound_shipment_items[\s\S]*SET from_location_id/);
     expect(mock.calls.filter((call) => call.tag === "insert")).toHaveLength(0);
   });
 
