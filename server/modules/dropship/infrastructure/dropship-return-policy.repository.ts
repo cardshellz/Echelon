@@ -53,14 +53,24 @@ interface AdminCommandRow {
   entity_id: string | null;
 }
 
-type CreatePolicyRepositoryInput = Omit<CreateReturnPolicyVersionInput, "idempotencyKey" | "actor"> & {
+type CreatePolicyRepositoryInput = Omit<
+  CreateReturnPolicyVersionInput,
+  "idempotencyKey" | "actor" | "vendorId" | "storeConnectionId"
+> & {
+  vendorId: number | null;
+  storeConnectionId: number | null;
   effectiveFrom: Date;
   idempotencyKey: string;
   actor: { actorType: "admin" | "system"; actorId?: string };
   now: Date;
 };
 
-type CreateFeeRepositoryInput = Omit<CreateReturnFeeVersionInput, "idempotencyKey" | "actor"> & {
+type CreateFeeRepositoryInput = Omit<
+  CreateReturnFeeVersionInput,
+  "idempotencyKey" | "actor" | "vendorId" | "storeConnectionId"
+> & {
+  vendorId: number | null;
+  storeConnectionId: number | null;
   effectiveFrom: Date;
   idempotencyKey: string;
   actor: { actorType: "admin" | "system"; actorId?: string };
