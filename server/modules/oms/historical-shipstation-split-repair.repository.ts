@@ -351,6 +351,36 @@ async function loadCanonicalPhysicalMemberships(
   );
 }
 
+async function loadVoidedCanonicalProviderShipmentId(
+  executor: QueryExecutor,
+  physicalShipmentId: number,
+): Promise<number | null> {
+  const result = await executor.query(
+    `SELECT physical.provider_physical_shipment_id
+     FROM wms.physical_shipments AS physical
+     JOIN wms.shipping_provider_label_links AS link
+       ON link.physical_shipment_id = physical.id
+     JOIN wms.shipping_provider_labels AS label
+       ON label.id = link.shipping_provider_label_id
+     WHERE physical.id = $1
+       AND physical.provider = 'shipstation'
+       AND physical.status = 'shipped'
+       AND label.provider = 'shipstation'
+       AND label.provider_label_id = physical.provider_physical_shipment_id
+     GROUP BY physical.id
+     HAVING COUNT(DISTINCT label.id) = 1
+        AND BOOL_AND(label.label_status = 'voided')
+        AND BOOL_AND(label.label_direction = 'outbound')`,
+    [physicalShipmentId],
+  );
+  const rows = rowsOf<Record<string, unknown>>(result);
+  if (rows.length !== 1) return null;
+  return asPositiveInteger(
+    rows[0].provider_physical_shipment_id,
+    "voided canonical provider shipment id",
+  );
+}
+
 function canonicalPhysicalMembershipMatchesPlan(
   plan: HistoricalSplitRepairPackagePlan,
   membership: readonly CanonicalPhysicalItemMembership[],
@@ -1583,6 +1613,48 @@ async function applyCanonicalPhysicalQuantityCorrection(
     );
   }
 
+  if (correction.correctionKind === "voided_label_supersession") {
+    if (correction.supersededProviderShipmentId === undefined) {
+      throw repairError(
+        "VOIDED_SUPERSESSION_PROVIDER_REQUIRED",
+        `Canonical physical shipment ${correction.physicalShipmentId} lacks its superseded provider identity`,
+      );
+    }
+    const retired = await client.query(
+      `UPDATE wms.physical_shipments
+       SET status = 'voided', updated_at = $3::timestamptz
+       WHERE id = $1
+         AND provider = 'shipstation'
+         AND provider_physical_shipment_id = $2::text
+         AND status = 'shipped'
+         AND EXISTS (
+           SELECT 1
+           FROM wms.shipping_provider_label_links AS link
+           JOIN wms.shipping_provider_labels AS label
+             ON label.id = link.shipping_provider_label_id
+           WHERE link.physical_shipment_id = wms.physical_shipments.id
+             AND label.provider = 'shipstation'
+             AND label.provider_label_id = wms.physical_shipments.provider_physical_shipment_id
+           GROUP BY link.physical_shipment_id
+           HAVING COUNT(DISTINCT label.id) = 1
+              AND BOOL_AND(label.label_status = 'voided')
+              AND BOOL_AND(label.label_direction = 'outbound')
+         )
+       RETURNING id`,
+      [
+        correction.physicalShipmentId,
+        correction.supersededProviderShipmentId,
+        audit.occurredAt,
+      ],
+    );
+    if (rowsOf(retired).length !== 1) {
+      throw repairError(
+        "VOIDED_SUPERSESSION_STATE_CHANGED",
+        `Canonical physical shipment ${correction.physicalShipmentId} is no longer an exact voided-label supersession candidate`,
+      );
+    }
+  }
+
   await applySourceAllocationsWithPersistedTargets(
     client,
     source,
@@ -2045,14 +2117,57 @@ export function createHistoricalShipStationSplitRepairRepository(
           )
         );
       if (foreignCanonicalSources.length > 0) {
-        unsafe.push(immutableFailure(
-          component.packages.map((plan) =>
-            plan.providerPackage.providerShipmentId
+        const replacementPlan = component.packages.length === 1
+          ? component.packages[0]
+          : null;
+        const foreignPhysicalIds = new Set(
+          foreignCanonicalSources.map((source) =>
+            source.canonical_physical_shipment_id!
           ),
-          "SOURCE_PACKAGE_LINEAGE_UNSAFE",
-          `source WMS shipment items ${foreignCanonicalSources.map((itemSource) => itemSource.id).join(", ")} belong to canonical packages outside the proven sibling cohort`,
-        ));
-        continue;
+        );
+        const exactReplacement = replacementPlan !== null
+          && foreignCanonicalSources.length === pendingSourceIds.size
+          && foreignPhysicalIds.size === 1
+          && replacementPlan.providerPackage.items.every((providerItem) => {
+            const source = sourceRows.get(providerItem.sourceShipmentItemId);
+            return source !== undefined
+              && source.qty === providerItem.quantity
+              && source.canonical_quantity_shipped === providerItem.quantity;
+          });
+        let voidedSupersessionProven = false;
+        if (exactReplacement && replacementPlan !== null) {
+          const physicalShipmentId = [...foreignPhysicalIds][0];
+          const supersededProviderShipmentId =
+            await loadVoidedCanonicalProviderShipmentId(
+              pool,
+              physicalShipmentId,
+            );
+          if (
+            supersededProviderShipmentId !== null
+            && supersededProviderShipmentId !==
+              replacementPlan.providerPackage.providerShipmentId
+          ) {
+            canonicalCorrections.push(Object.freeze({
+              providerShipmentId:
+                replacementPlan.providerPackage.providerShipmentId,
+              physicalShipmentId,
+              correctionKind: "voided_label_supersession" as const,
+              supersededProviderShipmentId,
+            }));
+            correctedPhysicalIds.add(physicalShipmentId);
+            voidedSupersessionProven = true;
+          }
+        }
+        if (!voidedSupersessionProven) {
+          unsafe.push(immutableFailure(
+            component.packages.map((plan) =>
+              plan.providerPackage.providerShipmentId
+            ),
+            "SOURCE_PACKAGE_LINEAGE_UNSAFE",
+            `source WMS shipment items ${foreignCanonicalSources.map((itemSource) => itemSource.id).join(", ")} belong to canonical packages outside the proven sibling cohort`,
+          ));
+          continue;
+        }
       }
 
       const supportedComponent: HistoricalSplitRepairComponent = Object.freeze({
@@ -2346,6 +2461,17 @@ export function createHistoricalShipStationSplitRepairRepository(
           ]),
         );
         for (const correction of canonicalCorrections) {
+          const correctedMembership =
+            correctedMemberships.get(correction.physicalShipmentId) ?? [];
+          if (correction.correctionKind === "voided_label_supersession") {
+            if (correctedMembership.length !== 0) {
+              throw repairError(
+                "VOIDED_SUPERSESSION_MEMBERSHIP_REMAINS",
+                `Voided canonical physical shipment ${correction.physicalShipmentId} still has effective item quantity after supersession`,
+              );
+            }
+            continue;
+          }
           const plan = packageByProviderShipmentId.get(
             correction.providerShipmentId,
           );
@@ -2353,7 +2479,7 @@ export function createHistoricalShipStationSplitRepairRepository(
             !plan
             || !canonicalPhysicalMembershipMatchesPlan(
               plan,
-              correctedMemberships.get(correction.physicalShipmentId) ?? [],
+              correctedMembership,
             )
           ) {
             throw repairError(

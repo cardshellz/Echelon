@@ -857,6 +857,52 @@ describe("historical ShipStation split repair repository guards", () => {
     }]);
   });
 
+  it("classifies an exact active package as superseding one voided canonical label", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("JOIN wms.shipping_provider_label_links AS link")) {
+        return { rows: [{ provider_physical_shipment_id: "444133783" }] };
+      }
+      if (sql.includes("FROM wms.physical_shipments AS physical")) {
+        return { rows: [] };
+      }
+      if (
+        sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")
+      ) {
+        return { rows: [sourceRow({
+          id: 10290,
+          shipment_id: 6521,
+          order_id: 204876,
+          order_item_id: 312115,
+          qty: 1,
+          tracking_number: "9434650106151101977558",
+          external_fulfillment_id: "shipstation_shipment:444133783",
+          canonical_physical_shipment_id: 876,
+          canonical_physical_shipment_item_id: 9901,
+          canonical_quantity_shipped: 1,
+        })] };
+      }
+      if (sql.includes("WHERE external_fulfillment_id = $1")) return { rows: [] };
+      if (
+        sql.includes("WHERE order_id = $1")
+        && sql.includes("status = 'shipped'")
+        && sql.includes("tracking_number = $2")
+      ) return { rows: [] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const replacement = packagePlan(446092075, [10290]);
+    const repository = createHistoricalShipStationSplitRepairRepository({ query } as any);
+
+    const result = await repository.inspectPackages([replacement]);
+
+    expect(result.unsafe).toEqual([]);
+    expect(result.repairableComponents).toHaveLength(1);
+    expect(result.repairableComponents[0].canonicalCorrections).toEqual([{
+      providerShipmentId: 446092075,
+      physicalShipmentId: 876,
+      correctionKind: "voided_label_supersession",
+      supersededProviderShipmentId: 444133783,
+    }]);
+  });
   it("rejects a retired duplicate that already has canonical fulfillment evidence", async () => {
     const query = vi.fn(
       async (sql: string, params: readonly unknown[] = []) => {
