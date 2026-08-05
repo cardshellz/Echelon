@@ -2,7 +2,9 @@ import type { Express, Request, Response } from "express";
 import { requirePermission } from "../../../../routes/middleware";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipReturnService } from "../../application/dropship-return-service";
+import type { DropshipNoInspectionReviewService } from "../../application/dropship-no-inspection-review-service";
 import { createDropshipReturnServiceFromEnv } from "../../infrastructure/dropship-return.factory";
+import { createDropshipNoInspectionReviewServiceFromEnv } from "../../infrastructure/dropship-no-inspection-review.factory";
 import { requireDropshipAuth } from "./dropship-auth.routes";
 
 type SessionUser = {
@@ -12,6 +14,7 @@ type SessionUser = {
 export function registerDropshipReturnRoutes(
   app: Express,
   service: DropshipReturnService = createDropshipReturnServiceFromEnv(),
+  noInspectionReviewService: DropshipNoInspectionReviewService = createDropshipNoInspectionReviewServiceFromEnv(),
 ): void {
   app.get("/api/dropship/returns", requireDropshipAuth, async (req, res) => {
     try {
@@ -150,6 +153,54 @@ export function registerDropshipReturnRoutes(
       }
     },
   );
+
+  // No-inspection review (D3): approve → pool credit; deny → closed w/ reason.
+  app.post(
+    "/api/dropship/admin/returns/:rmaId/no-inspection-review",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const actor = adminActor(req);
+        if (!actor.actorId) {
+          throw new DropshipError(
+            "DROPSHIP_RETURN_INVALID_REQUEST",
+            "No-inspection review requires an authenticated admin actor.",
+          );
+        }
+        const result = await noInspectionReviewService.review({
+          rmaId: parsePositiveInteger(req.params.rmaId, "rmaId"),
+          decision: req.body?.decision,
+          reason: req.body?.reason ?? null,
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: { actorType: "admin", actorId: actor.actorId },
+        });
+        return res.json(result);
+      } catch (error) {
+        return sendDropshipReturnError(res, error);
+      }
+    },
+  );
+
+  // Pool replenishment (D3): a linked carrier claim paid out — credit the pool.
+  app.post(
+    "/api/dropship/admin/insurance-pool/replenishments",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const result = await noInspectionReviewService.recordClaimReplenishment({
+          carrierClaimId: req.body?.carrierClaimId,
+          amountCents: req.body?.amountCents,
+          currency: req.body?.currency ?? "USD",
+          providerPayoutReference: req.body?.providerPayoutReference,
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: adminActor(req),
+        });
+        return res.status(result.idempotentReplay ? 200 : 201).json(result);
+      } catch (error) {
+        return sendDropshipReturnError(res, error);
+      }
+    },
+  );
 }
 
 function sendDropshipReturnError(res: Response, error: unknown): Response {
@@ -186,6 +237,10 @@ function statusForDropshipReturnError(code: string): number {
     case "DROPSHIP_RETURN_INSPECTION_INVALID_INPUT":
     case "DROPSHIP_RETURN_INVALID_REQUEST":
     case "DROPSHIP_RETURN_POLICY_INVALID_INPUT":
+    case "DROPSHIP_NO_INSPECTION_REVIEW_INVALID_INPUT":
+    case "DROPSHIP_NO_INSPECTION_REASON_REQUIRED":
+    case "DROPSHIP_NO_INSPECTION_CREDIT_BASIS_INVALID":
+    case "DROPSHIP_POOL_REPLENISHMENT_INVALID_INPUT":
       return 400;
     case "DROPSHIP_AUTH_REQUIRED":
       return 401;
@@ -198,11 +253,13 @@ function statusForDropshipReturnError(code: string): number {
     case "DROPSHIP_RMA_ITEM_NOT_FOUND":
     case "DROPSHIP_RETURN_POLICY_NOT_FOUND":
     case "DROPSHIP_RETURN_ECONOMICS_NOT_FOUND":
+    case "DROPSHIP_NO_INSPECTION_CREDIT_BASIS_MISSING":
       return 404;
     case "DROPSHIP_RMA_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_RMA_STATUS_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_RMA_ALREADY_INSPECTED":
     case "DROPSHIP_RMA_ILLEGAL_TRANSITION":
+    case "DROPSHIP_RMA_NOT_IN_NO_INSPECTION_REVIEW":
     case "DROPSHIP_RETURN_WINDOW_EXPIRED":
     case "DROPSHIP_RETURN_POLICY_REQUIRED":
     case "DROPSHIP_RETURN_POLICY_IDEMPOTENCY_CONFLICT":
