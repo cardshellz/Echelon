@@ -25,6 +25,7 @@ export interface DropshipLaunchNotificationPreferenceDefinition {
 
 export const DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES: DropshipLaunchNotificationPreferenceDefinition[] = [
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.AUTO_RELOAD_FAILED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.COLLECTION_ACCOUNT_REVIEW, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.ENTITLEMENT_BLOCKED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_PUSH_FAILED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_ACCEPTED, critical: false },
@@ -37,6 +38,7 @@ export const DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES: DropshipLaunchNotificatio
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_RECEIVED, critical: false },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_REJECTED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.RETURN_CREDIT_POSTED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.RMA_NO_INSPECTION_REVIEW, critical: false },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.RMA_OPENED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.STORE_DISCONNECTED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.STORE_NEEDS_REAUTH, critical: true },
