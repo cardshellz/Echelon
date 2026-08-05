@@ -283,7 +283,7 @@ export function registerOmsRoutes(app: Express) {
           contentsAuthority: req.body?.contentsAuthority,
           lineMappings: req.body?.lineMappings,
           operator,
-        }));
+        }, getFlowReconciliationDependencies(req).fulfillmentAuthority));
       } catch (err: any) {
         console.error("[OMS Routes] ShipStation reship adoption error:", err);
         const message = err?.message || "Failed to adopt ShipStation reship";

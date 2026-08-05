@@ -1019,6 +1019,9 @@ describe("ShipStation unmapped physical remediation", () => {
       }),
     };
     const service = shipStation();
+    const fulfillmentAuthority = {
+      ensureLegacyShipment: vi.fn().mockResolvedValue({}),
+    };
 
     const result = await adoptShipStationUnmappedPhysicalAsReship(db, service, {
       exceptionId: 77,
@@ -1027,7 +1030,7 @@ describe("ShipStation unmapped physical remediation", () => {
       reason: "packing_omission",
       notes: "The original box omitted SKU-A.",
       lineMappings: [{ providerItemIndex: 0, orderItemId: 101, quantity: 1 }],
-    });
+    }, fulfillmentAuthority as any);
 
     expect(result).toMatchObject({
       changed: true,
@@ -1042,6 +1045,11 @@ describe("ShipStation unmapped physical remediation", () => {
       },
     );
     const allSql = calls.join("\n");
+    expect(fulfillmentAuthority.ensureLegacyShipment).toHaveBeenCalledWith(10, {
+      executeImmediately: false,
+      source: "shipstation_omission_correction_source_projection",
+      suppressChannelWriteback: true,
+    });
     expect(allSql).toContain("correction_for_shipment_item_id");
     expect(allSql).toContain("shipment_item_purpose = 'omission_correction'");
     expect(allSql).toContain('"shipmentItemPurpose":"omission_correction"');

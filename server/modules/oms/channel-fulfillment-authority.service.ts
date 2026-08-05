@@ -74,6 +74,7 @@ export interface ChannelFulfillmentAuthorityService {
     options?: {
       executeImmediately?: boolean;
       source?: string;
+      suppressChannelWriteback?: boolean;
       suppressChannelProviders?: readonly string[];
     },
   ): Promise<MaterializeAndDispatchResult>;
@@ -415,6 +416,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
     options: {
       executeImmediately?: boolean;
       source?: string;
+      suppressChannelWriteback?: boolean;
       suppressChannelProviders?: readonly string[];
     } = {},
   ): Promise<MaterializeAndDispatchResult> {
@@ -423,6 +425,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
       ...resolved,
       legacyWmsShipmentIds: [...resolved.legacyWmsShipmentIds],
       source: options.source ?? "legacy_fulfillment_reconciliation",
+      suppressChannelWriteback: options.suppressChannelWriteback ?? false,
       suppressChannelProviders: options.suppressChannelProviders == null
         ? undefined
         : [...options.suppressChannelProviders],
