@@ -12,6 +12,7 @@ interface TransactionExecutor extends QueryExecutor {
 
 export interface ShipStationProviderPackageEchoItem {
   lineItemKey?: string | null;
+  sku?: string | null;
   quantity?: number | null;
 }
 
@@ -57,6 +58,13 @@ interface PhysicalItemRow {
   legacy_wms_shipment_id: unknown;
 }
 
+interface LegacyAuthorityItemRow {
+  legacy_wms_shipment_id: unknown;
+  shipment_item_id: unknown;
+  sku: unknown;
+  quantity: unknown;
+}
+
 function resultRows(result: any): any[] {
   return Array.isArray(result?.rows) ? result.rows : [];
 }
@@ -98,14 +106,28 @@ function parseProviderLines(
     .map(([shipmentItemId, quantity]) => ({ shipmentItemId, quantity }));
 }
 
-function sameQuantityMap(
-  left: ReadonlyMap<number, number>,
-  right: ReadonlyMap<number, number>,
+function sameQuantityMap<TKey>(
+  left: ReadonlyMap<TKey, number>,
+  right: ReadonlyMap<TKey, number>,
 ): boolean {
   return left.size === right.size
     && [...left.entries()].every(
       ([orderItemId, quantity]) => right.get(orderItemId) === quantity,
     );
+}
+
+function parseProviderSkuQuantities(
+  items: readonly ShipStationProviderPackageEchoItem[],
+): Map<string, number> | null {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  const quantities = new Map<string, number>();
+  for (const item of items) {
+    const sku = String(item.sku ?? "").trim().toUpperCase();
+    const quantity = Number(item.quantity);
+    if (!sku || !Number.isSafeInteger(quantity) || quantity <= 0) return null;
+    quantities.set(sku, (quantities.get(sku) ?? 0) + quantity);
+  }
+  return quantities;
 }
 
 function noMatch(
@@ -128,6 +150,7 @@ async function inspectExactLegacyProviderPackageIdentity(
     providerShipmentId: number;
     normalizedTracking: string;
     expectedWmsOrderId: number | null;
+    shipmentItems: readonly ShipStationProviderPackageEchoItem[];
   },
 ): Promise<ProviderPackageEchoResult | null> {
   const result: any = await db.execute(sql`
@@ -163,29 +186,105 @@ async function inspectExactLegacyProviderPackageIdentity(
   const rows = resultRows(result);
   if (rows.length === 0) return null;
 
-  const wmsOrderIds = new Set(rows.map((row) => Number(row.wms_order_id)));
-  const legacyWmsShipmentIds = [
+  const candidateShipmentIds = [
     ...new Set(rows.map((row) => Number(row.legacy_wms_shipment_id))),
-  ].sort((left, right) => left - right);
-  const shippingProviderLabelIds = new Set(
-    rows.map((row) => Number(row.shipping_provider_label_id)),
-  );
-  if (
-    wmsOrderIds.size !== 1
-    || legacyWmsShipmentIds.some(
-      (id) => !Number.isSafeInteger(id) || id <= 0,
+  ].filter((id) => Number.isSafeInteger(id) && id > 0);
+  if (candidateShipmentIds.length === 0) return null;
+  const providerItemQuantities = parseProviderLines(input.shipmentItems);
+  const providerSkuQuantities = parseProviderSkuQuantities(input.shipmentItems);
+  if (!providerItemQuantities && !providerSkuQuantities) return null;
+
+  const authorityResult: any = await db.execute(sql`
+    SELECT
+      shipment.id AS legacy_wms_shipment_id,
+      shipment_item.id AS shipment_item_id,
+      UPPER(BTRIM(COALESCE(order_item.sku, catalog_variant.sku, ''))) AS sku,
+      shipment_item.qty AS quantity
+    FROM wms.outbound_shipments AS shipment
+    JOIN wms.outbound_shipment_items AS shipment_item
+      ON shipment_item.shipment_id = shipment.id
+     AND shipment_item.qty > 0
+    LEFT JOIN wms.order_items AS order_item
+      ON order_item.id = COALESCE(
+        shipment_item.order_item_id,
+        shipment_item.replacement_for_order_item_id
+      )
+    LEFT JOIN catalog.product_variants AS catalog_variant
+      ON catalog_variant.id = shipment_item.product_variant_id
+    WHERE shipment.id IN (
+      ${sql.join(candidateShipmentIds.map((id) => sql`${id}`), sql`, `)}
     )
-    || shippingProviderLabelIds.size !== 1
-  ) {
+      AND COALESCE(shipment.requires_review, false) = false
+    ORDER BY shipment.id, shipment_item.id
+  `);
+  const authorityByShipment = new Map<number, LegacyAuthorityItemRow[]>();
+  for (const row of resultRows(authorityResult) as LegacyAuthorityItemRow[]) {
+    const shipmentId = Number(row.legacy_wms_shipment_id);
+    if (!Number.isSafeInteger(shipmentId) || shipmentId <= 0) continue;
+    const existing = authorityByShipment.get(shipmentId) ?? [];
+    existing.push(row);
+    authorityByShipment.set(shipmentId, existing);
+  }
+
+  const matchedRows = rows.filter((row) => {
+    const shipmentId = Number(row.legacy_wms_shipment_id);
+    const items = authorityByShipment.get(shipmentId) ?? [];
+    if (items.length === 0) return false;
+
+    if (providerItemQuantities) {
+      const actualByShipmentItemId = new Map<number, number>();
+      for (const item of items) {
+        const shipmentItemId = Number(item.shipment_item_id);
+        const quantity = Number(item.quantity);
+        if (
+          !Number.isSafeInteger(shipmentItemId)
+          || shipmentItemId <= 0
+          || !Number.isSafeInteger(quantity)
+          || quantity <= 0
+        ) return false;
+        actualByShipmentItemId.set(
+          shipmentItemId,
+          (actualByShipmentItemId.get(shipmentItemId) ?? 0) + quantity,
+        );
+      }
+      const expectedByShipmentItemId = new Map(
+        providerItemQuantities.map((item) => [item.shipmentItemId, item.quantity]),
+      );
+      if (sameQuantityMap(expectedByShipmentItemId, actualByShipmentItemId)) {
+        return true;
+      }
+    }
+
+    if (!providerSkuQuantities) return false;
+    const actualBySku = new Map<string, number>();
+    for (const item of items) {
+      const sku = String(item.sku ?? "").trim().toUpperCase();
+      const quantity = Number(item.quantity);
+      if (!sku || !Number.isSafeInteger(quantity) || quantity <= 0) return false;
+      actualBySku.set(sku, (actualBySku.get(sku) ?? 0) + quantity);
+    }
+    return sameQuantityMap(providerSkuQuantities, actualBySku);
+  });
+
+  if (matchedRows.length === 0) return null;
+  if (matchedRows.length > 1) {
     return {
       ...noMatch("multiple_matching_physical_packages"),
       status: "ambiguous",
     };
   }
-  const [wmsOrderId] = wmsOrderIds;
+
+  const [matched] = matchedRows;
+  const wmsOrderId = Number(matched.wms_order_id);
+  const legacyWmsShipmentId = Number(matched.legacy_wms_shipment_id);
+  const shippingProviderLabelId = Number(matched.shipping_provider_label_id);
   if (
     !Number.isSafeInteger(wmsOrderId)
     || wmsOrderId <= 0
+    || !Number.isSafeInteger(legacyWmsShipmentId)
+    || legacyWmsShipmentId <= 0
+    || !Number.isSafeInteger(shippingProviderLabelId)
+    || shippingProviderLabelId <= 0
     || (
       input.expectedWmsOrderId !== null
       && wmsOrderId !== input.expectedWmsOrderId
@@ -199,8 +298,8 @@ async function inspectExactLegacyProviderPackageIdentity(
     reason: "exact_provider_and_legacy_package_identity",
     physicalShipmentId: null,
     wmsOrderId,
-    authoritativeLegacyShipmentIds: legacyWmsShipmentIds,
-    shippingProviderLabelId: [...shippingProviderLabelIds][0],
+    authoritativeLegacyShipmentIds: [legacyWmsShipmentId],
+    shippingProviderLabelId,
     linkInserted: false,
   };
 }
@@ -226,6 +325,7 @@ export async function inspectShipStationProviderPackageEcho(
       providerShipmentId: input.providerShipmentId,
       normalizedTracking,
       expectedWmsOrderId,
+      shipmentItems: input.shipmentItems,
     },
   );
   if (exactLegacyPackage !== null) return exactLegacyPackage;

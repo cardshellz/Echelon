@@ -1720,11 +1720,7 @@ export function createShipStationService(
     const ssItems = Array.isArray(shipment.shipmentItems)
       ? shipment.shipmentItems
       : [];
-    if (ssItems.length === 0) {
-      return;
-    }
-
-    let parsedItems = parsePositiveWmsShipmentItemsFromShipStation(shipment) ?? [];
+    if (ssItems.length === 0) return;
 
     const targetItems: any = await executor.execute(sql`
       SELECT osi.id, osi.order_item_id, osi.replacement_for_order_item_id,
@@ -1741,6 +1737,8 @@ export function createShipStationService(
       WHERE osi.shipment_id = ${targetShipmentId}
     `);
 
+
+    let parsedItems = parsePositiveWmsShipmentItemsFromShipStation(shipment) ?? [];
     if (parsedItems.length === 0) {
       const remainingTargets = [...(targetItems?.rows ?? [])];
       const fallbackItems: Array<{ sourceShipmentItemId: number; qty: number }> = [];
@@ -2876,6 +2874,35 @@ export function createShipStationService(
     );
   }
 
+  function hasUsablePositiveProviderItems(shipment: ShipStationShipment): boolean {
+    const items = Array.isArray(shipment.shipmentItems)
+      ? shipment.shipmentItems
+      : [];
+    return items.length > 0 && items.every((item) => {
+      const quantity = Number(item.quantity);
+      const sku = String(item.sku ?? "").trim();
+      const lineItemKey = String(item.lineItemKey ?? "").trim();
+      return Number.isSafeInteger(quantity)
+        && quantity > 0
+        && (sku.length > 0 || lineItemKey.length > 0);
+    });
+  }
+
+  async function hasPositiveCustomerShipmentItemAuthority(
+    shipmentId: number,
+  ): Promise<boolean> {
+    if (!Number.isSafeInteger(shipmentId) || shipmentId <= 0) return false;
+    const result: any = await db.execute(sql`
+      SELECT EXISTS (
+        SELECT 1
+        FROM wms.outbound_shipment_items AS shipment_item
+        WHERE shipment_item.shipment_id = ${shipmentId}
+          AND shipment_item.order_item_id IS NOT NULL
+          AND shipment_item.qty > 0
+      ) AS has_positive_item_authority
+    `);
+    return result?.rows?.[0]?.has_positive_item_authority === true;
+  }
   async function applyShipNotifyV2EventToResolvedShipment(
     wmsShipmentRow: any,
     shipment: ShipStationShipment,
@@ -2889,13 +2916,18 @@ export function createShipStationService(
     const isCustomerFulfillmentShipment =
       shipmentPurpose === "customer_fulfillment";
     const isReplacementShipment = shipmentPurpose === "replacement";
-    const exactPhysicalShipmentReplay = isCustomerFulfillmentShipment
+    const exactPhysicalIdentityReplay = isCustomerFulfillmentShipment
       && event.kind === "shipped"
       && isExactShipStationPhysicalShipmentReplay({
         shipment,
         currentPhysicalShipmentRef: wmsShipmentRow.external_fulfillment_id,
         currentTrackingNumber: wmsShipmentRow.tracking_number,
       });
+    const exactPhysicalShipmentReplay = exactPhysicalIdentityReplay
+      && hasUsablePositiveProviderItems(shipment)
+      && await hasPositiveCustomerShipmentItemAuthority(
+        Number(wmsShipmentRow.id),
+      );
 
     if (exactPhysicalShipmentReplay) {
       const exceptionResolved =
@@ -2920,6 +2952,19 @@ export function createShipStationService(
       && !isReplacementShipment
     ) {
       try {
+        const isUnmappedProviderFirstShell =
+          String(wmsShipmentRow.source ?? "") === SHIPSTATION_SPLIT_SOURCE
+          && wmsShipmentRow.requires_review === true;
+        if (
+          isUnmappedProviderFirstShell
+          && !hasUsablePositiveProviderItems(shipment)
+        ) {
+          throw new ShipStationUnmappedItemsError(
+            "shipstation_package_contents_missing: ShipStation shipment "
+              + shipment.shipmentId
+              + " has no positive package-item evidence",
+          );
+        }
         await syncShipmentItemsFromShipStation(
           wmsShipmentRow.id,
           shipment,

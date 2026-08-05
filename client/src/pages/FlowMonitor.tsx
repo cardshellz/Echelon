@@ -367,6 +367,12 @@ interface ShipStationUnmappedPreview {
     currentTrackingNumber: string;
     originalTrackingNumber: string;
   } | null;
+  providerLineResolutions: Array<{
+    providerItemIndex: number;
+    status: "unique_match" | "ambiguous" | "unmatched" | "invalid";
+    suggestedOrderItemId: number | null;
+    eligibleOriginalShipmentIds: number[];
+  }>;
   providerPackageEcho: {
     status: "matched" | "no_match" | "ambiguous";
     reason: string;
@@ -727,11 +733,14 @@ function ShipStationPackageClassificationDialog(props: {
     setItemMode(providerItems.length === 0 ? "actual" : "provider");
     const defaults: Record<number, string> = {};
     const dispositionDefaults: Record<number, CorrectiveOrderedLineDisposition> = {};
-    providerItems.forEach((item, index) => {
-      const matches = preview.orderItems.filter(
-        (orderItem) => orderItem.sku.trim().toUpperCase() === item.sku.trim().toUpperCase(),
+    providerItems.forEach((_item, index) => {
+      const resolution = preview.providerLineResolutions.find(
+        (candidate) => candidate.providerItemIndex === index,
       );
-      defaults[index] = matches.length === 1 ? String(matches[0].id) : "";
+      defaults[index] = resolution?.status === "unique_match"
+        && resolution.suggestedOrderItemId !== null
+        ? String(resolution.suggestedOrderItemId)
+        : "";
       dispositionDefaults[index] = "replacement";
     });
     setLineMappings(defaults);
@@ -751,15 +760,24 @@ function ShipStationPackageClassificationDialog(props: {
   useEffect(() => {
     if (!preview || positiveFlowId(originalShipmentId) !== null) return;
     const restoredOriginalId = preview.originalPackageIdentityRepair?.wmsShipmentId ?? null;
-    const preferred = restoredOriginalId === null
+    const restored = restoredOriginalId === null
       ? null
       : validOriginalShipments.find((shipment) => shipment.id === restoredOriginalId);
-    if (preferred) {
-      setOriginalShipmentId(String(preferred.id));
-    } else if (validOriginalShipments.length === 1) {
-      setOriginalShipmentId(String(validOriginalShipments[0].id));
-    }
-  }, [originalShipmentId, preview, validOriginalShipments]);
+    const uniquelyResolvedLines = preview.providerLineResolutions.filter(
+      (resolution) => resolution.status === "unique_match",
+    );
+    const suggestedOriginals = validOriginalShipments.filter(
+      (shipment) => uniquelyResolvedLines.length === providerItems.length
+        && uniquelyResolvedLines.length > 0
+        && uniquelyResolvedLines.every(
+          (resolution) => resolution.eligibleOriginalShipmentIds.includes(shipment.id),
+        ),
+    );
+    const preferred = restored
+      ?? (suggestedOriginals.length === 1 ? suggestedOriginals[0] : null)
+      ?? (validOriginalShipments.length === 1 ? validOriginalShipments[0] : null);
+    if (preferred) setOriginalShipmentId(String(preferred.id));
+  }, [originalShipmentId, preview, providerItems.length, validOriginalShipments]);
 
   const selectedOriginalTracking = selectedOriginalShipment
     ? (preview?.originalPackageIdentityRepair?.wmsShipmentId === selectedOriginalShipment.id
