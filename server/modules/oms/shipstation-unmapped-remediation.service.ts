@@ -2056,8 +2056,14 @@ async function finishMappedShipment(
   await withOptionalTransaction(db, async (tx) => {
     await tx.execute(sql`
       UPDATE wms.outbound_shipments
-      SET requires_review = false,
-          review_reason = 'shipstation_reship_adopted',
+      SET requires_review = CASE
+            WHEN review_reason = 'historical_replacement_inventory_unproven' THEN true
+            ELSE false
+          END,
+          review_reason = CASE
+            WHEN review_reason = 'historical_replacement_inventory_unproven' THEN review_reason
+            ELSE 'shipstation_reship_adopted'
+          END,
           updated_at = NOW()
       WHERE id = ${candidateShipmentId}
     `);
