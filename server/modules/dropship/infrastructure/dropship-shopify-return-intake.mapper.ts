@@ -2,7 +2,7 @@ import { DropshipError } from "../domain/errors";
 import type {
   DropshipReturnIntakeDraft,
   DropshipReturnIntakeItemDraft,
-  DropshipReturnIntakeTrackingDraft,
+  DropshipReturnTrackingDraft,
 } from "../application/dropship-return-intake-provider";
 
 /**
@@ -181,7 +181,7 @@ function findShopifyReturnLabel(
   return null;
 }
 
-function buildShopifyReturnTracking(returnNode: ShopifyReturnNode): DropshipReturnIntakeTrackingDraft | null {
+function buildShopifyReturnTracking(returnNode: ShopifyReturnNode): DropshipReturnTrackingDraft | null {
   const nodes = returnNode.reverseFulfillmentOrders?.nodes;
   if (!Array.isArray(nodes)) return null;
   for (const node of nodes) {

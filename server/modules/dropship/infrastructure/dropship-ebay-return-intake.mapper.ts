@@ -2,7 +2,7 @@ import { DropshipError } from "../domain/errors";
 import type {
   DropshipReturnIntakeDraft,
   DropshipReturnIntakeItemDraft,
-  DropshipReturnIntakeTrackingDraft,
+  DropshipReturnTrackingDraft,
 } from "../application/dropship-return-intake-provider";
 import { parseEbayMoneyCents } from "./dropship-ebay-order-intake.mapper";
 
@@ -140,7 +140,7 @@ function buildEbayReturnItems(lineItems: unknown): DropshipReturnIntakeItemDraft
   return items;
 }
 
-function buildEbayReturnTracking(returnShipment: unknown): DropshipReturnIntakeTrackingDraft | null {
+function buildEbayReturnTracking(returnShipment: unknown): DropshipReturnTrackingDraft | null {
   if (!returnShipment || typeof returnShipment !== "object") return null;
   const shipment = returnShipment as Record<string, unknown>;
   const trackingNumber = readOptionalString(shipment.trackingNumber);

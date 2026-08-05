@@ -160,7 +160,7 @@ export class ShopifyDropshipReturnIntakeProvider implements DropshipReturnIntake
     // Shopify search query syntax: created_at:>=... AND created_at:<=...
     const query = `created_at:>=${input.since.toISOString()} AND created_at:<=${input.until.toISOString()}`;
     while (true) {
-      const response = await this.callGraphql<ShopifyReturnsQueryData>(input.credential, input.apiVersion, {
+      const response: ShopifyGraphqlResponse<ShopifyReturnsQueryData> = await this.callGraphql<ShopifyReturnsQueryData>(input.credential, input.apiVersion, {
         query: SHOPIFY_RETURNS_QUERY,
         variables: {
           first: SHOPIFY_PAGE_SIZE,
@@ -168,7 +168,7 @@ export class ShopifyDropshipReturnIntakeProvider implements DropshipReturnIntake
           query,
         },
       });
-      const page = response.data?.returns;
+      const page: ShopifyReturnsQueryData["returns"] = response.data?.returns;
       const pageNodes = Array.isArray(page?.nodes) ? page.nodes : [];
       nodes.push(...pageNodes);
       if (!page?.pageInfo?.hasNextPage || pageNodes.length === 0) {
