@@ -62,7 +62,8 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             cl.id AS listing_id,
             cl.sync_status AS listing_status,
             cl.sync_error AS listing_sync_error,
-            cl.external_product_id,
+            listing_identity.external_product_id,
+            listing_identity.external_product_id_count,
             p.ebay_listing_excluded,
             cpo.is_listed AS product_override_is_listed,
             COALESCE(ecm.listing_enabled, true) AS type_listing_enabled,
@@ -74,13 +75,24 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           LEFT JOIN ebay_category_mappings ecm ON ecm.product_type_slug = p.product_type AND ecm.channel_id = $1
           LEFT JOIN channels.channel_product_overrides cpo ON cpo.product_id = p.id AND cpo.channel_id = $1
           LEFT JOIN LATERAL (
-            SELECT cl2.id, cl2.sync_status, cl2.sync_error, cl2.external_product_id
+            SELECT cl2.id, cl2.sync_status, cl2.sync_error
             FROM channels.channel_listings cl2
             JOIN catalog.product_variants pv2 ON pv2.id = cl2.product_variant_id
             WHERE pv2.product_id = p.id AND cl2.channel_id = $1
             ORDER BY CASE WHEN cl2.sync_error IS NOT NULL THEN 0 ELSE 1 END, cl2.id DESC
             LIMIT 1
           ) cl ON true
+          LEFT JOIN LATERAL (
+            SELECT
+              MIN(cl3.external_product_id) AS external_product_id,
+              COUNT(DISTINCT cl3.external_product_id)::integer AS external_product_id_count
+            FROM channels.channel_listings cl3
+            JOIN catalog.product_variants pv3 ON pv3.id = cl3.product_variant_id
+            WHERE pv3.product_id = p.id
+              AND pv3.is_active = true
+              AND cl3.channel_id = $1
+              AND cl3.external_product_id IS NOT NULL
+          ) listing_identity ON true
           WHERE p.is_active = true AND p.product_type IS NOT NULL
           ORDER BY pt.sort_order ASC, p.name ASC
         `, [EBAY_CHANNEL_ID]);
@@ -310,7 +322,10 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             isListed,
             isExcluded,
             syncError: listingSyncError,
-            externalListingId: row.external_product_id,
+            externalListingId: row.external_product_id_count === 1
+              ? row.external_product_id
+              : null,
+            externalListingIdentityConflict: row.external_product_id_count > 1,
             variantCount: parseInt(row.variant_count) || 0,
             includedVariantCount,
             imageCount: parseInt(row.image_count) || 0,
