@@ -1,4 +1,4 @@
-﻿-- A provider list response may omit isReturnLabel. An omitted value is not
+-- A provider list response may omit isReturnLabel. An omitted value is not
 -- outbound authority: it stays non-dispatchable until a detail read confirms
 -- whether the provider label is outbound or return transport.
 
