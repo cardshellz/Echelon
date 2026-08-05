@@ -2268,6 +2268,7 @@ export function createShipStationService(
         osi.product_variant_id,
         osi.qty,
         target_shipment.shipment_purpose,
+        target_order.warehouse_id,
         -- Pick-derived source bin: the shipment item's own bin, or the pick
         -- ledger backstop for legacy planned rows created before source-bin
         -- backfill existed.
@@ -2318,6 +2319,8 @@ export function createShipStationService(
       FROM wms.outbound_shipment_items osi
       JOIN wms.outbound_shipments target_shipment
         ON target_shipment.id = osi.shipment_id
+      JOIN wms.orders target_order
+        ON target_order.id = target_shipment.order_id
       WHERE osi.shipment_id = ${shipmentId}
         AND osi.qty > 0
         -- An omission correction points back to inventory already consumed by
@@ -2335,13 +2338,14 @@ export function createShipStationService(
         // Never picked: the location came from the reserved-bin fallback, not a
         // pick. Drives on-hand-only deduction in recordShipment.
         ship_before_pick:
-          item.shipment_purpose === "replacement" ||
-          (pickLoc == null && fromLoc != null),
+          item.shipment_purpose !== "replacement" &&
+          pickLoc == null &&
+          fromLoc != null,
       };
     });
     const invalidItems = rows.filter((item) =>
       !item.product_variant_id ||
-      !item.from_location_id ||
+      (item.shipment_purpose !== "replacement" && !item.from_location_id) ||
       !Number.isInteger(Number(item.qty)) ||
       Number(item.qty) <= 0
     );
@@ -2387,6 +2391,29 @@ export function createShipStationService(
 
     try {
       for (const item of items) {
+        if (item.shipment_purpose === "replacement") {
+          const recorded = await inventoryCore.recordReplacementShipmentFromAvailableInventory({
+            productVariantId: item.product_variant_id,
+            qty: item.qty,
+            warehouseId: item.warehouse_id ?? null,
+            orderId: wmsOrderId,
+            orderItemId: item.inventory_order_item_id ?? item.order_item_id ?? null,
+            shipmentId,
+            shipmentItemId: item.id,
+            userId: "system:shipstation:v2",
+          });
+          await db.execute(sql`
+            UPDATE wms.outbound_shipment_items
+            SET from_location_id = ${recorded.warehouseLocationId}
+            WHERE id = ${item.id}
+              AND from_location_id IS DISTINCT FROM ${recorded.warehouseLocationId}
+          `);
+          console.log(
+            `[ShipStation Webhook V2] Recorded replacement shipment for variant ${item.product_variant_id} ` +
+            `qty ${item.qty} from location ${recorded.warehouseLocationId} (wmsOrder ${wmsOrderId})`,
+          );
+          continue;
+        }
         await inventoryCore.recordShipment({
           productVariantId: item.product_variant_id,
           warehouseLocationId: item.from_location_id,

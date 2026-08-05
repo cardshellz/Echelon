@@ -160,3 +160,142 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
     expect(tx.execute).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("InventoryUseCases.recordReplacementShipmentFromAvailableInventory", () => {
+  function replacementHarness(existingLocationId?: number) {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const tx = {
+      execute: vi.fn(async () => ({ rows: [] })),
+      select: vi.fn(() => {
+        const query = {
+          from: () => query,
+          where: () => query,
+          limit: async () => [{ cycleCountFreezeId: null }],
+        };
+        return query;
+      }),
+    };
+    tx.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce(existingLocationId ? { rows: [{ from_location_id: existingLocationId }] } : { rows: [] });
+    if (!existingLocationId) {
+      tx.execute.mockResolvedValueOnce({ rows: [{ warehouse_location_id: 21 }] });
+    }
+
+    const rootDb = {
+      select: vi.fn(),
+      update: vi.fn(),
+      insert: vi.fn(),
+      execute: vi.fn(),
+      transaction: vi.fn(async (fn: (t: any) => Promise<unknown>) => fn(tx)),
+    };
+    const storage = {
+      lockInventoryLevel: vi.fn(async () => ({
+        id: 10,
+        warehouseLocationId: 21,
+        productVariantId: 30,
+        variantQty: 8,
+        reservedQty: 3,
+        pickedQty: 0,
+        packedQty: 0,
+        backorderQty: 0,
+        updatedAt: new Date(),
+      })),
+      adjustInventoryLevel: vi.fn(async () => null),
+      createInventoryTransaction: vi.fn(async () => undefined),
+    } as any;
+    const pickFromLots = vi.fn(async () => []);
+    const shipFromLots = vi.fn(async () => undefined);
+    const lotService = { withTx: vi.fn(() => ({ pickFromLots, shipFromLots })) };
+    return { rootDb, storage, lotService, pickFromLots, shipFromLots };
+  }
+
+  it("allocates current unreserved stock, records a system pick, then ships it", async () => {
+    const { rootDb, storage, lotService, pickFromLots, shipFromLots } = replacementHarness();
+    const { InventoryUseCases } = await import("../../application/inventory.use-cases");
+    const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any, null as any);
+
+    await expect(inventory.recordReplacementShipmentFromAvailableInventory({
+      productVariantId: 30,
+      qty: 2,
+      warehouseId: 1,
+      orderId: 40,
+      orderItemId: 50,
+      shipmentId: 60,
+      shipmentItemId: 70,
+      userId: "system:shipstation:v2",
+    })).resolves.toEqual({ warehouseLocationId: 21, alreadyRecorded: false });
+
+    expect(storage.lockInventoryLevel).toHaveBeenCalledWith(21, 30, expect.anything());
+    expect(storage.adjustInventoryLevel).toHaveBeenNthCalledWith(1, 10, { variantQty: -2, pickedQty: 2 }, expect.anything());
+    expect(storage.adjustInventoryLevel).toHaveBeenNthCalledWith(2, 10, { pickedQty: -2 }, expect.anything());
+    expect(pickFromLots).toHaveBeenCalledWith(expect.objectContaining({
+      qty: 2,
+      recordOrderItemCosts: false,
+      allowReservedStock: false,
+    }));
+    expect(shipFromLots).toHaveBeenCalledWith(expect.objectContaining({ qty: 2 }));
+    expect(storage.createInventoryTransaction).toHaveBeenCalledTimes(2);
+    expect(storage.createInventoryTransaction.mock.calls[0][0]).toEqual(expect.objectContaining({
+      transactionType: "pick",
+      shipmentItemId: 70,
+      isImplicit: 1,
+    }));
+    expect(storage.createInventoryTransaction.mock.calls[1][0]).toEqual(expect.objectContaining({
+      transactionType: "ship",
+      shipmentItemId: 70,
+      referenceId: "60",
+    }));
+  });
+
+  it("does not allocate or deduct twice when the physical shipment item already posted", async () => {
+    const { rootDb, storage, lotService, pickFromLots, shipFromLots } = replacementHarness(21);
+    const { InventoryUseCases } = await import("../../application/inventory.use-cases");
+    const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any, null as any);
+
+    await expect(inventory.recordReplacementShipmentFromAvailableInventory({
+      productVariantId: 30,
+      qty: 2,
+      warehouseId: 1,
+      orderId: 40,
+      shipmentId: 60,
+      shipmentItemId: 70,
+    })).resolves.toEqual({ warehouseLocationId: 21, alreadyRecorded: true });
+
+    expect(storage.lockInventoryLevel).not.toHaveBeenCalled();
+    expect(storage.adjustInventoryLevel).not.toHaveBeenCalled();
+    expect(storage.createInventoryTransaction).not.toHaveBeenCalled();
+    expect(pickFromLots).not.toHaveBeenCalled();
+    expect(shipFromLots).not.toHaveBeenCalled();
+  });
+
+  it("rejects instead of consuming another order's reserved stock", async () => {
+    const { rootDb, storage, lotService, pickFromLots, shipFromLots } = replacementHarness();
+    storage.lockInventoryLevel.mockResolvedValueOnce({
+      id: 10,
+      warehouseLocationId: 21,
+      productVariantId: 30,
+      variantQty: 5,
+      reservedQty: 5,
+      pickedQty: 0,
+      packedQty: 0,
+      backorderQty: 0,
+      updatedAt: new Date(),
+    });
+    const { InventoryUseCases } = await import("../../application/inventory.use-cases");
+    const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any, null as any);
+
+    await expect(inventory.recordReplacementShipmentFromAvailableInventory({
+      productVariantId: 30,
+      qty: 1,
+      warehouseId: 1,
+      orderId: 40,
+      shipmentId: 60,
+      shipmentItemId: 70,
+    })).rejects.toThrow("no active, pickable, unfrozen location");
+
+    expect(storage.adjustInventoryLevel).not.toHaveBeenCalled();
+    expect(pickFromLots).not.toHaveBeenCalled();
+    expect(shipFromLots).not.toHaveBeenCalled();
+  });
+});
