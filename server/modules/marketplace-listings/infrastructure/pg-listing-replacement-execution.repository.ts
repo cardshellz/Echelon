@@ -6,6 +6,7 @@ import type {
   ClaimedListingReplacementStep,
   ListingReplacementStepSuccess,
   MarketplaceListingReplacementExecutionRepository,
+  TerminalListingReplacementOperation,
 } from "../application/execution-ports";
 import type { CanonicalJsonValue } from "../domain/canonical-hash";
 import { MarketplaceListingReplacementError } from "../domain/errors";
@@ -42,6 +43,8 @@ interface OperationRow extends QueryResultRow {
   source_provider_publication_key: string | null;
   source_external_listing_id: string | null;
   target_generation: number;
+  target_provider_publication_key: string | null;
+  target_external_listing_id: string | null;
 }
 
 interface StepRow extends QueryResultRow {
@@ -64,6 +67,9 @@ interface MemberRow extends QueryResultRow {
   sku_snapshot: string;
   disposition: string;
   reason_code: string | null;
+  external_variant_id: string | null;
+  external_offer_id: string | null;
+  external_inventory_item_id: string | null;
 }
 
 interface VersionRow extends QueryResultRow {
@@ -91,16 +97,25 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
 
   async claimNextStep(input: {
     readonly operationId: number;
+    readonly expectedOwner: ListingOwnerRef;
     readonly actor: ListingActor;
     readonly leaseToken: string | null;
     readonly now: Date;
     readonly leaseDurationMs: number;
-  }): Promise<ClaimedListingReplacementStep | null> {
+  }): Promise<
+    ClaimedListingReplacementStep | TerminalListingReplacementOperation
+  > {
     validateClaimInput(input);
     return this.inTransaction(async (client) => {
       const original = await lockOperation(client, input.operationId);
-      if (["completed", "failed", "cancelled"].includes(original.status))
-        return null;
+      assertExpectedOwner(original, input.expectedOwner);
+      if (["completed", "failed", "cancelled"].includes(original.status)) {
+        return {
+          kind: "terminal",
+          status:
+            original.status as TerminalListingReplacementOperation["status"],
+        };
+      }
       if (original.status === "manual_recovery_required") {
         throw executionError(
           "MARKETPLACE_LISTING_REPLACEMENT_MANUAL_RECOVERY_REQUIRED",
@@ -144,11 +159,21 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         input.actor,
         { leaseToken: lease.token },
       );
-      const members = await loadTargetMembers(
+      const targetMembers = await loadPublicationMembers(
         client,
         operation.target_publication_id,
       );
-      const claim = mapClaim(operation, running, members, input.actor);
+      const sourceMembers = await loadPublicationMembers(
+        client,
+        operation.source_publication_id,
+      );
+      const claim = mapClaim(
+        operation,
+        running,
+        sourceMembers,
+        targetMembers,
+        input.actor,
+      );
       return claim;
     });
   }
@@ -514,8 +539,9 @@ async function lockOperation(
   client: PoolClient,
   operationId: number,
 ): Promise<OperationRow> {
+  await lockOperationScope(client, operationId);
   const result = await client.query<OperationRow>(
-    `SELECT o.*, s.owner_kind, s.provider, s.marketplace_id, s.product_id, cls.channel_id, dls.store_connection_id, source.generation AS source_generation, source.desired_state_hash AS source_desired_state_hash, source.provider_publication_key AS source_provider_publication_key, source.external_listing_id AS source_external_listing_id, target.generation AS target_generation FROM marketplace.listing_replacement_operations o JOIN marketplace.listing_scopes s ON s.id = o.scope_id LEFT JOIN marketplace.channel_listing_scopes cls ON cls.scope_id = s.id LEFT JOIN marketplace.dropship_listing_scopes dls ON dls.scope_id = s.id JOIN marketplace.listing_publications source ON source.id = o.source_publication_id AND source.scope_id = o.scope_id JOIN marketplace.listing_publications target ON target.id = o.target_publication_id AND target.scope_id = o.scope_id WHERE o.id = $1 FOR UPDATE OF o`,
+    `SELECT o.*, s.owner_kind, s.provider, s.marketplace_id, s.product_id, cls.channel_id, dls.store_connection_id, source.generation AS source_generation, source.desired_state_hash AS source_desired_state_hash, source.provider_publication_key AS source_provider_publication_key, source.external_listing_id AS source_external_listing_id, target.generation AS target_generation, target.provider_publication_key AS target_provider_publication_key, target.external_listing_id AS target_external_listing_id FROM marketplace.listing_replacement_operations o JOIN marketplace.listing_scopes s ON s.id = o.scope_id LEFT JOIN marketplace.channel_listing_scopes cls ON cls.scope_id = s.id LEFT JOIN marketplace.dropship_listing_scopes dls ON dls.scope_id = s.id JOIN marketplace.listing_publications source ON source.id = o.source_publication_id AND source.scope_id = o.scope_id JOIN marketplace.listing_publications target ON target.id = o.target_publication_id AND target.scope_id = o.scope_id WHERE o.id = $1 FOR UPDATE OF o`,
     [operationId],
   );
   const row = result.rows[0];
@@ -526,6 +552,20 @@ async function lockOperation(
       { operationId },
     );
   return row;
+}
+
+async function lockOperationScope(
+  client: PoolClient,
+  operationId: number,
+): Promise<void> {
+  await client.query(
+    `SELECT s.id
+     FROM marketplace.listing_replacement_operations o
+     JOIN marketplace.listing_scopes s ON s.id = o.scope_id
+     WHERE o.id = $1
+     FOR UPDATE OF s`,
+    [operationId],
+  );
 }
 
 function decideLease(
@@ -660,18 +700,18 @@ async function startStep(
   return row;
 }
 
-async function loadTargetMembers(
+async function loadPublicationMembers(
   client: PoolClient,
   publicationIdValue: string | number,
 ): Promise<MemberRow[]> {
   const result = await client.query<MemberRow>(
-    `SELECT product_variant_id, sku_snapshot, disposition, reason_code FROM marketplace.listing_publication_members WHERE publication_id = $1 ORDER BY product_variant_id ASC`,
+    `SELECT product_variant_id, sku_snapshot, disposition, reason_code, external_variant_id, external_offer_id, external_inventory_item_id FROM marketplace.listing_publication_members WHERE publication_id = $1 ORDER BY product_variant_id ASC`,
     [toId(publicationIdValue)],
   );
   if (result.rows.length === 0)
     throw executionError(
       "MARKETPLACE_LISTING_REPLACEMENT_TARGET_MEMBERS_MISSING",
-      "Replacement target publication contains no members.",
+      "Replacement publication contains no members.",
     );
   return result.rows;
 }
@@ -745,7 +785,8 @@ async function nextEventSequence(
 function mapClaim(
   operation: OperationRow,
   step: StepRow,
-  members: MemberRow[],
+  sourceMembers: MemberRow[],
+  targetMembers: MemberRow[],
   executor: ListingActor,
 ): ClaimedListingReplacementStep {
   const owner = mapOwner(operation);
@@ -771,13 +812,11 @@ function mapClaim(
       },
       targetPublicationId: toId(operation.target_publication_id),
       targetGeneration: operation.target_generation,
+      targetProviderPublicationKey: operation.target_provider_publication_key,
+      targetExternalListingId: operation.target_external_listing_id,
       desiredStateHash: operation.desired_state_hash,
-      targetMembers: members.map((member) => ({
-        productVariantId: member.product_variant_id,
-        skuSnapshot: member.sku_snapshot,
-        disposition: member.disposition as "included" | "excluded",
-        reasonCode: member.reason_code,
-      })),
+      sourceMembers: sourceMembers.map(mapExecutionMember),
+      targetMembers: targetMembers.map(mapExecutionMember),
       actor: {
         type: operation.requested_by_type as ListingActor["type"],
         id: operation.requested_by_id,
@@ -798,6 +837,17 @@ function mapClaim(
   };
 }
 
+function mapExecutionMember(member: MemberRow) {
+  return {
+    productVariantId: member.product_variant_id,
+    skuSnapshot: member.sku_snapshot,
+    disposition: member.disposition as "included" | "excluded",
+    reasonCode: member.reason_code,
+    externalVariantId: member.external_variant_id,
+    externalOfferId: member.external_offer_id,
+    externalInventoryItemId: member.external_inventory_item_id,
+  };
+}
 function mapOwner(row: OperationRow): ListingOwnerRef {
   if (
     row.owner_kind === "channel" &&
@@ -830,8 +880,31 @@ function mapOwner(row: OperationRow): ListingOwnerRef {
   );
 }
 
+function assertExpectedOwner(
+  operation: OperationRow,
+  expected: ListingOwnerRef,
+): void {
+  const actual = mapOwner(operation);
+  const same =
+    actual.kind === expected.kind &&
+    actual.provider === expected.provider &&
+    actual.marketplaceId === expected.marketplaceId &&
+    actual.productId === expected.productId &&
+    (actual.kind === "channel"
+      ? expected.kind === "channel" && actual.channelId === expected.channelId
+      : expected.kind === "dropship" &&
+        actual.storeConnectionId === expected.storeConnectionId);
+  if (!same) {
+    throw executionError(
+      "MARKETPLACE_LISTING_REPLACEMENT_OWNER_BINDING_MISMATCH",
+      "Replacement operation is bound to a different marketplace owner.",
+      { operationId: toId(operation.id) },
+    );
+  }
+}
 function validateClaimInput(input: {
   operationId: number;
+  expectedOwner: ListingOwnerRef;
   actor: ListingActor;
   now: Date;
   leaseDurationMs: number;
@@ -840,6 +913,7 @@ function validateClaimInput(input: {
     !Number.isSafeInteger(input.operationId) ||
     input.operationId <= 0 ||
     !input.actor?.id?.trim() ||
+    !input.expectedOwner ||
     !(input.now instanceof Date) ||
     !Number.isFinite(input.now.getTime()) ||
     !Number.isSafeInteger(input.leaseDurationMs) ||

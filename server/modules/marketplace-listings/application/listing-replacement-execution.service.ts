@@ -1,5 +1,8 @@
 import { MarketplaceListingReplacementError } from "../domain/errors";
-import type { ListingActor } from "../domain/listing-replacement-plan";
+import type {
+  ListingActor,
+  ListingOwnerRef,
+} from "../domain/listing-replacement-plan";
 import type { CanonicalJsonValue } from "../domain/canonical-hash";
 import type {
   ClaimedListingReplacementStep,
@@ -11,14 +14,15 @@ import type {
 
 export interface ExecuteListingReplacementInput {
   readonly operationId: number;
+  readonly expectedOwner: ListingOwnerRef;
   readonly actor: ListingActor;
   readonly leaseDurationMs?: number;
 }
 export type ExecuteListingReplacementResult =
-  | Readonly<{ kind: "idle" }>
   | Readonly<{ kind: "completed"; stepKey: string }>
   | Readonly<{ kind: "failed"; stepKey: string }>
-  | Readonly<{ kind: "manual_recovery_required"; stepKey: string }>;
+  | Readonly<{ kind: "manual_recovery_required"; stepKey: string }>
+  | Readonly<{ kind: "cancelled"; stepKey: string }>;
 
 export class ListingReplacementExecutionService {
   constructor(
@@ -37,12 +41,18 @@ export class ListingReplacementExecutionService {
     for (let stepCount = 0; stepCount < 7; stepCount += 1) {
       const claim = await this.dependencies.repository.claimNextStep({
         operationId: input.operationId,
+        expectedOwner: input.expectedOwner,
         actor: input.actor,
         now: this.dependencies.clock.now(),
         leaseDurationMs: input.leaseDurationMs ?? 300_000,
         leaseToken,
       });
-      if (!claim) return { kind: "idle" };
+      if ("kind" in claim) {
+        return {
+          kind: claim.status,
+          stepKey: "operation.terminal",
+        };
+      }
       if (leaseToken !== null && claim.leaseToken !== leaseToken) {
         throw new MarketplaceListingReplacementError(
           "MARKETPLACE_LISTING_REPLACEMENT_LEASE_CHANGED",
@@ -166,6 +176,7 @@ function assertInput(input: ExecuteListingReplacementInput): void {
     !Number.isSafeInteger(input.operationId) ||
     input.operationId <= 0 ||
     !input.actor?.id?.trim() ||
+    !input.expectedOwner ||
     !["user", "service", "system"].includes(input.actor.type) ||
     (input.leaseDurationMs !== undefined &&
       (!Number.isSafeInteger(input.leaseDurationMs) ||

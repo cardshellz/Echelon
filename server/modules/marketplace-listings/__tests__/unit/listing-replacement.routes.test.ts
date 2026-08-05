@@ -92,6 +92,61 @@ describe("marketplace listing replacement routes", () => {
     });
   });
 
+  it("executes a Channel operation with a server-owned actor and expected owner", async () => {
+    const response = await request(
+      running.url +
+        "/api/marketplace-listings/replacements/channel/ebay/44/execute",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channelId: 7,
+          productId: 33,
+          marketplaceId: "EBAY_US",
+        }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      result: { kind: "completed", stepKey: "switch_mapping.activate_target" },
+    });
+    expect(resolver.executionInput).toEqual({
+      operationId: 44,
+      expectedOwner: {
+        kind: "channel",
+        channelId: 7,
+        productId: 33,
+        provider: "ebay",
+        marketplaceId: "EBAY_US",
+      },
+      actor: { type: "user", id: "admin-1" },
+    });
+  });
+
+  it("executes a Dropship operation through the same owner-bound contract", async () => {
+    const response = await request(
+      running.url +
+        "/api/marketplace-listings/replacements/dropship/ebay/45/execute",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          storeConnectionId: 91,
+          productId: 33,
+          marketplaceId: "EBAY_US",
+        }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(resolver.executionInput).toMatchObject({
+      operationId: 45,
+      expectedOwner: {
+        kind: "dropship",
+        storeConnectionId: 91,
+        productId: 33,
+      },
+    });
+  });
   it("rejects forged actor fields before resolving a service", async () => {
     const response = await request(
       running.url + "/api/marketplace-listings/replacements/channel/ebay/plan",
@@ -178,12 +233,20 @@ function members() {
 class FakeResolver implements MarketplaceListingReplacementServiceResolver {
   owner: any = null;
   input: any = null;
+  executionInput: any = null;
   forOwner(owner: any) {
     this.owner = owner;
     return {
       plan: async (input: unknown) => {
         this.input = input;
         return { kind: "created", operation: { operationId: 1 } };
+      },
+      execute: async (input: unknown) => {
+        this.executionInput = input;
+        return {
+          kind: "completed" as const,
+          stepKey: "switch_mapping.activate_target",
+        };
       },
     };
   }

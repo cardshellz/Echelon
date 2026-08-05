@@ -14,7 +14,8 @@ describe("ListingReplacementExecutionService", () => {
       externalListingId: "new-1",
     });
     await expect(harness.service.execute(command())).resolves.toEqual({
-      kind: "idle",
+      kind: "completed",
+      stepKey: "operation.terminal",
     });
     expect(harness.provider.createTarget).toHaveBeenCalledWith(
       harness.claim.operation,
@@ -52,7 +53,8 @@ describe("ListingReplacementExecutionService", () => {
       new Error("eBay unavailable"),
     );
     await expect(harness.service.execute(command())).resolves.toEqual({
-      kind: "idle",
+      kind: "failed",
+      stepKey: "operation.terminal",
     });
     expect(harness.repository.beginCompensation).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -78,7 +80,17 @@ describe("ListingReplacementExecutionService", () => {
 });
 
 function command() {
-  return { operationId: 100, actor: { type: "user" as const, id: "admin-1" } };
+  return {
+    operationId: 100,
+    expectedOwner: {
+      kind: "channel" as const,
+      channelId: 7,
+      productId: 33,
+      provider: "ebay",
+      marketplaceId: "EBAY_US",
+    },
+    actor: { type: "user" as const, id: "admin-1" },
+  };
 }
 function claim(
   stepKey: ClaimedListingReplacementStep["stepKey"],
@@ -105,13 +117,29 @@ function claim(
       },
       targetPublicationId: 52,
       targetGeneration: 3,
+      targetProviderPublicationKey: null,
+      targetExternalListingId: null,
       desiredStateHash: "b".repeat(64),
+      sourceMembers: [
+        {
+          productVariantId: 12,
+          skuSnapshot: "ARM-ENV-SGL-C750",
+          disposition: "included",
+          reasonCode: null,
+          externalVariantId: "offer-old",
+          externalOfferId: "offer-old",
+          externalInventoryItemId: "ARM-ENV-SGL-C750",
+        },
+      ],
       targetMembers: [
         {
           productVariantId: 12,
           skuSnapshot: "ARM-ENV-SGL-C750",
           disposition: "included",
           reasonCode: null,
+          externalVariantId: null,
+          externalOfferId: null,
+          externalInventoryItemId: null,
         },
       ],
       actor: { type: "user", id: "admin-1" },
@@ -132,7 +160,13 @@ function makeHarness(currentClaim: ClaimedListingReplacementStep) {
     claimNextStep: vi
       .fn()
       .mockResolvedValueOnce(currentClaim)
-      .mockResolvedValueOnce(null),
+      .mockResolvedValueOnce({
+        kind: "terminal",
+        status:
+          currentClaim.stepKey === "cutover.quiesce_source"
+            ? "failed"
+            : "completed",
+      } as const),
     completeStep: vi.fn(async () => undefined),
     activateTargetAndCompleteOperation: vi.fn(async () => undefined),
     failPreflight: vi.fn(async () => undefined),

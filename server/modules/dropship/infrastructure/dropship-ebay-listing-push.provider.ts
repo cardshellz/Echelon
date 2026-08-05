@@ -18,6 +18,7 @@ import {
 } from "../../channels/adapters/ebay/ebay-listing-builder";
 import type {
   EbayInventoryItem,
+  EbayInventoryItemGroup,
   EbayOffer,
 } from "../../channels/adapters/ebay/ebay-types";
 import type { ChannelListingPayload } from "../../channels/channel-adapter.interface";
@@ -44,10 +45,29 @@ interface EbayListingConfig {
 }
 
 interface EbayOfferResponse {
-  offers?: Array<{
-    offerId?: string;
-    listingId?: string;
-  }>;
+  offers?: Array<
+    EbayOffer & {
+      offerId?: string;
+      listingId?: string;
+      status?: string;
+    }
+  >;
+}
+
+export interface DropshipEbayListingLifecycleClient extends EbayListingConnectorClient {
+  getInventoryItemGroup(
+    groupKey: string,
+  ): Promise<(EbayInventoryItemGroup & { variantSKUs?: string[] }) | null>;
+  withdrawOffer(offerId: string): Promise<void>;
+  withdrawOfferByInventoryItemGroup(
+    groupKey: string,
+    marketplaceId: string,
+  ): Promise<void>;
+}
+
+export interface DropshipEbayReplacementSession {
+  readonly marketplaceId: string;
+  readonly client: DropshipEbayListingLifecycleClient;
 }
 
 interface EbayTokenResponse {
@@ -86,18 +106,27 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     private readonly clock: Clock = { now: () => new Date() },
   ) {}
 
-  async pushListing(input: DropshipMarketplaceListingPushRequest): Promise<DropshipMarketplaceListingPushResult> {
+  async pushListing(
+    input: DropshipMarketplaceListingPushRequest,
+  ): Promise<DropshipMarketplaceListingPushResult> {
     let credential = await this.credentials.loadForStoreConnection({
       vendorId: input.vendorId,
       storeConnectionId: input.storeConnectionId,
       platform: "ebay",
     });
-    const config = parseEbayListingConfig(input.listingIntent.marketplaceConfig, credential.config);
+    const config = parseEbayListingConfig(
+      input.listingIntent.marketplaceConfig,
+      credential.config,
+    );
     credential = await this.ensureFreshAccessToken(credential, config);
 
     assertEbayReady(input, config);
     const baseUrl = EBAY_BASE_URLS[config.environment];
-    const draft = buildDropshipEbayListingDraft(input, config, this.listingBuilder);
+    const draft = buildDropshipEbayListingDraft(
+      input,
+      config,
+      this.listingBuilder,
+    );
     const connectorResult = await this.listingConnector.pushListing({
       client: this.createConnectorClient({ credential, config, baseUrl }),
       draft: {
@@ -106,8 +135,11 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         inventoryItems: draft.inventoryItems,
         offers: draft.offers,
         itemGroup: draft.itemGroup,
-        publishMode: input.listingIntent.listingMode === "live" ? "publish" : "stage",
-        hasExistingExternalIds: Boolean(input.existingExternalListingId || input.existingExternalOfferId),
+        publishMode:
+          input.listingIntent.listingMode === "live" ? "publish" : "stage",
+        hasExistingExternalIds: Boolean(
+          input.existingExternalListingId || input.existingExternalOfferId,
+        ),
         existingExternalProductId: input.existingExternalListingId,
         existingOfferIdsByVariantId: {
           [input.productVariantId]: input.existingExternalOfferId,
@@ -116,8 +148,10 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       },
     });
 
-    const offerId = connectorResult.externalOfferIds[input.productVariantId] ?? null;
-    const listingId = connectorResult.externalProductId ?? input.existingExternalListingId;
+    const offerId =
+      connectorResult.externalOfferIds[input.productVariantId] ?? null;
+    const listingId =
+      connectorResult.externalProductId ?? input.existingExternalListingId;
     if (input.listingIntent.listingMode === "live" && !listingId) {
       throw new DropshipError(
         "DROPSHIP_EBAY_LISTING_ID_REQUIRED",
@@ -139,12 +173,53 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     };
   }
 
+  async createReplacementLifecycleClient(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    marketplaceConfig: Record<string, unknown>;
+  }): Promise<DropshipEbayReplacementSession> {
+    let credential = await this.credentials.loadForStoreConnection({
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      platform: "ebay",
+    });
+    const config = parseEbayListingConfig(
+      input.marketplaceConfig,
+      credential.config,
+    );
+    credential = await this.ensureFreshAccessToken(credential, config);
+    return {
+      marketplaceId: config.marketplaceId,
+      client: this.createConnectorClient({
+        credential,
+        config,
+        baseUrl: EBAY_BASE_URLS[config.environment],
+      }),
+    };
+  }
   private createConnectorClient(input: {
     credential: DropshipMarketplaceStoreCredentials;
     config: EbayListingConfig;
     baseUrl: string;
-  }): EbayListingConnectorClient {
+  }): DropshipEbayListingLifecycleClient {
     return {
+      getInventoryItemGroup: async (groupKey) => {
+        try {
+          return await this.requestEbay<
+            EbayInventoryItemGroup & { variantSKUs?: string[] }
+          >({
+            credential: input.credential,
+            config: input.config,
+            method: "GET",
+            path: `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
+            baseUrl: input.baseUrl,
+          });
+        } catch (error: unknown) {
+          if (error instanceof DropshipError && error.context?.status === 404)
+            return null;
+          throw error;
+        }
+      },
       getInventoryItem: async (sku) => {
         try {
           return await this.requestEbay<EbayInventoryItem>({
@@ -182,8 +257,19 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         });
         return {
           offers: (result.offers ?? [])
-            .filter((offer): offer is { offerId: string; listingId?: string } => Boolean(offer.offerId))
-            .map((offer) => offer as EbayOffer & { offerId: string; listingId?: string }),
+            .filter(
+              (
+                offer,
+              ): offer is EbayOffer & {
+                offerId: string;
+                listingId?: string;
+                status?: string;
+              } => Boolean(offer.offerId),
+            )
+            .map(
+              (offer) =>
+                offer as EbayOffer & { offerId: string; listingId?: string },
+            ),
         };
       },
       createOffer: async (offer) => {
@@ -245,6 +331,25 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
           baseUrl: input.baseUrl,
         });
       },
+      withdrawOffer: async (offerId) => {
+        await this.requestEbay({
+          credential: input.credential,
+          config: input.config,
+          method: "POST",
+          path: `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/withdraw`,
+          baseUrl: input.baseUrl,
+        });
+      },
+      withdrawOfferByInventoryItemGroup: async (groupKey, marketplaceId) => {
+        await this.requestEbay({
+          credential: input.credential,
+          config: input.config,
+          method: "POST",
+          path: "/sell/inventory/v1/offer/withdraw_by_inventory_item_group",
+          body: { inventoryItemGroupKey: groupKey, marketplaceId },
+          baseUrl: input.baseUrl,
+        });
+      },
     };
   }
 
@@ -253,8 +358,9 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     config: EbayListingConfig,
   ): Promise<DropshipMarketplaceStoreCredentials> {
     if (
-      credential.accessTokenExpiresAt
-      && credential.accessTokenExpiresAt.getTime() - this.clock.now().getTime() > EBAY_REFRESH_BUFFER_MS
+      credential.accessTokenExpiresAt &&
+      credential.accessTokenExpiresAt.getTime() - this.clock.now().getTime() >
+        EBAY_REFRESH_BUFFER_MS
     ) {
       return credential;
     }
@@ -263,17 +369,27 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         failureCode: "DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED",
         message: "eBay refresh token is missing for dropship listing push.",
       });
-      throw new DropshipError("DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED", "eBay refresh token is required.", {
-        storeConnectionId: credential.storeConnectionId,
-        retryable: false,
-      });
+      throw new DropshipError(
+        "DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED",
+        "eBay refresh token is required.",
+        {
+          storeConnectionId: credential.storeConnectionId,
+          retryable: false,
+        },
+      );
     }
-    const clientId = process.env.DROPSHIP_EBAY_CLIENT_ID ?? process.env.EBAY_CLIENT_ID;
-    const clientSecret = process.env.DROPSHIP_EBAY_CLIENT_SECRET ?? process.env.EBAY_CLIENT_SECRET;
+    const clientId =
+      process.env.DROPSHIP_EBAY_CLIENT_ID ?? process.env.EBAY_CLIENT_ID;
+    const clientSecret =
+      process.env.DROPSHIP_EBAY_CLIENT_SECRET ?? process.env.EBAY_CLIENT_SECRET;
     if (!clientId || !clientSecret) {
-      throw new DropshipError("DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED", "eBay OAuth client credentials are missing.", {
-        retryable: false,
-      });
+      throw new DropshipError(
+        "DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED",
+        "eBay OAuth client credentials are missing.",
+        {
+          retryable: false,
+        },
+      );
     }
 
     const response = await this.fetchImpl(EBAY_TOKEN_URLS[config.environment], {
@@ -312,10 +428,18 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       code: "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID_RESPONSE",
       message: "eBay token refresh returned invalid JSON.",
     });
-    if (!token.access_token || typeof token.expires_in !== "number" || token.expires_in <= 0) {
-      throw new DropshipError("DROPSHIP_EBAY_TOKEN_REFRESH_INVALID", "eBay token refresh response was invalid.", {
-        retryable: true,
-      });
+    if (
+      !token.access_token ||
+      typeof token.expires_in !== "number" ||
+      token.expires_in <= 0
+    ) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID",
+        "eBay token refresh response was invalid.",
+        {
+          retryable: true,
+        },
+      );
     }
     const now = this.clock.now();
     return this.credentials.replaceTokens({
@@ -420,24 +544,44 @@ function parseEbayListingConfig(
     categoryId: requiredConfigString(config, "categoryId"),
     merchantLocationKey: requiredConfigString(config, "merchantLocationKey"),
     businessPolicies: {
-      paymentPolicyId: requiredConfigString(businessPolicies, "paymentPolicyId"),
+      paymentPolicyId: requiredConfigString(
+        businessPolicies,
+        "paymentPolicyId",
+      ),
       returnPolicyId: requiredConfigString(businessPolicies, "returnPolicyId"),
-      fulfillmentPolicyId: requiredConfigString(businessPolicies, "fulfillmentPolicyId"),
+      fulfillmentPolicyId: requiredConfigString(
+        businessPolicies,
+        "fulfillmentPolicyId",
+      ),
     },
-    environment: config.environment === "sandbox" ? "sandbox" as const : "production" as const,
+    environment:
+      config.environment === "sandbox"
+        ? ("sandbox" as const)
+        : ("production" as const),
   };
   return parsed;
 }
 
-function assertEbayReady(input: DropshipMarketplaceListingPushRequest, config: EbayListingConfig): void {
+function assertEbayReady(
+  input: DropshipMarketplaceListingPushRequest,
+  config: EbayListingConfig,
+): void {
   const intent = input.listingIntent;
   if (!intent.sku?.trim()) {
-    throw new DropshipError("DROPSHIP_EBAY_SKU_REQUIRED", "eBay listing push requires a SKU.", { retryable: false });
+    throw new DropshipError(
+      "DROPSHIP_EBAY_SKU_REQUIRED",
+      "eBay listing push requires a SKU.",
+      { retryable: false },
+    );
   }
   if (intent.imageUrls.length === 0) {
-    throw new DropshipError("DROPSHIP_EBAY_IMAGE_REQUIRED", "eBay listing push requires at least one product image.", {
-      retryable: false,
-    });
+    throw new DropshipError(
+      "DROPSHIP_EBAY_IMAGE_REQUIRED",
+      "eBay listing push requires at least one product image.",
+      {
+        retryable: false,
+      },
+    );
   }
   if (!Number.isInteger(intent.weightGrams) || (intent.weightGrams ?? 0) <= 0) {
     throw new DropshipError(
@@ -447,9 +591,13 @@ function assertEbayReady(input: DropshipMarketplaceListingPushRequest, config: E
     );
   }
   if (!config.categoryId || !config.merchantLocationKey) {
-    throw new DropshipError("DROPSHIP_EBAY_LISTING_CONFIG_REQUIRED", "eBay listing configuration is incomplete.", {
-      retryable: false,
-    });
+    throw new DropshipError(
+      "DROPSHIP_EBAY_LISTING_CONFIG_REQUIRED",
+      "eBay listing configuration is incomplete.",
+      {
+        retryable: false,
+      },
+    );
   }
 }
 
@@ -461,9 +609,13 @@ function buildDropshipEbayListingDraft(
   const intent = input.listingIntent;
   const sku = intent.sku?.trim();
   if (!sku) {
-    throw new DropshipError("DROPSHIP_EBAY_SKU_REQUIRED", "eBay listing push requires a SKU.", {
-      retryable: false,
-    });
+    throw new DropshipError(
+      "DROPSHIP_EBAY_SKU_REQUIRED",
+      "eBay listing push requires a SKU.",
+      {
+        retryable: false,
+      },
+    );
   }
   const listing: ChannelListingPayload = {
     productId: input.productVariantId,
@@ -506,7 +658,9 @@ function buildDropshipEbayListingDraft(
       marketplaceCategoryId: config.categoryId,
     },
   };
-  const quantityByVariantId = new Map([[input.productVariantId, intent.quantity]]);
+  const quantityByVariantId = new Map([
+    [input.productVariantId, intent.quantity],
+  ]);
 
   return listingBuilder.buildListingDraft(listing, sharedConfig, {
     availableQuantityByVariantId: quantityByVariantId,
@@ -518,12 +672,17 @@ function buildDropshipEbayListingDraft(
   });
 }
 
-function buildEbayAspects(input: DropshipMarketplaceListingPushRequest): Record<string, string[]> {
+function buildEbayAspects(
+  input: DropshipMarketplaceListingPushRequest,
+): Record<string, string[]> {
   const raw = input.listingIntent.itemSpecifics ?? {};
   const aspects: Record<string, string[]> = {};
   for (const [key, value] of Object.entries(raw)) {
     if (Array.isArray(value)) {
-      const values = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+      const values = value.filter(
+        (item): item is string =>
+          typeof item === "string" && item.trim().length > 0,
+      );
       if (values.length > 0) aspects[key] = values;
     } else if (typeof value === "string" && value.trim()) {
       aspects[key] = [value.trim()];
@@ -535,7 +694,9 @@ function buildEbayAspects(input: DropshipMarketplaceListingPushRequest): Record<
   return aspects;
 }
 
-function mapEbayCondition(condition: string | null): EbayInventoryItem["condition"] {
+function mapEbayCondition(
+  condition: string | null,
+): EbayInventoryItem["condition"] {
   const normalized = condition?.trim().toLowerCase();
   if (!normalized || normalized === "new") {
     return "NEW";
@@ -547,7 +708,9 @@ function mapEbayCondition(condition: string | null): EbayInventoryItem["conditio
   return isEbayCondition(candidate) ? candidate : "NEW";
 }
 
-function isEbayCondition(value: string): value is EbayInventoryItem["condition"] {
+function isEbayCondition(
+  value: string,
+): value is EbayInventoryItem["condition"] {
   return [
     "NEW",
     "LIKE_NEW",
@@ -567,21 +730,31 @@ function isEbayCondition(value: string): value is EbayInventoryItem["condition"]
   ].includes(value);
 }
 
-function requiredConfigString(config: Record<string, unknown>, key: string): string {
+function requiredConfigString(
+  config: Record<string, unknown>,
+  key: string,
+): string {
   const value = config[key];
   if (typeof value !== "string" || !value.trim()) {
-    throw new DropshipError("DROPSHIP_EBAY_LISTING_CONFIG_REQUIRED", "eBay listing configuration is incomplete.", {
-      missingKey: key,
-      retryable: false,
-    });
+    throw new DropshipError(
+      "DROPSHIP_EBAY_LISTING_CONFIG_REQUIRED",
+      "eBay listing configuration is incomplete.",
+      {
+        missingKey: key,
+        retryable: false,
+      },
+    );
   }
   return value.trim();
 }
 
-function recordFromConfig(config: Record<string, unknown>, key: string): Record<string, unknown> {
+function recordFromConfig(
+  config: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
   const value = config[key];
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : {};
 }
 

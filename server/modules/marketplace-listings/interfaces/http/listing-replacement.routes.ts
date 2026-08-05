@@ -5,13 +5,16 @@ import { requirePermission } from "../../../../routes/middleware";
 import {
   MarketplaceListingReplacementError,
   requestedListingMemberSchema,
+  type ExecuteListingReplacementInput,
   type ListingOwnerRef,
+  type ListingReplacementExecutionService,
   type ListingReplacementPlanningService,
 } from "../..";
 
 type PlanningPort = Pick<ListingReplacementPlanningService, "plan">;
+type ExecutionPort = Pick<ListingReplacementExecutionService, "execute">;
 export interface MarketplaceListingReplacementServiceResolver {
-  forOwner(owner: ListingOwnerRef): PlanningPort;
+  forOwner(owner: ListingOwnerRef): PlanningPort & ExecutionPort;
 }
 
 const marketplaceIdSchema = z
@@ -33,6 +36,20 @@ const channelSchema = z
   })
   .strict()
   .superRefine(validateTargetMembers);
+const channelExecutionSchema = z
+  .object({
+    productId: common.productId,
+    marketplaceId: common.marketplaceId,
+    channelId: z.number().int().positive().max(2_147_483_647),
+  })
+  .strict();
+const dropshipExecutionSchema = z
+  .object({
+    productId: common.productId,
+    marketplaceId: common.marketplaceId,
+    storeConnectionId: z.number().int().positive().max(2_147_483_647),
+  })
+  .strict();
 const dropshipSchema = z
   .object({
     ...common,
@@ -98,6 +115,31 @@ export function registerMarketplaceListingReplacementRoutes(
     },
   );
   app.post(
+    "/api/marketplace-listings/replacements/channel/ebay/:operationId/execute",
+    requirePermission("channels", "edit"),
+    async (req, res) => {
+      try {
+        const body = parse(channelExecutionSchema, req.body);
+
+        const operationId = parseOperationId(req.params.operationId);
+        const owner: ListingOwnerRef = {
+          kind: "channel",
+          channelId: body.channelId,
+          productId: body.productId,
+          provider: "ebay",
+          marketplaceId: body.marketplaceId,
+        };
+        return res.status(200).json({
+          result: await resolver
+            .forOwner(owner)
+            .execute(buildExecutionInput(req, owner, operationId)),
+        });
+      } catch (error) {
+        return sendError(res, error);
+      }
+    },
+  );
+  app.post(
     "/api/marketplace-listings/replacements/dropship/ebay/plan",
     requirePermission("dropship", "manage_operations"),
     async (req, res) => {
@@ -120,6 +162,54 @@ export function registerMarketplaceListingReplacementRoutes(
       }
     },
   );
+  app.post(
+    "/api/marketplace-listings/replacements/dropship/ebay/:operationId/execute",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const body = parse(dropshipExecutionSchema, req.body);
+
+        const operationId = parseOperationId(req.params.operationId);
+        const owner: ListingOwnerRef = {
+          kind: "dropship",
+          storeConnectionId: body.storeConnectionId,
+          productId: body.productId,
+          provider: "ebay",
+          marketplaceId: body.marketplaceId,
+        };
+        return res.status(200).json({
+          result: await resolver
+            .forOwner(owner)
+            .execute(buildExecutionInput(req, owner, operationId)),
+        });
+      } catch (error) {
+        return sendError(res, error);
+      }
+    },
+  );
+}
+
+function buildExecutionInput(
+  req: Request,
+  owner: ListingOwnerRef,
+  operationId: number,
+): ExecuteListingReplacementInput {
+  return {
+    operationId,
+    expectedOwner: owner,
+    actor: { type: "user", id: sessionUser(req) },
+  };
+}
+
+function parseOperationId(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new MarketplaceListingReplacementError(
+      "MARKETPLACE_LISTING_REPLACEMENT_REQUEST_INVALID",
+      "Replacement operation ID is invalid.",
+    );
+  }
+  return parsed;
 }
 
 function buildInput(

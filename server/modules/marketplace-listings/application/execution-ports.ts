@@ -21,6 +21,12 @@ export type ListingReplacementExecutionStepKey =
   | (typeof LISTING_REPLACEMENT_FORWARD_STEP_KEYS)[number]
   | (typeof LISTING_REPLACEMENT_COMPENSATION_STEP_KEYS)[number];
 
+export interface ListingReplacementExecutionMember extends PlannedListingMember {
+  readonly externalVariantId: string | null;
+  readonly externalOfferId: string | null;
+  readonly externalInventoryItemId: string | null;
+}
+
 export interface ListingReplacementExecutionContext {
   readonly operationId: number;
   readonly operationStateVersion: number;
@@ -28,8 +34,11 @@ export interface ListingReplacementExecutionContext {
   readonly sourcePublication: SourceListingPublicationSnapshot;
   readonly targetPublicationId: number;
   readonly targetGeneration: number;
+  readonly targetProviderPublicationKey: string | null;
+  readonly targetExternalListingId: string | null;
   readonly desiredStateHash: string;
-  readonly targetMembers: readonly PlannedListingMember[];
+  readonly sourceMembers: readonly ListingReplacementExecutionMember[];
+  readonly targetMembers: readonly ListingReplacementExecutionMember[];
   readonly actor: ListingActor;
   readonly correlationId: string | null;
 }
@@ -60,14 +69,22 @@ export interface ListingReplacementStepSuccess {
   readonly externalUrl?: string | null;
 }
 
+export interface TerminalListingReplacementOperation {
+  readonly kind: "terminal";
+  readonly status: "completed" | "failed" | "cancelled";
+}
+
 export interface MarketplaceListingReplacementExecutionRepository {
   claimNextStep(input: {
     readonly operationId: number;
+    readonly expectedOwner: ListingOwnerRef;
     readonly actor: ListingActor;
     readonly leaseToken: string | null;
     readonly now: Date;
     readonly leaseDurationMs: number;
-  }): Promise<ClaimedListingReplacementStep | null>;
+  }): Promise<
+    ClaimedListingReplacementStep | TerminalListingReplacementOperation
+  >;
   completeStep(input: {
     readonly claim: ClaimedListingReplacementStep;
     readonly result: ListingReplacementStepSuccess;
