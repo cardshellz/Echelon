@@ -110,6 +110,9 @@ function makeDb(executeResponses: Array<{ rows: any[] }>) {
     ) {
       return { rows: [] };
     }
+    if (text.includes("AS has_positive_item_authority")) {
+      return { rows: [{ has_positive_item_authority: true }] };
+    }
     if (remaining.length === 0) return { rows: [] };
     return remaining.shift()!;
   });
@@ -334,6 +337,31 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       }),
       { executeImmediately: false },
     );
+  });
+
+  it("quarantines an unmapped provider-first shell when ShipStation omits package contents", async () => {
+    const shipmentPayload = makeShipmentPayload({ shipmentItems: [] });
+    const mock = makeDb([{
+      rows: [{
+        id: 5034,
+        order_id: 203878,
+        status: "shipped",
+        source: "shipstation_split",
+        shipment_purpose: "customer_fulfillment",
+        requires_review: true,
+        external_fulfillment_id: "shipstation_shipment:77777",
+        tracking_number: "1Z12345",
+      }],
+    }]);
+    globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
+
+    const processed = await processTestShipment(mock, shipmentPayload);
+
+    expect(processed).toBe(0);
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
+    const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
+    expect(sqlText).toContain("INSERT INTO wms.reconciliation_exceptions");
+    expect(sqlText).toContain("shipstation_unmapped_physical_shipment");
   });
 
   it("records a post-refund package for review without direct OMS or provider writes", async () => {

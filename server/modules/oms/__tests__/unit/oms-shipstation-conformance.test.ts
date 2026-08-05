@@ -118,6 +118,7 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(splitResolutionBlock).toContain("SET shipment_id = ${row.id}");
     expect(splitResolutionBlock).toContain("AND qty > ${item.qty}");
     expect(SHIPSTATION_SRC).toContain("parseWmsShipmentItemLineKey");
+    expect(SHIPSTATION_SRC).toContain("shipstation_package_contents_missing");
     expect(itemSyncBlock).toContain("shipstation_split_items_unmapped");
     expect(itemSyncBlock).toContain("shipstation_split_source_item_missing");
     expect(itemSyncBlock).toContain("UPDATE wms.outbound_shipment_items");
@@ -126,6 +127,8 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(itemSyncBlock).toContain("the remaining demand was preserved for review");
     expect(itemSyncWrapperBlock).toContain('typeof db.transaction === "function"');
     expect(itemSyncWrapperBlock).toContain("await db.transaction(syncItems)");
+    expect(SHIPSTATION_SRC).toContain("hasUsablePositiveProviderItems");
+    expect(SHIPSTATION_SRC).toContain("hasPositiveCustomerShipmentItemAuthority");
   });
 
   it("exempts legitimate ShipStation split children from active engine identity uniqueness", () => {
