@@ -195,6 +195,7 @@ function makeShipmentPayload(overrides: Partial<any> = {}) {
     serviceCode: "ups_ground",
     shipDate: SHIP_DATE,
     voidDate: null as string | null,
+    isReturnLabel: false,
     shipmentCost: 0,
     ...overrides,
   };

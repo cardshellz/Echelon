@@ -71,6 +71,7 @@ import { AspectEditor } from "@/components/ebay/AspectEditor";
 import { PushProgressModal } from "@/components/ebay/PushProgressModal";
 import { SyncProgressModal } from "@/components/ebay/SyncProgressModal";
 import { MarketplaceListingRegistrationDialog } from "@/components/marketplace/MarketplaceListingRegistrationDialog";
+import { MarketplaceListingReplacementDialog } from "@/components/marketplace/MarketplaceListingReplacementDialog";
 import {
   fetchChannelEbayMarketplaceListingRegistrationStatuses,
   type MarketplaceListingRegistrationStatus,
@@ -491,16 +492,39 @@ export default function EbayChannelPage() {
   const [feedSearch, setFeedSearch] = useState("");
   const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
   const [registrationTarget, setRegistrationTarget] = useState<FeedItem | null>(null);
+  const [replacementTarget, setReplacementTarget] = useState<FeedItem | null>(null);
+  const replacementVariants = useMemo(
+    () =>
+      replacementTarget?.variants.map((variant) => ({
+      id: variant.id,
+      sku: variant.sku,
+      name: variant.name,
+      included: variant.effectivelyListed,
+      })) ?? [],
+    [replacementTarget],
+  );
   const registrationOwner = useMemo(() => {
     const marketplaceId = config?.config.marketplaceId?.trim();
-    if (!registrationTarget || !config?.channel || !marketplaceId) return null;
+    const target = registrationTarget ?? replacementTarget;
+    if (!target || !config?.channel || !marketplaceId) return null;
     return {
       kind: "channel" as const,
       channelId: config.channel.id,
-      productId: registrationTarget.id,
+      productId: target.id,
       marketplaceId,
     };
-  }, [config?.channel, config?.config.marketplaceId, registrationTarget]);
+  }, [config?.channel, config?.config.marketplaceId, registrationTarget, replacementTarget]);
+  const handleReplacementComplete = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+    if (registrationStatusQueryInput) {
+      void queryClient.invalidateQueries({ queryKey: registrationStatusQueryKey, exact: true });
+    }
+    toast({
+      title: "eBay listing replaced",
+      description: "The replacement listing is live and is now Echelon's controlled baseline.",
+    });
+  }, [queryClient, registrationStatusQueryInput, registrationStatusQueryKey, toast]);
+
   const handleRegistrationComplete = useCallback(() => {
     if (registrationStatusQueryInput) {
       void queryClient.invalidateQueries({
@@ -1859,13 +1883,13 @@ export default function EbayChannelPage() {
                       const registrationStatusChecking = !registrationStatusUnavailable
                         && (registrationStatusesLoading || registrationStatusesFetching);
                       const registrationControlDisabled = registrationStatusUnavailable
-                        || registrationStatusChecking || registrationStatus !== null;
+                        || registrationStatusChecking || registrationConflictsWithCurrentListing;
                       const registrationControlTitle = registrationStatusUnavailable
                         ? "Stored listing baseline status is unavailable"
                         : registrationStatusChecking
                           ? "Checking the stored listing baseline status"
                           : registrationMatchesCurrentListing
-                            ? "This live eBay listing is registered as the controlled baseline"
+                            ? "Review and replace this registered live eBay listing"
                             : registrationConflictsWithCurrentListing
                               ? "A different eBay listing is already registered for this product"
                               : "Review and register the live eBay listing baseline";
@@ -1874,7 +1898,7 @@ export default function EbayChannelPage() {
                         : registrationStatusChecking
                           ? "Checking"
                           : registrationMatchesCurrentListing
-                            ? "Registered"
+                            ? "Replace listing"
                             : registrationConflictsWithCurrentListing ? "Baseline mismatch" : "Baseline";
                       const registrationIconClass = registrationMatchesCurrentListing
                         ? "text-green-600"
@@ -2036,7 +2060,8 @@ export default function EbayChannelPage() {
                                   disabled={registrationControlDisabled}
                                   onClick={(event) => {
                                     event.stopPropagation();
-                                    setRegistrationTarget(item);
+                                    if (registrationMatchesCurrentListing) setReplacementTarget(item);
+                                    else setRegistrationTarget(item);
                                   }}
                                   title={registrationControlTitle}
                                 >
@@ -2185,7 +2210,8 @@ export default function EbayChannelPage() {
                                     disabled={registrationControlDisabled}
                                     onClick={(event) => {
                                       event.stopPropagation();
-                                      setRegistrationTarget(item);
+                                      if (registrationMatchesCurrentListing) setReplacementTarget(item);
+                                      else setRegistrationTarget(item);
                                     }}
                                     title={registrationControlTitle}
                                     aria-label={registrationControlTitle}
@@ -2701,6 +2727,19 @@ export default function EbayChannelPage() {
           productName={registrationTarget.name}
           externalListingId={registrationTarget.externalListingId}
           onRegistered={handleRegistrationComplete}
+        />
+      )}
+
+      {replacementTarget && registrationOwner && (
+        <MarketplaceListingReplacementDialog
+          open
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) setReplacementTarget(null);
+          }}
+          owner={registrationOwner}
+          productName={replacementTarget.name}
+          variants={replacementVariants}
+          onCompleted={handleReplacementComplete}
         />
       )}
 

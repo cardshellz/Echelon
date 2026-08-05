@@ -122,6 +122,35 @@ describe("dropship marketplace listing push providers", () => {
     expect(fetcher.calls[3]?.url).toContain("/sell/inventory/v1/offer/offer-101/publish");
   });
 
+  it("creates an authenticated eBay replacement lifecycle client for a Dropship store", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ inventoryItemGroupKey: "GROUP-V2", variantSKUs: ["SKU-101"] }),
+      emptyResponse(),
+    ]);
+    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+
+    const session = await provider.createReplacementLifecycleClient({
+      vendorId: 10,
+      storeConnectionId: 22,
+      marketplaceConfig: ebayMarketplaceConfig(),
+    });
+    const group = await session.client.getInventoryItemGroup("GROUP-V2");
+    await session.client.withdrawOfferByInventoryItemGroup("GROUP-V2", "EBAY_US");
+
+    expect(session.marketplaceId).toBe("EBAY_US");
+    expect(group).toMatchObject({ variantSKUs: ["SKU-101"] });
+    expect(fetcher.calls.map((call) => ({ url: call.url, method: call.init.method }))).toEqual([
+      {
+        url: "https://api.ebay.com/sell/inventory/v1/inventory_item_group/GROUP-V2",
+        method: "GET",
+      },
+      {
+        url: "https://api.ebay.com/sell/inventory/v1/offer/withdraw_by_inventory_item_group",
+        method: "POST",
+      },
+    ]);
+  });
   it("does not invalidate store credentials for an ordinary eBay listing API 400", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([

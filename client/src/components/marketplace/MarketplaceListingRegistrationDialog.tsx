@@ -172,15 +172,14 @@ export function MarketplaceListingRegistrationDialog({
   const idempotencyKeyRef = useRef<string | null>(null);
   const requestVersionRef = useRef(0);
 
-  const requestAbortControllerRef = useRef<AbortController | null>(null);
-  const endpointBase =
-
   useEffect(() => () => {
     requestVersionRef.current += 1;
     requestAbortControllerRef.current?.abort();
     requestAbortControllerRef.current = null;
   }, []);
 
+  const requestAbortControllerRef = useRef<AbortController | null>(null);
+  const endpointBase =
     owner.kind === "channel"
       ? "/api/marketplace-listings/registrations/channel/ebay"
       : "/api/marketplace-listings/registrations/dropship/ebay";

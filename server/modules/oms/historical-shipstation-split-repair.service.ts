@@ -50,6 +50,8 @@ export interface HistoricalSplitCanonicalPackage {
 export interface HistoricalSplitCanonicalCorrection {
   readonly providerShipmentId: number;
   readonly physicalShipmentId: number;
+  readonly correctionKind?: "quantity_repartition" | "voided_label_supersession";
+  readonly supersededProviderShipmentId?: number;
 }
 
 export interface HistoricalSplitInspection {

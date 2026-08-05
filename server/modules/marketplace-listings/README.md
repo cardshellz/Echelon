@@ -68,21 +68,32 @@ compensation evidence that the target is not sellable and the source is live.
 Uncertain external state belongs in
 `manual_recovery_required`, not `failed`.
 
-## Required later stages
+## Stage 2B replacement execution
 
-1. Add a provider execution contract and an eBay adapter shared by Channel and
-   Dropship owners. Prove provider-specific sequencing, retry, verification,
-   and compensation behavior before enabling execution. The executor must use
-   compare-and-set writes with the current lease token and explicitly lock the
-   operation before any step update; triggers validate state but cannot prove
-   that a caller possessed the lease or impose row-lock order before the update
-   statement begins.
-2. Add the internal replacement workflow for progress, recovery, and execution
-   audit evidence.
-3. Enable production replacement execution only after disposable-PostgreSQL
-   concurrency tests and provider sandbox tests cover partial failures and
-   retries.
+Stage 2B now provides:
 
+- a provider-neutral execution contract and one eBay adapter used by Channel and
+  Dropship owners;
+- owner-bound, leased step claims, evidence persistence, deterministic retries,
+  verification, compensation, and manual-recovery classification;
+- exact target membership, so variants explicitly excluded from the plan are
+  not copied into the replacement item group;
+- Channel and Dropship HTTP planning/execution routes with server-derived actors
+  and operation-owner validation before any lease mutation;
+- a reusable review/execute dialog that explicitly includes or excludes every
+  local variant; the Channel listing feed launches it for a registered current
+  baseline, while a future Dropship listing-publication view can supply the same
+  owner and variant contract; and
+- default-off live execution. Set
+  `MARKETPLACE_LISTING_REPLACEMENT_EXECUTION_ENABLED=true` only after eBay
+  sandbox validation for the intended account and listing shape.
+
+Production enablement remains a rollout decision, not a code default. Provider
+sandbox tests must still prove the account-specific group replacement behavior,
+partial failures, retries, and compensation before the flag is enabled.
+Disposable-PostgreSQL concurrency coverage must also be run in CI; the unit
+contract proves the repository locks scope before operation, but it does not
+replace a two-connection lock-contention test.
 Provider calls must remain outside the domain and PostgreSQL repository. Every
 transition writer must lock in this order: scope, operation, publication or
 step. It must update one subject version and append that exact version's event
