@@ -1,5 +1,6 @@
 import type {
   DropshipCartonizedPackage,
+  DropshipPackagingWarning,
   NormalizedDropshipShippingDestination,
   NormalizedDropshipShippingQuoteItem,
 } from "../domain/shipping-quote";
@@ -20,6 +21,8 @@ export interface DropshipCartonizationResult {
     version: string;
   };
   warnings: string[];
+  /** Structured packaging degradation signals; persisted on the quote snapshot. */
+  packagingWarnings: DropshipPackagingWarning[];
 }
 
 export interface DropshipCartonizationProvider {

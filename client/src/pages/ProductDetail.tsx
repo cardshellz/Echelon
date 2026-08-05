@@ -219,7 +219,29 @@ function parsePositiveMeasurement(rawValue: string, label: string): number | nul
   return parsed;
 }
 
+/**
+ * Convert a display-unit measurement to stored units (grams / millimeters).
+ * Storage is numeric(10,2) (migration 185), so round to 2 decimals — NOT to
+ * whole units. Rounding to whole mm was the round-trip bug: 6in → 152.4mm →
+ * truncated to 152 → redisplayed as 5.984in. With 2-decimal storage, 6in →
+ * 152.40mm → displays as exactly 6in.
+ */
 function toStoredMeasurement(rawValue: string, label: string, multiplier: number): number | null {
+  const parsed = parsePositiveMeasurement(rawValue, label);
+  if (parsed === null) return null;
+
+  const storedValue = Math.round(parsed * multiplier * 100) / 100;
+  if (!Number.isFinite(storedValue) || storedValue <= 0) {
+    throw new Error(`${label} is too small to store.`);
+  }
+  return storedValue;
+}
+
+/**
+ * Integer-storage variant for rider/void columns (variant_shipping_attrs is
+ * still integer — out of scope for the numeric(10,2) conversion).
+ */
+function toStoredIntegerMeasurement(rawValue: string, label: string, multiplier: number): number | null {
   const parsed = parsePositiveMeasurement(rawValue, label);
   if (parsed === null) return null;
 
@@ -249,6 +271,25 @@ function buildVariantPackagePayload(
   }
 
   return payload;
+}
+
+function buildVariantPackingFlagsPayload(input: {
+  shipsInOwnContainer: boolean;
+  maxUnitsPerPackage: string;
+}): { shipsInOwnContainer: boolean; maxUnitsPerPackage: number | null } {
+  const trimmed = input.maxUnitsPerPackage.trim();
+  let maxUnitsPerPackage: number | null = null;
+  if (trimmed) {
+    const parsed = Number(trimmed);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error("Max units per package must be a positive whole number.");
+    }
+    maxUnitsPerPackage = parsed;
+  }
+  return {
+    shipsInOwnContainer: input.shipsInOwnContainer,
+    maxUnitsPerPackage,
+  };
 }
 
 function buildVariantPackageDisplay(variant: ProductVariantRow) {
@@ -291,6 +332,8 @@ interface ProductVariantRow {
   lengthMm: number | null;
   widthMm: number | null;
   heightMm: number | null;
+  shipsInOwnContainer: boolean;
+  maxUnitsPerPackage: number | null;
   hierarchyLevel: number;
   parentVariantId: number | null;
   isBaseUnit: boolean;
@@ -1224,7 +1267,9 @@ function ProductInventoryTab({ productId }: { productId: number }) {
   );
 }
 
-// --- Shipping behavior (shipping-engine packing attributes) for a single variant ---
+// --- Shipping behavior (shipping-engine rider/void attributes) for a single variant ---
+// SIOC itself is canonical on the variant and edited in Package Details above;
+// this panel edits only rider/void behavior (shipping.variant_shipping_attrs).
 interface VariantShippingAttrsRow {
   productVariantId: number;
   shipsInOwnContainer: boolean;
@@ -1239,10 +1284,12 @@ function VariantShippingBehavior({
   variantId,
   sku,
   name,
+  shipsInOwnContainer,
 }: {
   variantId: number;
   sku: string | null;
   name: string;
+  shipsInOwnContainer: boolean;
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -1261,7 +1308,6 @@ function VariantShippingBehavior({
   const row = data?.rows?.find((r) => r.productVariantId === variantId) || null;
 
   const [shippingForm, setShippingForm] = useState({
-    shipsInOwnContainer: false,
     riderEligible: false,
     riderVoidIn3: "",
     riderVoidMaxWeightOz: "",
@@ -1271,7 +1317,6 @@ function VariantShippingBehavior({
 
   useEffect(() => {
     setShippingForm({
-      shipsInOwnContainer: row?.shipsInOwnContainer ?? false,
       riderEligible: row?.riderEligible ?? false,
       riderVoidIn3: formatMeasurementInput(row?.riderVoidCm3, CUBIC_CM_PER_CUBIC_INCH),
       riderVoidMaxWeightOz: formatMeasurementInput(row?.riderVoidMaxWeightGrams, GRAMS_PER_OUNCE),
@@ -1282,14 +1327,14 @@ function VariantShippingBehavior({
 
   const saveShippingMutation = useMutation({
     mutationFn: async () => {
-      const riderVoidCm3 = shippingForm.shipsInOwnContainer
-        ? toStoredMeasurement(shippingForm.riderVoidIn3, "Rider void volume", CUBIC_CM_PER_CUBIC_INCH)
+      const riderVoidCm3 = shipsInOwnContainer
+        ? toStoredIntegerMeasurement(shippingForm.riderVoidIn3, "Rider void volume", CUBIC_CM_PER_CUBIC_INCH)
         : null;
-      const riderVoidMaxWeightGrams = shippingForm.shipsInOwnContainer
-        ? toStoredMeasurement(shippingForm.riderVoidMaxWeightOz, "Rider void max weight", GRAMS_PER_OUNCE)
+      const riderVoidMaxWeightGrams = shipsInOwnContainer
+        ? toStoredIntegerMeasurement(shippingForm.riderVoidMaxWeightOz, "Rider void max weight", GRAMS_PER_OUNCE)
         : null;
       let riderVoidMaxItems: number | null = null;
-      if (shippingForm.shipsInOwnContainer && shippingForm.riderVoidMaxItems.trim()) {
+      if (shipsInOwnContainer && shippingForm.riderVoidMaxItems.trim()) {
         const parsed = parseInt(shippingForm.riderVoidMaxItems.trim());
         if (!Number.isInteger(parsed) || parsed <= 0) {
           throw new Error("Rider void max items must be a positive whole number.");
@@ -1302,7 +1347,6 @@ function VariantShippingBehavior({
         credentials: "include",
         body: JSON.stringify({
           productVariantId: variantId,
-          shipsInOwnContainer: shippingForm.shipsInOwnContainer,
           riderEligible: shippingForm.riderEligible,
           riderVoidCm3,
           riderVoidMaxWeightGrams,
@@ -1333,23 +1377,10 @@ function VariantShippingBehavior({
       <div>
         <Label className="text-sm font-medium">Shipping behavior</Label>
         <p className="text-xs text-muted-foreground">
-          Packing attributes used by the shipping engine's cartonizer. Saved separately from the variant.
+          Rider/void packing attributes used by the shipping engine's cartonizer. Ships-in-own-container is set in Package Details above.
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="variant-shipping-sioc"
-            checked={shippingForm.shipsInOwnContainer}
-            onCheckedChange={(checked) => {
-              setShippingForm((prev) => ({ ...prev, shipsInOwnContainer: checked === true }));
-              setShippingDirty(true);
-            }}
-          />
-          <label htmlFor="variant-shipping-sioc" className="text-sm cursor-pointer">
-            Ships in own container (SIOC)
-          </label>
-        </div>
         <div className="flex items-center gap-2">
           <Checkbox
             id="variant-shipping-rider"
@@ -1364,7 +1395,7 @@ function VariantShippingBehavior({
           </label>
         </div>
       </div>
-      {shippingForm.shipsInOwnContainer && (
+      {shipsInOwnContainer && (
         <div className="grid grid-cols-3 gap-3">
           <div className="space-y-1.5">
             <Label className="text-xs">Rider void (in³)</Label>
@@ -2065,6 +2096,8 @@ export default function ProductDetail() {
     parentVariantId: null as number | null,
     isBaseUnit: false,
     package: emptyVariantPackageInput(),
+    shipsInOwnContainer: false,
+    maxUnitsPerPackage: "",
   });
   const [skuManuallyEdited, setSkuManuallyEdited] = useState(false);
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
@@ -2126,6 +2159,8 @@ export default function ProductDetail() {
       parentVariantId: null,
       isBaseUnit: false,
       package: emptyVariantPackageInput(),
+      shipsInOwnContainer: false,
+      maxUnitsPerPackage: "",
     });
     setVariantDialogOpen(true);
   }, [computeAutoSku, computeAutoName]);
@@ -2157,6 +2192,8 @@ export default function ProductDetail() {
       parentVariantId: null,
       isBaseUnit: false,
       package: emptyVariantPackageInput(),
+      shipsInOwnContainer: false,
+      maxUnitsPerPackage: "",
     });
     setVariantDialogOpen(true);
     toast({
@@ -2178,6 +2215,8 @@ export default function ProductDetail() {
       parentVariantId: variant.parentVariantId,
       isBaseUnit: variant.isBaseUnit ?? false,
       package: variantPackageInputFromVariant(variant),
+      shipsInOwnContainer: variant.shipsInOwnContainer ?? false,
+      maxUnitsPerPackage: variant.maxUnitsPerPackage != null ? String(variant.maxUnitsPerPackage) : "",
     });
     setVariantDialogOpen(true);
   }, []);
@@ -2213,6 +2252,7 @@ export default function ProductDetail() {
   const createVariantMutation = useMutation({
     mutationFn: async (data: typeof variantForm) => {
       const packageAttributes = buildVariantPackagePayload(data.package, "null");
+      const packingFlags = buildVariantPackingFlagsPayload(data);
       const res = await fetch(`/api/products/${product?.productId}/variants`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2225,6 +2265,7 @@ export default function ProductDetail() {
           parentVariantId: data.parentVariantId,
           isBaseUnit: data.isBaseUnit,
           ...packageAttributes,
+          ...packingFlags,
         }),
       });
       if (!res.ok) {
@@ -2270,6 +2311,7 @@ export default function ProductDetail() {
   const updateVariantMutation = useMutation({
     mutationFn: async ({ id, data }: { id: number; data: typeof variantForm }) => {
       const packageAttributes = buildVariantPackagePayload(data.package, "null");
+      const packingFlags = buildVariantPackingFlagsPayload(data);
       const res = await fetch(`/api/product-variants/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -2282,6 +2324,7 @@ export default function ProductDetail() {
           parentVariantId: data.parentVariantId,
           isBaseUnit: data.isBaseUnit,
           ...packageAttributes,
+          ...packingFlags,
         }),
       });
       if (!res.ok) {
@@ -4017,6 +4060,31 @@ export default function ProductDetail() {
                   />
                 </div>
               </div>
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="variant-ships-in-own-container"
+                    checked={variantForm.shipsInOwnContainer}
+                    onCheckedChange={(checked) => setVariantForm((prev) => ({ ...prev, shipsInOwnContainer: checked === true }))}
+                  />
+                  <label htmlFor="variant-ships-in-own-container" className="text-sm cursor-pointer">
+                    Ships in its own container (no outer box)
+                  </label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="variant-max-units-per-package" className="text-sm">Max units per package</Label>
+                  <Input
+                    id="variant-max-units-per-package"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={variantForm.maxUnitsPerPackage}
+                    onChange={(e) => setVariantForm((prev) => ({ ...prev, maxUnitsPerPackage: e.target.value }))}
+                    placeholder="No cap"
+                    className="h-9 w-28"
+                  />
+                </div>
+              </div>
             </div>
 
             {editingVariant && (
@@ -4024,6 +4092,7 @@ export default function ProductDetail() {
                 variantId={editingVariant.id}
                 sku={editingVariant.sku}
                 name={editingVariant.name}
+                shipsInOwnContainer={variantForm.shipsInOwnContainer}
               />
             )}
 

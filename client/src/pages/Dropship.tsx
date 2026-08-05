@@ -385,7 +385,6 @@ interface ShippingBoxFormState {
 
 interface ShippingPackageProfileFormState {
   productVariantId: string;
-  shipAlone: boolean;
   defaultCarrier: string;
   defaultService: string;
   defaultBoxId: string;
@@ -557,7 +556,6 @@ function makeEmptyReturnCreateForm(): ReturnCreateFormState {
 
 const emptyShippingPackageProfileForm: ShippingPackageProfileFormState = {
   productVariantId: "",
-  shipAlone: false,
   defaultCarrier: "",
   defaultService: "",
   defaultBoxId: "",
@@ -3721,7 +3719,6 @@ function ShippingConfigTab() {
     await runShippingAction("profile", async () => {
       await putJson("/api/dropship/admin/shipping/package-profiles", buildShippingPackageProfileInput({
         productVariantId: profileForm.productVariantId,
-        shipAlone: profileForm.shipAlone,
         defaultCarrier: profileForm.defaultCarrier,
         defaultService: profileForm.defaultService,
         defaultBoxId: profileForm.defaultBoxId,
@@ -4105,7 +4102,6 @@ function ShippingPackageProfilePanel({
             onChange(profile
               ? {
                   productVariantId: value,
-                  shipAlone: profile.shipAlone,
                   defaultCarrier: profile.defaultCarrier ?? "",
                   defaultService: profile.defaultService ?? "",
                   defaultBoxId: profile.defaultBoxId === null ? "" : String(profile.defaultBoxId),
@@ -4162,22 +4158,10 @@ function ShippingPackageProfilePanel({
           </Select>
         </div>
         <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
-        <div>
-          <label className="text-sm font-medium">Ship alone</label>
-          <Select value={form.shipAlone ? "yes" : "no"} onValueChange={(value) => onChange((current) => ({ ...current, shipAlone: value === "yes" }))}>
-            <SelectTrigger className="mt-2">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="no">No</SelectItem>
-              <SelectItem value="yes">Yes</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
       </div>
       <Button
         className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-        disabled={isSaving || !selectedVariant || !packageDataComplete}
+        disabled={isSaving || !selectedVariant}
         onClick={onSave}
       >
         <Save className="h-4 w-4" />
@@ -4682,7 +4666,7 @@ function ShippingProductProfilesTable({
           profile.defaultCarrier,
           profile.defaultService,
           profile.defaultBoxId ? `Box ${profile.defaultBoxId}` : null,
-          profile.shipAlone ? "Ships alone" : null,
+          profile.shipsInOwnContainer ? "Ships in own container" : null,
         ].filter(Boolean).join(" / ") || "None",
         profile.isActive ? "Active" : "Inactive",
       ])}

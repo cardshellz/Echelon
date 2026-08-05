@@ -272,7 +272,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            p.condition AS condition,
            p.item_specifics,
            assets.image_urls,
-           pv.weight_grams,
+           pv.weight_grams::float8 AS weight_grams,
            p.is_active AS product_is_active,
            pv.is_active AS variant_is_active,
            pv.units_per_variant,

@@ -32,8 +32,11 @@ describe("catalog package attributes", () => {
     });
   });
 
-  it("rejects floating point and non-positive package values", () => {
-    expect(() => extractPackageAttributeUpdates({ weightGrams: 1.5 })).toThrow(PackageAttributeValidationError);
+  it("accepts 2-decimal package values and rejects non-positive or over-precise ones", () => {
+    // numeric(10,2) storage (migration 185): decimals with ≤2 places are valid.
+    expect(extractPackageAttributeUpdates({ weightGrams: 226.8 })).toEqual({ weightGrams: 226.8 });
+    expect(extractPackageAttributeUpdates({ lengthMm: 152.4 })).toEqual({ lengthMm: 152.4 });
+    expect(() => extractPackageAttributeUpdates({ weightGrams: 1.555 })).toThrow(PackageAttributeValidationError);
     expect(() => extractPackageAttributeUpdates({ lengthMm: 0 })).toThrow(PackageAttributeValidationError);
     expect(() => extractPackageAttributeUpdates({ widthMm: -1 })).toThrow(PackageAttributeValidationError);
   });
@@ -64,6 +67,6 @@ describe("catalog package attributes", () => {
   it("rejects invalid bulk rows before any database write can run", () => {
     expect(() => parsePackageAttributeBulkRows([])).toThrow("rows array required");
     expect(() => parsePackageAttributeBulkRows([{ variantId: 0, updates: { weightGrams: 100 } }])).toThrow("Row 1 has an invalid variantId");
-    expect(() => parsePackageAttributeBulkRows([{ variantId: 12, updates: { heightMm: "10" } }])).toThrow("heightMm must be a positive integer or null");
+    expect(() => parsePackageAttributeBulkRows([{ variantId: 12, updates: { heightMm: "10" } }])).toThrow("heightMm must be a positive number with at most 2 decimal places, or null");
   });
 });

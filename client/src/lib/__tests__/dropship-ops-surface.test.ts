@@ -765,7 +765,6 @@ describe("dropship ops surface client helpers", () => {
 
     expect(buildShippingPackageProfileInput({
       productVariantId: "10",
-      shipAlone: false,
       defaultCarrier: "USPS",
       defaultService: "",
       defaultBoxId: "",
@@ -773,8 +772,9 @@ describe("dropship ops surface client helpers", () => {
       idempotencyKey: "package-profile-1",
     })).toMatchObject({
       productVariantId: 10,
-      maxUnitsPerPackage: null,
+      defaultCarrier: "USPS",
       defaultService: null,
+      defaultBoxId: null,
     });
 
     expect(buildShippingBoxInput({
@@ -790,13 +790,12 @@ describe("dropship ops surface client helpers", () => {
     })).toMatchObject({ maxWeightGrams: null });
     expect(buildShippingPackageProfileInput({
       productVariantId: "10",
-      shipAlone: false,
       defaultCarrier: "",
       defaultService: "",
       defaultBoxId: "",
       isActive: true,
       idempotencyKey: "package-profile-unbounded",
-    })).toMatchObject({ maxUnitsPerPackage: null });
+    })).toMatchObject({ defaultCarrier: null, defaultService: null, defaultBoxId: null });
 
     expect(buildShippingZoneRuleInput({
       originWarehouseId: "1",

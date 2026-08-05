@@ -35,17 +35,11 @@ const upsertBoxInputSchema = z.object({
 
 const upsertPackageProfileInputSchema = z.object({
   productVariantId: positiveIdSchema,
-  // Accepted temporarily for backward-compatible clients; catalog variant data is authoritative.
-  weightGrams: positiveIdSchema.optional(),
-  lengthMm: positiveIdSchema.optional(),
-  widthMm: positiveIdSchema.optional(),
-  heightMm: positiveIdSchema.optional(),
-  shipAlone: z.boolean().default(false),
+  // Channel defaults only. Physical facts (weight/dims/SIOC/max-units) are
+  // canonical on catalog.product_variants and edited in Catalog > Variants.
   defaultCarrier: optionalTrimmedStringSchema(50),
   defaultService: optionalTrimmedStringSchema(80),
   defaultBoxId: positiveIdSchema.nullable().optional(),
-  // Deprecated compatibility input; ignored by cartonizer v3.
-  maxUnitsPerPackage: positiveIdSchema.nullable().optional(),
   isActive: z.boolean().default(true),
   idempotencyKey: idempotencyKeySchema,
   actor: commandActorSchema,
@@ -168,16 +162,16 @@ export interface DropshipPackageProfileConfigRecord {
   productName: string | null;
   variantSku: string | null;
   variantName: string | null;
+  // Read-only mirrors of the canonical catalog variant facts (display only).
   weightGrams: number | null;
   lengthMm: number | null;
   widthMm: number | null;
   heightMm: number | null;
   packageDataComplete: boolean;
-  shipAlone: boolean;
+  shipsInOwnContainer: boolean;
   defaultCarrier: string | null;
   defaultService: string | null;
   defaultBoxId: number | null;
-  /** @deprecated Cartonizer v3 derives capacity from physical placement. */
   maxUnitsPerPackage: number | null;
   isActive: boolean;
   createdAt: Date;
@@ -304,7 +298,7 @@ export interface DropshipShippingConfigCommandContext {
 export type NormalizedUpsertDropshipBoxInput = Omit<UpsertDropshipBoxInput, "idempotencyKey" | "actor">;
 export type NormalizedUpsertDropshipPackageProfileInput = Omit<
   UpsertDropshipPackageProfileInput,
-  "idempotencyKey" | "actor" | "weightGrams" | "lengthMm" | "widthMm" | "heightMm"
+  "idempotencyKey" | "actor"
 >;
 export type NormalizedUpsertDropshipZoneRuleInput = Omit<UpsertDropshipZoneRuleInput, "idempotencyKey" | "actor">;
 export type NormalizedCreateDropshipRateTableInput = Omit<CreateDropshipRateTableInput, "idempotencyKey" | "actor">;
@@ -349,11 +343,7 @@ export class DropshipShippingConfigService {
     const parsed = upsertPackageProfileInputSchema.parse(input);
     const {
       actor: _actor,
-      heightMm: _legacyHeightMm,
       idempotencyKey: _idempotencyKey,
-      lengthMm: _legacyLengthMm,
-      weightGrams: _legacyWeightGrams,
-      widthMm: _legacyWidthMm,
       ...overrideInput
     } = parsed;
     const normalized: NormalizedUpsertDropshipPackageProfileInput = {
@@ -361,7 +351,6 @@ export class DropshipShippingConfigService {
       defaultCarrier: parsed.defaultCarrier?.trim() || null,
       defaultService: parsed.defaultService?.trim() || null,
       defaultBoxId: parsed.defaultBoxId ?? null,
-      maxUnitsPerPackage: parsed.maxUnitsPerPackage ?? null,
     };
     const result = await this.deps.repository.upsertPackageProfile(
       this.withCommandContext("shipping_package_profile_upserted", normalized, parsed),

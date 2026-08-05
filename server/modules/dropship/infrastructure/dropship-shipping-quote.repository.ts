@@ -52,6 +52,7 @@ interface QuoteSnapshotRow {
   dunnage_cents: string | number;
   total_shipping_cents: string | number;
   quote_payload: Record<string, unknown>;
+  warnings: unknown;
   created_at: Date;
 }
 
@@ -198,14 +199,14 @@ export class PgDropshipShippingQuoteRepository implements DropshipShippingQuoteR
            destination_country, destination_postal_code, currency,
            idempotency_key, request_hash, package_count, base_rate_cents,
            markup_cents, insurance_pool_cents, dunnage_cents, total_shipping_cents,
-           quote_payload, created_at)
+           quote_payload, warnings, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                 $11, $12, $13, $14, $15, $16::jsonb, $17)
+                 $11, $12, $13, $14, $15, $16::jsonb, $17::jsonb, $18)
          RETURNING id, vendor_id, store_connection_id, warehouse_id, rate_table_id,
                    destination_country, destination_postal_code, currency,
                    idempotency_key, request_hash, package_count, base_rate_cents,
                    markup_cents, insurance_pool_cents, dunnage_cents,
-                   total_shipping_cents, quote_payload, created_at`,
+                   total_shipping_cents, quote_payload, warnings, created_at`,
         [
           input.vendorId,
           input.storeConnectionId,
@@ -223,6 +224,7 @@ export class PgDropshipShippingQuoteRepository implements DropshipShippingQuoteR
           input.dunnageCents,
           input.totalShippingCents,
           JSON.stringify(input.quotePayload),
+          input.warnings === null ? null : JSON.stringify(input.warnings),
           input.createdAt,
         ],
       );
@@ -272,7 +274,7 @@ async function findQuoteSnapshotByIdempotencyKeyWithClient(
             destination_country, destination_postal_code, currency,
             idempotency_key, request_hash, package_count, base_rate_cents,
             markup_cents, insurance_pool_cents, dunnage_cents,
-            total_shipping_cents, quote_payload, created_at
+            total_shipping_cents, quote_payload, warnings, created_at
      FROM dropship.dropship_shipping_quote_snapshots
      WHERE vendor_id = $1
        AND idempotency_key = $2
@@ -333,6 +335,9 @@ function mapQuoteSnapshotRow(row: QuoteSnapshotRow): DropshipShippingQuoteSnapsh
     dunnageCents: Number(row.dunnage_cents),
     totalShippingCents: Number(row.total_shipping_cents),
     quotePayload: row.quote_payload,
+    warnings: Array.isArray(row.warnings)
+      ? row.warnings as DropshipShippingQuoteSnapshotRecord["warnings"]
+      : null,
     createdAt: row.created_at,
   };
 }

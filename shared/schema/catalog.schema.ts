@@ -1,4 +1,5 @@
-import { pgTable, text, varchar, integer, bigint, timestamp, jsonb, boolean, uniqueIndex, index, pgSchema } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, bigint, numeric, timestamp, jsonb, boolean, uniqueIndex, index, check, pgSchema } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -142,10 +143,19 @@ export const productVariants = catalogSchema.table("product_variants", {
   parentVariantId: integer("parent_variant_id"),
   isBaseUnit: boolean("is_base_unit").notNull().default(false),
   barcode: varchar("barcode", { length: 100 }),
-  weightGrams: integer("weight_grams"),
-  lengthMm: integer("length_mm"),
-  widthMm: integer("width_mm"),
-  heightMm: integer("height_mm"),
+  // Physical package facts are numeric(10,2) in the DB so inch/pound inputs
+  // round-trip exactly (6.00in = 152.40mm). The pg driver returns numeric as
+  // string; readers coerce via shared/utils/measurements.numericToNumber.
+  weightGrams: numeric("weight_grams", { precision: 10, scale: 2 }),
+  lengthMm: numeric("length_mm", { precision: 10, scale: 2 }),
+  widthMm: numeric("width_mm", { precision: 10, scale: 2 }),
+  heightMm: numeric("height_mm", { precision: 10, scale: 2 }),
+  // SIOC: parcel = the item's own packaging (no outer box). Canonical home
+  // for this fact (moved from shipping.variant_shipping_attrs /
+  // dropship.dropship_package_profiles in migration 185).
+  shipsInOwnContainer: boolean("ships_in_own_container").notNull().default(false),
+  // Optional packing cap for single-SKU parcels; null = derive from geometry.
+  maxUnitsPerPackage: integer("max_units_per_package"),
   priceCents: bigint("price_cents", { mode: "number" }),
   compareAtPriceCents: bigint("compare_at_price_cents", { mode: "number" }),
   standardCostCents: bigint("standard_cost_cents", { mode: "number" }), // Standard cost for valuation
@@ -175,6 +185,7 @@ export const productVariants = catalogSchema.table("product_variants", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("product_variants_id_product_uidx").on(table.id, table.productId),
+  check("product_variants_max_units_per_package_chk", sql`${table.maxUnitsPerPackage} IS NULL OR ${table.maxUnitsPerPackage} > 0`),
 ]);
 
 export const insertProductVariantSchema = createInsertSchema(productVariants).omit({

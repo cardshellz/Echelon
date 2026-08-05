@@ -659,16 +659,16 @@ export interface DropshipShippingPackageProfileConfig {
   productName: string | null;
   variantSku: string | null;
   variantName: string | null;
+  // Read-only mirrors of the canonical catalog variant facts (display only).
   weightGrams: number | null;
   lengthMm: number | null;
   widthMm: number | null;
   heightMm: number | null;
   packageDataComplete: boolean;
-  shipAlone: boolean;
+  shipsInOwnContainer: boolean;
   defaultCarrier: string | null;
   defaultService: string | null;
   defaultBoxId: number | null;
-  /** @deprecated Cartonizer v3 derives capacity from physical placement. */
   maxUnitsPerPackage: number | null;
   isActive: boolean;
   createdAt: string;
@@ -826,12 +826,9 @@ export interface DropshipShippingBoxInput {
 
 export interface DropshipShippingPackageProfileInput {
   productVariantId: number;
-  shipAlone: boolean;
   defaultCarrier: string | null;
   defaultService: string | null;
   defaultBoxId: number | null;
-  /** @deprecated Cartonizer v3 derives capacity from physical placement. */
-  maxUnitsPerPackage: number | null;
   isActive: boolean;
   idempotencyKey: string;
 }
@@ -3062,7 +3059,6 @@ export function buildShippingBoxInput(input: {
 
 export function buildShippingPackageProfileInput(input: {
   productVariantId: string;
-  shipAlone: boolean;
   defaultCarrier: string;
   defaultService: string;
   defaultBoxId: string;
@@ -3071,11 +3067,9 @@ export function buildShippingPackageProfileInput(input: {
 }): DropshipShippingPackageProfileInput {
   return {
     productVariantId: parsePositiveInteger(input.productVariantId, "productVariantId"),
-    shipAlone: input.shipAlone,
     defaultCarrier: input.defaultCarrier.trim() || null,
     defaultService: input.defaultService.trim() || null,
     defaultBoxId: input.defaultBoxId.trim() ? parsePositiveInteger(input.defaultBoxId, "defaultBoxId") : null,
-    maxUnitsPerPackage: null,
     isActive: input.isActive,
     idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
   };

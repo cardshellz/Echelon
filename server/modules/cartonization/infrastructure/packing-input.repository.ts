@@ -4,10 +4,10 @@
  * Packing-input loaders — read-only application-layer repository.
  *
  * Bridges the catalog/shipping schemas to the pure cartonizer: variant
- * dims/weight (catalog.product_variants) + shipping group code
+ * dims/weight/SIOC (catalog.product_variants) + shipping group code
  * (catalog.products → catalog.shipping_groups) + packing behavior
- * (shipping.variant_shipping_attrs, null-defaulted) into the exact
- * CartonizeItem shape cartonize() expects, and the active box suite
+ * (shipping.variant_shipping_attrs rider/void fields, null-defaulted) into
+ * the exact CartonizeItem shape cartonize() expects, and the active box suite
  * (shipping.box_catalog + box_warehouse_stock) into CartonizeBox[].
  *
  * NO writes here. Design: docs/SHIPPING-ENGINE-DESIGN.md.
@@ -23,6 +23,7 @@ import {
   shippingVariantAttrs,
 } from "@shared/schema";
 import { db } from "../../../db";
+import { numericToNumber } from "@shared/utils/measurements";
 import type { CartonizeBox, CartonizeItem } from "../domain/cartonize";
 
 /**
@@ -48,7 +49,8 @@ export async function loadPackingInputs(
       widthMm: productVariants.widthMm,
       heightMm: productVariants.heightMm,
       shippingGroupCode: shippingGroups.code,
-      shipsInOwnContainer: shippingVariantAttrs.shipsInOwnContainer,
+      // Canonical SIOC home is catalog.product_variants (migration 185).
+      shipsInOwnContainer: productVariants.shipsInOwnContainer,
       riderEligible: shippingVariantAttrs.riderEligible,
       riderVoidCm3: shippingVariantAttrs.riderVoidCm3,
       riderVoidMaxWeightGrams: shippingVariantAttrs.riderVoidMaxWeightGrams,
@@ -66,10 +68,11 @@ export async function loadPackingInputs(
       productVariantId: row.productVariantId,
       sku: row.sku,
       quantity: 0, // caller sets the line quantity
-      weightGrams: row.weightGrams,
-      lengthMm: row.lengthMm,
-      widthMm: row.widthMm,
-      heightMm: row.heightMm,
+      // numeric(10,2) columns arrive as strings from the pg driver; coerce.
+      weightGrams: numericToNumber(row.weightGrams),
+      lengthMm: numericToNumber(row.lengthMm),
+      widthMm: numericToNumber(row.widthMm),
+      heightMm: numericToNumber(row.heightMm),
       shippingGroupCode: row.shippingGroupCode ?? null,
       // No attrs row = default packing behavior (boxed, no rider/void).
       shipsInOwnContainer: row.shipsInOwnContainer ?? false,

@@ -7,8 +7,8 @@ import {
   type DropshipPackageProfileConfigRecord,
   type DropshipRateTableConfigRecord,
   type DropshipShippingConfigMutationResult,
+  type DropshipShippingConfigOverview,
   type DropshipShippingConfigRepository,
-  type DropshipShippingConfigSnapshot,
   type DropshipShippingMarkupPolicyRecord,
   type DropshipZoneRuleConfigRecord,
 } from "../../application/dropship-shipping-config-service";
@@ -102,7 +102,7 @@ describe("DropshipShippingConfigService", () => {
     expect(repository.lastInsuranceInput).toBeNull();
   });
 
-  it("normalizes package profiles as shipping overrides without accepting a second package-data source", async () => {
+  it("normalizes package profiles as shipping overrides carrying only channel defaults", async () => {
     const repository = new FakeShippingConfigRepository();
     const service = new DropshipShippingConfigService({
       repository,
@@ -112,15 +112,9 @@ describe("DropshipShippingConfigService", () => {
 
     await service.upsertPackageProfile({
       productVariantId: 10,
-      weightGrams: 999,
-      lengthMm: 999,
-      widthMm: 999,
-      heightMm: 999,
-      shipAlone: true,
       defaultCarrier: " USPS ",
       defaultService: null,
       defaultBoxId: null,
-      maxUnitsPerPackage: 1,
       isActive: true,
       idempotencyKey: "package-profile-001",
       actor: { actorType: "admin", actorId: "admin-1" },
@@ -128,12 +122,35 @@ describe("DropshipShippingConfigService", () => {
 
     expect(repository.lastPackageProfileInput).toMatchObject({
       productVariantId: 10,
-      shipAlone: true,
       defaultCarrier: "USPS",
-      maxUnitsPerPackage: 1,
+      defaultService: null,
+      defaultBoxId: null,
     });
+    // Physical facts are canonical on catalog.product_variants — the override
+    // write path must not carry them at all.
     expect(repository.lastPackageProfileInput).not.toHaveProperty("weightGrams");
     expect(repository.lastPackageProfileInput).not.toHaveProperty("lengthMm");
+    expect(repository.lastPackageProfileInput).not.toHaveProperty("shipAlone");
+    expect(repository.lastPackageProfileInput).not.toHaveProperty("maxUnitsPerPackage");
+  });
+
+  it("rejects package profile input that tries to write physical facts", async () => {
+    const repository = new FakeShippingConfigRepository();
+    const service = new DropshipShippingConfigService({
+      repository,
+      clock: { now: () => now },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    });
+
+    await expect(service.upsertPackageProfile({
+      productVariantId: 10,
+      shipAlone: true,
+      weightGrams: 999,
+      isActive: true,
+      idempotencyKey: "package-profile-002",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    })).rejects.toThrow();
+    expect(repository.lastPackageProfileInput).toBeNull();
   });
 
 });
@@ -146,7 +163,7 @@ class FakeShippingConfigRepository implements DropshipShippingConfigRepository {
   lastInsuranceInput: Parameters<DropshipShippingConfigRepository["createInsurancePolicy"]>[0] | null = null;
   lastPackageProfileInput: Parameters<DropshipShippingConfigRepository["upsertPackageProfile"]>[0] | null = null;
 
-  async getOverview(input: Parameters<DropshipShippingConfigRepository["getOverview"]>[0]): Promise<DropshipShippingConfigSnapshot> {
+  async getOverview(input: Parameters<DropshipShippingConfigRepository["getOverview"]>[0]): Promise<DropshipShippingConfigOverview> {
     return {
       boxes: this.boxes,
       packageProfiles: this.packageProfiles,
@@ -196,11 +213,11 @@ class FakeShippingConfigRepository implements DropshipShippingConfigRepository {
         widthMm: 120,
         heightMm: 20,
         packageDataComplete: true,
-        shipAlone: input.shipAlone,
+        shipsInOwnContainer: false,
         defaultCarrier: input.defaultCarrier,
         defaultService: input.defaultService,
         defaultBoxId: input.defaultBoxId,
-        maxUnitsPerPackage: input.maxUnitsPerPackage,
+        maxUnitsPerPackage: null,
         isActive: input.isActive,
         createdAt: input.now,
         updatedAt: input.now,

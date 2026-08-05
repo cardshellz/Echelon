@@ -31,7 +31,40 @@ import {
 import {
   coercePackageAttributesOnVariantPayload,
   parsePackageAttributeBulkRows,
+  serializePackageAttributeUpdates,
 } from "./package-attributes";
+import { z } from "zod";
+
+// Physical packing facts beyond weight/dims. Canonical on the variant since
+// migration 185; validated here because the variant PUT spreads req.body.
+const variantPackingFlagsSchema = z.object({
+  shipsInOwnContainer: z.boolean().optional(),
+  maxUnitsPerPackage: z.number().int().positive().nullable().optional(),
+}).strict();
+
+function coercePackingFlagsOnVariantPayload(input: unknown): {
+  shipsInOwnContainer?: boolean;
+  maxUnitsPerPackage?: number | null;
+} {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const source = input as Record<string, unknown>;
+  const candidate: Record<string, unknown> = {};
+  if (Object.prototype.hasOwnProperty.call(source, "shipsInOwnContainer")) {
+    candidate.shipsInOwnContainer = source.shipsInOwnContainer;
+  }
+  if (Object.prototype.hasOwnProperty.call(source, "maxUnitsPerPackage")) {
+    candidate.maxUnitsPerPackage = source.maxUnitsPerPackage;
+  }
+  if (Object.keys(candidate).length === 0) return {};
+  const parsed = variantPackingFlagsSchema.safeParse(candidate);
+  if (!parsed.success) {
+    throw Object.assign(
+      new Error("shipsInOwnContainer must be a boolean and maxUnitsPerPackage must be a positive integer or null"),
+      { statusCode: 400 },
+    );
+  }
+  return parsed.data;
+}
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
@@ -1463,9 +1496,11 @@ export async function registerProductRoutes(app: Express) {
         }
       }
       const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
+      const packingFlags = coercePackingFlagsOnVariantPayload(req.body);
       const variant = await storage.createProductVariant({
         ...req.body,
         ...packageAttributes,
+        ...packingFlags,
         productId,
       });
       res.json(variant);
@@ -1508,6 +1543,7 @@ export async function registerProductRoutes(app: Express) {
       }
 
       const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
+      const packingFlags = coercePackingFlagsOnVariantPayload(req.body);
       const actor = authenticatedActor(req);
       const updateResult = await db.transaction(async (tx) => {
         await tx.execute(sql`
@@ -1531,6 +1567,7 @@ export async function registerProductRoutes(app: Express) {
         const payload = {
           ...req.body,
           ...packageAttributes,
+          ...packingFlags,
           ...(normalizedNewSku ? { sku: normalizedNewSku } : {}),
         };
         const updatedVariant = await storage.updateProductVariant(id, payload, tx);
@@ -1599,7 +1636,7 @@ export async function registerProductRoutes(app: Express) {
         for (const row of rows) {
           const [variant] = await tx
             .update(productVariants)
-            .set({ ...row.updates, updatedAt: new Date() })
+            .set({ ...serializePackageAttributeUpdates(row.updates), updatedAt: new Date() })
             .where(and(eq(productVariants.productId, productId), eq(productVariants.id, row.variantId)))
             .returning();
           if (!variant) {
@@ -1643,7 +1680,7 @@ export async function registerProductRoutes(app: Express) {
         for (const row of rows) {
           const [variant] = await tx
             .update(productVariants)
-            .set({ ...row.updates, updatedAt: new Date() })
+            .set({ ...serializePackageAttributeUpdates(row.updates), updatedAt: new Date() })
             .where(eq(productVariants.id, row.variantId))
             .returning();
           if (!variant) {

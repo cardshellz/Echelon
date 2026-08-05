@@ -121,16 +121,16 @@ export const shippingBoxWarehouseStock = shippingSchema.table("box_warehouse_sto
 
 // ---------------------------------------------------------------------------
 // Variant shipping attributes
-// Physical dims/weight stay canonical on catalog.product_variants; this table
-// holds packing BEHAVIOR: SIOC, rider/void co-mingling (see design doc).
+// Physical dims/weight AND ships-in-own-container stay canonical on
+// catalog.product_variants (consolidated in migration 185); this table holds
+// packing BEHAVIOR only: rider/void co-mingling (see design doc).
 // ---------------------------------------------------------------------------
 
 export const shippingVariantAttrs = shippingSchema.table("variant_shipping_attrs", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id, { onDelete: "cascade" }),
-  // SIOC: parcel = the item's own packaging (no outer box). User-controlled;
-  // sioc_suggested marks system candidates (sealed case-level variants) awaiting review.
-  shipsInOwnContainer: boolean("ships_in_own_container").notNull().default(false),
+  // sioc_suggested marks system candidates (sealed case-level variants)
+  // awaiting review; the confirmed SIOC flag lives on the variant.
   siocSuggested: boolean("sioc_suggested").notNull().default(false),
   // Rider: soft/thin item allowed to fill another parcel's void space.
   riderEligible: boolean("rider_eligible").notNull().default(false),
