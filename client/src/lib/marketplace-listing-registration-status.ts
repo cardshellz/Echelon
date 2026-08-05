@@ -34,6 +34,12 @@ export const marketplaceListingRegistrationStatusSchema = z
     providerPublicationKey: nullableTrimmedTextSchema,
     externalListingId: z.string().trim().min(1).max(255),
     registeredVariantIds: z.array(positivePostgresIntegerSchema).default([]),
+    registeredVariants: z.array(z.object({
+      productVariantId: positivePostgresIntegerSchema,
+      sku: z.string().trim().min(1).max(255),
+      disposition: z.enum(["included", "excluded"]),
+    }).strict()).default([]),
+
     registeredAt: z.string().datetime({ offset: true }),
   })
   .strict();

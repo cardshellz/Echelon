@@ -19,6 +19,7 @@ export interface MarketplaceListingReplacementVariant {
   sku: string;
   name: string;
   included: boolean;
+  lockedExcluded?: boolean;
 }
 
 interface ReplacementApiErrorPayload {
@@ -83,7 +84,9 @@ export function buildMarketplaceListingReplacementMembers(
       : {
           productVariantId: variant.id,
           disposition: "excluded" as const,
-          reasonCode: "operator_excluded_from_replacement",
+          reasonCode: variant.lockedExcluded
+            ? "local_variant_inactive"
+            : "operator_excluded_from_replacement",
         },
   );
 }
@@ -243,13 +246,13 @@ export function MarketplaceListingReplacementDialog({
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-muted-foreground">
-                    {includedVariantIds.has(variant.id)
-                      ? "Included"
-                      : "Excluded"}
+                    {variant.lockedExcluded
+                      ? "Archived - will be removed"
+                      : includedVariantIds.has(variant.id) ? "Included" : "Excluded"}
                   </span>
                   <Switch
                     checked={includedVariantIds.has(variant.id)}
-                    disabled={locked}
+                    disabled={locked || variant.lockedExcluded === true}
                     onCheckedChange={(checked) => {
                       setIncludedVariantIds((current) => {
                         const next = new Set(current);
@@ -258,7 +261,7 @@ export function MarketplaceListingReplacementDialog({
                         return next;
                       });
                     }}
-                    aria-label={`${includedVariantIds.has(variant.id) ? "Exclude" : "Include"} ${variant.sku}`}
+                    aria-label={variant.lockedExcluded ? `${variant.sku} is archived and will be removed` : `${includedVariantIds.has(variant.id) ? "Exclude" : "Include"} ${variant.sku}`}
                   />
                 </div>
               </div>

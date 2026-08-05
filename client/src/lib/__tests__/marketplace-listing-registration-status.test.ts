@@ -211,6 +211,11 @@ function registrationStatus(productId: number) {
     providerPublicationKey: `publication-${productId}`,
     externalListingId: `listing-${productId}`,
     registeredVariantIds: [productId * 10],
+    registeredVariants: [{
+      productVariantId: productId * 10,
+      sku: `SKU-${productId}`,
+      disposition: "included" as const,
+    }],
     registeredAt: "2026-08-04T12:00:00.000Z",
   };
 }

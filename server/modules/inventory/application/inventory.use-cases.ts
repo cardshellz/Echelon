@@ -505,6 +505,196 @@ export class InventoryUseCases {
     });
   }
 
+  /**
+   * Materialize a physical replacement package from current warehouse stock.
+   *
+   * A replacement is a second inventory consumption, but not a second customer
+   * fulfillment or customer-order COGS event. The provider callback supplies
+   * evidence that the package shipped; this writer selects live, unreserved
+   * stock and records the temporary pick plus the shipment atomically.
+   */
+  async recordReplacementShipmentFromAvailableInventory(params: {
+    productVariantId: number;
+    qty: number;
+    warehouseId: number | null;
+    orderId: number;
+    orderItemId?: number | null;
+    shipmentId: number;
+    shipmentItemId: number;
+    userId?: string;
+  }): Promise<{ warehouseLocationId: number; alreadyRecorded: boolean }> {
+    if (!Number.isInteger(params.productVariantId) || params.productVariantId <= 0) {
+      throw new ValidationError("productVariantId must be a positive integer");
+    }
+    if (!Number.isInteger(params.qty) || params.qty <= 0) {
+      throw new ValidationError("qty must be a positive integer");
+    }
+    if (!Number.isInteger(params.orderId) || params.orderId <= 0) {
+      throw new ValidationError("orderId must be a positive integer");
+    }
+    if (!Number.isInteger(params.shipmentId) || params.shipmentId <= 0) {
+      throw new ValidationError("shipmentId must be a positive integer");
+    }
+    if (!Number.isInteger(params.shipmentItemId) || params.shipmentItemId <= 0) {
+      throw new ValidationError("shipmentItemId must be a positive integer");
+    }
+
+    const result = await this.db.transaction(async (tx) => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(918407, ${params.shipmentItemId})
+      `);
+
+      const existing = await tx.execute(sql`
+        SELECT from_location_id
+        FROM inventory.inventory_transactions
+        WHERE transaction_type = 'ship'
+          AND shipment_item_id = ${params.shipmentItemId}
+          AND reference_id = ${String(params.shipmentId)}
+        LIMIT 1
+      `);
+      if (existing.rows.length > 0) {
+        const locationId = Number((existing.rows[0] as any).from_location_id);
+        if (!Number.isInteger(locationId) || locationId <= 0) {
+          throw new IntegrityError(
+            `Replacement shipment item ${params.shipmentItemId} has an idempotent ship ledger row without a source location.`,
+          );
+        }
+        return { warehouseLocationId: locationId, alreadyRecorded: true };
+      }
+
+      // Read only current, usable inventory. Historic shipment source bins are
+      // deliberately excluded: a reship must never debit the location used by
+      // the original package merely because its row still references that bin.
+      const candidates = await tx.execute(sql`
+        SELECT il.warehouse_location_id
+        FROM inventory.inventory_levels il
+        JOIN warehouse.warehouse_locations wl
+          ON wl.id = il.warehouse_location_id
+        WHERE il.product_variant_id = ${params.productVariantId}
+          AND il.variant_qty > il.reserved_qty
+          AND wl.is_active = 1
+          AND wl.is_pickable = 1
+          AND wl.cycle_count_freeze_id IS NULL
+          AND (${params.warehouseId}::int IS NULL OR wl.warehouse_id = ${params.warehouseId})
+        ORDER BY
+          CASE wl.location_type
+            WHEN 'pick' THEN 0
+            WHEN 'pallet' THEN 1
+            ELSE 2
+          END,
+          wl.pick_sequence NULLS LAST,
+          wl.id
+      `);
+
+      let selectedLevel: InventoryLevel | undefined;
+      for (const candidate of candidates.rows as Array<{ warehouse_location_id: number }>) {
+        const locationId = Number(candidate.warehouse_location_id);
+        if (!Number.isInteger(locationId) || locationId <= 0) continue;
+
+        const level = await this.storage.lockInventoryLevel(
+          locationId,
+          params.productVariantId,
+          tx,
+        );
+        if (!level || level.variantQty - level.reservedQty < params.qty) continue;
+
+        // Recheck after locking the balance. A cycle count that starts between
+        // the candidate read and this lock must block the shipment rather than
+        // allowing a system callback to mutate a frozen bin.
+        await this.assertNotFrozen(locationId, tx);
+        selectedLevel = level;
+        break;
+      }
+
+      if (!selectedLevel) {
+        const warehouseText = params.warehouseId == null ? "any eligible warehouse" : `warehouse ${params.warehouseId}`;
+        throw new IntegrityError(
+          `Replacement inventory unavailable for variant ${params.productVariantId}: ` +
+          `no active, pickable, unfrozen location in ${warehouseText} has ${params.qty} unreserved unit(s).`,
+        );
+      }
+
+      const locationId = selectedLevel.warehouseLocationId;
+      // Mirror the regular pick writer: on-hand becomes picked first, then the
+      // exact picked quantity is consumed by the shipment in this same SQL tx.
+      await this.storage.adjustInventoryLevel(selectedLevel.id, {
+        variantQty: -params.qty,
+        pickedQty: params.qty,
+      }, tx);
+
+      if (this.lotService) {
+        const lotSvc = this.lotService.withTx(tx);
+        await lotSvc.pickFromLots({
+          productVariantId: params.productVariantId,
+          warehouseLocationId: locationId,
+          qty: params.qty,
+          orderId: params.orderId,
+          orderItemId: params.orderItemId ?? undefined,
+          recordOrderItemCosts: false,
+          allowReservedStock: false,
+        });
+      }
+
+      await this.storage.createInventoryTransaction({
+        productVariantId: params.productVariantId,
+        fromLocationId: locationId,
+        transactionType: "pick",
+        variantQtyDelta: -params.qty,
+        variantQtyBefore: selectedLevel.variantQty,
+        variantQtyAfter: selectedLevel.variantQty - params.qty,
+        reservedQtyDelta: 0,
+        sourceState: "on_hand",
+        targetState: "picked",
+        orderId: params.orderId,
+        orderItemId: params.orderItemId ?? null,
+        shipmentId: params.shipmentId,
+        shipmentItemId: params.shipmentItemId,
+        referenceType: "shipment",
+        referenceId: String(params.shipmentId),
+        userId: params.userId ?? null,
+        isImplicit: 1,
+        notes: "System replacement allocation from current unreserved inventory",
+      }, tx);
+
+      await this.storage.adjustInventoryLevel(selectedLevel.id, { pickedQty: -params.qty }, tx);
+
+      if (this.lotService) {
+        const lotSvc = this.lotService.withTx(tx);
+        await lotSvc.shipFromLots({
+          productVariantId: params.productVariantId,
+          warehouseLocationId: locationId,
+          qty: params.qty,
+        });
+      }
+
+      await this.storage.createInventoryTransaction({
+        productVariantId: params.productVariantId,
+        fromLocationId: locationId,
+        transactionType: "ship",
+        variantQtyDelta: -params.qty,
+        variantQtyBefore: selectedLevel.variantQty - params.qty,
+        variantQtyAfter: selectedLevel.variantQty - params.qty,
+        sourceState: "picked",
+        targetState: "shipped",
+        orderId: params.orderId,
+        orderItemId: params.orderItemId ?? null,
+        shipmentId: params.shipmentId,
+        shipmentItemId: params.shipmentItemId,
+        referenceType: "shipment",
+        referenceId: String(params.shipmentId),
+        userId: params.userId ?? null,
+        isImplicit: 1,
+        notes: "System replacement shipment after current-stock allocation",
+      }, tx);
+
+      return { warehouseLocationId: locationId, alreadyRecorded: false };
+    });
+
+    if (!result.alreadyRecorded) {
+      this.triggerNotifyChange(params.productVariantId, "replacement-shipment");
+    }
+    return result;
+  }
   // ---------------------------------------------------------------------------
   // ADJUSTMENT
   // ---------------------------------------------------------------------------
