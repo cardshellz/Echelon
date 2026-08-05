@@ -127,9 +127,9 @@ const CONSENT_URLS = {
   production: "https://auth.ebay.com/oauth2/authorize",
 } as const;
 
-const API_URLS = {
-  sandbox: "https://api.sandbox.ebay.com",
-  production: "https://api.ebay.com",
+const IDENTITY_API_URLS = {
+  sandbox: "https://apiz.sandbox.ebay.com",
+  production: "https://apiz.ebay.com",
 } as const;
 
 const EBAY_PROVIDER_ACCOUNT_IDENTITY_SCHEME = "provider_user_id" as const;
@@ -508,7 +508,7 @@ export class EbayAuthService {
     }
 
     const response = await this.fetchFn(
-      `${API_URLS[this.config.environment]}/commerce/identity/v1/user/`,
+      `${IDENTITY_API_URLS[this.config.environment]}/commerce/identity/v1/user/`,
       {
         method: "GET",
         headers: {

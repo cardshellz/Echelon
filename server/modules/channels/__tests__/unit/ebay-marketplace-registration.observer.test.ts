@@ -520,7 +520,7 @@ describe("EbayMarketplaceRegistrationObserver", () => {
     });
 
     expect(fetchFn).toHaveBeenCalledWith(
-      "https://api.ebay.com/commerce/identity/v1/user/",
+      "https://apiz.ebay.com/commerce/identity/v1/user/",
       expect.objectContaining({ method: "GET" }),
     );
   });
