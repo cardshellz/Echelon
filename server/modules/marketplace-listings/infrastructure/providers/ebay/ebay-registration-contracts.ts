@@ -138,7 +138,13 @@ export class FetchEbayRegistrationReadTransport
           Accept: "application/json",
           ...(marketplaceId === null
             ? {}
-            : { "X-EBAY-C-MARKETPLACE-ID": marketplaceId }),
+            : {
+                "X-EBAY-C-MARKETPLACE-ID": marketplaceId,
+                ...(marketplaceId === "EBAY_US"
+                  && url.pathname.startsWith("/sell/inventory/v1/")
+                  ? { "Accept-Language": "en-US" }
+                  : {}),
+              }),
         },
       });
       const responseText = await readBoundedResponseText(

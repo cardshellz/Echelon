@@ -40,7 +40,10 @@ describe("FetchEbayRegistrationReadTransport host routing", () => {
 
     expect(fetchFn).toHaveBeenCalledWith(
       "https://api.ebay.com/sell/inventory/v1/inventory_item/ARM-ENV-SGL-C750",
-      expect.objectContaining({ method: "GET" }),
+      expect.objectContaining({
+        method: "GET",
+        headers: expect.objectContaining({ "Accept-Language": "en-US" }),
+      }),
     );
   });
 
