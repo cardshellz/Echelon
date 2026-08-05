@@ -212,6 +212,45 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(contextQuery).not.toContain("provider_order_id");
   });
 
+  it("resumes a pending remediation through its open exception when the legacy flag is gone", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("shipment.source = 'shipstation_split'")) {
+          return { rows: [] };
+        }
+        if (
+          text.includes("FROM wms.reconciliation_exceptions exception")
+          && text.includes("OR candidate.id =")
+        ) {
+          return { rows: [contextRow] };
+        }
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [orderItemRow] };
+        }
+        if (text.includes("COUNT(shipment_item.id)::int AS item_count")) {
+          return { rows: [] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    const preview = await getShipStationUnmappedPhysicalPreview(
+      db,
+      shipStation(),
+      { shipmentId: 20 },
+    );
+
+    expect(preview.exceptionId).toBe(77);
+    expect(preview.candidateShipmentId).toBe(20);
+    const recoveryQuery = db.execute.mock.calls
+      .map(([query]) => queryText(query))
+      .find((text) => text.includes("OR candidate.id ="));
+    expect(recoveryQuery).toContain("exception.status IN ('open', 'acknowledged')");
+  });
   it("loads the target exclusively by exact physical shipment id", async () => {
     const exactShipment = {
       ...providerShipment,
