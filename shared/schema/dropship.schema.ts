@@ -291,6 +291,7 @@ export const dropshipStoreConnections = dropshipSchema.table("dropship_store_con
   graceEndsAt: timestamp("grace_ends_at", { withTimezone: true }),
   lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
   lastOrderSyncAt: timestamp("last_order_sync_at", { withTimezone: true }),
+  lastReturnSyncAt: timestamp("last_return_sync_at", { withTimezone: true }),
   lastInventorySyncAt: timestamp("last_inventory_sync_at", { withTimezone: true }),
   config: jsonb("config"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -1138,11 +1139,15 @@ export const dropshipRmas = dropshipSchema.table("dropship_rmas", {
   policyVersionId: integer("policy_version_id").references(() => dropshipReturnPolicies.id, { onDelete: "set null" }),
   noInspectionEvidence: jsonb("no_inspection_evidence"),
   returnExpectedDeliveryAt: timestamp("return_expected_delivery_at", { withTimezone: true }),
+  channelReturnId: varchar("channel_return_id", { length: 120 }),
+  channelEvidence: jsonb("channel_evidence"),
+  returnCarrier: varchar("return_carrier", { length: 80 }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("dropship_rma_number_idx").on(table.rmaNumber),
   uniqueIndex("dropship_rma_idem_idx").on(table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
   index("dropship_rma_vendor_status_idx").on(table.vendorId, table.status),
+  uniqueIndex("dropship_rma_channel_return_idx").on(table.storeConnectionId, table.channelReturnId).where(sql`channel_return_id IS NOT NULL`),
   check("dropship_rma_status_chk", sql`${table.status} IN ('requested','in_transit','received','inspecting','approved','rejected','disputed','credited','closed','no_inspection_review')`),
   check("dropship_rma_window_chk", sql`${table.returnWindowDays} > 0`),
   check("dropship_rma_fault_chk", sql`${table.faultCategory} IS NULL OR ${table.faultCategory} IN ('card_shellz','vendor','customer','marketplace','carrier')`),
@@ -1208,6 +1213,34 @@ export const dropshipRmaInspections = dropshipSchema.table("dropship_rma_inspect
   uniqueIndex("dropship_rma_inspection_idem_idx").on(table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
   check("dropship_rma_inspection_fault_chk", sql`${table.faultCategory} IS NULL OR ${table.faultCategory} IN ('card_shellz','vendor','customer','marketplace','carrier')`),
   check("dropship_rma_inspection_money_chk", sql`${table.creditCents} >= 0 AND ${table.feeCents} >= 0`),
+]);
+
+// Return-intake exception queue (migration 189; design spec D2a + deep review
+// 3.5). Channel returns that failed RMA draft creation quarantine here; one
+// open row per (store connection, channel return id). Rows never block the
+// poll watermark.
+export const dropshipReturnIntakeExceptions = dropshipSchema.table("dropship_return_intake_exceptions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id, { onDelete: "cascade" }),
+  storeConnectionId: integer("store_connection_id").notNull().references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
+  platform: varchar("platform", { length: 30 }).notNull(),
+  channelReturnId: varchar("channel_return_id", { length: 120 }).notNull(),
+  failureCode: varchar("failure_code", { length: 80 }).notNull(),
+  message: text("message").notNull(),
+  channelPayload: jsonb("channel_payload"),
+  attemptCount: integer("attempt_count").notNull().default(1),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).defaultNow().notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).defaultNow().notNull(),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_return_intake_exc_open_idx")
+    .on(table.storeConnectionId, table.channelReturnId)
+    .where(sql`resolved_at IS NULL`),
+  index("dropship_return_intake_exc_vendor_idx").on(table.vendorId, table.resolvedAt, table.lastSeenAt),
+  check("dropship_return_intake_exc_platform_chk", sql`${table.platform} IN ('ebay','shopify','tiktok','instagram','bigcommerce')`),
+  check("dropship_return_intake_exc_attempts_chk", sql`${table.attemptCount} > 0`),
 ]);
 
 // Collection sweep config (migration 188; design spec D5 + D-governing).
