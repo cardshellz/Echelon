@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { evaluateDropshipRmaTransition, DROPSHIP_RMA_DEFAULT_NO_SHIP_TIMEOUT_DAYS } from "../domain/rma-state-machine";
 import type {
   CreateDropshipRmaInput,
   DropshipReturnFaultCategory,
@@ -15,17 +16,18 @@ import type {
   DropshipRmaItemRecord,
   DropshipRmaListItem,
   DropshipRmaListResult,
+  DropshipRmaOrderEconomics,
   DropshipRmaOrderReference,
   DropshipRmaStatus,
   DropshipRmaStatusUpdateResult,
   ListDropshipRmasInput,
   NormalizedCreateDropshipReturnPolicyInput,
-  ProcessDropshipRmaInspectionInput,
+  NormalizedInspectionItem,
+  NormalizedProcessDropshipRmaInspectionInput,
   UpdateDropshipRmaStatusInput,
 } from "../application/dropship-return-service";
 import type {
   DropshipWalletLedgerRecord,
-  DropshipWalletLedgerType,
 } from "../application/dropship-wallet-service";
 
 interface RmaListRow {
@@ -51,6 +53,7 @@ interface RmaListRow {
   credited_at: Date | null;
   idempotency_key?: string | null;
   request_hash?: string | null;
+  policy_version_id?: number | null;
   updated_at: Date;
   item_count: string | number;
   total_quantity: string | number;
@@ -156,8 +159,15 @@ interface WalletLedgerRow {
 }
 
 type CreateRepositoryInput = CreateDropshipRmaInput & { requestHash: string; now: Date };
-type UpdateStatusRepositoryInput = UpdateDropshipRmaStatusInput & { requestHash: string; now: Date };
-type ProcessInspectionRepositoryInput = ProcessDropshipRmaInspectionInput & { requestHash: string; now: Date };
+type UpdateStatusRepositoryInput = UpdateDropshipRmaStatusInput & {
+  policyVersionId: number | null;
+  requestHash: string;
+  now: Date;
+};
+type ProcessInspectionRepositoryInput = NormalizedProcessDropshipRmaInspectionInput & {
+  requestHash: string;
+  now: Date;
+};
 type CreateReturnPolicyRepositoryInput = NormalizedCreateDropshipReturnPolicyInput & DropshipReturnPolicyCommandContext;
 
 export class PgDropshipReturnRepository implements DropshipReturnRepository {
@@ -410,6 +420,15 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
           idempotentReplay: true,
         };
       }
+      // D4: authoritative transition enforcement under the row lock. The
+      // service pre-evaluates for a clean 409; this re-check closes the race
+      // between the service read and this transaction's lock.
+      assertRmaTransitionLegalUnderLock({
+        from: existing.status,
+        to: input.status,
+        actor: input.actor,
+        reason: input.notes ?? null,
+      });
       await client.query(
         `UPDATE dropship.dropship_rmas
          SET status = $2,
@@ -426,6 +445,7 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
         notes: input.notes ?? null,
         actorType: input.actor.actorType,
         actorId: input.actor.actorId ?? null,
+        policyVersionId: input.policyVersionId,
         idempotencyKey: input.idempotencyKey,
         requestHash: input.requestHash,
         createdAt: input.now,
@@ -484,6 +504,15 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
         };
       }
 
+      // D4: inspection completes inspecting -> approved | rejected, enforced
+      // under the row lock. `credited` below is the system post-ledger path.
+      assertRmaTransitionLegalUnderLock({
+        from: rma.status,
+        to: input.outcome,
+        actor: input.actor,
+        reason: input.notes ?? null,
+      });
+
       const inspection = await insertInspection(client, {
         rmaId: input.rmaId,
         outcome: input.outcome,
@@ -504,15 +533,18 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
         faultCategory: input.faultCategory,
         creditCents: input.creditCents,
         feeCents: input.feeCents,
+        creditLedgerType: input.settlement.creditLedgerType,
+        policyVersionId: input.settlement.policyVersionId,
+        feeBreakdown: input.settlement.breakdown,
         idempotencyKey: input.idempotencyKey,
         requestHash: input.requestHash,
         now: input.now,
       });
-      const nextStatus: DropshipRmaStatus = input.outcome === "rejected"
-        ? "rejected"
-        : walletLedger.length > 0
-          ? "credited"
-          : "approved";
+      // D4: approved -> credited is system-written only, post-ledger. The
+      // ledger entries above commit in this same transaction, so the final
+      // status for an approved inspection is always `credited` (the
+      // settlement — including a zero settlement — is complete).
+      const nextStatus: DropshipRmaStatus = input.outcome === "rejected" ? "rejected" : "credited";
       await client.query(
         `UPDATE dropship.dropship_rmas
          SET status = $2,
@@ -523,6 +555,19 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
          WHERE id = $1`,
         [input.rmaId, nextStatus, input.faultCategory, input.now],
       );
+      await insertRmaStatusUpdate(client, {
+        rmaId: input.rmaId,
+        vendorId: rma.vendor_id,
+        previousStatus: rma.status,
+        status: nextStatus,
+        notes: input.notes ?? null,
+        actorType: "system",
+        actorId: input.actor.actorId ?? null,
+        policyVersionId: input.settlement.policyVersionId,
+        idempotencyKey: `${input.idempotencyKey}:transition`,
+        requestHash: input.requestHash,
+        createdAt: input.now,
+      });
       await recordReturnAuditEvent(client, {
         vendorId: rma.vendor_id,
         entityId: String(input.rmaId),
@@ -534,6 +579,9 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
           faultCategory: input.faultCategory,
           creditCents: input.creditCents,
           feeCents: input.feeCents,
+          policyVersionId: input.settlement.policyVersionId,
+          feeBreakdown: input.settlement.breakdown,
+          overrideReason: input.settlement.overrideReason,
           idempotencyKey: input.idempotencyKey,
           walletLedgerIds: walletLedger.map((entry) => entry.ledgerEntryId),
         },
@@ -553,6 +601,105 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
         const replay = await this.findInspectionReplayAfterUniqueConflict(input);
         if (replay) return replay;
       }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getOrderEconomics(input: { rmaId: number }): Promise<DropshipRmaOrderEconomics | null> {
+    const result = await this.dbPool.query<{
+      intake_id: number;
+      wholesale_subtotal_cents: string | number;
+      shipping_cents: string | number;
+      currency: string;
+      pricing_snapshot: Record<string, unknown> | null;
+    }>(
+      `SELECT e.intake_id, e.wholesale_subtotal_cents, e.shipping_cents,
+              e.currency, e.pricing_snapshot
+       FROM dropship.dropship_rmas r
+       JOIN dropship.dropship_order_economics_snapshots e ON e.intake_id = r.intake_id
+       WHERE r.id = $1
+       LIMIT 1`,
+      [input.rmaId],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      intakeId: row.intake_id,
+      wholesaleSubtotalCents: Number(row.wholesale_subtotal_cents),
+      shippingCents: Number(row.shipping_cents),
+      currency: row.currency,
+      lines: mapEconomicsWholesaleLines(row.pricing_snapshot),
+    };
+  }
+
+  /**
+   * D4 no-ship timeout sweep: requested -> closed for RMAs whose return never
+   * shipped within the policy timeout. The timeout days come from the RMA's
+   * policy version row (default 14 when the RMA predates policy versioning).
+   * Idempotent per RMA via the deterministic status-update idempotency key.
+   */
+  async closeNoShipTimedOutRmas(input: { now: Date }): Promise<{ closedCount: number }> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const candidates = await client.query<{
+        id: number;
+        vendor_id: number;
+        policy_version_id: number | null;
+      }>(
+        `SELECT r.id, r.vendor_id, r.policy_version_id
+         FROM dropship.dropship_rmas r
+         LEFT JOIN dropship.dropship_return_policies p ON p.id = r.policy_version_id
+         WHERE r.status = 'requested'
+           AND r.requested_at + (COALESCE(p.no_ship_timeout_days, $2) || ' days')::interval <= $1
+         ORDER BY r.id ASC
+         FOR UPDATE OF r`,
+        [input.now, DROPSHIP_RMA_DEFAULT_NO_SHIP_TIMEOUT_DAYS],
+      );
+      let closedCount = 0;
+      for (const rma of candidates.rows) {
+        const idempotencyKey = `rma-no-ship-close:${rma.id}`;
+        const updated = await client.query(
+          `UPDATE dropship.dropship_rmas
+           SET status = 'closed', updated_at = $2
+           WHERE id = $1
+             AND status = 'requested'`,
+          [rma.id, input.now],
+        );
+        if (updated.rowCount !== 1) continue;
+        await client.query(
+          `INSERT INTO dropship.dropship_rma_status_updates
+            (rma_id, vendor_id, previous_status, status, notes, actor_type, actor_id,
+             policy_version_id, idempotency_key, request_hash, created_at)
+           VALUES ($1, $2, 'requested', 'closed', $3, 'system', NULL, $4, $5, $6, $7)
+           ON CONFLICT (idempotency_key) DO NOTHING`,
+          [
+            rma.id,
+            rma.vendor_id,
+            "No-ship timeout: return was never shipped within the policy window.",
+            rma.policy_version_id,
+            idempotencyKey,
+            createHash("sha256").update(idempotencyKey).digest("hex"),
+            input.now,
+          ],
+        );
+        await recordReturnAuditEvent(client, {
+          vendorId: rma.vendor_id,
+          entityId: String(rma.id),
+          eventType: "rma_no_ship_timeout_closed",
+          actor: { actorType: "system" },
+          severity: "info",
+          payload: { previousStatus: "requested", status: "closed", policyVersionId: rma.policy_version_id },
+          createdAt: input.now,
+        });
+        closedCount += 1;
+      }
+      await client.query("COMMIT");
+      return { closedCount };
+    } catch (error) {
+      await rollbackQuietly(client);
       throw error;
     } finally {
       client.release();
@@ -654,7 +801,7 @@ async function getRmaDetailWithClient(
             r.status, r.reason_code, r.fault_category, r.return_window_days,
             r.label_source, r.return_tracking_number, r.vendor_notes,
             r.requested_at, r.received_at, r.inspected_at, r.credited_at,
-            r.idempotency_key, r.request_hash, r.updated_at,
+            r.idempotency_key, r.request_hash, r.policy_version_id, r.updated_at,
             COUNT(ri.id) AS item_count,
             COALESCE(SUM(ri.quantity), 0) AS total_quantity
      FROM dropship.dropship_rmas r
@@ -680,6 +827,7 @@ async function getRmaDetailWithClient(
     vendorNotes: row.vendor_notes ?? null,
     idempotencyKey: row.idempotency_key ?? null,
     requestHash: row.request_hash ?? null,
+    policyVersionId: row.policy_version_id ?? null,
     items,
     inspections,
     walletLedger,
@@ -795,6 +943,7 @@ async function insertRmaStatusUpdate(
     notes: string | null;
     actorType: "admin" | "system";
     actorId: string | null;
+    policyVersionId: number | null;
     idempotencyKey: string;
     requestHash: string;
     createdAt: Date;
@@ -803,8 +952,8 @@ async function insertRmaStatusUpdate(
   const result = await client.query<RmaStatusUpdateRow>(
     `INSERT INTO dropship.dropship_rma_status_updates
       (rma_id, vendor_id, previous_status, status, notes, actor_type, actor_id,
-       idempotency_key, request_hash, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       policy_version_id, idempotency_key, request_hash, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING id, rma_id, vendor_id, previous_status, status, notes,
                actor_type, actor_id, idempotency_key, request_hash, created_at`,
     [
@@ -815,12 +964,34 @@ async function insertRmaStatusUpdate(
       input.notes,
       input.actorType,
       input.actorId,
+      input.policyVersionId,
       input.idempotencyKey,
       input.requestHash,
       input.createdAt,
     ],
   );
   return requiredRow(result.rows[0], "Dropship RMA status update insert returned no row.");
+}
+
+function assertRmaTransitionLegalUnderLock(input: {
+  from: DropshipRmaStatus;
+  to: DropshipRmaStatus;
+  actor: { actorType: "admin" | "system"; actorId?: string | null };
+  reason: string | null;
+}): void {
+  const decision = evaluateDropshipRmaTransition({
+    from: input.from,
+    to: input.to,
+    actor: { actorType: input.actor.actorType, actorId: input.actor.actorId ?? null },
+    reason: input.reason,
+    systemLedgerCommit: false,
+  });
+  if (decision.allowed) return;
+  throw new DropshipError(
+    "DROPSHIP_RMA_ILLEGAL_TRANSITION",
+    "Dropship RMA status transition is not allowed.",
+    { from: input.from, to: input.to, violation: decision.violation },
+  );
 }
 
 async function findExistingInspectionForRma(
@@ -885,7 +1056,7 @@ async function insertInspection(
 async function updateInspectionItems(
   client: PoolClient,
   rmaId: number,
-  items: ProcessDropshipRmaInspectionInput["items"],
+  items: NormalizedInspectionItem[],
 ): Promise<void> {
   for (const item of items) {
     const result = await client.query(
@@ -915,6 +1086,9 @@ async function recordWalletAdjustmentsForInspection(
     faultCategory: DropshipReturnFaultCategory;
     creditCents: number;
     feeCents: number;
+    creditLedgerType: "return_credit" | "insurance_pool_credit";
+    policyVersionId: number | null;
+    feeBreakdown: Record<string, unknown>;
     idempotencyKey: string;
     requestHash: string;
     now: Date;
@@ -928,9 +1102,6 @@ async function recordWalletAdjustmentsForInspection(
   });
   const entries: DropshipWalletLedgerRecord[] = [];
   if (input.creditCents > 0) {
-    const type: DropshipWalletLedgerType = input.faultCategory === "carrier"
-      ? "insurance_pool_credit"
-      : "return_credit";
     const nextAvailable = account.availableBalanceCents + input.creditCents;
     account = await updateWalletAccountBalance(client, {
       walletAccountId: account.walletAccountId,
@@ -942,7 +1113,7 @@ async function recordWalletAdjustmentsForInspection(
     entries.push(await insertWalletLedger(client, {
       walletAccountId: account.walletAccountId,
       vendorId: input.vendorId,
-      type,
+      type: input.creditLedgerType,
       amountCents: input.creditCents,
       availableBalanceAfterCents: account.availableBalanceCents,
       pendingBalanceAfterCents: account.pendingBalanceCents,
@@ -952,23 +1123,16 @@ async function recordWalletAdjustmentsForInspection(
       metadata: {
         rmaId: input.rmaId,
         faultCategory: input.faultCategory,
+        policyVersionId: input.policyVersionId,
+        feeBreakdown: input.feeBreakdown,
       },
       createdAt: input.now,
     }));
   }
   if (input.feeCents > 0) {
-    if (account.availableBalanceCents < input.feeCents) {
-      throw new DropshipError(
-        "DROPSHIP_WALLET_INSUFFICIENT_FUNDS",
-        "Dropship wallet has insufficient available funds for the return fee.",
-        {
-          vendorId: input.vendorId,
-          rmaId: input.rmaId,
-          availableBalanceCents: account.availableBalanceCents,
-          requiredCents: input.feeCents,
-        },
-      );
-    }
+    // D5: negative balances are ALLOWED. Fees net against the same-RMA credit
+    // first; any remainder drives the wallet negative and rides the scheduled
+    // collection sweep. There is no insufficient-funds hard-fail here.
     const nextAvailable = account.availableBalanceCents - input.feeCents;
     account = await updateWalletAccountBalance(client, {
       walletAccountId: account.walletAccountId,
@@ -990,6 +1154,8 @@ async function recordWalletAdjustmentsForInspection(
       metadata: {
         rmaId: input.rmaId,
         faultCategory: input.faultCategory,
+        policyVersionId: input.policyVersionId,
+        feeBreakdown: input.feeBreakdown,
       },
       createdAt: input.now,
     }));
@@ -1430,6 +1596,28 @@ function mapRmaOrderReferenceLines(payload: Record<string, unknown> | null): Dro
   });
 }
 
+/**
+ * Extract the per-line wholesale credit basis from the economics snapshot's
+ * pricing_snapshot jsonb (written at order acceptance; version 1 shape).
+ */
+function mapEconomicsWholesaleLines(
+  payload: Record<string, unknown> | null,
+): DropshipRmaOrderEconomics["lines"] {
+  const wholesale = payload?.wholesale;
+  const lines = wholesale && typeof wholesale === "object"
+    ? (wholesale as Record<string, unknown>).lines
+    : null;
+  if (!Array.isArray(lines)) return [];
+  return lines.map((line) => {
+    const candidate = line && typeof line === "object" ? line as Record<string, unknown> : {};
+    return {
+      productVariantId: nullablePositiveInteger(candidate.productVariantId),
+      quantity: nullablePositiveInteger(candidate.quantity) ?? 0,
+      wholesaleUnitCostCents: nullableNonnegativeInteger(candidate.wholesaleUnitCostCents) ?? 0,
+    };
+  });
+}
+
 function mapRmaListRow(row: RmaListRow): DropshipRmaListItem {
   return {
     rmaId: row.id,
@@ -1542,6 +1730,17 @@ function nullablePositiveInteger(value: unknown): number | null {
     return Number.isInteger(value) && value > 0 ? value : null;
   }
   if (typeof value === "string" && /^[1-9]\d*$/.test(value)) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function nullableNonnegativeInteger(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && value >= 0 ? value : null;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value)) {
     const parsed = Number(value);
     return Number.isSafeInteger(parsed) ? parsed : null;
   }
