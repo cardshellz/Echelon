@@ -98,7 +98,7 @@ describe("channel fulfillment authority service", () => {
 
     expect(materializationSource).toBeDefined();
     expect(materializationSource).toMatch(
-      /const writebackCandidateItems = materializedCustomerItems\.filter\([\s\S]*?suppressChannelProviders/,
+      /const writebackCandidateItems = input\.suppressChannelWriteback[\s\S]*?materializedCustomerItems\.filter\([\s\S]*?suppressChannelProviders/,
     );
     expect(materializationSource).toMatch(
       /findLineWritebackEligibility\(\s*tx,\s*writebackCandidateItems,\s*\)/,
@@ -142,12 +142,14 @@ describe("channel fulfillment authority service", () => {
 
     await service.ensureLegacyShipment(501, {
       source: "script:historical-refund-authority-repair",
+      suppressChannelWriteback: true,
       suppressChannelProviders: ["shopify"],
     });
 
     expect(repository.materializePhysicalPackage).toHaveBeenCalledWith(
       expect.objectContaining({
         source: "script:historical-refund-authority-repair",
+        suppressChannelWriteback: true,
         suppressChannelProviders: ["shopify"],
       }),
     );

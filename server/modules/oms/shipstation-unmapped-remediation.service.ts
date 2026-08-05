@@ -5,6 +5,7 @@ import type {
   ShipStationShipment,
   ShipStationShipmentItem,
 } from "./shipstation.service";
+import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
 import {
   SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON,
   SHIPSTATION_UNMAPPED_PHYSICAL_RULE,
@@ -1996,6 +1997,7 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
   db: any,
   shipStation: ShipStationService,
   input: ShipStationUnmappedReshipAdoptionInput,
+  fulfillmentAuthority?: Pick<ChannelFulfillmentAuthorityService, "ensureLegacyShipment">,
 ): Promise<Record<string, unknown>> {
   const initialContext = await loadContext(db, input);
   const resolvedProvider = await resolveProviderShipment(db, shipStation, initialContext);
@@ -2038,6 +2040,16 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     input,
     contentsAuthority,
   );
+  if (lines.some((line) => line.shipmentItemPurpose === "omission_correction")) {
+    if (!fulfillmentAuthority) {
+      throw new Error("canonical fulfillment authority is unavailable for omission correction source projection");
+    }
+    await fulfillmentAuthority.ensureLegacyShipment(input.originalShipmentId, {
+      executeImmediately: false,
+      source: "shipstation_omission_correction_source_projection",
+      suppressChannelWriteback: true,
+    });
+  }
   const candidateShipmentId = await prepareMappedShipment(
     db,
     context,

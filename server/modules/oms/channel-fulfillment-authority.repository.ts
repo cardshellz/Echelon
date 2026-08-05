@@ -35,6 +35,7 @@ const materializeInputSchema = z.object({
   source: z.string().trim().min(1).max(80),
   correlationId: optionalIdentifier(100),
   causationId: optionalIdentifier(100),
+  suppressChannelWriteback: z.boolean().optional().default(false),
   suppressChannelProviders: z.array(
     z.string().trim().min(1).max(40).transform((value) => value.toLowerCase()),
   ).max(20).optional(),
@@ -2186,9 +2187,11 @@ export function createChannelFulfillmentAuthorityRepository(
         await recalculatePlanLine(tx, planLineId);
       }
 
-      const writebackCandidateItems = materializedCustomerItems.filter(
-        (item) => !input.suppressChannelProviders.includes(item.channelProvider),
-      );
+      const writebackCandidateItems = input.suppressChannelWriteback
+        ? []
+        : materializedCustomerItems.filter(
+            (item) => !input.suppressChannelProviders.includes(item.channelProvider),
+          );
       const lineWritebackEligibility = await findLineWritebackEligibility(
         tx,
         writebackCandidateItems,
