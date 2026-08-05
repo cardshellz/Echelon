@@ -461,6 +461,7 @@ function registrationStatus(): ListingRegistrationStatus {
     publicationId: 401,
     providerPublicationKey: "ARM-ENV-SGL-V3",
     externalListingId: "listing-456",
+    registeredVariantIds: [501, 502],
     registeredAt: new Date("2026-08-04T12:00:02.000Z"),
   };
 }

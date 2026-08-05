@@ -210,6 +210,7 @@ function registrationStatus(productId: number) {
     publicationId: 4_000 + productId,
     providerPublicationKey: `publication-${productId}`,
     externalListingId: `listing-${productId}`,
+    registeredVariantIds: [productId * 10],
     registeredAt: "2026-08-04T12:00:00.000Z",
   };
 }

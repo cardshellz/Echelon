@@ -330,10 +330,10 @@ export function MarketplaceListingRegistrationDialog({
         onPointerDownOutside={(event) => { if (isConfirming) event.preventDefault(); }}
       >
         <DialogHeader className="px-6 pt-6">
-          <DialogTitle>Register live eBay listing</DialogTitle>
+          <DialogTitle>Analyze live eBay listing</DialogTitle>
           <DialogDescription>
-            Record the listing currently on eBay as Echelon&apos;s controlled baseline
-            for {productName}. This reads eBay and writes local registration records;
+            Compare the listing currently on eBay with Echelon&apos;s intended variants
+            for {productName}. This reads eBay and records the reviewed state;
             it does not edit, end, or relist anything on eBay.
           </DialogDescription>
         </DialogHeader>
@@ -512,7 +512,7 @@ export function MarketplaceListingRegistrationDialog({
               disabled={!preview || isPreviewing || isConfirming}
             >
               {isConfirming && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Confirm and register baseline
+              Save listing analysis
             </Button>
           )}
         </DialogFooter>

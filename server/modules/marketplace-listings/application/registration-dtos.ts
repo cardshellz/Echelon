@@ -183,6 +183,7 @@ export const listingRegistrationStatusSchema = z
     publicationId: positiveSafeIntegerSchema,
     providerPublicationKey: nullableTrimmedText(255),
     externalListingId: trimmedText(255),
+    registeredVariantIds: z.array(positivePostgresIntegerSchema).default([]),
     registeredAt: z.date(),
   })
   .strict();
