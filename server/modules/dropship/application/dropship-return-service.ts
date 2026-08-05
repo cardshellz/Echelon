@@ -588,13 +588,19 @@ export class DropshipReturnService {
   async updateStatus(input: unknown): Promise<DropshipRmaStatusUpdateResult> {
     const parsed = parseReturnInput(updateDropshipRmaStatusInputSchema, input, "DROPSHIP_RETURN_STATUS_INVALID_INPUT");
     const rma = await this.requireRma({ rmaId: parsed.rmaId, vendorId: parsed.vendorId });
-    assertRmaTransitionAllowed({
-      from: rma.status,
-      to: parsed.status,
-      actor: parsed.actor,
-      reason: parsed.notes ?? null,
-      systemLedgerCommit: false,
-    });
+    // Idempotent-replay fast path: when the RMA is already in the target
+    // status, the transition has already happened — defer to the repository's
+    // idempotency layer (same key + hash replays; a different request with a
+    // new key is rejected there as a conflict).
+    if (rma.status !== parsed.status) {
+      assertRmaTransitionAllowed({
+        from: rma.status,
+        to: parsed.status,
+        actor: parsed.actor,
+        reason: parsed.notes ?? null,
+        systemLedgerCommit: false,
+      });
+    }
     const result = await this.deps.repository.updateStatus({
       ...parsed,
       policyVersionId: rma.policyVersionId ?? null,
@@ -623,15 +629,23 @@ export class DropshipReturnService {
     );
     const now = this.deps.clock.now();
     const rma = await this.requireRma({ rmaId: parsed.rmaId });
-    // D4: inspection completes inspecting -> approved | rejected. The
-    // repository re-enforces under row lock inside the transaction.
-    assertRmaTransitionAllowed({
-      from: rma.status,
-      to: parsed.outcome,
-      actor: parsed.actor,
-      reason: parsed.notes ?? null,
-      systemLedgerCommit: false,
-    });
+    // Idempotent-replay fast path: when this idempotency key already finalized
+    // an inspection on the RMA, defer to the repository's replay machinery
+    // (hash mismatch there is a conflict, not an illegal transition).
+    const alreadyInspectedWithKey = rma.inspections.some(
+      (inspection) => inspection.idempotencyKey === parsed.idempotencyKey,
+    );
+    if (!alreadyInspectedWithKey) {
+      // D4: inspection completes inspecting -> approved | rejected. The
+      // repository re-enforces under row lock inside the transaction.
+      assertRmaTransitionAllowed({
+        from: rma.status,
+        to: parsed.outcome,
+        actor: parsed.actor,
+        reason: parsed.notes ?? null,
+        systemLedgerCommit: false,
+      });
+    }
     const settlement = await this.computeInspectionSettlement(parsed, rma, now);
     const result = await this.deps.repository.processInspection({
       ...parsed,
