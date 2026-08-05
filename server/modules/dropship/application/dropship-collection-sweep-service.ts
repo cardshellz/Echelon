@@ -60,7 +60,8 @@ export type DropshipCollectionSkipReason =
   | "no_funding_method"
   | "funding_method_not_chargeable"
   | "funding_provider_not_configured"
-  | "balance_recovered";
+  | "balance_recovered"
+  | "already_attempted";
 
 export interface DropshipCollectionAttemptRecord {
   attemptId: number;
@@ -191,6 +192,17 @@ export interface DropshipCollectionSweepRepository {
     escalate: boolean;
     now: Date;
   }): Promise<{ consecutiveFailures: number; escalated: boolean }>;
+
+  /**
+   * Carry an existing escalation into a new period's attempt row without
+   * incrementing the failure count and without a new audit event: the
+   * vendor is already escalated; collection stays paused until a human
+   * resolves the account review.
+   */
+  carryForwardEscalation(input: {
+    attemptId: number;
+    now: Date;
+  }): Promise<{ consecutiveFailures: number }>;
 }
 
 export class DropshipCollectionSweepService {
@@ -305,7 +317,8 @@ export class DropshipCollectionSweepService {
     });
 
     if (!claim.created) {
-      // Replay inside the same period. Terminal states are never re-charged.
+      // Replay inside the same period. Terminal states are never re-charged
+      // and report as skipped (a replay is not a new charge).
       const terminal = claim.attempt.status === "succeeded"
         || claim.attempt.status === "escalated"
         || claim.attempt.status === "skipped";
@@ -313,15 +326,36 @@ export class DropshipCollectionSweepService {
         return {
           vendorId: vendor.vendorId,
           attemptId: claim.attempt.attemptId,
-          outcome: claim.attempt.status === "succeeded" ? "charged" : claim.attempt.status === "escalated" ? "escalated" : "skipped",
+          outcome: "skipped",
           amountCents: claim.attempt.amountCents,
-          skipReason: claim.attempt.status === "skipped" ? "balance_recovered" : null,
+          skipReason: "already_attempted",
           consecutiveFailures: claim.attempt.consecutiveFailures,
         };
       }
       // Non-terminal replay (pending/failed): fall through and retry the
       // charge. consecutive_failures already counts prior failures; the
       // escalation check below uses the post-increment value.
+    }
+
+    // Carry-forward guard: a vendor whose consecutive failure count already
+    // reached the escalation threshold in a prior period is NOT charged
+    // again — the account waits for human review (D5: suspension and account
+    // consequences are always a human decision). The new period's row is
+    // marked escalated without re-sending the review notification (the
+    // notification fires only on the transition into escalation).
+    if (claim.created && claim.attempt.consecutiveFailures >= config.maxConsecutiveFailures) {
+      const carried = await this.deps.repository.carryForwardEscalation({
+        attemptId: claim.attempt.attemptId,
+        now: input.now,
+      });
+      return {
+        vendorId: vendor.vendorId,
+        attemptId: claim.attempt.attemptId,
+        outcome: "escalated",
+        amountCents,
+        skipReason: null,
+        consecutiveFailures: carried.consecutiveFailures,
+      };
     }
 
     if (!fundingMethod) {

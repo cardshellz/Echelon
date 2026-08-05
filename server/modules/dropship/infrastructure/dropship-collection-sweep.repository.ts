@@ -126,44 +126,65 @@ export class PgDropshipCollectionSweepRepository implements DropshipCollectionSw
     idempotencyKey: string;
     now: Date;
   }): Promise<{ attempt: DropshipCollectionAttemptRecord; created: boolean }> {
-    const inserted = await this.dbPool.query<AttemptRow>(
-      `INSERT INTO dropship.dropship_collection_attempts
-        (vendor_id, period_start, period_end, amount_cents, currency,
-         funding_method_id, config_version_id, status, idempotency_key,
-         created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $9)
-       ON CONFLICT (vendor_id, period_start) DO NOTHING
-       RETURNING *`,
-      [
-        input.vendorId,
-        input.periodStart,
-        input.periodEnd,
-        input.amountCents,
-        input.currency,
-        input.fundingMethodId,
-        input.configVersionId,
-        input.idempotencyKey,
-        input.now,
-      ],
-    );
-    if (inserted.rows[0]) {
-      return { attempt: mapAttemptRow(inserted.rows[0]), created: true };
-    }
-    const existing = await this.dbPool.query<AttemptRow>(
-      `SELECT * FROM dropship.dropship_collection_attempts
-       WHERE vendor_id = $1 AND period_start = $2
-       LIMIT 1`,
-      [input.vendorId, input.periodStart],
-    );
-    const row = existing.rows[0];
-    if (!row) {
-      throw new DropshipError(
-        "DROPSHIP_COLLECTION_ATTEMPT_CLAIM_FAILED",
-        "Dropship collection attempt claim did not return a row.",
-        { vendorId: input.vendorId },
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const inserted = await client.query<AttemptRow>(
+        `INSERT INTO dropship.dropship_collection_attempts
+          (vendor_id, period_start, period_end, amount_cents, currency,
+           funding_method_id, config_version_id, status, consecutive_failures,
+           idempotency_key, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending',
+                 COALESCE((
+                   SELECT a.consecutive_failures
+                   FROM dropship.dropship_collection_attempts a
+                   WHERE a.vendor_id = $1
+                     AND a.status IN ('failed', 'escalated')
+                   ORDER BY a.period_start DESC, a.id DESC
+                   LIMIT 1
+                 ), 0),
+                 $8, $9, $9)
+         ON CONFLICT (vendor_id, period_start) DO NOTHING
+         RETURNING *`,
+        [
+          input.vendorId,
+          input.periodStart,
+          input.periodEnd,
+          input.amountCents,
+          input.currency,
+          input.fundingMethodId,
+          input.configVersionId,
+          input.idempotencyKey,
+          input.now,
+        ],
       );
+      if (inserted.rows[0]) {
+        await client.query("COMMIT");
+        return { attempt: mapAttemptRow(inserted.rows[0]), created: true };
+      }
+      const existing = await client.query<AttemptRow>(
+        `SELECT * FROM dropship.dropship_collection_attempts
+         WHERE vendor_id = $1 AND period_start = $2
+         LIMIT 1
+         FOR UPDATE`,
+        [input.vendorId, input.periodStart],
+      );
+      const row = existing.rows[0];
+      if (!row) {
+        throw new DropshipError(
+          "DROPSHIP_COLLECTION_ATTEMPT_CLAIM_FAILED",
+          "Dropship collection attempt claim did not return a row.",
+          { vendorId: input.vendorId },
+        );
+      }
+      await client.query("COMMIT");
+      return { attempt: mapAttemptRow(row), created: false };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
     }
-    return { attempt: mapAttemptRow(row), created: false };
   }
 
   async getDefaultChargeableFundingMethod(input: {
@@ -372,6 +393,32 @@ export class PgDropshipCollectionSweepRepository implements DropshipCollectionSw
     } finally {
       client.release();
     }
+  }
+
+  async carryForwardEscalation(input: {
+    attemptId: number;
+    now: Date;
+  }): Promise<{ consecutiveFailures: number }> {
+    const result = await this.dbPool.query<{ consecutive_failures: number }>(
+      `UPDATE dropship.dropship_collection_attempts
+       SET status = 'escalated',
+           escalated_at = COALESCE(escalated_at, $2),
+           updated_at = $2
+       WHERE id = $1
+         AND status = 'pending'
+       RETURNING consecutive_failures`,
+      [input.attemptId, input.now],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      // Already moved on (concurrent run) — read the current state.
+      const current = await this.dbPool.query<{ consecutive_failures: number }>(
+        `SELECT consecutive_failures FROM dropship.dropship_collection_attempts WHERE id = $1 LIMIT 1`,
+        [input.attemptId],
+      );
+      return { consecutiveFailures: current.rows[0]?.consecutive_failures ?? 0 };
+    }
+    return { consecutiveFailures: row.consecutive_failures };
   }
 }
 
