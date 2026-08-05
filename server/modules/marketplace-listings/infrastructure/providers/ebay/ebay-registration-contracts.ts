@@ -21,11 +21,18 @@ export const EBAY_REGISTRATION_IDENTITY_ROLES = [
 export type EbayRegistrationIdentityRole =
   (typeof EBAY_REGISTRATION_IDENTITY_ROLES)[number];
 
-const EBAY_API_ORIGINS: Readonly<
+const EBAY_INVENTORY_API_ORIGINS: Readonly<
   Record<EbayRegistrationEnvironment, string>
 > = {
   sandbox: "https://api.sandbox.ebay.com",
   production: "https://api.ebay.com",
+};
+
+const EBAY_IDENTITY_API_ORIGINS: Readonly<
+  Record<EbayRegistrationEnvironment, string>
+> = {
+  sandbox: "https://apiz.sandbox.ebay.com",
+  production: "https://apiz.ebay.com",
 };
 
 const EBAY_REGISTRATION_READ_PATH_PREFIXES = [
@@ -310,7 +317,9 @@ function buildEbayRegistrationReadUrl(
     );
   }
 
-  const allowedOrigin = EBAY_API_ORIGINS[environment];
+  const allowedOrigin = path.startsWith("/commerce/identity/v1/")
+    ? EBAY_IDENTITY_API_ORIGINS[environment]
+    : EBAY_INVENTORY_API_ORIGINS[environment];
   let url: URL;
   try {
     url = new URL(path, allowedOrigin);

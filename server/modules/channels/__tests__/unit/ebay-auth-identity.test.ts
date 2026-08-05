@@ -161,7 +161,7 @@ describe("EbayAuthService provider account identity", () => {
 
     expect(fetchFn).toHaveBeenNthCalledWith(
       2,
-      "https://api.ebay.com/commerce/identity/v1/user/",
+      "https://apiz.ebay.com/commerce/identity/v1/user/",
       expect.objectContaining({ method: "GET" }),
     );
     expect(state.inserted).toHaveLength(1);

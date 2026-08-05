@@ -240,7 +240,7 @@ describe("FetchEbayRegistrationReadTransport", () => {
       body: { userId: "seller-account-123" },
     });
     expect(fetchFn).toHaveBeenCalledWith(
-      "https://api.sandbox.ebay.com/commerce/identity/v1/user/",
+      "https://apiz.sandbox.ebay.com/commerce/identity/v1/user/",
       expect.objectContaining({
         method: "GET",
         signal: expect.any(AbortSignal),
