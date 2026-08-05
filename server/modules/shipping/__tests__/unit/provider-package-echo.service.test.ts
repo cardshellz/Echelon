@@ -19,6 +19,10 @@ function isExactLegacyPackageQuery(text: string): boolean {
   return text.includes("FROM wms.shipping_provider_labels AS label");
 }
 
+function isLegacyPackageAuthorityQuery(text: string): boolean {
+  return text.includes("shipment_item.id AS shipment_item_id");
+}
+
 const input = {
   providerShipmentId: 448105575,
   trackingNumber: "9400 1502 0621 7792 9280 44",
@@ -257,6 +261,16 @@ describe("ShipStation provider package echo", () => {
             }],
           };
         }
+        if (isLegacyPackageAuthorityQuery(text)) {
+          return {
+            rows: [{
+              legacy_wms_shipment_id: 4126,
+              shipment_item_id: 8502,
+              sku: "SKU-A",
+              quantity: 1,
+            }],
+          };
+        }
         throw new Error(`Unexpected query: ${text}`);
       }),
     };
@@ -276,9 +290,43 @@ describe("ShipStation provider package echo", () => {
       shippingProviderLabelId: 2788,
       linkInserted: false,
     });
-    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(db.execute).toHaveBeenCalledTimes(2);
   });
 
+
+  it("does not accept a linked provider-first shell without positive package authority", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return {
+            rows: [{
+              shipping_provider_label_id: 2788,
+              legacy_wms_shipment_id: 5034,
+              wms_order_id: 203878,
+            }],
+          };
+        }
+        if (isLegacyPackageAuthorityQuery(text)) return { rows: [] };
+        if (text.includes("FROM wms.outbound_shipment_items AS source_item")) {
+          return { rows: [] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    await expect(inspectShipStationProviderPackageEcho(db, {
+      providerShipmentId: 442187891,
+      trackingNumber: "9434650206217243615983",
+      expectedWmsOrderId: 203878,
+      shipmentItems: [{ lineItemKey: "wms-item-7491", sku: "SKU-A", quantity: 1 }],
+      source: "unit_test",
+    })).resolves.toMatchObject({
+      status: "no_match",
+      reason: "provider_lines_not_authoritative",
+      physicalShipmentId: null,
+    });
+  });
   it("reconciles an exact historical package without creating duplicate authority", async () => {
     const db: any = {
       transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
@@ -290,6 +338,16 @@ describe("ShipStation provider package echo", () => {
               shipping_provider_label_id: 2788,
               legacy_wms_shipment_id: 4126,
               wms_order_id: 204249,
+            }],
+          };
+        }
+        if (isLegacyPackageAuthorityQuery(text)) {
+          return {
+            rows: [{
+              legacy_wms_shipment_id: 4126,
+              shipment_item_id: 8502,
+              sku: "SKU-A",
+              quantity: 1,
             }],
           };
         }

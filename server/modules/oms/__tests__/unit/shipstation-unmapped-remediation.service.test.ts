@@ -204,6 +204,12 @@ describe("ShipStation unmapped physical remediation", () => {
       externalShipmentRef: "800",
       items: [{ orderItemId: 101, sku: "SKU-A", quantity: 1 }],
     });
+    expect(preview.providerLineResolutions).toEqual([{
+      providerItemIndex: 0,
+      status: "unique_match",
+      suggestedOrderItemId: 101,
+      eligibleOriginalShipmentIds: [10],
+    }]);
 
     const contextQuery = queryText(db.execute.mock.calls[0][0]);
     expect(contextQuery).toContain(
@@ -212,6 +218,45 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(contextQuery).not.toContain("provider_order_id");
   });
 
+
+  it("does not suggest an order line when one provider SKU matches multiple paid lines", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) return { rows: [contextRow] };
+        if (isExactLegacyPackageQuery(text)) return { rows: [] };
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [orderItemRow, { ...orderItemRow, id: 102 }] };
+        }
+        if (text.includes("COUNT(shipment_item.id)::int AS item_count")) {
+          return { rows: [{
+            id: 10,
+            status: "shipped",
+            source: "oms",
+            shipment_purpose: "customer_fulfillment",
+            tracking_number: "1Z-ORIGINAL",
+            external_fulfillment_id: "shipstation_shipment:800",
+            created_at: "2026-07-10T12:00:00Z",
+            item_count: 2,
+            items: [
+              { orderItemId: 101, sku: "SKU-A", name: "Card A", quantity: 1 },
+              { orderItemId: 102, sku: "SKU-A", name: "Card B", quantity: 1 },
+            ],
+          }] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    const preview = await getShipStationUnmappedPhysicalPreview(db, shipStation(), { exceptionId: 77 });
+
+    expect(preview.providerLineResolutions).toEqual([{
+      providerItemIndex: 0,
+      status: "ambiguous",
+      suggestedOrderItemId: null,
+      eligibleOriginalShipmentIds: [10],
+    }]);
+  });
   it("resumes a pending remediation through its open exception when the legacy flag is gone", async () => {
     const db = {
       execute: vi.fn(async (query: any) => {

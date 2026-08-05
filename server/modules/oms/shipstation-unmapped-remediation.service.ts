@@ -148,6 +148,13 @@ interface PreviewShipment {
   }>;
 }
 
+export interface ShipStationProviderLineResolution {
+  providerItemIndex: number;
+  status: "unique_match" | "ambiguous" | "unmatched" | "invalid";
+  suggestedOrderItemId: number | null;
+  eligibleOriginalShipmentIds: number[];
+}
+
 export interface ShipStationUnmappedPreview {
   exceptionId: number | null;
   wmsOrderId: number;
@@ -159,6 +166,7 @@ export interface ShipStationUnmappedPreview {
   providerIdentityRepair: ShipStationProviderIdentityRepair | null;
   providerPackageEcho: ProviderPackageEchoResult;
   originalPackageIdentityRepair: ShipStationOriginalPackageIdentityRepair | null;
+  providerLineResolutions: ShipStationProviderLineResolution[];
   orderItems: PreviewOrderItem[];
   shipments: PreviewShipment[];
 }
@@ -1042,6 +1050,77 @@ async function loadShipments(db: any, wmsOrderId: number): Promise<PreviewShipme
   });
 }
 
+function resolveShipStationProviderLinesAgainstOrder(
+  shipment: ShipStationShipment,
+  orderItems: readonly PreviewOrderItem[],
+  shipments: readonly PreviewShipment[],
+  candidateShipmentId: number | null,
+): ShipStationProviderLineResolution[] {
+  const eligibleShipments = shipments.filter((candidate) => (
+    candidate.id !== candidateShipmentId
+    && ["shipped", "returned", "lost"].includes(candidate.status)
+    && candidate.shipmentPurpose === "customer_fulfillment"
+    && candidate.itemCount > 0
+  ));
+
+  return (shipment.shipmentItems ?? []).map((providerItem, providerItemIndex) => {
+    const sku = normalizeSku(providerItem.sku);
+    const quantity = Number(providerItem.quantity);
+    if (!sku || !Number.isSafeInteger(quantity) || quantity <= 0) {
+      return {
+        providerItemIndex,
+        status: "invalid" as const,
+        suggestedOrderItemId: null,
+        eligibleOriginalShipmentIds: [],
+      };
+    }
+
+    const shipmentIdsByOrderItemId = new Map<number, Set<number>>();
+    for (const originalShipment of eligibleShipments) {
+      for (const originalItem of originalShipment.items) {
+        if (
+          normalizeSku(originalItem.sku) === sku
+          && Number(originalItem.quantity) >= quantity
+        ) {
+          const shipmentIds = shipmentIdsByOrderItemId.get(originalItem.orderItemId)
+            ?? new Set<number>();
+          shipmentIds.add(originalShipment.id);
+          shipmentIdsByOrderItemId.set(originalItem.orderItemId, shipmentIds);
+        }
+      }
+    }
+
+    const matchingOrderItems = orderItems.filter(
+      (orderItem) => normalizeSku(orderItem.sku) === sku,
+    );
+    const eligibleOrderItemIds = matchingOrderItems
+      .map((orderItem) => orderItem.id)
+      .filter((orderItemId) => shipmentIdsByOrderItemId.has(orderItemId));
+
+    if (eligibleOrderItemIds.length === 1) {
+      return {
+        providerItemIndex,
+        status: "unique_match" as const,
+        suggestedOrderItemId: eligibleOrderItemIds[0],
+        eligibleOriginalShipmentIds: [
+          ...(shipmentIdsByOrderItemId.get(eligibleOrderItemIds[0]) ?? []),
+        ].sort((left, right) => left - right),
+      };
+    }
+    return {
+      providerItemIndex,
+      status: eligibleOrderItemIds.length > 1 ? "ambiguous" as const : "unmatched" as const,
+      suggestedOrderItemId: null,
+      eligibleOriginalShipmentIds: [
+        ...new Set(
+          eligibleOrderItemIds.flatMap(
+            (orderItemId) => [...(shipmentIdsByOrderItemId.get(orderItemId) ?? [])],
+          ),
+        ),
+      ].sort((left, right) => left - right),
+    };
+  });
+}
 export async function getShipStationUnmappedPhysicalPreview(
   db: any,
   shipStation: ShipStationService,
@@ -1087,6 +1166,12 @@ export async function getShipStationUnmappedPhysicalPreview(
     providerIdentityRepair: identityRepair,
     providerPackageEcho,
     originalPackageIdentityRepair,
+    providerLineResolutions: resolveShipStationProviderLinesAgainstOrder(
+      providerShipment,
+      orderItems,
+      shipments,
+      context.candidateShipmentId,
+    ),
     orderItems,
     shipments,
   };
