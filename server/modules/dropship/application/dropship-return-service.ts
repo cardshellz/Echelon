@@ -16,6 +16,7 @@ import type {
 } from "./dropship-ports";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 import type { DropshipWalletLedgerRecord } from "./dropship-wallet-service";
+import type { DropshipReturnPolicyService } from "./dropship-return-policy-service";
 
 const positiveIdSchema = z.number().int().positive();
 const nonnegativeCentsSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
@@ -72,6 +73,7 @@ const createDropshipRmaRequestSchema = z.object({
 
 const createDropshipRmaInputSchema = createDropshipRmaRequestSchema.extend({
   vendorId: positiveIdSchema,
+  policyVersionId: positiveIdSchema.nullable().optional(),
   actor: z.object({
     actorType: z.enum(["vendor", "admin", "system"]),
     actorId: z.string().trim().min(1).max(255).optional(),
@@ -319,6 +321,7 @@ export class DropshipReturnService {
       vendorProvisioning: DropshipVendorProvisioningService;
       repository: DropshipReturnRepository;
       notificationSender?: DropshipNotificationSender;
+      returnPolicyService?: DropshipReturnPolicyService;
       clock: DropshipClock;
       logger: DropshipLogger;
     },
@@ -343,6 +346,22 @@ export class DropshipReturnService {
   }
 
   async getActiveReturnPolicy(): Promise<DropshipReturnPolicyRecord | null> {
+    if (this.deps.returnPolicyService) {
+      const resolved = await this.deps.returnPolicyService.resolveReturnPolicy({
+        at: this.deps.clock.now(),
+      });
+      if (resolved) {
+        return {
+          policyId: resolved.policyId,
+          name: `v${resolved.version} (${resolved.returnWindowDays}d)`,
+          returnWindowDays: resolved.returnWindowDays,
+          isActive: resolved.isActive,
+          effectiveFrom: resolved.effectiveFrom,
+          effectiveTo: resolved.effectiveTo,
+          createdAt: resolved.createdAt,
+        };
+      }
+    }
     return this.deps.repository.getActiveReturnPolicy(this.deps.clock.now());
   }
 
@@ -406,8 +425,16 @@ export class DropshipReturnService {
       });
     }
     assertMemberRmaOrderIsAccepted(parsed, orderReference);
-    const returnPolicy = await this.deps.repository.getActiveReturnPolicy(now);
-    if (!returnPolicy) {
+    const resolvedPolicy = this.deps.returnPolicyService
+      ? await this.deps.returnPolicyService.resolveReturnPolicy({
+          vendorId: vendor.vendor.vendorId,
+          storeConnectionId: orderReference.storeConnectionId,
+          at: now,
+        })
+      : null;
+    const legacyPolicy = resolvedPolicy ? null : await this.deps.repository.getActiveReturnPolicy(now);
+    const returnWindowDays = resolvedPolicy?.returnWindowDays ?? legacyPolicy?.returnWindowDays ?? null;
+    if (returnWindowDays === null) {
       throw new DropshipError(
         "DROPSHIP_RETURN_POLICY_REQUIRED",
         "An active dropship return policy is required before vendor RMAs can be submitted.",
@@ -418,13 +445,14 @@ export class DropshipReturnService {
         },
       );
     }
-    assertMemberRmaWithinReturnWindow(parsed, orderReference, now, returnPolicy.returnWindowDays);
+    assertMemberRmaWithinReturnWindow(parsed, orderReference, now, returnWindowDays);
     assertMemberRmaItemsMatchOrder(parsed, orderReference);
     return this.createRmaWithNow({
       ...parsed,
       storeConnectionId: orderReference.storeConnectionId,
       omsOrderId: orderReference.omsOrderId,
-      returnWindowDays: returnPolicy.returnWindowDays,
+      returnWindowDays,
+      policyVersionId: resolvedPolicy?.policyId ?? null,
       vendorId: vendor.vendor.vendorId,
       actor: { actorType: "vendor", actorId: memberId },
     }, now);

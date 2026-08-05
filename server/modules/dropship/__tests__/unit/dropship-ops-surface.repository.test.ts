@@ -194,7 +194,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(String(query.mock.calls[0]?.[0])).not.toContain("c.shipping_config #>> '{dropship,role}'");
     expect(String(query.mock.calls[0]?.[0])).not.toContain("cc.metadata #>> '{features,dropshipOms}'");
     expect(String(query.mock.calls[0]?.[0])).toContain("active_usdc_base_funding_method_count");
-    expect(String(query.mock.calls[0]?.[0])).toContain("dropship.dropship_return_policy_config");
+    expect(String(query.mock.calls[0]?.[0])).toContain("dropship.dropship_return_policies");
     expect(result.total).toBe(1);
     expect(result.items[0]?.metrics).toMatchObject({
       dropshipOmsChannelId: 7,
