@@ -52,6 +52,7 @@ interface CurrentRegistrationStatusRow extends QueryResultRow {
   publication_status: string | null;
   provider_publication_key: string | null;
   external_listing_id: string | null;
+  registered_variant_ids: number[];
   scope_provider_account_id: string | number | null;
   provider_account_id: string | number | null;
   account_owner_kind: string | null;
@@ -1057,6 +1058,12 @@ function currentRegistrationStatusesSql(owner: ListingOwnerRef): string {
       publication.status AS publication_status,
       publication.provider_publication_key,
       publication.external_listing_id,
+      ARRAY(
+        SELECT member.product_variant_id
+        FROM marketplace.listing_publication_members AS member
+        WHERE member.publication_id = publication.id
+        ORDER BY member.product_variant_id
+      ) AS registered_variant_ids,
       scope_account.provider_account_id AS scope_provider_account_id,
       account.id AS provider_account_id,
       account.owner_kind AS account_owner_kind,
@@ -1189,6 +1196,7 @@ function mapCurrentRegistrationStatus(
     publicationId,
     providerPublicationKey: row.provider_publication_key,
     externalListingId: row.external_listing_id,
+    registeredVariantIds: row.registered_variant_ids,
     registeredAt: toRequiredStatusDate(
       row.registered_at,
       "registration_status.registered_at",

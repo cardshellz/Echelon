@@ -26,11 +26,13 @@ describe("PgMarketplaceListingRegistrationRepository", () => {
       publicationId: 31,
       providerPublicationKey: "ARM-ENV-SGL-V3",
       externalListingId: "listing-456",
+      registeredVariantIds: [501, 502],
       registeredAt: new Date("2026-08-04T12:00:02.000Z"),
     });
     const [sql, params] = poolQuery.mock.calls[0] ?? [];
     expect(sql).toContain("marketplace.channel_listing_scopes");
     expect(sql).toContain("publication.status = 'active'");
+    expect(sql).toContain("FROM marketplace.listing_publication_members AS member");
     expect(params).toEqual(["channel", "ebay", "EBAY_US", 7, [33]]);
   });
 
@@ -530,6 +532,7 @@ function currentStatusRow(owner: ListingOwnerRef) {
     publication_status: "active",
     provider_publication_key: "ARM-ENV-SGL-V3",
     external_listing_id: "listing-456",
+    registered_variant_ids: [501, 502],
     scope_provider_account_id: 20,
     provider_account_id: 20,
     account_owner_kind: owner.kind,

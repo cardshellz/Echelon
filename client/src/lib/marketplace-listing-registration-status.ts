@@ -33,6 +33,7 @@ export const marketplaceListingRegistrationStatusSchema = z
     publicationId: positiveSafeIntegerSchema,
     providerPublicationKey: nullableTrimmedTextSchema,
     externalListingId: z.string().trim().min(1).max(255),
+    registeredVariantIds: z.array(positivePostgresIntegerSchema).default([]),
     registeredAt: z.string().datetime({ offset: true }),
   })
   .strict();

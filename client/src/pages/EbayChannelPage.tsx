@@ -76,6 +76,7 @@ import {
   fetchChannelEbayMarketplaceListingRegistrationStatuses,
   type MarketplaceListingRegistrationStatus,
 } from "@/lib/marketplace-listing-registration-status";
+import { reconcileMarketplaceListing } from "@/lib/marketplace-listing-reconciliation";
 
 // ============================================================================
 // Types
@@ -534,8 +535,8 @@ export default function EbayChannelPage() {
       });
     }
     toast({
-      title: "Listing baseline registered",
-      description: "The live eBay listing is now recorded for safe replacement planning.",
+      title: "Listing analyzed",
+      description: "Echelon recorded the live listing and can now choose the correct update or replacement flow.",
     });
   }, [queryClient, registrationStatusQueryInput, registrationStatusQueryKey, toast]);
 
@@ -1847,8 +1848,8 @@ export default function EbayChannelPage() {
                 <div className="mb-3 flex items-start gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-800 dark:bg-red-950/20 dark:text-red-300">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                   <div>
-                    <p className="font-medium">Listing baseline status is unavailable</p>
-                    <p className="mt-0.5 text-xs">Registration controls are disabled because Echelon could not verify the stored baseline state. Refresh the page or try again later.</p>
+                    <p className="font-medium">Listing change analysis is unavailable</p>
+                    <p className="mt-0.5 text-xs">Echelon could not determine whether listing changes require an update or replacement. Refresh the page or try again later.</p>
                   </div>
                 </div>
               )}
@@ -1875,35 +1876,45 @@ export default function EbayChannelPage() {
                       const allIncluded = item.includedVariantCount === item.variantCount;
                       const someExcluded = item.includedVariantCount < item.variantCount && item.includedVariantCount > 0;
                       const registrationStatus = registrationStatusByProductId.get(item.id) ?? null;
-                      const registrationMatchesCurrentListing =
-                        registrationStatus?.externalListingId === item.externalListingId;
-                      const registrationConflictsWithCurrentListing =
-                        registrationStatus !== null && !registrationMatchesCurrentListing;
                       const registrationStatusUnavailable = registrationStatusQueryInput === null
                         || registrationStatusesError !== null;
                       const registrationStatusChecking = !registrationStatusUnavailable
                         && (registrationStatusesLoading || registrationStatusesFetching);
-                      const registrationControlDisabled = registrationStatusUnavailable
-                        || registrationStatusChecking || registrationConflictsWithCurrentListing;
-                      const registrationControlTitle = registrationStatusUnavailable
-                        ? "Stored listing baseline status is unavailable"
-                        : registrationStatusChecking
-                          ? "Checking the stored listing baseline status"
-                          : registrationMatchesCurrentListing
-                            ? "Review and replace this registered live eBay listing"
-                            : registrationConflictsWithCurrentListing
-                              ? "A different eBay listing is already registered for this product"
-                              : "Review and register the live eBay listing baseline";
-                      const registrationControlLabel = registrationStatusUnavailable
-                        ? "Unavailable"
-                        : registrationStatusChecking
-                          ? "Checking"
-                          : registrationMatchesCurrentListing
-                            ? "Replace listing"
-                            : registrationConflictsWithCurrentListing ? "Baseline mismatch" : "Baseline";
-                      const registrationIconClass = registrationMatchesCurrentListing
-                        ? "text-green-600"
-                        : registrationConflictsWithCurrentListing ? "text-amber-600" : "";
+                      const reconciliation = registrationStatusUnavailable || registrationStatusChecking
+                        ? null
+                        : reconcileMarketplaceListing({
+                            externalListingId: item.externalListingId,
+                            desiredVariantIds: item.variants
+                              .filter((variant) => variant.effectivelyListed)
+                              .map((variant) => variant.id),
+                            registration: registrationStatus,
+                          });
+                      const reconciliationAction = reconciliation?.kind === "replacement_required"
+                        ? "Review replacement"
+                        : reconciliation?.kind === "update_available"
+                          ? "Update listing"
+                          : reconciliation?.kind === "verification_required"
+                            ? "Verify listing"
+                            : reconciliation?.kind === "normal" && item.status === "error"
+                              ? "Analyze listing"
+                              : null;
+                      const runReconciliationAction = () => {
+                        if (reconciliation?.kind === "replacement_required") {
+                          setReplacementTarget(item);
+                          return;
+                        }
+                        if (reconciliation?.kind === "update_available") {
+                          handlePushSingle(item.id);
+                          return;
+                        }
+                        if (reconciliation?.kind === "verification_required") {
+                          handleSyncProduct(item.id);
+                        }
+                        if (reconciliation?.kind === "normal") {
+                          setRegistrationTarget(item);
+                          return;
+                        }
+                      };
 
 
                       return (
@@ -2053,27 +2064,20 @@ export default function EbayChannelPage() {
                               {item.status === "excluded" && (
                                 <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
                               )}
-                              {item.externalListingId && item.status !== "deleted" && (
+                              {reconciliationAction && (
                                 <Button
                                   variant="outline"
                                   size="sm"
                                   className="min-h-[44px] px-3 text-xs"
-                                  disabled={registrationControlDisabled}
                                   onClick={(event) => {
                                     event.stopPropagation();
-                                    if (registrationMatchesCurrentListing) setReplacementTarget(item);
-                                    else setRegistrationTarget(item);
+                                    runReconciliationAction();
                                   }}
-                                  title={registrationControlTitle}
                                 >
-                                  {registrationStatusChecking ? (
-                                    <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                                  ) : registrationStatusUnavailable ? (
-                                    <AlertCircle className="h-4 w-4 mr-1 text-red-600" />
-                                  ) : (
-                                    <ShieldCheck className={`h-4 w-4 mr-1 ${registrationIconClass}`} />
+                                  {reconciliation?.kind === "replacement_required" && (
+                                    <RefreshCw className="h-4 w-4 mr-1" />
                                   )}
-                                  {registrationControlLabel}
+                                  {reconciliationAction}
                                 </Button>
                               )}
                             </div>
@@ -2208,27 +2212,20 @@ export default function EbayChannelPage() {
                                 {item.status === "excluded" && (
                                   <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
                                 )}
-                                {item.externalListingId && item.status !== "deleted" && (
+                                {reconciliationAction && (
                                   <Button
-                                    variant="ghost"
+                                    variant="outline"
                                     size="sm"
-                                    className="h-6 w-6 p-0"
-                                    disabled={registrationControlDisabled}
+                                    className="h-7 px-2 text-[11px]"
                                     onClick={(event) => {
                                       event.stopPropagation();
-                                      if (registrationMatchesCurrentListing) setReplacementTarget(item);
-                                      else setRegistrationTarget(item);
+                                      runReconciliationAction();
                                     }}
-                                    title={registrationControlTitle}
-                                    aria-label={registrationControlTitle}
                                   >
-                                    {registrationStatusChecking ? (
-                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    ) : registrationStatusUnavailable ? (
-                                      <AlertCircle className="h-3.5 w-3.5 text-red-600" />
-                                    ) : (
-                                      <ShieldCheck className={`h-3.5 w-3.5 ${registrationIconClass}`} />
+                                    {reconciliation?.kind === "replacement_required" && (
+                                      <RefreshCw className="h-3.5 w-3.5 mr-1" />
                                     )}
+                                    {reconciliationAction}
                                   </Button>
                                 )}
                               </div>
