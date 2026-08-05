@@ -36,6 +36,7 @@ export interface ListingReplacementExecutionContext {
 
 export interface ClaimedListingReplacementStep {
   readonly operation: ListingReplacementExecutionContext;
+  readonly executor: ListingActor;
   readonly stepId: number;
   readonly stepStateVersion: number;
   readonly stepKey: ListingReplacementExecutionStepKey;

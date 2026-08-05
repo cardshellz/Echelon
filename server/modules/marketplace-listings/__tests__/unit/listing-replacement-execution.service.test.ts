@@ -84,6 +84,7 @@ function claim(
   stepKey: ClaimedListingReplacementStep["stepKey"],
 ): ClaimedListingReplacementStep {
   return {
+    executor: { type: "user", id: "admin-1" },
     operation: {
       operationId: 100,
       operationStateVersion: 2,
