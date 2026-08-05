@@ -204,6 +204,27 @@ describe("EbayMarketplaceRegistrationObserver", () => {
     ]);
   });
 
+  it("excludes unpublished inventory-group members from the live listing baseline", async () => {
+    const transport = fixtureTransport({
+      groupSkus: ["ARM-ENV-SGL-C700", "ARM-ENV-SGL-C750"],
+      offersBySku: {
+        "ARM-ENV-SGL-C700": [
+          publishedOffer("offer-c700", "ARM-ENV-SGL-C700", "listing-123"),
+        ],
+        "ARM-ENV-SGL-C750": [],
+      },
+    });
+
+    const result = await observer(transport).observeExistingPublication(groupInput());
+
+    expect(result.members).toEqual([
+      expect.objectContaining({
+        sku: "ARM-ENV-SGL-C700",
+        offerIdentity: expect.objectContaining({ externalId: "offer-c700" }),
+      }),
+    ]);
+  });
+
   it("exhausts offer pagination and selects the exact listing instead of offers[0]", async () => {
     const transport = fixtureTransport({
       groupSkus: ["ARM-ENV-SGL-C750"],

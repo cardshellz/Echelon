@@ -345,13 +345,19 @@ export class EbayMarketplaceRegistrationObserver
       observedSkus,
       expectedListingId,
     );
+    const members = selectPublishedGroupMembers(observedSkus, listingId);
+    if (members.length === 0) {
+      throw observationError(
+        "EBAY_REGISTRATION_LISTING_NOT_FOUND",
+        "No inventory item group member has a published offer for the requested listing.",
+        { listingId, groupKey: normalizedGroupKey },
+      );
+    }
     return {
       listingId,
       groupKey: normalizedGroupKey,
       groupVariantSkus: variantSkus,
-      members: observedSkus.map((observed) =>
-        selectSinglePublishedOffer(observed, listingId)
-      ),
+      members,
     };
   }
 
@@ -715,21 +721,25 @@ function resolveCoherentListingId(
   return listingIds[0];
 }
 
-function selectSinglePublishedOffer(
-  observed: ObservedSku,
+function selectPublishedGroupMembers(
+  observedSkus: readonly ObservedSku[],
   listingId: string,
-): SelectedMember {
-  const offers = publishedOffersForListing(observed.offers, listingId);
-  if (offers.length !== 1) {
-    throw observationError(
-      offers.length === 0
-        ? "EBAY_REGISTRATION_GROUP_MEMBER_NOT_PUBLISHED"
-        : "EBAY_REGISTRATION_OFFER_AMBIGUOUS",
-      "Every observed eBay group member must have exactly one published offer for the listing.",
-      { sku: observed.sku, listingId, matchingOfferCount: offers.length },
-    );
+): SelectedMember[] {
+  const members: SelectedMember[] = [];
+  for (const observed of observedSkus) {
+    const offers = publishedOffersForListing(observed.offers, listingId);
+    if (offers.length > 1) {
+      throw observationError(
+        "EBAY_REGISTRATION_OFFER_AMBIGUOUS",
+        "An eBay group member has multiple published offers for the requested listing.",
+        { sku: observed.sku, listingId, matchingOfferCount: offers.length },
+      );
+    }
+    if (offers.length === 1) {
+      members.push(selectedMember(observed, offers[0], listingId));
+    }
   }
-  return selectedMember(observed, offers[0], listingId);
+  return members;
 }
 
 function selectedMember(
