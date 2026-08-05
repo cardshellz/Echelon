@@ -462,7 +462,7 @@ export class EbayMarketplaceRegistrationObserver
       marketplaceId,
     });
     if (response.status === 404) return null;
-    assertSuccessfulRead(response, "inventory_item");
+    assertSuccessfulRead(response, "inventory_item", { sku });
     const parsed = parseProviderResponse(
       inventoryItemResponseSchema,
       response.body,
@@ -496,7 +496,7 @@ export class EbayMarketplaceRegistrationObserver
       accessToken: credential.accessToken,
       marketplaceId,
     });
-    assertSuccessfulRead(response, "inventory_item_group");
+    assertSuccessfulRead(response, "inventory_item_group", { groupKey });
     return parseProviderResponse(
       inventoryItemGroupResponseSchema,
       response.body,
@@ -527,7 +527,7 @@ export class EbayMarketplaceRegistrationObserver
         accessToken: credential.accessToken,
         marketplaceId,
       });
-      assertSuccessfulRead(response, "offers");
+      assertSuccessfulRead(response, "offers", { sku });
       const page = parseProviderResponse(
         offersPageSchema,
         response.body,
@@ -792,6 +792,7 @@ function assertDistinctMemberIdentities(
 function assertSuccessfulRead(
   response: EbayRegistrationReadResponse,
   resource: string,
+  context: Readonly<Record<string, unknown>> = {},
 ): void {
   if (
     !Number.isInteger(response.status)
@@ -801,7 +802,7 @@ function assertSuccessfulRead(
     throw observationError(
       "EBAY_REGISTRATION_PROVIDER_READ_FAILED",
       "An eBay read required for registration failed.",
-      { resource, status: response.status },
+      { resource, status: response.status, ...context },
     );
   }
 }

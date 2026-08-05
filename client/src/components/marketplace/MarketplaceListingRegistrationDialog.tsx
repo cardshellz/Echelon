@@ -353,6 +353,11 @@ export function MarketplaceListingRegistrationDialog({
                 <div className="min-w-0">
                   <p className="font-medium">{error.message}</p>
                   <p className="mt-1 text-xs font-mono break-all">{error.code}</p>
+                  {formatRegistrationErrorContext(error.context) && (
+                    <p className="mt-1 text-xs">
+                      {formatRegistrationErrorContext(error.context)}
+                    </p>
+                  )}
                 </div>
               </div>
               <Button
@@ -631,6 +636,18 @@ export async function postRegistration<Output>(
     });
   }
   return parsed.data;
+}
+
+function formatRegistrationErrorContext(
+  context: Record<string, unknown> | undefined,
+): string | null {
+  if (!context) return null;
+  const details: string[] = [];
+  if (typeof context.resource === "string") details.push(`eBay resource: ${context.resource}`);
+  if (typeof context.sku === "string") details.push(`SKU: ${context.sku}`);
+  if (typeof context.groupKey === "string") details.push(`Group: ${context.groupKey}`);
+  if (typeof context.status === "number") details.push(`HTTP status: ${context.status}`);
+  return details.length > 0 ? details.join(" | ") : null;
 }
 
 function normalizeRegistrationError(error: unknown): RegistrationApiErrorPayload {
