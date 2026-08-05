@@ -80,7 +80,7 @@ describe("marketplace listing registration plan", () => {
     expect(second.desiredStateHash).toBe(first.desiredStateHash);
   });
 
-  it("rejects a remote SKU that is not in the complete local owner snapshot", () => {
+  it("keeps a remote-only SKU in the observation hash without creating a local member", () => {
     const input = planInput();
     input.observation = {
       ...input.observation,
@@ -90,9 +90,28 @@ describe("marketplace listing registration plan", () => {
       ],
     };
 
+    const plan = buildListingRegistrationPlan(input);
+    const withoutRemoteOnly = buildListingRegistrationPlan(planInput());
+
+    expect(plan.members).not.toContainEqual(
+      expect.objectContaining({ skuSnapshot: "UNKNOWN-SKU" }),
+    );
+    expect(plan.observationHash).not.toBe(withoutRemoteOnly.observationHash);
+    expect(plan.identityClaims).not.toContainEqual(
+      expect.objectContaining({ externalId: "unknown-offer" }),
+    );
+  });
+
+  it("requires at least one observed local SKU even when eBay has remote-only variations", () => {
+    const input = planInput();
+    input.observation = {
+      ...input.observation,
+      members: [observedMember("UNKNOWN-SKU", "unknown-offer")],
+    };
+
     expect(() => buildListingRegistrationPlan(input)).toThrowError(
       expect.objectContaining({
-        code: "MARKETPLACE_LISTING_REGISTRATION_REMOTE_UNKNOWN_SKU",
+        code: "MARKETPLACE_LISTING_REGISTRATION_INCLUDED_MEMBER_REQUIRED",
       }),
     );
   });

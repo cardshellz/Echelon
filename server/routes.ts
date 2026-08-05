@@ -35,6 +35,8 @@ import { registerDiagnosticsRoutes } from "./routes/diagnostics";
 import { registerPickPriorityRoutes } from "./routes/pick-priority.routes";
 import { createMarketplaceListingRegistrationResolverFromEnv } from "./marketplace-listing-registration.composition";
 import { registerMarketplaceListingRegistrationRoutes } from "./modules/marketplace-listings/interfaces/http/listing-registration.routes";
+import { createMarketplaceListingReplacementResolverFromEnv } from "./marketplace-listing-replacement.composition";
+import { registerMarketplaceListingReplacementRoutes } from "./modules/marketplace-listings/interfaces/http/listing-replacement.routes";
 import { registerDropshipAuthRoutes } from "./modules/dropship/interfaces/http/dropship-auth.routes";
 import { registerDropshipAdminCatalogRoutes } from "./modules/dropship/interfaces/http/dropship-admin-catalog.routes";
 import { registerDropshipAdminStoreConnectionRoutes } from "./modules/dropship/interfaces/http/dropship-admin-store-connection.routes";
@@ -140,6 +142,10 @@ export async function registerRoutes(
   registerMarketplaceListingRegistrationRoutes(
     app,
     createMarketplaceListingRegistrationResolverFromEnv(),
+  );
+  registerMarketplaceListingReplacementRoutes(
+    app,
+    createMarketplaceListingReplacementResolverFromEnv(),
   );
   registerSettingsRoutes(app);
   registerPickZoneRoutes(app);

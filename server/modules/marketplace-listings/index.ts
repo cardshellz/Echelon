@@ -1,4 +1,6 @@
 export * from "./application/dtos";
+export * from "./application/execution-ports";
+export * from "./application/listing-replacement-execution.service";
 export * from "./application/listing-registration.service";
 export * from "./application/listing-replacement-planning.service";
 export * from "./application/ports";
@@ -11,3 +13,7 @@ export * from "./domain/listing-registration-plan";
 export * from "./domain/listing-replacement-plan";
 export * from "./domain/registration-errors";
 export * from "./infrastructure/pg-listing-registration.repository";
+export * from "./infrastructure/pg-listing-replacement-execution.repository";
+export * from "./infrastructure/pg-listing-replacement-owner-reader";
+export * from "./infrastructure/pg-listing-replacement.repository";
+export * from "./infrastructure/providers/ebay/ebay-listing-replacement.provider";

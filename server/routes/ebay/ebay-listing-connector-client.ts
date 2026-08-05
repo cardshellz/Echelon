@@ -4,6 +4,7 @@ import {
 } from "../../modules/channels/listing-connectors/ebay-listing.connector";
 import type {
   EbayInventoryItem,
+  EbayInventoryItemGroup,
   EbayOffer,
 } from "../../modules/channels/adapters/ebay/ebay-types";
 import { ebayApiRequest, ebayApiRequestWithRateNotify } from "./ebay-utils";
@@ -16,8 +17,14 @@ interface EbayRouteClientInput {
 }
 
 export interface EbayRouteListingLifecycleClient extends EbayListingConnectorClient {
+  getInventoryItemGroup(
+    groupKey: string,
+  ): Promise<EbayInventoryItemGroup | null>;
   withdrawOffer(offerId: string): Promise<void>;
-  withdrawOfferByInventoryItemGroup(groupKey: string, marketplaceId: string): Promise<void>;
+  withdrawOfferByInventoryItemGroup(
+    groupKey: string,
+    marketplaceId: string,
+  ): Promise<void>;
   bulkUpdatePriceQuantity(request: unknown): Promise<void>;
   deleteOffer(offerId: string): Promise<void>;
   deleteInventoryItemGroup(groupKey: string): Promise<void>;
@@ -25,21 +32,27 @@ export interface EbayRouteListingLifecycleClient extends EbayListingConnectorCli
 }
 
 function createEbayRouteRequest(input: EbayRouteClientInput) {
-  return async <T>(method: string, path: string, body?: unknown): Promise<T> => {
+  return async <T>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> => {
     if (input.onRateLimit) {
-      return await ebayApiRequestWithRateNotify(
+      return (await ebayApiRequestWithRateNotify(
         method,
         path,
         input.accessToken,
         body,
         input.onRateLimit,
-      ) as T;
+      )) as T;
     }
-    return await ebayApiRequest(method, path, input.accessToken, body) as T;
+    return (await ebayApiRequest(method, path, input.accessToken, body)) as T;
   };
 }
 
-export function createEbayRouteListingClient(input: EbayRouteClientInput): EbayListingConnectorClient {
+export function createEbayRouteListingClient(
+  input: EbayRouteClientInput,
+): EbayListingConnectorClient {
   const request = createEbayRouteRequest(input);
   return {
     getInventoryItem: async (sku) => {
@@ -65,13 +78,19 @@ export function createEbayRouteListingClient(input: EbayRouteClientInput): EbayL
     },
     getOffers: async (sku, marketplaceId) => {
       try {
-        const response = await request<{ offers?: Array<EbayOffer & { offerId?: string; listingId?: string }> }>(
+        const response = await request<{
+          offers?: Array<EbayOffer & { offerId?: string; listingId?: string }>;
+        }>(
           "GET",
           `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${encodeURIComponent(marketplaceId)}`,
         );
         return {
-          offers: (response.offers ?? [])
-            .filter((offer): offer is EbayOffer & { offerId: string; listingId?: string } => Boolean(offer.offerId)),
+          offers: (response.offers ?? []).filter(
+            (
+              offer,
+            ): offer is EbayOffer & { offerId: string; listingId?: string } =>
+              Boolean(offer.offerId),
+          ),
         };
       } catch (error: any) {
         if (String(error?.message ?? "").includes("404")) {
@@ -81,14 +100,22 @@ export function createEbayRouteListingClient(input: EbayRouteClientInput): EbayL
       }
     },
     createOffer: async (offer) => {
-      const response = await request<{ offerId?: string }>("POST", "/sell/inventory/v1/offer", offer);
+      const response = await request<{ offerId?: string }>(
+        "POST",
+        "/sell/inventory/v1/offer",
+        offer,
+      );
       if (!response.offerId) {
         throw new Error("eBay create offer did not return an offer id.");
       }
       return response.offerId;
     },
     updateOffer: async (offerId, offer) => {
-      await request("PUT", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`, offer);
+      await request(
+        "PUT",
+        `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`,
+        offer,
+      );
     },
     createOrReplaceInventoryItemGroup: async (groupKey, group) => {
       await request(
@@ -103,7 +130,10 @@ export function createEbayRouteListingClient(input: EbayRouteClientInput): EbayL
         `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`,
       );
     },
-    publishOfferByInventoryItemGroup: async (inventoryItemGroupKey, marketplaceId) => {
+    publishOfferByInventoryItemGroup: async (
+      inventoryItemGroupKey,
+      marketplaceId,
+    ) => {
       return await request<{ listingId?: string }>(
         "POST",
         "/sell/inventory/v1/offer/publish_by_inventory_item_group",
@@ -113,10 +143,24 @@ export function createEbayRouteListingClient(input: EbayRouteClientInput): EbayL
   };
 }
 
-export function createEbayRouteListingLifecycleClient(input: EbayRouteClientInput): EbayRouteListingLifecycleClient {
+export function createEbayRouteListingLifecycleClient(
+  input: EbayRouteClientInput,
+): EbayRouteListingLifecycleClient {
   const request = createEbayRouteRequest(input);
   return {
     ...createEbayRouteListingClient(input),
+    getInventoryItemGroup: async (groupKey) => {
+      try {
+        return await request<EbayInventoryItemGroup>(
+          "GET",
+          `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
+        );
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("404") || message.includes("25710")) return null;
+        throw error;
+      }
+    },
     withdrawOffer: async (offerId) => {
       await request(
         "POST",
@@ -131,10 +175,17 @@ export function createEbayRouteListingLifecycleClient(input: EbayRouteClientInpu
       );
     },
     bulkUpdatePriceQuantity: async (body) => {
-      await request("POST", "/sell/inventory/v1/bulk_update_price_quantity", body);
+      await request(
+        "POST",
+        "/sell/inventory/v1/bulk_update_price_quantity",
+        body,
+      );
     },
     deleteOffer: async (offerId) => {
-      await request("DELETE", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`);
+      await request(
+        "DELETE",
+        `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`,
+      );
     },
     deleteInventoryItemGroup: async (groupKey) => {
       await request(
@@ -143,7 +194,10 @@ export function createEbayRouteListingLifecycleClient(input: EbayRouteClientInpu
       );
     },
     deleteInventoryItem: async (sku) => {
-      await request("DELETE", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`);
+      await request(
+        "DELETE",
+        `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
+      );
     },
   };
 }

@@ -294,7 +294,7 @@ describe("EbayMarketplaceRegistrationObserver", () => {
     ).rejects.toMatchObject({ code: "EBAY_REGISTRATION_LISTING_NOT_LIVE" });
   });
 
-  it("returns unknown remote group SKUs so the registration domain rejects them", async () => {
+  it("preserves remote-only group SKUs as evidence without fabricating local identities", async () => {
     const transport = fixtureTransport({
       groupSkus: ["ARM-ENV-SGL-C750", "REMOTE-UNKNOWN"],
       offersBySku: {
@@ -313,7 +313,7 @@ describe("EbayMarketplaceRegistrationObserver", () => {
       "ARM-ENV-SGL-C750",
       "REMOTE-UNKNOWN",
     ]);
-    expect(() => buildListingRegistrationPlan({
+    const plan = buildListingRegistrationPlan({
       owner,
       locator: input.locator,
       requestedBy: { type: "user", id: "user-1" },
@@ -321,11 +321,17 @@ describe("EbayMarketplaceRegistrationObserver", () => {
       observation,
       idempotencyKey: "registration-1",
       correlationId: null,
-    })).toThrowError(expect.objectContaining({
-      code: "MARKETPLACE_LISTING_REGISTRATION_REMOTE_UNKNOWN_SKU",
-    }));
+    });
+    expect(plan.members).toEqual([
+      expect.objectContaining({
+        productVariantId: candidates[1].productVariantId,
+        skuSnapshot: "ARM-ENV-SGL-C750",
+      }),
+    ]);
+    expect(plan.identityClaims).not.toContainEqual(
+      expect.objectContaining({ externalId: "offer-remote" }),
+    );
   });
-
   it("discovers one shared group from a listing locator without treating repeated group IDs as ambiguous", async () => {
     const transport = fixtureTransport({
       groupSkus: ["ARM-ENV-SGL-C700", "ARM-ENV-SGL-C750"],
