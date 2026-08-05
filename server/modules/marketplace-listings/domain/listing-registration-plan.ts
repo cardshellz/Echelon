@@ -190,9 +190,9 @@ export function buildListingRegistrationPlan(
     ),
     publicationKeyIdentity: canonicalIdentity(publicationKeyIdentity),
     listingIdentity: canonicalIdentity(listingIdentity),
-    members: members
-      .filter((member) => member.disposition === "included")
-      .map(canonicalObservedMember),
+    members: input.observation.members
+      .map(canonicalMarketplaceObservedMember)
+      .sort(compareCanonicalObservedMembers),
   });
   const desiredStateHash = sha256Canonical({
     desiredStateContractVersion: 1,
@@ -294,14 +294,9 @@ function buildRegistrationMembers(
         { sku },
       );
     }
-    if (!candidateBySku.has(sku)) {
-      throw registrationError(
-        "MARKETPLACE_LISTING_REGISTRATION_REMOTE_UNKNOWN_SKU",
-        "The observed publication contains a SKU outside the owner snapshot.",
-        { sku },
-      );
-    }
-    observedBySku.set(sku, rawMember);
+    // Remote-only members are audited as observed source evidence, but cannot
+    // become local publication members without a catalog variant foreign key.
+    if (candidateBySku.has(sku)) observedBySku.set(sku, rawMember);
   }
   if (observedBySku.size === 0) {
     throw registrationError(
@@ -470,6 +465,35 @@ function canonicalObservedMember(
       member.externalInventoryItemIdentityNamespace,
     ),
   };
+}
+
+function canonicalMarketplaceObservedMember(
+  member: MarketplaceObservedListingMember,
+): CanonicalJsonValue {
+  return {
+    sku: normalizeText(member.sku, "observation.members.sku", 100),
+    variantIdentity: canonicalIdentity(
+      normalizeOptionalIdentity(member.variantIdentity, "observation.members.variantIdentity"),
+    ),
+    offerIdentity: canonicalIdentity(
+      normalizeOptionalIdentity(member.offerIdentity, "observation.members.offerIdentity"),
+    ),
+    inventoryItemIdentity: canonicalIdentity(
+      normalizeOptionalIdentity(
+        member.inventoryItemIdentity,
+        "observation.members.inventoryItemIdentity",
+      ),
+    ),
+  };
+}
+
+function compareCanonicalObservedMembers(
+  left: CanonicalJsonValue,
+  right: CanonicalJsonValue,
+): number {
+  const leftValue = left as Readonly<Record<string, CanonicalJsonValue>>;
+  const rightValue = right as Readonly<Record<string, CanonicalJsonValue>>;
+  return compareCanonicalText(String(leftValue.sku), String(rightValue.sku));
 }
 
 function canonicalProviderAccount(
