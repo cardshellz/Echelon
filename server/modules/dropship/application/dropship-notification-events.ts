@@ -1,5 +1,7 @@
 export const DROPSHIP_NOTIFICATION_EVENTS = {
   AUTO_RELOAD_FAILED: "dropship_auto_reload_failed",
+  COLLECTION_ACCOUNT_REVIEW: "dropship_collection_account_review",
+  RMA_NO_INSPECTION_REVIEW: "dropship_rma_no_inspection_review",
   ENTITLEMENT_BLOCKED: "dropship_entitlement_blocked",
   LISTING_PUSH_FAILED: "dropship_listing_push_failed",
   ORDER_ACCEPTED: "dropship_order_accepted",

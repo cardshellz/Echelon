@@ -55,6 +55,7 @@ interface RmaListRow {
   idempotency_key?: string | null;
   request_hash?: string | null;
   policy_version_id?: number | null;
+  no_inspection_evidence?: Record<string, unknown> | null;
   updated_at: Date;
   item_count: string | number;
   total_quantity: string | number;
@@ -802,7 +803,8 @@ async function getRmaDetailWithClient(
             r.status, r.reason_code, r.fault_category, r.return_window_days,
             r.label_source, r.return_tracking_number, r.vendor_notes,
             r.requested_at, r.received_at, r.inspected_at, r.credited_at,
-            r.idempotency_key, r.request_hash, r.policy_version_id, r.updated_at,
+            r.idempotency_key, r.request_hash, r.policy_version_id,
+            r.no_inspection_evidence, r.updated_at,
             COUNT(ri.id) AS item_count,
             COALESCE(SUM(ri.quantity), 0) AS total_quantity
      FROM dropship.dropship_rmas r
@@ -829,6 +831,7 @@ async function getRmaDetailWithClient(
     idempotencyKey: row.idempotency_key ?? null,
     requestHash: row.request_hash ?? null,
     policyVersionId: row.policy_version_id ?? null,
+    noInspectionEvidence: row.no_inspection_evidence ?? null,
     items,
     inspections,
     walletLedger,
