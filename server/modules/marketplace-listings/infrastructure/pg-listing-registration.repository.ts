@@ -53,6 +53,11 @@ interface CurrentRegistrationStatusRow extends QueryResultRow {
   provider_publication_key: string | null;
   external_listing_id: string | null;
   registered_variant_ids: number[];
+  registered_variants: Array<{
+    productVariantId: number;
+    sku: string;
+    disposition: "included" | "excluded";
+  }>;
   scope_provider_account_id: string | number | null;
   provider_account_id: string | number | null;
   account_owner_kind: string | null;
@@ -1064,6 +1069,15 @@ function currentRegistrationStatusesSql(owner: ListingOwnerRef): string {
         WHERE member.publication_id = publication.id
         ORDER BY member.product_variant_id
       ) AS registered_variant_ids,
+      COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+          'productVariantId', member.product_variant_id,
+          'sku', member.sku_snapshot,
+          'disposition', member.disposition
+        ) ORDER BY member.product_variant_id)
+        FROM marketplace.listing_publication_members AS member
+        WHERE member.publication_id = publication.id
+      ), '[]'::jsonb) AS registered_variants,
       scope_account.provider_account_id AS scope_provider_account_id,
       account.id AS provider_account_id,
       account.owner_kind AS account_owner_kind,
@@ -1197,6 +1211,7 @@ function mapCurrentRegistrationStatus(
     providerPublicationKey: row.provider_publication_key,
     externalListingId: row.external_listing_id,
     registeredVariantIds: row.registered_variant_ids,
+    registeredVariants: row.registered_variants,
     registeredAt: toRequiredStatusDate(
       row.registered_at,
       "registration_status.registered_at",

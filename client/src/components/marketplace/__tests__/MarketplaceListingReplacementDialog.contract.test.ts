@@ -14,6 +14,7 @@ describe("MarketplaceListingReplacementDialog contract", () => {
           sku: "ARM-ENV-SGL-C700",
           name: "Case of 700",
           included: false,
+          lockedExcluded: true,
         },
         {
           id: 750,
@@ -30,7 +31,7 @@ describe("MarketplaceListingReplacementDialog contract", () => {
       {
         productVariantId: 700,
         disposition: "excluded",
-        reasonCode: "operator_excluded_from_replacement",
+        reasonCode: "local_variant_inactive",
       },
       { productVariantId: 750, disposition: "included", reasonCode: null },
       { productVariantId: 50, disposition: "included", reasonCode: null },

@@ -27,6 +27,11 @@ describe("PgMarketplaceListingRegistrationRepository", () => {
       providerPublicationKey: "ARM-ENV-SGL-V3",
       externalListingId: "listing-456",
       registeredVariantIds: [501, 502],
+      registeredVariants: [{
+        productVariantId: 501,
+        sku: "ARM-ENV-SGL-C700",
+        disposition: "included",
+      }],
       registeredAt: new Date("2026-08-04T12:00:02.000Z"),
     });
     const [sql, params] = poolQuery.mock.calls[0] ?? [];
@@ -532,6 +537,11 @@ function currentStatusRow(owner: ListingOwnerRef) {
     publication_status: "active",
     provider_publication_key: "ARM-ENV-SGL-V3",
     external_listing_id: "listing-456",
+    registered_variants: [{
+      productVariantId: 501,
+      sku: "ARM-ENV-SGL-C700",
+      disposition: "included",
+    }],
     registered_variant_ids: [501, 502],
     scope_provider_account_id: 20,
     provider_account_id: 20,

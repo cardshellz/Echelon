@@ -495,7 +495,7 @@ export default function EbayChannelPage() {
   const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
   const [registrationTarget, setRegistrationTarget] = useState<FeedItem | null>(null);
   const [replacementTarget, setReplacementTarget] = useState<FeedItem | null>(null);
-  const replacementVariants = useMemo(
+  const activeReplacementVariants = useMemo(
     () =>
       replacementTarget?.variants.map((variant) => ({
       id: variant.id,
@@ -505,6 +505,22 @@ export default function EbayChannelPage() {
       })) ?? [],
     [replacementTarget],
   );
+  const replacementVariants = useMemo(() => {
+    if (!replacementTarget) return [];
+    const activeVariantIds = new Set(activeReplacementVariants.map((variant) => variant.id));
+    const registeredVariants = registrationStatusByProductId
+      .get(replacementTarget.id)?.registeredVariants ?? [];
+    const archivedVariants = registeredVariants
+      .filter((variant) => !activeVariantIds.has(variant.productVariantId))
+      .map((variant) => ({
+        id: variant.productVariantId,
+        sku: variant.sku,
+        name: "Archived variant",
+        included: false,
+        lockedExcluded: true,
+      }));
+    return [...activeReplacementVariants, ...archivedVariants];
+  }, [activeReplacementVariants, registrationStatusByProductId, replacementTarget]);
   const registrationOwner = useMemo(() => {
     const marketplaceId = config?.config.marketplaceId?.trim();
     const target = registrationTarget ?? replacementTarget;

@@ -184,6 +184,12 @@ export const listingRegistrationStatusSchema = z
     providerPublicationKey: nullableTrimmedText(255),
     externalListingId: trimmedText(255),
     registeredVariantIds: z.array(positivePostgresIntegerSchema).default([]),
+    registeredVariants: z.array(z.object({
+      productVariantId: positivePostgresIntegerSchema,
+      sku: trimmedText(255),
+      disposition: z.enum(["included", "excluded"]),
+    }).strict()).default([]),
+
     registeredAt: z.date(),
   })
   .strict();
