@@ -210,6 +210,24 @@ describe("InventoryUseCases.recordReplacementShipmentFromAvailableInventory", ()
     return { rootDb, storage, lotService, pickFromLots, shipFromLots };
   }
 
+  it("classifies unavailable replacement stock with a stable error code", async () => {
+    const { rootDb, storage, lotService } = replacementHarness();
+    storage.lockInventoryLevel.mockResolvedValue(null);
+    const { InventoryUseCases } = await import("../../application/inventory.use-cases");
+    const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any, null as any);
+
+    await expect(inventory.recordReplacementShipmentFromAvailableInventory({
+      productVariantId: 30,
+      qty: 2,
+      warehouseId: 1,
+      orderId: 40,
+      shipmentId: 50,
+      shipmentItemId: 60,
+    })).rejects.toMatchObject({
+      code: "REPLACEMENT_INVENTORY_UNAVAILABLE",
+      context: { productVariantId: 30, qty: 2, warehouseId: 1 },
+    });
+  });
   it("allocates current unreserved stock, records a system pick, then ships it", async () => {
     const { rootDb, storage, lotService, pickFromLots, shipFromLots } = replacementHarness();
     const { InventoryUseCases } = await import("../../application/inventory.use-cases");

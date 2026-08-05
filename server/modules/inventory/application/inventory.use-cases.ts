@@ -18,6 +18,30 @@ export class FreezeViolationError extends Error {
   }
 }
 
+/**
+ * A provider-confirmed replacement package cannot be safely posted from the
+ * current balance when no unreserved stock remains. Callers must distinguish
+ * this from a malformed shipment or a failed inventory write: the package is
+ * a physical fact, while the inventory debit needs reconciliation.
+ */
+export class ReplacementInventoryUnavailableError extends IntegrityError {
+  constructor(context: {
+    productVariantId: number;
+    qty: number;
+    warehouseId: number | null;
+  }) {
+    const warehouseText = context.warehouseId == null
+      ? "any eligible warehouse"
+      : `warehouse ${context.warehouseId}`;
+    super(
+      `Replacement inventory unavailable for variant ${context.productVariantId}: ` +
+      `no active, pickable, unfrozen location in ${warehouseText} has ${context.qty} unreserved unit(s).`,
+      context,
+    );
+    this.code = "REPLACEMENT_INVENTORY_UNAVAILABLE";
+  }
+}
+
 /** Type wrapper for Drizzle database instance */
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -607,11 +631,11 @@ export class InventoryUseCases {
       }
 
       if (!selectedLevel) {
-        const warehouseText = params.warehouseId == null ? "any eligible warehouse" : `warehouse ${params.warehouseId}`;
-        throw new IntegrityError(
-          `Replacement inventory unavailable for variant ${params.productVariantId}: ` +
-          `no active, pickable, unfrozen location in ${warehouseText} has ${params.qty} unreserved unit(s).`,
-        );
+        throw new ReplacementInventoryUnavailableError({
+          productVariantId: params.productVariantId,
+          qty: params.qty,
+          warehouseId: params.warehouseId,
+        });
       }
 
       const locationId = selectedLevel.warehouseLocationId;

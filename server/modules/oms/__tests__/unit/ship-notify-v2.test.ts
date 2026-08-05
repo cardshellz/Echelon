@@ -1027,6 +1027,158 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(mock.calls.filter((call) => call.tag === "insert")).toHaveLength(0);
   });
 
+  it("records provider-confirmed historical replacement evidence when current stock cannot prove its past debit", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7005,
+      orderId: 555005,
+      orderKey: "echelon-wms-reship-9005",
+      trackingNumber: "1Z-HISTORICAL-REPLACEMENT",
+      shipmentItems: [
+        { lineItemKey: null, sku: "SKU-HISTORICAL", quantity: 1 },
+      ],
+    });
+    const inventoryCore = {
+      recordReplacementShipmentFromAvailableInventory: vi.fn(async () => {
+        throw {
+          code: "REPLACEMENT_INVENTORY_UNAVAILABLE",
+          message: "no current unreserved stock",
+          context: { productVariantId: 40002, qty: 1, warehouseId: 1 },
+        };
+      }),
+      recordShipment: vi.fn(async () => undefined),
+    };
+    const mock = makeDb([
+      {
+        rows: [{
+          id: 9005,
+          order_id: 42,
+          source: "shipstation_reship_adopted",
+          status: "shipped",
+          shipment_purpose: "replacement",
+          replaces_shipment_id: 501,
+          replacement_reason: "lost",
+          external_fulfillment_id: "shipstation_shipment:7005",
+          tracking_number: "1Z-HISTORICAL-REPLACEMENT",
+        }],
+      },
+      {
+        rows: [{
+          id: 91005,
+          order_item_id: null,
+          replacement_for_order_item_id: 30002,
+          inventory_order_item_id: 30002,
+          product_variant_id: 40002,
+          qty: 1,
+          pick_location_id: null,
+          warehouse_id: 1,
+          shipment_purpose: "replacement",
+          shipment_source: "shipstation_reship_adopted",
+          shipment_tracking_number: "1Z-HISTORICAL-REPLACEMENT",
+          external_fulfillment_id: "shipstation_shipment:7005",
+          historical_inventory_deferred: false,
+        }],
+      },
+      // Clear any stale missing-data marker before dispatch.
+      { rows: [] },
+      // Dispatch sees an already-shipped package before the inventory fact is deferred.
+      {
+        rows: [{
+          id: 9005,
+          order_id: 42,
+          status: "shipped",
+          tracking_number: "1Z-HISTORICAL-REPLACEMENT",
+          carrier: "UPS",
+          service_code: "ups_ground",
+        }],
+      },
+      // Persist the idempotent reconciliation exception and retain shipment review.
+      { rows: [] },
+      { rows: [] },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
+
+    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
+
+    expect(processed).toBe(1);
+    expect(inventoryCore.recordReplacementShipmentFromAvailableInventory).toHaveBeenCalledTimes(1);
+    expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
+    const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
+    expect(sqlText).toContain("historical_replacement_inventory_unproven");
+    expect(sqlText).toMatch(/INSERT INTO wms\.reconciliation_exceptions/);
+    expect(sqlText).toMatch(/UPDATE wms\.outbound_shipments[\s\S]*requires_review = true/);
+  });
+  it("does not debit newly available stock on a replay after historical replacement inventory was deferred", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7007,
+      orderId: 555007,
+      orderKey: "echelon-wms-reship-9007",
+      trackingNumber: "1Z-HISTORICAL-REPLAY",
+      shipmentItems: [
+        { lineItemKey: null, sku: "SKU-HISTORICAL", quantity: 1 },
+      ],
+    });
+    const inventoryCore = {
+      recordReplacementShipmentFromAvailableInventory: vi.fn(async () => ({
+        warehouseLocationId: 50002,
+        alreadyRecorded: false,
+      })),
+      recordShipment: vi.fn(async () => undefined),
+    };
+    const mock = makeDb([
+      {
+        rows: [{
+          id: 9007,
+          order_id: 42,
+          source: "shipstation_reship_adopted",
+          status: "shipped",
+          shipment_purpose: "replacement",
+          replaces_shipment_id: 501,
+          replacement_reason: "lost",
+          external_fulfillment_id: "shipstation_shipment:7007",
+          tracking_number: "1Z-HISTORICAL-REPLAY",
+        }],
+      },
+      {
+        rows: [{
+          id: 91007,
+          order_item_id: null,
+          replacement_for_order_item_id: 30002,
+          inventory_order_item_id: 30002,
+          product_variant_id: 40002,
+          qty: 1,
+          pick_location_id: null,
+          warehouse_id: 1,
+          shipment_purpose: "replacement",
+          shipment_source: "shipstation_reship_adopted",
+          shipment_tracking_number: "1Z-HISTORICAL-REPLAY",
+          external_fulfillment_id: "shipstation_shipment:7007",
+          historical_inventory_deferred: true,
+        }],
+      },
+      { rows: [] },
+      {
+        rows: [{
+          id: 9007,
+          order_id: 42,
+          status: "shipped",
+          tracking_number: "1Z-HISTORICAL-REPLAY",
+          carrier: "UPS",
+          service_code: "ups_ground",
+        }],
+      },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
+
+    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
+
+    expect(processed).toBe(1);
+    expect(inventoryCore.recordReplacementShipmentFromAvailableInventory).not.toHaveBeenCalled();
+    expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
+    const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
+    expect(sqlText).not.toMatch(/UPDATE wms\.outbound_shipment_items[\s\S]*SET from_location_id/);
+  });
   it("records an omission-correction package without a second inventory or fulfillment write", async () => {
     const shipmentPayload = makeShipmentPayload({
       shipmentId: 7006,
