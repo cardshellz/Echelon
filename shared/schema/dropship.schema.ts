@@ -1064,6 +1064,7 @@ export const dropshipReturnPolicies = dropshipSchema.table("dropship_return_poli
   version: integer("version").notNull().default(1),
   returnWindowDays: integer("return_window_days").notNull().default(DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS),
   noShipTimeoutDays: integer("no_ship_timeout_days").notNull().default(14),
+  noInspectionTimeoutDays: integer("no_inspection_timeout_days").notNull().default(10),
   vendorId: integer("vendor_id").references(() => dropshipVendors.id, { onDelete: "cascade" }),
   storeConnectionId: integer("store_connection_id").references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
   priority: integer("priority").notNull().default(0),
@@ -1080,6 +1081,7 @@ export const dropshipReturnPolicies = dropshipSchema.table("dropship_return_poli
   check("dropship_return_policies_version_chk", sql`${table.version} > 0`),
   check("dropship_return_policies_window_chk", sql`${table.returnWindowDays} > 0 AND ${table.returnWindowDays} <= 365`),
   check("dropship_return_policies_no_ship_chk", sql`${table.noShipTimeoutDays} > 0 AND ${table.noShipTimeoutDays} <= 365`),
+  check("dropship_return_policies_no_inspection_chk", sql`${table.noInspectionTimeoutDays} > 0 AND ${table.noInspectionTimeoutDays} <= 90`),
   check("dropship_return_policies_effective_chk", sql`${table.effectiveTo} IS NULL OR ${table.effectiveTo} > ${table.effectiveFrom}`),
   check("dropship_return_policies_scope_chk", sql`${table.vendorId} IS NOT NULL OR ${table.storeConnectionId} IS NULL`),
 ]);
@@ -1135,6 +1137,7 @@ export const dropshipRmas = dropshipSchema.table("dropship_rmas", {
   requestHash: varchar("request_hash", { length: 64 }),
   policyVersionId: integer("policy_version_id").references(() => dropshipReturnPolicies.id, { onDelete: "set null" }),
   noInspectionEvidence: jsonb("no_inspection_evidence"),
+  returnExpectedDeliveryAt: timestamp("return_expected_delivery_at", { withTimezone: true }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("dropship_rma_number_idx").on(table.rmaNumber),
@@ -1205,6 +1208,89 @@ export const dropshipRmaInspections = dropshipSchema.table("dropship_rma_inspect
   uniqueIndex("dropship_rma_inspection_idem_idx").on(table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
   check("dropship_rma_inspection_fault_chk", sql`${table.faultCategory} IS NULL OR ${table.faultCategory} IN ('card_shellz','vendor','customer','marketplace','carrier')`),
   check("dropship_rma_inspection_money_chk", sql`${table.creditCents} >= 0 AND ${table.feeCents} >= 0`),
+]);
+
+// Collection sweep config (migration 188; design spec D5 + D-governing).
+// Versioned, immutable money knobs; exactly one active global row.
+export const dropshipCollectionConfig = dropshipSchema.table("dropship_collection_config", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  version: integer("version").notNull(),
+  graceDays: integer("grace_days").notNull().default(7),
+  sweepCadenceDays: integer("sweep_cadence_days").notNull().default(7),
+  maxConsecutiveFailures: integer("max_consecutive_failures").notNull().default(3),
+  isActive: boolean("is_active").notNull().default(true),
+  effectiveFrom: timestamp("effective_from", { withTimezone: true }).defaultNow().notNull(),
+  effectiveTo: timestamp("effective_to", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_collection_config_active_idx").on(sql`true`).where(sql`${table.isActive}`),
+  check("dropship_collection_config_grace_chk", sql`${table.graceDays} >= 0 AND ${table.graceDays} <= 90`),
+  check("dropship_collection_config_cadence_chk", sql`${table.sweepCadenceDays} > 0 AND ${table.sweepCadenceDays} <= 90`),
+  check("dropship_collection_config_failures_chk", sql`${table.maxConsecutiveFailures} > 0 AND ${table.maxConsecutiveFailures} <= 100`),
+  check("dropship_collection_config_window_chk", sql`${table.effectiveTo} IS NULL OR ${table.effectiveTo} > ${table.effectiveFrom}`),
+]);
+
+// Collection attempts (migration 188; design spec D5). One row per (vendor,
+// sweep period) — the unique (vendorId, periodStart) index is the sweep's
+// idempotency backbone.
+export const dropshipCollectionAttempts = dropshipSchema.table("dropship_collection_attempts", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id, { onDelete: "cascade" }),
+  periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+  periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+  amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  fundingMethodId: integer("funding_method_id").references(() => dropshipFundingMethods.id, { onDelete: "set null" }),
+  configVersionId: integer("config_version_id").references(() => dropshipCollectionConfig.id, { onDelete: "set null" }),
+  status: varchar("status", { length: 30 }).notNull().default("pending"),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+  lastFailureCode: varchar("last_failure_code", { length: 120 }),
+  lastFailureMessage: text("last_failure_message"),
+  providerPaymentIntentId: varchar("provider_payment_intent_id", { length: 255 }),
+  walletLedgerEntryId: integer("wallet_ledger_entry_id").references(() => dropshipWalletLedger.id, { onDelete: "set null" }),
+  escalatedAt: timestamp("escalated_at", { withTimezone: true }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_collection_attempts_vendor_period_idx").on(table.vendorId, table.periodStart),
+  uniqueIndex("dropship_collection_attempts_idem_idx").on(table.idempotencyKey),
+  index("dropship_collection_attempts_status_idx").on(table.status, table.periodStart),
+  check("dropship_collection_attempts_status_chk", sql`${table.status} IN ('pending','succeeded','failed','escalated','skipped')`),
+  check("dropship_collection_attempts_amount_chk", sql`${table.amountCents} > 0`),
+  check("dropship_collection_attempts_period_chk", sql`${table.periodEnd} > ${table.periodStart}`),
+  check("dropship_collection_attempts_failures_chk", sql`${table.consecutiveFailures} >= 0`),
+]);
+
+// Insurance pool ledger (migration 188; design spec D3). Pool accounting
+// surface: no_inspection_payout rows (negative) record pool money credited to
+// a vendor wallet; claim_replenishment rows (positive) record a carrier-claim
+// payout returning to the pool. Replenishment never credits the vendor twice.
+export const dropshipInsurancePoolLedger = dropshipSchema.table("dropship_insurance_pool_ledger", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  entryType: varchar("entry_type", { length: 40 }).notNull(),
+  amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  rmaId: integer("rma_id").references(() => dropshipRmas.id, { onDelete: "set null" }),
+  carrierClaimId: integer("carrier_claim_id").references(() => dropshipCarrierClaims.id, { onDelete: "set null" }),
+  walletLedgerEntryId: integer("wallet_ledger_entry_id").references(() => dropshipWalletLedger.id, { onDelete: "set null" }),
+  referenceType: varchar("reference_type", { length: 80 }),
+  referenceId: varchar("reference_id", { length: 255 }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_pool_ledger_idem_idx").on(table.idempotencyKey),
+  index("dropship_pool_ledger_rma_idx").on(table.rmaId),
+  index("dropship_pool_ledger_claim_idx").on(table.carrierClaimId),
+  check("dropship_pool_ledger_type_chk", sql`${table.entryType} IN ('no_inspection_payout','claim_replenishment','manual_adjustment')`),
+  check("dropship_pool_ledger_amount_chk", sql`${table.amountCents} <> 0`),
+  check("dropship_pool_ledger_reference_chk", sql`
+    (${table.referenceType} IS NULL AND ${table.referenceId} IS NULL)
+    OR (${table.referenceType} IS NOT NULL AND ${table.referenceId} IS NOT NULL)
+  `),
 ]);
 
 export const dropshipCarrierProtectionPolicies = dropshipSchema.table("dropship_carrier_protection_policies", {
