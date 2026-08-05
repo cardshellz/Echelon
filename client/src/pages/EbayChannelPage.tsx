@@ -186,6 +186,7 @@ interface FeedItem {
   isExcluded: boolean;
   syncError: string | null;
   externalListingId: string | null;
+  externalListingIdentityConflict: boolean;
   variantCount: number;
   includedVariantCount: number;
   imageCount: number;
@@ -2082,6 +2083,11 @@ export default function EbayChannelPage() {
                                 {item.syncError}
                               </p>
                             )}
+                            {item.externalListingIdentityConflict && (
+                              <p className="text-xs text-red-600 mt-1 sm:hidden">
+                                Conflicting active eBay listing IDs; registration is unavailable.
+                              </p>
+                            )}
                           </TableCell>
                           {/* SKU — desktop only */}
                           <TableCell className="hidden sm:table-cell">
@@ -2230,6 +2236,11 @@ export default function EbayChannelPage() {
                               {item.syncError && item.status === "error" && (
                                 <p className="text-[10px] text-red-600 max-w-[180px] truncate" title={item.syncError}>
                                   {item.syncError}
+                                </p>
+                              )}
+                              {item.externalListingIdentityConflict && (
+                                <p className="text-[10px] text-red-600 max-w-[180px]" title="Active variants reference different eBay listing IDs">
+                                  Conflicting eBay listing IDs
                                 </p>
                               )}
                             </div>
