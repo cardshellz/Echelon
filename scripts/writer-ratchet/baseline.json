@@ -147,10 +147,16 @@
   "dropship.dropship_catalog_rules": [
     "modules/dropship"
   ],
+  "dropship.dropship_collection_attempts": [
+    "modules/dropship"
+  ],
   "dropship.dropship_funding_methods": [
     "modules/dropship"
   ],
   "dropship.dropship_insurance_pool_config": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_insurance_pool_ledger": [
     "modules/dropship"
   ],
   "dropship.dropship_listing_push_job_items": [
