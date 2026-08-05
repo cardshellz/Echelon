@@ -122,7 +122,7 @@ export const shippingBoxWarehouseStock = shippingSchema.table("box_warehouse_sto
 // ---------------------------------------------------------------------------
 // Variant shipping attributes
 // Physical dims/weight AND ships-in-own-container stay canonical on
-// catalog.product_variants (consolidated in migration 184); this table holds
+// catalog.product_variants (consolidated in migration 185); this table holds
 // packing BEHAVIOR only: rider/void co-mingling (see design doc).
 // ---------------------------------------------------------------------------
 

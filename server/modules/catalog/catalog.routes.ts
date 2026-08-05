@@ -36,7 +36,7 @@ import {
 import { z } from "zod";
 
 // Physical packing facts beyond weight/dims. Canonical on the variant since
-// migration 184; validated here because the variant PUT spreads req.body.
+// migration 185; validated here because the variant PUT spreads req.body.
 const variantPackingFlagsSchema = z.object({
   shipsInOwnContainer: z.boolean().optional(),
   maxUnitsPerPackage: z.number().int().positive().nullable().optional(),

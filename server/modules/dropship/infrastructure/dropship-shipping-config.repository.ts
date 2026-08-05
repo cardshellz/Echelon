@@ -47,7 +47,7 @@ interface PackageProfileRow {
   variant_sku: string | null;
   variant_name: string | null;
   // Physical facts are canonical on catalog.product_variants (numeric(10,2)
-  // since migration 184 → cast to float8 so pg returns numbers).
+  // since migration 185 → cast to float8 so pg returns numbers).
   weight_grams: number | null;
   length_mm: number | null;
   width_mm: number | null;

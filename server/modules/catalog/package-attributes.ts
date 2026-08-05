@@ -32,7 +32,7 @@ export class PackageAttributeValidationError extends Error {
 }
 
 /**
- * Package facts are stored as numeric(10,2) (migration 184) so inch/pound
+ * Package facts are stored as numeric(10,2) (migration 185) so inch/pound
  * inputs round-trip exactly. Accept any positive finite number with at most
  * 2 decimal places; reject everything else.
  */

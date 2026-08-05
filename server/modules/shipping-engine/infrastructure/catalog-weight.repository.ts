@@ -31,7 +31,7 @@ export async function loadCatalogShippingFactsBySku(
       sku: productVariants.sku,
       weightGrams: productVariants.weightGrams,
       shippingGroupCode: shippingGroups.code,
-      // Canonical SIOC home is catalog.product_variants (migration 184).
+      // Canonical SIOC home is catalog.product_variants (migration 185).
       shipsInOwnContainer: productVariants.shipsInOwnContainer,
     })
     .from(productVariants)

@@ -820,7 +820,7 @@ export const dropshipPackageProfiles = dropshipSchema.table("dropship_package_pr
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id, { onDelete: "cascade" }),
   // Channel-specific fulfillment defaults only. Intrinsic physical facts
   // (weight/dims/SIOC/max-units) live on catalog.product_variants — see
-  // migration 184 (dropship package data consolidation).
+  // migration 185 (dropship package data consolidation).
   defaultCarrier: varchar("default_carrier", { length: 50 }),
   defaultService: varchar("default_service", { length: 80 }),
   defaultBoxId: integer("default_box_id").references(() => dropshipBoxCatalog.id, { onDelete: "set null" }),

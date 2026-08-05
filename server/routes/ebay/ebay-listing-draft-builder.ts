@@ -222,7 +222,7 @@ function normalizePackageWeightGrams(variant: EbayRouteVariantInput): number | n
   if (typeof numeric !== "number" || !Number.isFinite(numeric) || numeric <= 0) {
     return null;
   }
-  // catalog.product_variants.weight_grams is numeric(10,2) (migration 184);
+  // catalog.product_variants.weight_grams is numeric(10,2) (migration 185);
   // eBay package weights are sent in whole grams.
   return Math.max(1, Math.round(numeric));
 }

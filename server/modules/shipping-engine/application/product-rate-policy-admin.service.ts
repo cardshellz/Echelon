@@ -547,7 +547,7 @@ async function resolveVariantIds(
   if (selector.ref !== "true") {
     throw new ProductRatePolicyAdminError(400, "SHIPPING_PRODUCT_POLICY_INVALID_SIOC", "SIOC selector must be enabled.");
   }
-  // Canonical SIOC home is catalog.product_variants (migration 184).
+  // Canonical SIOC home is catalog.product_variants (migration 185).
   return base.where(and(
       eq(productVariants.shipsInOwnContainer, true),
       eq(productVariants.isActive, true),

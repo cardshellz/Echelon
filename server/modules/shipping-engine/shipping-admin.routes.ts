@@ -164,7 +164,7 @@ export function registerShippingAdminRoutes(app: Express): void {
             lengthMm: productVariants.lengthMm,
             widthMm: productVariants.widthMm,
             heightMm: productVariants.heightMm,
-            // Canonical SIOC home is catalog.product_variants (migration 184).
+            // Canonical SIOC home is catalog.product_variants (migration 185).
             shipsInOwnContainer: productVariants.shipsInOwnContainer,
             siocSuggested: shippingVariantAttrs.siocSuggested,
             riderEligible: shippingVariantAttrs.riderEligible,
@@ -227,7 +227,7 @@ export function registerShippingAdminRoutes(app: Express): void {
   );
 
   // SIOC confirm/dismiss. The SIOC fact is canonical on
-  // catalog.product_variants (migration 184): confirming flips the variant;
+  // catalog.product_variants (migration 185): confirming flips the variant;
   // dismissing records an attrs row with siocSuggested=false so the heuristic
   // does not suggest the variant again.
   const siocDecisionSchema = z.object({

@@ -33,7 +33,7 @@ describe("catalog package attributes", () => {
   });
 
   it("accepts 2-decimal package values and rejects non-positive or over-precise ones", () => {
-    // numeric(10,2) storage (migration 184): decimals with ≤2 places are valid.
+    // numeric(10,2) storage (migration 185): decimals with ≤2 places are valid.
     expect(extractPackageAttributeUpdates({ weightGrams: 226.8 })).toEqual({ weightGrams: 226.8 });
     expect(extractPackageAttributeUpdates({ lengthMm: 152.4 })).toEqual({ lengthMm: 152.4 });
     expect(() => extractPackageAttributeUpdates({ weightGrams: 1.555 })).toThrow(PackageAttributeValidationError);

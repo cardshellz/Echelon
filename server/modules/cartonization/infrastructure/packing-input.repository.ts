@@ -49,7 +49,7 @@ export async function loadPackingInputs(
       widthMm: productVariants.widthMm,
       heightMm: productVariants.heightMm,
       shippingGroupCode: shippingGroups.code,
-      // Canonical SIOC home is catalog.product_variants (migration 184).
+      // Canonical SIOC home is catalog.product_variants (migration 185).
       shipsInOwnContainer: productVariants.shipsInOwnContainer,
       riderEligible: shippingVariantAttrs.riderEligible,
       riderVoidCm3: shippingVariantAttrs.riderVoidCm3,

@@ -152,7 +152,7 @@ export const productVariants = catalogSchema.table("product_variants", {
   heightMm: numeric("height_mm", { precision: 10, scale: 2 }),
   // SIOC: parcel = the item's own packaging (no outer box). Canonical home
   // for this fact (moved from shipping.variant_shipping_attrs /
-  // dropship.dropship_package_profiles in migration 184).
+  // dropship.dropship_package_profiles in migration 185).
   shipsInOwnContainer: boolean("ships_in_own_container").notNull().default(false),
   // Optional packing cap for single-SKU parcels; null = derive from geometry.
   maxUnitsPerPackage: integer("max_units_per_package"),

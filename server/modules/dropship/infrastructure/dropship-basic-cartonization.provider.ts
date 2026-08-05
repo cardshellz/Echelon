@@ -15,7 +15,7 @@ import { CARTONIZE_ENGINE } from "../../cartonization/domain/cartonize";
 const BASIC_DROPSHIP_CARTONIZATION_ENGINE = CARTONIZE_ENGINE;
 
 // catalog.product_variants weight/dim columns are numeric(10,2) since
-// migration 184; the pg driver returns numerics as strings, so the SELECT
+// migration 185; the pg driver returns numerics as strings, so the SELECT
 // casts to float8 to keep row types numeric end-to-end.
 interface PackageProfileRow {
   product_variant_id: number;

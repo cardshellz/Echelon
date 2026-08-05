@@ -55,7 +55,7 @@ function parsePositiveMeasurement(rawValue: string, label: string): number | nul
 
 /**
  * Convert a display-unit measurement to stored units (grams / millimeters).
- * Storage is numeric(10,2) (migration 184), so round to 2 decimals — NOT to
+ * Storage is numeric(10,2) (migration 185), so round to 2 decimals — NOT to
  * whole units. Rounding to whole mm was the round-trip bug: 6in → 152.4mm →
  * truncated to 152 → redisplayed as 5.984in. With 2-decimal storage, 6in →
  * 152.40mm → displays as exactly 6in.
