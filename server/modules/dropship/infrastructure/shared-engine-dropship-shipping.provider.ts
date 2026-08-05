@@ -247,11 +247,13 @@ function buildCartonSnapshotParcelPlan(
       source: "cartonization",
       actualWeightGrams: carton.weightGrams,
       billableWeightGrams: carton.weightGrams,
-      dimensions: {
-        lengthMm: carton.lengthMm,
-        widthMm: carton.widthMm,
-        heightMm: carton.heightMm,
-      },
+      dimensions: carton.lengthMm === null || carton.widthMm === null || carton.heightMm === null
+        ? null
+        : {
+            lengthMm: carton.lengthMm,
+            widthMm: carton.widthMm,
+            heightMm: carton.heightMm,
+          },
       shippingGroupCode: resolvePackageShippingGroup(
         carton.items,
         factsByVariantId,

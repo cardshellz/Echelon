@@ -69,6 +69,37 @@ describe("DropshipOrderProcessingService", () => {
     ]));
   });
 
+  it("continues to acceptance when the quote carries packaging warnings", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const acceptanceService = new FakeAcceptanceService();
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: new FakePackagingWarningQuoteService(),
+      orderAcceptance: acceptanceService,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processIntake({
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-packaging-warning",
+    });
+
+    // A quote with PACKAGING_DATA_INCOMPLETE warnings is a successful quote:
+    // acceptance proceeds and the order is not failed.
+    expect(result).toMatchObject({
+      outcome: "accepted",
+      intakeId: 1,
+    });
+    expect(acceptanceService.lastInput).toMatchObject({
+      intakeId: 1,
+      shippingQuoteSnapshotId: 34,
+    });
+    expect(repository.failure).toBeNull();
+  });
+
   it("syncs accepted dropship OMS orders into WMS", async () => {
     const repository = new FakeProcessingRepository(makeClaim());
     const fulfillmentSync = new FakeFulfillmentSync(6001);
@@ -615,6 +646,40 @@ class FakeShippingQuoteService {
       totalShippingCents: 1122,
       currency: "USD",
       carrierServices: [{ carrier: "USPS", service: "Ground Advantage" }],
+      warnings: [],
+      internalBreakdown: {
+        baseRateCents: 1000,
+        markupCents: 100,
+        insurancePoolCents: 22,
+        dunnageCents: 0,
+        rateTableId: 4,
+        requestHash: "quote-hash",
+      },
+    };
+  }
+}
+
+class FakePackagingWarningQuoteService {
+  async quote(): Promise<DropshipShippingQuoteResult> {
+    return {
+      quoteSnapshotId: 34,
+      idempotentReplay: false,
+      vendorId: 10,
+      storeConnectionId: 22,
+      warehouseId: 3,
+      destination: { country: "US", postalCode: "10001", region: "NY" },
+      packageCount: 1,
+      totalShippingCents: 1122,
+      currency: "USD",
+      carrierServices: [{ carrier: "USPS", service: "Ground Advantage" }],
+      // Quote succeeded with degraded (weight-only) packaging — order
+      // acceptance must continue.
+      warnings: [{
+        code: "PACKAGING_DATA_INCOMPLETE",
+        reason: "missing_dims",
+        productVariantIds: [101],
+        message: "One or more variants are missing catalog dimensions; quoted as weight-only packages.",
+      }],
       internalBreakdown: {
         baseRateCents: 1000,
         markupCents: 100,

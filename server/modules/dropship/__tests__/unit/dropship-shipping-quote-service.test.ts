@@ -52,7 +52,7 @@ const now = new Date("2026-05-01T16:00:00.000Z");
 
 describe("dropship shipping quote domain", () => {
   it("derives carton count from physical placement without a max-units setting", () => {
-    const packages = cartonizeDropshipItems({
+    const { packages, warnings } = cartonizeDropshipItems({
       items: normalizeDropshipQuoteItems([
         { productVariantId: 101, quantity: 3 },
       ]),
@@ -71,6 +71,7 @@ describe("dropship shipping quote domain", () => {
       })],
     });
 
+    expect(warnings).toEqual([]);
     expect(packages.map((carton) => ({
       sequence: carton.packageSequence,
       quantity: carton.quantity,
@@ -85,7 +86,7 @@ describe("dropship shipping quote domain", () => {
   });
 
   it("co-packs compatible SKUs from the same order", () => {
-    const packages = cartonizeDropshipItems({
+    const { packages } = cartonizeDropshipItems({
       items: normalizeDropshipQuoteItems([
         { productVariantId: 101, quantity: 1 },
         { productVariantId: 102, quantity: 1 },
@@ -124,7 +125,7 @@ describe("dropship shipping quote domain", () => {
   });
 
   it("keeps SKUs with different requested services in separate packing batches", () => {
-    const packages = cartonizeDropshipItems({
+    const { packages } = cartonizeDropshipItems({
       items: normalizeDropshipQuoteItems([
         { productVariantId: 101, quantity: 1 },
         { productVariantId: 102, quantity: 1 },
@@ -156,7 +157,7 @@ describe("dropship shipping quote domain", () => {
   });
 
   it("keeps catalog shipping groups in separate cartons", () => {
-    const packages = cartonizeDropshipItems({
+    const { packages } = cartonizeDropshipItems({
       items: normalizeDropshipQuoteItems([
         { productVariantId: 101, quantity: 1 },
         { productVariantId: 102, quantity: 1 },
@@ -183,11 +184,11 @@ describe("dropship shipping quote domain", () => {
   });
 
   it("keeps ship-alone quantities in one carton per unit", () => {
-    const packages = cartonizeDropshipItems({
+    const { packages } = cartonizeDropshipItems({
       items: normalizeDropshipQuoteItems([
         { productVariantId: 101, quantity: 2 },
       ]),
-      packageProfiles: [makePackageProfile({ shipAlone: true })],
+      packageProfiles: [makePackageProfile({ shipsInOwnContainer: true })],
       boxes: [makeBox()],
     });
 
@@ -195,35 +196,95 @@ describe("dropship shipping quote domain", () => {
     expect(packages.every((carton) => carton.quantity === 1)).toBe(true);
   });
 
-  it("blocks a long item whose volume fits but whose dimensions do not", () => {
-    let thrown: unknown;
-    try {
-      cartonizeDropshipItems({
-        items: normalizeDropshipQuoteItems([
-          { productVariantId: 101, quantity: 1 },
-        ]),
-        packageProfiles: [makePackageProfile({
-          productVariantId: 101,
-          lengthMm: 2000,
-          widthMm: 20,
-          heightMm: 20,
-        })],
-        boxes: [makeBox({
-          lengthMm: 200,
-          widthMm: 200,
-          heightMm: 200,
-        })],
-      });
-    } catch (error) {
-      thrown = error;
-    }
+  it("degrades to a weight-only package with a warning when no box fits", () => {
+    const { packages, warnings } = cartonizeDropshipItems({
+      items: normalizeDropshipQuoteItems([
+        { productVariantId: 101, quantity: 1 },
+      ]),
+      packageProfiles: [makePackageProfile({
+        productVariantId: 101,
+        lengthMm: 2000,
+        widthMm: 20,
+        heightMm: 20,
+      })],
+      boxes: [makeBox({
+        lengthMm: 200,
+        widthMm: 200,
+        heightMm: 200,
+      })],
+    });
 
-    expect(thrown).toBeInstanceOf(DropshipError);
-    expect(thrown).toMatchObject({ code: "DROPSHIP_CARTONIZATION_BLOCKED" });
+    expect(packages).toEqual([expect.objectContaining({
+      packageSequence: 1,
+      productVariantId: 101,
+      quantity: 1,
+      boxId: null,
+      boxCode: null,
+      weightGrams: 100,
+      lengthMm: null,
+      widthMm: null,
+      heightMm: null,
+    })]);
+    expect(warnings).toEqual([expect.objectContaining({
+      code: "PACKAGING_DATA_INCOMPLETE",
+      reason: "no_box_fits",
+      productVariantIds: [101],
+    })]);
+  });
+
+  it("degrades to a weight-only package with a warning when dims are missing", () => {
+    const { packages, warnings } = cartonizeDropshipItems({
+      items: normalizeDropshipQuoteItems([
+        { productVariantId: 101, quantity: 2 },
+      ]),
+      packageProfiles: [makePackageProfile({
+        productVariantId: 101,
+        weightGrams: 150,
+        lengthMm: null,
+        widthMm: null,
+        heightMm: null,
+      })],
+      boxes: [makeBox()],
+    });
+
+    expect(packages).toEqual([expect.objectContaining({
+      boxId: null,
+      boxCode: null,
+      weightGrams: 300,
+      lengthMm: null,
+      widthMm: null,
+      heightMm: null,
+    })]);
+    expect(warnings).toEqual([expect.objectContaining({
+      code: "PACKAGING_DATA_INCOMPLETE",
+      reason: "missing_dims",
+      productVariantIds: [101],
+    })]);
+  });
+
+  it("degrades to weight-only packages with a warning when no boxes are configured", () => {
+    const { packages, warnings } = cartonizeDropshipItems({
+      items: normalizeDropshipQuoteItems([
+        { productVariantId: 101, quantity: 1 },
+      ]),
+      packageProfiles: [makePackageProfile({ productVariantId: 101 })],
+      boxes: [],
+    });
+
+    expect(packages).toEqual([expect.objectContaining({
+      boxId: null,
+      boxCode: null,
+      weightGrams: 100,
+    })]);
+    expect(warnings).toEqual([expect.objectContaining({
+      code: "PACKAGING_DATA_INCOMPLETE",
+      reason: "no_boxes_configured",
+      productVariantIds: [101],
+    })]);
   });
 
   it("uses item rotation when the carton requires it", () => {
-    const packages = cartonizeDropshipItems({
+    const { packages } = cartonizeDropshipItems({
       items: normalizeDropshipQuoteItems([
         { productVariantId: 101, quantity: 1 },
       ]),
@@ -246,7 +307,7 @@ describe("dropship shipping quote domain", () => {
   });
 
   it("splits packages at the automatic 50 lb handling ceiling", () => {
-    const packages = cartonizeDropshipItems({
+    const { packages } = cartonizeDropshipItems({
       items: normalizeDropshipQuoteItems([
         { productVariantId: 101, quantity: 2 },
       ]),
@@ -266,7 +327,7 @@ describe("dropship shipping quote domain", () => {
     expect(packages.every((carton) => carton.weightGrams <= 22679)).toBe(true);
   });
 
-  it("blocks cartonization when canonical catalog package data is missing", () => {
+  it("still throws when canonical catalog weight is missing", () => {
     let thrown: unknown;
     try {
       cartonizeDropshipItems({
@@ -277,6 +338,22 @@ describe("dropship shipping quote domain", () => {
     } catch (error) {
       thrown = error;
     }
+    expect(thrown).toBeInstanceOf(DropshipError);
+    expect(thrown).toMatchObject({ code: "DROPSHIP_CATALOG_PACKAGE_DATA_REQUIRED" });
+  });
+
+  it("still throws when the catalog weight is non-positive", () => {
+    let thrown: unknown;
+    try {
+      cartonizeDropshipItems({
+        items: [{ productVariantId: 101, quantity: 1 }],
+        packageProfiles: [makePackageProfile({ productVariantId: 101, weightGrams: null })],
+        boxes: [makeBox()],
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(DropshipError);
     expect(thrown).toMatchObject({ code: "DROPSHIP_CATALOG_PACKAGE_DATA_REQUIRED" });
   });
 });
@@ -358,6 +435,46 @@ describe("DropshipShippingQuoteService", () => {
     expect(repository.lastCreateInput?.actor).toEqual({ actorType: "vendor", actorId: "member-1" });
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_SHIPPING_QUOTE_CREATED" });
     expect(shadowComparison.snapshots).toHaveLength(1);
+  });
+
+  it("quotes and persists packaging warnings when variant dims are missing", async () => {
+    cartonization.packageProfiles = [makePackageProfile({
+      productVariantId: 101,
+      lengthMm: null,
+      widthMm: null,
+      heightMm: null,
+    })];
+
+    const result = await service.quoteForMember("member-1", {
+      storeConnectionId: 22,
+      warehouseId: 3,
+      destination: { country: "US", postalCode: "10001" },
+      items: [{ productVariantId: 101, quantity: 1 }],
+      idempotencyKey: "quote-packaging-warning",
+    });
+
+    // Quote succeeds (no exception) and prices from the weight-only package.
+    expect(result.totalShippingCents).toBe(1122);
+    expect(result.packageCount).toBe(1);
+
+    // Structured warning persisted on the snapshot row and in the payload.
+    expect(repository.lastCreateInput?.warnings).toEqual([expect.objectContaining({
+      code: "PACKAGING_DATA_INCOMPLETE",
+      reason: "missing_dims",
+      productVariantIds: [101],
+    })]);
+    expect(repository.snapshots[0]?.warnings).toEqual([expect.objectContaining({
+      code: "PACKAGING_DATA_INCOMPLETE",
+    })]);
+    expect(repository.snapshots[0]?.quotePayload).toMatchObject({
+      warnings: {
+        packaging: [expect.objectContaining({ code: "PACKAGING_DATA_INCOMPLETE" })],
+      },
+      packages: [expect.objectContaining({
+        boxId: null,
+        dimensionsMm: null,
+      })],
+    });
   });
 
   it("replays the same idempotency key only when the request hash matches", async () => {
@@ -632,6 +749,7 @@ class FakeShippingQuoteRepository implements DropshipShippingQuoteRepository {
       dunnageCents: input.dunnageCents,
       totalShippingCents: input.totalShippingCents,
       quotePayload: input.quotePayload,
+      warnings: input.warnings,
       createdAt: input.createdAt,
     };
     this.snapshots.push(snapshot);
@@ -644,17 +762,19 @@ class FakeCartonizationProvider implements DropshipCartonizationProvider {
   boxes: DropshipBoxCatalogEntry[] = [makeBox()];
 
   async cartonize(input: DropshipCartonizationRequest): Promise<DropshipCartonizationResult> {
+    const result = cartonizeDropshipItems({
+      items: input.items,
+      packageProfiles: this.packageProfiles,
+      boxes: this.boxes,
+    });
     return {
-      packages: cartonizeDropshipItems({
-        items: input.items,
-        packageProfiles: this.packageProfiles,
-        boxes: this.boxes,
-      }),
+      packages: result.packages,
       engine: {
         name: "fake_cartonization",
         version: "test",
       },
-      warnings: [],
+      warnings: result.warnings.map((warning) => warning.message),
+      packagingWarnings: result.warnings,
     };
   }
 }
@@ -793,7 +913,8 @@ function makePackageProfile(overrides: Partial<DropshipPackageProfile> = {}): Dr
     widthMm: 75,
     heightMm: 20,
     shippingGroupCode: null,
-    shipAlone: false,
+    shipsInOwnContainer: false,
+    maxUnitsPerPackage: null,
     defaultCarrier: null,
     defaultService: null,
     defaultBoxId: null,

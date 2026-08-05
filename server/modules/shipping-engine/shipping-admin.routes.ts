@@ -32,7 +32,6 @@ const upsertBoxSchema = insertShippingBoxSchema.extend({
 
 const upsertVariantAttrsSchema = insertShippingVariantAttrsSchema.pick({
   productVariantId: true,
-  shipsInOwnContainer: true,
   riderEligible: true,
   riderVoidCm3: true,
   riderVoidMaxWeightGrams: true,
@@ -157,6 +156,7 @@ export function registerShippingAdminRoutes(app: Express): void {
         const rows = await db
           .select({
             productVariantId: productVariants.id,
+            productId: products.id,
             sku: productVariants.sku,
             name: productVariants.name,
             productName: products.name,
@@ -164,7 +164,8 @@ export function registerShippingAdminRoutes(app: Express): void {
             lengthMm: productVariants.lengthMm,
             widthMm: productVariants.widthMm,
             heightMm: productVariants.heightMm,
-            shipsInOwnContainer: shippingVariantAttrs.shipsInOwnContainer,
+            // Canonical SIOC home is catalog.product_variants (migration 184).
+            shipsInOwnContainer: productVariants.shipsInOwnContainer,
             siocSuggested: shippingVariantAttrs.siocSuggested,
             riderEligible: shippingVariantAttrs.riderEligible,
             riderVoidCm3: shippingVariantAttrs.riderVoidCm3,
@@ -225,15 +226,65 @@ export function registerShippingAdminRoutes(app: Express): void {
     },
   );
 
+  // SIOC confirm/dismiss. The SIOC fact is canonical on
+  // catalog.product_variants (migration 184): confirming flips the variant;
+  // dismissing records an attrs row with siocSuggested=false so the heuristic
+  // does not suggest the variant again.
+  const siocDecisionSchema = z.object({
+    productVariantId: z.number().int().positive(),
+    confirmed: z.boolean(),
+  }).strict();
+
+  app.put(
+    "/api/shipping/admin/sioc-decision",
+    requirePermission("settings", "edit"),
+    async (req, res) => {
+      try {
+        const parsed = siocDecisionSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", issues: parsed.error.issues } });
+        }
+        const { productVariantId, confirmed } = parsed.data;
+        const result = await db.transaction(async (tx) => {
+          const variant = await tx.select({ id: productVariants.id })
+            .from(productVariants)
+            .where(eq(productVariants.id, productVariantId))
+            .limit(1);
+          if (variant.length === 0) return null;
+
+          if (confirmed) {
+            await tx.update(productVariants)
+              .set({ shipsInOwnContainer: true, updatedAt: new Date() })
+              .where(eq(productVariants.id, productVariantId));
+          }
+          // Either way the suggestion is resolved for this variant.
+          await tx.insert(shippingVariantAttrs)
+            .values({ productVariantId, siocSuggested: false })
+            .onConflictDoUpdate({
+              target: shippingVariantAttrs.productVariantId,
+              set: { siocSuggested: false, updatedAt: new Date() },
+            });
+          return { productVariantId, confirmed };
+        });
+        if (!result) {
+          return res.status(404).json({ error: { code: "SHIPPING_ADMIN_VARIANT_NOT_FOUND" } });
+        }
+        return res.json({ decision: result });
+      } catch (error) {
+        return sendShippingAdminError(res, error, "record sioc decision");
+      }
+    },
+  );
+
   app.get(
     "/api/shipping/admin/sioc-suggestions",
     requirePermission("settings", "view"),
     async (_req, res) => {
       try {
         // Heuristic: sealed multi-unit pack levels (case/master) with complete
-        // dims. An existing attrs row — however it's flagged — means a human
-        // already decided (confirm OR dismiss both write one), so only
-        // attrs-less variants are suggested.
+        // dims. A variant already flagged SIOC, or one with an attrs row (a
+        // human confirmed or dismissed — dismissal writes siocSuggested=false),
+        // is not suggested again.
         const rows = await db
           .select({
             productVariantId: productVariants.id,
@@ -253,6 +304,7 @@ export function registerShippingAdminRoutes(app: Express): void {
             sql`${productVariants.unitsPerVariant} >= 2`,
             isNotNull(productVariants.weightGrams),
             isNotNull(productVariants.lengthMm),
+            eq(productVariants.shipsInOwnContainer, false),
             sql`${shippingVariantAttrs.id} is null`,
           ))
           .orderBy(asc(productVariants.sku))

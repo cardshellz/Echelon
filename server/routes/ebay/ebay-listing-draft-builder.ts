@@ -219,10 +219,12 @@ function normalizePackageWeightGrams(variant: EbayRouteVariantInput): number | n
     ?? variant.weightGrams
     ?? null;
   const numeric = typeof rawWeight === "string" ? Number(rawWeight) : rawWeight;
-  if (typeof numeric !== "number" || !Number.isInteger(numeric) || numeric <= 0) {
+  if (typeof numeric !== "number" || !Number.isFinite(numeric) || numeric <= 0) {
     return null;
   }
-  return numeric;
+  // catalog.product_variants.weight_grams is numeric(10,2) (migration 184);
+  // eBay package weights are sent in whole grams.
+  return Math.max(1, Math.round(numeric));
 }
 
 function escapeHtml(text: string): string {

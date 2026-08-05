@@ -15,7 +15,6 @@ import {
   shippingRateTableRows,
   shippingRateTables,
   shippingServiceLevels,
-  shippingVariantAttrs,
   type ShippingProductSetSelectorKind,
   type ShippingRateRuleAction,
   type ShippingRateRuleDestinationScope,
@@ -24,6 +23,7 @@ import {
 } from "@shared/schema";
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
+import { numericToNumber } from "@shared/utils/measurements";
 import {
   evaluateProductRatePolicy,
   validateProductRateRules,
@@ -311,7 +311,9 @@ export async function previewRateTableProductPolicy(
   const variantById = new Map(variants.map((variant) => [variant.id, variant]));
   const lines = input.lines.map((line) => {
     const variant = variantById.get(line.productVariantId)!;
-    if (!Number.isSafeInteger(variant.weightGrams) || variant.weightGrams! <= 0) {
+    // numeric(10,2) arrives as string from the pg driver; coerce once.
+    const weightGrams = numericToNumber(variant.weightGrams);
+    if (weightGrams === null || weightGrams <= 0) {
       throw new ProductRatePolicyAdminError(
         409,
         "SHIPPING_PRODUCT_POLICY_PREVIEW_WEIGHT_MISSING",
@@ -322,7 +324,7 @@ export async function previewRateTableProductPolicy(
       sku: variant.sku,
       productVariantId: variant.id,
       quantity: line.quantity,
-      unitWeightGrams: variant.weightGrams,
+      unitWeightGrams: weightGrams,
       unitPriceCents: line.unitPriceCents,
     };
   });
@@ -545,9 +547,9 @@ async function resolveVariantIds(
   if (selector.ref !== "true") {
     throw new ProductRatePolicyAdminError(400, "SHIPPING_PRODUCT_POLICY_INVALID_SIOC", "SIOC selector must be enabled.");
   }
-  return base.innerJoin(shippingVariantAttrs, eq(shippingVariantAttrs.productVariantId, productVariants.id))
-    .where(and(
-      eq(shippingVariantAttrs.shipsInOwnContainer, true),
+  // Canonical SIOC home is catalog.product_variants (migration 184).
+  return base.where(and(
+      eq(productVariants.shipsInOwnContainer, true),
       eq(productVariants.isActive, true),
       eq(products.isActive, true),
     )).orderBy(asc(productVariants.id)).then((rows) => rows.map((row) => row.id));

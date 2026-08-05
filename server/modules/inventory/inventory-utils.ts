@@ -9,12 +9,15 @@ import type { InventoryLevel, ProductVariant } from "@shared/schema";
 
 /** Calculate cubic volume for a variant in mm³. Returns null if dimensions not set. */
 export function getVariantCubicMm(variant: {
-  widthMm: number | null;
-  heightMm: number | null;
-  lengthMm?: number | null;
+  widthMm: number | string | null;
+  heightMm: number | string | null;
+  lengthMm?: number | string | null;
 }): number | null {
-  if (variant.widthMm && variant.heightMm && variant.lengthMm) {
-    return variant.widthMm * variant.heightMm * variant.lengthMm;
+  const width = typeof variant.widthMm === "string" ? Number.parseFloat(variant.widthMm) : variant.widthMm;
+  const height = typeof variant.heightMm === "string" ? Number.parseFloat(variant.heightMm) : variant.heightMm;
+  const length = typeof variant.lengthMm === "string" ? Number.parseFloat(variant.lengthMm) : variant.lengthMm;
+  if (width && height && length) {
+    return width * height * length;
   }
   return null;
 }

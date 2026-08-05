@@ -314,7 +314,9 @@ export class EbayListingBuilder {
     if (variant.weightGrams) {
       item.packageWeightAndSize = {
         weight: {
-          value: variant.weightGrams,
+          // weight_grams is numeric(10,2) (migration 184); eBay package
+          // weights are sent in whole grams.
+          value: Math.max(1, Math.round(variant.weightGrams)),
           unit: "GRAM",
         },
       };

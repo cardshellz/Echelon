@@ -37,14 +37,8 @@ describe("PgDropshipShippingConfigRepository policy windows", () => {
     expect(client.released).toBe(true);
   });
 
-  it("snapshots canonical catalog package data while storing only dropship overrides", async () => {
-    const client = new PackageProfileClient({
-      id: 10,
-      weight_grams: 321,
-      length_mm: 210,
-      width_mm: 140,
-      height_mm: 30,
-    });
+  it("stores only dropship channel defaults and reads physical facts from the catalog variant", async () => {
+    const client = new PackageProfileClient({ variantExists: true });
     const pool = { connect: async () => client as unknown as PoolClient } as unknown as Pool;
     const repository = new PgDropshipShippingConfigRepository(pool);
 
@@ -52,34 +46,55 @@ describe("PgDropshipShippingConfigRepository policy windows", () => {
 
     expect(result.record).toMatchObject({
       productVariantId: 10,
+      // Physical facts are read-only mirrors from catalog.product_variants.
       weightGrams: 321,
       lengthMm: 210,
       widthMm: 140,
       heightMm: 30,
       packageDataComplete: true,
-      shipAlone: true,
+      shipsInOwnContainer: true,
+      defaultCarrier: "USPS",
     });
     const insert = client.calls.find((call) => call.sql.includes("INSERT INTO dropship.dropship_package_profiles"));
-    expect(insert?.params.slice(0, 5)).toEqual([10, 321, 210, 140, 30]);
+    // Channel defaults only: variant id, carrier, service, box, active, now.
+    expect(insert?.params).toEqual([
+      10,
+      "USPS",
+      "Ground Advantage",
+      null,
+      true,
+      new Date("2026-07-11T12:00:00.000Z"),
+    ]);
+    expect(insert?.sql).not.toContain("weight_grams");
+    expect(insert?.sql).not.toContain("ship_alone");
+    expect(insert?.sql).not.toContain("max_units_per_package");
     const load = client.calls.find((call) => call.sql.includes("FROM dropship.dropship_package_profiles pp"));
     expect(load?.sql).toContain("pv.weight_grams");
+    expect(load?.sql).toContain("pv.ships_in_own_container");
     expect(load?.sql).not.toContain("pp.weight_grams");
+    expect(load?.sql).not.toContain("pp.ship_alone");
   });
 
-  it("rejects shipping overrides when catalog package data is incomplete", async () => {
-    const client = new PackageProfileClient({
-      id: 10,
-      weight_grams: null,
-      length_mm: 210,
-      width_mm: 140,
-      height_mm: 30,
-    });
+  it("allows saving channel defaults when catalog package data is incomplete", async () => {
+    const client = new PackageProfileClient({ variantExists: true });
+    const pool = { connect: async () => client as unknown as PoolClient } as unknown as Pool;
+    const repository = new PgDropshipShippingConfigRepository(pool);
+
+    // Missing dims no longer block saving channel defaults — the quote path
+    // degrades to weight-only packages with a warning instead.
+    const result = await repository.upsertPackageProfile(makePackageProfileInput());
+    expect(result.record.productVariantId).toBe(10);
+    expect(client.calls.some((call) => call.sql.includes("INSERT INTO dropship.dropship_package_profiles"))).toBe(true);
+  });
+
+  it("rejects channel defaults for a missing catalog variant", async () => {
+    const client = new PackageProfileClient({ variantExists: false });
     const pool = { connect: async () => client as unknown as PoolClient } as unknown as Pool;
     const repository = new PgDropshipShippingConfigRepository(pool);
 
     await expect(repository.upsertPackageProfile(makePackageProfileInput())).rejects.toMatchObject({
-      code: "DROPSHIP_CATALOG_PACKAGE_DATA_REQUIRED",
-      context: { productVariantId: 10, missingFields: ["weightGrams"] },
+      code: "DROPSHIP_PRODUCT_VARIANT_NOT_FOUND",
+      context: { productVariantId: 10 },
     });
     expect(client.calls.some((call) => call.sql.includes("INSERT INTO dropship.dropship_package_profiles"))).toBe(false);
     expect(client.queries).toContain("ROLLBACK");
@@ -89,11 +104,9 @@ describe("PgDropshipShippingConfigRepository policy windows", () => {
 function makePackageProfileInput() {
   return {
     productVariantId: 10,
-    shipAlone: true,
     defaultCarrier: "USPS",
     defaultService: "Ground Advantage",
     defaultBoxId: null,
-    maxUnitsPerPackage: 1,
     isActive: true,
     idempotencyKey: "package-profile-001",
     requestHash: "request-hash",
@@ -107,13 +120,7 @@ class PackageProfileClient {
   readonly calls: Array<{ sql: string; params: unknown[] }> = [];
   released = false;
 
-  constructor(private readonly packageData: {
-    id: number;
-    weight_grams: number | null;
-    length_mm: number | null;
-    width_mm: number | null;
-    height_mm: number | null;
-  }) {}
+  constructor(private readonly options: { variantExists: boolean }) {}
 
   async query<T>(sql: string, params: unknown[] = []): Promise<QueryResult<T>> {
     const normalized = sql.trim();
@@ -122,8 +129,8 @@ class PackageProfileClient {
     if (normalized.includes("INSERT INTO dropship.dropship_admin_config_commands")) {
       return result([{ id: 91 } as T]);
     }
-    if (normalized.includes("FROM catalog.product_variants") && normalized.includes("FOR UPDATE")) {
-      return result([this.packageData as T]);
+    if (normalized === "SELECT id FROM catalog.product_variants WHERE id = $1 LIMIT 1") {
+      return result(this.options.variantExists ? [{ id: 10 } as T] : []);
     }
     if (normalized.includes("INSERT INTO dropship.dropship_package_profiles")) {
       return result([{ id: 44 } as T]);
@@ -137,15 +144,15 @@ class PackageProfileClient {
         product_name: "Product",
         variant_sku: "SKU-10",
         variant_name: "Variant",
-        weight_grams: this.packageData.weight_grams,
-        length_mm: this.packageData.length_mm,
-        width_mm: this.packageData.width_mm,
-        height_mm: this.packageData.height_mm,
-        ship_alone: true,
+        weight_grams: 321,
+        length_mm: 210,
+        width_mm: 140,
+        height_mm: 30,
+        ships_in_own_container: true,
         default_carrier: "USPS",
         default_service: "Ground Advantage",
         default_box_id: null,
-        max_units_per_package: 1,
+        max_units_per_package: null,
         is_active: true,
         created_at: new Date("2026-07-11T12:00:00.000Z"),
         updated_at: new Date("2026-07-11T12:00:00.000Z"),

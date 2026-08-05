@@ -3,9 +3,9 @@ import {
   productVariants,
   products,
   shippingGroups,
-  shippingVariantAttrs,
 } from "@shared/schema";
 import { db } from "../../../db";
+import { numericToNumber } from "@shared/utils/measurements";
 
 export interface CatalogShippingFact {
   productVariantId: number;
@@ -31,12 +31,12 @@ export async function loadCatalogShippingFactsBySku(
       sku: productVariants.sku,
       weightGrams: productVariants.weightGrams,
       shippingGroupCode: shippingGroups.code,
-      shipsInOwnContainer: shippingVariantAttrs.shipsInOwnContainer,
+      // Canonical SIOC home is catalog.product_variants (migration 184).
+      shipsInOwnContainer: productVariants.shipsInOwnContainer,
     })
     .from(productVariants)
     .innerJoin(products, eq(products.id, productVariants.productId))
     .leftJoin(shippingGroups, eq(shippingGroups.id, products.shippingGroupId))
-    .leftJoin(shippingVariantAttrs, eq(shippingVariantAttrs.productVariantId, productVariants.id))
     .where(and(
       isNotNull(productVariants.sku),
       inArray(productVariants.sku, uniqueSkus),
@@ -49,7 +49,7 @@ export async function loadCatalogShippingFactsBySku(
     if (!incumbent || row.id < incumbent.productVariantId) {
       winnerBySku.set(row.sku, {
         productVariantId: row.id,
-        weightGrams: row.weightGrams,
+        weightGrams: numericToNumber(row.weightGrams),
         shippingGroupCode: row.shippingGroupCode,
         shipsInOwnContainer: row.shipsInOwnContainer ?? false,
       });
@@ -81,15 +81,11 @@ export async function loadCatalogShippingFactsByVariantIds(
       sku: productVariants.sku,
       weightGrams: productVariants.weightGrams,
       shippingGroupCode: shippingGroups.code,
-      shipsInOwnContainer: shippingVariantAttrs.shipsInOwnContainer,
+      shipsInOwnContainer: productVariants.shipsInOwnContainer,
     })
     .from(productVariants)
     .innerJoin(products, eq(products.id, productVariants.productId))
     .leftJoin(shippingGroups, eq(shippingGroups.id, products.shippingGroupId))
-    .leftJoin(
-      shippingVariantAttrs,
-      eq(shippingVariantAttrs.productVariantId, productVariants.id),
-    )
     .where(inArray(productVariants.id, uniqueIds));
 
   return new Map(rows.map((row) => [
@@ -97,7 +93,7 @@ export async function loadCatalogShippingFactsByVariantIds(
     {
       productVariantId: row.id,
       sku: row.sku,
-      weightGrams: row.weightGrams,
+      weightGrams: numericToNumber(row.weightGrams),
       shippingGroupCode: row.shippingGroupCode,
       shipsInOwnContainer: row.shipsInOwnContainer ?? false,
     },

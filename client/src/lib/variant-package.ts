@@ -53,12 +53,19 @@ function parsePositiveMeasurement(rawValue: string, label: string): number | nul
   return parsed;
 }
 
+/**
+ * Convert a display-unit measurement to stored units (grams / millimeters).
+ * Storage is numeric(10,2) (migration 184), so round to 2 decimals — NOT to
+ * whole units. Rounding to whole mm was the round-trip bug: 6in → 152.4mm →
+ * truncated to 152 → redisplayed as 5.984in. With 2-decimal storage, 6in →
+ * 152.40mm → displays as exactly 6in.
+ */
 function toStoredMeasurement(rawValue: string, label: string, multiplier: number): number | null {
   const parsed = parsePositiveMeasurement(rawValue, label);
   if (parsed === null) return null;
 
-  const storedValue = Math.round(parsed * multiplier);
-  if (!Number.isInteger(storedValue) || storedValue <= 0) {
+  const storedValue = Math.round(parsed * multiplier * 100) / 100;
+  if (!Number.isFinite(storedValue) || storedValue <= 0) {
     throw new Error(`${label} is too small to store.`);
   }
   return storedValue;

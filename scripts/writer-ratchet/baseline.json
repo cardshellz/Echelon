@@ -21,6 +21,7 @@
     "modules/catalog",
     "modules/channels",
     "modules/inventory",
+    "modules/shipping-engine",
     "server/routes/ebay/ebay-listing-state.ts",
     "server/routes/ebay/ebay-policies.routes.ts"
   ],

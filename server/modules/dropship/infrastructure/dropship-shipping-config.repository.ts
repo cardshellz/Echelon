@@ -46,11 +46,13 @@ interface PackageProfileRow {
   product_name: string | null;
   variant_sku: string | null;
   variant_name: string | null;
+  // Physical facts are canonical on catalog.product_variants (numeric(10,2)
+  // since migration 184 → cast to float8 so pg returns numbers).
   weight_grams: number | null;
   length_mm: number | null;
   width_mm: number | null;
   height_mm: number | null;
-  ship_alone: boolean;
+  ships_in_own_container: boolean;
   default_carrier: string | null;
   default_service: string | null;
   default_box_id: number | null;
@@ -58,14 +60,6 @@ interface PackageProfileRow {
   is_active: boolean;
   created_at: Date;
   updated_at: Date;
-}
-
-interface CatalogPackageDataRow {
-  id: number;
-  weight_grams: number | null;
-  length_mm: number | null;
-  width_mm: number | null;
-  height_mm: number | null;
 }
 
 interface ZoneRuleRow {
@@ -267,41 +261,31 @@ export class PgDropshipShippingConfigRepository implements DropshipShippingConfi
         return { record: profile, idempotentReplay: true };
       }
 
-      const packageData = await loadCompleteCatalogPackageDataForUpdate(client, input.productVariantId);
+      // Physical facts (weight/dims/SIOC/max-units) are canonical on
+      // catalog.product_variants and edited there; this upsert writes only
+      // dropship channel defaults.
+      await assertProductVariantExists(client, input.productVariantId);
       if (input.defaultBoxId !== null && input.defaultBoxId !== undefined) {
         await assertBoxExists(client, input.defaultBoxId);
       }
 
       const result = await client.query<{ id: number }>(
         `INSERT INTO dropship.dropship_package_profiles
-          (product_variant_id, weight_grams, length_mm, width_mm, height_mm,
-           ship_alone, default_carrier, default_service, default_box_id,
-           max_units_per_package, is_active, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
+          (product_variant_id, default_carrier, default_service, default_box_id,
+           is_active, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $6)
          ON CONFLICT (product_variant_id) DO UPDATE
-           SET weight_grams = EXCLUDED.weight_grams,
-               length_mm = EXCLUDED.length_mm,
-               width_mm = EXCLUDED.width_mm,
-               height_mm = EXCLUDED.height_mm,
-               ship_alone = EXCLUDED.ship_alone,
-               default_carrier = EXCLUDED.default_carrier,
+           SET default_carrier = EXCLUDED.default_carrier,
                default_service = EXCLUDED.default_service,
                default_box_id = EXCLUDED.default_box_id,
-               max_units_per_package = EXCLUDED.max_units_per_package,
                is_active = EXCLUDED.is_active,
                updated_at = EXCLUDED.updated_at
          RETURNING id`,
         [
           input.productVariantId,
-          packageData.weight_grams,
-          packageData.length_mm,
-          packageData.width_mm,
-          packageData.height_mm,
-          input.shipAlone,
           input.defaultCarrier,
           input.defaultService,
           input.defaultBoxId,
-          input.maxUnitsPerPackage,
           input.isActive,
           input.now,
         ],
@@ -772,9 +756,11 @@ async function listPackageProfilesWithClient(
   const result = await client.query<PackageProfileRow>(
     `SELECT pp.id, pp.product_variant_id, p.id AS product_id, p.sku AS product_sku,
             p.name AS product_name, pv.sku AS variant_sku, pv.name AS variant_name,
-            pv.weight_grams, pv.length_mm, pv.width_mm, pv.height_mm,
-            pp.ship_alone, pp.default_carrier, pp.default_service,
-            pp.default_box_id, pp.max_units_per_package, pp.is_active,
+            pv.weight_grams::float8 AS weight_grams, pv.length_mm::float8 AS length_mm,
+            pv.width_mm::float8 AS width_mm, pv.height_mm::float8 AS height_mm,
+            pv.ships_in_own_container, pv.max_units_per_package,
+            pp.default_carrier, pp.default_service,
+            pp.default_box_id, pp.is_active,
             pp.created_at, pp.updated_at
      FROM dropship.dropship_package_profiles pp
      INNER JOIN catalog.product_variants pv ON pv.id = pp.product_variant_id
@@ -855,9 +841,11 @@ async function loadPackageProfileByIdWithClient(
   const result = await client.query<PackageProfileRow>(
     `SELECT pp.id, pp.product_variant_id, p.id AS product_id, p.sku AS product_sku,
             p.name AS product_name, pv.sku AS variant_sku, pv.name AS variant_name,
-            pv.weight_grams, pv.length_mm, pv.width_mm, pv.height_mm,
-            pp.ship_alone, pp.default_carrier, pp.default_service,
-            pp.default_box_id, pp.max_units_per_package, pp.is_active,
+            pv.weight_grams::float8 AS weight_grams, pv.length_mm::float8 AS length_mm,
+            pv.width_mm::float8 AS width_mm, pv.height_mm::float8 AS height_mm,
+            pv.ships_in_own_container, pv.max_units_per_package,
+            pp.default_carrier, pp.default_service,
+            pp.default_box_id, pp.is_active,
             pp.created_at, pp.updated_at
      FROM dropship.dropship_package_profiles pp
      INNER JOIN catalog.product_variants pv ON pv.id = pp.product_variant_id
@@ -993,37 +981,16 @@ async function listInsurancePoliciesWithClient(
   return result.rows.map(mapInsurancePolicyRow);
 }
 
-async function loadCompleteCatalogPackageDataForUpdate(
-  client: PoolClient,
-  productVariantId: number,
-): Promise<CatalogPackageDataRow> {
-  const result = await client.query<CatalogPackageDataRow>(
-    `SELECT id, weight_grams, length_mm, width_mm, height_mm
-     FROM catalog.product_variants
-     WHERE id = $1
-     FOR UPDATE`,
+async function assertProductVariantExists(client: PoolClient, productVariantId: number): Promise<void> {
+  const result = await client.query<{ id: number }>(
+    "SELECT id FROM catalog.product_variants WHERE id = $1 LIMIT 1",
     [productVariantId],
   );
-  const packageData = result.rows[0];
-  if (!packageData) {
+  if (!result.rows[0]) {
     throw new DropshipError("DROPSHIP_PRODUCT_VARIANT_NOT_FOUND", "Product variant was not found.", {
       productVariantId,
     });
   }
-  const missingFields = [
-    ["weightGrams", packageData.weight_grams],
-    ["lengthMm", packageData.length_mm],
-    ["widthMm", packageData.width_mm],
-    ["heightMm", packageData.height_mm],
-  ].filter(([, value]) => !Number.isInteger(value) || Number(value) <= 0).map(([field]) => field);
-  if (missingFields.length > 0) {
-    throw new DropshipError(
-      "DROPSHIP_CATALOG_PACKAGE_DATA_REQUIRED",
-      "Complete catalog variant weight and dimensions are required before saving shipping overrides.",
-      { productVariantId, missingFields },
-    );
-  }
-  return packageData;
 }
 
 async function assertBoxExists(client: PoolClient, boxId: number): Promise<void> {
@@ -1121,12 +1088,12 @@ function mapPackageProfileRow(row: PackageProfileRow): DropshipPackageProfileCon
     productName: row.product_name,
     variantSku: row.variant_sku,
     variantName: row.variant_name,
-    weightGrams: row.weight_grams,
-    lengthMm: row.length_mm,
-    widthMm: row.width_mm,
-    heightMm: row.height_mm,
+    weightGrams: row.weight_grams === null ? null : Number(row.weight_grams),
+    lengthMm: row.length_mm === null ? null : Number(row.length_mm),
+    widthMm: row.width_mm === null ? null : Number(row.width_mm),
+    heightMm: row.height_mm === null ? null : Number(row.height_mm),
     packageDataComplete: hasCompleteCatalogPackageData(row),
-    shipAlone: row.ship_alone,
+    shipsInOwnContainer: row.ships_in_own_container,
     defaultCarrier: row.default_carrier,
     defaultService: row.default_service,
     defaultBoxId: row.default_box_id,
@@ -1139,7 +1106,7 @@ function mapPackageProfileRow(row: PackageProfileRow): DropshipPackageProfileCon
 
 function hasCompleteCatalogPackageData(row: PackageProfileRow): boolean {
   return [row.weight_grams, row.length_mm, row.width_mm, row.height_mm]
-    .every((value) => Number.isInteger(value) && Number(value) > 0);
+    .every((value) => typeof value === "number" && Number.isFinite(value) && value > 0);
 }
 
 function mapZoneRuleRow(row: ZoneRuleRow): DropshipZoneRuleConfigRecord {

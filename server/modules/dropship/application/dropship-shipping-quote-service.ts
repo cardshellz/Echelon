@@ -9,6 +9,7 @@ import {
   normalizeDropshipQuoteItems,
   normalizeDropshipShippingDestination,
   type DropshipCartonizedPackage,
+  type DropshipPackagingWarning,
   type NormalizedDropshipShippingDestination,
   type NormalizedDropshipShippingQuoteItem,
 } from "../domain/shipping-quote";
@@ -74,6 +75,8 @@ export interface DropshipShippingQuoteSnapshotRecord {
   dunnageCents: number;
   totalShippingCents: number;
   quotePayload: Record<string, unknown>;
+  /** Structured degradation signals (e.g. PACKAGING_DATA_INCOMPLETE); null when clean. */
+  warnings: DropshipPackagingWarning[] | null;
   createdAt: Date;
 }
 
@@ -93,6 +96,8 @@ export interface CreateDropshipShippingQuoteSnapshotInput {
   dunnageCents: number;
   totalShippingCents: number;
   quotePayload: Record<string, unknown>;
+  /** Structured degradation signals to persist on the snapshot row; null when clean. */
+  warnings: DropshipPackagingWarning[] | null;
   createdAt: Date;
   actor: {
     actorType: "vendor" | "admin" | "system" | "job";
@@ -137,6 +142,8 @@ export interface DropshipShippingQuoteResult {
   totalShippingCents: number;
   currency: string;
   carrierServices: Array<{ carrier: string; service: string }>;
+  /** Structured degradation signals (empty when the quote was clean). */
+  warnings: DropshipPackagingWarning[];
   internalBreakdown: {
     baseRateCents: number;
     markupCents: number;
@@ -255,6 +262,7 @@ export class DropshipShippingQuoteService {
       pricing,
       cartonizationProvider: cartonization.engine,
       cartonizationWarnings: cartonization.warnings,
+      packagingWarnings: cartonization.packagingWarnings,
       markupPolicy: resolvedMarkupPolicy,
       insurancePolicy: resolvedInsurancePolicy,
       totals: {
@@ -282,6 +290,9 @@ export class DropshipShippingQuoteService {
       dunnageCents,
       totalShippingCents,
       quotePayload,
+      warnings: cartonization.packagingWarnings.length > 0
+        ? cartonization.packagingWarnings
+        : null,
       createdAt: quotedAt,
       actor,
     });
@@ -430,6 +441,7 @@ function buildQuotePayload(input: {
   pricing: DropshipShippingPricingResult;
   cartonizationProvider: { name: string; version: string };
   cartonizationWarnings: readonly string[];
+  packagingWarnings: readonly DropshipPackagingWarning[];
   markupPolicy: DropshipShippingMarkupPolicy;
   insurancePolicy: DropshipInsurancePoolPolicy;
   totals: {
@@ -459,6 +471,7 @@ function buildLegacyQuotePayload(input: {
   pricing: Extract<DropshipShippingPricingResult, { source: "legacy" }>;
   cartonizationProvider: { name: string; version: string };
   cartonizationWarnings: readonly string[];
+  packagingWarnings: readonly DropshipPackagingWarning[];
   markupPolicy: DropshipShippingMarkupPolicy;
   insurancePolicy: DropshipInsurancePoolPolicy;
   totals: {
@@ -485,6 +498,7 @@ function buildLegacyQuotePayload(input: {
     },
     warnings: {
       cartonization: input.cartonizationWarnings,
+      packaging: input.packagingWarnings,
     },
     packages: input.packages.map((carton) => {
       const rate = ratesByPackage.get(carton.packageSequence);
@@ -497,11 +511,13 @@ function buildLegacyQuotePayload(input: {
         boxId: carton.boxId,
         boxCode: carton.boxCode,
         weightGrams: carton.weightGrams,
-        dimensionsMm: {
-          length: carton.lengthMm,
-          width: carton.widthMm,
-          height: carton.heightMm,
-        },
+        dimensionsMm: carton.lengthMm === null || carton.widthMm === null || carton.heightMm === null
+          ? null
+          : {
+              length: carton.lengthMm,
+              width: carton.widthMm,
+              height: carton.heightMm,
+            },
         rate,
       };
     }),
@@ -520,6 +536,7 @@ function buildSharedQuotePayload(input: {
   pricing: Extract<DropshipShippingPricingResult, { source: "shared" }>;
   cartonizationProvider: { name: string; version: string };
   cartonizationWarnings: readonly string[];
+  packagingWarnings: readonly DropshipPackagingWarning[];
   markupPolicy: DropshipShippingMarkupPolicy;
   insurancePolicy: DropshipInsurancePoolPolicy;
   totals: {
@@ -540,6 +557,7 @@ function buildSharedQuotePayload(input: {
     },
     warnings: {
       cartonization: input.cartonizationWarnings,
+      packaging: input.packagingWarnings,
       rates: input.pricing.quote.warnings,
     },
     packages: input.packages.map((carton) => ({
@@ -551,11 +569,13 @@ function buildSharedQuotePayload(input: {
       boxId: carton.boxId,
       boxCode: carton.boxCode,
       weightGrams: carton.weightGrams,
-      dimensionsMm: {
-        length: carton.lengthMm,
-        width: carton.widthMm,
-        height: carton.heightMm,
-      },
+      dimensionsMm: carton.lengthMm === null || carton.widthMm === null || carton.heightMm === null
+        ? null
+        : {
+            length: carton.lengthMm,
+            width: carton.widthMm,
+            height: carton.heightMm,
+          },
     })),
     pricing: {
       scope: "shipment",
@@ -607,6 +627,7 @@ function mapSnapshotToQuoteResult(
     totalShippingCents: snapshot.totalShippingCents,
     currency: snapshot.currency,
     carrierServices,
+    warnings: snapshot.warnings ?? [],
     internalBreakdown: {
       baseRateCents: snapshot.baseRateCents,
       markupCents: snapshot.markupCents,

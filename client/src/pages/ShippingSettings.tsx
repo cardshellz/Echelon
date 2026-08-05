@@ -66,6 +66,7 @@ interface ShippingAdminConfig {
 
 interface VariantAttrsRow {
   productVariantId: number;
+  productId: number;
   sku: string | null;
   name: string;
   productName: string;
@@ -738,7 +739,6 @@ function BoxCatalogTab({
 
 interface AttrsPayload {
   productVariantId: number;
-  shipsInOwnContainer: boolean;
   riderEligible: boolean;
   riderVoidCm3?: number | null;
   riderVoidMaxWeightGrams?: number | null;
@@ -747,7 +747,6 @@ interface AttrsPayload {
 }
 
 interface AttrsFormState {
-  shipsInOwnContainer: boolean;
   riderEligible: boolean;
   riderVoidIn3: string;
   riderVoidMaxWeightOz: string;
@@ -757,7 +756,6 @@ interface AttrsFormState {
 
 function attrsFormFromRow(row: VariantAttrsRow): AttrsFormState {
   return {
-    shipsInOwnContainer: row.shipsInOwnContainer,
     riderEligible: row.riderEligible,
     riderVoidIn3: formatMeasurementInput(row.riderVoidCm3, CUBIC_CM_PER_CUBIC_INCH),
     riderVoidMaxWeightOz: formatMeasurementInput(row.riderVoidMaxWeightGrams, GRAMS_PER_OUNCE),
@@ -766,15 +764,17 @@ function attrsFormFromRow(row: VariantAttrsRow): AttrsFormState {
   };
 }
 
-function buildAttrsPayload(productVariantId: number, form: AttrsFormState): AttrsPayload {
-  const riderVoidCm3 = form.shipsInOwnContainer
+function buildAttrsPayload(productVariantId: number, form: AttrsFormState, shipsInOwnContainer: boolean): AttrsPayload {
+  // Rider void caps only make sense on SIOC parcels; SIOC itself is edited
+  // on the catalog variant (Package Details), so it is passed in read-only.
+  const riderVoidCm3 = shipsInOwnContainer
     ? toStoredMeasurement(form.riderVoidIn3, "Rider void volume", CUBIC_CM_PER_CUBIC_INCH)
     : null;
-  const riderVoidMaxWeightGrams = form.shipsInOwnContainer
+  const riderVoidMaxWeightGrams = shipsInOwnContainer
     ? toStoredMeasurement(form.riderVoidMaxWeightOz, "Rider void max weight", GRAMS_PER_OUNCE)
     : null;
   let riderVoidMaxItems: number | null = null;
-  if (form.shipsInOwnContainer && form.riderVoidMaxItems.trim()) {
+  if (shipsInOwnContainer && form.riderVoidMaxItems.trim()) {
     const parsed = parseInt(form.riderVoidMaxItems.trim());
     if (!Number.isInteger(parsed) || parsed <= 0) {
       throw new Error("Rider void max items must be a positive whole number.");
@@ -783,7 +783,6 @@ function buildAttrsPayload(productVariantId: number, form: AttrsFormState): Attr
   }
   return {
     productVariantId,
-    shipsInOwnContainer: form.shipsInOwnContainer,
     riderEligible: form.riderEligible,
     riderVoidCm3,
     riderVoidMaxWeightGrams,
@@ -843,8 +842,8 @@ function PackingAttributesTab() {
   });
 
   const suggestionMutation = useMutation({
-    mutationFn: ({ payload }: { payload: AttrsPayload; confirmed: boolean }) =>
-      putJson<{ attrs: unknown }>("/api/shipping/admin/variant-attrs", payload),
+    mutationFn: ({ productVariantId, confirmed }: { productVariantId: number; confirmed: boolean }) =>
+      putJson<{ decision: unknown }>("/api/shipping/admin/sioc-decision", { productVariantId, confirmed }),
     onSuccess: (_data, { confirmed }) => {
       invalidateShippingAdmin(queryClient);
       toast({ title: confirmed ? "Marked as ships-in-own-container" : "Suggestion dismissed" });
@@ -862,7 +861,7 @@ function PackingAttributesTab() {
   const handleSave = () => {
     if (!editingRow || !form) return;
     try {
-      saveAttrsMutation.mutate(buildAttrsPayload(editingRow.productVariantId, form));
+      saveAttrsMutation.mutate(buildAttrsPayload(editingRow.productVariantId, form, editingRow.shipsInOwnContainer));
     } catch (e) {
       toast({ title: "Invalid attributes", description: (e as Error).message, variant: "destructive" });
     }
@@ -880,7 +879,7 @@ function PackingAttributesTab() {
             Packing attributes
           </CardTitle>
           <CardDescription className="text-xs md:text-sm">
-            Per-variant packing behavior: ships in own container (SIOC) and rider eligibility.
+            Per-variant rider/void packing behavior. Ships-in-own-container (SIOC) is edited on the catalog variant.
           </CardDescription>
         </CardHeader>
         <CardContent className="p-3 md:p-6 pt-0 md:pt-0 space-y-4">
@@ -1039,11 +1038,7 @@ function PackingAttributesTab() {
                             disabled={suggestionMutation.isPending}
                             onClick={() =>
                               suggestionMutation.mutate({
-                                payload: {
-                                  productVariantId: row.productVariantId,
-                                  shipsInOwnContainer: true,
-                                  riderEligible: false,
-                                },
+                                productVariantId: row.productVariantId,
                                 confirmed: true,
                               })
                             }
@@ -1057,11 +1052,7 @@ function PackingAttributesTab() {
                             disabled={suggestionMutation.isPending}
                             onClick={() =>
                               suggestionMutation.mutate({
-                                payload: {
-                                  productVariantId: row.productVariantId,
-                                  shipsInOwnContainer: false,
-                                  riderEligible: false,
-                                },
+                                productVariantId: row.productVariantId,
                                 confirmed: false,
                               })
                             }
@@ -1097,25 +1088,25 @@ function PackingAttributesTab() {
           </DialogHeader>
           {form && editingRow && (
             <div className="space-y-4 py-2">
-              <div className="flex items-start gap-3">
-                <Checkbox
-                  id="attrs-sioc"
-                  checked={form.shipsInOwnContainer}
-                  onCheckedChange={(checked) =>
-                    setForm((prev) => (prev ? { ...prev, shipsInOwnContainer: checked === true } : prev))
-                  }
-                  className="mt-0.5"
-                />
-                <div>
-                  <label htmlFor="attrs-sioc" className="text-sm font-medium cursor-pointer">
-                    Ships in own container (SIOC)
-                  </label>
-                  <p className="text-xs text-muted-foreground">
-                    Shipped as-is with a label — never packed into a box.
-                  </p>
+              <div className="rounded-md border p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <Label className="text-sm font-medium">Ships in own container (SIOC)</Label>
+                    <p className="text-xs text-muted-foreground">
+                      {editingRow.shipsInOwnContainer
+                        ? "Yes — shipped as-is with a label, never packed into a box."
+                        : "No — packed into a box by the cartonizer."}
+                    </p>
+                  </div>
+                  <Button asChild size="sm" variant="outline">
+                    <a href={`/products/${editingRow.productId}?tab=variants&variantId=${editingRow.productVariantId}`}>
+                      <Pencil className="mr-2 h-4 w-4" />
+                      Edit in Catalog
+                    </a>
+                  </Button>
                 </div>
               </div>
-              {form.shipsInOwnContainer && (
+              {editingRow.shipsInOwnContainer && (
                 <div className="rounded-md border p-3 space-y-3">
                   <div>
                     <Label className="text-sm font-medium">Rider void caps</Label>

@@ -818,24 +818,17 @@ export const dropshipBoxCatalog = dropshipSchema.table("dropship_box_catalog", {
 export const dropshipPackageProfiles = dropshipSchema.table("dropship_package_profiles", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id, { onDelete: "cascade" }),
-  // Deprecated compatibility snapshots. Runtime package data is read from catalog.product_variants.
-  weightGrams: integer("weight_grams").notNull(),
-  lengthMm: integer("length_mm").notNull(),
-  widthMm: integer("width_mm").notNull(),
-  heightMm: integer("height_mm").notNull(),
-  shipAlone: boolean("ship_alone").notNull().default(false),
+  // Channel-specific fulfillment defaults only. Intrinsic physical facts
+  // (weight/dims/SIOC/max-units) live on catalog.product_variants — see
+  // migration 184 (dropship package data consolidation).
   defaultCarrier: varchar("default_carrier", { length: 50 }),
   defaultService: varchar("default_service", { length: 80 }),
   defaultBoxId: integer("default_box_id").references(() => dropshipBoxCatalog.id, { onDelete: "set null" }),
-  // Deprecated compatibility field. Cartonizer v3 derives capacity from physical placement.
-  maxUnitsPerPackage: integer("max_units_per_package"),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("dropship_package_profile_variant_idx").on(table.productVariantId),
-  check("dropship_package_profile_dims_chk", sql`${table.weightGrams} > 0 AND ${table.lengthMm} > 0 AND ${table.widthMm} > 0 AND ${table.heightMm} > 0`),
-  check("dropship_package_profile_units_chk", sql`${table.maxUnitsPerPackage} IS NULL OR ${table.maxUnitsPerPackage} > 0`),
 ]);
 
 export const dropshipRateTables = dropshipSchema.table("dropship_rate_tables", {
@@ -940,6 +933,10 @@ export const dropshipShippingQuoteSnapshots = dropshipSchema.table("dropship_shi
   dunnageCents: bigint("dunnage_cents", { mode: "number" }).notNull().default(0),
   totalShippingCents: bigint("total_shipping_cents", { mode: "number" }).notNull(),
   quotePayload: jsonb("quote_payload").notNull(),
+  // Structured packaging/rate degradation signals (e.g. PACKAGING_DATA_INCOMPLETE).
+  // Null when the quote produced no warnings. Queryable so ops can list
+  // "orders shipped with incomplete packaging data".
+  warnings: jsonb("warnings"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   index("dropship_shipping_quote_vendor_idx").on(table.vendorId, table.createdAt),

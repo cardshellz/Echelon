@@ -406,8 +406,8 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           // 2. Fetch variants (skip excluded), include policy overrides
           const varResult = await client.query(
             `SELECT pv.id, pv.sku, pv.name, pv.option1_name, pv.option1_value, pv.option2_name, pv.option2_value,
-                    pv.price_cents, pv.compare_at_price_cents, pv.weight_grams, pv.barcode,
-                    COALESCE(cvo.weight_override, pv.weight_grams) AS ebay_weight_grams,
+                    pv.price_cents, pv.compare_at_price_cents, pv.weight_grams::float8 AS weight_grams, pv.barcode,
+                    COALESCE(cvo.weight_override, pv.weight_grams)::float8 AS ebay_weight_grams,
                     pv.units_per_variant, pv.hierarchy_level,
                     pv.ebay_fulfillment_policy_override, pv.ebay_return_policy_override, pv.ebay_payment_policy_override
              FROM product_variants pv
@@ -749,8 +749,8 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           // 2. Fetch variants
           const varResult = await client.query(
             `SELECT pv.id, pv.sku, pv.name, pv.option1_name, pv.option1_value, pv.option2_name, pv.option2_value,
-                    pv.price_cents, pv.compare_at_price_cents, pv.weight_grams, pv.barcode,
-                    COALESCE(cvo.weight_override, pv.weight_grams) AS ebay_weight_grams,
+                    pv.price_cents, pv.compare_at_price_cents, pv.weight_grams::float8 AS weight_grams, pv.barcode,
+                    COALESCE(cvo.weight_override, pv.weight_grams)::float8 AS ebay_weight_grams,
                     pv.units_per_variant, pv.hierarchy_level,
                     pv.ebay_fulfillment_policy_override, pv.ebay_return_policy_override, pv.ebay_payment_policy_override
              FROM product_variants pv
@@ -1118,7 +1118,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             pv.sku AS variant_sku,
             pv.name AS variant_name,
             pv.price_cents,
-            pv.weight_grams,
+            pv.weight_grams::float8 AS weight_grams,
             pv.is_active AS variant_is_active,
             pv.ebay_listing_excluded AS variant_excluded,
             cvo.is_listed AS variant_override_is_listed,

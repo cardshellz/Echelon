@@ -25,12 +25,13 @@ export interface DropshipSharedShippingQuoteRequest {
       productVariantId: number;
       quantity: number;
     }>;
-    boxId: number;
-    boxCode: string;
+    /** Null on weight-only degraded packages (packaging data incomplete). */
+    boxId: number | null;
+    boxCode: string | null;
     weightGrams: number;
-    lengthMm: number;
-    widthMm: number;
-    heightMm: number;
+    lengthMm: number | null;
+    widthMm: number | null;
+    heightMm: number | null;
   }>;
   cartonizationProvider: {
     name: string;
