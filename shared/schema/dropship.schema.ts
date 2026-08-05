@@ -1041,6 +1041,8 @@ export const dropshipOrderEconomicsSnapshots = dropshipSchema.table("dropship_or
   check("dropship_order_econ_nonnegative_chk", sql`${table.retailSubtotalCents} >= 0 AND ${table.wholesaleSubtotalCents} >= 0 AND ${table.shippingCents} >= 0 AND ${table.totalDebitCents} >= 0`),
 ]);
 
+// DEPRECATED by migration 186: superseded by dropshipReturnPolicies.
+// Kept for release-phase safety; do not write new rows.
 export const dropshipReturnPolicyConfig = dropshipSchema.table("dropship_return_policy_config", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   name: varchar("name", { length: 120 }).notNull(),
@@ -1053,6 +1055,60 @@ export const dropshipReturnPolicyConfig = dropshipSchema.table("dropship_return_
   index("dropship_return_policy_active_idx").on(table.isActive, table.effectiveFrom),
   check("dropship_return_policy_window_chk", sql`${table.returnWindowDays} > 0 AND ${table.returnWindowDays} <= 365`),
   check("dropship_return_policy_effective_chk", sql`${table.effectiveTo} IS NULL OR ${table.effectiveTo} > ${table.effectiveFrom}`),
+]);
+
+// Hierarchical, versioned return window policies (migration 186; design spec D1).
+// Resolution: vendor+store > vendor > store > global; tie-break priority DESC, id DESC.
+export const dropshipReturnPolicies = dropshipSchema.table("dropship_return_policies", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  version: integer("version").notNull().default(1),
+  returnWindowDays: integer("return_window_days").notNull().default(DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS),
+  vendorId: integer("vendor_id").references(() => dropshipVendors.id, { onDelete: "cascade" }),
+  storeConnectionId: integer("store_connection_id").references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
+  priority: integer("priority").notNull().default(0),
+  isActive: boolean("is_active").notNull().default(true),
+  effectiveFrom: timestamp("effective_from", { withTimezone: true }).defaultNow().notNull(),
+  effectiveTo: timestamp("effective_to", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_return_policies_one_active_global_idx")
+    .on(sql`true`)
+    .where(sql`${table.vendorId} IS NULL AND ${table.storeConnectionId} IS NULL AND ${table.isActive}`),
+  index("dropship_return_policies_scope_idx").on(table.vendorId, table.storeConnectionId, table.isActive, table.effectiveFrom),
+  check("dropship_return_policies_version_chk", sql`${table.version} > 0`),
+  check("dropship_return_policies_window_chk", sql`${table.returnWindowDays} > 0 AND ${table.returnWindowDays} <= 365`),
+  check("dropship_return_policies_effective_chk", sql`${table.effectiveTo} IS NULL OR ${table.effectiveTo} > ${table.effectiveFrom}`),
+  check("dropship_return_policies_scope_chk", sql`${table.vendorId} IS NOT NULL OR ${table.storeConnectionId} IS NULL`),
+]);
+
+// Return fee schedule (migration 186; design spec D2). return_shipping_fee rows
+// encode WHO PAYS per fault category; amount is irrelevant for shipping (the
+// actual label cost comes from channel evidence) so shipping rows use amount 0.
+export const dropshipReturnFeeSchedule = dropshipSchema.table("dropship_return_fee_schedule", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  version: integer("version").notNull().default(1),
+  feeType: varchar("fee_type", { length: 40 }).notNull(),
+  faultCategory: varchar("fault_category", { length: 40 }).notNull(),
+  amountType: varchar("amount_type", { length: 20 }).notNull().default("flat_cents"),
+  amount: numeric("amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  vendorId: integer("vendor_id").references(() => dropshipVendors.id, { onDelete: "cascade" }),
+  storeConnectionId: integer("store_connection_id").references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
+  priority: integer("priority").notNull().default(0),
+  isActive: boolean("is_active").notNull().default(true),
+  effectiveFrom: timestamp("effective_from", { withTimezone: true }).defaultNow().notNull(),
+  effectiveTo: timestamp("effective_to", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  index("dropship_return_fee_schedule_scope_idx").on(table.vendorId, table.storeConnectionId, table.feeType, table.faultCategory, table.isActive, table.effectiveFrom),
+  check("dropship_return_fee_version_chk", sql`${table.version} > 0`),
+  check("dropship_return_fee_type_chk", sql`${table.feeType} IN ('restocking_fee','processing_fee','return_shipping_fee')`),
+  check("dropship_return_fee_fault_chk", sql`${table.faultCategory} IN ('card_shellz','vendor','customer','marketplace','carrier')`),
+  check("dropship_return_fee_amount_type_chk", sql`${table.amountType} IN ('flat_cents','percent')`),
+  check("dropship_return_fee_amount_chk", sql`${table.amount} >= 0`),
+  check("dropship_return_fee_effective_chk", sql`${table.effectiveTo} IS NULL OR ${table.effectiveTo} > ${table.effectiveFrom}`),
+  check("dropship_return_fee_scope_chk", sql`${table.vendorId} IS NOT NULL OR ${table.storeConnectionId} IS NULL`),
 ]);
 
 export const dropshipRmas = dropshipSchema.table("dropship_rmas", {
@@ -1075,12 +1131,14 @@ export const dropshipRmas = dropshipSchema.table("dropship_rmas", {
   creditedAt: timestamp("credited_at", { withTimezone: true }),
   idempotencyKey: varchar("idempotency_key", { length: 200 }),
   requestHash: varchar("request_hash", { length: 64 }),
+  policyVersionId: integer("policy_version_id").references(() => dropshipReturnPolicies.id, { onDelete: "set null" }),
+  noInspectionEvidence: jsonb("no_inspection_evidence"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("dropship_rma_number_idx").on(table.rmaNumber),
   uniqueIndex("dropship_rma_idem_idx").on(table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
   index("dropship_rma_vendor_status_idx").on(table.vendorId, table.status),
-  check("dropship_rma_status_chk", sql`${table.status} IN ('requested','in_transit','received','inspecting','approved','rejected','credited','closed')`),
+  check("dropship_rma_status_chk", sql`${table.status} IN ('requested','in_transit','received','inspecting','approved','rejected','disputed','credited','closed','no_inspection_review')`),
   check("dropship_rma_window_chk", sql`${table.returnWindowDays} > 0`),
   check("dropship_rma_fault_chk", sql`${table.faultCategory} IS NULL OR ${table.faultCategory} IN ('card_shellz','vendor','customer','marketplace','carrier')`),
 ]);
@@ -1101,8 +1159,8 @@ export const dropshipRmaStatusUpdates = dropshipSchema.table("dropship_rma_statu
   uniqueIndex("dropship_rma_status_update_idem_idx").on(table.idempotencyKey),
   index("dropship_rma_status_update_rma_created_idx").on(table.rmaId, table.createdAt),
   index("dropship_rma_status_update_vendor_created_idx").on(table.vendorId, table.createdAt),
-  check("dropship_rma_status_update_previous_chk", sql`${table.previousStatus} IN ('requested','in_transit','received','inspecting','approved','rejected','credited','closed')`),
-  check("dropship_rma_status_update_status_chk", sql`${table.status} IN ('requested','in_transit','received','inspecting','approved','rejected','credited','closed')`),
+  check("dropship_rma_status_update_previous_chk", sql`${table.previousStatus} IN ('requested','in_transit','received','inspecting','approved','rejected','disputed','credited','closed','no_inspection_review')`),
+  check("dropship_rma_status_update_status_chk", sql`${table.status} IN ('requested','in_transit','received','inspecting','approved','rejected','disputed','credited','closed','no_inspection_review')`),
   check("dropship_rma_status_update_actor_chk", sql`${table.actorType} IN ('admin','system')`),
 ]);
 

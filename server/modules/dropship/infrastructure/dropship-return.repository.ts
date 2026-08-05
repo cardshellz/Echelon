@@ -321,8 +321,8 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
           (rma_number, vendor_id, store_connection_id, intake_id, oms_order_id,
            status, reason_code, fault_category, return_window_days, label_source,
            return_tracking_number, vendor_notes, requested_at, updated_at,
-           idempotency_key, request_hash)
-         VALUES ($1, $2, $3, $4, $5, 'requested', $6, $7, $8, $9, $10, $11, $12, $12, $13, $14)
+           idempotency_key, request_hash, policy_version_id)
+         VALUES ($1, $2, $3, $4, $5, 'requested', $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15)
          RETURNING id`,
         [
           input.rmaNumber,
@@ -339,6 +339,7 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
           input.now,
           input.idempotencyKey,
           input.requestHash,
+          input.policyVersionId ?? null,
         ],
       );
       const rmaId = requiredRow(insert.rows[0], "Dropship RMA insert returned no row.").id;

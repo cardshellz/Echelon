@@ -718,10 +718,12 @@ function dogfoodReadinessSql(): string {
     ) shipping_policies ON true
     LEFT JOIN LATERAL (
       SELECT COUNT(*) AS active_return_policy_count
-      FROM dropship.dropship_return_policy_config rpc
-      WHERE rpc.is_active = true
-        AND rpc.effective_from <= now()
-        AND (rpc.effective_to IS NULL OR rpc.effective_to > now())
+      FROM dropship.dropship_return_policies rp
+      WHERE rp.vendor_id IS NULL
+        AND rp.store_connection_id IS NULL
+        AND rp.is_active = true
+        AND rp.effective_from <= now()
+        AND (rp.effective_to IS NULL OR rp.effective_to > now())
     ) return_policies ON true
     LEFT JOIN LATERAL (
       SELECT COUNT(*) AS open_blocker_count
