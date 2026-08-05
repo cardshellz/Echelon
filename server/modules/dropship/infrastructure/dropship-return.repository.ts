@@ -28,6 +28,7 @@ import type {
 } from "../application/dropship-return-service";
 import type {
   DropshipWalletLedgerRecord,
+  DropshipWalletLedgerType,
 } from "../application/dropship-wallet-service";
 
 interface RmaListRow {
