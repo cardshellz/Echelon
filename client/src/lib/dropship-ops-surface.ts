@@ -180,6 +180,8 @@ const defaultDropshipRmaOpsStatuses: DropshipRmaStatus[] = [
   "inspecting",
   "approved",
   "rejected",
+  "disputed",
+  "no_inspection_review",
 ];
 
 export interface DropshipSettingsSection {
