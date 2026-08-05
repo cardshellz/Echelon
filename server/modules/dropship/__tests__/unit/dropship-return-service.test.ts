@@ -447,17 +447,17 @@ describe("DropshipReturnService", () => {
     expect(repository.lastInspectionInput).toBeNull();
   });
 
-  it("requires an override reason when inspection amounts override the engine", async () => {
+  it("requires an override reason when partially overriding the computed settlement", async () => {
     const repository = new FakeReturnRepository();
-    const service = makeService(repository, []);
+    repository.economics = makeOrderEconomics();
+    const service = makeService(repository, [], undefined, new FakeReturnPolicyService());
 
     await expect(service.processInspection({
       rmaId: 1,
       outcome: "approved",
       faultCategory: "customer",
       creditCents: 1000,
-      feeCents: 100,
-      items: [{ rmaItemId: 1, finalCreditCents: 1000, feeCents: 100 }],
+      items: [{ rmaItemId: 1 }],
       idempotencyKey: "inspect-rma-no-reason",
       actor: { actorType: "admin", actorId: "admin-1" },
     })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_INSPECTION_INVALID_INPUT" });

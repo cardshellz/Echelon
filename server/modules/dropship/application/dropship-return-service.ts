@@ -154,13 +154,24 @@ const processDropshipRmaInspectionInputSchema = z.object({
     actorId: z.string().trim().min(1).max(255).optional(),
   }).strict(),
 }).strict().superRefine((input, ctx) => {
-  const creditOverride = input.creditCents !== null && input.creditCents !== undefined;
-  const feeOverride = input.feeCents !== null && input.feeCents !== undefined;
-  if ((creditOverride || feeOverride) && !input.overrideReason?.trim()) {
+  const creditProvided = input.creditCents !== null && input.creditCents !== undefined;
+  const feeProvided = input.feeCents !== null && input.feeCents !== undefined;
+  const itemAmountsComplete = input.items.length > 0 && input.items.every(
+    (item) => item.finalCreditCents != null && item.feeCents != null,
+  );
+  // Paths:
+  //  - engine (no totals): computed settlement, no reason needed.
+  //  - full manual disposition (both totals + complete item amounts): the
+  //    legacy admin path; notes + actor are the audit trail.
+  //  - partial override (exactly one total, or totals without item amounts):
+  //    the engine computes the missing side; overrideReason is required (D2b).
+  const fullManual = creditProvided && feeProvided && itemAmountsComplete;
+  const anyOverride = creditProvided || feeProvided;
+  if (anyOverride && !fullManual && !input.overrideReason?.trim()) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["overrideReason"],
-      message: "overrideReason is required when creditCents or feeCents override the computed settlement.",
+      message: "overrideReason is required when partially overriding the computed settlement.",
     });
   }
   if (input.items.length === 0) return;
@@ -168,7 +179,7 @@ const processDropshipRmaInspectionInputSchema = z.object({
   const itemFees = input.items.map((item) => item.feeCents);
   const hasItemCredits = itemCredits.every((value) => value !== null && value !== undefined);
   const hasItemFees = itemFees.every((value) => value !== null && value !== undefined);
-  if (creditOverride && hasItemCredits) {
+  if (creditProvided && hasItemCredits) {
     const creditTotal = (itemCredits as number[]).reduce((sum, value) => sum + value, 0);
     if (creditTotal !== input.creditCents) {
       ctx.addIssue({
@@ -178,7 +189,7 @@ const processDropshipRmaInspectionInputSchema = z.object({
       });
     }
   }
-  if (feeOverride && hasItemFees) {
+  if (feeProvided && hasItemFees) {
     const feeTotal = (itemFees as number[]).reduce((sum, value) => sum + value, 0);
     if (feeTotal !== input.feeCents) {
       ctx.addIssue({
@@ -717,8 +728,8 @@ export class DropshipReturnService {
       };
     }
 
-    // Full manual path (legacy/admin override with per-item amounts): trust the
-    // human disposition, skip the engine. overrideReason is schema-enforced.
+    // Full manual disposition (D2b human disposes): both totals and complete
+    // per-item amounts were supplied. Trust the human; skip the engine.
     if (creditOverride && feeOverride && itemAmountsProvided) {
       return {
         creditCents: input.creditCents as number,
@@ -732,7 +743,7 @@ export class DropshipReturnService {
         creditLedgerType: input.faultCategory === "carrier" ? "insurance_pool_credit" : "return_credit",
         breakdown: {
           version: 1,
-          mode: "manual_override",
+          mode: "manual",
           faultCategory: input.faultCategory,
           overrideReason: input.overrideReason?.trim() ?? null,
         },
