@@ -161,6 +161,13 @@ describe("PgMarketplaceListingRegistrationRepository", () => {
     expect(queryIndex(queries, "pg_advisory_xact_lock")).toBeLessThan(
       queryIndex(queries, "INSERT INTO marketplace.listing_scopes"),
     );
+    const advisoryLockCall = vi.mocked(client.query).mock.calls.find(
+      ([sql]) => String(sql).includes("pg_advisory_xact_lock"),
+    );
+    expect(advisoryLockCall?.[1]).toEqual([
+      JSON.stringify(["ebay", "production", "provider-user-123"]),
+    ]);
+    expect(String(advisoryLockCall?.[1]?.[0])).not.toContain("\u0000");
     expect(queryIndex(queries, "status = 'staged'")).toBeLessThan(
       queryIndex(queries, "INSERT INTO marketplace.provider_identity_claims"),
     );

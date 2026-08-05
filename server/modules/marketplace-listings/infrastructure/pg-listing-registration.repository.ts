@@ -428,11 +428,11 @@ async function lockProviderAccountIdentity(
        hashtextextended($1, 0)
      )`,
     [
-      [
+      JSON.stringify([
         account.provider,
         account.accountNamespace,
         account.externalAccountId,
-      ].join("\u0000"),
+      ]),
     ],
   );
 }
