@@ -136,9 +136,12 @@ const processDropshipRmaInspectionInputSchema = z.object({
   outcome: dropshipRmaInspectionOutcomeSchema,
   faultCategory: dropshipReturnFaultCategorySchema,
   /**
-   * Admin override (D2b: rules propose, human disposes). When omitted, the
-   * fee engine computes the settlement from the economics snapshot + fee
-   * schedule. When provided, overrideReason is required.
+   * Admin disposition (D2b: rules propose, human disposes). When both totals
+   * plus complete per-item amounts are supplied, they are the settlement
+   * (manual path). When only one side is supplied, the fee engine computes
+   * the other and overrideReason is required. When omitted entirely, the
+   * engine computes the full settlement from the economics snapshot + fee
+   * schedule.
    */
   creditCents: nonnegativeCentsSchema.nullable().optional(),
   feeCents: nonnegativeCentsSchema.nullable().optional(),
