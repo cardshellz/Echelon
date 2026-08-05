@@ -378,6 +378,64 @@ async function withOptionalTransaction<T>(
   return typeof db.transaction === "function" ? db.transaction(work) : work(db);
 }
 
+async function loadOpenExceptionContextByShipmentId(
+  db: any,
+  shipmentId: number,
+): Promise<RemediationContext | null> {
+  const result: any = await db.execute(sql`
+    SELECT
+      exception.id AS exception_id,
+      COALESCE(exception.wms_order_id, authority.order_id) AS wms_order_id,
+      COALESCE(
+        NULLIF(BTRIM(exception.details->>'orderNumber'), ''),
+        wms_order.order_number
+      ) AS order_number,
+      exception.wms_shipment_id AS authority_shipment_id,
+      candidate.id AS candidate_shipment_id,
+      exception.external_shipment_ref,
+      COALESCE(candidate.tracking_number, exception.details->>'trackingNumber') AS tracking_number,
+      authority.external_fulfillment_id AS authority_external_fulfillment_id,
+      authority.tracking_number AS authority_tracking_number
+    FROM wms.reconciliation_exceptions exception
+    LEFT JOIN wms.outbound_shipments authority
+      ON authority.id = exception.wms_shipment_id
+    LEFT JOIN wms.outbound_shipments candidate
+      ON candidate.external_fulfillment_id =
+        'shipstation_shipment:' || exception.external_shipment_ref
+    JOIN wms.orders wms_order
+      ON wms_order.id = COALESCE(exception.wms_order_id, authority.order_id)
+    WHERE exception.rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+      AND exception.status IN ('open', 'acknowledged')
+      AND (
+        exception.wms_shipment_id = ${shipmentId}
+        OR candidate.id = ${shipmentId}
+      )
+    ORDER BY exception.updated_at DESC, exception.id DESC
+    LIMIT 2
+  `);
+  const rows = resultRows(result);
+  if (rows.length === 0) return null;
+  if (rows.length > 1) {
+    throw new Error("multiple open unmapped ShipStation exceptions match this shipment");
+  }
+  const row = rows[0];
+  return {
+    exceptionId: positiveInteger(row.exception_id, "exceptionId"),
+    wmsOrderId: positiveInteger(row.wms_order_id, "wmsOrderId"),
+    orderNumber: String(row.order_number),
+    authorityShipmentId: positiveInteger(row.authority_shipment_id, "authorityShipmentId"),
+    candidateShipmentId: optionalPositiveInteger(row.candidate_shipment_id),
+    externalShipmentRef: String(row.external_shipment_ref),
+    trackingNumber: row.tracking_number == null ? null : String(row.tracking_number),
+    authorityExternalShipmentRef: shipStationShipmentRefFromExternalFulfillmentId(
+      row.authority_external_fulfillment_id,
+    ),
+    authorityTrackingNumber: row.authority_tracking_number == null
+      ? null
+      : String(row.authority_tracking_number),
+  };
+}
+
 async function loadContext(
   db: any,
   input: ShipStationUnmappedLocator,
@@ -453,7 +511,14 @@ async function loadContext(
     LIMIT 1
   `);
   const row = resultRows(result)[0];
-  if (!row) throw new Error("legacy unmapped ShipStation shipment not found or already resolved");
+  if (!row) {
+    const resumableContext = await loadOpenExceptionContextByShipmentId(
+      db,
+      target.shipmentId,
+    );
+    if (resumableContext) return resumableContext;
+    throw new Error("legacy unmapped ShipStation shipment not found or already resolved");
+  }
   return {
     exceptionId: null,
     wmsOrderId: positiveInteger(row.wms_order_id, "wmsOrderId"),
