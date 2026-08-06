@@ -2,10 +2,26 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   buildListingReplacementFailureEvidence,
+  claimStateForStep,
   buildListingReplacementStepEventEvidence,
   PgMarketplaceListingReplacementExecutionRepository,
 } from "../../infrastructure/pg-listing-replacement-execution.repository";
 
+describe("listing replacement claim state", () => {
+  it("validates compensation completions against compensating state", () => {
+    expect(claimStateForStep("compensate.ensure_target_not_sellable")).toEqual({
+      status: "compensating",
+      phase: "compensate",
+    });
+  });
+
+  it("keeps forward completions in their deterministic phase", () => {
+    expect(claimStateForStep("publish.create_target")).toEqual({
+      status: "running",
+      phase: "publish",
+    });
+  });
+});
 describe("listing replacement step audit evidence", () => {
   it("preserves exact error fields for failed steps", () => {
     expect(
