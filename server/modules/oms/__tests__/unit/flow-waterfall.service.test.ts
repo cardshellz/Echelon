@@ -262,6 +262,17 @@ describe("getFlowWaterfall", () => {
     expect(issueBlock).not.toContain("review_reason LIKE '%split_items_unmapped%'");
   });
 
+  it("hides a pending reship shell when its unmapped provider exception owns the work", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf('code: "SHIPMENT_REQUIRES_REVIEW"');
+    const end = FLOW_WATERFALL_SRC.indexOf("\n  },", start);
+    const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
+
+    expect(issueBlock).toContain("PAIRED_UNMAPPED_RESHIP_SHELL_EXCLUSION");
+    expect(FLOW_WATERFALL_SRC).toContain("shipstation_reship_adoption_pending");
+    expect(FLOW_WATERFALL_SRC).toContain("SHIPSTATION_UNMAPPED_PHYSICAL_RULE");
+    expect(FLOW_WATERFALL_SRC).toContain("os.external_fulfillment_id =");
+  });
+
   it("classifies known production dead-letter signatures without depending on legacy topic names", () => {
     const taxonomyBlock = FLOW_WATERFALL_SRC.slice(
       FLOW_WATERFALL_SRC.indexOf("const DEAD_LETTER_REASON_CODE"),

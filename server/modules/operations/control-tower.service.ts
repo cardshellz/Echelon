@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 
 import { getFlowBucketSamples, getFlowWaterfall } from "../oms/flow-waterfall.service";
 import { getOmsOpsHealth, type OmsOpsIssue } from "../oms/ops-health.service";
+import { SHIPSTATION_UNMAPPED_PHYSICAL_RULE } from "../oms/shipstation-unmapped-physical";
 import {
   remediateOmsFlowIssue,
   type OmsFlowReconciliationDependencies,
@@ -465,7 +466,29 @@ async function loadShipping(deps: ControlTowerDependencies, limit: number): Prom
       WHERE os.voided_at IS NULL
         AND COALESCE(o.warehouse_status, '') NOT IN ('cancelled', 'shipped')
         AND (
-          os.requires_review = true
+          (
+            os.requires_review = true
+            AND NOT (
+              os.source = 'shipstation_reship_adopted'
+              AND os.review_reason = 'shipstation_reship_adoption_pending'
+              AND EXISTS (
+                SELECT 1
+                FROM wms.reconciliation_exceptions exception
+                WHERE exception.rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+                  AND exception.status IN ('open', 'acknowledged')
+                  AND COALESCE(
+                    exception.wms_order_id,
+                    (
+                      SELECT authority.order_id
+                      FROM wms.outbound_shipments authority
+                      WHERE authority.id = exception.wms_shipment_id
+                    )
+                  ) = os.order_id
+                  AND os.external_fulfillment_id =
+                    'shipstation_shipment:' || BTRIM(exception.external_shipment_ref)
+              )
+            )
+          )
           OR (os.held = true AND COALESCE(os.source, '') <> 'line_item_hold')
           OR (
             os.status IN ('planned', 'queued', 'labeled')
