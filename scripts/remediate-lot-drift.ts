@@ -1,38 +1,29 @@
 /**
- * L0.5 — Lot-drift remediation (lot layer → inventory_levels).
+ * Reconcile FIFO lot projections to the operational inventory-level spine.
  *
- * One-time corrective pass for the Lot Identity & Lineage arc (WMS-INVENTORY-REFACTOR.md §6).
- * Phases 0–1 reconciled the LEDGER to `inventory_levels` (the trusted on-hand spine). The
- * `inventory_lots` cost-layer was never tied to levels and has diverged (see
- * `wms:reconcile-lots`). This brings the lot layer into agreement with the EXISTING levels
- * so the lot→levels reconciler reaches zero — the prerequisite for the storage migration (L1+).
+ * This command never changes inventory.inventory_levels and never posts a
+ * physical inventory movement. It repairs only the lot projection used for
+ * FIFO/COGS selection: on-hand, reserved, and picked totals per variant/location.
  *
- * IMPORTANT — lot layer ONLY:
- *   - It mutates `inventory.inventory_lots` exclusively. It does NOT touch
- *     `inventory.inventory_levels` (already correct) and writes NO
- *     `inventory.inventory_transactions` row (an on-hand ledger row with no matching level
- *     change would BREAK the Phase 0 ledger→levels reconciler, which is at zero). The audit
- *     trail is the remediation lots themselves: cost_source='legacy', a LOT-RECON-* number,
- *     and a batch tag in notes.
+ * Safety:
+ *   - dry-run by default;
+ *   - apply requires actor, reason, approval reference, and the exact dry-run hash;
+ *   - takes a transaction-scoped advisory lock and blocks concurrent level/lot DML;
+ *   - re-reads and fingerprints the locked state before writing;
+ *   - writes all changes atomically and rolls back unless global parity is zero;
+ *   - leaves a durable run/actor/reason note on every changed lot.
  *
- * Per drifting (variant, location) cell:
- *   - level > lot  → CREATE a remediation lot for the shortfall. Cost (A) = the variant's
- *     avg_cost_cents (else last_cost_cents); (B) if neither is set → $0 with cost_provisional=1
- *     (cost backfilled later via the lot-cost CSV upload). Written in mills + cent mirrors.
- *   - lot > level  → DEPLETE the excess qty_on_hand from the cell's lots, oldest first
- *     (depleted at 0).
- *
- * SAFETY: DRY-RUN by default (no writes). Pass --apply to write, inside one transaction.
- * Idempotent: re-running after a successful apply finds zero drift and does nothing.
- *
- *   npx tsx scripts/remediate-lot-drift.ts             # dry-run (default)
- *   npx tsx scripts/remediate-lot-drift.ts --limit=30  # dry-run, show 30 sample cells
- *   npx tsx scripts/remediate-lot-drift.ts --apply     # WRITE (lot layer only)
- *
- * Connection: EXTERNAL_DATABASE_URL (per CLAUDE.md), falling back to DATABASE_URL.
- * Verify after apply with: npm run wms:reconcile-lots  (expect zero variance).
+ * Usage:
+ *   npm run wms:remediate-lot-drift -- --limit=30
+ *   npm run wms:remediate-lot-drift -- --json
+ *   npm run wms:remediate-lot-drift -- --apply \
+ *     --expected-hash=<dry-run hash> --actor=<operator> \
+ *     --reason=<reason> --approval=<change/approval reference>
  */
 
+import { createHash, randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 
 const { Pool } = pg;
@@ -40,200 +31,638 @@ const { Pool } = pg;
 interface CliOptions {
   apply: boolean;
   json: boolean;
-  limit: number | null;
+  limit: number;
+  expectedHash: string | null;
+  actor: string | null;
+  reason: string | null;
+  approval: string | null;
+}
+
+interface LevelRow {
+  id: number;
+  productVariantId: number;
+  warehouseLocationId: number;
+  qtyOnHand: number;
+  qtyReserved: number;
+  qtyPicked: number;
+}
+
+interface LotRow {
+  id: number;
+  lotNumber: string;
+  productVariantId: number;
+  warehouseLocationId: number;
+  qtyOnHand: number;
+  qtyReserved: number;
+  qtyPicked: number;
+  qtyReceived: number;
+  qtyConsumed: number;
+  receivedAt: string;
+  status: string;
+  notes: string | null;
+}
+
+interface CellState {
+  key: string;
+  productVariantId: number;
+  warehouseLocationId: number;
+  levelId: number | null;
+  levelOnHand: number;
+  levelReserved: number;
+  levelPicked: number;
+  lotOnHand: number;
+  lotReserved: number;
+  lotPicked: number;
+  negativeLotBuckets: number;
+  costCents: number;
+  lots: LotRow[];
+}
+
+export interface Snapshot {
+  levels: LevelRow[];
+  lots: LotRow[];
+  costs: Map<number, number>;
+}
+
+interface RepairStats {
+  runId: string;
+  cells: number;
+  negativeLotsNormalized: number;
+  topupLotsCreated: number;
+  topupUnits: number;
+  lotsDepleted: number;
+  depletedUnits: number;
+  bucketLotsUpdated: number;
 }
 
 function parseArgs(argv: string[]): CliOptions {
-  const opts: CliOptions = { apply: false, json: false, limit: null };
+  const options: CliOptions = {
+    apply: false,
+    json: false,
+    limit: 30,
+    expectedHash: null,
+    actor: null,
+    reason: null,
+    approval: null,
+  };
+
   for (const arg of argv.slice(2)) {
-    if (arg === "--apply") opts.apply = true;
-    else if (arg === "--json") opts.json = true;
-    else if (arg.startsWith("--limit=")) opts.limit = Number(arg.split("=")[1]) || null;
-  }
-  return opts;
-}
-
-interface Cell {
-  pv: number;
-  loc: number;
-  lotQty: number;
-  lvlQty: number;
-  costCents: number; // resolved A cost (avg→last), 0 if none on file
-}
-
-async function main() {
-  const opts = parseArgs(process.argv);
-  const connectionString =
-    process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
-  if (!connectionString) {
-    console.error("ERROR: EXTERNAL_DATABASE_URL (or DATABASE_URL) is not set.");
-    process.exit(2);
+    if (arg === "--apply") options.apply = true;
+    else if (arg === "--json") options.json = true;
+    else if (arg.startsWith("--limit=")) options.limit = Math.max(0, Number(arg.slice(8)) || 0);
+    else if (arg.startsWith("--expected-hash=")) options.expectedHash = arg.slice(16).trim() || null;
+    else if (arg.startsWith("--actor=")) options.actor = arg.slice(8).trim() || null;
+    else if (arg.startsWith("--reason=")) options.reason = arg.slice(9).trim() || null;
+    else if (arg.startsWith("--approval=")) options.approval = arg.slice(11).trim() || null;
+    else throw new Error(`Unknown argument: ${arg}`);
   }
 
-  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, ""); // YYYYMMDD
-  const batch = `L05-LOTRECON-${stamp}`;
+  if (options.apply) {
+    const missing = [
+      ["--expected-hash", options.expectedHash],
+      ["--actor", options.actor],
+      ["--reason", options.reason],
+      ["--approval", options.approval],
+    ].filter(([, value]) => !value).map(([flag]) => flag);
+    if (missing.length > 0) {
+      throw new Error(`Apply requires ${missing.join(", ")}`);
+    }
+    if (!/^[0-9a-f]{64}$/.test(options.expectedHash!)) {
+      throw new Error("--expected-hash must be a 64-character lowercase SHA-256 hash");
+    }
+  }
+
+  return options;
+}
+
+function cellKey(productVariantId: number, warehouseLocationId: number): string {
+  return `${productVariantId}:${warehouseLocationId}`;
+}
+
+async function loadSnapshot(client: pg.Pool | pg.PoolClient): Promise<Snapshot> {
+  const [levelsResult, lotsResult, costsResult] = await Promise.all([
+    client.query(`
+      SELECT id,
+             product_variant_id AS "productVariantId",
+             warehouse_location_id AS "warehouseLocationId",
+             variant_qty AS "qtyOnHand",
+             reserved_qty AS "qtyReserved",
+             picked_qty AS "qtyPicked"
+      FROM inventory.inventory_levels
+      ORDER BY product_variant_id, warehouse_location_id
+    `),
+    client.query(`
+      SELECT id,
+             lot_number AS "lotNumber",
+             product_variant_id AS "productVariantId",
+             warehouse_location_id AS "warehouseLocationId",
+             qty_on_hand AS "qtyOnHand",
+             qty_reserved AS "qtyReserved",
+             qty_picked AS "qtyPicked",
+             COALESCE(qty_received, 0) AS "qtyReceived",
+             COALESCE(qty_consumed, 0) AS "qtyConsumed",
+             received_at AS "receivedAt",
+             status,
+             notes
+      FROM inventory.inventory_lots
+      ORDER BY product_variant_id, warehouse_location_id, received_at, id
+    `),
+    client.query(`
+      SELECT id,
+             COALESCE(NULLIF(avg_cost_cents, 0), NULLIF(last_cost_cents, 0), 0)::bigint AS "costCents"
+      FROM catalog.product_variants
+    `),
+  ]);
+
+  const levels = levelsResult.rows.map((row) => ({
+    id: Number(row.id),
+    productVariantId: Number(row.productVariantId),
+    warehouseLocationId: Number(row.warehouseLocationId),
+    qtyOnHand: Number(row.qtyOnHand),
+    qtyReserved: Number(row.qtyReserved),
+    qtyPicked: Number(row.qtyPicked),
+  }));
+  const lots = lotsResult.rows.map((row) => ({
+    id: Number(row.id),
+    lotNumber: String(row.lotNumber),
+    productVariantId: Number(row.productVariantId),
+    warehouseLocationId: Number(row.warehouseLocationId),
+    qtyOnHand: Number(row.qtyOnHand),
+    qtyReserved: Number(row.qtyReserved),
+    qtyPicked: Number(row.qtyPicked),
+    qtyReceived: Number(row.qtyReceived),
+    qtyConsumed: Number(row.qtyConsumed),
+    receivedAt: new Date(row.receivedAt).toISOString(),
+    status: String(row.status ?? "active"),
+    notes: row.notes == null ? null : String(row.notes),
+  }));
+  const costs = new Map<number, number>(
+    costsResult.rows.map((row) => [Number(row.id), Number(row.costCents)]),
+  );
+
+  return { levels, lots, costs };
+}
+
+export function buildCells(snapshot: Snapshot): CellState[] {
+  const cells = new Map<string, CellState>();
+
+  for (const level of snapshot.levels) {
+    const key = cellKey(level.productVariantId, level.warehouseLocationId);
+    cells.set(key, {
+      key,
+      productVariantId: level.productVariantId,
+      warehouseLocationId: level.warehouseLocationId,
+      levelId: level.id,
+      levelOnHand: level.qtyOnHand,
+      levelReserved: level.qtyReserved,
+      levelPicked: level.qtyPicked,
+      lotOnHand: 0,
+      lotReserved: 0,
+      lotPicked: 0,
+      negativeLotBuckets: 0,
+      costCents: snapshot.costs.get(level.productVariantId) ?? 0,
+      lots: [],
+    });
+  }
+
+  for (const lot of snapshot.lots) {
+    const key = cellKey(lot.productVariantId, lot.warehouseLocationId);
+    const cell = cells.get(key) ?? {
+      key,
+      productVariantId: lot.productVariantId,
+      warehouseLocationId: lot.warehouseLocationId,
+      levelId: null,
+      levelOnHand: 0,
+      levelReserved: 0,
+      levelPicked: 0,
+      lotOnHand: 0,
+      lotReserved: 0,
+      lotPicked: 0,
+      negativeLotBuckets: 0,
+      costCents: snapshot.costs.get(lot.productVariantId) ?? 0,
+      lots: [],
+    };
+
+    // Negative lot buckets are invalid projections. The repair clamps them to
+    // zero before balancing the cell, so totals here represent the safe state.
+    cell.lotOnHand += Math.max(0, lot.qtyOnHand);
+    cell.lotReserved += Math.max(0, lot.qtyReserved);
+    cell.lotPicked += Math.max(0, lot.qtyPicked);
+    cell.negativeLotBuckets += [lot.qtyOnHand, lot.qtyReserved, lot.qtyPicked]
+      .filter((qty) => qty < 0).length;
+    cell.lots.push(lot);
+    cells.set(key, cell);
+  }
+
+  return [...cells.values()].sort((a, b) =>
+    a.productVariantId - b.productVariantId ||
+    a.warehouseLocationId - b.warehouseLocationId,
+  );
+}
+
+export function isDrifting(cell: CellState): boolean {
+  return cell.negativeLotBuckets > 0 ||
+    cell.levelOnHand !== cell.lotOnHand ||
+    cell.levelReserved !== cell.lotReserved ||
+    cell.levelPicked !== cell.lotPicked;
+}
+
+export function validateSnapshot(snapshot: Snapshot, cells: CellState[]): void {
+  const invalidMetadata = snapshot.lots.filter((lot) => lot.qtyReceived < 0 || lot.qtyConsumed < 0);
+  if (invalidMetadata.length > 0) {
+    throw new Error(
+      `Refusing repair: ${invalidMetadata.length} lot(s) have negative received/consumed history`,
+    );
+  }
+
+  const invalidLevels = cells.filter((cell) =>
+    cell.levelOnHand < 0 || cell.levelReserved < 0 || cell.levelPicked < 0 ||
+    cell.levelReserved > cell.levelOnHand,
+  );
+  if (invalidLevels.length > 0) {
+    throw new Error(
+      `Refusing repair: ${invalidLevels.length} inventory level cell(s) have invalid target buckets`,
+    );
+  }
+}
+
+export function fingerprint(cells: CellState[]): string {
+  const candidates = cells.filter(isDrifting).map((cell) => ({
+    productVariantId: cell.productVariantId,
+    warehouseLocationId: cell.warehouseLocationId,
+    level: [cell.levelId, cell.levelOnHand, cell.levelReserved, cell.levelPicked],
+    lots: cell.lots.map((lot) => [
+      lot.id,
+      lot.qtyOnHand,
+      lot.qtyReserved,
+      lot.qtyPicked,
+      lot.qtyReceived,
+      lot.qtyConsumed,
+      lot.status,
+    ]),
+  }));
+  return createHash("sha256").update(JSON.stringify(candidates)).digest("hex");
+}
+
+export function summarize(cells: CellState[]) {
+  const drift = cells.filter(isDrifting);
+  return {
+    candidateCells: drift.length,
+    onHandDriftCells: drift.filter((cell) => cell.levelOnHand !== cell.lotOnHand).length,
+    reservedDriftCells: drift.filter((cell) => cell.levelReserved !== cell.lotReserved).length,
+    pickedDriftCells: drift.filter((cell) => cell.levelPicked !== cell.lotPicked).length,
+    negativeLotBucketCells: drift.filter((cell) => cell.negativeLotBuckets > 0).length,
+    onHandUnitsToCreate: drift.reduce(
+      (sum, cell) => sum + Math.max(0, cell.levelOnHand - cell.lotOnHand),
+      0,
+    ),
+    onHandUnitsToDeplete: drift.reduce(
+      (sum, cell) => sum + Math.max(0, cell.lotOnHand - cell.levelOnHand),
+      0,
+    ),
+    reservedAbsoluteDrift: drift.reduce(
+      (sum, cell) => sum + Math.abs(cell.levelReserved - cell.lotReserved),
+      0,
+    ),
+    pickedAbsoluteDrift: drift.reduce(
+      (sum, cell) => sum + Math.abs(cell.levelPicked - cell.lotPicked),
+      0,
+    ),
+  };
+}
+
+async function insertRepairLot(
+  client: pg.PoolClient,
+  cell: CellState,
+  qtyOnHand: number,
+  runId: string,
+): Promise<number> {
+  const costCents = cell.costCents;
+  const costMills = costCents * 100;
+  const result = await client.query(`
+    INSERT INTO inventory.inventory_lots (
+      lot_number, product_variant_id, warehouse_location_id, received_at,
+      qty_on_hand, qty_received, qty_reserved, qty_picked,
+      unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
+      landed_cost_cents, total_unit_cost_cents,
+      unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
+      landed_cost_mills, total_unit_cost_mills,
+      cost_source, cost_provisional, status, notes
+    ) VALUES (
+      $1, $2, $3, NOW(),
+      $4, $4, 0, 0,
+      $5, $5, 0, 0, $5,
+      $6, $6, 0, 0, $6,
+      'legacy', $7, 'active', $8
+    )
+    RETURNING id
+  `, [
+    `LOT-RECON-${runId.slice(0, 8)}-${cell.productVariantId}-${cell.warehouseLocationId}`,
+    cell.productVariantId,
+    cell.warehouseLocationId,
+    qtyOnHand,
+    costCents,
+    costMills,
+    costCents === 0 ? 1 : 0,
+    `Lot projection reconciliation run ${runId}`,
+  ]);
+  return Number(result.rows[0].id);
+}
+
+async function applyRepair(
+  client: pg.PoolClient,
+  cellsBefore: CellState[],
+  options: CliOptions,
+): Promise<RepairStats> {
+  const runId = randomUUID();
+  const changedLotIds = new Set<number>();
+  const stats: RepairStats = {
+    runId,
+    cells: cellsBefore.filter(isDrifting).length,
+    negativeLotsNormalized: 0,
+    topupLotsCreated: 0,
+    topupUnits: 0,
+    lotsDepleted: 0,
+    depletedUnits: 0,
+    bucketLotsUpdated: 0,
+  };
+
+  // First repair physical on-hand lot totals and normalize invalid negative
+  // projection buckets. No inventory level or movement ledger row is changed.
+  for (const cell of cellsBefore.filter(isDrifting)) {
+    const lots = cell.lots.map((lot) => ({ ...lot }));
+    for (const lot of lots) {
+      if (lot.qtyOnHand < 0 || lot.qtyReserved < 0 || lot.qtyPicked < 0) {
+        await client.query(`
+          UPDATE inventory.inventory_lots
+          SET qty_on_hand = GREATEST(qty_on_hand, 0),
+              qty_reserved = GREATEST(qty_reserved, 0),
+              qty_picked = GREATEST(qty_picked, 0)
+          WHERE id = $1
+        `, [lot.id]);
+        lot.qtyOnHand = Math.max(0, lot.qtyOnHand);
+        lot.qtyReserved = Math.max(0, lot.qtyReserved);
+        lot.qtyPicked = Math.max(0, lot.qtyPicked);
+        changedLotIds.add(lot.id);
+        stats.negativeLotsNormalized += 1;
+      }
+    }
+
+    let lotOnHand = lots.reduce((sum, lot) => sum + lot.qtyOnHand, 0);
+    if (lotOnHand < cell.levelOnHand) {
+      const qty = cell.levelOnHand - lotOnHand;
+      const lotId = await insertRepairLot(client, cell, qty, runId);
+      changedLotIds.add(lotId);
+      stats.topupLotsCreated += 1;
+      stats.topupUnits += qty;
+      lotOnHand += qty;
+    } else if (lotOnHand > cell.levelOnHand) {
+      let remaining = lotOnHand - cell.levelOnHand;
+      for (const lot of lots) {
+        if (remaining <= 0) break;
+        const take = Math.min(lot.qtyOnHand, remaining);
+        if (take <= 0) continue;
+        await client.query(`
+          UPDATE inventory.inventory_lots
+          SET qty_on_hand = qty_on_hand - $1
+          WHERE id = $2
+        `, [take, lot.id]);
+        lot.qtyOnHand -= take;
+        remaining -= take;
+        changedLotIds.add(lot.id);
+        stats.lotsDepleted += 1;
+        stats.depletedUnits += take;
+      }
+      if (remaining !== 0) {
+        throw new Error(`Could not deplete full on-hand drift for cell ${cell.key}`);
+      }
+    }
+
+    if (lots.length === 0 && cell.levelOnHand === 0 && cell.levelPicked > 0) {
+      const lotId = await insertRepairLot(client, cell, 0, runId);
+      changedLotIds.add(lotId);
+      stats.topupLotsCreated += 1;
+    }
+  }
+
+  // Re-read after the on-hand phase so newly created lots participate in FIFO
+  // reservation/picked allocation.
+  const afterOnHand = await loadSnapshot(client);
+  const cellsAfterOnHand = buildCells(afterOnHand);
+  const bucketUpdates: Array<{
+    lotId: number;
+    qtyReserved: number;
+    qtyPicked: number;
+    status: string;
+  }> = [];
+
+  for (const cell of cellsAfterOnHand) {
+    if (!isDrifting(cell)) continue;
+
+    let reservedRemaining = cell.levelReserved;
+    const reservedByLot = new Map<number, number>();
+    for (const lot of cell.lots) {
+      const qty = Math.min(Math.max(0, lot.qtyOnHand), reservedRemaining);
+      reservedByLot.set(lot.id, qty);
+      reservedRemaining -= qty;
+    }
+    if (reservedRemaining !== 0) {
+      throw new Error(`Could not allocate reserved target for cell ${cell.key}`);
+    }
+
+    // Preserve existing FIFO picked attribution where possible. Excess picked
+    // projection is trimmed newest-last; any shortfall is assigned to the oldest
+    // layer, matching the service's FIFO shipment behavior.
+    let pickedRemaining = cell.levelPicked;
+    const pickedByLot = new Map<number, number>();
+    for (const lot of cell.lots) {
+      const qty = Math.min(Math.max(0, lot.qtyPicked), pickedRemaining);
+      pickedByLot.set(lot.id, qty);
+      pickedRemaining -= qty;
+    }
+    if (pickedRemaining > 0) {
+      const oldest = cell.lots[0];
+      if (!oldest) throw new Error(`No lot can carry picked target for cell ${cell.key}`);
+      pickedByLot.set(oldest.id, (pickedByLot.get(oldest.id) ?? 0) + pickedRemaining);
+      pickedRemaining = 0;
+    }
+
+    for (const lot of cell.lots) {
+      const qtyReserved = reservedByLot.get(lot.id) ?? 0;
+      const qtyPicked = pickedByLot.get(lot.id) ?? 0;
+      const status = lot.status === "expired"
+        ? "expired"
+        : (lot.qtyOnHand === 0 && qtyReserved === 0 && qtyPicked === 0 ? "depleted" : "active");
+      if (
+        qtyReserved !== lot.qtyReserved ||
+        qtyPicked !== lot.qtyPicked ||
+        status !== lot.status
+      ) {
+        bucketUpdates.push({ lotId: lot.id, qtyReserved, qtyPicked, status });
+        changedLotIds.add(lot.id);
+      }
+    }
+  }
+
+  if (bucketUpdates.length > 0) {
+    await client.query(`
+      WITH updates AS (
+        SELECT *
+        FROM jsonb_to_recordset($1::jsonb)
+          AS x("lotId" int, "qtyReserved" int, "qtyPicked" int, status text)
+      )
+      UPDATE inventory.inventory_lots AS lot
+      SET qty_reserved = updates."qtyReserved",
+          qty_picked = updates."qtyPicked",
+          status = updates.status
+      FROM updates
+      WHERE lot.id = updates."lotId"
+    `, [JSON.stringify(bucketUpdates)]);
+    stats.bucketLotsUpdated = bucketUpdates.length;
+  }
+
+  if (changedLotIds.size > 0) {
+    const auditNote = [
+      `lot-projection-reconciliation run=${runId}`,
+      `actor=${options.actor}`,
+      `approval=${options.approval}`,
+      `reason=${options.reason}`,
+    ].join("; ");
+    await client.query(`
+      UPDATE inventory.inventory_lots
+      SET notes = CONCAT_WS(' | ', NULLIF(notes, ''), $1)
+      WHERE id = ANY($2::int[])
+    `, [auditNote, [...changedLotIds]]);
+  }
+
+  return stats;
+}
+
+function printDryRun(cells: CellState[], hash: string, options: CliOptions): void {
+  const summary = summarize(cells);
+  const samples = cells.filter(isDrifting).slice(0, options.limit).map((cell) => ({
+    productVariantId: cell.productVariantId,
+    warehouseLocationId: cell.warehouseLocationId,
+    level: {
+      onHand: cell.levelOnHand,
+      reserved: cell.levelReserved,
+      picked: cell.levelPicked,
+    },
+    lots: {
+      onHand: cell.lotOnHand,
+      reserved: cell.lotReserved,
+      picked: cell.lotPicked,
+      negativeBuckets: cell.negativeLotBuckets,
+    },
+  }));
+
+  if (options.json) {
+    console.log(JSON.stringify({ mode: "dry-run", inputHash: hash, summary, samples }, null, 2));
+    return;
+  }
+
+  console.log("\n=== FIFO Lot Projection Reconciliation (DRY-RUN) ===");
+  console.log(`Input hash:                 ${hash}`);
+  console.log(`Candidate cells:            ${summary.candidateCells}`);
+  console.log(`On-hand drift cells:        ${summary.onHandDriftCells}`);
+  console.log(`Reserved drift cells:       ${summary.reservedDriftCells}`);
+  console.log(`Picked drift cells:         ${summary.pickedDriftCells}`);
+  console.log(`Negative bucket cells:      ${summary.negativeLotBucketCells}`);
+  console.log(`On-hand units to create:    ${summary.onHandUnitsToCreate}`);
+  console.log(`On-hand units to deplete:   ${summary.onHandUnitsToDeplete}`);
+  console.log(`Reserved absolute drift:    ${summary.reservedAbsoluteDrift}`);
+  console.log(`Picked absolute drift:      ${summary.pickedAbsoluteDrift}`);
+  if (samples.length > 0) {
+    console.log(`\nFirst ${samples.length} candidate cell(s):`);
+    console.table(samples.map((sample) => ({
+      variant: sample.productVariantId,
+      location: sample.warehouseLocationId,
+      onHand: `${sample.lots.onHand}->${sample.level.onHand}`,
+      reserved: `${sample.lots.reserved}->${sample.level.reserved}`,
+      picked: `${sample.lots.picked}->${sample.level.picked}`,
+      negativeBuckets: sample.lots.negativeBuckets,
+    })));
+  }
+  console.log("\nNo rows were written. Apply requires this exact hash and explicit audit metadata.\n");
+}
+
+async function main(): Promise<void> {
+  const options = parseArgs(process.argv);
+  const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+  if (!connectionString) throw new Error("EXTERNAL_DATABASE_URL (or DATABASE_URL) is not set");
 
   const pool = new Pool({ connectionString, ssl: { rejectUnauthorized: false } });
-
   try {
-    // 1. Drifting cells + the variant's on-file cost (avg→last→0).
-    const res = await pool.query(`
-      WITH lot_sums AS (
-        SELECT product_variant_id pv, warehouse_location_id loc, SUM(qty_on_hand) lot_qty
-        FROM inventory.inventory_lots GROUP BY 1,2
-      )
-      SELECT COALESCE(l.product_variant_id, s.pv)            AS pv,
-             COALESCE(l.warehouse_location_id, s.loc)        AS loc,
-             COALESCE(s.lot_qty,0)::int                      AS lot_qty,
-             COALESCE(l.variant_qty,0)::int                  AS lvl_qty,
-             COALESCE(NULLIF(pv.avg_cost_cents,0), NULLIF(pv.last_cost_cents,0), 0)::bigint AS cost_cents
-      FROM inventory.inventory_levels l
-      FULL OUTER JOIN lot_sums s
-        ON s.pv = l.product_variant_id AND s.loc = l.warehouse_location_id
-      LEFT JOIN catalog.product_variants pv ON pv.id = COALESCE(l.product_variant_id, s.pv)
-      WHERE COALESCE(l.variant_qty,0) <> COALESCE(s.lot_qty,0)
-        AND COALESCE(l.variant_qty,0) >= 0
-        AND COALESCE(s.lot_qty,0) >= 0
-      ORDER BY pv, loc
-    `);
-
-    const cells: Cell[] = res.rows.map((r) => ({
-      pv: Number(r.pv),
-      loc: Number(r.loc),
-      lotQty: Number(r.lot_qty),
-      lvlQty: Number(r.lvl_qty),
-      costCents: Number(r.cost_cents),
-    }));
-
-    const topups = cells
-      .filter((c) => c.lvlQty > c.lotQty)
-      .map((c) => ({ ...c, qty: c.lvlQty - c.lotQty }));
-    const deplete = cells
-      .filter((c) => c.lotQty > c.lvlQty)
-      .map((c) => ({ ...c, qty: c.lotQty - c.lvlQty }));
-
-    const topupWithCost = topups.filter((t) => t.costCents > 0);
-    const topupZeroCost = topups.filter((t) => t.costCents === 0);
-    const topupUnits = topups.reduce((s, t) => s + t.qty, 0);
-    const depleteUnits = deplete.reduce((s, t) => s + t.qty, 0);
-
-    console.log("");
-    console.log(`=== L0.5 Lot-Drift Remediation ${opts.apply ? "(APPLY)" : "(DRY-RUN — no writes)"} ===`);
-    console.log(`Batch tag:            ${batch}`);
-    console.log(`Top-up cells:         ${topups.length}  (+${topupUnits} units → create remediation lots)`);
-    console.log(`  • with cost (A):    ${topupWithCost.length}  (variant avg/last cost)`);
-    console.log(`  • $0 provisional(B):${topupZeroCost.length}  (no cost on file → CSV-backfill later)`);
-    console.log(`Deplete cells:        ${deplete.length}  (-${depleteUnits} units → reduce lot on-hand FIFO)`);
-    console.log("");
-
-    if (opts.limit != null) {
-      console.log(`Sample cells (first ${opts.limit}):`);
-      console.log("  pv      loc     lot→lvl    action");
-      for (const c of cells.slice(0, opts.limit)) {
-        const action =
-          c.lvlQty > c.lotQty
-            ? `topup +${c.lvlQty - c.lotQty} @ ${c.costCents > 0 ? "$" + (c.costCents / 100).toFixed(2) : "$0 prov"}`
-            : `deplete -${c.lotQty - c.lvlQty}`;
-        console.log(
-          `  ${String(c.pv).padStart(6)}  ${String(c.loc).padStart(6)}  ${String(c.lotQty).padStart(5)}→${String(c.lvlQty).padEnd(5)}  ${action}`,
-        );
-      }
-      console.log("");
+    if (!options.apply) {
+      const snapshot = await loadSnapshot(pool);
+      const cells = buildCells(snapshot);
+      validateSnapshot(snapshot, cells);
+      printDryRun(cells, fingerprint(cells), options);
+      return;
     }
 
-    if (!opts.apply) {
-      console.log("DRY-RUN complete. No rows written. Re-run with --apply to write (lot layer only).");
-      console.log("After --apply, verify with: npm run wms:reconcile-lots  (expect zero variance).");
-      console.log("");
-      return; // pool closed in finally
-    }
-
-    // 2. APPLY — one transaction, lot layer only.
     const client = await pool.connect();
-    let created = 0;
-    let depletedLots = 0;
-    let lotCounter = 0;
     try {
       await client.query("BEGIN");
+      await client.query("SET LOCAL lock_timeout = '10s'");
+      await client.query("SET LOCAL statement_timeout = '120s'");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('wms-lot-projection-reconciliation'))");
+      await client.query(
+        "LOCK TABLE inventory.inventory_levels, inventory.inventory_lots IN SHARE ROW EXCLUSIVE MODE",
+      );
 
-      // 2a. Top-ups: create one remediation lot per cell.
-      for (const t of topups) {
-        lotCounter += 1;
-        const lotNumber = `LOT-RECON-${stamp}-${String(lotCounter).padStart(4, "0")}`;
-        const costCents = t.costCents; // A (>0) or B (0)
-        const costMills = costCents * 100;
-        const provisional = costCents === 0 ? 1 : 0;
-        await client.query(
-          `INSERT INTO inventory.inventory_lots
-             (lot_number, product_variant_id, warehouse_location_id, received_at,
-              qty_on_hand, qty_received, qty_reserved, qty_picked,
-              unit_cost_cents, po_unit_cost_cents, packaging_cost_cents, landed_cost_cents, total_unit_cost_cents,
-              unit_cost_mills, po_unit_cost_mills, packaging_cost_mills, landed_cost_mills, total_unit_cost_mills,
-              cost_source, cost_provisional, status, notes)
-           VALUES ($1,$2,$3, now(),
-              $4,$4,0,0,
-              $5,$5,0,0,$5,
-              $6,$6,0,0,$6,
-              'legacy',$7,'active',$8)`,
-          [
-            lotNumber,
-            t.pv,
-            t.loc,
-            t.qty,
-            costCents,
-            costMills,
-            provisional,
-            `L0.5 lot-drift remediation (${batch}); level had stock with no/short lots`,
-          ],
+      const snapshot = await loadSnapshot(client);
+      const cells = buildCells(snapshot);
+      validateSnapshot(snapshot, cells);
+      const lockedHash = fingerprint(cells);
+      if (lockedHash !== options.expectedHash) {
+        throw new Error(
+          `Inventory changed after dry-run: expected ${options.expectedHash}, locked state is ${lockedHash}. ` +
+          "No rows were written; run dry-run again.",
         );
-        created += 1;
       }
 
-      // 2b. Depletes: reduce qty_on_hand across the cell's lots, oldest first.
-      for (const d of deplete) {
-        let remaining = d.qty;
-        const lotsRes = await client.query(
-          `SELECT id, qty_on_hand FROM inventory.inventory_lots
-             WHERE product_variant_id=$1 AND warehouse_location_id=$2 AND qty_on_hand > 0
-             ORDER BY received_at ASC, id ASC`,
-          [d.pv, d.loc],
+      const stats = await applyRepair(client, cells, options);
+      const finalSnapshot = await loadSnapshot(client);
+      const finalCells = buildCells(finalSnapshot);
+      validateSnapshot(finalSnapshot, finalCells);
+      const remaining = finalCells.filter(isDrifting);
+      if (remaining.length > 0) {
+        throw new Error(
+          `Post-write verification found ${remaining.length} drifting cell(s); rolling back the entire repair`,
         );
-        for (const lot of lotsRes.rows) {
-          if (remaining <= 0) break;
-          const take = Math.min(Number(lot.qty_on_hand), remaining);
-          await client.query(
-            `UPDATE inventory.inventory_lots
-               SET qty_on_hand = qty_on_hand - $1,
-                   status = CASE WHEN (qty_on_hand - $1) = 0 AND qty_reserved = 0 AND qty_picked = 0 THEN 'depleted' ELSE status END,
-                   notes = COALESCE(notes,'') || $3
-               WHERE id = $2`,
-            [take, lot.id, ` | L0.5 deplete -${take} (${batch})`],
-          );
-          remaining -= take;
-          depletedLots += 1;
-        }
-        if (remaining > 0) {
-          console.warn(`  ⚠ cell pv=${d.pv} loc=${d.loc}: could not deplete full ${d.qty} (short by ${remaining}) — insufficient lot on-hand`);
-        }
       }
 
       await client.query("COMMIT");
-    } catch (err) {
+      const result = {
+        mode: "applied",
+        inputHash: lockedHash,
+        remainingDriftCells: 0,
+        ...stats,
+      };
+      if (options.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log("\n=== FIFO Lot Projection Reconciliation (APPLIED) ===");
+        console.log(JSON.stringify(result, null, 2));
+        console.log("Global on-hand/reserved/picked lot parity verified at zero.\n");
+      }
+    } catch (error) {
       await client.query("ROLLBACK");
-      throw err;
+      throw error;
     } finally {
       client.release();
     }
-
-    console.log(`APPLIED: created ${created} remediation lot(s), depleted across ${depletedLots} lot(s).`);
-    console.log(`Now run: npm run wms:reconcile-lots  (expect zero variance).`);
-    console.log("");
   } finally {
     await pool.end();
   }
 }
 
-main().catch((err) => {
-  console.error("Lot-drift remediation failed:", err);
-  process.exit(2);
-});
+const isMainModule = process.argv[1] != null &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+
+if (isMainModule) {
+  main().catch((error) => {
+    console.error("Lot projection reconciliation failed:", error instanceof Error ? error.message : error);
+    process.exit(2);
+  });
+}
