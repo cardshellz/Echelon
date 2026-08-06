@@ -146,6 +146,7 @@ describe("PgMarketplaceListingReplacementRepository", () => {
     const active = {
       ...operationRow(plan),
       idempotency_key: "marketplace-replacement:channel:7:33:prior-session",
+      source_publication_id: String(plan.sourcePublication.publicationId),
     };
     const harness = makeHarness({
       clientSteps: [
