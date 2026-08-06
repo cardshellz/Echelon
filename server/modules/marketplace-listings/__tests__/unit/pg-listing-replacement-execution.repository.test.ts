@@ -1,6 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { PgMarketplaceListingReplacementExecutionRepository } from "../../infrastructure/pg-listing-replacement-execution.repository";
+import {
+  buildListingReplacementFailureEvidence,
+  PgMarketplaceListingReplacementExecutionRepository,
+} from "../../infrastructure/pg-listing-replacement-execution.repository";
+
+describe("listing replacement failure audit evidence", () => {
+  it("includes terminal error fields and exact recovery context", () => {
+    const recoveryContext = { failedStepKey: "publish.create_target" };
+    expect(
+      buildListingReplacementFailureEvidence({
+        errorCode: "FAILURE",
+        errorMessage: "Provider failed.",
+        recoveryContext,
+        evidence: { compensationCompleted: true },
+      }),
+    ).toEqual({
+      compensationCompleted: true,
+      errorCode: "FAILURE",
+      errorMessage: "Provider failed.",
+      recoveryContext,
+    });
+  });
+
+  it("omits recovery context when the terminal operation has none", () => {
+    expect(
+      buildListingReplacementFailureEvidence({
+        errorCode: "PREFLIGHT_FAILED",
+        errorMessage: "Preflight failed.",
+        recoveryContext: null,
+        evidence: { provider: "ebay" },
+      }),
+    ).toEqual({
+      provider: "ebay",
+      errorCode: "PREFLIGHT_FAILED",
+      errorMessage: "Preflight failed.",
+    });
+  });
+});
 
 describe("PgMarketplaceListingReplacementExecutionRepository", () => {
   it("locks the listing scope before the replacement operation", async () => {
