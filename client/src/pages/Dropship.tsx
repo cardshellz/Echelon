@@ -1859,7 +1859,7 @@ function ReturnPoliciesTab() {
     search: "",
     status: "all",
     platform: "all",
-    limit: 250,
+    limit: 100,
   }), []);
   const policiesQuery = useQuery<DropshipAdminReturnPolicyListResponse>({
     queryKey: [policiesUrl],
@@ -2485,12 +2485,12 @@ function ReturnOpsTab() {
     search: "",
     status: "all",
     platform: "all",
-    limit: 250,
+    limit: 100,
   }), []);
   const returnOrderIntakeUrl = useMemo(() => buildAdminOrderIntakeUrl({
     search: "",
     status: "all",
-    limit: 250,
+    limit: 100,
   }), []);
 
   const returnsQuery = useQuery<DropshipReturnListResponse>({
