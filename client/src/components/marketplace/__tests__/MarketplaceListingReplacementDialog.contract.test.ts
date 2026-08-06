@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildMarketplaceListingReplacementMembers,
   replacementEndpointBase,
+  executionResultMessage,
 } from "../MarketplaceListingReplacementDialog";
 
 describe("MarketplaceListingReplacementDialog contract", () => {
@@ -38,6 +39,24 @@ describe("MarketplaceListingReplacementDialog contract", () => {
     ]);
   });
 
+  it("distinguishes a safe preflight stop from a compensated execution failure", () => {
+    expect(
+      executionResultMessage({
+        kind: "failed",
+        stepKey: "preflight.validate_plan",
+      }),
+    ).toBe(
+      "Replacement stopped during preflight. The live eBay listing was not changed.",
+    );
+    expect(
+      executionResultMessage({
+        kind: "failed",
+        stepKey: "compensate.ensure_source_live",
+      }),
+    ).toBe(
+      "Replacement failed, and compensation restored the previous listing state.",
+    );
+  });
   it("routes Channel and Dropship owners through the same provider-neutral UI contract", () => {
     expect(
       replacementEndpointBase({
