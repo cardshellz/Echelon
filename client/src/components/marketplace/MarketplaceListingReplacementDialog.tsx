@@ -248,7 +248,9 @@ export function MarketplaceListingReplacementDialog({
                   <span className="text-xs text-muted-foreground">
                     {variant.lockedExcluded
                       ? "Archived - will be removed"
-                      : includedVariantIds.has(variant.id) ? "Included" : "Excluded"}
+                      : includedVariantIds.has(variant.id)
+                        ? "Included"
+                        : "Excluded"}
                   </span>
                   <Switch
                     checked={includedVariantIds.has(variant.id)}
@@ -261,7 +263,11 @@ export function MarketplaceListingReplacementDialog({
                         return next;
                       });
                     }}
-                    aria-label={variant.lockedExcluded ? `${variant.sku} is archived and will be removed` : `${includedVariantIds.has(variant.id) ? "Exclude" : "Include"} ${variant.sku}`}
+                    aria-label={
+                      variant.lockedExcluded
+                        ? `${variant.sku} is archived and will be removed`
+                        : `${includedVariantIds.has(variant.id) ? "Exclude" : "Include"} ${variant.sku}`
+                    }
                   />
                 </div>
               </div>
@@ -418,12 +424,14 @@ function normalizeReplacementError(error: unknown): ReplacementApiErrorPayload {
   };
 }
 
-function executionResultMessage(result: ExecutionResult): string {
+export function executionResultMessage(result: ExecutionResult): string {
   switch (result.kind) {
     case "completed":
       return "Replacement completed and Echelon now controls the new listing.";
     case "failed":
-      return "Replacement failed, and compensation restored the previous listing state.";
+      return result.stepKey === "preflight.validate_plan"
+        ? "Replacement stopped during preflight. The live eBay listing was not changed."
+        : "Replacement failed, and compensation restored the previous listing state.";
     case "manual_recovery_required":
       return "Automatic recovery failed. Do not retry blindly; manual eBay recovery is required.";
     case "cancelled":
