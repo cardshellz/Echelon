@@ -2118,13 +2118,18 @@ function FlowOverview(props: {
       { key: "shipped", label: "Shipped", count: snapshot.funnel.shipped, icon: Truck, issueStages: ["shipped"] as FlowIssueStage[] },
       { key: "confirmed", label: "Channel updated", count: snapshot.funnel.trackingConfirmed, icon: CheckCircle2, issueStages: ["writeback"] as FlowIssueStage[] },
     ].map((stage) => {
-      const issues = (snapshotIsCurrent ? snapshot.issues : [])
+      // A stale snapshot is not current alerting evidence, but its issue
+      // categories are still the only navigable handles for a live drill-down.
+      // The bucket API re-runs the selected condition before it presents rows.
+      const snapshotIssues = snapshot.issues
         .filter((issue) => stage.issueStages.includes(issue.stage))
         .sort((left, right) => FLOW_SEVERITY_ORDER[left.severity] - FLOW_SEVERITY_ORDER[right.severity] || right.count - left.count);
       return {
         ...stage,
-        issues,
-        monitorMatches: issues.reduce((total, issue) => total + issue.count, 0),
+        issues: snapshotIssues,
+        monitorMatches: snapshotIsCurrent
+          ? snapshotIssues.reduce((total, issue) => total + issue.count, 0)
+          : 0,
       };
     });
   }, [snapshot, snapshotIsCurrent]);
@@ -2279,16 +2284,22 @@ function FlowOverview(props: {
                     "relative min-w-0 border-b border-r p-3 text-left even:border-r-0 md:border-b-0 md:border-r md:even:border-r md:last:border-r-0",
                     stage.issues.length > 0 && "cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary",
                   )}
-                  aria-label={stage.issues.length > 0 ? `Review ${stage.label} exceptions` : `${stage.label}: no open exceptions`}
+                  aria-label={stage.issues.length > 0
+                    ? `Review ${snapshotIsCurrent ? "current" : "last scan"} ${stage.label} exceptions`
+                    : `${stage.label}: no open exceptions`}
                 >
                   <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
                     <Icon className="h-4 w-4" /> {stage.label}
                   </div>
                   <div className="mt-2 text-2xl font-semibold tabular-nums">{stage.count.toLocaleString()}</div>
                   {gap !== null && <div className="mt-1 text-xs text-orange-700">{gap.toLocaleString()} not yet advanced</div>}
-                  {stage.issues.length > 0 ? (
-                    <div className={cn("mt-2 text-xs font-medium", snapshotIsCurrent ? "text-red-700" : "text-amber-800")}>
+                  {stage.issues.length > 0 && snapshotIsCurrent ? (
+                    <div className="mt-2 text-xs font-medium text-red-700">
                       {stage.issues.length.toLocaleString()} exception type{stage.issues.length === 1 ? "" : "s"} · {stage.monitorMatches.toLocaleString()} monitor matches
+                    </div>
+                  ) : stage.issues.length > 0 ? (
+                    <div className="mt-2 text-xs text-amber-800">
+                      {stage.issues.length.toLocaleString()} issue type{stage.issues.length === 1 ? "" : "s"} in last scan
                     </div>
                   ) : (
                     <div className={cn("mt-2 text-xs", snapshotIsCurrent ? "text-emerald-700" : "text-muted-foreground")}>
