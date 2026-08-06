@@ -1853,7 +1853,7 @@ function ReturnPoliciesTab() {
     search: "",
     status: "all",
     platform: "all",
-    limit: 250,
+    limit: 100,
   }), []);
   const scopeStoreConnectionsUrl = useMemo(() => buildAdminStoreConnectionsUrl({
     search: "",
@@ -2479,7 +2479,7 @@ function ReturnOpsTab() {
     search: "",
     status: "all",
     platform: "all",
-    limit: 250,
+    limit: 100,
   }), []);
   const returnStoreConnectionsUrl = useMemo(() => buildAdminStoreConnectionsUrl({
     search: "",
@@ -3502,7 +3502,7 @@ function WalletOpsTab() {
     search: "",
     status: "all",
     platform: "all",
-    limit: 250,
+    limit: 100,
   }), []);
   const walletVendorOptionsQuery = useQuery<DropshipDogfoodReadinessResponse>({
     queryKey: [walletVendorOptionsUrl, "wallet-vendors"],
