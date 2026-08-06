@@ -12,6 +12,7 @@ interface Row extends QueryResultRow {
   scope_id: string | number;
   publication_id: string | number;
   generation: number;
+  max_generation: string | number;
   desired_state_hash: string;
   provider_publication_key: string | null;
   external_listing_id: string | null;
@@ -35,6 +36,7 @@ export class PgMarketplaceListingReplacementOwnerReader implements MarketplaceLi
       );
     const scopeId = positive(first.scope_id, "scope_id");
     const publicationId = positive(first.publication_id, "publication_id");
+    const maxGeneration = positive(first.max_generation, "max_generation");
     if (!first.external_listing_id)
       throw failure(
         "MARKETPLACE_LISTING_REPLACEMENT_SOURCE_EXTERNAL_ID_MISSING",
@@ -46,6 +48,7 @@ export class PgMarketplaceListingReplacementOwnerReader implements MarketplaceLi
         positive(row.scope_id, "scope_id") !== scopeId ||
         positive(row.publication_id, "publication_id") !== publicationId ||
         row.generation !== first.generation ||
+        positive(row.max_generation, "max_generation") !== maxGeneration ||
         row.desired_state_hash !== first.desired_state_hash ||
         row.provider_publication_key !== first.provider_publication_key ||
         row.external_listing_id !== first.external_listing_id
@@ -78,7 +81,7 @@ export class PgMarketplaceListingReplacementOwnerReader implements MarketplaceLi
         providerPublicationKey: first.provider_publication_key,
         externalListingId: first.external_listing_id,
       },
-      nextGeneration: first.generation + 1,
+      nextGeneration: nextSafeGeneration(maxGeneration, owner),
       memberCandidates,
     };
   }
@@ -89,7 +92,7 @@ function sql(owner: ListingOwnerRef): string {
     owner.kind === "channel"
       ? "cls.channel_id = $5"
       : "dls.store_connection_id = $5";
-  return `SELECT s.id AS scope_id, p.id AS publication_id, p.generation, p.desired_state_hash, p.provider_publication_key, p.external_listing_id, m.product_variant_id, m.sku_snapshot, m.disposition FROM marketplace.listing_scopes s JOIN marketplace.listing_publications p ON p.scope_id = s.id AND p.status = 'active' JOIN marketplace.listing_publication_members m ON m.publication_id = p.id LEFT JOIN marketplace.channel_listing_scopes cls ON cls.scope_id = s.id LEFT JOIN marketplace.dropship_listing_scopes dls ON dls.scope_id = s.id WHERE s.owner_kind = $1 AND s.provider = $2 AND s.marketplace_id = $3 AND s.product_id = $4 AND ${binding} ORDER BY m.product_variant_id ASC`;
+  return `SELECT s.id AS scope_id, p.id AS publication_id, p.generation, (SELECT MAX(history.generation) FROM marketplace.listing_publications history WHERE history.scope_id = s.id) AS max_generation, p.desired_state_hash, p.provider_publication_key, p.external_listing_id, m.product_variant_id, m.sku_snapshot, m.disposition FROM marketplace.listing_scopes s JOIN marketplace.listing_publications p ON p.scope_id = s.id AND p.status = 'active' JOIN marketplace.listing_publication_members m ON m.publication_id = p.id LEFT JOIN marketplace.channel_listing_scopes cls ON cls.scope_id = s.id LEFT JOIN marketplace.dropship_listing_scopes dls ON dls.scope_id = s.id WHERE s.owner_kind = $1 AND s.provider = $2 AND s.marketplace_id = $3 AND s.product_id = $4 AND ${binding} ORDER BY m.product_variant_id ASC`;
 }
 function params(owner: ListingOwnerRef): unknown[] {
   return [
@@ -109,6 +112,19 @@ function positive(value: string | number, field: string): number {
       { field, value },
     );
   return parsed;
+}
+function nextSafeGeneration(
+  maxGeneration: number,
+  owner: ListingOwnerRef,
+): number {
+  const nextGeneration = maxGeneration + 1;
+  if (!Number.isSafeInteger(nextGeneration))
+    throw failure(
+      "MARKETPLACE_LISTING_REPLACEMENT_SOURCE_CONTRACT_INVALID",
+      "Registered marketplace publication generation exceeds the supported range.",
+      owner,
+    );
+  return nextGeneration;
 }
 function failure(
   code: string,
