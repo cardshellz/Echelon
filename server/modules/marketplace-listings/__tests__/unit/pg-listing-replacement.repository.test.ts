@@ -141,6 +141,52 @@ describe("PgMarketplaceListingReplacementRepository", () => {
     expect(connect).toHaveBeenCalledOnce();
   });
 
+  it("returns a matching active operation created by an earlier modal session", async () => {
+    const plan = replacementPlan();
+    const active = {
+      ...operationRow(plan),
+      idempotency_key: "marketplace-replacement:channel:7:33:prior-session",
+    };
+    const harness = makeHarness({
+      clientSteps: [
+        { includes: "BEGIN" },
+        { includes: "SET LOCAL lock_timeout" },
+        {
+          includes: "FROM marketplace.listing_scopes",
+          rows: [scopeRow()],
+          values: [plan.scopeId],
+        },
+        {
+          includes: "FROM marketplace.listing_replacement_operations",
+          rows: [],
+          values: [plan.scopeId, plan.idempotencyKey],
+        },
+        {
+          includes:
+            "status IN ('planned', 'running', 'compensating', 'manual_recovery_required')",
+          rows: [active],
+          values: [plan.scopeId],
+        },
+        { includes: "COMMIT" },
+      ],
+    });
+    const repository = new PgMarketplaceListingReplacementRepository(
+      harness.pool,
+    );
+
+    await expect(repository.createOrReplayPlan(plan)).resolves.toMatchObject({
+      kind: "replay",
+      operation: {
+        operationId: 3001,
+        idempotencyKey: active.idempotency_key,
+        desiredStateHash: plan.desiredStateHash,
+      },
+    });
+    expect(
+      harness.executedSql().some((sql) => sql.startsWith("INSERT INTO")),
+    ).toBe(false);
+    expect(harness.remainingClientSteps()).toBe(0);
+  });
   it("commits a complete creation only after writing the initial event", async () => {
     const plan = replacementPlan();
     const harness = makeHarness({
@@ -256,6 +302,11 @@ describe("PgMarketplaceListingReplacementRepository", () => {
         { includes: "FROM marketplace.listing_scopes", rows: [scopeRow()] },
         {
           includes: "FROM marketplace.listing_replacement_operations",
+          rows: [],
+        },
+        {
+          includes:
+            "status IN ('planned', 'running', 'compensating', 'manual_recovery_required')",
           rows: [],
         },
         {
@@ -717,6 +768,12 @@ function creationPrefix(
       includes: "FROM marketplace.listing_replacement_operations",
       rows: [],
       values: [plan.scopeId, plan.idempotencyKey],
+    },
+    {
+      includes:
+        "status IN ('planned', 'running', 'compensating', 'manual_recovery_required')",
+      rows: [],
+      values: [plan.scopeId],
     },
     {
       includes: "FROM marketplace.listing_publications",

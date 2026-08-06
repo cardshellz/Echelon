@@ -116,14 +116,15 @@ export class ListingReplacementPlanningService {
       "MARKETPLACE_LISTING_REPLACEMENT_REPOSITORY_RESULT_INVALID",
       "Marketplace listing replacement repository returned an invalid result.",
     );
+    if (persisted.kind === "replay") {
+      assertOperationCanResumePlan(persisted.operation, plan);
+      return { kind: "replay", operation: persisted.operation, plan: null };
+    }
     assertOperationMatchesRequest(
       persisted.operation,
       plan.idempotencyKey,
       plan.requestHash,
     );
-    if (persisted.kind === "replay") {
-      return { kind: "replay", operation: persisted.operation, plan: null };
-    }
 
     assertCreatedOperationMatchesPlan(persisted.operation, plan);
     return {
@@ -242,6 +243,28 @@ function assertOperationMatchesRequest(
     "MARKETPLACE_LISTING_REPLACEMENT_REPOSITORY_INTEGRITY_ERROR",
     "Marketplace listing replacement repository result does not match the requested command.",
     { operationId: operation.operationId },
+  );
+}
+
+function assertOperationCanResumePlan(
+  operation: ListingReplacementOperation,
+  plan: ListingReplacementPlan,
+): void {
+  const exactReplay =
+    operation.idempotencyKey === plan.idempotencyKey &&
+    operation.requestHash === plan.requestHash;
+  const matchingActivePlan =
+    operation.scopeId === plan.scopeId &&
+    operation.sourcePublicationId === plan.sourcePublication.publicationId &&
+    operation.desiredStateHash === plan.desiredStateHash &&
+    ["planned", "running", "compensating", "manual_recovery_required"].includes(
+      operation.status,
+    );
+  if (exactReplay || matchingActivePlan) return;
+  throw new MarketplaceListingReplacementError(
+    "MARKETPLACE_LISTING_REPLACEMENT_REPOSITORY_INTEGRITY_ERROR",
+    "Marketplace listing replacement replay does not match the requested plan.",
+    { operationId: operation.operationId, scopeId: plan.scopeId },
   );
 }
 

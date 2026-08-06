@@ -236,7 +236,7 @@ describe("ListingReplacementPlanningService", () => {
     expect(ownerReader.calls).toBe(1);
   });
 
-  it("rejects a post-lock replay that does not match the command", async () => {
+  it("resumes a matching active plan created with an earlier idempotency key", async () => {
     const ownerReader = new FakeOwnerReader(ownerSnapshot());
     const repository = repositoryDouble({
       async createOrReplayPlan(plan) {
@@ -251,12 +251,13 @@ describe("ListingReplacementPlanningService", () => {
 
     await expect(
       createService(repository, ownerReader).plan(command()),
-    ).rejects.toMatchObject({
-      code: "MARKETPLACE_LISTING_REPLACEMENT_REPOSITORY_INTEGRITY_ERROR",
+    ).resolves.toMatchObject({
+      kind: "replay",
+      operation: { idempotencyKey: "different-operation-key" },
+      plan: null,
     });
     expect(ownerReader.calls).toBe(1);
   });
-
   it("returns a replay when a concurrent request wins after the early lookup", async () => {
     const ownerReader = new FakeOwnerReader(ownerSnapshot());
     let createCalls = 0;
