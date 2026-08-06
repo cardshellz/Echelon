@@ -171,16 +171,10 @@ async function inspectExactLegacyProviderPackageIdentity(
       AND label.voided_at IS NULL
       AND label.normalized_tracking_number = ${input.normalizedTracking}
       AND legacy_shipment.status = 'shipped'
-      AND (
-        legacy_shipment.external_fulfillment_id =
-          ${`shipstation_shipment:${input.providerShipmentId}`}
-        OR legacy_shipment.external_fulfillment_id = CONCAT(
-          'shipstation_combined:',
-          CAST(${String(input.providerShipmentId)} AS text),
-          ':order:',
-          legacy_shipment.order_id::text
-        )
-      )
+      -- The provider-label link is the durable package identity. Older
+      -- combined orders can have a linked shipped sibling without a legacy
+      -- external_fulfillment_id; the exact item/quantity proof below remains
+      -- required before this evidence can be reconciled.
       AND UPPER(
         REGEXP_REPLACE(
           COALESCE(legacy_shipment.tracking_number, ''),
