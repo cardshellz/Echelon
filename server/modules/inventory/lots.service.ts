@@ -22,6 +22,10 @@ import {
 } from "@shared/schema";
 import type { InventoryLot, InsertInventoryLot } from "@shared/schema";
 import { resolveCost } from "./cost-resolver";
+import {
+  calculateLotPickableOnHand,
+  calculateUnreservedLotOnHand,
+} from "./domain/inventory.domain";
 import { millsToCents, centsToMills } from "@shared/utils/money";
 import { IntegrityError } from "../../../shared/errors";
 
@@ -228,7 +232,7 @@ export class InventoryLotService {
     for (const lot of lots) {
       if (remaining <= 0) break;
 
-      const available = lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked;
+      const available = calculateUnreservedLotOnHand(lot);
       if (available <= 0) continue;
 
       const take = Math.min(available, remaining);
@@ -377,13 +381,16 @@ export class InventoryLotService {
       // Normal picks consume this order's reservation first. System replacement
       // picks have no reservation of their own, so they may use unreserved stock
       // only and can never steal a reservation held by another order.
-      const reservedAvailable = params.allowReservedStock === false ? 0 : lot.qtyReserved;
-      const unreservedAvailable = lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked;
-      const totalPickable = reservedAvailable + Math.max(0, unreservedAvailable);
+      const totalPickable = calculateLotPickableOnHand(
+        lot,
+        params.allowReservedStock !== false,
+      );
       if (totalPickable <= 0) continue;
 
       const take = Math.min(totalPickable, remaining);
-      const fromReserved = Math.min(reservedAvailable, take);
+      const fromReserved = params.allowReservedStock === false
+        ? 0
+        : Math.min(Math.max(0, lot.qtyReserved), take);
 
       pickUpdates.push({ lotId: lot.id, take, fromReserved });
 
@@ -598,7 +605,7 @@ export class InventoryLotService {
 
       for (const lot of onHandLots) {
         if (remaining <= 0) break;
-        const available = lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked;
+        const available = calculateLotPickableOnHand(lot, true);
         if (available <= 0) continue;
 
         const take = Math.min(available, remaining);
@@ -675,7 +682,7 @@ export class InventoryLotService {
     for (const lot of lots) {
       if (remaining <= 0) break;
 
-      const unreservedAvailable = Math.max(0, lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked);
+      const unreservedAvailable = calculateUnreservedLotOnHand(lot);
       const unreservedTake = Math.min(unreservedAvailable, remaining);
       const reservedTake = Math.min(
         Math.max(0, lot.qtyReserved),
@@ -745,7 +752,7 @@ export class InventoryLotService {
     for (const lot of lots) {
       if (remaining <= 0) break;
 
-      const available = lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked;
+      const available = calculateUnreservedLotOnHand(lot);
       if (available <= 0) continue;
 
       const take = Math.min(available, remaining);

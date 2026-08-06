@@ -6,6 +6,7 @@ import {
   channelFeeds,
   warehouseLocations,
 } from "@shared/schema";
+import { calculateFungibleAtpBase } from "./domain/inventory.domain";
 
 // ============================================================================
 // Types
@@ -123,11 +124,12 @@ class InventoryAtpService {
   /**
    * Calculate the fungible ATP pool for a product in base units.
    *
-   * Formula: ATP = totalOnHand - totalReserved - totalPicked - totalPacked
+   * Formula: ATP = totalOnHand - totalReserved. Picked and packed units have
+   * already left on-hand and remain visible only as workflow counters.
    */
   async getAtpBase(productId: number): Promise<number> {
     const totals = await this.getTotalBaseUnits(productId);
-    return totals.onHand - totals.reserved - totals.picked - totals.packed;
+    return calculateFungibleAtpBase(totals);
   }
 
   // --------------------------------------------------------------------------
@@ -202,7 +204,7 @@ class InventoryAtpService {
     const rows = await this.db.execute(sql`
       SELECT 
         il.product_variant_id,
-        SUM(GREATEST(il.variant_qty - il.reserved_qty - il.picked_qty - COALESCE(il.packed_qty, 0), 0)) as atp
+        SUM(GREATEST(il.variant_qty - il.reserved_qty, 0)) as atp
       FROM inventory.inventory_levels il
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.product_variant_id IN (${idList})
