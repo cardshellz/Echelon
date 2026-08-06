@@ -401,7 +401,7 @@ async function applyRepair(
           SET qty_on_hand = GREATEST(qty_on_hand, 0),
               qty_reserved = GREATEST(qty_reserved, 0),
               qty_picked = GREATEST(qty_picked, 0)
-          WHERE id = $1
+          WHERE id = $1::integer
         `, [lot.id]);
         lot.qtyOnHand = Math.max(0, lot.qtyOnHand);
         lot.qtyReserved = Math.max(0, lot.qtyReserved);
@@ -427,8 +427,8 @@ async function applyRepair(
         if (take <= 0) continue;
         await client.query(`
           UPDATE inventory.inventory_lots
-          SET qty_on_hand = qty_on_hand - $1
-          WHERE id = $2
+          SET qty_on_hand = qty_on_hand - $1::integer
+          WHERE id = $2::integer
         `, [take, lot.id]);
         lot.qtyOnHand -= take;
         remaining -= take;
@@ -531,15 +531,17 @@ async function applyRepair(
       `approval=${options.approval}`,
       `reason=${options.reason}`,
     ].join("; ");
-    await client.query(`
-      UPDATE inventory.inventory_lots
-      SET notes = CONCAT_WS(' | ', NULLIF(notes, ''), $1)
-      WHERE id = ANY($2::int[])
-    `, [auditNote, [...changedLotIds]]);
+    await client.query(APPEND_REPAIR_AUDIT_SQL, [auditNote, [...changedLotIds]]);
   }
 
   return stats;
 }
+
+export const APPEND_REPAIR_AUDIT_SQL = `
+  UPDATE inventory.inventory_lots
+  SET notes = CONCAT_WS(' | ', NULLIF(notes, ''), $1::text)
+  WHERE id = ANY($2::integer[])
+`;
 
 function printDryRun(cells: CellState[], hash: string, options: CliOptions): void {
   const summary = summarize(cells);
