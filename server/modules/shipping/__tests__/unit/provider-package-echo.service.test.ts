@@ -147,6 +147,11 @@ describe("ShipStation provider package echo", () => {
       shippingProviderLabelId: 10,
       linkInserted: false,
     });
+    const exactLegacyQuery = db.execute.mock.calls
+      .map(([query]: [any]) => queryText(query))
+      .find(isExactLegacyPackageQuery);
+    expect(exactLegacyQuery).toContain("CAST(");
+    expect(exactLegacyQuery).toContain("AS text)");
   });
   it("rejects a provider quantity that differs from its authoritative WMS shipment item", async () => {
     const db = {

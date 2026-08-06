@@ -176,7 +176,7 @@ async function inspectExactLegacyProviderPackageIdentity(
           ${`shipstation_shipment:${input.providerShipmentId}`}
         OR legacy_shipment.external_fulfillment_id = CONCAT(
           'shipstation_combined:',
-          ${String(input.providerShipmentId)},
+          CAST(${String(input.providerShipmentId)} AS text),
           ':order:',
           legacy_shipment.order_id::text
         )

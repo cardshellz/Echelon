@@ -41,6 +41,32 @@ const DEFAULT_WINDOW_DAYS = 30;
 const MAX_WINDOW_DAYS = 365;
 const STATEMENT_TIMEOUT = "8s";
 
+// A queued reship shell is created only while an unmapped ShipStation package
+// awaits classification. The open exception is the single operator work item;
+// showing both would present the same package in two buckets.
+const PAIRED_UNMAPPED_RESHIP_SHELL_EXCLUSION = sql`
+  NOT (
+    os.source = 'shipstation_reship_adopted'
+    AND os.review_reason = 'shipstation_reship_adoption_pending'
+    AND EXISTS (
+      SELECT 1
+      FROM wms.reconciliation_exceptions exception
+      WHERE exception.rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+        AND exception.status IN ('open', 'acknowledged')
+        AND COALESCE(
+          exception.wms_order_id,
+          (
+            SELECT authority.order_id
+            FROM wms.outbound_shipments authority
+            WHERE authority.id = exception.wms_shipment_id
+          )
+        ) = os.order_id
+        AND os.external_fulfillment_id =
+          'shipstation_shipment:' || BTRIM(exception.external_shipment_ref)
+    )
+  )
+`;
+
 export type FunnelStageKey =
   | "intake" | "oms_to_wms" | "wms_fulfill" | "engine_push" | "shipped" | "writeback";
 
@@ -611,10 +637,10 @@ const BASE_ISSUES: FlowIssueDef[] = [
     message: "Shipments flagged for review",
     why: "These shipments were held for a person to check before they go out. Open each one, resolve the flag, and release it.",
     remediation: "MANUAL_REVIEW", replaySafe: false,
-    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE requires_review = true AND status NOT IN ('cancelled','voided','shipped')`,
+    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments os WHERE os.requires_review = true AND os.status NOT IN ('cancelled','voided','shipped') AND ${PAIRED_UNMAPPED_RESHIP_SHELL_EXCLUSION}`,
     // Higher limit + reason-ordered: the drill-down rolls these up by review_reason
     // (categories first, expand to orders), so it must return the full set, not a top-50.
-    sample: () => sql`SELECT os.review_reason, os.id AS shipment_id, wo.order_number, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.requires_review = true AND os.status NOT IN ('cancelled','voided','shipped') ORDER BY os.review_reason, os.created_at DESC LIMIT 500`,
+    sample: () => sql`SELECT os.review_reason, os.id AS shipment_id, wo.order_number, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.requires_review = true AND os.status NOT IN ('cancelled','voided','shipped') AND ${PAIRED_UNMAPPED_RESHIP_SHELL_EXCLUSION} ORDER BY os.review_reason, os.created_at DESC LIMIT 500`,
   },
   {
     code: "SHIPMENT_ON_HOLD", kind: "stuck", stage: "wms_fulfill", severity: "warning",
