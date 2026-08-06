@@ -76,6 +76,39 @@ describe("product shipping policy", () => {
     expect(fallbackWeights).toEqual([907]);
   });
 
+  it("rates an exact decimal catalog weight at the aggregate whole-gram boundary", () => {
+    const fallbackWeights: number[] = [];
+    const result = evaluateProductRatePolicy({
+      destination: DESTINATION,
+      lines: [{
+        sku: "DECIMAL-WEIGHT",
+        productVariantId: 30,
+        quantity: 1,
+        unitWeightGrams: 907.18,
+        weightSource: "echelon_catalog",
+        unitPriceCents: 100,
+      }],
+      rules: [rule()],
+      defaultRateForWeightGrams: (grams) => {
+        fallbackWeights.push(grams);
+        return 999;
+      },
+    });
+
+    expect(result).toMatchObject({ ok: true, totalCents: 999 });
+    expect(fallbackWeights).toEqual([908]);
+  });
+
+  it("continues to reject non-finite physical weights", () => {
+    const result = evaluateProductRatePolicy({
+      destination: DESTINATION,
+      lines: [{ ...LINES[1], unitWeightGrams: Number.POSITIVE_INFINITY }],
+      rules: [rule()],
+      defaultRateForWeightGrams: () => 599,
+    });
+    expect(result).toMatchObject({ ok: false, code: "INVALID_INPUT" });
+  });
+
   it("blocks before calculating a customer charge", () => {
     const result = evaluateProductRatePolicy({
       destination: DESTINATION,
@@ -124,6 +157,30 @@ describe("product shipping policy", () => {
       defaultRateForWeightGrams: () => null,
     });
     expect(result).toMatchObject({ ok: true, totalCents: 798 });
+  });
+
+  it("ceil-normalizes exact decimal weights before per-item band selection", () => {
+    const result = evaluateProductRatePolicy({
+      destination: DESTINATION,
+      lines: [{
+        ...LINES[1],
+        quantity: 2,
+        unitWeightGrams: 500.01,
+        weightSource: "echelon_catalog",
+      }],
+      rules: [rule({
+        action: "fixed_band",
+        measurementScope: "each_item",
+        memberVariantIds: [20],
+        rateCents: null,
+        bands: [
+          { minMeasure: 0, maxMeasure: 500, rateCents: 399 },
+          { minMeasure: 501, maxMeasure: null, rateCents: 699 },
+        ],
+      })],
+      defaultRateForWeightGrams: () => null,
+    });
+    expect(result).toMatchObject({ ok: true, totalCents: 1_398 });
   });
 
   it("charges the base once and the additional amount for every later matching unit", () => {
@@ -306,6 +363,27 @@ describe("product shipping policy", () => {
       defaultRateForWeightGrams: () => null,
     });
     expect(result).toMatchObject({ ok: true, totalCents: 1_798 });
+  });
+
+  it("ceil-normalizes exact decimal weights before started-pound pricing", () => {
+    const result = evaluateProductRatePolicy({
+      destination: DESTINATION,
+      lines: [{
+        ...LINES[1],
+        quantity: 1,
+        unitWeightGrams: 453.59,
+        weightSource: "echelon_catalog",
+      }],
+      rules: [rule({
+        action: "base_plus_per_started_pound",
+        measurementScope: "each_item",
+        memberVariantIds: [20],
+        rateCents: 899,
+        perStartedPoundCents: 180,
+      })],
+      defaultRateForWeightGrams: () => null,
+    });
+    expect(result).toMatchObject({ ok: true, totalCents: 1_079 });
   });
 
   it("fails closed when a free-shipping threshold cannot read item value", () => {
