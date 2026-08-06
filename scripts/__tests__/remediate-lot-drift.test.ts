@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  APPEND_REPAIR_AUDIT_SQL,
   buildCells,
   fingerprint,
   isDrifting,
@@ -58,6 +59,11 @@ describe("lot drift remediation planning", () => {
     expect(REPAIR_LOT_INSERT_SQL).toContain("$6::bigint");
     expect(REPAIR_LOT_INSERT_SQL).toContain("$7::integer");
     expect(REPAIR_LOT_INSERT_SQL).toContain("$8::text");
+  });
+
+  it("types audit parameters passed through PostgreSQL variadic functions", () => {
+    expect(APPEND_REPAIR_AUDIT_SQL).toContain("$1::text");
+    expect(APPEND_REPAIR_AUDIT_SQL).toContain("$2::integer[]");
   });
 
   it("loads snapshots sequentially on a transaction client", async () => {
