@@ -332,7 +332,12 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         failed,
         operation.status,
         input.claim.executor,
-        input.evidence,
+        buildListingReplacementFailureEvidence({
+          errorCode: input.errorCode,
+          errorMessage: input.errorMessage,
+          recoveryContext: null,
+          evidence: input.evidence,
+        }),
       );
     });
   }
@@ -442,7 +447,13 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         failed,
         operation.status,
         input.claim.executor,
-        { compensationCompleted: true },
+        buildListingReplacementFailureEvidence({
+          errorCode: "MARKETPLACE_LISTING_REPLACEMENT_COMPENSATED",
+          errorMessage:
+            "Replacement failed and the source listing was restored safely.",
+          recoveryContext: operation.recovery_context,
+          evidence: { compensationCompleted: true },
+        }),
       );
     });
   }
@@ -480,16 +491,17 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         input.claim.executor,
         input.evidence,
       );
+      const recoveryContext = {
+        failedCompensationStepKey: input.claim.stepKey,
+        evidence: input.evidence,
+      };
       const manual = await updateOperation(client, operation, {
         status: "manual_recovery_required",
         phase: "compensate",
         completedAt: input.failedAt,
         errorCode: input.errorCode,
         errorMessage: input.errorMessage,
-        recoveryContext: {
-          failedCompensationStepKey: input.claim.stepKey,
-          evidence: input.evidence,
-        },
+        recoveryContext,
         clearLease: true,
         at: input.failedAt,
       });
@@ -498,7 +510,15 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         manual,
         operation.status,
         input.claim.executor,
-        { manualRecoveryRequired: true, failedStepKey: input.claim.stepKey },
+        buildListingReplacementFailureEvidence({
+          errorCode: input.errorCode,
+          errorMessage: input.errorMessage,
+          recoveryContext,
+          evidence: {
+            manualRecoveryRequired: true,
+            failedStepKey: input.claim.stepKey,
+          },
+        }),
       );
     });
   }
@@ -974,6 +994,22 @@ function requiredText(value: string | null, field: string): string {
     );
   return value;
 }
+export function buildListingReplacementFailureEvidence(input: {
+  readonly errorCode: string;
+  readonly errorMessage: string;
+  readonly recoveryContext: Readonly<Record<string, CanonicalJsonValue>> | null;
+  readonly evidence: Readonly<Record<string, CanonicalJsonValue>>;
+}): Record<string, CanonicalJsonValue> {
+  return {
+    ...input.evidence,
+    errorCode: input.errorCode,
+    errorMessage: input.errorMessage,
+    ...(input.recoveryContext === null
+      ? {}
+      : { recoveryContext: input.recoveryContext }),
+  };
+}
+
 function executionError(
   code: string,
   message: string,

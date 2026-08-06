@@ -107,7 +107,10 @@ function context(): ListingReplacementExecutionContext {
     targetProviderPublicationKey: null,
     targetExternalListingId: null,
     desiredStateHash: "b".repeat(64),
-    sourceMembers: [member(12, "ARM-ENV-SGL-C750", "offer-c750")],
+    sourceMembers: [
+      member(11, "ARM-ENV-SGL-C700", "offer-c700"),
+      member(13, "ARM-ENV-SGL-P50", "offer-p50"),
+    ],
     targetMembers: [
       member(12, "ARM-ENV-SGL-C750", null),
       member(13, "ARM-ENV-SGL-P50", null),
@@ -161,15 +164,12 @@ function makeHarness() {
         aspects: {},
         imageUrls: [],
         variesBy: { specifications: [] },
-        variantSKUs: [
-          "ARM-ENV-SGL-C700",
-          "ARM-ENV-SGL-C750",
-          "ARM-ENV-SGL-P50",
-        ],
+        variantSKUs: ["ARM-ENV-SGL-C700", "ARM-ENV-SGL-P50"],
       },
     ],
   ]);
   const offers = new Map<string, EbayReplacementOffer[]>([
+    ["ARM-ENV-SGL-C700", [offer("offer-c700", "ARM-ENV-SGL-C700")]],
     ["ARM-ENV-SGL-C750", [offer("offer-c750", "ARM-ENV-SGL-C750")]],
     ["ARM-ENV-SGL-P50", [offer("offer-p50", "ARM-ENV-SGL-P50")]],
   ]);

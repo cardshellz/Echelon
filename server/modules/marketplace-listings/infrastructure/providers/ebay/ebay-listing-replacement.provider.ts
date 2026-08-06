@@ -59,15 +59,16 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
   ): Promise<ListingReplacementStepSuccess> {
     validateContext(context, idempotencyKey);
     const client = await this.clients.forOwner(context.owner);
-    const members = included(context.targetMembers);
+    const targetMembers = included(context.targetMembers);
+    const sourceMembers = included(context.sourceMembers);
     const sourceKey = context.sourcePublication.providerPublicationKey;
     if (sourceKey) {
       const group = await requireGroup(client, sourceKey, "source");
-      assertGroupContains(group, members, false);
+      assertGroupContains(group, sourceMembers, false);
     }
     await requireListingState({
       client,
-      members: sourceKey ? members : included(context.sourceMembers),
+      members: sourceMembers,
       marketplaceId: context.owner.marketplaceId,
       expectedListingId: context.sourcePublication.externalListingId,
       expectedActive: true,
@@ -78,7 +79,7 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
         sourceListingId: context.sourcePublication.externalListingId,
         sourcePublicationKey: sourceKey,
         targetPublicationKey: targetGroupKey(context),
-        includedSkus: members.map((member) => member.skuSnapshot),
+        includedSkus: targetMembers.map((member) => member.skuSnapshot),
       },
     };
   }
@@ -90,9 +91,7 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
     validateContext(context, idempotencyKey);
     const client = await this.clients.forOwner(context.owner);
     const sourceKey = context.sourcePublication.providerPublicationKey;
-    const sourceMembers = sourceKey
-      ? included(context.targetMembers)
-      : included(context.sourceMembers);
+    const sourceMembers = included(context.sourceMembers);
     const state = await inspectListingState(
       client,
       sourceMembers,
@@ -149,7 +148,7 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
         }
       }
       const source = await requireGroup(client, sourceKey, "source");
-      assertGroupContains(source, members, false);
+      assertGroupContains(source, included(context.sourceMembers), false);
       await client.createOrReplaceInventoryItemGroup(targetKey, {
         ...source,
         variantSKUs: members.map((member) => member.skuSnapshot),
@@ -290,9 +289,7 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
     validateContext(context, idempotencyKey);
     const client = await this.clients.forOwner(context.owner);
     const sourceKey = context.sourcePublication.providerPublicationKey;
-    const members = sourceKey
-      ? included(context.targetMembers)
-      : included(context.sourceMembers);
+    const members = included(context.sourceMembers);
     const state = await inspectListingState(
       client,
       members,
