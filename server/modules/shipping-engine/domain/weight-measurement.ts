@@ -21,6 +21,21 @@ export function applyMinimumRateSelectionWeightGrams(
 }
 
 /**
+ * Convert one positive physical weight to the conservative whole-gram measure
+ * consumed by rate bands and started-pound pricing. Catalog precision remains
+ * intact until this rating boundary.
+ */
+export function normalizePhysicalWeightGramsForRating(
+  weightGrams: number,
+): number | null {
+  if (!Number.isFinite(weightGrams) || weightGrams <= 0) return null;
+  const roundedWeightGrams = Math.ceil(weightGrams);
+  return Number.isSafeInteger(roundedWeightGrams)
+    ? roundedWeightGrams
+    : null;
+}
+
+/**
  * Returns the lowest whole-gram total supported by integer-gram unit weights.
  *
  * Shopify and Echelon persist a unit weight rounded to the nearest gram. When
