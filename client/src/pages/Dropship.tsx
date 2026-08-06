@@ -211,6 +211,14 @@ import {
   type DropshipSystemReadinessCheck,
   type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
+import {
+  RETURN_POLICY_ANY_STORE_VALUE,
+  RETURN_POLICY_GLOBAL_VENDOR_VALUE,
+  buildReturnPolicyStoreOptions,
+  buildReturnPolicyVendorOptions,
+  returnPolicyScopeValueFromPicker,
+  returnPolicyScopeValueToPicker,
+} from "@/lib/dropship-return-policy-scope";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
@@ -1841,6 +1849,18 @@ function ReturnPoliciesTab() {
 
   const policiesUrl = useMemo(() => buildAdminReturnPoliciesUrl({ includeInactive: true }), []);
   const feesUrl = useMemo(() => buildAdminReturnFeesUrl({ includeInactive: true }), []);
+  const scopeVendorOptionsUrl = useMemo(() => buildAdminDogfoodReadinessUrl({
+    search: "",
+    status: "all",
+    platform: "all",
+    limit: 250,
+  }), []);
+  const scopeStoreConnectionsUrl = useMemo(() => buildAdminStoreConnectionsUrl({
+    search: "",
+    status: "all",
+    platform: "all",
+    limit: 250,
+  }), []);
   const policiesQuery = useQuery<DropshipAdminReturnPolicyListResponse>({
     queryKey: [policiesUrl],
     queryFn: () => fetchJson<DropshipAdminReturnPolicyListResponse>(policiesUrl),
@@ -1849,6 +1869,65 @@ function ReturnPoliciesTab() {
     queryKey: [feesUrl],
     queryFn: () => fetchJson<DropshipAdminReturnFeeListResponse>(feesUrl),
   });
+  const scopeVendorOptionsQuery = useQuery<DropshipDogfoodReadinessResponse>({
+    queryKey: [scopeVendorOptionsUrl, "return-policy-scope-vendors"],
+    queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(scopeVendorOptionsUrl),
+  });
+  const scopeStoreConnectionsQuery = useQuery<DropshipAdminStoreConnectionListResponse>({
+    queryKey: [scopeStoreConnectionsUrl, "return-policy-scope-store-connections"],
+    queryFn: () => fetchJson<DropshipAdminStoreConnectionListResponse>(scopeStoreConnectionsUrl),
+  });
+
+  const scopeVendorOptions = useMemo(
+    () => buildReturnPolicyVendorOptions(scopeVendorOptionsQuery.data?.items ?? []),
+    [scopeVendorOptionsQuery.data?.items],
+  );
+  const scopeStoreConnections = useMemo(
+    () => scopeStoreConnectionsQuery.data?.items ?? [],
+    [scopeStoreConnectionsQuery.data?.items],
+  );
+  const policyStoreOptions = useMemo(
+    () => buildReturnPolicyStoreOptions(scopeStoreConnections, policyForm.vendorId),
+    [scopeStoreConnections, policyForm.vendorId],
+  );
+  const feeStoreOptions = useMemo(
+    () => buildReturnPolicyStoreOptions(scopeStoreConnections, feeForm.vendorId),
+    [scopeStoreConnections, feeForm.vendorId],
+  );
+  const effectiveStoreOptions = useMemo(
+    () => buildReturnPolicyStoreOptions(scopeStoreConnections, effectiveVendorId),
+    [scopeStoreConnections, effectiveVendorId],
+  );
+  const scopeOptionsLoading =
+    scopeVendorOptionsQuery.isLoading || scopeVendorOptionsQuery.isFetching
+    || scopeStoreConnectionsQuery.isLoading || scopeStoreConnectionsQuery.isFetching;
+
+  function selectPolicyScopeVendor(value: string) {
+    const vendorId = returnPolicyScopeValueFromPicker(value);
+    setPolicyForm((current) => {
+      if (vendorId === current.vendorId) return current;
+      // Store connections belong to vendors: a store picked under a different
+      // vendor is no longer valid, so reset it when the vendor changes.
+      return { ...current, vendorId, storeConnectionId: "" };
+    });
+  }
+
+  function selectFeeScopeVendor(value: string) {
+    const vendorId = returnPolicyScopeValueFromPicker(value);
+    setFeeForm((current) => {
+      if (vendorId === current.vendorId) return current;
+      return { ...current, vendorId, storeConnectionId: "" };
+    });
+  }
+
+  function selectEffectiveScopeVendor(value: string) {
+    const vendorId = returnPolicyScopeValueFromPicker(value);
+    setEffectiveVendorId((current) => {
+      if (vendorId === current) return current;
+      setEffectiveStoreConnectionId("");
+      return vendorId;
+    });
+  }
 
   const effectiveVendor = effectiveVendorId.trim() ? Number(effectiveVendorId) : null;
   const effectiveStore = effectiveStoreConnectionId.trim() ? Number(effectiveStoreConnectionId) : null;
@@ -1989,11 +2068,14 @@ function ReturnPoliciesTab() {
 
   return (
     <div className="space-y-5">
-      {(policiesQuery.error || feesQuery.error || error) && (
+      {(policiesQuery.error || feesQuery.error || scopeVendorOptionsQuery.error || scopeStoreConnectionsQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(policiesQuery.error ?? feesQuery.error, "Unable to load return policies.")}
+            {error || queryErrorMessage(
+              policiesQuery.error ?? feesQuery.error ?? scopeVendorOptionsQuery.error ?? scopeStoreConnectionsQuery.error,
+              "Unable to load return policies.",
+            )}
           </AlertDescription>
         </Alert>
       )}
@@ -2036,17 +2118,28 @@ function ReturnPoliciesTab() {
                   value={policyForm.priority}
                   onChange={(value) => setPolicyForm((current) => ({ ...current, priority: value }))}
                 />
-                <ShippingInput
-                  label="Vendor id"
-                  placeholder="Blank = global/store scope"
-                  value={policyForm.vendorId}
-                  onChange={(value) => setPolicyForm((current) => ({ ...current, vendorId: value }))}
+                <SearchableOptionPicker
+                  label="Vendor"
+                  value={returnPolicyScopeValueToPicker(policyForm.vendorId, RETURN_POLICY_GLOBAL_VENDOR_VALUE)}
+                  options={scopeVendorOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder="Global (no vendor)"
+                  searchPlaceholder="Search vendor, email, or member..."
+                  emptyText="No dropship vendors found."
+                  onChange={selectPolicyScopeVendor}
                 />
-                <ShippingInput
-                  label="Store connection id"
-                  placeholder="Optional"
-                  value={policyForm.storeConnectionId}
-                  onChange={(value) => setPolicyForm((current) => ({ ...current, storeConnectionId: value }))}
+                <SearchableOptionPicker
+                  label="Store connection"
+                  value={returnPolicyScopeValueToPicker(policyForm.storeConnectionId, RETURN_POLICY_ANY_STORE_VALUE)}
+                  options={policyStoreOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder={policyForm.vendorId ? "Any store (vendor scope)" : "Global (no store)"}
+                  searchPlaceholder="Search store, platform, or vendor..."
+                  emptyText="No store connections found."
+                  onChange={(value) => setPolicyForm((current) => ({
+                    ...current,
+                    storeConnectionId: returnPolicyScopeValueFromPicker(value),
+                  }))}
                 />
               </div>
               <Button
@@ -2174,17 +2267,28 @@ function ReturnPoliciesTab() {
                   value={feeForm.priority}
                   onChange={(value) => setFeeForm((current) => ({ ...current, priority: value }))}
                 />
-                <ShippingInput
-                  label="Vendor id"
-                  placeholder="Blank = global/store scope"
-                  value={feeForm.vendorId}
-                  onChange={(value) => setFeeForm((current) => ({ ...current, vendorId: value }))}
+                <SearchableOptionPicker
+                  label="Vendor"
+                  value={returnPolicyScopeValueToPicker(feeForm.vendorId, RETURN_POLICY_GLOBAL_VENDOR_VALUE)}
+                  options={scopeVendorOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder="Global (no vendor)"
+                  searchPlaceholder="Search vendor, email, or member..."
+                  emptyText="No dropship vendors found."
+                  onChange={selectFeeScopeVendor}
                 />
-                <ShippingInput
-                  label="Store connection id"
-                  placeholder="Optional"
-                  value={feeForm.storeConnectionId}
-                  onChange={(value) => setFeeForm((current) => ({ ...current, storeConnectionId: value }))}
+                <SearchableOptionPicker
+                  label="Store connection"
+                  value={returnPolicyScopeValueToPicker(feeForm.storeConnectionId, RETURN_POLICY_ANY_STORE_VALUE)}
+                  options={feeStoreOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder={feeForm.vendorId ? "Any store (vendor scope)" : "Global (no store)"}
+                  searchPlaceholder="Search store, platform, or vendor..."
+                  emptyText="No store connections found."
+                  onChange={(value) => setFeeForm((current) => ({
+                    ...current,
+                    storeConnectionId: returnPolicyScopeValueFromPicker(value),
+                  }))}
                 />
               </div>
               <Button
@@ -2263,17 +2367,25 @@ function ReturnPoliciesTab() {
               detail="Resolve the window + fees that would apply for a vendor/store pair. Blank ids resolve the global policy."
             />
             <div className="mt-4 grid gap-3 md:grid-cols-3">
-              <ShippingInput
-                label="Vendor id"
-                placeholder="Blank = global"
-                value={effectiveVendorId}
-                onChange={setEffectiveVendorId}
+              <SearchableOptionPicker
+                label="Vendor"
+                value={returnPolicyScopeValueToPicker(effectiveVendorId, RETURN_POLICY_GLOBAL_VENDOR_VALUE)}
+                options={scopeVendorOptions}
+                isLoading={scopeOptionsLoading}
+                placeholder="Global (no vendor)"
+                searchPlaceholder="Search vendor, email, or member..."
+                emptyText="No dropship vendors found."
+                onChange={selectEffectiveScopeVendor}
               />
-              <ShippingInput
-                label="Store connection id"
-                placeholder="Blank = none"
-                value={effectiveStoreConnectionId}
-                onChange={setEffectiveStoreConnectionId}
+              <SearchableOptionPicker
+                label="Store connection"
+                value={returnPolicyScopeValueToPicker(effectiveStoreConnectionId, RETURN_POLICY_ANY_STORE_VALUE)}
+                options={effectiveStoreOptions}
+                isLoading={scopeOptionsLoading}
+                placeholder={effectiveVendorId ? "Any store (vendor scope)" : "Global (no store)"}
+                searchPlaceholder="Search store, platform, or vendor..."
+                emptyText="No store connections found."
+                onChange={(value) => setEffectiveStoreConnectionId(returnPolicyScopeValueFromPicker(value))}
               />
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Fault category</span>
