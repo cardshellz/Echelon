@@ -60,6 +60,9 @@ interface StepRow extends QueryResultRow {
   state_version: number;
   attempt_count: number;
   attempt_limit: number;
+  error_code: string | null;
+  error_message: string | null;
+  result_evidence: Record<string, CanonicalJsonValue> | null;
 }
 
 interface MemberRow extends QueryResultRow {
@@ -786,7 +789,7 @@ async function insertStepEvent(
       step.status,
       step.attempt_count,
       step.state_version,
-      JSON.stringify(evidence),
+      JSON.stringify(buildListingReplacementStepEventEvidence(step, evidence)),
     ],
   );
 }
@@ -993,6 +996,25 @@ function requiredText(value: string | null, field: string): string {
       { field },
     );
   return value;
+}
+export function buildListingReplacementStepEventEvidence(
+  step: Pick<
+    StepRow,
+    "status" | "error_code" | "error_message" | "result_evidence"
+  >,
+  evidence: Readonly<Record<string, CanonicalJsonValue>>,
+): Record<string, CanonicalJsonValue> {
+  if (step.status === "failed") {
+    return {
+      ...evidence,
+      errorCode: requiredText(step.error_code, "step.error_code"),
+      errorMessage: requiredText(step.error_message, "step.error_message"),
+    };
+  }
+  if (step.status === "succeeded") {
+    return { ...evidence, resultEvidence: step.result_evidence };
+  }
+  return { ...evidence };
 }
 export function buildListingReplacementFailureEvidence(input: {
   readonly errorCode: string;

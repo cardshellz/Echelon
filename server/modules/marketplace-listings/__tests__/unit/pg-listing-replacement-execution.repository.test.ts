@@ -2,9 +2,47 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   buildListingReplacementFailureEvidence,
+  buildListingReplacementStepEventEvidence,
   PgMarketplaceListingReplacementExecutionRepository,
 } from "../../infrastructure/pg-listing-replacement-execution.repository";
 
+describe("listing replacement step audit evidence", () => {
+  it("preserves exact error fields for failed steps", () => {
+    expect(
+      buildListingReplacementStepEventEvidence(
+        {
+          status: "failed",
+          error_code: "MARKETPLACE_LISTING_REPLACEMENT_LEASE_EXPIRED",
+          error_message: "The previous executor lease expired.",
+          result_evidence: null,
+        },
+        { recoveredExpiredLease: true },
+      ),
+    ).toEqual({
+      recoveredExpiredLease: true,
+      errorCode: "MARKETPLACE_LISTING_REPLACEMENT_LEASE_EXPIRED",
+      errorMessage: "The previous executor lease expired.",
+    });
+  });
+
+  it("preserves exact result evidence for succeeded steps", () => {
+    const resultEvidence = { sourceListingId: "source-listing" };
+    expect(
+      buildListingReplacementStepEventEvidence(
+        {
+          status: "succeeded",
+          error_code: null,
+          error_message: null,
+          result_evidence: resultEvidence,
+        },
+        resultEvidence,
+      ),
+    ).toEqual({
+      sourceListingId: "source-listing",
+      resultEvidence,
+    });
+  });
+});
 describe("listing replacement failure audit evidence", () => {
   it("includes terminal error fields and exact recovery context", () => {
     const recoveryContext = { failedStepKey: "publish.create_target" };
