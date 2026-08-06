@@ -291,7 +291,10 @@ function assertActiveOperationMatchesPlan(
   plan: ListingReplacementPlan,
 ): void {
   if (
-    active.source_publication_id === plan.sourcePublication.publicationId &&
+    toSafeInteger(
+      active.source_publication_id,
+      "operation.source_publication_id",
+    ) === plan.sourcePublication.publicationId &&
     active.desired_state_hash === plan.desiredStateHash
   )
     return;
