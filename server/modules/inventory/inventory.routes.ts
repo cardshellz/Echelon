@@ -2292,7 +2292,7 @@ export function registerInventoryRoutes(app: Express) {
         variantQty: row.variant_qty,
         reservedQty: row.reserved_qty,
         pickedQty: row.picked_qty,
-        available: row.variant_qty - row.reserved_qty - row.picked_qty,
+        available: row.variant_qty - row.reserved_qty,
       }));
       
       res.json(locations);

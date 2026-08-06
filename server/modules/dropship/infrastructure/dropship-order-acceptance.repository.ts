@@ -642,7 +642,7 @@ async function lockInventoryLevelsWithClient(
      WHERE il.product_variant_id = ANY($1::int[])
        AND wl.warehouse_id = $2
      ORDER BY il.product_variant_id ASC,
-              (il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty) DESC,
+              (il.variant_qty - il.reserved_qty) DESC,
               il.id ASC
      FOR UPDATE`,
     [input.productVariantIds, input.warehouseId],
@@ -1257,7 +1257,9 @@ function summarizeInventoryAvailability(
 }
 
 function inventoryLevelAvailableQty(level: InventoryLevelRow): number {
-  return Math.max(0, level.variant_qty - level.reserved_qty - level.picked_qty - level.packed_qty);
+  // Picking already removes units from variant_qty; picked/packed are workflow
+  // counters and must not consume the same physical units a second time.
+  return Math.max(0, level.variant_qty - level.reserved_qty);
 }
 
 function aggregatePlanQuantityByVariant(
