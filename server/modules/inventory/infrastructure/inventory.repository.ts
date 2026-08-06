@@ -924,7 +924,7 @@ export function createInventoryMethods(
         il.variant_qty,
         il.reserved_qty,
         il.picked_qty,
-        (il.variant_qty - il.reserved_qty - il.picked_qty) as available_qty
+        (il.variant_qty - il.reserved_qty) as available_qty
       FROM inventory.inventory_levels il
       JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
       LEFT JOIN catalog.products p ON pv.product_id = p.id
