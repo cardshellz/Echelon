@@ -139,9 +139,11 @@ function cellKey(productVariantId: number, warehouseLocationId: number): string 
   return `${productVariantId}:${warehouseLocationId}`;
 }
 
-async function loadSnapshot(client: pg.Pool | pg.PoolClient): Promise<Snapshot> {
-  const [levelsResult, lotsResult, costsResult] = await Promise.all([
-    client.query(`
+export async function loadSnapshot(client: pg.Pool | pg.PoolClient): Promise<Snapshot> {
+  // A PoolClient represents one PostgreSQL connection and cannot execute
+  // concurrent queries safely. Keep these reads sequential because apply mode
+  // uses a locked transaction on a single client.
+  const levelsResult = await client.query(`
       SELECT id,
              product_variant_id AS "productVariantId",
              warehouse_location_id AS "warehouseLocationId",
@@ -150,8 +152,8 @@ async function loadSnapshot(client: pg.Pool | pg.PoolClient): Promise<Snapshot> 
              picked_qty AS "qtyPicked"
       FROM inventory.inventory_levels
       ORDER BY product_variant_id, warehouse_location_id
-    `),
-    client.query(`
+    `);
+  const lotsResult = await client.query(`
       SELECT id,
              lot_number AS "lotNumber",
              product_variant_id AS "productVariantId",
@@ -166,13 +168,12 @@ async function loadSnapshot(client: pg.Pool | pg.PoolClient): Promise<Snapshot> 
              notes
       FROM inventory.inventory_lots
       ORDER BY product_variant_id, warehouse_location_id, received_at, id
-    `),
-    client.query(`
+    `);
+  const costsResult = await client.query(`
       SELECT id,
              COALESCE(NULLIF(avg_cost_cents, 0), NULLIF(last_cost_cents, 0), 0)::bigint AS "costCents"
       FROM catalog.product_variants
-    `),
-  ]);
+    `);
 
   const levels = levelsResult.rows.map((row) => ({
     id: Number(row.id),
@@ -331,6 +332,25 @@ export function summarize(cells: CellState[]) {
   };
 }
 
+export const REPAIR_LOT_INSERT_SQL = `
+  INSERT INTO inventory.inventory_lots (
+    lot_number, product_variant_id, warehouse_location_id, received_at,
+    qty_on_hand, qty_received, qty_reserved, qty_picked,
+    unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
+    landed_cost_cents, total_unit_cost_cents,
+    unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
+    landed_cost_mills, total_unit_cost_mills,
+    cost_source, cost_provisional, status, notes
+  ) VALUES (
+    $1::text, $2::integer, $3::integer, NOW(),
+    $4::integer, $4::integer, 0, 0,
+    $5::integer, $5::integer, 0, 0, $5::integer,
+    $6::bigint, $6::bigint, 0, 0, $6::bigint,
+    'legacy', $7::integer, 'active', $8::text
+  )
+  RETURNING id
+`;
+
 async function insertRepairLot(
   client: pg.PoolClient,
   cell: CellState,
@@ -339,24 +359,7 @@ async function insertRepairLot(
 ): Promise<number> {
   const costCents = cell.costCents;
   const costMills = costCents * 100;
-  const result = await client.query(`
-    INSERT INTO inventory.inventory_lots (
-      lot_number, product_variant_id, warehouse_location_id, received_at,
-      qty_on_hand, qty_received, qty_reserved, qty_picked,
-      unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
-      landed_cost_cents, total_unit_cost_cents,
-      unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
-      landed_cost_mills, total_unit_cost_mills,
-      cost_source, cost_provisional, status, notes
-    ) VALUES (
-      $1, $2, $3, NOW(),
-      $4, $4, 0, 0,
-      $5, $5, 0, 0, $5,
-      $6, $6, 0, 0, $6,
-      'legacy', $7, 'active', $8
-    )
-    RETURNING id
-  `, [
+  const result = await client.query(REPAIR_LOT_INSERT_SQL, [
     `LOT-RECON-${runId.slice(0, 8)}-${cell.productVariantId}-${cell.warehouseLocationId}`,
     cell.productVariantId,
     cell.warehouseLocationId,

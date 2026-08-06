@@ -3,6 +3,8 @@ import {
   buildCells,
   fingerprint,
   isDrifting,
+  loadSnapshot,
+  REPAIR_LOT_INSERT_SQL,
   summarize,
   validateSnapshot,
   type Snapshot,
@@ -50,6 +52,32 @@ function makeSnapshot(): Snapshot {
 }
 
 describe("lot drift remediation planning", () => {
+  it("types every repair-lot parameter for PostgreSQL", () => {
+    expect(REPAIR_LOT_INSERT_SQL).toContain("$1::text");
+    expect(REPAIR_LOT_INSERT_SQL).toContain("$2::integer");
+    expect(REPAIR_LOT_INSERT_SQL).toContain("$6::bigint");
+    expect(REPAIR_LOT_INSERT_SQL).toContain("$7::integer");
+    expect(REPAIR_LOT_INSERT_SQL).toContain("$8::text");
+  });
+
+  it("loads snapshots sequentially on a transaction client", async () => {
+    let activeQueries = 0;
+    let maxActiveQueries = 0;
+    const client = {
+      query: async () => {
+        activeQueries += 1;
+        maxActiveQueries = Math.max(maxActiveQueries, activeQueries);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        activeQueries -= 1;
+        return { rows: [] };
+      },
+    } as unknown as Parameters<typeof loadSnapshot>[0];
+
+    await loadSnapshot(client);
+
+    expect(maxActiveQueries).toBe(1);
+  });
+
   it("clamps negative projection buckets before measuring repair quantities", () => {
     const snapshot = makeSnapshot();
     const cells = buildCells(snapshot);
