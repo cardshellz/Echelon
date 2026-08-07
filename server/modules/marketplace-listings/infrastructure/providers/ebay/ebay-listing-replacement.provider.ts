@@ -61,9 +61,23 @@ export interface EbayListingReplacementClientResolver {
 }
 
 const ACTIVE_OFFER_STATUSES = new Set(["ACTIVE", "PUBLISHED"]);
+const GROUP_REASSIGNMENT_DELAYS_MS = [250, 750, 1_500] as const;
+
+export interface EbayListingReplacementConsistencyPolicy {
+  sleep(delayMs: number): Promise<void>;
+}
+
+const DEFAULT_CONSISTENCY_POLICY: EbayListingReplacementConsistencyPolicy = {
+  sleep: async (delayMs) =>
+    await new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
+};
 
 export class EbayMarketplaceListingReplacementProvider implements MarketplaceListingReplacementProvider {
-  constructor(private readonly clients: EbayListingReplacementClientResolver) {}
+  constructor(
+    private readonly clients: EbayListingReplacementClientResolver,
+    private readonly consistency: EbayListingReplacementConsistencyPolicy =
+      DEFAULT_CONSISTENCY_POLICY,
+  ) {}
 
   async preflight(
     context: ListingReplacementExecutionContext,
@@ -167,7 +181,13 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
       const snapshot = requireSourceGroupSnapshot(context);
       const target = await buildTargetGroup(client, snapshot, members);
       await client.deleteInventoryItemGroup(sourceKey);
-      await client.createOrReplaceInventoryItemGroup(targetKey, target);
+      await createTargetGroupAfterSourceDeletion({
+        client,
+        sourceKey,
+        targetKey,
+        target,
+        consistency: this.consistency,
+      });
       const published = await client.publishOfferByInventoryItemGroup(
         targetKey,
         context.owner.marketplaceId,
@@ -266,6 +286,21 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
     validateContext(context, idempotencyKey);
     const client = await this.clients.forOwner(context.owner);
     const members = included(context.targetMembers);
+    const targetKey =
+      context.targetProviderPublicationKey ?? targetGroupKey(context);
+    if (
+      context.sourcePublication.providerPublicationKey &&
+      !(await client.getInventoryItemGroup(targetKey))
+    ) {
+      return {
+        evidence: {
+          targetNotSellable: true,
+          alreadyNotSellable: true,
+          targetGroupAbsent: true,
+          withdrawnOfferIds: [],
+        },
+      };
+    }
     const listingId = normalizedText(context.targetExternalListingId);
     const state = listingId
       ? await inspectListingState(
@@ -280,8 +315,6 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
           context.owner.marketplaceId,
         );
     if (state.activeOfferIds.length > 0) {
-      const targetKey =
-        context.targetProviderPublicationKey ?? targetGroupKey(context);
       if (context.sourcePublication.providerPublicationKey) {
         await client.withdrawOfferByInventoryItemGroup(
           targetKey,
@@ -292,12 +325,7 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
           await client.withdrawOffer(offerId);
       }
     }
-    const targetKey =
-      context.targetProviderPublicationKey ?? targetGroupKey(context);
-    if (
-      context.sourcePublication.providerPublicationKey &&
-      (await client.getInventoryItemGroup(targetKey))
-    ) {
+    if (context.sourcePublication.providerPublicationKey) {
       await client.deleteInventoryItemGroup(targetKey);
     }
     return {
@@ -401,6 +429,39 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
       },
     };
   }
+}
+
+async function createTargetGroupAfterSourceDeletion(input: {
+  readonly client: EbayListingReplacementClient;
+  readonly sourceKey: string;
+  readonly targetKey: string;
+  readonly target: EbayReplacementItemGroup;
+  readonly consistency: EbayListingReplacementConsistencyPolicy;
+}): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await input.client.createOrReplaceInventoryItemGroup(
+        input.targetKey,
+        input.target,
+      );
+      return;
+    } catch (error: unknown) {
+      const delayMs = GROUP_REASSIGNMENT_DELAYS_MS[attempt];
+      if (
+        delayMs === undefined ||
+        !isSkuStillAssignedError(error) ||
+        (await input.client.getInventoryItemGroup(input.sourceKey)) !== null
+      ) {
+        throw error;
+      }
+      await input.consistency.sleep(delayMs);
+    }
+  }
+}
+
+function isSkuStillAssignedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('"errorId":25703');
 }
 
 async function buildTargetGroup(
