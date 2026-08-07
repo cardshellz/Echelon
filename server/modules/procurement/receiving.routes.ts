@@ -401,4 +401,92 @@ export function registerReceivingRoutes(app: Express) {
       res.status(500).json({ error: "Failed to void zero-post receiving order" });
     }
   });
+
+  // ===== RECEIPT REVERSALS (Spec D) =====
+  //
+  // Posted (closed) receipts are immutable; corrections happen via reversal.
+  // Elevated gate: purchasing:approve (same as PO void — a financial
+  // correction permission). Idempotency-Key header is required so a retried
+  // reversal cannot double-apply.
+
+  app.post(
+    "/api/procurement/receiving-lines/:id/reverse",
+    requirePermission("purchasing", "approve"),
+    requireIdempotency(),
+    async (req, res) => {
+      try {
+        const { receiptReversal } = req.app.locals.services;
+        const headerKey = req.headers["idempotency-key"] || req.headers["x-idempotency-key"];
+        const result = await receiptReversal.reverseReceivingLine({
+          receivingLineId: Number(req.params.id),
+          qty: Number(req.body?.qty),
+          reason: String(req.body?.reason ?? ""),
+          idempotencyKey: typeof headerKey === "string" ? headerKey : String(req.body?.idempotencyKey ?? ""),
+          allowNegative: req.body?.allowNegative === true,
+          userId: req.session.user?.id ?? null,
+        });
+        res.json(result);
+      } catch (error: any) {
+        if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
+        console.error("[Receiving] Error reversing receiving line:", error);
+        res.status(500).json({ error: "Failed to reverse receiving line" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/procurement/receiving-orders/:id/reverse",
+    requirePermission("purchasing", "approve"),
+    requireIdempotency(),
+    async (req, res) => {
+      try {
+        const { receiptReversal } = req.app.locals.services;
+        const headerKey = req.headers["idempotency-key"] || req.headers["x-idempotency-key"];
+        const result = await receiptReversal.reverseReceivingOrder({
+          receivingOrderId: Number(req.params.id),
+          reason: String(req.body?.reason ?? ""),
+          idempotencyKey: typeof headerKey === "string" ? headerKey : String(req.body?.idempotencyKey ?? ""),
+          allowNegative: req.body?.allowNegative === true,
+          userId: req.session.user?.id ?? null,
+        });
+        res.json(result);
+      } catch (error: any) {
+        if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
+        console.error("[Receiving] Error reversing receiving order:", error);
+        res.status(500).json({ error: "Failed to reverse receiving order" });
+      }
+    },
+  );
+
+  app.get(
+    "/api/procurement/receiving-orders/:id/reversals",
+    requireAuth,
+    async (req, res) => {
+      try {
+        const { receiptReversal } = req.app.locals.services;
+        const reversals = await receiptReversal.getReversalsForOrder(Number(req.params.id));
+        res.json(reversals);
+      } catch (error: any) {
+        console.error("[Receiving] Error fetching reversals:", error);
+        res.status(500).json({ error: "Failed to fetch reversals" });
+      }
+    },
+  );
+
+  // Receive-time validation warnings (Spec D, Part 2). Preview for the
+  // receive UI; the close path persists the same warnings as PO exceptions.
+  app.get(
+    "/api/procurement/receiving-orders/:id/validation-warnings",
+    requireAuth,
+    async (req, res) => {
+      try {
+        const { receiveValidation } = req.app.locals.services;
+        const warnings = await receiveValidation.evaluateOrder(Number(req.params.id));
+        res.json(warnings);
+      } catch (error: any) {
+        console.error("[Receiving] Error evaluating validation warnings:", error);
+        res.status(500).json({ error: "Failed to evaluate validation warnings" });
+      }
+    },
+  );
 }

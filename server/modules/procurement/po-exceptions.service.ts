@@ -125,6 +125,70 @@ export async function recordReceivingReconciliationFailure(
   });
 }
 
+// ─── Receive-time validation warnings (Spec D, Part 2) ─────────────────────
+//
+// The receiving close path evaluates receive-validation.service.ts detectors
+// and reports each warning here. Warnings map to receive_* exception kinds
+// (migration 187 extends the CHECK). Payload-hash dedup means re-closing or
+// re-evaluating the same receipt never double-logs the same warning.
+
+export interface ReceiveValidationWarningInput {
+  kind: string;
+  severity: "warn" | "error";
+  receivingLineId: number;
+  purchaseOrderLineId?: number;
+  title: string;
+  detail: string;
+  payload: Record<string, unknown>;
+}
+
+const RECEIVE_WARNING_KIND_TO_EXCEPTION_KIND: Record<string, ExceptionKind> = {
+  uom_disagreement: "receive_uom_disagreement",
+  base_unit_pack_conflict: "receive_base_unit_pack_conflict",
+  cost_variance_soft: "receive_cost_variance_soft",
+  cost_variance_hard: "receive_cost_variance_hard",
+  variant_base_unit_misconfig: "receive_variant_base_unit_misconfig",
+  variant_missing_parent: "receive_variant_missing_parent",
+};
+
+export async function recordReceiveValidationWarnings(input: {
+  receivingOrderId: number;
+  purchaseOrderId: number | null;
+  warnings: ReceiveValidationWarningInput[];
+  userId?: string | null;
+}): Promise<void> {
+  // Warnings are PO-scoped exceptions; without a PO there is nowhere to
+  // persist them (blind receipts have no PO to attach an exception to).
+  // The UI preview endpoint still surfaces them live.
+  if (!input.purchaseOrderId) return;
+
+  for (const warning of input.warnings) {
+    const kind = RECEIVE_WARNING_KIND_TO_EXCEPTION_KIND[warning.kind];
+    if (!kind) continue;
+    try {
+      await upsertException({
+        poId: input.purchaseOrderId,
+        kind,
+        severity: warning.severity,
+        title: warning.title,
+        message: warning.detail,
+        payload: {
+          ...warning.payload,
+          receivingOrderId: input.receivingOrderId,
+          receivingLineId: warning.receivingLineId,
+        },
+        detectedBy: input.userId ?? "system",
+      });
+    } catch (error) {
+      // Warning persistence must never fail the receiving close.
+      console.warn(
+        `[po-exceptions] Failed to persist receive warning ${warning.kind} for PO ${input.purchaseOrderId}:`,
+        error,
+      );
+    }
+  }
+}
+
 /**
  * Idempotent insert/update for exception detection.
  *

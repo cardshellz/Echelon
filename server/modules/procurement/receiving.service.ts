@@ -107,6 +107,36 @@ interface ApprovedInvoiceCostReconciler {
   ): Promise<unknown>;
 }
 
+// Spec D, Part 2: receive-time validation warnings. Evaluated after a
+// successful close; the reporter persists them (PO exceptions pattern).
+// Evaluation failures must never fail the close — warnings are advisory.
+export interface ReceiveWarningEvaluator {
+  evaluateOrder(receivingOrderId: number): Promise<Array<{
+    kind: string;
+    severity: "warn" | "error";
+    receivingLineId: number;
+    purchaseOrderLineId?: number;
+    title: string;
+    detail: string;
+    payload: Record<string, unknown>;
+  }>>;
+}
+
+export type ReceiveWarningReporter = (input: {
+  receivingOrderId: number;
+  purchaseOrderId: number | null;
+  warnings: Array<{
+    kind: string;
+    severity: "warn" | "error";
+    receivingLineId: number;
+    purchaseOrderLineId?: number;
+    title: string;
+    detail: string;
+    payload: Record<string, unknown>;
+  }>;
+  userId?: string | null;
+}) => Promise<unknown>;
+
 interface Storage {
   // Receiving orders
   getReceivingOrderById(id: number, tx?: any): Promise<any>;
@@ -410,6 +440,8 @@ export class ReceivingService {
     private shipmentTracking: ShipmentTracking | null = null,
     private reconciliationFailureReporter: ReceivingReconciliationFailureReporter | null = null,
     private approvedInvoiceCostReconciler: ApprovedInvoiceCostReconciler | null = null,
+    private receiveWarningEvaluator: ReceiveWarningEvaluator | null = null,
+    private receiveWarningReporter: ReceiveWarningReporter | null = null,
   ) {}
 
   private async lockReceivingOrder(tx: any, orderId: number): Promise<any> {
@@ -1344,6 +1376,27 @@ export class ReceivingService {
     const closedLines = await this.storage.getReceivingLines(orderId);
     const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, updated, closedLines, userId);
 
+    // Spec D, Part 2: receive-time validation warnings. Advisory only —
+    // evaluation or persistence failures must never fail the close.
+    if (this.receiveWarningEvaluator && this.receiveWarningReporter) {
+      try {
+        const warnings = await this.receiveWarningEvaluator.evaluateOrder(orderId);
+        if (warnings.length > 0) {
+          await this.receiveWarningReporter({
+            receivingOrderId: orderId,
+            purchaseOrderId: updated.purchaseOrderId ?? null,
+            warnings,
+            userId,
+          });
+        }
+      } catch (warningError) {
+        console.warn(
+          `[Receiving] Validation warning evaluation failed for receiving order ${orderId}:`,
+          warningError,
+        );
+      }
+    }
+
     return this.buildCloseResult(
       updated,
       closedLines,
@@ -1764,6 +1817,8 @@ export function createReceivingService(
   shipmentTracking?: ShipmentTracking | null,
   reconciliationFailureReporter?: ReceivingReconciliationFailureReporter | null,
   approvedInvoiceCostReconciler?: ApprovedInvoiceCostReconciler | null,
+  receiveWarningEvaluator?: ReceiveWarningEvaluator | null,
+  receiveWarningReporter?: ReceiveWarningReporter | null,
 ) {
   return new ReceivingService(
     db,
@@ -1774,5 +1829,7 @@ export function createReceivingService(
     shipmentTracking ?? null,
     reconciliationFailureReporter ?? null,
     approvedInvoiceCostReconciler ?? null,
+    receiveWarningEvaluator ?? null,
+    receiveWarningReporter ?? null,
   );
 }

@@ -44,6 +44,8 @@ import { createPickingService } from "../modules/orders/picking.use-cases";
 import { createOrderCombiningService } from "../modules/orders/combining.service";
 import { createOperationsDashboardService } from "../modules/orders/operations-dashboard.service";
 import { createReceivingService } from "../modules/procurement/receiving.service";
+import { createReceiptReversalService } from "../modules/procurement/receipt-reversal.service";
+import { createReceiveValidationService } from "../modules/procurement/receive-validation.service";
 import { createProductImportService } from "../modules/catalog/product-import.service";
 import { createChannelProductPushService } from "../modules/channels/product-push.service";
 import { createSyncSettingsService } from "../modules/channels/sync-settings.service";
@@ -53,7 +55,7 @@ import { createVendorService } from "../modules/procurement/vendor.service";
 import { createRecommendationPoHandoffService } from "../modules/procurement/recommendation-po-handoff.service";
 import { createDrizzleRecommendationPoHandoffRepository } from "../modules/procurement/recommendation-po-handoff.repository";
 import { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
-import { recordReceivingReconciliationFailure } from "../modules/procurement/po-exceptions.service";
+import { recordReceivingReconciliationFailure, recordReceiveValidationWarnings } from "../modules/procurement/po-exceptions.service";
 import { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } from "../modules/procurement/ap-ledger.service";
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
@@ -176,6 +178,13 @@ export function createServices(db: any) {
     ...catalogStorage,
   }, cogs);
 
+  // Receive-time validation warnings (Spec D, Part 2) — pure detectors fed by
+  // live variant/PO-line facts; threshold from echelon_settings. Created
+  // before `receiving` so the close path can evaluate + persist warnings.
+  const receiveValidation = createReceiveValidationService(db, (key) =>
+    warehouseStorage.getSetting(key),
+  );
+
   // Depends on inventoryCore + channelSync + multi-module storage + purchasing + shipmentTracking
   const receiving = createReceivingService(db, inventoryCore, channelSync, {
     ...procurementStorage,
@@ -199,7 +208,13 @@ export function createServices(db: any) {
       tx,
       actorId,
     ),
+  }, receiveValidation, async (input) => {
+    await recordReceiveValidationWarnings(input);
   });
+
+  // Receipt reversal (Spec D) — compensating transactions for posted receipts.
+  // Inventory writes go through the inventory module's public API (P2.1).
+  const receiptReversal = createReceiptReversalService(db, inventoryCore);
 
   // Standalone (imports from Shopify)
   const productImport = createProductImportService();
@@ -410,6 +425,8 @@ export function createServices(db: any) {
     cycleCount,
     operationsDashboard,
     receiving,
+    receiptReversal,
+    receiveValidation,
     productImport,
     channelProductPush,
     binAssignment,

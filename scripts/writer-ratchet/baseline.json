@@ -576,6 +576,9 @@
   "procurement.purchasing_recommendation_po_handoffs": [
     "modules/procurement"
   ],
+  "procurement.receipt_reversals": [
+    "modules/procurement"
+  ],
   "procurement.receiving_lines": [
     "modules/procurement"
   ],
