@@ -77,12 +77,6 @@ export interface TerminalListingReplacementOperation {
 }
 
 export interface MarketplaceListingReplacementExecutionRepository {
-  resumeManualRecovery(input: {
-    readonly operationId: number;
-    readonly expectedOwner: ListingOwnerRef;
-    readonly actor: ListingActor;
-    readonly resumedAt: Date;
-  }): Promise<void>;
   claimNextStep(input: {
     readonly operationId: number;
     readonly expectedOwner: ListingOwnerRef;
@@ -90,6 +84,7 @@ export interface MarketplaceListingReplacementExecutionRepository {
     readonly leaseToken: string | null;
     readonly now: Date;
     readonly leaseDurationMs: number;
+    readonly recoveryAuthorized: boolean;
   }): Promise<
     ClaimedListingReplacementStep | TerminalListingReplacementOperation
   >;
