@@ -92,6 +92,9 @@ const createReturnPolicyVersionInputSchema = z.object({
   storeConnectionId: positiveIdSchema.nullable().optional(),
   priority: z.number().int().min(0).max(1_000_000).default(0),
   effectiveFrom: z.coerce.date().optional(),
+  // Edit-as-new-version: when set, the referenced row is deactivated in the
+  // same transaction (replacement semantics even if the scope key changed).
+  supersedesPolicyId: positiveIdSchema.optional(),
   idempotencyKey: z.string().trim().min(8).max(200),
   actor: z.object({
     actorType: z.enum(["admin", "system"]),
@@ -117,6 +120,8 @@ const createReturnFeeVersionInputSchema = z.object({
   storeConnectionId: positiveIdSchema.nullable().optional(),
   priority: z.number().int().min(0).max(1_000_000).default(0),
   effectiveFrom: z.coerce.date().optional(),
+  // Edit-as-new-version: same replacement semantics as supersedesPolicyId.
+  supersedesFeeId: positiveIdSchema.optional(),
   idempotencyKey: z.string().trim().min(8).max(200),
   actor: z.object({
     actorType: z.enum(["admin", "system"]),
@@ -204,7 +209,8 @@ export interface DropshipReturnPolicyRepository {
   listPolicies(input: z.infer<typeof listReturnPoliciesInputSchema>): Promise<DropshipReturnPolicyVersionRecord[]>;
   listFees(input: z.infer<typeof listReturnFeesInputSchema>): Promise<DropshipReturnFeeScheduleRecord[]>;
   createPolicyVersion(
-    input: Omit<CreateReturnPolicyVersionInput, "idempotencyKey" | "actor"> & {
+    input: Omit<CreateReturnPolicyVersionInput, "idempotencyKey" | "actor" | "supersedesPolicyId"> & {
+      supersedesPolicyId: number | null;
       effectiveFrom: Date;
       idempotencyKey: string;
       actor: { actorType: "admin" | "system"; actorId?: string };
@@ -212,7 +218,8 @@ export interface DropshipReturnPolicyRepository {
     },
   ): Promise<DropshipReturnPolicyMutationResult>;
   createFeeVersion(
-    input: Omit<CreateReturnFeeVersionInput, "idempotencyKey" | "actor"> & {
+    input: Omit<CreateReturnFeeVersionInput, "idempotencyKey" | "actor" | "supersedesFeeId"> & {
+      supersedesFeeId: number | null;
       effectiveFrom: Date;
       idempotencyKey: string;
       actor: { actorType: "admin" | "system"; actorId?: string };
@@ -295,6 +302,7 @@ export class DropshipReturnPolicyService {
       storeConnectionId: parsed.storeConnectionId ?? null,
       priority: parsed.priority,
       effectiveFrom: parsed.effectiveFrom ?? now,
+      supersedesPolicyId: parsed.supersedesPolicyId ?? null,
       idempotencyKey: parsed.idempotencyKey,
       actor: parsed.actor,
       now,
@@ -328,6 +336,7 @@ export class DropshipReturnPolicyService {
       storeConnectionId: parsed.storeConnectionId ?? null,
       priority: parsed.priority,
       effectiveFrom: parsed.effectiveFrom ?? now,
+      supersedesFeeId: parsed.supersedesFeeId ?? null,
       idempotencyKey: parsed.idempotencyKey,
       actor: parsed.actor,
       now,

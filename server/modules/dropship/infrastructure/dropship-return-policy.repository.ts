@@ -55,10 +55,11 @@ interface AdminCommandRow {
 
 type CreatePolicyRepositoryInput = Omit<
   CreateReturnPolicyVersionInput,
-  "idempotencyKey" | "actor" | "vendorId" | "storeConnectionId"
+  "idempotencyKey" | "actor" | "vendorId" | "storeConnectionId" | "supersedesPolicyId"
 > & {
   vendorId: number | null;
   storeConnectionId: number | null;
+  supersedesPolicyId: number | null;
   effectiveFrom: Date;
   idempotencyKey: string;
   actor: { actorType: "admin" | "system"; actorId?: string };
@@ -67,10 +68,11 @@ type CreatePolicyRepositoryInput = Omit<
 
 type CreateFeeRepositoryInput = Omit<
   CreateReturnFeeVersionInput,
-  "idempotencyKey" | "actor" | "vendorId" | "storeConnectionId"
+  "idempotencyKey" | "actor" | "vendorId" | "storeConnectionId" | "supersedesFeeId"
 > & {
   vendorId: number | null;
   storeConnectionId: number | null;
+  supersedesFeeId: number | null;
   effectiveFrom: Date;
   idempotencyKey: string;
   actor: { actorType: "admin" | "system"; actorId?: string };
@@ -270,6 +272,16 @@ export class PgDropshipReturnPolicyRepository implements DropshipReturnPolicyRep
           [input.now, input.vendorId, input.storeConnectionId],
         );
       }
+      // Edit-as-new-version: explicitly retire the row the operator edited,
+      // even when the new version's scope key differs (e.g. scope change).
+      if (input.supersedesPolicyId != null) {
+        await client.query(
+          `UPDATE dropship.dropship_return_policies
+           SET is_active = false, effective_to = COALESCE(effective_to, $1), updated_at = $1
+           WHERE id = $2 AND is_active = true`,
+          [input.now, input.supersedesPolicyId],
+        );
+      }
       const inserted = await client.query<PolicyRow>(
         `INSERT INTO dropship.dropship_return_policies
           (version, return_window_days, vendor_id, store_connection_id, priority,
@@ -355,6 +367,16 @@ export class PgDropshipReturnPolicyRepository implements DropshipReturnPolicyRep
              AND store_connection_id IS NOT DISTINCT FROM $5
              AND is_active = true`,
           [input.now, input.feeType, input.faultCategory, input.vendorId, input.storeConnectionId],
+        );
+      }
+      // Edit-as-new-version: retire the edited row even when the new version's
+      // key differs (e.g. fault category change must not leave the old row live).
+      if (input.supersedesFeeId != null) {
+        await client.query(
+          `UPDATE dropship.dropship_return_fee_schedule
+           SET is_active = false, effective_to = COALESCE(effective_to, $1), updated_at = $1
+           WHERE id = $2 AND is_active = true`,
+          [input.now, input.supersedesFeeId],
         );
       }
       const inserted = await client.query<FeeRow>(
