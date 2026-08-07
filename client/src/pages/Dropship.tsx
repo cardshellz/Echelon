@@ -761,11 +761,13 @@ const returnOpsUpdateStatuses: DropshipRmaStatus[] = [
   "closed",
 ];
 
+// NOTE: "marketplace" remains in the shared enum but is intentionally not
+// offered in the UI — vendor absorbs marketplace-fault outcomes by policy
+// (Overlord, 2026-08-07).
 const returnFaultCategories: DropshipReturnFaultCategory[] = [
   "card_shellz",
   "vendor",
   "customer",
-  "marketplace",
   "carrier",
 ];
 
@@ -2306,10 +2308,9 @@ function ReturnPoliciesTab() {
                     value={feeForm.faultCategory}
                     onChange={(event) => setFeeForm((current) => ({ ...current, faultCategory: event.target.value as DropshipReturnFaultCategory }))}
                   >
-                    <option value="card_shellz">Card Shellz</option>
-                    <option value="vendor">Vendor</option>
-                    <option value="customer">Customer</option>
-                    <option value="marketplace">Marketplace</option>
+                    <option value="card_shellz">Card Shellz (us)</option>
+                    <option value="vendor">Vendor (store owner)</option>
+                    <option value="customer">Customer (vendor's customer)</option>
                     <option value="carrier">Carrier</option>
                   </select>
                 </label>
@@ -2481,10 +2482,9 @@ function ReturnPoliciesTab() {
                   value={effectiveFaultCategory}
                   onChange={(event) => setEffectiveFaultCategory(event.target.value as DropshipReturnFaultCategory)}
                 >
-                  <option value="card_shellz">Card Shellz</option>
-                  <option value="vendor">Vendor</option>
-                  <option value="customer">Customer</option>
-                  <option value="marketplace">Marketplace</option>
+                  <option value="card_shellz">Card Shellz (us)</option>
+                  <option value="vendor">Vendor (store owner)</option>
+                  <option value="customer">Customer (vendor's customer)</option>
                   <option value="carrier">Carrier</option>
                 </select>
               </label>
