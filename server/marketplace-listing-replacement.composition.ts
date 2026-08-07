@@ -116,6 +116,18 @@ export function createMarketplaceListingReplacementResolverFromEnv(): Marketplac
           }
           return execution.execute(input);
         },
+        async recover(
+          input: ExecuteListingReplacementInput,
+        ): Promise<ExecuteListingReplacementResult> {
+          assertSameOwner(input.expectedOwner, boundOwner);
+          if (!executionEnabled) {
+            throw new MarketplaceListingReplacementError(
+              "MARKETPLACE_LISTING_REPLACEMENT_EXECUTION_DISABLED",
+              "Marketplace listing replacement execution is disabled until provider sandbox validation is complete.",
+            );
+          }
+          return execution.recover(input);
+        },
       };
     },
   };
