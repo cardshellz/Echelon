@@ -387,10 +387,6 @@ export const receivingLines = procurementSchema.table("receiving_lines", {
   expectedQty: integer("expected_qty").notNull().default(0), // From PO (0 for blind receives)
   receivedQty: integer("received_qty").notNull().default(0), // Actually received
   damagedQty: integer("damaged_qty").notNull().default(0), // Damaged during receipt
-  // Running tally of reversed quantity (Spec D, migration 187). Invariant
-  // enforced in DB: 0 <= reversed_qty <= received_qty. Closed rows stay
-  // immutable; corrections are compensating rows in receipt_reversals.
-  reversedQty: integer("reversed_qty").notNull().default(0),
 
   // PO line linkage
   purchaseOrderLineId: integer("purchase_order_line_id"), // FK to purchase_order_lines (added post-definition)
@@ -1427,48 +1423,6 @@ export const insertPoReceiptSchema = createInsertSchema(poReceipts).omit({
 
 export type InsertPoReceipt = z.infer<typeof insertPoReceiptSchema>;
 export type PoReceipt = typeof poReceipts.$inferSelect;
-
-// ============================================================================
-// 9b. RECEIPT REVERSALS (Spec D, migration 187)
-// ============================================================================
-//
-// Posted (closed) receipts are immutable. Corrections happen via a reversal:
-// a compensating transaction linked to the original receiving order/line.
-// Each row is one reversal event against one receiving line; a whole-order
-// reversal writes one row per line sharing the same order_reversal_id group.
-//
-// Idempotency: idempotency_key is unique — a retried reversal with the same
-// key returns the existing row instead of double-applying (Rule #6).
-
-export const receiptReversals = procurementSchema.table("receipt_reversals", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  receivingOrderId: integer("receiving_order_id").notNull().references(() => receivingOrders.id, { onDelete: "cascade" }),
-  receivingLineId: integer("receiving_line_id").notNull().references(() => receivingLines.id, { onDelete: "cascade" }),
-  // Quantity reversed, in the receiving line's variant units. Always positive.
-  qty: integer("qty").notNull(),
-  reason: text("reason").notNull(),
-  reversalScope: varchar("reversal_scope", { length: 10 }).notNull().default("line"), // 'line' | 'order'
-  orderReversalId: integer("order_reversal_id"),
-  baseUnitsReversed: integer("base_units_reversed"),
-  lotUnitCostMills: bigint("lot_unit_cost_mills", { mode: "number" }),
-  allowNegative: integer("allow_negative").notNull().default(0),
-  apReconciliationReopened: integer("ap_reconciliation_reopened").notNull().default(0),
-  idempotencyKey: varchar("idempotency_key", { length: 100 }).notNull(),
-  createdBy: varchar("created_by", { length: 100 }),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-}, (table) => [
-  uniqueIndex("receipt_reversals_idempotency_key_idx").on(table.idempotencyKey),
-  index("receipt_reversals_line_idx").on(table.receivingLineId, table.createdAt),
-  index("receipt_reversals_order_idx").on(table.receivingOrderId, table.createdAt),
-]);
-
-export const insertReceiptReversalSchema = createInsertSchema(receiptReversals).omit({
-  id: true,
-  createdAt: true,
-});
-
-export type InsertReceiptReversal = z.infer<typeof insertReceiptReversalSchema>;
-export type ReceiptReversal = typeof receiptReversals.$inferSelect;
 
 // ============================================================================
 // 10. INBOUND SHIPMENTS (external refs only)
