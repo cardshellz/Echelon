@@ -18,12 +18,10 @@ describe("ListingReplacementExecutionService", () => {
       kind: "failed",
       stepKey: "compensate.ensure_source_live",
     });
-    expect(harness.repository.resumeManualRecovery).toHaveBeenCalledWith({
-      operationId: 100,
-      expectedOwner: command().expectedOwner,
-      actor: command().actor,
-      resumedAt: new Date("2026-08-04T12:00:00Z"),
-    });
+    expect(harness.repository.claimNextStep).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ recoveryAuthorized: true }),
+    );
   });
   it("dispatches a provider step and persists its evidence", async () => {
     const harness = makeHarness(claim("publish.create_target"));
@@ -175,7 +173,6 @@ function claim(
 }
 function makeHarness(currentClaim: ClaimedListingReplacementStep) {
   const repository = {
-    resumeManualRecovery: vi.fn(async () => undefined),
     claimNextStep: vi
       .fn()
       .mockResolvedValueOnce(currentClaim)

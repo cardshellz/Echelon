@@ -98,56 +98,6 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
     },
   ) {}
 
-  async resumeManualRecovery(input: {
-    readonly operationId: number;
-    readonly expectedOwner: ListingOwnerRef;
-    readonly actor: ListingActor;
-    readonly resumedAt: Date;
-  }): Promise<void> {
-    if (
-      !Number.isSafeInteger(input.operationId) ||
-      input.operationId <= 0 ||
-      !input.actor.id.trim() ||
-      !Number.isFinite(input.resumedAt.getTime())
-    ) {
-      throw executionError(
-        "MARKETPLACE_LISTING_REPLACEMENT_EXECUTION_INPUT_INVALID",
-        "Manual recovery resume input is invalid.",
-      );
-    }
-    await this.inTransaction(async (client) => {
-      const operation = await lockOperation(client, input.operationId);
-      assertExpectedOwner(operation, input.expectedOwner);
-      if (operation.status === "compensating") return;
-      if (operation.status !== "manual_recovery_required") {
-        throw executionError(
-          "MARKETPLACE_LISTING_REPLACEMENT_RECOVERY_STATE_INVALID",
-          "Only a manual-recovery replacement can resume compensation.",
-          { operationId: input.operationId, status: operation.status },
-        );
-      }
-      const resumed = await updateOperation(client, operation, {
-        status: "compensating",
-        phase: "compensate",
-        completedAt: null,
-        errorCode: null,
-        errorMessage: null,
-        recoveryContext: operation.recovery_context,
-        clearLease: true,
-        at: input.resumedAt,
-      });
-      await insertOperationEvent(
-        client,
-        resumed,
-        operation.status,
-        input.actor,
-        {
-          recoveryDecision: "retry_compensation",
-          previousRecoveryContext: operation.recovery_context,
-        },
-      );
-    });
-  }
   async claimNextStep(input: {
     readonly operationId: number;
     readonly expectedOwner: ListingOwnerRef;
@@ -155,6 +105,7 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
     readonly leaseToken: string | null;
     readonly now: Date;
     readonly leaseDurationMs: number;
+    readonly recoveryAuthorized: boolean;
   }): Promise<
     ClaimedListingReplacementStep | TerminalListingReplacementOperation
   > {
@@ -169,7 +120,10 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
             original.status as TerminalListingReplacementOperation["status"],
         };
       }
-      if (original.status === "manual_recovery_required") {
+      if (
+        original.status === "manual_recovery_required" &&
+        !input.recoveryAuthorized
+      ) {
         throw executionError(
           "MARKETPLACE_LISTING_REPLACEMENT_MANUAL_RECOVERY_REQUIRED",
           "Replacement execution requires an explicit recovery decision.",
@@ -188,7 +142,15 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         operation,
         original.status,
         input.actor,
-        lease.isNew ? { leaseAcquired: true } : { leaseRenewed: true },
+        original.status === "manual_recovery_required"
+          ? {
+              leaseAcquired: true,
+              recoveryDecision: "retry_compensation",
+              previousRecoveryContext: original.recovery_context,
+            }
+          : lease.isNew
+            ? { leaseAcquired: true }
+            : { leaseRenewed: true },
       );
       await recoverExpiredRunningStep(
         client,
@@ -664,7 +626,7 @@ function decideLease(
   input: { leaseToken: string | null; now: Date },
   factory: MarketplaceListingLeaseTokenFactory,
 ): { token: string; isNew: boolean } {
-  if (row.status === "planned")
+  if (["planned", "manual_recovery_required"].includes(row.status))
     return { token: validateUuid(factory.create()), isNew: true };
   if (!["running", "compensating"].includes(row.status))
     throw executionError(
@@ -695,9 +657,15 @@ async function acquireOrRenewLease(
   lease: { token: string; isNew: boolean },
 ): Promise<OperationRow> {
   const expiresAt = new Date(input.now.getTime() + input.leaseDurationMs);
-  const nextStatus = row.status === "planned" ? "running" : row.status;
+  const resumesRecovery = row.status === "manual_recovery_required";
+  const nextStatus =
+    row.status === "planned"
+      ? "running"
+      : resumesRecovery
+        ? "compensating"
+        : row.status;
   const result = await client.query<OperationRow>(
-    `UPDATE marketplace.listing_replacement_operations SET status = $2, state_version = state_version + 1, attempt_count = attempt_count + $3, lease_token = $4, lease_expires_at = $5, started_at = COALESCE(started_at, $6), updated_at = $6 WHERE id = $1 AND state_version = $7 RETURNING *`,
+    `UPDATE marketplace.listing_replacement_operations SET status = $2, state_version = state_version + 1, attempt_count = attempt_count + $3, lease_token = $4, lease_expires_at = $5, started_at = COALESCE(started_at, $6), completed_at = CASE WHEN $8 THEN NULL ELSE completed_at END, error_code = CASE WHEN $8 THEN NULL ELSE error_code END, error_message = CASE WHEN $8 THEN NULL ELSE error_message END, updated_at = $6 WHERE id = $1 AND state_version = $7 RETURNING *`,
     [
       toId(row.id),
       nextStatus,
@@ -706,6 +674,7 @@ async function acquireOrRenewLease(
       expiresAt,
       input.now,
       row.state_version,
+      resumesRecovery,
     ],
   );
   const updated = result.rows[0];

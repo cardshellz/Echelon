@@ -36,17 +36,17 @@ export class ListingReplacementExecutionService {
   async recover(
     input: ExecuteListingReplacementInput,
   ): Promise<ExecuteListingReplacementResult> {
-    assertInput(input);
-    await this.dependencies.repository.resumeManualRecovery({
-      operationId: input.operationId,
-      expectedOwner: input.expectedOwner,
-      actor: input.actor,
-      resumedAt: this.dependencies.clock.now(),
-    });
-    return this.execute(input);
+    return this.executeInternal(input, true);
   }
   async execute(
     input: ExecuteListingReplacementInput,
+  ): Promise<ExecuteListingReplacementResult> {
+    return this.executeInternal(input, false);
+  }
+
+  private async executeInternal(
+    input: ExecuteListingReplacementInput,
+    recoveryAuthorized: boolean,
   ): Promise<ExecuteListingReplacementResult> {
     assertInput(input);
     let leaseToken: string | null = null;
@@ -58,6 +58,7 @@ export class ListingReplacementExecutionService {
         now: this.dependencies.clock.now(),
         leaseDurationMs: input.leaseDurationMs ?? 300_000,
         leaseToken,
+        recoveryAuthorized,
       });
       if ("kind" in claim) {
         return {
