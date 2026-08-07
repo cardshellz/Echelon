@@ -161,6 +161,9 @@ function adaptLifecycleClient(
       (await client.getInventoryItemGroup(
         groupKey,
       )) as EbayReplacementItemGroup | null,
+    getInventoryItem: async (sku) => await client.getInventoryItem(sku),
+    deleteInventoryItemGroup: async (groupKey) =>
+      await client.deleteInventoryItemGroup(groupKey),
     createOrReplaceInventoryItemGroup: async (groupKey, group) => {
       const { inventoryItemGroupKey: _ignored, ...payload } = group;
       await client.createOrReplaceInventoryItemGroup(
