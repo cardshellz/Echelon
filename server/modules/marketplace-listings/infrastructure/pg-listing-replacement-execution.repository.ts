@@ -170,12 +170,17 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         client,
         operation.source_publication_id,
       );
+      const sourceProviderSnapshot = await loadSourceProviderSnapshot(
+        client,
+        operation.id,
+      );
       const claim = mapClaim(
         operation,
         running,
         sourceMembers,
         targetMembers,
         input.actor,
+        sourceProviderSnapshot,
       );
       return claim;
     });
@@ -187,7 +192,14 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
     readonly completedAt: Date;
   }): Promise<void> {
     await this.inTransaction(async (client) => {
-      const operation = await lockClaim(client, input.claim, input.completedAt);
+      const expected = claimStateForStep(input.claim.stepKey);
+      const operation = await lockClaim(
+        client,
+        input.claim,
+        input.completedAt,
+        expected.status,
+        expected.phase,
+      );
       const step = await completeClaimedStep(
         client,
         input.claim,
@@ -427,6 +439,12 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         "running",
         input.claim.executor,
         input.result.evidence,
+      );
+      await updateRestoredSourcePublication(
+        client,
+        operation,
+        input.result,
+        input.completedAt,
       );
       await requireSingleUpdate(
         client,
@@ -805,12 +823,27 @@ async function nextEventSequence(
   return toId(result.rows[0]?.next_sequence ?? 0);
 }
 
+async function loadSourceProviderSnapshot(
+  client: PoolClient,
+  operationId: string | number,
+): Promise<CanonicalJsonValue | null> {
+  const result = await client.query<{
+    result_evidence: Record<string, CanonicalJsonValue> | null;
+  }>(
+    `SELECT result_evidence FROM marketplace.listing_replacement_steps
+     WHERE operation_id = $1 AND step_key = 'preflight.validate_plan' AND status = 'succeeded'
+     ORDER BY sequence ASC LIMIT 1`,
+    [toId(operationId)],
+  );
+  return result.rows[0]?.result_evidence?.sourceProviderSnapshot ?? null;
+}
 function mapClaim(
   operation: OperationRow,
   step: StepRow,
   sourceMembers: MemberRow[],
   targetMembers: MemberRow[],
   executor: ListingActor,
+  sourceProviderSnapshot: CanonicalJsonValue | null,
 ): ClaimedListingReplacementStep {
   const owner = mapOwner(operation);
   const sourceExternalListingId = operation.source_external_listing_id;
@@ -838,6 +871,7 @@ function mapClaim(
       targetProviderPublicationKey: operation.target_provider_publication_key,
       targetExternalListingId: operation.target_external_listing_id,
       desiredStateHash: operation.desired_state_hash,
+      sourceProviderSnapshot,
       sourceMembers: sourceMembers.map(mapExecutionMember),
       targetMembers: targetMembers.map(mapExecutionMember),
       actor: {
@@ -1165,6 +1199,49 @@ async function failClaimedStep(
   return requireRow(result.rows[0], "step failure");
 }
 
+async function updateRestoredSourcePublication(
+  client: PoolClient,
+  operation: OperationRow,
+  result: ListingReplacementStepSuccess,
+  at: Date,
+): Promise<void> {
+  const listingId = result.externalListingId?.trim();
+  if (!listingId) {
+    throw executionError(
+      "MARKETPLACE_LISTING_REPLACEMENT_RESTORED_SOURCE_IDENTITY_INVALID",
+      "Restored source publication returned no external listing ID.",
+    );
+  }
+  await requireSingleUpdate(
+    client,
+    `UPDATE marketplace.listing_publications
+     SET external_listing_id = $2, external_url = $3, verified_at = $4, updated_at = $4
+     WHERE id = $1 AND status = 'active'`,
+    [
+      toId(operation.source_publication_id),
+      listingId,
+      result.externalUrl?.trim() || null,
+      at,
+    ],
+    "restored source identity reconciliation",
+  );
+  for (const identity of result.memberIdentities ?? []) {
+    await requireSingleUpdate(
+      client,
+      `UPDATE marketplace.listing_publication_members
+       SET external_variant_id = $3, external_offer_id = $4, external_inventory_item_id = $5
+       WHERE publication_id = $1 AND product_variant_id = $2 AND disposition = 'included'`,
+      [
+        toId(operation.source_publication_id),
+        identity.productVariantId,
+        nullableText(identity.externalVariantId),
+        nullableText(identity.externalOfferId),
+        nullableText(identity.externalInventoryItemId),
+      ],
+      "restored source member identity reconciliation",
+    );
+  }
+}
 async function stageTargetPublication(
   client: PoolClient,
   operation: OperationRow,
@@ -1304,6 +1381,13 @@ function nextForwardPhase(
   }
 }
 
+export function claimStateForStep(
+  stepKey: ClaimedListingReplacementStep["stepKey"],
+): Readonly<{ status: "running" | "compensating"; phase: string }> {
+  return stepKey.startsWith("compensate.")
+    ? { status: "compensating", phase: "compensate" }
+    : { status: "running", phase: phaseForStep(stepKey) };
+}
 function phaseForStep(
   stepKey: ClaimedListingReplacementStep["stepKey"],
 ): string {

@@ -37,6 +37,17 @@ describe("EbayMarketplaceListingReplacementProvider", () => {
       "ARM-ENV-SGL-C750",
       "ARM-ENV-SGL-P50",
     ]);
+    expect(harness.groups.get("ARM-ENV-SGL-V1-R52")?.variesBy).toEqual({
+      specifications: [
+        { name: "Style", values: ["Case of 750", "Pack of 50"] },
+      ],
+    });
+    expect(
+      harness.client.deleteInventoryItemGroup.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.client.createOrReplaceInventoryItemGroup.mock
+        .invocationCallOrder[0],
+    );
 
     await expect(
       harness.provider.verifyTarget(stagedContext(), "verify-key"),
@@ -51,10 +62,7 @@ describe("EbayMarketplaceListingReplacementProvider", () => {
     await harness.provider.createTarget(context(), "create-key");
 
     await expect(
-      harness.provider.ensureTargetNotSellable(
-        stagedContext(),
-        "target-off-key",
-      ),
+      harness.provider.ensureTargetNotSellable(context(), "target-off-key"),
     ).resolves.toMatchObject({ evidence: { targetNotSellable: true } });
     expect(
       harness.client.withdrawOfferByInventoryItemGroup,
@@ -66,6 +74,11 @@ describe("EbayMarketplaceListingReplacementProvider", () => {
     expect(
       harness.client.publishOfferByInventoryItemGroup,
     ).toHaveBeenLastCalledWith("ARM-ENV-SGL-V1", "EBAY_US");
+    expect(harness.groups.has("ARM-ENV-SGL-V1-R52")).toBe(false);
+    expect(harness.groups.get("ARM-ENV-SGL-V1")?.variantSKUs).toEqual([
+      "ARM-ENV-SGL-C700",
+      "ARM-ENV-SGL-P50",
+    ]);
   });
 
   it("rejects a target group containing an excluded stale SKU", async () => {
@@ -107,6 +120,19 @@ function context(): ListingReplacementExecutionContext {
     targetProviderPublicationKey: null,
     targetExternalListingId: null,
     desiredStateHash: "b".repeat(64),
+    sourceProviderSnapshot: {
+      inventoryItemGroupKey: "ARM-ENV-SGL-V1",
+      title: "Armaloope Envelope Single Pocket",
+      description: "Envelope",
+      aspects: {},
+      imageUrls: [],
+      variesBy: {
+        specifications: [
+          { name: "Style", values: ["Case of 700", "Pack of 50"] },
+        ],
+      },
+      variantSKUs: ["ARM-ENV-SGL-C700", "ARM-ENV-SGL-P50"],
+    },
     sourceMembers: [
       member(11, "ARM-ENV-SGL-C700", "offer-c700"),
       member(13, "ARM-ENV-SGL-P50", "offer-p50"),
@@ -193,6 +219,22 @@ function makeHarness() {
         groups.set(key, { ...group, inventoryItemGroupKey: key });
       },
     ),
+    getInventoryItem: vi.fn(async (sku: string) => ({
+      product: {
+        aspects: {
+          Style: [
+            sku.endsWith("C750")
+              ? "Case of 750"
+              : sku.endsWith("C700")
+                ? "Case of 700"
+                : "Pack of 50",
+          ],
+        },
+      },
+    })),
+    deleteInventoryItemGroup: vi.fn(async (key: string) => {
+      groups.delete(key);
+    }),
     getOffers: vi.fn(async (sku: string) => offers.get(sku) ?? []),
     createOffer: vi.fn(async () => "new-offer"),
     publishOffer: vi.fn(async () => ({ listingId: "target-listing" })),
