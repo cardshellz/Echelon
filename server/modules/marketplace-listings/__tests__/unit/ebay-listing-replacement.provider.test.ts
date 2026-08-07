@@ -81,6 +81,24 @@ describe("EbayMarketplaceListingReplacementProvider", () => {
       harness.client.publishOfferByInventoryItemGroup,
     ).not.toHaveBeenCalled();
   });
+  it("treats an absent target group as already not sellable", async () => {
+    const harness = makeHarness();
+
+    await expect(
+      harness.provider.ensureTargetNotSellable(context(), "target-off-key"),
+    ).resolves.toMatchObject({
+      evidence: {
+        targetNotSellable: true,
+        alreadyNotSellable: true,
+        targetGroupAbsent: true,
+        withdrawnOfferIds: [],
+      },
+    });
+    expect(
+      harness.client.withdrawOfferByInventoryItemGroup,
+    ).not.toHaveBeenCalled();
+  });
+
   it("compensates by withdrawing the target and restoring the original listing", async () => {
     const harness = makeHarness();
     await harness.provider.quiesceSource(context(), "quiesce-key");
@@ -104,6 +122,23 @@ describe("EbayMarketplaceListingReplacementProvider", () => {
       "ARM-ENV-SGL-C700",
       "ARM-ENV-SGL-P50",
     ]);
+  });
+
+  it("retries a target group create while eBay releases deleted source membership", async () => {
+    const harness = makeHarness();
+    harness.client.createOrReplaceInventoryItemGroup.mockImplementationOnce(
+      async () => {
+        throw new Error('{"errorId":25703}');
+      },
+    );
+
+    await expect(
+      harness.provider.createTarget(context(), "create-key"),
+    ).resolves.toMatchObject({ externalListingId: "target-listing" });
+    expect(
+      harness.client.createOrReplaceInventoryItemGroup,
+    ).toHaveBeenCalledTimes(2);
+    expect(harness.consistency.sleep).toHaveBeenCalledWith(250);
   });
 
   it("rejects a target group containing an excluded stale SKU", async () => {
@@ -235,6 +270,7 @@ function makeHarness() {
       );
     }
   };
+  const consistency = { sleep: vi.fn(async () => undefined) };
   const client = {
     getInventoryItemGroup: vi.fn(
       async (key: string) => groups.get(key) ?? null,
@@ -280,9 +316,11 @@ function makeHarness() {
     groups,
     offers,
     client,
-    provider: new EbayMarketplaceListingReplacementProvider({
-      forOwner: async () => client,
-    }),
+    consistency,
+    provider: new EbayMarketplaceListingReplacementProvider(
+      { forOwner: async () => client },
+      consistency,
+    ),
   };
 }
 
