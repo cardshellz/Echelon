@@ -63,6 +63,7 @@ export const transactionTypeEnum = [
   "return",       // Customer return (future)
   "csv_upload",   // Bulk update from CSV file
   "sku_correction", // Cross-variant transfer for SKU corrections
+  "receipt_reversal", // Compensating reversal of a posted receipt (Spec D)
 ] as const;
 export type TransactionType = typeof transactionTypeEnum[number];
 
