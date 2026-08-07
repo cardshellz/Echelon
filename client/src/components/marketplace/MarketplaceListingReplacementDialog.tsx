@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, RefreshCw } from "lucide-react";
 import { z } from "zod";
 
@@ -11,7 +11,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Switch } from "@/components/ui/switch";
 import type { MarketplaceListingRegistrationOwner } from "./MarketplaceListingRegistrationDialog";
 
 export interface MarketplaceListingReplacementVariant {
@@ -20,83 +19,6 @@ export interface MarketplaceListingReplacementVariant {
   name: string;
   included: boolean;
   lockedExcluded?: boolean;
-}
-
-interface ReplacementApiErrorPayload {
-  code: string;
-  message: string;
-}
-
-interface ReplacementPlan {
-  operationId: number;
-  status: string;
-  currentPhase: string;
-  targetPublicationId: number;
-}
-
-type ExecutionResult =
-  | { kind: "completed"; stepKey: string }
-  | { kind: "failed"; stepKey: string }
-  | { kind: "manual_recovery_required"; stepKey: string }
-  | { kind: "cancelled"; stepKey: string };
-
-const operationSchema = z
-  .object({
-    operationId: z.number().int().positive(),
-    status: z.string().min(1),
-    currentPhase: z.string().min(1),
-    targetPublicationId: z.number().int().positive(),
-  })
-  .passthrough();
-
-const planResponseSchema = z
-  .object({
-    kind: z.enum(["created", "replay"]),
-    operation: operationSchema,
-  })
-  .passthrough();
-
-const executionResponseSchema = z.object({
-  result: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("completed"), stepKey: z.string() }),
-    z.object({ kind: z.literal("failed"), stepKey: z.string() }),
-    z.object({
-      kind: z.literal("manual_recovery_required"),
-      stepKey: z.string(),
-    }),
-    z.object({ kind: z.literal("cancelled"), stepKey: z.string() }),
-  ]),
-});
-
-export const MARKETPLACE_LISTING_REPLACEMENT_REQUEST_TIMEOUT_MS = 360_000;
-
-export function buildMarketplaceListingReplacementMembers(
-  variants: readonly MarketplaceListingReplacementVariant[],
-  includedVariantIds: ReadonlySet<number>,
-) {
-  return variants.map((variant) =>
-    includedVariantIds.has(variant.id)
-      ? {
-          productVariantId: variant.id,
-          disposition: "included" as const,
-          reasonCode: null,
-        }
-      : {
-          productVariantId: variant.id,
-          disposition: "excluded" as const,
-          reasonCode: variant.lockedExcluded
-            ? "local_variant_inactive"
-            : "operator_excluded_from_replacement",
-        },
-  );
-}
-
-export function replacementEndpointBase(
-  owner: MarketplaceListingRegistrationOwner,
-): string {
-  return owner.kind === "channel"
-    ? "/api/marketplace-listings/replacements/channel/ebay"
-    : "/api/marketplace-listings/replacements/dropship/ebay";
 }
 
 export interface MarketplaceListingReplacementDialogProps {
@@ -108,6 +30,41 @@ export interface MarketplaceListingReplacementDialogProps {
   onCompleted?(): void;
 }
 
+const rebuildPreviewSchema = z.object({
+  productId: z.number().int().positive(),
+  groupKey: z.string().min(1),
+  currentExternalListingId: z.string().min(1),
+  currentSkus: z.array(z.string().min(1)).min(1),
+  desiredSkus: z.array(z.string().min(1)).min(1),
+  addedSkus: z.array(z.string().min(1)),
+  removedSkus: z.array(z.string().min(1)),
+  rebuildRequired: z.boolean(),
+  confirmationToken: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+
+type RebuildPreview = z.infer<typeof rebuildPreviewSchema>;
+
+const pushResponseSchema = z.object({
+  results: z.array(z.object({
+    productId: z.number().int().positive(),
+    success: z.boolean(),
+    listingId: z.string().optional(),
+    error: z.string().optional(),
+    rebuildPreview: rebuildPreviewSchema.optional(),
+  }).passthrough()).min(1),
+}).passthrough();
+
+export const MARKETPLACE_LISTING_REPLACEMENT_REQUEST_TIMEOUT_MS = 360_000;
+
+export function replacementEndpointBase(
+  owner: MarketplaceListingRegistrationOwner,
+): string {
+  if (owner.kind !== "channel") {
+    throw new Error("Listing rebuild must be invoked through the owning marketplace surface.");
+  }
+  return "/api/ebay/listings/push";
+}
+
 export function MarketplaceListingReplacementDialog({
   open,
   onOpenChange,
@@ -116,380 +73,192 @@ export function MarketplaceListingReplacementDialog({
   variants,
   onCompleted,
 }: MarketplaceListingReplacementDialogProps) {
-  const [includedVariantIds, setIncludedVariantIds] = useState<Set<number>>(
-    new Set(),
-  );
-  const [plan, setPlan] = useState<ReplacementPlan | null>(null);
-  const [result, setResult] = useState<ExecutionResult | null>(null);
-  const [error, setError] = useState<ReplacementApiErrorPayload | null>(null);
-  const [busy, setBusy] = useState<
-    "planning" | "executing" | "recovering" | null
-  >(null);
-  const keyRef = useRef<string | null>(null);
+  const [preview, setPreview] = useState<RebuildPreview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"preview" | "execute" | null>(null);
+  const [completedListingId, setCompletedListingId] = useState<string | null>(null);
+
+  const loadPreview = useCallback(async () => {
+    setBusy("preview");
+    setError(null);
+    setPreview(null);
+    setCompletedListingId(null);
+    try {
+      if (owner.kind !== "channel") {
+        throw new Error("Dropship rebuild must be started from the owning store connection.");
+      }
+      const response = await postRebuildRequest(replacementEndpointBase(owner), {
+        productIds: [owner.productId],
+        rebuild: { mode: "preview" },
+      });
+      const result = response.results[0];
+      if (!result.success || !result.rebuildPreview) {
+        throw new Error(result.error ?? "The listing rebuild preview was unavailable.");
+      }
+      setPreview(result.rebuildPreview);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  }, [owner]);
 
   useEffect(() => {
     if (!open) {
-      setPlan(null);
-      setResult(null);
+      setPreview(null);
       setError(null);
       setBusy(null);
-      keyRef.current = null;
+      setCompletedListingId(null);
       return;
     }
-    setIncludedVariantIds(
-      new Set(
-        variants
-          .filter((variant) => variant.included)
-          .map((variant) => variant.id),
-      ),
-    );
-    keyRef.current = createReplacementIdempotencyKey(owner);
-  }, [open, owner, variants]);
+    void loadPreview();
+  }, [loadPreview, open]);
 
-  const members = useMemo(
-    () =>
-      buildMarketplaceListingReplacementMembers(variants, includedVariantIds),
-    [includedVariantIds, variants],
-  );
-  const endpointBase = replacementEndpointBase(owner);
-  const ownerBody =
-    owner.kind === "channel"
-      ? {
-          channelId: owner.channelId,
-          productId: owner.productId,
-          marketplaceId: owner.marketplaceId,
-        }
-      : {
-          storeConnectionId: owner.storeConnectionId,
-          productId: owner.productId,
-          marketplaceId: owner.marketplaceId,
-        };
-
-  const planReplacement = async () => {
-    if (!keyRef.current || includedVariantIds.size === 0) return;
-    setBusy("planning");
-    setError(null);
-    setResult(null);
-    try {
-      const response = await postReplacement(
-        endpointBase + "/plan",
-        {
-          ...ownerBody,
-          targetMembers: members,
-          idempotencyKey: keyRef.current,
-        },
-        planResponseSchema,
-      );
-      setPlan(response.operation);
-    } catch (requestError) {
-      setError(normalizeReplacementError(requestError));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const executeReplacement = async () => {
-    if (!plan) return;
-    setBusy("executing");
+  const executeRebuild = async () => {
+    if (!preview || !preview.rebuildRequired || owner.kind !== "channel") return;
+    setBusy("execute");
     setError(null);
     try {
-      const response = await postReplacement(
-        `${endpointBase}/${plan.operationId}/execute`,
-        ownerBody,
-        executionResponseSchema,
-      );
-      setResult(response.result);
-      if (response.result.kind === "completed") onCompleted?.();
-    } catch (requestError) {
-      setError(normalizeReplacementError(requestError));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const recoverAndReplan = async () => {
-    if (!plan) return;
-    setBusy("recovering");
-    setError(null);
-    setResult(null);
-    try {
-      const recovery = await postReplacement(
-        `${endpointBase}/${plan.operationId}/recover`,
-        ownerBody,
-        executionResponseSchema,
-      );
-      if (recovery.result.kind !== "failed") {
-        throw {
-          code: "MARKETPLACE_LISTING_REPLACEMENT_RECOVERY_INCOMPLETE",
-          message: executionResultMessage(recovery.result),
-        };
+      const response = await postRebuildRequest(replacementEndpointBase(owner), {
+        productIds: [owner.productId],
+        rebuild: { mode: "execute", preview },
+      });
+      const result = response.results[0];
+      if (!result.success || !result.listingId) {
+        throw new Error(result.error ?? "The rebuilt listing was not published.");
       }
-      const freshKey = createReplacementIdempotencyKey(owner);
-      keyRef.current = freshKey;
-      const freshPlan = await postReplacement(
-        endpointBase + "/plan",
-        {
-          ...ownerBody,
-          targetMembers: members,
-          idempotencyKey: freshKey,
-        },
-        planResponseSchema,
-      );
-      setPlan(freshPlan.operation);
-    } catch (requestError) {
-      setError(normalizeReplacementError(requestError));
+      setCompletedListingId(result.listingId);
+      onCompleted?.();
+    } catch (cause) {
+      setError(errorMessage(cause));
     } finally {
       setBusy(null);
     }
   };
-  const succeeded = result?.kind === "completed";
-  const locked = plan !== null || busy !== null;
 
   return (
-    <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
-      <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col p-0">
-        <DialogHeader className="px-6 pt-6">
-          <DialogTitle>Replace live eBay listing</DialogTitle>
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (busy === null) onOpenChange(nextOpen); }}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Rebuild eBay listing</DialogTitle>
           <DialogDescription>
-            Build a new listing for {productName} with exactly the selected
-            variants, verify it, then switch Echelon to the new listing.
+            End the current listing for {productName}, then publish a new listing containing exactly the active variants below.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="min-h-0 overflow-y-auto px-6 space-y-4">
-          <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
-            <div className="flex gap-2">
-              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
-              <p>
-                Execution temporarily withdraws the current listing before
-                publishing the replacement. If publication fails, Echelon
-                attempts to remove the target and restore the source. A failed
-                restoration is reported as manual recovery required.
-              </p>
-            </div>
-          </div>
-
+        <div className="space-y-4">
           <div className="rounded-md border divide-y">
             {variants.map((variant) => (
-              <div
-                key={variant.id}
-                className="flex items-center justify-between gap-4 p-3"
-              >
-                <div className="min-w-0">
-                  <p className="font-medium text-sm truncate">{variant.name}</p>
-                  <code className="text-xs text-muted-foreground">
-                    {variant.sku}
-                  </code>
+              <div key={variant.id} className="flex items-center justify-between gap-4 p-3">
+                <div>
+                  <p className="font-medium">{variant.name}</p>
+                  <code className="text-xs text-muted-foreground">{variant.sku}</code>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">
-                    {variant.lockedExcluded
-                      ? "Archived - will be removed"
-                      : includedVariantIds.has(variant.id)
-                        ? "Included"
-                        : "Excluded"}
-                  </span>
-                  <Switch
-                    checked={includedVariantIds.has(variant.id)}
-                    disabled={locked || variant.lockedExcluded === true}
-                    onCheckedChange={(checked) => {
-                      setIncludedVariantIds((current) => {
-                        const next = new Set(current);
-                        if (checked) next.add(variant.id);
-                        else next.delete(variant.id);
-                        return next;
-                      });
-                    }}
-                    aria-label={
-                      variant.lockedExcluded
-                        ? `${variant.sku} is archived and will be removed`
-                        : `${includedVariantIds.has(variant.id) ? "Exclude" : "Include"} ${variant.sku}`
-                    }
-                  />
-                </div>
+                <span className={variant.included ? "text-sm text-blue-700" : "text-sm text-muted-foreground"}>
+                  {variant.included ? "Included" : "Archived - removed"}
+                </span>
               </div>
             ))}
           </div>
 
-          {includedVariantIds.size === 0 && (
-            <p className="text-sm text-red-700">
-              Select at least one variant for the replacement listing.
-            </p>
-          )}
-          {plan && !result && (
-            <div className="rounded-md border border-blue-300 bg-blue-50 p-4 text-sm text-blue-950">
-              Plan #{plan.operationId} is ready. Target publication #
-              {plan.targetPublicationId} will contain {includedVariantIds.size}{" "}
-              of {variants.length} variants. Review this count before executing.
+          {busy === "preview" && (
+            <div className="flex items-center gap-2 rounded-md border p-3 text-sm">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Reading the current eBay listing...
             </div>
           )}
-          {result && (
-            <div
-              className={`rounded-md border p-4 text-sm ${succeeded ? "border-green-300 bg-green-50 text-green-950" : "border-red-300 bg-red-50 text-red-950"}`}
-            >
+
+          {preview && !preview.rebuildRequired && (
+            <div className="flex gap-2 rounded-md border border-blue-300 bg-blue-50 p-3 text-sm text-blue-900">
+              <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+              The live listing has no stale variants. Use the normal Update listing action instead.
+            </div>
+          )}
+
+          {preview?.rebuildRequired && !completedListingId && (
+            <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
               <div className="flex gap-2">
-                {succeeded ? (
-                  <CheckCircle2 className="h-4 w-4 mt-0.5" />
-                ) : (
-                  <AlertTriangle className="h-4 w-4 mt-0.5" />
-                )}
-                <p>{executionResultMessage(result)}</p>
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-medium">The current listing will be ended before the new listing is published.</p>
+                  <p className="mt-1">
+                    Remove {preview.removedSkus.join(", ")}; publish {preview.desiredSkus.join(", ")}.
+                  </p>
+                </div>
               </div>
             </div>
           )}
+
+          {completedListingId && (
+            <div className="flex gap-2 rounded-md border border-green-300 bg-green-50 p-3 text-sm text-green-900">
+              <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+              New eBay listing {completedListingId} is live and Echelon now points to it.
+            </div>
+          )}
+
           {error && (
-            <div className="rounded-md border border-red-300 bg-red-50 p-4 text-sm text-red-950">
-              <p className="font-medium">{error.message}</p>
-              <code className="text-xs">{error.code}</code>
+            <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+              <p className="font-medium">Listing rebuild could not continue.</p>
+              <p className="mt-1">{error}</p>
             </div>
           )}
         </div>
 
-        <DialogFooter className="px-6 py-4 border-t">
-          <Button
-            variant="outline"
-            disabled={busy !== null}
-            onClick={() => onOpenChange(false)}
-          >
-            {succeeded ? "Close" : "Cancel"}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy !== null}>
+            {completedListingId ? "Close" : "Cancel"}
           </Button>
-          {!plan && !result && (
-            <Button
-              disabled={busy !== null || includedVariantIds.size === 0}
-              onClick={planReplacement}
-            >
-              {busy === "planning" ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <RefreshCw className="h-4 w-4 mr-2" />
-              )}
-              Review replacement
+          {error && !completedListingId && (
+            <Button variant="outline" onClick={() => void loadPreview()} disabled={busy !== null}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Read eBay again
             </Button>
           )}
-          {plan &&
-            !result &&
-            error?.code !==
-              "MARKETPLACE_LISTING_REPLACEMENT_MANUAL_RECOVERY_REQUIRED" && (
-              <Button
-                variant="destructive"
-                disabled={busy !== null}
-                onClick={executeReplacement}
-              >
-                {busy === "executing" && (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                )}
-                Replace listing
-              </Button>
-            )}
-          {plan &&
-            !result &&
-            error?.code ===
-              "MARKETPLACE_LISTING_REPLACEMENT_MANUAL_RECOVERY_REQUIRED" && (
-              <Button
-                variant="destructive"
-                disabled={busy !== null}
-                onClick={recoverAndReplan}
-              >
-                {busy === "recovering" && (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                )}
-                Verify recovery and start fresh
-              </Button>
-            )}
+          {preview?.rebuildRequired && !completedListingId && (
+            <Button onClick={() => void executeRebuild()} disabled={busy !== null}>
+              {busy === "execute" && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Rebuild listing
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 }
 
-async function postReplacement<T extends z.ZodTypeAny>(
-  url: string,
-  body: unknown,
-  schema: T,
-): Promise<z.output<T>> {
+async function postRebuildRequest(url: string, body: unknown) {
   const controller = new AbortController();
-  const timeout = window.setTimeout(
+  const timeout = globalThis.setTimeout(
     () => controller.abort(),
     MARKETPLACE_LISTING_REPLACEMENT_REQUEST_TIMEOUT_MS,
   );
   try {
     const response = await fetch(url, {
       method: "POST",
+      credentials: "include",
       headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    const payload: unknown = await response.json().catch(() => null);
+    const payload: unknown = await response.json();
     if (!response.ok) {
-      const parsed = z
-        .object({ error: z.object({ code: z.string(), message: z.string() }) })
-        .safeParse(payload);
-      throw parsed.success
-        ? parsed.data.error
-        : {
-            code: "MARKETPLACE_LISTING_REPLACEMENT_REQUEST_FAILED",
-            message: `Replacement request failed (${response.status}).`,
-          };
+      const message = payload && typeof payload === "object" && "error" in payload
+        ? String(payload.error)
+        : `Request failed (${response.status}).`;
+      throw new Error(message);
     }
-    return schema.parse(payload);
+    return pushResponseSchema.parse(payload);
   } finally {
-    window.clearTimeout(timeout);
+    globalThis.clearTimeout(timeout);
   }
 }
 
-function createReplacementIdempotencyKey(
-  owner: MarketplaceListingRegistrationOwner,
-): string {
-  if (!globalThis.crypto?.randomUUID)
-    throw new Error("Secure UUID generation is unavailable.");
-  const scope =
-    owner.kind === "channel"
-      ? `channel-${owner.channelId}`
-      : `dropship-${owner.storeConnectionId}`;
-  return `marketplace-replacement:${scope}:${owner.productId}:${globalThis.crypto.randomUUID()}`;
-}
-
-function normalizeReplacementError(error: unknown): ReplacementApiErrorPayload {
-  if (
-    error &&
-    typeof error === "object" &&
-    "code" in error &&
-    "message" in error
-  ) {
-    return { code: String(error.code), message: String(error.message) };
+function errorMessage(cause: unknown): string {
+  if (cause instanceof DOMException && cause.name === "AbortError") {
+    return "The request timed out. Read eBay again before retrying.";
   }
-  if (error instanceof z.ZodError)
-    return {
-      code: "MARKETPLACE_LISTING_REPLACEMENT_RESPONSE_INVALID",
-      message: "The server returned an invalid replacement response.",
-    };
-  if (error instanceof DOMException && error.name === "AbortError")
-    return {
-      code: "MARKETPLACE_LISTING_REPLACEMENT_TIMEOUT",
-      message:
-        "The replacement request timed out. Check operation status before retrying.",
-    };
-  return {
-    code: "MARKETPLACE_LISTING_REPLACEMENT_REQUEST_FAILED",
-    message:
-      error instanceof Error
-        ? error.message
-        : "The replacement request failed.",
-  };
-}
-
-export function executionResultMessage(result: ExecutionResult): string {
-  switch (result.kind) {
-    case "completed":
-      return "Replacement completed and Echelon now controls the new listing.";
-    case "failed":
-      return result.stepKey === "preflight.validate_plan"
-        ? "Replacement stopped during preflight. The live eBay listing was not changed."
-        : "Replacement failed, and compensation restored the previous listing state.";
-    case "manual_recovery_required":
-      return "Automatic recovery failed. Do not retry blindly; manual eBay recovery is required.";
-    case "cancelled":
-      return "The replacement operation was cancelled before completion.";
+  if (cause instanceof z.ZodError) {
+    return "The server returned an invalid listing rebuild response.";
   }
+  return cause instanceof Error ? cause.message : "The listing rebuild request failed.";
 }

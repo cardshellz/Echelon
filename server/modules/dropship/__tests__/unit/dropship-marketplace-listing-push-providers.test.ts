@@ -151,6 +151,80 @@ describe("dropship marketplace listing push providers", () => {
       },
     ]);
   });
+  it("previews and executes a generic grouped rebuild through the shared eBay connector", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const currentGroup = {
+      inventoryItemGroupKey: "CATALOG-GROUP",
+      variantSKUs: ["CATALOG-KEEP", "CATALOG-STALE"],
+      aspects: {},
+      description: "Catalog group",
+      imageUrls: ["https://cdn.example.test/catalog.jpg"],
+      title: "Catalog group",
+      variesBy: { specifications: [] },
+    };
+    const publishedKeep = {
+      offers: [{ offerId: "offer-keep", listingId: "listing-old", status: "PUBLISHED" }],
+    };
+    const publishedStale = {
+      offers: [{ offerId: "offer-stale", listingId: "listing-old", status: "PUBLISHED" }],
+    };
+    const fetcher = new FakeFetch([
+      jsonResponse(currentGroup),
+      jsonResponse(publishedKeep),
+      jsonResponse(publishedStale),
+      jsonResponse(currentGroup),
+      jsonResponse(publishedKeep),
+      jsonResponse(publishedStale),
+      emptyResponse(),
+      emptyResponse(),
+      jsonResponse({ offers: [{ offerId: "offer-keep", status: "UNPUBLISHED" }] }),
+      jsonResponse({ offers: [{ offerId: "offer-new", status: "UNPUBLISHED" }] }),
+      emptyResponse(),
+      emptyResponse(),
+      emptyResponse(),
+      emptyResponse(),
+      emptyResponse(),
+      jsonResponse({ listingId: "listing-new" }),
+    ]);
+    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+    const draft = makeGroupedRebuildDraft();
+
+    const preview = await provider.previewListingRebuild({
+      vendorId: 10,
+      storeConnectionId: 22,
+      marketplaceConfig: ebayMarketplaceConfig(),
+      currentExternalListingId: "listing-old",
+      draft,
+    });
+    const result = await provider.executeListingRebuild({
+      vendorId: 10,
+      storeConnectionId: 22,
+      marketplaceConfig: ebayMarketplaceConfig(),
+      draft,
+      preview,
+    });
+
+    expect(preview).toMatchObject({
+      groupKey: "CATALOG-GROUP",
+      currentExternalListingId: "listing-old",
+      currentSkus: ["CATALOG-KEEP", "CATALOG-STALE"],
+      desiredSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
+      addedSkus: ["CATALOG-NEW"],
+      removedSkus: ["CATALOG-STALE"],
+      rebuildRequired: true,
+    });
+    expect(result).toMatchObject({
+      externalProductId: "listing-new",
+      previousExternalListingId: "listing-old",
+      removedSkus: ["CATALOG-STALE"],
+      published: true,
+    });
+    expect(fetcher.calls.map((call) => call.init.method)).toEqual([
+      "GET", "GET", "GET",
+      "GET", "GET", "GET", "POST", "DELETE",
+      "GET", "GET", "PUT", "PUT", "PUT", "PUT", "PUT", "POST",
+    ]);
+  });
   it("does not invalidate store credentials for an ordinary eBay listing API 400", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([
@@ -290,6 +364,57 @@ function makeRequest(input: {
   };
 }
 
+function makeGroupedRebuildDraft() {
+  const inventoryItem = (sku: string) => ({
+    sku,
+    payload: {
+      product: {
+        title: "Catalog group",
+        description: "Catalog group",
+        imageUrls: ["https://cdn.example.test/catalog.jpg"],
+      },
+      condition: "NEW" as const,
+      availability: { shipToLocationAvailability: { quantity: 1 } },
+    },
+  });
+  const offer = (sku: string, variantId: number) => ({
+    sku,
+    variantId,
+    payload: {
+      sku,
+      marketplaceId: "EBAY_US" as const,
+      format: "FIXED_PRICE" as const,
+      availableQuantity: 1,
+      categoryId: "183454",
+      listingPolicies: {
+        paymentPolicyId: "payment-policy",
+        returnPolicyId: "return-policy",
+        fulfillmentPolicyId: "fulfillment-policy",
+      },
+      merchantLocationKey: "vendor-location",
+      pricingSummary: { price: { value: "12.99", currency: "USD" } },
+    },
+  });
+  return {
+    productId: 501,
+    marketplaceId: "EBAY_US",
+    inventoryItems: [inventoryItem("CATALOG-KEEP"), inventoryItem("CATALOG-NEW")],
+    offers: [offer("CATALOG-KEEP", 5011), offer("CATALOG-NEW", 5012)],
+    itemGroup: {
+      groupKey: "CATALOG-GROUP",
+      payload: {
+        aspects: {},
+        description: "Catalog group",
+        imageUrls: ["https://cdn.example.test/catalog.jpg"],
+        title: "Catalog group",
+        variantSKUs: ["CATALOG-KEEP", "CATALOG-NEW"],
+        variesBy: { specifications: [] },
+      },
+    },
+    publishMode: "publish" as const,
+    hasExistingExternalIds: false,
+  };
+}
 function shopifyCredential(): DropshipMarketplaceStoreCredentials {
   return {
     vendorId: 10,
