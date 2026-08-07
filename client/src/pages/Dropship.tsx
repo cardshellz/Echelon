@@ -216,6 +216,8 @@ import {
   RETURN_POLICY_GLOBAL_VENDOR_VALUE,
   buildReturnPolicyStoreOptions,
   buildReturnPolicyVendorOptions,
+  returnFeeRowToEditFormState,
+  returnPolicyRowToEditFormState,
   returnPolicyScopeValueFromPicker,
   returnPolicyScopeValueToPicker,
 } from "@/lib/dropship-return-policy-scope";
@@ -1840,6 +1842,10 @@ function ReturnPoliciesTab() {
   const [activeSection, setActiveSection] = useState<ReturnPolicySectionKey>("policies");
   const [policyForm, setPolicyForm] = useState<ReturnPolicyVersionFormState>(emptyReturnPolicyVersionForm);
   const [feeForm, setFeeForm] = useState<ReturnFeeVersionFormState>(emptyReturnFeeVersionForm);
+  // Edit-as-new-version state: when set, the corresponding form is pre-filled
+  // from that row and submitting creates a superseding version server-side.
+  const [editingPolicyId, setEditingPolicyId] = useState<number | null>(null);
+  const [editingFeeId, setEditingFeeId] = useState<number | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -2001,7 +2007,20 @@ function ReturnPoliciesTab() {
       });
       setMessage(`Return policy version created (${returnWindowDays}d window, ${returnPolicyScopeLabel({ vendorId, storeConnectionId })}).`);
       setPolicyForm(emptyReturnPolicyVersionForm);
+      setEditingPolicyId(null);
     });
+  }
+
+  function startEditPolicy(policy: DropshipReturnPolicyVersion) {
+    setError("");
+    setMessage("");
+    setPolicyForm(returnPolicyRowToEditFormState(policy));
+    setEditingPolicyId(policy.policyId);
+  }
+
+  function cancelEditPolicy() {
+    setPolicyForm(emptyReturnPolicyVersionForm);
+    setEditingPolicyId(null);
   }
 
   async function saveFeeVersion() {
@@ -2037,7 +2056,20 @@ function ReturnPoliciesTab() {
       });
       setMessage(`Fee schedule version created (${feeForm.feeType} / ${feeForm.faultCategory}).`);
       setFeeForm(emptyReturnFeeVersionForm);
+      setEditingFeeId(null);
     });
+  }
+
+  function startEditFee(fee: DropshipReturnFeeScheduleRecord) {
+    setError("");
+    setMessage("");
+    setFeeForm(returnFeeRowToEditFormState(fee));
+    setEditingFeeId(fee.feeId);
+  }
+
+  function cancelEditFee() {
+    setFeeForm(emptyReturnFeeVersionForm);
+    setEditingFeeId(null);
   }
 
   async function deactivatePolicy(policy: DropshipReturnPolicyVersion) {
@@ -2085,6 +2117,9 @@ function ReturnPoliciesTab() {
           <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
+      <p className="text-sm text-muted-foreground">
+        Policies and fees are versioned and immutable once effective; editing creates a new version.
+      </p>
       <Tabs
         value={activeSection}
         onValueChange={(value) => setActiveSection(value as ReturnPolicySectionKey)}
@@ -2102,9 +2137,15 @@ function ReturnPoliciesTab() {
           <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <section className="rounded-md border bg-card p-4">
               <PanelHeader
-                title="New policy version"
+                title={editingPolicyId === null ? "New policy version" : `Edit policy #${editingPolicyId} (new version)`}
                 detail="Versioned + immutable once effective. Most specific scope wins: vendor+store > vendor > store > global."
               />
+              {editingPolicyId !== null && (
+                <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  Editing creates a new version — the current version will be retired. Scope is locked;
+                  changing scope means creating a different policy.
+                </p>
+              )}
               <div className="mt-4 grid gap-3 md:grid-cols-2">
                 <ShippingInput
                   label="Return window (days)"
@@ -2126,6 +2167,7 @@ function ReturnPoliciesTab() {
                   placeholder="Global (no vendor)"
                   searchPlaceholder="Search vendor, email, or member..."
                   emptyText="No dropship vendors found."
+                  disabled={editingPolicyId !== null}
                   onChange={selectPolicyScopeVendor}
                 />
                 <SearchableOptionPicker
@@ -2136,20 +2178,28 @@ function ReturnPoliciesTab() {
                   placeholder={policyForm.vendorId ? "Any store (vendor scope)" : "Global (no store)"}
                   searchPlaceholder="Search store, platform, or vendor..."
                   emptyText="No store connections found."
+                  disabled={editingPolicyId !== null}
                   onChange={(value) => setPolicyForm((current) => ({
                     ...current,
                     storeConnectionId: returnPolicyScopeValueFromPicker(value),
                   }))}
                 />
               </div>
-              <Button
-                className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-                disabled={pendingAction === "policy-create"}
-                onClick={savePolicyVersion}
-              >
-                <Save className="h-4 w-4" />
-                Create policy version
-              </Button>
+              <div className="mt-4 flex items-center gap-2">
+                <Button
+                  className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                  disabled={pendingAction === "policy-create"}
+                  onClick={savePolicyVersion}
+                >
+                  <Save className="h-4 w-4" />
+                  {editingPolicyId === null ? "Create policy version" : "Save as new version"}
+                </Button>
+                {editingPolicyId !== null && (
+                  <Button variant="outline" onClick={cancelEditPolicy} disabled={pendingAction === "policy-create"}>
+                    Cancel edit
+                  </Button>
+                )}
+              </div>
             </section>
             <section className="rounded-md border bg-card p-4">
               <PanelHeader title="Policy versions" detail={`${policies.length} row(s) loaded (including inactive).`} />
@@ -2184,14 +2234,23 @@ function ReturnPoliciesTab() {
                         </TableCell>
                         <TableCell className="text-right">
                           {policy.isActive && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={pendingAction === `policy-deactivate-${policy.policyId}`}
-                              onClick={() => deactivatePolicy(policy)}
-                            >
-                              Deactivate
-                            </Button>
+                            <div className="flex justify-end gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => startEditPolicy(policy)}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={pendingAction === `policy-deactivate-${policy.policyId}`}
+                                onClick={() => deactivatePolicy(policy)}
+                              >
+                                Deactivate
+                              </Button>
+                            </div>
                           )}
                         </TableCell>
                       </TableRow>
@@ -2214,9 +2273,15 @@ function ReturnPoliciesTab() {
           <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <section className="rounded-md border bg-card p-4">
               <PanelHeader
-                title="New fee version"
+                title={editingFeeId === null ? "New fee version" : `Edit fee row #${editingFeeId} (new version)`}
                 detail="return_shipping_fee rows encode WHO PAYS per fault (amount ignored — label cost comes from channel evidence)."
               />
+              {editingFeeId !== null && (
+                <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  Editing creates a new version — the current version will be retired. Scope is locked;
+                  changing scope means creating a different fee row.
+                </p>
+              )}
               <div className="mt-4 grid gap-3 md:grid-cols-2">
                 <label className="space-y-1 text-sm">
                   <span className="text-muted-foreground">Fee type</span>
@@ -2275,6 +2340,7 @@ function ReturnPoliciesTab() {
                   placeholder="Global (no vendor)"
                   searchPlaceholder="Search vendor, email, or member..."
                   emptyText="No dropship vendors found."
+                  disabled={editingFeeId !== null}
                   onChange={selectFeeScopeVendor}
                 />
                 <SearchableOptionPicker
@@ -2285,20 +2351,28 @@ function ReturnPoliciesTab() {
                   placeholder={feeForm.vendorId ? "Any store (vendor scope)" : "Global (no store)"}
                   searchPlaceholder="Search store, platform, or vendor..."
                   emptyText="No store connections found."
+                  disabled={editingFeeId !== null}
                   onChange={(value) => setFeeForm((current) => ({
                     ...current,
                     storeConnectionId: returnPolicyScopeValueFromPicker(value),
                   }))}
                 />
               </div>
-              <Button
-                className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-                disabled={pendingAction === "fee-create"}
-                onClick={saveFeeVersion}
-              >
-                <Save className="h-4 w-4" />
-                Create fee version
-              </Button>
+              <div className="mt-4 flex items-center gap-2">
+                <Button
+                  className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                  disabled={pendingAction === "fee-create"}
+                  onClick={saveFeeVersion}
+                >
+                  <Save className="h-4 w-4" />
+                  {editingFeeId === null ? "Create fee version" : "Save as new version"}
+                </Button>
+                {editingFeeId !== null && (
+                  <Button variant="outline" onClick={cancelEditFee} disabled={pendingAction === "fee-create"}>
+                    Cancel edit
+                  </Button>
+                )}
+              </div>
             </section>
             <section className="rounded-md border bg-card p-4">
               <PanelHeader title="Fee schedule rows" detail={`${fees.length} row(s) loaded (including inactive).`} />
@@ -2334,14 +2408,23 @@ function ReturnPoliciesTab() {
                         </TableCell>
                         <TableCell className="text-right">
                           {fee.isActive && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={pendingAction === `fee-deactivate-${fee.feeId}`}
-                              onClick={() => deactivateFee(fee)}
-                            >
-                              Deactivate
-                            </Button>
+                            <div className="flex justify-end gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => startEditFee(fee)}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={pendingAction === `fee-deactivate-${fee.feeId}`}
+                                onClick={() => deactivateFee(fee)}
+                              >
+                                Deactivate
+                              </Button>
+                            </div>
                           )}
                         </TableCell>
                       </TableRow>

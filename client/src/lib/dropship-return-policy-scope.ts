@@ -2,6 +2,11 @@ import {
   formatStatus,
   type DropshipAdminStoreConnectionListItem,
   type DropshipDogfoodReadinessItem,
+  type DropshipReturnFeeAmountType,
+  type DropshipReturnFeeScheduleRecord,
+  type DropshipReturnFeeType,
+  type DropshipReturnFaultCategory,
+  type DropshipReturnPolicyVersion,
 } from "./dropship-ops-surface";
 
 /**
@@ -76,6 +81,76 @@ export function returnPolicyScopeValueToPicker(
   blankSentinel: typeof RETURN_POLICY_GLOBAL_VENDOR_VALUE | typeof RETURN_POLICY_ANY_STORE_VALUE,
 ): string {
   return value.trim() === "" ? blankSentinel : value;
+}
+
+/**
+ * Form-state shape produced when an operator picks "Edit" on a return window
+ * policy row. Mirrors the ReturnPoliciesTab policy form (all strings — the
+ * form binds to text/number inputs) so the tab can prefill directly.
+ *
+ * Editing a versioned, immutable row means creating the NEXT version that
+ * supersedes it, so the mapping copies every editable field verbatim.
+ */
+export interface ReturnPolicyVersionEditFormState {
+  returnWindowDays: string;
+  vendorId: string;
+  storeConnectionId: string;
+  priority: string;
+}
+
+/** Form-state shape produced when an operator picks "Edit" on a fee row. */
+export interface ReturnFeeVersionEditFormState {
+  feeType: DropshipReturnFeeType;
+  faultCategory: DropshipReturnFaultCategory;
+  amountType: DropshipReturnFeeAmountType;
+  amount: string;
+  vendorId: string;
+  storeConnectionId: string;
+  priority: string;
+}
+
+function scopeIdToFormValue(id: number | null): string {
+  return id === null ? "" : String(id);
+}
+
+/**
+ * Map a policy row to the pre-filled form state for edit-as-new-version.
+ * Null scope ids become "" (the form's blank/global representation).
+ */
+export function returnPolicyRowToEditFormState(
+  row: Pick<
+    DropshipReturnPolicyVersion,
+    "returnWindowDays" | "vendorId" | "storeConnectionId" | "priority"
+  >,
+): ReturnPolicyVersionEditFormState {
+  return {
+    returnWindowDays: String(row.returnWindowDays),
+    vendorId: scopeIdToFormValue(row.vendorId),
+    storeConnectionId: scopeIdToFormValue(row.storeConnectionId),
+    priority: String(row.priority),
+  };
+}
+
+/**
+ * Map a fee schedule row to the pre-filled form state for edit-as-new-version.
+ * Amounts stay in their stored unit (integer cents for flat_cents, percent
+ * basis value for percent) — the form labels the input by amountType.
+ */
+export function returnFeeRowToEditFormState(
+  row: Pick<
+    DropshipReturnFeeScheduleRecord,
+    "feeType" | "faultCategory" | "amountType" | "amount" | "vendorId" | "storeConnectionId" | "priority"
+  >,
+): ReturnFeeVersionEditFormState {
+  return {
+    feeType: row.feeType,
+    faultCategory: row.faultCategory,
+    amountType: row.amountType,
+    amount: String(row.amount),
+    vendorId: scopeIdToFormValue(row.vendorId),
+    storeConnectionId: scopeIdToFormValue(row.storeConnectionId),
+    priority: String(row.priority),
+  };
 }
 
 /**
