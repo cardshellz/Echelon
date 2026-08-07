@@ -211,6 +211,16 @@ import {
   type DropshipSystemReadinessCheck,
   type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
+import {
+  RETURN_POLICY_ANY_STORE_VALUE,
+  RETURN_POLICY_GLOBAL_VENDOR_VALUE,
+  buildReturnPolicyStoreOptions,
+  buildReturnPolicyVendorOptions,
+  returnFeeRowToEditFormState,
+  returnPolicyRowToEditFormState,
+  returnPolicyScopeValueFromPicker,
+  returnPolicyScopeValueToPicker,
+} from "@/lib/dropship-return-policy-scope";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
@@ -751,11 +761,13 @@ const returnOpsUpdateStatuses: DropshipRmaStatus[] = [
   "closed",
 ];
 
+// NOTE: "marketplace" remains in the shared enum but is intentionally not
+// offered in the UI — vendor absorbs marketplace-fault outcomes by policy
+// (Overlord, 2026-08-07).
 const returnFaultCategories: DropshipReturnFaultCategory[] = [
   "card_shellz",
   "vendor",
   "customer",
-  "marketplace",
   "carrier",
 ];
 
@@ -1832,6 +1844,10 @@ function ReturnPoliciesTab() {
   const [activeSection, setActiveSection] = useState<ReturnPolicySectionKey>("policies");
   const [policyForm, setPolicyForm] = useState<ReturnPolicyVersionFormState>(emptyReturnPolicyVersionForm);
   const [feeForm, setFeeForm] = useState<ReturnFeeVersionFormState>(emptyReturnFeeVersionForm);
+  // Edit-as-new-version state: when set, the corresponding form is pre-filled
+  // from that row and submitting creates a superseding version server-side.
+  const [editingPolicyId, setEditingPolicyId] = useState<number | null>(null);
+  const [editingFeeId, setEditingFeeId] = useState<number | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -1841,6 +1857,18 @@ function ReturnPoliciesTab() {
 
   const policiesUrl = useMemo(() => buildAdminReturnPoliciesUrl({ includeInactive: true }), []);
   const feesUrl = useMemo(() => buildAdminReturnFeesUrl({ includeInactive: true }), []);
+  const scopeVendorOptionsUrl = useMemo(() => buildAdminDogfoodReadinessUrl({
+    search: "",
+    status: "all",
+    platform: "all",
+    limit: 100,
+  }), []);
+  const scopeStoreConnectionsUrl = useMemo(() => buildAdminStoreConnectionsUrl({
+    search: "",
+    status: "all",
+    platform: "all",
+    limit: 100,
+  }), []);
   const policiesQuery = useQuery<DropshipAdminReturnPolicyListResponse>({
     queryKey: [policiesUrl],
     queryFn: () => fetchJson<DropshipAdminReturnPolicyListResponse>(policiesUrl),
@@ -1849,6 +1877,65 @@ function ReturnPoliciesTab() {
     queryKey: [feesUrl],
     queryFn: () => fetchJson<DropshipAdminReturnFeeListResponse>(feesUrl),
   });
+  const scopeVendorOptionsQuery = useQuery<DropshipDogfoodReadinessResponse>({
+    queryKey: [scopeVendorOptionsUrl, "return-policy-scope-vendors"],
+    queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(scopeVendorOptionsUrl),
+  });
+  const scopeStoreConnectionsQuery = useQuery<DropshipAdminStoreConnectionListResponse>({
+    queryKey: [scopeStoreConnectionsUrl, "return-policy-scope-store-connections"],
+    queryFn: () => fetchJson<DropshipAdminStoreConnectionListResponse>(scopeStoreConnectionsUrl),
+  });
+
+  const scopeVendorOptions = useMemo(
+    () => buildReturnPolicyVendorOptions(scopeVendorOptionsQuery.data?.items ?? []),
+    [scopeVendorOptionsQuery.data?.items],
+  );
+  const scopeStoreConnections = useMemo(
+    () => scopeStoreConnectionsQuery.data?.items ?? [],
+    [scopeStoreConnectionsQuery.data?.items],
+  );
+  const policyStoreOptions = useMemo(
+    () => buildReturnPolicyStoreOptions(scopeStoreConnections, policyForm.vendorId),
+    [scopeStoreConnections, policyForm.vendorId],
+  );
+  const feeStoreOptions = useMemo(
+    () => buildReturnPolicyStoreOptions(scopeStoreConnections, feeForm.vendorId),
+    [scopeStoreConnections, feeForm.vendorId],
+  );
+  const effectiveStoreOptions = useMemo(
+    () => buildReturnPolicyStoreOptions(scopeStoreConnections, effectiveVendorId),
+    [scopeStoreConnections, effectiveVendorId],
+  );
+  const scopeOptionsLoading =
+    scopeVendorOptionsQuery.isLoading || scopeVendorOptionsQuery.isFetching
+    || scopeStoreConnectionsQuery.isLoading || scopeStoreConnectionsQuery.isFetching;
+
+  function selectPolicyScopeVendor(value: string) {
+    const vendorId = returnPolicyScopeValueFromPicker(value);
+    setPolicyForm((current) => {
+      if (vendorId === current.vendorId) return current;
+      // Store connections belong to vendors: a store picked under a different
+      // vendor is no longer valid, so reset it when the vendor changes.
+      return { ...current, vendorId, storeConnectionId: "" };
+    });
+  }
+
+  function selectFeeScopeVendor(value: string) {
+    const vendorId = returnPolicyScopeValueFromPicker(value);
+    setFeeForm((current) => {
+      if (vendorId === current.vendorId) return current;
+      return { ...current, vendorId, storeConnectionId: "" };
+    });
+  }
+
+  function selectEffectiveScopeVendor(value: string) {
+    const vendorId = returnPolicyScopeValueFromPicker(value);
+    setEffectiveVendorId((current) => {
+      if (vendorId === current) return current;
+      setEffectiveStoreConnectionId("");
+      return vendorId;
+    });
+  }
 
   const effectiveVendor = effectiveVendorId.trim() ? Number(effectiveVendorId) : null;
   const effectiveStore = effectiveStoreConnectionId.trim() ? Number(effectiveStoreConnectionId) : null;
@@ -1878,8 +1965,13 @@ function ReturnPoliciesTab() {
     enabled: activeSection === "effective" && effectiveLookupReady,
   });
 
-  const policies = policiesQuery.data?.items ?? [];
-  const fees = feesQuery.data?.items ?? [];
+  const [showInactive, setShowInactive] = useState(false);
+  const policies = (policiesQuery.data?.items ?? [])
+    .filter((row) => showInactive || row.isActive)
+    .sort((a, b) => b.policyId - a.policyId);
+  const fees = (feesQuery.data?.items ?? [])
+    .filter((row) => showInactive || row.isActive)
+    .sort((a, b) => b.feeId - a.feeId);
 
   async function runPolicyAction(action: string, task: () => Promise<void>) {
     setPendingAction(action);
@@ -1918,11 +2010,27 @@ function ReturnPoliciesTab() {
         vendorId,
         storeConnectionId,
         priority: Number(policyForm.priority) || 0,
+        // Edit-as-new-version: retire the row being edited even if the scope
+        // key changed (server supersedes same-key rows automatically).
+        supersedesPolicyId: editingPolicyId ?? undefined,
         idempotencyKey: createDropshipIdempotencyKey("return-policy-version"),
       });
       setMessage(`Return policy version created (${returnWindowDays}d window, ${returnPolicyScopeLabel({ vendorId, storeConnectionId })}).`);
       setPolicyForm(emptyReturnPolicyVersionForm);
+      setEditingPolicyId(null);
     });
+  }
+
+  function startEditPolicy(policy: DropshipReturnPolicyVersion) {
+    setError("");
+    setMessage("");
+    setPolicyForm(returnPolicyRowToEditFormState(policy));
+    setEditingPolicyId(policy.policyId);
+  }
+
+  function cancelEditPolicy() {
+    setPolicyForm(emptyReturnPolicyVersionForm);
+    setEditingPolicyId(null);
   }
 
   async function saveFeeVersion() {
@@ -1954,11 +2062,25 @@ function ReturnPoliciesTab() {
         vendorId,
         storeConnectionId,
         priority: Number(feeForm.priority) || 0,
+        supersedesFeeId: editingFeeId ?? undefined,
         idempotencyKey: createDropshipIdempotencyKey("return-fee-version"),
       });
       setMessage(`Fee schedule version created (${feeForm.feeType} / ${feeForm.faultCategory}).`);
       setFeeForm(emptyReturnFeeVersionForm);
+      setEditingFeeId(null);
     });
+  }
+
+  function startEditFee(fee: DropshipReturnFeeScheduleRecord) {
+    setError("");
+    setMessage("");
+    setFeeForm(returnFeeRowToEditFormState(fee));
+    setEditingFeeId(fee.feeId);
+  }
+
+  function cancelEditFee() {
+    setFeeForm(emptyReturnFeeVersionForm);
+    setEditingFeeId(null);
   }
 
   async function deactivatePolicy(policy: DropshipReturnPolicyVersion) {
@@ -1989,11 +2111,14 @@ function ReturnPoliciesTab() {
 
   return (
     <div className="space-y-5">
-      {(policiesQuery.error || feesQuery.error || error) && (
+      {(policiesQuery.error || feesQuery.error || scopeVendorOptionsQuery.error || scopeStoreConnectionsQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(policiesQuery.error ?? feesQuery.error, "Unable to load return policies.")}
+            {error || queryErrorMessage(
+              policiesQuery.error ?? feesQuery.error ?? scopeVendorOptionsQuery.error ?? scopeStoreConnectionsQuery.error,
+              "Unable to load return policies.",
+            )}
           </AlertDescription>
         </Alert>
       )}
@@ -2003,6 +2128,9 @@ function ReturnPoliciesTab() {
           <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
+      <p className="text-sm text-muted-foreground">
+        Policies and fees are versioned and immutable once effective; editing creates a new version.
+      </p>
       <Tabs
         value={activeSection}
         onValueChange={(value) => setActiveSection(value as ReturnPolicySectionKey)}
@@ -2020,9 +2148,15 @@ function ReturnPoliciesTab() {
           <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <section className="rounded-md border bg-card p-4">
               <PanelHeader
-                title="New policy version"
+                title={editingPolicyId === null ? "New policy version" : `Edit policy #${editingPolicyId} (new version)`}
                 detail="Versioned + immutable once effective. Most specific scope wins: vendor+store > vendor > store > global."
               />
+              {editingPolicyId !== null && (
+                <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  Editing creates a new version — the current version will be retired. Scope is locked;
+                  changing scope means creating a different policy.
+                </p>
+              )}
               <div className="mt-4 grid gap-3 md:grid-cols-2">
                 <ShippingInput
                   label="Return window (days)"
@@ -2036,30 +2170,54 @@ function ReturnPoliciesTab() {
                   value={policyForm.priority}
                   onChange={(value) => setPolicyForm((current) => ({ ...current, priority: value }))}
                 />
-                <ShippingInput
-                  label="Vendor id"
-                  placeholder="Blank = global/store scope"
-                  value={policyForm.vendorId}
-                  onChange={(value) => setPolicyForm((current) => ({ ...current, vendorId: value }))}
+                <SearchableOptionPicker
+                  label="Vendor"
+                  value={returnPolicyScopeValueToPicker(policyForm.vendorId, RETURN_POLICY_GLOBAL_VENDOR_VALUE)}
+                  options={scopeVendorOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder="Global (no vendor)"
+                  searchPlaceholder="Search vendor, email, or member..."
+                  emptyText="No dropship vendors found."
+                  disabled={editingPolicyId !== null}
+                  onChange={selectPolicyScopeVendor}
                 />
-                <ShippingInput
-                  label="Store connection id"
-                  placeholder="Optional"
-                  value={policyForm.storeConnectionId}
-                  onChange={(value) => setPolicyForm((current) => ({ ...current, storeConnectionId: value }))}
+                <SearchableOptionPicker
+                  label="Store connection"
+                  value={returnPolicyScopeValueToPicker(policyForm.storeConnectionId, RETURN_POLICY_ANY_STORE_VALUE)}
+                  options={policyStoreOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder={policyForm.vendorId ? "Any store (vendor scope)" : "Global (no store)"}
+                  searchPlaceholder="Search store, platform, or vendor..."
+                  emptyText="No store connections found."
+                  disabled={editingPolicyId !== null}
+                  onChange={(value) => setPolicyForm((current) => ({
+                    ...current,
+                    storeConnectionId: returnPolicyScopeValueFromPicker(value),
+                  }))}
                 />
               </div>
-              <Button
-                className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-                disabled={pendingAction === "policy-create"}
-                onClick={savePolicyVersion}
-              >
-                <Save className="h-4 w-4" />
-                Create policy version
-              </Button>
+              <div className="mt-4 flex items-center gap-2">
+                <Button
+                  className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                  disabled={pendingAction === "policy-create"}
+                  onClick={savePolicyVersion}
+                >
+                  <Save className="h-4 w-4" />
+                  {editingPolicyId === null ? "Create policy version" : "Save as new version"}
+                </Button>
+                {editingPolicyId !== null && (
+                  <Button variant="outline" onClick={cancelEditPolicy} disabled={pendingAction === "policy-create"}>
+                    Cancel edit
+                  </Button>
+                )}
+              </div>
             </section>
             <section className="rounded-md border bg-card p-4">
-              <PanelHeader title="Policy versions" detail={`${policies.length} row(s) loaded (including inactive).`} />
+              <PanelHeader title="Policy versions" detail={`${policies.length} row(s) shown.`} />
+              <label className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
+                <input type="checkbox" checked={showInactive} onChange={(event) => setShowInactive(event.target.checked)} />
+                Show inactive (history)
+              </label>
               <div className="mt-4 overflow-auto">
                 <Table>
                   <TableHeader>
@@ -2091,14 +2249,23 @@ function ReturnPoliciesTab() {
                         </TableCell>
                         <TableCell className="text-right">
                           {policy.isActive && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={pendingAction === `policy-deactivate-${policy.policyId}`}
-                              onClick={() => deactivatePolicy(policy)}
-                            >
-                              Deactivate
-                            </Button>
+                            <div className="flex justify-end gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => startEditPolicy(policy)}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={pendingAction === `policy-deactivate-${policy.policyId}`}
+                                onClick={() => deactivatePolicy(policy)}
+                              >
+                                Deactivate
+                              </Button>
+                            </div>
                           )}
                         </TableCell>
                       </TableRow>
@@ -2121,9 +2288,15 @@ function ReturnPoliciesTab() {
           <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <section className="rounded-md border bg-card p-4">
               <PanelHeader
-                title="New fee version"
+                title={editingFeeId === null ? "New fee version" : `Edit fee row #${editingFeeId} (new version)`}
                 detail="return_shipping_fee rows encode WHO PAYS per fault (amount ignored — label cost comes from channel evidence)."
               />
+              {editingFeeId !== null && (
+                <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  Editing creates a new version — the current version will be retired. Scope is locked;
+                  changing scope means creating a different fee row.
+                </p>
+              )}
               <div className="mt-4 grid gap-3 md:grid-cols-2">
                 <label className="space-y-1 text-sm">
                   <span className="text-muted-foreground">Fee type</span>
@@ -2144,10 +2317,9 @@ function ReturnPoliciesTab() {
                     value={feeForm.faultCategory}
                     onChange={(event) => setFeeForm((current) => ({ ...current, faultCategory: event.target.value as DropshipReturnFaultCategory }))}
                   >
-                    <option value="card_shellz">Card Shellz</option>
-                    <option value="vendor">Vendor</option>
-                    <option value="customer">Customer</option>
-                    <option value="marketplace">Marketplace</option>
+                    <option value="card_shellz">Card Shellz (us)</option>
+                    <option value="vendor">Vendor (store owner)</option>
+                    <option value="customer">Customer (vendor's customer)</option>
                     <option value="carrier">Carrier</option>
                   </select>
                 </label>
@@ -2174,30 +2346,50 @@ function ReturnPoliciesTab() {
                   value={feeForm.priority}
                   onChange={(value) => setFeeForm((current) => ({ ...current, priority: value }))}
                 />
-                <ShippingInput
-                  label="Vendor id"
-                  placeholder="Blank = global/store scope"
-                  value={feeForm.vendorId}
-                  onChange={(value) => setFeeForm((current) => ({ ...current, vendorId: value }))}
+                <SearchableOptionPicker
+                  label="Vendor"
+                  value={returnPolicyScopeValueToPicker(feeForm.vendorId, RETURN_POLICY_GLOBAL_VENDOR_VALUE)}
+                  options={scopeVendorOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder="Global (no vendor)"
+                  searchPlaceholder="Search vendor, email, or member..."
+                  emptyText="No dropship vendors found."
+                  disabled={editingFeeId !== null}
+                  onChange={selectFeeScopeVendor}
                 />
-                <ShippingInput
-                  label="Store connection id"
-                  placeholder="Optional"
-                  value={feeForm.storeConnectionId}
-                  onChange={(value) => setFeeForm((current) => ({ ...current, storeConnectionId: value }))}
+                <SearchableOptionPicker
+                  label="Store connection"
+                  value={returnPolicyScopeValueToPicker(feeForm.storeConnectionId, RETURN_POLICY_ANY_STORE_VALUE)}
+                  options={feeStoreOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder={feeForm.vendorId ? "Any store (vendor scope)" : "Global (no store)"}
+                  searchPlaceholder="Search store, platform, or vendor..."
+                  emptyText="No store connections found."
+                  disabled={editingFeeId !== null}
+                  onChange={(value) => setFeeForm((current) => ({
+                    ...current,
+                    storeConnectionId: returnPolicyScopeValueFromPicker(value),
+                  }))}
                 />
               </div>
-              <Button
-                className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-                disabled={pendingAction === "fee-create"}
-                onClick={saveFeeVersion}
-              >
-                <Save className="h-4 w-4" />
-                Create fee version
-              </Button>
+              <div className="mt-4 flex items-center gap-2">
+                <Button
+                  className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                  disabled={pendingAction === "fee-create"}
+                  onClick={saveFeeVersion}
+                >
+                  <Save className="h-4 w-4" />
+                  {editingFeeId === null ? "Create fee version" : "Save as new version"}
+                </Button>
+                {editingFeeId !== null && (
+                  <Button variant="outline" onClick={cancelEditFee} disabled={pendingAction === "fee-create"}>
+                    Cancel edit
+                  </Button>
+                )}
+              </div>
             </section>
             <section className="rounded-md border bg-card p-4">
-              <PanelHeader title="Fee schedule rows" detail={`${fees.length} row(s) loaded (including inactive).`} />
+              <PanelHeader title="Fee schedule rows" detail={`${fees.length} row(s) shown.`} />
               <div className="mt-4 overflow-auto">
                 <Table>
                   <TableHeader>
@@ -2230,14 +2422,23 @@ function ReturnPoliciesTab() {
                         </TableCell>
                         <TableCell className="text-right">
                           {fee.isActive && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={pendingAction === `fee-deactivate-${fee.feeId}`}
-                              onClick={() => deactivateFee(fee)}
-                            >
-                              Deactivate
-                            </Button>
+                            <div className="flex justify-end gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => startEditFee(fee)}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={pendingAction === `fee-deactivate-${fee.feeId}`}
+                                onClick={() => deactivateFee(fee)}
+                              >
+                                Deactivate
+                              </Button>
+                            </div>
                           )}
                         </TableCell>
                       </TableRow>
@@ -2263,17 +2464,25 @@ function ReturnPoliciesTab() {
               detail="Resolve the window + fees that would apply for a vendor/store pair. Blank ids resolve the global policy."
             />
             <div className="mt-4 grid gap-3 md:grid-cols-3">
-              <ShippingInput
-                label="Vendor id"
-                placeholder="Blank = global"
-                value={effectiveVendorId}
-                onChange={setEffectiveVendorId}
+              <SearchableOptionPicker
+                label="Vendor"
+                value={returnPolicyScopeValueToPicker(effectiveVendorId, RETURN_POLICY_GLOBAL_VENDOR_VALUE)}
+                options={scopeVendorOptions}
+                isLoading={scopeOptionsLoading}
+                placeholder="Global (no vendor)"
+                searchPlaceholder="Search vendor, email, or member..."
+                emptyText="No dropship vendors found."
+                onChange={selectEffectiveScopeVendor}
               />
-              <ShippingInput
-                label="Store connection id"
-                placeholder="Blank = none"
-                value={effectiveStoreConnectionId}
-                onChange={setEffectiveStoreConnectionId}
+              <SearchableOptionPicker
+                label="Store connection"
+                value={returnPolicyScopeValueToPicker(effectiveStoreConnectionId, RETURN_POLICY_ANY_STORE_VALUE)}
+                options={effectiveStoreOptions}
+                isLoading={scopeOptionsLoading}
+                placeholder={effectiveVendorId ? "Any store (vendor scope)" : "Global (no store)"}
+                searchPlaceholder="Search store, platform, or vendor..."
+                emptyText="No store connections found."
+                onChange={(value) => setEffectiveStoreConnectionId(returnPolicyScopeValueFromPicker(value))}
               />
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Fault category</span>
@@ -2282,10 +2491,9 @@ function ReturnPoliciesTab() {
                   value={effectiveFaultCategory}
                   onChange={(event) => setEffectiveFaultCategory(event.target.value as DropshipReturnFaultCategory)}
                 >
-                  <option value="card_shellz">Card Shellz</option>
-                  <option value="vendor">Vendor</option>
-                  <option value="customer">Customer</option>
-                  <option value="marketplace">Marketplace</option>
+                  <option value="card_shellz">Card Shellz (us)</option>
+                  <option value="vendor">Vendor (store owner)</option>
+                  <option value="customer">Customer (vendor's customer)</option>
                   <option value="carrier">Carrier</option>
                 </select>
               </label>
@@ -2367,18 +2575,18 @@ function ReturnOpsTab() {
     search: "",
     status: "all",
     platform: "all",
-    limit: 250,
+    limit: 100,
   }), []);
   const returnStoreConnectionsUrl = useMemo(() => buildAdminStoreConnectionsUrl({
     search: "",
     status: "all",
     platform: "all",
-    limit: 250,
+    limit: 100,
   }), []);
   const returnOrderIntakeUrl = useMemo(() => buildAdminOrderIntakeUrl({
     search: "",
     status: "all",
-    limit: 250,
+    limit: 100,
   }), []);
 
   const returnsQuery = useQuery<DropshipReturnListResponse>({
@@ -3390,7 +3598,7 @@ function WalletOpsTab() {
     search: "",
     status: "all",
     platform: "all",
-    limit: 250,
+    limit: 100,
   }), []);
   const walletVendorOptionsQuery = useQuery<DropshipDogfoodReadinessResponse>({
     queryKey: [walletVendorOptionsUrl, "wallet-vendors"],

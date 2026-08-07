@@ -19,6 +19,7 @@ export interface MarketplaceListingReplacementVariant {
   sku: string;
   name: string;
   included: boolean;
+  lockedExcluded?: boolean;
 }
 
 interface ReplacementApiErrorPayload {
@@ -83,7 +84,9 @@ export function buildMarketplaceListingReplacementMembers(
       : {
           productVariantId: variant.id,
           disposition: "excluded" as const,
-          reasonCode: "operator_excluded_from_replacement",
+          reasonCode: variant.lockedExcluded
+            ? "local_variant_inactive"
+            : "operator_excluded_from_replacement",
         },
   );
 }
@@ -119,7 +122,9 @@ export function MarketplaceListingReplacementDialog({
   const [plan, setPlan] = useState<ReplacementPlan | null>(null);
   const [result, setResult] = useState<ExecutionResult | null>(null);
   const [error, setError] = useState<ReplacementApiErrorPayload | null>(null);
-  const [busy, setBusy] = useState<"planning" | "executing" | null>(null);
+  const [busy, setBusy] = useState<
+    "planning" | "executing" | "recovering" | null
+  >(null);
   const keyRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -202,6 +207,41 @@ export function MarketplaceListingReplacementDialog({
     }
   };
 
+  const recoverAndReplan = async () => {
+    if (!plan) return;
+    setBusy("recovering");
+    setError(null);
+    setResult(null);
+    try {
+      const recovery = await postReplacement(
+        `${endpointBase}/${plan.operationId}/recover`,
+        ownerBody,
+        executionResponseSchema,
+      );
+      if (recovery.result.kind !== "failed") {
+        throw {
+          code: "MARKETPLACE_LISTING_REPLACEMENT_RECOVERY_INCOMPLETE",
+          message: executionResultMessage(recovery.result),
+        };
+      }
+      const freshKey = createReplacementIdempotencyKey(owner);
+      keyRef.current = freshKey;
+      const freshPlan = await postReplacement(
+        endpointBase + "/plan",
+        {
+          ...ownerBody,
+          targetMembers: members,
+          idempotencyKey: freshKey,
+        },
+        planResponseSchema,
+      );
+      setPlan(freshPlan.operation);
+    } catch (requestError) {
+      setError(normalizeReplacementError(requestError));
+    } finally {
+      setBusy(null);
+    }
+  };
   const succeeded = result?.kind === "completed";
   const locked = plan !== null || busy !== null;
 
@@ -243,13 +283,15 @@ export function MarketplaceListingReplacementDialog({
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-muted-foreground">
-                    {includedVariantIds.has(variant.id)
-                      ? "Included"
-                      : "Excluded"}
+                    {variant.lockedExcluded
+                      ? "Archived - will be removed"
+                      : includedVariantIds.has(variant.id)
+                        ? "Included"
+                        : "Excluded"}
                   </span>
                   <Switch
                     checked={includedVariantIds.has(variant.id)}
-                    disabled={locked}
+                    disabled={locked || variant.lockedExcluded === true}
                     onCheckedChange={(checked) => {
                       setIncludedVariantIds((current) => {
                         const next = new Set(current);
@@ -258,7 +300,11 @@ export function MarketplaceListingReplacementDialog({
                         return next;
                       });
                     }}
-                    aria-label={`${includedVariantIds.has(variant.id) ? "Exclude" : "Include"} ${variant.sku}`}
+                    aria-label={
+                      variant.lockedExcluded
+                        ? `${variant.sku} is archived and will be removed`
+                        : `${includedVariantIds.has(variant.id) ? "Exclude" : "Include"} ${variant.sku}`
+                    }
                   />
                 </div>
               </div>
@@ -320,18 +366,36 @@ export function MarketplaceListingReplacementDialog({
               Review replacement
             </Button>
           )}
-          {plan && !result && (
-            <Button
-              variant="destructive"
-              disabled={busy !== null}
-              onClick={executeReplacement}
-            >
-              {busy === "executing" && (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              )}
-              Replace listing
-            </Button>
-          )}
+          {plan &&
+            !result &&
+            error?.code !==
+              "MARKETPLACE_LISTING_REPLACEMENT_MANUAL_RECOVERY_REQUIRED" && (
+              <Button
+                variant="destructive"
+                disabled={busy !== null}
+                onClick={executeReplacement}
+              >
+                {busy === "executing" && (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                )}
+                Replace listing
+              </Button>
+            )}
+          {plan &&
+            !result &&
+            error?.code ===
+              "MARKETPLACE_LISTING_REPLACEMENT_MANUAL_RECOVERY_REQUIRED" && (
+              <Button
+                variant="destructive"
+                disabled={busy !== null}
+                onClick={recoverAndReplan}
+              >
+                {busy === "recovering" && (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                )}
+                Verify recovery and start fresh
+              </Button>
+            )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -415,12 +479,14 @@ function normalizeReplacementError(error: unknown): ReplacementApiErrorPayload {
   };
 }
 
-function executionResultMessage(result: ExecutionResult): string {
+export function executionResultMessage(result: ExecutionResult): string {
   switch (result.kind) {
     case "completed":
       return "Replacement completed and Echelon now controls the new listing.";
     case "failed":
-      return "Replacement failed, and compensation restored the previous listing state.";
+      return result.stepKey === "preflight.validate_plan"
+        ? "Replacement stopped during preflight. The live eBay listing was not changed."
+        : "Replacement failed, and compensation restored the previous listing state.";
     case "manual_recovery_required":
       return "Automatic recovery failed. Do not retry blindly; manual eBay recovery is required.";
     case "cancelled":

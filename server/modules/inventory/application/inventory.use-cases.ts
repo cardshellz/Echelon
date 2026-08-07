@@ -8,13 +8,58 @@ import type { InventoryLevel, InsertInventoryTransaction, InventoryTransaction }
 import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { IntegrityError, ValidationError } from "../../../../shared/errors";
 import { resolveCost } from "../cost-resolver";
-import { centsToMills } from "../../../../shared/utils/money";
+import { centsToMills, millsToCents } from "../../../../shared/utils/money";
 import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-item-commands";
 
 export class FreezeViolationError extends Error {
   code = "LOCATION_FROZEN";
   constructor(locationId: number) {
     super(`Location ${locationId} is frozen for cycle counting — mutation blocked`);
+  }
+}
+
+/**
+ * Raised when a receipt reversal cannot post because the lot/location on-hand
+ * is already consumed or sold. The caller decides whether to surface this as
+ * a block (default) or retry with the audited allowNegative override.
+ */
+export class InsufficientOnHandForReversalError extends IntegrityError {
+  constructor(context: {
+    receivingLineId: number;
+    qty: number;
+    available: number;
+  }) {
+    super(
+      `Insufficient on-hand to reverse ${context.qty} unit(s) for receiving line ` +
+        `${context.receivingLineId}: only ${context.available} available (quantity already ` +
+        `consumed or sold). Pass allowNegative to override.`,
+      { ...context, code: "REVERSAL_INSUFFICIENT_ON_HAND" },
+    );
+    this.code = "REVERSAL_INSUFFICIENT_ON_HAND";
+  }
+}
+
+/**
+ * A provider-confirmed replacement package cannot be safely posted from the
+ * current balance when no unreserved stock remains. Callers must distinguish
+ * this from a malformed shipment or a failed inventory write: the package is
+ * a physical fact, while the inventory debit needs reconciliation.
+ */
+export class ReplacementInventoryUnavailableError extends IntegrityError {
+  constructor(context: {
+    productVariantId: number;
+    qty: number;
+    warehouseId: number | null;
+  }) {
+    const warehouseText = context.warehouseId == null
+      ? "any eligible warehouse"
+      : `warehouse ${context.warehouseId}`;
+    super(
+      `Replacement inventory unavailable for variant ${context.productVariantId}: ` +
+      `no active, pickable, unfrozen location in ${warehouseText} has ${context.qty} unreserved unit(s).`,
+      context,
+    );
+    this.code = "REPLACEMENT_INVENTORY_UNAVAILABLE";
   }
 }
 
@@ -207,6 +252,185 @@ export class InventoryUseCases {
     }
 
     this.triggerNotifyChange(params.productVariantId, "receive");
+  }
+
+  // ---------------------------------------------------------------------------
+  // REVERSE RECEIPT (Spec D — compensating decrement for a posted receipt)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Reverse the inventory effects of a posted receiving line:
+   *   1. Decrement the lot(s) created by that line at their ORIGINAL cost
+   *      (exact mills round-trip — never re-costed).
+   *   2. Decrement the location level by the variant qty.
+   *   3. Write a 'receipt_reversal' ledger row referencing the reversal.
+   *
+   * Ownership: this is the ONLY writer path for receipt reversals into
+   * inventory.inventory_lots / inventory_levels / inventory_transactions
+   * (writer-ratchet P2.1 — procurement calls this public API, never the
+   * tables directly).
+   *
+   * Insufficient on-hand throws InsufficientOnHandForReversalError unless
+   * allowNegative is set (elevated-permission override; the caller audits it
+   * on the reversal row).
+   *
+   * Returns the original lot unit cost (mills, per variant unit) so the
+   * caller can snapshot it on the reversal record, or null when no lot was
+   * found (legacy receipts predating lot tracking).
+   */
+  async reverseReceiptInventory(params: {
+    receivingLineId: number;
+    receivingOrderId: number;
+    productVariantId: number;
+    warehouseLocationId: number | null;
+    qty: number;
+    reversalId: number;
+    reason: string;
+    userId?: string | null;
+    allowNegative?: boolean;
+  }, externalTx?: any): Promise<{ lotUnitCostMills: number | null }> {
+    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) {
+      throw new ValidationError("qty must be a positive integer");
+    }
+    const allowNegative = params.allowNegative === true;
+
+    const doWork = async (tx: any): Promise<{ lotUnitCostMills: number | null }> => {
+      if (params.warehouseLocationId !== null) {
+        await this.assertNotFrozen(params.warehouseLocationId, tx);
+      }
+
+      // 1. Lots created by this receiving line (resolved through the ledger —
+      //    the receipt transaction row carries the exact lot linkage).
+      const lotRows = await tx.execute(sql`
+        SELECT l.id, l.qty_on_hand, l.unit_cost_mills
+        FROM inventory.inventory_lots l
+        JOIN inventory.inventory_transactions t
+          ON t.inventory_lot_id = l.id
+        WHERE t.receiving_line_id = ${params.receivingLineId}
+          AND t.transaction_type = 'receipt'
+          AND t.voided_at IS NULL
+        ORDER BY l.id
+        FOR UPDATE OF l
+      `);
+
+      let lotUnitCostMills: number | null = null;
+      if (lotRows.rows.length > 0) {
+        // Pre-check total availability BEFORE any mutation (Rule #7: the
+        // transaction would roll back anyway, but failing fast keeps the
+        // error deterministic and avoids lock churn).
+        if (!allowNegative) {
+          const totalOnHand = lotRows.rows.reduce(
+            (sum: number, lot: any) => sum + Math.max(0, Number(lot.qty_on_hand) || 0),
+            0,
+          );
+          if (totalOnHand < params.qty) {
+            throw new InsufficientOnHandForReversalError({
+              receivingLineId: params.receivingLineId,
+              qty: params.qty,
+              available: totalOnHand,
+            });
+          }
+        }
+
+        let remainingToReverse = params.qty;
+        for (const lot of lotRows.rows) {
+          if (remainingToReverse <= 0) break;
+          const lotId = Number(lot.id);
+          const onHand = Number(lot.qty_on_hand) || 0;
+          const decrement = Math.min(
+            remainingToReverse,
+            allowNegative ? remainingToReverse : onHand,
+          );
+          if (decrement <= 0) continue;
+
+          if (lotUnitCostMills === null && lot.unit_cost_mills !== null) {
+            lotUnitCostMills = Number(lot.unit_cost_mills);
+          }
+
+          const updated = await tx.execute(sql`
+            UPDATE inventory.inventory_lots
+            SET qty_on_hand = qty_on_hand - ${decrement},
+                status = CASE
+                  WHEN qty_on_hand - ${decrement} <= 0 THEN 'depleted'::varchar
+                  ELSE status
+                END
+            WHERE id = ${lotId}
+            RETURNING qty_on_hand
+          `);
+          const newOnHand = Number(updated.rows?.[0]?.qty_on_hand);
+          if (newOnHand < 0 && !allowNegative) {
+            throw new InsufficientOnHandForReversalError({
+              receivingLineId: params.receivingLineId,
+              qty: params.qty,
+              available: onHand,
+            });
+          }
+          remainingToReverse -= decrement;
+        }
+      }
+
+      // 2. Location level decrement.
+      let qtyBefore: number | null = null;
+      if (params.warehouseLocationId !== null) {
+        const levelRows = await tx.execute(sql`
+          SELECT id, variant_qty
+          FROM inventory.inventory_levels
+          WHERE product_variant_id = ${params.productVariantId}
+            AND warehouse_location_id = ${params.warehouseLocationId}
+          FOR UPDATE
+        `);
+        const level = levelRows.rows?.[0];
+        if (level) {
+          const currentQty = Number(level.variant_qty) || 0;
+          if (currentQty < params.qty && !allowNegative) {
+            throw new InsufficientOnHandForReversalError({
+              receivingLineId: params.receivingLineId,
+              qty: params.qty,
+              available: currentQty,
+            });
+          }
+          qtyBefore = currentQty;
+          await tx.execute(sql`
+            UPDATE inventory.inventory_levels
+            SET variant_qty = variant_qty - ${params.qty},
+                updated_at = NOW()
+            WHERE id = ${level.id}
+          `);
+        }
+      }
+
+      // 3. Ledger audit row (Rule #8).
+      await tx.execute(sql`
+        INSERT INTO inventory.inventory_transactions
+          (product_variant_id, from_location_id, transaction_type, variant_qty_delta,
+           variant_qty_before, variant_qty_after,
+           source_state, target_state, reference_type, reference_id,
+           receiving_order_id, receiving_line_id, notes, user_id, unit_cost_cents)
+        VALUES (
+          ${params.productVariantId},
+          ${params.warehouseLocationId},
+          'receipt_reversal',
+          ${-params.qty},
+          ${qtyBefore},
+          ${qtyBefore === null ? null : qtyBefore - params.qty},
+          'on_hand',
+          'external',
+          'receipt_reversal',
+          ${`REV-${params.reversalId}`},
+          ${params.receivingOrderId},
+          ${params.receivingLineId},
+          ${params.reason},
+          ${params.userId ?? null},
+          ${lotUnitCostMills === null ? null : millsToCents(lotUnitCostMills)}
+        )
+      `);
+
+      return { lotUnitCostMills };
+    };
+
+    const result = externalTx ? await doWork(externalTx) : await this.db.transaction(doWork);
+    this.triggerNotifyChange(params.productVariantId, "receipt_reversal");
+    return result;
   }
 
   // ---------------------------------------------------------------------------
@@ -505,6 +729,196 @@ export class InventoryUseCases {
     });
   }
 
+  /**
+   * Materialize a physical replacement package from current warehouse stock.
+   *
+   * A replacement is a second inventory consumption, but not a second customer
+   * fulfillment or customer-order COGS event. The provider callback supplies
+   * evidence that the package shipped; this writer selects live, unreserved
+   * stock and records the temporary pick plus the shipment atomically.
+   */
+  async recordReplacementShipmentFromAvailableInventory(params: {
+    productVariantId: number;
+    qty: number;
+    warehouseId: number | null;
+    orderId: number;
+    orderItemId?: number | null;
+    shipmentId: number;
+    shipmentItemId: number;
+    userId?: string;
+  }): Promise<{ warehouseLocationId: number; alreadyRecorded: boolean }> {
+    if (!Number.isInteger(params.productVariantId) || params.productVariantId <= 0) {
+      throw new ValidationError("productVariantId must be a positive integer");
+    }
+    if (!Number.isInteger(params.qty) || params.qty <= 0) {
+      throw new ValidationError("qty must be a positive integer");
+    }
+    if (!Number.isInteger(params.orderId) || params.orderId <= 0) {
+      throw new ValidationError("orderId must be a positive integer");
+    }
+    if (!Number.isInteger(params.shipmentId) || params.shipmentId <= 0) {
+      throw new ValidationError("shipmentId must be a positive integer");
+    }
+    if (!Number.isInteger(params.shipmentItemId) || params.shipmentItemId <= 0) {
+      throw new ValidationError("shipmentItemId must be a positive integer");
+    }
+
+    const result = await this.db.transaction(async (tx) => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(918407, ${params.shipmentItemId})
+      `);
+
+      const existing = await tx.execute(sql`
+        SELECT from_location_id
+        FROM inventory.inventory_transactions
+        WHERE transaction_type = 'ship'
+          AND shipment_item_id = ${params.shipmentItemId}
+          AND reference_id = ${String(params.shipmentId)}
+        LIMIT 1
+      `);
+      if (existing.rows.length > 0) {
+        const locationId = Number((existing.rows[0] as any).from_location_id);
+        if (!Number.isInteger(locationId) || locationId <= 0) {
+          throw new IntegrityError(
+            `Replacement shipment item ${params.shipmentItemId} has an idempotent ship ledger row without a source location.`,
+          );
+        }
+        return { warehouseLocationId: locationId, alreadyRecorded: true };
+      }
+
+      // Read only current, usable inventory. Historic shipment source bins are
+      // deliberately excluded: a reship must never debit the location used by
+      // the original package merely because its row still references that bin.
+      const candidates = await tx.execute(sql`
+        SELECT il.warehouse_location_id
+        FROM inventory.inventory_levels il
+        JOIN warehouse.warehouse_locations wl
+          ON wl.id = il.warehouse_location_id
+        WHERE il.product_variant_id = ${params.productVariantId}
+          AND il.variant_qty > il.reserved_qty
+          AND wl.is_active = 1
+          AND wl.is_pickable = 1
+          AND wl.cycle_count_freeze_id IS NULL
+          AND (${params.warehouseId}::int IS NULL OR wl.warehouse_id = ${params.warehouseId})
+        ORDER BY
+          CASE wl.location_type
+            WHEN 'pick' THEN 0
+            WHEN 'pallet' THEN 1
+            ELSE 2
+          END,
+          wl.pick_sequence NULLS LAST,
+          wl.id
+      `);
+
+      let selectedLevel: InventoryLevel | undefined;
+      for (const candidate of candidates.rows as Array<{ warehouse_location_id: number }>) {
+        const locationId = Number(candidate.warehouse_location_id);
+        if (!Number.isInteger(locationId) || locationId <= 0) continue;
+
+        const level = await this.storage.lockInventoryLevel(
+          locationId,
+          params.productVariantId,
+          tx,
+        );
+        if (!level || level.variantQty - level.reservedQty < params.qty) continue;
+
+        // Recheck after locking the balance. A cycle count that starts between
+        // the candidate read and this lock must block the shipment rather than
+        // allowing a system callback to mutate a frozen bin.
+        await this.assertNotFrozen(locationId, tx);
+        selectedLevel = level;
+        break;
+      }
+
+      if (!selectedLevel) {
+        throw new ReplacementInventoryUnavailableError({
+          productVariantId: params.productVariantId,
+          qty: params.qty,
+          warehouseId: params.warehouseId,
+        });
+      }
+
+      const locationId = selectedLevel.warehouseLocationId;
+      // Mirror the regular pick writer: on-hand becomes picked first, then the
+      // exact picked quantity is consumed by the shipment in this same SQL tx.
+      await this.storage.adjustInventoryLevel(selectedLevel.id, {
+        variantQty: -params.qty,
+        pickedQty: params.qty,
+      }, tx);
+
+      if (this.lotService) {
+        const lotSvc = this.lotService.withTx(tx);
+        await lotSvc.pickFromLots({
+          productVariantId: params.productVariantId,
+          warehouseLocationId: locationId,
+          qty: params.qty,
+          orderId: params.orderId,
+          orderItemId: params.orderItemId ?? undefined,
+          recordOrderItemCosts: false,
+          allowReservedStock: false,
+        });
+      }
+
+      await this.storage.createInventoryTransaction({
+        productVariantId: params.productVariantId,
+        fromLocationId: locationId,
+        transactionType: "pick",
+        variantQtyDelta: -params.qty,
+        variantQtyBefore: selectedLevel.variantQty,
+        variantQtyAfter: selectedLevel.variantQty - params.qty,
+        reservedQtyDelta: 0,
+        sourceState: "on_hand",
+        targetState: "picked",
+        orderId: params.orderId,
+        orderItemId: params.orderItemId ?? null,
+        shipmentId: params.shipmentId,
+        shipmentItemId: params.shipmentItemId,
+        referenceType: "shipment",
+        referenceId: String(params.shipmentId),
+        userId: params.userId ?? null,
+        isImplicit: 1,
+        notes: "System replacement allocation from current unreserved inventory",
+      }, tx);
+
+      await this.storage.adjustInventoryLevel(selectedLevel.id, { pickedQty: -params.qty }, tx);
+
+      if (this.lotService) {
+        const lotSvc = this.lotService.withTx(tx);
+        await lotSvc.shipFromLots({
+          productVariantId: params.productVariantId,
+          warehouseLocationId: locationId,
+          qty: params.qty,
+        });
+      }
+
+      await this.storage.createInventoryTransaction({
+        productVariantId: params.productVariantId,
+        fromLocationId: locationId,
+        transactionType: "ship",
+        variantQtyDelta: -params.qty,
+        variantQtyBefore: selectedLevel.variantQty - params.qty,
+        variantQtyAfter: selectedLevel.variantQty - params.qty,
+        sourceState: "picked",
+        targetState: "shipped",
+        orderId: params.orderId,
+        orderItemId: params.orderItemId ?? null,
+        shipmentId: params.shipmentId,
+        shipmentItemId: params.shipmentItemId,
+        referenceType: "shipment",
+        referenceId: String(params.shipmentId),
+        userId: params.userId ?? null,
+        isImplicit: 1,
+        notes: "System replacement shipment after current-stock allocation",
+      }, tx);
+
+      return { warehouseLocationId: locationId, alreadyRecorded: false };
+    });
+
+    if (!result.alreadyRecorded) {
+      this.triggerNotifyChange(params.productVariantId, "replacement-shipment");
+    }
+    return result;
+  }
   // ---------------------------------------------------------------------------
   // ADJUSTMENT
   // ---------------------------------------------------------------------------

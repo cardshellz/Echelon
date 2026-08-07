@@ -58,6 +58,7 @@ export interface DropshipEbayListingLifecycleClient extends EbayListingConnector
   getInventoryItemGroup(
     groupKey: string,
   ): Promise<(EbayInventoryItemGroup & { variantSKUs?: string[] }) | null>;
+  deleteInventoryItemGroup(groupKey: string): Promise<void>;
   withdrawOffer(offerId: string): Promise<void>;
   withdrawOfferByInventoryItemGroup(
     groupKey: string,
@@ -312,6 +313,16 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
           baseUrl: input.baseUrl,
         });
       },
+      deleteInventoryItemGroup: async (groupKey) => {
+        await this.requestEbay({
+          credential: input.credential,
+          config: input.config,
+          method: "DELETE",
+          path: `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
+          expectNoContent: true,
+          baseUrl: input.baseUrl,
+        });
+      },
       publishOffer: async (offerId) => {
         return await this.requestEbay<{ listingId?: string }>({
           credential: input.credential,
@@ -456,7 +467,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
   private async requestEbay<T = Record<string, unknown>>(input: {
     credential: DropshipMarketplaceStoreCredentials;
     config: EbayListingConfig;
-    method: "GET" | "POST" | "PUT";
+    method: "GET" | "POST" | "PUT" | "DELETE";
     path: string;
     body?: unknown;
     expectNoContent?: boolean;

@@ -55,10 +55,11 @@ interface AdminCommandRow {
 
 type CreatePolicyRepositoryInput = Omit<
   CreateReturnPolicyVersionInput,
-  "idempotencyKey" | "actor" | "vendorId" | "storeConnectionId"
+  "idempotencyKey" | "actor" | "vendorId" | "storeConnectionId" | "supersedesPolicyId"
 > & {
   vendorId: number | null;
   storeConnectionId: number | null;
+  supersedesPolicyId: number | null;
   effectiveFrom: Date;
   idempotencyKey: string;
   actor: { actorType: "admin" | "system"; actorId?: string };
@@ -67,10 +68,11 @@ type CreatePolicyRepositoryInput = Omit<
 
 type CreateFeeRepositoryInput = Omit<
   CreateReturnFeeVersionInput,
-  "idempotencyKey" | "actor" | "vendorId" | "storeConnectionId"
+  "idempotencyKey" | "actor" | "vendorId" | "storeConnectionId" | "supersedesFeeId"
 > & {
   vendorId: number | null;
   storeConnectionId: number | null;
+  supersedesFeeId: number | null;
   effectiveFrom: Date;
   idempotencyKey: string;
   actor: { actorType: "admin" | "system"; actorId?: string };
@@ -257,14 +259,27 @@ export class PgDropshipReturnPolicyRepository implements DropshipReturnPolicyRep
         vendorId: input.vendorId,
         storeConnectionId: input.storeConnectionId,
       });
-      // Exactly-one-active-global invariant: supersede the current active
-      // global row when the new row is global and effective now.
-      if (input.vendorId === null && input.storeConnectionId === null && input.effectiveFrom <= input.now) {
+      // One-active-version-per-scope invariant: supersede the current active
+      // row at the SAME scope when the new version is effective now. Global is
+      // just the all-NULL case of the same rule (IS NOT DISTINCT FROM).
+      if (input.effectiveFrom <= input.now) {
         await client.query(
           `UPDATE dropship.dropship_return_policies
            SET is_active = false, effective_to = $1, updated_at = $1
-           WHERE vendor_id IS NULL AND store_connection_id IS NULL AND is_active = true`,
-          [input.now],
+           WHERE vendor_id IS NOT DISTINCT FROM $2
+             AND store_connection_id IS NOT DISTINCT FROM $3
+             AND is_active = true`,
+          [input.now, input.vendorId, input.storeConnectionId],
+        );
+      }
+      // Edit-as-new-version: explicitly retire the row the operator edited,
+      // even when the new version's scope key differs (e.g. scope change).
+      if (input.supersedesPolicyId != null) {
+        await client.query(
+          `UPDATE dropship.dropship_return_policies
+           SET is_active = false, effective_to = COALESCE(effective_to, $1), updated_at = $1
+           WHERE id = $2 AND is_active = true`,
+          [input.now, input.supersedesPolicyId],
         );
       }
       const inserted = await client.query<PolicyRow>(
@@ -340,6 +355,30 @@ export class PgDropshipReturnPolicyRepository implements DropshipReturnPolicyRep
         vendorId: input.vendorId,
         storeConnectionId: input.storeConnectionId,
       });
+      // One active version per (fee_type, fault_category, scope): supersede
+      // the current active row with the same key when effective now.
+      if (input.effectiveFrom <= input.now) {
+        await client.query(
+          `UPDATE dropship.dropship_return_fee_schedule
+           SET is_active = false, effective_to = $1, updated_at = $1
+           WHERE fee_type = $2
+             AND fault_category = $3
+             AND vendor_id IS NOT DISTINCT FROM $4
+             AND store_connection_id IS NOT DISTINCT FROM $5
+             AND is_active = true`,
+          [input.now, input.feeType, input.faultCategory, input.vendorId, input.storeConnectionId],
+        );
+      }
+      // Edit-as-new-version: retire the edited row even when the new version's
+      // key differs (e.g. fault category change must not leave the old row live).
+      if (input.supersedesFeeId != null) {
+        await client.query(
+          `UPDATE dropship.dropship_return_fee_schedule
+           SET is_active = false, effective_to = COALESCE(effective_to, $1), updated_at = $1
+           WHERE id = $2 AND is_active = true`,
+          [input.now, input.supersedesFeeId],
+        );
+      }
       const inserted = await client.query<FeeRow>(
         `INSERT INTO dropship.dropship_return_fee_schedule
           (version, fee_type, fault_category, amount_type, amount,

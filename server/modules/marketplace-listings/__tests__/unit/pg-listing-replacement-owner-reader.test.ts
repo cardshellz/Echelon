@@ -55,6 +55,23 @@ describe("PgMarketplaceListingReplacementOwnerReader", () => {
     );
   });
 
+  it("allocates after the latest immutable generation when an earlier target exists", async () => {
+    const query = vi.fn(async () => ({
+      rows: [
+        row(12, "ARM-ENV-SGL-C750", "included", 4),
+        row(13, "ARM-ENV-SGL-P50", "excluded", 4),
+      ],
+    }));
+    const reader = new PgMarketplaceListingReplacementOwnerReader({
+      query,
+    } as unknown as Pool);
+
+    await expect(reader.loadSnapshot(CHANNEL_OWNER)).resolves.toMatchObject({
+      sourcePublication: { generation: 2 },
+      nextGeneration: 5,
+    });
+  });
+
   it("uses the Dropship binding without changing the shared snapshot contract", async () => {
     const owner: ListingOwnerRef = {
       kind: "dropship",
@@ -105,11 +122,17 @@ describe("PgMarketplaceListingReplacementOwnerReader", () => {
   });
 });
 
-function row(productVariantId: number, sku: string, disposition: string) {
+function row(
+  productVariantId: number,
+  sku: string,
+  disposition: string,
+  maxGeneration = 2,
+) {
   return {
     scope_id: "41",
     publication_id: "51",
     generation: 2,
+    max_generation: maxGeneration,
     desired_state_hash: "a".repeat(64),
     provider_publication_key: "ARM-ENV-SGL",
     external_listing_id: "36412213011",

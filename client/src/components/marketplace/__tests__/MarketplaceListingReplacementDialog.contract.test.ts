@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildMarketplaceListingReplacementMembers,
   replacementEndpointBase,
+  executionResultMessage,
 } from "../MarketplaceListingReplacementDialog";
 
 describe("MarketplaceListingReplacementDialog contract", () => {
@@ -14,6 +15,7 @@ describe("MarketplaceListingReplacementDialog contract", () => {
           sku: "ARM-ENV-SGL-C700",
           name: "Case of 700",
           included: false,
+          lockedExcluded: true,
         },
         {
           id: 750,
@@ -30,13 +32,31 @@ describe("MarketplaceListingReplacementDialog contract", () => {
       {
         productVariantId: 700,
         disposition: "excluded",
-        reasonCode: "operator_excluded_from_replacement",
+        reasonCode: "local_variant_inactive",
       },
       { productVariantId: 750, disposition: "included", reasonCode: null },
       { productVariantId: 50, disposition: "included", reasonCode: null },
     ]);
   });
 
+  it("distinguishes a safe preflight stop from a compensated execution failure", () => {
+    expect(
+      executionResultMessage({
+        kind: "failed",
+        stepKey: "preflight.validate_plan",
+      }),
+    ).toBe(
+      "Replacement stopped during preflight. The live eBay listing was not changed.",
+    );
+    expect(
+      executionResultMessage({
+        kind: "failed",
+        stepKey: "compensate.ensure_source_live",
+      }),
+    ).toBe(
+      "Replacement failed, and compensation restored the previous listing state.",
+    );
+  });
   it("routes Channel and Dropship owners through the same provider-neutral UI contract", () => {
     expect(
       replacementEndpointBase({

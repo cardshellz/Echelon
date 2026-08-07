@@ -124,6 +124,93 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
     });
   });
 
+  it("does not subtract already-picked units from remaining lot on-hand", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryLotService } = await import("../../lots.service");
+
+    const lots = [
+      {
+        id: 10, lotNumber: "LOT-001", productVariantId: 10,
+        warehouseLocationId: 20, unitCostCents: 500, qtyOnHand: 4,
+        qtyReserved: 0, qtyPicked: 4, receivedAt: new Date(), status: "active",
+      },
+    ];
+
+    let selectCallCount = 0;
+    const db = {
+      select: vi.fn(() => {
+        selectCallCount++;
+        if (selectCallCount === 1) {
+          return {
+            from: vi.fn().mockReturnThis(),
+            where: vi.fn().mockResolvedValue([]),
+          };
+        }
+        return {
+          from: vi.fn().mockReturnThis(),
+          where: vi.fn().mockReturnThis(),
+          orderBy: vi.fn().mockResolvedValue(lots),
+        };
+      }),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([]) })),
+      })),
+      execute: vi.fn(async () => ({ rows: [] })),
+      update: vi.fn(),
+      delete: vi.fn(),
+      transaction: vi.fn(),
+    } as any;
+
+    const svc = new InventoryLotService(db);
+    const result = await svc.pickFromLots({
+      productVariantId: 10,
+      warehouseLocationId: 20,
+      qty: 1,
+      orderId: 100,
+      orderItemId: 200,
+    });
+
+    expect(result).toEqual([{ lotId: 10, qty: 1, unitCostCents: 500 }]);
+    expect(db.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps replacement picks out of stock reserved for customer orders", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryLotService } = await import("../../lots.service");
+
+    const lots = [
+      {
+        id: 10, lotNumber: "LOT-001", productVariantId: 10,
+        warehouseLocationId: 20, unitCostCents: 500, qtyOnHand: 4,
+        qtyReserved: 3, qtyPicked: 4, receivedAt: new Date(), status: "active",
+      },
+    ];
+    const db = {
+      select: vi.fn(() => ({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn().mockResolvedValue(lots),
+      })),
+      insert: vi.fn(),
+      execute: vi.fn(async () => ({ rows: [] })),
+      update: vi.fn(),
+      delete: vi.fn(),
+      transaction: vi.fn(),
+    } as any;
+
+    const svc = new InventoryLotService(db);
+    await expect(svc.pickFromLots({
+      productVariantId: 10,
+      warehouseLocationId: 20,
+      qty: 2,
+      orderId: 100,
+      recordOrderItemCosts: false,
+      allowReservedStock: false,
+    })).rejects.toThrow("required 2, available 1");
+
+    expect(db.execute).not.toHaveBeenCalled();
+  });
+
   /**
    * unpickFromLots must reverse COGS: delete order_item_costs rows and
    * restore lot quantities.

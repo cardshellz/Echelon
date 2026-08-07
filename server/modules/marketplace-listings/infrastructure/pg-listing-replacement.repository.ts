@@ -149,6 +149,14 @@ export class PgMarketplaceListingReplacementRepository implements MarketplaceLis
         return { kind: "replay", operation: mapped };
       }
 
+      const active = await loadActiveOperationForScope(client, plan.scopeId);
+      if (active) {
+        assertActiveOperationMatchesPlan(active, plan);
+        const mapped = mapOperation(active);
+        await client.query("COMMIT");
+        return { kind: "replay", operation: mapped };
+      }
+
       const source = await lockAndLoadSourcePublication(
         client,
         plan.scopeId,
@@ -259,6 +267,45 @@ async function loadOperationForIdempotencyKey(
     [scopeId, idempotencyKey],
   );
   return result.rows[0] ?? null;
+}
+
+async function loadActiveOperationForScope(
+  client: PoolClient,
+  scopeId: number,
+): Promise<OperationRow | null> {
+  const result = await client.query<OperationRow>(
+    operationSelectSql() +
+      " WHERE scope_id = $1 AND status IN ('planned', 'running', 'compensating', 'manual_recovery_required') FOR UPDATE",
+    [scopeId],
+  );
+  if (result.rows.length > 1) {
+    throw databaseContractError(
+      "Listing replacement scope returned more than one active operation.",
+    );
+  }
+  return result.rows[0] ?? null;
+}
+
+function assertActiveOperationMatchesPlan(
+  active: OperationRow,
+  plan: ListingReplacementPlan,
+): void {
+  if (
+    toSafeInteger(
+      active.source_publication_id,
+      "operation.source_publication_id",
+    ) === plan.sourcePublication.publicationId &&
+    active.desired_state_hash === plan.desiredStateHash
+  )
+    return;
+  throw new MarketplaceListingReplacementError(
+    "MARKETPLACE_LISTING_REPLACEMENT_ALREADY_ACTIVE",
+    "Another replacement operation with different selected variants is already active for this listing scope.",
+    {
+      scopeId: plan.scopeId,
+      operationId: toSafeInteger(active.id, "operation.id"),
+    },
+  );
 }
 
 function assertMatchingRequestHash(

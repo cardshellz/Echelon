@@ -462,6 +462,11 @@ function registrationStatus(): ListingRegistrationStatus {
     providerPublicationKey: "ARM-ENV-SGL-V3",
     externalListingId: "listing-456",
     registeredVariantIds: [501, 502],
+    registeredVariants: [{
+      productVariantId: 501,
+      sku: "ARM-ENV-SGL-C700",
+      disposition: "included",
+    }],
     registeredAt: new Date("2026-08-04T12:00:02.000Z"),
   };
 }

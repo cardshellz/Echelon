@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyMinimumRateSelectionWeightGrams,
+  normalizePhysicalWeightGramsForRating,
   sumRateSelectionWeightGrams,
 } from "../../domain/weight-measurement";
 
@@ -10,6 +11,16 @@ describe("shipping rating weight measurement", () => {
     expect(applyMinimumRateSelectionWeightGrams(907)).toBe(907);
     expect(applyMinimumRateSelectionWeightGrams(-1)).toBeNull();
     expect(applyMinimumRateSelectionWeightGrams(1.5)).toBeNull();
+  });
+
+  it("ceil-normalizes positive decimal physical weights at the rating boundary", () => {
+    expect(normalizePhysicalWeightGramsForRating(907.18)).toBe(908);
+    expect(normalizePhysicalWeightGramsForRating(908)).toBe(908);
+    expect(normalizePhysicalWeightGramsForRating(0)).toBeNull();
+    expect(normalizePhysicalWeightGramsForRating(-0.01)).toBeNull();
+    expect(normalizePhysicalWeightGramsForRating(Number.NaN)).toBeNull();
+    expect(normalizePhysicalWeightGramsForRating(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(normalizePhysicalWeightGramsForRating(Number.MAX_SAFE_INTEGER + 0.5)).toBeNull();
   });
 
   it.each([

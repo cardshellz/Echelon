@@ -87,6 +87,72 @@ describe("ShipStation provider package echo", () => {
     });
   });
 
+  it("recognizes combined-order children as one provider package with exact item proof", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return {
+            rows: [
+              {
+                shipping_provider_label_id: 10,
+                legacy_wms_shipment_id: 10628,
+                wms_order_id: 205783,
+              },
+              {
+                shipping_provider_label_id: 10,
+                legacy_wms_shipment_id: 10849,
+                wms_order_id: 205784,
+              },
+            ],
+          };
+        }
+        if (isLegacyPackageAuthorityQuery(text)) {
+          return {
+            rows: [
+              {
+                legacy_wms_shipment_id: 10628,
+                shipment_item_id: 17501,
+                sku: "GLV-MAG-75PT-P100",
+                quantity: 1,
+              },
+              {
+                legacy_wms_shipment_id: 10849,
+                shipment_item_id: 17502,
+                sku: "GLV-MAG-130PT-P50",
+                quantity: 1,
+              },
+            ],
+          };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    await expect(inspectShipStationProviderPackageEcho(db, {
+      providerShipmentId: 446993073,
+      trackingNumber: "9400150106151319027302",
+      expectedWmsOrderId: 205784,
+      shipmentItems: [
+        { lineItemKey: "wms-item-17501", quantity: 1 },
+        { lineItemKey: "wms-item-17502", quantity: 1 },
+      ],
+      source: "unit_test_combined_order",
+    })).resolves.toEqual({
+      status: "matched",
+      reason: "exact_provider_and_legacy_package_identity",
+      physicalShipmentId: null,
+      wmsOrderId: 205784,
+      authoritativeLegacyShipmentIds: [10628, 10849],
+      shippingProviderLabelId: 10,
+      linkInserted: false,
+    });
+    const exactLegacyQuery = db.execute.mock.calls
+      .map(([query]: [any]) => queryText(query))
+      .find(isExactLegacyPackageQuery);
+    expect(exactLegacyQuery).toContain("JOIN wms.shipping_provider_label_links AS label_link");
+    expect(exactLegacyQuery).not.toContain("legacy_shipment.external_fulfillment_id");
+  });
   it("rejects a provider quantity that differs from its authoritative WMS shipment item", async () => {
     const db = {
       execute: vi.fn(async (query: any) => {
@@ -294,6 +360,49 @@ describe("ShipStation provider package echo", () => {
   });
 
 
+  it("matches a combined package when one linked legacy sibling has no external fulfillment id", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return {
+            rows: [
+              { shipping_provider_label_id: 10, legacy_wms_shipment_id: 10628, wms_order_id: 205783 },
+              { shipping_provider_label_id: 10, legacy_wms_shipment_id: 10849, wms_order_id: 205784 },
+            ],
+          };
+        }
+        if (isLegacyPackageAuthorityQuery(text)) {
+          return {
+            rows: [
+              { legacy_wms_shipment_id: 10628, shipment_item_id: 13927, sku: "GLV-MAG-75PT-P50", quantity: 1 },
+              { legacy_wms_shipment_id: 10849, shipment_item_id: 14181, sku: "GLV-MAG-130PT-P50", quantity: 1 },
+            ],
+          };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    await expect(inspectShipStationProviderPackageEcho(db, {
+      providerShipmentId: 446993073,
+      trackingNumber: "9400150106151319027302",
+      expectedWmsOrderId: 205784,
+      shipmentItems: [
+        { sku: "GLV-MAG-75PT-P50", quantity: 1 },
+        { sku: "GLV-MAG-130PT-P50", quantity: 1 },
+      ],
+      source: "unit_test",
+    })).resolves.toEqual({
+      status: "matched",
+      reason: "exact_provider_and_legacy_package_identity",
+      physicalShipmentId: null,
+      wmsOrderId: 205784,
+      authoritativeLegacyShipmentIds: [10628, 10849],
+      shippingProviderLabelId: 10,
+      linkInserted: false,
+    });
+  });
   it("does not accept a linked provider-first shell without positive package authority", async () => {
     const db = {
       execute: vi.fn(async (query: any) => {

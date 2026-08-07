@@ -60,6 +60,9 @@ interface StepRow extends QueryResultRow {
   state_version: number;
   attempt_count: number;
   attempt_limit: number;
+  error_code: string | null;
+  error_message: string | null;
+  result_evidence: Record<string, CanonicalJsonValue> | null;
 }
 
 interface MemberRow extends QueryResultRow {
@@ -102,6 +105,7 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
     readonly leaseToken: string | null;
     readonly now: Date;
     readonly leaseDurationMs: number;
+    readonly recoveryAuthorized: boolean;
   }): Promise<
     ClaimedListingReplacementStep | TerminalListingReplacementOperation
   > {
@@ -116,7 +120,10 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
             original.status as TerminalListingReplacementOperation["status"],
         };
       }
-      if (original.status === "manual_recovery_required") {
+      if (
+        original.status === "manual_recovery_required" &&
+        !input.recoveryAuthorized
+      ) {
         throw executionError(
           "MARKETPLACE_LISTING_REPLACEMENT_MANUAL_RECOVERY_REQUIRED",
           "Replacement execution requires an explicit recovery decision.",
@@ -135,7 +142,15 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         operation,
         original.status,
         input.actor,
-        lease.isNew ? { leaseAcquired: true } : { leaseRenewed: true },
+        original.status === "manual_recovery_required"
+          ? {
+              leaseAcquired: true,
+              recoveryDecision: "retry_compensation",
+              previousRecoveryContext: original.recovery_context,
+            }
+          : lease.isNew
+            ? { leaseAcquired: true }
+            : { leaseRenewed: true },
       );
       await recoverExpiredRunningStep(
         client,
@@ -167,12 +182,17 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         client,
         operation.source_publication_id,
       );
+      const sourceProviderSnapshot = await loadSourceProviderSnapshot(
+        client,
+        operation.id,
+      );
       const claim = mapClaim(
         operation,
         running,
         sourceMembers,
         targetMembers,
         input.actor,
+        sourceProviderSnapshot,
       );
       return claim;
     });
@@ -184,7 +204,14 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
     readonly completedAt: Date;
   }): Promise<void> {
     await this.inTransaction(async (client) => {
-      const operation = await lockClaim(client, input.claim, input.completedAt);
+      const expected = claimStateForStep(input.claim.stepKey);
+      const operation = await lockClaim(
+        client,
+        input.claim,
+        input.completedAt,
+        expected.status,
+        expected.phase,
+      );
       const step = await completeClaimedStep(
         client,
         input.claim,
@@ -332,7 +359,12 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         failed,
         operation.status,
         input.claim.executor,
-        input.evidence,
+        buildListingReplacementFailureEvidence({
+          errorCode: input.errorCode,
+          errorMessage: input.errorMessage,
+          recoveryContext: null,
+          evidence: input.evidence,
+        }),
       );
     });
   }
@@ -420,6 +452,12 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         input.claim.executor,
         input.result.evidence,
       );
+      await updateRestoredSourcePublication(
+        client,
+        operation,
+        input.result,
+        input.completedAt,
+      );
       await requireSingleUpdate(
         client,
         `UPDATE marketplace.listing_publications SET status = 'failed', updated_at = $2 WHERE id = $1 AND status IN ('planned', 'staged')`,
@@ -442,7 +480,13 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         failed,
         operation.status,
         input.claim.executor,
-        { compensationCompleted: true },
+        buildListingReplacementFailureEvidence({
+          errorCode: "MARKETPLACE_LISTING_REPLACEMENT_COMPENSATED",
+          errorMessage:
+            "Replacement failed and the source listing was restored safely.",
+          recoveryContext: operation.recovery_context,
+          evidence: { compensationCompleted: true },
+        }),
       );
     });
   }
@@ -480,16 +524,17 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         input.claim.executor,
         input.evidence,
       );
+      const recoveryContext = {
+        failedCompensationStepKey: input.claim.stepKey,
+        evidence: input.evidence,
+      };
       const manual = await updateOperation(client, operation, {
         status: "manual_recovery_required",
         phase: "compensate",
         completedAt: input.failedAt,
         errorCode: input.errorCode,
         errorMessage: input.errorMessage,
-        recoveryContext: {
-          failedCompensationStepKey: input.claim.stepKey,
-          evidence: input.evidence,
-        },
+        recoveryContext,
         clearLease: true,
         at: input.failedAt,
       });
@@ -498,7 +543,15 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         manual,
         operation.status,
         input.claim.executor,
-        { manualRecoveryRequired: true, failedStepKey: input.claim.stepKey },
+        buildListingReplacementFailureEvidence({
+          errorCode: input.errorCode,
+          errorMessage: input.errorMessage,
+          recoveryContext,
+          evidence: {
+            manualRecoveryRequired: true,
+            failedStepKey: input.claim.stepKey,
+          },
+        }),
       );
     });
   }
@@ -573,7 +626,7 @@ function decideLease(
   input: { leaseToken: string | null; now: Date },
   factory: MarketplaceListingLeaseTokenFactory,
 ): { token: string; isNew: boolean } {
-  if (row.status === "planned")
+  if (["planned", "manual_recovery_required"].includes(row.status))
     return { token: validateUuid(factory.create()), isNew: true };
   if (!["running", "compensating"].includes(row.status))
     throw executionError(
@@ -604,9 +657,15 @@ async function acquireOrRenewLease(
   lease: { token: string; isNew: boolean },
 ): Promise<OperationRow> {
   const expiresAt = new Date(input.now.getTime() + input.leaseDurationMs);
-  const nextStatus = row.status === "planned" ? "running" : row.status;
+  const resumesRecovery = row.status === "manual_recovery_required";
+  const nextStatus =
+    row.status === "planned"
+      ? "running"
+      : resumesRecovery
+        ? "compensating"
+        : row.status;
   const result = await client.query<OperationRow>(
-    `UPDATE marketplace.listing_replacement_operations SET status = $2, state_version = state_version + 1, attempt_count = attempt_count + $3, lease_token = $4, lease_expires_at = $5, started_at = COALESCE(started_at, $6), updated_at = $6 WHERE id = $1 AND state_version = $7 RETURNING *`,
+    `UPDATE marketplace.listing_replacement_operations SET status = $2, state_version = state_version + 1, attempt_count = attempt_count + $3, lease_token = $4, lease_expires_at = $5, started_at = COALESCE(started_at, $6), completed_at = CASE WHEN $8 THEN NULL ELSE completed_at END, error_code = CASE WHEN $8 THEN NULL ELSE error_code END, error_message = CASE WHEN $8 THEN NULL ELSE error_message END, updated_at = $6 WHERE id = $1 AND state_version = $7 RETURNING *`,
     [
       toId(row.id),
       nextStatus,
@@ -615,6 +674,7 @@ async function acquireOrRenewLease(
       expiresAt,
       input.now,
       row.state_version,
+      resumesRecovery,
     ],
   );
   const updated = result.rows[0];
@@ -766,7 +826,7 @@ async function insertStepEvent(
       step.status,
       step.attempt_count,
       step.state_version,
-      JSON.stringify(evidence),
+      JSON.stringify(buildListingReplacementStepEventEvidence(step, evidence)),
     ],
   );
 }
@@ -782,12 +842,27 @@ async function nextEventSequence(
   return toId(result.rows[0]?.next_sequence ?? 0);
 }
 
+async function loadSourceProviderSnapshot(
+  client: PoolClient,
+  operationId: string | number,
+): Promise<CanonicalJsonValue | null> {
+  const result = await client.query<{
+    result_evidence: Record<string, CanonicalJsonValue> | null;
+  }>(
+    `SELECT result_evidence FROM marketplace.listing_replacement_steps
+     WHERE operation_id = $1 AND step_key = 'preflight.validate_plan' AND status = 'succeeded'
+     ORDER BY sequence ASC LIMIT 1`,
+    [toId(operationId)],
+  );
+  return result.rows[0]?.result_evidence?.sourceProviderSnapshot ?? null;
+}
 function mapClaim(
   operation: OperationRow,
   step: StepRow,
   sourceMembers: MemberRow[],
   targetMembers: MemberRow[],
   executor: ListingActor,
+  sourceProviderSnapshot: CanonicalJsonValue | null,
 ): ClaimedListingReplacementStep {
   const owner = mapOwner(operation);
   const sourceExternalListingId = operation.source_external_listing_id;
@@ -815,6 +890,7 @@ function mapClaim(
       targetProviderPublicationKey: operation.target_provider_publication_key,
       targetExternalListingId: operation.target_external_listing_id,
       desiredStateHash: operation.desired_state_hash,
+      sourceProviderSnapshot,
       sourceMembers: sourceMembers.map(mapExecutionMember),
       targetMembers: targetMembers.map(mapExecutionMember),
       actor: {
@@ -974,6 +1050,41 @@ function requiredText(value: string | null, field: string): string {
     );
   return value;
 }
+export function buildListingReplacementStepEventEvidence(
+  step: Pick<
+    StepRow,
+    "status" | "error_code" | "error_message" | "result_evidence"
+  >,
+  evidence: Readonly<Record<string, CanonicalJsonValue>>,
+): Record<string, CanonicalJsonValue> {
+  if (step.status === "failed") {
+    return {
+      ...evidence,
+      errorCode: requiredText(step.error_code, "step.error_code"),
+      errorMessage: requiredText(step.error_message, "step.error_message"),
+    };
+  }
+  if (step.status === "succeeded") {
+    return { ...evidence, resultEvidence: step.result_evidence };
+  }
+  return { ...evidence };
+}
+export function buildListingReplacementFailureEvidence(input: {
+  readonly errorCode: string;
+  readonly errorMessage: string;
+  readonly recoveryContext: Readonly<Record<string, CanonicalJsonValue>> | null;
+  readonly evidence: Readonly<Record<string, CanonicalJsonValue>>;
+}): Record<string, CanonicalJsonValue> {
+  return {
+    ...input.evidence,
+    errorCode: input.errorCode,
+    errorMessage: input.errorMessage,
+    ...(input.recoveryContext === null
+      ? {}
+      : { recoveryContext: input.recoveryContext }),
+  };
+}
+
 function executionError(
   code: string,
   message: string,
@@ -1107,6 +1218,49 @@ async function failClaimedStep(
   return requireRow(result.rows[0], "step failure");
 }
 
+async function updateRestoredSourcePublication(
+  client: PoolClient,
+  operation: OperationRow,
+  result: ListingReplacementStepSuccess,
+  at: Date,
+): Promise<void> {
+  const listingId = result.externalListingId?.trim();
+  if (!listingId) {
+    throw executionError(
+      "MARKETPLACE_LISTING_REPLACEMENT_RESTORED_SOURCE_IDENTITY_INVALID",
+      "Restored source publication returned no external listing ID.",
+    );
+  }
+  await requireSingleUpdate(
+    client,
+    `UPDATE marketplace.listing_publications
+     SET external_listing_id = $2, external_url = $3, verified_at = $4, updated_at = $4
+     WHERE id = $1 AND status = 'active'`,
+    [
+      toId(operation.source_publication_id),
+      listingId,
+      result.externalUrl?.trim() || null,
+      at,
+    ],
+    "restored source identity reconciliation",
+  );
+  for (const identity of result.memberIdentities ?? []) {
+    await requireSingleUpdate(
+      client,
+      `UPDATE marketplace.listing_publication_members
+       SET external_variant_id = $3, external_offer_id = $4, external_inventory_item_id = $5
+       WHERE publication_id = $1 AND product_variant_id = $2 AND disposition = 'included'`,
+      [
+        toId(operation.source_publication_id),
+        identity.productVariantId,
+        nullableText(identity.externalVariantId),
+        nullableText(identity.externalOfferId),
+        nullableText(identity.externalInventoryItemId),
+      ],
+      "restored source member identity reconciliation",
+    );
+  }
+}
 async function stageTargetPublication(
   client: PoolClient,
   operation: OperationRow,
@@ -1246,6 +1400,13 @@ function nextForwardPhase(
   }
 }
 
+export function claimStateForStep(
+  stepKey: ClaimedListingReplacementStep["stepKey"],
+): Readonly<{ status: "running" | "compensating"; phase: string }> {
+  return stepKey.startsWith("compensate.")
+    ? { status: "compensating", phase: "compensate" }
+    : { status: "running", phase: phaseForStep(stepKey) };
+}
 function phaseForStep(
   stepKey: ClaimedListingReplacementStep["stepKey"],
 ): string {

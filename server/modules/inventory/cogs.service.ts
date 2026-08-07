@@ -19,6 +19,7 @@ import {
   orders,
   orderItems,
 } from "@shared/schema";
+import { calculateUnreservedLotOnHand } from "./domain/inventory.domain";
 import type { InventoryLot } from "@shared/schema";
 
 /**
@@ -437,7 +438,7 @@ export class COGSService {
     for (const lot of lots) {
       if (remaining <= 0) break;
 
-      const available = lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked;
+      const available = calculateUnreservedLotOnHand(lot);
       if (available <= 0) continue;
 
       const take = Math.min(available, remaining);

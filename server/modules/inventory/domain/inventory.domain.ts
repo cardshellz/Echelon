@@ -48,10 +48,13 @@ export function calculateBaseUnitTotals(levels: InventoryLevelData[]): BaseUnitT
 
 /**
  * Derives the fungible ATP pool (in base units) from totals.
- * Formula: ATP = totalOnHand - totalReserved - totalPicked - totalPacked
+ *
+ * Picking moves units out of onHand and into picked; packing moves those units
+ * through a later workflow bucket. Neither may be deducted from onHand again.
+ * Formula: ATP = totalOnHand - totalReserved.
  */
 export function calculateFungibleAtpBase(totals: BaseUnitTotals): number {
-  return totals.onHand - totals.reserved - totals.picked - totals.packed;
+  return totals.onHand - totals.reserved;
 }
 
 /**
@@ -84,6 +87,29 @@ export interface FIFOConsumption {
   totalCostCents: number;
 }
 
+export interface LotAvailabilityInput {
+  qtyOnHand: number;
+  qtyReserved: number;
+}
+
+/**
+ * Lot qtyOnHand is the physical stock still in the location. Picking already
+ * removes stock from qtyOnHand while separately incrementing qtyPicked, so
+ * qtyPicked must never be subtracted from qtyOnHand a second time.
+ */
+export function calculateUnreservedLotOnHand(lot: LotAvailabilityInput): number {
+  return Math.max(0, lot.qtyOnHand - lot.qtyReserved);
+}
+
+export function calculateLotPickableOnHand(
+  lot: LotAvailabilityInput,
+  allowReservedStock: boolean,
+): number {
+  return allowReservedStock
+    ? Math.max(0, lot.qtyOnHand)
+    : calculateUnreservedLotOnHand(lot);
+}
+
 /**
  * Given a sorted array of FIFO active lots, and a quantity to consume,
  * returns the optimal consumptions without exceeding the required quantity.
@@ -99,7 +125,7 @@ export function calculateFIFOConsumption(
   for (const lot of sortedLots) {
     if (remaining <= 0) break;
 
-    const available = lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked;
+    const available = calculateUnreservedLotOnHand(lot);
     if (available <= 0) continue;
 
     const take = Math.min(available, remaining);

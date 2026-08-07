@@ -105,6 +105,34 @@ interface ReceivingLine {
   unitCost: number | null;
   notes: string | null;
   purchaseOrderLineId: number | null;
+  reversedQty?: number;
+}
+
+interface ReceiptReversal {
+  id: number;
+  receivingOrderId: number;
+  receivingLineId: number;
+  qty: number;
+  reason: string;
+  reversalScope: string;
+  orderReversalId: number | null;
+  baseUnitsReversed: number | null;
+  lotUnitCostMills: number | null;
+  allowNegative: boolean;
+  apReconciliationReopened: boolean;
+  idempotencyKey: string;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+interface ReceiveValidationWarning {
+  kind: string;
+  severity: "warn" | "error";
+  receivingLineId: number;
+  purchaseOrderLineId?: number;
+  title: string;
+  detail: string;
+  payload: Record<string, unknown>;
 }
 
 interface ReceivingOrder {
@@ -448,6 +476,91 @@ DEF-456,25,,,5.00,,Location TBD`;
     onError: (error: Error) => {
       // Surface 409 reason verbatim — do not hide it (spec: "don't pretend it succeeded")
       toast({ title: "Cannot discard receipt", description: error.message, variant: "destructive" });
+    },
+  });
+
+  // ── Receipt reversal (Spec D) ────────────────────────────────────────────
+  const [reverseTarget, setReverseTarget] = useState<{
+    scope: "line" | "order";
+    lineId?: number;
+    lineLabel?: string;
+    maxQty?: number;
+  } | null>(null);
+  const [reverseQty, setReverseQty] = useState<string>("");
+  const [reverseReason, setReverseReason] = useState("");
+  const [reverseAllowNegative, setReverseAllowNegative] = useState(false);
+
+  const reversalsQuery = useQuery({
+    queryKey: ["/api/procurement/receiving-orders", selectedReceipt?.id, "reversals"],
+    queryFn: async () => {
+      const res = await fetch(`/api/procurement/receiving-orders/${selectedReceipt!.id}/reversals`);
+      if (!res.ok) throw new Error("Failed to fetch reversals");
+      return (await res.json()) as ReceiptReversal[];
+    },
+    enabled: !!selectedReceipt && selectedReceipt.status === "closed",
+  });
+
+  const validationWarningsQuery = useQuery({
+    queryKey: ["/api/procurement/receiving-orders", selectedReceipt?.id, "validation-warnings"],
+    queryFn: async () => {
+      const res = await fetch(`/api/procurement/receiving-orders/${selectedReceipt!.id}/validation-warnings`);
+      if (!res.ok) throw new Error("Failed to fetch validation warnings");
+      return (await res.json()) as ReceiveValidationWarning[];
+    },
+    enabled: !!selectedReceipt && selectedReceipt.status !== "closed" && selectedReceipt.status !== "cancelled",
+    refetchInterval: 15000,
+  });
+
+  const reverseMutation = useMutation({
+    mutationFn: async (input: {
+      scope: "line" | "order";
+      lineId?: number;
+      qty?: number;
+      reason: string;
+      allowNegative: boolean;
+    }) => {
+      const url = input.scope === "line"
+        ? `/api/procurement/receiving-lines/${input.lineId}/reverse`
+        : `/api/procurement/receiving-orders/${selectedReceipt!.id}/reverse`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": createReceivingIdempotencyKey(
+            `receiving-reverse-${input.scope}-${input.lineId ?? selectedReceipt!.id}`,
+          ),
+        },
+        body: JSON.stringify({
+          qty: input.qty,
+          reason: input.reason,
+          allowNegative: input.allowNegative,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Reversal failed (${res.status})`);
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      reversalsQuery.refetch();
+      // Refresh the detail view so reversed_qty tallies update.
+      if (selectedReceipt) {
+        fetch(`/api/receiving/${selectedReceipt.id}`)
+          .then((r) => r.json())
+          .then((full) => setSelectedReceipt(full))
+          .catch(() => {});
+      }
+      setReverseTarget(null);
+      setReverseQty("");
+      setReverseReason("");
+      setReverseAllowNegative(false);
+      toast({ title: "Receipt reversed", description: "Inventory and PO quantities were decremented." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Cannot reverse receipt", description: error.message, variant: "destructive" });
     },
   });
 
@@ -1839,7 +1952,43 @@ DEF-456,25,,,5.00,,Location TBD`;
                       </Button>
                     </>
                   )}
+                  {selectedReceipt.status === "closed" && (
+                    <Button
+                      variant="outline"
+                      className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none text-destructive border-destructive/40 hover:bg-destructive/10"
+                      onClick={() => {
+                        setReverseTarget({ scope: "order" });
+                        setReverseQty("");
+                        setReverseReason("");
+                        setReverseAllowNegative(false);
+                      }}
+                      data-testid="btn-reverse-order"
+                    >
+                      <X className="h-4 w-4 mr-1 md:mr-2" />
+                      Reverse Entire Receipt
+                    </Button>
+                  )}
                 </div>
+
+                {/* Receive-time validation warnings (Spec D, Part 2) — advisory,
+                    never blocking. Shown inline before close. */}
+                {selectedReceipt.status !== "closed" &&
+                  selectedReceipt.status !== "cancelled" &&
+                  (validationWarningsQuery.data?.length ?? 0) > 0 && (
+                  <div className="p-3 rounded-lg border bg-amber-50 border-amber-200 text-amber-900 text-sm space-y-1" data-testid="receive-validation-warnings">
+                    <div className="font-semibold flex items-center gap-2">
+                      <AlertTriangle className="h-4 w-4 text-amber-600" />
+                      {validationWarningsQuery.data!.length} receive warning{validationWarningsQuery.data!.length !== 1 ? "s" : ""}
+                    </div>
+                    <ul className="list-disc pl-6 space-y-0.5">
+                      {validationWarningsQuery.data!.map((w, i) => (
+                        <li key={`${w.kind}-${w.receivingLineId}-${i}`} className={w.severity === "error" ? "text-red-700 font-medium" : ""}>
+                          <span className="font-medium">{w.title}</span> — {w.detail}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
 
                 {/* Source banner — where these goods (and their cost) come from */}
                 {selectedReceipt.sourceType === "shipment" && selectedReceipt.status !== "closed" && (
@@ -2078,6 +2227,33 @@ DEF-456,25,,,5.00,,Location TBD`;
                                 {line.status === "complete" && (
                                   <Check className="h-5 w-5 text-green-600" />
                                 )}
+                                {selectedReceipt.status === "closed" &&
+                                  ((line.receivedQty ?? 0) - (line.reversedQty ?? 0)) > 0 && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="min-h-[44px] text-destructive hover:text-destructive hover:bg-destructive/10"
+                                    onClick={() => {
+                                      const remaining = (line.receivedQty ?? 0) - (line.reversedQty ?? 0);
+                                      setReverseTarget({
+                                        scope: "line",
+                                        lineId: line.id,
+                                        lineLabel: line.sku || `Line #${line.id}`,
+                                        maxQty: remaining,
+                                      });
+                                      setReverseQty(String(remaining));
+                                      setReverseReason("");
+                                      setReverseAllowNegative(false);
+                                    }}
+                                    data-testid={`btn-reverse-line-mobile-${line.id}`}
+                                  >
+                                    <X className="h-4 w-4 mr-1" />
+                                    Reverse
+                                  </Button>
+                                )}
+                                {selectedReceipt.status === "closed" && (line.reversedQty ?? 0) > 0 && (
+                                  <span className="text-xs text-destructive font-medium">−{line.reversedQty} reversed</span>
+                                )}
                               </div>
                             </CardContent>
                           </Card>
@@ -2096,6 +2272,8 @@ DEF-456,25,,,5.00,,Location TBD`;
                           <TableHead>Received</TableHead>
                           <TableHead>Location</TableHead>
                           <TableHead>Status</TableHead>
+                          {selectedReceipt.status === "closed" && <TableHead>Reversed</TableHead>}
+                          {selectedReceipt.status === "closed" && <TableHead></TableHead>}
                           {selectedReceipt.status !== "closed" && <TableHead>Issues</TableHead>}
                           {selectedReceipt.status !== "closed" && <TableHead></TableHead>}
                         </TableRow>
@@ -2197,6 +2375,44 @@ DEF-456,25,,,5.00,,Location TBD`;
                                   {line.status}
                                 </Badge>
                               </TableCell>
+                              {selectedReceipt.status === "closed" && (
+                                <TableCell>
+                                  {(line.reversedQty ?? 0) > 0 ? (
+                                    <span className="text-xs text-destructive font-medium" data-testid={`reversed-qty-${line.id}`}>
+                                      −{line.reversedQty} reversed
+                                    </span>
+                                  ) : (
+                                    <span className="text-xs text-muted-foreground">—</span>
+                                  )}
+                                </TableCell>
+                              )}
+                              {selectedReceipt.status === "closed" && (
+                                <TableCell>
+                                  {((line.receivedQty ?? 0) - (line.reversedQty ?? 0)) > 0 && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="min-h-[44px] text-destructive hover:text-destructive hover:bg-destructive/10"
+                                      onClick={() => {
+                                        const remaining = (line.receivedQty ?? 0) - (line.reversedQty ?? 0);
+                                        setReverseTarget({
+                                          scope: "line",
+                                          lineId: line.id,
+                                          lineLabel: line.sku || `Line #${line.id}`,
+                                          maxQty: remaining,
+                                        });
+                                        setReverseQty(String(remaining));
+                                        setReverseReason("");
+                                        setReverseAllowNegative(false);
+                                      }}
+                                      data-testid={`btn-reverse-line-${line.id}`}
+                                    >
+                                      <X className="h-4 w-4 mr-1" />
+                                      Reverse
+                                    </Button>
+                                  )}
+                                </TableCell>
+                              )}
                               {selectedReceipt.status !== "closed" && (
                                 <TableCell>
                                   {(!line.productVariantId || !line.putawayLocationId) && (
@@ -2257,9 +2473,148 @@ DEF-456,25,,,5.00,,Location TBD`;
                     </Table>
                   </CardContent>
                 </Card>
+
+                {/* Reversal history (Spec D) — closed receipts only. */}
+                {selectedReceipt.status === "closed" && (reversalsQuery.data?.length ?? 0) > 0 && (
+                  <Card>
+                    <CardHeader className="p-3 md:pb-2">
+                      <CardTitle className="text-sm md:text-base">Reversal History</CardTitle>
+                      <CardDescription className="text-xs">
+                        Compensating corrections applied to this posted receipt. Original receipt rows are never mutated.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="p-3 pt-0">
+                      <div className="space-y-2" data-testid="reversal-history">
+                        {reversalsQuery.data!.map((rev) => {
+                          const line = selectedReceipt.lines?.find((l) => l.id === rev.receivingLineId);
+                          return (
+                            <div key={rev.id} className="flex items-start gap-2 p-2 rounded border bg-destructive/5 border-destructive/20 text-sm">
+                              <XCircle className="h-4 w-4 mt-0.5 shrink-0 text-destructive" />
+                              <div className="flex-1">
+                                <div>
+                                  <span className="font-medium">−{rev.qty}</span>{" "}
+                                  {line?.sku ?? `line #${rev.receivingLineId}`}
+                                  {rev.baseUnitsReversed !== null && rev.baseUnitsReversed !== rev.qty && (
+                                    <span className="text-muted-foreground"> ({rev.baseUnitsReversed} pieces)</span>
+                                  )}
+                                  {rev.reversalScope === "order" && (
+                                    <Badge variant="outline" className="ml-2 text-[10px]">order reversal</Badge>
+                                  )}
+                                  {rev.allowNegative && (
+                                    <Badge variant="destructive" className="ml-2 text-[10px]">negative override</Badge>
+                                  )}
+                                  {rev.apReconciliationReopened && (
+                                    <Badge variant="outline" className="ml-2 text-[10px]">AP re-opened</Badge>
+                                  )}
+                                </div>
+                                <div className="text-xs text-muted-foreground">
+                                  {rev.reason} — {rev.createdBy ?? "system"},{" "}
+                                  {rev.createdAt ? format(new Date(rev.createdAt), "MMM d, yyyy h:mm a") : ""}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
               </div>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Reversal modal (Spec D) — qty defaults to remaining reversible; reason
+          required; shows exactly what will be decremented before confirming. */}
+      <Dialog open={!!reverseTarget} onOpenChange={(open) => { if (!open) setReverseTarget(null); }}>
+        <DialogContent className="max-w-md p-4">
+          <DialogHeader>
+            <DialogTitle>
+              {reverseTarget?.scope === "order" ? "Reverse entire receipt" : `Reverse ${reverseTarget?.lineLabel ?? "line"}`}
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Posts a compensating reversal: inventory lots are decremented at their original cost and the
+              linked PO line's received quantity is reduced. The original receipt is never mutated.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {reverseTarget?.scope === "line" && (
+              <div>
+                <Label htmlFor="reverse-qty" className="text-xs">Quantity to reverse (max {reverseTarget.maxQty})</Label>
+                <Input
+                  id="reverse-qty"
+                  type="number"
+                  min={1}
+                  max={reverseTarget.maxQty}
+                  value={reverseQty}
+                  onChange={(e) => setReverseQty(e.target.value)}
+                  className="h-10"
+                  data-testid="input-reverse-qty"
+                />
+              </div>
+            )}
+            {reverseTarget?.scope === "order" && (
+              <div className="text-sm text-muted-foreground">
+                Every line with remaining reversible quantity will be reversed in full.
+              </div>
+            )}
+            <div>
+              <Label htmlFor="reverse-reason" className="text-xs">Reason (required)</Label>
+              <Textarea
+                id="reverse-reason"
+                value={reverseReason}
+                onChange={(e) => setReverseReason(e.target.value)}
+                placeholder="e.g. Case variant misconfigured as base unit — rebooking as cases"
+                className="min-h-[80px]"
+                data-testid="input-reverse-reason"
+              />
+            </div>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={reverseAllowNegative}
+                onChange={(e) => setReverseAllowNegative(e.target.checked)}
+                className="mt-1"
+                data-testid="input-reverse-allow-negative"
+              />
+              <span>
+                Allow negative inventory override{" "}
+                <span className="text-xs text-muted-foreground">
+                  (post the reversal even if the quantity was already consumed or sold; audited)
+                </span>
+              </span>
+            </label>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setReverseTarget(null)} data-testid="btn-reverse-cancel">
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={
+                  reverseMutation.isPending ||
+                  reverseReason.trim().length === 0 ||
+                  (reverseTarget?.scope === "line" &&
+                    (!Number.isInteger(Number(reverseQty)) ||
+                      Number(reverseQty) <= 0 ||
+                      Number(reverseQty) > (reverseTarget.maxQty ?? 0)))
+                }
+                onClick={() => {
+                  if (!reverseTarget) return;
+                  reverseMutation.mutate({
+                    scope: reverseTarget.scope,
+                    lineId: reverseTarget.lineId,
+                    qty: reverseTarget.scope === "line" ? Number(reverseQty) : undefined,
+                    reason: reverseReason.trim(),
+                    allowNegative: reverseAllowNegative,
+                  });
+                }}
+                data-testid="btn-reverse-confirm"
+              >
+                {reverseMutation.isPending ? "Reversing..." : "Confirm reversal"}
+              </Button>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
 

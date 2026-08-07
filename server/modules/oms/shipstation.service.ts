@@ -45,12 +45,14 @@ import {
   proveShipStationOrderAdoption,
   resolveShipStationHandoffCommands,
 } from "./shipstation-order-adoption";
+import { ReplacementInventoryUnavailableError } from "../inventory/application/inventory.use-cases";
 
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
 const SHIPSTATION_SPLIT_SOURCE = "shipstation_split";
 const SHIPSTATION_COMBINED_CHILD_SOURCE = "shipstation_combined_child";
 const SHIPSTATION_CARRIER_COST_SOURCE = "shipstation_ship_notify";
+const HISTORICAL_REPLACEMENT_INVENTORY_RULE = "historical_replacement_inventory_unproven";
 const SENSITIVE_URL_QUERY_PARAMS = new Set(["secret", "token", "signature", "key"]);
 
 class ShipStationWebhookProcessingError extends Error {
@@ -2268,6 +2270,17 @@ export function createShipStationService(
         osi.product_variant_id,
         osi.qty,
         target_shipment.shipment_purpose,
+        target_shipment.source AS shipment_source,
+        target_shipment.tracking_number AS shipment_tracking_number,
+        target_shipment.external_fulfillment_id,
+        EXISTS (
+          SELECT 1
+          FROM wms.reconciliation_exceptions deferred
+          WHERE deferred.idempotency_key =
+            ${HISTORICAL_REPLACEMENT_INVENTORY_RULE} || ':shipment-item:' || osi.id::text
+            AND deferred.status IN ('open', 'acknowledged')
+        ) AS historical_inventory_deferred,
+        target_order.warehouse_id,
         -- Pick-derived source bin: the shipment item's own bin, or the pick
         -- ledger backstop for legacy planned rows created before source-bin
         -- backfill existed.
@@ -2318,6 +2331,8 @@ export function createShipStationService(
       FROM wms.outbound_shipment_items osi
       JOIN wms.outbound_shipments target_shipment
         ON target_shipment.id = osi.shipment_id
+      JOIN wms.orders target_order
+        ON target_order.id = target_shipment.order_id
       WHERE osi.shipment_id = ${shipmentId}
         AND osi.qty > 0
         -- An omission correction points back to inventory already consumed by
@@ -2335,13 +2350,14 @@ export function createShipStationService(
         // Never picked: the location came from the reserved-bin fallback, not a
         // pick. Drives on-hand-only deduction in recordShipment.
         ship_before_pick:
-          item.shipment_purpose === "replacement" ||
-          (pickLoc == null && fromLoc != null),
+          item.shipment_purpose !== "replacement" &&
+          pickLoc == null &&
+          fromLoc != null,
       };
     });
     const invalidItems = rows.filter((item) =>
       !item.product_variant_id ||
-      !item.from_location_id ||
+      (item.shipment_purpose !== "replacement" && !item.from_location_id) ||
       !Number.isInteger(Number(item.qty)) ||
       Number(item.qty) <= 0
     );
@@ -2376,6 +2392,81 @@ export function createShipStationService(
     return rows;
   }
 
+  function isHistoricalReplacementAdoption(item: any): boolean {
+    return item.shipment_purpose === "replacement"
+      && item.shipment_source === "shipstation_reship_adopted";
+  }
+
+  function historicalReplacementInventoryKey(shipmentItemId: number): string {
+    return `${HISTORICAL_REPLACEMENT_INVENTORY_RULE}:shipment-item:${shipmentItemId}`;
+  }
+
+  async function deferHistoricalReplacementInventory(
+    shipmentId: number,
+    wmsOrderId: number,
+    item: any,
+    error: ReplacementInventoryUnavailableError,
+  ): Promise<void> {
+    const idempotencyKey = historicalReplacementInventoryKey(Number(item.id));
+    const details = {
+      wmsOrderId,
+      wmsShipmentId: shipmentId,
+      wmsShipmentItemId: Number(item.id),
+      productVariantId: Number(item.product_variant_id),
+      quantity: Number(item.qty),
+      warehouseId: item.warehouse_id == null ? null : Number(item.warehouse_id),
+      trackingNumber: item.shipment_tracking_number ?? null,
+      externalFulfillmentId: item.external_fulfillment_id ?? null,
+      shipmentSource: item.shipment_source,
+      errorCode: error.code,
+      errorContext: error.context ?? {},
+      requiredAction: "Verify the historic inventory movement with a count or ledger reconciliation. Do not replenish or consume another order's picked stock.",
+    };
+    await db.execute(sql`
+      INSERT INTO wms.reconciliation_exceptions (
+        source, classification, rule, status, severity,
+        wms_order_id, wms_shipment_id,
+        external_system, external_shipment_ref,
+        idempotency_key, summary, details
+      )
+      VALUES (
+        'shipstation_manual_remediation', 'manual_review',
+        ${HISTORICAL_REPLACEMENT_INVENTORY_RULE}, 'open', 'review',
+        ${wmsOrderId}, ${shipmentId},
+        'shipstation', ${item.external_fulfillment_id ?? null},
+        ${idempotencyKey},
+        ${`Provider-confirmed replacement package was shipped, but current inventory cannot prove the replacement debit for variant ${item.product_variant_id}.`},
+        ${JSON.stringify(details)}::jsonb
+      )
+      ON CONFLICT (idempotency_key)
+        WHERE status IN ('open', 'acknowledged')
+      DO UPDATE SET
+        last_seen_at = NOW(),
+        updated_at = NOW(),
+        occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
+        details = wms.reconciliation_exceptions.details || EXCLUDED.details
+    `);
+    await db.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET requires_review = true,
+          review_reason = ${HISTORICAL_REPLACEMENT_INVENTORY_RULE},
+          updated_at = NOW()
+      WHERE id = ${shipmentId}
+    `);
+    console.warn(JSON.stringify({
+      level: "warn",
+      component: "shipstation",
+      code: "HISTORICAL_REPLACEMENT_INVENTORY_DEFERRED",
+      wmsShipmentId: shipmentId,
+      wmsShipmentItemId: Number(item.id),
+      wmsOrderId,
+      productVariantId: Number(item.product_variant_id),
+      quantity: Number(item.qty),
+      warehouseId: item.warehouse_id ?? null,
+      message: error.message,
+    }));
+  }
+
   async function recordInventoryForShipment(
     shipmentId: number,
     wmsOrderId: number,
@@ -2384,9 +2475,49 @@ export function createShipStationService(
     if (!inventoryCore || items.length === 0) {
       return;
     }
-
     try {
       for (const item of items) {
+        if (item.shipment_purpose === "replacement") {
+          if (
+            isHistoricalReplacementAdoption(item)
+            && item.historical_inventory_deferred === true
+          ) {
+            continue;
+          }
+          try {
+            const recorded = await inventoryCore.recordReplacementShipmentFromAvailableInventory({
+              productVariantId: item.product_variant_id,
+              qty: item.qty,
+              warehouseId: item.warehouse_id ?? null,
+              orderId: wmsOrderId,
+              orderItemId: item.inventory_order_item_id ?? item.order_item_id ?? null,
+              shipmentId,
+              shipmentItemId: item.id,
+              userId: "system:shipstation:v2",
+            });
+            await db.execute(sql`
+              UPDATE wms.outbound_shipment_items
+              SET from_location_id = ${recorded.warehouseLocationId}
+              WHERE id = ${item.id}
+                AND from_location_id IS DISTINCT FROM ${recorded.warehouseLocationId}
+            `);
+            console.log(
+              `[ShipStation Webhook V2] Recorded replacement shipment for variant ${item.product_variant_id} ` +
+              `qty ${item.qty} from location ${recorded.warehouseLocationId} (wmsOrder ${wmsOrderId})`,
+            );
+          } catch (error: any) {
+            if (
+              isHistoricalReplacementAdoption(item)
+              && (error instanceof ReplacementInventoryUnavailableError
+                || error?.code === "REPLACEMENT_INVENTORY_UNAVAILABLE")
+            ) {
+              await deferHistoricalReplacementInventory(shipmentId, wmsOrderId, item, error);
+              continue;
+            }
+            throw error;
+          }
+          continue;
+        }
         await inventoryCore.recordShipment({
           productVariantId: item.product_variant_id,
           warehouseLocationId: item.from_location_id,
@@ -2396,8 +2527,7 @@ export function createShipStationService(
           shipmentId: String(shipmentId),
           shipmentItemId: item.id,
           userId: "system:shipstation:v2",
-          // SHIP-BEFORE-PICK FALLBACK (removable): never-picked items have no
-          // picked pool — deduct on-hand only and release the reservation.
+          // SHIP-BEFORE-PICK FALLBACK: never-picked items have no picked pool.
           deductFromOnHandOnly: item.ship_before_pick === true,
           releaseReservation: item.shipment_item_purpose !== "concession",
         });

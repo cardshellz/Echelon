@@ -171,8 +171,10 @@ async function inspectExactLegacyProviderPackageIdentity(
       AND label.voided_at IS NULL
       AND label.normalized_tracking_number = ${input.normalizedTracking}
       AND legacy_shipment.status = 'shipped'
-      AND legacy_shipment.external_fulfillment_id =
-        ${`shipstation_shipment:${input.providerShipmentId}`}
+      -- The provider-label link is the durable package identity. Older
+      -- combined orders can have a linked shipped sibling without a legacy
+      -- external_fulfillment_id; the exact item/quantity proof below remains
+      -- required before this evidence can be reconciled.
       AND UPPER(
         REGEXP_REPLACE(
           COALESCE(legacy_shipment.tracking_number, ''),
@@ -217,89 +219,82 @@ async function inspectExactLegacyProviderPackageIdentity(
       AND COALESCE(shipment.requires_review, false) = false
     ORDER BY shipment.id, shipment_item.id
   `);
-  const authorityByShipment = new Map<number, LegacyAuthorityItemRow[]>();
-  for (const row of resultRows(authorityResult) as LegacyAuthorityItemRow[]) {
-    const shipmentId = Number(row.legacy_wms_shipment_id);
-    if (!Number.isSafeInteger(shipmentId) || shipmentId <= 0) continue;
-    const existing = authorityByShipment.get(shipmentId) ?? [];
-    existing.push(row);
-    authorityByShipment.set(shipmentId, existing);
-  }
 
-  const matchedRows = rows.filter((row) => {
-    const shipmentId = Number(row.legacy_wms_shipment_id);
-    const items = authorityByShipment.get(shipmentId) ?? [];
-    if (items.length === 0) return false;
-
-    if (providerItemQuantities) {
-      const actualByShipmentItemId = new Map<number, number>();
-      for (const item of items) {
-        const shipmentItemId = Number(item.shipment_item_id);
-        const quantity = Number(item.quantity);
-        if (
-          !Number.isSafeInteger(shipmentItemId)
-          || shipmentItemId <= 0
-          || !Number.isSafeInteger(quantity)
-          || quantity <= 0
-        ) return false;
-        actualByShipmentItemId.set(
-          shipmentItemId,
-          (actualByShipmentItemId.get(shipmentItemId) ?? 0) + quantity,
-        );
-      }
-      const expectedByShipmentItemId = new Map(
-        providerItemQuantities.map((item) => [item.shipmentItemId, item.quantity]),
-      );
-      if (sameQuantityMap(expectedByShipmentItemId, actualByShipmentItemId)) {
-        return true;
-      }
-    }
-
-    if (!providerSkuQuantities) return false;
-    const actualBySku = new Map<string, number>();
-    for (const item of items) {
-      const sku = String(item.sku ?? "").trim().toUpperCase();
-      const quantity = Number(item.quantity);
-      if (!sku || !Number.isSafeInteger(quantity) || quantity <= 0) return false;
-      actualBySku.set(sku, (actualBySku.get(sku) ?? 0) + quantity);
-    }
-    return sameQuantityMap(providerSkuQuantities, actualBySku);
-  });
-
-  if (matchedRows.length === 0) return null;
-  if (matchedRows.length > 1) {
+  const wmsOrderIds = new Set(
+    rows.map((row) => Number(row.wms_order_id)),
+  );
+  const shippingProviderLabelIds = new Set(
+    rows.map((row) => Number(row.shipping_provider_label_id)),
+  );
+  if (
+    [...wmsOrderIds].some((id) => !Number.isSafeInteger(id) || id <= 0)
+    || [...shippingProviderLabelIds].some((id) => !Number.isSafeInteger(id) || id <= 0)
+    || shippingProviderLabelIds.size !== 1
+    || (
+      input.expectedWmsOrderId !== null
+      && !wmsOrderIds.has(input.expectedWmsOrderId)
+    )
+    || (input.expectedWmsOrderId === null && wmsOrderIds.size !== 1)
+  ) {
     return {
       ...noMatch("multiple_matching_physical_packages"),
       status: "ambiguous",
     };
   }
 
-  const [matched] = matchedRows;
-  const wmsOrderId = Number(matched.wms_order_id);
-  const legacyWmsShipmentId = Number(matched.legacy_wms_shipment_id);
-  const shippingProviderLabelId = Number(matched.shipping_provider_label_id);
+  const actualByShipmentItemId = new Map<number, number>();
+  const actualBySku = new Map<string, number>();
+  const authorityShipmentIds = new Set<number>();
+  for (const row of resultRows(authorityResult) as LegacyAuthorityItemRow[]) {
+    const shipmentId = Number(row.legacy_wms_shipment_id);
+    const shipmentItemId = Number(row.shipment_item_id);
+    const quantity = Number(row.quantity);
+    const sku = String(row.sku ?? "").trim().toUpperCase();
+    if (
+      !Number.isSafeInteger(shipmentId)
+      || shipmentId <= 0
+      || !Number.isSafeInteger(shipmentItemId)
+      || shipmentItemId <= 0
+      || !Number.isSafeInteger(quantity)
+      || quantity <= 0
+      || !candidateShipmentIds.includes(shipmentId)
+    ) {
+      return null;
+    }
+    authorityShipmentIds.add(shipmentId);
+    actualByShipmentItemId.set(
+      shipmentItemId,
+      (actualByShipmentItemId.get(shipmentItemId) ?? 0) + quantity,
+    );
+    if (sku) {
+      actualBySku.set(sku, (actualBySku.get(sku) ?? 0) + quantity);
+    }
+  }
   if (
-    !Number.isSafeInteger(wmsOrderId)
-    || wmsOrderId <= 0
-    || !Number.isSafeInteger(legacyWmsShipmentId)
-    || legacyWmsShipmentId <= 0
-    || !Number.isSafeInteger(shippingProviderLabelId)
-    || shippingProviderLabelId <= 0
-    || (
-      input.expectedWmsOrderId !== null
-      && wmsOrderId !== input.expectedWmsOrderId
-    )
+    authorityShipmentIds.size !== candidateShipmentIds.length
+    || candidateShipmentIds.some((id) => !authorityShipmentIds.has(id))
   ) {
-    return noMatch("provider_lines_not_authoritative");
+    return null;
   }
 
+  const hasExactItemProof = providerItemQuantities !== null && sameQuantityMap(
+    new Map(providerItemQuantities.map((item) => [item.shipmentItemId, item.quantity])),
+    actualByShipmentItemId,
+  );
+  const hasExactSkuProof = providerSkuQuantities !== null && sameQuantityMap(
+    providerSkuQuantities,
+    actualBySku,
+  );
+  if (!hasExactItemProof && !hasExactSkuProof) return null;
+
+  const wmsOrderId = input.expectedWmsOrderId ?? [...wmsOrderIds][0];
   return {
     status: "matched",
     reason: "exact_provider_and_legacy_package_identity",
     physicalShipmentId: null,
     wmsOrderId,
-    authoritativeLegacyShipmentIds: [legacyWmsShipmentId],
-    shippingProviderLabelId,
+    authoritativeLegacyShipmentIds: candidateShipmentIds,
+    shippingProviderLabelId: [...shippingProviderLabelIds][0],
     linkInserted: false,
   };
 }
