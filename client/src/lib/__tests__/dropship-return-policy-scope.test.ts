@@ -4,6 +4,8 @@ import {
   RETURN_POLICY_GLOBAL_VENDOR_VALUE,
   buildReturnPolicyStoreOptions,
   buildReturnPolicyVendorOptions,
+  returnFeeRowToEditFormState,
+  returnPolicyRowToEditFormState,
   returnPolicyScopeValueFromPicker,
   returnPolicyScopeValueToPicker,
 } from "../dropship-return-policy-scope";
@@ -202,5 +204,120 @@ describe("returnPolicyScopeValueFromPicker / returnPolicyScopeValueToPicker", ()
       const picker = returnPolicyScopeValueToPicker(raw, RETURN_POLICY_GLOBAL_VENDOR_VALUE);
       expect(returnPolicyScopeValueFromPicker(picker)).toBe(raw.trim() === "" ? "" : raw);
     }
+  });
+});
+
+describe("returnPolicyRowToEditFormState", () => {
+  it("maps a vendor+store-scoped policy row to string form state", () => {
+    expect(returnPolicyRowToEditFormState({
+      returnWindowDays: 45,
+      vendorId: 12,
+      storeConnectionId: 34,
+      priority: 7,
+    })).toEqual({
+      returnWindowDays: "45",
+      vendorId: "12",
+      storeConnectionId: "34",
+      priority: "7",
+    });
+  });
+
+  it("maps null scope ids to empty-string (global) form state", () => {
+    expect(returnPolicyRowToEditFormState({
+      returnWindowDays: 30,
+      vendorId: null,
+      storeConnectionId: null,
+      priority: 0,
+    })).toEqual({
+      returnWindowDays: "30",
+      vendorId: "",
+      storeConnectionId: "",
+      priority: "0",
+    });
+  });
+
+  it("maps vendor-only scope (null store) to a blank store field", () => {
+    const state = returnPolicyRowToEditFormState({
+      returnWindowDays: 14,
+      vendorId: 9,
+      storeConnectionId: null,
+      priority: 1,
+    });
+    expect(state.vendorId).toBe("9");
+    expect(state.storeConnectionId).toBe("");
+  });
+});
+
+describe("returnFeeRowToEditFormState", () => {
+  it("maps a flat-cents fee row to string form state, preserving integer cents", () => {
+    expect(returnFeeRowToEditFormState({
+      feeType: "restocking_fee",
+      faultCategory: "customer",
+      amountType: "flat_cents",
+      amount: 1500,
+      vendorId: 3,
+      storeConnectionId: 8,
+      priority: 2,
+    })).toEqual({
+      feeType: "restocking_fee",
+      faultCategory: "customer",
+      amountType: "flat_cents",
+      amount: "1500",
+      vendorId: "3",
+      storeConnectionId: "8",
+      priority: "2",
+    });
+  });
+
+  it("maps a percent fee row without unit conversion", () => {
+    const state = returnFeeRowToEditFormState({
+      feeType: "processing_fee",
+      faultCategory: "vendor",
+      amountType: "percent",
+      amount: 15,
+      vendorId: null,
+      storeConnectionId: null,
+      priority: 0,
+    });
+    expect(state.amountType).toBe("percent");
+    expect(state.amount).toBe("15");
+    expect(state.vendorId).toBe("");
+    expect(state.storeConnectionId).toBe("");
+  });
+
+  it("maps a return_shipping_fee row (amount ignored downstream) verbatim", () => {
+    const state = returnFeeRowToEditFormState({
+      feeType: "return_shipping_fee",
+      faultCategory: "marketplace",
+      amountType: "flat_cents",
+      amount: 0,
+      vendorId: 21,
+      storeConnectionId: null,
+      priority: 5,
+    });
+    expect(state).toEqual({
+      feeType: "return_shipping_fee",
+      faultCategory: "marketplace",
+      amountType: "flat_cents",
+      amount: "0",
+      vendorId: "21",
+      storeConnectionId: "",
+      priority: "5",
+    });
+  });
+
+  it("round-trips through the picker value mapping so the scope pickers show the row's scope", () => {
+    const state = returnFeeRowToEditFormState({
+      feeType: "restocking_fee",
+      faultCategory: "carrier",
+      amountType: "flat_cents",
+      amount: 250,
+      vendorId: 4,
+      storeConnectionId: null,
+      priority: 0,
+    });
+    expect(returnPolicyScopeValueToPicker(state.vendorId, RETURN_POLICY_GLOBAL_VENDOR_VALUE)).toBe("4");
+    expect(returnPolicyScopeValueToPicker(state.storeConnectionId, RETURN_POLICY_ANY_STORE_VALUE))
+      .toBe(RETURN_POLICY_ANY_STORE_VALUE);
   });
 });
