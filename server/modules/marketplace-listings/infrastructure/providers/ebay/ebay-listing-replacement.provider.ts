@@ -317,6 +317,33 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
     const client = await this.clients.forOwner(context.owner);
     const sourceKey = context.sourcePublication.providerPublicationKey;
     const members = included(context.sourceMembers);
+    const activeSource = await inspectAnyActiveListing(
+      client,
+      members,
+      context.owner.marketplaceId,
+    );
+    if (
+      activeSource.listingId &&
+      activeSource.offers.length === members.length
+    ) {
+      const observed = publicationResult(
+        sourceKey,
+        activeSource.listingId,
+        members,
+        activeSource.offers,
+        true,
+      );
+      return {
+        ...observed,
+        evidence: {
+          ...observed.evidence,
+          sourceLive: true,
+          alreadyLive: true,
+          previousSourceListingId: context.sourcePublication.externalListingId,
+          sourceListingId: activeSource.listingId,
+        },
+      };
+    }
     if (sourceKey && !(await client.getInventoryItemGroup(sourceKey))) {
       await client.createOrReplaceInventoryItemGroup(
         sourceKey,

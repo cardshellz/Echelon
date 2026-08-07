@@ -33,6 +33,18 @@ export class ListingReplacementExecutionService {
     },
   ) {}
 
+  async recover(
+    input: ExecuteListingReplacementInput,
+  ): Promise<ExecuteListingReplacementResult> {
+    assertInput(input);
+    await this.dependencies.repository.resumeManualRecovery({
+      operationId: input.operationId,
+      expectedOwner: input.expectedOwner,
+      actor: input.actor,
+      resumedAt: this.dependencies.clock.now(),
+    });
+    return this.execute(input);
+  }
   async execute(
     input: ExecuteListingReplacementInput,
   ): Promise<ExecuteListingReplacementResult> {

@@ -122,7 +122,9 @@ export function MarketplaceListingReplacementDialog({
   const [plan, setPlan] = useState<ReplacementPlan | null>(null);
   const [result, setResult] = useState<ExecutionResult | null>(null);
   const [error, setError] = useState<ReplacementApiErrorPayload | null>(null);
-  const [busy, setBusy] = useState<"planning" | "executing" | null>(null);
+  const [busy, setBusy] = useState<
+    "planning" | "executing" | "recovering" | null
+  >(null);
   const keyRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -205,6 +207,41 @@ export function MarketplaceListingReplacementDialog({
     }
   };
 
+  const recoverAndReplan = async () => {
+    if (!plan) return;
+    setBusy("recovering");
+    setError(null);
+    setResult(null);
+    try {
+      const recovery = await postReplacement(
+        `${endpointBase}/${plan.operationId}/recover`,
+        ownerBody,
+        executionResponseSchema,
+      );
+      if (recovery.result.kind !== "failed") {
+        throw {
+          code: "MARKETPLACE_LISTING_REPLACEMENT_RECOVERY_INCOMPLETE",
+          message: executionResultMessage(recovery.result),
+        };
+      }
+      const freshKey = createReplacementIdempotencyKey(owner);
+      keyRef.current = freshKey;
+      const freshPlan = await postReplacement(
+        endpointBase + "/plan",
+        {
+          ...ownerBody,
+          targetMembers: members,
+          idempotencyKey: freshKey,
+        },
+        planResponseSchema,
+      );
+      setPlan(freshPlan.operation);
+    } catch (requestError) {
+      setError(normalizeReplacementError(requestError));
+    } finally {
+      setBusy(null);
+    }
+  };
   const succeeded = result?.kind === "completed";
   const locked = plan !== null || busy !== null;
 
@@ -329,18 +366,36 @@ export function MarketplaceListingReplacementDialog({
               Review replacement
             </Button>
           )}
-          {plan && !result && (
-            <Button
-              variant="destructive"
-              disabled={busy !== null}
-              onClick={executeReplacement}
-            >
-              {busy === "executing" && (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              )}
-              Replace listing
-            </Button>
-          )}
+          {plan &&
+            !result &&
+            error?.code !==
+              "MARKETPLACE_LISTING_REPLACEMENT_MANUAL_RECOVERY_REQUIRED" && (
+              <Button
+                variant="destructive"
+                disabled={busy !== null}
+                onClick={executeReplacement}
+              >
+                {busy === "executing" && (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                )}
+                Replace listing
+              </Button>
+            )}
+          {plan &&
+            !result &&
+            error?.code ===
+              "MARKETPLACE_LISTING_REPLACEMENT_MANUAL_RECOVERY_REQUIRED" && (
+              <Button
+                variant="destructive"
+                disabled={busy !== null}
+                onClick={recoverAndReplan}
+              >
+                {busy === "recovering" && (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                )}
+                Verify recovery and start fresh
+              </Button>
+            )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
