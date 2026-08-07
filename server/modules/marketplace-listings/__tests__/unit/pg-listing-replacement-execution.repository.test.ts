@@ -138,6 +138,12 @@ describe("PgMarketplaceListingReplacementExecutionRepository", () => {
                 ...operation,
                 status: "compensating",
                 state_version: 3,
+                attempt_count: 2,
+                lease_token: "11111111-1111-4111-8111-111111111111",
+                lease_expires_at: new Date("2026-08-07T12:05:00Z"),
+                completed_at: null,
+                error_code: null,
+                error_message: null,
               },
             ],
           };
@@ -153,24 +159,34 @@ describe("PgMarketplaceListingReplacementExecutionRepository", () => {
       connect: vi.fn(async () => client),
     } as never);
 
-    await repository.resumeManualRecovery({
-      operationId: 100,
-      expectedOwner: {
-        kind: "channel",
-        channelId: 7,
-        productId: 33,
-        provider: "ebay",
-        marketplaceId: "EBAY_US",
-      },
-      actor: { type: "user", id: "admin-1" },
-      resumedAt: new Date("2026-08-07T12:00:00Z"),
+    await expect(
+      repository.claimNextStep({
+        operationId: 100,
+        expectedOwner: {
+          kind: "channel",
+          channelId: 7,
+          productId: 33,
+          provider: "ebay",
+          marketplaceId: "EBAY_US",
+        },
+        actor: { type: "user", id: "admin-1" },
+        leaseToken: null,
+        now: new Date("2026-08-07T12:00:00Z"),
+        leaseDurationMs: 300_000,
+        recoveryAuthorized: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "MARKETPLACE_LISTING_REPLACEMENT_NEXT_STEP_NOT_FOUND",
     });
 
     const transition = queries.find(({ sql }) =>
       sql.includes("UPDATE marketplace.listing_replacement_operations"),
     );
-    expect(transition?.values).toEqual(
-      expect.arrayContaining(["compensating", "compensate"]),
+    expect(transition?.values[1]).toBe("compensating");
+    expect(transition?.values[3]).toEqual(expect.any(String));
+    expect(transition?.values[7]).toBe(true);
+    expect(transition?.sql).toContain(
+      "completed_at = CASE WHEN $8 THEN NULL",
     );
     const event = queries.find(({ sql }) =>
       sql.includes("INSERT INTO marketplace.listing_replacement_events"),
