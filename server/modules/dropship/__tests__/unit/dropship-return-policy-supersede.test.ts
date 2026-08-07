@@ -179,4 +179,53 @@ describe("PgDropshipReturnPolicyRepository supersede invariants", () => {
     expect(supersede.sql).toContain("fault_category =");
     expect(supersede.params).toEqual([NOW, "restocking_fee", "customer", 1, 1]);
   });
+
+  it("retires the explicitly superseded policy row even when the scope key changed", async () => {
+    const { client, calls } = makeClient(baseHandlers(policyRow));
+    const repo = new PgDropshipReturnPolicyRepository(makePool(client));
+
+    await repo.createPolicyVersion({
+      returnWindowDays: 60,
+      vendorId: 1,
+      storeConnectionId: 1,
+      priority: 0,
+      effectiveFrom: NOW,
+      supersedesPolicyId: 2,
+      idempotencyKey: "test-key-policy-edit",
+      actor: ACTOR,
+      now: NOW,
+    });
+
+    const retire = calls.find(
+      (c) => c.sql.includes("UPDATE dropship.dropship_return_policies") && c.sql.includes("WHERE id = $2"),
+    );
+    expect(retire).toBeDefined();
+    expect(retire!.params).toEqual([NOW, 2]);
+  });
+
+  it("retires the explicitly superseded fee row even when the fault category changed", async () => {
+    const { client, calls } = makeClient(baseHandlers(feeRow));
+    const repo = new PgDropshipReturnPolicyRepository(makePool(client));
+
+    await repo.createFeeVersion({
+      feeType: "restocking_fee",
+      faultCategory: "vendor",
+      amountType: "flat_cents",
+      amount: 500,
+      vendorId: null,
+      storeConnectionId: null,
+      priority: 0,
+      effectiveFrom: NOW,
+      supersedesFeeId: 1,
+      idempotencyKey: "test-key-fee-edit",
+      actor: ACTOR,
+      now: NOW,
+    });
+
+    const retire = calls.find(
+      (c) => c.sql.includes("UPDATE dropship.dropship_return_fee_schedule") && c.sql.includes("WHERE id = $2"),
+    );
+    expect(retire).toBeDefined();
+    expect(retire!.params).toEqual([NOW, 1]);
+  });
 });

@@ -761,11 +761,13 @@ const returnOpsUpdateStatuses: DropshipRmaStatus[] = [
   "closed",
 ];
 
+// NOTE: "marketplace" remains in the shared enum but is intentionally not
+// offered in the UI — vendor absorbs marketplace-fault outcomes by policy
+// (Overlord, 2026-08-07).
 const returnFaultCategories: DropshipReturnFaultCategory[] = [
   "card_shellz",
   "vendor",
   "customer",
-  "marketplace",
   "carrier",
 ];
 
@@ -2003,6 +2005,9 @@ function ReturnPoliciesTab() {
         vendorId,
         storeConnectionId,
         priority: Number(policyForm.priority) || 0,
+        // Edit-as-new-version: retire the row being edited even if the scope
+        // key changed (server supersedes same-key rows automatically).
+        supersedesPolicyId: editingPolicyId ?? undefined,
         idempotencyKey: createDropshipIdempotencyKey("return-policy-version"),
       });
       setMessage(`Return policy version created (${returnWindowDays}d window, ${returnPolicyScopeLabel({ vendorId, storeConnectionId })}).`);
@@ -2052,6 +2057,7 @@ function ReturnPoliciesTab() {
         vendorId,
         storeConnectionId,
         priority: Number(feeForm.priority) || 0,
+        supersedesFeeId: editingFeeId ?? undefined,
         idempotencyKey: createDropshipIdempotencyKey("return-fee-version"),
       });
       setMessage(`Fee schedule version created (${feeForm.feeType} / ${feeForm.faultCategory}).`);
@@ -2302,10 +2308,9 @@ function ReturnPoliciesTab() {
                     value={feeForm.faultCategory}
                     onChange={(event) => setFeeForm((current) => ({ ...current, faultCategory: event.target.value as DropshipReturnFaultCategory }))}
                   >
-                    <option value="card_shellz">Card Shellz</option>
-                    <option value="vendor">Vendor</option>
-                    <option value="customer">Customer</option>
-                    <option value="marketplace">Marketplace</option>
+                    <option value="card_shellz">Card Shellz (us)</option>
+                    <option value="vendor">Vendor (store owner)</option>
+                    <option value="customer">Customer (vendor's customer)</option>
                     <option value="carrier">Carrier</option>
                   </select>
                 </label>
@@ -2477,10 +2482,9 @@ function ReturnPoliciesTab() {
                   value={effectiveFaultCategory}
                   onChange={(event) => setEffectiveFaultCategory(event.target.value as DropshipReturnFaultCategory)}
                 >
-                  <option value="card_shellz">Card Shellz</option>
-                  <option value="vendor">Vendor</option>
-                  <option value="customer">Customer</option>
-                  <option value="marketplace">Marketplace</option>
+                  <option value="card_shellz">Card Shellz (us)</option>
+                  <option value="vendor">Vendor (store owner)</option>
+                  <option value="customer">Customer (vendor's customer)</option>
                   <option value="carrier">Carrier</option>
                 </select>
               </label>
