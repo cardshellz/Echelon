@@ -1063,6 +1063,7 @@ export const dropshipReturnPolicies = dropshipSchema.table("dropship_return_poli
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   version: integer("version").notNull().default(1),
   returnWindowDays: integer("return_window_days").notNull().default(DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS),
+  noShipTimeoutDays: integer("no_ship_timeout_days").notNull().default(14),
   vendorId: integer("vendor_id").references(() => dropshipVendors.id, { onDelete: "cascade" }),
   storeConnectionId: integer("store_connection_id").references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
   priority: integer("priority").notNull().default(0),
@@ -1078,6 +1079,7 @@ export const dropshipReturnPolicies = dropshipSchema.table("dropship_return_poli
   index("dropship_return_policies_scope_idx").on(table.vendorId, table.storeConnectionId, table.isActive, table.effectiveFrom),
   check("dropship_return_policies_version_chk", sql`${table.version} > 0`),
   check("dropship_return_policies_window_chk", sql`${table.returnWindowDays} > 0 AND ${table.returnWindowDays} <= 365`),
+  check("dropship_return_policies_no_ship_chk", sql`${table.noShipTimeoutDays} > 0 AND ${table.noShipTimeoutDays} <= 365`),
   check("dropship_return_policies_effective_chk", sql`${table.effectiveTo} IS NULL OR ${table.effectiveTo} > ${table.effectiveFrom}`),
   check("dropship_return_policies_scope_chk", sql`${table.vendorId} IS NOT NULL OR ${table.storeConnectionId} IS NULL`),
 ]);
@@ -1152,6 +1154,7 @@ export const dropshipRmaStatusUpdates = dropshipSchema.table("dropship_rma_statu
   notes: text("notes"),
   actorType: varchar("actor_type", { length: 40 }).notNull().default("system"),
   actorId: varchar("actor_id", { length: 255 }),
+  policyVersionId: integer("policy_version_id").references(() => dropshipReturnPolicies.id, { onDelete: "set null" }),
   idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
   requestHash: varchar("request_hash", { length: 64 }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
