@@ -98,6 +98,56 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
     },
   ) {}
 
+  async resumeManualRecovery(input: {
+    readonly operationId: number;
+    readonly expectedOwner: ListingOwnerRef;
+    readonly actor: ListingActor;
+    readonly resumedAt: Date;
+  }): Promise<void> {
+    if (
+      !Number.isSafeInteger(input.operationId) ||
+      input.operationId <= 0 ||
+      !input.actor.id.trim() ||
+      !Number.isFinite(input.resumedAt.getTime())
+    ) {
+      throw executionError(
+        "MARKETPLACE_LISTING_REPLACEMENT_EXECUTION_INPUT_INVALID",
+        "Manual recovery resume input is invalid.",
+      );
+    }
+    await this.inTransaction(async (client) => {
+      const operation = await lockOperation(client, input.operationId);
+      assertExpectedOwner(operation, input.expectedOwner);
+      if (operation.status === "compensating") return;
+      if (operation.status !== "manual_recovery_required") {
+        throw executionError(
+          "MARKETPLACE_LISTING_REPLACEMENT_RECOVERY_STATE_INVALID",
+          "Only a manual-recovery replacement can resume compensation.",
+          { operationId: input.operationId, status: operation.status },
+        );
+      }
+      const resumed = await updateOperation(client, operation, {
+        status: "compensating",
+        phase: "compensate",
+        completedAt: null,
+        errorCode: null,
+        errorMessage: null,
+        recoveryContext: operation.recovery_context,
+        clearLease: true,
+        at: input.resumedAt,
+      });
+      await insertOperationEvent(
+        client,
+        resumed,
+        operation.status,
+        input.actor,
+        {
+          recoveryDecision: "retry_compensation",
+          previousRecoveryContext: operation.recovery_context,
+        },
+      );
+    });
+  }
   async claimNextStep(input: {
     readonly operationId: number;
     readonly expectedOwner: ListingOwnerRef;
