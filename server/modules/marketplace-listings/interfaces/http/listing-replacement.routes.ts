@@ -12,7 +12,10 @@ import {
 } from "../..";
 
 type PlanningPort = Pick<ListingReplacementPlanningService, "plan">;
-type ExecutionPort = Pick<ListingReplacementExecutionService, "execute">;
+type ExecutionPort = Pick<
+  ListingReplacementExecutionService,
+  "execute" | "recover"
+>;
 export interface MarketplaceListingReplacementServiceResolver {
   forOwner(owner: ListingOwnerRef): PlanningPort & ExecutionPort;
 }
@@ -140,6 +143,30 @@ export function registerMarketplaceListingReplacementRoutes(
     },
   );
   app.post(
+    "/api/marketplace-listings/replacements/channel/ebay/:operationId/recover",
+    requirePermission("channels", "edit"),
+    async (req, res) => {
+      try {
+        const body = parse(channelExecutionSchema, req.body);
+        const operationId = parseOperationId(req.params.operationId);
+        const owner: ListingOwnerRef = {
+          kind: "channel",
+          channelId: body.channelId,
+          productId: body.productId,
+          provider: "ebay",
+          marketplaceId: body.marketplaceId,
+        };
+        return res.status(200).json({
+          result: await resolver
+            .forOwner(owner)
+            .recover(buildExecutionInput(req, owner, operationId)),
+        });
+      } catch (error) {
+        return sendError(res, error);
+      }
+    },
+  );
+  app.post(
     "/api/marketplace-listings/replacements/dropship/ebay/plan",
     requirePermission("dropship", "manage_operations"),
     async (req, res) => {
@@ -181,6 +208,30 @@ export function registerMarketplaceListingReplacementRoutes(
           result: await resolver
             .forOwner(owner)
             .execute(buildExecutionInput(req, owner, operationId)),
+        });
+      } catch (error) {
+        return sendError(res, error);
+      }
+    },
+  );
+  app.post(
+    "/api/marketplace-listings/replacements/dropship/ebay/:operationId/recover",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const body = parse(dropshipExecutionSchema, req.body);
+        const operationId = parseOperationId(req.params.operationId);
+        const owner: ListingOwnerRef = {
+          kind: "dropship",
+          storeConnectionId: body.storeConnectionId,
+          productId: body.productId,
+          provider: "ebay",
+          marketplaceId: body.marketplaceId,
+        };
+        return res.status(200).json({
+          result: await resolver
+            .forOwner(owner)
+            .recover(buildExecutionInput(req, owner, operationId)),
         });
       } catch (error) {
         return sendError(res, error);
@@ -286,7 +337,9 @@ function sendError(res: Response, error: unknown): Response {
       : error.code.includes("INVALID") || error.code.includes("AUTH_CONTEXT")
         ? 400
         : error.code.includes("CONFLICT") ||
-            error.code.includes("ACTIVE_SOURCE")
+            error.code.includes("ACTIVE_SOURCE") ||
+            error.code.includes("MANUAL_RECOVERY") ||
+            error.code.includes("RECOVERY_STATE")
           ? 409
           : 500;
     return res.status(status).json({

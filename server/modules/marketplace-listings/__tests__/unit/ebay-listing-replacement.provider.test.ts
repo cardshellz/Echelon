@@ -56,6 +56,31 @@ describe("EbayMarketplaceListingReplacementProvider", () => {
     });
   });
 
+  it("recognizes an already-live restored source under a new listing ID", async () => {
+    const harness = makeHarness();
+    const staleContext = {
+      ...context(),
+      sourcePublication: {
+        ...context().sourcePublication,
+        externalListingId: "withdrawn-listing",
+      },
+    };
+
+    await expect(
+      harness.provider.ensureSourceLive(staleContext, "recovery-key"),
+    ).resolves.toMatchObject({
+      externalListingId: "source-listing",
+      evidence: {
+        sourceLive: true,
+        alreadyLive: true,
+        previousSourceListingId: "withdrawn-listing",
+        sourceListingId: "source-listing",
+      },
+    });
+    expect(
+      harness.client.publishOfferByInventoryItemGroup,
+    ).not.toHaveBeenCalled();
+  });
   it("compensates by withdrawing the target and restoring the original listing", async () => {
     const harness = makeHarness();
     await harness.provider.quiesceSource(context(), "quiesce-key");

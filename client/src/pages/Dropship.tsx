@@ -1965,8 +1965,13 @@ function ReturnPoliciesTab() {
     enabled: activeSection === "effective" && effectiveLookupReady,
   });
 
-  const policies = policiesQuery.data?.items ?? [];
-  const fees = feesQuery.data?.items ?? [];
+  const [showInactive, setShowInactive] = useState(false);
+  const policies = (policiesQuery.data?.items ?? [])
+    .filter((row) => showInactive || row.isActive)
+    .sort((a, b) => b.policyId - a.policyId);
+  const fees = (feesQuery.data?.items ?? [])
+    .filter((row) => showInactive || row.isActive)
+    .sort((a, b) => b.feeId - a.feeId);
 
   async function runPolicyAction(action: string, task: () => Promise<void>) {
     setPendingAction(action);
@@ -2208,7 +2213,11 @@ function ReturnPoliciesTab() {
               </div>
             </section>
             <section className="rounded-md border bg-card p-4">
-              <PanelHeader title="Policy versions" detail={`${policies.length} row(s) loaded (including inactive).`} />
+              <PanelHeader title="Policy versions" detail={`${policies.length} row(s) shown.`} />
+              <label className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
+                <input type="checkbox" checked={showInactive} onChange={(event) => setShowInactive(event.target.checked)} />
+                Show inactive (history)
+              </label>
               <div className="mt-4 overflow-auto">
                 <Table>
                   <TableHeader>
@@ -2380,7 +2389,7 @@ function ReturnPoliciesTab() {
               </div>
             </section>
             <section className="rounded-md border bg-card p-4">
-              <PanelHeader title="Fee schedule rows" detail={`${fees.length} row(s) loaded (including inactive).`} />
+              <PanelHeader title="Fee schedule rows" detail={`${fees.length} row(s) shown.`} />
               <div className="mt-4 overflow-auto">
                 <Table>
                   <TableHeader>

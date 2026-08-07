@@ -84,6 +84,7 @@ export interface MarketplaceListingReplacementExecutionRepository {
     readonly leaseToken: string | null;
     readonly now: Date;
     readonly leaseDurationMs: number;
+    readonly recoveryAuthorized: boolean;
   }): Promise<
     ClaimedListingReplacementStep | TerminalListingReplacementOperation
   >;

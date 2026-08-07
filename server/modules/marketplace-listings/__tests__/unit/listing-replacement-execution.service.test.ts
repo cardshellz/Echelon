@@ -7,6 +7,22 @@ import type {
 } from "../../application/execution-ports";
 
 describe("ListingReplacementExecutionService", () => {
+  it("resumes manual recovery before executing compensation", async () => {
+    const harness = makeHarness(claim("compensate.ensure_source_live"));
+    harness.provider.ensureSourceLive.mockResolvedValue({
+      evidence: { sourceLive: true },
+      externalListingId: "restored-listing",
+    });
+
+    await expect(harness.service.recover(command())).resolves.toEqual({
+      kind: "failed",
+      stepKey: "compensate.ensure_source_live",
+    });
+    expect(harness.repository.claimNextStep).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ recoveryAuthorized: true }),
+    );
+  });
   it("dispatches a provider step and persists its evidence", async () => {
     const harness = makeHarness(claim("publish.create_target"));
     harness.provider.createTarget.mockResolvedValue({

@@ -123,6 +123,37 @@ describe("marketplace listing replacement routes", () => {
     });
   });
 
+  it("resumes manual recovery through an explicit Channel action", async () => {
+    const response = await request(
+      running.url +
+        "/api/marketplace-listings/replacements/channel/ebay/44/recover",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channelId: 7,
+          productId: 33,
+          marketplaceId: "EBAY_US",
+        }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.result).toEqual({
+      kind: "failed",
+      stepKey: "compensate.ensure_source_live",
+    });
+    expect(resolver.recoveryInput).toEqual({
+      operationId: 44,
+      expectedOwner: {
+        kind: "channel",
+        channelId: 7,
+        productId: 33,
+        provider: "ebay",
+        marketplaceId: "EBAY_US",
+      },
+      actor: { type: "user", id: "admin-1" },
+    });
+  });
   it("executes a Dropship operation through the same owner-bound contract", async () => {
     const response = await request(
       running.url +
@@ -234,12 +265,20 @@ class FakeResolver implements MarketplaceListingReplacementServiceResolver {
   owner: any = null;
   input: any = null;
   executionInput: any = null;
+  recoveryInput: any = null;
   forOwner(owner: any) {
     this.owner = owner;
     return {
       plan: async (input: unknown) => {
         this.input = input;
         return { kind: "created", operation: { operationId: 1 } };
+      },
+      recover: async (input: unknown) => {
+        this.recoveryInput = input;
+        return {
+          kind: "failed" as const,
+          stepKey: "compensate.ensure_source_live",
+        };
       },
       execute: async (input: unknown) => {
         this.executionInput = input;
