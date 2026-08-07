@@ -2003,6 +2003,9 @@ function ReturnPoliciesTab() {
         vendorId,
         storeConnectionId,
         priority: Number(policyForm.priority) || 0,
+        // Edit-as-new-version: retire the row being edited even if the scope
+        // key changed (server supersedes same-key rows automatically).
+        supersedesPolicyId: editingPolicyId ?? undefined,
         idempotencyKey: createDropshipIdempotencyKey("return-policy-version"),
       });
       setMessage(`Return policy version created (${returnWindowDays}d window, ${returnPolicyScopeLabel({ vendorId, storeConnectionId })}).`);
@@ -2052,6 +2055,7 @@ function ReturnPoliciesTab() {
         vendorId,
         storeConnectionId,
         priority: Number(feeForm.priority) || 0,
+        supersedesFeeId: editingFeeId ?? undefined,
         idempotencyKey: createDropshipIdempotencyKey("return-fee-version"),
       });
       setMessage(`Fee schedule version created (${feeForm.feeType} / ${feeForm.faultCategory}).`);
