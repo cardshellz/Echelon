@@ -1905,22 +1905,28 @@ export default function EbayChannelPage() {
                               .map((variant) => variant.id),
                             registration: registrationStatus,
                           });
-                      const shouldReviewListingChanges = Boolean(
+                      const hasProvenListingChanges = Boolean(
                         item.externalListingId
                         && (
                           reconciliation?.kind === "replacement_required"
                           || reconciliation?.kind === "update_available"
                           || reconciliation?.kind === "verification_required"
-                          || (reconciliation?.kind === "normal" && someExcluded)
                         )
                       );
-                      const reconciliationAction = shouldReviewListingChanges
+                      const needsInitialVariantCheck = Boolean(
+                        item.externalListingId
+                        && reconciliation?.kind === "normal"
+                        && someExcluded
+                      );
+                      const reconciliationAction = hasProvenListingChanges
                         ? "Review listing changes"
-                        : reconciliation?.kind === "normal" && item.status === "error"
-                          ? "Analyze listing"
-                          : null;
+                        : needsInitialVariantCheck
+                          ? "Check eBay variants"
+                          : reconciliation?.kind === "normal" && item.status === "error"
+                            ? "Analyze listing"
+                            : null;
                       const runReconciliationAction = () => {
-                        if (shouldReviewListingChanges) {
+                        if (hasProvenListingChanges || needsInitialVariantCheck) {
                           setListingChangesTarget(item);
                           return;
                         }
