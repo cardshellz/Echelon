@@ -6,6 +6,8 @@ import {
   type EbayObservedOffer,
 } from "../../modules/channels/listing-connectors/ebay-listing.connector";
 import type {
+  EbayBulkPriceQuantityRequest,
+  EbayBulkPriceQuantityResponse,
   EbayInventoryItem,
   EbayInventoryItemGroup,
   EbayOffer,
@@ -54,7 +56,7 @@ export interface EbayRouteListingLifecycleClient extends EbayListingConnectorCli
     groupKey: string,
     marketplaceId: string,
   ): Promise<void>;
-  bulkUpdatePriceQuantity(request: unknown): Promise<void>;
+  bulkUpdatePriceQuantity(request: EbayBulkPriceQuantityRequest): Promise<EbayBulkPriceQuantityResponse>;
   deleteOffer(offerId: string): Promise<void>;
   deleteInventoryItemGroup(groupKey: string): Promise<void>;
   deleteInventoryItem(sku: string): Promise<void>;
@@ -195,7 +197,7 @@ export function createEbayRouteListingLifecycleClient(
       );
     },
     bulkUpdatePriceQuantity: async (body) => {
-      await request(
+      return await request<EbayBulkPriceQuantityResponse>(
         "POST",
         "/sell/inventory/v1/bulk_update_price_quantity",
         body,
