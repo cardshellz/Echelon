@@ -362,19 +362,159 @@ export class EbayMarketplaceListingConnector {
       throw new Error("The current eBay listing is no longer active and cannot be updated in place.");
     }
 
-    const result = await this.pushListing({
+    const result = await this.updateExistingVariationGroup({
       client: input.client,
       draft: {
         ...input.draft,
+        itemGroup: input.draft.itemGroup!,
         hasExistingExternalIds: true,
         existingExternalProductId: currentPreview.currentExternalListingId,
       },
+      removedSkus: currentPreview.removedSkus,
     });
     if (result.externalProductId !== currentPreview.currentExternalListingId) {
       throw new Error("eBay did not preserve the reviewed listing id during the in-place update.");
     }
     return { ...result, removedSkus: [...currentPreview.removedSkus] };
   }
+  /**
+   * Update an active variation listing in eBay's required dependency order:
+   * inventory items, group membership, offers, then publication. The generic
+   * push path intentionally repairs offers first and is not valid when the
+   * set of variation specifics is changing.
+   */
+  private async updateExistingVariationGroup(input: {
+    client: EbayListingLifecycleClient;
+    draft: EbayListingConnectorDraft & { itemGroup: BuiltItemGroup };
+    removedSkus: readonly string[];
+  }): Promise<EbayListingConnectorResult> {
+    const resolvedOffers = await this.resolvePushOffers(input.client, input.draft);
+    const offerIdsByVariantId: Record<number, string> = {};
+
+    for (const item of input.draft.inventoryItems) {
+      await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
+      await this.delay(this.inventoryDelayMs);
+    }
+
+    let retainedRemovedSkus: string[] = [];
+    try {
+      await input.client.createOrReplaceInventoryItemGroup(
+        input.draft.itemGroup.groupKey,
+        input.draft.itemGroup.payload,
+      );
+    } catch (error) {
+      if (input.removedSkus.length === 0 || !isInvalidInventoryItemGroupError(error)) {
+        throw error;
+      }
+      const currentGroup = await input.client.getInventoryItemGroup(
+        input.draft.itemGroup.groupKey,
+      );
+      if (!currentGroup) throw error;
+
+      retainedRemovedSkus = normalizedSkus(input.removedSkus);
+      await input.client.createOrReplaceInventoryItemGroup(
+        input.draft.itemGroup.groupKey,
+        buildRetainedVariationGroupPayload({
+          desiredGroup: input.draft.itemGroup.payload,
+          currentGroup,
+          retainedSkus: retainedRemovedSkus,
+        }),
+      );
+    }
+
+    for (const { offer, existingOfferId } of resolvedOffers) {
+      const offerId = existingOfferId
+        ? existingOfferId
+        : await input.client.createOffer(offer.payload);
+      if (existingOfferId || input.draft.updateOfferAfterCreate) {
+        await input.client.updateOffer(offerId, withOfferId(offer.payload, offerId));
+      }
+      offerIdsByVariantId[offer.variantId] = offerId;
+      await this.delay(this.offerDelayMs);
+    }
+
+    for (const sku of retainedRemovedSkus) {
+      await this.disableRetainedVariation(input.client, sku, input.draft.marketplaceId);
+    }
+
+    const publishResult = await this.publishGroupWithConsistencyRetry({
+      client: input.client,
+      groupKey: input.draft.itemGroup.groupKey,
+      marketplaceId: input.draft.marketplaceId,
+    });
+    return {
+      productId: input.draft.productId,
+      status: "updated",
+      externalProductId: publishResult.listingId ?? input.draft.existingExternalProductId ?? undefined,
+      externalVariantIds: offerIdsByVariantId,
+      externalOfferIds: offerIdsByVariantId,
+      published: true,
+    };
+  }
+
+  private async resolvePushOffers(
+    client: EbayListingConnectorClient,
+    draft: EbayListingConnectorDraft,
+  ): Promise<ResolvedPushOffer[]> {
+    const resolved: ResolvedPushOffer[] = [];
+    const expectedListingId = draft.existingExternalProductId?.trim();
+    for (const offer of draft.offers) {
+      let existingOfferId = draft.existingOfferIdsByVariantId?.[offer.variantId] ?? null;
+      if (!existingOfferId) {
+        const response = await client.getOffers(offer.sku, draft.marketplaceId);
+        const conflictingPublishedOffer = response.offers.find((candidate) => {
+          const listingId = observedOfferListingId(candidate);
+          return isPublishedObservedOffer(candidate)
+            && listingId !== undefined
+            && listingId !== expectedListingId;
+        });
+        if (conflictingPublishedOffer) {
+          throw new Error(`The eBay variation ${offer.sku} belongs to a different active listing.`);
+        }
+
+        const candidates = response.offers.filter((candidate) => {
+          const listingId = observedOfferListingId(candidate);
+          return listingId === expectedListingId || !isPublishedObservedOffer(candidate);
+        });
+        if (candidates.length > 1) {
+          throw new Error(`The eBay variation ${offer.sku} has multiple offers that could be updated.`);
+        }
+        existingOfferId = candidates[0]?.offerId ?? null;
+      }
+      resolved.push({ offer, existingOfferId });
+    }
+    return resolved;
+  }
+
+  private async disableRetainedVariation(
+    client: EbayListingConnectorClient,
+    sku: string,
+    marketplaceId: string,
+  ): Promise<void> {
+    const inventoryItem = await client.getInventoryItem(sku);
+    if (!inventoryItem) {
+      throw new Error(`Cannot retain removed eBay variation ${sku} because its inventory item was not found.`);
+    }
+    const { sku: ignoredSku, ...inventoryItemPayload } = inventoryItem;
+    void ignoredSku;
+    await client.createOrReplaceInventoryItem(sku, {
+      ...inventoryItemPayload,
+      availability: {
+        ...inventoryItemPayload.availability,
+        shipToLocationAvailability: {
+          ...inventoryItemPayload.availability.shipToLocationAvailability,
+          quantity: 0,
+        },
+      },
+    });
+
+    const response = await client.getOffers(sku, marketplaceId);
+    for (const offer of response.offers) {
+      await client.updateOffer(offer.offerId, toWritableOffer(offer, 0));
+      await this.delay(this.offerDelayMs);
+    }
+  }
+
   async syncExistingListing(input: {
     client: EbayListingConnectorClient;
     draft: Pick<EbayListingConnectorDraft, "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup">;
@@ -532,6 +672,62 @@ function validateDraft(draft: EbayListingConnectorDraft): void {
   if (draft.offers.length === 0) {
     throw new Error("At least one eBay offer is required.");
   }
+}
+
+function buildRetainedVariationGroupPayload(input: {
+  desiredGroup: Omit<EbayInventoryItemGroup, "inventoryItemGroupKey">;
+  currentGroup: EbayInventoryItemGroup & { variantSKUs?: string[] };
+  retainedSkus: readonly string[];
+}): Omit<EbayInventoryItemGroup, "inventoryItemGroupKey"> {
+  const desiredSpecifications = input.desiredGroup.variesBy.specifications;
+  const currentSpecifications = input.currentGroup.variesBy.specifications;
+  const currentByName = new Map(
+    currentSpecifications.map((specification) => [specification.name, specification.values]),
+  );
+  const desiredNames = new Set(desiredSpecifications.map((specification) => specification.name));
+  const currentNames = new Set(currentSpecifications.map((specification) => specification.name));
+  if (!sameStrings([...desiredNames].sort(), [...currentNames].sort())) {
+    throw new Error(
+      "The live and desired eBay listings use different variation aspect names and cannot be updated in place.",
+    );
+  }
+
+  return {
+    ...input.desiredGroup,
+    variantSKUs: normalizedSkus([
+      ...normalizedSkus(input.desiredGroup.variantSKUs),
+      ...normalizedSkus(input.retainedSkus),
+    ]),
+    variesBy: {
+      ...input.desiredGroup.variesBy,
+      specifications: desiredSpecifications.map((specification) => ({
+        ...specification,
+        values: [...new Set([
+          ...specification.values,
+          ...(currentByName.get(specification.name) ?? []),
+        ])],
+      })),
+    },
+  };
+}
+
+function toWritableOffer(offer: EbayObservedOffer, availableQuantity: number): EbayOffer {
+  const {
+    offerId,
+    status: ignoredStatus,
+    listingId: ignoredListingId,
+    listing: ignoredListing,
+    ...payload
+  } = offer;
+  void ignoredStatus;
+  void ignoredListingId;
+  void ignoredListing;
+  return { ...payload, offerId, availableQuantity };
+}
+
+function isInvalidInventoryItemGroupError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:errorId["']?\s*:\s*25013|\b25013\b|invalid data in the inventory item group)/i.test(message);
 }
 
 function validateMaintenanceDraft(
