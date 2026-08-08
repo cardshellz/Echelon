@@ -5,14 +5,17 @@ import {
   listingRegistrationReceiptSchema,
   listingRegistrationResultSchema,
   listingRegistrationStatusSchema,
+  listingVerificationResultSchema,
   type ListingRegistrationReceipt,
   type ListingRegistrationResult,
   type ListingRegistrationStatus,
+  type ListingVerificationResult,
 } from "../application/registration-dtos";
 import type {
   ListingRegistrationReplayLookup,
   MarketplaceListingRegistrationRepository,
   PersistListingRegistrationInput,
+  PersistVerifiedListingInput,
 } from "../application/registration-ports";
 import type {
   ListingRegistrationPlan,
@@ -119,6 +122,19 @@ interface MemberRow extends QueryResultRow {
   product_variant_id: number;
 }
 
+interface VerificationRow extends QueryResultRow {
+  id: string | number;
+  source_publication_id: string | number;
+  external_listing_id: string;
+  observation_hash: string;
+  verified_at: Date | string;
+}
+
+interface ActivePublicationRow extends QueryResultRow {
+  id: string | number;
+  external_listing_id: string;
+}
+
 interface IdRow extends QueryResultRow {
   id: string | number;
 }
@@ -208,6 +224,90 @@ export class PgMarketplaceListingRegistrationRepository implements MarketplaceLi
       return mapReceipt(row);
     } catch (error) {
       throw classifyReplayError(error, lookup);
+    }
+  }
+
+  async verifyExistingPublication(
+    input: PersistVerifiedListingInput,
+  ): Promise<ListingVerificationResult> {
+    let client: PoolClient;
+    try {
+      client = await this.dbPool.connect();
+    } catch (error) {
+      throw classifyPersistenceError(error, input.plan);
+    }
+    let destroyClient = false;
+    try {
+      await client.query("BEGIN");
+      await client.query("SET LOCAL lock_timeout = '2s'");
+      await lockAndValidateCatalogVariants(client, input.plan);
+      const scopeResult = await client.query<ScopeRow>(
+        scopeLookupSql(input.plan.owner),
+        scopeLookupParams(input.plan.owner),
+      );
+      const scope = scopeResult.rows[0];
+      if (!scope) {
+        throw databaseContractError("Verified listing scope does not exist.");
+      }
+      assertScopeMatchesOwner(scope, input.plan.owner);
+      const scopeId = toSafeInteger(scope.id, "verification.scope_id");
+
+      const replay = await loadVerificationForIdempotencyKey(
+        client,
+        scopeId,
+        input.plan.idempotencyKey,
+      );
+      if (replay) {
+        if (replay.observation_hash !== input.plan.observationHash) {
+          throw new MarketplaceListingRegistrationError(
+            "MARKETPLACE_LISTING_REGISTRATION_IDEMPOTENCY_CONFLICT",
+            "Listing verification idempotency key was already used for a different observation.",
+            { scopeId },
+          );
+        }
+        await client.query("COMMIT");
+        return listingVerificationResultSchema.parse({
+          kind: "verified",
+          publicationId: toSafeInteger(replay.source_publication_id, "verification.source_publication_id"),
+          externalListingId: replay.external_listing_id,
+          verifiedAt: toDate(replay.verified_at, "verification.verified_at"),
+        });
+      }
+
+      const account = await lockAndValidateVerificationAccount(
+        client,
+        scopeId,
+        input.plan,
+      );
+      const publication = await lockActivePublication(client, scopeId);
+      const verificationId = await insertVerificationSnapshot(
+        client,
+        scopeId,
+        toSafeInteger(account.id, "verification.provider_account_id"),
+        publication,
+        input,
+      );
+      await insertVerificationMembers(client, verificationId, input.plan);
+      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+      await client.query("COMMIT");
+      return listingVerificationResultSchema.parse({
+        kind: publication.external_listing_id === input.plan.externalListingId
+          ? "verified"
+          : "adopted_replacement",
+        publicationId: toSafeInteger(publication.id, "verification.source_publication_id"),
+        externalListingId: input.plan.externalListingId,
+        verifiedAt: input.verifiedAt,
+      });
+    } catch (error) {
+      const persistenceError = classifyPersistenceError(error, input.plan);
+      const rollback = await rollbackTransaction(client);
+      if (!rollback.ok) {
+        destroyClient = true;
+        throw rollbackFailureError(persistenceError, rollback.error, input.plan);
+      }
+      throw persistenceError;
+    } finally {
+      client.release(destroyClient);
     }
   }
 
@@ -314,6 +414,160 @@ export class PgMarketplaceListingRegistrationRepository implements MarketplaceLi
     } finally {
       client.release(destroyClient);
     }
+  }
+}
+
+async function loadVerificationForIdempotencyKey(
+  client: PoolClient,
+  scopeId: number,
+  idempotencyKey: string,
+): Promise<VerificationRow | null> {
+  const result = await client.query<VerificationRow>(
+    `SELECT id, source_publication_id, external_listing_id, observation_hash, verified_at
+     FROM marketplace.listing_verification_snapshots
+     WHERE scope_id = $1 AND idempotency_key = $2
+     FOR UPDATE`,
+    [scopeId, idempotencyKey],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function lockAndValidateVerificationAccount(
+  client: PoolClient,
+  scopeId: number,
+  plan: ListingRegistrationPlan,
+): Promise<ProviderAccountRow> {
+  const result = await client.query<ProviderAccountRow>(
+    `SELECT account.*
+     FROM marketplace.listing_scope_provider_accounts AS binding
+     JOIN marketplace.listing_registrations AS registration
+       ON registration.scope_id = binding.scope_id
+      AND registration.provider_account_id = binding.provider_account_id
+     JOIN marketplace.provider_accounts AS account
+       ON account.id = binding.provider_account_id
+     WHERE binding.scope_id = $1
+     FOR UPDATE OF account`,
+    [scopeId],
+  );
+  const account = result.rows[0];
+  if (!account) {
+    throw databaseContractError("Verified listing scope has no provider account binding.");
+  }
+  assertProviderAccountMatchesOwner(account, plan.owner);
+  if (
+    account.account_namespace !== plan.providerAccount.accountNamespace ||
+    account.external_account_id !== plan.providerAccount.externalAccountId
+  ) {
+    throw ownerChanged(
+      plan.owner,
+      "The observed marketplace account no longer matches the registered owner account.",
+    );
+  }
+  return account;
+}
+
+async function lockActivePublication(
+  client: PoolClient,
+  scopeId: number,
+): Promise<ActivePublicationRow> {
+  const result = await client.query<ActivePublicationRow>(
+    `SELECT id, external_listing_id
+     FROM marketplace.listing_publications
+     WHERE scope_id = $1 AND status = 'active'
+     FOR UPDATE`,
+    [scopeId],
+  );
+  const publication = result.rows[0];
+  if (!publication?.external_listing_id?.trim()) {
+    throw databaseContractError("Verified listing scope has no active publication identity.");
+  }
+  return publication;
+}
+
+async function insertVerificationSnapshot(
+  client: PoolClient,
+  scopeId: number,
+  providerAccountId: number,
+  publication: ActivePublicationRow,
+  input: PersistVerifiedListingInput,
+): Promise<number> {
+  const plan = input.plan;
+  const result = await client.query<IdRow>(
+    `INSERT INTO marketplace.listing_verification_snapshots (
+       scope_id, product_id, source_publication_id, provider_account_id, idempotency_key,
+       request_hash, observation_hash, desired_state_hash,
+       provider_publication_key, external_listing_id, external_url, evidence,
+       observed_at, verified_at, verified_by_type, verified_by_id,
+       correlation_id, created_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
+       $13, $14, $15, $16, $17, $14
+     ) RETURNING id`,
+    [
+      scopeId,
+      plan.owner.productId,
+      toSafeInteger(publication.id, "verification.source_publication_id"),
+      providerAccountId,
+      plan.idempotencyKey,
+      plan.requestHash,
+      plan.observationHash,
+      plan.desiredStateHash,
+      plan.providerPublicationKey,
+      plan.externalListingId,
+      plan.externalUrl,
+      JSON.stringify(plan.evidence),
+      plan.observedAt,
+      input.verifiedAt,
+      plan.requestedBy.type,
+      plan.requestedBy.id,
+      plan.correlationId,
+    ],
+  );
+  return toSafeInteger(
+    requiredRow(result.rows[0], "Verification snapshot insert returned no row.").id,
+    "verification.id",
+  );
+}
+
+async function insertVerificationMembers(
+  client: PoolClient,
+  verificationId: number,
+  plan: ListingRegistrationPlan,
+): Promise<void> {
+  const result = await client.query(
+    `INSERT INTO marketplace.listing_verification_members (
+       verification_id, product_id, product_variant_id, sku_snapshot, disposition,
+       reason_code, external_variant_id, external_offer_id,
+       external_inventory_item_id
+     )
+     SELECT $1, $2, member.product_variant_id, member.sku_snapshot,
+            member.disposition, member.reason_code, member.external_variant_id,
+            member.external_offer_id, member.external_inventory_item_id
+     FROM jsonb_to_recordset($3::jsonb) AS member(
+       product_variant_id INTEGER,
+       sku_snapshot TEXT,
+       disposition TEXT,
+       reason_code TEXT,
+       external_variant_id TEXT,
+       external_offer_id TEXT,
+       external_inventory_item_id TEXT
+     )`,
+    [
+      verificationId,
+      plan.owner.productId,
+      JSON.stringify(plan.members.map((member) => ({
+        product_variant_id: member.productVariantId,
+        sku_snapshot: member.skuSnapshot,
+        disposition: member.disposition,
+        reason_code: member.reasonCode,
+        external_variant_id: member.externalVariantId,
+        external_offer_id: member.externalOfferId,
+        external_inventory_item_id: member.externalInventoryItemId,
+      }))),
+    ],
+  );
+  if (result.rowCount !== plan.members.length) {
+    throw databaseContractError("Verification member insert was incomplete.");
   }
 }
 
@@ -1061,15 +1315,32 @@ function currentRegistrationStatusesSql(owner: ListingOwnerRef): string {
       publication.id AS publication_id,
       publication.scope_id AS publication_scope_id,
       publication.status AS publication_status,
-      publication.provider_publication_key,
-      publication.external_listing_id,
-      ARRAY(
+      COALESCE(verification.provider_publication_key, publication.provider_publication_key)
+        AS provider_publication_key,
+      COALESCE(verification.external_listing_id, publication.external_listing_id)
+        AS external_listing_id,
+      CASE WHEN verification.id IS NOT NULL THEN ARRAY(
+        SELECT member.product_variant_id
+        FROM marketplace.listing_verification_members AS member
+        WHERE member.verification_id = verification.id
+          AND member.disposition = 'included'
+        ORDER BY member.product_variant_id
+      ) ELSE ARRAY(
         SELECT member.product_variant_id
         FROM marketplace.listing_publication_members AS member
         WHERE member.publication_id = publication.id
+          AND member.disposition = 'included'
         ORDER BY member.product_variant_id
-      ) AS registered_variant_ids,
-      COALESCE((
+      ) END AS registered_variant_ids,
+      CASE WHEN verification.id IS NOT NULL THEN COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+          'productVariantId', member.product_variant_id,
+          'sku', member.sku_snapshot,
+          'disposition', member.disposition
+        ) ORDER BY member.product_variant_id)
+        FROM marketplace.listing_verification_members AS member
+        WHERE member.verification_id = verification.id
+      ), '[]'::jsonb) ELSE COALESCE((
         SELECT jsonb_agg(jsonb_build_object(
           'productVariantId', member.product_variant_id,
           'sku', member.sku_snapshot,
@@ -1077,7 +1348,7 @@ function currentRegistrationStatusesSql(owner: ListingOwnerRef): string {
         ) ORDER BY member.product_variant_id)
         FROM marketplace.listing_publication_members AS member
         WHERE member.publication_id = publication.id
-      ), '[]'::jsonb) AS registered_variants,
+      ), '[]'::jsonb) END AS registered_variants,
       scope_account.provider_account_id AS scope_provider_account_id,
       account.id AS provider_account_id,
       account.owner_kind AS account_owner_kind,
@@ -1092,6 +1363,14 @@ function currentRegistrationStatusesSql(owner: ListingOwnerRef): string {
     LEFT JOIN marketplace.listing_publications AS publication
       ON publication.scope_id = scope.id
      AND publication.status = 'active'
+    LEFT JOIN LATERAL (
+      SELECT snapshot.*
+      FROM marketplace.listing_verification_snapshots AS snapshot
+      WHERE snapshot.scope_id = scope.id
+        AND snapshot.source_publication_id = publication.id
+      ORDER BY snapshot.verified_at DESC, snapshot.id DESC
+      LIMIT 1
+    ) AS verification ON TRUE
     LEFT JOIN marketplace.listing_scope_provider_accounts AS scope_account
       ON scope_account.scope_id = scope.id
     LEFT JOIN marketplace.provider_accounts AS account

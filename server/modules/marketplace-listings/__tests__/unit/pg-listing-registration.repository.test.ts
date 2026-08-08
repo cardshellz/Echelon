@@ -1,7 +1,10 @@
 import type { Pool, PoolClient, QueryResult } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
-import type { PersistListingRegistrationInput } from "../../application/registration-ports";
+import type {
+  PersistListingRegistrationInput,
+  PersistVerifiedListingInput,
+} from "../../application/registration-ports";
 import {
   buildListingRegistrationPlan,
   type ListingRegistrationPlan,
@@ -38,6 +41,9 @@ describe("PgMarketplaceListingRegistrationRepository", () => {
     expect(sql).toContain("marketplace.channel_listing_scopes");
     expect(sql).toContain("publication.status = 'active'");
     expect(sql).toContain("FROM marketplace.listing_publication_members AS member");
+    expect(sql).toContain("marketplace.listing_verification_snapshots");
+    expect(sql).toContain("snapshot.source_publication_id = publication.id");
+    expect(sql).toContain("member.disposition = 'included'");
     expect(params).toEqual(["channel", "ebay", "EBAY_US", 7, [33]]);
   });
 
@@ -139,6 +145,83 @@ describe("PgMarketplaceListingRegistrationRepository", () => {
         code: "MARKETPLACE_LISTING_REGISTRATION_DATABASE_CONTRACT_ERROR",
       },
     );
+  });
+
+  it("persists a verified existing listing snapshot and all observed members atomically", async () => {
+    const registrationInput = persistenceInput();
+    const input: PersistVerifiedListingInput = {
+      plan: registrationInput.plan,
+      verifiedAt: new Date("2026-08-04T12:00:02.000Z"),
+    };
+    const queries: string[] = [];
+    const release = vi.fn();
+    const query = vi.fn(async (sql: string) => {
+      queries.push(sql);
+      if (
+        sql === "BEGIN" || sql === "COMMIT" || sql.startsWith("SET LOCAL") ||
+        sql.startsWith("SET CONSTRAINTS")
+      ) return result([]);
+      if (sql.includes("FROM catalog.product_variants")) {
+        return result([
+          { id: 11, sku: "ARM-ENV-SGL-C750", is_active: false },
+          { id: 12, sku: "ARM-ENV-SGL-C700", is_active: false },
+        ]);
+      }
+      if (sql.includes("FROM marketplace.listing_scopes AS scope")) {
+        return result([{
+          id: 10,
+          owner_kind: "channel",
+          provider: "ebay",
+          marketplace_id: "EBAY_US",
+          product_id: 33,
+          channel_id: 7,
+          store_connection_id: null,
+        }]);
+      }
+      if (sql.includes("FROM marketplace.listing_verification_snapshots") && sql.includes("idempotency_key")) {
+        return result([]);
+      }
+      if (sql.includes("FROM marketplace.listing_scope_provider_accounts AS binding")) {
+        return result([{
+          id: 20,
+          owner_kind: "channel",
+          channel_id: 7,
+          store_connection_id: null,
+          provider: "ebay",
+          account_namespace: "production",
+          external_account_id: "provider-user-123",
+          identity_scheme: "provider_user_id",
+        }]);
+      }
+      if (sql.includes("FROM marketplace.listing_publications") && sql.includes("status = 'active'")) {
+        return result([{ id: 30, external_listing_id: "listing-old" }]);
+      }
+      if (sql.includes("INSERT INTO marketplace.listing_verification_snapshots")) {
+        return result([{ id: 50 }]);
+      }
+      if (sql.includes("INSERT INTO marketplace.listing_verification_members")) {
+        return result([], input.plan.members.length);
+      }
+      throw new Error(`Unexpected verification SQL: ${sql}`);
+    });
+    const repository = new PgMarketplaceListingRegistrationRepository({
+      connect: vi.fn(async () => ({ query, release }) as unknown as PoolClient),
+    } as unknown as Pool);
+
+    await expect(repository.verifyExistingPublication(input)).resolves.toEqual({
+      kind: "adopted_replacement",
+      publicationId: 30,
+      externalListingId: "listing-123",
+      verifiedAt: input.verifiedAt,
+    });
+    expect(queryIndex(queries, "FROM catalog.product_variants")).toBeLessThan(
+      queryIndex(queries, "INSERT INTO marketplace.listing_verification_snapshots"),
+    );
+    expect(queryIndex(queries, "INSERT INTO marketplace.listing_verification_snapshots")).toBeLessThan(
+      queryIndex(queries, "INSERT INTO marketplace.listing_verification_members"),
+    );
+    expect(queries.at(-1)).toBe("COMMIT");
+    expect(release).toHaveBeenCalledWith(false);
   });
 
   it("imports an observed listing in one transaction after owner and global identity locks", async () => {

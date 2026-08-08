@@ -7,6 +7,7 @@ import type {
   ListingOwnerRef,
   MarketplaceListingRegistrationService,
   PreviewListingRegistrationInput,
+  VerifyExistingListingInput,
 } from "../..";
 import { MarketplaceListingRegistrationError } from "../../domain/registration-errors";
 
@@ -17,7 +18,7 @@ const MAX_POSTGRES_INTEGER = 2_147_483_647;
 
 type RegistrationServicePort = Pick<
   MarketplaceListingRegistrationService,
-  "preview" | "confirm" | "getCurrentRegistrationStatuses"
+  "preview" | "confirm" | "verifyExisting" | "getCurrentRegistrationStatuses"
 >;
 
 export interface MarketplaceListingRegistrationServiceResolver {
@@ -83,6 +84,13 @@ const channelConfirmRequestSchema = z
   .strict()
   .superRefine(validateLocator);
 
+const channelVerificationRequestSchema = z.object({
+  ...registrationRequestShape,
+  channelId: z.number().int().positive().max(MAX_POSTGRES_INTEGER),
+  expectedObservationHash: z.string().regex(/^[0-9a-f]{64}$/),
+  expectedIncludedVariantIds: z.array(z.number().int().positive().max(MAX_POSTGRES_INTEGER)).min(1).max(10_000),
+}).strict().superRefine(validateLocator);
+
 const dropshipRequestSchema = z
   .object({
     ...registrationRequestShape,
@@ -99,6 +107,13 @@ const dropshipConfirmRequestSchema = z
   })
   .strict()
   .superRefine(validateLocator);
+
+const dropshipVerificationRequestSchema = z.object({
+  ...registrationRequestShape,
+  storeConnectionId: z.number().int().positive().max(MAX_POSTGRES_INTEGER),
+  expectedObservationHash: z.string().regex(/^[0-9a-f]{64}$/),
+  expectedIncludedVariantIds: z.array(z.number().int().positive().max(MAX_POSTGRES_INTEGER)).min(1).max(10_000),
+}).strict().superRefine(validateLocator);
 
 const channelStatusQuerySchema = z
   .object({
@@ -207,6 +222,23 @@ export function registerMarketplaceListingRegistrationRoutes(
   );
 
   app.post(
+    "/api/marketplace-listings/registrations/channel/ebay/verify",
+    requirePermission("channels", "edit"),
+    async (req, res) => {
+      try {
+        const body = parseRequest(channelVerificationRequestSchema, req.body);
+        const owner = channelOwner(body.channelId, body.productId, body.marketplaceId);
+        const result = await resolver.forOwner(owner).verifyExisting(
+          buildVerificationInput(req, owner, body),
+        );
+        return res.json({ result });
+      } catch (error) {
+        return sendRegistrationError(res, error);
+      }
+    },
+  );
+
+  app.post(
     "/api/marketplace-listings/registrations/dropship/ebay/preview",
     requirePermission("dropship", "manage_operations"),
     async (req, res) => {
@@ -240,6 +272,27 @@ export function registerMarketplaceListingRegistrationRoutes(
         );
         const result = await resolver.forOwner(owner).confirm(
           buildConfirmInput(req, owner, body),
+        );
+        return res.json({ result });
+      } catch (error) {
+        return sendRegistrationError(res, error);
+      }
+    },
+  );
+
+  app.post(
+    "/api/marketplace-listings/registrations/dropship/ebay/verify",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const body = parseRequest(dropshipVerificationRequestSchema, req.body);
+        const owner = dropshipOwner(
+          body.storeConnectionId,
+          body.productId,
+          body.marketplaceId,
+        );
+        const result = await resolver.forOwner(owner).verifyExisting(
+          buildVerificationInput(req, owner, body),
         );
         return res.json({ result });
       } catch (error) {
@@ -302,6 +355,20 @@ function buildConfirmInput(
   return {
     ...buildPreviewInput(req, owner, body),
     expectedObservationHash: body.expectedObservationHash,
+  };
+}
+
+function buildVerificationInput(
+  req: Request,
+  owner: ListingOwnerRef,
+  body: RegistrationRouteBody & {
+    expectedObservationHash: string;
+    expectedIncludedVariantIds: number[];
+  },
+): VerifyExistingListingInput {
+  return {
+    ...buildConfirmInput(req, owner, body),
+    expectedIncludedVariantIds: body.expectedIncludedVariantIds,
   };
 }
 
@@ -414,6 +481,7 @@ function statusForRegistrationError(code: string): number {
   if (code.includes("NOT_FOUND")) return 404;
   if (
     code.includes("OBSERVATION_CHANGED") ||
+    code.includes("MEMBERSHIP_CHANGED") ||
     code.includes("CONFLICT") ||
     code.includes("ALREADY") ||
     code.includes("NOT_LIVE") ||

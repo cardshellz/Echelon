@@ -52,14 +52,12 @@ const rebuildPreviewSchema = z.object({
 type RebuildPreview = z.infer<typeof rebuildPreviewSchema>;
 type Completion = Readonly<{ listingId: string; mode: "verify" | "update" | "replace" }>;
 
-const registrationConfirmResponseSchema = z.object({
+const listingVerificationResponseSchema = z.object({
   result: z.object({
-    kind: z.enum(["created", "replay"]),
-    receipt: z.object({
-      registrationId: z.number().int().positive(),
-      publicationId: z.number().int().positive(),
-      registeredAt: z.string().datetime(),
-    }),
+    kind: z.enum(["verified", "adopted_replacement"]),
+    publicationId: z.number().int().positive(),
+    externalListingId: z.string().min(1),
+    verifiedAt: z.string().datetime(),
   }),
 });
 
@@ -155,7 +153,11 @@ export function MarketplaceListingChangesDialog({
       }
       setCompletion({ listingId: result.listingId, mode });
       try {
-        await refreshListingAnalysis(owner, result.listingId);
+        await persistVerifiedListingState(
+          owner,
+          result.listingId,
+          variants.filter((variant) => variant.included).map((variant) => variant.id),
+        );
       } catch (baselineCause) {
         setBaselineWarning(
           `The eBay change succeeded, but Echelon could not refresh its comparison baseline: ${errorMessage(baselineCause)}`,
@@ -174,7 +176,11 @@ export function MarketplaceListingChangesDialog({
     setBusy("update");
     setError(null);
     try {
-      await refreshListingAnalysis(owner, preview.currentExternalListingId);
+      await persistVerifiedListingState(
+        owner,
+        preview.currentExternalListingId,
+        variants.filter((variant) => variant.included).map((variant) => variant.id),
+      );
       setCompletion({ listingId: preview.currentExternalListingId, mode: "verify" });
       onCompleted?.();
     } catch (cause) {
@@ -371,16 +377,17 @@ function errorMessage(cause: unknown): string {
   }
   return cause instanceof Error ? cause.message : "The listing-change request failed.";
 }
-async function refreshListingAnalysis(
+async function persistVerifiedListingState(
   owner: MarketplaceListingRegistrationOwner,
   externalListingId: string,
+  expectedIncludedVariantIds: readonly number[],
 ): Promise<void> {
   if (typeof globalThis.crypto?.randomUUID !== "function") {
     throw new Error("This browser cannot create a secure listing-analysis idempotency key.");
   }
   const ownerId = owner.kind === "channel" ? owner.channelId : owner.storeConnectionId;
   const idempotencyKey = [
-    "marketplace-listing-registration",
+    "marketplace-listing-verification",
     owner.kind,
     ownerId,
     owner.marketplaceId,
@@ -406,8 +413,12 @@ async function refreshListingAnalysis(
     registrationPreviewResponseSchema,
   );
   await postRegistration(
-    endpointBase + "/confirm",
-    { ...requestBody, expectedObservationHash: preview.preview.observationHash },
-    registrationConfirmResponseSchema,
+    endpointBase + "/verify",
+    {
+      ...requestBody,
+      expectedObservationHash: preview.preview.observationHash,
+      expectedIncludedVariantIds,
+    },
+    listingVerificationResponseSchema,
   );
 }
