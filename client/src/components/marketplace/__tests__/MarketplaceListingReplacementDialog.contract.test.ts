@@ -27,6 +27,7 @@ describe("MarketplaceListingReplacementDialog contract", () => {
     expect(source).toContain('rebuild: { mode: "execute", preview }');
     expect(source).toContain('sourceState: z.enum(["active", "withdrawn"])');
     expect(source).toContain("confirmationToken: z.string()");
+    expect(source).toContain('preview.sourceState === "withdrawn" ? "Publish new listing" : "Rebuild listing"');
   });
 
   it("does not expose legacy compensation or manual recovery controls", () => {
