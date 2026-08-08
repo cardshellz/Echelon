@@ -2,6 +2,9 @@
 
 > Status: **COMPLETE** — all 9 rounds answered; design doc written (`DESIGN.md`)
 > and its seven deferred decisions user-confirmed 2026-08-08.
+> Naming note (post-discovery): the schema/module referred to below as
+> "`marketing`" was finalized as **`crm`** on 2026-08-08 (see `DESIGN.md` status
+> note). Answers are preserved verbatim as the historical record.
 > Goal: replace Klaviyo with an in-house marketing/email/SMS system (Resend as the
 > email delivery engine), generic enough that any Shopify/marketplace store can
 > connect with zero custom coding.

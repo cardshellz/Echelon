@@ -1,9 +1,14 @@
-# Helm — In-House Marketing Engine: Design Document
+# CRM — In-House Marketing Engine: Design Document
 
 > Status: **APPROVED** — all seven deferred decisions (D1–D7, §3) user-confirmed
 > as recommended on 2026-08-08. Input: `DISCOVERY.md` (all 9 rounds answered).
-> Working name: **Helm** (the marketing module inside Archon). Rename freely —
-> the name only appears in schema/module identifiers at implementation time.
+> Final name: **`crm`** — schema and module both, no codename (owner-confirmed
+> 2026-08-08, replacing the working name "Helm"). The wider-than-v1 name is
+> deliberate: enterprise/B2B customers are on the roadmap, and an account layer
+> (companies, contacts → accounts, pipeline) extends this person-level profile
+> model later without rework. v1 scope is unchanged — the marketing engine
+> specified below. The module-interface boundary rule (§2) is what keeps the
+> wide name from becoming a scope grab-bag.
 >
 > Implementation target: the **Archon repo** (`cardshellz/archon`), as a bounded
 > module. This doc lives in Echelon's repo because discovery ran here; copy or
@@ -46,10 +51,10 @@
   Shopify store(s) ─┐  webhooks/API           ┌─ Resend (email port)
   Web snippet ──────┤                          ├─ Twilio (SMS port, phase S)
   Shellz Club ──────┼─► CANONICAL EVENT API ──►│
-  Echelon OMS ──────┘   (Helm ingestion)       └─ [future: ads/social ports]
+  Echelon OMS ──────┘   (CRM ingestion)       └─ [future: ads/social ports]
                               │
         ┌─────────────────────▼──────────────────────┐
-        │  HELM (marketing schema + module in Archon) │
+        │  CRM (`crm` schema + module in Archon)      │
         │  profiles · consent · events · segments     │
         │  journeys · campaigns · messages · stats    │
         └─────────────────────┬──────────────────────┘
@@ -58,10 +63,10 @@
 ```
 
 Boundary rules (Echelon BOUNDARIES.md discipline, adopted verbatim per Q9.1):
-- Helm owns every table in the `marketing` schema. **No other Archon code
-  writes them; Helm writes nothing outside them.** All access via the
-  published TS interface (`server/marketing/index.ts` in Archon).
-- No cross-schema joins between `marketing.*` and Archon's existing tables,
+- CRM owns every table in the `crm` schema. **No other Archon code
+  writes them; CRM writes nothing outside them.** All access via the
+  published TS interface (`server/crm/index.ts` in Archon).
+- No cross-schema joins between `crm.*` and Archon's existing tables,
   even though they share a database (Q4.2). The interface is the boundary.
 - External replaceable vendors sit behind **ports**: `EmailProvider` (Resend
   adapter first), `SmsProvider` (Twilio recommended), future
@@ -82,7 +87,7 @@ later = lift schema + put HTTP in front of the same interface.
 ## 3. Resolved design decisions (the seven deferred from discovery)
 
 > All seven confirmed by the owner on 2026-08-08, each as recommended:
-> D1 Postgres queues · D2 Helm-owned profile store · D3 first-party snippet in
+> D1 Postgres queues · D2 CRM-owned profile store · D3 first-party snippet in
 > v1 · D4 per-store platform catalog sync · D5 per-source opt-in policy ·
 > D6 click-based attribution · D7 own link/open tracking.
 
@@ -97,12 +102,12 @@ operational surface for a solo operator, and buys nothing at this scale.
 Revisit only past ~10× the target. Advisory-lock scheduler exclusion +
 per-worker kill-switch env vars, copied from Echelon.
 
-### D2. Identity master → **Helm owns the profile store** (Q4.4)
-`marketing.profiles` (+ identities, consent, merges) is the canonical customer
+### D2. Identity master → **CRM owns the profile store** (Q4.4)
+`crm.profiles` (+ identities, consent, merges) is the canonical customer
 identity for marketing. Archon's existing `customers` table remains what it
 actually is today — an analytics cache fed by sync jobs — and is progressively
-demoted: Phase 2 adds a one-way projection (Helm → a read model the dashboards
-can use), and customer-intel reads migrate to the Helm interface over time.
+demoted: Phase 2 adds a one-way projection (CRM → a read model the dashboards
+can use), and customer-intel reads migrate to the CRM interface over time.
 Rationale: the existing `customers` pipeline has documented intake-quality
 problems (no HMAC verification called, events ACKed-and-lost, hardcoded
 workspace, dead code paths), no alias/merge machinery, and no consent model.
@@ -114,14 +119,14 @@ from `customers` + Shopify + Klaviyo exports at migration (§10).
 Behavioral segmentation is a day-one requirement (Q7.3) and the Klaviyo
 snippet is live today (Q2.3), so browse behavior is part of current parity.
 A minimal first-party snippet (~2 KB): anonymous id cookie, `product.viewed`,
-`session.active`, identify-on-click (links in Helm emails carry a profile
+`session.active`, identify-on-click (links in CRM emails carry a profile
 token) and identify-on-signup. It posts to the same canonical event API as
 every other source. Not needed for campaign cutover (Phases 0–2) — needed
 before flow cutover completes.
 
 ### D4. Catalog source → **Per-store platform sync** (Q5.3)
 Each connected store syncs its own catalog from its platform (Shopify
-products API first) into `marketing.catalog_items`, keyed
+products API first) into `crm.catalog_items`, keyed
 `(store_id, external_product_id, external_variant_id)` with title, image,
 price cents, url, stock state. Fully generic — works for Hobby Hive and any
 foreign store with zero engine changes. Echelon's richer catalog is NOT wired
@@ -141,9 +146,9 @@ CASL requirements encoded in the ledger itself: every consent row carries
 2 years after the transaction and the engine stops sending unless refreshed.
 
 ### D6. Attribution → **Click-based last-touch, 5-day window, per-workspace config** (Q8.1)
-An order attributes to the last Helm message the profile **clicked** within
+An order attributes to the last CRM message the profile **clicked** within
 5 days before `order.placed`. Opens never attribute (Apple MPP inflation).
-Stored as computed rows (`marketing.attributions`) written by a worker that
+Stored as computed rows (`crm.attributions`) written by a worker that
 joins order events to message-click events, so the model + window are
 workspace config and history can be recomputed. Expect reported revenue to
 drop vs Klaviyo's open-inclusive numbers at cutover — same reality, honest
@@ -159,7 +164,7 @@ webhooks remain authoritative for `sent/delivered/bounced/complained`.
 
 ---
 
-## 4. Data model (`marketing` schema)
+## 4. Data model (`crm` schema)
 
 All money integer cents; all tables carry `workspace_id`; timestamps
 `timestamptz`; every mutation through the module interface. Partitioned
@@ -294,7 +299,7 @@ Envelope (Zod-validated at the boundary — no implicit `any`):
 }
 ```
 
-Ingestion paths: `POST /api/marketing/v1/events` (batch ≤ 500, per-store API
+Ingestion paths: `POST /api/crm/v1/events` (batch ≤ 500, per-store API
 key) for app sources and the web snippet; connector webhooks land in
 `event_inbox` first and are normalized asynchronously. 2xx only after the
 inbox row is durable (Echelon rule: never ACK work you might lose).
@@ -336,14 +341,14 @@ consent dies unparsed in raw payloads.
 **6.2 Shellz Club** — replaces its 997-line `klaviyo.ts` with one small
 emitter posting `member.*`, `back_in_stock.requested`, and `consent.*`
 canonical events to the ingestion API. Its per-plan Klaviyo list churn
-becomes a Helm segment rule (`plan_name = X`), deleting that machinery.
+becomes a CRM segment rule (`plan_name = X`), deleting that machinery.
 
 **6.3 Echelon (changes in THIS repo)** — the existing `mc-push.ts`
 fire-and-forget POST becomes a durable outbox: order lifecycle events write
 an outbox row in the same transaction as the OMS event, a worker delivers to
-Helm's ingestion API with retry/backoff/DLQ (pattern already exists —
+CRM's ingestion API with retry/backoff/DLQ (pattern already exists —
 channel-fulfillment outbox), and the hardcoded fallback secret is removed
-(env-only, per CLAUDE.md §16). Helm additionally polls
+(env-only, per CLAUDE.md §16). CRM additionally polls
 `GET /api/internal/orders` on a slow schedule as the reconciliation sweep,
 mirroring the carrier-tracking projection precedent.
 
@@ -438,7 +443,7 @@ per-agent budgets (max recipients/day, max sends/day) from `send_policies`;
 approval thresholds (sends above N recipients or outside sandbox require a
 human approval record — threshold per workspace, so autonomy can widen as
 trust grows). The AI analyst keeps its generate→approve pipeline in Phase 1,
-now targeting Helm instead of Klaviyo export; agentic operation deepens after
+now targeting CRM instead of Klaviyo export; agentic operation deepens after
 cutover, inside these rails. Campaign/journey stats feed the analyst prompt
 (Q8.3), closing the learning loop Klaviyo never provided.
 
@@ -467,7 +472,7 @@ schedule and alerts). Klaviyo continues normal operation during ramp
 flow cutover + SMS migration.
 
 **Flow cutover**: one family at a time — build in sandbox → verify against
-the Klaviyo inventory → enable in Helm + disable in Klaviyo in the same
+the Klaviyo inventory → enable in CRM + disable in Klaviyo in the same
 change window (double-delivery guard: never both live). Suppression/consent
 deltas re-imported from Klaviyo immediately before each cutover step.
 
@@ -485,10 +490,10 @@ counting. Noted here so the first post-cutover report isn't a surprise.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **0 — Foundation** (wk 1) | `marketing` schema migrations; profiles/identities/consents/suppressions; imports (Shopify, Klaviyo, Shellz, `customers` seed); Resend + DNS setup; Archon CLAUDE.md engineering contract; structured logger + correlation context for the module | Imported profiles queryable; consent state provably correct on samples; contract merged |
-| **1 — Campaign sending** (wk 2–3) | Templates/versions; messages + send pipeline + policy gate; Resend adapter + webhooks; unsubscribe endpoint + headers; sandbox + seed list; link wrapping + pixel; warm-up throttles; campaign scheduled sends; ops alerts | First real campaign sent via Helm to an engaged segment; warm-up ramp running; unsubscribe verified end-to-end |
+| **0 — Foundation** (wk 1) | `crm` schema migrations; profiles/identities/consents/suppressions; imports (Shopify, Klaviyo, Shellz, `customers` seed); Resend + DNS setup; Archon CLAUDE.md engineering contract; structured logger + correlation context for the module | Imported profiles queryable; consent state provably correct on samples; contract merged |
+| **1 — Campaign sending** (wk 2–3) | Templates/versions; messages + send pipeline + policy gate; Resend adapter + webhooks; unsubscribe endpoint + headers; sandbox + seed list; link wrapping + pixel; warm-up throttles; campaign scheduled sends; ops alerts | First real campaign sent via CRM to an engaged segment; warm-up ramp running; unsubscribe verified end-to-end |
 | **2 — Events & segments** (wk 3–4) | Event inbox + canonical API; Shopify connector (webhooks, consent, catalog); Echelon outbox hardening (Echelon-side PR); Shellz emitter; behavioral segment engine + rebuild reconciler; stats rollups → daily_metrics | Behavioral segments live and reconciler-verified; **campaign cutover complete — Klaviyo campaigns off, tier downgraded** |
-| **3 — Journeys** (wk 4–6) | Journey runtime (triggers, wake scheduler, guards, reconciler); the four flow families sandbox→live; web snippet; coupon capability; attribution worker | All four families live in Helm, Klaviyo flows off |
+| **3 — Journeys** (wk 4–6) | Journey runtime (triggers, wake scheduler, guards, reconciler); the four flow families sandbox→live; web snippet; coupon capability; attribution worker | All four families live in CRM, Klaviyo flows off |
 | **S — SMS fast-follow** (wk 6–8) | Twilio adapter, number, TCPA gate, STOP/HELP, SMS journeys/campaigns | Klaviyo SMS off; **Klaviyo cancelled** |
 | **4+ — Growth** | A/B variants; topic preference center; transactional stream; ad-audience port (Meta/Google); deeper agentic operation; Hobby Hive workspace onboarding (the generic-connector proof) | — |
 
@@ -517,7 +522,7 @@ cross-repo dependency.
   cutover, not the build start.
 - **Archon codebase quality**: existing intake paths are explicitly NOT
   reused (D2); the engineering contract applies to all new module code; the
-  module boundary protects Helm from the legacy paths.
+  module boundary protects CRM from the legacy paths.
 - **Solo-operator overload**: every worker has DLQ + replay + one actionable
   alert stream (Discord, reusing Echelon's log-drain alerting convention);
   reconcilers self-heal drift and alert only on anomaly.
@@ -529,7 +534,8 @@ cross-repo dependency.
 
 1. Klaviyo dashboard inventory + exports (user; gates §10, not build start).
 2. Resend account + DNS records (user, Phase 0).
-3. Name check: `marketing` schema + "Helm" module naming sign-off.
+3. ~~Name check~~ — **resolved 2026-08-08**: schema and module both named
+   `crm`, codename dropped (see status note at top).
 4. Twilio number strategy after the Klaviyo SMS number-type check.
 5. Verify current Resend batch size / rate limits / webhook event set at
    Phase 1 implementation (documented values move fast).
