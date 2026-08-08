@@ -779,6 +779,15 @@ const returnFaultCategories: DropshipReturnFaultCategory[] = [
   "carrier",
 ];
 
+const RETURN_INSPECTION_ITEM_STATUSES = [
+  "inspected",
+  "damaged",
+  "missing",
+  "wrong_item",
+] as const;
+
+type ReturnInspectionItemStatus = (typeof RETURN_INSPECTION_ITEM_STATUSES)[number];
+
 const dogfoodReadinessStatusFilters: DogfoodReadinessStatusFilter[] = [
   "all",
   "blocked",
@@ -8038,12 +8047,20 @@ function ReturnInspectionPanel({
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Input
+                      <Select
                         value={item.status}
-                        onChange={(event) => onItemChange(item.rmaItemId, { status: event.target.value })}
-                        maxLength={40}
+                        onValueChange={(value) => onItemChange(item.rmaItemId, { status: value })}
                         disabled={existingInspection !== null || pending}
-                      />
+                      >
+                        <SelectTrigger className="h-9 w-[130px]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {RETURN_INSPECTION_ITEM_STATUSES.map((s) => (
+                            <SelectItem key={s} value={s}>{formatStatus(s)}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </TableCell>
                     <TableCell className="text-right font-mono">{item.quantity}</TableCell>
                     <TableCell>
@@ -9665,7 +9682,7 @@ function buildReturnInspectionFormState(rma: DropshipReturnDetail): ReturnInspec
         rmaItemId: item.rmaItemId,
         productVariantId: item.productVariantId,
         quantity: item.quantity,
-        status: item.finalCreditCents !== null || item.feeCents !== null ? item.status : "approved",
+        status: item.finalCreditCents !== null || item.feeCents !== null ? item.status : "inspected",
         finalCreditAmount: centsToDollarInput(finalCreditCents),
         feeAmount: centsToDollarInput(feeCents),
       };
