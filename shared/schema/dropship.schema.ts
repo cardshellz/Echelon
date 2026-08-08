@@ -1243,6 +1243,7 @@ export const dropshipReturnIntakeExceptions = dropshipSchema.table("dropship_ret
   check("dropship_return_intake_exc_attempts_chk", sql`${table.attemptCount} > 0`),
 ]);
 
+
 // Collection sweep config (migration 188; design spec D5 + D-governing).
 // Versioned, immutable money knobs; exactly one active global row.
 export const dropshipCollectionConfig = dropshipSchema.table("dropship_collection_config", {
