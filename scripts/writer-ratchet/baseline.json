@@ -198,6 +198,9 @@
   "dropship.dropship_return_fee_schedule": [
     "modules/dropship"
   ],
+  "dropship.dropship_return_intake_exceptions": [
+    "modules/dropship"
+  ],
   "dropship.dropship_return_policies": [
     "modules/dropship"
   ],
