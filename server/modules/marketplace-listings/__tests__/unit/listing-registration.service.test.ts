@@ -194,6 +194,7 @@ describe("MarketplaceListingRegistrationService", () => {
     const observer = new FakeObserver(observation());
     const claimer = new FakeClaimer();
     const repository = new FakeRepository();
+    repository.status = registrationStatus();
     const service = createService(ownerReader, observer, claimer, repository);
     const preview = await service.preview(command());
 
@@ -207,6 +208,28 @@ describe("MarketplaceListingRegistrationService", () => {
     });
     expect(repository.verifyCalls).toBe(1);
     expect(claimer.calls).toBe(0);
+  });
+
+  it("creates the initial baseline when verified state has no current registration", async () => {
+    const ownerReader = new FakeOwnerReader(ownerSnapshot());
+    const observer = new FakeObserver(observation());
+    const claimer = new FakeClaimer();
+    const repository = new FakeRepository();
+    const service = createService(ownerReader, observer, claimer, repository);
+    const preview = await service.preview(command());
+
+    await expect(service.verifyExisting({
+      ...command(),
+      expectedObservationHash: preview.observationHash,
+      expectedIncludedVariantIds: [11],
+    })).resolves.toMatchObject({
+      kind: "verified",
+      publicationId: 400,
+      externalListingId: "listing-123",
+    });
+    expect(repository.registerCalls).toBe(1);
+    expect(repository.verifyCalls).toBe(0);
+    expect(claimer.calls).toBe(1);
   });
 
   it("rejects verification when fresh provider membership differs from the expected variants", async () => {

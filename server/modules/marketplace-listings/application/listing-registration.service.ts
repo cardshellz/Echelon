@@ -159,6 +159,20 @@ export class MarketplaceListingRegistrationService {
         { observedIncludedIds, expectedIncludedIds },
       );
     }
+    const currentRegistration = await this.repository.findCurrentRegistration(plan.owner);
+    if (!currentRegistration) {
+      const {
+        expectedIncludedVariantIds: _expectedIncludedVariantIds,
+        ...confirmationInput
+      } = command;
+      const registration = await this.confirm(confirmationInput);
+      return listingVerificationResultSchema.parse({
+        kind: "verified",
+        publicationId: registration.receipt.publicationId,
+        externalListingId: plan.externalListingId,
+        verifiedAt: registration.receipt.registeredAt,
+      });
+    }
     try {
       return listingVerificationResultSchema.parse(
         await this.repository.verifyExistingPublication({
