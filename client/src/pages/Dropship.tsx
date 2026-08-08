@@ -31,6 +31,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useLocation, useSearch } from "wouter";
+import { toast } from "@/hooks/use-toast";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -2585,6 +2586,13 @@ function ReturnOpsTab() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  // Auto-dismiss success messages after 5 seconds.
+  useEffect(() => {
+    if (!message) return;
+    const timer = setTimeout(() => setMessage(""), 5000);
+    return () => clearTimeout(timer);
+  }, [message]);
+
   const returnsUrl = useMemo(() => buildAdminReturnsUrl({
     search: appliedFilters.search,
     status: appliedFilters.status,
@@ -2803,6 +2811,7 @@ function ReturnOpsTab() {
         input,
       );
       setMessage(`RMA ${response.rma.rmaNumber} moved to ${formatStatus(response.rma.status)}.`);
+      toast({ title: "Status updated", description: `RMA ${response.rma.rmaNumber} moved to ${formatStatus(response.rma.status)}` });
       setStatusNotes((current) => ({ ...current, [rma.rmaId]: "" }));
       setStatusInputs((current) => {
         const next = { ...current };
@@ -2815,7 +2824,9 @@ function ReturnOpsTab() {
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship return status update failed.");
+      const errMsg = caught instanceof Error ? caught.message : "Dropship return status update failed.";
+      setError(errMsg);
+      toast({ title: "Status update failed", description: errMsg, variant: "destructive" });
     } finally {
       setPendingRmaId(null);
     }
@@ -2899,6 +2910,7 @@ function ReturnOpsTab() {
       setMessage(
         `RMA ${response.rma.rmaNumber} inspected: ${formatStatus(response.inspection.outcome)} with ${formatCents(response.inspection.creditCents)} credit and ${formatCents(response.inspection.feeCents)} fee.`,
       );
+      toast({ title: "Inspection submitted", description: `Inspection submitted for RMA ${response.rma.rmaNumber}` });
       setInspectionForm(buildReturnInspectionFormState(response.rma));
       await Promise.all([
         returnsQuery.refetch(),
@@ -2908,7 +2920,9 @@ function ReturnOpsTab() {
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship return inspection failed.");
+      const errMsg = caught instanceof Error ? caught.message : "Dropship return inspection failed.";
+      setError(errMsg);
+      toast({ title: "Inspection failed", description: errMsg, variant: "destructive" });
     } finally {
       setInspectionPendingRmaId(null);
     }
