@@ -276,6 +276,7 @@ export interface DropshipRmaDetail extends DropshipRmaListItem {
   idempotencyKey: string | null;
   requestHash: string | null;
   policyVersionId: number | null;
+  noInspectionEvidence: Record<string, unknown> | null;
   items: DropshipRmaItemRecord[];
   inspections: DropshipRmaInspectionRecord[];
   walletLedger: DropshipWalletLedgerRecord[];

@@ -131,6 +131,8 @@ describe("dropship ops surface client helpers", () => {
       "inspecting",
       "approved",
       "rejected",
+      "disputed",
+      "no_inspection_review",
       "credited",
       "closed",
     ]);
@@ -473,7 +475,7 @@ describe("dropship ops surface client helpers", () => {
     expect(buildAdminReturnsUrl({
       search: " rma ",
       status: "default",
-    })).toBe("/api/dropship/admin/returns?search=rma&statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected&page=1&limit=50");
+    })).toBe("/api/dropship/admin/returns?search=rma&statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected%2Cdisputed%2Cno_inspection_review&page=1&limit=50");
     expect(buildAdminReturnsUrl({
       search: "",
       status: "inspecting",
@@ -483,7 +485,7 @@ describe("dropship ops surface client helpers", () => {
     expect(buildAdminReturnsUrl({
       search: "",
       status: "all",
-    })).toBe("/api/dropship/admin/returns?statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected%2Ccredited%2Cclosed&page=1&limit=50");
+    })).toBe("/api/dropship/admin/returns?statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected%2Cdisputed%2Cno_inspection_review%2Ccredited%2Cclosed&page=1&limit=50");
     expect(buildAdminReturnPolicyUrl()).toBe("/api/dropship/admin/returns/policy");
   });
 

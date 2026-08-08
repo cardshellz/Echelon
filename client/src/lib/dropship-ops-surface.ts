@@ -68,6 +68,8 @@ export type DropshipRmaStatus =
   | "inspecting"
   | "approved"
   | "rejected"
+  | "disputed"
+  | "no_inspection_review"
   | "credited"
   | "closed";
 export type DropshipReturnFaultCategory =
@@ -139,6 +141,8 @@ export const allDropshipRmaStatuses: DropshipRmaStatus[] = [
   "inspecting",
   "approved",
   "rejected",
+  "disputed",
+  "no_inspection_review",
   "credited",
   "closed",
 ];
@@ -176,6 +180,8 @@ const defaultDropshipRmaOpsStatuses: DropshipRmaStatus[] = [
   "inspecting",
   "approved",
   "rejected",
+  "disputed",
+  "no_inspection_review",
 ];
 
 export interface DropshipSettingsSection {
@@ -2136,9 +2142,43 @@ export interface DropshipReturnDetail extends DropshipReturnListItem {
   vendorNotes: string | null;
   idempotencyKey: string | null;
   requestHash: string | null;
+  noInspectionEvidence: DropshipNoInspectionEvidencePack | null;
   items: DropshipReturnItem[];
   inspections: DropshipReturnInspection[];
   walletLedger: DropshipReturnWalletLedgerEntry[];
+}
+
+export interface DropshipNoInspectionEvidencePack {
+  version: 1;
+  trigger: "carrier_lost_status" | "delivery_timeout";
+  trackingNumber: string | null;
+  carrierStatus: string | null;
+  trackingHistory: {
+    status: string;
+    occurredAt: string;
+    description: string | null;
+  }[] | null;
+  marketplaceCaseRef: string | null;
+  expectedDeliveryAt: string | null;
+  noInspectionTimeoutDays: number;
+  detectedAt: string;
+  workerId: string;
+}
+
+export interface DropshipAdminNoInspectionReviewInput {
+  decision: "approve" | "deny";
+  reason?: string | null;
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminNoInspectionReviewResponse {
+  rmaId: number;
+  decision: "approve" | "deny";
+  status: string;
+  creditCents: number;
+  walletLedgerEntryId: number | null;
+  poolLedgerEntryId: number | null;
+  idempotentReplay: boolean;
 }
 
 export interface DropshipReturnDetailResponse {

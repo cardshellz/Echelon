@@ -28,6 +28,7 @@ import {
   Store,
   Truck,
   Wallet,
+  XCircle,
 } from "lucide-react";
 import { useLocation, useSearch } from "wouter";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -157,6 +158,8 @@ import {
   type DropshipAdminReturnPolicyVersionResponse,
   type DropshipAdminReturnFeeVersionResponse,
   type DropshipAdminReturnStatusUpdateResponse,
+  type DropshipAdminNoInspectionReviewInput,
+  type DropshipAdminNoInspectionReviewResponse,
   type DropshipAdminShippingConfigResponse,
   type CarrierProtectionAssignmentConfig,
   type CarrierProtectionConfigResponse,
@@ -197,6 +200,7 @@ import {
   type DropshipReturnListResponse,
   type DropshipReturnDetail,
   type DropshipReturnDetailResponse,
+  type DropshipNoInspectionEvidencePack,
   type DropshipReturnFaultCategory,
   type DropshipReturnPolicyConfig,
   type DropshipRmaInspectionOutcome,
@@ -748,6 +752,8 @@ const returnOpsStatusFilters: ReturnOpsStatusFilter[] = [
   "inspecting",
   "approved",
   "rejected",
+  "disputed",
+  "no_inspection_review",
   "credited",
   "closed",
 ];
@@ -2563,6 +2569,8 @@ function ReturnOpsTab() {
   const [selectedInspectionRmaId, setSelectedInspectionRmaId] = useState<number | null>(null);
   const [inspectionForm, setInspectionForm] = useState<ReturnInspectionFormState | null>(null);
   const [inspectionPendingRmaId, setInspectionPendingRmaId] = useState<number | null>(null);
+  const [reviewReason, setReviewReason] = useState("");
+  const [reviewPendingDecision, setReviewPendingDecision] = useState<"approve" | "deny" | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -2701,6 +2709,7 @@ function ReturnOpsTab() {
   function selectInspectionRma(rma: DropshipReturnListItem) {
     setSelectedInspectionRmaId(rma.rmaId);
     setInspectionForm(null);
+    setReviewReason("");
     setError("");
     setMessage("");
   }
@@ -2708,6 +2717,45 @@ function ReturnOpsTab() {
   function clearInspectionSelection() {
     setSelectedInspectionRmaId(null);
     setInspectionForm(null);
+    setReviewReason("");
+  }
+
+  async function submitNoInspectionReview(decision: "approve" | "deny") {
+    const rma = returnDetailQuery.data?.rma;
+    if (!rma || rma.status !== "no_inspection_review") return;
+    if (decision === "deny" && !reviewReason.trim()) {
+      setError("Denying a lost-in-transit review requires a reason.");
+      return;
+    }
+    setReviewPendingDecision(decision);
+    setError("");
+    setMessage("");
+    try {
+      const response = await postJson<DropshipAdminNoInspectionReviewResponse>(
+        `/api/dropship/admin/returns/${rma.rmaId}/no-inspection-review`,
+        {
+          decision,
+          reason: reviewReason.trim() || null,
+          idempotencyKey: createDropshipIdempotencyKey(`admin-no-inspection-review-${rma.rmaId}-${decision}`),
+        } satisfies DropshipAdminNoInspectionReviewInput,
+      );
+      setMessage(
+        response.decision === "approve"
+          ? `RMA ${rma.rmaNumber} approved — pool credit of ${formatCents(response.creditCents)} posted.`
+          : `RMA ${rma.rmaNumber} no-inspection review denied and closed.`,
+      );
+      setReviewReason("");
+      await Promise.all([
+        returnsQuery.refetch(),
+        returnDetailQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Dropship no-inspection review failed.");
+    } finally {
+      setReviewPendingDecision(null);
+    }
   }
 
   function updateInspectionForm(patch: Partial<ReturnInspectionFormState>) {
@@ -2977,6 +3025,18 @@ function ReturnOpsTab() {
         onItemChange={updateInspectionItem}
         onSave={saveReturnInspection}
         pendingRmaId={inspectionPendingRmaId}
+        rma={returnDetailQuery.data?.rma ?? null}
+        selectedRmaId={selectedInspectionRmaId}
+      />
+
+      <NoInspectionReviewPanel
+        error={returnDetailQuery.error}
+        isLoading={returnDetailQuery.isLoading || returnDetailQuery.isFetching}
+        onCancel={clearInspectionSelection}
+        onReasonChange={setReviewReason}
+        onSubmit={submitNoInspectionReview}
+        pendingDecision={reviewPendingDecision}
+        reason={reviewReason}
         rma={returnDetailQuery.data?.rma ?? null}
         selectedRmaId={selectedInspectionRmaId}
       />
@@ -7640,6 +7700,168 @@ function AdminReturnInput({
   );
 }
 
+function NoInspectionReviewPanel({
+  error,
+  isLoading,
+  onCancel,
+  onReasonChange,
+  onSubmit,
+  pendingDecision,
+  reason,
+  rma,
+  selectedRmaId,
+}: {
+  error: unknown;
+  isLoading: boolean;
+  onCancel: () => void;
+  onReasonChange: (value: string) => void;
+  onSubmit: (decision: "approve" | "deny") => void;
+  pendingDecision: "approve" | "deny" | null;
+  reason: string;
+  rma: DropshipReturnDetail | null;
+  selectedRmaId: number | null;
+}) {
+  if (selectedRmaId === null) return null;
+  if (isLoading) return null;
+  if (error) return null;
+  if (!rma || rma.status !== "no_inspection_review") return null;
+
+  const evidence = rma.noInspectionEvidence;
+  const pending = pendingDecision !== null;
+  const denyDisabled = pending || !reason.trim();
+
+  return (
+    <section className="rounded-md border border-amber-300 bg-amber-50/60 p-4" data-testid="panel-no-inspection-review">
+      <div className="flex flex-col gap-3 border-b border-amber-200 pb-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Lost-in-transit review for {rma.rmaNumber}</h2>
+          <p className="text-sm text-muted-foreground">
+            {rma.vendorName || rma.vendorEmail || `Vendor ${rma.vendorId}`} / {rma.platform ? formatStatus(rma.platform) : "No platform"} / {rma.returnTrackingNumber || "No return tracking"}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Approving credits the vendor from the insurance pool. Denying closes the RMA. Both are final.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Badge variant="outline" className={returnOpsStatusTone(rma.status)}>{formatStatus(rma.status)}</Badge>
+          <Button type="button" variant="ghost" size="sm" onClick={onCancel}>Close</Button>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_320px]">
+        <div className="space-y-3">
+          <div className="rounded-md border bg-card p-3">
+            <div className="text-sm font-medium">Evidence pack</div>
+            {evidence ? (
+              <dl className="mt-2 grid gap-2 text-sm">
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Trigger</dt>
+                  <dd className="font-medium">{evidence.trigger === "carrier_lost_status" ? "Carrier reported lost" : "Delivery timeout"}</dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Tracking</dt>
+                  <dd className="font-mono text-xs">{evidence.trackingNumber || "None"}</dd>
+                </div>
+                {evidence.carrierStatus && (
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-muted-foreground">Carrier status</dt>
+                    <dd className="font-medium">{formatStatus(evidence.carrierStatus)}</dd>
+                  </div>
+                )}
+                {evidence.expectedDeliveryAt && (
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-muted-foreground">Expected delivery</dt>
+                    <dd>{formatDateTime(evidence.expectedDeliveryAt)}</dd>
+                  </div>
+                )}
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Timeout window</dt>
+                  <dd>{evidence.noInspectionTimeoutDays} days past expected delivery</dd>
+                </div>
+                {evidence.marketplaceCaseRef && (
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-muted-foreground">Marketplace case</dt>
+                    <dd className="font-mono text-xs">{evidence.marketplaceCaseRef}</dd>
+                  </div>
+                )}
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Detected</dt>
+                  <dd>{formatDateTime(evidence.detectedAt)}</dd>
+                </div>
+              </dl>
+            ) : (
+              <p className="mt-2 text-sm text-muted-foreground">No evidence pack recorded on this RMA.</p>
+            )}
+          </div>
+
+          {evidence?.trackingHistory && evidence.trackingHistory.length > 0 && (
+            <div className="rounded-md border bg-card p-3">
+              <div className="text-sm font-medium">Tracking history</div>
+              <ul className="mt-2 space-y-1 text-sm">
+                {evidence.trackingHistory.map((event, index) => (
+                  <li key={`${event.occurredAt}-${index}`} className="flex justify-between gap-4">
+                    <span>{event.description || formatStatus(event.status)}</span>
+                    <span className="text-xs text-muted-foreground">{formatDateTime(event.occurredAt)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="rounded-md border bg-card p-3">
+            <div className="text-sm font-medium">Requested items</div>
+            <ul className="mt-2 space-y-1 text-sm">
+              {rma.items.map((item) => (
+                <li key={item.rmaItemId} className="flex justify-between gap-4">
+                  <span>Variant {item.productVariantId ?? "unknown"} × {item.quantity}</span>
+                  <span className="text-xs text-muted-foreground">{formatStatus(item.status)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="text-sm font-medium">Reason (required to deny)</label>
+            <Textarea
+              value={reason}
+              onChange={(event) => onReasonChange(event.target.value)}
+              placeholder="Audit note — required when denying"
+              className="mt-2 min-h-[96px]"
+              maxLength={2000}
+              disabled={pending}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Button
+              type="button"
+              className="gap-2 bg-emerald-600 hover:bg-emerald-700"
+              disabled={pending}
+              onClick={() => onSubmit("approve")}
+              data-testid="button-no-inspection-approve"
+            >
+              <CheckCircle2 className={pendingDecision === "approve" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+              Approve pool credit
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              className="gap-2"
+              disabled={denyDisabled}
+              onClick={() => onSubmit("deny")}
+              data-testid="button-no-inspection-deny"
+            >
+              <XCircle className={pendingDecision === "deny" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+              Deny and close
+            </Button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ReturnInspectionPanel({
   error,
   form,
@@ -7691,6 +7913,9 @@ function ReturnInspectionPanel({
   }
 
   if (!rma || !form) return null;
+  // RMAs queued for lost-in-transit review are handled by the
+  // NoInspectionReviewPanel — the inspection form does not apply.
+  if (rma.status === "no_inspection_review") return null;
 
   const existingInspection = rma.inspections[0] ?? null;
   const totals = returnInspectionFormTotals(form);
@@ -7997,7 +8222,7 @@ function ReturnOpsTable({
                     onClick={() => onInspect(rma)}
                   >
                     <FileSearch className="h-4 w-4" />
-                    Inspect
+                    {rma.status === "no_inspection_review" ? "Review" : "Inspect"}
                   </Button>
                 </TableCell>
                 <TableCell>

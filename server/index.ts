@@ -18,6 +18,7 @@ import { startBillingScheduler } from "./modules/subscriptions/subscription.sche
 import { startDropshipListingPushWorker } from "./modules/dropship/infrastructure/dropship-listing-push-job-runner";
 import { startDropshipOrderProcessingWorker } from "./modules/dropship/infrastructure/dropship-order-processing-runner";
 import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastructure/dropship-ebay-order-intake-runner";
+import { startDropshipReturnsMaintenanceWorker } from "./modules/dropship/infrastructure/dropship-returns-maintenance-runner";
 import { setDropshipFulfillmentSync } from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startChannelFulfillmentCommandWorker } from "./modules/oms/channel-fulfillment-command.worker";
@@ -912,6 +913,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         startDropshipListingPushWorker();
         startDropshipOrderProcessingWorker();
         startDropshipEbayOrderIntakeWorker();
+        startDropshipReturnsMaintenanceWorker();
       } else {
         logSchedulerDisabled("scheduler", "Dropship workers");
       }
