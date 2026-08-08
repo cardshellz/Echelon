@@ -34,6 +34,7 @@ const rebuildPreviewSchema = z.object({
   productId: z.number().int().positive(),
   groupKey: z.string().min(1),
   currentExternalListingId: z.string().min(1),
+  sourceState: z.enum(["active", "withdrawn"]),
   currentSkus: z.array(z.string().min(1)).min(1),
   desiredSkus: z.array(z.string().min(1)).min(1),
   addedSkus: z.array(z.string().min(1)),
@@ -180,7 +181,11 @@ export function MarketplaceListingReplacementDialog({
               <div className="flex gap-2">
                 <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                 <div>
-                  <p className="font-medium">The current listing will be ended before the new listing is published.</p>
+                  <p className="font-medium">
+                    {preview.sourceState === "active"
+                      ? "The current listing will be ended before the new listing is published."
+                      : "The previous listing is already ended. Its stale variation group will be removed before the new listing is published."}
+                  </p>
                   <p className="mt-1">
                     Remove {preview.removedSkus.join(", ")}; publish {preview.desiredSkus.join(", ")}.
                   </p>
