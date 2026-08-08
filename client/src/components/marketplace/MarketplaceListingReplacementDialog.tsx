@@ -143,7 +143,7 @@ export function MarketplaceListingReplacementDialog({
         <DialogHeader>
           <DialogTitle>Rebuild eBay listing</DialogTitle>
           <DialogDescription>
-            End the current listing for {productName}, then publish a new listing containing exactly the active variants below.
+            Publish a new listing for {productName} containing exactly the active variants below. Any live prior listing will be ended first.
           </DialogDescription>
         </DialogHeader>
 
@@ -187,7 +187,9 @@ export function MarketplaceListingReplacementDialog({
                       : "The previous listing is already ended. Its stale variation group will be removed before the new listing is published."}
                   </p>
                   <p className="mt-1">
-                    Remove {preview.removedSkus.join(", ")}; publish {preview.desiredSkus.join(", ")}.
+                    {preview.removedSkus.length > 0
+                      ? `Remove ${preview.removedSkus.join(", ")}; publish ${preview.desiredSkus.join(", ")}.`
+                      : `Publish ${preview.desiredSkus.join(", ")} as a new live listing.`}
                   </p>
                 </div>
               </div>
@@ -222,7 +224,7 @@ export function MarketplaceListingReplacementDialog({
           {preview?.rebuildRequired && !completedListingId && (
             <Button onClick={() => void executeRebuild()} disabled={busy !== null}>
               {busy === "execute" && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Rebuild listing
+              {preview.sourceState === "withdrawn" ? "Publish new listing" : "Rebuild listing"}
             </Button>
           )}
         </DialogFooter>

@@ -474,6 +474,59 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     expect(calls.indexOf("delete_group")).toBeLessThan(calls.indexOf("put_group"));
   });
 
+  it("publishes a new listing when the desired group exists but every offer is withdrawn", async () => {
+    const calls: string[] = [];
+    const client = makeLifecycleClient({
+      currentSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
+      currentListingId: "listing-old",
+      calls,
+    });
+    vi.mocked(client.getOffers).mockImplementation(async (sku: string) => ({
+      offers: [{
+        offerId: "offer-" + sku,
+        sku,
+        marketplaceId: "EBAY_US" as const,
+        format: "FIXED_PRICE" as const,
+        availableQuantity: 5,
+        categoryId: "123",
+        listingPolicies: {
+          fulfillmentPolicyId: "fulfillment",
+          paymentPolicyId: "payment",
+          returnPolicyId: "return",
+        },
+        merchantLocationKey: "warehouse",
+        pricingSummary: { price: { value: "9.99", currency: "USD" } },
+        status: "UNPUBLISHED",
+      }],
+    }));
+    const connector = new EbayMarketplaceListingConnector();
+    const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-NEW"]);
+
+    const preview = await connector.previewListingRebuild({
+      client,
+      draft,
+      currentExternalListingId: "listing-old",
+    });
+
+    expect(preview).toMatchObject({
+      sourceState: "withdrawn",
+      currentSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
+      desiredSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
+      addedSkus: [],
+      removedSkus: [],
+      rebuildRequired: true,
+    });
+    await expect(connector.executeListingRebuild({ client, draft, preview }))
+      .resolves.toMatchObject({
+        externalProductId: "listing-new",
+        removedSkus: [],
+        published: true,
+      });
+    expect(client.withdrawOfferByInventoryItemGroup).not.toHaveBeenCalled();
+    expect(client.deleteInventoryItemGroup).toHaveBeenCalledTimes(1);
+    expect(calls.indexOf("delete_group")).toBeLessThan(calls.indexOf("publish_group"));
+  });
+
   it("ends the confirmed source and publishes exactly the desired variations", async () => {
     const calls: string[] = [];
     const client = makeLifecycleClient({

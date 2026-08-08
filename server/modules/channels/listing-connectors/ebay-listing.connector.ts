@@ -236,7 +236,7 @@ export class EbayMarketplaceListingConnector {
     };
     return {
       ...previewWithoutToken,
-      rebuildRequired: previewWithoutToken.removedSkus.length > 0,
+      rebuildRequired: previewWithoutToken.removedSkus.length > 0 || previewWithoutToken.sourceState === "withdrawn",
       confirmationToken: rebuildConfirmationToken(previewWithoutToken),
     };
   }
@@ -248,7 +248,7 @@ export class EbayMarketplaceListingConnector {
   }): Promise<EbayListingRebuildResult> {
     validateRebuildInput(input.draft, input.preview.currentExternalListingId);
     validateConfirmedPreview(input.draft, input.preview);
-    if (!input.preview.rebuildRequired || input.preview.removedSkus.length === 0) {
+    if (!input.preview.rebuildRequired) {
       throw new Error("The confirmed eBay listing does not require a rebuild.");
     }
 
@@ -538,7 +538,7 @@ function validateConfirmedPreview(
   const desired = new Set(desiredSkus);
   const expectedAddedSkus = desiredSkus.filter((sku) => !current.has(sku));
   const expectedRemovedSkus = currentSkus.filter((sku) => !desired.has(sku));
-  const expectedRebuildRequired = expectedRemovedSkus.length > 0;
+  const expectedRebuildRequired = expectedRemovedSkus.length > 0 || preview.sourceState === "withdrawn";
   const expectedToken = rebuildConfirmationToken({
     productId: draft.productId,
     groupKey: draft.itemGroup!.groupKey,
