@@ -72,6 +72,9 @@ import {
   riskSeverityTone,
   sectionStatusTone,
   trackingPushRetryEligibility,
+  DROPSHIP_RMA_TRANSITIONS,
+  legalRmaTransitions,
+  isRmaStatusTerminal,
 } from "../dropship-ops-surface";
 import type {
   DropshipCatalogRow,
@@ -1739,6 +1742,41 @@ describe("dropship ops surface client helpers", () => {
       amount: "250",
       returnTo: "https://attacker.example/wallet",
     })).toThrow();
+  });
+
+  describe("RMA state machine transitions", () => {
+    it("exposes the D4 transition map", () => {
+      expect(DROPSHIP_RMA_TRANSITIONS.requested).toEqual(["in_transit", "no_inspection_review", "closed"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.in_transit).toEqual(["received", "no_inspection_review"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.received).toEqual(["inspecting"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.inspecting).toEqual(["approved", "rejected"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.approved).toEqual(["credited"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.rejected).toEqual(["disputed", "closed"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.disputed).toEqual(["credited", "closed"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.no_inspection_review).toEqual(["credited", "closed"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.credited).toEqual(["closed"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.closed).toEqual([]);
+    });
+
+    it("returns legal transitions for each status", () => {
+      expect(legalRmaTransitions("requested")).toEqual(["in_transit", "no_inspection_review", "closed"]);
+      expect(legalRmaTransitions("inspecting")).toEqual(["approved", "rejected"]);
+      expect(legalRmaTransitions("closed")).toEqual([]);
+    });
+
+    it("identifies terminal statuses", () => {
+      expect(isRmaStatusTerminal("closed")).toBe(true);
+      expect(isRmaStatusTerminal("credited")).toBe(false);
+      expect(isRmaStatusTerminal("requested")).toBe(false);
+      expect(isRmaStatusTerminal("inspecting")).toBe(false);
+    });
+
+    it("covers all RMA statuses in the transition map", () => {
+      for (const status of allDropshipRmaStatuses) {
+        expect(DROPSHIP_RMA_TRANSITIONS).toHaveProperty(status);
+        expect(Array.isArray(DROPSHIP_RMA_TRANSITIONS[status])).toBe(true);
+      }
+    });
   });
 });
 

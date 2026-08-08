@@ -147,6 +147,36 @@ export const allDropshipRmaStatuses: DropshipRmaStatus[] = [
   "closed",
 ];
 
+/**
+ * Client-side mirror of the D4 RMA transition map from
+ * `server/modules/dropship/domain/rma-state-machine.ts`.
+ * Keep in sync with the server-side constant.
+ */
+export const DROPSHIP_RMA_TRANSITIONS: Readonly<
+  Record<DropshipRmaStatus, readonly DropshipRmaStatus[]>
+> = Object.freeze({
+  requested: ["in_transit", "no_inspection_review", "closed"],
+  in_transit: ["received", "no_inspection_review"],
+  received: ["inspecting"],
+  inspecting: ["approved", "rejected"],
+  approved: ["credited"],
+  rejected: ["disputed", "closed"],
+  disputed: ["credited", "closed"],
+  no_inspection_review: ["credited", "closed"],
+  credited: ["closed"],
+  closed: [],
+});
+
+/** Return the statuses reachable from `currentStatus` under the D4 rules. */
+export function legalRmaTransitions(currentStatus: DropshipRmaStatus): readonly DropshipRmaStatus[] {
+  return DROPSHIP_RMA_TRANSITIONS[currentStatus] ?? [];
+}
+
+/** True when the RMA status has no outgoing transitions (terminal). */
+export function isRmaStatusTerminal(status: DropshipRmaStatus): boolean {
+  return legalRmaTransitions(status).length === 0;
+}
+
 export const allDropshipListingModes: DropshipListingMode[] = ["draft_first", "live", "manual_only"];
 export const allDropshipListingInventoryModes: DropshipListingInventoryMode[] = [
   "managed_quantity_sync",

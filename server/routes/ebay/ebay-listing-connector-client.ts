@@ -1,6 +1,9 @@
+import { z } from "zod";
+
 import {
   EbayMarketplaceListingConnector,
   type EbayListingConnectorClient,
+  type EbayObservedOffer,
 } from "../../modules/channels/listing-connectors/ebay-listing.connector";
 import type {
   EbayInventoryItem,
@@ -10,6 +13,32 @@ import type {
 import { ebayApiRequest, ebayApiRequestWithRateNotify } from "./ebay-utils";
 
 const ebayListingConnector = new EbayMarketplaceListingConnector();
+
+const ebayObservedOfferSchema = z.object({
+  offerId: z.string().trim().min(1).max(255),
+  status: z.enum(["PUBLISHED", "UNPUBLISHED"]),
+  availableQuantity: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  listingId: z.string().trim().min(1).max(255).optional(),
+  listing: z.object({
+    listingId: z.string().trim().min(1).max(255),
+  }).passthrough().optional(),
+}).passthrough();
+
+const ebayOffersResponseSchema = z.object({
+  offers: z.array(ebayObservedOfferSchema).max(10_000).default([]),
+}).passthrough();
+
+export function normalizeEbayObservedOffers(response: unknown): EbayObservedOffer[] {
+  return ebayOffersResponseSchema.parse(response).offers.map((offer) => {
+    const listingId = offer.listingId ?? offer.listing?.listingId;
+    return {
+      ...offer,
+      offerId: offer.offerId,
+      status: offer.status,
+      ...(listingId === undefined ? {} : { listingId }),
+    } as unknown as EbayObservedOffer;
+  });
+}
 
 interface EbayRouteClientInput {
   accessToken: string;
@@ -78,20 +107,11 @@ export function createEbayRouteListingClient(
     },
     getOffers: async (sku, marketplaceId) => {
       try {
-        const response = await request<{
-          offers?: Array<EbayOffer & { offerId?: string; listingId?: string }>;
-        }>(
+        const response = await request<unknown>(
           "GET",
           `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${encodeURIComponent(marketplaceId)}`,
         );
-        return {
-          offers: (response.offers ?? []).filter(
-            (
-              offer,
-            ): offer is EbayOffer & { offerId: string; listingId?: string } =>
-              Boolean(offer.offerId),
-          ),
-        };
+        return { offers: normalizeEbayObservedOffers(response) };
       } catch (error: any) {
         if (String(error?.message ?? "").includes("404")) {
           return { offers: [] };

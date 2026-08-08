@@ -906,7 +906,9 @@ function makeLifecycleClient(input: {
         merchantLocationKey: "warehouse",
         pricingSummary: { price: { value: "9.99", currency: "USD" } },
         status: input.currentSkus.includes(sku) ? "PUBLISHED" : "UNPUBLISHED",
-        ...(input.currentSkus.includes(sku) ? { listingId: input.currentListingId } : {}),
+        ...(input.currentSkus.includes(sku)
+          ? { listing: { listingId: input.currentListingId, listingStatus: "ACTIVE" } }
+          : {}),
       }],
     })),
     createOffer: vi.fn(async (offer: EbayOffer) => `offer-${offer.sku}`),
