@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   BuiltInventoryItem,
   BuiltItemGroup,
@@ -32,6 +33,18 @@ export interface EbayListingConnectorClient {
     inventoryItemGroupKey: string,
     marketplaceId: string,
   ): Promise<{ listingId?: string }>;
+}
+
+/** Destructive operations used only by explicit rebuild execution. */
+export interface EbayListingLifecycleClient extends EbayListingConnectorClient {
+  getInventoryItemGroup(
+    groupKey: string,
+  ): Promise<(EbayInventoryItemGroup & { variantSKUs?: string[] }) | null>;
+  withdrawOfferByInventoryItemGroup(
+    groupKey: string,
+    marketplaceId: string,
+  ): Promise<void>;
+  deleteInventoryItemGroup(groupKey: string): Promise<void>;
 }
 
 export interface EbayListingConnectorDraft {
@@ -71,10 +84,28 @@ export interface EbayListingStatusInspection {
   availableQuantity: number | null;
 }
 
+export interface EbayListingRebuildPreview {
+  productId: number;
+  groupKey: string;
+  currentExternalListingId: string;
+  currentSkus: string[];
+  desiredSkus: string[];
+  addedSkus: string[];
+  removedSkus: string[];
+  rebuildRequired: boolean;
+  confirmationToken: string;
+}
+
+export interface EbayListingRebuildResult extends EbayListingConnectorResult {
+  previousExternalListingId: string;
+  removedSkus: string[];
+}
+
 interface EbayMarketplaceListingConnectorOptions {
   delay?: (ms: number) => Promise<void>;
   inventoryDelayMs?: number;
   offerDelayMs?: number;
+  groupPublishRetryDelaysMs?: readonly number[];
 }
 
 interface ResolvedPushOffer {
@@ -86,11 +117,13 @@ export class EbayMarketplaceListingConnector {
   private readonly delay: (ms: number) => Promise<void>;
   private readonly inventoryDelayMs: number;
   private readonly offerDelayMs: number;
+  private readonly groupPublishRetryDelaysMs: readonly number[];
 
   constructor(options: EbayMarketplaceListingConnectorOptions = {}) {
     this.delay = options.delay ?? (() => Promise.resolve());
     this.inventoryDelayMs = options.inventoryDelayMs ?? 0;
     this.offerDelayMs = options.offerDelayMs ?? 0;
+    this.groupPublishRetryDelaysMs = options.groupPublishRetryDelaysMs ?? [250, 750, 1_500];
   }
 
   async pushListing(input: {
@@ -165,6 +198,132 @@ export class EbayMarketplaceListingConnector {
     };
   }
 
+  async previewListingRebuild(input: {
+    client: EbayListingLifecycleClient;
+    draft: EbayListingConnectorDraft;
+    currentExternalListingId: string;
+  }): Promise<EbayListingRebuildPreview> {
+    validateRebuildInput(input.draft, input.currentExternalListingId);
+    const itemGroup = input.draft.itemGroup!;
+    const remoteGroup = await input.client.getInventoryItemGroup(itemGroup.groupKey);
+    if (!remoteGroup) {
+      throw new Error("The current eBay variation group could not be found.");
+    }
+
+    const currentSkus = normalizedSkus(remoteGroup.variantSKUs);
+    const desiredSkus = normalizedSkus(itemGroup.payload.variantSKUs);
+    if (currentSkus.length === 0 || desiredSkus.length === 0) {
+      throw new Error("Current and desired eBay variation groups must contain at least one SKU.");
+    }
+    const currentPublication = await inspectListingPublication({
+      client: input.client,
+      skus: currentSkus,
+      marketplaceId: input.draft.marketplaceId,
+      expectedListingId: input.currentExternalListingId,
+    });
+    if (currentPublication.state !== "active") {
+      throw new Error("The current eBay variation group is not published.");
+    }
+
+    const current = new Set(currentSkus);
+    const desired = new Set(desiredSkus);
+    const previewWithoutToken = {
+      productId: input.draft.productId,
+      groupKey: itemGroup.groupKey,
+      currentExternalListingId: input.currentExternalListingId.trim(),
+      currentSkus,
+      desiredSkus,
+      addedSkus: desiredSkus.filter((sku) => !current.has(sku)),
+      removedSkus: currentSkus.filter((sku) => !desired.has(sku)),
+    };
+    return {
+      ...previewWithoutToken,
+      rebuildRequired: previewWithoutToken.removedSkus.length > 0,
+      confirmationToken: rebuildConfirmationToken(previewWithoutToken),
+    };
+  }
+
+  async executeListingRebuild(input: {
+    client: EbayListingLifecycleClient;
+    draft: EbayListingConnectorDraft;
+    preview: EbayListingRebuildPreview;
+  }): Promise<EbayListingRebuildResult> {
+    validateRebuildInput(input.draft, input.preview.currentExternalListingId);
+    validateConfirmedPreview(input.draft, input.preview);
+    if (!input.preview.rebuildRequired || input.preview.removedSkus.length === 0) {
+      throw new Error("The confirmed eBay listing does not require a rebuild.");
+    }
+
+    const itemGroup = input.draft.itemGroup!;
+    const remoteGroup = await input.client.getInventoryItemGroup(itemGroup.groupKey);
+    if (remoteGroup) {
+      const observedSkus = normalizedSkus(remoteGroup.variantSKUs);
+      if (sameStrings(observedSkus, input.preview.currentSkus)) {
+        const sourcePublication = await inspectListingPublication({
+          client: input.client,
+          skus: observedSkus,
+          marketplaceId: input.draft.marketplaceId,
+          expectedListingId: input.preview.currentExternalListingId,
+        });
+        if (sourcePublication.state === "active") {
+          await input.client.withdrawOfferByInventoryItemGroup(
+            itemGroup.groupKey,
+            input.draft.marketplaceId,
+          );
+        }
+        await input.client.deleteInventoryItemGroup(itemGroup.groupKey);
+      } else if (sameStrings(observedSkus, input.preview.desiredSkus)) {
+        const targetPublication = await inspectListingPublication({
+          client: input.client,
+          skus: observedSkus,
+          marketplaceId: input.draft.marketplaceId,
+        });
+        if (targetPublication.state === "active") {
+          if (targetPublication.listingId === input.preview.currentExternalListingId) {
+            throw new Error("eBay still associates the desired variation group with the old listing identity.");
+          }
+          const externalOfferIds: Record<number, string> = {};
+          for (const offer of input.draft.offers) {
+            const offerId = targetPublication.offerIdsBySku.get(offer.sku);
+            if (!offerId) {
+              throw new Error(`The published replacement is missing an offer for ${offer.sku}.`);
+            }
+            externalOfferIds[offer.variantId] = offerId;
+          }
+          return {
+            productId: input.draft.productId,
+            status: "created",
+            externalProductId: targetPublication.listingId,
+            externalVariantIds: externalOfferIds,
+            externalOfferIds,
+            published: true,
+            previousExternalListingId: input.preview.currentExternalListingId,
+            removedSkus: [...input.preview.removedSkus],
+          };
+        }
+      } else {
+        throw new Error("The eBay variation group changed after rebuild confirmation. Preview it again.");
+      }
+    }
+
+    const result = await this.pushListing({
+      client: input.client,
+      draft: {
+        ...input.draft,
+        publishMode: "publish",
+        hasExistingExternalIds: false,
+        existingExternalProductId: null,
+      },
+    });
+    if (!result.externalProductId || result.externalProductId === input.preview.currentExternalListingId) {
+      throw new Error("eBay did not return a new listing identity after rebuilding the listing.");
+    }
+    return {
+      ...result,
+      previousExternalListingId: input.preview.currentExternalListingId,
+      removedSkus: [...input.preview.removedSkus],
+    };
+  }
   async syncExistingListing(input: {
     client: EbayListingConnectorClient;
     draft: Pick<EbayListingConnectorDraft, "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup">;
@@ -275,10 +434,11 @@ export class EbayMarketplaceListingConnector {
         input.draft.itemGroup.groupKey,
         input.draft.itemGroup.payload,
       );
-      const publishResult = await input.client.publishOfferByInventoryItemGroup(
-        input.draft.itemGroup.groupKey,
-        input.draft.marketplaceId,
-      );
+      const publishResult = await this.publishGroupWithConsistencyRetry({
+        client: input.client,
+        groupKey: input.draft.itemGroup.groupKey,
+        marketplaceId: input.draft.marketplaceId,
+      });
       return publishResult.listingId ?? input.draft.existingExternalProductId ?? input.firstListingId;
     }
 
@@ -288,6 +448,29 @@ export class EbayMarketplaceListingConnector {
     }
     const publishResult = await input.client.publishOffer(offerId);
     return publishResult.listingId ?? input.draft.existingExternalProductId ?? input.firstListingId;
+  }
+
+  private async publishGroupWithConsistencyRetry(input: {
+    client: EbayListingConnectorClient;
+    groupKey: string;
+    marketplaceId: string;
+  }): Promise<{ listingId?: string }> {
+    let attempt = 0;
+    for (;;) {
+      try {
+        return await input.client.publishOfferByInventoryItemGroup(
+          input.groupKey,
+          input.marketplaceId,
+        );
+      } catch (error) {
+        const delayMs = this.groupPublishRetryDelaysMs[attempt];
+        if (delayMs === undefined || !isRetryableGroupPublishConsistencyError(error)) {
+          throw error;
+        }
+        attempt += 1;
+        await this.delay(delayMs);
+      }
+    }
   }
 }
 
@@ -332,4 +515,132 @@ function listingPoliciesChanged(
   return existing?.fulfillmentPolicyId !== next.fulfillmentPolicyId
     || existing?.returnPolicyId !== next.returnPolicyId
     || existing?.paymentPolicyId !== next.paymentPolicyId;
+}
+
+function validateRebuildInput(
+  draft: EbayListingConnectorDraft,
+  currentExternalListingId: string,
+): void {
+  validateDraft(draft);
+  if (draft.publishMode !== "publish" || !draft.itemGroup) {
+    throw new Error("Only published eBay variation groups can be rebuilt.");
+  }
+  if (!currentExternalListingId.trim()) {
+    throw new Error("The current eBay listing id is required for rebuild confirmation.");
+  }
+}
+
+function validateConfirmedPreview(
+  draft: EbayListingConnectorDraft,
+  preview: EbayListingRebuildPreview,
+): void {
+  const currentSkus = normalizedSkus(preview.currentSkus);
+  const desiredSkus = normalizedSkus(draft.itemGroup?.payload.variantSKUs);
+  const current = new Set(currentSkus);
+  const desired = new Set(desiredSkus);
+  const expectedAddedSkus = desiredSkus.filter((sku) => !current.has(sku));
+  const expectedRemovedSkus = currentSkus.filter((sku) => !desired.has(sku));
+  const expectedRebuildRequired = expectedRemovedSkus.length > 0;
+  const expectedToken = rebuildConfirmationToken({
+    productId: draft.productId,
+    groupKey: draft.itemGroup!.groupKey,
+    currentExternalListingId: preview.currentExternalListingId.trim(),
+    currentSkus,
+    desiredSkus,
+    addedSkus: expectedAddedSkus,
+    removedSkus: expectedRemovedSkus,
+  });
+  if (
+    preview.productId !== draft.productId
+    || preview.groupKey !== draft.itemGroup!.groupKey
+    || !sameStrings(normalizedSkus(preview.desiredSkus), desiredSkus)
+    || !sameStrings(normalizedSkus(preview.addedSkus), expectedAddedSkus)
+    || !sameStrings(normalizedSkus(preview.removedSkus), expectedRemovedSkus)
+    || preview.rebuildRequired !== expectedRebuildRequired
+    || preview.confirmationToken !== expectedToken
+  ) {
+    throw new Error("The eBay listing rebuild confirmation is stale or invalid.");
+  }
+}
+
+type ListingPublicationInspection =
+  | Readonly<{
+      state: "active";
+      listingId: string;
+      offerIdsBySku: ReadonlyMap<string, string>;
+    }>
+  | Readonly<{ state: "withdrawn" }>;
+
+async function inspectListingPublication(input: {
+  client: EbayListingLifecycleClient;
+  skus: readonly string[];
+  marketplaceId: string;
+  expectedListingId?: string;
+}): Promise<ListingPublicationInspection> {
+  const activeListingIds = new Set<string>();
+  const offerIdsBySku = new Map<string, string>();
+  let activeMemberCount = 0;
+  let withdrawnMemberCount = 0;
+
+  for (const sku of input.skus) {
+    const response = await input.client.getOffers(sku, input.marketplaceId);
+    const activeOffers = response.offers.filter((offer) => {
+      const status = String((offer as EbayOffer & { status?: string }).status ?? "").toUpperCase();
+      return status === "PUBLISHED" || status === "ACTIVE";
+    });
+    if (activeOffers.length === 0) {
+      withdrawnMemberCount += 1;
+      continue;
+    }
+    const [activeOffer] = activeOffers;
+    if (activeOffers.length !== 1 || !activeOffer?.listingId) {
+      throw new Error(`The eBay variation ${sku} does not have exactly one identifiable active offer.`);
+    }
+    if (input.expectedListingId && activeOffer.listingId !== input.expectedListingId.trim()) {
+      throw new Error("The active eBay listing identity changed. Preview the rebuild again.");
+    }
+    activeMemberCount += 1;
+    activeListingIds.add(activeOffer.listingId);
+    offerIdsBySku.set(sku, activeOffer.offerId);
+  }
+
+  if (activeMemberCount === input.skus.length && activeListingIds.size === 1) {
+    return {
+      state: "active",
+      listingId: [...activeListingIds][0],
+      offerIdsBySku,
+    };
+  }
+  if (withdrawnMemberCount === input.skus.length) {
+    return { state: "withdrawn" };
+  }
+  throw new Error("The eBay variation group is only partially published. Resolve its remote state before rebuilding.");
+}
+function normalizedSkus(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value
+    .filter((sku): sku is string => typeof sku === "string")
+    .map((sku) => sku.trim())
+    .filter(Boolean))]
+    .sort();
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function rebuildConfirmationToken(input: {
+  productId: number;
+  groupKey: string;
+  currentExternalListingId: string;
+  currentSkus: readonly string[];
+  desiredSkus: readonly string[];
+  addedSkus: readonly string[];
+  removedSkus: readonly string[];
+}): string {
+  return createHash("sha256").update(JSON.stringify(input)).digest("hex");
+}
+function isRetryableGroupPublishConsistencyError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:25604|25703|offer\s+not\s+found)/i.test(message);
 }

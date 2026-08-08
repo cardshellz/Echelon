@@ -539,7 +539,7 @@ export default function EbayChannelPage() {
     }
     toast({
       title: "eBay listing replaced",
-      description: "The replacement listing is live and is now Echelon's controlled baseline.",
+      description: "The old listing was ended and the rebuilt listing is now live.",
     });
   }, [queryClient, registrationStatusQueryInput, registrationStatusQueryKey, toast]);
 
@@ -552,7 +552,7 @@ export default function EbayChannelPage() {
     }
     toast({
       title: "Listing analyzed",
-      description: "Echelon recorded the live listing and can now choose the correct update or replacement flow.",
+      description: "Echelon read the live listing and can now identify whether it needs an update or a rebuild.",
     });
   }, [queryClient, registrationStatusQueryInput, registrationStatusQueryKey, toast]);
 
@@ -1906,7 +1906,7 @@ export default function EbayChannelPage() {
                             registration: registrationStatus,
                           });
                       const reconciliationAction = reconciliation?.kind === "replacement_required"
-                        ? "Review replacement"
+                        ? "Rebuild listing"
                         : reconciliation?.kind === "update_available"
                           ? "Update listing"
                           : reconciliation?.kind === "verification_required"

@@ -1,63 +1,17 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import {
-  buildMarketplaceListingReplacementMembers,
-  replacementEndpointBase,
-  executionResultMessage,
-} from "../MarketplaceListingReplacementDialog";
+import { replacementEndpointBase } from "../MarketplaceListingReplacementDialog";
 
 describe("MarketplaceListingReplacementDialog contract", () => {
-  it("classifies every variant explicitly and preserves inventory-independent inclusion", () => {
-    const members = buildMarketplaceListingReplacementMembers(
-      [
-        {
-          id: 700,
-          sku: "ARM-ENV-SGL-C700",
-          name: "Case of 700",
-          included: false,
-          lockedExcluded: true,
-        },
-        {
-          id: 750,
-          sku: "ARM-ENV-SGL-C750",
-          name: "Case of 750",
-          included: true,
-        },
-        { id: 50, sku: "ARM-ENV-SGL-P50", name: "Pack of 50", included: true },
-      ],
-      new Set([750, 50]),
-    );
+  const source = readFileSync(
+    resolve(process.cwd(), "client/src/components/marketplace/MarketplaceListingReplacementDialog.tsx"),
+    "utf8",
+  );
 
-    expect(members).toEqual([
-      {
-        productVariantId: 700,
-        disposition: "excluded",
-        reasonCode: "local_variant_inactive",
-      },
-      { productVariantId: 750, disposition: "included", reasonCode: null },
-      { productVariantId: 50, disposition: "included", reasonCode: null },
-    ]);
-  });
-
-  it("distinguishes a safe preflight stop from a compensated execution failure", () => {
-    expect(
-      executionResultMessage({
-        kind: "failed",
-        stepKey: "preflight.validate_plan",
-      }),
-    ).toBe(
-      "Replacement stopped during preflight. The live eBay listing was not changed.",
-    );
-    expect(
-      executionResultMessage({
-        kind: "failed",
-        stepKey: "compensate.ensure_source_live",
-      }),
-    ).toBe(
-      "Replacement failed, and compensation restored the previous listing state.",
-    );
-  });
-  it("routes Channel and Dropship owners through the same provider-neutral UI contract", () => {
+  it("uses the explicit direct-channel rebuild endpoint", () => {
     expect(
       replacementEndpointBase({
         kind: "channel",
@@ -65,15 +19,19 @@ describe("MarketplaceListingReplacementDialog contract", () => {
         productId: 5,
         marketplaceId: "EBAY_US",
       }),
-    ).toBe("/api/marketplace-listings/replacements/channel/ebay");
+    ).toBe("/api/ebay/listings/push");
+  });
 
-    expect(
-      replacementEndpointBase({
-        kind: "dropship",
-        storeConnectionId: 81,
-        productId: 5,
-        marketplaceId: "EBAY_US",
-      }),
-    ).toBe("/api/marketplace-listings/replacements/dropship/ebay");
+  it("previews before execution and resubmits the exact confirmation", () => {
+    expect(source).toContain('rebuild: { mode: "preview" }');
+    expect(source).toContain('rebuild: { mode: "execute", preview }');
+    expect(source).toContain("confirmationToken: z.string()");
+  });
+
+  it("does not expose legacy compensation or manual recovery controls", () => {
+    expect(source).not.toContain("manual_recovery_required");
+    expect(source).not.toContain("recovering");
+    expect(source).not.toContain("compensation");
+    expect(source).toContain("Archived - removed");
   });
 });

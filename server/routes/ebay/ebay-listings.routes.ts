@@ -1,5 +1,6 @@
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
+import { z } from "zod";
 import { db, pool } from "../../db";
 import { requireAuth, requireAuthOrInternalApiKey, requirePermission } from "../middleware";
 import {
@@ -20,7 +21,10 @@ import {
   isVariantEffectivelyListed,
   isVariantSellable,
 } from "./ebay-listing-state";
-import { EbayMarketplaceListingConnector } from "../../modules/channels/listing-connectors/ebay-listing.connector";
+import {
+  EbayMarketplaceListingConnector,
+  type EbayListingRebuildPreview,
+} from "../../modules/channels/listing-connectors/ebay-listing.connector";
 import { queueVariantAvailabilityRepair } from "../../modules/channels/variant-availability-sync.service";
 import {
   buildEbayRouteListingDraft,
@@ -29,12 +33,43 @@ import {
 } from "./ebay-listing-draft-builder";
 import {
   createEbayRouteListingClient,
+  createEbayRouteListingLifecycleClient,
   getExistingEbayInventoryImageUrls,
 } from "./ebay-listing-connector-client";
 
 export const router = express.Router();
 const EBAY_LISTING_DEFAULT_MARKETPLACE_ID = "EBAY_US";
 const ebayListingConnector = new EbayMarketplaceListingConnector();
+const ebayListingRebuildPreviewSchema: z.ZodType<EbayListingRebuildPreview> = z.object({
+  productId: z.number().int().positive(),
+  groupKey: z.string().trim().min(1).max(100),
+  currentExternalListingId: z.string().trim().min(1).max(255),
+  currentSkus: z.array(z.string().trim().min(1).max(100)).min(1),
+  desiredSkus: z.array(z.string().trim().min(1).max(100)).min(1),
+  addedSkus: z.array(z.string().trim().min(1).max(100)),
+  removedSkus: z.array(z.string().trim().min(1).max(100)),
+  rebuildRequired: z.boolean(),
+  confirmationToken: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+const ebayListingPushRequestSchema = z.object({
+  productIds: z.array(z.number().int().positive()).min(1).max(500),
+  rebuild: z.discriminatedUnion("mode", [
+    z.object({ mode: z.literal("preview") }).strict(),
+    z.object({
+      mode: z.literal("execute"),
+      preview: ebayListingRebuildPreviewSchema,
+    }).strict(),
+  ]).optional(),
+}).strict().superRefine((value, context) => {
+  if (value.rebuild && value.productIds.length !== 1) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["productIds"],
+      message: "A listing rebuild must target exactly one product.",
+    });
+  }
+});
+
 
   // GET /api/ebay/listing-feed — Products with types for listing feed
   // -----------------------------------------------------------------------
@@ -352,11 +387,12 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
   // -----------------------------------------------------------------------
   router.post("/api/ebay/listings/push", requireAuth, async (req: Request, res: Response) => {
     try {
-      const { productIds } = req.body as { productIds: number[] };
-      if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
-        res.status(400).json({ error: "productIds array is required" });
+      const parsedRequest = ebayListingPushRequestSchema.safeParse(req.body);
+      if (!parsedRequest.success) {
+        res.status(400).json({ error: "Invalid eBay listing request", details: parsedRequest.error.flatten() });
         return;
       }
+      const { productIds, rebuild } = parsedRequest.data;
 
       const authService = getAuthService();
       if (!authService) {
@@ -389,6 +425,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
         offerId?: string;
         error?: string;
         variantDetails?: Array<{ sku: string; success: boolean; error?: string }>;
+        rebuildPreview?: EbayListingRebuildPreview;
       }> = [];
 
       try {
@@ -578,21 +615,67 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           const offerIds: Map<string, string> = new Map();
           let variantDetails: Array<{ sku: string; success: boolean; error?: string }> = [];
           let successfulSkus: string[] = [];
+          let removedSkus: string[] = [];
 
           try {
-            const connectorResult = await ebayListingConnector.pushListing({
-              client: createEbayRouteListingClient({ accessToken }),
-              draft: {
-                productId,
-                marketplaceId,
-                inventoryItems: routeDraft.inventoryItems,
-                offers: routeDraft.offers,
-                itemGroup: routeDraft.itemGroup,
-                publishMode: "publish",
-                hasExistingExternalIds: false,
-              },
-            });
+            const draft = {
+              productId,
+              marketplaceId,
+              inventoryItems: routeDraft.inventoryItems,
+              offers: routeDraft.offers,
+              itemGroup: routeDraft.itemGroup,
+              publishMode: "publish" as const,
+              hasExistingExternalIds: false,
+            };
+            const lifecycleClient = createEbayRouteListingLifecycleClient({ accessToken });
+            let connectorResult;
+            if (rebuild) {
+              const listingIdentityResult = await client.query<{ external_product_id: string }>(
+                `SELECT DISTINCT cl.external_product_id
+                 FROM channels.channel_listings cl
+                 JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
+                 WHERE cl.channel_id = $1
+                   AND pv.product_id = $2
+                   AND cl.external_product_id IS NOT NULL`,
+                [EBAY_CHANNEL_ID, productId],
+              );
+              const currentListingIds = listingIdentityResult.rows
+                .map((row) => row.external_product_id?.trim())
+                .filter((value): value is string => Boolean(value));
+              if (currentListingIds.length !== 1) {
+                throw new Error("The product must have exactly one current eBay listing identity before rebuilding.");
+              }
+              if (rebuild.mode === "preview") {
+                const rebuildPreview = await ebayListingConnector.previewListingRebuild({
+                  client: lifecycleClient,
+                  draft,
+                  currentExternalListingId: currentListingIds[0],
+                });
+                results.push({
+                  productId,
+                  productName: product.name,
+                  variantCount: variants.length,
+                  success: true,
+                  listingId: currentListingIds[0],
+                  rebuildPreview,
+                });
+                continue;
+              }
+              connectorResult = await ebayListingConnector.executeListingRebuild({
+                client: lifecycleClient,
+                draft,
+                preview: rebuild.preview,
+              });
+            } else {
+              connectorResult = await ebayListingConnector.pushListing({
+                client: createEbayRouteListingClient({ accessToken }),
+                draft,
+              });
+            }
 
+            if ("removedSkus" in connectorResult && Array.isArray(connectorResult.removedSkus)) {
+              removedSkus = [...connectorResult.removedSkus];
+            }
             listingId = connectorResult.externalProductId ?? null;
             successfulSkus = routeDraft.offers.map((offer) => offer.sku);
             variantDetails = routeDraft.offers.map((offer) => ({ sku: offer.sku, success: true }));
@@ -602,11 +685,13 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             }
           } catch (err: any) {
             const errMsg = `Listing push failed: ${err.message.substring(0, 500)}`;
-            for (const variant of variants) {
-              await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.id, {
-                syncStatus: "error",
-                syncError: errMsg.substring(0, 1000),
-              });
+            if (rebuild?.mode !== "preview") {
+              for (const variant of variants) {
+                await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.id, {
+                  syncStatus: "error",
+                  syncError: errMsg.substring(0, 1000),
+                });
+              }
             }
             results.push({
               productId,
@@ -621,6 +706,24 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
               })),
             });
             continue;
+          }
+          if (removedSkus.length > 0) {
+            await client.query(
+              `UPDATE channels.channel_listings cl
+               SET external_product_id = NULL,
+                   external_variant_id = NULL,
+                   external_url = NULL,
+                   sync_status = 'synced',
+                   sync_error = NULL,
+                   last_synced_at = NOW(),
+                   updated_at = NOW()
+               FROM catalog.product_variants pv
+               WHERE pv.id = cl.product_variant_id
+                 AND cl.channel_id = $1
+                 AND pv.product_id = $2
+                 AND cl.external_sku = ANY($3::text[])`,
+              [EBAY_CHANNEL_ID, productId, removedSkus],
+            );
           }
           // ---- Success: Update all variant listings ----
           for (const variant of variants) {
