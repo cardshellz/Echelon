@@ -40,6 +40,8 @@ const rebuildPreviewSchema = z.object({
   currentExternalListingId: z.string().min(1),
   sourceState: z.enum(["active", "withdrawn"]),
   currentSkus: z.array(z.string().min(1)).min(1),
+  activeSkus: z.array(z.string().min(1)),
+  inactiveSkus: z.array(z.string().min(1)),
   desiredSkus: z.array(z.string().min(1)).min(1),
   addedSkus: z.array(z.string().min(1)),
   removedSkus: z.array(z.string().min(1)),
@@ -210,7 +212,7 @@ export function MarketplaceListingChangesDialog({
                 <div className="rounded-md border p-3">
                   <p className="text-xs text-muted-foreground">Current eBay listing</p>
                   <p className="font-medium">{preview.currentExternalListingId}</p>
-                  <p className="mt-1 text-xs text-muted-foreground">{preview.currentSkus.length} live variant{preview.currentSkus.length === 1 ? "" : "s"}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{preview.activeSkus.length} buyer-visible variant{preview.activeSkus.length === 1 ? "" : "s"}</p>
                 </div>
                 <div className="rounded-md border p-3">
                   <p className="text-xs text-muted-foreground">Desired Echelon listing</p>
@@ -222,20 +224,23 @@ export function MarketplaceListingChangesDialog({
               <div className="rounded-md border divide-y">
                 {[...new Set([...preview.currentSkus, ...preview.desiredSkus])].sort().map((sku) => {
                   const variant = variantsBySku.get(sku);
-                  const isCurrent = preview.currentSkus.includes(sku);
+                  const isActive = preview.activeSkus.includes(sku);
+                  const isInactive = preview.inactiveSkus.includes(sku);
                   const isDesired = preview.desiredSkus.includes(sku);
-                  const status = !isCurrent
+                  const status = !isActive && isDesired
                     ? "Will be added"
-                    : !isDesired
-                      ? "Will be removed or disabled"
-                      : "Unchanged";
+                    : isInactive
+                      ? "Historical/inactive on eBay - no action needed"
+                      : !isDesired
+                        ? "Will be removed or disabled"
+                        : "Unchanged";
                   return (
                     <div key={sku} className="flex items-center justify-between gap-4 p-3">
                       <div>
                         <p className="font-medium">{variant?.name ?? "eBay variant"}</p>
                         <code className="text-xs text-muted-foreground">{sku}</code>
                       </div>
-                      <span className={status === "Unchanged" ? "text-sm text-muted-foreground" : "text-sm font-medium text-blue-700"}>
+                      <span className={status === "Unchanged" || status.startsWith("Historical/") ? "text-sm text-muted-foreground" : "text-sm font-medium text-blue-700"}>
                         {status}
                       </span>
                     </div>

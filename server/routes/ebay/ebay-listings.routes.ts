@@ -46,6 +46,8 @@ const ebayListingRebuildPreviewSchema: z.ZodType<EbayListingRebuildPreview> = z.
   currentExternalListingId: z.string().trim().min(1).max(255),
   sourceState: z.enum(["active", "withdrawn"]),
   currentSkus: z.array(z.string().trim().min(1).max(100)).min(1),
+  activeSkus: z.array(z.string().trim().min(1).max(100)),
+  inactiveSkus: z.array(z.string().trim().min(1).max(100)),
   desiredSkus: z.array(z.string().trim().min(1).max(100)).min(1),
   addedSkus: z.array(z.string().trim().min(1).max(100)),
   removedSkus: z.array(z.string().trim().min(1).max(100)),
