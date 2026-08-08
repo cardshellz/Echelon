@@ -1,6 +1,7 @@
 # In-House Marketing System — Discovery Q&A
 
-> Status: **IN PROGRESS** — recording answers before any design/scoping work.
+> Status: **COMPLETE** — all 9 rounds answered; design doc written (`DESIGN.md`)
+> and its seven deferred decisions user-confirmed 2026-08-08.
 > Goal: replace Klaviyo with an in-house marketing/email/SMS system (Resend as the
 > email delivery engine), generic enough that any Shopify/marketplace store can
 > connect with zero custom coding.
@@ -275,7 +276,8 @@ not visible from code):**
 - Export procedure for Klaviyo suppression list + email consent + SMS/TCPA
   consent records (the migration seed per Q6.4).
 
-**Decisions deliberately deferred to the design doc:**
+**Decisions deliberately deferred to the design doc** *(all seven resolved in
+`DESIGN.md` §3 and user-confirmed 2026-08-08 — see D1–D7 there)*:
 - Queue infra: Postgres queues vs Redis/BullMQ — now constrained by the 500k/5M
   scale target (Q4.3 × Q9.3).
 - Identity master: evolve Archon `customers` vs engine-owned profile store (Q4.4).

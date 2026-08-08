@@ -1,6 +1,7 @@
 # Helm — In-House Marketing Engine: Design Document
 
-> Status: **DRAFT for review** · Input: `DISCOVERY.md` (all 9 rounds answered)
+> Status: **APPROVED** — all seven deferred decisions (D1–D7, §3) user-confirmed
+> as recommended on 2026-08-08. Input: `DISCOVERY.md` (all 9 rounds answered).
 > Working name: **Helm** (the marketing module inside Archon). Rename freely —
 > the name only appears in schema/module identifiers at implementation time.
 >
@@ -79,6 +80,11 @@ later = lift schema + put HTTP in front of the same interface.
 ---
 
 ## 3. Resolved design decisions (the seven deferred from discovery)
+
+> All seven confirmed by the owner on 2026-08-08, each as recommended:
+> D1 Postgres queues · D2 Helm-owned profile store · D3 first-party snippet in
+> v1 · D4 per-store platform catalog sync · D5 per-source opt-in policy ·
+> D6 click-based attribution · D7 own link/open tracking.
 
 ### D1. Queue infrastructure → **Postgres queues (Echelon pattern)** (Q4.3)
 5M emails/month ≈ 170k/day average; a worst-case full-list campaign is ~500k
