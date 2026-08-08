@@ -31,6 +31,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useLocation, useSearch } from "wouter";
+import { toast } from "@/hooks/use-toast";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -110,6 +111,8 @@ import {
   formatCents,
   formatDateTime,
   formatStatus,
+  isRmaStatusTerminal,
+  legalRmaTransitions,
   listingPushJobRetryEligibility,
   notificationRetryEligibility,
   orderCancellationRetryEligibility,
@@ -776,6 +779,15 @@ const returnFaultCategories: DropshipReturnFaultCategory[] = [
   "customer",
   "carrier",
 ];
+
+const RETURN_INSPECTION_ITEM_STATUSES = [
+  "inspected",
+  "damaged",
+  "missing",
+  "wrong_item",
+] as const;
+
+type ReturnInspectionItemStatus = (typeof RETURN_INSPECTION_ITEM_STATUSES)[number];
 
 const dogfoodReadinessStatusFilters: DogfoodReadinessStatusFilter[] = [
   "all",
@@ -2574,6 +2586,13 @@ function ReturnOpsTab() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  // Auto-dismiss success messages after 5 seconds.
+  useEffect(() => {
+    if (!message) return;
+    const timer = setTimeout(() => setMessage(""), 5000);
+    return () => clearTimeout(timer);
+  }, [message]);
+
   const returnsUrl = useMemo(() => buildAdminReturnsUrl({
     search: appliedFilters.search,
     status: appliedFilters.status,
@@ -2656,6 +2675,24 @@ function ReturnOpsTab() {
     [returnVariantsQuery.data],
   );
 
+  const inspectionRmaDetail = returnDetailQuery.data?.rma ?? null;
+  const inspectionFaultCategory = inspectionForm?.faultCategory ?? null;
+  const effectiveFeesUrl = useMemo(() => {
+    if (!inspectionRmaDetail || !inspectionFaultCategory) return null;
+    return buildAdminEffectiveReturnFeesUrl({
+      vendorId: inspectionRmaDetail.vendorId,
+      faultCategory: inspectionFaultCategory,
+    });
+  }, [inspectionRmaDetail, inspectionFaultCategory]);
+  const effectiveFeesQuery = useQuery<DropshipAdminEffectiveReturnFeesResponse>({
+    queryKey: [effectiveFeesUrl],
+    queryFn: () => {
+      if (!effectiveFeesUrl) throw new Error("Missing effective fees URL.");
+      return fetchJson<DropshipAdminEffectiveReturnFeesResponse>(effectiveFeesUrl);
+    },
+    enabled: effectiveFeesUrl !== null,
+  });
+
   useEffect(() => {
     const rma = returnDetailQuery.data?.rma;
     if (!rma) return;
@@ -2664,6 +2701,34 @@ function ReturnOpsTab() {
       return buildReturnInspectionFormState(rma);
     });
   }, [returnDetailQuery.data?.rma]);
+
+  // Auto-fill fees when fault category changes and fee data is available.
+  useEffect(() => {
+    const fees = effectiveFeesQuery.data?.fees;
+    if (!fees) return;
+    setInspectionForm((current) => {
+      if (!current || current.items.length === 0) return current;
+      // Sum all applicable fee amounts (flat-cents only; percent fees require
+      // order economics context we don't have at item level).
+      let totalFlatFeeCents = 0;
+      for (const fee of [fees.restockingFee, fees.processingFee, fees.returnShippingFee]) {
+        if (fee && fee.amountType === "flat_cents") {
+          totalFlatFeeCents += fee.amount;
+        }
+      }
+      if (totalFlatFeeCents <= 0) return current;
+      // Distribute evenly across items; remainder goes to the first item.
+      const perItem = Math.floor(totalFlatFeeCents / current.items.length);
+      const remainder = totalFlatFeeCents - (perItem * current.items.length);
+      return {
+        ...current,
+        items: current.items.map((item, index) => ({
+          ...item,
+          feeAmount: centsToDollarInput(perItem + (index === 0 ? remainder : 0)),
+        })),
+      };
+    });
+  }, [effectiveFeesQuery.data?.fees]);
 
   function applyReturnFilters() {
     setAppliedFilters({ search, status });
@@ -2792,6 +2857,7 @@ function ReturnOpsTab() {
         input,
       );
       setMessage(`RMA ${response.rma.rmaNumber} moved to ${formatStatus(response.rma.status)}.`);
+      toast({ title: "Status updated", description: `RMA ${response.rma.rmaNumber} moved to ${formatStatus(response.rma.status)}` });
       setStatusNotes((current) => ({ ...current, [rma.rmaId]: "" }));
       setStatusInputs((current) => {
         const next = { ...current };
@@ -2804,7 +2870,9 @@ function ReturnOpsTab() {
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship return status update failed.");
+      const errMsg = caught instanceof Error ? caught.message : "Dropship return status update failed.";
+      setError(errMsg);
+      toast({ title: "Status update failed", description: errMsg, variant: "destructive" });
     } finally {
       setPendingRmaId(null);
     }
@@ -2888,6 +2956,7 @@ function ReturnOpsTab() {
       setMessage(
         `RMA ${response.rma.rmaNumber} inspected: ${formatStatus(response.inspection.outcome)} with ${formatCents(response.inspection.creditCents)} credit and ${formatCents(response.inspection.feeCents)} fee.`,
       );
+      toast({ title: "Inspection submitted", description: `Inspection submitted for RMA ${response.rma.rmaNumber}` });
       setInspectionForm(buildReturnInspectionFormState(response.rma));
       await Promise.all([
         returnsQuery.refetch(),
@@ -2897,7 +2966,9 @@ function ReturnOpsTab() {
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship return inspection failed.");
+      const errMsg = caught instanceof Error ? caught.message : "Dropship return inspection failed.";
+      setError(errMsg);
+      toast({ title: "Inspection failed", description: errMsg, variant: "destructive" });
     } finally {
       setInspectionPendingRmaId(null);
     }
@@ -7998,6 +8069,12 @@ function ReturnInspectionPanel({
                   {totals.hasInvalidAmount ? "Invalid" : formatCents(totals.feeCents)}
                 </span>
               </div>
+              <div className="flex justify-between gap-3 border-t pt-1 font-medium">
+                <span>Net</span>
+                <span className="font-mono text-foreground">
+                  {totals.hasInvalidAmount ? "Invalid" : formatCents(totals.creditCents - totals.feeCents)}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -8036,12 +8113,20 @@ function ReturnInspectionPanel({
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Input
+                      <Select
                         value={item.status}
-                        onChange={(event) => onItemChange(item.rmaItemId, { status: event.target.value })}
-                        maxLength={40}
+                        onValueChange={(value) => onItemChange(item.rmaItemId, { status: value })}
                         disabled={existingInspection !== null || pending}
-                      />
+                      >
+                        <SelectTrigger className="h-9 w-[130px]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {RETURN_INSPECTION_ITEM_STATUSES.map((s) => (
+                            <SelectItem key={s} value={s}>{formatStatus(s)}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </TableCell>
                     <TableCell className="text-right font-mono">{item.quantity}</TableCell>
                     <TableCell>
@@ -8158,9 +8243,11 @@ function ReturnOpsTable({
         <TableBody>
           {rmas.map((rma) => {
             const nextStatus = statusInputs[rma.rmaId] ?? rma.status;
+            const allowedTransitions = legalRmaTransitions(rma.status);
+            const isTerminal = isRmaStatusTerminal(rma.status);
             const statusActionDisabled = pendingRmaId !== null
               || nextStatus === rma.status
-              || rma.status === "credited";
+              || isTerminal;
             return (
               <TableRow key={rma.rmaId}>
                 <TableCell>
@@ -8230,13 +8317,13 @@ function ReturnOpsTable({
                     <Select
                       value={nextStatus}
                       onValueChange={(value) => onStatusChange(rma.rmaId, value as DropshipRmaStatus)}
-                      disabled={rma.status === "credited"}
+                      disabled={isTerminal}
                     >
                       <SelectTrigger className="h-9">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {returnOpsUpdateStatuses.map((option) => (
+                        {allowedTransitions.map((option) => (
                           <SelectItem key={option} value={option}>
                             {formatStatus(option)}
                           </SelectItem>
@@ -8249,7 +8336,7 @@ function ReturnOpsTable({
                         onChange={(event) => onStatusNoteChange(rma.rmaId, event.target.value)}
                         placeholder="Optional audit note"
                         maxLength={5000}
-                        disabled={rma.status === "credited"}
+                        disabled={isTerminal}
                       />
                       <Button
                         type="button"
@@ -9661,7 +9748,7 @@ function buildReturnInspectionFormState(rma: DropshipReturnDetail): ReturnInspec
         rmaItemId: item.rmaItemId,
         productVariantId: item.productVariantId,
         quantity: item.quantity,
-        status: item.finalCreditCents !== null || item.feeCents !== null ? item.status : "approved",
+        status: item.finalCreditCents !== null || item.feeCents !== null ? item.status : "inspected",
         finalCreditAmount: centsToDollarInput(finalCreditCents),
         feeAmount: centsToDollarInput(feeCents),
       };
