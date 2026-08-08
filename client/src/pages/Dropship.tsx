@@ -228,6 +228,7 @@ import {
   returnPolicyScopeValueFromPicker,
   returnPolicyScopeValueToPicker,
 } from "@/lib/dropship-return-policy-scope";
+import { ReturnInspectionModal } from "@/components/dropship/ReturnInspectionModal";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
@@ -2579,6 +2580,7 @@ function ReturnOpsTab() {
   const [statusNotes, setStatusNotes] = useState<Record<number, string>>({});
   const [pendingRmaId, setPendingRmaId] = useState<number | null>(null);
   const [selectedInspectionRmaId, setSelectedInspectionRmaId] = useState<number | null>(null);
+  const [inspectionModalOpen, setInspectionModalOpen] = useState(false);
   const [inspectionForm, setInspectionForm] = useState<ReturnInspectionFormState | null>(null);
   const [inspectionPendingRmaId, setInspectionPendingRmaId] = useState<number | null>(null);
   const [reviewReason, setReviewReason] = useState("");
@@ -2777,11 +2779,15 @@ function ReturnOpsTab() {
     setReviewReason("");
     setError("");
     setMessage("");
+    if (rma.status === "inspecting") {
+      setInspectionModalOpen(true);
+    }
   }
 
   function clearInspectionSelection() {
     setSelectedInspectionRmaId(null);
     setInspectionForm(null);
+    setInspectionModalOpen(false);
     setReviewReason("");
   }
 
@@ -3087,17 +3093,16 @@ function ReturnOpsTab() {
         total={returnsQuery.data?.total ?? 0}
       />
 
-      <ReturnInspectionPanel
-        error={returnDetailQuery.error}
-        form={inspectionForm}
-        isLoading={returnDetailQuery.isLoading || returnDetailQuery.isFetching}
-        onCancel={clearInspectionSelection}
-        onFormChange={updateInspectionForm}
-        onItemChange={updateInspectionItem}
-        onSave={saveReturnInspection}
-        pendingRmaId={inspectionPendingRmaId}
-        rma={returnDetailQuery.data?.rma ?? null}
-        selectedRmaId={selectedInspectionRmaId}
+      <ReturnInspectionModal
+        rmaId={selectedInspectionRmaId}
+        open={inspectionModalOpen}
+        onOpenChange={(open) => {
+          setInspectionModalOpen(open);
+          if (!open) clearInspectionSelection();
+        }}
+        onInspectionComplete={() => {
+          returnsQuery.refetch();
+        }}
       />
 
       <NoInspectionReviewPanel
@@ -8304,8 +8309,9 @@ function ReturnOpsTable({
                   <Button
                     type="button"
                     size="sm"
-                    variant="outline"
+                    variant={rma.status === "inspecting" ? "default" : "outline"}
                     className="gap-2"
+                    disabled={rma.status !== "inspecting" && rma.status !== "no_inspection_review"}
                     onClick={() => onInspect(rma)}
                   >
                     <FileSearch className="h-4 w-4" />
