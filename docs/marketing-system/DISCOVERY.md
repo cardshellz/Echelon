@@ -137,100 +137,164 @@ tracking snippet installed?**
 
 ## Round 5 — Data ingestion & tracking
 
-**Q5.1 Order data path: marketing engine consumes order events via Echelon
-(hardened push + reconciliation poll), or does the marketing system also get its
-OWN direct store connectors? Note: storefront behavioral data (product viewed,
-checkout started) never passes through Echelon — abandoned-checkout and browse
-flows need a direct-to-store connector or web tracking regardless.**
-> A: —
+**Q5.1 Order data path: via Echelon, direct store connectors, or hybrid?**
+> A: **DECIDED: Hybrid.** Echelon events are the order source for
+> Echelon-managed stores (harden today's fire-and-forget push into a durable
+> outbox + reconciliation poll). The engine ALSO gets its own connector
+> framework for storefront-only data (checkout started, consent, signups) and
+> for future stores that never touch Echelon.
 
-**Q5.2 Web tracking: do you want an onsite JS snippet (viewed product, add to
-cart, identified sessions) in v1, or defer browse-behavior triggers?**
-> A: —
+**Q5.2 First-party web tracking snippet in v1?**
+> A: **Recommend during design.** Decide after inventorying which live Klaviyo
+> flows depend on browse events (Klaviyo's snippet with Viewed Product /
+> Active on Site IS currently installed — see Q2.3 — so cutover parity likely
+> requires it; confirm during design).
 
-**Q5.3 Catalog: product data for email blocks/recommendations — sync per store
-from the platform, or reuse Echelon catalog for Card Shellz and platform sync for
-foreign stores?**
-> A: —
+**Q5.3 Product catalog source for email content?**
+> A: **Recommend during design.** Options: per-store platform sync (fully
+> generic; `syncedProducts` as seed) vs Echelon's richer catalog for Card
+> Shellz + platform sync for foreign stores. Decide from what email blocks
+> actually need (images, price, stock state — back-in-stock needs stock truth,
+> which for Card Shellz lives in Echelon/WMS).
 
-**Q5.4 Coupons: are unique/per-send discount codes needed (requires per-platform
-connector capability, e.g. Shopify discount API)?**
-> A: —
+**Q5.4 Unique coupon/discount codes?**
+> A: **DECIDED: launch requirement.** Per-recipient/expiring codes are part of
+> the playbook — the Shopify discount-API connector capability is v1 scope
+> (modeled as an optional per-connector capability, not engine core).
 
 ## Round 6 — Compliance & consent
 
-**Q6.1 Customer jurisdictions: US-only, or EU/UK/Canada too (GDPR/CASL change
-consent + deletion requirements)?**
-> A: —
+**Q6.1 Customer jurisdictions?**
+> A: **US + Canada.** CAN-SPAM + TCPA (SMS) + CASL. CASL implications: express
+> vs implied consent must be distinguished in the consent ledger, implied
+> consent expires (2 years from purchase), and sender identification rules
+> apply. No GDPR machinery required.
 
-**Q6.2 Where is marketing consent captured today (Shopify checkout opt-in, club
-signup, popups)? Do you want double opt-in going forward?**
-> A: —
+**Q6.2 Consent capture strategy / double opt-in?**
+> A: **Recommend during design.** Likely per-source policy (e.g. double opt-in
+> for popups/forms, single for checkout + club signup). Engine must record
+> source/timestamp/method/evidence for every consent regardless — CASL makes
+> proof of consent mandatory.
 
-**Q6.3 Preference center: one global per brand/store, and what granularity
-(unsubscribe-all vs topic preferences)?**
-> A: —
+**Q6.3 Preference center granularity?**
+> A: **DECIDED: simple unsubscribe-all per store at launch; data model supports
+> per-topic + per-channel subscriptions so a hosted preference page can come
+> later without migration.** List-Unsubscribe + one-click (RFC 8058) headers
+> from day one.
 
-**Q6.4 Consent migration: is Shopify's customer consent state + Klaviyo's
-suppression list export the agreed source of truth to seed the new system?**
-> A: —
+**Q6.4 Consent migration seed?**
+> A: **DECIDED: Shopify customer consent state + Klaviyo exports (email
+> suppression/consent AND SMS/TCPA consent records) seed the new system.
+> Anyone in neither is NOT sendable.** Conservative and defensible.
 
 ## Round 7 — Feature priorities
 
-**Q7.1 Rank the launch flows (what must work on day one vs later): welcome,
-abandoned checkout, back-in-stock, post-purchase, winback, tier/membership
-lifecycle, birthday.**
-> A: —
+**Q7.1 Which flows must work on day one of flow cutover?**
+> A: **All four: welcome series, abandoned checkout, back-in-stock,
+> post-purchase/winback.** No partial flow cutover — the journey runtime must
+> support event triggers (signup, checkout started, back-in-stock, order
+> placed), time-based waits, and exit conditions before Klaviyo flows turn off.
+> Note: abandoned checkout requires checkout-started events (store connector);
+> back-in-stock requires the Shellz Club feed + stock truth.
 
-**Q7.2 Campaign features at launch: A/B testing? send-time optimization? or plain
-scheduled sends first?**
-> A: —
+**Q7.2 Campaign features at launch?**
+> A: **Plain scheduled sends** (segment/list + template + scheduled/immediate).
+> A/B and send-time optimization later. (Design note: structure the send log
+> around variants anyway so A/B arrives without schema migration.)
 
-**Q7.3 Segmentation depth needed at launch: profile-property rules only, or
-behavioral event conditions ("purchased X in last N days", "opened nothing in
-60d") from day one?**
-> A: —
+**Q7.3 Segmentation depth at launch?**
+> A: **Behavioral from day one.** Event-based conditions ("purchased in last
+> 90d", "opened nothing in 60d", "viewed product X") — Klaviyo-parity
+> segmentation, not just profile properties. This makes the canonical event
+> store + aggregate computation a v1 requirement, not a later phase.
 
-**Q7.4 AI's role: keep the existing generate→approve→export pipeline pointed at
-the new engine? Should AI ever author/modify journeys, and with what approval
-gates?**
-> A: —
+**Q7.4 AI's role?**
+> A: **Full agentic ambition.** AI agents run marketing semi-autonomously
+> within guardrails (budgets, frequency caps, approval thresholds) — the
+> long-term Archon vision. Design implication: the engine's published module
+> interface must be complete enough that an AI agent is a first-class operator
+> (create segment, draft campaign, schedule send, read results) with hard
+> server-side guardrails (caps, suppression, consent) that agents CANNOT
+> override — safety enforced in the engine, not in the prompt.
 
 ## Round 8 — Analytics & reporting
 
-**Q8.1 Attribution model you actually want to see (e.g. last-click within 5 days,
-click-only vs click+open), and is revenue-per-campaign/flow the headline metric?**
-> A: —
+**Q8.1 Attribution model?**
+> A: **Recommend during design; make it configurable per workspace.** Working
+> recommendation to validate: click-based last-touch within ~5 days (opens
+> directional-only due to Apple MPP). Note historical Klaviyo reports likely
+> used open-inclusive attribution — expect the new numbers to look smaller for
+> the same reality; call this out at cutover.
 
-**Q8.2 Click/open tracking: per-store tracking domains (links.store.com)?
-Comfortable that opens are directional-only (Apple MPP)?**
-> A: —
+**Q8.2 Click/open tracking mechanics?**
+> A: **Recommend during design.** Decide per-store branded tracking domains +
+> own link wrapping vs Resend's built-in open/click tracking, after checking
+> what Resend's webhooks expose vs what the chosen attribution model needs.
 
-**Q8.3 Where does reporting live — Archon CommandDeck/daily_metrics, and should
-campaign performance feed the AI analyst's context?**
-> A: —
+**Q8.3 Reporting home + AI feedback loop?**
+> A: **DECIDED: Archon dashboards + AI context.** Performance lands in the
+> marketing schema, surfaces on CommandDeck/daily_metrics, and feeds the AI
+> analyst's prompt so recommendations learn from real send results — closing
+> the loop Klaviyo never gave Archon (it pulls zero analytics today).
 
 ## Round 9 — Ops, quality bar & cutover
 
-**Q9.1 Does Echelon's financial-grade engineering contract (CLAUDE.md: evidence
-discipline, idempotency, transactions, structured errors, tests-with-change)
-apply verbatim to this system?**
-> A: —
+**Q9.1 Does Echelon's financial-grade engineering contract apply?**
+> A: **DECIDED: yes, verbatim.** Adopt Echelon's CLAUDE.md standards for the
+> marketing module — sends are money-adjacent and consent is legally
+> auditable. Action: write an Archon CLAUDE.md section enforcing the contract
+> for the `marketing` module (Archon has no such contract today).
 
-**Q9.2 Environments: is there a staging story, and do you want a send-sandbox
-mode (render + log but don't deliver) from day one?**
-> A: —
+**Q9.2 Environments & safe-send story?**
+> A: **DECIDED: first-class sandbox mode + internal seed list.** Engine renders
+> and logs but delivers only to the seed list; sandbox flag per
+> workspace/campaign. No separate staging app.
 
-**Q9.3 Scale targets to size for: profiles, emails/day at peak (drop + campaign
-days), acceptable send latency for triggered flows?**
-> A: —
+**Q9.3 Scale target without redesign?**
+> A: **DECIDED: 500k profiles / 5M emails-month.** Design an order of magnitude
+> beyond today: influences queue technology choice (Q4.3) and means send-log +
+> event tables are partitioned/pruned by design from day one.
 
-**Q9.4 Cutover appetite: dual-run duration alongside Klaviyo, domain warm-up
-tolerance (weeks of throttled volume), and who flips each flow over?**
-> A: —
+**Q9.4 Cutover appetite?**
+> A: **DECIDED: aggressive (~4–6 weeks).** Start domain warm-up the moment v1
+> campaigns work; downgrade the Klaviyo tier ASAP; accept some deliverability
+> risk to stop the cost bleeding sooner. Warm-up ramps on most-engaged
+> segments first.
 
 ---
 
 ## Parking lot / follow-ups raised during Q&A
 
-- (none yet)
+**Manual inventory needed before design finalizes (Klaviyo/Shopify dashboards —
+not visible from code):**
+- Exact configuration of the four live Klaviyo flow families (triggers, steps,
+  timing, templates).
+- Klaviyo SMS number type (toll-free vs short code) → port vs fresh-number
+  decision (Q3.2).
+- Which Klaviyo forms/popups are live on the storefront and what they collect.
+- Export procedure for Klaviyo suppression list + email consent + SMS/TCPA
+  consent records (the migration seed per Q6.4).
+
+**Decisions deliberately deferred to the design doc:**
+- Queue infra: Postgres queues vs Redis/BullMQ — now constrained by the 500k/5M
+  scale target (Q4.3 × Q9.3).
+- Identity master: evolve Archon `customers` vs engine-owned profile store (Q4.4).
+- First-party web-tracking snippet in v1 (Q5.2 — leaning yes, since the Klaviyo
+  snippet is live and behavioral segmentation is a day-one requirement per Q7.3).
+- Catalog source per store (Q5.3).
+- Per-source consent policy / double opt-in (Q6.2).
+- Attribution model + window, configurable per workspace (Q8.1).
+- Link wrapping: own tracking domains vs Resend built-in (Q8.2).
+
+**Scope notes captured along the way:**
+- Multi-channel ambition beyond email/SMS: ad-audience sync (Meta/Google),
+  video/social content — later phases, but the channel-port design must not
+  preclude them (Q2.2).
+- AI agents as first-class operators of the engine with server-side guardrails
+  they cannot override (Q7.4).
+- Unique coupon codes = v1 connector capability (Q5.4).
+- Behavioral segmentation day one ⇒ canonical event store + aggregates are v1
+  core, not phase 2 (Q7.3).
+- All four flow families must work before Klaviyo flows turn off (Q7.1).
+
+## Status: DISCOVERY COMPLETE — ready for design doc.
