@@ -2675,6 +2675,24 @@ function ReturnOpsTab() {
     [returnVariantsQuery.data],
   );
 
+  const inspectionRmaDetail = returnDetailQuery.data?.rma ?? null;
+  const inspectionFaultCategory = inspectionForm?.faultCategory ?? null;
+  const effectiveFeesUrl = useMemo(() => {
+    if (!inspectionRmaDetail || !inspectionFaultCategory) return null;
+    return buildAdminEffectiveReturnFeesUrl({
+      vendorId: inspectionRmaDetail.vendorId,
+      faultCategory: inspectionFaultCategory,
+    });
+  }, [inspectionRmaDetail, inspectionFaultCategory]);
+  const effectiveFeesQuery = useQuery<DropshipAdminEffectiveReturnFeesResponse>({
+    queryKey: [effectiveFeesUrl],
+    queryFn: () => {
+      if (!effectiveFeesUrl) throw new Error("Missing effective fees URL.");
+      return fetchJson<DropshipAdminEffectiveReturnFeesResponse>(effectiveFeesUrl);
+    },
+    enabled: effectiveFeesUrl !== null,
+  });
+
   useEffect(() => {
     const rma = returnDetailQuery.data?.rma;
     if (!rma) return;
@@ -2683,6 +2701,34 @@ function ReturnOpsTab() {
       return buildReturnInspectionFormState(rma);
     });
   }, [returnDetailQuery.data?.rma]);
+
+  // Auto-fill fees when fault category changes and fee data is available.
+  useEffect(() => {
+    const fees = effectiveFeesQuery.data?.fees;
+    if (!fees) return;
+    setInspectionForm((current) => {
+      if (!current || current.items.length === 0) return current;
+      // Sum all applicable fee amounts (flat-cents only; percent fees require
+      // order economics context we don't have at item level).
+      let totalFlatFeeCents = 0;
+      for (const fee of [fees.restockingFee, fees.processingFee, fees.returnShippingFee]) {
+        if (fee && fee.amountType === "flat_cents") {
+          totalFlatFeeCents += fee.amount;
+        }
+      }
+      if (totalFlatFeeCents <= 0) return current;
+      // Distribute evenly across items; remainder goes to the first item.
+      const perItem = Math.floor(totalFlatFeeCents / current.items.length);
+      const remainder = totalFlatFeeCents - (perItem * current.items.length);
+      return {
+        ...current,
+        items: current.items.map((item, index) => ({
+          ...item,
+          feeAmount: centsToDollarInput(perItem + (index === 0 ? remainder : 0)),
+        })),
+      };
+    });
+  }, [effectiveFeesQuery.data?.fees]);
 
   function applyReturnFilters() {
     setAppliedFilters({ search, status });
