@@ -8069,6 +8069,12 @@ function ReturnInspectionPanel({
                   {totals.hasInvalidAmount ? "Invalid" : formatCents(totals.feeCents)}
                 </span>
               </div>
+              <div className="flex justify-between gap-3 border-t pt-1 font-medium">
+                <span>Net</span>
+                <span className="font-mono text-foreground">
+                  {totals.hasInvalidAmount ? "Invalid" : formatCents(totals.creditCents - totals.feeCents)}
+                </span>
+              </div>
             </div>
           </div>
 
