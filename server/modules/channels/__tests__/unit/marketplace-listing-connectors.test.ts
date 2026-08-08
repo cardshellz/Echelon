@@ -722,6 +722,8 @@ describe("explicit eBay listing rebuild lifecycle", () => {
         },
       }),
     ]);
+
+    expect(calls).not.toContain("put_inventory:CATALOG-KEEP");
     expect(calls.filter((call) => call === "put_inventory:CATALOG-NEW")).toHaveLength(2);
   });
 

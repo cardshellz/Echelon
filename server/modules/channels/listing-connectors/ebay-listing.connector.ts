@@ -384,6 +384,7 @@ export class EbayMarketplaceListingConnector {
       client: input.client,
       draft: alignedDraft,
       currentGroup: liveGroup,
+      addedSkus: currentPreview.addedSkus,
       removedSkus: currentPreview.removedSkus,
     });
     if (result.externalProductId !== currentPreview.currentExternalListingId) {
@@ -401,6 +402,7 @@ export class EbayMarketplaceListingConnector {
     client: EbayListingLifecycleClient;
     draft: EbayListingConnectorDraft & { itemGroup: BuiltItemGroup };
     currentGroup: EbayInventoryItemGroup & { variantSKUs?: string[] };
+    addedSkus: readonly string[];
     removedSkus: readonly string[];
   }): Promise<EbayListingConnectorResult> {
     const resolvedOffers = await this.resolvePushOffers(input.client, input.draft);
@@ -409,9 +411,13 @@ export class EbayMarketplaceListingConnector {
     let workingGroup = input.currentGroup;
     let temporaryTransitionApplied = false;
     let targetGroupApplied = false;
+    const addedSkus = new Set(normalizedSkus(input.addedSkus));
+    const inventoryItemsToPrepare = input.draft.inventoryItems.filter((item) =>
+      addedSkus.has(item.sku),
+    );
 
     try {
-      for (const item of input.draft.inventoryItems) {
+      for (const item of inventoryItemsToPrepare) {
         try {
           await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
         } catch (error) {
