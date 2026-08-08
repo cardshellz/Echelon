@@ -34,6 +34,13 @@ describe("MarketplaceListingChangesDialog contract", () => {
     expect(source).toContain("confirmationToken: z.string()");
   });
 
+  it("distinguishes buyer-visible variants from inactive eBay group history", () => {
+    expect(source).toContain("activeSkus: z.array");
+    expect(source).toContain("inactiveSkus: z.array");
+    expect(source).toContain("preview.activeSkus.length");
+    expect(source).toContain("Historical/inactive on eBay - no action needed");
+    expect(source).toContain("!isActive && isDesired");
+  });
   it("recommends preserving the listing and labels replacement as a last resort", () => {
     expect(source).toContain("Review eBay listing changes");
     expect(source).toContain("Update existing listing");

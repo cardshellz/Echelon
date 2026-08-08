@@ -90,6 +90,8 @@ export interface EbayListingRebuildPreview {
   currentExternalListingId: string;
   sourceState: "active" | "withdrawn";
   currentSkus: string[];
+  activeSkus: string[];
+  inactiveSkus: string[];
   desiredSkus: string[];
   addedSkus: string[];
   removedSkus: string[];
@@ -222,7 +224,11 @@ export class EbayMarketplaceListingConnector {
       marketplaceId: input.draft.marketplaceId,
       expectedListingId: input.currentExternalListingId,
     });
-    const current = new Set(currentSkus);
+    const activeSkus = currentPublication.state === "active"
+      ? normalizedSkus([...currentPublication.offerIdsBySku.keys()])
+      : [];
+    const active = new Set(activeSkus);
+    const inactiveSkus = currentSkus.filter((sku) => !active.has(sku));
     const desired = new Set(desiredSkus);
     const previewWithoutToken = {
       productId: input.draft.productId,
@@ -230,9 +236,11 @@ export class EbayMarketplaceListingConnector {
       currentExternalListingId: input.currentExternalListingId.trim(),
       sourceState: currentPublication.state,
       currentSkus,
+      activeSkus,
+      inactiveSkus,
       desiredSkus,
-      addedSkus: desiredSkus.filter((sku) => !current.has(sku)),
-      removedSkus: currentSkus.filter((sku) => !desired.has(sku)),
+      addedSkus: desiredSkus.filter((sku) => !active.has(sku)),
+      removedSkus: activeSkus.filter((sku) => !desired.has(sku)),
     };
     return {
       ...previewWithoutToken,
@@ -565,11 +573,15 @@ function validateConfirmedPreview(
   preview: EbayListingRebuildPreview,
 ): void {
   const currentSkus = normalizedSkus(preview.currentSkus);
+  const activeSkus = normalizedSkus(preview.activeSkus);
+  const inactiveSkus = normalizedSkus(preview.inactiveSkus);
   const desiredSkus = normalizedSkus(draft.itemGroup?.payload.variantSKUs);
   const current = new Set(currentSkus);
+  const active = new Set(activeSkus);
+  const inactive = new Set(inactiveSkus);
   const desired = new Set(desiredSkus);
-  const expectedAddedSkus = desiredSkus.filter((sku) => !current.has(sku));
-  const expectedRemovedSkus = currentSkus.filter((sku) => !desired.has(sku));
+  const expectedAddedSkus = desiredSkus.filter((sku) => !active.has(sku));
+  const expectedRemovedSkus = activeSkus.filter((sku) => !desired.has(sku));
   const expectedRebuildRequired = expectedRemovedSkus.length > 0 || preview.sourceState === "withdrawn";
   const expectedToken = rebuildConfirmationToken({
     productId: draft.productId,
@@ -577,6 +589,8 @@ function validateConfirmedPreview(
     currentExternalListingId: preview.currentExternalListingId.trim(),
     sourceState: preview.sourceState,
     currentSkus,
+    activeSkus,
+    inactiveSkus,
     desiredSkus,
     addedSkus: expectedAddedSkus,
     removedSkus: expectedRemovedSkus,
@@ -585,6 +599,9 @@ function validateConfirmedPreview(
     preview.productId !== draft.productId
     || preview.groupKey !== draft.itemGroup!.groupKey
     || (preview.sourceState !== "active" && preview.sourceState !== "withdrawn")
+    || activeSkus.some((sku) => !current.has(sku) || inactive.has(sku))
+    || inactiveSkus.some((sku) => !current.has(sku))
+    || currentSkus.some((sku) => !active.has(sku) && !inactive.has(sku))
     || !sameStrings(normalizedSkus(preview.desiredSkus), desiredSkus)
     || !sameStrings(normalizedSkus(preview.addedSkus), expectedAddedSkus)
     || !sameStrings(normalizedSkus(preview.removedSkus), expectedRemovedSkus)
@@ -679,6 +696,8 @@ function rebuildConfirmationToken(input: {
   currentExternalListingId: string;
   sourceState: "active" | "withdrawn";
   currentSkus: readonly string[];
+  activeSkus: readonly string[];
+  inactiveSkus: readonly string[];
   desiredSkus: readonly string[];
   addedSkus: readonly string[];
   removedSkus: readonly string[];

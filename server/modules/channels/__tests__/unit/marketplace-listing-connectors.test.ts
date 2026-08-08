@@ -471,12 +471,17 @@ describe("explicit eBay listing rebuild lifecycle", () => {
 
     await expect(connector.previewListingRebuild({
       client,
-      draft: makeGroupedDraft(["CATALOG-KEEP", "CATALOG-NEW"]),
+      draft: makeGroupedDraft(["CATALOG-KEEP"]),
       currentExternalListingId: "listing-old",
     })).resolves.toMatchObject({
       sourceState: "active",
       currentSkus: ["CATALOG-KEEP", "CATALOG-OLD"],
-      removedSkus: ["CATALOG-OLD"],
+      activeSkus: ["CATALOG-KEEP"],
+      inactiveSkus: ["CATALOG-OLD"],
+      desiredSkus: ["CATALOG-KEEP"],
+      addedSkus: [],
+      removedSkus: [],
+      rebuildRequired: false,
     });
   });
 
@@ -607,8 +612,11 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     expect(preview).toMatchObject({
       sourceState: "withdrawn",
       currentSkus: ["CATALOG-KEEP", "CATALOG-OLD"],
+      activeSkus: [],
+      inactiveSkus: ["CATALOG-KEEP", "CATALOG-OLD"],
       desiredSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
-      removedSkus: ["CATALOG-OLD"],
+      addedSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
+      removedSkus: [],
       rebuildRequired: true,
     });
     await expect(connector.executeListingRebuild({ client, draft, preview }))
@@ -655,8 +663,10 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     expect(preview).toMatchObject({
       sourceState: "withdrawn",
       currentSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
+      activeSkus: [],
+      inactiveSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
       desiredSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
-      addedSkus: [],
+      addedSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
       removedSkus: [],
       rebuildRequired: true,
     });
