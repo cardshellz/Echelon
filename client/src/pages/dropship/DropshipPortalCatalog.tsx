@@ -62,19 +62,15 @@ type PendingSelectionAction = string | null;
 type PendingListingAction = "preview" | "send-code" | "verify-code" | "passkey-proof" | "push" | null;
 type CatalogFilters = {
   search: string;
-  selectedOnly: string;
   category: string;
   productLineIds: string;
-  productId: string;
 };
 
 const ALL_FILTER_VALUE = "all";
 const defaultCatalogFilters: CatalogFilters = {
   search: "",
-  selectedOnly: "false",
   category: ALL_FILTER_VALUE,
   productLineIds: ALL_FILTER_VALUE,
-  productId: ALL_FILTER_VALUE,
 };
 
 export default function DropshipPortalCatalog() {
@@ -86,11 +82,9 @@ export default function DropshipPortalCatalog() {
     verifyEmailStepUp,
     verifyPasskeyStepUp,
   } = useDropshipAuth();
-  const [search, setSearch] = useState("");
-  const [selectedOnly, setSelectedOnly] = useState("false");
+  const [productSearch, setProductSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState(ALL_FILTER_VALUE);
   const [productLineIdsFilter, setProductLineIdsFilter] = useState(ALL_FILTER_VALUE);
-  const [productIdFilter, setProductIdFilter] = useState(ALL_FILTER_VALUE);
   const [applied, setApplied] = useState<CatalogFilters>(defaultCatalogFilters);
   const [pendingSelectionAction, setPendingSelectionAction] = useState<PendingSelectionAction>(null);
   const [pendingListingAction, setPendingListingAction] = useState<PendingListingAction>(null);
@@ -108,8 +102,6 @@ export default function DropshipPortalCatalog() {
     search: applied.search,
     category: applied.category === ALL_FILTER_VALUE ? undefined : applied.category,
     productLineIds: applied.productLineIds === ALL_FILTER_VALUE ? undefined : applied.productLineIds,
-    productId: applied.productId === ALL_FILTER_VALUE ? undefined : applied.productId,
-    selectedOnly: applied.selectedOnly,
     page: 1,
     limit: 50,
   }), [applied]);
@@ -128,22 +120,14 @@ export default function DropshipPortalCatalog() {
   const visibleRows = catalogQuery.data?.rows ?? [];
   const visibleSelectableRows = visibleRows.filter(canSelectRow);
   const visibleSelectedRows = visibleRows.filter((row) => row.selectionDecision.selected);
-  const catalogFacets = catalogQuery.data?.facets ?? {
-    categories: [],
-    productLines: [],
-    products: [],
-  };
+  const catalogFacets = catalogQuery.data?.facets ?? buildFacetsFromRows(visibleRows);
   const activeSelectionRuleCount = selectionRulesQuery.data?.rules.filter((rule) => rule.isActive !== false).length ?? 0;
   const hasActiveFilters = applied.search !== ""
-    || applied.selectedOnly !== "false"
     || applied.category !== ALL_FILTER_VALUE
     || applied.productLineIds !== ALL_FILTER_VALUE
-    || applied.productId !== ALL_FILTER_VALUE
-    || search.trim() !== ""
-    || selectedOnly !== "false"
+    || productSearch.trim() !== ""
     || categoryFilter !== ALL_FILTER_VALUE
-    || productLineIdsFilter !== ALL_FILTER_VALUE
-    || productIdFilter !== ALL_FILTER_VALUE;
+    || productLineIdsFilter !== ALL_FILTER_VALUE;
   const launchReadyStoreConnections = useMemo(
     () => listLaunchReadyStoreConnections(settingsQuery.data?.settings.storeConnections ?? []),
     [settingsQuery.data?.settings.storeConnections],
@@ -171,6 +155,25 @@ export default function DropshipPortalCatalog() {
     }
     setSelectedStoreConnectionId(String(launchReadyStoreConnections[0].storeConnectionId));
   }, [launchReadyStoreConnections, selectedStoreConnectionId]);
+
+  useEffect(() => {
+    const nextFilters: CatalogFilters = {
+      search: productSearch.trim(),
+      category: categoryFilter,
+      productLineIds: productLineIdsFilter,
+    };
+    const handle = window.setTimeout(() => {
+      setApplied((current) => {
+        if (catalogFiltersEqual(current, nextFilters)) {
+          return current;
+        }
+        setListingPreview(null);
+        setListingPushResult(null);
+        return nextFilters;
+      });
+    }, 250);
+    return () => window.clearTimeout(handle);
+  }, [categoryFilter, productLineIdsFilter, productSearch]);
 
   async function replaceSelection(action: DropshipVendorSelectionAction, rows: readonly DropshipCatalogRow[], actionKey: string) {
     if (!selectionRulesQuery.data) {
@@ -450,24 +453,10 @@ export default function DropshipPortalCatalog() {
     setMessage("");
   }
 
-  function applyCatalogFilters() {
-    setApplied({
-      search: search.trim(),
-      selectedOnly,
-      category: categoryFilter,
-      productLineIds: productLineIdsFilter,
-      productId: productIdFilter,
-    });
-    setListingPreview(null);
-    setListingPushResult(null);
-  }
-
   function resetCatalogFilters() {
-    setSearch("");
-    setSelectedOnly("false");
+    setProductSearch("");
     setCategoryFilter(ALL_FILTER_VALUE);
     setProductLineIdsFilter(ALL_FILTER_VALUE);
-    setProductIdFilter(ALL_FILTER_VALUE);
     setApplied(defaultCatalogFilters);
     setListingPreview(null);
     setListingPushResult(null);
@@ -483,7 +472,7 @@ export default function DropshipPortalCatalog() {
               Catalog
             </h1>
             <p className="mt-1 text-sm text-zinc-500">
-              Filter the exposed catalog, then choose products and variants from the table.
+              Filter the catalog, then choose products and variants from the table.
             </p>
           </div>
         </div>
@@ -530,19 +519,13 @@ export default function DropshipPortalCatalog() {
           categoryOptions={catalogFacets.categories}
           disabled={catalogQuery.isFetching}
           hasActiveFilters={hasActiveFilters}
-          productId={productIdFilter}
           productLineIds={productLineIdsFilter}
           productLineOptions={catalogFacets.productLines}
-          productOptions={catalogFacets.products}
-          search={search}
-          selectedOnly={selectedOnly}
-          onApply={applyCatalogFilters}
+          productSearch={productSearch}
           onCategoryChange={setCategoryFilter}
-          onProductChange={setProductIdFilter}
           onProductLineChange={setProductLineIdsFilter}
           onReset={resetCatalogFilters}
-          onSearchChange={setSearch}
-          onSelectedOnlyChange={setSelectedOnly}
+          onProductSearchChange={setProductSearch}
         />
 
         <CatalogSelectionProofPanel
@@ -599,7 +582,7 @@ export default function DropshipPortalCatalog() {
               <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
               <EmptyHeader>
                 <EmptyTitle>No catalog rows</EmptyTitle>
-                <EmptyDescription>No exposed catalog rows match the current filters.</EmptyDescription>
+                <EmptyDescription>No catalog rows match the current filters.</EmptyDescription>
               </EmptyHeader>
             </Empty>
           )}
@@ -634,37 +617,25 @@ function CatalogFilterPanel({
   categoryOptions,
   disabled,
   hasActiveFilters,
-  onApply,
   onCategoryChange,
-  onProductChange,
   onProductLineChange,
+  onProductSearchChange,
   onReset,
-  onSearchChange,
-  onSelectedOnlyChange,
-  productId,
   productLineIds,
   productLineOptions,
-  productOptions,
-  search,
-  selectedOnly,
+  productSearch,
 }: {
   category: string;
   categoryOptions: DropshipCatalogResponse["facets"]["categories"];
   disabled: boolean;
   hasActiveFilters: boolean;
-  onApply: () => void;
   onCategoryChange: (value: string) => void;
-  onProductChange: (value: string) => void;
   onProductLineChange: (value: string) => void;
+  onProductSearchChange: (value: string) => void;
   onReset: () => void;
-  onSearchChange: (value: string) => void;
-  onSelectedOnlyChange: (value: string) => void;
-  productId: string;
   productLineIds: string;
   productLineOptions: DropshipCatalogResponse["facets"]["productLines"];
-  productOptions: DropshipCatalogResponse["facets"]["products"];
-  search: string;
-  selectedOnly: string;
+  productSearch: string;
 }) {
   return (
     <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
@@ -685,43 +656,20 @@ function CatalogFilterPanel({
           >
             Reset
           </Button>
-          <Button
-            type="button"
-            className="h-10 bg-[#C060E0] hover:bg-[#a94bc9]"
-            disabled={disabled}
-            onClick={onApply}
-          >
-            Apply filters
-          </Button>
         </div>
       </div>
 
-      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <div className="xl:col-span-2">
-          <Label>Search</Label>
-          <div className="relative mt-2">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
-            <Input
-              value={search}
-              onChange={(event) => onSearchChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  onApply();
-                }
-              }}
-              className="pl-9"
-              placeholder="Product, variant, or SKU"
-            />
-          </div>
-        </div>
-
+      <div className="mt-4 grid gap-3 lg:grid-cols-3">
         <FilterSelect
-          label="Selection"
-          value={selectedOnly}
-          onValueChange={onSelectedOnlyChange}
+          label="Product line"
+          value={productLineIds}
+          onValueChange={onProductLineChange}
           options={[
-            { value: "false", label: "All exposed" },
-            { value: "true", label: "Selected only" },
+            { value: ALL_FILTER_VALUE, label: "All product lines" },
+            ...productLineOptions.map((option) => ({
+              value: option.productLineIds.join(","),
+              label: `${option.label} (${option.rowCount})`,
+            })),
           ]}
         />
         <FilterSelect
@@ -736,31 +684,17 @@ function CatalogFilterPanel({
             })),
           ]}
         />
-        <FilterSelect
-          label="Product line"
-          value={productLineIds}
-          onValueChange={onProductLineChange}
-          options={[
-            { value: ALL_FILTER_VALUE, label: "All product lines" },
-            ...productLineOptions.map((option) => ({
-              value: option.productLineIds.join(","),
-              label: `${option.label} (${option.rowCount})`,
-            })),
-          ]}
-        />
-        <div className="xl:col-span-2">
-          <FilterSelect
-            label="Product"
-            value={productId}
-            onValueChange={onProductChange}
-            options={[
-              { value: ALL_FILTER_VALUE, label: "All products" },
-              ...productOptions.map((option) => ({
-                value: String(option.productId),
-                label: `${option.label}${option.sku ? ` (${option.sku})` : ""}`,
-              })),
-            ]}
-          />
+        <div>
+          <Label>Product</Label>
+          <div className="relative mt-2">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+            <Input
+              value={productSearch}
+              onChange={(event) => onProductSearchChange(event.target.value)}
+              className="pl-9"
+              placeholder="Type product, variant, or SKU"
+            />
+          </div>
         </div>
       </div>
     </section>
@@ -1270,6 +1204,66 @@ function pushButtonIcon(pendingListingAction: PendingListingAction, emailCodeSen
   if (pendingListingAction === "send-code" || (emailCodeSent && pendingListingAction !== "push")) return <Mail className="h-4 w-4" />;
   if (pendingListingAction === "push") return <Send className="h-4 w-4" />;
   return <ArrowRight className="h-4 w-4" />;
+}
+
+function catalogFiltersEqual(left: CatalogFilters, right: CatalogFilters): boolean {
+  return left.search === right.search
+    && left.category === right.category
+    && left.productLineIds === right.productLineIds;
+}
+
+function buildFacetsFromRows(rows: readonly DropshipCatalogRow[]): DropshipCatalogResponse["facets"] {
+  const categories = new Map<string, DropshipCatalogResponse["facets"]["categories"][number]>();
+  const productLines = new Map<string, DropshipCatalogResponse["facets"]["productLines"][number]>();
+  const products = new Map<number, DropshipCatalogResponse["facets"]["products"][number]>();
+
+  for (const row of rows) {
+    const category = row.category?.trim();
+    if (category) {
+      const key = category.toLowerCase();
+      const facet = categories.get(key) ?? { category, label: category, rowCount: 0 };
+      facet.rowCount += 1;
+      categories.set(key, facet);
+    }
+
+    const countedProductLineKeys = new Set<string>();
+    row.productLineIds.forEach((productLineId, index) => {
+      if (!Number.isInteger(productLineId) || productLineId <= 0) {
+        return;
+      }
+      const label = row.productLineNames[index]?.trim() || `Product line ${productLineId}`;
+      const key = label.toLowerCase();
+      const facet = productLines.get(key) ?? { productLineIds: [], label, rowCount: 0 };
+      if (!facet.productLineIds.includes(productLineId)) {
+        facet.productLineIds.push(productLineId);
+        facet.productLineIds.sort((left, right) => left - right);
+      }
+      if (!countedProductLineKeys.has(key)) {
+        facet.rowCount += 1;
+        countedProductLineKeys.add(key);
+      }
+      productLines.set(key, facet);
+    });
+
+    const product = products.get(row.productId) ?? {
+      productId: row.productId,
+      label: row.productName || row.productSku || `Product ${row.productId}`,
+      sku: row.productSku,
+      rowCount: 0,
+    };
+    product.rowCount += 1;
+    products.set(row.productId, product);
+  }
+
+  return {
+    categories: sortFacetOptions(Array.from(categories.values())),
+    productLines: sortFacetOptions(Array.from(productLines.values())),
+    products: sortFacetOptions(Array.from(products.values())),
+  };
+}
+
+function sortFacetOptions<T extends { label: string }>(facets: T[]): T[] {
+  return facets.sort((left, right) => left.label.localeCompare(right.label));
 }
 
 function selectionTargetLabel(target: DropshipVendorSelectionScopeTarget): string {
