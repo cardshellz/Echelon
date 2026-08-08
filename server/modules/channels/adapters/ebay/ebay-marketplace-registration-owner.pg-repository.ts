@@ -14,7 +14,7 @@ import type {
 type EbayMarketplaceRegistrationReadDb = Pick<typeof defaultDb, "select">;
 
 export interface EbayRegistrationAtpReader {
-  getAtpBase(productId: number): Promise<number>;
+  getDirectVariantAtp(variantIds: number[]): Promise<Map<number, number>>;
 }
 
 /**
@@ -82,27 +82,18 @@ export class PgEbayMarketplaceRegistrationOwnerRepository
   async loadAllProductVariants(
     productId: number,
   ): Promise<readonly EbayRegistrationVariantRecord[]> {
-    const [rows, atpBase] = await Promise.all([
-      this.db
-        .select({
-          id: productVariants.id,
-          productId: productVariants.productId,
-          sku: productVariants.sku,
-          isActive: productVariants.isActive,
-          unitsPerVariant: productVariants.unitsPerVariant,
-        })
-        .from(productVariants)
-        .where(eq(productVariants.productId, productId))
-        .orderBy(asc(productVariants.id)),
-      this.atp.getAtpBase(productId),
-    ]);
-    if (!Number.isSafeInteger(atpBase)) {
-      throw repositoryError(
-        "CHANNEL_MARKETPLACE_REGISTRATION_ATP_INVALID",
-        "The authoritative inventory service returned an invalid ATP value.",
-        { productId },
-      );
-    }
+    const rows = await this.db
+      .select({
+        id: productVariants.id,
+        productId: productVariants.productId,
+        sku: productVariants.sku,
+        isActive: productVariants.isActive,
+        unitsPerVariant: productVariants.unitsPerVariant,
+      })
+      .from(productVariants)
+      .where(eq(productVariants.productId, productId))
+      .orderBy(asc(productVariants.id));
+    const directAtp = await this.atp.getDirectVariantAtp(rows.map((row) => row.id));
 
     return rows.map((row) => {
       if (
@@ -120,12 +111,30 @@ export class PgEbayMarketplaceRegistrationOwnerRepository
         productId: row.productId,
         sku: row.sku,
         isActive: row.isActive,
-        availableQuantity: Math.floor(atpBase / row.unitsPerVariant),
+        availableQuantity: requireValidDirectAtp(
+          directAtp.get(row.id),
+          productId,
+          row.id,
+        ),
       };
     });
   }
 }
 
+function requireValidDirectAtp(
+  value: number | undefined,
+  productId: number,
+  productVariantId: number,
+): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw repositoryError(
+      "CHANNEL_MARKETPLACE_REGISTRATION_ATP_INVALID",
+      "The authoritative inventory service returned an invalid ATP value.",
+      { productId, productVariantId },
+    );
+  }
+  return value;
+}
 function asMetadata(value: unknown): Readonly<Record<string, unknown>> {
   if (
     typeof value !== "object"

@@ -102,8 +102,10 @@ function createMockAtpService(config: {
   variants: any[];
   /** Per-warehouse ATP in base units: { warehouseId: atpBase } */
   warehouseAtp?: Record<number, number>;
+  /** Direct variant ATP: { warehouseId: { variantId: variantUnits } } */
+  directWarehouseAtp?: Record<number, Record<number, number>>;
 }) {
-  const { variants, warehouseAtp = {} } = config;
+  const { variants, warehouseAtp = {}, directWarehouseAtp = {} } = config;
   const globalAtpBase = variants.length > 0 ? variants[0].atpBase : 0;
 
   return {
@@ -119,6 +121,16 @@ function createMockAtpService(config: {
     }),
     getAtpBaseByWarehouse: vi.fn(async (_productId: number, warehouseId: number) => {
       return warehouseAtp[warehouseId] ?? 0;
+    }),
+    getDirectVariantAtpByWarehouse: vi.fn(async (variantIds: number[], warehouseId: number) => {
+      const configured = directWarehouseAtp[warehouseId];
+      return new Map(variantIds.map((variantId) => {
+        const variant = variants.find((candidate: any) => candidate.productVariantId === variantId);
+        const fallback = variant
+          ? Math.floor((warehouseAtp[warehouseId] ?? 0) / variant.unitsPerVariant)
+          : 0;
+        return [variantId, configured?.[variantId] ?? fallback];
+      }));
     }),
   };
 }
@@ -170,6 +182,33 @@ describe("Allocation Engine (Parallel Model)", () => {
       expect(caAlloc?.method).toBe("mirror");
     });
 
+    it("uses only each eBay variant's direct inventory without reverse conversion", async () => {
+      const variants = [
+        { productVariantId: 60, sku: "CASE-60", name: "Case of 60", unitsPerVariant: 60, atpUnits: 188, atpBase: 11_300 },
+        { productVariantId: 10, sku: "PACK-10", name: "Pack of 10", unitsPerVariant: 10, atpUnits: 1_130, atpBase: 11_300 },
+      ];
+      const channels = [
+        { id: 67, name: "eBay", provider: "ebay", status: "active", priority: 0 },
+      ];
+      const warehouseAssignments = [
+        { channelId: 67, warehouseId: 1, enabled: true },
+      ];
+      const atp = createMockAtpService({
+        variants,
+        warehouseAtp: { 1: 11_300 },
+        directWarehouseAtp: { 1: { 60: 0, 10: 1_130 } },
+      });
+      const engine = createAllocationEngine(
+        createMockDb({ activeChannels: channels, warehouseAssignments }),
+        atp,
+      );
+
+      const result = await engine.allocateProduct(501);
+
+      expect(result.allocations.find((item) => item.productVariantId === 60)?.allocatedUnits).toBe(0);
+      expect(result.allocations.find((item) => item.productVariantId === 10)?.allocatedUnits).toBe(1_130);
+      expect(atp.getDirectVariantAtpByWarehouse).toHaveBeenCalledWith([60, 10], 1);
+    });
     it("should fall back to all fulfillment warehouses when no assignments exist", async () => {
       const variants = [
         { productVariantId: 1, sku: "TL-100", name: "100ct", unitsPerVariant: 1, atpUnits: 1000, atpBase: 1000 },

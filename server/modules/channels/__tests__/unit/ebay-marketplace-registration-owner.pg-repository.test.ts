@@ -35,7 +35,7 @@ function orderedLimitedRows(rows: readonly unknown[]) {
 }
 
 describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
-  it("loads the authoritative owner and every variant using shared-pool ATP", async () => {
+  it("loads the authoritative owner and every variant using direct per-SKU ATP", async () => {
     const db = {
       select: vi.fn()
         .mockReturnValueOnce(limitedRows([{ id: 67, provider: "ebay" }]))
@@ -68,7 +68,13 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
           },
         ])),
     };
-    const atp = { getAtpBase: vi.fn().mockResolvedValue(1_500) };
+    const atp = {
+      getDirectVariantAtp: vi.fn().mockResolvedValue(new Map([
+        [700, 525],
+        [750, 490],
+        [50, 7_361],
+      ])),
+    };
     const repository = new PgEbayMarketplaceRegistrationOwnerRepository(
       db as any,
       atp,
@@ -86,24 +92,24 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
         productId: 501,
         sku: "ARM-ENV-SGL-C700",
         isActive: false,
-        availableQuantity: 2,
+        availableQuantity: 525,
       },
       {
         id: 750,
         productId: 501,
         sku: "ARM-ENV-SGL-C750",
         isActive: true,
-        availableQuantity: 2,
+        availableQuantity: 490,
       },
       {
         id: 50,
         productId: 501,
         sku: "ARM-ENV-SGL-P50",
         isActive: true,
-        availableQuantity: 30,
+        availableQuantity: 7_361,
       },
     ]);
-    expect(atp.getAtpBase).toHaveBeenCalledWith(501);
+    expect(atp.getDirectVariantAtp).toHaveBeenCalledWith([700, 750, 50]);
   });
 
   it("uses the connector default marketplace only when metadata omits it", async () => {
@@ -114,7 +120,7 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
     };
     const repository = new PgEbayMarketplaceRegistrationOwnerRepository(
       db as any,
-      { getAtpBase: vi.fn() },
+      { getDirectVariantAtp: vi.fn() },
     );
 
     await expect(repository.loadChannel(67)).resolves.toMatchObject({
@@ -133,7 +139,7 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
     };
     const repository = new PgEbayMarketplaceRegistrationOwnerRepository(
       db as any,
-      { getAtpBase: vi.fn() },
+      { getDirectVariantAtp: vi.fn() },
     );
 
     await expect(repository.loadChannel(67)).rejects.toMatchObject({
@@ -153,7 +159,7 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
     };
     const repository = new PgEbayMarketplaceRegistrationOwnerRepository(
       db as any,
-      { getAtpBase: vi.fn().mockResolvedValue(0) },
+      { getDirectVariantAtp: vi.fn().mockResolvedValue(new Map([[700, 0]])) },
     );
 
     await expect(repository.loadAllProductVariants(501)).resolves.toEqual([{
@@ -177,7 +183,7 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
     };
     const repository = new PgEbayMarketplaceRegistrationOwnerRepository(
       db as any,
-      { getAtpBase: vi.fn().mockResolvedValue(1_500) },
+      { getDirectVariantAtp: vi.fn().mockResolvedValue(new Map([[700, 1_500]])) },
     );
 
     await expect(repository.loadAllProductVariants(501)).rejects.toMatchObject({

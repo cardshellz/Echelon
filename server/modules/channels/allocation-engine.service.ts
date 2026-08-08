@@ -113,6 +113,7 @@ type AtpService = {
     atpBase: number;
   }>>;
   getAtpBaseByWarehouse?(productId: number, warehouseId: number): Promise<number>;
+  getDirectVariantAtpByWarehouse?(variantIds: number[], warehouseId: number): Promise<Map<number, number>>;
 };
 
 /** Per-channel allocation result for a single variant */
@@ -411,6 +412,22 @@ class AllocationEngine {
         }
       }
 
+      // eBay cannot sell inventory by implicitly converting sibling SKUs. Load
+      // direct ATP per warehouse once, then run the existing allocation rules
+      // against each variant's own physical units.
+      const ebayDirectAtpByWarehouse = new Map<number, Map<number, number>>();
+      if (channel.provider === "ebay") {
+        if (!this.atpService.getDirectVariantAtpByWarehouse) {
+          throw new Error("Direct per-variant ATP is required for eBay allocation");
+        }
+        const variantIds = globalVariantAtp.map((variant) => variant.productVariantId);
+        for (const warehouseId of assignedWarehouseIds) {
+          ebayDirectAtpByWarehouse.set(
+            warehouseId,
+            await this.atpService.getDirectVariantAtpByWarehouse(variantIds, warehouseId),
+          );
+        }
+      }
       // Get channel's rules + merge with global rules (per-channel takes priority)
       const channelRules = rulesByChannel.get(channel.id) ?? [];
 
@@ -496,9 +513,23 @@ class AllocationEngine {
         );
 
         const resolved = this.resolveRule(channelDefaultRule, productRule, variantRule);
+        let variantChannelBaseAtp = channelBaseAtp;
+        let variantWarehouseRawAtp = warehouseRawAtp;
+        if (channel.provider === "ebay") {
+          variantWarehouseRawAtp = new Map<number, number>();
+          variantChannelBaseAtp = 0;
+          for (const warehouseId of assignedWarehouseIds) {
+            const directVariantUnits = ebayDirectAtpByWarehouse
+              .get(warehouseId)
+              ?.get(variant.productVariantId) ?? 0;
+            const directVariantBase = directVariantUnits * variant.unitsPerVariant;
+            variantWarehouseRawAtp.set(warehouseId, directVariantBase);
+            variantChannelBaseAtp += directVariantBase;
+          }
+        }
         const allocation = this.computeAllocation(
-          channelBaseAtp,
-          warehouseRawAtp,
+          variantChannelBaseAtp,
+          variantWarehouseRawAtp,
           variant,
           resolved,
           channel,

@@ -232,6 +232,36 @@ class InventoryAtpService {
     return result;
   }
 
+  // --------------------------------------------------------------------------
+  // 2d. getDirectVariantAtp
+  // --------------------------------------------------------------------------
+
+  /**
+   * Per-variant ATP calculated directly from inventory_levels across all locations.
+   * This deliberately does not convert inventory held in sibling variants.
+   */
+  async getDirectVariantAtp(variantIds: number[]): Promise<Map<number, number>> {
+    if (variantIds.length === 0) return new Map();
+
+    const idList = sql.join(variantIds.map((id) => sql`${id}`), sql`, `);
+    const rows = await this.db.execute(sql`
+      SELECT
+        il.product_variant_id,
+        SUM(GREATEST(il.variant_qty - il.reserved_qty, 0)) AS atp
+      FROM inventory.inventory_levels il
+      WHERE il.product_variant_id IN (${idList})
+      GROUP BY il.product_variant_id
+    `);
+
+    const result = new Map<number, number>();
+    for (const row of rows.rows as any[]) {
+      result.set(Number(row.product_variant_id), Math.max(0, Number(row.atp)));
+    }
+    for (const variantId of variantIds) {
+      if (!result.has(variantId)) result.set(variantId, 0);
+    }
+    return result;
+  }
   /**
    * Per-variant ATP scoped to a single warehouse. Returns sellable
    * variant units for each active variant based on that warehouse's

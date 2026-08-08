@@ -456,12 +456,10 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
       const isMultiVariant = variants.length > 1;
       const variationAspectName = isMultiVariant ? determineVariationAspectName(variants) : "";
 
-      // ---- Fetch fungible ATP for this product (shared pool) ----
-      const syncVariantAtps = await atpService.getAtpPerVariant(productId);
-      const syncAtpByVariantId: Map<number, number> = new Map();
-      for (const va of syncVariantAtps) {
-        syncAtpByVariantId.set(va.productVariantId, va.atpUnits);
-      }
+      // eBay sync advertises only ATP physically held in each SKU.
+      const syncAtpByVariantId = await atpService.getDirectVariantAtp(
+        variants.map((variant: any) => Number(variant.variant_id)),
+      );
 
       const routeProduct = {
         name: product.product_name,

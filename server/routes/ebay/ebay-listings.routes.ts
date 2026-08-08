@@ -155,15 +155,11 @@ const ebayListingPushRequestSchema = z.object({
             ORDER BY pv.product_id, pv.position ASC, pv.id ASC
           `, [productIds, EBAY_CHANNEL_ID]);
 
-          // Fetch fungible ATP for all products in the feed
-          const atpByVariantId: Map<number, number> = new Map();
-          const uniqueProductIds = [...new Set(varResult.rows.map((v: any) => v.product_id))];
-          for (const pid of uniqueProductIds) {
-            const variantAtps = await atpService.getAtpPerVariant(pid);
-            for (const va of variantAtps) {
-              atpByVariantId.set(va.productVariantId, va.atpUnits);
-            }
-          }
+          // eBay must advertise only ATP physically held in each SKU. Inventory
+          // in sibling pack sizes is not implicitly convertible in this path.
+          const atpByVariantId = await atpService.getDirectVariantAtp(
+            varResult.rows.map((variant: any) => Number(variant.id)),
+          );
 
           for (const v of varResult.rows) {
             const pid = v.product_id;
@@ -569,12 +565,11 @@ const ebayListingPushRequestSchema = z.object({
           // Determine the variation aspect name for multi-variant products
           const variationAspectName = isMultiVariant ? determineVariationAspectName(variants) : "";
 
-          // ---- Fetch fungible ATP for this product (shared pool) ----
-          const variantAtps = await atpService.getAtpPerVariant(productId);
-          const atpByVariantId: Map<number, number> = new Map();
-          for (const va of variantAtps) {
-            atpByVariantId.set(va.productVariantId, va.atpUnits);
-          }
+          // eBay listing quantities are direct per-SKU ATP; sibling variants
+          // cannot be assembled into this variant by the listing workflow.
+          const atpByVariantId = await atpService.getDirectVariantAtp(
+            variants.map((variant: any) => Number(variant.id)),
+          );
 
           let routeDraft: ReturnType<typeof buildEbayRouteListingDraft>;
           try {
@@ -985,12 +980,10 @@ const ebayListingPushRequestSchema = z.object({
             variantPrices.set(v.id, resolved);
           }
 
-          // ATP
-          const variantAtps = await atpService.getAtpPerVariant(productId);
-          const atpByVariantId: Map<number, number> = new Map();
-          for (const va of variantAtps) {
-            atpByVariantId.set(va.productVariantId, va.atpUnits);
-          }
+          // eBay listing quantities are direct per-SKU ATP.
+          const atpByVariantId = await atpService.getDirectVariantAtp(
+            variants.map((variant: any) => Number(variant.id)),
+          );
 
           let routeDraft: ReturnType<typeof buildEbayRouteListingDraft>;
           try {
@@ -1381,9 +1374,9 @@ const ebayListingPushRequestSchema = z.object({
             const isMultiVariant = variants.length > 1;
             const variationAspectName = isMultiVariant ? determineVariationAspectName(variants) : "";
 
-            const syncVariantAtps = await atpService.getAtpPerVariant(productId);
-            const syncAtpByVariantId: Map<number, number> = new Map();
-            for (const va of syncVariantAtps) syncAtpByVariantId.set(va.productVariantId, va.atpUnits);
+            const syncAtpByVariantId = await atpService.getDirectVariantAtp(
+              variants.map((variant: any) => Number(variant.variant_id)),
+            );
 
             let storeCategoryNames: string[] = [];
             if (product.product_type) {
