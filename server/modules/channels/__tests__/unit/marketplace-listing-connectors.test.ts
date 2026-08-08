@@ -543,7 +543,7 @@ describe("explicit eBay listing rebuild lifecycle", () => {
         status: "updated",
         removedSkus: ["CATALOG-OLD"],
       });
-    expect(client.getInventoryItemGroup).toHaveBeenCalledTimes(2);
+    expect(client.getInventoryItemGroup).toHaveBeenCalledTimes(3);
     expect(client.createOrReplaceInventoryItemGroup).toHaveBeenCalledWith(
       "CATALOG-GROUP",
       expect.objectContaining({ variantSKUs: ["CATALOG-KEEP", "CATALOG-NEW"] }),
@@ -553,6 +553,73 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     expect(calls.indexOf("update_offer")).toBeLessThan(calls.indexOf("publish_group"));
     expect(client.withdrawOfferByInventoryItemGroup).not.toHaveBeenCalled();
     expect(client.deleteInventoryItemGroup).not.toHaveBeenCalled();
+  });
+
+  it("preserves the live eBay variation aspect name when the catalog-derived name changed", async () => {
+    const client = makeLifecycleClient({
+      currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"],
+      currentListingId: "listing-old",
+      currentVariationAspectName: "Style",
+    });
+    vi.mocked(client.publishOfferByInventoryItemGroup)
+      .mockResolvedValue({ listingId: "listing-old" });
+    const connector = new EbayMarketplaceListingConnector();
+    const baseDraft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-NEW"]);
+    const draft: EbayListingConnectorDraft = {
+      ...baseDraft,
+      inventoryItems: baseDraft.inventoryItems.map((item) => ({
+        ...item,
+        payload: {
+          ...item.payload,
+          product: {
+            ...item.payload.product,
+            aspects: { "Pack Size": [item.sku] },
+          },
+        },
+      })),
+      itemGroup: {
+        ...baseDraft.itemGroup!,
+        payload: {
+          ...baseDraft.itemGroup!.payload,
+          variesBy: {
+            specifications: [{
+              name: "Pack Size",
+              values: ["CATALOG-KEEP", "CATALOG-NEW"],
+            }],
+          },
+        },
+      },
+    };
+    const preview = await connector.previewListingRebuild({
+      client,
+      draft,
+      currentExternalListingId: "listing-old",
+    });
+
+    await expect(connector.updateExistingListing({ client, draft, preview }))
+      .resolves.toMatchObject({ externalProductId: "listing-old" });
+    expect(client.createOrReplaceInventoryItem).toHaveBeenCalledWith(
+      "CATALOG-NEW",
+      expect.objectContaining({
+        product: expect.objectContaining({
+          aspects: expect.objectContaining({ Style: ["CATALOG-NEW"] }),
+        }),
+      }),
+    );
+    const newInventoryItemCall = vi.mocked(client.createOrReplaceInventoryItem).mock.calls
+      .find(([sku]) => sku === "CATALOG-NEW");
+    expect(newInventoryItemCall?.[1].product.aspects).not.toHaveProperty("Pack Size");
+    expect(client.createOrReplaceInventoryItemGroup).toHaveBeenCalledWith(
+      "CATALOG-GROUP",
+      expect.objectContaining({
+        variesBy: {
+          specifications: [{
+            name: "Style",
+            values: ["CATALOG-KEEP", "CATALOG-NEW"],
+          }],
+        },
+      }),
+    );
   });
 
   it("retains a removed variation at zero when eBay rejects desired membership with error 25013", async () => {
@@ -597,20 +664,13 @@ describe("explicit eBay listing rebuild lifecycle", () => {
         },
       }),
     );
-    expect(client.createOrReplaceInventoryItem).toHaveBeenCalledWith(
-      "CATALOG-OLD",
-      expect.objectContaining({
-        availability: { shipToLocationAvailability: { quantity: 0 } },
-      }),
-    );
-    expect(client.updateOffer).toHaveBeenCalledWith(
-      "offer-CATALOG-OLD",
-      expect.objectContaining({
-        offerId: "offer-CATALOG-OLD",
+    expect(client.bulkUpdatePriceQuantity).toHaveBeenCalledWith({
+      requests: [{
         sku: "CATALOG-OLD",
-        availableQuantity: 0,
-      }),
-    );
+        shipToLocationAvailability: { quantity: 0 },
+        offers: [{ offerId: "offer-CATALOG-OLD", availableQuantity: 0 }],
+      }],
+    });
   });
 
   it("rejects an in-place update when live membership changed after review", async () => {
@@ -941,6 +1001,7 @@ function makeGroupedDraft(skus: string[]): EbayListingConnectorDraft {
 function makeLifecycleClient(input: {
   currentSkus: string[];
   currentListingId: string;
+  currentVariationAspectName?: string;
   calls?: string[];
 }): EbayListingLifecycleClient & Record<string, ReturnType<typeof vi.fn>> {
   const calls = input.calls ?? [];
@@ -951,7 +1012,7 @@ function makeLifecycleClient(input: {
       description: "Current group",
       imageUrls: [],
       title: "Current group",
-      variesBy: { specifications: [{ name: "Size", values: input.currentSkus }] },
+      variesBy: { specifications: [{ name: input.currentVariationAspectName ?? "Size", values: input.currentSkus }] },
       variantSKUs: input.currentSkus,
     })),
     getInventoryItem: vi.fn(async () => null),
@@ -986,6 +1047,7 @@ function makeLifecycleClient(input: {
       return { listingId: "listing-new" };
     }),
     withdrawOfferByInventoryItemGroup: vi.fn(async () => { calls.push("withdraw_group"); }),
+    bulkUpdatePriceQuantity: vi.fn(async () => ({ responses: [{ statusCode: 204 }] })),
     deleteInventoryItemGroup: vi.fn(async () => { calls.push("delete_group"); }),
   } as EbayListingLifecycleClient & Record<string, ReturnType<typeof vi.fn>>;
 }

@@ -20,6 +20,8 @@ import {
   type EbayListingConfig as SharedEbayListingConfig,
 } from "../../channels/adapters/ebay/ebay-listing-builder";
 import type {
+  EbayBulkPriceQuantityRequest,
+  EbayBulkPriceQuantityResponse,
   EbayInventoryItem,
   EbayInventoryItemGroup,
   EbayOffer,
@@ -372,6 +374,16 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
           method: "POST",
           path: "/sell/inventory/v1/offer/publish_by_inventory_item_group",
           body: { inventoryItemGroupKey: groupKey, marketplaceId },
+          baseUrl: input.baseUrl,
+        });
+      },
+      bulkUpdatePriceQuantity: async (body: EbayBulkPriceQuantityRequest) => {
+        return await this.requestEbay<EbayBulkPriceQuantityResponse>({
+          credential: input.credential,
+          config: input.config,
+          method: "POST",
+          path: "/sell/inventory/v1/bulk_update_price_quantity",
+          body,
           baseUrl: input.baseUrl,
         });
       },
