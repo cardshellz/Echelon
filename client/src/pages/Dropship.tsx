@@ -110,6 +110,8 @@ import {
   formatCents,
   formatDateTime,
   formatStatus,
+  isRmaStatusTerminal,
+  legalRmaTransitions,
   listingPushJobRetryEligibility,
   notificationRetryEligibility,
   orderCancellationRetryEligibility,
@@ -8158,9 +8160,11 @@ function ReturnOpsTable({
         <TableBody>
           {rmas.map((rma) => {
             const nextStatus = statusInputs[rma.rmaId] ?? rma.status;
+            const allowedTransitions = legalRmaTransitions(rma.status);
+            const isTerminal = isRmaStatusTerminal(rma.status);
             const statusActionDisabled = pendingRmaId !== null
               || nextStatus === rma.status
-              || rma.status === "credited";
+              || isTerminal;
             return (
               <TableRow key={rma.rmaId}>
                 <TableCell>
@@ -8230,13 +8234,13 @@ function ReturnOpsTable({
                     <Select
                       value={nextStatus}
                       onValueChange={(value) => onStatusChange(rma.rmaId, value as DropshipRmaStatus)}
-                      disabled={rma.status === "credited"}
+                      disabled={isTerminal}
                     >
                       <SelectTrigger className="h-9">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {returnOpsUpdateStatuses.map((option) => (
+                        {allowedTransitions.map((option) => (
                           <SelectItem key={option} value={option}>
                             {formatStatus(option)}
                           </SelectItem>
@@ -8249,7 +8253,7 @@ function ReturnOpsTable({
                         onChange={(event) => onStatusNoteChange(rma.rmaId, event.target.value)}
                         placeholder="Optional audit note"
                         maxLength={5000}
-                        disabled={rma.status === "credited"}
+                        disabled={isTerminal}
                       />
                       <Button
                         type="button"
