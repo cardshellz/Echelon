@@ -322,6 +322,38 @@ export class EbayMarketplaceListingConnector {
       removedSkus: [...input.preview.removedSkus],
     };
   }
+  async updateExistingListing(input: {
+    client: EbayListingLifecycleClient;
+    draft: EbayListingConnectorDraft;
+    preview: EbayListingRebuildPreview;
+  }): Promise<EbayListingConnectorResult & { removedSkus: string[] }> {
+    validateRebuildInput(input.draft, input.preview.currentExternalListingId);
+
+    const currentPreview = await this.previewListingRebuild({
+      client: input.client,
+      draft: input.draft,
+      currentExternalListingId: input.preview.currentExternalListingId,
+    });
+    if (currentPreview.confirmationToken !== input.preview.confirmationToken) {
+      throw new Error("The live eBay listing changed after review. Read eBay again before updating it.");
+    }
+    if (currentPreview.sourceState !== "active") {
+      throw new Error("The current eBay listing is no longer active and cannot be updated in place.");
+    }
+
+    const result = await this.pushListing({
+      client: input.client,
+      draft: {
+        ...input.draft,
+        hasExistingExternalIds: true,
+        existingExternalProductId: currentPreview.currentExternalListingId,
+      },
+    });
+    if (result.externalProductId !== currentPreview.currentExternalListingId) {
+      throw new Error("eBay did not preserve the reviewed listing id during the in-place update.");
+    }
+    return { ...result, removedSkus: [...currentPreview.removedSkus] };
+  }
   async syncExistingListing(input: {
     client: EbayListingConnectorClient;
     draft: Pick<EbayListingConnectorDraft, "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup">;
@@ -577,10 +609,10 @@ async function inspectListingPublication(input: {
   marketplaceId: string;
   expectedListingId?: string;
 }): Promise<ListingPublicationInspection> {
+  const expectedListingId = input.expectedListingId?.trim();
   const activeListingIds = new Set<string>();
   const offerIdsBySku = new Map<string, string>();
   let activeMemberCount = 0;
-  let withdrawnMemberCount = 0;
 
   for (const sku of input.skus) {
     const response = await input.client.getOffers(sku, input.marketplaceId);
@@ -588,33 +620,45 @@ async function inspectListingPublication(input: {
       const status = String((offer as EbayOffer & { status?: string }).status ?? "").toUpperCase();
       return status === "PUBLISHED" || status === "ACTIVE";
     });
-    if (activeOffers.length === 0) {
-      withdrawnMemberCount += 1;
+    const identifiableActiveOffers = activeOffers.filter(
+      (offer): offer is typeof offer & { listingId: string } => Boolean(offer.listingId?.trim()),
+    );
+    const matchingOffers = expectedListingId
+      ? identifiableActiveOffers.filter((offer) => offer.listingId.trim() === expectedListingId)
+      : identifiableActiveOffers;
+    const conflictingOffers = expectedListingId
+      ? identifiableActiveOffers.filter((offer) => offer.listingId.trim() !== expectedListingId)
+      : [];
+
+    if (conflictingOffers.length > 0) {
+      throw new Error(`The active eBay variation ${sku} belongs to a different listing.`);
+    }
+    if (matchingOffers.length > 1) {
+      throw new Error(`The eBay variation ${sku} has multiple active offers for the same listing.`);
+    }
+    const [activeOffer] = matchingOffers;
+    if (!activeOffer) {
+      // An item group can legitimately retain an unpublished or zero-quantity
+      // historical variation. Group membership remains observable even when the
+      // variation does not identify the active listing.
       continue;
     }
-    const [activeOffer] = activeOffers;
-    if (activeOffers.length !== 1 || !activeOffer?.listingId) {
-      throw new Error(`The eBay variation ${sku} does not have exactly one identifiable active offer.`);
-    }
-    if (input.expectedListingId && activeOffer.listingId !== input.expectedListingId.trim()) {
-      throw new Error("The active eBay listing identity changed. Preview the rebuild again.");
-    }
     activeMemberCount += 1;
-    activeListingIds.add(activeOffer.listingId);
+    activeListingIds.add(activeOffer.listingId.trim());
     offerIdsBySku.set(sku, activeOffer.offerId);
   }
 
-  if (activeMemberCount === input.skus.length && activeListingIds.size === 1) {
+  if (activeMemberCount > 0 && activeListingIds.size === 1) {
     return {
       state: "active",
       listingId: [...activeListingIds][0],
       offerIdsBySku,
     };
   }
-  if (withdrawnMemberCount === input.skus.length) {
+  if (activeMemberCount === 0) {
     return { state: "withdrawn" };
   }
-  throw new Error("The eBay variation group is only partially published. Resolve its remote state before rebuilding.");
+  throw new Error("The eBay variation group resolves to multiple active listings.");
 }
 function normalizedSkus(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
