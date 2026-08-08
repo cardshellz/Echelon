@@ -432,8 +432,8 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
       });
       await client.query(
         `UPDATE dropship.dropship_rmas
-         SET status = $2,
-             received_at = CASE WHEN $2 = 'received' THEN COALESCE(received_at, $3) ELSE received_at END,
+         SET status = $2::varchar,
+             received_at = CASE WHEN $2::varchar = 'received' THEN COALESCE(received_at, $3) ELSE received_at END,
              updated_at = $3
          WHERE id = $1`,
         [input.rmaId, input.status, input.now],
@@ -551,7 +551,7 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
          SET status = $2,
              fault_category = $3,
              inspected_at = $4,
-             credited_at = CASE WHEN $2 = 'credited' THEN $4 ELSE credited_at END,
+             credited_at = CASE WHEN $2::varchar = 'credited' THEN $4 ELSE credited_at END,
              updated_at = $4
          WHERE id = $1`,
         [input.rmaId, nextStatus, input.faultCategory, input.now],
