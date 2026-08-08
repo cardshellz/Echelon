@@ -88,6 +88,7 @@ export interface EbayListingRebuildPreview {
   productId: number;
   groupKey: string;
   currentExternalListingId: string;
+  sourceState: "active" | "withdrawn";
   currentSkus: string[];
   desiredSkus: string[];
   addedSkus: string[];
@@ -221,16 +222,13 @@ export class EbayMarketplaceListingConnector {
       marketplaceId: input.draft.marketplaceId,
       expectedListingId: input.currentExternalListingId,
     });
-    if (currentPublication.state !== "active") {
-      throw new Error("The current eBay variation group is not published.");
-    }
-
     const current = new Set(currentSkus);
     const desired = new Set(desiredSkus);
     const previewWithoutToken = {
       productId: input.draft.productId,
       groupKey: itemGroup.groupKey,
       currentExternalListingId: input.currentExternalListingId.trim(),
+      sourceState: currentPublication.state,
       currentSkus,
       desiredSkus,
       addedSkus: desiredSkus.filter((sku) => !current.has(sku)),
@@ -545,6 +543,7 @@ function validateConfirmedPreview(
     productId: draft.productId,
     groupKey: draft.itemGroup!.groupKey,
     currentExternalListingId: preview.currentExternalListingId.trim(),
+    sourceState: preview.sourceState,
     currentSkus,
     desiredSkus,
     addedSkus: expectedAddedSkus,
@@ -553,6 +552,7 @@ function validateConfirmedPreview(
   if (
     preview.productId !== draft.productId
     || preview.groupKey !== draft.itemGroup!.groupKey
+    || (preview.sourceState !== "active" && preview.sourceState !== "withdrawn")
     || !sameStrings(normalizedSkus(preview.desiredSkus), desiredSkus)
     || !sameStrings(normalizedSkus(preview.addedSkus), expectedAddedSkus)
     || !sameStrings(normalizedSkus(preview.removedSkus), expectedRemovedSkus)
@@ -633,6 +633,7 @@ function rebuildConfirmationToken(input: {
   productId: number;
   groupKey: string;
   currentExternalListingId: string;
+  sourceState: "active" | "withdrawn";
   currentSkus: readonly string[];
   desiredSkus: readonly string[];
   addedSkus: readonly string[];

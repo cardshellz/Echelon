@@ -13,6 +13,7 @@ describe("eBay listing rebuild route contract", () => {
     expect(source).toContain('mode: z.literal("preview")');
     expect(source).toContain('mode: z.literal("execute")');
     expect(source).toContain("preview: ebayListingRebuildPreviewSchema");
+    expect(source).toContain('sourceState: z.enum(["active", "withdrawn"])');
     expect(source).toContain("previewListingRebuild");
     expect(source).toContain("executeListingRebuild");
   });

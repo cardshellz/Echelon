@@ -414,6 +414,7 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     });
 
     expect(preview).toMatchObject({
+      sourceState: "active",
       currentSkus: ["CATALOG-KEEP", "CATALOG-OLD"],
       desiredSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
       addedSkus: ["CATALOG-NEW"],
@@ -423,6 +424,54 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     expect(preview.confirmationToken).toMatch(/^[a-f0-9]{64}$/);
     expect(client.withdrawOfferByInventoryItemGroup).not.toHaveBeenCalled();
     expect(client.deleteInventoryItemGroup).not.toHaveBeenCalled();
+  });
+
+  it("previews and rebuilds a fully withdrawn source variation group", async () => {
+    const calls: string[] = [];
+    const client = makeLifecycleClient({
+      currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"],
+      currentListingId: "listing-old",
+      calls,
+    });
+    vi.mocked(client.getOffers).mockImplementation(async (sku: string) => ({
+      offers: [{
+        offerId: "offer-" + sku,
+        sku,
+        marketplaceId: "EBAY_US" as const,
+        format: "FIXED_PRICE" as const,
+        availableQuantity: 5,
+        categoryId: "123",
+        listingPolicies: {
+          fulfillmentPolicyId: "fulfillment",
+          paymentPolicyId: "payment",
+          returnPolicyId: "return",
+        },
+        merchantLocationKey: "warehouse",
+        pricingSummary: { price: { value: "9.99", currency: "USD" } },
+        status: "UNPUBLISHED",
+      }],
+    }));
+    const connector = new EbayMarketplaceListingConnector();
+    const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-NEW"]);
+
+    const preview = await connector.previewListingRebuild({
+      client,
+      draft,
+      currentExternalListingId: "listing-old",
+    });
+
+    expect(preview).toMatchObject({
+      sourceState: "withdrawn",
+      currentSkus: ["CATALOG-KEEP", "CATALOG-OLD"],
+      desiredSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
+      removedSkus: ["CATALOG-OLD"],
+      rebuildRequired: true,
+    });
+    await expect(connector.executeListingRebuild({ client, draft, preview }))
+      .resolves.toMatchObject({ externalProductId: "listing-new" });
+    expect(client.withdrawOfferByInventoryItemGroup).not.toHaveBeenCalled();
+    expect(client.deleteInventoryItemGroup).toHaveBeenCalledTimes(1);
+    expect(calls.indexOf("delete_group")).toBeLessThan(calls.indexOf("put_group"));
   });
 
   it("ends the confirmed source and publishes exactly the desired variations", async () => {
