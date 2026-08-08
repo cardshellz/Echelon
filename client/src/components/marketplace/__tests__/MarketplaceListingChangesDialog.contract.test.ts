@@ -10,6 +10,10 @@ describe("MarketplaceListingChangesDialog contract", () => {
     resolve(process.cwd(), "client/src/components/marketplace/MarketplaceListingChangesDialog.tsx"),
     "utf8",
   );
+  const pageSource = readFileSync(
+    resolve(process.cwd(), "client/src/pages/EbayChannelPage.tsx"),
+    "utf8",
+  );
 
   it("uses the owning direct-channel listing endpoint", () => {
     expect(
@@ -44,6 +48,13 @@ describe("MarketplaceListingChangesDialog contract", () => {
     expect(source).toContain("expectedObservationHash");
   });
 
+  it("distinguishes proven changes from an initial neutral variant check", () => {
+    expect(pageSource).toContain("hasProvenListingChanges");
+    expect(pageSource).toContain("needsInitialVariantCheck");
+    expect(pageSource).toContain('? "Review listing changes"');
+    expect(pageSource).toContain('? "Check eBay variants"');
+    expect(pageSource).not.toContain('reconciliation?.kind === "normal" && someExcluded)\n                        )');
+  });
   it("does not expose legacy compensation or manual recovery controls", () => {
     expect(source).not.toContain("manual_recovery_required");
     expect(source).not.toContain("recovering");
