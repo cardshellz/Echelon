@@ -12,6 +12,16 @@ import type {
 
 export type EbayListingPublishMode = "stage" | "publish";
 
+export interface EbayObservedOffer extends EbayOffer {
+  offerId: string;
+  status?: string;
+  listingId?: string;
+  listing?: {
+    listingId?: string;
+    listingStatus?: string;
+  };
+}
+
 export interface EbayListingConnectorClient {
   getInventoryItem(sku: string): Promise<EbayInventoryItem | null>;
   createOrReplaceInventoryItem(
@@ -21,7 +31,7 @@ export interface EbayListingConnectorClient {
   getOffers(
     sku: string,
     marketplaceId: string,
-  ): Promise<{ offers: Array<EbayOffer & { offerId: string; listingId?: string }> }>;
+  ): Promise<{ offers: EbayObservedOffer[] }>;
   createOffer(offer: EbayOffer): Promise<string>;
   updateOffer(offerId: string, offer: EbayOffer): Promise<void>;
   createOrReplaceInventoryItemGroup(
@@ -145,8 +155,11 @@ export class EbayMarketplaceListingConnector {
         const existingOffers = await input.client.getOffers(offer.sku, input.draft.marketplaceId);
         const existingOffer = existingOffers.offers[0];
         existingOfferId = existingOffer?.offerId ?? null;
-        if (existingOffer?.listingId && !firstListingId) {
-          firstListingId = existingOffer.listingId;
+        const existingListingId = existingOffer === undefined
+          ? undefined
+          : observedOfferListingId(existingOffer);
+        if (existingListingId && !firstListingId) {
+          firstListingId = existingListingId;
         }
       }
 
@@ -440,10 +453,7 @@ export class EbayMarketplaceListingConnector {
     }
 
     const offers = await input.client.getOffers(input.sku, input.marketplaceId);
-    const activeOffers = offers.offers.filter((offer) => {
-      const status = (offer as EbayOffer & { status?: string }).status;
-      return status === "PUBLISHED" || status === "ACTIVE";
-    });
+    const activeOffers = offers.offers.filter(isPublishedObservedOffer);
     const quantities = activeOffers
       .map((offer) => offer.availableQuantity)
       .filter((quantity): quantity is number => Number.isSafeInteger(quantity) && quantity >= 0);
@@ -633,20 +643,17 @@ async function inspectListingPublication(input: {
 
   for (const sku of input.skus) {
     const response = await input.client.getOffers(sku, input.marketplaceId);
-    const activeOffers = response.offers.filter((offer) => {
-      const status = String((offer as EbayOffer & { status?: string }).status ?? "").toUpperCase();
-      return status === "PUBLISHED" || status === "ACTIVE";
+    const activeOffers = response.offers.filter(isPublishedObservedOffer);
+    const identifiableActiveOffers = activeOffers.flatMap((offer) => {
+      const listingId = observedOfferListingId(offer);
+      return listingId === undefined ? [] : [{ offer, listingId }];
     });
-    const identifiableActiveOffers = activeOffers.filter(
-      (offer): offer is typeof offer & { listingId: string } => Boolean(offer.listingId?.trim()),
-    );
     const matchingOffers = expectedListingId
-      ? identifiableActiveOffers.filter((offer) => offer.listingId.trim() === expectedListingId)
+      ? identifiableActiveOffers.filter(({ listingId }) => listingId === expectedListingId)
       : identifiableActiveOffers;
     const conflictingOffers = expectedListingId
-      ? identifiableActiveOffers.filter((offer) => offer.listingId.trim() !== expectedListingId)
+      ? identifiableActiveOffers.filter(({ listingId }) => listingId !== expectedListingId)
       : [];
-
     if (conflictingOffers.length > 0) {
       throw new Error(`The active eBay variation ${sku} belongs to a different listing.`);
     }
@@ -661,8 +668,8 @@ async function inspectListingPublication(input: {
       continue;
     }
     activeMemberCount += 1;
-    activeListingIds.add(activeOffer.listingId.trim());
-    offerIdsBySku.set(sku, activeOffer.offerId);
+    activeListingIds.add(activeOffer.listingId);
+    offerIdsBySku.set(sku, activeOffer.offer.offerId);
   }
 
   if (activeMemberCount > 0 && activeListingIds.size === 1) {
@@ -677,6 +684,17 @@ async function inspectListingPublication(input: {
   }
   throw new Error("The eBay variation group resolves to multiple active listings.");
 }
+function isPublishedObservedOffer(offer: EbayObservedOffer): boolean {
+  return offer.status?.trim().toUpperCase() === "PUBLISHED";
+}
+
+function observedOfferListingId(offer: EbayObservedOffer): string | undefined {
+  const listingId = offer.listingId ?? offer.listing?.listingId;
+  if (typeof listingId !== "string") return undefined;
+  const normalized = listingId.trim();
+  return normalized.length === 0 ? undefined : normalized;
+}
+
 function normalizedSkus(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return [...new Set(value
