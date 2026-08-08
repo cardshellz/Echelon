@@ -164,6 +164,12 @@ function sendDropshipReturnError(res: Response, error: unknown): Response {
   }
 
   console.error("[DropshipReturnRoutes] Unexpected return error:", error);
+  // Extra diagnostic: log the stack trace explicitly for Heroku log drain
+  if (error instanceof Error) {
+    console.error(`[DROPSHIP-500-DEBUG] ${error.name}: ${error.message}\n${error.stack}`);
+  } else {
+    console.error(`[DROPSHIP-500-DEBUG] Non-Error thrown: ${JSON.stringify(error)}`);
+  }
   return res.status(500).json({
     error: {
       code: "DROPSHIP_RETURN_INTERNAL_ERROR",
