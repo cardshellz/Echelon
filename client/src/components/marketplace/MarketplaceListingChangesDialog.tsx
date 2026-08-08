@@ -159,8 +159,9 @@ export function MarketplaceListingChangesDialog({
           variants.filter((variant) => variant.included).map((variant) => variant.id),
         );
       } catch (baselineCause) {
+        console.error("[MarketplaceListingChangesDialog] Verified state persistence failed", baselineCause);
         setBaselineWarning(
-          `The eBay change succeeded, but Echelon could not refresh its comparison baseline: ${errorMessage(baselineCause)}`,
+          "Echelon could not save its local verification record. The live eBay update remains successful; do not update the listing again. Refresh this comparison and choose Save verified state to retry.",
         );
       }
       onCompleted?.();
