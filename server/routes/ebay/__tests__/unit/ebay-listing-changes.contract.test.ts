@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { normalizeEbayObservedOffers } from "../../ebay-listing-connector-client";
+
 describe("eBay reviewed listing-change route contract", () => {
   const source = readFileSync(
     resolve(process.cwd(), "server/routes/ebay/ebay-listings.routes.ts"),
@@ -38,5 +40,26 @@ describe("eBay reviewed listing-change route contract", () => {
 
   it("does not persist a failed read-only preview as a listing sync failure", () => {
     expect(source).toContain('if (rebuild?.mode !== "preview")');
+  });
+  it("normalizes the real nested eBay listing identity", () => {
+    const [offer] = normalizeEbayObservedOffers({
+      offers: [{
+        offerId: "offer-c750",
+        sku: "ARM-ENV-SGL-C750",
+        status: "PUBLISHED",
+        availableQuantity: 870,
+        listing: {
+          listingId: "298569307307",
+          listingStatus: "ACTIVE",
+        },
+      }],
+    });
+
+    expect(offer).toMatchObject({
+      offerId: "offer-c750",
+      status: "PUBLISHED",
+      listingId: "298569307307",
+      availableQuantity: 870,
+    });
   });
 });
