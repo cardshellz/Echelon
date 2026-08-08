@@ -54,6 +54,10 @@ const ebayListingRebuildPreviewSchema: z.ZodType<EbayListingRebuildPreview> = z.
 }).strict();
 const ebayListingPushRequestSchema = z.object({
   productIds: z.array(z.number().int().positive()).min(1).max(500),
+  updateExisting: z.object({
+    mode: z.literal("execute"),
+    preview: ebayListingRebuildPreviewSchema,
+  }).strict().optional(),
   rebuild: z.discriminatedUnion("mode", [
     z.object({ mode: z.literal("preview") }).strict(),
     z.object({
@@ -62,11 +66,18 @@ const ebayListingPushRequestSchema = z.object({
     }).strict(),
   ]).optional(),
 }).strict().superRefine((value, context) => {
-  if (value.rebuild && value.productIds.length !== 1) {
+  if ((value.rebuild || value.updateExisting) && value.productIds.length !== 1) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["productIds"],
-      message: "A listing rebuild must target exactly one product.",
+      message: "A reviewed listing change must target exactly one product.",
+    });
+  }
+  if (value.rebuild && value.updateExisting) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["updateExisting"],
+      message: "Choose either an in-place update or a rebuild, not both.",
     });
   }
 });
@@ -393,7 +404,7 @@ const ebayListingPushRequestSchema = z.object({
         res.status(400).json({ error: "Invalid eBay listing request", details: parsedRequest.error.flatten() });
         return;
       }
-      const { productIds, rebuild } = parsedRequest.data;
+      const { productIds, rebuild, updateExisting } = parsedRequest.data;
 
       const authService = getAuthService();
       if (!authService) {
@@ -630,7 +641,7 @@ const ebayListingPushRequestSchema = z.object({
             };
             const lifecycleClient = createEbayRouteListingLifecycleClient({ accessToken });
             let connectorResult;
-            if (rebuild) {
+            if (rebuild || updateExisting) {
               const listingIdentityResult = await client.query<{ external_product_id: string }>(
                 `SELECT DISTINCT cl.external_product_id
                  FROM channels.channel_listings cl
@@ -644,9 +655,9 @@ const ebayListingPushRequestSchema = z.object({
                 .map((row) => row.external_product_id?.trim())
                 .filter((value): value is string => Boolean(value));
               if (currentListingIds.length !== 1) {
-                throw new Error("The product must have exactly one current eBay listing identity before rebuilding.");
+                throw new Error("The product must have exactly one current eBay listing identity before applying reviewed listing changes.");
               }
-              if (rebuild.mode === "preview") {
+              if (rebuild?.mode === "preview") {
                 const rebuildPreview = await ebayListingConnector.previewListingRebuild({
                   client: lifecycleClient,
                   draft,
@@ -662,11 +673,17 @@ const ebayListingPushRequestSchema = z.object({
                 });
                 continue;
               }
-              connectorResult = await ebayListingConnector.executeListingRebuild({
-                client: lifecycleClient,
-                draft,
-                preview: rebuild.preview,
-              });
+              connectorResult = updateExisting
+                ? await ebayListingConnector.updateExistingListing({
+                    client: lifecycleClient,
+                    draft,
+                    preview: updateExisting.preview,
+                  })
+                : await ebayListingConnector.executeListingRebuild({
+                    client: lifecycleClient,
+                    draft,
+                    preview: rebuild!.preview,
+                  });
             } else {
               connectorResult = await ebayListingConnector.pushListing({
                 client: createEbayRouteListingClient({ accessToken }),

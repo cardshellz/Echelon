@@ -322,6 +322,38 @@ export class EbayMarketplaceListingConnector {
       removedSkus: [...input.preview.removedSkus],
     };
   }
+  async updateExistingListing(input: {
+    client: EbayListingLifecycleClient;
+    draft: EbayListingConnectorDraft;
+    preview: EbayListingRebuildPreview;
+  }): Promise<EbayListingConnectorResult & { removedSkus: string[] }> {
+    validateRebuildInput(input.draft, input.preview.currentExternalListingId);
+
+    const currentPreview = await this.previewListingRebuild({
+      client: input.client,
+      draft: input.draft,
+      currentExternalListingId: input.preview.currentExternalListingId,
+    });
+    if (currentPreview.confirmationToken !== input.preview.confirmationToken) {
+      throw new Error("The live eBay listing changed after review. Read eBay again before updating it.");
+    }
+    if (currentPreview.sourceState !== "active") {
+      throw new Error("The current eBay listing is no longer active and cannot be updated in place.");
+    }
+
+    const result = await this.pushListing({
+      client: input.client,
+      draft: {
+        ...input.draft,
+        hasExistingExternalIds: true,
+        existingExternalProductId: currentPreview.currentExternalListingId,
+      },
+    });
+    if (result.externalProductId !== currentPreview.currentExternalListingId) {
+      throw new Error("eBay did not preserve the reviewed listing id during the in-place update.");
+    }
+    return { ...result, removedSkus: [...currentPreview.removedSkus] };
+  }
   async syncExistingListing(input: {
     client: EbayListingConnectorClient;
     draft: Pick<EbayListingConnectorDraft, "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup">;
