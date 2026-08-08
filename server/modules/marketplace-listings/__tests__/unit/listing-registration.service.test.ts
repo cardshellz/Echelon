@@ -16,6 +16,7 @@ import type {
   MarketplaceListingRegistrationRepository,
   ObserveMarketplaceListingInput,
   PersistListingRegistrationInput,
+  PersistVerifiedListingInput,
 } from "../../application/registration-ports";
 
 describe("MarketplaceListingRegistrationService", () => {
@@ -188,6 +189,46 @@ describe("MarketplaceListingRegistrationService", () => {
     expect(repository.registerCalls).toBe(0);
   });
 
+  it("persists a fresh verified observation without claiming the account again", async () => {
+    const ownerReader = new FakeOwnerReader(ownerSnapshot());
+    const observer = new FakeObserver(observation());
+    const claimer = new FakeClaimer();
+    const repository = new FakeRepository();
+    const service = createService(ownerReader, observer, claimer, repository);
+    const preview = await service.preview(command());
+
+    await expect(service.verifyExisting({
+      ...command(),
+      expectedObservationHash: preview.observationHash,
+      expectedIncludedVariantIds: [11],
+    })).resolves.toMatchObject({
+      kind: "verified",
+      externalListingId: "listing-123",
+    });
+    expect(repository.verifyCalls).toBe(1);
+    expect(claimer.calls).toBe(0);
+  });
+
+  it("rejects verification when fresh provider membership differs from the expected variants", async () => {
+    const repository = new FakeRepository();
+    const service = createService(
+      new FakeOwnerReader(ownerSnapshot()),
+      new FakeObserver(observation()),
+      new FakeClaimer(),
+      repository,
+    );
+    const preview = await service.preview(command());
+
+    await expect(service.verifyExisting({
+      ...command(),
+      expectedObservationHash: preview.observationHash,
+      expectedIncludedVariantIds: [12],
+    })).rejects.toMatchObject({
+      code: "MARKETPLACE_LISTING_VERIFICATION_MEMBERSHIP_CHANGED",
+    });
+    expect(repository.verifyCalls).toBe(0);
+  });
+
   it("durably claims the stable account before marketplace persistence", async () => {
     const callOrder: string[] = [];
     const ownerReader = new FakeOwnerReader(ownerSnapshot());
@@ -300,6 +341,7 @@ class FakeRepository implements MarketplaceListingRegistrationRepository {
   batchStatusCalls = 0;
   replayCalls = 0;
   registerCalls = 0;
+  verifyCalls = 0;
   status: ListingRegistrationStatus | null = null;
   statuses: readonly ListingRegistrationStatus[] = [];
   replay: ListingRegistrationReceipt | null = null;
@@ -316,6 +358,16 @@ class FakeRepository implements MarketplaceListingRegistrationRepository {
   async findReplay(): Promise<ListingRegistrationReceipt | null> {
     this.replayCalls += 1;
     return this.replay;
+  }
+  async verifyExistingPublication(input: PersistVerifiedListingInput) {
+    this.verifyCalls += 1;
+    if (this.failure) throw this.failure;
+    return {
+      kind: "verified" as const,
+      publicationId: 400,
+      externalListingId: input.plan.externalListingId,
+      verifiedAt: input.verifiedAt,
+    };
   }
   async registerOrReplay(input: PersistListingRegistrationInput) {
     this.registerCalls += 1;

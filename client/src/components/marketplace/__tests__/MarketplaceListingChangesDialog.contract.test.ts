@@ -51,7 +51,9 @@ describe("MarketplaceListingChangesDialog contract", () => {
 
   it("supports verification without mutation when live membership already matches", () => {
     expect(source).toContain("Save verified state");
-    expect(source).toContain("refreshListingAnalysis");
+    expect(source).toContain("persistVerifiedListingState");
+    expect(source).toContain('/verify');
+    expect(source).toContain("expectedIncludedVariantIds");
     expect(source).toContain("expectedObservationHash");
   });
 

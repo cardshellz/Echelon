@@ -12,6 +12,7 @@ import type {
   ListingRegistrationReceipt,
   ListingRegistrationStatus,
   ListingRegistrationResult,
+  ListingVerificationResult,
   ProviderAccountClaimResult,
 } from "./registration-dtos";
 
@@ -74,6 +75,11 @@ export interface PersistListingRegistrationInput {
   readonly accountClaim: ProviderAccountClaimResult;
 }
 
+export interface PersistVerifiedListingInput {
+  readonly plan: ListingRegistrationPlan;
+  readonly verifiedAt: Date;
+}
+
 export interface MarketplaceListingRegistrationRepository {
   findCurrentRegistration(
     owner: ListingOwnerRef,
@@ -90,4 +96,8 @@ export interface MarketplaceListingRegistrationRepository {
   registerOrReplay(
     input: PersistListingRegistrationInput,
   ): Promise<ListingRegistrationResult>;
+
+  verifyExistingPublication(
+    input: PersistVerifiedListingInput,
+  ): Promise<ListingVerificationResult>;
 }

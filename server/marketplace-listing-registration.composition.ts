@@ -19,6 +19,7 @@ import {
   type ListingRegistrationPlan,
   type ListingRegistrationResult,
   type ListingRegistrationStatus,
+  type ListingVerificationResult,
   type MarketplaceListingProviderAccountClaim,
   type MarketplaceListingProviderAccountClaimer,
   type MarketplaceListingRegistrationClock,
@@ -27,6 +28,7 @@ import {
   type MarketplaceListingRegistrationRepository,
   type ObserveMarketplaceListingInput,
   type PreviewListingRegistrationInput,
+  type VerifyExistingListingInput,
 } from "./modules/marketplace-listings";
 import type {
   MarketplaceListingRegistrationServiceResolver,
@@ -175,6 +177,13 @@ class BoundMarketplaceListingRegistrationFacade {
   ): Promise<ListingRegistrationResult> {
     assertExactOwner(input.owner, this.boundOwner, "confirmation");
     return this.service.confirm(input);
+  }
+
+  async verifyExisting(
+    input: VerifyExistingListingInput,
+  ): Promise<ListingVerificationResult> {
+    assertExactOwner(input.owner, this.boundOwner, "verification");
+    return this.service.verifyExisting(input);
   }
 
   async getCurrentRegistrationStatuses(
