@@ -14,6 +14,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
+import { millsToCents } from "@shared/utils/money";
 import {
   Activity,
   AlertTriangle,
@@ -56,10 +57,12 @@ import {
   MAX_PO_HANDOFF_LINES,
   STATUS_META,
   allChipsSelected,
+  applyStagedVendors,
   availableValueCents,
   buildAcceptedForPoDecisionBody,
   buildCreatePoItemBody,
   buildRfqLineBody,
+  buildVendorAssignmentBody,
   chipMatchesItem,
   computeSuggestedSpend,
   confidenceTooltip,
@@ -67,6 +70,7 @@ import {
   controlAckKey,
   daysOfSupplyDisplay,
   decisionNoteForSubmit,
+  effectiveVendorMode,
   exceedReasonValid,
   exceedsSuggestion,
   filterItemsByChips,
@@ -74,8 +78,11 @@ import {
   formatIsoDateShort,
   formatMoneyCents,
   groupReorderItems,
+  hasPoEligibleSupplierQuote,
+  isDisplaySkipped,
   isOrderQueueSelection,
   isOverstocked,
+  isVendorGapRow,
   leadTimeSourceLabel,
   orderBarSummary,
   orderBuilderGroups,
@@ -83,6 +90,7 @@ import {
   orderLineValueCents,
   orderSoonDates,
   parseReorderEngineDeepLink,
+  parseUnitCostDollarsToMills,
   poLineFlagged,
   removeOrderLine,
   rfqBaselinePieces,
@@ -99,6 +107,7 @@ import {
   trendDisplay,
   unitCostCents,
   type ChipKey,
+  type StagedVendorAssignment,
   type ConfirmPoLineInput,
   type ConfirmRfqLineInput,
   type OrderBuilderGroup,
@@ -196,6 +205,9 @@ interface CockpitItem {
     costQuality: string;
     pricingBasis: string;
     purchaseUom: string | null;
+    /** Explicit quote fields — the client PO-eligibility mirror reads these (queue truth). */
+    quotedUnitCostMills?: number | null;
+    quotedAt?: string | null;
     piecesPerPurchaseUom: number | null;
     /** Vendor pack size — the case-rounding fallback for per-piece quotes (PR 3 engine change). */
     packSize?: number | null;
@@ -280,6 +292,17 @@ interface ReorderAnalysisResponse {
 // ---------------------------------------------------------------------------
 // Order Builder wire types + the single mutation seam
 // ---------------------------------------------------------------------------
+
+/**
+ * Subset of GET /api/vendors rows the builder's vendor picker consumes. The
+ * endpoint returns a bare array of procurement.vendors rows (procurement
+ * routes → storage.getAllVendors, name-sorted); `active` is an integer flag.
+ */
+interface VendorApiRow {
+  id: number;
+  name: string;
+  active: number;
+}
 
 /** Subset of GET /api/purchasing/rfq-queue items the builder consumes. */
 interface RfqQueueItem {
@@ -1221,6 +1244,15 @@ export default function ReorderEngine() {
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderStage, setBuilderStage] = useState<"edit" | "confirm" | "result">("edit");
   const [vendorMode, setVendorMode] = useState<Record<string, VendorOrderMode>>({});
+  // Inline vendor assignment (queue truth): staged choices for lines whose
+  // server mapping does not exist yet (kept until the mapping persists — via
+  // the upsert save when a cost was typed, or via the RFQ batch otherwise),
+  // plus the per-line picker drafts and the in-flight save id.
+  const [stagedVendors, setStagedVendors] = useState<ReadonlyMap<string, StagedVendorAssignment>>(
+    new Map(),
+  );
+  const [assignDrafts, setAssignDrafts] = useState<Record<string, { vendorId: string; cost: string }>>({});
+  const [savingAssignmentId, setSavingAssignmentId] = useState<string | null>(null);
   const [ackedControls, setAckedControls] = useState<ReadonlySet<string>>(new Set());
   const [approvedExceptions, setApprovedExceptions] = useState<ReadonlySet<string>>(new Set());
   const [decisionNote, setDecisionNote] = useState("");
@@ -1263,9 +1295,29 @@ export default function ReorderEngine() {
     [orderableItems, orderSelection],
   );
 
+  // Staged vendor choices overlay items with no server-side vendor so they
+  // group under the chosen vendor (quote-request path only — no mapping means
+  // no usable quote, so the PO radio stays off for them).
+  const builderItems = useMemo(
+    () => applyStagedVendors(orderableItems, stagedVendors),
+    [orderableItems, stagedVendors],
+  );
+
   const builderGroups = useMemo(
-    () => orderBuilderGroups(orderableItems, orderSelection),
-    [orderableItems, orderSelection],
+    () => orderBuilderGroups(builderItems, orderSelection),
+    [builderItems, orderSelection],
+  );
+
+  // Active vendors for the inline assignment picker (queue truth). Bare-array
+  // response of procurement.vendors rows; `active` is an integer flag.
+  const vendorsQuery = useQuery<VendorApiRow[]>({
+    queryKey: ["/api/vendors"],
+    queryFn: () => getJson("/api/vendors"),
+    enabled: builderOpen,
+  });
+  const activeVendors = useMemo(
+    () => (vendorsQuery.data ?? []).filter((vendor) => Number(vendor.active) === 1),
+    [vendorsQuery.data],
   );
 
   // RFQ mapping (live analysis line → saved recommendation-run line). Loaded
@@ -1283,7 +1335,10 @@ export default function ReorderEngine() {
   }, [rfqQueueQuery.data]);
 
   // Confirm-stage views: vendor groups split by mode, lines with pieces > 0
-  // only (0 = "skip this line", straight from the mock).
+  // only (0 = "skip this line", straight from the mock). Mode is the
+  // EFFECTIVE mode: a group with no PO-eligible supplier quote is forced onto
+  // the quote-request path — the PO handoff would skip every line
+  // (supplier_quote_basis_review_required), so offering PO would be a lie.
   const confirmView = useMemo(() => {
     const poGroups: Array<{ group: OrderBuilderGroup<CockpitItem>; lines: Array<{ item: CockpitItem; state: OrderLineState }> }> = [];
     const rfqGroups: typeof poGroups = [];
@@ -1292,7 +1347,11 @@ export default function ReorderEngine() {
         .map((item) => ({ item, state: orderSelection.get(item.recommendationId)! }))
         .filter((line) => line.state.pieces > 0);
       if (lines.length === 0) continue;
-      ((vendorMode[group.key] ?? "po") === "rfq" ? rfqGroups : poGroups).push({ group, lines });
+      const mode = effectiveVendorMode(
+        vendorMode[group.key],
+        group.lines.some((item) => hasPoEligibleSupplierQuote(item)),
+      );
+      (mode === "rfq" ? rfqGroups : poGroups).push({ group, lines });
     }
     return { poGroups, rfqGroups };
   }, [builderGroups, orderSelection, vendorMode]);
@@ -1348,8 +1407,72 @@ export default function ReorderEngine() {
     setSubmitResult(null);
     setPieceDrafts({});
     setRoundedHints({});
+    // Assignment picker drafts reset; STAGED assignments survive re-open —
+    // they represent a made decision that persists with the quote request.
+    setAssignDrafts({});
+    setSavingAssignmentId(null);
     setRfqIdempotencyKey(crypto.randomUUID());
     setBuilderOpen(true);
+  };
+
+  // ---------------- inline vendor assignment (queue truth) ----------------
+
+  const setAssignDraft = (recommendationId: string, patch: Partial<{ vendorId: string; cost: string }>) => {
+    setAssignDrafts((current) => {
+      const existing = current[recommendationId] ?? { vendorId: "", cost: "" };
+      return { ...current, [recommendationId]: { ...existing, ...patch } };
+    });
+  };
+
+  const stageVendor = (item: CockpitItem, vendor: VendorApiRow) => {
+    setStagedVendors((current) => {
+      const next = new Map(current);
+      next.set(item.recommendationId, { vendorId: vendor.id, vendorName: vendor.name });
+      return next;
+    });
+  };
+
+  /**
+   * Save vendor + unit cost as a preferred vendor_products mapping through
+   * POST /api/vendor-products/upsert (per-piece explicit quote, quotedAt now
+   * → PO-eligible under the handoff's quote gate). Cost is required for THIS
+   * path because the catalog endpoint requires a price — assigning without a
+   * cost stages the vendor for the quote-request path instead, where the RFQ
+   * batch persists the mapping with honest null costs.
+   */
+  const saveVendorAssignment = async (item: CockpitItem, vendor: VendorApiRow, costMills: number) => {
+    if (item.productVariantId == null) return; // guarded by the disabled button
+    setSavingAssignmentId(item.recommendationId);
+    try {
+      const result = await postPurchasingCommand(
+        "/api/vendor-products/upsert",
+        buildVendorAssignmentBody({
+          vendorId: vendor.id,
+          productId: item.productId,
+          productVariantId: item.productVariantId,
+          unitCostMills: costMills,
+          quotedAtIso: new Date().toISOString(),
+        }),
+      );
+      if (!result.ok) {
+        toast({ title: "Vendor not saved", description: result.error, variant: "destructive" });
+        return;
+      }
+      // Stage immediately so the line moves into the vendor group now; the
+      // refetched analysis then carries the real mapping (vendor + quote) and
+      // the overlay becomes a no-op. Selection and edited pieces are keyed by
+      // recommendationId, so they survive the refetch untouched.
+      stageVendor(item, vendor);
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/kpis"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/supplier-setup-gaps"] });
+      toast({
+        title: "Vendor saved",
+        description: `${item.sku} → ${vendor.name} at ${formatMoneyCents(millsToCents(costMills))}/piece — PO-ready once the analysis refreshes.`,
+      });
+    } finally {
+      setSavingAssignmentId(null);
+    }
   };
 
   const toggleOrder = (item: CockpitItem) => {
@@ -1671,6 +1794,15 @@ export default function ReorderEngine() {
       for (const id of submittedIds) next.delete(id);
       return next;
     });
+    // Staged vendor choices for submitted RFQ lines are now persisted
+    // server-side (createRfqBatch saved the preferred mapping) — drop the
+    // client overlay so the refetched analysis is the single source again.
+    setStagedVendors((current) => {
+      if (![...submittedIds].some((id) => current.has(id))) return current;
+      const next = new Map(current);
+      for (const id of submittedIds) next.delete(id);
+      return next;
+    });
     invalidateAfterOrderMutations();
     setSubmitResult({
       posCreated,
@@ -1747,7 +1879,10 @@ export default function ReorderEngine() {
     let grandCents = 0;
     let missingCostCount = 0;
     for (const group of builderGroups.vendorGroups) {
-      const mode = vendorMode[group.key] ?? "po";
+      const mode = effectiveVendorMode(
+        vendorMode[group.key],
+        group.lines.some((item) => hasPoEligibleSupplierQuote(item)),
+      );
       let vendorHasPieces = false;
       for (const item of group.lines) {
         const state = orderSelection.get(item.recommendationId);
@@ -2170,11 +2305,15 @@ export default function ReorderEngine() {
                 <SheetTitle className="flex flex-wrap items-center gap-2 text-base">
                   <span className="font-mono">{drawerItem.sku}</span>
                   <StatusBadge status={drawerItem.status} />
-                  {drawerItem.skippedReason && (
+                  {isVendorGapRow(drawerItem) ? (
+                    <Badge variant="outline" className={TONE_BADGE_CLASSES.amber}>
+                      No vendor yet
+                    </Badge>
+                  ) : drawerItem.skippedReason ? (
                     <Badge variant="outline" className={TONE_BADGE_CLASSES.gray}>
                       {skippedReasonLabel(drawerItem.skippedReason)}
                     </Badge>
-                  )}
+                  ) : null}
                 </SheetTitle>
                 <SheetDescription className="truncate">
                   {drawerItem.productName} · {drawerItem.preferredVendorName ?? "No vendor"} · lead{" "}
@@ -2248,7 +2387,11 @@ export default function ReorderEngine() {
                   <div className="py-10 text-center text-sm text-zinc-500">No items — add SKUs from the table</div>
                 )}
                 {builderGroups.vendorGroups.map((group) => {
-                  const mode = vendorMode[group.key] ?? "po";
+                  // A group with no PO-eligible quote cannot send a PO — the
+                  // handoff would skip every line — so the PO radio is
+                  // disabled and the group runs on the quote-request path.
+                  const groupPoEligible = group.lines.some((item) => hasPoEligibleSupplierQuote(item));
+                  const mode = effectiveVendorMode(vendorMode[group.key], groupPoEligible);
                   let vendorCents = 0;
                   return (
                     <div key={group.key} className="overflow-hidden rounded-md border">
@@ -2299,6 +2442,12 @@ export default function ReorderEngine() {
                                       <div className="text-[11px] text-amber-600">
                                         vendor cost {item.supplierBasis.costQuality.replace(/_/g, " ")} — consider
                                         requesting a quote
+                                      </div>
+                                    )}
+                                    {mode === "po" && !hasPoEligibleSupplierQuote(item) && (
+                                      <div className="text-[11px] text-amber-600">
+                                        no confirmed quote — the PO handoff will skip this line; request a quote
+                                        instead
                                       </div>
                                     )}
                                   </td>
@@ -2385,11 +2534,19 @@ export default function ReorderEngine() {
                           Vendor total <b className="tabular-nums">{formatMoneyCents(vendorCents)}</b>
                         </span>
                         <span className="flex items-center gap-3">
-                          <label className="flex cursor-pointer items-center gap-1.5">
+                          <label
+                            className={`flex items-center gap-1.5 ${groupPoEligible ? "cursor-pointer" : "cursor-not-allowed text-zinc-400"}`}
+                            title={
+                              groupPoEligible
+                                ? undefined
+                                : "No confirmed supplier quote on any line — the PO handoff would skip every line (supplier quote basis review required). Request a quote, or save a unit cost for a SKU first."
+                            }
+                          >
                             <input
                               type="radio"
                               name={`order-mode-${group.key}`}
                               value="po"
+                              disabled={!groupPoEligible}
                               checked={mode === "po"}
                               onChange={() => setVendorMode((current) => ({ ...current, [group.key]: "po" }))}
                             />
@@ -2411,45 +2568,137 @@ export default function ReorderEngine() {
                   );
                 })}
 
-                {/* Needs supplier — selected lines that can never submit */}
+                {/* Needs supplier — actionable (queue truth): pick a vendor
+                    per line, optionally with a unit cost. With a cost the
+                    mapping saves NOW (explicit per-piece quote → PO-ready);
+                    without one the vendor is staged for a quote request and
+                    the mapping persists when the RFQ batch is created. */}
                 {builderGroups.needsSupplier.length > 0 && (
                   <div className="overflow-hidden rounded-md border border-amber-200">
                     <div className="border-b border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">
-                      Needs supplier — cannot be submitted
+                      No vendor yet — assign one to order
                     </div>
-                    {builderGroups.needsSupplier.map((item) => (
-                      <div
-                        key={item.recommendationId}
-                        className="flex items-center justify-between border-b px-3 py-2 text-xs last:border-b-0"
-                      >
-                        <span className="min-w-0 truncate">
-                          <span className="font-mono font-semibold">{item.sku}</span>{" "}
-                          <span className="text-zinc-600">{item.productName}</span>
-                        </span>
-                        <span className="flex items-center gap-2 whitespace-nowrap">
-                          <span className="tabular-nums text-zinc-500">
-                            {(orderSelection.get(item.recommendationId)?.pieces ?? 0).toLocaleString()} pc
-                          </span>
-                          <button
-                            type="button"
-                            className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
-                            title="Remove from order"
-                            aria-label={`Remove ${item.sku} from order`}
-                            onClick={() => removeOrderRow(item.recommendationId)}
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </span>
-                      </div>
-                    ))}
+                    {builderGroups.needsSupplier.map((item) => {
+                      const draft = assignDrafts[item.recommendationId] ?? { vendorId: "", cost: "" };
+                      const pickedVendor = activeVendors.find((vendor) => String(vendor.id) === draft.vendorId);
+                      const costMills = parseUnitCostDollarsToMills(draft.cost);
+                      const costEntered = draft.cost.trim().length > 0;
+                      const costInvalid = costEntered && costMills === null;
+                      const saving = savingAssignmentId === item.recommendationId;
+                      const variantMissing = item.productVariantId == null;
+                      return (
+                        <div key={item.recommendationId} className="space-y-1.5 border-b px-3 py-2 text-xs last:border-b-0">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="min-w-0 truncate">
+                              <span className="font-mono font-semibold">{item.sku}</span>{" "}
+                              <span className="text-zinc-600">{item.productName}</span>
+                            </span>
+                            <span className="flex items-center gap-2 whitespace-nowrap">
+                              <span className="tabular-nums text-zinc-500">
+                                {(orderSelection.get(item.recommendationId)?.pieces ?? 0).toLocaleString()} pc
+                              </span>
+                              <button
+                                type="button"
+                                className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+                                title="Remove from order"
+                                aria-label={`Remove ${item.sku} from order`}
+                                onClick={() => removeOrderRow(item.recommendationId)}
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <select
+                              className="h-7 min-w-[160px] rounded-md border border-zinc-300 bg-white px-2 text-xs"
+                              value={draft.vendorId}
+                              aria-label={`Vendor for ${item.sku}`}
+                              onChange={(event) =>
+                                setAssignDraft(item.recommendationId, { vendorId: event.target.value })
+                              }
+                            >
+                              <option value="">
+                                {vendorsQuery.isLoading ? "Loading vendors…" : "Pick a vendor…"}
+                              </option>
+                              {activeVendors.map((vendor) => (
+                                <option key={vendor.id} value={String(vendor.id)}>
+                                  {vendor.name}
+                                </option>
+                              ))}
+                            </select>
+                            <Input
+                              className="h-7 w-[110px] text-right text-xs"
+                              inputMode="decimal"
+                              placeholder="Unit cost $"
+                              title="Optional — needed for a direct PO; leave blank to send a quote request instead"
+                              value={draft.cost}
+                              aria-label={`Unit cost for ${item.sku}`}
+                              onChange={(event) =>
+                                setAssignDraft(item.recommendationId, { cost: event.target.value })
+                              }
+                            />
+                            {costEntered ? (
+                              <Button
+                                size="sm"
+                                className="h-7 text-xs"
+                                disabled={!pickedVendor || costMills === null || saving || variantMissing}
+                                title={
+                                  variantMissing
+                                    ? "This product has no active variant, so a catalog mapping cannot be saved here — use the Suppliers page."
+                                    : !pickedVendor
+                                      ? "Pick a vendor first"
+                                      : costMills === null
+                                        ? "Enter a cost above $0 with up to 4 decimals, e.g. 4.125 — or leave it blank to request a quote"
+                                        : "Saves the vendor mapping with this cost as a confirmed per-piece quote (PO-ready)"
+                                }
+                                onClick={() => {
+                                  if (pickedVendor && costMills !== null) {
+                                    void saveVendorAssignment(item, pickedVendor, costMills);
+                                  }
+                                }}
+                              >
+                                {saving ? "Saving…" : "Save vendor + cost"}
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-xs"
+                                disabled={!pickedVendor || saving}
+                                title={
+                                  !pickedVendor
+                                    ? "Pick a vendor first"
+                                    : "No cost yet — the line moves under this vendor for a quote request; the mapping is saved when the quote request is created"
+                                }
+                                onClick={() => {
+                                  if (pickedVendor) stageVendor(item, pickedVendor);
+                                }}
+                              >
+                                Use for quote request
+                              </Button>
+                            )}
+                          </div>
+                          {costInvalid && (
+                            <div className="text-[11px] text-red-600">
+                              Enter a cost above $0 with up to 4 decimals (e.g. 4.125), or leave it blank to
+                              request a quote — a $0 confirmed quote would be fake cost data.
+                            </div>
+                          )}
+                          {vendorsQuery.isError && (
+                            <div className="text-[11px] text-red-600">
+                              Vendors could not be loaded — reopen the builder or manage the mapping on the
+                              Suppliers page.
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                     <div className="px-3 py-2 text-xs text-amber-700">
-                      These SKUs have no preferred supplier, so neither a PO nor a quote request can be created.{" "}
-                      <button
-                        type="button"
-                        className="font-semibold underline"
-                        onClick={() => navigate("/suppliers")}
-                      >
-                        Assign a supplier →
+                      The engine says these SKUs need ordering — the missing vendor mapping is setup, not a reason
+                      to hide them. Unit cost is optional: with one, the vendor saves as a confirmed quote and the
+                      line can go straight to a PO; without one, send a quote request. Full catalog setup lives on{" "}
+                      <button type="button" className="font-semibold underline" onClick={() => navigate("/suppliers")}>
+                        Suppliers →
                       </button>
                     </div>
                   </div>
@@ -2966,7 +3215,11 @@ function ItemRow({
   inOrder: boolean;
   onToggleOrder: () => void;
 }) {
-  const skipped = item.skippedReason !== null && item.skippedReason !== undefined;
+  // Queue truth: no_vendor rows have real demand — they render as first-class
+  // queue rows (true status badge + honest "No vendor yet" tag), never as
+  // greyed "skipped" rows. All other skip reasons keep the muted treatment.
+  const skipped = isDisplaySkipped(item);
+  const vendorGap = isVendorGapRow(item);
   // Any non-excluded row can join the order (rev 2: healthy rows exist for
   // MOQ/freight top-offs); analysis membership is managed on Planning Policy.
   const orderable = item.skippedReason !== "excluded";
@@ -3009,7 +3262,22 @@ function ItemRow({
             <div className="mt-0.5 text-[11px]">{skippedReasonLabel(item.skippedReason)}</div>
           </>
         ) : (
-          <StatusBadge status={item.status} />
+          <>
+            <StatusBadge status={item.status} />
+            {vendorGap && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Badge variant="outline" className={`mt-0.5 block w-fit cursor-help ${TONE_BADGE_CLASSES.amber}`}>
+                    No vendor yet
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-[280px] text-xs">
+                  The demand is real — no preferred vendor is mapped yet. Add it to the order and assign a vendor
+                  in the builder (with a cost for a direct PO, or without one to request a quote).
+                </TooltipContent>
+              </Tooltip>
+            )}
+          </>
         )}
       </TableCell>
       <TableCell className="text-center">
