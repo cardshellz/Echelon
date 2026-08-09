@@ -1,11 +1,15 @@
-export type DropshipSectionStatus = "ready" | "attention_required" | "coming_soon";
+export type DropshipSectionStatus =
+  "ready" | "attention_required" | "coming_soon";
 export type DropshipSeverity = "info" | "warning" | "error";
 export type DropshipStorePlatform = "ebay" | "shopify";
 export type DropshipDogfoodReadinessStatus = "ready" | "warning" | "blocked";
-export type DropshipSystemReadinessStatus = DropshipDogfoodReadinessStatus | "not_applicable";
+export type DropshipSystemReadinessStatus =
+  DropshipDogfoodReadinessStatus | "not_applicable";
 export type DropshipListingMode = "draft_first" | "live" | "manual_only";
-export type DropshipListingInventoryMode = "managed_quantity_sync" | "manual_quantity" | "disabled";
-export type DropshipListingPriceMode = "vendor_defined" | "connection_default" | "disabled";
+export type DropshipListingInventoryMode =
+  "managed_quantity_sync" | "manual_quantity" | "disabled";
+export type DropshipListingPriceMode =
+  "vendor_defined" | "connection_default" | "disabled";
 export type DropshipListingRequiredProductField =
   | "sku"
   | "productName"
@@ -19,7 +23,8 @@ export type DropshipListingRequiredProductField =
   | "condition"
   | "itemSpecifics"
   | "imageUrls";
-export type DropshipCatalogExposureScope = "catalog" | "product_line" | "category" | "product" | "variant";
+export type DropshipCatalogExposureScope =
+  "catalog" | "product_line" | "category" | "product" | "variant";
 export type DropshipCatalogExposureAction = "include" | "exclude";
 export type DropshipOpsOrderIntakeStatus =
   | "received"
@@ -39,28 +44,13 @@ export type DropshipOrderCancellationStatus =
   | "marketplace_cancellation_failed"
   | "marketplace_cancelled";
 export type DropshipListingPushJobStatus =
-  | "queued"
-  | "processing"
-  | "completed"
-  | "failed"
-  | "cancelled";
+  "queued" | "processing" | "completed" | "failed" | "cancelled";
 export type DropshipTrackingPushStatus =
-  | "queued"
-  | "processing"
-  | "succeeded"
-  | "failed";
+  "queued" | "processing" | "succeeded" | "failed";
 export type DropshipAdminTrackingPushRetryStatus =
-  | "not_dropship"
-  | "already_succeeded"
-  | "already_processing"
-  | "succeeded";
-export type DropshipNotificationOpsStatus =
-  | "pending"
-  | "delivered"
-  | "failed";
-export type DropshipNotificationOpsChannel =
-  | "email"
-  | "in_app";
+  "not_dropship" | "already_succeeded" | "already_processing" | "succeeded";
+export type DropshipNotificationOpsStatus = "pending" | "delivered" | "failed";
+export type DropshipNotificationOpsChannel = "email" | "in_app";
 export type DropshipRmaStatus =
   | "requested"
   | "in_transit"
@@ -73,11 +63,7 @@ export type DropshipRmaStatus =
   | "credited"
   | "closed";
 export type DropshipReturnFaultCategory =
-  | "card_shellz"
-  | "vendor"
-  | "customer"
-  | "marketplace"
-  | "carrier";
+  "card_shellz" | "vendor" | "customer" | "marketplace" | "carrier";
 export type DropshipRmaInspectionOutcome = "approved" | "rejected";
 export type DropshipStoreConnectionLifecycleStatus =
   | "connected"
@@ -86,28 +72,31 @@ export type DropshipStoreConnectionLifecycleStatus =
   | "grace_period"
   | "paused"
   | "disconnected";
-export type DropshipStoreOAuthIntent = "connect" | "refresh_connection" | "change_store";
+export type DropshipStoreOAuthIntent =
+  "connect" | "refresh_connection" | "change_store";
 
-export const allDropshipOpsOrderIntakeStatuses: DropshipOpsOrderIntakeStatus[] = [
-  "received",
-  "processing",
-  "accepted",
-  "rejected",
-  "retrying",
-  "failed",
-  "payment_hold",
-  "cancelled",
-  "exception",
-];
+export const allDropshipOpsOrderIntakeStatuses: DropshipOpsOrderIntakeStatus[] =
+  [
+    "received",
+    "processing",
+    "accepted",
+    "rejected",
+    "retrying",
+    "failed",
+    "payment_hold",
+    "cancelled",
+    "exception",
+  ];
 
-export const allDropshipOrderCancellationStatuses: DropshipOrderCancellationStatus[] = [
-  "payment_hold_expired",
-  "order_intake_rejected",
-  "marketplace_cancellation_processing",
-  "marketplace_cancellation_retrying",
-  "marketplace_cancellation_failed",
-  "marketplace_cancelled",
-];
+export const allDropshipOrderCancellationStatuses: DropshipOrderCancellationStatus[] =
+  [
+    "payment_hold_expired",
+    "order_intake_rejected",
+    "marketplace_cancellation_processing",
+    "marketplace_cancellation_retrying",
+    "marketplace_cancellation_failed",
+    "marketplace_cancelled",
+  ];
 
 const allDropshipListingPushJobStatuses: DropshipListingPushJobStatus[] = [
   "queued",
@@ -168,7 +157,9 @@ export const DROPSHIP_RMA_TRANSITIONS: Readonly<
 });
 
 /** Return the statuses reachable from `currentStatus` under the D4 rules. */
-export function legalRmaTransitions(currentStatus: DropshipRmaStatus): readonly DropshipRmaStatus[] {
+export function legalRmaTransitions(
+  currentStatus: DropshipRmaStatus,
+): readonly DropshipRmaStatus[] {
   return DROPSHIP_RMA_TRANSITIONS[currentStatus] ?? [];
 }
 
@@ -177,31 +168,33 @@ export function isRmaStatusTerminal(status: DropshipRmaStatus): boolean {
   return legalRmaTransitions(status).length === 0;
 }
 
-export const allDropshipListingModes: DropshipListingMode[] = ["draft_first", "live", "manual_only"];
-export const allDropshipListingInventoryModes: DropshipListingInventoryMode[] = [
-  "managed_quantity_sync",
-  "manual_quantity",
-  "disabled",
+export const allDropshipListingModes: DropshipListingMode[] = [
+  "draft_first",
+  "live",
+  "manual_only",
 ];
+export const allDropshipListingInventoryModes: DropshipListingInventoryMode[] =
+  ["managed_quantity_sync", "manual_quantity", "disabled"];
 export const allDropshipListingPriceModes: DropshipListingPriceMode[] = [
   "vendor_defined",
   "connection_default",
   "disabled",
 ];
-export const allDropshipListingRequiredProductFields: DropshipListingRequiredProductField[] = [
-  "sku",
-  "productName",
-  "variantName",
-  "title",
-  "description",
-  "category",
-  "brand",
-  "gtin",
-  "mpn",
-  "condition",
-  "itemSpecifics",
-  "imageUrls",
-];
+export const allDropshipListingRequiredProductFields: DropshipListingRequiredProductField[] =
+  [
+    "sku",
+    "productName",
+    "variantName",
+    "title",
+    "description",
+    "category",
+    "brand",
+    "gtin",
+    "mpn",
+    "condition",
+    "itemSpecifics",
+    "imageUrls",
+  ];
 
 const defaultDropshipRmaOpsStatuses: DropshipRmaStatus[] = [
   "requested",
@@ -215,7 +208,14 @@ const defaultDropshipRmaOpsStatuses: DropshipRmaStatus[] = [
 ];
 
 export interface DropshipSettingsSection {
-  key: "account" | "store_connection" | "wallet_payment" | "notifications" | "api_keys" | "webhooks" | "return_contact";
+  key:
+    | "account"
+    | "store_connection"
+    | "wallet_payment"
+    | "notifications"
+    | "api_keys"
+    | "webhooks"
+    | "return_contact";
   label: string;
   status: DropshipSectionStatus;
   comingSoon: boolean;
@@ -237,7 +237,12 @@ export interface DropshipStoreConnectionSummary {
 }
 
 export interface DropshipOnboardingStep {
-  key: "vendor_profile" | "store_connection" | "catalog_available" | "catalog_selection" | "wallet_payment";
+  key:
+    | "vendor_profile"
+    | "store_connection"
+    | "catalog_available"
+    | "catalog_selection"
+    | "wallet_payment";
   label: string;
   status: "complete" | "incomplete" | "blocked";
   required: boolean;
@@ -341,7 +346,10 @@ export interface DropshipStoreConnectionListResponse {
     includedStoreConnections: number;
   };
   connections: DropshipStoreConnectionProfileResponse[];
-  setupChecksByConnectionId: Record<string, DropshipStoreConnectionSetupCheck[]>;
+  setupChecksByConnectionId: Record<
+    string,
+    DropshipStoreConnectionSetupCheck[]
+  >;
 }
 
 export interface DropshipStoreConnectionDisconnectInput {
@@ -554,7 +562,8 @@ export interface DropshipDogfoodReadinessResponse {
   launchGate: DropshipDogfoodLaunchGate;
 }
 
-export type DropshipDogfoodSmokeStageKey = "listing" | "order_intake" | "fulfillment" | "tracking";
+export type DropshipDogfoodSmokeStageKey =
+  "listing" | "order_intake" | "fulfillment" | "tracking";
 
 export interface DropshipDogfoodSmokeStage {
   key: DropshipDogfoodSmokeStageKey;
@@ -622,7 +631,8 @@ export interface DropshipDogfoodLaunchStatusResponse {
   runbookSteps: DropshipDogfoodLaunchRunbookStep[];
 }
 
-export type DropshipAdminWorkerSweepName = "listing_push" | "order_processing" | "ebay_order_intake";
+export type DropshipAdminWorkerSweepName =
+  "listing_push" | "order_processing" | "ebay_order_intake";
 
 export interface DropshipAdminWorkerSweepInput {
   batchSize?: number;
@@ -806,7 +816,8 @@ export interface CarrierProtectionPolicyConfig {
   lossWaitDays: number;
   misdeliveryWaitDays: number;
   damageInspectionRequired: boolean;
-  payoutTrigger: "internal_approval" | "carrier_claim_approved" | "carrier_payment_received";
+  payoutTrigger:
+    "internal_approval" | "carrier_claim_approved" | "carrier_payment_received";
   carrierClaimRequired: boolean;
   approvalMode: "manual" | "automatic";
   automaticApprovalLimitCents: number | null;
@@ -1164,7 +1175,8 @@ export interface DropshipAdminTrackingPushListResponse {
   summary: Array<{ status: DropshipTrackingPushStatus; count: number }>;
 }
 
-export type DropshipAdminNotificationOpsVendorSummary = DropshipAdminOrderOpsVendorSummary;
+export type DropshipAdminNotificationOpsVendorSummary =
+  DropshipAdminOrderOpsVendorSummary;
 
 export interface DropshipAdminNotificationOpsListItem {
   notificationEventId: number;
@@ -1191,7 +1203,10 @@ export interface DropshipAdminNotificationOpsListResponse {
   statuses: DropshipNotificationOpsStatus[];
   channels: DropshipNotificationOpsChannel[] | null;
   summary: Array<{ status: DropshipNotificationOpsStatus; count: number }>;
-  channelSummary: Array<{ channel: DropshipNotificationOpsChannel; count: number }>;
+  channelSummary: Array<{
+    channel: DropshipNotificationOpsChannel;
+    count: number;
+  }>;
 }
 
 export interface DropshipAdminNotificationRetryInput {
@@ -1263,9 +1278,7 @@ export interface DropshipOrderIntakeRetryEligibility {
 }
 
 export type DropshipNotificationRetryEligibilityReason =
-  | "failed_email"
-  | "status_not_retryable"
-  | "channel_not_retryable";
+  "failed_email" | "status_not_retryable" | "channel_not_retryable";
 
 export interface DropshipNotificationRetryEligibility {
   canRetry: boolean;
@@ -1604,7 +1617,8 @@ export interface DropshipListingPushResponse {
   idempotentReplay: boolean;
 }
 
-export type DropshipVendorSelectionScope = "catalog" | "product_line" | "category" | "product" | "variant";
+export type DropshipVendorSelectionScope =
+  "catalog" | "product_line" | "category" | "product" | "variant";
 export type DropshipVendorSelectionAction = "include" | "exclude";
 
 export interface DropshipVendorSelectionRule {
@@ -1920,7 +1934,8 @@ export interface DropshipWalletResponse {
   };
 }
 
-export type DropshipWalletFundingRail = "stripe_card" | "stripe_ach" | "usdc_base" | "manual";
+export type DropshipWalletFundingRail =
+  "stripe_card" | "stripe_ach" | "usdc_base" | "manual";
 
 export interface DropshipAutoReloadConfigInput {
   fundingMethodId: number | null;
@@ -1980,6 +1995,7 @@ export interface DropshipReturnListItem {
   rmaId: number;
   rmaNumber: string;
   vendorId: number;
+  storeConnectionId: number | null;
   vendorName: string | null;
   vendorEmail: string | null;
   status: DropshipRmaStatus;
@@ -2021,7 +2037,8 @@ export interface DropshipAdminReturnPolicyResponse {
 }
 
 // Hierarchical return policies (migration 186; build spec B1).
-export type DropshipReturnFeeType = "restocking_fee" | "processing_fee" | "return_shipping_fee";
+export type DropshipReturnFeeType =
+  "restocking_fee" | "processing_fee" | "return_shipping_fee";
 export type DropshipReturnFeeAmountType = "flat_cents" | "percent";
 
 export interface DropshipReturnPolicyVersion {
@@ -2049,6 +2066,7 @@ export interface DropshipReturnFeeScheduleRecord {
   storeConnectionId: number | null;
   priority: number;
   isActive: boolean;
+  isDefault: boolean;
   effectiveFrom: string;
   effectiveTo: string | null;
   createdAt: string;
@@ -2092,6 +2110,7 @@ export interface DropshipAdminReturnFeeVersionInput {
   vendorId?: number | null;
   storeConnectionId?: number | null;
   priority?: number;
+  isDefault?: boolean;
   effectiveFrom?: string;
   idempotencyKey: string;
 }
@@ -2183,11 +2202,13 @@ export interface DropshipNoInspectionEvidencePack {
   trigger: "carrier_lost_status" | "delivery_timeout";
   trackingNumber: string | null;
   carrierStatus: string | null;
-  trackingHistory: {
-    status: string;
-    occurredAt: string;
-    description: string | null;
-  }[] | null;
+  trackingHistory:
+    | {
+        status: string;
+        occurredAt: string;
+        description: string | null;
+      }[]
+    | null;
   marketplaceCaseRef: string | null;
   expectedDeliveryAt: string | null;
   noInspectionTimeoutDays: number;
@@ -2285,11 +2306,20 @@ export interface DropshipAdminReturnInspectionItemInput {
   feeCents: number;
 }
 
+export interface DropshipAdminReturnFeeDecisionInput {
+  feeType: DropshipReturnFeeType;
+  responsibility: DropshipReturnFaultCategory;
+  amountCents: number;
+  overrideReason?: string | null;
+}
+
 export interface DropshipAdminReturnInspectionInput {
   outcome: DropshipRmaInspectionOutcome;
   faultCategory: DropshipReturnFaultCategory;
   creditCents: number;
   feeCents: number;
+  feeDecisions?: DropshipAdminReturnFeeDecisionInput[];
+  returnShippingActualCents?: number | null;
   notes?: string;
   photos: Record<string, unknown>[];
   items: DropshipAdminReturnInspectionItemInput[];
@@ -2357,7 +2387,10 @@ export interface DropshipNotificationPreferenceUpdateResponse {
   preference: DropshipNotificationPreference;
 }
 
-export function buildQueryUrl(path: string, params: Record<string, string | number | boolean | undefined | null>): string {
+export function buildQueryUrl(
+  path: string,
+  params: Record<string, string | number | boolean | undefined | null>,
+): string {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null || value === "") continue;
@@ -2417,8 +2450,10 @@ export function buildAdminCatalogExposurePreviewUrl(input: {
   page?: number;
   limit?: number;
 }): string {
-  const visibility = input.visibility ?? (input.exposedOnly ? "visible" : "all");
-  const catalogStatus = input.catalogStatus ?? (input.includeInactiveCatalog ? "all" : "active");
+  const visibility =
+    input.visibility ?? (input.exposedOnly ? "visible" : "all");
+  const catalogStatus =
+    input.catalogStatus ?? (input.includeInactiveCatalog ? "all" : "active");
   return buildQueryUrl("/api/dropship/admin/catalog/preview", {
     search: input.search.trim(),
     visibility,
@@ -2435,14 +2470,16 @@ export function buildAdminOrderIntakeUrl(input: {
   page?: number;
   limit?: number;
 }): string {
-  const statuses = input.status === "default"
-    ? undefined
-    : input.status === "all"
-      ? allDropshipOpsOrderIntakeStatuses.join(",")
-      : input.status;
-  const cancellationStatuses = !input.cancellationStatus || input.cancellationStatus === "all"
-    ? undefined
-    : input.cancellationStatus;
+  const statuses =
+    input.status === "default"
+      ? undefined
+      : input.status === "all"
+        ? allDropshipOpsOrderIntakeStatuses.join(",")
+        : input.status;
+  const cancellationStatuses =
+    !input.cancellationStatus || input.cancellationStatus === "all"
+      ? undefined
+      : input.cancellationStatus;
   return buildQueryUrl("/api/dropship/admin/order-intake", {
     search: input.search.trim(),
     statuses,
@@ -2459,11 +2496,12 @@ export function buildAdminListingPushJobsUrl(input: {
   page?: number;
   limit?: number;
 }): string {
-  const statuses = input.status === "default"
-    ? undefined
-    : input.status === "all"
-      ? allDropshipListingPushJobStatuses.join(",")
-      : input.status;
+  const statuses =
+    input.status === "default"
+      ? undefined
+      : input.status === "all"
+        ? allDropshipListingPushJobStatuses.join(",")
+        : input.status;
   return buildQueryUrl("/api/dropship/admin/listing-push-jobs", {
     search: input.search.trim(),
     statuses,
@@ -2491,7 +2529,10 @@ export function buildAdminListingPushJobRetryInput(input: {
 }
 
 export function listingPushJobRetryEligibility(
-  job: Pick<DropshipAdminListingPushJobListItem, "status" | "updatedAt" | "itemSummary">,
+  job: Pick<
+    DropshipAdminListingPushJobListItem,
+    "status" | "updatedAt" | "itemSummary"
+  >,
   now: Date = new Date(),
 ): DropshipListingPushJobRetryEligibility {
   if (job.status === "failed") {
@@ -2504,7 +2545,8 @@ export function listingPushJobRetryEligibility(
     if (Number.isNaN(updatedAt.getTime())) {
       return { canRetry: false, reason: "invalid_processing_timestamp" };
     }
-    return updatedAt.getTime() <= now.getTime() - DROPSHIP_LISTING_PUSH_STALE_PROCESSING_MS
+    return updatedAt.getTime() <=
+      now.getTime() - DROPSHIP_LISTING_PUSH_STALE_PROCESSING_MS
       ? { canRetry: true, reason: "stale_processing" }
       : { canRetry: false, reason: "processing_not_stale" };
   }
@@ -2518,11 +2560,12 @@ export function buildAdminTrackingPushesUrl(input: {
   page?: number;
   limit?: number;
 }): string {
-  const statuses = input.status === "default"
-    ? undefined
-    : input.status === "all"
-      ? allDropshipTrackingPushStatuses.join(",")
-      : input.status;
+  const statuses =
+    input.status === "default"
+      ? undefined
+      : input.status === "all"
+        ? allDropshipTrackingPushStatuses.join(",")
+        : input.status;
   return buildQueryUrl("/api/dropship/admin/tracking-pushes", {
     search: input.search.trim(),
     statuses,
@@ -2540,14 +2583,14 @@ export function buildAdminNotificationEventsUrl(input: {
   page?: number;
   limit?: number;
 }): string {
-  const statuses = input.status === "default"
-    ? undefined
-    : input.status === "all"
-      ? allDropshipNotificationOpsStatuses.join(",")
-      : input.status;
-  const critical = input.critical === "all"
-    ? undefined
-    : input.critical === "critical";
+  const statuses =
+    input.status === "default"
+      ? undefined
+      : input.status === "all"
+        ? allDropshipNotificationOpsStatuses.join(",")
+        : input.status;
+  const critical =
+    input.critical === "all" ? undefined : input.critical === "critical";
   return buildQueryUrl("/api/dropship/admin/notifications", {
     search: input.search.trim(),
     statuses,
@@ -2576,7 +2619,9 @@ export function buildNotificationPreferenceUpdateInput(input: {
   inAppEnabled: boolean;
 }): DropshipNotificationPreferenceUpdateInput {
   if (input.critical && (!input.emailEnabled || !input.inAppEnabled)) {
-    throw new Error("Critical notifications must keep email and in-app delivery enabled.");
+    throw new Error(
+      "Critical notifications must keep email and in-app delivery enabled.",
+    );
   }
 
   return {
@@ -2594,11 +2639,12 @@ export function buildAdminReturnsUrl(input: {
   page?: number;
   limit?: number;
 }): string {
-  const statuses = input.status === "default"
-    ? defaultDropshipRmaOpsStatuses.join(",")
-    : input.status === "all"
-      ? allDropshipRmaStatuses.join(",")
-      : input.status;
+  const statuses =
+    input.status === "default"
+      ? defaultDropshipRmaOpsStatuses.join(",")
+      : input.status === "all"
+        ? allDropshipRmaStatuses.join(",")
+        : input.status;
   return buildQueryUrl("/api/dropship/admin/returns", {
     search: input.search.trim(),
     statuses,
@@ -2611,14 +2657,20 @@ export function buildAdminReturnPolicyUrl(): string {
   return "/api/dropship/admin/returns/policy";
 }
 
-export function buildAdminReturnPoliciesUrl(input: { includeInactive?: boolean } = {}): string {
+export function buildAdminReturnPoliciesUrl(
+  input: { includeInactive?: boolean } = {},
+): string {
   const params = new URLSearchParams();
   if (input.includeInactive) params.set("includeInactive", "true");
   const query = params.toString();
-  return query ? `/api/dropship/admin/return-policies?${query}` : "/api/dropship/admin/return-policies";
+  return query
+    ? `/api/dropship/admin/return-policies?${query}`
+    : "/api/dropship/admin/return-policies";
 }
 
-export function buildAdminReturnFeesUrl(input: { includeInactive?: boolean } = {}): string {
+export function buildAdminReturnFeesUrl(
+  input: { includeInactive?: boolean } = {},
+): string {
   const params = new URLSearchParams();
   if (input.includeInactive) params.set("includeInactive", "true");
   const query = params.toString();
@@ -2633,7 +2685,8 @@ export function buildAdminEffectiveReturnPolicyUrl(input: {
 }): string {
   const params = new URLSearchParams();
   if (input.vendorId != null) params.set("vendorId", String(input.vendorId));
-  if (input.storeConnectionId != null) params.set("storeConnectionId", String(input.storeConnectionId));
+  if (input.storeConnectionId != null)
+    params.set("storeConnectionId", String(input.storeConnectionId));
   const query = params.toString();
   return query
     ? `/api/dropship/admin/return-policies/effective?${query}`
@@ -2647,9 +2700,24 @@ export function buildAdminEffectiveReturnFeesUrl(input: {
 }): string {
   const params = new URLSearchParams();
   if (input.vendorId != null) params.set("vendorId", String(input.vendorId));
-  if (input.storeConnectionId != null) params.set("storeConnectionId", String(input.storeConnectionId));
+  if (input.storeConnectionId != null)
+    params.set("storeConnectionId", String(input.storeConnectionId));
   params.set("faultCategory", input.faultCategory);
   return `/api/dropship/admin/return-policies/fee-schedule/effective?${params.toString()}`;
+}
+
+export function buildAdminDefaultReturnFeesUrl(input: {
+  vendorId?: number | null;
+  storeConnectionId?: number | null;
+}): string {
+  const params = new URLSearchParams();
+  if (input.vendorId != null) params.set("vendorId", String(input.vendorId));
+  if (input.storeConnectionId != null)
+    params.set("storeConnectionId", String(input.storeConnectionId));
+  const query = params.toString();
+  return query
+    ? `/api/dropship/admin/return-policies/fee-schedule/effective-defaults?${query}`
+    : "/api/dropship/admin/return-policies/fee-schedule/effective-defaults";
 }
 
 export function buildAdminDogfoodReadinessUrl(input: {
@@ -2694,7 +2762,9 @@ export function buildAdminDogfoodLaunchStatusUrl(input: {
   });
 }
 
-export function buildAdminWorkerSweepRunUrl(worker: DropshipAdminWorkerSweepName): string {
+export function buildAdminWorkerSweepRunUrl(
+  worker: DropshipAdminWorkerSweepName,
+): string {
   return `/api/dropship/admin/worker-sweeps/${worker}/run`;
 }
 
@@ -2708,9 +2778,15 @@ export function buildAdminWorkerSweepInput(input: {
     throw new Error("idempotencyKey must be between 8 and 200 characters.");
   }
 
-  const batchSize = input.batchSize === "" ? undefined : Number(input.batchSize);
-  if (batchSize !== undefined && (!Number.isInteger(batchSize) || batchSize <= 0 || batchSize > 100)) {
-    throw new Error("batchSize must be a positive integer no greater than 100.");
+  const batchSize =
+    input.batchSize === "" ? undefined : Number(input.batchSize);
+  if (
+    batchSize !== undefined &&
+    (!Number.isInteger(batchSize) || batchSize <= 0 || batchSize > 100)
+  ) {
+    throw new Error(
+      "batchSize must be a positive integer no greater than 100.",
+    );
   }
 
   const reason = input.reason?.trim() ?? "";
@@ -2759,10 +2835,12 @@ export function buildAdminOmsChannelConfigureInput(input: {
   };
 }
 
-export function buildAdminShippingConfigUrl(input: {
-  packageProfileLimit?: number;
-  rateTableLimit?: number;
-} = {}): string {
+export function buildAdminShippingConfigUrl(
+  input: {
+    packageProfileLimit?: number;
+    rateTableLimit?: number;
+  } = {},
+): string {
   return buildQueryUrl("/api/dropship/admin/shipping/config", {
     packageProfileLimit: input.packageProfileLimit ?? 50,
     rateTableLimit: input.rateTableLimit ?? 25,
@@ -2825,9 +2903,14 @@ export function buildStoreListingConfigInput(input: {
     listingMode: input.listingMode,
     inventoryMode: input.inventoryMode,
     priceMode: input.priceMode,
-    marketplaceConfig: parseJsonObject(input.marketplaceConfigJson, "marketplaceConfig"),
+    marketplaceConfig: parseJsonObject(
+      input.marketplaceConfigJson,
+      "marketplaceConfig",
+    ),
     requiredConfigKeys: parseRequiredConfigKeys(input.requiredConfigKeys),
-    requiredProductFields: parseRequiredProductFields(input.requiredProductFields),
+    requiredProductFields: parseRequiredProductFields(
+      input.requiredProductFields,
+    ),
     isActive: input.isActive,
   };
 }
@@ -2908,13 +2991,22 @@ export function buildAdminWalletConfirmedUsdcCreditInput(input: {
   if (amountCents <= 0) {
     throw new Error("Amount must be greater than $0.00.");
   }
-  const amountAtomicUnits = parseUsdcAmountToAtomicUnits(input.usdcAmount, "usdcAmount");
-  const transactionHash = normalizeEvmTransactionHash(input.transactionHash, "transactionHash");
+  const amountAtomicUnits = parseUsdcAmountToAtomicUnits(
+    input.usdcAmount,
+    "usdcAmount",
+  );
+  const transactionHash = normalizeEvmTransactionHash(
+    input.transactionHash,
+    "transactionHash",
+  );
   const fromAddress = input.fromAddress.trim()
     ? normalizeEvmAddress(input.fromAddress, "fromAddress")
     : null;
   const toAddress = normalizeEvmAddress(input.toAddress, "toAddress");
-  const confirmations = parsePositiveInteger(input.confirmations, "confirmations");
+  const confirmations = parsePositiveInteger(
+    input.confirmations,
+    "confirmations",
+  );
   if (confirmations > 10_000) {
     throw new Error("confirmations must be 10,000 or fewer.");
   }
@@ -3007,7 +3099,8 @@ export function orderIntakeRetryEligibility(
     if (Number.isNaN(updatedAt.getTime())) {
       return { canRetry: false, reason: "invalid_processing_timestamp" };
     }
-    return updatedAt.getTime() <= now.getTime() - DROPSHIP_ORDER_INTAKE_STALE_PROCESSING_MS
+    return updatedAt.getTime() <=
+      now.getTime() - DROPSHIP_ORDER_INTAKE_STALE_PROCESSING_MS
       ? { canRetry: true, reason: "stale_processing" }
       : { canRetry: false, reason: "processing_not_stale" };
   }
@@ -3015,7 +3108,10 @@ export function orderIntakeRetryEligibility(
 }
 
 export function trackingPushRetryEligibility(
-  push: Pick<DropshipAdminTrackingPushListItem, "status" | "retryable" | "updatedAt">,
+  push: Pick<
+    DropshipAdminTrackingPushListItem,
+    "status" | "retryable" | "updatedAt"
+  >,
   now: Date = new Date(),
 ): DropshipTrackingPushRetryEligibility {
   if (push.status === "failed") {
@@ -3028,7 +3124,8 @@ export function trackingPushRetryEligibility(
     if (Number.isNaN(updatedAt.getTime())) {
       return { canRetry: false, reason: "invalid_processing_timestamp" };
     }
-    return updatedAt.getTime() <= now.getTime() - DROPSHIP_TRACKING_PUSH_STALE_PROCESSING_MS
+    return updatedAt.getTime() <=
+      now.getTime() - DROPSHIP_TRACKING_PUSH_STALE_PROCESSING_MS
       ? { canRetry: true, reason: "stale_processing" }
       : { canRetry: false, reason: "processing_not_stale" };
   }
@@ -3088,22 +3185,34 @@ export function buildAdminReturnCreateInput(input: {
       throw new Error(`items.${index}.status must be 40 characters or fewer.`);
     }
     return {
-      productVariantId: parseOptionalPositiveInteger(item.productVariantId, `items.${index}.productVariantId`),
+      productVariantId: parseOptionalPositiveInteger(
+        item.productVariantId,
+        `items.${index}.productVariantId`,
+      ),
       quantity: parsePositiveInteger(item.quantity, `items.${index}.quantity`),
       status,
-      requestedCreditCents: parseNullableDollarInputToCents(item.requestedCreditAmount, `items.${index}.requestedCreditAmount`),
+      requestedCreditCents: parseNullableDollarInputToCents(
+        item.requestedCreditAmount,
+        `items.${index}.requestedCreditAmount`,
+      ),
     };
   });
 
   return {
     vendorId: parsePositiveInteger(input.vendorId, "vendorId"),
     rmaNumber,
-    storeConnectionId: parseOptionalPositiveInteger(input.storeConnectionId, "storeConnectionId"),
+    storeConnectionId: parseOptionalPositiveInteger(
+      input.storeConnectionId,
+      "storeConnectionId",
+    ),
     intakeId: parseOptionalPositiveInteger(input.intakeId, "intakeId"),
     omsOrderId: parseOptionalPositiveInteger(input.omsOrderId, "omsOrderId"),
     reasonCode: input.reasonCode.trim() || null,
     faultCategory: input.faultCategory === "none" ? null : input.faultCategory,
-    returnWindowDays: parsePositiveInteger(input.returnWindowDays, "returnWindowDays"),
+    returnWindowDays: parsePositiveInteger(
+      input.returnWindowDays,
+      "returnWindowDays",
+    ),
     labelSource: input.labelSource.trim() || null,
     returnTrackingNumber: input.returnTrackingNumber.trim() || null,
     vendorNotes: vendorNotes || null,
@@ -3120,7 +3229,10 @@ export function buildAdminReturnPolicyInput(input: {
   effectiveTo: string;
   idempotencyKey: string;
 }): DropshipAdminReturnPolicyInput {
-  const returnWindowDays = parsePositiveInteger(input.returnWindowDays, "returnWindowDays");
+  const returnWindowDays = parsePositiveInteger(
+    input.returnWindowDays,
+    "returnWindowDays",
+  );
   if (returnWindowDays > 365) {
     throw new Error("returnWindowDays must be 365 or fewer.");
   }
@@ -3153,17 +3265,27 @@ export function buildPortalReturnCreateInput(input: {
   const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
   const rmaNumber = requiredTrimmedString(input.rmaNumber, "rmaNumber", 80);
   const intakeId = parsePositiveInteger(input.intakeId, "intakeId");
-  const vendorNotes = optionalTrimmedString(input.vendorNotes, "vendorNotes", 5000);
+  const vendorNotes = optionalTrimmedString(
+    input.vendorNotes,
+    "vendorNotes",
+    5000,
+  );
   const items = input.items.map((item, index) => {
     const status = item.status.trim() || "requested";
     if (status.length > 40) {
       throw new Error(`items.${index}.status must be 40 characters or fewer.`);
     }
     return {
-      productVariantId: parseOptionalPositiveInteger(item.productVariantId, `items.${index}.productVariantId`),
+      productVariantId: parseOptionalPositiveInteger(
+        item.productVariantId,
+        `items.${index}.productVariantId`,
+      ),
       quantity: parsePositiveInteger(item.quantity, `items.${index}.quantity`),
       status,
-      requestedCreditCents: parseNullableDollarInputToCents(item.requestedCreditAmount, `items.${index}.requestedCreditAmount`),
+      requestedCreditCents: parseNullableDollarInputToCents(
+        item.requestedCreditAmount,
+        `items.${index}.requestedCreditAmount`,
+      ),
     };
   });
   return {
@@ -3172,7 +3294,11 @@ export function buildPortalReturnCreateInput(input: {
     reasonCode: optionalTrimmedString(input.reasonCode, "reasonCode", 255),
     faultCategory: input.faultCategory === "none" ? null : input.faultCategory,
     labelSource: optionalTrimmedString(input.labelSource, "labelSource", 255),
-    returnTrackingNumber: optionalTrimmedString(input.returnTrackingNumber, "returnTrackingNumber", 255),
+    returnTrackingNumber: optionalTrimmedString(
+      input.returnTrackingNumber,
+      "returnTrackingNumber",
+      255,
+    ),
     vendorNotes,
     items,
     idempotencyKey,
@@ -3190,6 +3316,13 @@ export function buildAdminReturnInspectionInput(input: {
     finalCreditAmount: string;
     feeAmount: string;
   }>;
+  feeDecisions?: Array<{
+    feeType: DropshipReturnFeeType;
+    responsibility: DropshipReturnFaultCategory;
+    amount: string;
+    overrideReason?: string;
+  }>;
+  returnShippingActualAmount?: string;
 }): DropshipAdminReturnInspectionInput {
   const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
   const notes = input.notes.trim();
@@ -3198,7 +3331,10 @@ export function buildAdminReturnInspectionInput(input: {
   }
 
   const items = input.items.map((item, index) => {
-    const rmaItemId = assertPositiveInteger(item.rmaItemId, `items.${index}.rmaItemId`);
+    const rmaItemId = assertPositiveInteger(
+      item.rmaItemId,
+      `items.${index}.rmaItemId`,
+    );
     const status = item.status.trim() || "resellable";
     if (status.length > 40) {
       throw new Error(`items.${index}.status must be 40 characters or fewer.`);
@@ -3206,18 +3342,51 @@ export function buildAdminReturnInspectionInput(input: {
     return {
       rmaItemId,
       status,
-      finalCreditCents: parseOptionalDollarInputToCents(item.finalCreditAmount, `items.${index}.finalCreditAmount`),
-      feeCents: parseOptionalDollarInputToCents(item.feeAmount, `items.${index}.feeAmount`),
+      finalCreditCents: parseOptionalDollarInputToCents(
+        item.finalCreditAmount,
+        `items.${index}.finalCreditAmount`,
+      ),
+      feeCents: parseOptionalDollarInputToCents(
+        item.feeAmount,
+        `items.${index}.feeAmount`,
+      ),
     };
   });
-  const creditCents = items.reduce((sum, item) => sum + item.finalCreditCents, 0);
+  const creditCents = items.reduce(
+    (sum, item) => sum + item.finalCreditCents,
+    0,
+  );
   const feeCents = items.reduce((sum, item) => sum + item.feeCents, 0);
 
+  const feeDecisions = input.feeDecisions?.map((decision, index) => ({
+    feeType: decision.feeType,
+    responsibility: decision.responsibility,
+    amountCents: parseOptionalDollarInputToCents(
+      decision.amount,
+      `feeDecisions.${index}.amount`,
+    ),
+    overrideReason: decision.overrideReason?.trim() || null,
+  }));
+  if (
+    feeDecisions &&
+    new Set(feeDecisions.map((decision) => decision.feeType)).size !==
+      feeDecisions.length
+  ) {
+    throw new Error("Fee decisions must contain each fee type at most once.");
+  }
   return {
     outcome: input.outcome,
     faultCategory: input.faultCategory,
     creditCents,
     feeCents,
+    feeDecisions,
+    returnShippingActualCents:
+      input.returnShippingActualAmount === undefined
+        ? undefined
+        : parseOptionalDollarInputToCents(
+            input.returnShippingActualAmount,
+            "returnShippingActualAmount",
+          ),
     notes: notes || undefined,
     photos: [],
     items,
@@ -3241,13 +3410,18 @@ export function buildShippingBoxInput(input: {
     ? parsePositiveInteger(input.maxWeightGrams, "maxWeightGrams")
     : null;
   return {
-    boxId: input.boxId?.trim() ? parsePositiveInteger(input.boxId, "boxId") : undefined,
+    boxId: input.boxId?.trim()
+      ? parsePositiveInteger(input.boxId, "boxId")
+      : undefined,
     code: requiredTrimmedString(input.code, "code", 80),
     name: requiredTrimmedString(input.name, "name", 200),
     lengthMm: parsePositiveInteger(input.lengthMm, "lengthMm"),
     widthMm: parsePositiveInteger(input.widthMm, "widthMm"),
     heightMm: parsePositiveInteger(input.heightMm, "heightMm"),
-    tareWeightGrams: parseNonNegativeInteger(input.tareWeightGrams, "tareWeightGrams"),
+    tareWeightGrams: parseNonNegativeInteger(
+      input.tareWeightGrams,
+      "tareWeightGrams",
+    ),
     maxWeightGrams,
     isActive: input.isActive,
     idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
@@ -3263,10 +3437,15 @@ export function buildShippingPackageProfileInput(input: {
   idempotencyKey: string;
 }): DropshipShippingPackageProfileInput {
   return {
-    productVariantId: parsePositiveInteger(input.productVariantId, "productVariantId"),
+    productVariantId: parsePositiveInteger(
+      input.productVariantId,
+      "productVariantId",
+    ),
     defaultCarrier: input.defaultCarrier.trim() || null,
     defaultService: input.defaultService.trim() || null,
-    defaultBoxId: input.defaultBoxId.trim() ? parsePositiveInteger(input.defaultBoxId, "defaultBoxId") : null,
+    defaultBoxId: input.defaultBoxId.trim()
+      ? parsePositiveInteger(input.defaultBoxId, "defaultBoxId")
+      : null,
     isActive: input.isActive,
     idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
   };
@@ -3284,9 +3463,18 @@ export function buildShippingZoneRuleInput(input: {
   idempotencyKey: string;
 }): DropshipShippingZoneRuleInput {
   return {
-    zoneRuleId: input.zoneRuleId?.trim() ? parsePositiveInteger(input.zoneRuleId, "zoneRuleId") : undefined,
-    originWarehouseId: parsePositiveInteger(input.originWarehouseId, "originWarehouseId"),
-    destinationCountry: requiredTrimmedString(input.destinationCountry, "destinationCountry", 2).toUpperCase(),
+    zoneRuleId: input.zoneRuleId?.trim()
+      ? parsePositiveInteger(input.zoneRuleId, "zoneRuleId")
+      : undefined,
+    originWarehouseId: parsePositiveInteger(
+      input.originWarehouseId,
+      "originWarehouseId",
+    ),
+    destinationCountry: requiredTrimmedString(
+      input.destinationCountry,
+      "destinationCountry",
+      2,
+    ).toUpperCase(),
     destinationRegion: input.destinationRegion.trim() || null,
     postalPrefix: input.postalPrefix.trim() || null,
     zone: requiredTrimmedString(input.zone, "zone", 40),
@@ -3310,26 +3498,46 @@ export function buildShippingRateTableInput(input: {
   rate: string;
   idempotencyKey: string;
 }): DropshipShippingRateTableInput {
-  const minWeightGrams = parseNonNegativeInteger(input.minWeightGrams, "minWeightGrams");
-  const maxWeightGrams = parsePositiveInteger(input.maxWeightGrams, "maxWeightGrams");
+  const minWeightGrams = parseNonNegativeInteger(
+    input.minWeightGrams,
+    "minWeightGrams",
+  );
+  const maxWeightGrams = parsePositiveInteger(
+    input.maxWeightGrams,
+    "maxWeightGrams",
+  );
   if (maxWeightGrams < minWeightGrams) {
-    throw new Error("maxWeightGrams must be greater than or equal to minWeightGrams.");
+    throw new Error(
+      "maxWeightGrams must be greater than or equal to minWeightGrams.",
+    );
   }
 
   return {
     carrier: requiredTrimmedString(input.carrier, "carrier", 50),
     service: requiredTrimmedString(input.service, "service", 80),
-    currency: requiredTrimmedString(input.currency, "currency", 3).toUpperCase(),
+    currency: requiredTrimmedString(
+      input.currency,
+      "currency",
+      3,
+    ).toUpperCase(),
     status: input.status,
     effectiveFrom: input.effectiveFrom.trim() || undefined,
     effectiveTo: input.effectiveTo.trim() || null,
-    rows: [{
-      warehouseId: input.warehouseId.trim() ? parsePositiveInteger(input.warehouseId, "warehouseId") : null,
-      destinationZone: requiredTrimmedString(input.destinationZone, "destinationZone", 40),
-      minWeightGrams,
-      maxWeightGrams,
-      rateCents: parseDollarInputToCents(input.rate, "rate"),
-    }],
+    rows: [
+      {
+        warehouseId: input.warehouseId.trim()
+          ? parsePositiveInteger(input.warehouseId, "warehouseId")
+          : null,
+        destinationZone: requiredTrimmedString(
+          input.destinationZone,
+          "destinationZone",
+          40,
+        ),
+        minWeightGrams,
+        maxWeightGrams,
+        rateCents: parseDollarInputToCents(input.rate, "rate"),
+      },
+    ],
     metadata: {},
     idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
   };
@@ -3349,9 +3557,16 @@ export function buildShippingMarkupPolicyInput(input: {
   return {
     name: requiredTrimmedString(input.name, "name", 120),
     markupBps: parseBasisPoints(input.markupBps, "markupBps"),
-    fixedMarkupCents: parseDollarInputToCents(input.fixedMarkup || "0", "fixedMarkup"),
-    minMarkupCents: input.minMarkup.trim() ? parseDollarInputToCents(input.minMarkup, "minMarkup") : null,
-    maxMarkupCents: input.maxMarkup.trim() ? parseDollarInputToCents(input.maxMarkup, "maxMarkup") : null,
+    fixedMarkupCents: parseDollarInputToCents(
+      input.fixedMarkup || "0",
+      "fixedMarkup",
+    ),
+    minMarkupCents: input.minMarkup.trim()
+      ? parseDollarInputToCents(input.minMarkup, "minMarkup")
+      : null,
+    maxMarkupCents: input.maxMarkup.trim()
+      ? parseDollarInputToCents(input.maxMarkup, "maxMarkup")
+      : null,
     isActive: input.isActive,
     effectiveFrom: input.effectiveFrom.trim() || undefined,
     effectiveTo: input.effectiveTo.trim() || null,
@@ -3372,8 +3587,12 @@ export function buildShippingInsurancePolicyInput(input: {
   return {
     name: requiredTrimmedString(input.name, "name", 120),
     feeBps: parseBasisPoints(input.feeBps, "feeBps"),
-    minFeeCents: input.minFee.trim() ? parseDollarInputToCents(input.minFee, "minFee") : null,
-    maxFeeCents: input.maxFee.trim() ? parseDollarInputToCents(input.maxFee, "maxFee") : null,
+    minFeeCents: input.minFee.trim()
+      ? parseDollarInputToCents(input.minFee, "minFee")
+      : null,
+    maxFeeCents: input.maxFee.trim()
+      ? parseDollarInputToCents(input.maxFee, "maxFee")
+      : null,
     isActive: input.isActive,
     effectiveFrom: input.effectiveFrom.trim() || undefined,
     effectiveTo: input.effectiveTo.trim() || null,
@@ -3392,9 +3611,12 @@ export function buildCatalogExposureRuleInput(input: {
   notes?: string | null;
   metadata?: Record<string, unknown>;
 }): DropshipAdminCatalogExposureRuleInput {
-  const priority = input.priority === undefined || input.priority === null || input.priority === ""
-    ? 0
-    : parseIntegerInput(input.priority, "priority");
+  const priority =
+    input.priority === undefined ||
+    input.priority === null ||
+    input.priority === ""
+      ? 0
+      : parseIntegerInput(input.priority, "priority");
   const rule: DropshipAdminCatalogExposureRuleInput = {
     scopeType: input.scopeType,
     action: input.action,
@@ -3410,11 +3632,17 @@ export function buildCatalogExposureRuleInput(input: {
   };
 
   if (input.scopeType === "product_line") {
-    rule.productLineId = parsePositiveIntegerInput(input.productLineId, "productLineId");
+    rule.productLineId = parsePositiveIntegerInput(
+      input.productLineId,
+      "productLineId",
+    );
   } else if (input.scopeType === "product") {
     rule.productId = parsePositiveIntegerInput(input.productId, "productId");
   } else if (input.scopeType === "variant") {
-    rule.productVariantId = parsePositiveIntegerInput(input.productVariantId, "productVariantId");
+    rule.productVariantId = parsePositiveIntegerInput(
+      input.productVariantId,
+      "productVariantId",
+    );
   } else if (input.scopeType === "category") {
     const category = input.category?.trim();
     if (!category) {
@@ -3426,7 +3654,10 @@ export function buildCatalogExposureRuleInput(input: {
   return rule;
 }
 
-export type DropshipCatalogExposurePreviewRuleScope = Exclude<DropshipCatalogExposureScope, "catalog">;
+export type DropshipCatalogExposurePreviewRuleScope = Exclude<
+  DropshipCatalogExposureScope,
+  "catalog"
+>;
 
 export function buildCatalogExposureRuleFromPreviewRow(input: {
   row: Pick<
@@ -3486,7 +3717,9 @@ function catalogExposurePreviewRuleTarget(input: {
   if (input.scopeType === "category") {
     const category = input.row.category?.trim();
     if (!category) {
-      throw new Error("category is required to build a category exposure rule from preview.");
+      throw new Error(
+        "category is required to build a category exposure rule from preview.",
+      );
     }
     return {
       category,
@@ -3497,25 +3730,37 @@ function catalogExposurePreviewRuleTarget(input: {
   if (input.scopeType === "product_line") {
     const productLineId = input.productLineId ?? input.row.productLineIds[0];
     if (!Number.isInteger(productLineId) || productLineId <= 0) {
-      throw new Error("productLineId is required to build a product line exposure rule from preview.");
+      throw new Error(
+        "productLineId is required to build a product line exposure rule from preview.",
+      );
     }
     const index = input.row.productLineIds.indexOf(productLineId);
     return {
       productLineId,
-      label: input.row.productLineNames[index] || `product line ${productLineId}`,
+      label:
+        input.row.productLineNames[index] || `product line ${productLineId}`,
     };
   }
 
   if (input.scopeType === "product") {
     return {
       productId: assertPositiveInteger(input.row.productId, "productId"),
-      label: input.row.productSku || input.row.productName || `product ${input.row.productId}`,
+      label:
+        input.row.productSku ||
+        input.row.productName ||
+        `product ${input.row.productId}`,
     };
   }
 
   return {
-    productVariantId: assertPositiveInteger(input.row.productVariantId, "productVariantId"),
-    label: input.row.variantSku || input.row.variantName || `variant ${input.row.productVariantId}`,
+    productVariantId: assertPositiveInteger(
+      input.row.productVariantId,
+      "productVariantId",
+    ),
+    label:
+      input.row.variantSku ||
+      input.row.variantName ||
+      `variant ${input.row.productVariantId}`,
   };
 }
 
@@ -3537,10 +3782,17 @@ export function catalogExposureRecordToInput(
   };
 }
 
-export function catalogExposureRuleKey(rule: Pick<
-  DropshipAdminCatalogExposureRuleInput,
-  "scopeType" | "action" | "productLineId" | "productId" | "productVariantId" | "category"
->): string {
+export function catalogExposureRuleKey(
+  rule: Pick<
+    DropshipAdminCatalogExposureRuleInput,
+    | "scopeType"
+    | "action"
+    | "productLineId"
+    | "productId"
+    | "productVariantId"
+    | "category"
+  >,
+): string {
   return [
     rule.scopeType,
     rule.action,
@@ -3583,7 +3835,11 @@ export function buildStoreConnectionDisconnectInput(input: {
 }
 
 export function normalizeShopifyShopDomainInput(value: string): string {
-  const normalized = value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/+$/, "");
   if (!normalized) return "";
   return normalized.includes(".") ? normalized : `${normalized}.myshopify.com`;
 }
@@ -3606,7 +3862,9 @@ export function createDropshipIdempotencyKey(prefix: string): string {
   if (crypto.randomUUID) return `${prefix}:${crypto.randomUUID()}`;
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  const suffix = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const suffix = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
   return `${prefix}:${suffix}`;
 }
 
@@ -3642,14 +3900,20 @@ export function buildListingPreviewRequest(input: {
   requestedRetailPricesByVariantId?: Record<string, number>;
 } {
   const productVariantIds = uniqueSelectedVariantIds(input.rows);
-  const requestedRetailPricesByVariantId = buildRequestedRetailPricesByVariantId({
-    productVariantIds,
-    retailPriceByVariantId: input.retailPriceByVariantId,
-  });
+  const requestedRetailPricesByVariantId =
+    buildRequestedRetailPricesByVariantId({
+      productVariantIds,
+      retailPriceByVariantId: input.retailPriceByVariantId,
+    });
   return {
-    storeConnectionId: assertPositiveInteger(input.storeConnectionId, "storeConnectionId"),
+    storeConnectionId: assertPositiveInteger(
+      input.storeConnectionId,
+      "storeConnectionId",
+    ),
     productVariantIds,
-    ...(Object.keys(requestedRetailPricesByVariantId).length > 0 ? { requestedRetailPricesByVariantId } : {}),
+    ...(Object.keys(requestedRetailPricesByVariantId).length > 0
+      ? { requestedRetailPricesByVariantId }
+      : {}),
   };
 }
 
@@ -3664,28 +3928,40 @@ export function buildListingPushRequest(input: {
   idempotencyKey: string;
   requestedRetailPricesByVariantId?: Record<string, number>;
 } {
-  const storeConnectionId = assertPositiveInteger(input.storeConnectionId, "storeConnectionId");
+  const storeConnectionId = assertPositiveInteger(
+    input.storeConnectionId,
+    "storeConnectionId",
+  );
   if (input.preview.storeConnectionId !== storeConnectionId) {
-    throw new Error("Listing preview store connection must match the selected store connection.");
+    throw new Error(
+      "Listing preview store connection must match the selected store connection.",
+    );
   }
   const productVariantIds = input.preview.rows
     .filter((row) => row.previewStatus !== "blocked")
     .map((row) => row.productVariantId);
-  const requestedRetailPricesByVariantId = buildRequestedRetailPricesByVariantId({
-    productVariantIds,
-    retailPriceByVariantId: input.retailPriceByVariantId,
-  });
+  const requestedRetailPricesByVariantId =
+    buildRequestedRetailPricesByVariantId({
+      productVariantIds,
+      retailPriceByVariantId: input.retailPriceByVariantId,
+    });
 
   return {
     storeConnectionId,
     productVariantIds,
     idempotencyKey: input.idempotencyKey,
-    ...(Object.keys(requestedRetailPricesByVariantId).length > 0 ? { requestedRetailPricesByVariantId } : {}),
+    ...(Object.keys(requestedRetailPricesByVariantId).length > 0
+      ? { requestedRetailPricesByVariantId }
+      : {}),
   };
 }
 
-export function listingPreviewPushableCount(preview: DropshipListingPreviewResult | null | undefined): number {
-  return preview?.rows.filter((row) => row.previewStatus !== "blocked").length ?? 0;
+export function listingPreviewPushableCount(
+  preview: DropshipListingPreviewResult | null | undefined,
+): number {
+  return (
+    preview?.rows.filter((row) => row.previewStatus !== "blocked").length ?? 0
+  );
 }
 
 export function buildAutoReloadConfigInput(input: {
@@ -3695,21 +3971,39 @@ export function buildAutoReloadConfigInput(input: {
   maxSingleReload: string;
   paymentHoldTimeoutMinutes: string;
 }): DropshipAutoReloadConfigInput {
-  const fundingMethodId = input.fundingMethodId.trim() ? parsePositiveInteger(input.fundingMethodId, "fundingMethodId") : null;
-  const minimumBalanceCents = parseDollarInputToCents(input.minimumBalance, "minimumBalance");
+  const fundingMethodId = input.fundingMethodId.trim()
+    ? parsePositiveInteger(input.fundingMethodId, "fundingMethodId")
+    : null;
+  const minimumBalanceCents = parseDollarInputToCents(
+    input.minimumBalance,
+    "minimumBalance",
+  );
   const maxSingleReloadCents = input.maxSingleReload.trim()
     ? parseDollarInputToCents(input.maxSingleReload, "maxSingleReload")
     : null;
-  const paymentHoldTimeoutMinutes = parsePositiveInteger(input.paymentHoldTimeoutMinutes, "paymentHoldTimeoutMinutes");
+  const paymentHoldTimeoutMinutes = parsePositiveInteger(
+    input.paymentHoldTimeoutMinutes,
+    "paymentHoldTimeoutMinutes",
+  );
 
   if (input.enabled && !fundingMethodId) {
-    throw new Error("Select an active funding method before enabling auto-reload.");
+    throw new Error(
+      "Select an active funding method before enabling auto-reload.",
+    );
   }
   if (input.enabled && minimumBalanceCents <= 0) {
-    throw new Error("Minimum balance must be greater than $0.00 when auto-reload is enabled.");
+    throw new Error(
+      "Minimum balance must be greater than $0.00 when auto-reload is enabled.",
+    );
   }
-  if (input.enabled && maxSingleReloadCents !== null && maxSingleReloadCents < minimumBalanceCents) {
-    throw new Error("Maximum single reload must be at least the minimum balance.");
+  if (
+    input.enabled &&
+    maxSingleReloadCents !== null &&
+    maxSingleReloadCents < minimumBalanceCents
+  ) {
+    throw new Error(
+      "Maximum single reload must be at least the minimum balance.",
+    );
   }
 
   return {
@@ -3739,7 +4033,10 @@ export function buildStripeWalletFundingSessionInput(input: {
   amount: string;
   returnTo: string;
 }): DropshipStripeWalletFundingSessionInput {
-  const fundingMethodId = parsePositiveInteger(input.fundingMethodId, "fundingMethodId");
+  const fundingMethodId = parsePositiveInteger(
+    input.fundingMethodId,
+    "fundingMethodId",
+  );
   const amountCents = parseDollarInputToCents(input.amount, "fundingAmount");
   if (amountCents <= 0) {
     throw new Error("Funding amount must be greater than $0.00.");
@@ -3756,7 +4053,10 @@ export function buildUsdcBaseFundingMethodInput(input: {
   displayLabel: string;
   isDefault: boolean;
 }): DropshipUsdcBaseFundingMethodInput {
-  const walletAddress = normalizeEvmAddress(input.walletAddress, "walletAddress");
+  const walletAddress = normalizeEvmAddress(
+    input.walletAddress,
+    "walletAddress",
+  );
   const displayLabel = input.displayLabel.trim();
   if (displayLabel.length > 200) {
     throw new Error("displayLabel must be 200 characters or fewer.");
@@ -3771,7 +4071,9 @@ export function buildUsdcBaseFundingMethodInput(input: {
 export function parseDollarInputToCents(value: string, field: string): number {
   const normalized = value.trim().replace(/^\$/, "").replace(/,/g, "");
   if (!/^\d+(\.\d{1,2})?$/.test(normalized)) {
-    throw new Error(`${field} must be a non-negative dollar amount with no more than two decimal places.`);
+    throw new Error(
+      `${field} must be a non-negative dollar amount with no more than two decimal places.`,
+    );
   }
 
   const [dollars, cents = ""] = normalized.split(".");
@@ -3789,7 +4091,10 @@ function parseOptionalDollarInputToCents(value: string, field: string): number {
   return parseDollarInputToCents(normalized || "0", field);
 }
 
-function parseNullableDollarInputToCents(value: string, field: string): number | null {
+function parseNullableDollarInputToCents(
+  value: string,
+  field: string,
+): number | null {
   const normalized = value.trim();
   return normalized ? parseDollarInputToCents(normalized, field) : null;
 }
@@ -3837,7 +4142,9 @@ export function buildScopedSelectionReplacement(input: {
   return [...activeRules, actionRule];
 }
 
-function toReplaceableSelectionRule(rule: DropshipVendorSelectionRule): DropshipVendorSelectionRuleInput {
+function toReplaceableSelectionRule(
+  rule: DropshipVendorSelectionRule,
+): DropshipVendorSelectionRuleInput {
   return {
     scopeType: rule.scopeType,
     action: rule.action,
@@ -3880,7 +4187,10 @@ function scopedSelectionRuleInput(
     return {
       ...base,
       scopeType: "product_line",
-      productLineId: assertPositiveInteger(target.productLineId, "productLineId"),
+      productLineId: assertPositiveInteger(
+        target.productLineId,
+        "productLineId",
+      ),
     };
   }
   if (target.scopeType === "category") {
@@ -3904,36 +4214,69 @@ function scopedSelectionRuleInput(
   return {
     ...base,
     scopeType: "variant",
-    productVariantId: assertPositiveInteger(target.productVariantId, "productVariantId"),
+    productVariantId: assertPositiveInteger(
+      target.productVariantId,
+      "productVariantId",
+    ),
   };
 }
 
 function isSameSelectionTarget(
-  left: Pick<DropshipVendorSelectionRuleInput, "scopeType" | "productLineId" | "productId" | "productVariantId" | "category">,
-  right: Pick<DropshipVendorSelectionRuleInput, "scopeType" | "productLineId" | "productId" | "productVariantId" | "category">,
+  left: Pick<
+    DropshipVendorSelectionRuleInput,
+    | "scopeType"
+    | "productLineId"
+    | "productId"
+    | "productVariantId"
+    | "category"
+  >,
+  right: Pick<
+    DropshipVendorSelectionRuleInput,
+    | "scopeType"
+    | "productLineId"
+    | "productId"
+    | "productVariantId"
+    | "category"
+  >,
 ): boolean {
-  return left.scopeType === right.scopeType
-    && (left.productLineId ?? null) === (right.productLineId ?? null)
-    && (left.productId ?? null) === (right.productId ?? null)
-    && (left.productVariantId ?? null) === (right.productVariantId ?? null)
-    && (left.category?.trim().toLowerCase() ?? null) === (right.category?.trim().toLowerCase() ?? null);
+  return (
+    left.scopeType === right.scopeType &&
+    (left.productLineId ?? null) === (right.productLineId ?? null) &&
+    (left.productId ?? null) === (right.productId ?? null) &&
+    (left.productVariantId ?? null) === (right.productVariantId ?? null) &&
+    (left.category?.trim().toLowerCase() ?? null) ===
+      (right.category?.trim().toLowerCase() ?? null)
+  );
 }
 
-function isTargetedVariantRule(rule: DropshipVendorSelectionRuleInput, variantIds: ReadonlySet<number>): boolean {
-  return rule.scopeType === "variant"
-    && typeof rule.productVariantId === "number"
-    && variantIds.has(rule.productVariantId);
+function isTargetedVariantRule(
+  rule: DropshipVendorSelectionRuleInput,
+  variantIds: ReadonlySet<number>,
+): boolean {
+  return (
+    rule.scopeType === "variant" &&
+    typeof rule.productVariantId === "number" &&
+    variantIds.has(rule.productVariantId)
+  );
 }
 
-function uniquePositiveVariantIds(rows: readonly DropshipCatalogRow[]): Set<number> {
+function uniquePositiveVariantIds(
+  rows: readonly DropshipCatalogRow[],
+): Set<number> {
   const ids = rows
     .map((row) => row.productVariantId)
     .filter((id) => Number.isInteger(id) && id > 0);
   return new Set(ids);
 }
 
-function uniqueSelectedVariantIds(rows: readonly DropshipCatalogRow[]): number[] {
-  return Array.from(uniquePositiveVariantIds(rows.filter((row) => row.selectionDecision.selected)));
+function uniqueSelectedVariantIds(
+  rows: readonly DropshipCatalogRow[],
+): number[] {
+  return Array.from(
+    uniquePositiveVariantIds(
+      rows.filter((row) => row.selectionDecision.selected),
+    ),
+  );
 }
 
 function buildRequestedRetailPricesByVariantId(input: {
@@ -3942,11 +4285,15 @@ function buildRequestedRetailPricesByVariantId(input: {
 }): Record<string, number> {
   const result: Record<string, number> = {};
   for (const productVariantId of input.productVariantIds) {
-    const rawValue = input.retailPriceByVariantId?.[String(productVariantId)]?.trim();
+    const rawValue =
+      input.retailPriceByVariantId?.[String(productVariantId)]?.trim();
     if (!rawValue) {
       continue;
     }
-    result[String(productVariantId)] = parseDollarInputToCents(rawValue, `retailPrice:${productVariantId}`);
+    result[String(productVariantId)] = parseDollarInputToCents(
+      rawValue,
+      `retailPrice:${productVariantId}`,
+    );
   }
   return result;
 }
@@ -3977,7 +4324,9 @@ function normalizeEvmTransactionHash(value: string, field: string): string {
 function parseUsdcAmountToAtomicUnits(value: string, field: string): string {
   const normalized = value.trim().replace(/,/g, "");
   if (!/^\d+(\.\d{1,6})?$/.test(normalized)) {
-    throw new Error(`${field} must be a non-negative USDC amount with no more than six decimal places.`);
+    throw new Error(
+      `${field} must be a non-negative USDC amount with no more than six decimal places.`,
+    );
   }
   const [whole, fractional = ""] = normalized.split(".");
   const paddedFractional = fractional.padEnd(6, "0");
@@ -4000,7 +4349,10 @@ function parsePositiveInteger(value: string, key: string): number {
   return assertPositiveInteger(parsed, key);
 }
 
-function parseOptionalPositiveInteger(value: string, key: string): number | null {
+function parseOptionalPositiveInteger(
+  value: string,
+  key: string,
+): number | null {
   const normalized = value.trim();
   return normalized ? parsePositiveInteger(normalized, key) : null;
 }
@@ -4033,7 +4385,11 @@ function normalizeIdempotencyKey(value: string): string {
   return idempotencyKey;
 }
 
-function requiredTrimmedString(value: string, key: string, maxLength: number): string {
+function requiredTrimmedString(
+  value: string,
+  key: string,
+  maxLength: number,
+): string {
   const trimmed = value.trim();
   if (!trimmed) {
     throw new Error(`${key} is required.`);
@@ -4044,7 +4400,11 @@ function requiredTrimmedString(value: string, key: string, maxLength: number): s
   return trimmed;
 }
 
-function optionalTrimmedString(value: string, key: string, maxLength: number): string | null {
+function optionalTrimmedString(
+  value: string,
+  key: string,
+  maxLength: number,
+): string | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
   if (trimmed.length > maxLength) {
@@ -4053,7 +4413,10 @@ function optionalTrimmedString(value: string, key: string, maxLength: number): s
   return trimmed;
 }
 
-function parsePositiveIntegerInput(value: string | number | null | undefined, key: string): number {
+function parsePositiveIntegerInput(
+  value: string | number | null | undefined,
+  key: string,
+): number {
   if (typeof value === "number") {
     return assertPositiveInteger(value, key);
   }
@@ -4105,19 +4468,27 @@ function parseRequiredConfigKeys(value: string): string[] {
   }
   for (const key of keys) {
     if (!/^[A-Za-z0-9_.-]+$/.test(key) || key.length > 120) {
-      throw new Error("Required config keys may only contain letters, numbers, dots, underscores, and hyphens.");
+      throw new Error(
+        "Required config keys may only contain letters, numbers, dots, underscores, and hyphens.",
+      );
     }
   }
   return keys;
 }
 
-function parseRequiredProductFields(value: string): DropshipListingRequiredProductField[] {
+function parseRequiredProductFields(
+  value: string,
+): DropshipListingRequiredProductField[] {
   const fields = uniqueCsvTokens(value);
   if (fields.length > 25) {
     throw new Error("requiredProductFields must include 25 or fewer fields.");
   }
   for (const field of fields) {
-    if (!allDropshipListingRequiredProductFields.includes(field as DropshipListingRequiredProductField)) {
+    if (
+      !allDropshipListingRequiredProductFields.includes(
+        field as DropshipListingRequiredProductField,
+      )
+    ) {
       throw new Error(`${field} is not a supported required product field.`);
     }
   }
@@ -4168,21 +4539,24 @@ export function formatStatus(value: string | null | undefined): string {
     .join(" ");
 }
 
-export function listLaunchReadyStoreConnections<T extends { launchReady: boolean }>(
-  connections: readonly T[],
-): T[] {
+export function listLaunchReadyStoreConnections<
+  T extends { launchReady: boolean },
+>(connections: readonly T[]): T[] {
   return connections.filter((connection) => connection.launchReady);
 }
 
 export function sectionStatusTone(status: DropshipSectionStatus): string {
-  if (status === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-800";
-  if (status === "coming_soon") return "border-zinc-200 bg-zinc-50 text-zinc-600";
+  if (status === "ready")
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (status === "coming_soon")
+    return "border-zinc-200 bg-zinc-50 text-zinc-600";
   return "border-amber-200 bg-amber-50 text-amber-900";
 }
 
 export function riskSeverityTone(severity: DropshipSeverity): string {
   if (severity === "error") return "border-rose-200 bg-rose-50 text-rose-800";
-  if (severity === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
+  if (severity === "warning")
+    return "border-amber-200 bg-amber-50 text-amber-900";
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
 }
 

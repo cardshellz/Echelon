@@ -26,17 +26,15 @@
  */
 
 export type DropshipReturnEngineFaultCategory =
-  | "card_shellz"
-  | "vendor"
-  | "customer"
-  | "marketplace"
-  | "carrier";
+  "card_shellz" | "vendor" | "customer" | "marketplace" | "carrier";
 
 export interface DropshipReturnFeeScheduleRow {
   feeType: "restocking_fee" | "processing_fee" | "return_shipping_fee";
   amountType: "flat_cents" | "percent";
   /** flat_cents: integer cents. percent: 0-100. */
   amount: number;
+  /** Responsibility selected for this fee independently of overall return fault. */
+  responsibility: DropshipReturnEngineFaultCategory;
 }
 
 export interface DropshipReturnAcceptedLine {
@@ -56,7 +54,6 @@ export interface DropshipReturnSettlementInput {
   fees: {
     restockingFee: DropshipReturnFeeScheduleRow | null;
     processingFee: DropshipReturnFeeScheduleRow | null;
-    /** Presence means the vendor pays return shipping for this fault. */
     returnShippingFee: DropshipReturnFeeScheduleRow | null;
   };
 }
@@ -111,26 +108,27 @@ export function computeDropshipReturnSettlement(
     ? input.originalShippingCents
     : 0;
 
-  const chargesFees =
-    input.faultCategory === "vendor"
-    || input.faultCategory === "customer"
-    || input.faultCategory === "marketplace";
-
-  const restockingFeeCents = chargesFees && input.fees.restockingFee
-    ? computeReturnFeeCents(input.fees.restockingFee, productCreditCents)
+  const restockingFeeCents = vendorPaysFee(input.fees.restockingFee)
+    ? computeReturnFeeCents(
+        input.fees.restockingFee as DropshipReturnFeeScheduleRow,
+        productCreditCents,
+      )
     : 0;
-  const processingFeeCents = chargesFees && input.fees.processingFee
-    ? computeReturnFeeCents(input.fees.processingFee, productCreditCents)
+  const processingFeeCents = vendorPaysFee(input.fees.processingFee)
+    ? computeReturnFeeCents(
+        input.fees.processingFee as DropshipReturnFeeScheduleRow,
+        productCreditCents,
+      )
     : 0;
-  // The return_shipping_fee row encodes WHO PAYS (D2): its presence for this
-  // fault category means the vendor pays the actual label cost.
   const returnShippingFeeCents =
-    chargesFees && input.fees.returnShippingFee && input.returnShippingActualCents !== null
+    vendorPaysFee(input.fees.returnShippingFee) &&
+    input.returnShippingActualCents !== null
       ? input.returnShippingActualCents
       : 0;
 
   const grossCreditCents = productCreditCents + originalShippingCreditCents;
-  const totalFeeCents = restockingFeeCents + processingFeeCents + returnShippingFeeCents;
+  const totalFeeCents =
+    restockingFeeCents + processingFeeCents + returnShippingFeeCents;
   const netSettlementCents = grossCreditCents - totalFeeCents;
 
   return {
@@ -142,7 +140,10 @@ export function computeDropshipReturnSettlement(
     grossCreditCents,
     totalFeeCents,
     netSettlementCents,
-    creditLedgerType: input.faultCategory === "carrier" ? "insurance_pool_credit" : "return_credit",
+    creditLedgerType:
+      input.faultCategory === "carrier"
+        ? "insurance_pool_credit"
+        : "return_credit",
     breakdown: {
       version: 1,
       faultCategory: input.faultCategory,
@@ -155,10 +156,17 @@ export function computeDropshipReturnSettlement(
       productCreditCents,
       originalShippingCreditCents,
       fees: {
-        restocking: feeBreakdownEntry(input.fees.restockingFee, restockingFeeCents),
-        processing: feeBreakdownEntry(input.fees.processingFee, processingFeeCents),
+        restocking: feeBreakdownEntry(
+          input.fees.restockingFee,
+          restockingFeeCents,
+        ),
+        processing: feeBreakdownEntry(
+          input.fees.processingFee,
+          processingFeeCents,
+        ),
         returnShipping: {
-          vendorPays: chargesFees && input.fees.returnShippingFee !== null,
+          vendorPays: vendorPaysFee(input.fees.returnShippingFee),
+          responsibility: input.fees.returnShippingFee?.responsibility ?? null,
           actualLabelCostCents: input.returnShippingActualCents,
           chargedCents: returnShippingFeeCents,
         },
@@ -168,6 +176,17 @@ export function computeDropshipReturnSettlement(
       netSettlementCents,
     },
   };
+}
+
+function vendorPaysFee(
+  row: DropshipReturnFeeScheduleRow | null,
+): row is DropshipReturnFeeScheduleRow {
+  return (
+    row !== null &&
+    (row.responsibility === "vendor" ||
+      row.responsibility === "customer" ||
+      row.responsibility === "marketplace")
+  );
 }
 
 function feeBreakdownEntry(
@@ -181,6 +200,8 @@ function feeBreakdownEntry(
     configured: true,
     amountType: row.amountType,
     amount: row.amount,
+    responsibility: row.responsibility,
+    vendorPays: vendorPaysFee(row),
     chargedCents,
   };
 }

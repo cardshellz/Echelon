@@ -46,18 +46,27 @@ type ReturnPolicyVendorSource = Pick<
 
 type ReturnPolicyStoreSource = Pick<
   DropshipAdminStoreConnectionListItem,
-  "storeConnectionId" | "platform" | "status" | "externalDisplayName" | "shopDomain" | "vendor"
+  | "storeConnectionId"
+  | "platform"
+  | "status"
+  | "externalDisplayName"
+  | "shopDomain"
+  | "vendor"
 >;
 
-export function returnPolicyVendorDisplayName(vendor: ReturnPolicyVendorSource): string {
+export function returnPolicyVendorDisplayName(
+  vendor: ReturnPolicyVendorSource,
+): string {
   return vendor.businessName || vendor.email || `Vendor ${vendor.vendorId}`;
 }
 
-export function returnPolicyStoreDisplayName(connection: ReturnPolicyStoreSource): string {
+export function returnPolicyStoreDisplayName(
+  connection: ReturnPolicyStoreSource,
+): string {
   return (
-    connection.externalDisplayName
-    || connection.shopDomain
-    || `${formatStatus(connection.platform)} store`
+    connection.externalDisplayName ||
+    connection.shopDomain ||
+    `${formatStatus(connection.platform)} store`
   );
 }
 
@@ -66,7 +75,10 @@ export function returnPolicyStoreDisplayName(connection: ReturnPolicyStoreSource
  * Sentinel values for the explicit blank options collapse to "".
  */
 export function returnPolicyScopeValueFromPicker(value: string): string {
-  if (value === RETURN_POLICY_GLOBAL_VENDOR_VALUE || value === RETURN_POLICY_ANY_STORE_VALUE) {
+  if (
+    value === RETURN_POLICY_GLOBAL_VENDOR_VALUE ||
+    value === RETURN_POLICY_ANY_STORE_VALUE
+  ) {
     return "";
   }
   return value;
@@ -78,7 +90,9 @@ export function returnPolicyScopeValueFromPicker(value: string): string {
  */
 export function returnPolicyScopeValueToPicker(
   value: string,
-  blankSentinel: typeof RETURN_POLICY_GLOBAL_VENDOR_VALUE | typeof RETURN_POLICY_ANY_STORE_VALUE,
+  blankSentinel:
+    | typeof RETURN_POLICY_GLOBAL_VENDOR_VALUE
+    | typeof RETURN_POLICY_ANY_STORE_VALUE,
 ): string {
   return value.trim() === "" ? blankSentinel : value;
 }
@@ -104,6 +118,7 @@ export interface ReturnFeeVersionEditFormState {
   faultCategory: DropshipReturnFaultCategory;
   amountType: DropshipReturnFeeAmountType;
   amount: string;
+  isDefault: boolean;
   vendorId: string;
   storeConnectionId: string;
   priority: string;
@@ -139,7 +154,14 @@ export function returnPolicyRowToEditFormState(
 export function returnFeeRowToEditFormState(
   row: Pick<
     DropshipReturnFeeScheduleRecord,
-    "feeType" | "faultCategory" | "amountType" | "amount" | "vendorId" | "storeConnectionId" | "priority"
+    | "feeType"
+    | "faultCategory"
+    | "amountType"
+    | "amount"
+    | "isDefault"
+    | "vendorId"
+    | "storeConnectionId"
+    | "priority"
   >,
 ): ReturnFeeVersionEditFormState {
   return {
@@ -147,6 +169,7 @@ export function returnFeeRowToEditFormState(
     faultCategory: row.faultCategory,
     amountType: row.amountType,
     amount: String(row.amount),
+    isDefault: row.isDefault,
     vendorId: scopeIdToFormValue(row.vendorId),
     storeConnectionId: scopeIdToFormValue(row.storeConnectionId),
     priority: String(row.priority),
@@ -166,22 +189,27 @@ export function buildReturnPolicyVendorOptions(
     vendors.set(item.vendor.vendorId, item.vendor);
   }
   const vendorOptions = Array.from(vendors.values())
-    .sort((first, second) => (
-      returnPolicyVendorDisplayName(first).localeCompare(returnPolicyVendorDisplayName(second))
-    ))
+    .sort((first, second) =>
+      returnPolicyVendorDisplayName(first).localeCompare(
+        returnPolicyVendorDisplayName(second),
+      ),
+    )
     .map((vendor) => {
       const label = returnPolicyVendorDisplayName(vendor);
       return {
         value: String(vendor.vendorId),
         label,
-        detail: vendor.email && vendor.email !== label ? vendor.email : undefined,
+        detail:
+          vendor.email && vendor.email !== label ? vendor.email : undefined,
         search: [
           vendor.vendorId,
           vendor.businessName,
           vendor.email,
           vendor.memberId,
           vendor.status,
-        ].filter(Boolean).join(" "),
+        ]
+          .filter(Boolean)
+          .join(" "),
       };
     });
   return [
@@ -208,16 +236,24 @@ export function buildReturnPolicyStoreOptions(
   connections: ReturnPolicyStoreSource[],
   selectedVendorId: string,
 ): ReturnPolicyScopeOption[] {
-  const vendorIdFilter = selectedVendorId.trim() === "" ? null : Number(selectedVendorId);
-  const filtered = vendorIdFilter === null
-    ? connections
-    : connections.filter((connection) => connection.vendor.vendorId === vendorIdFilter);
+  const vendorIdFilter =
+    selectedVendorId.trim() === "" ? null : Number(selectedVendorId);
+  const filtered =
+    vendorIdFilter === null
+      ? connections
+      : connections.filter(
+          (connection) => connection.vendor.vendorId === vendorIdFilter,
+        );
 
   const storeOptions = filtered
     .slice()
     .sort((first, second) => {
-      const labelCompare = returnPolicyStoreDisplayName(first).localeCompare(returnPolicyStoreDisplayName(second));
-      return labelCompare !== 0 ? labelCompare : first.storeConnectionId - second.storeConnectionId;
+      const labelCompare = returnPolicyStoreDisplayName(first).localeCompare(
+        returnPolicyStoreDisplayName(second),
+      );
+      return labelCompare !== 0
+        ? labelCompare
+        : first.storeConnectionId - second.storeConnectionId;
     })
     .map((connection) => {
       const storeLabel = returnPolicyStoreDisplayName(connection);
@@ -225,12 +261,14 @@ export function buildReturnPolicyStoreOptions(
       const platformLabel = formatStatus(connection.platform);
       return {
         value: String(connection.storeConnectionId),
-        label: vendorIdFilter === null
-          ? `${platformLabel} — ${storeLabel} (${vendorLabel})`
-          : `${platformLabel} — ${storeLabel}`,
-        detail: vendorIdFilter === null
-          ? `ID ${connection.storeConnectionId} / ${formatStatus(connection.status)}`
-          : `${vendorLabel} / ID ${connection.storeConnectionId} / ${formatStatus(connection.status)}`,
+        label:
+          vendorIdFilter === null
+            ? `${platformLabel} — ${storeLabel} (${vendorLabel})`
+            : `${platformLabel} — ${storeLabel}`,
+        detail:
+          vendorIdFilter === null
+            ? `ID ${connection.storeConnectionId} / ${formatStatus(connection.status)}`
+            : `${vendorLabel} / ID ${connection.storeConnectionId} / ${formatStatus(connection.status)}`,
         search: [
           connection.storeConnectionId,
           storeLabel,
@@ -240,24 +278,26 @@ export function buildReturnPolicyStoreOptions(
           vendorLabel,
           connection.vendor.email,
           connection.vendor.vendorId,
-        ].filter(Boolean).join(" "),
+        ]
+          .filter(Boolean)
+          .join(" "),
       };
     });
 
   return [
     vendorIdFilter === null
       ? {
-        value: RETURN_POLICY_ANY_STORE_VALUE,
-        label: "Global (no store)",
-        detail: "Not scoped to a store connection",
-        search: "global default no store any",
-      }
+          value: RETURN_POLICY_ANY_STORE_VALUE,
+          label: "Global (no store)",
+          detail: "Not scoped to a store connection",
+          search: "global default no store any",
+        }
       : {
-        value: RETURN_POLICY_ANY_STORE_VALUE,
-        label: "Any store (vendor scope)",
-        detail: "Applies to every store connection for the selected vendor",
-        search: "any store vendor scope all",
-      },
+          value: RETURN_POLICY_ANY_STORE_VALUE,
+          label: "Any store (vendor scope)",
+          detail: "Applies to every store connection for the selected vendor",
+          search: "any store vendor scope all",
+        },
     ...storeOptions,
   ];
 }
