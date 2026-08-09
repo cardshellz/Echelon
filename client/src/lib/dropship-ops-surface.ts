@@ -3199,7 +3199,7 @@ export function buildAdminReturnInspectionInput(input: {
 
   const items = input.items.map((item, index) => {
     const rmaItemId = assertPositiveInteger(item.rmaItemId, `items.${index}.rmaItemId`);
-    const status = item.status.trim() || "inspected";
+    const status = item.status.trim() || "resellable";
     if (status.length > 40) {
       throw new Error(`items.${index}.status must be 40 characters or fewer.`);
     }
