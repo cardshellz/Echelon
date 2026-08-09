@@ -623,7 +623,7 @@ describe("DropshipReturnService", () => {
       netSettlementCents: 850,
     });
     expect(repository.lastInspectionInput?.items).toEqual([
-      { rmaItemId: 1, status: "inspected", finalCreditCents: 2_000, feeCents: 1_150 },
+      { rmaItemId: 1, status: "resellable", finalCreditCents: 2_000, feeCents: 1_150 },
     ]);
     expect(result.walletLedger[0]).toMatchObject({ type: "return_credit", amountCents: 2_000 });
   });

@@ -124,7 +124,7 @@ const updateDropshipRmaStatusInputSchema = z.object({
 
 const inspectionItemInputSchema = z.object({
   rmaItemId: positiveIdSchema,
-  status: z.string().trim().min(1).max(40).default("inspected"),
+  status: z.string().trim().min(1).max(40).default("resellable"),
   /** Units accepted at inspection. Defaults to the full requested quantity. */
   acceptedQuantity: z.number().int().min(0).max(1_000_000).nullable().optional(),
   finalCreditCents: nonnegativeCentsSchema.nullable().optional(),

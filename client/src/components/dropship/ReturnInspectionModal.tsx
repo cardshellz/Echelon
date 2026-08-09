@@ -89,10 +89,9 @@ interface FeeLine {
 }
 
 const RETURN_INSPECTION_ITEM_STATUSES = [
-  "inspected",
-  "damaged",
-  "missing",
-  "wrong_item",
+  "resellable",
+  "warehouse_deals",
+  "damaged_defective",
 ] as const;
 
 const FAULT_CATEGORIES: DropshipReturnFaultCategory[] = [
@@ -136,7 +135,7 @@ function buildFormState(rma: DropshipReturnDetail): InspectionFormState {
         status:
           item.finalCreditCents !== null || item.feeCents !== null
             ? item.status
-            : "inspected",
+            : "resellable",
         finalCreditAmount: centsToDollarInput(creditCents),
         feeAmount: centsToDollarInput(feeCents),
       };

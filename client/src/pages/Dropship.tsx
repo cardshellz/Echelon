@@ -782,10 +782,9 @@ const returnFaultCategories: DropshipReturnFaultCategory[] = [
 ];
 
 const RETURN_INSPECTION_ITEM_STATUSES = [
-  "inspected",
-  "damaged",
-  "missing",
-  "wrong_item",
+  "resellable",
+  "warehouse_deals",
+  "damaged_defective",
 ] as const;
 
 type ReturnInspectionItemStatus = (typeof RETURN_INSPECTION_ITEM_STATUSES)[number];
@@ -9754,7 +9753,7 @@ function buildReturnInspectionFormState(rma: DropshipReturnDetail): ReturnInspec
         rmaItemId: item.rmaItemId,
         productVariantId: item.productVariantId,
         quantity: item.quantity,
-        status: item.finalCreditCents !== null || item.feeCents !== null ? item.status : "inspected",
+        status: item.finalCreditCents !== null || item.feeCents !== null ? item.status : "resellable",
         finalCreditAmount: centsToDollarInput(finalCreditCents),
         feeAmount: centsToDollarInput(feeCents),
       };
