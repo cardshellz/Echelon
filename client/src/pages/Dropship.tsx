@@ -35,6 +35,7 @@ import { toast } from "@/hooks/use-toast";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Command,
   CommandEmpty,
@@ -165,6 +166,7 @@ import {
   type DropshipAdminOrderOpsVendorSummary,
   type DropshipAdminOrderOpsWmsSyncResponse,
   type DropshipOrderDetail,
+  type DropshipOrderDetailLine,
   type DropshipOrderDetailResponse,
   type DropshipAdminOmsChannelConfigResponse,
   type DropshipAdminOmsChannelConfigureResponse,
@@ -406,9 +408,13 @@ interface ReturnInspectionFormState {
 }
 
 interface ReturnCreateItemFormState {
+  source: "order" | "manual_exception";
+  orderLineIndex: string;
+  externalLineItemId: string;
   productVariantId: string;
+  manualDescription: string;
+  exceptionReason: string;
   quantity: string;
-  status: string;
   requestedCreditAmount: string;
 }
 
@@ -590,9 +596,13 @@ const emptyShippingBoxForm: ShippingBoxFormState = {
 };
 
 const emptyReturnCreateItemForm: ReturnCreateItemFormState = {
+  source: "manual_exception",
+  orderLineIndex: "",
+  externalLineItemId: "",
   productVariantId: "",
+  manualDescription: "",
+  exceptionReason: "",
   quantity: "1",
-  status: "requested",
   requestedCreditAmount: "",
 };
 
@@ -608,7 +618,7 @@ const emptyReturnCreateForm: ReturnCreateFormState = {
   labelSource: "",
   returnTrackingNumber: "",
   vendorNotes: "",
-  items: [{ ...emptyReturnCreateItemForm }],
+  items: [],
 };
 
 const emptyReturnPolicyForm: ReturnPolicyFormState = {
@@ -622,7 +632,7 @@ const emptyReturnPolicyForm: ReturnPolicyFormState = {
 function makeEmptyReturnCreateForm(): ReturnCreateFormState {
   return {
     ...emptyReturnCreateForm,
-    items: [{ ...emptyReturnCreateItemForm }],
+    items: [],
   };
 }
 
@@ -3365,6 +3375,19 @@ function ReturnOpsTab() {
     queryFn: () =>
       fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
   });
+  const selectedReturnIntakeId = /^\d+$/.test(createForm.intakeId)
+    ? Number(createForm.intakeId)
+    : null;
+  const returnCreateOrderQuery = useQuery<DropshipOrderDetailResponse>({
+    queryKey: ["dropship-admin-return-create-order", selectedReturnIntakeId],
+    queryFn: () => {
+      if (selectedReturnIntakeId === null) throw new Error("Missing intake ID.");
+      return fetchJson<DropshipOrderDetailResponse>(
+        `/api/dropship/admin/order-intake/${selectedReturnIntakeId}`,
+      );
+    },
+    enabled: selectedReturnIntakeId !== null,
+  });
 
   const rmas = returnsQuery.data?.items ?? [];
   const activeReturnPolicy = returnPolicyQuery.data?.policy ?? null;
@@ -3929,6 +3952,14 @@ function ReturnOpsTab() {
       <ReturnCreatePanel
         form={createForm}
         isSaving={creatingRma}
+        order={returnCreateOrderQuery.data?.order ?? null}
+        orderError={queryErrorMessage(
+          returnCreateOrderQuery.error,
+          "Unable to load the selected order.",
+        )}
+        orderLoading={
+          returnCreateOrderQuery.isLoading || returnCreateOrderQuery.isFetching
+        }
         intakes={returnOrderIntakes}
         intakesLoading={
           returnOrderIntakesQuery.isLoading ||
@@ -10508,6 +10539,9 @@ function ReturnCreatePanel({
   onItemChange,
   onRemoveItem,
   onSubmit,
+  order,
+  orderError,
+  orderLoading,
   storeConnections,
   storeConnectionsLoading,
   variants,
@@ -10521,12 +10555,12 @@ function ReturnCreatePanel({
   isSaving: boolean;
   onAddItem: () => void;
   onChange: (patch: Partial<ReturnCreateFormState>) => void;
-  onItemChange: (
-    index: number,
-    patch: Partial<ReturnCreateItemFormState>,
-  ) => void;
+  onItemChange: (index: number, patch: Partial<ReturnCreateItemFormState>) => void;
   onRemoveItem: (index: number) => void;
   onSubmit: () => void;
+  order: DropshipOrderDetail | null;
+  orderError: string;
+  orderLoading: boolean;
   storeConnections: DropshipAdminStoreConnectionListItem[];
   storeConnectionsLoading: boolean;
   variants: DropshipProductVariantOption[];
@@ -10534,11 +10568,13 @@ function ReturnCreatePanel({
   vendorOptions: DropshipSelectOption[];
   vendorsLoading: boolean;
 }) {
-  const storeConnectionOptions = storeConnections.map(
-    storeConnectionSelectOption,
-  );
+  const storeConnectionOptions = storeConnections.map(storeConnectionSelectOption);
   const intakeOptions = intakes.map(orderIntakeSelectOption);
   const omsOrderOptions = buildOmsOrderSelectOptions(intakes);
+  const orderItems = form.items.filter((item) => item.source === "order");
+  const manualItems = form.items
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.source === "manual_exception");
 
   function selectStoreConnection(storeConnectionId: string) {
     const connection = storeConnections.find(
@@ -10546,7 +10582,20 @@ function ReturnCreatePanel({
     );
     onChange({
       storeConnectionId,
+      intakeId: "",
+      omsOrderId: "",
+      items: [],
       ...(connection ? { vendorId: String(connection.vendor.vendorId) } : {}),
+    });
+  }
+
+  function selectVendor(vendorId: string) {
+    onChange({
+      vendorId,
+      storeConnectionId: "",
+      intakeId: "",
+      omsOrderId: "",
+      items: [],
     });
   }
 
@@ -10556,12 +10605,12 @@ function ReturnCreatePanel({
     );
     onChange({
       intakeId,
+      items: [],
       ...(intake
         ? {
             vendorId: String(intake.vendor.vendorId),
             storeConnectionId: String(intake.storeConnection.storeConnectionId),
-            omsOrderId:
-              intake.omsOrderId === null ? "" : String(intake.omsOrderId),
+            omsOrderId: intake.omsOrderId === null ? "" : String(intake.omsOrderId),
           }
         : {}),
     });
@@ -10570,11 +10619,11 @@ function ReturnCreatePanel({
   function selectOmsOrder(omsOrderId: string) {
     const intake = intakes.find(
       (candidate) =>
-        candidate.omsOrderId !== null &&
-        String(candidate.omsOrderId) === omsOrderId,
+        candidate.omsOrderId !== null && String(candidate.omsOrderId) === omsOrderId,
     );
     onChange({
       omsOrderId,
+      items: [],
       ...(intake
         ? {
             vendorId: String(intake.vendor.vendorId),
@@ -10585,247 +10634,168 @@ function ReturnCreatePanel({
     });
   }
 
+  function selectedOrderItemIndex(lineIndex: number): number {
+    return form.items.findIndex(
+      (item) => item.source === "order" && item.orderLineIndex === String(lineIndex),
+    );
+  }
+
+  function toggleOrderLine(line: DropshipOrderDetailLine, checked: boolean) {
+    const selectedIndex = selectedOrderItemIndex(line.lineIndex);
+    if (!checked) {
+      if (selectedIndex >= 0) onRemoveItem(selectedIndex);
+      return;
+    }
+    if (selectedIndex >= 0) return;
+    onChange({
+      items: [
+        ...form.items,
+        {
+          source: "order",
+          orderLineIndex: String(line.lineIndex),
+          externalLineItemId: line.externalLineItemId ?? "",
+          productVariantId:
+            line.productVariantId === null ? "" : String(line.productVariantId),
+          manualDescription: line.title ?? line.sku ?? "Order item",
+          exceptionReason: "",
+          quantity: String(line.quantity),
+          requestedCreditAmount: "",
+        },
+      ],
+    });
+  }
+
   return (
     <section className="rounded-md border bg-card p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h2 className="text-lg font-semibold">Create RMA</h2>
           <p className="text-sm text-muted-foreground">
-            Open a dropship return against a vendor, store, intake, or OMS
-            order.
+            Select the source order, then choose the exact lines being returned.
           </p>
         </div>
-        <Button
-          type="button"
-          className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-          disabled={isSaving}
-          onClick={onSubmit}
-        >
-          <PlusCircle
-            className={isSaving ? "h-4 w-4 animate-spin" : "h-4 w-4"}
-          />
+        <Button type="button" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSubmit}>
+          <PlusCircle className={isSaving ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
           Create RMA
         </Button>
       </div>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_1.2fr]">
+      <div className="mt-4 grid gap-4 xl:grid-cols-[0.9fr_1.3fr]">
         <div className="grid gap-3 md:grid-cols-2">
-          <SearchableOptionPicker
-            label="Vendor"
-            value={form.vendorId}
-            disabled={isSaving}
-            options={vendorOptions}
-            isLoading={vendorsLoading}
-            placeholder="Select vendor"
-            searchPlaceholder="Search vendor, email, or member..."
-            emptyText="No dropship vendors found."
-            onChange={(value) => onChange({ vendorId: value })}
-          />
-          <AdminReturnInput
-            label="RMA number"
-            value={form.rmaNumber}
-            disabled={isSaving}
-            onChange={(value) => onChange({ rmaNumber: value })}
-          />
-          <SearchableOptionPicker
-            label="Store connection"
-            value={form.storeConnectionId}
-            disabled={isSaving}
-            clearable
-            clearLabel="No store connection"
-            options={storeConnectionOptions}
-            isLoading={storeConnectionsLoading}
-            placeholder="Optional"
-            searchPlaceholder="Search store, vendor, or email..."
-            emptyText="No store connections found."
-            onChange={selectStoreConnection}
-          />
-          <SearchableOptionPicker
-            label="Order intake"
-            value={form.intakeId}
-            disabled={isSaving}
-            clearable
-            clearLabel="No intake"
-            options={intakeOptions}
-            isLoading={intakesLoading}
-            placeholder="Optional"
-            searchPlaceholder="Search order, intake, vendor, or store..."
-            emptyText="No order intakes found."
-            onChange={selectIntake}
-          />
-          <SearchableOptionPicker
-            label="OMS order"
-            value={form.omsOrderId}
-            disabled={isSaving}
-            clearable
-            clearLabel="No OMS order"
-            options={omsOrderOptions}
-            isLoading={intakesLoading}
-            placeholder="Optional"
-            searchPlaceholder="Search OMS order, intake, or marketplace order..."
-            emptyText="No OMS orders found."
-            onChange={selectOmsOrder}
-          />
-          <AdminReturnInput
-            label="Return window days"
-            value={form.returnWindowDays}
-            disabled={isSaving}
-            onChange={(value) => onChange({ returnWindowDays: value })}
-          />
-          <AdminReturnInput
-            label="Reason code"
-            value={form.reasonCode}
-            placeholder="Optional"
-            disabled={isSaving}
-            onChange={(value) => onChange({ reasonCode: value })}
-          />
+          <SearchableOptionPicker label="Vendor" value={form.vendorId} disabled={isSaving} options={vendorOptions} isLoading={vendorsLoading} placeholder="Select vendor" searchPlaceholder="Search vendor, email, or member..." emptyText="No dropship vendors found." onChange={selectVendor} />
+          <AdminReturnInput label="RMA number" value={form.rmaNumber} disabled={isSaving} onChange={(value) => onChange({ rmaNumber: value })} />
+          <SearchableOptionPicker label="Store connection" value={form.storeConnectionId} disabled={isSaving} clearable clearLabel="No store connection" options={storeConnectionOptions} isLoading={storeConnectionsLoading} placeholder="Optional" searchPlaceholder="Search store, vendor, or email..." emptyText="No store connections found." onChange={selectStoreConnection} />
+          <SearchableOptionPicker label="Source order" value={form.intakeId} disabled={isSaving} clearable clearLabel="No source order" options={intakeOptions} isLoading={intakesLoading} placeholder="Select order" searchPlaceholder="Search marketplace order, OMS order, store, or vendor..." emptyText="No dropship orders found." onChange={selectIntake} />
+          <SearchableOptionPicker label="OMS order" value={form.omsOrderId} disabled={isSaving} clearable clearLabel="No OMS order" options={omsOrderOptions} isLoading={intakesLoading} placeholder="Inferred from source order" searchPlaceholder="Search OMS order, intake, or marketplace order..." emptyText="No OMS orders found." onChange={selectOmsOrder} />
+          <AdminReturnInput label="Return window days" value={form.returnWindowDays} disabled={isSaving} onChange={(value) => onChange({ returnWindowDays: value })} />
+          <AdminReturnInput label="Reason code" value={form.reasonCode} placeholder="Optional" disabled={isSaving} onChange={(value) => onChange({ reasonCode: value })} />
           <div>
             <label className="text-sm font-medium">Fault category</label>
-            <Select
-              value={form.faultCategory}
-              onValueChange={(value) =>
-                onChange({
-                  faultCategory: value as DropshipReturnFaultCategory | "none",
-                })
-              }
-              disabled={isSaving}
-            >
-              <SelectTrigger className="mt-2">
-                <SelectValue />
-              </SelectTrigger>
+            <Select value={form.faultCategory} onValueChange={(value) => onChange({ faultCategory: value as DropshipReturnFaultCategory | "none" })} disabled={isSaving}>
+              <SelectTrigger className="mt-2"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="none">Pending</SelectItem>
-                {returnFaultCategories.map((category) => (
-                  <SelectItem key={category} value={category}>
-                    {formatStatus(category)}
-                  </SelectItem>
-                ))}
+                {returnFaultCategories.map((category) => <SelectItem key={category} value={category}>{formatStatus(category)}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
-          <AdminReturnInput
-            label="Label source"
-            value={form.labelSource}
-            placeholder="marketplace, vendor, ops"
-            disabled={isSaving}
-            onChange={(value) => onChange({ labelSource: value })}
-          />
-          <AdminReturnInput
-            label="Tracking number"
-            value={form.returnTrackingNumber}
-            placeholder="Optional"
-            disabled={isSaving}
-            onChange={(value) => onChange({ returnTrackingNumber: value })}
-          />
+          <AdminReturnInput label="Label source" value={form.labelSource} placeholder="marketplace, vendor, ops" disabled={isSaving} onChange={(value) => onChange({ labelSource: value })} />
+          <AdminReturnInput label="Tracking number" value={form.returnTrackingNumber} placeholder="Optional" disabled={isSaving} onChange={(value) => onChange({ returnTrackingNumber: value })} />
           <div className="md:col-span-2">
-            <label
-              className="text-sm font-medium"
-              htmlFor="dropship-return-create-notes"
-            >
-              Vendor notes
-            </label>
-            <Textarea
-              id="dropship-return-create-notes"
-              className="mt-2 min-h-24"
-              maxLength={5000}
-              value={form.vendorNotes}
-              onChange={(event) =>
-                onChange({ vendorNotes: event.target.value })
-              }
-              disabled={isSaving}
-            />
+            <label className="text-sm font-medium" htmlFor="dropship-return-create-notes">Vendor notes</label>
+            <Textarea id="dropship-return-create-notes" className="mt-2 min-h-24" maxLength={5000} value={form.vendorNotes} onChange={(event) => onChange({ vendorNotes: event.target.value })} disabled={isSaving} />
           </div>
         </div>
 
-        <div className="space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-sm font-medium">Return items</div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="gap-2"
-              disabled={isSaving}
-              onClick={onAddItem}
-            >
-              <PlusCircle className="h-4 w-4" />
-              Add item
-            </Button>
+        <div className="space-y-4">
+          <div className="rounded-md border p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="font-medium">Items on source order</div>
+                <p className="text-sm text-muted-foreground">Select only the lines and quantities being returned.</p>
+              </div>
+              <Badge variant="outline">{orderItems.length} selected</Badge>
+            </div>
+            {!form.intakeId ? (
+              <div className="mt-4 rounded-md border border-dashed p-5 text-center text-sm text-muted-foreground">Select a source order to load its items.</div>
+            ) : orderLoading ? (
+              <div className="mt-4 space-y-2"><Skeleton className="h-20 w-full" /><Skeleton className="h-20 w-full" /></div>
+            ) : orderError ? (
+              <Alert variant="destructive" className="mt-4"><AlertCircle className="h-4 w-4" /><AlertDescription>{orderError}</AlertDescription></Alert>
+            ) : !order || order.lines.length === 0 ? (
+              <div className="mt-4 rounded-md border border-dashed p-5 text-center text-sm text-muted-foreground">This order has no returnable item lines.</div>
+            ) : (
+              <div className="mt-4 space-y-2">
+                {order.lines.map((line) => {
+                  const itemIndex = selectedOrderItemIndex(line.lineIndex);
+                  const selectedItem = itemIndex >= 0 ? form.items[itemIndex] : null;
+                  const lineLabel = line.title ?? line.sku ?? `Order line ${line.lineIndex + 1}`;
+                  return (
+                    <div key={line.lineIndex} className="rounded-md border p-3">
+                      <div className="flex items-start gap-3">
+                        <Checkbox checked={itemIndex >= 0} disabled={isSaving} onCheckedChange={(checked) => toggleOrderLine(line, checked === true)} aria-label={`Return ${lineLabel}`} />
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium">{lineLabel}</div>
+                          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                            <span>SKU: {line.sku ?? "Not provided"}</span>
+                            <span>Ordered: {line.quantity}</span>
+                            {line.lineRetailTotalCents !== null ? <span>Line total: {formatCents(line.lineRetailTotalCents)}</span> : null}
+                          </div>
+                        </div>
+                      </div>
+                      {selectedItem && itemIndex >= 0 ? (
+                        <div className="mt-3 grid gap-3 border-t pt-3 sm:grid-cols-2">
+                          <div>
+                            <label className="text-xs font-medium">Return quantity</label>
+                            <Input className="mt-1" type="number" min={1} max={line.quantity} value={selectedItem.quantity} disabled={isSaving} onChange={(event) => onItemChange(itemIndex, { quantity: event.target.value })} />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium">Requested credit (optional)</label>
+                            <Input className="mt-1" inputMode="decimal" placeholder="0.00" value={selectedItem.requestedCreditAmount} disabled={isSaving} onChange={(event) => onItemChange(itemIndex, { requestedCreditAmount: event.target.value })} />
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
-          <div className="rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Variant</TableHead>
-                  <TableHead className="w-[90px]">Qty</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Requested credit</TableHead>
-                  <TableHead className="w-[84px]">Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {form.items.map((item, index) => (
-                  <TableRow key={index}>
-                    <TableCell>
-                      <ProductVariantSkuPicker
-                        clearable
-                        disabled={isSaving}
-                        isLoading={variantsLoading}
-                        label=""
-                        placeholder="Optional SKU"
-                        variants={variants}
-                        value={item.productVariantId}
-                        onChange={(value) =>
-                          onItemChange(index, { productVariantId: value })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        value={item.quantity}
-                        disabled={isSaving}
-                        onChange={(event) =>
-                          onItemChange(index, { quantity: event.target.value })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        value={item.status}
-                        maxLength={40}
-                        disabled={isSaving}
-                        onChange={(event) =>
-                          onItemChange(index, { status: event.target.value })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        value={item.requestedCreditAmount}
-                        placeholder="Optional"
-                        disabled={isSaving}
-                        onChange={(event) =>
-                          onItemChange(index, {
-                            requestedCreditAmount: event.target.value,
-                          })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={isSaving || form.items.length === 1}
-                        onClick={() => onRemoveItem(index)}
-                      >
-                        Remove
-                      </Button>
-                    </TableCell>
-                  </TableRow>
+
+          <div className="rounded-md border p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="font-medium">Manual exceptions</div>
+                <p className="text-sm text-muted-foreground">Use only when an item cannot be matched to the source order. A reason is required and audited.</p>
+              </div>
+              <Button type="button" variant="outline" size="sm" className="gap-2" disabled={isSaving} onClick={onAddItem}>
+                <PlusCircle className="h-4 w-4" /> Add exception
+              </Button>
+            </div>
+            {manualItems.length === 0 ? (
+              <div className="mt-4 rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">No manual exceptions.</div>
+            ) : (
+              <div className="mt-4 space-y-3">
+                {manualItems.map(({ item, index }, exceptionIndex) => (
+                  <div key={index} className="rounded-md border p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="font-medium">Manual exception {exceptionIndex + 1}</div>
+                      <Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => onRemoveItem(index)}>Remove</Button>
+                    </div>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                      <ProductVariantSkuPicker clearable disabled={isSaving} isLoading={variantsLoading} label="Catalog variant (optional)" placeholder="Search SKU" variants={variants} value={item.productVariantId} onChange={(value) => onItemChange(index, { productVariantId: value })} />
+                      <AdminReturnInput label="Item description" value={item.manualDescription} placeholder="Required when no catalog variant is selected" disabled={isSaving} onChange={(value) => onItemChange(index, { manualDescription: value })} />
+                      <AdminReturnInput label="Quantity" value={item.quantity} disabled={isSaving} onChange={(value) => onItemChange(index, { quantity: value })} />
+                      <AdminReturnInput label="Requested credit (optional)" value={item.requestedCreditAmount} placeholder="0.00" disabled={isSaving} onChange={(value) => onItemChange(index, { requestedCreditAmount: value })} />
+                      <div className="sm:col-span-2">
+                        <label className="text-sm font-medium">Exception reason *</label>
+                        <Textarea className="mt-2 min-h-20" maxLength={2000} value={item.exceptionReason} onChange={(event) => onItemChange(index, { exceptionReason: event.target.value })} disabled={isSaving} placeholder="Explain why this item cannot be tied to an order line." />
+                      </div>
+                    </div>
+                  </div>
                 ))}
-              </TableBody>
-            </Table>
+              </div>
+            )}
           </div>
         </div>
       </div>

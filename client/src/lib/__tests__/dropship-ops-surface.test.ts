@@ -711,14 +711,14 @@ describe("dropship ops surface client helpers", () => {
     ).toThrow();
   });
 
-  it("builds admin return create bodies with explicit RMA fields and item rows", () => {
+  it("builds admin RMAs from exact order lines and audited manual exceptions", () => {
     expect(
       buildAdminReturnCreateInput({
         idempotencyKey: "return-create-1",
         vendorId: " 12 ",
         rmaNumber: " RMA-1001 ",
         storeConnectionId: "34",
-        intakeId: "",
+        intakeId: "44",
         omsOrderId: "56",
         reasonCode: "damaged",
         faultCategory: "carrier",
@@ -728,15 +728,23 @@ describe("dropship ops surface client helpers", () => {
         vendorNotes: " package lost ",
         items: [
           {
+            source: "order",
+            orderLineIndex: "0",
+            externalLineItemId: " line-100 ",
             productVariantId: "789",
+            manualDescription: "ignored",
+            exceptionReason: "",
             quantity: "2",
-            status: "requested",
             requestedCreditAmount: "12.50",
           },
           {
+            source: "manual_exception",
+            orderLineIndex: "",
+            externalLineItemId: "",
             productVariantId: "",
+            manualDescription: "Unmapped bonus item",
+            exceptionReason: "Marketplace included an item absent from intake",
             quantity: "1",
-            status: "",
             requestedCreditAmount: "",
           },
         ],
@@ -746,7 +754,7 @@ describe("dropship ops surface client helpers", () => {
       vendorId: 12,
       rmaNumber: "RMA-1001",
       storeConnectionId: 34,
-      intakeId: null,
+      intakeId: 44,
       omsOrderId: 56,
       reasonCode: "damaged",
       faultCategory: "carrier",
@@ -756,61 +764,73 @@ describe("dropship ops surface client helpers", () => {
       vendorNotes: "package lost",
       items: [
         {
+          source: "order",
+          orderLineIndex: 0,
+          externalLineItemId: "line-100",
           productVariantId: 789,
+          manualDescription: null,
+          exceptionReason: null,
           quantity: 2,
           status: "requested",
           requestedCreditCents: 1250,
         },
         {
+          source: "manual_exception",
+          orderLineIndex: null,
+          externalLineItemId: null,
           productVariantId: null,
+          manualDescription: "Unmapped bonus item",
+          exceptionReason: "Marketplace included an item absent from intake",
           quantity: 1,
           status: "requested",
           requestedCreditCents: null,
         },
       ],
     });
+  });
+
+  it("rejects incomplete admin RMA item selections", () => {
+    const base = {
+      idempotencyKey: "return-create-2",
+      vendorId: "12",
+      rmaNumber: "RMA-1002",
+      storeConnectionId: "34",
+      intakeId: "44",
+      omsOrderId: "56",
+      reasonCode: "",
+      faultCategory: "none" as const,
+      returnWindowDays: "30",
+      labelSource: "",
+      returnTrackingNumber: "",
+      vendorNotes: "",
+    };
 
     expect(() =>
-      buildAdminReturnCreateInput({
-        idempotencyKey: "return-create-2",
-        vendorId: "12",
-        rmaNumber: "",
-        storeConnectionId: "",
-        intakeId: "",
-        omsOrderId: "",
-        reasonCode: "",
-        faultCategory: "none",
-        returnWindowDays: "30",
-        labelSource: "",
-        returnTrackingNumber: "",
-        vendorNotes: "",
-        items: [],
-      }),
+      buildAdminReturnCreateInput({ ...base, rmaNumber: "", items: [] }),
     ).toThrow("rmaNumber is required.");
     expect(() =>
+      buildAdminReturnCreateInput({ ...base, items: [] }),
+    ).toThrow("At least one return item is required.");
+    expect(() =>
       buildAdminReturnCreateInput({
-        idempotencyKey: "return-create-3",
-        vendorId: "12",
-        rmaNumber: "RMA-1002",
-        storeConnectionId: "",
-        intakeId: "",
-        omsOrderId: "",
-        reasonCode: "",
-        faultCategory: "none",
-        returnWindowDays: "30",
-        labelSource: "",
-        returnTrackingNumber: "",
-        vendorNotes: "",
-        items: [
-          {
-            productVariantId: "",
-            quantity: "0",
-            status: "requested",
-            requestedCreditAmount: "",
-          },
-        ],
+        ...base,
+        items: [{
+          source: "order", orderLineIndex: "", externalLineItemId: "",
+          productVariantId: "20", manualDescription: "", exceptionReason: "",
+          quantity: "1", requestedCreditAmount: "",
+        }],
       }),
-    ).toThrow("items.0.quantity must be a positive integer.");
+    ).toThrow("items.0.orderLineIndex");
+    expect(() =>
+      buildAdminReturnCreateInput({
+        ...base,
+        items: [{
+          source: "manual_exception", orderLineIndex: "", externalLineItemId: "",
+          productVariantId: "", manualDescription: "", exceptionReason: "Needs review",
+          quantity: "1", requestedCreditAmount: "",
+        }],
+      }),
+    ).toThrow("requires a catalog variant or item description");
   });
 
   it("builds portal return create bodies without vendor-controlled financial policy", () => {

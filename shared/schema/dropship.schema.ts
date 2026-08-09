@@ -2096,6 +2096,11 @@ export const dropshipRmaItems = dropshipSchema.table(
       () => productVariants.id,
       { onDelete: "set null" },
     ),
+    source: varchar("source", { length: 30 }).notNull().default("legacy"),
+    orderLineIndex: integer("order_line_index"),
+    externalLineItemId: varchar("external_line_item_id", { length: 255 }),
+    manualDescription: varchar("manual_description", { length: 500 }),
+    exceptionReason: text("exception_reason"),
     quantity: integer("quantity").notNull(),
     status: varchar("status", { length: 40 }).notNull().default("requested"),
     requestedCreditCents: bigint("requested_credit_cents", { mode: "number" }),
@@ -2106,7 +2111,27 @@ export const dropshipRmaItems = dropshipSchema.table(
       .notNull(),
   },
   (table) => [
+    uniqueIndex("dropship_rma_item_order_line_idx")
+      .on(table.rmaId, table.orderLineIndex)
+      .where(sql`${table.source} = 'order'`),
     check("dropship_rma_item_qty_chk", sql`${table.quantity} > 0`),
+    check(
+      "dropship_rma_item_source_chk",
+      sql`${table.source} IN ('legacy', 'order', 'manual_exception')`,
+    ),
+    check(
+      "dropship_rma_item_source_fields_chk",
+      sql`
+        (${table.source} = 'legacy' AND ${table.orderLineIndex} IS NULL)
+        OR (${table.source} = 'order' AND ${table.orderLineIndex} IS NOT NULL
+          AND ${table.orderLineIndex} >= 0 AND ${table.exceptionReason} IS NULL)
+        OR (${table.source} = 'manual_exception' AND ${table.orderLineIndex} IS NULL
+          AND (${table.productVariantId} IS NOT NULL OR (${table.manualDescription} IS NOT NULL
+            AND length(btrim(${table.manualDescription})) > 0))
+          AND ${table.exceptionReason} IS NOT NULL
+          AND length(btrim(${table.exceptionReason})) > 0)
+      `,
+    ),
     check(
       "dropship_rma_item_money_chk",
       sql`
