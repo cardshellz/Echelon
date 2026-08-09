@@ -528,9 +528,17 @@ Fault categories:
 
 Fees:
 
-- All return/refund fees are configurable.
+- Overall RMA responsibility is recorded separately from responsibility for each fee.
+- The fee types evaluated at inspection are restocking, inspection, and return shipping.
+- Each fee type has one policy-selected default responsibility for the applicable policy scope.
+- Fee responsibility may be Card Shellz, vendor, customer, marketplace, or carrier according to policy.
+- Fee schedules are immutable, effective-dated policy versions; fee amounts are stored and calculated in integer cents or whole percentage values.
+- An operator may override a fee's default responsibility or computed amount only with a required reason.
+- Final inspection stores an immutable per-fee snapshot containing the configured default, final responsibility, configured and final amounts, selected fee policy/version, and override reason.
+- Fees remain RMA-level settlement line items. Internal item allocation must reconcile exactly to each RMA-level fee and the total settlement.
 - Vendor/customer/marketplace fault may share the same configurable fee treatment.
-- No return/refund fee amount should be hardcoded.
+- No return/refund fee amount or responsibility should be hardcoded.
+- A future-dated fee version may be configured, but cannot replace the currently effective default before its effective date.
 
 Insurance pool:
 

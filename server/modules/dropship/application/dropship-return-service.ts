@@ -24,13 +24,34 @@ import type {
 } from "./dropship-ports";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 import type { DropshipWalletLedgerRecord } from "./dropship-wallet-service";
-import type { DropshipReturnPolicyService } from "./dropship-return-policy-service";
+import type {
+  DropshipResolvedReturnFees,
+  DropshipReturnFeeScheduleRecord,
+  DropshipReturnFeeType,
+  DropshipReturnPolicyService,
+} from "./dropship-return-policy-service";
 
 const positiveIdSchema = z.number().int().positive();
-const nonnegativeCentsSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const nonnegativeCentsSchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(Number.MAX_SAFE_INTEGER);
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
-const nullableStringSchema = z.string().trim().min(1).max(5000).nullable().optional();
-const shortNullableStringSchema = z.string().trim().min(1).max(255).nullable().optional();
+const nullableStringSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(5000)
+  .nullable()
+  .optional();
+const shortNullableStringSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(255)
+  .nullable()
+  .optional();
 const jsonObjectSchema = z.record(z.unknown());
 
 export const dropshipRmaStatusSchema = z.enum(DROPSHIP_RMA_STATUSES);
@@ -43,173 +64,275 @@ export const dropshipReturnFaultCategorySchema = z.enum([
   "marketplace",
   "carrier",
 ]);
-export type DropshipReturnFaultCategory = z.infer<typeof dropshipReturnFaultCategorySchema>;
+export type DropshipReturnFaultCategory = z.infer<
+  typeof dropshipReturnFaultCategorySchema
+>;
 
-export const dropshipRmaInspectionOutcomeSchema = z.enum(["approved", "rejected"]);
-export type DropshipRmaInspectionOutcome = z.infer<typeof dropshipRmaInspectionOutcomeSchema>;
+export const dropshipRmaInspectionOutcomeSchema = z.enum([
+  "approved",
+  "rejected",
+]);
+export type DropshipRmaInspectionOutcome = z.infer<
+  typeof dropshipRmaInspectionOutcomeSchema
+>;
 
-const rmaItemInputSchema = z.object({
-  productVariantId: positiveIdSchema.nullable().optional(),
-  quantity: z.number().int().positive(),
-  status: z.string().trim().min(1).max(40).default("requested"),
-  requestedCreditCents: nonnegativeCentsSchema.nullable().optional(),
-}).strict();
+const rmaItemInputSchema = z
+  .object({
+    productVariantId: positiveIdSchema.nullable().optional(),
+    quantity: z.number().int().positive(),
+    status: z.string().trim().min(1).max(40).default("requested"),
+    requestedCreditCents: nonnegativeCentsSchema.nullable().optional(),
+  })
+  .strict();
 
-const createDropshipRmaRequestSchema = z.object({
-  rmaNumber: z.string().trim().min(1).max(80),
-  storeConnectionId: positiveIdSchema.nullable().optional(),
-  intakeId: positiveIdSchema.nullable().optional(),
-  omsOrderId: positiveIdSchema.nullable().optional(),
-  reasonCode: shortNullableStringSchema,
-  faultCategory: dropshipReturnFaultCategorySchema.nullable().optional(),
-  returnWindowDays: z.number().int().positive().max(365).default(DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS),
-  labelSource: shortNullableStringSchema,
-  returnTrackingNumber: shortNullableStringSchema,
-  vendorNotes: nullableStringSchema,
-  items: z.array(rmaItemInputSchema).max(200).default([]),
-  idempotencyKey: idempotencyKeySchema,
-}).strict();
+const createDropshipRmaRequestSchema = z
+  .object({
+    rmaNumber: z.string().trim().min(1).max(80),
+    storeConnectionId: positiveIdSchema.nullable().optional(),
+    intakeId: positiveIdSchema.nullable().optional(),
+    omsOrderId: positiveIdSchema.nullable().optional(),
+    reasonCode: shortNullableStringSchema,
+    faultCategory: dropshipReturnFaultCategorySchema.nullable().optional(),
+    returnWindowDays: z
+      .number()
+      .int()
+      .positive()
+      .max(365)
+      .default(DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS),
+    labelSource: shortNullableStringSchema,
+    returnTrackingNumber: shortNullableStringSchema,
+    vendorNotes: nullableStringSchema,
+    items: z.array(rmaItemInputSchema).max(200).default([]),
+    idempotencyKey: idempotencyKeySchema,
+  })
+  .strict();
 
-const createDropshipRmaInputSchema = createDropshipRmaRequestSchema.extend({
-  vendorId: positiveIdSchema,
-  policyVersionId: positiveIdSchema.nullable().optional(),
-  actor: z.object({
-    actorType: z.enum(["vendor", "admin", "system"]),
-    actorId: z.string().trim().min(1).max(255).optional(),
-  }).strict(),
-}).strict();
+const createDropshipRmaInputSchema = createDropshipRmaRequestSchema
+  .extend({
+    vendorId: positiveIdSchema,
+    policyVersionId: positiveIdSchema.nullable().optional(),
+    actor: z
+      .object({
+        actorType: z.enum(["vendor", "admin", "system"]),
+        actorId: z.string().trim().min(1).max(255).optional(),
+      })
+      .strict(),
+  })
+  .strict();
 
-const createDropshipMemberRmaInputSchema = createDropshipRmaRequestSchema.omit({
-  omsOrderId: true,
-  returnWindowDays: true,
-  storeConnectionId: true,
-}).extend({
-  intakeId: positiveIdSchema,
-}).strict();
+const createDropshipMemberRmaInputSchema = createDropshipRmaRequestSchema
+  .omit({
+    omsOrderId: true,
+    returnWindowDays: true,
+    storeConnectionId: true,
+  })
+  .extend({
+    intakeId: positiveIdSchema,
+  })
+  .strict();
 
-const createDropshipReturnPolicyInputSchema = z.object({
-  name: z.string().trim().min(1).max(120),
-  returnWindowDays: z.number().int().positive().max(365).default(DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS),
-  isActive: z.boolean().default(true),
-  effectiveFrom: z.coerce.date().optional(),
-  effectiveTo: z.coerce.date().nullable().optional(),
-  idempotencyKey: idempotencyKeySchema,
-  actor: z.object({
-    actorType: z.enum(["admin", "system"]),
-    actorId: z.string().trim().min(1).max(255).optional(),
-  }).strict(),
-}).strict();
+const createDropshipReturnPolicyInputSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    returnWindowDays: z
+      .number()
+      .int()
+      .positive()
+      .max(365)
+      .default(DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS),
+    isActive: z.boolean().default(true),
+    effectiveFrom: z.coerce.date().optional(),
+    effectiveTo: z.coerce.date().nullable().optional(),
+    idempotencyKey: idempotencyKeySchema,
+    actor: z
+      .object({
+        actorType: z.enum(["admin", "system"]),
+        actorId: z.string().trim().min(1).max(255).optional(),
+      })
+      .strict(),
+  })
+  .strict();
 
 const MILLISECONDS_PER_DAY = 86_400_000;
 
-const listDropshipRmasInputSchema = z.object({
-  vendorId: positiveIdSchema.optional(),
-  statuses: z.array(dropshipRmaStatusSchema).min(1).max(8).optional(),
-  search: z.string().trim().min(1).max(200).optional(),
-  page: z.number().int().positive().default(1),
-  limit: z.number().int().positive().max(100).default(50),
-}).strict();
+const listDropshipRmasInputSchema = z
+  .object({
+    vendorId: positiveIdSchema.optional(),
+    statuses: z.array(dropshipRmaStatusSchema).min(1).max(8).optional(),
+    search: z.string().trim().min(1).max(200).optional(),
+    page: z.number().int().positive().default(1),
+    limit: z.number().int().positive().max(100).default(50),
+  })
+  .strict();
 
-const updateDropshipRmaStatusInputSchema = z.object({
-  rmaId: positiveIdSchema,
-  status: dropshipRmaStatusSchema,
-  vendorId: positiveIdSchema.optional(),
-  notes: nullableStringSchema,
-  idempotencyKey: idempotencyKeySchema,
-  actor: z.object({
-    actorType: z.enum(["admin", "system"]),
-    actorId: z.string().trim().min(1).max(255).optional(),
-  }).strict(),
-}).strict();
+const updateDropshipRmaStatusInputSchema = z
+  .object({
+    rmaId: positiveIdSchema,
+    status: dropshipRmaStatusSchema,
+    vendorId: positiveIdSchema.optional(),
+    notes: nullableStringSchema,
+    idempotencyKey: idempotencyKeySchema,
+    actor: z
+      .object({
+        actorType: z.enum(["admin", "system"]),
+        actorId: z.string().trim().min(1).max(255).optional(),
+      })
+      .strict(),
+  })
+  .strict();
 
-const inspectionItemInputSchema = z.object({
-  rmaItemId: positiveIdSchema,
-  status: z.string().trim().min(1).max(40).default("resellable"),
-  /** Units accepted at inspection. Defaults to the full requested quantity. */
-  acceptedQuantity: z.number().int().min(0).max(1_000_000).nullable().optional(),
-  finalCreditCents: nonnegativeCentsSchema.nullable().optional(),
-  feeCents: nonnegativeCentsSchema.nullable().optional(),
-}).strict();
+const inspectionItemInputSchema = z
+  .object({
+    rmaItemId: positiveIdSchema,
+    status: z.string().trim().min(1).max(40).default("resellable"),
+    /** Units accepted at inspection. Defaults to the full requested quantity. */
+    acceptedQuantity: z
+      .number()
+      .int()
+      .min(0)
+      .max(1_000_000)
+      .nullable()
+      .optional(),
+    finalCreditCents: nonnegativeCentsSchema.nullable().optional(),
+    feeCents: nonnegativeCentsSchema.nullable().optional(),
+  })
+  .strict();
 
-const processDropshipRmaInspectionInputSchema = z.object({
-  rmaId: positiveIdSchema,
-  outcome: dropshipRmaInspectionOutcomeSchema,
-  faultCategory: dropshipReturnFaultCategorySchema,
-  /**
-   * Admin disposition (D2b: rules propose, human disposes). When both totals
-   * plus complete per-item amounts are supplied, they are the settlement
-   * (manual path). When only one side is supplied, the fee engine computes
-   * the other and overrideReason is required. When omitted entirely, the
-   * engine computes the full settlement from the economics snapshot + fee
-   * schedule.
-   */
-  creditCents: nonnegativeCentsSchema.nullable().optional(),
-  feeCents: nonnegativeCentsSchema.nullable().optional(),
-  overrideReason: z.string().trim().min(1).max(1000).nullable().optional(),
-  /** Actual return label cost from channel evidence (D2a), when known. */
-  returnShippingActualCents: nonnegativeCentsSchema.nullable().optional(),
-  notes: nullableStringSchema,
-  photos: z.array(jsonObjectSchema).max(20).default([]),
-  items: z.array(inspectionItemInputSchema).max(200).default([]),
-  idempotencyKey: idempotencyKeySchema,
-  actor: z.object({
-    actorType: z.enum(["admin", "system"]),
-    actorId: z.string().trim().min(1).max(255).optional(),
-  }).strict(),
-}).strict().superRefine((input, ctx) => {
-  const creditProvided = input.creditCents !== null && input.creditCents !== undefined;
-  const feeProvided = input.feeCents !== null && input.feeCents !== undefined;
-  const itemAmountsComplete = input.items.length > 0 && input.items.every(
-    (item) => item.finalCreditCents != null && item.feeCents != null,
-  );
-  // Paths:
-  //  - engine (no totals): computed settlement, no reason needed.
-  //  - full manual disposition (both totals + complete item amounts): the
-  //    legacy admin path; notes + actor are the audit trail.
-  //  - partial override (exactly one total, or totals without item amounts):
-  //    the engine computes the missing side; overrideReason is required (D2b).
-  const fullManual = creditProvided && feeProvided && itemAmountsComplete;
-  const anyOverride = creditProvided || feeProvided;
-  if (anyOverride && !fullManual && !input.overrideReason?.trim()) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["overrideReason"],
-      message: "overrideReason is required when partially overriding the computed settlement.",
-    });
-  }
-  if (input.items.length === 0) return;
-  const itemCredits = input.items.map((item) => item.finalCreditCents);
-  const itemFees = input.items.map((item) => item.feeCents);
-  const hasItemCredits = itemCredits.every((value) => value !== null && value !== undefined);
-  const hasItemFees = itemFees.every((value) => value !== null && value !== undefined);
-  if (creditProvided && hasItemCredits) {
-    const creditTotal = (itemCredits as number[]).reduce((sum, value) => sum + value, 0);
-    if (creditTotal !== input.creditCents) {
+const inspectionFeeDecisionSchema = z
+  .object({
+    feeType: z.enum([
+      "restocking_fee",
+      "processing_fee",
+      "return_shipping_fee",
+    ]),
+    responsibility: dropshipReturnFaultCategorySchema,
+    amountCents: nonnegativeCentsSchema,
+    overrideReason: z.string().trim().min(1).max(1000).nullable().optional(),
+  })
+  .strict();
+
+const processDropshipRmaInspectionInputSchema = z
+  .object({
+    rmaId: positiveIdSchema,
+    outcome: dropshipRmaInspectionOutcomeSchema,
+    faultCategory: dropshipReturnFaultCategorySchema,
+    /**
+     * Admin disposition (D2b: rules propose, human disposes). When both totals
+     * plus complete per-item amounts are supplied, they are the settlement
+     * (manual path). When only one side is supplied, the fee engine computes
+     * the other and overrideReason is required. When omitted entirely, the
+     * engine computes the full settlement from the economics snapshot + fee
+     * schedule.
+     */
+    creditCents: nonnegativeCentsSchema.nullable().optional(),
+    feeCents: nonnegativeCentsSchema.nullable().optional(),
+    overrideReason: z.string().trim().min(1).max(1000).nullable().optional(),
+    /** Actual return label cost from channel evidence (D2a), when known. */
+    returnShippingActualCents: nonnegativeCentsSchema.nullable().optional(),
+    feeDecisions: z.array(inspectionFeeDecisionSchema).length(3).optional(),
+    notes: nullableStringSchema,
+    photos: z.array(jsonObjectSchema).max(20).default([]),
+    items: z.array(inspectionItemInputSchema).max(200).default([]),
+    idempotencyKey: idempotencyKeySchema,
+    actor: z
+      .object({
+        actorType: z.enum(["admin", "system"]),
+        actorId: z.string().trim().min(1).max(255).optional(),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((input, ctx) => {
+    if (input.feeDecisions) {
+      const feeTypes = new Set(
+        input.feeDecisions.map((decision) => decision.feeType),
+      );
+      if (feeTypes.size !== 3) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["feeDecisions"],
+          message: "Exactly one decision is required for each fee type.",
+        });
+      }
+    }
+    const creditProvided =
+      input.creditCents !== null && input.creditCents !== undefined;
+    const feeProvided = input.feeCents !== null && input.feeCents !== undefined;
+    const itemAmountsComplete =
+      input.items.length > 0 &&
+      input.items.every(
+        (item) => item.finalCreditCents != null && item.feeCents != null,
+      );
+    // Paths:
+    //  - engine (no totals): computed settlement, no reason needed.
+    //  - full manual disposition (both totals + complete item amounts): the
+    //    legacy admin path; notes + actor are the audit trail.
+    //  - partial override (exactly one total, or totals without item amounts):
+    //    the engine computes the missing side; overrideReason is required (D2b).
+    const fullManual = creditProvided && feeProvided && itemAmountsComplete;
+    const anyOverride = creditProvided || feeProvided;
+    if (anyOverride && !fullManual && !input.overrideReason?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["items"],
-        message: "Item final credit cents must add up to inspection credit cents.",
+        path: ["overrideReason"],
+        message:
+          "overrideReason is required when partially overriding the computed settlement.",
       });
     }
-  }
-  if (feeProvided && hasItemFees) {
-    const feeTotal = (itemFees as number[]).reduce((sum, value) => sum + value, 0);
-    if (feeTotal !== input.feeCents) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["items"],
-        message: "Item fee cents must add up to inspection fee cents.",
-      });
+    if (input.items.length === 0) return;
+    const itemCredits = input.items.map((item) => item.finalCreditCents);
+    const itemFees = input.items.map((item) => item.feeCents);
+    const hasItemCredits = itemCredits.every(
+      (value) => value !== null && value !== undefined,
+    );
+    const hasItemFees = itemFees.every(
+      (value) => value !== null && value !== undefined,
+    );
+    if (creditProvided && hasItemCredits) {
+      const creditTotal = (itemCredits as number[]).reduce(
+        (sum, value) => sum + value,
+        0,
+      );
+      if (creditTotal !== input.creditCents) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["items"],
+          message:
+            "Item final credit cents must add up to inspection credit cents.",
+        });
+      }
     }
-  }
-});
+    if (feeProvided && hasItemFees) {
+      const feeTotal = (itemFees as number[]).reduce(
+        (sum, value) => sum + value,
+        0,
+      );
+      if (feeTotal !== input.feeCents) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["items"],
+          message: "Item fee cents must add up to inspection fee cents.",
+        });
+      }
+    }
+  });
 
-export type CreateDropshipRmaInput = z.infer<typeof createDropshipRmaInputSchema>;
-export type CreateDropshipMemberRmaInput = z.infer<typeof createDropshipMemberRmaInputSchema>;
-export type CreateDropshipReturnPolicyInput = z.infer<typeof createDropshipReturnPolicyInputSchema>;
+export type CreateDropshipRmaInput = z.infer<
+  typeof createDropshipRmaInputSchema
+>;
+export type CreateDropshipMemberRmaInput = z.infer<
+  typeof createDropshipMemberRmaInputSchema
+>;
+export type CreateDropshipReturnPolicyInput = z.infer<
+  typeof createDropshipReturnPolicyInputSchema
+>;
 export type ListDropshipRmasInput = z.infer<typeof listDropshipRmasInputSchema>;
-export type UpdateDropshipRmaStatusInput = z.infer<typeof updateDropshipRmaStatusInputSchema>;
-export type ProcessDropshipRmaInspectionInput = z.infer<typeof processDropshipRmaInspectionInputSchema>;
+export type UpdateDropshipRmaStatusInput = z.infer<
+  typeof updateDropshipRmaStatusInputSchema
+>;
+export type ProcessDropshipRmaInspectionInput = z.infer<
+  typeof processDropshipRmaInspectionInputSchema
+>;
 
 export type NormalizedCreateDropshipReturnPolicyInput = Omit<
   CreateDropshipReturnPolicyInput,
@@ -264,6 +387,7 @@ export interface DropshipRmaInspectionRecord {
   photos: Record<string, unknown>[];
   creditCents: number;
   feeCents: number;
+  feeBreakdown: Record<string, unknown>;
   inspectedBy: string | null;
   idempotencyKey: string | null;
   requestHash: string | null;
@@ -371,24 +495,44 @@ export interface DropshipReturnPolicyCommandContext {
 
 export interface DropshipReturnRepository {
   listRmas(input: ListDropshipRmasInput): Promise<DropshipRmaListResult>;
-  getRma(input: { rmaId: number; vendorId?: number }): Promise<DropshipRmaDetail | null>;
-  getOrderReference(input: { vendorId: number; intakeId: number }): Promise<DropshipRmaOrderReference | null>;
-  getOrderEconomics(input: { rmaId: number }): Promise<DropshipRmaOrderEconomics | null>;
+  getRma(input: {
+    rmaId: number;
+    vendorId?: number;
+  }): Promise<DropshipRmaDetail | null>;
+  getOrderReference(input: {
+    vendorId: number;
+    intakeId: number;
+  }): Promise<DropshipRmaOrderReference | null>;
+  getOrderEconomics(input: {
+    rmaId: number;
+  }): Promise<DropshipRmaOrderEconomics | null>;
   getActiveReturnPolicy(at: Date): Promise<DropshipReturnPolicyRecord | null>;
   createReturnPolicy(
-    input: NormalizedCreateDropshipReturnPolicyInput & DropshipReturnPolicyCommandContext,
+    input: NormalizedCreateDropshipReturnPolicyInput &
+      DropshipReturnPolicyCommandContext,
   ): Promise<DropshipReturnPolicyMutationResult>;
-  createRma(input: CreateDropshipRmaInput & { requestHash: string; now: Date }): Promise<{
+  createRma(
+    input: CreateDropshipRmaInput & { requestHash: string; now: Date },
+  ): Promise<{
     rma: DropshipRmaDetail;
     idempotentReplay: boolean;
   }>;
   updateStatus(
-    input: UpdateDropshipRmaStatusInput & { policyVersionId: number | null; requestHash: string; now: Date },
+    input: UpdateDropshipRmaStatusInput & {
+      policyVersionId: number | null;
+      requestHash: string;
+      now: Date;
+    },
   ): Promise<DropshipRmaStatusUpdateResult>;
   processInspection(
-    input: NormalizedProcessDropshipRmaInspectionInput & { requestHash: string; now: Date },
+    input: NormalizedProcessDropshipRmaInspectionInput & {
+      requestHash: string;
+      now: Date;
+    },
   ): Promise<DropshipRmaInspectionResult>;
-  closeNoShipTimedOutRmas(input: { now: Date }): Promise<{ closedCount: number }>;
+  closeNoShipTimedOutRmas(input: {
+    now: Date;
+  }): Promise<{ closedCount: number }>;
 }
 
 /**
@@ -417,21 +561,36 @@ export class DropshipReturnService {
     },
   ) {}
 
-  async listForMember(memberId: string, input: unknown = {}): Promise<DropshipRmaListResult> {
-    const vendor = await this.deps.vendorProvisioning.provisionForMember(memberId);
+  async listForMember(
+    memberId: string,
+    input: unknown = {},
+  ): Promise<DropshipRmaListResult> {
+    const vendor =
+      await this.deps.vendorProvisioning.provisionForMember(memberId);
     return this.listForVendor(vendor.vendor.vendorId, input);
   }
 
-  async listForVendor(vendorId: number, input: unknown = {}): Promise<DropshipRmaListResult> {
-    const parsed = parseReturnInput(listDropshipRmasInputSchema, {
-      ...(typeof input === "object" && input !== null ? input : {}),
-      vendorId,
-    }, "DROPSHIP_RETURN_LIST_INVALID_INPUT");
+  async listForVendor(
+    vendorId: number,
+    input: unknown = {},
+  ): Promise<DropshipRmaListResult> {
+    const parsed = parseReturnInput(
+      listDropshipRmasInputSchema,
+      {
+        ...(typeof input === "object" && input !== null ? input : {}),
+        vendorId,
+      },
+      "DROPSHIP_RETURN_LIST_INVALID_INPUT",
+    );
     return this.deps.repository.listRmas(parsed);
   }
 
   async listForAdmin(input: unknown = {}): Promise<DropshipRmaListResult> {
-    const parsed = parseReturnInput(listDropshipRmasInputSchema, input, "DROPSHIP_RETURN_LIST_INVALID_INPUT");
+    const parsed = parseReturnInput(
+      listDropshipRmasInputSchema,
+      input,
+      "DROPSHIP_RETURN_LIST_INVALID_INPUT",
+    );
     return this.deps.repository.listRmas(parsed);
   }
 
@@ -474,7 +633,9 @@ export class DropshipReturnService {
     return result;
   }
 
-  async createReturnPolicy(input: unknown): Promise<DropshipReturnPolicyMutationResult> {
+  async createReturnPolicy(
+    input: unknown,
+  ): Promise<DropshipReturnPolicyMutationResult> {
     const parsed = parseReturnInput(
       createDropshipReturnPolicyInputSchema,
       input,
@@ -510,8 +671,12 @@ export class DropshipReturnService {
     return result;
   }
 
-  async getForMember(memberId: string, rmaId: number): Promise<DropshipRmaDetail> {
-    const vendor = await this.deps.vendorProvisioning.provisionForMember(memberId);
+  async getForMember(
+    memberId: string,
+    rmaId: number,
+  ): Promise<DropshipRmaDetail> {
+    const vendor =
+      await this.deps.vendorProvisioning.provisionForMember(memberId);
     return this.requireRma({ rmaId, vendorId: vendor.vendor.vendorId });
   }
 
@@ -519,19 +684,31 @@ export class DropshipReturnService {
     return this.requireRma({ rmaId });
   }
 
-  async createRmaForMember(memberId: string, input: unknown): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
-    const parsed = parseReturnInput(createDropshipMemberRmaInputSchema, input, "DROPSHIP_RETURN_CREATE_INVALID_INPUT");
+  async createRmaForMember(
+    memberId: string,
+    input: unknown,
+  ): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
+    const parsed = parseReturnInput(
+      createDropshipMemberRmaInputSchema,
+      input,
+      "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+    );
     const now = this.deps.clock.now();
-    const vendor = await this.deps.vendorProvisioning.provisionForMember(memberId);
+    const vendor =
+      await this.deps.vendorProvisioning.provisionForMember(memberId);
     const orderReference = await this.deps.repository.getOrderReference({
       vendorId: vendor.vendor.vendorId,
       intakeId: parsed.intakeId,
     });
     if (!orderReference) {
-      throw new DropshipError("DROPSHIP_ORDER_INTAKE_NOT_FOUND", "Dropship order intake was not found for the vendor.", {
-        vendorId: vendor.vendor.vendorId,
-        intakeId: parsed.intakeId,
-      });
+      throw new DropshipError(
+        "DROPSHIP_ORDER_INTAKE_NOT_FOUND",
+        "Dropship order intake was not found for the vendor.",
+        {
+          vendorId: vendor.vendor.vendorId,
+          intakeId: parsed.intakeId,
+        },
+      );
     }
     assertMemberRmaOrderIsAccepted(parsed, orderReference);
     const resolvedPolicy = this.deps.returnPolicyService
@@ -541,8 +718,13 @@ export class DropshipReturnService {
           at: now,
         })
       : null;
-    const legacyPolicy = resolvedPolicy ? null : await this.deps.repository.getActiveReturnPolicy(now);
-    const returnWindowDays = resolvedPolicy?.returnWindowDays ?? legacyPolicy?.returnWindowDays ?? null;
+    const legacyPolicy = resolvedPolicy
+      ? null
+      : await this.deps.repository.getActiveReturnPolicy(now);
+    const returnWindowDays =
+      resolvedPolicy?.returnWindowDays ??
+      legacyPolicy?.returnWindowDays ??
+      null;
     if (returnWindowDays === null) {
       throw new DropshipError(
         "DROPSHIP_RETURN_POLICY_REQUIRED",
@@ -554,20 +736,30 @@ export class DropshipReturnService {
         },
       );
     }
-    assertMemberRmaWithinReturnWindow(parsed, orderReference, now, returnWindowDays);
-    assertMemberRmaItemsMatchOrder(parsed, orderReference);
-    return this.createRmaWithNow({
-      ...parsed,
-      storeConnectionId: orderReference.storeConnectionId,
-      omsOrderId: orderReference.omsOrderId,
+    assertMemberRmaWithinReturnWindow(
+      parsed,
+      orderReference,
+      now,
       returnWindowDays,
-      policyVersionId: resolvedPolicy?.policyId ?? null,
-      vendorId: vendor.vendor.vendorId,
-      actor: { actorType: "vendor", actorId: memberId },
-    }, now);
+    );
+    assertMemberRmaItemsMatchOrder(parsed, orderReference);
+    return this.createRmaWithNow(
+      {
+        ...parsed,
+        storeConnectionId: orderReference.storeConnectionId,
+        omsOrderId: orderReference.omsOrderId,
+        returnWindowDays,
+        policyVersionId: resolvedPolicy?.policyId ?? null,
+        vendorId: vendor.vendor.vendorId,
+        actor: { actorType: "vendor", actorId: memberId },
+      },
+      now,
+    );
   }
 
-  async createRma(input: unknown): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
+  async createRma(
+    input: unknown,
+  ): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
     return this.createRmaWithNow(input, this.deps.clock.now());
   }
 
@@ -575,7 +767,11 @@ export class DropshipReturnService {
     input: unknown,
     now: Date,
   ): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
-    const parsed = parseReturnInput(createDropshipRmaInputSchema, input, "DROPSHIP_RETURN_CREATE_INVALID_INPUT");
+    const parsed = parseReturnInput(
+      createDropshipRmaInputSchema,
+      input,
+      "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+    );
     const requestHash = hashDropshipRmaCreate(parsed);
     const result = await this.deps.repository.createRma({
       ...parsed,
@@ -601,8 +797,15 @@ export class DropshipReturnService {
   }
 
   async updateStatus(input: unknown): Promise<DropshipRmaStatusUpdateResult> {
-    const parsed = parseReturnInput(updateDropshipRmaStatusInputSchema, input, "DROPSHIP_RETURN_STATUS_INVALID_INPUT");
-    const rma = await this.requireRma({ rmaId: parsed.rmaId, vendorId: parsed.vendorId });
+    const parsed = parseReturnInput(
+      updateDropshipRmaStatusInputSchema,
+      input,
+      "DROPSHIP_RETURN_STATUS_INVALID_INPUT",
+    );
+    const rma = await this.requireRma({
+      rmaId: parsed.rmaId,
+      vendorId: parsed.vendorId,
+    });
     // Idempotent-replay fast path: when the RMA is already in the target
     // status, the transition has already happened — defer to the repository's
     // idempotency layer (same key + hash replays; a different request with a
@@ -636,7 +839,9 @@ export class DropshipReturnService {
     return result;
   }
 
-  async processInspection(input: unknown): Promise<DropshipRmaInspectionResult> {
+  async processInspection(
+    input: unknown,
+  ): Promise<DropshipRmaInspectionResult> {
     const parsed = parseReturnInput(
       processDropshipRmaInspectionInputSchema,
       input,
@@ -687,7 +892,9 @@ export class DropshipReturnService {
           faultCategory: result.inspection.faultCategory,
           creditCents: result.inspection.creditCents,
           feeCents: result.inspection.feeCents,
-          walletLedgerIds: result.walletLedger.map((entry) => entry.ledgerEntryId),
+          walletLedgerIds: result.walletLedger.map(
+            (entry) => entry.ledgerEntryId,
+          ),
           idempotencyKey: parsed.idempotencyKey,
         },
       });
@@ -714,27 +921,44 @@ export class DropshipReturnService {
     breakdown: Record<string, unknown>;
     computed: DropshipReturnSettlement | null;
   }> {
-    const creditOverride = input.creditCents !== null && input.creditCents !== undefined;
+    const creditOverride =
+      input.creditCents !== null && input.creditCents !== undefined;
     const feeOverride = input.feeCents !== null && input.feeCents !== undefined;
-    const itemAmountsProvided = input.items.length > 0 && input.items.every(
-      (item) => item.finalCreditCents != null && item.feeCents != null,
-    );
+    const itemAmountsProvided =
+      input.items.length > 0 &&
+      input.items.every(
+        (item) => item.finalCreditCents != null && item.feeCents != null,
+      );
 
     // Rejected inspections never move money; fees/credits are zero by rule.
     if (input.outcome === "rejected") {
       return {
         creditCents: 0,
         feeCents: 0,
-        items: normalizeInspectionItems(input.items, rma, () => 0, () => 0),
+        items: normalizeInspectionItems(
+          input.items,
+          rma,
+          () => 0,
+          () => 0,
+        ),
         creditLedgerType: "return_credit",
-        breakdown: { version: 1, outcome: "rejected", faultCategory: input.faultCategory },
+        breakdown: {
+          version: 1,
+          outcome: "rejected",
+          faultCategory: input.faultCategory,
+        },
         computed: null,
       };
     }
 
     // Full manual disposition (D2b human disposes): both totals and complete
     // per-item amounts were supplied. Trust the human; skip the engine.
-    if (creditOverride && feeOverride && itemAmountsProvided) {
+    if (
+      creditOverride &&
+      feeOverride &&
+      itemAmountsProvided &&
+      !input.feeDecisions
+    ) {
       return {
         creditCents: input.creditCents as number,
         feeCents: input.feeCents as number,
@@ -744,7 +968,10 @@ export class DropshipReturnService {
           (item) => item.finalCreditCents as number,
           (item) => item.feeCents as number,
         ),
-        creditLedgerType: input.faultCategory === "carrier" ? "insurance_pool_credit" : "return_credit",
+        creditLedgerType:
+          input.faultCategory === "carrier"
+            ? "insurance_pool_credit"
+            : "return_credit",
         breakdown: {
           version: 1,
           mode: "manual",
@@ -763,7 +990,9 @@ export class DropshipReturnService {
         { rmaId: rma.rmaId },
       );
     }
-    const snapshot = await this.deps.repository.getOrderEconomics({ rmaId: rma.rmaId });
+    const snapshot = await this.deps.repository.getOrderEconomics({
+      rmaId: rma.rmaId,
+    });
     if (!snapshot) {
       throw new DropshipError(
         "DROPSHIP_RETURN_ECONOMICS_NOT_FOUND",
@@ -771,12 +1000,23 @@ export class DropshipReturnService {
         { rmaId: rma.rmaId, intakeId: rma.intakeId },
       );
     }
-    const fees = await this.deps.returnPolicyService.resolveReturnFees({
-      vendorId: rma.vendorId,
-      storeConnectionId: rma.storeConnectionId,
-      faultCategory: input.faultCategory,
-      at: now,
-    });
+    const feeResolution = input.feeDecisions
+      ? await resolveInspectionFeeDecisions({
+          decisions: input.feeDecisions,
+          vendorId: rma.vendorId,
+          storeConnectionId: rma.storeConnectionId,
+          returnPolicyService: this.deps.returnPolicyService,
+          at: now,
+        })
+      : null;
+    const fees =
+      feeResolution?.selected ??
+      (await this.deps.returnPolicyService.resolveReturnFees({
+        vendorId: rma.vendorId,
+        storeConnectionId: rma.storeConnectionId,
+        faultCategory: input.faultCategory,
+        at: now,
+      }));
     const acceptedLines = buildAcceptedLines(input.items, rma, snapshot);
     const computed = computeDropshipReturnSettlement({
       faultCategory: input.faultCategory,
@@ -785,23 +1025,66 @@ export class DropshipReturnService {
       returnShippingActualCents: input.returnShippingActualCents ?? null,
       fees: {
         restockingFee: fees.restockingFee
-          ? { feeType: "restocking_fee", amountType: fees.restockingFee.amountType, amount: fees.restockingFee.amount }
+          ? {
+              feeType: "restocking_fee",
+              amountType: fees.restockingFee.amountType,
+              amount: fees.restockingFee.amount,
+              responsibility:
+                feeResolution?.responsibilities.restocking_fee ??
+                input.faultCategory,
+            }
           : null,
         processingFee: fees.processingFee
-          ? { feeType: "processing_fee", amountType: fees.processingFee.amountType, amount: fees.processingFee.amount }
+          ? {
+              feeType: "processing_fee",
+              amountType: fees.processingFee.amountType,
+              amount: fees.processingFee.amount,
+              responsibility:
+                feeResolution?.responsibilities.processing_fee ??
+                input.faultCategory,
+            }
           : null,
         returnShippingFee: fees.returnShippingFee
-          ? { feeType: "return_shipping_fee", amountType: fees.returnShippingFee.amountType, amount: fees.returnShippingFee.amount }
+          ? {
+              feeType: "return_shipping_fee",
+              amountType: fees.returnShippingFee.amountType,
+              amount: fees.returnShippingFee.amount,
+              responsibility:
+                feeResolution?.responsibilities.return_shipping_fee ??
+                input.faultCategory,
+            }
           : null,
       },
     });
 
-    const creditCents = creditOverride ? (input.creditCents as number) : computed.grossCreditCents;
-    const feeCents = feeOverride ? (input.feeCents as number) : computed.totalFeeCents;
+    if (feeResolution) {
+      validateFeeDecisionOverrides(
+        input.feeDecisions ?? [],
+        feeResolution.defaults,
+        computed,
+      );
+    }
+    const creditCents = creditOverride
+      ? (input.creditCents as number)
+      : computed.grossCreditCents;
+    const feeCents = feeResolution
+      ? (input.feeDecisions ?? []).reduce(
+          (sum, decision) => sum + decision.amountCents,
+          0,
+        )
+      : feeOverride
+        ? (input.feeCents as number)
+        : computed.totalFeeCents;
     return {
       creditCents,
       feeCents,
-      items: allocateInspectionItemAmounts(input.items, rma, computed, creditCents, feeCents),
+      items: allocateInspectionItemAmounts(
+        input.items,
+        rma,
+        computed,
+        creditCents,
+        feeCents,
+      ),
       creditLedgerType: computed.creditLedgerType,
       breakdown: {
         ...computed.breakdown,
@@ -809,86 +1092,116 @@ export class DropshipReturnService {
         overrideReason: input.overrideReason?.trim() ?? null,
         finalCreditCents: creditCents,
         finalFeeCents: feeCents,
+        feeDecisions: feeResolution
+          ? buildFeeDecisionAudit(
+              input.feeDecisions ?? [],
+              feeResolution,
+              computed,
+            )
+          : null,
       },
       computed,
     };
   }
 
-  private async requireRma(input: { rmaId: number; vendorId?: number }): Promise<DropshipRmaDetail> {
+  private async requireRma(input: {
+    rmaId: number;
+    vendorId?: number;
+  }): Promise<DropshipRmaDetail> {
     const rma = await this.deps.repository.getRma(input);
     if (!rma) {
-      throw new DropshipError("DROPSHIP_RMA_NOT_FOUND", "Dropship RMA was not found.", input);
+      throw new DropshipError(
+        "DROPSHIP_RMA_NOT_FOUND",
+        "Dropship RMA was not found.",
+        input,
+      );
     }
     return rma;
   }
 
   private async notifyRmaCreated(rma: DropshipRmaDetail): Promise<void> {
-    await sendDropshipNotificationSafely(this.deps, {
-      vendorId: rma.vendorId,
-      eventType: DROPSHIP_NOTIFICATION_EVENTS.RMA_OPENED,
-      critical: true,
-      channels: ["email", "in_app"],
-      title: "Dropship RMA opened",
-      message: `RMA ${rma.rmaNumber} was opened for review.`,
-      payload: {
-        rmaId: rma.rmaId,
-        rmaNumber: rma.rmaNumber,
+    await sendDropshipNotificationSafely(
+      this.deps,
+      {
         vendorId: rma.vendorId,
-        storeConnectionId: rma.storeConnectionId,
-        intakeId: rma.intakeId,
-        omsOrderId: rma.omsOrderId,
-        status: rma.status,
-        reasonCode: rma.reasonCode,
+        eventType: DROPSHIP_NOTIFICATION_EVENTS.RMA_OPENED,
+        critical: true,
+        channels: ["email", "in_app"],
+        title: "Dropship RMA opened",
+        message: `RMA ${rma.rmaNumber} was opened for review.`,
+        payload: {
+          rmaId: rma.rmaId,
+          rmaNumber: rma.rmaNumber,
+          vendorId: rma.vendorId,
+          storeConnectionId: rma.storeConnectionId,
+          intakeId: rma.intakeId,
+          omsOrderId: rma.omsOrderId,
+          status: rma.status,
+          reasonCode: rma.reasonCode,
+        },
+        idempotencyKey: `rma-opened:${rma.rmaId}`,
       },
-      idempotencyKey: `rma-opened:${rma.rmaId}`,
-    }, {
-      code: "DROPSHIP_RMA_OPENED_NOTIFICATION_FAILED",
-      message: "Dropship RMA opened notification failed after RMA creation.",
-      context: {
-        rmaId: rma.rmaId,
-        rmaNumber: rma.rmaNumber,
-        vendorId: rma.vendorId,
+      {
+        code: "DROPSHIP_RMA_OPENED_NOTIFICATION_FAILED",
+        message: "Dropship RMA opened notification failed after RMA creation.",
+        context: {
+          rmaId: rma.rmaId,
+          rmaNumber: rma.rmaNumber,
+          vendorId: rma.vendorId,
+        },
       },
-    });
+    );
   }
 
-  private async notifyReturnCreditPosted(result: DropshipRmaInspectionResult): Promise<void> {
-    if (result.inspection.creditCents <= 0 || result.walletLedger.length === 0) {
+  private async notifyReturnCreditPosted(
+    result: DropshipRmaInspectionResult,
+  ): Promise<void> {
+    if (
+      result.inspection.creditCents <= 0 ||
+      result.walletLedger.length === 0
+    ) {
       return;
     }
     const creditCurrency = result.walletLedger[0]?.currency ?? "USD";
 
-    await sendDropshipNotificationSafely(this.deps, {
-      vendorId: result.rma.vendorId,
-      eventType: DROPSHIP_NOTIFICATION_EVENTS.RETURN_CREDIT_POSTED,
-      critical: true,
-      channels: ["email", "in_app"],
-      title: "Dropship return credit posted",
-      message: `RMA ${result.rma.rmaNumber} credit posted for ${formatNotificationCurrency(result.inspection.creditCents, creditCurrency)}.`,
-      payload: {
-        rmaId: result.rma.rmaId,
-        rmaNumber: result.rma.rmaNumber,
+    await sendDropshipNotificationSafely(
+      this.deps,
+      {
         vendorId: result.rma.vendorId,
-        inspectionId: result.inspection.rmaInspectionId,
-        outcome: result.inspection.outcome,
-        faultCategory: result.inspection.faultCategory,
-        creditCents: result.inspection.creditCents,
-        currency: creditCurrency,
-        feeCents: result.inspection.feeCents,
-        walletLedgerIds: result.walletLedger.map((entry) => entry.ledgerEntryId),
+        eventType: DROPSHIP_NOTIFICATION_EVENTS.RETURN_CREDIT_POSTED,
+        critical: true,
+        channels: ["email", "in_app"],
+        title: "Dropship return credit posted",
+        message: `RMA ${result.rma.rmaNumber} credit posted for ${formatNotificationCurrency(result.inspection.creditCents, creditCurrency)}.`,
+        payload: {
+          rmaId: result.rma.rmaId,
+          rmaNumber: result.rma.rmaNumber,
+          vendorId: result.rma.vendorId,
+          inspectionId: result.inspection.rmaInspectionId,
+          outcome: result.inspection.outcome,
+          faultCategory: result.inspection.faultCategory,
+          creditCents: result.inspection.creditCents,
+          currency: creditCurrency,
+          feeCents: result.inspection.feeCents,
+          walletLedgerIds: result.walletLedger.map(
+            (entry) => entry.ledgerEntryId,
+          ),
+        },
+        idempotencyKey: `rma-credit-posted:${result.rma.rmaId}:${result.inspection.rmaInspectionId}`,
       },
-      idempotencyKey: `rma-credit-posted:${result.rma.rmaId}:${result.inspection.rmaInspectionId}`,
-    }, {
-      code: "DROPSHIP_RETURN_CREDIT_NOTIFICATION_FAILED",
-      message: "Dropship return credit notification failed after inspection finalization.",
-      context: {
-        rmaId: result.rma.rmaId,
-        rmaNumber: result.rma.rmaNumber,
-        vendorId: result.rma.vendorId,
-        inspectionId: result.inspection.rmaInspectionId,
-        creditCents: result.inspection.creditCents,
+      {
+        code: "DROPSHIP_RETURN_CREDIT_NOTIFICATION_FAILED",
+        message:
+          "Dropship return credit notification failed after inspection finalization.",
+        context: {
+          rmaId: result.rma.rmaId,
+          rmaNumber: result.rma.rmaNumber,
+          vendorId: result.rma.vendorId,
+          inspectionId: result.inspection.rmaInspectionId,
+          creditCents: result.inspection.creditCents,
+        },
       },
-    });
+    );
   }
 }
 
@@ -909,7 +1222,9 @@ export function hashDropshipRmaCreate(input: CreateDropshipRmaInput): string {
   });
 }
 
-export function hashDropshipRmaInspection(input: ProcessDropshipRmaInspectionInput): string {
+export function hashDropshipRmaInspection(
+  input: ProcessDropshipRmaInspectionInput,
+): string {
   return hashReturnRequest({
     rmaId: input.rmaId,
     outcome: input.outcome,
@@ -917,6 +1232,7 @@ export function hashDropshipRmaInspection(input: ProcessDropshipRmaInspectionInp
     creditCents: input.creditCents ?? null,
     feeCents: input.feeCents ?? null,
     overrideReason: input.overrideReason ?? null,
+    feeDecisions: input.feeDecisions ?? null,
     returnShippingActualCents: input.returnShippingActualCents ?? null,
     notes: input.notes ?? null,
     photos: input.photos,
@@ -924,7 +1240,9 @@ export function hashDropshipRmaInspection(input: ProcessDropshipRmaInspectionInp
   });
 }
 
-export function hashDropshipRmaStatusUpdate(input: UpdateDropshipRmaStatusInput): string {
+export function hashDropshipRmaStatusUpdate(
+  input: UpdateDropshipRmaStatusInput,
+): string {
   return hashReturnRequest({
     rmaId: input.rmaId,
     vendorId: input.vendorId ?? null,
@@ -934,7 +1252,9 @@ export function hashDropshipRmaStatusUpdate(input: UpdateDropshipRmaStatusInput)
   });
 }
 
-export function hashDropshipReturnPolicyCreate(input: NormalizedCreateDropshipReturnPolicyInput): string {
+export function hashDropshipReturnPolicyCreate(
+  input: NormalizedCreateDropshipReturnPolicyInput,
+): string {
   return hashReturnRequest({
     name: input.name,
     returnWindowDays: input.returnWindowDays,
@@ -956,7 +1276,11 @@ export const systemDropshipReturnClock: DropshipClock = {
   now: () => new Date(),
 };
 
-function parseReturnInput<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input: unknown, code: string): T {
+function parseReturnInput<T>(
+  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+  input: unknown,
+  code: string,
+): T {
   const result = schema.safeParse(input);
   if (!result.success) {
     throw new DropshipError(code, "Dropship return input failed validation.", {
@@ -970,8 +1294,13 @@ function parseReturnInput<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input:
   return result.data;
 }
 
-function assertReturnPolicyEffectiveWindow(input: NormalizedCreateDropshipReturnPolicyInput): void {
-  if (!input.effectiveTo || input.effectiveTo.getTime() > input.effectiveFrom.getTime()) {
+function assertReturnPolicyEffectiveWindow(
+  input: NormalizedCreateDropshipReturnPolicyInput,
+): void {
+  if (
+    !input.effectiveTo ||
+    input.effectiveTo.getTime() > input.effectiveFrom.getTime()
+  ) {
     return;
   }
   throw new DropshipError(
@@ -988,7 +1317,11 @@ function assertMemberRmaOrderIsAccepted(
   input: CreateDropshipMemberRmaInput,
   orderReference: DropshipRmaOrderReference,
 ): void {
-  if (orderReference.status === "accepted" && orderReference.omsOrderId !== null) return;
+  if (
+    orderReference.status === "accepted" &&
+    orderReference.omsOrderId !== null
+  )
+    return;
   throw new DropshipError(
     "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
     "RMA intake references must point to an accepted dropship order.",
@@ -1013,7 +1346,10 @@ function assertMemberRmaWithinReturnWindow(
       { intakeId: input.intakeId },
     );
   }
-  const expiresAt = new Date(orderReference.acceptedAt.getTime() + returnWindowDays * MILLISECONDS_PER_DAY);
+  const expiresAt = new Date(
+    orderReference.acceptedAt.getTime() +
+      returnWindowDays * MILLISECONDS_PER_DAY,
+  );
   if (now.getTime() <= expiresAt.getTime()) {
     return;
   }
@@ -1034,7 +1370,10 @@ function assertMemberRmaItemsMatchOrder(
   input: CreateDropshipMemberRmaInput,
   orderReference: DropshipRmaOrderReference | null,
 ): void {
-  const linkedItems = input.items.filter((item) => item.productVariantId !== null && item.productVariantId !== undefined);
+  const linkedItems = input.items.filter(
+    (item) =>
+      item.productVariantId !== null && item.productVariantId !== undefined,
+  );
   if (linkedItems.length === 0) {
     return;
   }
@@ -1051,7 +1390,8 @@ function assertMemberRmaItemsMatchOrder(
     if (!line.productVariantId) continue;
     orderedQuantityByVariant.set(
       line.productVariantId,
-      (orderedQuantityByVariant.get(line.productVariantId) ?? 0) + line.quantity,
+      (orderedQuantityByVariant.get(line.productVariantId) ?? 0) +
+        line.quantity,
     );
   }
 
@@ -1068,7 +1408,8 @@ function assertMemberRmaItemsMatchOrder(
         },
       );
     }
-    const nextQuantity = (requestedQuantityByVariant.get(productVariantId) ?? 0) + item.quantity;
+    const nextQuantity =
+      (requestedQuantityByVariant.get(productVariantId) ?? 0) + item.quantity;
     const orderedQuantity = orderedQuantityByVariant.get(productVariantId) ?? 0;
     if (nextQuantity > orderedQuantity) {
       throw new DropshipError(
@@ -1133,16 +1474,32 @@ function buildAcceptedLines(
   items: ProcessDropshipRmaInspectionInput["items"],
   rma: DropshipRmaDetail,
   snapshot: DropshipRmaOrderEconomics,
-): { productVariantId: number | null; acceptedQuantity: number; wholesaleUnitCostCents: number }[] {
+): {
+  productVariantId: number | null;
+  acceptedQuantity: number;
+  wholesaleUnitCostCents: number;
+}[] {
   const wholesaleByVariant = new Map<number, number>();
   for (const line of snapshot.lines) {
-    if (line.productVariantId !== null && !wholesaleByVariant.has(line.productVariantId)) {
-      wholesaleByVariant.set(line.productVariantId, line.wholesaleUnitCostCents);
+    if (
+      line.productVariantId !== null &&
+      !wholesaleByVariant.has(line.productVariantId)
+    ) {
+      wholesaleByVariant.set(
+        line.productVariantId,
+        line.wholesaleUnitCostCents,
+      );
     }
   }
-  const lines: { productVariantId: number | null; acceptedQuantity: number; wholesaleUnitCostCents: number }[] = [];
+  const lines: {
+    productVariantId: number | null;
+    acceptedQuantity: number;
+    wholesaleUnitCostCents: number;
+  }[] = [];
   for (const item of items) {
-    const rmaItem = rma.items.find((candidate) => candidate.rmaItemId === item.rmaItemId);
+    const rmaItem = rma.items.find(
+      (candidate) => candidate.rmaItemId === item.rmaItemId,
+    );
     if (!rmaItem) {
       throw new DropshipError(
         "DROPSHIP_RMA_ITEM_NOT_FOUND",
@@ -1157,17 +1514,27 @@ function buildAcceptedLines(
       throw new DropshipError(
         "DROPSHIP_RETURN_INSPECTION_INVALID_INPUT",
         "Accepted quantity exceeds the RMA item quantity.",
-        { rmaId: rma.rmaId, rmaItemId: item.rmaItemId, acceptedQuantity, requestedQuantity: rmaItem.quantity },
+        {
+          rmaId: rma.rmaId,
+          rmaItemId: item.rmaItemId,
+          acceptedQuantity,
+          requestedQuantity: rmaItem.quantity,
+        },
       );
     }
-    const wholesaleUnitCostCents = rmaItem.productVariantId !== null
-      ? wholesaleByVariant.get(rmaItem.productVariantId) ?? null
-      : null;
+    const wholesaleUnitCostCents =
+      rmaItem.productVariantId !== null
+        ? (wholesaleByVariant.get(rmaItem.productVariantId) ?? null)
+        : null;
     if (wholesaleUnitCostCents === null) {
       throw new DropshipError(
         "DROPSHIP_RETURN_ECONOMICS_NOT_FOUND",
         "Dropship order economics snapshot has no wholesale line for the RMA item variant.",
-        { rmaId: rma.rmaId, rmaItemId: item.rmaItemId, productVariantId: rmaItem.productVariantId },
+        {
+          rmaId: rma.rmaId,
+          rmaItemId: item.rmaItemId,
+          productVariantId: rmaItem.productVariantId,
+        },
       );
     }
     lines.push({
@@ -1179,10 +1546,150 @@ function buildAcceptedLines(
   return lines;
 }
 
+function feeRecordForType(
+  fees: DropshipResolvedReturnFees,
+  feeType: DropshipReturnFeeType,
+): DropshipReturnFeeScheduleRecord | null {
+  if (feeType === "restocking_fee") return fees.restockingFee;
+  if (feeType === "processing_fee") return fees.processingFee;
+  return fees.returnShippingFee;
+}
+
+async function resolveInspectionFeeDecisions(input: {
+  decisions: NonNullable<ProcessDropshipRmaInspectionInput["feeDecisions"]>;
+  vendorId: number;
+  storeConnectionId: number | null;
+  returnPolicyService: DropshipReturnPolicyService;
+  at: Date;
+}): Promise<{
+  defaults: DropshipResolvedReturnFees;
+  selected: DropshipResolvedReturnFees;
+  responsibilities: Record<DropshipReturnFeeType, DropshipReturnFaultCategory>;
+}> {
+  const defaults = await input.returnPolicyService.resolveDefaultReturnFees({
+    vendorId: input.vendorId,
+    storeConnectionId: input.storeConnectionId,
+    at: input.at,
+  });
+  const resolvedDecisions = await Promise.all(
+    input.decisions.map(async (decision) => {
+      const resolved = await input.returnPolicyService.resolveReturnFees({
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        faultCategory: decision.responsibility,
+        at: input.at,
+      });
+      const record = feeRecordForType(resolved, decision.feeType);
+      if (!record)
+        throw new DropshipError(
+          "DROPSHIP_RETURN_FEE_NOT_CONFIGURED",
+          "No active fee policy is configured for the selected responsibility.",
+          {
+            feeType: decision.feeType,
+            responsibility: decision.responsibility,
+          },
+        );
+      return { decision, record };
+    }),
+  );
+  const selected: DropshipResolvedReturnFees = {
+    restockingFee: null,
+    processingFee: null,
+    returnShippingFee: null,
+  };
+  const responsibilities = {} as Record<
+    DropshipReturnFeeType,
+    DropshipReturnFaultCategory
+  >;
+  for (const { decision, record } of resolvedDecisions) {
+    if (decision.feeType === "restocking_fee") selected.restockingFee = record;
+    else if (decision.feeType === "processing_fee")
+      selected.processingFee = record;
+    else selected.returnShippingFee = record;
+    responsibilities[decision.feeType] = decision.responsibility;
+  }
+  return { defaults, selected, responsibilities };
+}
+
+function validateFeeDecisionOverrides(
+  decisions: NonNullable<ProcessDropshipRmaInspectionInput["feeDecisions"]>,
+  defaults: DropshipResolvedReturnFees,
+  computed: DropshipReturnSettlement,
+): void {
+  const expected: Record<DropshipReturnFeeType, number> = {
+    restocking_fee: computed.restockingFeeCents,
+    processing_fee: computed.processingFeeCents,
+    return_shipping_fee: computed.returnShippingFeeCents,
+  };
+  for (const decision of decisions) {
+    const defaultRecord = feeRecordForType(defaults, decision.feeType);
+    if (!defaultRecord)
+      throw new DropshipError(
+        "DROPSHIP_RETURN_FEE_DEFAULT_NOT_CONFIGURED",
+        "No default responsibility is configured for this fee type.",
+        { feeType: decision.feeType },
+      );
+    const isOverride =
+      decision.responsibility !== defaultRecord.faultCategory ||
+      decision.amountCents !== expected[decision.feeType];
+    if (isOverride && !decision.overrideReason?.trim())
+      throw new DropshipError(
+        "DROPSHIP_RETURN_FEE_OVERRIDE_REASON_REQUIRED",
+        "A reason is required when fee responsibility or amount differs from policy.",
+        {
+          feeType: decision.feeType,
+          defaultResponsibility: defaultRecord.faultCategory,
+          selectedResponsibility: decision.responsibility,
+          expectedAmountCents: expected[decision.feeType],
+          selectedAmountCents: decision.amountCents,
+        },
+      );
+  }
+}
+
+function buildFeeDecisionAudit(
+  decisions: NonNullable<ProcessDropshipRmaInspectionInput["feeDecisions"]>,
+  resolution: {
+    defaults: DropshipResolvedReturnFees;
+    selected: DropshipResolvedReturnFees;
+  },
+  computed: DropshipReturnSettlement,
+): Record<string, unknown>[] {
+  const expectedAmounts: Record<DropshipReturnFeeType, number> = {
+    restocking_fee: computed.restockingFeeCents,
+    processing_fee: computed.processingFeeCents,
+    return_shipping_fee: computed.returnShippingFeeCents,
+  };
+  return decisions.map((decision) => {
+    const defaultRecord = feeRecordForType(
+      resolution.defaults,
+      decision.feeType,
+    );
+    const selectedRecord = feeRecordForType(
+      resolution.selected,
+      decision.feeType,
+    );
+    return {
+      feeType: decision.feeType,
+      defaultResponsibility: defaultRecord?.faultCategory ?? null,
+      selectedResponsibility: decision.responsibility,
+      defaultPolicyFeeId: defaultRecord?.feeId ?? null,
+      selectedPolicyFeeId: selectedRecord?.feeId ?? null,
+      selectedPolicyAmountType: selectedRecord?.amountType ?? null,
+      selectedPolicyAmount: selectedRecord?.amount ?? null,
+      expectedAmountCents: expectedAmounts[decision.feeType],
+      amountCents: decision.amountCents,
+      overrideReason: decision.overrideReason?.trim() ?? null,
+    };
+  });
+}
+
 function normalizeInspectionItems(
   items: ProcessDropshipRmaInspectionInput["items"],
   rma: DropshipRmaDetail,
-  creditFor: (item: ProcessDropshipRmaInspectionInput["items"][number]) => number,
+  creditFor: (
+    item: ProcessDropshipRmaInspectionInput["items"][number],
+  ) => number,
   feeFor: (item: ProcessDropshipRmaInspectionInput["items"][number]) => number,
 ): NormalizedInspectionItem[] {
   return items.map((item) => ({
@@ -1212,11 +1719,14 @@ function allocateInspectionItemAmounts(
   }[]) {
     lineCreditByVariant.set(
       line.productVariantId,
-      (lineCreditByVariant.get(line.productVariantId) ?? 0) + line.lineCreditCents,
+      (lineCreditByVariant.get(line.productVariantId) ?? 0) +
+        line.lineCreditCents,
     );
   }
   const basis = items.map((item) => {
-    const rmaItem = rma.items.find((candidate) => candidate.rmaItemId === item.rmaItemId);
+    const rmaItem = rma.items.find(
+      (candidate) => candidate.rmaItemId === item.rmaItemId,
+    );
     if (!rmaItem || item.status === "rejected") return 0;
     return lineCreditByVariant.get(rmaItem.productVariantId) ?? 0;
   });
@@ -1231,7 +1741,10 @@ function allocateInspectionItemAmounts(
 }
 
 /** Largest-remainder pro-rata allocation; sums exactly to totalCents. */
-function allocateProRata(basis: readonly number[], totalCents: number): number[] {
+function allocateProRata(
+  basis: readonly number[],
+  totalCents: number,
+): number[] {
   const basisTotal = basis.reduce((sum, value) => sum + value, 0);
   if (basis.length === 0) return [];
   if (basisTotal <= 0 || totalCents <= 0) return basis.map(() => 0);
@@ -1240,7 +1753,10 @@ function allocateProRata(basis: readonly number[], totalCents: number): number[]
   let remainder = totalCents - floors.reduce((sum, value) => sum + value, 0);
   const byFraction = floors
     .map((value, index) => ({ index, fraction: exact[index] - value }))
-    .sort((left, right) => right.fraction - left.fraction || left.index - right.index);
+    .sort(
+      (left, right) =>
+        right.fraction - left.fraction || left.index - right.index,
+    );
   const allocated = [...floors];
   for (const entry of byFraction) {
     if (remainder <= 0) break;
@@ -1250,7 +1766,10 @@ function allocateProRata(basis: readonly number[], totalCents: number): number[]
   return allocated;
 }
 
-function logDropshipReturnEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
+function logDropshipReturnEvent(
+  level: "info" | "warn" | "error",
+  event: DropshipLogEvent,
+): void {
   const payload = JSON.stringify({
     code: event.code,
     message: event.message,

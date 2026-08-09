@@ -31,7 +31,11 @@ describe("DropshipReturnService", () => {
     const repository = new FakeReturnRepository();
     const service = makeService(repository, []);
 
-    await service.listForMember("member-1", { statuses: ["credited"], page: 2, limit: 10 });
+    await service.listForMember("member-1", {
+      statuses: ["credited"],
+      page: 2,
+      limit: 10,
+    });
 
     expect(repository.lastListInput).toMatchObject({
       vendorId: 10,
@@ -55,12 +59,17 @@ describe("DropshipReturnService", () => {
       labelSource: "vendor",
       returnTrackingNumber: "9400",
       vendorNotes: "Buyer return opened in marketplace.",
-      items: [{ productVariantId: 20, quantity: 1, requestedCreditCents: 1500 }],
+      items: [
+        { productVariantId: 20, quantity: 1, requestedCreditCents: 1500 },
+      ],
       idempotencyKey: "vendor-rma-100",
     });
 
     expect(result.rma.rmaNumber).toBe("RMA-VENDOR-100");
-    expect(repository.lastOrderReferenceInput).toEqual({ vendorId: 10, intakeId: 44 });
+    expect(repository.lastOrderReferenceInput).toEqual({
+      vendorId: 10,
+      intakeId: 44,
+    });
     expect(repository.lastPolicyLookupAt).toEqual(now);
     expect(repository.lastCreateInput).toMatchObject({
       vendorId: 10,
@@ -74,15 +83,17 @@ describe("DropshipReturnService", () => {
     expect(repository.lastCreateInput?.requestHash).toMatch(/^[a-f0-9]{64}$/);
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_RMA_CREATED" });
 
-    await expect(service.createRmaForMember("member-1", {
-      vendorId: 99,
-      rmaNumber: "RMA-SPOOFED",
-      returnWindowDays: 365,
-      storeConnectionId: 70,
-      omsOrderId: 9001,
-      items: [],
-      idempotencyKey: "vendor-rma-spoof",
-    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+    await expect(
+      service.createRmaForMember("member-1", {
+        vendorId: 99,
+        rmaNumber: "RMA-SPOOFED",
+        returnWindowDays: 365,
+        storeConnectionId: 70,
+        omsOrderId: 9001,
+        items: [],
+        idempotencyKey: "vendor-rma-spoof",
+      }),
+    ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
   });
 
   it("uses the active return policy window for member RMA enforcement", async () => {
@@ -110,12 +121,14 @@ describe("DropshipReturnService", () => {
     const repository = new FakeReturnRepository();
     const service = makeService(repository, []);
 
-    await expect(service.createRmaForMember("member-1", {
-      rmaNumber: "RMA-NO-POLICY",
-      intakeId: 44,
-      items: [{ productVariantId: 20, quantity: 1 }],
-      idempotencyKey: "vendor-rma-no-policy",
-    })).rejects.toMatchObject({
+    await expect(
+      service.createRmaForMember("member-1", {
+        rmaNumber: "RMA-NO-POLICY",
+        intakeId: 44,
+        items: [{ productVariantId: 20, quantity: 1 }],
+        idempotencyKey: "vendor-rma-no-policy",
+      }),
+    ).rejects.toMatchObject({
       code: "DROPSHIP_RETURN_POLICY_REQUIRED",
       context: {
         vendorId: 10,
@@ -132,25 +145,31 @@ describe("DropshipReturnService", () => {
     repository.activePolicy = makeReturnPolicy();
     const service = makeService(repository, []);
 
-    await expect(service.createRmaForMember("member-1", {
-      rmaNumber: "RMA-NO-ORDER",
-      items: [{ productVariantId: 20, quantity: 1 }],
-      idempotencyKey: "vendor-rma-no-order",
-    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+    await expect(
+      service.createRmaForMember("member-1", {
+        rmaNumber: "RMA-NO-ORDER",
+        items: [{ productVariantId: 20, quantity: 1 }],
+        idempotencyKey: "vendor-rma-no-order",
+      }),
+    ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
 
-    await expect(service.createRmaForMember("member-1", {
-      rmaNumber: "RMA-BAD-VARIANT",
-      intakeId: 44,
-      items: [{ productVariantId: 999, quantity: 1 }],
-      idempotencyKey: "vendor-rma-bad-variant",
-    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+    await expect(
+      service.createRmaForMember("member-1", {
+        rmaNumber: "RMA-BAD-VARIANT",
+        intakeId: 44,
+        items: [{ productVariantId: 999, quantity: 1 }],
+        idempotencyKey: "vendor-rma-bad-variant",
+      }),
+    ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
 
-    await expect(service.createRmaForMember("member-1", {
-      rmaNumber: "RMA-OVER-QTY",
-      intakeId: 44,
-      items: [{ productVariantId: 20, quantity: 4 }],
-      idempotencyKey: "vendor-rma-over-qty",
-    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+    await expect(
+      service.createRmaForMember("member-1", {
+        rmaNumber: "RMA-OVER-QTY",
+        intakeId: 44,
+        items: [{ productVariantId: 20, quantity: 4 }],
+        idempotencyKey: "vendor-rma-over-qty",
+      }),
+    ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
 
     expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-OVER-QTY");
   });
@@ -159,11 +178,13 @@ describe("DropshipReturnService", () => {
     const repository = new FakeReturnRepository();
     const service = makeService(repository, []);
 
-    await expect(service.createRmaForMember("member-1", {
-      rmaNumber: "RMA-MISSING-LINK",
-      items: [],
-      idempotencyKey: "vendor-rma-missing-link",
-    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+    await expect(
+      service.createRmaForMember("member-1", {
+        rmaNumber: "RMA-MISSING-LINK",
+        items: [],
+        idempotencyKey: "vendor-rma-missing-link",
+      }),
+    ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
     expect(repository.lastOrderReferenceInput).toBeNull();
     expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-MISSING-LINK");
   });
@@ -176,12 +197,14 @@ describe("DropshipReturnService", () => {
     });
     const service = makeService(repository, []);
 
-    await expect(service.createRmaForMember("member-1", {
-      rmaNumber: "RMA-UNACCEPTED",
-      intakeId: 44,
-      items: [{ productVariantId: 20, quantity: 1 }],
-      idempotencyKey: "vendor-rma-unaccepted",
-    })).rejects.toMatchObject({
+    await expect(
+      service.createRmaForMember("member-1", {
+        rmaNumber: "RMA-UNACCEPTED",
+        intakeId: 44,
+        items: [{ productVariantId: 20, quantity: 1 }],
+        idempotencyKey: "vendor-rma-unaccepted",
+      }),
+    ).rejects.toMatchObject({
       code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
       context: {
         intakeId: 44,
@@ -200,12 +223,14 @@ describe("DropshipReturnService", () => {
     });
     const service = makeService(repository, []);
 
-    await expect(service.createRmaForMember("member-1", {
-      rmaNumber: "RMA-EXPIRED",
-      intakeId: 44,
-      items: [{ productVariantId: 20, quantity: 1 }],
-      idempotencyKey: "vendor-rma-expired",
-    })).rejects.toMatchObject({
+    await expect(
+      service.createRmaForMember("member-1", {
+        rmaNumber: "RMA-EXPIRED",
+        intakeId: 44,
+        items: [{ productVariantId: 20, quantity: 1 }],
+        idempotencyKey: "vendor-rma-expired",
+      }),
+    ).rejects.toMatchObject({
       code: "DROPSHIP_RETURN_WINDOW_EXPIRED",
       context: {
         intakeId: 44,
@@ -248,7 +273,9 @@ describe("DropshipReturnService", () => {
       actor: { actorType: "admin", actorId: "admin-1" },
       now,
     });
-    expect(repository.lastReturnPolicyInput?.requestHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(repository.lastReturnPolicyInput?.requestHash).toMatch(
+      /^[a-f0-9]{64}$/,
+    );
     expect(logs[0]).toMatchObject({
       code: "DROPSHIP_RETURN_POLICY_CREATED",
       context: {
@@ -263,14 +290,16 @@ describe("DropshipReturnService", () => {
     const repository = new FakeReturnRepository();
     const service = makeService(repository, []);
 
-    await expect(service.createReturnPolicy({
-      name: "Invalid return policy",
-      returnWindowDays: 30,
-      effectiveFrom: "2026-05-03T00:00:00.000Z",
-      effectiveTo: "2026-05-03T00:00:00.000Z",
-      idempotencyKey: "return-policy-invalid-window",
-      actor: { actorType: "admin", actorId: "admin-1" },
-    })).rejects.toMatchObject({
+    await expect(
+      service.createReturnPolicy({
+        name: "Invalid return policy",
+        returnWindowDays: 30,
+        effectiveFrom: "2026-05-03T00:00:00.000Z",
+        effectiveTo: "2026-05-03T00:00:00.000Z",
+        idempotencyKey: "return-policy-invalid-window",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      }),
+    ).rejects.toMatchObject({
       code: "DROPSHIP_RETURN_POLICY_INVALID_INPUT",
       context: {
         effectiveFrom: "2026-05-03T00:00:00.000Z",
@@ -285,12 +314,14 @@ describe("DropshipReturnService", () => {
     repository.orderReference = null;
     const service = makeService(repository, []);
 
-    await expect(service.createRmaForMember("member-1", {
-      rmaNumber: "RMA-MISSING-ORDER",
-      intakeId: 55,
-      items: [],
-      idempotencyKey: "vendor-rma-missing-order",
-    })).rejects.toMatchObject({ code: "DROPSHIP_ORDER_INTAKE_NOT_FOUND" });
+    await expect(
+      service.createRmaForMember("member-1", {
+        rmaNumber: "RMA-MISSING-ORDER",
+        intakeId: 55,
+        items: [],
+        idempotencyKey: "vendor-rma-missing-order",
+      }),
+    ).rejects.toMatchObject({ code: "DROPSHIP_ORDER_INTAKE_NOT_FOUND" });
   });
 
   it("creates RMAs with idempotency, request hash, actor, and clock context", async () => {
@@ -303,7 +334,9 @@ describe("DropshipReturnService", () => {
       vendorId: 10,
       rmaNumber: "RMA-100",
       returnWindowDays: 30,
-      items: [{ productVariantId: 20, quantity: 2, requestedCreditCents: 1500 }],
+      items: [
+        { productVariantId: 20, quantity: 2, requestedCreditCents: 1500 },
+      ],
       idempotencyKey: "create-rma-100",
       actor: { actorType: "admin", actorId: "admin-1" },
     });
@@ -346,7 +379,10 @@ describe("DropshipReturnService", () => {
       actor: { actorType: "admin", actorId: "admin-1" },
     });
 
-    expect(result).toMatchObject({ idempotentReplay: false, rma: { status: "received" } });
+    expect(result).toMatchObject({
+      idempotentReplay: false,
+      rma: { status: "received" },
+    });
     expect(repository.lastStatusInput).toMatchObject({
       rmaId: 1,
       status: "received",
@@ -365,14 +401,20 @@ describe("DropshipReturnService", () => {
     repository.rmaStatus = "requested";
     const service = makeService(repository, []);
 
-    await expect(service.updateStatus({
-      rmaId: 1,
-      status: "received",
-      idempotencyKey: "status-rma-skip",
-      actor: { actorType: "admin", actorId: "admin-1" },
-    })).rejects.toMatchObject({
+    await expect(
+      service.updateStatus({
+        rmaId: 1,
+        status: "received",
+        idempotencyKey: "status-rma-skip",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      }),
+    ).rejects.toMatchObject({
       code: "DROPSHIP_RMA_ILLEGAL_TRANSITION",
-      context: { from: "requested", to: "received", violation: "illegal_transition" },
+      context: {
+        from: "requested",
+        to: "received",
+        violation: "illegal_transition",
+      },
     });
     expect(repository.lastStatusInput).toBeNull();
   });
@@ -382,14 +424,20 @@ describe("DropshipReturnService", () => {
     repository.rmaStatus = "approved";
     const service = makeService(repository, []);
 
-    await expect(service.updateStatus({
-      rmaId: 1,
-      status: "credited",
-      idempotencyKey: "status-rma-credit",
-      actor: { actorType: "admin", actorId: "admin-1" },
-    })).rejects.toMatchObject({
+    await expect(
+      service.updateStatus({
+        rmaId: 1,
+        status: "credited",
+        idempotencyKey: "status-rma-credit",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      }),
+    ).rejects.toMatchObject({
       code: "DROPSHIP_RMA_ILLEGAL_TRANSITION",
-      context: { from: "approved", to: "credited", violation: "credited_requires_system_ledger" },
+      context: {
+        from: "approved",
+        to: "credited",
+        violation: "credited_requires_system_ledger",
+      },
     });
     expect(repository.lastStatusInput).toBeNull();
   });
@@ -399,14 +447,20 @@ describe("DropshipReturnService", () => {
     repository.rmaStatus = "inspecting";
     const service = makeService(repository, []);
 
-    await expect(service.updateStatus({
-      rmaId: 1,
-      status: "rejected",
-      idempotencyKey: "status-rma-reject",
-      actor: { actorType: "admin", actorId: "admin-1" },
-    })).rejects.toMatchObject({
+    await expect(
+      service.updateStatus({
+        rmaId: 1,
+        status: "rejected",
+        idempotencyKey: "status-rma-reject",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      }),
+    ).rejects.toMatchObject({
       code: "DROPSHIP_RMA_ILLEGAL_TRANSITION",
-      context: { from: "inspecting", to: "rejected", violation: "reason_required" },
+      context: {
+        from: "inspecting",
+        to: "rejected",
+        violation: "reason_required",
+      },
     });
     expect(repository.lastStatusInput).toBeNull();
   });
@@ -433,34 +487,47 @@ describe("DropshipReturnService", () => {
     const repository = new FakeReturnRepository();
     const service = makeService(repository, []);
 
-    await expect(service.processInspection({
-      rmaId: 1,
-      outcome: "approved",
-      faultCategory: "customer",
-      creditCents: 1000,
-      feeCents: 100,
-      overrideReason: "manual disposition",
-      items: [{ rmaItemId: 1, finalCreditCents: 900, feeCents: 100 }],
-      idempotencyKey: "inspect-rma-1",
-      actor: { actorType: "admin", actorId: "admin-1" },
-    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_INSPECTION_INVALID_INPUT" });
+    await expect(
+      service.processInspection({
+        rmaId: 1,
+        outcome: "approved",
+        faultCategory: "customer",
+        creditCents: 1000,
+        feeCents: 100,
+        overrideReason: "manual disposition",
+        items: [{ rmaItemId: 1, finalCreditCents: 900, feeCents: 100 }],
+        idempotencyKey: "inspect-rma-1",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      }),
+    ).rejects.toMatchObject({
+      code: "DROPSHIP_RETURN_INSPECTION_INVALID_INPUT",
+    });
     expect(repository.lastInspectionInput).toBeNull();
   });
 
   it("requires an override reason when partially overriding the computed settlement", async () => {
     const repository = new FakeReturnRepository();
     repository.economics = makeOrderEconomics();
-    const service = makeService(repository, [], undefined, new FakeReturnPolicyService());
+    const service = makeService(
+      repository,
+      [],
+      undefined,
+      new FakeReturnPolicyService(),
+    );
 
-    await expect(service.processInspection({
-      rmaId: 1,
-      outcome: "approved",
-      faultCategory: "customer",
-      creditCents: 1000,
-      items: [{ rmaItemId: 1 }],
-      idempotencyKey: "inspect-rma-no-reason",
-      actor: { actorType: "admin", actorId: "admin-1" },
-    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_INSPECTION_INVALID_INPUT" });
+    await expect(
+      service.processInspection({
+        rmaId: 1,
+        outcome: "approved",
+        faultCategory: "customer",
+        creditCents: 1000,
+        items: [{ rmaItemId: 1 }],
+        idempotencyKey: "inspect-rma-no-reason",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      }),
+    ).rejects.toMatchObject({
+      code: "DROPSHIP_RETURN_INSPECTION_INVALID_INPUT",
+    });
     expect(repository.lastInspectionInput).toBeNull();
   });
 
@@ -469,19 +536,25 @@ describe("DropshipReturnService", () => {
     repository.rmaStatus = "requested";
     const service = makeService(repository, []);
 
-    await expect(service.processInspection({
-      rmaId: 1,
-      outcome: "approved",
-      faultCategory: "customer",
-      creditCents: 1000,
-      feeCents: 100,
-      overrideReason: "manual disposition",
-      items: [{ rmaItemId: 1, finalCreditCents: 1000, feeCents: 100 }],
-      idempotencyKey: "inspect-rma-wrong-state",
-      actor: { actorType: "admin", actorId: "admin-1" },
-    })).rejects.toMatchObject({
+    await expect(
+      service.processInspection({
+        rmaId: 1,
+        outcome: "approved",
+        faultCategory: "customer",
+        creditCents: 1000,
+        feeCents: 100,
+        overrideReason: "manual disposition",
+        items: [{ rmaItemId: 1, finalCreditCents: 1000, feeCents: 100 }],
+        idempotencyKey: "inspect-rma-wrong-state",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      }),
+    ).rejects.toMatchObject({
       code: "DROPSHIP_RMA_ILLEGAL_TRANSITION",
-      context: { from: "requested", to: "approved", violation: "illegal_transition" },
+      context: {
+        from: "requested",
+        to: "approved",
+        violation: "illegal_transition",
+      },
     });
     expect(repository.lastInspectionInput).toBeNull();
   });
@@ -518,7 +591,9 @@ describe("DropshipReturnService", () => {
       policyVersionId: 41,
       overrideReason: "carrier claim approved by ops",
     });
-    expect(repository.lastInspectionInput?.requestHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(repository.lastInspectionInput?.requestHash).toMatch(
+      /^[a-f0-9]{64}$/,
+    );
     expect(logs[0]).toMatchObject({
       code: "DROPSHIP_RMA_INSPECTED",
       context: { creditCents: 2000, feeCents: 0 },
@@ -560,7 +635,9 @@ describe("DropshipReturnService", () => {
   it("logs notification failures without undoing RMA creation", async () => {
     const repository = new FakeReturnRepository();
     const logs: DropshipLogEvent[] = [];
-    const notificationSender = new FakeNotificationSender(new Error("email unavailable"));
+    const notificationSender = new FakeNotificationSender(
+      new Error("email unavailable"),
+    );
     const service = makeService(repository, logs, notificationSender);
 
     const result = await service.createRma({
@@ -574,10 +651,13 @@ describe("DropshipReturnService", () => {
 
     expect(result.rma.rmaNumber).toBe("RMA-FAIL-NOTIFY");
     expect(notificationSender.sent).toHaveLength(1);
-    expect(logs.some((event) => (
-      event.code === "DROPSHIP_RMA_OPENED_NOTIFICATION_FAILED"
-        && event.context?.rmaId === 1
-    ))).toBe(true);
+    expect(
+      logs.some(
+        (event) =>
+          event.code === "DROPSHIP_RMA_OPENED_NOTIFICATION_FAILED" &&
+          event.context?.rmaId === 1,
+      ),
+    ).toBe(true);
   });
 
   it("computes the inspection settlement via the fee engine when no override is given", async () => {
@@ -613,7 +693,8 @@ describe("DropshipReturnService", () => {
       policyVersionId: 41,
       overrideReason: null,
     });
-    const breakdown = repository.lastInspectionInput?.settlement.breakdown as Record<string, unknown>;
+    const breakdown = repository.lastInspectionInput?.settlement
+      .breakdown as Record<string, unknown>;
     expect(breakdown).toMatchObject({
       version: 1,
       mode: "computed",
@@ -623,9 +704,280 @@ describe("DropshipReturnService", () => {
       netSettlementCents: 850,
     });
     expect(repository.lastInspectionInput?.items).toEqual([
-      { rmaItemId: 1, status: "resellable", finalCreditCents: 2_000, feeCents: 1_150 },
+      {
+        rmaItemId: 1,
+        status: "resellable",
+        finalCreditCents: 2_000,
+        feeCents: 1_150,
+      },
     ]);
-    expect(result.walletLedger[0]).toMatchObject({ type: "return_credit", amountCents: 2_000 });
+    expect(result.walletLedger[0]).toMatchObject({
+      type: "return_credit",
+      amountCents: 2_000,
+    });
+  });
+
+  it("applies mixed fee responsibilities and persists the selected policy audit", async () => {
+    const repository = new FakeReturnRepository();
+    repository.economics = makeOrderEconomics();
+    const policyService = new FakeReturnPolicyService();
+    policyService.defaultFees = makeResolvedFees({
+      restockingFee: makeFee(
+        61,
+        "restocking_fee",
+        "customer",
+        "flat_cents",
+        250,
+      ),
+      processingFee: makeFee(
+        62,
+        "processing_fee",
+        "card_shellz",
+        "percent",
+        10,
+      ),
+      returnShippingFee: makeFee(
+        63,
+        "return_shipping_fee",
+        "carrier",
+        "flat_cents",
+        0,
+      ),
+    });
+    policyService.feesByResponsibility.set(
+      "vendor",
+      makeResolvedFees({
+        restockingFee: makeFee(
+          71,
+          "restocking_fee",
+          "vendor",
+          "flat_cents",
+          300,
+        ),
+      }),
+    );
+    policyService.feesByResponsibility.set(
+      "card_shellz",
+      makeResolvedFees({
+        processingFee: makeFee(
+          72,
+          "processing_fee",
+          "card_shellz",
+          "percent",
+          10,
+        ),
+      }),
+    );
+    policyService.feesByResponsibility.set(
+      "carrier",
+      makeResolvedFees({
+        returnShippingFee: makeFee(
+          73,
+          "return_shipping_fee",
+          "carrier",
+          "flat_cents",
+          0,
+        ),
+      }),
+    );
+    const service = makeService(repository, [], undefined, policyService);
+
+    await service.processInspection({
+      rmaId: 1,
+      outcome: "approved",
+      faultCategory: "customer",
+      returnShippingActualCents: 650,
+      items: [{ rmaItemId: 1 }],
+      feeDecisions: [
+        {
+          feeType: "restocking_fee",
+          responsibility: "vendor",
+          amountCents: 300,
+          overrideReason: "Vendor accepted restocking responsibility.",
+        },
+        {
+          feeType: "processing_fee",
+          responsibility: "card_shellz",
+          amountCents: 0,
+        },
+        {
+          feeType: "return_shipping_fee",
+          responsibility: "carrier",
+          amountCents: 0,
+        },
+      ],
+      idempotencyKey: "inspect-rma-mixed-fees",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(repository.lastInspectionInput).toMatchObject({
+      creditCents: 2_000,
+      feeCents: 300,
+    });
+    expect(
+      policyService.resolveCalls.map((call) => call.faultCategory),
+    ).toEqual(["vendor", "card_shellz", "carrier"]);
+    const breakdown = repository.lastInspectionInput?.settlement
+      .breakdown as Record<string, unknown>;
+    expect(breakdown.feeDecisions).toEqual([
+      expect.objectContaining({
+        feeType: "restocking_fee",
+        defaultResponsibility: "customer",
+        selectedResponsibility: "vendor",
+        defaultPolicyFeeId: 61,
+        selectedPolicyFeeId: 71,
+        expectedAmountCents: 300,
+        amountCents: 300,
+      }),
+      expect.objectContaining({
+        feeType: "processing_fee",
+        defaultResponsibility: "card_shellz",
+        selectedResponsibility: "card_shellz",
+        selectedPolicyFeeId: 72,
+        expectedAmountCents: 0,
+        amountCents: 0,
+      }),
+      expect.objectContaining({
+        feeType: "return_shipping_fee",
+        defaultResponsibility: "carrier",
+        selectedResponsibility: "carrier",
+        selectedPolicyFeeId: 73,
+        expectedAmountCents: 0,
+        amountCents: 0,
+      }),
+    ]);
+  });
+
+  it("requires an audit reason when fee responsibility differs from the policy default", async () => {
+    const repository = new FakeReturnRepository();
+    repository.economics = makeOrderEconomics();
+    const service = makeService(
+      repository,
+      [],
+      undefined,
+      configuredDecisionPolicyService(),
+    );
+    await expect(
+      service.processInspection({
+        rmaId: 1,
+        outcome: "approved",
+        faultCategory: "customer",
+        items: [{ rmaItemId: 1 }],
+        feeDecisions: [
+          {
+            feeType: "restocking_fee",
+            responsibility: "vendor",
+            amountCents: 300,
+          },
+          {
+            feeType: "processing_fee",
+            responsibility: "card_shellz",
+            amountCents: 0,
+          },
+          {
+            feeType: "return_shipping_fee",
+            responsibility: "carrier",
+            amountCents: 0,
+          },
+        ],
+        idempotencyKey: "inspect-rma-responsibility-no-reason",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      }),
+    ).rejects.toMatchObject({
+      code: "DROPSHIP_RETURN_FEE_OVERRIDE_REASON_REQUIRED",
+      context: { feeType: "restocking_fee" },
+    });
+    expect(repository.lastInspectionInput).toBeNull();
+  });
+
+  it("requires an audit reason when a fee amount differs from the computed policy amount", async () => {
+    const repository = new FakeReturnRepository();
+    repository.economics = makeOrderEconomics();
+    const service = makeService(
+      repository,
+      [],
+      undefined,
+      configuredDecisionPolicyService({
+        restockingDefaultResponsibility: "vendor",
+      }),
+    );
+    await expect(
+      service.processInspection({
+        rmaId: 1,
+        outcome: "approved",
+        faultCategory: "customer",
+        items: [{ rmaItemId: 1 }],
+        feeDecisions: [
+          {
+            feeType: "restocking_fee",
+            responsibility: "vendor",
+            amountCents: 301,
+          },
+          {
+            feeType: "processing_fee",
+            responsibility: "card_shellz",
+            amountCents: 0,
+          },
+          {
+            feeType: "return_shipping_fee",
+            responsibility: "carrier",
+            amountCents: 0,
+          },
+        ],
+        idempotencyKey: "inspect-rma-amount-no-reason",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      }),
+    ).rejects.toMatchObject({
+      code: "DROPSHIP_RETURN_FEE_OVERRIDE_REASON_REQUIRED",
+      context: {
+        feeType: "restocking_fee",
+        expectedAmountCents: 300,
+        selectedAmountCents: 301,
+      },
+    });
+    expect(repository.lastInspectionInput).toBeNull();
+  });
+
+  it("accepts policy-default fee decisions without override reasons", async () => {
+    const repository = new FakeReturnRepository();
+    repository.economics = makeOrderEconomics();
+    const service = makeService(
+      repository,
+      [],
+      undefined,
+      configuredDecisionPolicyService({
+        restockingDefaultResponsibility: "vendor",
+      }),
+    );
+    await service.processInspection({
+      rmaId: 1,
+      outcome: "approved",
+      faultCategory: "customer",
+      items: [{ rmaItemId: 1 }],
+      feeDecisions: [
+        {
+          feeType: "restocking_fee",
+          responsibility: "vendor",
+          amountCents: 300,
+        },
+        {
+          feeType: "processing_fee",
+          responsibility: "card_shellz",
+          amountCents: 0,
+        },
+        {
+          feeType: "return_shipping_fee",
+          responsibility: "carrier",
+          amountCents: 0,
+        },
+      ],
+      idempotencyKey: "inspect-rma-policy-fees",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+    expect(repository.lastInspectionInput).toMatchObject({
+      creditCents: 2_000,
+      feeCents: 300,
+    });
   });
 
   it("engine path: card_shellz fault credits product + original shipping with no fees", async () => {
@@ -675,7 +1027,8 @@ describe("DropshipReturnService", () => {
       creditCents: 2_000,
       feeCents: 5_700,
     });
-    const breakdown = repository.lastInspectionInput?.settlement.breakdown as Record<string, unknown>;
+    const breakdown = repository.lastInspectionInput?.settlement
+      .breakdown as Record<string, unknown>;
     expect(breakdown).toMatchObject({ netSettlementCents: -3_700 });
   });
 
@@ -708,26 +1061,43 @@ describe("DropshipReturnService", () => {
     const policyService = new FakeReturnPolicyService();
     const service = makeService(repository, [], undefined, policyService);
 
-    await expect(service.processInspection({
-      rmaId: 1,
-      outcome: "approved",
-      faultCategory: "customer",
-      items: [{ rmaItemId: 1 }],
-      idempotencyKey: "inspect-rma-no-econ",
-      actor: { actorType: "admin", actorId: "admin-1" },
-    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_ECONOMICS_NOT_FOUND" });
+    await expect(
+      service.processInspection({
+        rmaId: 1,
+        outcome: "approved",
+        faultCategory: "customer",
+        items: [{ rmaItemId: 1 }],
+        idempotencyKey: "inspect-rma-no-econ",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      }),
+    ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_ECONOMICS_NOT_FOUND" });
     expect(repository.lastInspectionInput).toBeNull();
   });
 });
 
 class FakeReturnRepository implements DropshipReturnRepository {
-  lastListInput: Parameters<DropshipReturnRepository["listRmas"]>[0] | null = null;
-  lastCreateInput: (CreateDropshipRmaInput & { requestHash: string; now: Date }) | null = null;
-  lastStatusInput: (UpdateDropshipRmaStatusInput & { policyVersionId: number | null; requestHash: string; now: Date }) | null = null;
-  lastInspectionInput: (NormalizedProcessDropshipRmaInspectionInput & { requestHash: string; now: Date }) | null = null;
-  lastOrderReferenceInput: Parameters<DropshipReturnRepository["getOrderReference"]>[0] | null = null;
+  lastListInput: Parameters<DropshipReturnRepository["listRmas"]>[0] | null =
+    null;
+  lastCreateInput:
+    (CreateDropshipRmaInput & { requestHash: string; now: Date }) | null = null;
+  lastStatusInput:
+    | (UpdateDropshipRmaStatusInput & {
+        policyVersionId: number | null;
+        requestHash: string;
+        now: Date;
+      })
+    | null = null;
+  lastInspectionInput:
+    | (NormalizedProcessDropshipRmaInspectionInput & {
+        requestHash: string;
+        now: Date;
+      })
+    | null = null;
+  lastOrderReferenceInput:
+    Parameters<DropshipReturnRepository["getOrderReference"]>[0] | null = null;
   lastPolicyLookupAt: Date | null = null;
-  lastReturnPolicyInput: Parameters<DropshipReturnRepository["createReturnPolicy"]>[0] | null = null;
+  lastReturnPolicyInput:
+    Parameters<DropshipReturnRepository["createReturnPolicy"]>[0] | null = null;
   orderReference: DropshipRmaOrderReference | null = makeOrderReference();
   activePolicy: DropshipReturnPolicyRecord | null = null;
   nextStatusReplay = false;
@@ -747,9 +1117,16 @@ class FakeReturnRepository implements DropshipReturnRepository {
   ];
   economics: DropshipRmaOrderEconomics | null = null;
 
-  async listRmas(input: Parameters<DropshipReturnRepository["listRmas"]>[0]): Promise<DropshipRmaListResult> {
+  async listRmas(
+    input: Parameters<DropshipReturnRepository["listRmas"]>[0],
+  ): Promise<DropshipRmaListResult> {
     this.lastListInput = input;
-    return { items: [makeRma()], total: 1, page: input.page, limit: input.limit };
+    return {
+      items: [makeRma()],
+      total: 1,
+      page: input.page,
+      limit: input.limit,
+    };
   }
 
   async getRma(): Promise<DropshipRmaDetail | null> {
@@ -761,7 +1138,9 @@ class FakeReturnRepository implements DropshipReturnRepository {
     });
   }
 
-  async getOrderReference(input: Parameters<DropshipReturnRepository["getOrderReference"]>[0]): Promise<DropshipRmaOrderReference | null> {
+  async getOrderReference(
+    input: Parameters<DropshipReturnRepository["getOrderReference"]>[0],
+  ): Promise<DropshipRmaOrderReference | null> {
     this.lastOrderReferenceInput = input;
     return this.orderReference;
   }
@@ -774,7 +1153,9 @@ class FakeReturnRepository implements DropshipReturnRepository {
     return { closedCount: 0 };
   }
 
-  async getActiveReturnPolicy(at: Date): Promise<DropshipReturnPolicyRecord | null> {
+  async getActiveReturnPolicy(
+    at: Date,
+  ): Promise<DropshipReturnPolicyRecord | null> {
     this.lastPolicyLookupAt = at;
     return this.activePolicy;
   }
@@ -797,16 +1178,25 @@ class FakeReturnRepository implements DropshipReturnRepository {
     };
   }
 
-  async createRma(input: CreateDropshipRmaInput & { requestHash: string; now: Date }): Promise<{
+  async createRma(
+    input: CreateDropshipRmaInput & { requestHash: string; now: Date },
+  ): Promise<{
     rma: DropshipRmaDetail;
     idempotentReplay: boolean;
   }> {
     this.lastCreateInput = input;
-    return { rma: makeRmaDetail({ rmaNumber: input.rmaNumber }), idempotentReplay: false };
+    return {
+      rma: makeRmaDetail({ rmaNumber: input.rmaNumber }),
+      idempotentReplay: false,
+    };
   }
 
   async updateStatus(
-    input: UpdateDropshipRmaStatusInput & { policyVersionId: number | null; requestHash: string; now: Date },
+    input: UpdateDropshipRmaStatusInput & {
+      policyVersionId: number | null;
+      requestHash: string;
+      now: Date;
+    },
   ): Promise<DropshipRmaStatusUpdateResult> {
     this.lastStatusInput = input;
     return {
@@ -816,30 +1206,36 @@ class FakeReturnRepository implements DropshipReturnRepository {
   }
 
   async processInspection(
-    input: NormalizedProcessDropshipRmaInspectionInput & { requestHash: string; now: Date },
+    input: NormalizedProcessDropshipRmaInspectionInput & {
+      requestHash: string;
+      now: Date;
+    },
   ): Promise<DropshipRmaInspectionResult> {
     this.lastInspectionInput = input;
-    const walletLedger = input.creditCents > 0
-      ? [{
-          ledgerEntryId: 99,
-          walletAccountId: 5,
-          vendorId: 10,
-          type: input.settlement.creditLedgerType,
-          status: "settled" as const,
-          amountCents: input.creditCents,
-          currency: "USD",
-          availableBalanceAfterCents: 2000,
-          pendingBalanceAfterCents: 0,
-          referenceType: "dropship_rma",
-          referenceId: `${input.rmaId}:credit`,
-          idempotencyKey: "ledger-idem",
-          fundingMethodId: null,
-          externalTransactionId: null,
-          metadata: {},
-          createdAt: input.now,
-          settledAt: input.now,
-        }]
-      : [];
+    const walletLedger =
+      input.creditCents > 0
+        ? [
+            {
+              ledgerEntryId: 99,
+              walletAccountId: 5,
+              vendorId: 10,
+              type: input.settlement.creditLedgerType,
+              status: "settled" as const,
+              amountCents: input.creditCents,
+              currency: "USD",
+              availableBalanceAfterCents: 2000,
+              pendingBalanceAfterCents: 0,
+              referenceType: "dropship_rma",
+              referenceId: `${input.rmaId}:credit`,
+              idempotencyKey: "ledger-idem",
+              fundingMethodId: null,
+              externalTransactionId: null,
+              metadata: {},
+              createdAt: input.now,
+              settledAt: input.now,
+            },
+          ]
+        : [];
     return {
       rma: makeRmaDetail({
         status: input.outcome === "rejected" ? "rejected" : "credited",
@@ -866,7 +1262,9 @@ class FakeReturnRepository implements DropshipReturnRepository {
 }
 
 class FakeVendorProvisioningService {
-  async provisionForMember(memberId: string): Promise<DropshipProvisionVendorRepositoryResult> {
+  async provisionForMember(
+    memberId: string,
+  ): Promise<DropshipProvisionVendorRepositoryResult> {
     return {
       vendor: makeVendor({ memberId }),
       created: false,
@@ -895,7 +1293,8 @@ function makeService(
   returnPolicyService?: FakeReturnPolicyService,
 ): DropshipReturnService {
   return new DropshipReturnService({
-    vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+    vendorProvisioning:
+      new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
     repository,
     notificationSender,
     returnPolicyService: returnPolicyService as never,
@@ -910,17 +1309,132 @@ function makeService(
 
 class FakeReturnPolicyService {
   fees: {
-    restockingFee: { feeId: number; amountType: "flat_cents" | "percent"; amount: number } | null;
-    processingFee: { feeId: number; amountType: "flat_cents" | "percent"; amount: number } | null;
-    returnShippingFee: { feeId: number; amountType: "flat_cents" | "percent"; amount: number } | null;
+    restockingFee: {
+      feeId: number;
+      amountType: "flat_cents" | "percent";
+      amount: number;
+    } | null;
+    processingFee: {
+      feeId: number;
+      amountType: "flat_cents" | "percent";
+      amount: number;
+    } | null;
+    returnShippingFee: {
+      feeId: number;
+      amountType: "flat_cents" | "percent";
+      amount: number;
+    } | null;
   } = { restockingFee: null, processingFee: null, returnShippingFee: null };
+  defaultFees = makeResolvedFees();
+  feesByResponsibility = new Map<string, ReturnType<typeof makeResolvedFees>>();
+  resolveCalls: Array<{ faultCategory: string }> = [];
 
-  async resolveReturnFees(): Promise<never> {
-    return this.fees as never;
+  async resolveReturnFees(input?: { faultCategory: string }): Promise<never> {
+    if (input) this.resolveCalls.push(input);
+    return (
+      input
+        ? (this.feesByResponsibility.get(input.faultCategory) ?? this.fees)
+        : this.fees
+    ) as never;
+  }
+
+  async resolveDefaultReturnFees(): Promise<never> {
+    return this.defaultFees as never;
   }
 }
 
-function makeRma(overrides: Partial<DropshipRmaDetail> = {}): DropshipRmaDetail {
+function makeFee(
+  feeId: number,
+  feeType: "restocking_fee" | "processing_fee" | "return_shipping_fee",
+  faultCategory:
+    "card_shellz" | "vendor" | "customer" | "marketplace" | "carrier",
+  amountType: "flat_cents" | "percent",
+  amount: number,
+) {
+  return {
+    feeId,
+    feeType,
+    faultCategory,
+    amountType,
+    amount,
+    isDefault: false,
+  };
+}
+
+function makeResolvedFees(
+  overrides: Partial<{
+    restockingFee: ReturnType<typeof makeFee> | null;
+    processingFee: ReturnType<typeof makeFee> | null;
+    returnShippingFee: ReturnType<typeof makeFee> | null;
+  }> = {},
+) {
+  return {
+    restockingFee: null,
+    processingFee: null,
+    returnShippingFee: null,
+    ...overrides,
+  };
+}
+
+function configuredDecisionPolicyService(
+  input: { restockingDefaultResponsibility?: "customer" | "vendor" } = {},
+): FakeReturnPolicyService {
+  const service = new FakeReturnPolicyService();
+  const restockingDefaultResponsibility =
+    input.restockingDefaultResponsibility ?? "customer";
+  service.defaultFees = makeResolvedFees({
+    restockingFee: makeFee(
+      61,
+      "restocking_fee",
+      restockingDefaultResponsibility,
+      "flat_cents",
+      restockingDefaultResponsibility === "vendor" ? 300 : 250,
+    ),
+    processingFee: makeFee(62, "processing_fee", "card_shellz", "percent", 10),
+    returnShippingFee: makeFee(
+      63,
+      "return_shipping_fee",
+      "carrier",
+      "flat_cents",
+      0,
+    ),
+  });
+  service.feesByResponsibility.set(
+    "vendor",
+    makeResolvedFees({
+      restockingFee: makeFee(71, "restocking_fee", "vendor", "flat_cents", 300),
+    }),
+  );
+  service.feesByResponsibility.set(
+    "card_shellz",
+    makeResolvedFees({
+      processingFee: makeFee(
+        72,
+        "processing_fee",
+        "card_shellz",
+        "percent",
+        10,
+      ),
+    }),
+  );
+  service.feesByResponsibility.set(
+    "carrier",
+    makeResolvedFees({
+      returnShippingFee: makeFee(
+        73,
+        "return_shipping_fee",
+        "carrier",
+        "flat_cents",
+        0,
+      ),
+    }),
+  );
+  return service;
+}
+
+function makeRma(
+  overrides: Partial<DropshipRmaDetail> = {},
+): DropshipRmaDetail {
   return {
     rmaId: 1,
     rmaNumber: "RMA-1",
@@ -955,11 +1469,15 @@ function makeRma(overrides: Partial<DropshipRmaDetail> = {}): DropshipRmaDetail 
   };
 }
 
-function makeRmaDetail(overrides: Partial<DropshipRmaDetail> = {}): DropshipRmaDetail {
+function makeRmaDetail(
+  overrides: Partial<DropshipRmaDetail> = {},
+): DropshipRmaDetail {
   return makeRma(overrides);
 }
 
-function makeOrderReference(overrides: Partial<DropshipRmaOrderReference> = {}): DropshipRmaOrderReference {
+function makeOrderReference(
+  overrides: Partial<DropshipRmaOrderReference> = {},
+): DropshipRmaOrderReference {
   return {
     intakeId: 44,
     storeConnectionId: 70,
@@ -974,7 +1492,9 @@ function makeOrderReference(overrides: Partial<DropshipRmaOrderReference> = {}):
   };
 }
 
-function makeReturnPolicy(overrides: Partial<DropshipReturnPolicyRecord> = {}): DropshipReturnPolicyRecord {
+function makeReturnPolicy(
+  overrides: Partial<DropshipReturnPolicyRecord> = {},
+): DropshipReturnPolicyRecord {
   return {
     policyId: 30,
     name: "Default returns",
@@ -999,7 +1519,9 @@ function makeOrderEconomics(): DropshipRmaOrderEconomics {
   };
 }
 
-function makeVendor(overrides: Partial<DropshipProvisionedVendorProfile> = {}): DropshipProvisionedVendorProfile {
+function makeVendor(
+  overrides: Partial<DropshipProvisionedVendorProfile> = {},
+): DropshipProvisionedVendorProfile {
   return {
     vendorId: 10,
     memberId: "member-1",

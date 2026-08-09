@@ -496,8 +496,14 @@ Goal: prove return policy, fault, inspection, and credit/release behavior.
 | [ ] | RETURN-05 | If item inspection applies, complete inspection once. | Inspection ID/result: |  |
 | [ ] | RETURN-06 | Confirm credit/release behavior follows inspection result where inspection applies. | Credit/release ID: |  |
 | [ ] | RETURN-07 | For lost package, misdelivery, or carrier fault, confirm no item inspection is incorrectly required. | Outcome evidence: |  |
-| [ ] | RETURN-08 | Confirm vendor/customer/marketplace fault fees follow policy. | Fee evidence: |  |
-| [ ] | RETURN-09 | Confirm audit event exists for return action. | Audit event ID: |  |
+| [ ] | RETURN-08 | Confirm overall RMA responsibility is displayed and stored separately from fee responsibility. | RMA responsibility / inspection ID: |  |
+| [ ] | RETURN-09 | Confirm restocking, inspection, and return-shipping fees each load their policy-selected default responsibility and amount. | Fee policy IDs / defaults: |  |
+| [ ] | RETURN-10 | Complete an inspection without overrides and confirm no override reason is required. | Inspection ID / fee snapshot: |  |
+| [ ] | RETURN-11 | Override one fee responsibility and confirm a reason is required and persisted. | Fee type / reason / audit ID: |  |
+| [ ] | RETURN-12 | Override one fee amount and confirm a reason is required and persisted. | Fee type / amount / audit ID: |  |
+| [ ] | RETURN-13 | Confirm RMA-level fees and internal item allocations reconcile exactly to the final settlement. | Settlement / allocation evidence: |  |
+| [ ] | RETURN-14 | Confirm rejected inspection creates no approved fee settlement. | Inspection ID/result: |  |
+| [ ] | RETURN-15 | Confirm audit event exists for the final return action and contains policy/version evidence. | Audit event ID: |  |
 
 Phase pass criteria:
 

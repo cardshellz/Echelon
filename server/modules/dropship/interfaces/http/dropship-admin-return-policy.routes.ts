@@ -24,7 +24,9 @@ export function registerDropshipAdminReturnPolicyRoutes(
       try {
         const policies = await service.listPolicies({
           vendorId: parseOptionalPositiveIntegerQuery(req.query.vendorId),
-          storeConnectionId: parseOptionalPositiveIntegerQuery(req.query.storeConnectionId),
+          storeConnectionId: parseOptionalPositiveIntegerQuery(
+            req.query.storeConnectionId,
+          ),
           includeInactive: req.query.includeInactive === "true",
         });
         return res.json({ items: policies });
@@ -73,9 +75,15 @@ export function registerDropshipAdminReturnPolicyRoutes(
     requirePermission("dropship", "view"),
     async (req, res) => {
       try {
-        const vendorId = parseOptionalPositiveIntegerQuery(req.query.vendorId) ?? null;
-        const storeConnectionId = parseOptionalPositiveIntegerQuery(req.query.storeConnectionId) ?? null;
-        const policy = await service.resolveReturnPolicy({ vendorId, storeConnectionId });
+        const vendorId =
+          parseOptionalPositiveIntegerQuery(req.query.vendorId) ?? null;
+        const storeConnectionId =
+          parseOptionalPositiveIntegerQuery(req.query.storeConnectionId) ??
+          null;
+        const policy = await service.resolveReturnPolicy({
+          vendorId,
+          storeConnectionId,
+        });
         return res.json({ policy });
       } catch (error) {
         return sendDropshipReturnPolicyError(res, error);
@@ -90,7 +98,9 @@ export function registerDropshipAdminReturnPolicyRoutes(
       try {
         const fees = await service.listFees({
           vendorId: parseOptionalPositiveIntegerQuery(req.query.vendorId),
-          storeConnectionId: parseOptionalPositiveIntegerQuery(req.query.storeConnectionId),
+          storeConnectionId: parseOptionalPositiveIntegerQuery(
+            req.query.storeConnectionId,
+          ),
           feeType: parseOptionalStringQuery(req.query.feeType),
           faultCategory: parseOptionalStringQuery(req.query.faultCategory),
           includeInactive: req.query.includeInactive === "true",
@@ -137,12 +147,36 @@ export function registerDropshipAdminReturnPolicyRoutes(
   );
 
   app.get(
+    "/api/dropship/admin/return-policies/fee-schedule/effective-defaults",
+    requirePermission("dropship", "view"),
+    async (req, res) => {
+      try {
+        const vendorId =
+          parseOptionalPositiveIntegerQuery(req.query.vendorId) ?? null;
+        const storeConnectionId =
+          parseOptionalPositiveIntegerQuery(req.query.storeConnectionId) ??
+          null;
+        const fees = await service.resolveDefaultReturnFees({
+          vendorId,
+          storeConnectionId,
+        });
+        return res.json({ fees });
+      } catch (error) {
+        return sendDropshipReturnPolicyError(res, error);
+      }
+    },
+  );
+
+  app.get(
     "/api/dropship/admin/return-policies/fee-schedule/effective",
     requirePermission("dropship", "view"),
     async (req, res) => {
       try {
-        const vendorId = parseOptionalPositiveIntegerQuery(req.query.vendorId) ?? null;
-        const storeConnectionId = parseOptionalPositiveIntegerQuery(req.query.storeConnectionId) ?? null;
+        const vendorId =
+          parseOptionalPositiveIntegerQuery(req.query.vendorId) ?? null;
+        const storeConnectionId =
+          parseOptionalPositiveIntegerQuery(req.query.storeConnectionId) ??
+          null;
         const faultCategory = parseOptionalStringQuery(req.query.faultCategory);
         if (!faultCategory) {
           throw new DropshipError(
@@ -150,7 +184,11 @@ export function registerDropshipAdminReturnPolicyRoutes(
             "faultCategory query parameter is required.",
           );
         }
-        const fees = await service.resolveReturnFees({ vendorId, storeConnectionId, faultCategory });
+        const fees = await service.resolveReturnFees({
+          vendorId,
+          storeConnectionId,
+          faultCategory,
+        });
         return res.json({ fees });
       } catch (error) {
         return sendDropshipReturnPolicyError(res, error);
@@ -159,7 +197,10 @@ export function registerDropshipAdminReturnPolicyRoutes(
   );
 }
 
-function sendDropshipReturnPolicyError(res: Response, error: unknown): Response {
+function sendDropshipReturnPolicyError(
+  res: Response,
+  error: unknown,
+): Response {
   if (error instanceof DropshipError) {
     return res.status(statusForDropshipReturnPolicyError(error.code)).json({
       error: {
@@ -170,7 +211,10 @@ function sendDropshipReturnPolicyError(res: Response, error: unknown): Response 
     });
   }
 
-  console.error("[DropshipAdminReturnPolicyRoutes] Unexpected return policy error:", error);
+  console.error(
+    "[DropshipAdminReturnPolicyRoutes] Unexpected return policy error:",
+    error,
+  );
   return res.status(500).json({
     error: {
       code: "DROPSHIP_RETURN_POLICY_INTERNAL_ERROR",
@@ -199,8 +243,12 @@ function statusForDropshipReturnPolicyError(code: string): number {
 }
 
 function resolveIdempotencyKey(req: Request): string {
-  const header = req.header("Idempotency-Key") ?? req.header("X-Idempotency-Key");
-  const bodyKey = typeof req.body?.idempotencyKey === "string" ? req.body.idempotencyKey : null;
+  const header =
+    req.header("Idempotency-Key") ?? req.header("X-Idempotency-Key");
+  const bodyKey =
+    typeof req.body?.idempotencyKey === "string"
+      ? req.body.idempotencyKey
+      : null;
   const key = bodyKey ?? header;
   if (!key) {
     throw new DropshipError(
