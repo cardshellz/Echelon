@@ -108,6 +108,29 @@ export function registerDropshipReturnRoutes(
     }
   });
 
+  app.get(
+    "/api/dropship/admin/returns/source-orders/:intakeId",
+    requirePermission("dropship", "view"),
+    async (req, res) => {
+      try {
+        const vendorId = parseOptionalPositiveIntegerQuery(req.query.vendorId);
+        if (vendorId === undefined) {
+          throw new DropshipError(
+            "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+            "A positive vendorId is required.",
+          );
+        }
+        const order = await service.getOrderReferenceForAdmin({
+          vendorId,
+          intakeId: parsePositiveInteger(req.params.intakeId, "intakeId"),
+        });
+        return res.json({ order });
+      } catch (error) {
+        return sendDropshipReturnError(res, error);
+      }
+    },
+  );
+
   app.get("/api/dropship/admin/returns/:rmaId", requirePermission("dropship", "view"), async (req, res) => {
     try {
       const rma = await service.getForAdmin(parsePositiveInteger(req.params.rmaId, "rmaId"));

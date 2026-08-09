@@ -99,6 +99,7 @@ import {
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
   buildAdminReturnCreateInput,
+  buildAdminReturnSourceOrderUrl,
   buildAdminReturnInspectionInput,
   buildAdminReturnPolicyInput,
   buildAdminReturnPolicyUrl,
@@ -172,6 +173,11 @@ import {
   type DropshipAdminOmsChannelConfigureResponse,
   type DropshipOmsChannelOption,
   type DropshipAdminReturnCreateResponse,
+  type DropshipAdminReturnSourceOrder,
+  type DropshipAdminReturnSourceOrderLine,
+  type DropshipAdminReturnSourceOrderResponse,
+  type DropshipAdminRmaLabelSource,
+  type DropshipAdminRmaReasonCode,
   type DropshipAdminReturnInspectionResponse,
   type DropshipAdminReturnPolicyCreateResponse,
   type DropshipAdminReturnPolicyResponse,
@@ -424,10 +430,10 @@ interface ReturnCreateFormState {
   storeConnectionId: string;
   intakeId: string;
   omsOrderId: string;
-  reasonCode: string;
+  reasonCode: DropshipAdminRmaReasonCode | "";
   faultCategory: DropshipReturnFaultCategory | "none";
   returnWindowDays: string;
-  labelSource: string;
+  labelSource: DropshipAdminRmaLabelSource | "";
   returnTrackingNumber: string;
   vendorNotes: string;
   items: ReturnCreateItemFormState[];
@@ -3375,18 +3381,31 @@ function ReturnOpsTab() {
     queryFn: () =>
       fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
   });
+  const selectedReturnVendorId = /^\d+$/.test(createForm.vendorId)
+    ? Number(createForm.vendorId)
+    : null;
   const selectedReturnIntakeId = /^\d+$/.test(createForm.intakeId)
     ? Number(createForm.intakeId)
     : null;
-  const returnCreateOrderQuery = useQuery<DropshipOrderDetailResponse>({
-    queryKey: ["dropship-admin-return-create-order", selectedReturnIntakeId],
+  const returnCreateOrderQuery = useQuery<DropshipAdminReturnSourceOrderResponse>({
+    queryKey: [
+      "dropship-admin-return-create-order",
+      selectedReturnVendorId,
+      selectedReturnIntakeId,
+    ],
     queryFn: () => {
-      if (selectedReturnIntakeId === null) throw new Error("Missing intake ID.");
-      return fetchJson<DropshipOrderDetailResponse>(
-        `/api/dropship/admin/order-intake/${selectedReturnIntakeId}`,
+      if (selectedReturnVendorId === null || selectedReturnIntakeId === null) {
+        throw new Error("Missing vendor or intake ID.");
+      }
+      return fetchJson<DropshipAdminReturnSourceOrderResponse>(
+        buildAdminReturnSourceOrderUrl({
+          vendorId: selectedReturnVendorId,
+          intakeId: selectedReturnIntakeId,
+        }),
       );
     },
-    enabled: selectedReturnIntakeId !== null,
+    enabled:
+      selectedReturnVendorId !== null && selectedReturnIntakeId !== null,
   });
 
   const rmas = returnsQuery.data?.items ?? [];
@@ -10558,7 +10577,7 @@ function ReturnCreatePanel({
   onItemChange: (index: number, patch: Partial<ReturnCreateItemFormState>) => void;
   onRemoveItem: (index: number) => void;
   onSubmit: () => void;
-  order: DropshipOrderDetail | null;
+  order: DropshipAdminReturnSourceOrder | null;
   orderError: string;
   orderLoading: boolean;
   storeConnections: DropshipAdminStoreConnectionListItem[];
@@ -10640,7 +10659,10 @@ function ReturnCreatePanel({
     );
   }
 
-  function toggleOrderLine(line: DropshipOrderDetailLine, checked: boolean) {
+  function toggleOrderLine(
+    line: DropshipAdminReturnSourceOrderLine,
+    checked: boolean,
+  ) {
     const selectedIndex = selectedOrderItemIndex(line.lineIndex);
     if (!checked) {
       if (selectedIndex >= 0) onRemoveItem(selectedIndex);
@@ -10688,7 +10710,28 @@ function ReturnCreatePanel({
           <SearchableOptionPicker label="Source order" value={form.intakeId} disabled={isSaving} clearable clearLabel="No source order" options={intakeOptions} isLoading={intakesLoading} placeholder="Select order" searchPlaceholder="Search marketplace order, OMS order, store, or vendor..." emptyText="No dropship orders found." onChange={selectIntake} />
           <SearchableOptionPicker label="OMS order" value={form.omsOrderId} disabled={isSaving} clearable clearLabel="No OMS order" options={omsOrderOptions} isLoading={intakesLoading} placeholder="Inferred from source order" searchPlaceholder="Search OMS order, intake, or marketplace order..." emptyText="No OMS orders found." onChange={selectOmsOrder} />
           <AdminReturnInput label="Return window days" value={form.returnWindowDays} disabled={isSaving} onChange={(value) => onChange({ returnWindowDays: value })} />
-          <AdminReturnInput label="Reason code" value={form.reasonCode} placeholder="Optional" disabled={isSaving} onChange={(value) => onChange({ reasonCode: value })} />
+          <div>
+            <label className="text-sm font-medium">Return reason</label>
+            <Select
+              value={form.reasonCode || "none"}
+              onValueChange={(value) =>
+                onChange({
+                  reasonCode:
+                    value === "none" ? "" : (value as DropshipAdminRmaReasonCode),
+                })
+              }
+              disabled={isSaving}
+            >
+              <SelectTrigger className="mt-2"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">Not specified</SelectItem>
+                <SelectItem value="buyer_return">Buyer return</SelectItem>
+                <SelectItem value="damaged">Damaged</SelectItem>
+                <SelectItem value="wrong_item">Wrong item</SelectItem>
+                <SelectItem value="other">Other</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <div>
             <label className="text-sm font-medium">Fault category</label>
             <Select value={form.faultCategory} onValueChange={(value) => onChange({ faultCategory: value as DropshipReturnFaultCategory | "none" })} disabled={isSaving}>
@@ -10699,8 +10742,35 @@ function ReturnCreatePanel({
               </SelectContent>
             </Select>
           </div>
-          <AdminReturnInput label="Label source" value={form.labelSource} placeholder="marketplace, vendor, ops" disabled={isSaving} onChange={(value) => onChange({ labelSource: value })} />
-          <AdminReturnInput label="Tracking number" value={form.returnTrackingNumber} placeholder="Optional" disabled={isSaving} onChange={(value) => onChange({ returnTrackingNumber: value })} />
+          <div>
+            <label className="text-sm font-medium">Return label</label>
+            <Select
+              value={form.labelSource || "none"}
+              onValueChange={(value) => {
+                if (value === "none") {
+                  onChange({ labelSource: "", returnTrackingNumber: "" });
+                  return;
+                }
+                onChange({ labelSource: value as DropshipAdminRmaLabelSource });
+              }}
+              disabled={isSaving}
+            >
+              <SelectTrigger className="mt-2"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">No label or tracking</SelectItem>
+                <SelectItem value="marketplace">Marketplace provided</SelectItem>
+                <SelectItem value="vendor">Vendor provided</SelectItem>
+                <SelectItem value="ops">Ops provided</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <AdminReturnInput
+            label="Tracking number"
+            value={form.returnTrackingNumber}
+            placeholder={form.labelSource ? "Optional" : "Select a return label first"}
+            disabled={isSaving || !form.labelSource}
+            onChange={(value) => onChange({ returnTrackingNumber: value })}
+          />
           <div className="md:col-span-2">
             <label className="text-sm font-medium" htmlFor="dropship-return-create-notes">Vendor notes</label>
             <Textarea id="dropship-return-create-notes" className="mt-2 min-h-24" maxLength={5000} value={form.vendorNotes} onChange={(event) => onChange({ vendorNotes: event.target.value })} disabled={isSaving} />
@@ -10739,7 +10809,6 @@ function ReturnCreatePanel({
                           <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                             <span>SKU: {line.sku ?? "Not provided"}</span>
                             <span>Ordered: {line.quantity}</span>
-                            {line.lineRetailTotalCents !== null ? <span>Line total: {formatCents(line.lineRetailTotalCents)}</span> : null}
                           </div>
                         </div>
                       </div>

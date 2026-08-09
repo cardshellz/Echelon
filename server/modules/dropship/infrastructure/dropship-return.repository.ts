@@ -1885,6 +1885,8 @@ function mapRmaOrderReferenceLines(
           ? candidate.externalLineItemId
           : null,
       productVariantId: nullablePositiveInteger(candidate.productVariantId),
+      sku: typeof candidate.sku === "string" ? candidate.sku : null,
+      title: typeof candidate.title === "string" ? candidate.title : null,
       quantity: nullablePositiveInteger(candidate.quantity) ?? 0,
     };
   });
