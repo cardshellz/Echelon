@@ -69,6 +69,11 @@ interface RmaItemRow {
   id: number;
   rma_id: number;
   product_variant_id: number | null;
+  source: DropshipRmaItemRecord["source"];
+  order_line_index: number | null;
+  external_line_item_id: string | null;
+  manual_description: string | null;
+  exception_reason: string | null;
   quantity: number;
   status: string;
   requested_credit_cents: string | number | null;
@@ -418,13 +423,19 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
       for (const item of input.items) {
         await client.query(
           `INSERT INTO dropship.dropship_rma_items
-            (rma_id, product_variant_id, quantity, status, requested_credit_cents, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
+            (rma_id, product_variant_id, source, order_line_index,
+             external_line_item_id, manual_description, exception_reason,
+             quantity, status, requested_credit_cents, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'requested', $9, $10)`,
           [
             rmaId,
             item.productVariantId ?? null,
+            item.source,
+            item.orderLineIndex ?? null,
+            item.externalLineItemId ?? null,
+            item.manualDescription ?? null,
+            item.exceptionReason ?? null,
             item.quantity,
-            item.status,
             item.requestedCreditCents ?? null,
             input.now,
           ],
@@ -1011,8 +1022,10 @@ async function listRmaItemsWithClient(
   rmaId: number,
 ): Promise<DropshipRmaItemRecord[]> {
   const result = await client.query<RmaItemRow>(
-    `SELECT id, rma_id, product_variant_id, quantity, status,
-            requested_credit_cents, final_credit_cents, fee_cents, created_at
+    `SELECT id, rma_id, product_variant_id, source, order_line_index,
+            external_line_item_id, manual_description, exception_reason,
+            quantity, status, requested_credit_cents, final_credit_cents,
+            fee_cents, created_at
      FROM dropship.dropship_rma_items
      WHERE rma_id = $1
      ORDER BY id ASC`,
@@ -1867,6 +1880,10 @@ function mapRmaOrderReferenceLines(
       line && typeof line === "object" ? (line as Record<string, unknown>) : {};
     return {
       lineIndex: index,
+      externalLineItemId:
+        typeof candidate.externalLineItemId === "string"
+          ? candidate.externalLineItemId
+          : null,
       productVariantId: nullablePositiveInteger(candidate.productVariantId),
       quantity: nullablePositiveInteger(candidate.quantity) ?? 0,
     };
@@ -1929,6 +1946,11 @@ function mapRmaItemRow(row: RmaItemRow): DropshipRmaItemRecord {
     rmaItemId: row.id,
     rmaId: row.rma_id,
     productVariantId: row.product_variant_id,
+    source: row.source,
+    orderLineIndex: row.order_line_index,
+    externalLineItemId: row.external_line_item_id,
+    manualDescription: row.manual_description,
+    exceptionReason: row.exception_reason,
     quantity: row.quantity,
     status: row.status,
     requestedCreditCents:

@@ -2237,9 +2237,14 @@ export interface DropshipReturnDetailResponse {
 }
 
 export interface DropshipAdminReturnCreateItemInput {
+  source: "order" | "manual_exception";
+  orderLineIndex: number | null;
+  externalLineItemId: string | null;
   productVariantId: number | null;
+  manualDescription: string | null;
+  exceptionReason: string | null;
   quantity: number;
-  status: string;
+  status: "requested";
   requestedCreditCents: number | null;
 }
 
@@ -3166,9 +3171,13 @@ export function buildAdminReturnCreateInput(input: {
   returnTrackingNumber: string;
   vendorNotes: string;
   items: Array<{
+    source: "order" | "manual_exception";
+    orderLineIndex: string;
+    externalLineItemId: string;
     productVariantId: string;
+    manualDescription: string;
+    exceptionReason: string;
     quantity: string;
-    status: string;
     requestedCreditAmount: string;
   }>;
 }): DropshipAdminReturnCreateInput {
@@ -3178,23 +3187,67 @@ export function buildAdminReturnCreateInput(input: {
   if (vendorNotes.length > 5000) {
     throw new Error("vendorNotes must be 5000 characters or fewer.");
   }
+  if (input.items.length === 0) {
+    throw new Error("At least one return item is required.");
+  }
 
   const items = input.items.map((item, index) => {
-    const status = item.status.trim() || "requested";
-    if (status.length > 40) {
-      throw new Error(`items.${index}.status must be 40 characters or fewer.`);
+    const requestedCreditCents = parseNullableDollarInputToCents(
+      item.requestedCreditAmount,
+      `items.${index}.requestedCreditAmount`,
+    );
+    const quantity = parsePositiveInteger(
+      item.quantity,
+      `items.${index}.quantity`,
+    );
+    if (item.source === "order") {
+      return {
+        source: "order" as const,
+        orderLineIndex: parseNonNegativeInteger(
+          item.orderLineIndex,
+          `items.${index}.orderLineIndex`,
+        ),
+        externalLineItemId: item.externalLineItemId.trim() || null,
+        productVariantId: parseOptionalPositiveInteger(
+          item.productVariantId,
+          `items.${index}.productVariantId`,
+        ),
+        manualDescription: null,
+        exceptionReason: null,
+        quantity,
+        status: "requested" as const,
+        requestedCreditCents,
+      };
+    }
+
+    const exceptionReason = requiredTrimmedString(
+      item.exceptionReason,
+      `items.${index}.exceptionReason`,
+      2000,
+    );
+    const manualDescription = item.manualDescription.trim();
+    if (manualDescription.length > 500) {
+      throw new Error(`items.${index}.manualDescription must be 500 characters or fewer.`);
+    }
+    const productVariantId = parseOptionalPositiveInteger(
+      item.productVariantId,
+      `items.${index}.productVariantId`,
+    );
+    if (productVariantId === null && !manualDescription) {
+      throw new Error(
+        `items.${index} requires a catalog variant or item description.`,
+      );
     }
     return {
-      productVariantId: parseOptionalPositiveInteger(
-        item.productVariantId,
-        `items.${index}.productVariantId`,
-      ),
-      quantity: parsePositiveInteger(item.quantity, `items.${index}.quantity`),
-      status,
-      requestedCreditCents: parseNullableDollarInputToCents(
-        item.requestedCreditAmount,
-        `items.${index}.requestedCreditAmount`,
-      ),
+      source: "manual_exception" as const,
+      orderLineIndex: null,
+      externalLineItemId: null,
+      productVariantId,
+      manualDescription: manualDescription || null,
+      exceptionReason,
+      quantity,
+      status: "requested" as const,
+      requestedCreditCents,
     };
   });
 
@@ -3208,7 +3261,8 @@ export function buildAdminReturnCreateInput(input: {
     intakeId: parseOptionalPositiveInteger(input.intakeId, "intakeId"),
     omsOrderId: parseOptionalPositiveInteger(input.omsOrderId, "omsOrderId"),
     reasonCode: input.reasonCode.trim() || null,
-    faultCategory: input.faultCategory === "none" ? null : input.faultCategory,
+    faultCategory:
+      input.faultCategory === "none" ? null : input.faultCategory,
     returnWindowDays: parsePositiveInteger(
       input.returnWindowDays,
       "returnWindowDays",

@@ -78,12 +78,52 @@ export type DropshipRmaInspectionOutcome = z.infer<
 
 const rmaItemInputSchema = z
   .object({
+    source: z.enum(["legacy", "order", "manual_exception"]).default("legacy"),
+    orderLineIndex: z.number().int().nonnegative().nullable().optional(),
+    externalLineItemId: shortNullableStringSchema,
     productVariantId: positiveIdSchema.nullable().optional(),
+    manualDescription: z.string().trim().min(1).max(500).nullable().optional(),
+    exceptionReason: z.string().trim().min(1).max(2000).nullable().optional(),
     quantity: z.number().int().positive(),
-    status: z.string().trim().min(1).max(40).default("requested"),
+    status: z.literal("requested").default("requested"),
     requestedCreditCents: nonnegativeCentsSchema.nullable().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((item, ctx) => {
+    if (item.source === "order" && item.orderLineIndex == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["orderLineIndex"],
+        message: "Order-backed RMA items require an order line index.",
+      });
+    }
+    if (item.source === "manual_exception" && !item.exceptionReason) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["exceptionReason"],
+        message: "Manual RMA items require an exception reason.",
+      });
+    }
+    if (
+      item.source === "manual_exception" &&
+      item.productVariantId == null &&
+      !item.manualDescription
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["manualDescription"],
+        message:
+          "Manual RMA items require a catalog variant or item description.",
+      });
+    }
+    if (item.source !== "manual_exception" && item.exceptionReason) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["exceptionReason"],
+        message: "Exception reasons are only valid for manual RMA items.",
+      });
+    }
+  });
 
 const createDropshipRmaRequestSchema = z
   .object({
@@ -370,6 +410,11 @@ export interface DropshipRmaItemRecord {
   rmaItemId: number;
   rmaId: number;
   productVariantId: number | null;
+  source: "legacy" | "order" | "manual_exception";
+  orderLineIndex: number | null;
+  externalLineItemId: string | null;
+  manualDescription: string | null;
+  exceptionReason: string | null;
   quantity: number;
   status: string;
   requestedCreditCents: number | null;
@@ -455,6 +500,7 @@ export interface DropshipRmaStatusUpdateResult {
 
 export interface DropshipRmaOrderLineReference {
   lineIndex: number;
+  externalLineItemId: string | null;
   productVariantId: number | null;
   quantity: number;
 }
@@ -757,10 +803,17 @@ export class DropshipReturnService {
     );
   }
 
-  async createRma(
-    input: unknown,
-  ): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
-    return this.createRmaWithNow(input, this.deps.clock.now());
+  async createRma(input: unknown): Promise<{
+    rma: DropshipRmaDetail;
+    idempotentReplay: boolean;
+  }> {
+    const parsed = parseReturnInput(
+      createDropshipRmaInputSchema,
+      input,
+      "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+    );
+    await this.assertAdminRmaItemsMatchOrder(parsed);
+    return this.createRmaWithNow(parsed, this.deps.clock.now());
   }
 
   private async createRmaWithNow(
@@ -794,6 +847,78 @@ export class DropshipReturnService {
       await this.notifyRmaCreated(result.rma);
     }
     return result;
+  }
+
+  private async assertAdminRmaItemsMatchOrder(
+    input: CreateDropshipRmaInput,
+  ): Promise<void> {
+    if (input.actor.actorType === "admin" && input.items.length === 0) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "Administrator-created RMAs require at least one return item.",
+      );
+    }
+
+    const legacyItems = input.items.filter((item) => item.source === "legacy");
+    if (input.actor.actorType === "admin" && legacyItems.length > 0) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "Administrator-created RMA items must reference an order line or be recorded as a manual exception.",
+        { legacyItemCount: legacyItems.length },
+      );
+    }
+
+    const manualItems = input.items.filter(
+      (item) => item.source === "manual_exception",
+    );
+    if (manualItems.length > 0 && input.actor.actorType !== "admin") {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "Manual RMA items can only be created by an administrator.",
+        { manualItemCount: manualItems.length },
+      );
+    }
+
+    const orderItems = input.items.filter((item) => item.source === "order");
+    if (orderItems.length === 0) return;
+    if (!input.intakeId) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "Order-backed RMA items require a dropship order intake.",
+      );
+    }
+    const orderReference = await this.deps.repository.getOrderReference({
+      vendorId: input.vendorId,
+      intakeId: input.intakeId,
+    });
+    if (!orderReference) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_INTAKE_NOT_FOUND",
+        "Dropship order intake was not found for the vendor.",
+        { vendorId: input.vendorId, intakeId: input.intakeId },
+      );
+    }
+    if (
+      input.storeConnectionId != null &&
+      input.storeConnectionId !== orderReference.storeConnectionId
+    ) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "The selected store does not own the dropship order intake.",
+        { intakeId: input.intakeId, storeConnectionId: input.storeConnectionId },
+      );
+    }
+    if (
+      input.omsOrderId != null &&
+      input.omsOrderId !== orderReference.omsOrderId
+    ) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "The selected OMS order does not match the dropship order intake.",
+        { intakeId: input.intakeId, omsOrderId: input.omsOrderId },
+      );
+    }
+    assertAdminRmaItemsMatchExactOrderLines(input, orderReference);
   }
 
   async updateStatus(input: unknown): Promise<DropshipRmaStatusUpdateResult> {
@@ -1424,6 +1549,71 @@ function assertMemberRmaItemsMatchOrder(
       );
     }
     requestedQuantityByVariant.set(productVariantId, nextQuantity);
+  }
+}
+
+function assertAdminRmaItemsMatchExactOrderLines(
+  input: CreateDropshipRmaInput,
+  orderReference: DropshipRmaOrderReference,
+): void {
+  const linesByIndex = new Map(
+    orderReference.lines.map((line) => [line.lineIndex, line]),
+  );
+  const referencedLineIndexes = new Set<number>();
+  for (const item of input.items) {
+    if (item.source !== "order") continue;
+    const orderLineIndex = item.orderLineIndex;
+    if (orderLineIndex != null && referencedLineIndexes.has(orderLineIndex)) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "An order line can only appear once on an RMA.",
+        { intakeId: orderReference.intakeId, orderLineIndex },
+      );
+    }
+    if (orderLineIndex != null) referencedLineIndexes.add(orderLineIndex);
+    const line =
+      orderLineIndex == null ? undefined : linesByIndex.get(orderLineIndex);
+    if (!line) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "RMA item does not reference a line on the linked dropship order.",
+        { intakeId: orderReference.intakeId, orderLineIndex },
+      );
+    }
+    if ((item.productVariantId ?? null) !== line.productVariantId) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "RMA item product variant does not match the linked order line.",
+        {
+          intakeId: orderReference.intakeId,
+          orderLineIndex,
+          productVariantId: item.productVariantId ?? null,
+          orderedProductVariantId: line.productVariantId,
+        },
+      );
+    }
+    if (
+      item.externalLineItemId != null &&
+      item.externalLineItemId !== line.externalLineItemId
+    ) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "RMA item marketplace line identifier does not match the linked order line.",
+        { intakeId: orderReference.intakeId, orderLineIndex },
+      );
+    }
+    if (item.quantity > line.quantity) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "RMA item quantity exceeds the linked order-line quantity.",
+        {
+          intakeId: orderReference.intakeId,
+          orderLineIndex,
+          requestedQuantity: item.quantity,
+          orderedQuantity: line.quantity,
+        },
+      );
+    }
   }
 }
 

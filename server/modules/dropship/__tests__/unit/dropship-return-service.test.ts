@@ -324,7 +324,7 @@ describe("DropshipReturnService", () => {
     ).rejects.toMatchObject({ code: "DROPSHIP_ORDER_INTAKE_NOT_FOUND" });
   });
 
-  it("creates RMAs with idempotency, request hash, actor, and clock context", async () => {
+  it("creates admin RMAs from exact linked order lines", async () => {
     const repository = new FakeReturnRepository();
     const logs: DropshipLogEvent[] = [];
     const notificationSender = new FakeNotificationSender();
@@ -333,9 +333,19 @@ describe("DropshipReturnService", () => {
     const result = await service.createRma({
       vendorId: 10,
       rmaNumber: "RMA-100",
+      storeConnectionId: 70,
+      intakeId: 44,
+      omsOrderId: 9001,
       returnWindowDays: 30,
       items: [
-        { productVariantId: 20, quantity: 2, requestedCreditCents: 1500 },
+        {
+          source: "order",
+          orderLineIndex: 0,
+          externalLineItemId: "line-20",
+          productVariantId: 20,
+          quantity: 2,
+          requestedCreditCents: 1500,
+        },
       ],
       idempotencyKey: "create-rma-100",
       actor: { actorType: "admin", actorId: "admin-1" },
@@ -363,6 +373,103 @@ describe("DropshipReturnService", () => {
         status: "requested",
       },
     });
+  });
+
+  it("rejects empty administrator-created RMAs", async () => {
+    const service = makeService(new FakeReturnRepository(), []);
+
+    await expect(
+      service.createRma({
+        vendorId: 10,
+        rmaNumber: "RMA-NO-ITEMS",
+        returnWindowDays: 30,
+        items: [],
+        idempotencyKey: "admin-rma-no-items",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      }),
+    ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+  });
+
+  it("rejects fabricated, duplicate, or excessive admin order-line returns", async () => {
+    const service = makeService(new FakeReturnRepository(), []);
+    const base = {
+      vendorId: 10,
+      storeConnectionId: 70,
+      intakeId: 44,
+      omsOrderId: 9001,
+      rmaNumber: "RMA-INVALID-LINE",
+      returnWindowDays: 30,
+      idempotencyKey: "admin-rma-invalid-line",
+      actor: { actorType: "admin" as const, actorId: "admin-1" },
+    };
+
+    await expect(service.createRma({
+      ...base,
+      items: [{ source: "order", orderLineIndex: 99, productVariantId: 20, quantity: 1 }],
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+    await expect(service.createRma({
+      ...base,
+      idempotencyKey: "admin-rma-wrong-variant",
+      items: [{ source: "order", orderLineIndex: 0, productVariantId: 21, quantity: 1 }],
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+    await expect(service.createRma({
+      ...base,
+      idempotencyKey: "admin-rma-over-quantity",
+      items: [{ source: "order", orderLineIndex: 0, productVariantId: 20, quantity: 3 }],
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+    await expect(service.createRma({
+      ...base,
+      idempotencyKey: "admin-rma-duplicate-line",
+      items: [
+        { source: "order", orderLineIndex: 0, productVariantId: 20, quantity: 1 },
+        { source: "order", orderLineIndex: 0, productVariantId: 20, quantity: 1 },
+      ],
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+  });
+
+  it("requires audited, identifiable manual exceptions for admin RMAs", async () => {
+    const repository = new FakeReturnRepository();
+    const service = makeService(repository, []);
+    const base = {
+      vendorId: 10,
+      rmaNumber: "RMA-MANUAL",
+      returnWindowDays: 30,
+      idempotencyKey: "admin-rma-manual",
+      actor: { actorType: "admin" as const, actorId: "admin-1" },
+    };
+
+    await expect(service.createRma({
+      ...base,
+      items: [{ source: "manual_exception", quantity: 1, exceptionReason: "Not on order" }],
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+
+    await service.createRma({
+      ...base,
+      items: [{
+        source: "manual_exception",
+        quantity: 1,
+        manualDescription: "Unmapped marketplace bonus item",
+        exceptionReason: "Marketplace line was absent from intake payload",
+      }],
+    });
+    expect(repository.lastCreateInput?.items[0]).toMatchObject({
+      source: "manual_exception",
+      manualDescription: "Unmapped marketplace bonus item",
+      exceptionReason: "Marketplace line was absent from intake payload",
+      status: "requested",
+    });
+  });
+
+  it("rejects legacy item rows on administrator-created RMAs", async () => {
+    const service = makeService(new FakeReturnRepository(), []);
+    await expect(service.createRma({
+      vendorId: 10,
+      rmaNumber: "RMA-LEGACY",
+      returnWindowDays: 30,
+      items: [{ productVariantId: 20, quantity: 1 }],
+      idempotencyKey: "admin-rma-legacy",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
   });
 
   it("updates status with idempotency, request hash, actor, and clock context", async () => {
@@ -644,7 +751,12 @@ describe("DropshipReturnService", () => {
       vendorId: 10,
       rmaNumber: "RMA-FAIL-NOTIFY",
       returnWindowDays: 30,
-      items: [],
+      items: [{
+        source: "manual_exception",
+        quantity: 1,
+        manualDescription: "Unmapped returned item",
+        exceptionReason: "Notification failure test fixture",
+      }],
       idempotencyKey: "create-rma-notify-fail",
       actor: { actorType: "admin", actorId: "admin-1" },
     });
@@ -1107,6 +1219,11 @@ class FakeReturnRepository implements DropshipReturnRepository {
       rmaItemId: 1,
       rmaId: 1,
       productVariantId: 20,
+      source: "order",
+      orderLineIndex: 0,
+      externalLineItemId: "line-20",
+      manualDescription: null,
+      exceptionReason: null,
       quantity: 2,
       status: "requested",
       requestedCreditCents: null,
@@ -1485,8 +1602,18 @@ function makeOrderReference(
     omsOrderId: 9001,
     acceptedAt: new Date("2026-05-01T19:00:00.000Z"),
     lines: [
-      { lineIndex: 0, productVariantId: 20, quantity: 2 },
-      { lineIndex: 1, productVariantId: 21, quantity: 1 },
+      {
+        lineIndex: 0,
+        externalLineItemId: "line-20",
+        productVariantId: 20,
+        quantity: 2,
+      },
+      {
+        lineIndex: 1,
+        externalLineItemId: "line-21",
+        productVariantId: 21,
+        quantity: 1,
+      },
     ],
     ...overrides,
   };
