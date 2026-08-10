@@ -160,7 +160,8 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Orders", icon: Globe, href: "/oms/orders" },
-      { label: "Returns", icon: RotateCcw, href: "/returns" },
+      { label: "Return Receiving", icon: RotateCcw, href: "/returns" },
+      { label: "Return Policies", icon: FileText, href: "/return-policies", roles: ["admin"] },
       { label: "Order History", icon: History, href: "/order-history" },
     ],
   },
