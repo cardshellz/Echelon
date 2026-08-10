@@ -4406,9 +4406,10 @@ export default function ProductDetail() {
                 )}
 
                 {/* Simple blocked message for shipments-only blocking (no inventory) */}
-                {archiveDeps.blocked && archiveDeps.dependencies.inventory.totalQty === 0 && (
-                  <p className="text-xs text-red-600 bg-red-50 dark:bg-red-900/20 dark:text-red-400 p-2 rounded">
-                    This product has pending shipments. Complete or cancel them before archiving.
+                {archiveDeps.dependencies.shipments.pending > 0 && (
+                  <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-400 p-2 rounded">
+                    {archiveDeps.dependencies.shipments.pending} in-flight shipment item(s) will complete normally
+                    on the archived product — fulfillment resolves by variant id, not SKU. Safe to archive now.
                   </p>
                 )}
               </div>
@@ -4425,7 +4426,6 @@ export default function ProductDetail() {
                 disabled={
                   archiveMutation.isPending ||
                   archiveScanning ||
-                  (archiveDeps.blocked && archiveDeps.dependencies.shipments.pending > 0 && archiveDeps.dependencies.inventory.totalQty === 0) ||
                   (transferMode && !transferTargetVariant)
                 }
                 className="min-h-[44px]"
@@ -4666,9 +4666,10 @@ export default function ProductDetail() {
                   </div>
                 )}
 
-                {variantArchiveDeps.blocked && variantArchiveDeps.dependencies.inventory.totalQty === 0 && (
-                  <p className="text-xs text-red-600 bg-red-50 dark:bg-red-900/20 dark:text-red-400 p-2 rounded">
-                    Pending shipments must be completed or cancelled before archiving.
+                {variantArchiveDeps.dependencies.shipments.pending > 0 && (
+                  <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-400 p-2 rounded">
+                    {variantArchiveDeps.dependencies.shipments.pending} in-flight shipment item(s) will complete
+                    normally on the archived SKU — fulfillment resolves by variant id, not SKU. Safe to archive now.
                   </p>
                 )}
               </div>
@@ -4685,7 +4686,6 @@ export default function ProductDetail() {
                 disabled={
                   variantArchiveMutation.isPending ||
                   variantArchiveScanning ||
-                  (variantArchiveDeps.blocked && variantArchiveDeps.dependencies.shipments.pending > 0 && variantArchiveDeps.dependencies.inventory.totalQty === 0) ||
                   (variantTransferMode && !variantTransferTarget)
                 }
                 className="min-h-[44px]"

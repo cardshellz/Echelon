@@ -1136,6 +1136,8 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               AND COALESCE(oi.requires_shipping, 1) <> 0
               AND COALESCE(oi.quantity, 0) > 0
               AND oi.status NOT IN ('cancelled', 'completed', 'short')
+              -- physically picked = not pickable, whatever the label says
+              AND COALESCE(oi.picked_quantity, 0) < COALESCE(oi.quantity, 0)
           )
       `);
       const zombieFixed: string[] = [];

@@ -323,6 +323,12 @@ class ReservationService {
           continue;
         }
 
+        // Non-stock item: nothing to reserve, never a shortfall (mirrors the
+        // confirmation-only pick path in picking.use-cases._deductInventory).
+        if (variant.trackInventory === false) {
+          continue;
+        }
+
         // 2. Reserve via ATP-gated method
         const res = await this.reserveForOrder(
           variant.productId,

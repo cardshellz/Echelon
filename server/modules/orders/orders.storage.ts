@@ -488,6 +488,8 @@ export const orderMethods: IOrderStorage = {
                 AND COALESCE(open_items.requires_shipping, 1) <> 0
                 AND COALESCE(open_items.quantity, 0) > COALESCE(open_items.fulfilled_quantity, 0)
                 AND open_items.status NOT IN ('cancelled', 'completed', 'short')
+                -- physically picked = not pickable, whatever the label says
+                AND COALESCE(open_items.picked_quantity, 0) < COALESCE(open_items.quantity, 0)
             )
           )
         )
@@ -506,6 +508,8 @@ export const orderMethods: IOrderStorage = {
                 AND COALESCE(oi.requires_shipping, 1) <> 0
                 AND COALESCE(oi.quantity, 0) > 0
                 AND oi.status NOT IN ('cancelled', 'completed', 'short')
+                -- physically picked = not pickable, whatever the label says
+                AND COALESCE(oi.picked_quantity, 0) < COALESCE(oi.quantity, 0)
             )
           )
           -- Completed orders: show for 24 hours in done queue
@@ -763,7 +767,10 @@ export const orderMethods: IOrderStorage = {
       if (["ready", "in_progress"].includes(order.warehouseStatus)) {
         const items = itemsByOrderId.get(order.id) || [];
         const pendingShippable = items.filter(
-          i => i.requiresShipping === 1 && !["cancelled", "completed", "short"].includes(i.status),
+          i => i.requiresShipping === 1
+            && !["cancelled", "completed", "short"].includes(i.status)
+            // physically picked = not pickable, whatever the label says
+            && (i.pickedQuantity ?? 0) < (i.quantity ?? 0),
         );
         if (pendingShippable.length === 0) {
           try {
