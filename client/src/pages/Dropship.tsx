@@ -426,7 +426,6 @@ interface ReturnCreateItemFormState {
 
 interface ReturnCreateFormState {
   vendorId: string;
-  rmaNumber: string;
   storeConnectionId: string;
   intakeId: string;
   omsOrderId: string;
@@ -613,7 +612,6 @@ const emptyReturnCreateItemForm: ReturnCreateItemFormState = {
 
 const emptyReturnCreateForm: ReturnCreateFormState = {
   vendorId: "",
-  rmaNumber: "",
   storeConnectionId: "",
   intakeId: "",
   omsOrderId: "",
@@ -3725,11 +3723,16 @@ function ReturnOpsTab() {
         }),
       ]);
     } catch (caught) {
-      setError(
+      const message =
         caught instanceof Error
           ? caught.message
-          : "Dropship return creation failed.",
-      );
+          : "Dropship return creation failed.";
+      setError(message);
+      toast({
+        title: "RMA not created",
+        description: message,
+        variant: "destructive",
+      });
     } finally {
       setCreatingRma(false);
     }
@@ -10711,7 +10714,12 @@ function ReturnCreatePanel({
       <div className="mt-4 grid gap-4 xl:grid-cols-[0.9fr_1.3fr]">
         <div className="grid gap-3 md:grid-cols-2">
           <SearchableOptionPicker label="Vendor" value={form.vendorId} disabled={isSaving} options={vendorOptions} isLoading={vendorsLoading} placeholder="Select vendor" searchPlaceholder="Search vendor, email, or member..." emptyText="No dropship vendors found." onChange={selectVendor} />
-          <AdminReturnInput label="RMA number" value={form.rmaNumber} disabled={isSaving} onChange={(value) => onChange({ rmaNumber: value })} />
+          <div className="space-y-1">
+            <div className="text-sm font-medium">RMA number</div>
+            <div className="flex min-h-10 items-center rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground">
+              Assigned automatically when created
+            </div>
+          </div>
           <SearchableOptionPicker label="Store connection" value={form.storeConnectionId} disabled={isSaving} clearable clearLabel="No store connection" options={storeConnectionOptions} isLoading={storeConnectionsLoading} placeholder="Optional" searchPlaceholder="Search store, vendor, or email..." emptyText="No store connections found." onChange={selectStoreConnection} />
           <SearchableOptionPicker label="Source order" value={form.intakeId} disabled={isSaving} clearable clearLabel="No source order" options={intakeOptions} isLoading={intakesLoading} placeholder="Select order" searchPlaceholder="Search marketplace order, OMS order, store, or vendor..." emptyText="No dropship orders found." onChange={selectIntake} />
           <SearchableOptionPicker label="OMS order" value={form.omsOrderId} disabled={isSaving} clearable clearLabel="No OMS order" options={omsOrderOptions} isLoading={intakesLoading} placeholder="Inferred from source order" searchPlaceholder="Search OMS order, intake, or marketplace order..." emptyText="No OMS orders found." onChange={selectOmsOrder} />

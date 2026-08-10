@@ -126,7 +126,9 @@ const rmaItemInputSchema = z
 
 const createDropshipRmaRequestSchema = z
   .object({
-    rmaNumber: z.string().trim().min(1).max(80),
+    // Legacy clients may still send this field. It is intentionally ignored;
+    // the repository obtains the public RMA number from the database.
+    rmaNumber: z.string().trim().min(1).max(80).optional(),
     storeConnectionId: positiveIdSchema.nullable().optional(),
     intakeId: positiveIdSchema.nullable().optional(),
     omsOrderId: positiveIdSchema.nullable().optional(),
@@ -390,6 +392,10 @@ const processDropshipRmaInspectionInputSchema = z
 export type CreateDropshipRmaInput = z.infer<
   typeof createDropshipRmaInputSchema
 >;
+export type NormalizedCreateDropshipRmaInput = Omit<
+  CreateDropshipRmaInput,
+  "rmaNumber"
+>;
 export type CreateDropshipMemberRmaInput = z.infer<
   typeof createDropshipMemberRmaInputSchema
 >;
@@ -593,7 +599,10 @@ export interface DropshipReturnRepository {
       DropshipReturnPolicyCommandContext,
   ): Promise<DropshipReturnPolicyMutationResult>;
   createRma(
-    input: CreateDropshipRmaInput & { requestHash: string; now: Date },
+    input: NormalizedCreateDropshipRmaInput & {
+      requestHash: string;
+      now: Date;
+    },
   ): Promise<{
     rma: DropshipRmaDetail;
     idempotentReplay: boolean;
@@ -879,9 +888,10 @@ export class DropshipReturnService {
       input,
       "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
     );
-    const requestHash = hashDropshipRmaCreate(parsed);
+    const { rmaNumber: _legacyRmaNumber, ...systemNumberedInput } = parsed;
+    const requestHash = hashDropshipRmaCreate(systemNumberedInput);
     const result = await this.deps.repository.createRma({
-      ...parsed,
+      ...systemNumberedInput,
       requestHash,
       now,
     });
@@ -1384,10 +1394,11 @@ export class DropshipReturnService {
   }
 }
 
-export function hashDropshipRmaCreate(input: CreateDropshipRmaInput): string {
+export function hashDropshipRmaCreate(
+  input: NormalizedCreateDropshipRmaInput,
+): string {
   return hashReturnRequest({
     vendorId: input.vendorId,
-    rmaNumber: input.rmaNumber,
     storeConnectionId: input.storeConnectionId ?? null,
     intakeId: input.intakeId ?? null,
     omsOrderId: input.omsOrderId ?? null,

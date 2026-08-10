@@ -59,7 +59,6 @@ const returnFaultOptions: Array<DropshipReturnFaultCategory | "none"> = [
 let returnItemClientCounter = 0;
 
 interface PortalReturnCreateFormState {
-  rmaNumber: string;
   intakeId: string;
   reasonCode: string;
   faultCategory: DropshipReturnFaultCategory | "none";
@@ -78,7 +77,6 @@ interface PortalReturnCreateItemFormState {
 
 function createInitialReturnCreateForm(): PortalReturnCreateFormState {
   return {
-    rmaNumber: "",
     intakeId: "",
     reasonCode: "",
     faultCategory: "none",
@@ -166,7 +164,6 @@ export default function DropshipPortalReturns() {
         }));
       const input = buildPortalReturnCreateInput({
         idempotencyKey: createDropshipIdempotencyKey("portal-rma-create"),
-        rmaNumber: createForm.rmaNumber,
         intakeId: createForm.intakeId,
         reasonCode: createForm.reasonCode,
         faultCategory: createForm.faultCategory,
@@ -461,14 +458,10 @@ function CreateReturnSheet({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label htmlFor="portal-rma-number">RMA number</Label>
-              <Input
-                id="portal-rma-number"
-                value={form.rmaNumber}
-                onChange={(event) => onChange("rmaNumber", event.target.value)}
-                maxLength={80}
-                required
-              />
+              <Label>RMA number</Label>
+              <div className="flex min-h-10 items-center rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground">
+                Assigned automatically when submitted
+              </div>
             </div>
             <div className="space-y-2">
               <Label htmlFor="portal-return-tracking">Return tracking</Label>

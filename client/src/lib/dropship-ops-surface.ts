@@ -2293,7 +2293,6 @@ export interface DropshipAdminReturnSourceOrderResponse {
 
 export interface DropshipAdminReturnCreateInput {
   vendorId: number;
-  rmaNumber: string;
   storeConnectionId?: number | null;
   intakeId?: number | null;
   omsOrderId?: number | null;
@@ -2319,7 +2318,6 @@ export interface DropshipPortalReturnCreateItemInput {
 }
 
 export interface DropshipPortalReturnCreateInput {
-  rmaNumber: string;
   intakeId?: number | null;
   reasonCode?: string | null;
   faultCategory?: DropshipReturnFaultCategory | null;
@@ -3228,7 +3226,6 @@ export function buildAdminReturnStatusUpdateInput(input: {
 export function buildAdminReturnCreateInput(input: {
   idempotencyKey: string;
   vendorId: string;
-  rmaNumber: string;
   storeConnectionId: string;
   intakeId: string;
   omsOrderId: string;
@@ -3249,7 +3246,6 @@ export function buildAdminReturnCreateInput(input: {
   }>;
 }): DropshipAdminReturnCreateInput {
   const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
-  const rmaNumber = requiredTrimmedString(input.rmaNumber, "rmaNumber", 80);
   const reasonCode = input.reasonCode || null;
   const labelSource = input.labelSource || null;
   const returnTrackingNumber = input.returnTrackingNumber.trim() || null;
@@ -3320,7 +3316,6 @@ export function buildAdminReturnCreateInput(input: {
 
   return {
     vendorId: parsePositiveInteger(input.vendorId, "vendorId"),
-    rmaNumber,
     storeConnectionId: parseOptionalPositiveInteger(
       input.storeConnectionId,
       "storeConnectionId",
@@ -3369,7 +3364,6 @@ export function buildAdminReturnPolicyInput(input: {
 
 export function buildPortalReturnCreateInput(input: {
   idempotencyKey: string;
-  rmaNumber: string;
   intakeId: string;
   reasonCode: string;
   faultCategory: DropshipReturnFaultCategory | "none";
@@ -3383,7 +3377,6 @@ export function buildPortalReturnCreateInput(input: {
   }>;
 }): DropshipPortalReturnCreateInput {
   const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
-  const rmaNumber = requiredTrimmedString(input.rmaNumber, "rmaNumber", 80);
   const intakeId = parsePositiveInteger(input.intakeId, "intakeId");
   const vendorNotes = optionalTrimmedString(
     input.vendorNotes,
@@ -3405,7 +3398,6 @@ export function buildPortalReturnCreateInput(input: {
     };
   });
   return {
-    rmaNumber,
     intakeId,
     reasonCode: optionalTrimmedString(input.reasonCode, "reasonCode", 255),
     faultCategory: input.faultCategory === "none" ? null : input.faultCategory,

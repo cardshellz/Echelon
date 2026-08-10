@@ -739,7 +739,6 @@ describe("dropship ops surface client helpers", () => {
       buildAdminReturnCreateInput({
         idempotencyKey: "return-create-1",
         vendorId: " 12 ",
-        rmaNumber: " RMA-1001 ",
         storeConnectionId: "34",
         intakeId: "44",
         omsOrderId: "56",
@@ -773,7 +772,6 @@ describe("dropship ops surface client helpers", () => {
     ).toEqual({
       idempotencyKey: "return-create-1",
       vendorId: 12,
-      rmaNumber: "RMA-1001",
       storeConnectionId: 34,
       intakeId: 44,
       omsOrderId: 56,
@@ -812,7 +810,6 @@ describe("dropship ops surface client helpers", () => {
     const base = {
       idempotencyKey: "return-create-2",
       vendorId: "12",
-      rmaNumber: "RMA-1002",
       storeConnectionId: "34",
       intakeId: "44",
       omsOrderId: "56",
@@ -824,9 +821,6 @@ describe("dropship ops surface client helpers", () => {
       vendorNotes: "",
     };
 
-    expect(() =>
-      buildAdminReturnCreateInput({ ...base, rmaNumber: "", items: [] }),
-    ).toThrow("rmaNumber is required.");
     expect(() =>
       buildAdminReturnCreateInput({ ...base, items: [] }),
     ).toThrow("At least one return item is required.");
@@ -867,7 +861,6 @@ describe("dropship ops surface client helpers", () => {
     expect(
       buildPortalReturnCreateInput({
         idempotencyKey: "portal-return-create-1",
-        rmaNumber: " RMA-VENDOR-1 ",
         intakeId: "44",
         reasonCode: " wrong_item ",
         faultCategory: "marketplace",
@@ -889,7 +882,6 @@ describe("dropship ops surface client helpers", () => {
       }),
     ).toEqual({
       idempotencyKey: "portal-return-create-1",
-      rmaNumber: "RMA-VENDOR-1",
       intakeId: 44,
       reasonCode: "wrong_item",
       faultCategory: "marketplace",
@@ -912,7 +904,6 @@ describe("dropship ops surface client helpers", () => {
     expect(
       buildPortalReturnCreateInput({
         idempotencyKey: "portal-return-create-2",
-        rmaNumber: "RMA-VENDOR-2",
         intakeId: "45",
         reasonCode: "",
         faultCategory: "none",
@@ -925,7 +916,6 @@ describe("dropship ops surface client helpers", () => {
     expect(
       buildPortalReturnCreateInput({
         idempotencyKey: "portal-return-create-3",
-        rmaNumber: "RMA-VENDOR-3",
         intakeId: "45",
         reasonCode: "",
         faultCategory: "none",
@@ -938,7 +928,6 @@ describe("dropship ops surface client helpers", () => {
     expect(() =>
       buildPortalReturnCreateInput({
         idempotencyKey: "portal-return-create-4",
-        rmaNumber: "RMA-VENDOR-4",
         intakeId: "",
         reasonCode: "",
         faultCategory: "none",
