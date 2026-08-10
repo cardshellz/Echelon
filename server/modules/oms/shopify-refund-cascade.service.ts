@@ -70,6 +70,15 @@ export interface ShopifyRefundCascadeHelpers {
     }) => Promise<unknown>;
   };
   pushShipment?: (shipmentId: number) => Promise<unknown>;
+  recordReturnCase?: (args: {
+    tx: any;
+    channelId: number;
+    omsOrderId: number;
+    wmsOrderId: number;
+    wmsReturnId: number;
+    refundExternalId: string;
+    now: Date;
+  }) => Promise<unknown>;
 }
 
 export interface ShopifyRefundCascadeOptions {
@@ -900,6 +909,8 @@ async function applyInternalRefundState(
     sourceInboxId: number | null;
     now: Date;
     canPushShipment: boolean;
+    channelId: number;
+    recordReturnCase?: ShopifyRefundCascadeHelpers["recordReturnCase"];
   },
 ): Promise<InternalRefundResult> {
   return db.transaction(async (tx: any) => {
@@ -969,6 +980,17 @@ async function applyInternalRefundState(
       wmsItems: wmsResult.items,
       now: args.now,
     });
+    if (expectedReturn.returnId !== null && args.recordReturnCase) {
+      await args.recordReturnCase({
+        tx,
+        channelId: args.channelId,
+        omsOrderId: args.omsOrderId,
+        wmsOrderId: args.wmsOrderId,
+        wmsReturnId: expectedReturn.returnId,
+        refundExternalId: args.refundExternalId,
+        now: args.now,
+      });
+    }
 
     return {
       insertedAdjustments,
@@ -1296,6 +1318,8 @@ export async function applyShopifyRefundCascade(
     sourceInboxId: options.sourceInboxId ?? null,
     now,
     canPushShipment: typeof helpers.pushShipment === "function",
+    channelId: options.channelId,
+    recordReturnCase: helpers.recordReturnCase,
   });
 
   let releasedReservationQuantity = 0;

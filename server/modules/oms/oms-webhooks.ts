@@ -56,12 +56,14 @@ import {
   enqueueShipStationShipmentPushRetry,
 } from "./webhook-retry.worker";
 import type { ShippingEngine } from "../shipping/engine";
+import { recordShopifyRefundReturnCase } from "../returns/application/shopify-return-case.service";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const LOG_PREFIX = "[OMS Shopify Webhook]";
+const RETURN_CASE_SHOPIFY_RUNTIME_ENABLED = process.env.RETURN_CASE_SHOPIFY_RUNTIME_ENABLED === "true";
 
 function authorityLinePatch(state: OmsLineAuthorityState) {
   return {
@@ -1990,6 +1992,9 @@ export function registerOmsWebhooks(
                   }
                 }
               : undefined,
+          recordReturnCase: RETURN_CASE_SHOPIFY_RUNTIME_ENABLED
+            ? recordShopifyRefundReturnCase
+            : undefined,
         },
         {
           channelId,

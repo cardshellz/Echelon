@@ -26,6 +26,7 @@ import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import { RotateCcw, Search, Package, AlertCircle } from "lucide-react";
 import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
+import { ReturnCaseAdminPanel } from "@/components/returns/ReturnCaseAdminPanel";
 
 interface OrderLookup {
   order: {
@@ -228,6 +229,8 @@ export default function Returns() {
           Process customer returns and restock inventory
         </p>
       </div>
+
+      <ReturnCaseAdminPanel />
 
       {/* Order Search */}
       <Card>
