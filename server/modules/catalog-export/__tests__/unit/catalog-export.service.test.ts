@@ -28,6 +28,12 @@ function snapshot(overrides: Partial<CatalogVariantSnapshot> = {}): CatalogVaria
     variantIsActive: true,
     productUpdatedAt: new Date("2026-08-01T12:00:00.000Z"),
     variantUpdatedAt: new Date("2026-08-02T12:00:00.000Z"),
+    externalIdentifiers: [{
+      provider: "shopify",
+      scope: "cardshellz.myshopify.com",
+      identifierType: "variant_id",
+      value: "62621541925023",
+    }],
     ...overrides,
   };
 }
@@ -53,10 +59,18 @@ describe("CatalogExportService", () => {
         externalItemId: "variant:11",
         externalParentId: "product:7",
         name: "Shellz Club annual membership",
+        parentName: "Shellz Club",
+        variantName: "Shellz Club annual membership",
         sku: "SHLZ-CLUB-ANNUAL-US",
         kind: "non_inventory",
         status: "active",
         sourceUpdatedAt: "2026-08-02T12:00:00.000Z",
+        identifiers: [{
+          provider: "shopify",
+          scope: "cardshellz.myshopify.com",
+          identifierType: "variant_id",
+          value: "62621541925023",
+        }],
       }],
     });
     expect(page.nextCursor).not.toBeNull();

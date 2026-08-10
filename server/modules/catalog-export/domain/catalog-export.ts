@@ -13,6 +13,13 @@ const sourceIdSchema = z.string().trim().min(1).max(255);
 export type CatalogExportItemKind = "inventory" | "non_inventory" | "service" | "unknown";
 export type CatalogExportItemStatus = "active" | "archived";
 
+export interface CatalogExternalIdentifier {
+  provider: string;
+  scope: string;
+  identifierType: "product_id" | "variant_id" | "sku";
+  value: string;
+}
+
 export interface CatalogVariantSnapshot {
   variantId: number;
   productId: number;
@@ -31,18 +38,22 @@ export interface CatalogVariantSnapshot {
   variantIsActive: boolean;
   productUpdatedAt: Date;
   variantUpdatedAt: Date;
+  externalIdentifiers: CatalogExternalIdentifier[];
 }
 
 export interface NormalizedCatalogExportItem {
   externalItemId: string;
   externalParentId: string;
   name: string;
+  parentName: string;
+  variantName: string | null;
   sku: string | null;
   gtin: string | null;
   kind: CatalogExportItemKind;
   status: CatalogExportItemStatus;
   sourceUpdatedAt: string;
   attributes: Record<string, string | number | boolean | null>;
+  identifiers: CatalogExternalIdentifier[];
 }
 
 export interface NormalizedCatalogExportPage {
@@ -114,6 +125,12 @@ function resolvedItemName(snapshot: CatalogVariantSnapshot): string {
   throw new TypeError(`Catalog variant ${snapshot.variantId} has no usable name.`);
 }
 
+function resolvedParentName(snapshot: CatalogVariantSnapshot): string {
+  const productName = snapshot.productName.trim();
+  if (productName) return productName;
+  throw new TypeError(`Catalog product ${snapshot.productId} has no usable name.`);
+}
+
 export function normalizeCatalogVariant(snapshot: CatalogVariantSnapshot): NormalizedCatalogExportItem {
   if (!Number.isSafeInteger(snapshot.variantId) || snapshot.variantId < 1) {
     throw new TypeError("Catalog variant ID must be a positive safe integer.");
@@ -133,6 +150,8 @@ export function normalizeCatalogVariant(snapshot: CatalogVariantSnapshot): Norma
     externalItemId: `variant:${snapshot.variantId}`,
     externalParentId: `product:${snapshot.productId}`,
     name: resolvedItemName(snapshot),
+    parentName: resolvedParentName(snapshot),
+    variantName: normalizedOptionalIdentifier(snapshot.variantName),
     sku: normalizedOptionalIdentifier(snapshot.variantSku),
     gtin: normalizedOptionalIdentifier(snapshot.gtin),
     kind: catalogItemKind(snapshot.inventoryType),
@@ -148,5 +167,11 @@ export function normalizeCatalogVariant(snapshot: CatalogVariantSnapshot): Norma
       baseUnit: snapshot.baseUnit,
       sourceInventoryType: snapshot.inventoryType,
     },
+    identifiers: [...snapshot.externalIdentifiers].sort((left, right) => (
+      left.provider.localeCompare(right.provider)
+      || left.scope.localeCompare(right.scope)
+      || left.identifierType.localeCompare(right.identifierType)
+      || left.value.localeCompare(right.value)
+    )),
   };
 }
