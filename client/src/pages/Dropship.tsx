@@ -422,7 +422,6 @@ interface ReturnCreateItemFormState {
   manualDescription: string;
   exceptionReason: string;
   quantity: string;
-  requestedCreditAmount: string;
 }
 
 interface ReturnCreateFormState {
@@ -610,7 +609,6 @@ const emptyReturnCreateItemForm: ReturnCreateItemFormState = {
   manualDescription: "",
   exceptionReason: "",
   quantity: "1",
-  requestedCreditAmount: "",
 };
 
 const emptyReturnCreateForm: ReturnCreateFormState = {
@@ -10588,6 +10586,14 @@ function ReturnCreatePanel({
   vendorOptions: DropshipSelectOption[];
   vendorsLoading: boolean;
 }) {
+  function formatSourceOrderPrice(cents: number | null, currency: string | null): string {
+    if (!Number.isSafeInteger(cents) || cents === null || cents < 0) return "Not recorded";
+    const dollars = Math.trunc(cents / 100);
+    const remainder = cents % 100;
+    const amount = `${dollars.toLocaleString("en-US")}.${String(remainder).padStart(2, "0")}`;
+    return currency ? `${currency} ${amount}` : amount;
+  }
+
   const storeConnectionOptions = storeConnections.map(storeConnectionSelectOption);
   const intakeOptions = intakes.map(orderIntakeSelectOption);
   const omsOrderOptions = buildOmsOrderSelectOptions(intakes);
@@ -10682,7 +10688,6 @@ function ReturnCreatePanel({
           manualDescription: line.title ?? line.sku ?? "Order item",
           exceptionReason: "",
           quantity: String(line.quantity),
-          requestedCreditAmount: "",
         },
       ],
     });
@@ -10810,18 +10815,16 @@ function ReturnCreatePanel({
                           <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                             <span>SKU: {line.sku ?? "Not provided"}</span>
                             <span>Ordered: {line.quantity}</span>
+                            <span>Unit price: {formatSourceOrderPrice(line.unitRetailPriceCents, order.currency)}</span>
+                            <span>Line total: {formatSourceOrderPrice(line.lineRetailTotalCents, order.currency)}</span>
                           </div>
                         </div>
                       </div>
                       {selectedItem && itemIndex >= 0 ? (
-                        <div className="mt-3 grid gap-3 border-t pt-3 sm:grid-cols-2">
+                        <div className="mt-3 border-t pt-3 sm:max-w-xs">
                           <div>
                             <label className="text-xs font-medium">Return quantity</label>
                             <Input className="mt-1" type="number" min={1} max={line.quantity} value={selectedItem.quantity} disabled={isSaving} onChange={(event) => onItemChange(itemIndex, { quantity: event.target.value })} />
-                          </div>
-                          <div>
-                            <label className="text-xs font-medium">Requested credit (optional)</label>
-                            <Input className="mt-1" inputMode="decimal" placeholder="0.00" value={selectedItem.requestedCreditAmount} disabled={isSaving} onChange={(event) => onItemChange(itemIndex, { requestedCreditAmount: event.target.value })} />
                           </div>
                         </div>
                       ) : null}
@@ -10856,7 +10859,6 @@ function ReturnCreatePanel({
                       <ProductVariantSkuPicker clearable disabled={isSaving} isLoading={variantsLoading} label="Catalog variant (optional)" placeholder="Search SKU" variants={variants} value={item.productVariantId} onChange={(value) => onItemChange(index, { productVariantId: value })} />
                       <AdminReturnInput label="Item description" value={item.manualDescription} placeholder="Required when no catalog variant is selected" disabled={isSaving} onChange={(value) => onItemChange(index, { manualDescription: value })} />
                       <AdminReturnInput label="Quantity" value={item.quantity} disabled={isSaving} onChange={(value) => onItemChange(index, { quantity: value })} />
-                      <AdminReturnInput label="Requested credit (optional)" value={item.requestedCreditAmount} placeholder="0.00" disabled={isSaving} onChange={(value) => onItemChange(index, { requestedCreditAmount: value })} />
                       <div className="sm:col-span-2">
                         <label className="text-sm font-medium">Exception reason *</label>
                         <Textarea className="mt-2 min-h-20" maxLength={2000} value={item.exceptionReason} onChange={(event) => onItemChange(index, { exceptionReason: event.target.value })} disabled={isSaving} placeholder="Explain why this item cannot be tied to an order line." />

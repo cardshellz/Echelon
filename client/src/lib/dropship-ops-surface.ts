@@ -2245,7 +2245,6 @@ export interface DropshipAdminReturnCreateItemInput {
   exceptionReason: string | null;
   quantity: number;
   status: "requested";
-  requestedCreditCents: number | null;
 }
 
 export const DROPSHIP_ADMIN_RMA_REASON_CODES = [
@@ -2274,6 +2273,8 @@ export interface DropshipAdminReturnSourceOrderLine {
   sku: string | null;
   title: string | null;
   quantity: number;
+  unitRetailPriceCents: number | null;
+  lineRetailTotalCents: number | null;
 }
 
 export interface DropshipAdminReturnSourceOrder {
@@ -2282,6 +2283,7 @@ export interface DropshipAdminReturnSourceOrder {
   status: DropshipOpsOrderIntakeStatus;
   omsOrderId: number | null;
   acceptedAt: string | null;
+  currency: string | null;
   lines: DropshipAdminReturnSourceOrderLine[];
 }
 
@@ -2314,7 +2316,6 @@ export interface DropshipPortalReturnCreateItemInput {
   productVariantId: number | null;
   quantity: number;
   status: string;
-  requestedCreditCents: number | null;
 }
 
 export interface DropshipPortalReturnCreateInput {
@@ -3245,7 +3246,6 @@ export function buildAdminReturnCreateInput(input: {
     manualDescription: string;
     exceptionReason: string;
     quantity: string;
-    requestedCreditAmount: string;
   }>;
 }): DropshipAdminReturnCreateInput {
   const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
@@ -3265,10 +3265,6 @@ export function buildAdminReturnCreateInput(input: {
   }
 
   const items = input.items.map((item, index) => {
-    const requestedCreditCents = parseNullableDollarInputToCents(
-      item.requestedCreditAmount,
-      `items.${index}.requestedCreditAmount`,
-    );
     const quantity = parsePositiveInteger(
       item.quantity,
       `items.${index}.quantity`,
@@ -3289,7 +3285,6 @@ export function buildAdminReturnCreateInput(input: {
         exceptionReason: null,
         quantity,
         status: "requested" as const,
-        requestedCreditCents,
       };
     }
 
@@ -3320,7 +3315,6 @@ export function buildAdminReturnCreateInput(input: {
       exceptionReason,
       quantity,
       status: "requested" as const,
-      requestedCreditCents,
     };
   });
 
@@ -3386,7 +3380,6 @@ export function buildPortalReturnCreateInput(input: {
     productVariantId: string;
     quantity: string;
     status: string;
-    requestedCreditAmount: string;
   }>;
 }): DropshipPortalReturnCreateInput {
   const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
@@ -3409,10 +3402,6 @@ export function buildPortalReturnCreateInput(input: {
       ),
       quantity: parsePositiveInteger(item.quantity, `items.${index}.quantity`),
       status,
-      requestedCreditCents: parseNullableDollarInputToCents(
-        item.requestedCreditAmount,
-        `items.${index}.requestedCreditAmount`,
-      ),
     };
   });
   return {

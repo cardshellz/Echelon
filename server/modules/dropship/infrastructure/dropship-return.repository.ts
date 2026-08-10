@@ -426,7 +426,7 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
             (rma_id, product_variant_id, source, order_line_index,
              external_line_item_id, manual_description, exception_reason,
              quantity, status, requested_credit_cents, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'requested', $9, $10)`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'requested', NULL, $9)`,
           [
             rmaId,
             item.productVariantId ?? null,
@@ -436,7 +436,6 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
             item.manualDescription ?? null,
             item.exceptionReason ?? null,
             item.quantity,
-            item.requestedCreditCents ?? null,
             input.now,
           ],
         );
@@ -1855,6 +1854,7 @@ function mapRmaOrderReferenceRow(
         ? null
         : safeInteger(row.oms_order_id, "oms_order_id"),
     acceptedAt: row.accepted_at,
+    currency: mapRmaOrderReferenceCurrency(row.normalized_payload),
     lines: mapRmaOrderReferenceLines(row.normalized_payload),
   };
 }
@@ -1878,6 +1878,10 @@ function mapRmaOrderReferenceLines(
   return lines.map((line, index) => {
     const candidate =
       line && typeof line === "object" ? (line as Record<string, unknown>) : {};
+    const quantity = nullablePositiveInteger(candidate.quantity) ?? 0;
+    const unitRetailPriceCents = nullableNonnegativeInteger(
+      candidate.unitRetailPriceCents,
+    );
     return {
       lineIndex: index,
       externalLineItemId:
@@ -1887,9 +1891,25 @@ function mapRmaOrderReferenceLines(
       productVariantId: nullablePositiveInteger(candidate.productVariantId),
       sku: typeof candidate.sku === "string" ? candidate.sku : null,
       title: typeof candidate.title === "string" ? candidate.title : null,
-      quantity: nullablePositiveInteger(candidate.quantity) ?? 0,
+      quantity,
+      unitRetailPriceCents,
+      lineRetailTotalCents:
+        unitRetailPriceCents === null
+          ? null
+          : safeIntegerProduct(unitRetailPriceCents, quantity),
     };
   });
+}
+
+function mapRmaOrderReferenceCurrency(
+  payload: Record<string, unknown> | null,
+): string | null {
+  const totals = payload?.totals;
+  if (!totals || typeof totals !== "object") return null;
+  const currency = (totals as Record<string, unknown>).currency;
+  if (typeof currency !== "string") return null;
+  const normalized = currency.trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(normalized) ? normalized : null;
 }
 
 /**
@@ -2064,6 +2084,11 @@ function nullableNonnegativeInteger(value: unknown): number | null {
     return Number.isSafeInteger(parsed) ? parsed : null;
   }
   return null;
+}
+
+function safeIntegerProduct(left: number, right: number): number | null {
+  const product = left * right;
+  return Number.isSafeInteger(product) ? product : null;
 }
 
 function safeInteger(value: string | number, field: string): number {

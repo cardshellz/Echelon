@@ -74,7 +74,6 @@ interface PortalReturnCreateItemFormState {
   orderLineIndex: string;
   productVariantId: string;
   quantity: string;
-  requestedCreditAmount: string;
 }
 
 function createInitialReturnCreateForm(): PortalReturnCreateFormState {
@@ -96,7 +95,6 @@ function createInitialReturnItem(): PortalReturnCreateItemFormState {
     orderLineIndex: "",
     productVariantId: "",
     quantity: "",
-    requestedCreditAmount: "",
   };
 }
 
@@ -165,7 +163,6 @@ export default function DropshipPortalReturns() {
           productVariantId: item.productVariantId,
           quantity: item.quantity,
           status: "requested",
-          requestedCreditAmount: item.requestedCreditAmount,
         }));
       const input = buildPortalReturnCreateInput({
         idempotencyKey: createDropshipIdempotencyKey("portal-rma-create"),
@@ -559,7 +556,7 @@ function CreateReturnSheet({
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
-                  <div className="grid gap-4 sm:grid-cols-3">
+                  <div className="grid gap-4 sm:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor={`portal-rma-line-${item.clientId}`}>Order line</Label>
                       <Select
@@ -604,15 +601,6 @@ function CreateReturnSheet({
                         inputMode="numeric"
                         value={item.quantity}
                         onChange={(event) => onItemChange(item.clientId, "quantity", event.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor={`portal-rma-credit-${item.clientId}`}>Requested credit</Label>
-                      <Input
-                        id={`portal-rma-credit-${item.clientId}`}
-                        inputMode="decimal"
-                        value={item.requestedCreditAmount}
-                        onChange={(event) => onItemChange(item.clientId, "requestedCreditAmount", event.target.value)}
                       />
                     </div>
                   </div>
@@ -717,9 +705,6 @@ function ReturnDetailSheet({
                         <TableHead>Item</TableHead>
                         <TableHead>Status</TableHead>
                         <TableHead className="text-right">Qty</TableHead>
-                        <TableHead className="text-right">Requested</TableHead>
-                        <TableHead className="text-right">Final</TableHead>
-                        <TableHead className="text-right">Fee</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -733,9 +718,6 @@ function ReturnDetailSheet({
                           </TableCell>
                           <TableCell><Badge variant="outline" className={statusTone(item.status)}>{formatStatus(item.status)}</Badge></TableCell>
                           <TableCell className="text-right font-mono">{item.quantity}</TableCell>
-                          <TableCell className="text-right">{formatNullableCents(item.requestedCreditCents)}</TableCell>
-                          <TableCell className="text-right">{formatNullableCents(item.finalCreditCents)}</TableCell>
-                          <TableCell className="text-right">{formatNullableCents(item.feeCents)}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -935,8 +917,7 @@ function formatNullableCents(value: number | null | undefined): string {
 
 function returnItemFormIsBlank(item: PortalReturnCreateItemFormState): boolean {
   return !item.productVariantId.trim()
-    && !item.quantity.trim()
-    && !item.requestedCreditAmount.trim();
+    && !item.quantity.trim();
 }
 
 function statusTone(status: string): string {

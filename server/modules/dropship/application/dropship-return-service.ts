@@ -86,7 +86,6 @@ const rmaItemInputSchema = z
     exceptionReason: z.string().trim().min(1).max(2000).nullable().optional(),
     quantity: z.number().int().positive(),
     status: z.literal("requested").default("requested"),
-    requestedCreditCents: nonnegativeCentsSchema.nullable().optional(),
   })
   .strict()
   .superRefine((item, ctx) => {
@@ -536,6 +535,8 @@ export interface DropshipRmaOrderLineReference {
   sku: string | null;
   title: string | null;
   quantity: number;
+  unitRetailPriceCents: number | null;
+  lineRetailTotalCents: number | null;
 }
 
 export interface DropshipRmaOrderReference {
@@ -544,6 +545,7 @@ export interface DropshipRmaOrderReference {
   status: DropshipOrderIntakeStatus;
   omsOrderId: number | null;
   acceptedAt: Date | null;
+  currency: string | null;
   lines: DropshipRmaOrderLineReference[];
 }
 
