@@ -68,6 +68,7 @@ import {
   normalizePortalReturnPath,
   normalizeShopifyShopDomainInput,
   orderIntakeRetryEligibility,
+  optionalQueryErrorMessage,
   parseDollarInputToCents,
   queryErrorMessage,
   riskSeverityTone,
@@ -118,6 +119,20 @@ describe("dropship ops surface client helpers", () => {
       queryErrorMessage(new Error("Store connection failed."), "Fallback"),
     ).toBe("Store connection failed.");
     expect(queryErrorMessage({ code: "UNKNOWN" }, "Fallback")).toBe("Fallback");
+  });
+
+  it("does not manufacture a query error before a request fails", () => {
+    expect(optionalQueryErrorMessage(null, "Fallback")).toBeNull();
+    expect(optionalQueryErrorMessage(undefined, "Fallback")).toBeNull();
+    expect(
+      optionalQueryErrorMessage(
+        new Error("Source order failed."),
+        "Fallback",
+      ),
+    ).toBe("Source order failed.");
+    expect(optionalQueryErrorMessage({ code: "UNKNOWN" }, "Fallback")).toBe(
+      "Fallback",
+    );
   });
 
   it("normalizes API status tokens for display", () => {
