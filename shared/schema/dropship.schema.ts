@@ -1965,7 +1965,9 @@ export const dropshipRmas = dropshipSchema.table(
   "dropship_rmas",
   {
     id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-    rmaNumber: varchar("rma_number", { length: 80 }).notNull(),
+    rmaNumber: varchar("rma_number", { length: 80 })
+      .default(sql`dropship.next_rma_number()`)
+      .notNull(),
     vendorId: integer("vendor_id")
       .notNull()
       .references(() => dropshipVendors.id, { onDelete: "cascade" }),

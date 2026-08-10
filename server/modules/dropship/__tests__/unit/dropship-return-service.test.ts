@@ -5,7 +5,6 @@ import type {
 } from "../../application/dropship-ports";
 import {
   DropshipReturnService,
-  type CreateDropshipRmaInput,
   type DropshipReturnPolicyMutationResult,
   type DropshipReturnPolicyRecord,
   type DropshipReturnRepository,
@@ -82,7 +81,6 @@ describe("DropshipReturnService", () => {
     const service = makeService(repository, logs);
 
     const result = await service.createRmaForMember("member-1", {
-      rmaNumber: "RMA-VENDOR-100",
       intakeId: 44,
       reasonCode: "buyer_return",
       faultCategory: "marketplace",
@@ -95,7 +93,7 @@ describe("DropshipReturnService", () => {
       idempotencyKey: "vendor-rma-100",
     });
 
-    expect(result.rma.rmaNumber).toBe("RMA-VENDOR-100");
+    expect(result.rma.rmaNumber).toBe("RMA-00000001");
     expect(repository.lastOrderReferenceInput).toEqual({
       vendorId: 10,
       intakeId: 44,
@@ -105,12 +103,12 @@ describe("DropshipReturnService", () => {
       vendorId: 10,
       storeConnectionId: 70,
       omsOrderId: 9001,
-      rmaNumber: "RMA-VENDOR-100",
       returnWindowDays: 30,
       idempotencyKey: "vendor-rma-100",
       actor: { actorType: "vendor", actorId: "member-1" },
     });
     expect(repository.lastCreateInput?.requestHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(repository.lastCreateInput).not.toHaveProperty("rmaNumber");
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_RMA_CREATED" });
 
     await expect(
@@ -166,10 +164,8 @@ describe("DropshipReturnService", () => {
       idempotencyKey: "vendor-rma-policy-window",
     });
 
-    expect(repository.lastCreateInput).toMatchObject({
-      rmaNumber: "RMA-POLICY-WINDOW",
-      returnWindowDays: 45,
-    });
+    expect(repository.lastCreateInput).toMatchObject({ returnWindowDays: 45 });
+    expect(repository.lastCreateInput).not.toHaveProperty("rmaNumber");
   });
 
   it("rejects member RMAs when no active return policy is configured", async () => {
@@ -192,7 +188,7 @@ describe("DropshipReturnService", () => {
       },
     });
     expect(repository.lastPolicyLookupAt).toEqual(now);
-    expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-NO-POLICY");
+    expect(repository.lastCreateInput).toBeNull();
   });
 
   it("rejects vendor RMA item variants that are not proven by the linked order", async () => {
@@ -226,7 +222,7 @@ describe("DropshipReturnService", () => {
       }),
     ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
 
-    expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-OVER-QTY");
+    expect(repository.lastCreateInput).toBeNull();
   });
 
   it("rejects member RMAs without a linked accepted order intake", async () => {
@@ -241,7 +237,7 @@ describe("DropshipReturnService", () => {
       }),
     ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
     expect(repository.lastOrderReferenceInput).toBeNull();
-    expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-MISSING-LINK");
+    expect(repository.lastCreateInput).toBeNull();
   });
 
   it("rejects member RMA references to unaccepted order intake", async () => {
@@ -267,7 +263,7 @@ describe("DropshipReturnService", () => {
         omsOrderId: null,
       },
     });
-    expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-UNACCEPTED");
+    expect(repository.lastCreateInput).toBeNull();
   });
 
   it("rejects member RMA references outside the return window", async () => {
@@ -295,7 +291,7 @@ describe("DropshipReturnService", () => {
         now: now.toISOString(),
       },
     });
-    expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-EXPIRED");
+    expect(repository.lastCreateInput).toBeNull();
   });
 
   it("creates configurable return policies with idempotency and audit context", async () => {
@@ -405,7 +401,7 @@ describe("DropshipReturnService", () => {
       actor: { actorType: "admin", actorId: "admin-1" },
     });
 
-    expect(result.rma.rmaNumber).toBe("RMA-100");
+    expect(result.rma.rmaNumber).toBe("RMA-00000001");
     expect(repository.lastCreateInput).toMatchObject({
       vendorId: 10,
       idempotencyKey: "create-rma-100",
@@ -423,7 +419,7 @@ describe("DropshipReturnService", () => {
       idempotencyKey: "rma-opened:1",
       payload: {
         rmaId: 1,
-        rmaNumber: "RMA-100",
+        rmaNumber: "RMA-00000001",
         status: "requested",
       },
     });
@@ -849,7 +845,7 @@ describe("DropshipReturnService", () => {
       actor: { actorType: "admin", actorId: "admin-1" },
     });
 
-    expect(result.rma.rmaNumber).toBe("RMA-FAIL-NOTIFY");
+    expect(result.rma.rmaNumber).toBe("RMA-00000001");
     expect(notificationSender.sent).toHaveLength(1);
     expect(
       logs.some(
@@ -1279,7 +1275,7 @@ class FakeReturnRepository implements DropshipReturnRepository {
   lastListInput: Parameters<DropshipReturnRepository["listRmas"]>[0] | null =
     null;
   lastCreateInput:
-    (CreateDropshipRmaInput & { requestHash: string; now: Date }) | null = null;
+    Parameters<DropshipReturnRepository["createRma"]>[0] | null = null;
   lastStatusInput:
     | (UpdateDropshipRmaStatusInput & {
         policyVersionId: number | null;
@@ -1384,14 +1380,14 @@ class FakeReturnRepository implements DropshipReturnRepository {
   }
 
   async createRma(
-    input: CreateDropshipRmaInput & { requestHash: string; now: Date },
+    input: Parameters<DropshipReturnRepository["createRma"]>[0],
   ): Promise<{
     rma: DropshipRmaDetail;
     idempotentReplay: boolean;
   }> {
     this.lastCreateInput = input;
     return {
-      rma: makeRmaDetail({ rmaNumber: input.rmaNumber }),
+      rma: makeRmaDetail({ rmaNumber: "RMA-00000001" }),
       idempotentReplay: false,
     };
   }

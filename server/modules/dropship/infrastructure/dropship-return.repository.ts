@@ -7,7 +7,7 @@ import {
   DROPSHIP_RMA_DEFAULT_NO_SHIP_TIMEOUT_DAYS,
 } from "../domain/rma-state-machine";
 import type {
-  CreateDropshipRmaInput,
+  NormalizedCreateDropshipRmaInput,
   DropshipReturnFaultCategory,
   DropshipReturnPolicyCommandContext,
   DropshipReturnPolicyMutationResult,
@@ -169,7 +169,7 @@ interface WalletLedgerRow {
   settled_at: Date | null;
 }
 
-type CreateRepositoryInput = CreateDropshipRmaInput & {
+type CreateRepositoryInput = NormalizedCreateDropshipRmaInput & {
   requestHash: string;
   now: Date;
 };
@@ -390,16 +390,15 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
         input.vendorId,
         input.intakeId ?? null,
       );
-      const insert = await client.query<{ id: number }>(
+      const insert = await client.query<{ id: number; rma_number: string }>(
         `INSERT INTO dropship.dropship_rmas
-          (rma_number, vendor_id, store_connection_id, intake_id, oms_order_id,
+          (vendor_id, store_connection_id, intake_id, oms_order_id,
            status, reason_code, fault_category, return_window_days, label_source,
            return_tracking_number, vendor_notes, requested_at, updated_at,
            idempotency_key, request_hash, policy_version_id)
-         VALUES ($1, $2, $3, $4, $5, 'requested', $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15)
-         RETURNING id`,
+         VALUES ($1, $2, $3, $4, 'requested', $5, $6, $7, $8, $9, $10, $11, $11, $12, $13, $14)
+         RETURNING id, rma_number`,
         [
-          input.rmaNumber,
           input.vendorId,
           input.storeConnectionId ?? null,
           input.intakeId ?? null,
@@ -416,10 +415,11 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
           input.policyVersionId ?? null,
         ],
       );
-      const rmaId = requiredRow(
+      const insertedRma = requiredRow(
         insert.rows[0],
         "Dropship RMA insert returned no row.",
-      ).id;
+      );
+      const rmaId = insertedRma.id;
       for (const item of input.items) {
         await client.query(
           `INSERT INTO dropship.dropship_rma_items
@@ -447,7 +447,7 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
         actor: input.actor,
         severity: "info",
         payload: {
-          rmaNumber: input.rmaNumber,
+          rmaNumber: insertedRma.rma_number,
           idempotencyKey: input.idempotencyKey,
           itemCount: input.items.length,
         },
