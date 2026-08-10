@@ -22,6 +22,8 @@ const responseSchema = z.object({
     externalItemId: z.string().trim().min(1).max(255),
     externalParentId: z.string().trim().min(1).max(255),
     name: z.string().trim().min(1).max(500),
+    parentName: z.string().trim().min(1).max(500),
+    variantName: z.string().trim().min(1).max(500).nullable(),
     sku: z.string().trim().min(1).max(255).nullable(),
     gtin: z.string().trim().min(1).max(255).nullable(),
     kind: z.enum(["inventory", "non_inventory", "service", "unknown"]),
@@ -31,6 +33,12 @@ const responseSchema = z.object({
       z.string().trim().min(1).max(100),
       z.union([z.string(), z.number().finite(), z.boolean(), z.null()]),
     ),
+    identifiers: z.array(z.object({
+      provider: z.string().trim().min(1).max(50),
+      scope: z.string().trim().min(1).max(255),
+      identifierType: z.enum(["product_id", "variant_id", "sku"]),
+      value: z.string().trim().min(1).max(255),
+    }).strict()).max(100),
   }).strict()).max(CATALOG_EXPORT_MAX_PAGE_SIZE),
   nextCursor: z.string().trim().min(1).max(255).nullable(),
 }).strict();
