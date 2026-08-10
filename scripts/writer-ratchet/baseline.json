@@ -650,6 +650,12 @@
   "public.reorder_exclusion_rules": [
     "modules/procurement"
   ],
+  "returns.return_policies": [
+    "modules/returns"
+  ],
+  "returns.return_policy_commands": [
+    "modules/returns"
+  ],
   "shipping.box_catalog": [
     "modules/shipping-engine"
   ],
