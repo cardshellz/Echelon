@@ -28,12 +28,22 @@ import {
   Store,
   Truck,
   Wallet,
+  XCircle,
 } from "lucide-react";
 import { useLocation, useSearch } from "wouter";
+import { toast } from "@/hooks/use-toast";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import {
   Dialog,
   DialogContent,
@@ -42,10 +52,26 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
@@ -73,6 +99,7 @@ import {
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
   buildAdminReturnCreateInput,
+  buildAdminReturnSourceOrderUrl,
   buildAdminReturnInspectionInput,
   buildAdminReturnPolicyInput,
   buildAdminReturnPolicyUrl,
@@ -109,11 +136,14 @@ import {
   formatCents,
   formatDateTime,
   formatStatus,
+  isRmaStatusTerminal,
+  legalRmaTransitions,
   listingPushJobRetryEligibility,
   notificationRetryEligibility,
   orderCancellationRetryEligibility,
   postJson,
   putJson,
+  optionalQueryErrorMessage,
   queryErrorMessage,
   riskSeverityTone,
   orderIntakeRetryEligibility,
@@ -138,11 +168,17 @@ import {
   type DropshipAdminOrderOpsVendorSummary,
   type DropshipAdminOrderOpsWmsSyncResponse,
   type DropshipOrderDetail,
+  type DropshipOrderDetailLine,
   type DropshipOrderDetailResponse,
   type DropshipAdminOmsChannelConfigResponse,
   type DropshipAdminOmsChannelConfigureResponse,
   type DropshipOmsChannelOption,
   type DropshipAdminReturnCreateResponse,
+  type DropshipAdminReturnSourceOrder,
+  type DropshipAdminReturnSourceOrderLine,
+  type DropshipAdminReturnSourceOrderResponse,
+  type DropshipAdminRmaLabelSource,
+  type DropshipAdminRmaReasonCode,
   type DropshipAdminReturnInspectionResponse,
   type DropshipAdminReturnPolicyCreateResponse,
   type DropshipAdminReturnPolicyResponse,
@@ -157,6 +193,8 @@ import {
   type DropshipAdminReturnPolicyVersionResponse,
   type DropshipAdminReturnFeeVersionResponse,
   type DropshipAdminReturnStatusUpdateResponse,
+  type DropshipAdminNoInspectionReviewInput,
+  type DropshipAdminNoInspectionReviewResponse,
   type DropshipAdminShippingConfigResponse,
   type CarrierProtectionAssignmentConfig,
   type CarrierProtectionConfigResponse,
@@ -197,6 +235,7 @@ import {
   type DropshipReturnListResponse,
   type DropshipReturnDetail,
   type DropshipReturnDetailResponse,
+  type DropshipNoInspectionEvidencePack,
   type DropshipReturnFaultCategory,
   type DropshipReturnPolicyConfig,
   type DropshipRmaInspectionOutcome,
@@ -211,6 +250,17 @@ import {
   type DropshipSystemReadinessCheck,
   type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
+import {
+  RETURN_POLICY_ANY_STORE_VALUE,
+  RETURN_POLICY_GLOBAL_VENDOR_VALUE,
+  buildReturnPolicyStoreOptions,
+  buildReturnPolicyVendorOptions,
+  returnFeeRowToEditFormState,
+  returnPolicyRowToEditFormState,
+  returnPolicyScopeValueFromPicker,
+  returnPolicyScopeValueToPicker,
+} from "@/lib/dropship-return-policy-scope";
+import { ReturnInspectionModal } from "@/components/dropship/ReturnInspectionModal";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
@@ -218,14 +268,18 @@ type OrderOpsStatusFilter = DropshipOpsOrderIntakeStatus | "default" | "all";
 type OrderOpsCancellationStatusFilter = DropshipOrderCancellationStatus | "all";
 type ListingPushStatusFilter = DropshipListingPushJobStatus | "default" | "all";
 type TrackingPushStatusFilter = DropshipTrackingPushStatus | "default" | "all";
-type NotificationOpsStatusFilter = DropshipNotificationOpsStatus | "default" | "all";
+type NotificationOpsStatusFilter =
+  DropshipNotificationOpsStatus | "default" | "all";
 type NotificationOpsChannelFilter = DropshipNotificationOpsChannel | "all";
 type NotificationOpsCriticalFilter = "all" | "critical" | "noncritical";
 type ReturnOpsStatusFilter = DropshipRmaStatus | "default" | "all";
-type StoreConnectionStatusFilter = DropshipStoreConnectionLifecycleStatus | "all";
+type StoreConnectionStatusFilter =
+  DropshipStoreConnectionLifecycleStatus | "all";
 type StoreConnectionPlatformFilter = DropshipStorePlatform | "all";
-type DropshipOpsSearchableTab = "listing-pushes" | "order-intake" | "tracking-pushes";
-type OrderIntakeAdminAction = "retry" | "exception" | "process" | "retry-cancellation" | "retry-wms-sync";
+type DropshipOpsSearchableTab =
+  "listing-pushes" | "order-intake" | "tracking-pushes";
+type OrderIntakeAdminAction =
+  "retry" | "exception" | "process" | "retry-cancellation" | "retry-wms-sync";
 type DropshipOpsTabValue =
   | "overview"
   | "dogfood"
@@ -240,8 +294,10 @@ type DropshipOpsTabValue =
   | "returns"
   | "return-policies"
   | "audit";
-type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
-type CatalogExposureActionFilter = DropshipAdminCatalogExposureRuleInput["action"];
+type CatalogExposureScopeFilter =
+  DropshipAdminCatalogExposureRuleInput["scopeType"];
+type CatalogExposureActionFilter =
+  DropshipAdminCatalogExposureRuleInput["action"];
 type CatalogPreviewVisibilityFilter = "all" | "visible" | "hidden";
 type CatalogPreviewStatusFilter = "active" | "inactive" | "all";
 
@@ -359,22 +415,24 @@ interface ReturnInspectionFormState {
 }
 
 interface ReturnCreateItemFormState {
+  source: "order" | "manual_exception";
+  orderLineIndex: string;
+  externalLineItemId: string;
   productVariantId: string;
+  manualDescription: string;
+  exceptionReason: string;
   quantity: string;
-  status: string;
-  requestedCreditAmount: string;
 }
 
 interface ReturnCreateFormState {
   vendorId: string;
-  rmaNumber: string;
   storeConnectionId: string;
   intakeId: string;
   omsOrderId: string;
-  reasonCode: string;
+  reasonCode: DropshipAdminRmaReasonCode | "";
   faultCategory: DropshipReturnFaultCategory | "none";
   returnWindowDays: string;
-  labelSource: string;
+  labelSource: DropshipAdminRmaLabelSource | "";
   returnTrackingNumber: string;
   vendorNotes: string;
   items: ReturnCreateItemFormState[];
@@ -467,7 +525,8 @@ interface CarrierProtectionPolicyFormState {
   lossWaitDays: string;
   misdeliveryWaitDays: string;
   damageInspectionRequired: boolean;
-  payoutTrigger: "internal_approval" | "carrier_claim_approved" | "carrier_payment_received";
+  payoutTrigger:
+    "internal_approval" | "carrier_claim_approved" | "carrier_payment_received";
   carrierClaimRequired: boolean;
   approvalMode: "manual" | "automatic";
   automaticApprovalLimit: string;
@@ -490,7 +549,12 @@ interface CarrierProtectionAssignmentFormState {
   isDefault: boolean;
 }
 
-interface DropshipChannelOption { id: number; name: string; provider: string; status: string }
+interface DropshipChannelOption {
+  id: number;
+  name: string;
+  provider: string;
+  status: string;
+}
 
 type ShippingConfigSectionKey =
   | "overview"
@@ -501,7 +565,10 @@ type ShippingConfigSectionKey =
   | "markup"
   | "insurance";
 
-const shippingConfigSections: Array<{ key: ShippingConfigSectionKey; label: string }> = [
+const shippingConfigSections: Array<{
+  key: ShippingConfigSectionKey;
+  label: string;
+}> = [
   { key: "overview", label: "Overview" },
   { key: "boxes", label: "Boxes" },
   { key: "profiles", label: "Variant overrides" },
@@ -534,15 +601,17 @@ const emptyShippingBoxForm: ShippingBoxFormState = {
 };
 
 const emptyReturnCreateItemForm: ReturnCreateItemFormState = {
+  source: "manual_exception",
+  orderLineIndex: "",
+  externalLineItemId: "",
   productVariantId: "",
+  manualDescription: "",
+  exceptionReason: "",
   quantity: "1",
-  status: "requested",
-  requestedCreditAmount: "",
 };
 
 const emptyReturnCreateForm: ReturnCreateFormState = {
   vendorId: "",
-  rmaNumber: "",
   storeConnectionId: "",
   intakeId: "",
   omsOrderId: "",
@@ -552,7 +621,7 @@ const emptyReturnCreateForm: ReturnCreateFormState = {
   labelSource: "",
   returnTrackingNumber: "",
   vendorNotes: "",
-  items: [{ ...emptyReturnCreateItemForm }],
+  items: [],
 };
 
 const emptyReturnPolicyForm: ReturnPolicyFormState = {
@@ -566,7 +635,7 @@ const emptyReturnPolicyForm: ReturnPolicyFormState = {
 function makeEmptyReturnCreateForm(): ReturnCreateFormState {
   return {
     ...emptyReturnCreateForm,
-    items: [{ ...emptyReturnCreateItemForm }],
+    items: [],
   };
 }
 
@@ -646,20 +715,21 @@ const emptyCarrierProtectionPolicyForm: CarrierProtectionPolicyFormState = {
   effectiveTo: "",
 };
 
-const emptyCarrierProtectionAssignmentForm: CarrierProtectionAssignmentFormState = {
-  policyId: "",
-  name: "Default carrier protection",
-  priority: "0",
-  channelId: "",
-  warehouseId: "",
-  carrier: "",
-  service: "",
-  destinationCountry: "",
-  destinationRegion: "",
-  minShipmentValue: "",
-  maxShipmentValue: "",
-  isDefault: true,
-};
+const emptyCarrierProtectionAssignmentForm: CarrierProtectionAssignmentFormState =
+  {
+    policyId: "",
+    name: "Default carrier protection",
+    priority: "0",
+    channelId: "",
+    warehouseId: "",
+    carrier: "",
+    service: "",
+    destinationCountry: "",
+    destinationRegion: "",
+    minShipmentValue: "",
+    maxShipmentValue: "",
+    isDefault: true,
+  };
 
 const orderOpsStatusFilters: OrderOpsStatusFilter[] = [
   "default",
@@ -738,11 +808,16 @@ const returnOpsStatusFilters: ReturnOpsStatusFilter[] = [
   "inspecting",
   "approved",
   "rejected",
+  "disputed",
+  "no_inspection_review",
   "credited",
   "closed",
 ];
 
-const returnOpsTerminalStatuses = new Set<DropshipRmaStatus>(["credited", "closed"]);
+const returnOpsTerminalStatuses = new Set<DropshipRmaStatus>([
+  "credited",
+  "closed",
+]);
 
 const returnOpsUpdateStatuses: DropshipRmaStatus[] = [
   "in_transit",
@@ -751,13 +826,24 @@ const returnOpsUpdateStatuses: DropshipRmaStatus[] = [
   "closed",
 ];
 
+// NOTE: "marketplace" remains in the shared enum but is intentionally not
+// offered in the UI — vendor absorbs marketplace-fault outcomes by policy
+// (Overlord, 2026-08-07).
 const returnFaultCategories: DropshipReturnFaultCategory[] = [
   "card_shellz",
   "vendor",
   "customer",
-  "marketplace",
   "carrier",
 ];
+
+const RETURN_INSPECTION_ITEM_STATUSES = [
+  "resellable",
+  "warehouse_deals",
+  "damaged_defective",
+] as const;
+
+type ReturnInspectionItemStatus =
+  (typeof RETURN_INSPECTION_ITEM_STATUSES)[number];
 
 const dogfoodReadinessStatusFilters: DogfoodReadinessStatusFilter[] = [
   "all",
@@ -774,12 +860,14 @@ const adminWorkerSweepOptions: Array<{
   {
     worker: "listing_push",
     label: "Listing push",
-    description: "Claims pending or stale listing push jobs and sends marketplace updates.",
+    description:
+      "Claims pending or stale listing push jobs and sends marketplace updates.",
   },
   {
     worker: "order_processing",
     label: "Order processing",
-    description: "Processes received dropship orders, payment holds, cancellations, and stale intakes.",
+    description:
+      "Processes received dropship orders, payment holds, cancellations, and stale intakes.",
   },
   {
     worker: "ebay_order_intake",
@@ -788,12 +876,18 @@ const adminWorkerSweepOptions: Array<{
   },
 ];
 
-function isDropshipOpsTabValue(value: string | null): value is DropshipOpsTabValue {
-  return value !== null && dropshipOpsTabValues.has(value as DropshipOpsTabValue);
+function isDropshipOpsTabValue(
+  value: string | null,
+): value is DropshipOpsTabValue {
+  return (
+    value !== null && dropshipOpsTabValues.has(value as DropshipOpsTabValue)
+  );
 }
 
 function parseDropshipOpsTab(searchString: string): DropshipOpsTabValue {
-  const normalizedSearch = searchString.startsWith("?") ? searchString.slice(1) : searchString;
+  const normalizedSearch = searchString.startsWith("?")
+    ? searchString.slice(1)
+    : searchString;
   const tab = new URLSearchParams(normalizedSearch).get("tab");
   return isDropshipOpsTabValue(tab) ? tab : "overview";
 }
@@ -805,11 +899,16 @@ function buildDropshipTabHref(tab: DropshipOpsTabValue): string {
 export default function Dropship() {
   const [, navigate] = useLocation();
   const searchString = useSearch();
-  const locationTab = useMemo(() => parseDropshipOpsTab(searchString), [searchString]);
+  const locationTab = useMemo(
+    () => parseDropshipOpsTab(searchString),
+    [searchString],
+  );
   const [activeTab, setActiveTab] = useState<DropshipOpsTabValue>(locationTab);
-  const [opsSearchSignal, setOpsSearchSignal] = useState<DropshipOpsSearchSignal | null>(null);
+  const [opsSearchSignal, setOpsSearchSignal] =
+    useState<DropshipOpsSearchSignal | null>(null);
   const [auditSearch, setAuditSearch] = useState("");
-  const [auditSeverity, setAuditSeverity] = useState<AuditSeverityFilter>("all");
+  const [auditSeverity, setAuditSeverity] =
+    useState<AuditSeverityFilter>("all");
   const [appliedAuditFilters, setAppliedAuditFilters] = useState({
     search: "",
     severity: "all" as AuditSeverityFilter,
@@ -817,14 +916,19 @@ export default function Dropship() {
 
   const auditUrl = useMemo(() => {
     const params = new URLSearchParams({ page: "1", limit: "25" });
-    if (appliedAuditFilters.search.trim()) params.set("search", appliedAuditFilters.search.trim());
-    if (appliedAuditFilters.severity !== "all") params.set("severity", appliedAuditFilters.severity);
+    if (appliedAuditFilters.search.trim())
+      params.set("search", appliedAuditFilters.search.trim());
+    if (appliedAuditFilters.severity !== "all")
+      params.set("severity", appliedAuditFilters.severity);
     return `/api/dropship/admin/audit-events?${params.toString()}`;
   }, [appliedAuditFilters]);
 
   const overviewQuery = useQuery<DropshipAdminOpsOverviewResponse>({
     queryKey: ["/api/dropship/admin/ops/overview"],
-    queryFn: () => fetchJson<DropshipAdminOpsOverviewResponse>("/api/dropship/admin/ops/overview"),
+    queryFn: () =>
+      fetchJson<DropshipAdminOpsOverviewResponse>(
+        "/api/dropship/admin/ops/overview",
+      ),
   });
   const auditQuery = useQuery<DropshipAuditEventSearchResponse>({
     queryKey: [auditUrl],
@@ -866,12 +970,17 @@ export default function Dropship() {
       <div className="border-b bg-card px-4 py-5 md:px-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <h1 className="flex items-center gap-2 text-2xl font-bold tracking-normal" data-testid="text-page-title">
+            <h1
+              className="flex items-center gap-2 text-2xl font-bold tracking-normal"
+              data-testid="text-page-title"
+            >
               <ShieldAlert className="h-6 w-6 text-[#C060E0]" />
               Dropship Ops
             </h1>
             <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-              Monitor .ops setup blockers, store health, order intake exceptions, listing pushes, tracking pushes, returns, notifications, and audit history.
+              Monitor .ops setup blockers, store health, order intake
+              exceptions, listing pushes, tracking pushes, returns,
+              notifications, and audit history.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -886,7 +995,13 @@ export default function Dropship() {
               disabled={overviewQuery.isFetching || auditQuery.isFetching}
               onClick={refreshAll}
             >
-              <RefreshCw className={overviewQuery.isFetching || auditQuery.isFetching ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+              <RefreshCw
+                className={
+                  overviewQuery.isFetching || auditQuery.isFetching
+                    ? "h-4 w-4 animate-spin"
+                    : "h-4 w-4"
+                }
+              />
               Refresh
             </Button>
           </div>
@@ -903,14 +1018,21 @@ export default function Dropship() {
       </div>
 
       <div className="flex-1 overflow-auto p-4 md:p-6">
-        <Tabs value={activeTab} onValueChange={selectTab} className="flex min-h-0 flex-1 flex-col">
+        <Tabs
+          value={activeTab}
+          onValueChange={selectTab}
+          className="flex min-h-0 flex-1 flex-col"
+        >
           <TabsContent value="overview" className="m-0 space-y-5">
             {overviewQuery.isLoading ? (
               <OverviewSkeleton />
             ) : overview ? (
               <OverviewTab overview={overview} />
             ) : (
-              <EmptyState title="No ops data" description="The dropship ops overview did not return any data." />
+              <EmptyState
+                title="No ops data"
+                description="The dropship ops overview did not return any data."
+              />
             )}
           </TabsContent>
 
@@ -927,7 +1049,11 @@ export default function Dropship() {
           </TabsContent>
 
           <TabsContent value="order-intake" className="m-0">
-            <OrderIntakeOpsTab searchSignal={opsSearchSignal?.tab === "order-intake" ? opsSearchSignal : null} />
+            <OrderIntakeOpsTab
+              searchSignal={
+                opsSearchSignal?.tab === "order-intake" ? opsSearchSignal : null
+              }
+            />
           </TabsContent>
 
           <TabsContent value="wallet-ops" className="m-0">
@@ -939,11 +1065,23 @@ export default function Dropship() {
           </TabsContent>
 
           <TabsContent value="listing-pushes" className="m-0">
-            <ListingPushOpsTab searchSignal={opsSearchSignal?.tab === "listing-pushes" ? opsSearchSignal : null} />
+            <ListingPushOpsTab
+              searchSignal={
+                opsSearchSignal?.tab === "listing-pushes"
+                  ? opsSearchSignal
+                  : null
+              }
+            />
           </TabsContent>
 
           <TabsContent value="tracking-pushes" className="m-0">
-            <TrackingPushOpsTab searchSignal={opsSearchSignal?.tab === "tracking-pushes" ? opsSearchSignal : null} />
+            <TrackingPushOpsTab
+              searchSignal={
+                opsSearchSignal?.tab === "tracking-pushes"
+                  ? opsSearchSignal
+                  : null
+              }
+            />
           </TabsContent>
 
           <TabsContent value="notifications" className="m-0">
@@ -962,7 +1100,10 @@ export default function Dropship() {
             <div className="rounded-md border bg-card p-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
                 <div className="min-w-0 flex-1">
-                  <label className="text-sm font-medium" htmlFor="dropship-audit-search">
+                  <label
+                    className="text-sm font-medium"
+                    htmlFor="dropship-audit-search"
+                  >
                     Search
                   </label>
                   <div className="mt-2 flex items-center gap-2">
@@ -980,7 +1121,12 @@ export default function Dropship() {
                 </div>
                 <div className="w-full lg:w-48">
                   <label className="text-sm font-medium">Severity</label>
-                  <Select value={auditSeverity} onValueChange={(value) => setAuditSeverity(value as AuditSeverityFilter)}>
+                  <Select
+                    value={auditSeverity}
+                    onValueChange={(value) =>
+                      setAuditSeverity(value as AuditSeverityFilter)
+                    }
+                  >
                     <SelectTrigger className="mt-2">
                       <SelectValue />
                     </SelectTrigger>
@@ -992,7 +1138,10 @@ export default function Dropship() {
                     </SelectContent>
                   </Select>
                 </div>
-                <Button className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyAuditFilters}>
+                <Button
+                  className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                  onClick={applyAuditFilters}
+                >
                   <FileSearch className="h-4 w-4" />
                   Apply
                 </Button>
@@ -1019,13 +1168,15 @@ function DogfoodReadinessTab({
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<DogfoodReadinessStatusFilter>("all");
-  const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
+  const [platform, setPlatform] =
+    useState<StoreConnectionPlatformFilter>("all");
   const [omsMessage, setOmsMessage] = useState("");
   const [omsError, setOmsError] = useState("");
   const [isSavingOmsChannel, setIsSavingOmsChannel] = useState(false);
   const [workerBatchSize, setWorkerBatchSize] = useState("10");
   const [workerReason, setWorkerReason] = useState("Dogfood manual sweep");
-  const [pendingWorkerSweep, setPendingWorkerSweep] = useState<DropshipAdminWorkerSweepName | null>(null);
+  const [pendingWorkerSweep, setPendingWorkerSweep] =
+    useState<DropshipAdminWorkerSweepName | null>(null);
   const [workerSweepMessage, setWorkerSweepMessage] = useState("");
   const [workerSweepError, setWorkerSweepError] = useState("");
   const [appliedFilters, setAppliedFilters] = useState({
@@ -1034,15 +1185,23 @@ function DogfoodReadinessTab({
     platform: "all" as StoreConnectionPlatformFilter,
   });
 
-  const readinessUrl = useMemo(() => buildAdminDogfoodReadinessUrl({
-    search: appliedFilters.search,
-    status: appliedFilters.status,
-    platform: appliedFilters.platform,
-  }), [appliedFilters]);
-  const launchStatusUrl = useMemo(() => buildAdminDogfoodLaunchStatusUrl({
-    search: appliedFilters.search,
-    platform: appliedFilters.platform,
-  }), [appliedFilters]);
+  const readinessUrl = useMemo(
+    () =>
+      buildAdminDogfoodReadinessUrl({
+        search: appliedFilters.search,
+        status: appliedFilters.status,
+        platform: appliedFilters.platform,
+      }),
+    [appliedFilters],
+  );
+  const launchStatusUrl = useMemo(
+    () =>
+      buildAdminDogfoodLaunchStatusUrl({
+        search: appliedFilters.search,
+        platform: appliedFilters.platform,
+      }),
+    [appliedFilters],
+  );
 
   const readinessQuery = useQuery<DropshipDogfoodReadinessResponse>({
     queryKey: [readinessUrl],
@@ -1050,19 +1209,27 @@ function DogfoodReadinessTab({
   });
   const launchStatusQuery = useQuery<DropshipDogfoodLaunchStatusResponse>({
     queryKey: [launchStatusUrl],
-    queryFn: () => fetchJson<DropshipDogfoodLaunchStatusResponse>(launchStatusUrl),
+    queryFn: () =>
+      fetchJson<DropshipDogfoodLaunchStatusResponse>(launchStatusUrl),
   });
   const omsChannelConfigUrl = buildAdminOmsChannelConfigUrl();
-  const omsChannelConfigQuery = useQuery<DropshipAdminOmsChannelConfigResponse>({
-    queryKey: [omsChannelConfigUrl],
-    queryFn: () => fetchJson<DropshipAdminOmsChannelConfigResponse>(omsChannelConfigUrl),
-  });
+  const omsChannelConfigQuery = useQuery<DropshipAdminOmsChannelConfigResponse>(
+    {
+      queryKey: [omsChannelConfigUrl],
+      queryFn: () =>
+        fetchJson<DropshipAdminOmsChannelConfigResponse>(omsChannelConfigUrl),
+    },
+  );
 
   const items = readinessQuery.data?.items ?? [];
   const summary = readinessQuery.data?.summary ?? [];
   const launchStatus = launchStatusQuery.data ?? null;
-  const systemChecks = readinessQuery.data?.systemChecks ?? launchStatus?.readiness.systemChecks ?? [];
-  const launchGate = launchStatus?.launchGate ?? readinessQuery.data?.launchGate ?? null;
+  const systemChecks =
+    readinessQuery.data?.systemChecks ??
+    launchStatus?.readiness.systemChecks ??
+    [];
+  const launchGate =
+    launchStatus?.launchGate ?? readinessQuery.data?.launchGate ?? null;
   const omsConfig = omsChannelConfigQuery.data?.config ?? null;
 
   function applyReadinessFilters() {
@@ -1081,16 +1248,26 @@ function DogfoodReadinessTab({
         buildAdminOmsChannelDefaultSourceUrl(),
         input,
       );
-      setOmsMessage(`Internal dropship channel initialized as ${dropshipOmsSourceLabel(response.selectedChannel)}.`);
+      setOmsMessage(
+        `Internal dropship channel initialized as ${dropshipOmsSourceLabel(response.selectedChannel)}.`,
+      );
       await Promise.all([
         omsChannelConfigQuery.refetch(),
         readinessQuery.refetch(),
         launchStatusQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setOmsError(caught instanceof Error ? caught.message : "Internal dropship channel setup failed.");
+      setOmsError(
+        caught instanceof Error
+          ? caught.message
+          : "Internal dropship channel setup failed.",
+      );
     } finally {
       setIsSavingOmsChannel(false);
     }
@@ -1102,7 +1279,9 @@ function DogfoodReadinessTab({
     setWorkerSweepMessage("");
     try {
       const input = buildAdminWorkerSweepInput({
-        idempotencyKey: createDropshipIdempotencyKey(`admin-worker-sweep-${worker}`),
+        idempotencyKey: createDropshipIdempotencyKey(
+          `admin-worker-sweep-${worker}`,
+        ),
         batchSize: workerBatchSize,
         reason: workerReason,
       });
@@ -1114,11 +1293,19 @@ function DogfoodReadinessTab({
       await Promise.all([
         readinessQuery.refetch(),
         launchStatusQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setWorkerSweepError(caught instanceof Error ? caught.message : "Dropship worker sweep failed.");
+      setWorkerSweepError(
+        caught instanceof Error
+          ? caught.message
+          : "Dropship worker sweep failed.",
+      );
     } finally {
       setPendingWorkerSweep(null);
     }
@@ -1126,14 +1313,22 @@ function DogfoodReadinessTab({
 
   return (
     <div className="space-y-5">
-      {(readinessQuery.error || launchStatusQuery.error || omsChannelConfigQuery.error || omsError || workerSweepError) && (
+      {(readinessQuery.error ||
+        launchStatusQuery.error ||
+        omsChannelConfigQuery.error ||
+        omsError ||
+        workerSweepError) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {omsError || workerSweepError || queryErrorMessage(
-              readinessQuery.error ?? launchStatusQuery.error ?? omsChannelConfigQuery.error,
-              "Unable to load dropship dogfood readiness.",
-            )}
+            {omsError ||
+              workerSweepError ||
+              queryErrorMessage(
+                readinessQuery.error ??
+                  launchStatusQuery.error ??
+                  omsChannelConfigQuery.error,
+                "Unable to load dropship dogfood readiness.",
+              )}
           </AlertDescription>
         </Alert>
       )}
@@ -1152,7 +1347,9 @@ function DogfoodReadinessTab({
 
       <OmsChannelConfigPanel
         config={omsConfig}
-        isLoading={omsChannelConfigQuery.isLoading || omsChannelConfigQuery.isFetching}
+        isLoading={
+          omsChannelConfigQuery.isLoading || omsChannelConfigQuery.isFetching
+        }
         isSaving={isSavingOmsChannel}
         onEnsureDefaultSource={ensureOmsSource}
       />
@@ -1191,7 +1388,8 @@ function DogfoodReadinessTab({
           <div>
             <h2 className="text-lg font-semibold">Dogfood readiness</h2>
             <p className="text-sm text-muted-foreground">
-              Validate each vendor/store against the minimum internal launch checklist before running live orders.
+              Validate each vendor/store against the minimum internal launch
+              checklist before running live orders.
             </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row">
@@ -1204,7 +1402,12 @@ function DogfoodReadinessTab({
                 placeholder="Vendor, member, store, or domain"
               />
             </div>
-            <Select value={platform} onValueChange={(value) => setPlatform(value as StoreConnectionPlatformFilter)}>
+            <Select
+              value={platform}
+              onValueChange={(value) =>
+                setPlatform(value as StoreConnectionPlatformFilter)
+              }
+            >
               <SelectTrigger className="lg:w-40">
                 <SelectValue />
               </SelectTrigger>
@@ -1214,7 +1417,12 @@ function DogfoodReadinessTab({
                 <SelectItem value="shopify">Shopify</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={status} onValueChange={(value) => setStatus(value as DogfoodReadinessStatusFilter)}>
+            <Select
+              value={status}
+              onValueChange={(value) =>
+                setStatus(value as DogfoodReadinessStatusFilter)
+              }
+            >
               <SelectTrigger className="lg:w-48">
                 <SelectValue />
               </SelectTrigger>
@@ -1226,7 +1434,10 @@ function DogfoodReadinessTab({
                 ))}
               </SelectContent>
             </Select>
-            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyReadinessFilters}>
+            <Button
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              onClick={applyReadinessFilters}
+            >
               <FileSearch className="h-4 w-4" />
               Apply
             </Button>
@@ -1235,10 +1446,26 @@ function DogfoodReadinessTab({
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Ready" value={String(readinessSummaryCount(summary, "ready"))} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Blocked" value={String(readinessSummaryCount(summary, "blocked"))} />
-        <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Warnings" value={String(readinessSummaryCount(summary, "warning"))} />
-        <CatalogMetric icon={<Store className="h-4 w-4" />} label="Matching rows" value={String(readinessQuery.data?.total ?? 0)} />
+        <CatalogMetric
+          icon={<CheckCircle2 className="h-4 w-4" />}
+          label="Ready"
+          value={String(readinessSummaryCount(summary, "ready"))}
+        />
+        <CatalogMetric
+          icon={<AlertCircle className="h-4 w-4" />}
+          label="Blocked"
+          value={String(readinessSummaryCount(summary, "blocked"))}
+        />
+        <CatalogMetric
+          icon={<ShieldAlert className="h-4 w-4" />}
+          label="Warnings"
+          value={String(readinessSummaryCount(summary, "warning"))}
+        />
+        <CatalogMetric
+          icon={<Store className="h-4 w-4" />}
+          label="Matching rows"
+          value={String(readinessQuery.data?.total ?? 0)}
+        />
       </section>
 
       <DogfoodReadinessTable
@@ -1258,32 +1485,44 @@ function ListingPushOpsTab({
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<ListingPushStatusFilter>("default");
-  const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
+  const [platform, setPlatform] =
+    useState<StoreConnectionPlatformFilter>("all");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
     status: "default" as ListingPushStatusFilter,
     platform: "all" as StoreConnectionPlatformFilter,
   });
   const [retryReason, setRetryReason] = useState("");
-  const [pendingRetryJobId, setPendingRetryJobId] = useState<number | null>(null);
+  const [pendingRetryJobId, setPendingRetryJobId] = useState<number | null>(
+    null,
+  );
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const listingPushJobsUrl = useMemo(() => buildAdminListingPushJobsUrl({
-    search: appliedFilters.search,
-    status: appliedFilters.status,
-    platform: appliedFilters.platform,
-  }), [appliedFilters]);
+  const listingPushJobsUrl = useMemo(
+    () =>
+      buildAdminListingPushJobsUrl({
+        search: appliedFilters.search,
+        status: appliedFilters.status,
+        platform: appliedFilters.platform,
+      }),
+    [appliedFilters],
+  );
 
-  const listingPushJobsQuery = useQuery<DropshipAdminListingPushJobListResponse>({
-    queryKey: [listingPushJobsUrl],
-    queryFn: () => fetchJson<DropshipAdminListingPushJobListResponse>(listingPushJobsUrl),
-  });
+  const listingPushJobsQuery =
+    useQuery<DropshipAdminListingPushJobListResponse>({
+      queryKey: [listingPushJobsUrl],
+      queryFn: () =>
+        fetchJson<DropshipAdminListingPushJobListResponse>(listingPushJobsUrl),
+    });
 
   const jobs = listingPushJobsQuery.data?.items ?? [];
-  const listingPushRetryNow = useMemo(() => new Date(), [listingPushJobsQuery.dataUpdatedAt]);
-  const recoverableJobCount = jobs.filter((job) =>
-    listingPushJobRetryEligibility(job, listingPushRetryNow).canRetry
+  const listingPushRetryNow = useMemo(
+    () => new Date(),
+    [listingPushJobsQuery.dataUpdatedAt],
+  );
+  const recoverableJobCount = jobs.filter(
+    (job) => listingPushJobRetryEligibility(job, listingPushRetryNow).canRetry,
   ).length;
 
   useEffect(() => {
@@ -1308,7 +1547,9 @@ function ListingPushOpsTab({
     setMessage("");
     try {
       const input = buildAdminListingPushJobRetryInput({
-        idempotencyKey: createDropshipIdempotencyKey(`admin-listing-job-retry-${job.jobId}`),
+        idempotencyKey: createDropshipIdempotencyKey(
+          `admin-listing-job-retry-${job.jobId}`,
+        ),
         reason: retryReason,
       });
       const response = await postJson<DropshipAdminListingPushJobRetryResponse>(
@@ -1317,18 +1558,28 @@ function ListingPushOpsTab({
       );
       const itemLabel = response.requeuedItemCount === 1 ? "item" : "items";
       setMessage(
-        `Listing push job ${response.jobId} moved from ${formatStatus(response.previousStatus)} `
-        + `to ${formatStatus(response.status)} with ${response.requeuedItemCount} ${itemLabel} requeued.`,
+        `Listing push job ${response.jobId} moved from ${formatStatus(response.previousStatus)} ` +
+          `to ${formatStatus(response.status)} with ${response.requeuedItemCount} ${itemLabel} requeued.`,
       );
       setRetryReason("");
       await Promise.all([
         listingPushJobsQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship listing push job retry failed.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Dropship listing push job retry failed.",
+      );
     } finally {
       setPendingRetryJobId(null);
     }
@@ -1340,7 +1591,11 @@ function ListingPushOpsTab({
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(listingPushJobsQuery.error, "Unable to load dropship listing push jobs.")}
+            {error ||
+              queryErrorMessage(
+                listingPushJobsQuery.error,
+                "Unable to load dropship listing push jobs.",
+              )}
           </AlertDescription>
         </Alert>
       )}
@@ -1356,7 +1611,8 @@ function ListingPushOpsTab({
           <div>
             <h2 className="text-lg font-semibold">Listing push operations</h2>
             <p className="text-sm text-muted-foreground">
-              Review bulk listing push jobs, marketplace failures, blocked items, and vendor store context.
+              Review bulk listing push jobs, marketplace failures, blocked
+              items, and vendor store context.
             </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row">
@@ -1369,7 +1625,12 @@ function ListingPushOpsTab({
                 placeholder="Job, vendor, store, error, or hash"
               />
             </div>
-            <Select value={platform} onValueChange={(value) => setPlatform(value as StoreConnectionPlatformFilter)}>
+            <Select
+              value={platform}
+              onValueChange={(value) =>
+                setPlatform(value as StoreConnectionPlatformFilter)
+              }
+            >
               <SelectTrigger className="lg:w-40">
                 <SelectValue />
               </SelectTrigger>
@@ -1379,7 +1640,12 @@ function ListingPushOpsTab({
                 <SelectItem value="shopify">Shopify</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={status} onValueChange={(value) => setStatus(value as ListingPushStatusFilter)}>
+            <Select
+              value={status}
+              onValueChange={(value) =>
+                setStatus(value as ListingPushStatusFilter)
+              }
+            >
               <SelectTrigger className="lg:w-48">
                 <SelectValue />
               </SelectTrigger>
@@ -1391,14 +1657,20 @@ function ListingPushOpsTab({
                 ))}
               </SelectContent>
             </Select>
-            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyListingPushFilters}>
+            <Button
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              onClick={applyListingPushFilters}
+            >
               <FileSearch className="h-4 w-4" />
               Apply
             </Button>
           </div>
         </div>
         <div className="mt-4 max-w-3xl">
-          <label className="text-sm font-medium" htmlFor="dropship-listing-job-retry-reason">
+          <label
+            className="text-sm font-medium"
+            htmlFor="dropship-listing-job-retry-reason"
+          >
             Retry reason
           </label>
           <Input
@@ -1413,14 +1685,36 @@ function ListingPushOpsTab({
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Matching jobs" value={String(listingPushJobsQuery.data?.total ?? 0)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible recoverable" value={String(recoverableJobCount)} />
-        <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Visible blocked items" value={String(jobs.reduce((sum, job) => sum + job.itemSummary.blocked, 0))} />
-        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible completed items" value={String(jobs.reduce((sum, job) => sum + job.itemSummary.completed, 0))} />
+        <CatalogMetric
+          icon={<RefreshCw className="h-4 w-4" />}
+          label="Matching jobs"
+          value={String(listingPushJobsQuery.data?.total ?? 0)}
+        />
+        <CatalogMetric
+          icon={<AlertCircle className="h-4 w-4" />}
+          label="Visible recoverable"
+          value={String(recoverableJobCount)}
+        />
+        <CatalogMetric
+          icon={<Boxes className="h-4 w-4" />}
+          label="Visible blocked items"
+          value={String(
+            jobs.reduce((sum, job) => sum + job.itemSummary.blocked, 0),
+          )}
+        />
+        <CatalogMetric
+          icon={<CheckCircle2 className="h-4 w-4" />}
+          label="Visible completed items"
+          value={String(
+            jobs.reduce((sum, job) => sum + job.itemSummary.completed, 0),
+          )}
+        />
       </section>
 
       <ListingPushJobsTable
-        isLoading={listingPushJobsQuery.isLoading || listingPushJobsQuery.isFetching}
+        isLoading={
+          listingPushJobsQuery.isLoading || listingPushJobsQuery.isFetching
+        }
         jobs={jobs}
         onRetry={retryListingPushJob}
         pendingRetryJobId={pendingRetryJobId}
@@ -1440,32 +1734,43 @@ function TrackingPushOpsTab({
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<TrackingPushStatusFilter>("default");
-  const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
+  const [platform, setPlatform] =
+    useState<StoreConnectionPlatformFilter>("all");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
     status: "default" as TrackingPushStatusFilter,
     platform: "all" as StoreConnectionPlatformFilter,
   });
   const [retryReason, setRetryReason] = useState("");
-  const [pendingRetryPushId, setPendingRetryPushId] = useState<number | null>(null);
+  const [pendingRetryPushId, setPendingRetryPushId] = useState<number | null>(
+    null,
+  );
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const trackingPushesUrl = useMemo(() => buildAdminTrackingPushesUrl({
-    search: appliedFilters.search,
-    status: appliedFilters.status,
-    platform: appliedFilters.platform,
-  }), [appliedFilters]);
+  const trackingPushesUrl = useMemo(
+    () =>
+      buildAdminTrackingPushesUrl({
+        search: appliedFilters.search,
+        status: appliedFilters.status,
+        platform: appliedFilters.platform,
+      }),
+    [appliedFilters],
+  );
 
   const trackingPushesQuery = useQuery<DropshipAdminTrackingPushListResponse>({
     queryKey: [trackingPushesUrl],
-    queryFn: () => fetchJson<DropshipAdminTrackingPushListResponse>(trackingPushesUrl),
+    queryFn: () =>
+      fetchJson<DropshipAdminTrackingPushListResponse>(trackingPushesUrl),
   });
 
   const pushes = trackingPushesQuery.data?.items ?? [];
-  const trackingPushRetryNow = useMemo(() => new Date(), [trackingPushesQuery.dataUpdatedAt]);
-  const recoverablePushCount = pushes.filter((push) =>
-    trackingPushRetryEligibility(push, trackingPushRetryNow).canRetry
+  const trackingPushRetryNow = useMemo(
+    () => new Date(),
+    [trackingPushesQuery.dataUpdatedAt],
+  );
+  const recoverablePushCount = pushes.filter(
+    (push) => trackingPushRetryEligibility(push, trackingPushRetryNow).canRetry,
   ).length;
 
   useEffect(() => {
@@ -1490,22 +1795,34 @@ function TrackingPushOpsTab({
     setMessage("");
     try {
       const input = buildAdminTrackingPushRetryInput({
-        idempotencyKey: createDropshipIdempotencyKey(`admin-tracking-retry-${push.pushId}`),
+        idempotencyKey: createDropshipIdempotencyKey(
+          `admin-tracking-retry-${push.pushId}`,
+        ),
         reason: retryReason,
       });
       const response = await postJson<DropshipAdminTrackingPushRetryResponse>(
         `/api/dropship/admin/tracking-pushes/${push.pushId}/retry`,
         input,
       );
-      setMessage(`Tracking push ${response.pushId} retry returned ${formatStatus(response.status)}.`);
+      setMessage(
+        `Tracking push ${response.pushId} retry returned ${formatStatus(response.status)}.`,
+      );
       setRetryReason("");
       await Promise.all([
         trackingPushesQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship tracking push retry failed.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Dropship tracking push retry failed.",
+      );
     } finally {
       setPendingRetryPushId(null);
     }
@@ -1517,7 +1834,11 @@ function TrackingPushOpsTab({
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(trackingPushesQuery.error, "Unable to load dropship tracking pushes.")}
+            {error ||
+              queryErrorMessage(
+                trackingPushesQuery.error,
+                "Unable to load dropship tracking pushes.",
+              )}
           </AlertDescription>
         </Alert>
       )}
@@ -1533,7 +1854,8 @@ function TrackingPushOpsTab({
           <div>
             <h2 className="text-lg font-semibold">Tracking push operations</h2>
             <p className="text-sm text-muted-foreground">
-              Review marketplace tracking notifications, fulfillment ids, failed pushes, and retry context.
+              Review marketplace tracking notifications, fulfillment ids, failed
+              pushes, and retry context.
             </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row">
@@ -1546,7 +1868,12 @@ function TrackingPushOpsTab({
                 placeholder="Order, tracking, carrier, vendor, or error"
               />
             </div>
-            <Select value={platform} onValueChange={(value) => setPlatform(value as StoreConnectionPlatformFilter)}>
+            <Select
+              value={platform}
+              onValueChange={(value) =>
+                setPlatform(value as StoreConnectionPlatformFilter)
+              }
+            >
               <SelectTrigger className="lg:w-40">
                 <SelectValue />
               </SelectTrigger>
@@ -1556,7 +1883,12 @@ function TrackingPushOpsTab({
                 <SelectItem value="shopify">Shopify</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={status} onValueChange={(value) => setStatus(value as TrackingPushStatusFilter)}>
+            <Select
+              value={status}
+              onValueChange={(value) =>
+                setStatus(value as TrackingPushStatusFilter)
+              }
+            >
               <SelectTrigger className="lg:w-48">
                 <SelectValue />
               </SelectTrigger>
@@ -1568,14 +1900,20 @@ function TrackingPushOpsTab({
                 ))}
               </SelectContent>
             </Select>
-            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyTrackingPushFilters}>
+            <Button
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              onClick={applyTrackingPushFilters}
+            >
               <FileSearch className="h-4 w-4" />
               Apply
             </Button>
           </div>
         </div>
         <div className="mt-4 max-w-3xl">
-          <label className="text-sm font-medium" htmlFor="dropship-tracking-retry-reason">
+          <label
+            className="text-sm font-medium"
+            htmlFor="dropship-tracking-retry-reason"
+          >
             Retry reason
           </label>
           <Input
@@ -1590,14 +1928,36 @@ function TrackingPushOpsTab({
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Matching pushes" value={String(trackingPushesQuery.data?.total ?? 0)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible recoverable" value={String(recoverablePushCount)} />
-        <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Visible attempts" value={String(pushes.reduce((sum, push) => sum + push.attemptCount, 0))} />
-        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible succeeded" value={String(pushes.filter((push) => push.status === "succeeded").length)} />
+        <CatalogMetric
+          icon={<Truck className="h-4 w-4" />}
+          label="Matching pushes"
+          value={String(trackingPushesQuery.data?.total ?? 0)}
+        />
+        <CatalogMetric
+          icon={<AlertCircle className="h-4 w-4" />}
+          label="Visible recoverable"
+          value={String(recoverablePushCount)}
+        />
+        <CatalogMetric
+          icon={<RefreshCw className="h-4 w-4" />}
+          label="Visible attempts"
+          value={String(
+            pushes.reduce((sum, push) => sum + push.attemptCount, 0),
+          )}
+        />
+        <CatalogMetric
+          icon={<CheckCircle2 className="h-4 w-4" />}
+          label="Visible succeeded"
+          value={String(
+            pushes.filter((push) => push.status === "succeeded").length,
+          )}
+        />
       </section>
 
       <TrackingPushesTable
-        isLoading={trackingPushesQuery.isLoading || trackingPushesQuery.isFetching}
+        isLoading={
+          trackingPushesQuery.isLoading || trackingPushesQuery.isFetching
+        }
         onRetry={retryTrackingPush}
         pendingRetryPushId={pendingRetryPushId}
         pushes={pushes}
@@ -1614,7 +1974,8 @@ function NotificationOpsTab() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<NotificationOpsStatusFilter>("default");
   const [channel, setChannel] = useState<NotificationOpsChannelFilter>("all");
-  const [critical, setCritical] = useState<NotificationOpsCriticalFilter>("all");
+  const [critical, setCritical] =
+    useState<NotificationOpsCriticalFilter>("all");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
     status: "default" as NotificationOpsStatusFilter,
@@ -1622,51 +1983,77 @@ function NotificationOpsTab() {
     critical: "all" as NotificationOpsCriticalFilter,
   });
   const [retryReason, setRetryReason] = useState("");
-  const [pendingRetryEventId, setPendingRetryEventId] = useState<number | null>(null);
+  const [pendingRetryEventId, setPendingRetryEventId] = useState<number | null>(
+    null,
+  );
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const notificationEventsUrl = useMemo(() => buildAdminNotificationEventsUrl({
-    search: appliedFilters.search,
-    status: appliedFilters.status,
-    channel: appliedFilters.channel,
-    critical: appliedFilters.critical,
-  }), [appliedFilters]);
+  const notificationEventsUrl = useMemo(
+    () =>
+      buildAdminNotificationEventsUrl({
+        search: appliedFilters.search,
+        status: appliedFilters.status,
+        channel: appliedFilters.channel,
+        critical: appliedFilters.critical,
+      }),
+    [appliedFilters],
+  );
 
-  const notificationEventsQuery = useQuery<DropshipAdminNotificationOpsListResponse>({
-    queryKey: [notificationEventsUrl],
-    queryFn: () => fetchJson<DropshipAdminNotificationOpsListResponse>(notificationEventsUrl),
-  });
+  const notificationEventsQuery =
+    useQuery<DropshipAdminNotificationOpsListResponse>({
+      queryKey: [notificationEventsUrl],
+      queryFn: () =>
+        fetchJson<DropshipAdminNotificationOpsListResponse>(
+          notificationEventsUrl,
+        ),
+    });
 
   const events = notificationEventsQuery.data?.items ?? [];
-  const recoverableEventCount = events.filter((event) => notificationRetryEligibility(event).canRetry).length;
+  const recoverableEventCount = events.filter(
+    (event) => notificationRetryEligibility(event).canRetry,
+  ).length;
 
   function applyNotificationFilters() {
     setAppliedFilters({ search, status, channel, critical });
   }
 
-  async function retryNotificationEvent(event: DropshipAdminNotificationOpsListItem) {
+  async function retryNotificationEvent(
+    event: DropshipAdminNotificationOpsListItem,
+  ) {
     setPendingRetryEventId(event.notificationEventId);
     setError("");
     setMessage("");
     try {
       const input = buildAdminNotificationRetryInput({
-        idempotencyKey: createDropshipIdempotencyKey(`admin-notification-retry-${event.notificationEventId}`),
+        idempotencyKey: createDropshipIdempotencyKey(
+          `admin-notification-retry-${event.notificationEventId}`,
+        ),
         reason: retryReason,
       });
       const response = await postJson<DropshipAdminNotificationRetryResponse>(
         `/api/dropship/admin/notifications/${event.notificationEventId}/retry`,
         input,
       );
-      setMessage(`Notification ${response.notificationEventId} retry returned ${formatStatus(response.status)}.`);
+      setMessage(
+        `Notification ${response.notificationEventId} retry returned ${formatStatus(response.status)}.`,
+      );
       setRetryReason("");
       await Promise.all([
         notificationEventsQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship notification retry failed.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Dropship notification retry failed.",
+      );
     } finally {
       setPendingRetryEventId(null);
     }
@@ -1678,7 +2065,11 @@ function NotificationOpsTab() {
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(notificationEventsQuery.error, "Unable to load dropship notification events.")}
+            {error ||
+              queryErrorMessage(
+                notificationEventsQuery.error,
+                "Unable to load dropship notification events.",
+              )}
           </AlertDescription>
         </Alert>
       )}
@@ -1694,7 +2085,8 @@ function NotificationOpsTab() {
           <div>
             <h2 className="text-lg font-semibold">Notification operations</h2>
             <p className="text-sm text-muted-foreground">
-              Review vendor notification delivery, unread critical notices, and failed message events.
+              Review vendor notification delivery, unread critical notices, and
+              failed message events.
             </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row">
@@ -1707,7 +2099,12 @@ function NotificationOpsTab() {
                 placeholder="Event, title, vendor, email, or hash"
               />
             </div>
-            <Select value={channel} onValueChange={(value) => setChannel(value as NotificationOpsChannelFilter)}>
+            <Select
+              value={channel}
+              onValueChange={(value) =>
+                setChannel(value as NotificationOpsChannelFilter)
+              }
+            >
               <SelectTrigger className="lg:w-40">
                 <SelectValue />
               </SelectTrigger>
@@ -1719,7 +2116,12 @@ function NotificationOpsTab() {
                 ))}
               </SelectContent>
             </Select>
-            <Select value={critical} onValueChange={(value) => setCritical(value as NotificationOpsCriticalFilter)}>
+            <Select
+              value={critical}
+              onValueChange={(value) =>
+                setCritical(value as NotificationOpsCriticalFilter)
+              }
+            >
               <SelectTrigger className="lg:w-44">
                 <SelectValue />
               </SelectTrigger>
@@ -1731,7 +2133,12 @@ function NotificationOpsTab() {
                 ))}
               </SelectContent>
             </Select>
-            <Select value={status} onValueChange={(value) => setStatus(value as NotificationOpsStatusFilter)}>
+            <Select
+              value={status}
+              onValueChange={(value) =>
+                setStatus(value as NotificationOpsStatusFilter)
+              }
+            >
               <SelectTrigger className="lg:w-48">
                 <SelectValue />
               </SelectTrigger>
@@ -1743,14 +2150,20 @@ function NotificationOpsTab() {
                 ))}
               </SelectContent>
             </Select>
-            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyNotificationFilters}>
+            <Button
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              onClick={applyNotificationFilters}
+            >
               <FileSearch className="h-4 w-4" />
               Apply
             </Button>
           </div>
         </div>
         <div className="mt-4">
-          <label htmlFor="dropship-notification-retry-reason" className="text-sm font-medium">
+          <label
+            htmlFor="dropship-notification-retry-reason"
+            className="text-sm font-medium"
+          >
             Retry audit note
           </label>
           <Input
@@ -1765,16 +2178,37 @@ function NotificationOpsTab() {
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <CatalogMetric icon={<Bell className="h-4 w-4" />} label="Matching events" value={String(notificationEventsQuery.data?.total ?? 0)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible recoverable" value={String(recoverableEventCount)} />
-        <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Visible pending" value={String(events.filter((event) => event.status === "pending").length)} />
-        <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Critical visible" value={String(events.filter((event) => event.critical).length)} />
+        <CatalogMetric
+          icon={<Bell className="h-4 w-4" />}
+          label="Matching events"
+          value={String(notificationEventsQuery.data?.total ?? 0)}
+        />
+        <CatalogMetric
+          icon={<AlertCircle className="h-4 w-4" />}
+          label="Visible recoverable"
+          value={String(recoverableEventCount)}
+        />
+        <CatalogMetric
+          icon={<RefreshCw className="h-4 w-4" />}
+          label="Visible pending"
+          value={String(
+            events.filter((event) => event.status === "pending").length,
+          )}
+        />
+        <CatalogMetric
+          icon={<ShieldAlert className="h-4 w-4" />}
+          label="Critical visible"
+          value={String(events.filter((event) => event.critical).length)}
+        />
       </section>
 
       <NotificationEventsTable
         channelSummary={notificationEventsQuery.data?.channelSummary ?? []}
         events={events}
-        isLoading={notificationEventsQuery.isLoading || notificationEventsQuery.isFetching}
+        isLoading={
+          notificationEventsQuery.isLoading ||
+          notificationEventsQuery.isFetching
+        }
         onRetry={retryNotificationEvent}
         pendingRetryEventId={pendingRetryEventId}
         summary={notificationEventsQuery.data?.summary ?? []}
@@ -1796,6 +2230,7 @@ interface ReturnFeeVersionFormState {
   faultCategory: DropshipReturnFaultCategory;
   amountType: DropshipReturnFeeAmountType;
   amount: string;
+  isDefault: boolean;
   vendorId: string;
   storeConnectionId: string;
   priority: string;
@@ -1813,6 +2248,7 @@ const emptyReturnFeeVersionForm: ReturnFeeVersionFormState = {
   faultCategory: "vendor",
   amountType: "flat_cents",
   amount: "0",
+  isDefault: false,
   vendorId: "",
   storeConnectionId: "",
   priority: "0",
@@ -1820,8 +2256,12 @@ const emptyReturnFeeVersionForm: ReturnFeeVersionFormState = {
 
 type ReturnPolicySectionKey = "policies" | "fees" | "effective";
 
-function returnPolicyScopeLabel(row: { vendorId: number | null; storeConnectionId: number | null }): string {
-  if (row.vendorId !== null && row.storeConnectionId !== null) return `Vendor #${row.vendorId} + store #${row.storeConnectionId}`;
+function returnPolicyScopeLabel(row: {
+  vendorId: number | null;
+  storeConnectionId: number | null;
+}): string {
+  if (row.vendorId !== null && row.storeConnectionId !== null)
+    return `Vendor #${row.vendorId} + store #${row.storeConnectionId}`;
   if (row.vendorId !== null) return `Vendor #${row.vendorId}`;
   if (row.storeConnectionId !== null) return `Store #${row.storeConnectionId}`;
   return "Global";
@@ -1829,57 +2269,190 @@ function returnPolicyScopeLabel(row: { vendorId: number | null; storeConnectionI
 
 function ReturnPoliciesTab() {
   const queryClient = useQueryClient();
-  const [activeSection, setActiveSection] = useState<ReturnPolicySectionKey>("policies");
-  const [policyForm, setPolicyForm] = useState<ReturnPolicyVersionFormState>(emptyReturnPolicyVersionForm);
-  const [feeForm, setFeeForm] = useState<ReturnFeeVersionFormState>(emptyReturnFeeVersionForm);
+  const [activeSection, setActiveSection] =
+    useState<ReturnPolicySectionKey>("policies");
+  const [policyForm, setPolicyForm] = useState<ReturnPolicyVersionFormState>(
+    emptyReturnPolicyVersionForm,
+  );
+  const [feeForm, setFeeForm] = useState<ReturnFeeVersionFormState>(
+    emptyReturnFeeVersionForm,
+  );
+  // Edit-as-new-version state: when set, the corresponding form is pre-filled
+  // from that row and submitting creates a superseding version server-side.
+  const [editingPolicyId, setEditingPolicyId] = useState<number | null>(null);
+  const [editingFeeId, setEditingFeeId] = useState<number | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [effectiveVendorId, setEffectiveVendorId] = useState("");
-  const [effectiveStoreConnectionId, setEffectiveStoreConnectionId] = useState("");
-  const [effectiveFaultCategory, setEffectiveFaultCategory] = useState<DropshipReturnFaultCategory>("vendor");
+  const [effectiveStoreConnectionId, setEffectiveStoreConnectionId] =
+    useState("");
+  const [effectiveFaultCategory, setEffectiveFaultCategory] =
+    useState<DropshipReturnFaultCategory>("vendor");
 
-  const policiesUrl = useMemo(() => buildAdminReturnPoliciesUrl({ includeInactive: true }), []);
-  const feesUrl = useMemo(() => buildAdminReturnFeesUrl({ includeInactive: true }), []);
+  const policiesUrl = useMemo(
+    () => buildAdminReturnPoliciesUrl({ includeInactive: true }),
+    [],
+  );
+  const feesUrl = useMemo(
+    () => buildAdminReturnFeesUrl({ includeInactive: true }),
+    [],
+  );
+  const scopeVendorOptionsUrl = useMemo(
+    () =>
+      buildAdminDogfoodReadinessUrl({
+        search: "",
+        status: "all",
+        platform: "all",
+        limit: 100,
+      }),
+    [],
+  );
+  const scopeStoreConnectionsUrl = useMemo(
+    () =>
+      buildAdminStoreConnectionsUrl({
+        search: "",
+        status: "all",
+        platform: "all",
+        limit: 100,
+      }),
+    [],
+  );
   const policiesQuery = useQuery<DropshipAdminReturnPolicyListResponse>({
     queryKey: [policiesUrl],
-    queryFn: () => fetchJson<DropshipAdminReturnPolicyListResponse>(policiesUrl),
+    queryFn: () =>
+      fetchJson<DropshipAdminReturnPolicyListResponse>(policiesUrl),
   });
   const feesQuery = useQuery<DropshipAdminReturnFeeListResponse>({
     queryKey: [feesUrl],
     queryFn: () => fetchJson<DropshipAdminReturnFeeListResponse>(feesUrl),
   });
+  const scopeVendorOptionsQuery = useQuery<DropshipDogfoodReadinessResponse>({
+    queryKey: [scopeVendorOptionsUrl, "return-policy-scope-vendors"],
+    queryFn: () =>
+      fetchJson<DropshipDogfoodReadinessResponse>(scopeVendorOptionsUrl),
+  });
+  const scopeStoreConnectionsQuery =
+    useQuery<DropshipAdminStoreConnectionListResponse>({
+      queryKey: [
+        scopeStoreConnectionsUrl,
+        "return-policy-scope-store-connections",
+      ],
+      queryFn: () =>
+        fetchJson<DropshipAdminStoreConnectionListResponse>(
+          scopeStoreConnectionsUrl,
+        ),
+    });
 
-  const effectiveVendor = effectiveVendorId.trim() ? Number(effectiveVendorId) : null;
-  const effectiveStore = effectiveStoreConnectionId.trim() ? Number(effectiveStoreConnectionId) : null;
+  const scopeVendorOptions = useMemo(
+    () =>
+      buildReturnPolicyVendorOptions(scopeVendorOptionsQuery.data?.items ?? []),
+    [scopeVendorOptionsQuery.data?.items],
+  );
+  const scopeStoreConnections = useMemo(
+    () => scopeStoreConnectionsQuery.data?.items ?? [],
+    [scopeStoreConnectionsQuery.data?.items],
+  );
+  const policyStoreOptions = useMemo(
+    () =>
+      buildReturnPolicyStoreOptions(scopeStoreConnections, policyForm.vendorId),
+    [scopeStoreConnections, policyForm.vendorId],
+  );
+  const feeStoreOptions = useMemo(
+    () =>
+      buildReturnPolicyStoreOptions(scopeStoreConnections, feeForm.vendorId),
+    [scopeStoreConnections, feeForm.vendorId],
+  );
+  const effectiveStoreOptions = useMemo(
+    () =>
+      buildReturnPolicyStoreOptions(scopeStoreConnections, effectiveVendorId),
+    [scopeStoreConnections, effectiveVendorId],
+  );
+  const scopeOptionsLoading =
+    scopeVendorOptionsQuery.isLoading ||
+    scopeVendorOptionsQuery.isFetching ||
+    scopeStoreConnectionsQuery.isLoading ||
+    scopeStoreConnectionsQuery.isFetching;
+
+  function selectPolicyScopeVendor(value: string) {
+    const vendorId = returnPolicyScopeValueFromPicker(value);
+    setPolicyForm((current) => {
+      if (vendorId === current.vendorId) return current;
+      // Store connections belong to vendors: a store picked under a different
+      // vendor is no longer valid, so reset it when the vendor changes.
+      return { ...current, vendorId, storeConnectionId: "" };
+    });
+  }
+
+  function selectFeeScopeVendor(value: string) {
+    const vendorId = returnPolicyScopeValueFromPicker(value);
+    setFeeForm((current) => {
+      if (vendorId === current.vendorId) return current;
+      return { ...current, vendorId, storeConnectionId: "" };
+    });
+  }
+
+  function selectEffectiveScopeVendor(value: string) {
+    const vendorId = returnPolicyScopeValueFromPicker(value);
+    setEffectiveVendorId((current) => {
+      if (vendorId === current) return current;
+      setEffectiveStoreConnectionId("");
+      return vendorId;
+    });
+  }
+
+  const effectiveVendor = effectiveVendorId.trim()
+    ? Number(effectiveVendorId)
+    : null;
+  const effectiveStore = effectiveStoreConnectionId.trim()
+    ? Number(effectiveStoreConnectionId)
+    : null;
   const effectiveLookupReady =
     (effectiveVendorId.trim() === "" || Number.isInteger(effectiveVendor)) &&
-    (effectiveStoreConnectionId.trim() === "" || Number.isInteger(effectiveStore));
+    (effectiveStoreConnectionId.trim() === "" ||
+      Number.isInteger(effectiveStore));
   const effectivePolicyUrl = useMemo(
-    () => buildAdminEffectiveReturnPolicyUrl({ vendorId: effectiveVendor, storeConnectionId: effectiveStore }),
+    () =>
+      buildAdminEffectiveReturnPolicyUrl({
+        vendorId: effectiveVendor,
+        storeConnectionId: effectiveStore,
+      }),
     [effectiveVendor, effectiveStore],
   );
   const effectiveFeesUrl = useMemo(
-    () => buildAdminEffectiveReturnFeesUrl({
-      vendorId: effectiveVendor,
-      storeConnectionId: effectiveStore,
-      faultCategory: effectiveFaultCategory,
-    }),
+    () =>
+      buildAdminEffectiveReturnFeesUrl({
+        vendorId: effectiveVendor,
+        storeConnectionId: effectiveStore,
+        faultCategory: effectiveFaultCategory,
+      }),
     [effectiveVendor, effectiveStore, effectiveFaultCategory],
   );
-  const effectivePolicyQuery = useQuery<DropshipAdminEffectiveReturnPolicyResponse>({
-    queryKey: [effectivePolicyUrl],
-    queryFn: () => fetchJson<DropshipAdminEffectiveReturnPolicyResponse>(effectivePolicyUrl),
-    enabled: activeSection === "effective" && effectiveLookupReady,
-  });
-  const effectiveFeesQuery = useQuery<DropshipAdminEffectiveReturnFeesResponse>({
-    queryKey: [effectiveFeesUrl],
-    queryFn: () => fetchJson<DropshipAdminEffectiveReturnFeesResponse>(effectiveFeesUrl),
-    enabled: activeSection === "effective" && effectiveLookupReady,
-  });
+  const effectivePolicyQuery =
+    useQuery<DropshipAdminEffectiveReturnPolicyResponse>({
+      queryKey: [effectivePolicyUrl],
+      queryFn: () =>
+        fetchJson<DropshipAdminEffectiveReturnPolicyResponse>(
+          effectivePolicyUrl,
+        ),
+      enabled: activeSection === "effective" && effectiveLookupReady,
+    });
+  const effectiveFeesQuery = useQuery<DropshipAdminEffectiveReturnFeesResponse>(
+    {
+      queryKey: [effectiveFeesUrl],
+      queryFn: () =>
+        fetchJson<DropshipAdminEffectiveReturnFeesResponse>(effectiveFeesUrl),
+      enabled: activeSection === "effective" && effectiveLookupReady,
+    },
+  );
 
-  const policies = policiesQuery.data?.items ?? [];
-  const fees = feesQuery.data?.items ?? [];
+  const [showInactive, setShowInactive] = useState(false);
+  const policies = (policiesQuery.data?.items ?? [])
+    .filter((row) => showInactive || row.isActive)
+    .sort((a, b) => b.policyId - a.policyId);
+  const fees = (feesQuery.data?.items ?? [])
+    .filter((row) => showInactive || row.isActive)
+    .sort((a, b) => b.feeId - a.feeId);
 
   async function runPolicyAction(action: string, task: () => Promise<void>) {
     setPendingAction(action);
@@ -1890,11 +2463,17 @@ function ReturnPoliciesTab() {
       await Promise.all([
         policiesQuery.refetch(),
         feesQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Return policy save failed.");
+      setError(
+        caught instanceof Error ? caught.message : "Return policy save failed.",
+      );
     } finally {
       setPendingAction(null);
     }
@@ -1902,27 +2481,58 @@ function ReturnPoliciesTab() {
 
   async function savePolicyVersion() {
     const returnWindowDays = Number(policyForm.returnWindowDays);
-    if (!Number.isInteger(returnWindowDays) || returnWindowDays <= 0 || returnWindowDays > 365) {
+    if (
+      !Number.isInteger(returnWindowDays) ||
+      returnWindowDays <= 0 ||
+      returnWindowDays > 365
+    ) {
       setError("Return window must be an integer between 1 and 365 days.");
       return;
     }
-    const vendorId = policyForm.vendorId.trim() ? Number(policyForm.vendorId) : null;
-    const storeConnectionId = policyForm.storeConnectionId.trim() ? Number(policyForm.storeConnectionId) : null;
+    const vendorId = policyForm.vendorId.trim()
+      ? Number(policyForm.vendorId)
+      : null;
+    const storeConnectionId = policyForm.storeConnectionId.trim()
+      ? Number(policyForm.storeConnectionId)
+      : null;
     if (storeConnectionId !== null && vendorId === null) {
-      setError("Store-scoped policies require a vendor id (store connections belong to vendors).");
+      setError(
+        "Store-scoped policies require a vendor id (store connections belong to vendors).",
+      );
       return;
     }
     await runPolicyAction("policy-create", async () => {
-      await postJson<DropshipAdminReturnPolicyVersionResponse>("/api/dropship/admin/return-policies", {
-        returnWindowDays,
-        vendorId,
-        storeConnectionId,
-        priority: Number(policyForm.priority) || 0,
-        idempotencyKey: createDropshipIdempotencyKey("return-policy-version"),
-      });
-      setMessage(`Return policy version created (${returnWindowDays}d window, ${returnPolicyScopeLabel({ vendorId, storeConnectionId })}).`);
+      await postJson<DropshipAdminReturnPolicyVersionResponse>(
+        "/api/dropship/admin/return-policies",
+        {
+          returnWindowDays,
+          vendorId,
+          storeConnectionId,
+          priority: Number(policyForm.priority) || 0,
+          // Edit-as-new-version: retire the row being edited even if the scope
+          // key changed (server supersedes same-key rows automatically).
+          supersedesPolicyId: editingPolicyId ?? undefined,
+          idempotencyKey: createDropshipIdempotencyKey("return-policy-version"),
+        },
+      );
+      setMessage(
+        `Return policy version created (${returnWindowDays}d window, ${returnPolicyScopeLabel({ vendorId, storeConnectionId })}).`,
+      );
       setPolicyForm(emptyReturnPolicyVersionForm);
+      setEditingPolicyId(null);
     });
+  }
+
+  function startEditPolicy(policy: DropshipReturnPolicyVersion) {
+    setError("");
+    setMessage("");
+    setPolicyForm(returnPolicyRowToEditFormState(policy));
+    setEditingPolicyId(policy.policyId);
+  }
+
+  function cancelEditPolicy() {
+    setPolicyForm(emptyReturnPolicyVersionForm);
+    setEditingPolicyId(null);
   }
 
   async function saveFeeVersion() {
@@ -1940,32 +2550,60 @@ function ReturnPoliciesTab() {
       return;
     }
     const vendorId = feeForm.vendorId.trim() ? Number(feeForm.vendorId) : null;
-    const storeConnectionId = feeForm.storeConnectionId.trim() ? Number(feeForm.storeConnectionId) : null;
+    const storeConnectionId = feeForm.storeConnectionId.trim()
+      ? Number(feeForm.storeConnectionId)
+      : null;
     if (storeConnectionId !== null && vendorId === null) {
-      setError("Store-scoped fee rows require a vendor id (store connections belong to vendors).");
+      setError(
+        "Store-scoped fee rows require a vendor id (store connections belong to vendors).",
+      );
       return;
     }
     await runPolicyAction("fee-create", async () => {
-      await postJson<DropshipAdminReturnFeeVersionResponse>("/api/dropship/admin/return-policies/fee-schedule", {
-        feeType: feeForm.feeType,
-        faultCategory: feeForm.faultCategory,
-        amountType: feeForm.amountType,
-        amount,
-        vendorId,
-        storeConnectionId,
-        priority: Number(feeForm.priority) || 0,
-        idempotencyKey: createDropshipIdempotencyKey("return-fee-version"),
-      });
-      setMessage(`Fee schedule version created (${feeForm.feeType} / ${feeForm.faultCategory}).`);
+      await postJson<DropshipAdminReturnFeeVersionResponse>(
+        "/api/dropship/admin/return-policies/fee-schedule",
+        {
+          feeType: feeForm.feeType,
+          faultCategory: feeForm.faultCategory,
+          amountType: feeForm.amountType,
+          amount,
+          isDefault: feeForm.isDefault,
+          vendorId,
+          storeConnectionId,
+          priority: Number(feeForm.priority) || 0,
+          supersedesFeeId: editingFeeId ?? undefined,
+          idempotencyKey: createDropshipIdempotencyKey("return-fee-version"),
+        },
+      );
+      setMessage(
+        `Fee schedule version created (${feeForm.feeType} / ${feeForm.faultCategory}).`,
+      );
       setFeeForm(emptyReturnFeeVersionForm);
+      setEditingFeeId(null);
     });
+  }
+
+  function startEditFee(fee: DropshipReturnFeeScheduleRecord) {
+    setError("");
+    setMessage("");
+    setFeeForm(returnFeeRowToEditFormState(fee));
+    setEditingFeeId(fee.feeId);
+  }
+
+  function cancelEditFee() {
+    setFeeForm(emptyReturnFeeVersionForm);
+    setEditingFeeId(null);
   }
 
   async function deactivatePolicy(policy: DropshipReturnPolicyVersion) {
     await runPolicyAction(`policy-deactivate-${policy.policyId}`, async () => {
       await postJson<DropshipAdminReturnPolicyVersionResponse>(
         `/api/dropship/admin/return-policies/${policy.policyId}/deactivate`,
-        { idempotencyKey: createDropshipIdempotencyKey(`return-policy-deactivate-${policy.policyId}`) },
+        {
+          idempotencyKey: createDropshipIdempotencyKey(
+            `return-policy-deactivate-${policy.policyId}`,
+          ),
+        },
       );
       setMessage(`Policy #${policy.policyId} deactivated.`);
     });
@@ -1975,7 +2613,11 @@ function ReturnPoliciesTab() {
     await runPolicyAction(`fee-deactivate-${fee.feeId}`, async () => {
       await postJson<DropshipAdminReturnFeeVersionResponse>(
         `/api/dropship/admin/return-policies/fee-schedule/${fee.feeId}/deactivate`,
-        { idempotencyKey: createDropshipIdempotencyKey(`return-fee-deactivate-${fee.feeId}`) },
+        {
+          idempotencyKey: createDropshipIdempotencyKey(
+            `return-fee-deactivate-${fee.feeId}`,
+          ),
+        },
       );
       setMessage(`Fee row #${fee.feeId} deactivated.`);
     });
@@ -1989,11 +2631,22 @@ function ReturnPoliciesTab() {
 
   return (
     <div className="space-y-5">
-      {(policiesQuery.error || feesQuery.error || error) && (
+      {(policiesQuery.error ||
+        feesQuery.error ||
+        scopeVendorOptionsQuery.error ||
+        scopeStoreConnectionsQuery.error ||
+        error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(policiesQuery.error ?? feesQuery.error, "Unable to load return policies.")}
+            {error ||
+              queryErrorMessage(
+                policiesQuery.error ??
+                  feesQuery.error ??
+                  scopeVendorOptionsQuery.error ??
+                  scopeStoreConnectionsQuery.error,
+                "Unable to load return policies.",
+              )}
           </AlertDescription>
         </Alert>
       )}
@@ -2003,14 +2656,24 @@ function ReturnPoliciesTab() {
           <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
+      <p className="text-sm text-muted-foreground">
+        Policies and fees are versioned and immutable once effective; editing
+        creates a new version.
+      </p>
       <Tabs
         value={activeSection}
-        onValueChange={(value) => setActiveSection(value as ReturnPolicySectionKey)}
+        onValueChange={(value) =>
+          setActiveSection(value as ReturnPolicySectionKey)
+        }
         className="space-y-5"
       >
         <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto rounded-md border bg-muted/50 p-1">
           {sections.map((section) => (
-            <TabsTrigger key={section.key} value={section.key} className="shrink-0 px-4 py-2">
+            <TabsTrigger
+              key={section.key}
+              value={section.key}
+              className="shrink-0 px-4 py-2"
+            >
               {section.label}
             </TabsTrigger>
           ))}
@@ -2020,46 +2683,117 @@ function ReturnPoliciesTab() {
           <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <section className="rounded-md border bg-card p-4">
               <PanelHeader
-                title="New policy version"
+                title={
+                  editingPolicyId === null
+                    ? "New policy version"
+                    : `Edit policy #${editingPolicyId} (new version)`
+                }
                 detail="Versioned + immutable once effective. Most specific scope wins: vendor+store > vendor > store > global."
               />
+              {editingPolicyId !== null && (
+                <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  Editing creates a new version — the current version will be
+                  retired. Scope is locked; changing scope means creating a
+                  different policy.
+                </p>
+              )}
               <div className="mt-4 grid gap-3 md:grid-cols-2">
                 <ShippingInput
                   label="Return window (days)"
                   type="number"
                   value={policyForm.returnWindowDays}
-                  onChange={(value) => setPolicyForm((current) => ({ ...current, returnWindowDays: value }))}
+                  onChange={(value) =>
+                    setPolicyForm((current) => ({
+                      ...current,
+                      returnWindowDays: value,
+                    }))
+                  }
                 />
                 <ShippingInput
                   label="Priority"
                   type="number"
                   value={policyForm.priority}
-                  onChange={(value) => setPolicyForm((current) => ({ ...current, priority: value }))}
+                  onChange={(value) =>
+                    setPolicyForm((current) => ({
+                      ...current,
+                      priority: value,
+                    }))
+                  }
                 />
-                <ShippingInput
-                  label="Vendor id"
-                  placeholder="Blank = global/store scope"
-                  value={policyForm.vendorId}
-                  onChange={(value) => setPolicyForm((current) => ({ ...current, vendorId: value }))}
+                <SearchableOptionPicker
+                  label="Vendor"
+                  value={returnPolicyScopeValueToPicker(
+                    policyForm.vendorId,
+                    RETURN_POLICY_GLOBAL_VENDOR_VALUE,
+                  )}
+                  options={scopeVendorOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder="Global (no vendor)"
+                  searchPlaceholder="Search vendor, email, or member..."
+                  emptyText="No dropship vendors found."
+                  disabled={editingPolicyId !== null}
+                  onChange={selectPolicyScopeVendor}
                 />
-                <ShippingInput
-                  label="Store connection id"
-                  placeholder="Optional"
-                  value={policyForm.storeConnectionId}
-                  onChange={(value) => setPolicyForm((current) => ({ ...current, storeConnectionId: value }))}
+                <SearchableOptionPicker
+                  label="Store connection"
+                  value={returnPolicyScopeValueToPicker(
+                    policyForm.storeConnectionId,
+                    RETURN_POLICY_ANY_STORE_VALUE,
+                  )}
+                  options={policyStoreOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder={
+                    policyForm.vendorId
+                      ? "Any store (vendor scope)"
+                      : "Global (no store)"
+                  }
+                  searchPlaceholder="Search store, platform, or vendor..."
+                  emptyText="No store connections found."
+                  disabled={editingPolicyId !== null}
+                  onChange={(value) =>
+                    setPolicyForm((current) => ({
+                      ...current,
+                      storeConnectionId:
+                        returnPolicyScopeValueFromPicker(value),
+                    }))
+                  }
                 />
               </div>
-              <Button
-                className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-                disabled={pendingAction === "policy-create"}
-                onClick={savePolicyVersion}
-              >
-                <Save className="h-4 w-4" />
-                Create policy version
-              </Button>
+              <div className="mt-4 flex items-center gap-2">
+                <Button
+                  className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                  disabled={pendingAction === "policy-create"}
+                  onClick={savePolicyVersion}
+                >
+                  <Save className="h-4 w-4" />
+                  {editingPolicyId === null
+                    ? "Create policy version"
+                    : "Save as new version"}
+                </Button>
+                {editingPolicyId !== null && (
+                  <Button
+                    variant="outline"
+                    onClick={cancelEditPolicy}
+                    disabled={pendingAction === "policy-create"}
+                  >
+                    Cancel edit
+                  </Button>
+                )}
+              </div>
             </section>
             <section className="rounded-md border bg-card p-4">
-              <PanelHeader title="Policy versions" detail={`${policies.length} row(s) loaded (including inactive).`} />
+              <PanelHeader
+                title="Policy versions"
+                detail={`${policies.length} row(s) shown.`}
+              />
+              <label className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={showInactive}
+                  onChange={(event) => setShowInactive(event.target.checked)}
+                />
+                Show inactive (history)
+              </label>
               <div className="mt-4 overflow-auto">
                 <Table>
                   <TableHeader>
@@ -2081,32 +2815,53 @@ function ReturnPoliciesTab() {
                         <TableCell>{policy.returnWindowDays}d</TableCell>
                         <TableCell>{policy.priority}</TableCell>
                         <TableCell>
-                          <Badge variant={policy.isActive ? "default" : "outline"}>
+                          <Badge
+                            variant={policy.isActive ? "default" : "outline"}
+                          >
                             {policy.isActive ? "Active" : "Inactive"}
                           </Badge>
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {formatDateTime(policy.effectiveFrom)}
-                          {policy.effectiveTo ? ` → ${formatDateTime(policy.effectiveTo)}` : ""}
+                          {policy.effectiveTo
+                            ? ` → ${formatDateTime(policy.effectiveTo)}`
+                            : ""}
                         </TableCell>
                         <TableCell className="text-right">
                           {policy.isActive && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={pendingAction === `policy-deactivate-${policy.policyId}`}
-                              onClick={() => deactivatePolicy(policy)}
-                            >
-                              Deactivate
-                            </Button>
+                            <div className="flex justify-end gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => startEditPolicy(policy)}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={
+                                  pendingAction ===
+                                  `policy-deactivate-${policy.policyId}`
+                                }
+                                onClick={() => deactivatePolicy(policy)}
+                              >
+                                Deactivate
+                              </Button>
+                            </div>
                           )}
                         </TableCell>
                       </TableRow>
                     ))}
                     {policies.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
-                          {policiesQuery.isLoading ? "Loading policies…" : "No return policy rows."}
+                        <TableCell
+                          colSpan={7}
+                          className="text-center text-sm text-muted-foreground"
+                        >
+                          {policiesQuery.isLoading
+                            ? "Loading policies…"
+                            : "No return policy rows."}
                         </TableCell>
                       </TableRow>
                     )}
@@ -2121,20 +2876,38 @@ function ReturnPoliciesTab() {
           <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <section className="rounded-md border bg-card p-4">
               <PanelHeader
-                title="New fee version"
+                title={
+                  editingFeeId === null
+                    ? "New fee version"
+                    : `Edit fee row #${editingFeeId} (new version)`
+                }
                 detail="return_shipping_fee rows encode WHO PAYS per fault (amount ignored — label cost comes from channel evidence)."
               />
+              {editingFeeId !== null && (
+                <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  Editing creates a new version — the current version will be
+                  retired. Scope is locked; changing scope means creating a
+                  different fee row.
+                </p>
+              )}
               <div className="mt-4 grid gap-3 md:grid-cols-2">
                 <label className="space-y-1 text-sm">
                   <span className="text-muted-foreground">Fee type</span>
                   <select
                     className="w-full rounded-md border bg-background px-3 py-2"
                     value={feeForm.feeType}
-                    onChange={(event) => setFeeForm((current) => ({ ...current, feeType: event.target.value as DropshipReturnFeeType }))}
+                    onChange={(event) =>
+                      setFeeForm((current) => ({
+                        ...current,
+                        feeType: event.target.value as DropshipReturnFeeType,
+                      }))
+                    }
                   >
                     <option value="restocking_fee">Restocking fee</option>
                     <option value="processing_fee">Processing fee</option>
-                    <option value="return_shipping_fee">Return shipping (who pays)</option>
+                    <option value="return_shipping_fee">
+                      Return shipping (who pays)
+                    </option>
                   </select>
                 </label>
                 <label className="space-y-1 text-sm">
@@ -2142,12 +2915,19 @@ function ReturnPoliciesTab() {
                   <select
                     className="w-full rounded-md border bg-background px-3 py-2"
                     value={feeForm.faultCategory}
-                    onChange={(event) => setFeeForm((current) => ({ ...current, faultCategory: event.target.value as DropshipReturnFaultCategory }))}
+                    onChange={(event) =>
+                      setFeeForm((current) => ({
+                        ...current,
+                        faultCategory: event.target
+                          .value as DropshipReturnFaultCategory,
+                      }))
+                    }
                   >
-                    <option value="card_shellz">Card Shellz</option>
-                    <option value="vendor">Vendor</option>
-                    <option value="customer">Customer</option>
-                    <option value="marketplace">Marketplace</option>
+                    <option value="card_shellz">Card Shellz (us)</option>
+                    <option value="vendor">Vendor (store owner)</option>
+                    <option value="customer">
+                      Customer (vendor's customer)
+                    </option>
                     <option value="carrier">Carrier</option>
                   </select>
                 </label>
@@ -2156,48 +2936,119 @@ function ReturnPoliciesTab() {
                   <select
                     className="w-full rounded-md border bg-background px-3 py-2"
                     value={feeForm.amountType}
-                    onChange={(event) => setFeeForm((current) => ({ ...current, amountType: event.target.value as DropshipReturnFeeAmountType }))}
+                    onChange={(event) =>
+                      setFeeForm((current) => ({
+                        ...current,
+                        amountType: event.target
+                          .value as DropshipReturnFeeAmountType,
+                      }))
+                    }
                   >
                     <option value="flat_cents">Flat cents</option>
                     <option value="percent">Percent of credit</option>
                   </select>
                 </label>
                 <ShippingInput
-                  label={feeForm.amountType === "percent" ? "Amount (%)" : "Amount (cents)"}
+                  label={
+                    feeForm.amountType === "percent"
+                      ? "Amount (%)"
+                      : "Amount (cents)"
+                  }
                   type="number"
                   value={feeForm.amount}
-                  onChange={(value) => setFeeForm((current) => ({ ...current, amount: value }))}
+                  onChange={(value) =>
+                    setFeeForm((current) => ({ ...current, amount: value }))
+                  }
                 />
+                <label className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={feeForm.isDefault}
+                    onChange={(event) =>
+                      setFeeForm((current) => ({
+                        ...current,
+                        isDefault: event.target.checked,
+                      }))
+                    }
+                  />
+                  <span>
+                    Default responsibility for this fee type and scope
+                  </span>
+                </label>
                 <ShippingInput
                   label="Priority"
                   type="number"
                   value={feeForm.priority}
-                  onChange={(value) => setFeeForm((current) => ({ ...current, priority: value }))}
+                  onChange={(value) =>
+                    setFeeForm((current) => ({ ...current, priority: value }))
+                  }
                 />
-                <ShippingInput
-                  label="Vendor id"
-                  placeholder="Blank = global/store scope"
-                  value={feeForm.vendorId}
-                  onChange={(value) => setFeeForm((current) => ({ ...current, vendorId: value }))}
+                <SearchableOptionPicker
+                  label="Vendor"
+                  value={returnPolicyScopeValueToPicker(
+                    feeForm.vendorId,
+                    RETURN_POLICY_GLOBAL_VENDOR_VALUE,
+                  )}
+                  options={scopeVendorOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder="Global (no vendor)"
+                  searchPlaceholder="Search vendor, email, or member..."
+                  emptyText="No dropship vendors found."
+                  disabled={editingFeeId !== null}
+                  onChange={selectFeeScopeVendor}
                 />
-                <ShippingInput
-                  label="Store connection id"
-                  placeholder="Optional"
-                  value={feeForm.storeConnectionId}
-                  onChange={(value) => setFeeForm((current) => ({ ...current, storeConnectionId: value }))}
+                <SearchableOptionPicker
+                  label="Store connection"
+                  value={returnPolicyScopeValueToPicker(
+                    feeForm.storeConnectionId,
+                    RETURN_POLICY_ANY_STORE_VALUE,
+                  )}
+                  options={feeStoreOptions}
+                  isLoading={scopeOptionsLoading}
+                  placeholder={
+                    feeForm.vendorId
+                      ? "Any store (vendor scope)"
+                      : "Global (no store)"
+                  }
+                  searchPlaceholder="Search store, platform, or vendor..."
+                  emptyText="No store connections found."
+                  disabled={editingFeeId !== null}
+                  onChange={(value) =>
+                    setFeeForm((current) => ({
+                      ...current,
+                      storeConnectionId:
+                        returnPolicyScopeValueFromPicker(value),
+                    }))
+                  }
                 />
               </div>
-              <Button
-                className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-                disabled={pendingAction === "fee-create"}
-                onClick={saveFeeVersion}
-              >
-                <Save className="h-4 w-4" />
-                Create fee version
-              </Button>
+              <div className="mt-4 flex items-center gap-2">
+                <Button
+                  className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                  disabled={pendingAction === "fee-create"}
+                  onClick={saveFeeVersion}
+                >
+                  <Save className="h-4 w-4" />
+                  {editingFeeId === null
+                    ? "Create fee version"
+                    : "Save as new version"}
+                </Button>
+                {editingFeeId !== null && (
+                  <Button
+                    variant="outline"
+                    onClick={cancelEditFee}
+                    disabled={pendingAction === "fee-create"}
+                  >
+                    Cancel edit
+                  </Button>
+                )}
+              </div>
             </section>
             <section className="rounded-md border bg-card p-4">
-              <PanelHeader title="Fee schedule rows" detail={`${fees.length} row(s) loaded (including inactive).`} />
+              <PanelHeader
+                title="Fee schedule rows"
+                detail={`${fees.length} row(s) shown.`}
+              />
               <div className="mt-4 overflow-auto">
                 <Table>
                   <TableHeader>
@@ -2213,8 +3064,17 @@ function ReturnPoliciesTab() {
                   <TableBody>
                     {fees.map((fee) => (
                       <TableRow key={fee.feeId}>
-                        <TableCell>{formatStatus(fee.feeType)} v{fee.version}</TableCell>
-                        <TableCell>{formatStatus(fee.faultCategory)}</TableCell>
+                        <TableCell>
+                          {formatStatus(fee.feeType)} v{fee.version}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            <span>{formatStatus(fee.faultCategory)}</span>
+                            {fee.isDefault && (
+                              <Badge variant="outline">Default</Badge>
+                            )}
+                          </div>
+                        </TableCell>
                         <TableCell>
                           {fee.feeType === "return_shipping_fee"
                             ? "Vendor pays"
@@ -2230,22 +3090,39 @@ function ReturnPoliciesTab() {
                         </TableCell>
                         <TableCell className="text-right">
                           {fee.isActive && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={pendingAction === `fee-deactivate-${fee.feeId}`}
-                              onClick={() => deactivateFee(fee)}
-                            >
-                              Deactivate
-                            </Button>
+                            <div className="flex justify-end gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => startEditFee(fee)}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={
+                                  pendingAction ===
+                                  `fee-deactivate-${fee.feeId}`
+                                }
+                                onClick={() => deactivateFee(fee)}
+                              >
+                                Deactivate
+                              </Button>
+                            </div>
                           )}
                         </TableCell>
                       </TableRow>
                     ))}
                     {fees.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
-                          {feesQuery.isLoading ? "Loading fee schedule…" : "No fee schedule rows."}
+                        <TableCell
+                          colSpan={6}
+                          className="text-center text-sm text-muted-foreground"
+                        >
+                          {feesQuery.isLoading
+                            ? "Loading fee schedule…"
+                            : "No fee schedule rows."}
                         </TableCell>
                       </TableRow>
                     )}
@@ -2263,36 +3140,63 @@ function ReturnPoliciesTab() {
               detail="Resolve the window + fees that would apply for a vendor/store pair. Blank ids resolve the global policy."
             />
             <div className="mt-4 grid gap-3 md:grid-cols-3">
-              <ShippingInput
-                label="Vendor id"
-                placeholder="Blank = global"
-                value={effectiveVendorId}
-                onChange={setEffectiveVendorId}
+              <SearchableOptionPicker
+                label="Vendor"
+                value={returnPolicyScopeValueToPicker(
+                  effectiveVendorId,
+                  RETURN_POLICY_GLOBAL_VENDOR_VALUE,
+                )}
+                options={scopeVendorOptions}
+                isLoading={scopeOptionsLoading}
+                placeholder="Global (no vendor)"
+                searchPlaceholder="Search vendor, email, or member..."
+                emptyText="No dropship vendors found."
+                onChange={selectEffectiveScopeVendor}
               />
-              <ShippingInput
-                label="Store connection id"
-                placeholder="Blank = none"
-                value={effectiveStoreConnectionId}
-                onChange={setEffectiveStoreConnectionId}
+              <SearchableOptionPicker
+                label="Store connection"
+                value={returnPolicyScopeValueToPicker(
+                  effectiveStoreConnectionId,
+                  RETURN_POLICY_ANY_STORE_VALUE,
+                )}
+                options={effectiveStoreOptions}
+                isLoading={scopeOptionsLoading}
+                placeholder={
+                  effectiveVendorId
+                    ? "Any store (vendor scope)"
+                    : "Global (no store)"
+                }
+                searchPlaceholder="Search store, platform, or vendor..."
+                emptyText="No store connections found."
+                onChange={(value) =>
+                  setEffectiveStoreConnectionId(
+                    returnPolicyScopeValueFromPicker(value),
+                  )
+                }
               />
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Fault category</span>
                 <select
                   className="w-full rounded-md border bg-background px-3 py-2"
                   value={effectiveFaultCategory}
-                  onChange={(event) => setEffectiveFaultCategory(event.target.value as DropshipReturnFaultCategory)}
+                  onChange={(event) =>
+                    setEffectiveFaultCategory(
+                      event.target.value as DropshipReturnFaultCategory,
+                    )
+                  }
                 >
-                  <option value="card_shellz">Card Shellz</option>
-                  <option value="vendor">Vendor</option>
-                  <option value="customer">Customer</option>
-                  <option value="marketplace">Marketplace</option>
+                  <option value="card_shellz">Card Shellz (us)</option>
+                  <option value="vendor">Vendor (store owner)</option>
+                  <option value="customer">Customer (vendor's customer)</option>
                   <option value="carrier">Carrier</option>
                 </select>
               </label>
             </div>
             <div className="mt-4 grid gap-3 md:grid-cols-2">
               <div className="rounded-md border p-3">
-                <div className="text-xs uppercase text-muted-foreground">Resolved return window</div>
+                <div className="text-xs uppercase text-muted-foreground">
+                  Resolved return window
+                </div>
                 <div className="mt-1 text-lg font-semibold">
                   {effectivePolicyQuery.data?.policy
                     ? `${effectivePolicyQuery.data.policy.returnWindowDays} days`
@@ -2300,32 +3204,43 @@ function ReturnPoliciesTab() {
                 </div>
                 {effectivePolicyQuery.data?.policy && (
                   <div className="mt-1 text-xs text-muted-foreground">
-                    {returnPolicyScopeLabel(effectivePolicyQuery.data.policy)} · v{effectivePolicyQuery.data.policy.version}
+                    {returnPolicyScopeLabel(effectivePolicyQuery.data.policy)} ·
+                    v{effectivePolicyQuery.data.policy.version}
                   </div>
                 )}
               </div>
               <div className="rounded-md border p-3">
-                <div className="text-xs uppercase text-muted-foreground">Resolved fees ({formatStatus(effectiveFaultCategory)})</div>
+                <div className="text-xs uppercase text-muted-foreground">
+                  Resolved fees ({formatStatus(effectiveFaultCategory)})
+                </div>
                 <div className="mt-1 space-y-1 text-sm">
                   <div>
                     Restocking:{" "}
                     {effectiveFeesQuery.data?.fees.restockingFee
-                      ? effectiveFeesQuery.data.fees.restockingFee.amountType === "percent"
+                      ? effectiveFeesQuery.data.fees.restockingFee
+                          .amountType === "percent"
                         ? `${effectiveFeesQuery.data.fees.restockingFee.amount}%`
-                        : formatCents(effectiveFeesQuery.data.fees.restockingFee.amount)
+                        : formatCents(
+                            effectiveFeesQuery.data.fees.restockingFee.amount,
+                          )
                       : "none"}
                   </div>
                   <div>
                     Processing:{" "}
                     {effectiveFeesQuery.data?.fees.processingFee
-                      ? effectiveFeesQuery.data.fees.processingFee.amountType === "percent"
+                      ? effectiveFeesQuery.data.fees.processingFee
+                          .amountType === "percent"
                         ? `${effectiveFeesQuery.data.fees.processingFee.amount}%`
-                        : formatCents(effectiveFeesQuery.data.fees.processingFee.amount)
+                        : formatCents(
+                            effectiveFeesQuery.data.fees.processingFee.amount,
+                          )
                       : "none"}
                   </div>
                   <div>
                     Return shipping:{" "}
-                    {effectiveFeesQuery.data?.fees.returnShippingFee ? "vendor pays" : "absorbed (no row)"}
+                    {effectiveFeesQuery.data?.fees.returnShippingFee
+                      ? "vendor pays"
+                      : "absorbed (no row)"}
                   </div>
                 </div>
               </div>
@@ -2345,41 +3260,80 @@ function ReturnOpsTab() {
     search: "",
     status: "default" as ReturnOpsStatusFilter,
   });
-  const [createForm, setCreateForm] = useState<ReturnCreateFormState>(() => makeEmptyReturnCreateForm());
-  const [policyForm, setPolicyForm] = useState<ReturnPolicyFormState>(emptyReturnPolicyForm);
+  const [createForm, setCreateForm] = useState<ReturnCreateFormState>(() =>
+    makeEmptyReturnCreateForm(),
+  );
+  const [policyForm, setPolicyForm] = useState<ReturnPolicyFormState>(
+    emptyReturnPolicyForm,
+  );
   const [creatingRma, setCreatingRma] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
-  const [statusInputs, setStatusInputs] = useState<Record<number, DropshipRmaStatus>>({});
+  const [statusInputs, setStatusInputs] = useState<
+    Record<number, DropshipRmaStatus>
+  >({});
   const [statusNotes, setStatusNotes] = useState<Record<number, string>>({});
   const [pendingRmaId, setPendingRmaId] = useState<number | null>(null);
-  const [selectedInspectionRmaId, setSelectedInspectionRmaId] = useState<number | null>(null);
-  const [inspectionForm, setInspectionForm] = useState<ReturnInspectionFormState | null>(null);
-  const [inspectionPendingRmaId, setInspectionPendingRmaId] = useState<number | null>(null);
+  const [selectedInspectionRmaId, setSelectedInspectionRmaId] = useState<
+    number | null
+  >(null);
+  const [inspectionModalOpen, setInspectionModalOpen] = useState(false);
+  const [inspectionForm, setInspectionForm] =
+    useState<ReturnInspectionFormState | null>(null);
+  const [inspectionPendingRmaId, setInspectionPendingRmaId] = useState<
+    number | null
+  >(null);
+  const [reviewReason, setReviewReason] = useState("");
+  const [reviewPendingDecision, setReviewPendingDecision] = useState<
+    "approve" | "deny" | null
+  >(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const returnsUrl = useMemo(() => buildAdminReturnsUrl({
-    search: appliedFilters.search,
-    status: appliedFilters.status,
-  }), [appliedFilters]);
+  // Auto-dismiss success messages after 5 seconds.
+  useEffect(() => {
+    if (!message) return;
+    const timer = setTimeout(() => setMessage(""), 5000);
+    return () => clearTimeout(timer);
+  }, [message]);
+
+  const returnsUrl = useMemo(
+    () =>
+      buildAdminReturnsUrl({
+        search: appliedFilters.search,
+        status: appliedFilters.status,
+      }),
+    [appliedFilters],
+  );
   const returnPolicyUrl = useMemo(() => buildAdminReturnPolicyUrl(), []);
-  const returnVendorOptionsUrl = useMemo(() => buildAdminDogfoodReadinessUrl({
-    search: "",
-    status: "all",
-    platform: "all",
-    limit: 250,
-  }), []);
-  const returnStoreConnectionsUrl = useMemo(() => buildAdminStoreConnectionsUrl({
-    search: "",
-    status: "all",
-    platform: "all",
-    limit: 250,
-  }), []);
-  const returnOrderIntakeUrl = useMemo(() => buildAdminOrderIntakeUrl({
-    search: "",
-    status: "all",
-    limit: 250,
-  }), []);
+  const returnVendorOptionsUrl = useMemo(
+    () =>
+      buildAdminDogfoodReadinessUrl({
+        search: "",
+        status: "all",
+        platform: "all",
+        limit: 100,
+      }),
+    [],
+  );
+  const returnStoreConnectionsUrl = useMemo(
+    () =>
+      buildAdminStoreConnectionsUrl({
+        search: "",
+        status: "all",
+        platform: "all",
+        limit: 100,
+      }),
+    [],
+  );
+  const returnOrderIntakeUrl = useMemo(
+    () =>
+      buildAdminOrderIntakeUrl({
+        search: "",
+        status: "all",
+        limit: 100,
+      }),
+    [],
+  );
 
   const returnsQuery = useQuery<DropshipReturnListResponse>({
     queryKey: [returnsUrl],
@@ -2387,31 +3341,68 @@ function ReturnOpsTab() {
   });
   const returnPolicyQuery = useQuery<DropshipAdminReturnPolicyResponse>({
     queryKey: [returnPolicyUrl],
-    queryFn: () => fetchJson<DropshipAdminReturnPolicyResponse>(returnPolicyUrl),
+    queryFn: () =>
+      fetchJson<DropshipAdminReturnPolicyResponse>(returnPolicyUrl),
   });
   const returnDetailQuery = useQuery<DropshipReturnDetailResponse>({
     queryKey: ["dropship-admin-return-detail", selectedInspectionRmaId],
     queryFn: () => {
-      if (selectedInspectionRmaId === null) throw new Error("Missing selected RMA.");
-      return fetchJson<DropshipReturnDetailResponse>(`/api/dropship/admin/returns/${selectedInspectionRmaId}`);
+      if (selectedInspectionRmaId === null)
+        throw new Error("Missing selected RMA.");
+      return fetchJson<DropshipReturnDetailResponse>(
+        `/api/dropship/admin/returns/${selectedInspectionRmaId}`,
+      );
     },
     enabled: selectedInspectionRmaId !== null,
   });
   const returnVendorOptionsQuery = useQuery<DropshipDogfoodReadinessResponse>({
     queryKey: [returnVendorOptionsUrl, "return-vendors"],
-    queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(returnVendorOptionsUrl),
+    queryFn: () =>
+      fetchJson<DropshipDogfoodReadinessResponse>(returnVendorOptionsUrl),
   });
-  const returnStoreConnectionsQuery = useQuery<DropshipAdminStoreConnectionListResponse>({
-    queryKey: [returnStoreConnectionsUrl, "return-store-connections"],
-    queryFn: () => fetchJson<DropshipAdminStoreConnectionListResponse>(returnStoreConnectionsUrl),
-  });
+  const returnStoreConnectionsQuery =
+    useQuery<DropshipAdminStoreConnectionListResponse>({
+      queryKey: [returnStoreConnectionsUrl, "return-store-connections"],
+      queryFn: () =>
+        fetchJson<DropshipAdminStoreConnectionListResponse>(
+          returnStoreConnectionsUrl,
+        ),
+    });
   const returnOrderIntakesQuery = useQuery<DropshipAdminOrderOpsListResponse>({
     queryKey: [returnOrderIntakeUrl, "return-order-intakes"],
-    queryFn: () => fetchJson<DropshipAdminOrderOpsListResponse>(returnOrderIntakeUrl),
+    queryFn: () =>
+      fetchJson<DropshipAdminOrderOpsListResponse>(returnOrderIntakeUrl),
   });
   const returnVariantsQuery = useQuery<DropshipProductVariantOption[]>({
     queryKey: ["/api/product-variants", "return-options"],
-    queryFn: () => fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
+    queryFn: () =>
+      fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
+  });
+  const selectedReturnVendorId = /^\d+$/.test(createForm.vendorId)
+    ? Number(createForm.vendorId)
+    : null;
+  const selectedReturnIntakeId = /^\d+$/.test(createForm.intakeId)
+    ? Number(createForm.intakeId)
+    : null;
+  const returnCreateOrderQuery = useQuery<DropshipAdminReturnSourceOrderResponse>({
+    queryKey: [
+      "dropship-admin-return-create-order",
+      selectedReturnVendorId,
+      selectedReturnIntakeId,
+    ],
+    queryFn: () => {
+      if (selectedReturnVendorId === null || selectedReturnIntakeId === null) {
+        throw new Error("Missing vendor or intake ID.");
+      }
+      return fetchJson<DropshipAdminReturnSourceOrderResponse>(
+        buildAdminReturnSourceOrderUrl({
+          vendorId: selectedReturnVendorId,
+          intakeId: selectedReturnIntakeId,
+        }),
+      );
+    },
+    enabled:
+      selectedReturnVendorId !== null && selectedReturnIntakeId !== null,
   });
 
   const rmas = returnsQuery.data?.items ?? [];
@@ -2429,15 +3420,38 @@ function ReturnOpsTab() {
     [returnOrderIntakesQuery.data?.items],
   );
   const returnVariantOptions = useMemo(
-    () => (returnVariantsQuery.data ?? [])
-      .filter((variant) => variant.isActive !== false && variant.active !== 0)
-      .sort((first, second) => {
-        const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
-        if (skuCompare !== 0) return skuCompare;
-        const nameCompare = first.name.localeCompare(second.name);
-        return nameCompare !== 0 ? nameCompare : first.id - second.id;
-      }),
+    () =>
+      (returnVariantsQuery.data ?? [])
+        .filter((variant) => variant.isActive !== false && variant.active !== 0)
+        .sort((first, second) => {
+          const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
+          if (skuCompare !== 0) return skuCompare;
+          const nameCompare = first.name.localeCompare(second.name);
+          return nameCompare !== 0 ? nameCompare : first.id - second.id;
+        }),
     [returnVariantsQuery.data],
+  );
+
+  const inspectionRmaDetail = returnDetailQuery.data?.rma ?? null;
+  const inspectionFaultCategory = inspectionForm?.faultCategory ?? null;
+  const effectiveFeesUrl = useMemo(() => {
+    if (!inspectionRmaDetail || !inspectionFaultCategory) return null;
+    return buildAdminEffectiveReturnFeesUrl({
+      vendorId: inspectionRmaDetail.vendorId,
+      faultCategory: inspectionFaultCategory,
+    });
+  }, [inspectionRmaDetail, inspectionFaultCategory]);
+  const effectiveFeesQuery = useQuery<DropshipAdminEffectiveReturnFeesResponse>(
+    {
+      queryKey: [effectiveFeesUrl],
+      queryFn: () => {
+        if (!effectiveFeesUrl) throw new Error("Missing effective fees URL.");
+        return fetchJson<DropshipAdminEffectiveReturnFeesResponse>(
+          effectiveFeesUrl,
+        );
+      },
+      enabled: effectiveFeesUrl !== null,
+    },
   );
 
   useEffect(() => {
@@ -2448,6 +3462,40 @@ function ReturnOpsTab() {
       return buildReturnInspectionFormState(rma);
     });
   }, [returnDetailQuery.data?.rma]);
+
+  // Auto-fill fees when fault category changes and fee data is available.
+  useEffect(() => {
+    const fees = effectiveFeesQuery.data?.fees;
+    if (!fees) return;
+    setInspectionForm((current) => {
+      if (!current || current.items.length === 0) return current;
+      // Sum all applicable fee amounts (flat-cents only; percent fees require
+      // order economics context we don't have at item level).
+      let totalFlatFeeCents = 0;
+      for (const fee of [
+        fees.restockingFee,
+        fees.processingFee,
+        fees.returnShippingFee,
+      ]) {
+        if (fee && fee.amountType === "flat_cents") {
+          totalFlatFeeCents += fee.amount;
+        }
+      }
+      if (totalFlatFeeCents <= 0) return current;
+      // Distribute evenly across items; remainder goes to the first item.
+      const perItem = Math.floor(totalFlatFeeCents / current.items.length);
+      const remainder = totalFlatFeeCents - perItem * current.items.length;
+      return {
+        ...current,
+        items: current.items.map((item, index) => ({
+          ...item,
+          feeAmount: centsToDollarInput(
+            perItem + (index === 0 ? remainder : 0),
+          ),
+        })),
+      };
+    });
+  }, [effectiveFeesQuery.data?.fees]);
 
   function applyReturnFilters() {
     setAppliedFilters({ search, status });
@@ -2461,10 +3509,15 @@ function ReturnOpsTab() {
     setPolicyForm((current) => ({ ...current, ...patch }));
   }
 
-  function updateCreateItem(index: number, patch: Partial<ReturnCreateItemFormState>) {
+  function updateCreateItem(
+    index: number,
+    patch: Partial<ReturnCreateItemFormState>,
+  ) {
     setCreateForm((current) => ({
       ...current,
-      items: current.items.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item),
+      items: current.items.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, ...patch } : item,
+      ),
     }));
   }
 
@@ -2493,28 +3546,91 @@ function ReturnOpsTab() {
   function selectInspectionRma(rma: DropshipReturnListItem) {
     setSelectedInspectionRmaId(rma.rmaId);
     setInspectionForm(null);
+    setReviewReason("");
     setError("");
     setMessage("");
+    if (rma.status === "inspecting") {
+      setInspectionModalOpen(true);
+    }
   }
 
   function clearInspectionSelection() {
     setSelectedInspectionRmaId(null);
     setInspectionForm(null);
+    setInspectionModalOpen(false);
+    setReviewReason("");
+  }
+
+  async function submitNoInspectionReview(decision: "approve" | "deny") {
+    const rma = returnDetailQuery.data?.rma;
+    if (!rma || rma.status !== "no_inspection_review") return;
+    if (decision === "deny" && !reviewReason.trim()) {
+      setError("Denying a lost-in-transit review requires a reason.");
+      return;
+    }
+    setReviewPendingDecision(decision);
+    setError("");
+    setMessage("");
+    try {
+      const response = await postJson<DropshipAdminNoInspectionReviewResponse>(
+        `/api/dropship/admin/returns/${rma.rmaId}/no-inspection-review`,
+        {
+          decision,
+          reason: reviewReason.trim() || null,
+          idempotencyKey: createDropshipIdempotencyKey(
+            `admin-no-inspection-review-${rma.rmaId}-${decision}`,
+          ),
+        } satisfies DropshipAdminNoInspectionReviewInput,
+      );
+      setMessage(
+        response.decision === "approve"
+          ? `RMA ${rma.rmaNumber} approved — pool credit of ${formatCents(response.creditCents)} posted.`
+          : `RMA ${rma.rmaNumber} no-inspection review denied and closed.`,
+      );
+      setReviewReason("");
+      await Promise.all([
+        returnsQuery.refetch(),
+        returnDetailQuery.refetch(),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
+      ]);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Dropship no-inspection review failed.",
+      );
+    } finally {
+      setReviewPendingDecision(null);
+    }
   }
 
   function updateInspectionForm(patch: Partial<ReturnInspectionFormState>) {
-    setInspectionForm((current) => current ? { ...current, ...patch } : current);
+    setInspectionForm((current) =>
+      current ? { ...current, ...patch } : current,
+    );
   }
 
   function updateInspectionItem(
     rmaItemId: number,
-    patch: Partial<Pick<ReturnInspectionItemFormState, "status" | "finalCreditAmount" | "feeAmount">>,
+    patch: Partial<
+      Pick<
+        ReturnInspectionItemFormState,
+        "status" | "finalCreditAmount" | "feeAmount"
+      >
+    >,
   ) {
     setInspectionForm((current) => {
       if (!current) return current;
       return {
         ...current,
-        items: current.items.map((item) => item.rmaItemId === rmaItemId ? { ...item, ...patch } : item),
+        items: current.items.map((item) =>
+          item.rmaItemId === rmaItemId ? { ...item, ...patch } : item,
+        ),
       };
     });
   }
@@ -2527,7 +3643,9 @@ function ReturnOpsTab() {
     setMessage("");
     try {
       const input = buildAdminReturnStatusUpdateInput({
-        idempotencyKey: createDropshipIdempotencyKey(`admin-return-status-${rma.rmaId}`),
+        idempotencyKey: createDropshipIdempotencyKey(
+          `admin-return-status-${rma.rmaId}`,
+        ),
         status: nextStatus,
         notes: statusNotes[rma.rmaId] ?? "",
       });
@@ -2535,7 +3653,13 @@ function ReturnOpsTab() {
         `/api/dropship/admin/returns/${rma.rmaId}/status`,
         input,
       );
-      setMessage(`RMA ${response.rma.rmaNumber} moved to ${formatStatus(response.rma.status)}.`);
+      setMessage(
+        `RMA ${response.rma.rmaNumber} moved to ${formatStatus(response.rma.status)}.`,
+      );
+      toast({
+        title: "Status updated",
+        description: `RMA ${response.rma.rmaNumber} moved to ${formatStatus(response.rma.status)}`,
+      });
       setStatusNotes((current) => ({ ...current, [rma.rmaId]: "" }));
       setStatusInputs((current) => {
         const next = { ...current };
@@ -2544,11 +3668,24 @@ function ReturnOpsTab() {
       });
       await Promise.all([
         returnsQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship return status update failed.");
+      const errMsg =
+        caught instanceof Error
+          ? caught.message
+          : "Dropship return status update failed.";
+      setError(errMsg);
+      toast({
+        title: "Status update failed",
+        description: errMsg,
+        variant: "destructive",
+      });
     } finally {
       setPendingRmaId(null);
     }
@@ -2561,19 +3698,41 @@ function ReturnOpsTab() {
     try {
       const input = buildAdminReturnCreateInput({
         ...createForm,
-        idempotencyKey: createDropshipIdempotencyKey(`admin-return-create-${createForm.vendorId || "vendor"}`),
+        idempotencyKey: createDropshipIdempotencyKey(
+          `admin-return-create-${createForm.vendorId || "vendor"}`,
+        ),
       });
-      const response = await postJson<DropshipAdminReturnCreateResponse>("/api/dropship/admin/returns", input);
-      setMessage(`RMA ${response.rma.rmaNumber} created for vendor ${response.rma.vendorId}.`);
+      const response = await postJson<DropshipAdminReturnCreateResponse>(
+        "/api/dropship/admin/returns",
+        input,
+      );
+      setMessage(
+        `RMA ${response.rma.rmaNumber} created for vendor ${response.rma.vendorId}.`,
+      );
       setCreateForm(makeEmptyReturnCreateForm());
       await Promise.all([
         returnsQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship return creation failed.");
+      const message =
+        caught instanceof Error
+          ? caught.message
+          : "Dropship return creation failed.";
+      setError(message);
+      toast({
+        title: "RMA not created",
+        description: message,
+        variant: "destructive",
+      });
     } finally {
       setCreatingRma(false);
     }
@@ -2588,18 +3747,30 @@ function ReturnOpsTab() {
         "/api/dropship/admin/returns/policies",
         buildAdminReturnPolicyInput({
           ...policyForm,
-          idempotencyKey: createDropshipIdempotencyKey(`admin-return-policy-${policyForm.returnWindowDays || "window"}`),
+          idempotencyKey: createDropshipIdempotencyKey(
+            `admin-return-policy-${policyForm.returnWindowDays || "window"}`,
+          ),
         }),
       );
-      setMessage(`Return policy ${response.policy.name} set to ${response.policy.returnWindowDays} days.`);
+      setMessage(
+        `Return policy ${response.policy.name} set to ${response.policy.returnWindowDays} days.`,
+      );
       setPolicyForm(emptyReturnPolicyForm);
       await Promise.all([
         returnPolicyQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship return policy save failed.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Dropship return policy save failed.",
+      );
     } finally {
       setSavingPolicy(false);
     }
@@ -2614,7 +3785,9 @@ function ReturnOpsTab() {
     setMessage("");
     try {
       const input = buildAdminReturnInspectionInput({
-        idempotencyKey: createDropshipIdempotencyKey(`admin-return-inspection-${inspectionForm.rmaId}`),
+        idempotencyKey: createDropshipIdempotencyKey(
+          `admin-return-inspection-${inspectionForm.rmaId}`,
+        ),
         outcome: inspectionForm.outcome,
         faultCategory: inspectionForm.faultCategory,
         notes: inspectionForm.notes,
@@ -2632,16 +3805,35 @@ function ReturnOpsTab() {
       setMessage(
         `RMA ${response.rma.rmaNumber} inspected: ${formatStatus(response.inspection.outcome)} with ${formatCents(response.inspection.creditCents)} credit and ${formatCents(response.inspection.feeCents)} fee.`,
       );
+      toast({
+        title: "Inspection submitted",
+        description: `Inspection submitted for RMA ${response.rma.rmaNumber}`,
+      });
       setInspectionForm(buildReturnInspectionFormState(response.rma));
       await Promise.all([
         returnsQuery.refetch(),
         returnDetailQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship return inspection failed.");
+      const errMsg =
+        caught instanceof Error
+          ? caught.message
+          : "Dropship return inspection failed.";
+      setError(errMsg);
+      toast({
+        title: "Inspection failed",
+        description: errMsg,
+        variant: "destructive",
+      });
     } finally {
       setInspectionPendingRmaId(null);
     }
@@ -2649,21 +3841,30 @@ function ReturnOpsTab() {
 
   return (
     <div className="space-y-5">
-      {(returnsQuery.error || returnPolicyQuery.error || returnVendorOptionsQuery.error || returnStoreConnectionsQuery.error || returnOrderIntakesQuery.error || returnVariantsQuery.error || error) && (
+      {(returnsQuery.error ||
+        returnPolicyQuery.error ||
+        returnVendorOptionsQuery.error ||
+        returnStoreConnectionsQuery.error ||
+        returnOrderIntakesQuery.error ||
+        returnVariantsQuery.error ||
+        error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error
-              || (returnsQuery.error
-                ? queryErrorMessage(returnsQuery.error, "Unable to load dropship returns.")
+            {error ||
+              (returnsQuery.error
+                ? queryErrorMessage(
+                    returnsQuery.error,
+                    "Unable to load dropship returns.",
+                  )
                 : queryErrorMessage(
-                  returnPolicyQuery.error
-                    ?? returnVendorOptionsQuery.error
-                    ?? returnStoreConnectionsQuery.error
-                    ?? returnOrderIntakesQuery.error
-                    ?? returnVariantsQuery.error,
-                  "Unable to load dropship return setup data.",
-                ))}
+                    returnPolicyQuery.error ??
+                      returnVendorOptionsQuery.error ??
+                      returnStoreConnectionsQuery.error ??
+                      returnOrderIntakesQuery.error ??
+                      returnVariantsQuery.error,
+                    "Unable to load dropship return setup data.",
+                  ))}
           </AlertDescription>
         </Alert>
       )}
@@ -2679,7 +3880,8 @@ function ReturnOpsTab() {
           <div>
             <h2 className="text-lg font-semibold">Return operations</h2>
             <p className="text-sm text-muted-foreground">
-              Review RMAs, return tracking, fault assignment, inspection progress, and final credit state.
+              Review RMAs, return tracking, fault assignment, inspection
+              progress, and final credit state.
             </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row">
@@ -2692,7 +3894,12 @@ function ReturnOpsTab() {
                 placeholder="RMA, order, tracking, or vendor"
               />
             </div>
-            <Select value={status} onValueChange={(value) => setStatus(value as ReturnOpsStatusFilter)}>
+            <Select
+              value={status}
+              onValueChange={(value) =>
+                setStatus(value as ReturnOpsStatusFilter)
+              }
+            >
               <SelectTrigger className="lg:w-48">
                 <SelectValue />
               </SelectTrigger>
@@ -2704,7 +3911,10 @@ function ReturnOpsTab() {
                 ))}
               </SelectContent>
             </Select>
-            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyReturnFilters}>
+            <Button
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              onClick={applyReturnFilters}
+            >
               <FileSearch className="h-4 w-4" />
               Apply
             </Button>
@@ -2713,11 +3923,42 @@ function ReturnOpsTab() {
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <CatalogMetric icon={<RotateCcw className="h-4 w-4" />} label="Matching RMAs" value={String(returnsQuery.data?.total ?? 0)} />
-        <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Visible open" value={String(rmas.filter((rma) => !returnOpsTerminalStatuses.has(rma.status)).length)} />
-        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Awaiting inspection" value={String(rmas.filter((rma) => rma.status === "received" || rma.status === "inspecting").length)} />
-        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible credited" value={String(rmas.filter((rma) => rma.status === "credited").length)} />
-        <CatalogMetric icon={<History className="h-4 w-4" />} label="Return window" value={activeReturnPolicy ? `${activeReturnPolicy.returnWindowDays}d` : "Not set"} />
+        <CatalogMetric
+          icon={<RotateCcw className="h-4 w-4" />}
+          label="Matching RMAs"
+          value={String(returnsQuery.data?.total ?? 0)}
+        />
+        <CatalogMetric
+          icon={<ShieldAlert className="h-4 w-4" />}
+          label="Visible open"
+          value={String(
+            rmas.filter((rma) => !returnOpsTerminalStatuses.has(rma.status))
+              .length,
+          )}
+        />
+        <CatalogMetric
+          icon={<FileSearch className="h-4 w-4" />}
+          label="Awaiting inspection"
+          value={String(
+            rmas.filter(
+              (rma) => rma.status === "received" || rma.status === "inspecting",
+            ).length,
+          )}
+        />
+        <CatalogMetric
+          icon={<CheckCircle2 className="h-4 w-4" />}
+          label="Visible credited"
+          value={String(rmas.filter((rma) => rma.status === "credited").length)}
+        />
+        <CatalogMetric
+          icon={<History className="h-4 w-4" />}
+          label="Return window"
+          value={
+            activeReturnPolicy
+              ? `${activeReturnPolicy.returnWindowDays}d`
+              : "Not set"
+          }
+        />
       </section>
 
       <ReturnPolicyPanel
@@ -2732,19 +3973,38 @@ function ReturnOpsTab() {
       <ReturnCreatePanel
         form={createForm}
         isSaving={creatingRma}
+        order={returnCreateOrderQuery.data?.order ?? null}
+        orderError={optionalQueryErrorMessage(
+          returnCreateOrderQuery.error,
+          "Unable to load the selected order.",
+        )}
+        orderLoading={
+          returnCreateOrderQuery.isLoading || returnCreateOrderQuery.isFetching
+        }
         intakes={returnOrderIntakes}
-        intakesLoading={returnOrderIntakesQuery.isLoading || returnOrderIntakesQuery.isFetching}
+        intakesLoading={
+          returnOrderIntakesQuery.isLoading ||
+          returnOrderIntakesQuery.isFetching
+        }
         onAddItem={addCreateItem}
         onChange={updateCreateForm}
         onItemChange={updateCreateItem}
         onRemoveItem={removeCreateItem}
         onSubmit={createReturn}
         storeConnections={returnStoreConnections}
-        storeConnectionsLoading={returnStoreConnectionsQuery.isLoading || returnStoreConnectionsQuery.isFetching}
+        storeConnectionsLoading={
+          returnStoreConnectionsQuery.isLoading ||
+          returnStoreConnectionsQuery.isFetching
+        }
         variants={returnVariantOptions}
-        variantsLoading={returnVariantsQuery.isLoading || returnVariantsQuery.isFetching}
+        variantsLoading={
+          returnVariantsQuery.isLoading || returnVariantsQuery.isFetching
+        }
         vendorOptions={returnVendorOptions}
-        vendorsLoading={returnVendorOptionsQuery.isLoading || returnVendorOptionsQuery.isFetching}
+        vendorsLoading={
+          returnVendorOptionsQuery.isLoading ||
+          returnVendorOptionsQuery.isFetching
+        }
       />
 
       <ReturnOpsTable
@@ -2760,15 +4020,26 @@ function ReturnOpsTab() {
         total={returnsQuery.data?.total ?? 0}
       />
 
-      <ReturnInspectionPanel
+      <ReturnInspectionModal
+        rmaId={selectedInspectionRmaId}
+        open={inspectionModalOpen}
+        onOpenChange={(open) => {
+          setInspectionModalOpen(open);
+          if (!open) clearInspectionSelection();
+        }}
+        onInspectionComplete={() => {
+          returnsQuery.refetch();
+        }}
+      />
+
+      <NoInspectionReviewPanel
         error={returnDetailQuery.error}
-        form={inspectionForm}
         isLoading={returnDetailQuery.isLoading || returnDetailQuery.isFetching}
         onCancel={clearInspectionSelection}
-        onFormChange={updateInspectionForm}
-        onItemChange={updateInspectionItem}
-        onSave={saveReturnInspection}
-        pendingRmaId={inspectionPendingRmaId}
+        onReasonChange={setReviewReason}
+        onSubmit={submitNoInspectionReview}
+        pendingDecision={reviewPendingDecision}
+        reason={reviewReason}
         rma={returnDetailQuery.data?.rma ?? null}
         selectedRmaId={selectedInspectionRmaId}
       />
@@ -2780,32 +4051,49 @@ function StoreConnectionOpsTab() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<StoreConnectionStatusFilter>("all");
-  const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
+  const [platform, setPlatform] =
+    useState<StoreConnectionPlatformFilter>("all");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
     status: "all" as StoreConnectionStatusFilter,
     platform: "all" as StoreConnectionPlatformFilter,
   });
-  const [disableTarget, setDisableTarget] = useState<DropshipAdminStoreConnectionListItem | null>(null);
-  const [disableReason, setDisableReason] = useState("Disabled by Card Shellz admin.");
-  const [disablingConnectionId, setDisablingConnectionId] = useState<number | null>(null);
-  const [warehouseTarget, setWarehouseTarget] = useState<DropshipAdminStoreConnectionListItem | null>(null);
+  const [disableTarget, setDisableTarget] =
+    useState<DropshipAdminStoreConnectionListItem | null>(null);
+  const [disableReason, setDisableReason] = useState(
+    "Disabled by Card Shellz admin.",
+  );
+  const [disablingConnectionId, setDisablingConnectionId] = useState<
+    number | null
+  >(null);
+  const [warehouseTarget, setWarehouseTarget] =
+    useState<DropshipAdminStoreConnectionListItem | null>(null);
   const [warehouseInput, setWarehouseInput] = useState("");
-  const [savingWarehouseConnectionId, setSavingWarehouseConnectionId] = useState<number | null>(null);
-  const [repairingWebhookConnectionId, setRepairingWebhookConnectionId] = useState<number | null>(null);
+  const [savingWarehouseConnectionId, setSavingWarehouseConnectionId] =
+    useState<number | null>(null);
+  const [repairingWebhookConnectionId, setRepairingWebhookConnectionId] =
+    useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const storeConnectionsUrl = useMemo(() => buildAdminStoreConnectionsUrl({
-    search: appliedFilters.search,
-    status: appliedFilters.status,
-    platform: appliedFilters.platform,
-  }), [appliedFilters]);
+  const storeConnectionsUrl = useMemo(
+    () =>
+      buildAdminStoreConnectionsUrl({
+        search: appliedFilters.search,
+        status: appliedFilters.status,
+        platform: appliedFilters.platform,
+      }),
+    [appliedFilters],
+  );
 
-  const storeConnectionsQuery = useQuery<DropshipAdminStoreConnectionListResponse>({
-    queryKey: [storeConnectionsUrl],
-    queryFn: () => fetchJson<DropshipAdminStoreConnectionListResponse>(storeConnectionsUrl),
-  });
+  const storeConnectionsQuery =
+    useQuery<DropshipAdminStoreConnectionListResponse>({
+      queryKey: [storeConnectionsUrl],
+      queryFn: () =>
+        fetchJson<DropshipAdminStoreConnectionListResponse>(
+          storeConnectionsUrl,
+        ),
+    });
 
   const warehousesQuery = useQuery<DropshipWarehouseOption[]>({
     queryKey: ["/api/warehouses"],
@@ -2817,25 +4105,37 @@ function StoreConnectionOpsTab() {
     [storeConnectionsQuery.data?.items],
   );
   const warehouseOptions = useMemo(
-    () => (warehousesQuery.data ?? [])
-      .filter((warehouse) => warehouse.isActive === 1 && warehouse.warehouseType !== "bulk_storage")
-      .sort((a, b) => {
-        if (a.isDefault !== b.isDefault) return b.isDefault - a.isDefault;
-        return a.name.localeCompare(b.name);
-      }),
+    () =>
+      (warehousesQuery.data ?? [])
+        .filter(
+          (warehouse) =>
+            warehouse.isActive === 1 &&
+            warehouse.warehouseType !== "bulk_storage",
+        )
+        .sort((a, b) => {
+          if (a.isDefault !== b.isDefault) return b.isDefault - a.isDefault;
+          return a.name.localeCompare(b.name);
+        }),
     [warehousesQuery.data],
   );
-  const summary = useMemo(() => buildStoreConnectionSummary(connections), [connections]);
+  const summary = useMemo(
+    () => buildStoreConnectionSummary(connections),
+    [connections],
+  );
 
   function applyStoreFilters() {
     setAppliedFilters({ search, status, platform });
   }
 
-  function openWarehouseConfigDialog(connection: DropshipAdminStoreConnectionListItem) {
+  function openWarehouseConfigDialog(
+    connection: DropshipAdminStoreConnectionListItem,
+  ) {
     setWarehouseTarget(connection);
-    setWarehouseInput(connection.orderProcessingConfig.defaultWarehouseId === null
-      ? ""
-      : String(connection.orderProcessingConfig.defaultWarehouseId));
+    setWarehouseInput(
+      connection.orderProcessingConfig.defaultWarehouseId === null
+        ? ""
+        : String(connection.orderProcessingConfig.defaultWarehouseId),
+    );
     setError("");
     setMessage("");
   }
@@ -2846,34 +4146,57 @@ function StoreConnectionOpsTab() {
     setError("");
     setMessage("");
     try {
-      const response = await putJson<DropshipStoreOrderProcessingConfigResponse>(
-        `/api/dropship/admin/store-connections/${warehouseTarget.storeConnectionId}/order-processing-config`,
-        buildStoreOrderProcessingConfigInput({
-          defaultWarehouseId: warehouseInput,
-          idempotencyKey: createDropshipIdempotencyKey(`admin-store-${warehouseTarget.storeConnectionId}-warehouse`),
-        }),
+      const response =
+        await putJson<DropshipStoreOrderProcessingConfigResponse>(
+          `/api/dropship/admin/store-connections/${warehouseTarget.storeConnectionId}/order-processing-config`,
+          buildStoreOrderProcessingConfigInput({
+            defaultWarehouseId: warehouseInput,
+            idempotencyKey: createDropshipIdempotencyKey(
+              `admin-store-${warehouseTarget.storeConnectionId}-warehouse`,
+            ),
+          }),
+        );
+      setMessage(
+        `${storeConnectionDisplayName(warehouseTarget)} warehouse assignment saved.`,
       );
-      setMessage(`${storeConnectionDisplayName(warehouseTarget)} warehouse assignment saved.`);
       setWarehouseTarget(null);
       await Promise.all([
         storeConnectionsQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
-      setWarehouseInput(response.connection.orderProcessingConfig.defaultWarehouseId === null
-        ? ""
-        : String(response.connection.orderProcessingConfig.defaultWarehouseId));
+      setWarehouseInput(
+        response.connection.orderProcessingConfig.defaultWarehouseId === null
+          ? ""
+          : String(
+              response.connection.orderProcessingConfig.defaultWarehouseId,
+            ),
+      );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Warehouse assignment update failed.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Warehouse assignment update failed.",
+      );
     } finally {
       setSavingWarehouseConnectionId(null);
     }
   }
 
-  function openDisableStoreDialog(connection: DropshipAdminStoreConnectionListItem) {
+  function openDisableStoreDialog(
+    connection: DropshipAdminStoreConnectionListItem,
+  ) {
     setDisableTarget(connection);
-    setDisableReason(`Disabled by Card Shellz admin for ${storeConnectionDisplayName(connection)}.`);
+    setDisableReason(
+      `Disabled by Card Shellz admin for ${storeConnectionDisplayName(connection)}.`,
+    );
     setError("");
     setMessage("");
   }
@@ -2888,25 +4211,41 @@ function StoreConnectionOpsTab() {
         `/api/dropship/admin/store-connections/${disableTarget.storeConnectionId}/disconnect`,
         buildStoreConnectionDisconnectInput({
           reason: disableReason,
-          idempotencyKey: createDropshipIdempotencyKey(`admin-store-${disableTarget.storeConnectionId}-disconnect`),
+          idempotencyKey: createDropshipIdempotencyKey(
+            `admin-store-${disableTarget.storeConnectionId}-disconnect`,
+          ),
         }),
       );
-      setMessage(`${storeConnectionDisplayName(disableTarget)} was disabled. Intake and listing pushes are paused during the disconnect grace period.`);
+      setMessage(
+        `${storeConnectionDisplayName(disableTarget)} was disabled. Intake and listing pushes are paused during the disconnect grace period.`,
+      );
       setDisableTarget(null);
       await Promise.all([
         storeConnectionsQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Store disable request failed.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Store disable request failed.",
+      );
     } finally {
       setDisablingConnectionId(null);
     }
   }
 
-  async function repairShopifyWebhooks(connection: DropshipAdminStoreConnectionListItem) {
+  async function repairShopifyWebhooks(
+    connection: DropshipAdminStoreConnectionListItem,
+  ) {
     setRepairingWebhookConnectionId(connection.storeConnectionId);
     setError("");
     setMessage("");
@@ -2914,18 +4253,32 @@ function StoreConnectionOpsTab() {
       const response = await postJson<DropshipAdminStoreWebhookRepairResponse>(
         `/api/dropship/admin/store-connections/${connection.storeConnectionId}/shopify-webhooks/repair`,
         buildAdminStoreWebhookRepairInput({
-          idempotencyKey: createDropshipIdempotencyKey(`admin-store-${connection.storeConnectionId}-shopify-webhooks-repair`),
+          idempotencyKey: createDropshipIdempotencyKey(
+            `admin-store-${connection.storeConnectionId}-shopify-webhooks-repair`,
+          ),
         }),
       );
-      setMessage(`Shopify webhooks repaired for ${response.result.shopDomain}.`);
+      setMessage(
+        `Shopify webhooks repaired for ${response.result.shopDomain}.`,
+      );
       await Promise.all([
         storeConnectionsQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Shopify webhook repair failed.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Shopify webhook repair failed.",
+      );
     } finally {
       setRepairingWebhookConnectionId(null);
     }
@@ -2937,7 +4290,11 @@ function StoreConnectionOpsTab() {
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(storeConnectionsQuery.error ?? warehousesQuery.error, "Unable to load dropship store connections.")}
+            {error ||
+              queryErrorMessage(
+                storeConnectionsQuery.error ?? warehousesQuery.error,
+                "Unable to load dropship store connections.",
+              )}
           </AlertDescription>
         </Alert>
       )}
@@ -2951,9 +4308,12 @@ function StoreConnectionOpsTab() {
       <section className="rounded-md border bg-card p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h2 className="text-lg font-semibold">Customer store connections</h2>
+            <h2 className="text-lg font-semibold">
+              Customer store connections
+            </h2>
             <p className="text-sm text-muted-foreground">
-              Monitor connected dropship stores, owner identity, setup progress, and operator actions.
+              Monitor connected dropship stores, owner identity, setup progress,
+              and operator actions.
             </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row">
@@ -2966,7 +4326,12 @@ function StoreConnectionOpsTab() {
                 placeholder="Store, owner, email, or domain"
               />
             </div>
-            <Select value={platform} onValueChange={(value) => setPlatform(value as StoreConnectionPlatformFilter)}>
+            <Select
+              value={platform}
+              onValueChange={(value) =>
+                setPlatform(value as StoreConnectionPlatformFilter)
+              }
+            >
               <SelectTrigger className="lg:w-40">
                 <SelectValue />
               </SelectTrigger>
@@ -2976,7 +4341,12 @@ function StoreConnectionOpsTab() {
                 <SelectItem value="shopify">Shopify</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={status} onValueChange={(value) => setStatus(value as StoreConnectionStatusFilter)}>
+            <Select
+              value={status}
+              onValueChange={(value) =>
+                setStatus(value as StoreConnectionStatusFilter)
+              }
+            >
               <SelectTrigger className="lg:w-48">
                 <SelectValue />
               </SelectTrigger>
@@ -2988,7 +4358,10 @@ function StoreConnectionOpsTab() {
                 ))}
               </SelectContent>
             </Select>
-            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyStoreFilters}>
+            <Button
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              onClick={applyStoreFilters}
+            >
               <FileSearch className="h-4 w-4" />
               Apply
             </Button>
@@ -2997,16 +4370,38 @@ function StoreConnectionOpsTab() {
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <CatalogMetric icon={<Store className="h-4 w-4" />} label="Matching stores" value={String(storeConnectionsQuery.data?.total ?? 0)} />
-        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Ready stores" value={String(summary.ready)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Needs setup" value={String(summary.setupIncomplete)} />
-        <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Auth attention" value={String(summary.authAttention)} />
-        <CatalogMetric icon={<MinusCircle className="h-4 w-4" />} label="Disabled" value={String(summary.disabled)} />
+        <CatalogMetric
+          icon={<Store className="h-4 w-4" />}
+          label="Matching stores"
+          value={String(storeConnectionsQuery.data?.total ?? 0)}
+        />
+        <CatalogMetric
+          icon={<CheckCircle2 className="h-4 w-4" />}
+          label="Ready stores"
+          value={String(summary.ready)}
+        />
+        <CatalogMetric
+          icon={<AlertCircle className="h-4 w-4" />}
+          label="Needs setup"
+          value={String(summary.setupIncomplete)}
+        />
+        <CatalogMetric
+          icon={<ShieldAlert className="h-4 w-4" />}
+          label="Auth attention"
+          value={String(summary.authAttention)}
+        />
+        <CatalogMetric
+          icon={<MinusCircle className="h-4 w-4" />}
+          label="Disabled"
+          value={String(summary.disabled)}
+        />
       </section>
 
       <StoreConnectionsTable
         connections={connections}
-        isLoading={storeConnectionsQuery.isLoading || storeConnectionsQuery.isFetching}
+        isLoading={
+          storeConnectionsQuery.isLoading || storeConnectionsQuery.isFetching
+        }
         onDisableStoreConnection={openDisableStoreDialog}
         onOpenWarehouseConfig={openWarehouseConfigDialog}
         onRepairShopifyWebhooks={repairShopifyWebhooks}
@@ -3028,36 +4423,65 @@ function StoreConnectionOpsTab() {
           <DialogHeader>
             <DialogTitle>Assign default warehouse</DialogTitle>
             <DialogDescription>
-              This sets the internal Echelon warehouse used when accepted dropship orders are routed for fulfillment.
+              This sets the internal Echelon warehouse used when accepted
+              dropship orders are routed for fulfillment.
             </DialogDescription>
           </DialogHeader>
           {warehouseTarget && (
             <div className="space-y-4">
               <div className="rounded-md border bg-muted/30 p-3">
-                <div className="font-medium">{storeConnectionDisplayName(warehouseTarget)}</div>
+                <div className="font-medium">
+                  {storeConnectionDisplayName(warehouseTarget)}
+                </div>
                 <div className="text-sm text-muted-foreground">
-                  {formatStatus(warehouseTarget.platform)} / {storeConnectionOwnerLabel(warehouseTarget)}
+                  {formatStatus(warehouseTarget.platform)} /{" "}
+                  {storeConnectionOwnerLabel(warehouseTarget)}
                 </div>
               </div>
               <div>
-                <label className="text-sm font-medium" htmlFor="dropship-store-warehouse">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="dropship-store-warehouse"
+                >
                   Default warehouse
                 </label>
                 <Select
                   value={warehouseInput || NO_DEFAULT_WAREHOUSE_VALUE}
-                  onValueChange={(value) => setWarehouseInput(value === NO_DEFAULT_WAREHOUSE_VALUE ? "" : value)}
-                  disabled={warehousesQuery.isLoading || warehousesQuery.isFetching}
+                  onValueChange={(value) =>
+                    setWarehouseInput(
+                      value === NO_DEFAULT_WAREHOUSE_VALUE ? "" : value,
+                    )
+                  }
+                  disabled={
+                    warehousesQuery.isLoading || warehousesQuery.isFetching
+                  }
                 >
                   <SelectTrigger id="dropship-store-warehouse" className="mt-2">
-                    <SelectValue placeholder={warehousesQuery.isLoading ? "Loading warehouses..." : "Select warehouse"} />
+                    <SelectValue
+                      placeholder={
+                        warehousesQuery.isLoading
+                          ? "Loading warehouses..."
+                          : "Select warehouse"
+                      }
+                    />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>Not assigned</SelectItem>
-                    {warehouseInput !== ""
-                      && !warehouseOptions.some((warehouse) => String(warehouse.id) === warehouseInput)
-                      && <SelectItem value={warehouseInput}>Warehouse ID {warehouseInput} (not found)</SelectItem>}
+                    <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>
+                      Not assigned
+                    </SelectItem>
+                    {warehouseInput !== "" &&
+                      !warehouseOptions.some(
+                        (warehouse) => String(warehouse.id) === warehouseInput,
+                      ) && (
+                        <SelectItem value={warehouseInput}>
+                          Warehouse ID {warehouseInput} (not found)
+                        </SelectItem>
+                      )}
                     {warehouseOptions.map((warehouse) => (
-                      <SelectItem key={warehouse.id} value={String(warehouse.id)}>
+                      <SelectItem
+                        key={warehouse.id}
+                        value={String(warehouse.id)}
+                      >
                         {formatWarehouseOption(warehouse)}
                       </SelectItem>
                     ))}
@@ -3078,11 +4502,23 @@ function StoreConnectionOpsTab() {
             <Button
               type="button"
               className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-              disabled={savingWarehouseConnectionId !== null || warehousesQuery.isLoading || warehousesQuery.isFetching}
+              disabled={
+                savingWarehouseConnectionId !== null ||
+                warehousesQuery.isLoading ||
+                warehousesQuery.isFetching
+              }
               onClick={saveWarehouseConfig}
             >
-              <Save className={savingWarehouseConnectionId !== null ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-              {savingWarehouseConnectionId !== null ? "Saving" : "Save warehouse"}
+              <Save
+                className={
+                  savingWarehouseConnectionId !== null
+                    ? "h-4 w-4 animate-spin"
+                    : "h-4 w-4"
+                }
+              />
+              {savingWarehouseConnectionId !== null
+                ? "Saving"
+                : "Save warehouse"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3100,19 +4536,27 @@ function StoreConnectionOpsTab() {
           <DialogHeader>
             <DialogTitle>Disable store connection</DialogTitle>
             <DialogDescription>
-              This moves the store into disconnect grace, clears marketplace tokens, and pauses dropship intake and listing pushes for this store.
+              This moves the store into disconnect grace, clears marketplace
+              tokens, and pauses dropship intake and listing pushes for this
+              store.
             </DialogDescription>
           </DialogHeader>
           {disableTarget && (
             <div className="space-y-4">
               <div className="rounded-md border bg-muted/30 p-3">
-                <div className="font-medium">{storeConnectionDisplayName(disableTarget)}</div>
+                <div className="font-medium">
+                  {storeConnectionDisplayName(disableTarget)}
+                </div>
                 <div className="text-sm text-muted-foreground">
-                  {formatStatus(disableTarget.platform)} / {storeConnectionOwnerLabel(disableTarget)}
+                  {formatStatus(disableTarget.platform)} /{" "}
+                  {storeConnectionOwnerLabel(disableTarget)}
                 </div>
               </div>
               <div>
-                <label className="text-sm font-medium" htmlFor="dropship-store-disable-reason">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="dropship-store-disable-reason"
+                >
                   Reason
                 </label>
                 <Textarea
@@ -3123,7 +4567,8 @@ function StoreConnectionOpsTab() {
                   maxLength={500}
                 />
                 <div className="mt-1 text-xs text-muted-foreground">
-                  This reason is saved to audit history and included in the vendor notification.
+                  This reason is saved to audit history and included in the
+                  vendor notification.
                 </div>
               </div>
             </div>
@@ -3140,7 +4585,10 @@ function StoreConnectionOpsTab() {
             <Button
               type="button"
               variant="destructive"
-              disabled={disablingConnectionId !== null || disableReason.trim().length === 0}
+              disabled={
+                disablingConnectionId !== null ||
+                disableReason.trim().length === 0
+              }
               onClick={confirmDisableStoreConnection}
             >
               {disablingConnectionId !== null ? "Disabling" : "Disable store"}
@@ -3160,7 +4608,8 @@ function OrderIntakeOpsTab({
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<OrderOpsStatusFilter>("default");
-  const [cancellationStatus, setCancellationStatus] = useState<OrderOpsCancellationStatusFilter>("all");
+  const [cancellationStatus, setCancellationStatus] =
+    useState<OrderOpsCancellationStatusFilter>("all");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
     status: "default" as OrderOpsStatusFilter,
@@ -3175,11 +4624,15 @@ function OrderIntakeOpsTab({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const orderIntakeUrl = useMemo(() => buildAdminOrderIntakeUrl({
-    search: appliedFilters.search,
-    status: appliedFilters.status,
-    cancellationStatus: appliedFilters.cancellationStatus,
-  }), [appliedFilters]);
+  const orderIntakeUrl = useMemo(
+    () =>
+      buildAdminOrderIntakeUrl({
+        search: appliedFilters.search,
+        status: appliedFilters.status,
+        cancellationStatus: appliedFilters.cancellationStatus,
+      }),
+    [appliedFilters],
+  );
 
   const orderIntakeQuery = useQuery<DropshipAdminOrderOpsListResponse>({
     queryKey: [orderIntakeUrl],
@@ -3188,13 +4641,19 @@ function OrderIntakeOpsTab({
   const orderDetailQuery = useQuery<DropshipOrderDetailResponse>({
     queryKey: ["dropship-admin-order-detail", selectedIntakeId],
     queryFn: () => {
-      if (selectedIntakeId === null) throw new Error("Missing selected intake.");
-      return fetchJson<DropshipOrderDetailResponse>(`/api/dropship/admin/order-intake/${selectedIntakeId}`);
+      if (selectedIntakeId === null)
+        throw new Error("Missing selected intake.");
+      return fetchJson<DropshipOrderDetailResponse>(
+        `/api/dropship/admin/order-intake/${selectedIntakeId}`,
+      );
     },
     enabled: selectedIntakeId !== null,
   });
   const orderIntakes = orderIntakeQuery.data?.items ?? [];
-  const orderRetryEligibilityNow = useMemo(() => new Date(), [orderIntakeQuery.dataUpdatedAt]);
+  const orderRetryEligibilityNow = useMemo(
+    () => new Date(),
+    [orderIntakeQuery.dataUpdatedAt],
+  );
 
   useEffect(() => {
     if (!searchSignal) return;
@@ -3221,29 +4680,38 @@ function OrderIntakeOpsTab({
     setMessage("");
     try {
       const input = buildAdminOrderOpsActionInput({
-        idempotencyKey: createDropshipIdempotencyKey(`admin-order-${action}-${intake.intakeId}`),
+        idempotencyKey: createDropshipIdempotencyKey(
+          `admin-order-${action}-${intake.intakeId}`,
+        ),
         reason: actionReason,
         requireReason: action === "exception",
       });
       const response = await postJson<
-        DropshipAdminOrderOpsActionResponse
+        | DropshipAdminOrderOpsActionResponse
         | DropshipAdminOrderOpsCancellationRetryResponse
         | DropshipAdminOrderOpsProcessResponse
         | DropshipAdminOrderOpsWmsSyncResponse
-      >(
-        `/api/dropship/admin/order-intake/${intake.intakeId}/${action}`,
-        input,
-      );
+      >(`/api/dropship/admin/order-intake/${intake.intakeId}/${action}`, input);
       setMessage(orderActionMessage(response, action));
       setActionReason("");
       await Promise.all([
         orderIntakeQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship order intake action failed.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Dropship order intake action failed.",
+      );
     } finally {
       setPendingAction(null);
     }
@@ -3255,7 +4723,11 @@ function OrderIntakeOpsTab({
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(orderIntakeQuery.error, "Unable to load dropship order intake exceptions.")}
+            {error ||
+              queryErrorMessage(
+                orderIntakeQuery.error,
+                "Unable to load dropship order intake exceptions.",
+              )}
           </AlertDescription>
         </Alert>
       )}
@@ -3271,7 +4743,8 @@ function OrderIntakeOpsTab({
           <div>
             <h2 className="text-lg font-semibold">Order intake exceptions</h2>
             <p className="text-sm text-muted-foreground">
-              Review marketplace intake rows, retry recoverable failures, and mark unresolved rows as ops exceptions.
+              Review marketplace intake rows, retry recoverable failures, and
+              mark unresolved rows as ops exceptions.
             </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row lg:flex-wrap">
@@ -3284,7 +4757,12 @@ function OrderIntakeOpsTab({
                 placeholder="Order, vendor, store, or customer"
               />
             </div>
-            <Select value={status} onValueChange={(value) => setStatus(value as OrderOpsStatusFilter)}>
+            <Select
+              value={status}
+              onValueChange={(value) =>
+                setStatus(value as OrderOpsStatusFilter)
+              }
+            >
               <SelectTrigger className="lg:w-48">
                 <SelectValue />
               </SelectTrigger>
@@ -3298,7 +4776,9 @@ function OrderIntakeOpsTab({
             </Select>
             <Select
               value={cancellationStatus}
-              onValueChange={(value) => setCancellationStatus(value as OrderOpsCancellationStatusFilter)}
+              onValueChange={(value) =>
+                setCancellationStatus(value as OrderOpsCancellationStatusFilter)
+              }
             >
               <SelectTrigger className="lg:w-60">
                 <SelectValue />
@@ -3311,7 +4791,10 @@ function OrderIntakeOpsTab({
                 ))}
               </SelectContent>
             </Select>
-            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyOrderFilters}>
+            <Button
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              onClick={applyOrderFilters}
+            >
               <FileSearch className="h-4 w-4" />
               Apply
             </Button>
@@ -3320,7 +4803,12 @@ function OrderIntakeOpsTab({
 
         <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_0.45fr]">
           <div>
-            <label className="text-sm font-medium" htmlFor="dropship-order-ops-reason">Action reason</label>
+            <label
+              className="text-sm font-medium"
+              htmlFor="dropship-order-ops-reason"
+            >
+              Action reason
+            </label>
             <Input
               id="dropship-order-ops-reason"
               className="mt-2"
@@ -3331,7 +4819,9 @@ function OrderIntakeOpsTab({
             />
           </div>
           <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-            Actions are idempotent and audited. Process runs quote, wallet, reservation, and OMS creation now; retry queues failed rows; exception marks manual resolution.
+            Actions are idempotent and audited. Process runs quote, wallet,
+            reservation, and OMS creation now; retry queues failed rows;
+            exception marks manual resolution.
           </div>
         </div>
       </section>
@@ -3376,30 +4866,40 @@ function WalletOpsTab() {
   const [usdcFromAddress, setUsdcFromAddress] = useState("");
   const [usdcToAddress, setUsdcToAddress] = useState("");
   const [usdcConfirmations, setUsdcConfirmations] = useState("12");
-  const [manualCreditIdempotencyKey, setManualCreditIdempotencyKey] = useState(() =>
-    createDropshipIdempotencyKey("admin-wallet-credit")
+  const [manualCreditIdempotencyKey, setManualCreditIdempotencyKey] = useState(
+    () => createDropshipIdempotencyKey("admin-wallet-credit"),
   );
   const [usdcCreditIdempotencyKey, setUsdcCreditIdempotencyKey] = useState(() =>
-    createDropshipIdempotencyKey("admin-usdc-credit")
+    createDropshipIdempotencyKey("admin-usdc-credit"),
   );
-  const [pendingAction, setPendingAction] = useState<"manual" | "usdc" | null>(null);
+  const [pendingAction, setPendingAction] = useState<"manual" | "usdc" | null>(
+    null,
+  );
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const pending = pendingAction !== null;
-  const walletVendorOptionsUrl = useMemo(() => buildAdminDogfoodReadinessUrl({
-    search: "",
-    status: "all",
-    platform: "all",
-    limit: 250,
-  }), []);
+  const walletVendorOptionsUrl = useMemo(
+    () =>
+      buildAdminDogfoodReadinessUrl({
+        search: "",
+        status: "all",
+        platform: "all",
+        limit: 100,
+      }),
+    [],
+  );
   const walletVendorOptionsQuery = useQuery<DropshipDogfoodReadinessResponse>({
     queryKey: [walletVendorOptionsUrl, "wallet-vendors"],
-    queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(walletVendorOptionsUrl),
+    queryFn: () =>
+      fetchJson<DropshipDogfoodReadinessResponse>(walletVendorOptionsUrl),
   });
   const selectedUsdcVendorId = usdcVendorId.trim();
   const usdcWalletQuery = useQuery<DropshipWalletResponse>({
     queryKey: ["/api/dropship/admin/wallet/vendors", selectedUsdcVendorId],
-    queryFn: () => fetchJson<DropshipWalletResponse>(`/api/dropship/admin/wallet/vendors/${selectedUsdcVendorId}`),
+    queryFn: () =>
+      fetchJson<DropshipWalletResponse>(
+        `/api/dropship/admin/wallet/vendors/${selectedUsdcVendorId}`,
+      ),
     enabled: /^[1-9]\d*$/.test(selectedUsdcVendorId),
   });
   const vendorSelectOptions = useMemo(
@@ -3407,32 +4907,43 @@ function WalletOpsTab() {
     [walletVendorOptionsQuery.data?.items],
   );
   const usdcFundingMethodOptions = useMemo(
-    () => (usdcWalletQuery.data?.wallet.fundingMethods ?? [])
-      .filter((method) => method.rail === "usdc_base")
-      .sort((first, second) => {
-        if (first.isDefault !== second.isDefault) return Number(second.isDefault) - Number(first.isDefault);
-        if (first.status !== second.status) return first.status.localeCompare(second.status);
-        return first.fundingMethodId - second.fundingMethodId;
-      })
-      .map((method) => ({
-        value: String(method.fundingMethodId),
-        label: method.displayLabel || formatStatus(method.rail),
-        detail: [
-          `ID ${method.fundingMethodId}`,
-          formatStatus(method.status),
-          method.isDefault ? "default" : "",
-          method.usdcWalletAddress ? truncateMiddle(method.usdcWalletAddress, 16) : "",
-        ].filter(Boolean).join(" / "),
-      })),
+    () =>
+      (usdcWalletQuery.data?.wallet.fundingMethods ?? [])
+        .filter((method) => method.rail === "usdc_base")
+        .sort((first, second) => {
+          if (first.isDefault !== second.isDefault)
+            return Number(second.isDefault) - Number(first.isDefault);
+          if (first.status !== second.status)
+            return first.status.localeCompare(second.status);
+          return first.fundingMethodId - second.fundingMethodId;
+        })
+        .map((method) => ({
+          value: String(method.fundingMethodId),
+          label: method.displayLabel || formatStatus(method.rail),
+          detail: [
+            `ID ${method.fundingMethodId}`,
+            formatStatus(method.status),
+            method.isDefault ? "default" : "",
+            method.usdcWalletAddress
+              ? truncateMiddle(method.usdcWalletAddress, 16)
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" / "),
+        })),
     [usdcWalletQuery.data?.wallet.fundingMethods],
   );
 
   function resetManualCreditIdempotencyKey() {
-    setManualCreditIdempotencyKey(createDropshipIdempotencyKey("admin-wallet-credit"));
+    setManualCreditIdempotencyKey(
+      createDropshipIdempotencyKey("admin-wallet-credit"),
+    );
   }
 
   function resetUsdcCreditIdempotencyKey() {
-    setUsdcCreditIdempotencyKey(createDropshipIdempotencyKey("admin-usdc-credit"));
+    setUsdcCreditIdempotencyKey(
+      createDropshipIdempotencyKey("admin-usdc-credit"),
+    );
   }
 
   async function creditWallet() {
@@ -3450,19 +4961,31 @@ function WalletOpsTab() {
         "/api/dropship/admin/wallet/manual-credit",
         input,
       );
-      setMessage(response.idempotentReplay
-        ? `Vendor ${response.account.vendorId} wallet credit already recorded for ${formatCents(response.ledgerEntry.amountCents)}.`
-        : `Vendor ${response.account.vendorId} wallet credited ${formatCents(response.ledgerEntry.amountCents)}.`);
+      setMessage(
+        response.idempotentReplay
+          ? `Vendor ${response.account.vendorId} wallet credit already recorded for ${formatCents(response.ledgerEntry.amountCents)}.`
+          : `Vendor ${response.account.vendorId} wallet credited ${formatCents(response.ledgerEntry.amountCents)}.`,
+      );
       setAmount("");
       setReason("");
       resetManualCreditIdempotencyKey();
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Manual wallet credit failed.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Manual wallet credit failed.",
+      );
     } finally {
       setPendingAction(null);
     }
@@ -3484,13 +5007,16 @@ function WalletOpsTab() {
         confirmations: usdcConfirmations,
         idempotencyKey: usdcCreditIdempotencyKey,
       });
-      const response = await postJson<DropshipAdminWalletConfirmedUsdcCreditResponse>(
-        "/api/dropship/admin/wallet/usdc/confirmed-credit",
-        input,
+      const response =
+        await postJson<DropshipAdminWalletConfirmedUsdcCreditResponse>(
+          "/api/dropship/admin/wallet/usdc/confirmed-credit",
+          input,
+        );
+      setMessage(
+        response.idempotentReplay
+          ? `Vendor ${response.account.vendorId} USDC transfer already credited for ${formatCents(response.ledgerEntry.amountCents)}.`
+          : `Vendor ${response.account.vendorId} USDC transfer credited ${formatCents(response.ledgerEntry.amountCents)}.`,
       );
-      setMessage(response.idempotentReplay
-        ? `Vendor ${response.account.vendorId} USDC transfer already credited for ${formatCents(response.ledgerEntry.amountCents)}.`
-        : `Vendor ${response.account.vendorId} USDC transfer credited ${formatCents(response.ledgerEntry.amountCents)}.`);
       setUsdcDollarAmount("");
       setUsdcAmount("");
       setUsdcTransactionHash("");
@@ -3499,12 +5025,20 @@ function WalletOpsTab() {
       setUsdcConfirmations("12");
       resetUsdcCreditIdempotencyKey();
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "USDC wallet credit failed.");
+      setError(
+        caught instanceof Error ? caught.message : "USDC wallet credit failed.",
+      );
     } finally {
       setPendingAction(null);
     }
@@ -3516,7 +5050,11 @@ function WalletOpsTab() {
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(walletVendorOptionsQuery.error, "Unable to load dropship vendors.")}
+            {error ||
+              queryErrorMessage(
+                walletVendorOptionsQuery.error,
+                "Unable to load dropship vendors.",
+              )}
           </AlertDescription>
         </Alert>
       )}
@@ -3531,7 +5069,10 @@ function WalletOpsTab() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold">Manual wallet credit</h2>
-            <p className="text-sm text-muted-foreground">Admin-only settled funding credit for dogfood and operational correction.</p>
+            <p className="text-sm text-muted-foreground">
+              Admin-only settled funding credit for dogfood and operational
+              correction.
+            </p>
           </div>
           <Wallet className="h-5 w-5 text-muted-foreground" />
         </div>
@@ -3545,13 +5086,19 @@ function WalletOpsTab() {
               resetManualCreditIdempotencyKey();
             }}
             options={vendorSelectOptions}
-            isLoading={walletVendorOptionsQuery.isLoading || walletVendorOptionsQuery.isFetching}
+            isLoading={
+              walletVendorOptionsQuery.isLoading ||
+              walletVendorOptionsQuery.isFetching
+            }
             placeholder="Select vendor"
             searchPlaceholder="Search vendor, email, or member..."
             emptyText="No dropship vendors found."
           />
           <div>
-            <label className="text-sm font-medium" htmlFor="dropship-wallet-credit-amount">
+            <label
+              className="text-sm font-medium"
+              htmlFor="dropship-wallet-credit-amount"
+            >
               Amount
             </label>
             <Input
@@ -3567,7 +5114,10 @@ function WalletOpsTab() {
             />
           </div>
           <div>
-            <label className="text-sm font-medium" htmlFor="dropship-wallet-credit-reason">
+            <label
+              className="text-sm font-medium"
+              htmlFor="dropship-wallet-credit-reason"
+            >
               Reason
             </label>
             <Textarea
@@ -3587,7 +5137,11 @@ function WalletOpsTab() {
             disabled={pending}
             onClick={creditWallet}
           >
-            <Wallet className={pendingAction === "manual" ? "h-4 w-4 animate-pulse" : "h-4 w-4"} />
+            <Wallet
+              className={
+                pendingAction === "manual" ? "h-4 w-4 animate-pulse" : "h-4 w-4"
+              }
+            />
             Credit
           </Button>
         </div>
@@ -3597,7 +5151,11 @@ function WalletOpsTab() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold">Confirmed USDC transfer</h2>
-            <p className="text-sm text-muted-foreground">Optional admin-assisted rail. Independently verify the Base transfer before recording it; this flow does not query Base. Wallet and USDC ledgers are recorded atomically.</p>
+            <p className="text-sm text-muted-foreground">
+              Optional admin-assisted rail. Independently verify the Base
+              transfer before recording it; this flow does not query Base.
+              Wallet and USDC ledgers are recorded atomically.
+            </p>
           </div>
           <CircleDollarSign className="h-5 w-5 text-muted-foreground" />
         </div>
@@ -3612,7 +5170,10 @@ function WalletOpsTab() {
               resetUsdcCreditIdempotencyKey();
             }}
             options={vendorSelectOptions}
-            isLoading={walletVendorOptionsQuery.isLoading || walletVendorOptionsQuery.isFetching}
+            isLoading={
+              walletVendorOptionsQuery.isLoading ||
+              walletVendorOptionsQuery.isFetching
+            }
             placeholder="Select vendor"
             searchPlaceholder="Search vendor, email, or member..."
             emptyText="No dropship vendors found."
@@ -3622,16 +5183,24 @@ function WalletOpsTab() {
             <Select
               value={usdcFundingMethodId || NO_DEFAULT_WAREHOUSE_VALUE}
               onValueChange={(value) => {
-                setUsdcFundingMethodId(value === NO_DEFAULT_WAREHOUSE_VALUE ? "" : value);
+                setUsdcFundingMethodId(
+                  value === NO_DEFAULT_WAREHOUSE_VALUE ? "" : value,
+                );
                 resetUsdcCreditIdempotencyKey();
               }}
-              disabled={!selectedUsdcVendorId || usdcWalletQuery.isLoading || usdcWalletQuery.isFetching}
+              disabled={
+                !selectedUsdcVendorId ||
+                usdcWalletQuery.isLoading ||
+                usdcWalletQuery.isFetching
+              }
             >
               <SelectTrigger className="mt-2">
                 <SelectValue placeholder="Select funding method" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>No funding method</SelectItem>
+                <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>
+                  No funding method
+                </SelectItem>
                 {usdcFundingMethodOptions.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label} - {option.detail}
@@ -3641,12 +5210,18 @@ function WalletOpsTab() {
             </Select>
             {usdcWalletQuery.error && (
               <p className="mt-1 text-xs text-rose-700">
-                {queryErrorMessage(usdcWalletQuery.error, "Unable to load vendor wallet.")}
+                {queryErrorMessage(
+                  usdcWalletQuery.error,
+                  "Unable to load vendor wallet.",
+                )}
               </p>
             )}
           </div>
           <div>
-            <label className="text-sm font-medium" htmlFor="dropship-usdc-dollar-amount">
+            <label
+              className="text-sm font-medium"
+              htmlFor="dropship-usdc-dollar-amount"
+            >
               Wallet credit
             </label>
             <Input
@@ -3662,7 +5237,10 @@ function WalletOpsTab() {
             />
           </div>
           <div>
-            <label className="text-sm font-medium" htmlFor="dropship-usdc-amount">
+            <label
+              className="text-sm font-medium"
+              htmlFor="dropship-usdc-amount"
+            >
               USDC amount
             </label>
             <Input
@@ -3681,7 +5259,10 @@ function WalletOpsTab() {
 
         <div className="mt-4 grid gap-4 lg:grid-cols-[1.4fr_1fr_1fr_0.4fr]">
           <div>
-            <label className="text-sm font-medium" htmlFor="dropship-usdc-transaction">
+            <label
+              className="text-sm font-medium"
+              htmlFor="dropship-usdc-transaction"
+            >
               Transaction hash
             </label>
             <Input
@@ -3726,7 +5307,10 @@ function WalletOpsTab() {
             />
           </div>
           <div>
-            <label className="text-sm font-medium" htmlFor="dropship-usdc-confirmations">
+            <label
+              className="text-sm font-medium"
+              htmlFor="dropship-usdc-confirmations"
+            >
               Confirmations
             </label>
             <Input
@@ -3748,7 +5332,11 @@ function WalletOpsTab() {
           disabled={pending}
           onClick={creditConfirmedUsdc}
         >
-          <CircleDollarSign className={pendingAction === "usdc" ? "h-4 w-4 animate-pulse" : "h-4 w-4"} />
+          <CircleDollarSign
+            className={
+              pendingAction === "usdc" ? "h-4 w-4 animate-pulse" : "h-4 w-4"
+            }
+          />
           Record verified transfer
         </Button>
       </section>
@@ -3759,45 +5347,62 @@ function WalletOpsTab() {
 function CatalogExposureTab() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
-  const [visibilityFilter, setVisibilityFilter] = useState<CatalogPreviewVisibilityFilter>("all");
-  const [catalogStatusFilter, setCatalogStatusFilter] = useState<CatalogPreviewStatusFilter>("active");
+  const [visibilityFilter, setVisibilityFilter] =
+    useState<CatalogPreviewVisibilityFilter>("all");
+  const [catalogStatusFilter, setCatalogStatusFilter] =
+    useState<CatalogPreviewStatusFilter>("active");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
     visibility: "all" as CatalogPreviewVisibilityFilter,
     catalogStatus: "active" as CatalogPreviewStatusFilter,
   });
   const [previewPage, setPreviewPage] = useState(1);
-  const [draftRules, setDraftRules] = useState<DropshipAdminCatalogExposureRuleInput[]>([]);
+  const [draftRules, setDraftRules] = useState<
+    DropshipAdminCatalogExposureRuleInput[]
+  >([]);
   const [loadedRulesKey, setLoadedRulesKey] = useState("");
-  const [ruleForm, setRuleForm] = useState<CatalogRuleFormState>(emptyCatalogRuleForm);
+  const [ruleForm, setRuleForm] =
+    useState<CatalogRuleFormState>(emptyCatalogRuleForm);
   const [ruleDialogOpen, setRuleDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const previewUrl = useMemo(() => buildAdminCatalogExposurePreviewUrl({
-    search: appliedFilters.search,
-    visibility: appliedFilters.visibility,
-    catalogStatus: appliedFilters.catalogStatus,
-    page: previewPage,
-    limit: CATALOG_PREVIEW_PAGE_SIZE,
-  }), [appliedFilters, previewPage]);
+  const previewUrl = useMemo(
+    () =>
+      buildAdminCatalogExposurePreviewUrl({
+        search: appliedFilters.search,
+        visibility: appliedFilters.visibility,
+        catalogStatus: appliedFilters.catalogStatus,
+        page: previewPage,
+        limit: CATALOG_PREVIEW_PAGE_SIZE,
+      }),
+    [appliedFilters, previewPage],
+  );
 
   const rulesQuery = useQuery<DropshipAdminCatalogExposureRulesResponse>({
     queryKey: ["/api/dropship/admin/catalog/rules"],
-    queryFn: () => fetchJson<DropshipAdminCatalogExposureRulesResponse>("/api/dropship/admin/catalog/rules"),
+    queryFn: () =>
+      fetchJson<DropshipAdminCatalogExposureRulesResponse>(
+        "/api/dropship/admin/catalog/rules",
+      ),
   });
   const previewQuery = useQuery<DropshipAdminCatalogExposurePreviewResponse>({
     queryKey: [previewUrl],
-    queryFn: () => fetchJson<DropshipAdminCatalogExposurePreviewResponse>(previewUrl),
+    queryFn: () =>
+      fetchJson<DropshipAdminCatalogExposurePreviewResponse>(previewUrl),
   });
   const productLinesQuery = useQuery<DropshipProductLineOption[]>({
     queryKey: ["/api/product-lines", "active"],
-    queryFn: () => fetchJson<DropshipProductLineOption[]>("/api/product-lines?status=active"),
+    queryFn: () =>
+      fetchJson<DropshipProductLineOption[]>(
+        "/api/product-lines?status=active",
+      ),
   });
   const categoriesQuery = useQuery<DropshipProductCategoryOption[]>({
     queryKey: ["/api/product-categories"],
-    queryFn: () => fetchJson<DropshipProductCategoryOption[]>("/api/product-categories"),
+    queryFn: () =>
+      fetchJson<DropshipProductCategoryOption[]>("/api/product-categories"),
   });
   const productsQuery = useQuery<DropshipProductOption[]>({
     queryKey: ["/api/products", "active-options"],
@@ -3805,7 +5410,8 @@ function CatalogExposureTab() {
   });
   const variantsQuery = useQuery<DropshipProductVariantOption[]>({
     queryKey: ["/api/product-variants", "active-options"],
-    queryFn: () => fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
+    queryFn: () =>
+      fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
   });
 
   const previewRows = previewQuery.data?.rows ?? [];
@@ -3813,64 +5419,102 @@ function CatalogExposureTab() {
   const previewLimit = previewQuery.data?.limit ?? CATALOG_PREVIEW_PAGE_SIZE;
   const previewTotalPages = Math.max(1, Math.ceil(previewTotal / previewLimit));
   const activeRuleInputs = useMemo(
-    () => normalizeCatalogRuleOrder((rulesQuery.data?.rules ?? [])
-      .filter((rule) => rule.isActive !== false)
-      .map(catalogExposureRecordToInput)),
+    () =>
+      normalizeCatalogRuleOrder(
+        (rulesQuery.data?.rules ?? [])
+          .filter((rule) => rule.isActive !== false)
+          .map(catalogExposureRecordToInput),
+      ),
     [rulesQuery.data?.rules],
   );
-  const activeRulesKey = useMemo(() => catalogExposureRulesStateKey(activeRuleInputs), [activeRuleInputs]);
-  const draftRulesKey = useMemo(() => catalogExposureRulesStateKey(draftRules), [draftRules]);
+  const activeRulesKey = useMemo(
+    () => catalogExposureRulesStateKey(activeRuleInputs),
+    [activeRuleInputs],
+  );
+  const draftRulesKey = useMemo(
+    () => catalogExposureRulesStateKey(draftRules),
+    [draftRules],
+  );
   const hasUnsavedExposureChanges = draftRulesKey !== activeRulesKey;
-  const unsavedExposureRuleCount = hasUnsavedExposureChanges ? draftRules.length : 0;
+  const unsavedExposureRuleCount = hasUnsavedExposureChanges
+    ? draftRules.length
+    : 0;
   const productLineOptions = useMemo(
-    () => (productLinesQuery.data ?? [])
-      .filter((line) => line.status === undefined || line.status === null || line.status === "active")
-      .sort((first, second) => first.name.localeCompare(second.name)),
+    () =>
+      (productLinesQuery.data ?? [])
+        .filter(
+          (line) =>
+            line.status === undefined ||
+            line.status === null ||
+            line.status === "active",
+        )
+        .sort((first, second) => first.name.localeCompare(second.name)),
     [productLinesQuery.data],
   );
   const categoryOptions = useMemo(
-    () => (categoriesQuery.data ?? [])
-      .filter((category) => category.isActive !== false)
-      .sort((first, second) => first.name.localeCompare(second.name)),
+    () =>
+      (categoriesQuery.data ?? [])
+        .filter((category) => category.isActive !== false)
+        .sort((first, second) => first.name.localeCompare(second.name)),
     [categoriesQuery.data],
   );
   const productOptions = useMemo(
-    () => (productsQuery.data ?? [])
-      .filter((product) => product.status ? product.status === "active" : product.active !== 0)
-      .sort((first, second) => {
-        const firstSku = first.sku ?? first.baseSku ?? "";
-        const secondSku = second.sku ?? second.baseSku ?? "";
-        const skuCompare = firstSku.localeCompare(secondSku);
-        return skuCompare !== 0 ? skuCompare : first.name.localeCompare(second.name);
-      }),
+    () =>
+      (productsQuery.data ?? [])
+        .filter((product) =>
+          product.status ? product.status === "active" : product.active !== 0,
+        )
+        .sort((first, second) => {
+          const firstSku = first.sku ?? first.baseSku ?? "";
+          const secondSku = second.sku ?? second.baseSku ?? "";
+          const skuCompare = firstSku.localeCompare(secondSku);
+          return skuCompare !== 0
+            ? skuCompare
+            : first.name.localeCompare(second.name);
+        }),
     [productsQuery.data],
   );
   const variantOptions = useMemo(
-    () => (variantsQuery.data ?? [])
-      .filter((variant) => variant.isActive !== false && variant.active !== 0)
-      .sort((first, second) => {
-        const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
-        if (skuCompare !== 0) return skuCompare;
-        const nameCompare = first.name.localeCompare(second.name);
-        return nameCompare !== 0 ? nameCompare : first.id - second.id;
-      }),
+    () =>
+      (variantsQuery.data ?? [])
+        .filter((variant) => variant.isActive !== false && variant.active !== 0)
+        .sort((first, second) => {
+          const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
+          if (skuCompare !== 0) return skuCompare;
+          const nameCompare = first.name.localeCompare(second.name);
+          return nameCompare !== 0 ? nameCompare : first.id - second.id;
+        }),
     [variantsQuery.data],
   );
-  const catalogRuleTargetLabels = useMemo<CatalogRuleTargetLabels>(() => ({
-    productLineNamesById: new Map(productLineOptions.map((line) => [line.id, line.name])),
-    productLabelsById: new Map(productOptions.map((product) => [
-      product.id,
-      [product.sku ?? product.baseSku, product.name].filter(Boolean).join(" - ") || `Product ${product.id}`,
-    ])),
-    variantLabelsById: new Map(variantOptions.map((variant) => [
-      variant.id,
-      [variant.sku, variant.name].filter(Boolean).join(" - ") || `Variant ${variant.id}`,
-    ])),
-    categoryLabelsByKey: new Map(categoryOptions.map((category) => [
-      normalizeCatalogRuleLabelKey(category.name),
-      category.name,
-    ])),
-  }), [categoryOptions, productLineOptions, productOptions, variantOptions]);
+  const catalogRuleTargetLabels = useMemo<CatalogRuleTargetLabels>(
+    () => ({
+      productLineNamesById: new Map(
+        productLineOptions.map((line) => [line.id, line.name]),
+      ),
+      productLabelsById: new Map(
+        productOptions.map((product) => [
+          product.id,
+          [product.sku ?? product.baseSku, product.name]
+            .filter(Boolean)
+            .join(" - ") || `Product ${product.id}`,
+        ]),
+      ),
+      variantLabelsById: new Map(
+        variantOptions.map((variant) => [
+          variant.id,
+          [variant.sku, variant.name].filter(Boolean).join(" - ") ||
+            `Variant ${variant.id}`,
+        ]),
+      ),
+      categoryLabelsByKey: new Map(
+        categoryOptions.map((category) => [
+          normalizeCatalogRuleLabelKey(category.name),
+          category.name,
+        ]),
+      ),
+    }),
+    [categoryOptions, productLineOptions, productOptions, variantOptions],
+  );
 
   useEffect(() => {
     if (!rulesQuery.data) return;
@@ -3914,11 +5558,17 @@ function CatalogExposureTab() {
       upsertDraftRule(rule);
       setRuleDialogOpen(false);
       setRuleForm(emptyCatalogRuleForm);
-      setMessage(`${catalogExposureActionLabel(rule.action)} ${catalogRuleTargetLabel(rule, catalogRuleTargetLabels)} added to unsaved changes.`);
+      setMessage(
+        `${catalogExposureActionLabel(rule.action)} ${catalogRuleTargetLabel(rule, catalogRuleTargetLabels)} added to unsaved changes.`,
+      );
       setError("");
     } catch (caught) {
       setMessage("");
-      setError(caught instanceof Error ? caught.message : "Catalog exposure rule is invalid.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Catalog exposure rule is invalid.",
+      );
     }
   }
 
@@ -3933,7 +5583,9 @@ function CatalogExposureTab() {
       },
     });
     upsertDraftRule(rule);
-    setMessage(`${catalogExposureActionLabel(action)} entire active catalog added to unsaved changes.`);
+    setMessage(
+      `${catalogExposureActionLabel(action)} entire active catalog added to unsaved changes.`,
+    );
     setError("");
   }
 
@@ -3956,30 +5608,45 @@ function CatalogExposureTab() {
       upsertDraftRule({
         ...rule,
         priority: draftRules.length,
-        notes: rule.notes
-          ?.replace(/^Include /, "Expose ")
-          .replace(/^Exclude /, "Hide ") ?? rule.notes,
+        notes:
+          rule.notes
+            ?.replace(/^Include /, "Expose ")
+            .replace(/^Exclude /, "Hide ") ?? rule.notes,
       });
-      setMessage(`${catalogExposureActionLabel(action)} variant rule added to unsaved changes.`);
+      setMessage(
+        `${catalogExposureActionLabel(action)} variant rule added to unsaved changes.`,
+      );
       setError("");
     } catch (caught) {
       setMessage("");
-      setError(caught instanceof Error ? caught.message : "Catalog exposure rule is invalid.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Catalog exposure rule is invalid.",
+      );
     }
   }
 
   function upsertDraftRule(rule: DropshipAdminCatalogExposureRuleInput) {
     const targetKey = catalogExposureRuleTargetKey(rule);
     setDraftRules((current) => {
-      const existingIndex = current.findIndex((existing) => catalogExposureRuleTargetKey(existing) === targetKey);
+      const existingIndex = current.findIndex(
+        (existing) => catalogExposureRuleTargetKey(existing) === targetKey,
+      );
       if (existingIndex < 0) {
         return normalizeCatalogRuleOrder([...current, rule]);
       }
-      return normalizeCatalogRuleOrder(current.map((existing, index) => (index === existingIndex ? rule : existing)));
+      return normalizeCatalogRuleOrder(
+        current.map((existing, index) =>
+          index === existingIndex ? rule : existing,
+        ),
+      );
     });
   }
 
-  function catalogExposureRuleTargetKey(rule: DropshipAdminCatalogExposureRuleInput): string {
+  function catalogExposureRuleTargetKey(
+    rule: DropshipAdminCatalogExposureRuleInput,
+  ): string {
     return [
       rule.scopeType,
       rule.productVariantId ?? "",
@@ -3991,19 +5658,32 @@ function CatalogExposureTab() {
 
   function removeDraftRule(rule: DropshipAdminCatalogExposureRuleInput) {
     const ruleKey = catalogExposureRuleKey(rule);
-    setDraftRules((current) => normalizeCatalogRuleOrder(
-      current.filter((existing) => catalogExposureRuleKey(existing) !== ruleKey),
-    ));
+    setDraftRules((current) =>
+      normalizeCatalogRuleOrder(
+        current.filter(
+          (existing) => catalogExposureRuleKey(existing) !== ruleKey,
+        ),
+      ),
+    );
   }
 
-  function moveDraftRule(rule: DropshipAdminCatalogExposureRuleInput, direction: -1 | 1) {
+  function moveDraftRule(
+    rule: DropshipAdminCatalogExposureRuleInput,
+    direction: -1 | 1,
+  ) {
     const ruleKey = catalogExposureRuleKey(rule);
     setDraftRules((current) => {
-      const currentIndex = current.findIndex((existing) => catalogExposureRuleKey(existing) === ruleKey);
+      const currentIndex = current.findIndex(
+        (existing) => catalogExposureRuleKey(existing) === ruleKey,
+      );
       const nextIndex = currentIndex + direction;
-      if (currentIndex < 0 || nextIndex < 0 || nextIndex >= current.length) return current;
+      if (currentIndex < 0 || nextIndex < 0 || nextIndex >= current.length)
+        return current;
       const next = [...current];
-      [next[currentIndex], next[nextIndex]] = [next[nextIndex], next[currentIndex]];
+      [next[currentIndex], next[nextIndex]] = [
+        next[nextIndex],
+        next[currentIndex],
+      ];
       return normalizeCatalogRuleOrder(next);
     });
   }
@@ -4015,24 +5695,37 @@ function CatalogExposureTab() {
     try {
       const orderedRules = normalizeCatalogRuleOrder(draftRules);
       const orderedRulesKey = catalogExposureRulesStateKey(orderedRules);
-      const result = await putJson<DropshipAdminCatalogExposureRulesReplaceResponse>(
-        "/api/dropship/admin/catalog/rules",
-        {
-          idempotencyKey: createDropshipIdempotencyKey("admin-catalog-exposure"),
-          rules: orderedRules,
-        },
-      );
+      const result =
+        await putJson<DropshipAdminCatalogExposureRulesReplaceResponse>(
+          "/api/dropship/admin/catalog/rules",
+          {
+            idempotencyKey: createDropshipIdempotencyKey(
+              "admin-catalog-exposure",
+            ),
+            rules: orderedRules,
+          },
+        );
       setDraftRules(orderedRules);
       setLoadedRulesKey(orderedRulesKey);
-      setMessage(`Catalog exposure rules published as revision ${result.revisionId}.`);
+      setMessage(
+        `Catalog exposure rules published as revision ${result.revisionId}.`,
+      );
       await Promise.all([
         rulesQuery.refetch(),
         previewQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Catalog exposure save failed.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Catalog exposure save failed.",
+      );
     } finally {
       setSaving(false);
     }
@@ -4044,8 +5737,11 @@ function CatalogExposureTab() {
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error
-              || queryErrorMessage(rulesQuery.error ?? previewQuery.error, "Dropship catalog exposure request failed.")}
+            {error ||
+              queryErrorMessage(
+                rulesQuery.error ?? previewQuery.error,
+                "Dropship catalog exposure request failed.",
+              )}
           </AlertDescription>
         </Alert>
       )}
@@ -4057,8 +5753,16 @@ function CatalogExposureTab() {
       )}
 
       <div className="grid gap-3 md:grid-cols-2">
-        <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active rules" value={String(activeRuleInputs.length)} />
-        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Unsaved changes" value={String(unsavedExposureRuleCount)} />
+        <CatalogMetric
+          icon={<Boxes className="h-4 w-4" />}
+          label="Active rules"
+          value={String(activeRuleInputs.length)}
+        />
+        <CatalogMetric
+          icon={<FileSearch className="h-4 w-4" />}
+          label="Unsaved changes"
+          value={String(unsavedExposureRuleCount)}
+        />
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
@@ -4067,14 +5771,20 @@ function CatalogExposureTab() {
             <div>
               <h2 className="text-lg font-semibold">Catalog exposure</h2>
               <p className="text-sm text-muted-foreground">
-                Publish the catalog vendors can see. Rules run top to bottom, and later matching rules override earlier ones.
+                Publish the catalog vendors can see. Rules run top to bottom,
+                and later matching rules override earlier ones.
               </p>
             </div>
             <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-              Common setup: expose the entire active catalog first, then add hide rules below it for exceptions.
+              Common setup: expose the entire active catalog first, then add
+              hide rules below it for exceptions.
             </div>
             <div className="grid gap-2">
-              <Button type="button" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={() => addCatalogWideRule("include")}>
+              <Button
+                type="button"
+                className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                onClick={() => addCatalogWideRule("include")}
+              >
                 <PlusCircle className="h-4 w-4" />
                 Expose entire active catalog
               </Button>
@@ -4112,8 +5822,12 @@ function CatalogExposureTab() {
         onOpenChange={setRuleDialogOpen}
         onSubmit={addRuleFromForm}
         categoryOptions={categoryOptions}
-        isLoadingCategories={categoriesQuery.isLoading || categoriesQuery.isFetching}
-        isLoadingProductLines={productLinesQuery.isLoading || productLinesQuery.isFetching}
+        isLoadingCategories={
+          categoriesQuery.isLoading || categoriesQuery.isFetching
+        }
+        isLoadingProductLines={
+          productLinesQuery.isLoading || productLinesQuery.isFetching
+        }
         isLoadingProducts={productsQuery.isLoading || productsQuery.isFetching}
         isLoadingVariants={variantsQuery.isLoading || variantsQuery.isFetching}
         productLineOptions={productLineOptions}
@@ -4127,7 +5841,9 @@ function CatalogExposureTab() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <h2 className="text-lg font-semibold">Catalog preview</h2>
-            <p className="text-sm text-muted-foreground">Verify current exposure decisions before vendors select products.</p>
+            <p className="text-sm text-muted-foreground">
+              Verify current exposure decisions before vendors select products.
+            </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row">
             <div className="relative min-w-0 lg:w-80">
@@ -4141,7 +5857,9 @@ function CatalogExposureTab() {
             </div>
             <Select
               value={visibilityFilter}
-              onValueChange={(value) => applyVisibilityFilter(value as CatalogPreviewVisibilityFilter)}
+              onValueChange={(value) =>
+                applyVisibilityFilter(value as CatalogPreviewVisibilityFilter)
+              }
             >
               <SelectTrigger className="lg:w-44">
                 <SelectValue />
@@ -4154,7 +5872,9 @@ function CatalogExposureTab() {
             </Select>
             <Select
               value={catalogStatusFilter}
-              onValueChange={(value) => applyCatalogStatusFilter(value as CatalogPreviewStatusFilter)}
+              onValueChange={(value) =>
+                applyCatalogStatusFilter(value as CatalogPreviewStatusFilter)
+              }
             >
               <SelectTrigger className="lg:w-44">
                 <SelectValue />
@@ -4165,7 +5885,10 @@ function CatalogExposureTab() {
                 <SelectItem value="all">Both</SelectItem>
               </SelectContent>
             </Select>
-            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyCatalogFilters}>
+            <Button
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              onClick={applyCatalogFilters}
+            >
               <FileSearch className="h-4 w-4" />
               Apply
             </Button>
@@ -4189,34 +5912,60 @@ function CatalogExposureTab() {
 
 function ShippingConfigTab() {
   const queryClient = useQueryClient();
-  const [boxForm, setBoxForm] = useState<ShippingBoxFormState>(emptyShippingBoxForm);
-  const [profileForm, setProfileForm] = useState<ShippingPackageProfileFormState>(emptyShippingPackageProfileForm);
-  const [zoneForm, setZoneForm] = useState<ShippingZoneRuleFormState>(emptyShippingZoneRuleForm);
-  const [rateForm, setRateForm] = useState<ShippingRateTableFormState>(emptyShippingRateTableForm);
-  const [markupForm, setMarkupForm] = useState<ShippingMarkupPolicyFormState>(emptyShippingMarkupPolicyForm);
-  const [insuranceForm, setInsuranceForm] = useState<ShippingInsurancePolicyFormState>(emptyShippingInsurancePolicyForm);
-  const [protectionPolicyForm, setProtectionPolicyForm] = useState<CarrierProtectionPolicyFormState>(emptyCarrierProtectionPolicyForm);
-  const [protectionAssignmentForm, setProtectionAssignmentForm] = useState<CarrierProtectionAssignmentFormState>(emptyCarrierProtectionAssignmentForm);
+  const [boxForm, setBoxForm] =
+    useState<ShippingBoxFormState>(emptyShippingBoxForm);
+  const [profileForm, setProfileForm] =
+    useState<ShippingPackageProfileFormState>(emptyShippingPackageProfileForm);
+  const [zoneForm, setZoneForm] = useState<ShippingZoneRuleFormState>(
+    emptyShippingZoneRuleForm,
+  );
+  const [rateForm, setRateForm] = useState<ShippingRateTableFormState>(
+    emptyShippingRateTableForm,
+  );
+  const [markupForm, setMarkupForm] = useState<ShippingMarkupPolicyFormState>(
+    emptyShippingMarkupPolicyForm,
+  );
+  const [insuranceForm, setInsuranceForm] =
+    useState<ShippingInsurancePolicyFormState>(
+      emptyShippingInsurancePolicyForm,
+    );
+  const [protectionPolicyForm, setProtectionPolicyForm] =
+    useState<CarrierProtectionPolicyFormState>(
+      emptyCarrierProtectionPolicyForm,
+    );
+  const [protectionAssignmentForm, setProtectionAssignmentForm] =
+    useState<CarrierProtectionAssignmentFormState>(
+      emptyCarrierProtectionAssignmentForm,
+    );
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [policyToDeactivate, setPolicyToDeactivate] = useState<{
     kind: "markup" | "insurance";
     policyId: number;
     name: string;
   } | null>(null);
-  const [activeSection, setActiveSection] = useState<ShippingConfigSectionKey>("overview");
+  const [activeSection, setActiveSection] =
+    useState<ShippingConfigSectionKey>("overview");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const shippingConfigUrl = useMemo(
-    () => buildAdminShippingConfigUrl({ packageProfileLimit: 250, rateTableLimit: 100 }),
+    () =>
+      buildAdminShippingConfigUrl({
+        packageProfileLimit: 250,
+        rateTableLimit: 100,
+      }),
     [],
   );
   const shippingQuery = useQuery<DropshipAdminShippingConfigResponse>({
     queryKey: [shippingConfigUrl],
-    queryFn: () => fetchJson<DropshipAdminShippingConfigResponse>(shippingConfigUrl),
+    queryFn: () =>
+      fetchJson<DropshipAdminShippingConfigResponse>(shippingConfigUrl),
   });
   const protectionQuery = useQuery<CarrierProtectionConfigResponse>({
     queryKey: ["/api/dropship/admin/carrier-protection"],
-    queryFn: () => fetchJson<CarrierProtectionConfigResponse>("/api/dropship/admin/carrier-protection"),
+    queryFn: () =>
+      fetchJson<CarrierProtectionConfigResponse>(
+        "/api/dropship/admin/carrier-protection",
+      ),
   });
   const channelsQuery = useQuery<DropshipChannelOption[]>({
     queryKey: ["/api/channels"],
@@ -4224,7 +5973,8 @@ function ShippingConfigTab() {
   });
   const variantsQuery = useQuery<DropshipProductVariantOption[]>({
     queryKey: ["/api/product-variants"],
-    queryFn: () => fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
+    queryFn: () =>
+      fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
   });
   const warehousesQuery = useQuery<DropshipWarehouseOption[]>({
     queryKey: ["/api/warehouses"],
@@ -4232,23 +5982,30 @@ function ShippingConfigTab() {
   });
   const config = shippingQuery.data?.config;
   const productVariantOptions = useMemo(
-    () => (variantsQuery.data ?? [])
-      .filter((variant) => variant.isActive !== false && variant.active !== 0)
-      .sort((first, second) => {
-        const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
-        if (skuCompare !== 0) return skuCompare;
-        const nameCompare = first.name.localeCompare(second.name);
-        return nameCompare !== 0 ? nameCompare : first.id - second.id;
-      }),
+    () =>
+      (variantsQuery.data ?? [])
+        .filter((variant) => variant.isActive !== false && variant.active !== 0)
+        .sort((first, second) => {
+          const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
+          if (skuCompare !== 0) return skuCompare;
+          const nameCompare = first.name.localeCompare(second.name);
+          return nameCompare !== 0 ? nameCompare : first.id - second.id;
+        }),
     [variantsQuery.data],
   );
   const warehouseOptions = useMemo(
-    () => (warehousesQuery.data ?? [])
-      .filter((warehouse) => warehouse.isActive === 1 && warehouse.warehouseType !== "bulk_storage")
-      .sort((first, second) => {
-        if (first.isDefault !== second.isDefault) return second.isDefault - first.isDefault;
-        return first.name.localeCompare(second.name);
-      }),
+    () =>
+      (warehousesQuery.data ?? [])
+        .filter(
+          (warehouse) =>
+            warehouse.isActive === 1 &&
+            warehouse.warehouseType !== "bulk_storage",
+        )
+        .sort((first, second) => {
+          if (first.isDefault !== second.isDefault)
+            return second.isDefault - first.isDefault;
+          return first.name.localeCompare(second.name);
+        }),
     [warehousesQuery.data],
   );
 
@@ -4261,10 +6018,16 @@ function ShippingConfigTab() {
       await Promise.all([
         shippingQuery.refetch(),
         protectionQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Shipping config save failed.");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Shipping config save failed.",
+      );
     } finally {
       setPendingAction(null);
     }
@@ -4272,17 +6035,25 @@ function ShippingConfigTab() {
 
   async function saveBox() {
     await runShippingAction("box", async () => {
-      await putJson("/api/dropship/admin/shipping/boxes", buildShippingBoxInput({
-        code: boxForm.code,
-        name: boxForm.name,
-        lengthMm: inchesToMillimetersString(boxForm.lengthIn, "length"),
-        widthMm: inchesToMillimetersString(boxForm.widthIn, "width"),
-        heightMm: inchesToMillimetersString(boxForm.heightIn, "height"),
-        tareWeightGrams: poundsToGramsString(boxForm.tareWeightLb, "tare weight"),
-        maxWeightGrams: boxForm.maxWeightLb.trim() ? poundsToGramsString(boxForm.maxWeightLb, "max weight") : "",
-        isActive: boxForm.isActive,
-        idempotencyKey: createDropshipIdempotencyKey("shipping-box"),
-      }));
+      await putJson(
+        "/api/dropship/admin/shipping/boxes",
+        buildShippingBoxInput({
+          code: boxForm.code,
+          name: boxForm.name,
+          lengthMm: inchesToMillimetersString(boxForm.lengthIn, "length"),
+          widthMm: inchesToMillimetersString(boxForm.widthIn, "width"),
+          heightMm: inchesToMillimetersString(boxForm.heightIn, "height"),
+          tareWeightGrams: poundsToGramsString(
+            boxForm.tareWeightLb,
+            "tare weight",
+          ),
+          maxWeightGrams: boxForm.maxWeightLb.trim()
+            ? poundsToGramsString(boxForm.maxWeightLb, "max weight")
+            : "",
+          isActive: boxForm.isActive,
+          idempotencyKey: createDropshipIdempotencyKey("shipping-box"),
+        }),
+      );
       setBoxForm(emptyShippingBoxForm);
       setMessage("Box saved.");
     });
@@ -4290,14 +6061,19 @@ function ShippingConfigTab() {
 
   async function savePackageProfile() {
     await runShippingAction("profile", async () => {
-      await putJson("/api/dropship/admin/shipping/package-profiles", buildShippingPackageProfileInput({
-        productVariantId: profileForm.productVariantId,
-        defaultCarrier: profileForm.defaultCarrier,
-        defaultService: profileForm.defaultService,
-        defaultBoxId: profileForm.defaultBoxId,
-        isActive: profileForm.isActive,
-        idempotencyKey: createDropshipIdempotencyKey("shipping-package-profile"),
-      }));
+      await putJson(
+        "/api/dropship/admin/shipping/package-profiles",
+        buildShippingPackageProfileInput({
+          productVariantId: profileForm.productVariantId,
+          defaultCarrier: profileForm.defaultCarrier,
+          defaultService: profileForm.defaultService,
+          defaultBoxId: profileForm.defaultBoxId,
+          isActive: profileForm.isActive,
+          idempotencyKey: createDropshipIdempotencyKey(
+            "shipping-package-profile",
+          ),
+        }),
+      );
       setProfileForm(emptyShippingPackageProfileForm);
       setMessage("Variant shipping overrides saved.");
     });
@@ -4305,10 +6081,13 @@ function ShippingConfigTab() {
 
   async function saveZoneRule() {
     await runShippingAction("zone", async () => {
-      await putJson("/api/dropship/admin/shipping/zone-rules", buildShippingZoneRuleInput({
-        ...zoneForm,
-        idempotencyKey: createDropshipIdempotencyKey("shipping-zone-rule"),
-      }));
+      await putJson(
+        "/api/dropship/admin/shipping/zone-rules",
+        buildShippingZoneRuleInput({
+          ...zoneForm,
+          idempotencyKey: createDropshipIdempotencyKey("shipping-zone-rule"),
+        }),
+      );
       setZoneForm(emptyShippingZoneRuleForm);
       setMessage("Zone rule saved.");
     });
@@ -4316,10 +6095,13 @@ function ShippingConfigTab() {
 
   async function saveRateTable() {
     await runShippingAction("rate", async () => {
-      await postJson("/api/dropship/admin/shipping/rate-tables", buildShippingRateTableInput({
-        ...rateForm,
-        idempotencyKey: createDropshipIdempotencyKey("shipping-rate-table"),
-      }));
+      await postJson(
+        "/api/dropship/admin/shipping/rate-tables",
+        buildShippingRateTableInput({
+          ...rateForm,
+          idempotencyKey: createDropshipIdempotencyKey("shipping-rate-table"),
+        }),
+      );
       setRateForm(emptyShippingRateTableForm);
       setMessage("Rate table created.");
     });
@@ -4327,10 +6109,15 @@ function ShippingConfigTab() {
 
   async function saveMarkupPolicy() {
     await runShippingAction("markup", async () => {
-      await postJson("/api/dropship/admin/shipping/markup-policies", buildShippingMarkupPolicyInput({
-        ...markupForm,
-        idempotencyKey: createDropshipIdempotencyKey("shipping-markup-policy"),
-      }));
+      await postJson(
+        "/api/dropship/admin/shipping/markup-policies",
+        buildShippingMarkupPolicyInput({
+          ...markupForm,
+          idempotencyKey: createDropshipIdempotencyKey(
+            "shipping-markup-policy",
+          ),
+        }),
+      );
       setMarkupForm(emptyShippingMarkupPolicyForm);
       setMessage("Shipping markup policy created.");
     });
@@ -4338,10 +6125,15 @@ function ShippingConfigTab() {
 
   async function saveInsurancePolicy() {
     await runShippingAction("insurance", async () => {
-      await postJson("/api/dropship/admin/shipping/insurance-policies", buildShippingInsurancePolicyInput({
-        ...insuranceForm,
-        idempotencyKey: createDropshipIdempotencyKey("shipping-insurance-policy"),
-      }));
+      await postJson(
+        "/api/dropship/admin/shipping/insurance-policies",
+        buildShippingInsurancePolicyInput({
+          ...insuranceForm,
+          idempotencyKey: createDropshipIdempotencyKey(
+            "shipping-insurance-policy",
+          ),
+        }),
+      );
       setInsuranceForm(emptyShippingInsurancePolicyForm);
       setMessage("Insurance pool policy created.");
     });
@@ -4351,28 +6143,52 @@ function ShippingConfigTab() {
     await runShippingAction("carrier-protection-policy", async () => {
       await postJson("/api/dropship/admin/carrier-protection/policies", {
         policyKey: protectionPolicyForm.policyKey,
-        supersedesPolicyId: optionalPositiveInteger(protectionPolicyForm.supersedesPolicyId),
+        supersedesPolicyId: optionalPositiveInteger(
+          protectionPolicyForm.supersedesPolicyId,
+        ),
         name: protectionPolicyForm.name,
         status: protectionPolicyForm.status,
         coveredLoss: protectionPolicyForm.coveredLoss,
         coveredMisdelivery: protectionPolicyForm.coveredMisdelivery,
         coveredDamage: protectionPolicyForm.coveredDamage,
-        merchandiseReimbursementBps: percentageInputToBps(protectionPolicyForm.merchandisePercent),
-        shippingReimbursementBps: percentageInputToBps(protectionPolicyForm.shippingPercent),
-        deductibleCents: currencyInputToCents(protectionPolicyForm.deductible, "deductible"),
-        maxCreditCents: optionalCurrencyInputToCents(protectionPolicyForm.maxCredit, "maximum credit"),
-        lossWaitDays: requiredNonnegativeInteger(protectionPolicyForm.lossWaitDays, "loss wait days"),
-        misdeliveryWaitDays: requiredNonnegativeInteger(protectionPolicyForm.misdeliveryWaitDays, "misdelivery wait days"),
+        merchandiseReimbursementBps: percentageInputToBps(
+          protectionPolicyForm.merchandisePercent,
+        ),
+        shippingReimbursementBps: percentageInputToBps(
+          protectionPolicyForm.shippingPercent,
+        ),
+        deductibleCents: currencyInputToCents(
+          protectionPolicyForm.deductible,
+          "deductible",
+        ),
+        maxCreditCents: optionalCurrencyInputToCents(
+          protectionPolicyForm.maxCredit,
+          "maximum credit",
+        ),
+        lossWaitDays: requiredNonnegativeInteger(
+          protectionPolicyForm.lossWaitDays,
+          "loss wait days",
+        ),
+        misdeliveryWaitDays: requiredNonnegativeInteger(
+          protectionPolicyForm.misdeliveryWaitDays,
+          "misdelivery wait days",
+        ),
         damageInspectionRequired: protectionPolicyForm.damageInspectionRequired,
         payoutTrigger: protectionPolicyForm.payoutTrigger,
         carrierClaimRequired: protectionPolicyForm.carrierClaimRequired,
         approvalMode: protectionPolicyForm.approvalMode,
-        automaticApprovalLimitCents: protectionPolicyForm.approvalMode === "automatic"
-          ? optionalCurrencyInputToCents(protectionPolicyForm.automaticApprovalLimit, "automatic approval limit")
-          : null,
+        automaticApprovalLimitCents:
+          protectionPolicyForm.approvalMode === "automatic"
+            ? optionalCurrencyInputToCents(
+                protectionPolicyForm.automaticApprovalLimit,
+                "automatic approval limit",
+              )
+            : null,
         effectiveFrom: optionalIsoDate(protectionPolicyForm.effectiveFrom),
         effectiveTo: optionalIsoDate(protectionPolicyForm.effectiveTo),
-        idempotencyKey: createDropshipIdempotencyKey("carrier-protection-policy"),
+        idempotencyKey: createDropshipIdempotencyKey(
+          "carrier-protection-policy",
+        ),
       });
       setProtectionPolicyForm(emptyCarrierProtectionPolicyForm);
       setMessage("Carrier-protection policy version created.");
@@ -4382,19 +6198,49 @@ function ShippingConfigTab() {
   async function saveProtectionAssignment() {
     await runShippingAction("carrier-protection-assignment", async () => {
       await postJson("/api/dropship/admin/carrier-protection/assignments", {
-        policyId: requiredPositiveInteger(protectionAssignmentForm.policyId, "policy"),
+        policyId: requiredPositiveInteger(
+          protectionAssignmentForm.policyId,
+          "policy",
+        ),
         name: protectionAssignmentForm.name,
-        priority: requiredInteger(protectionAssignmentForm.priority, "priority"),
-        channelId: protectionAssignmentForm.isDefault ? null : optionalPositiveInteger(protectionAssignmentForm.channelId),
-        warehouseId: protectionAssignmentForm.isDefault ? null : optionalPositiveInteger(protectionAssignmentForm.warehouseId),
-        carrier: protectionAssignmentForm.isDefault ? null : optionalText(protectionAssignmentForm.carrier),
-        service: protectionAssignmentForm.isDefault ? null : optionalText(protectionAssignmentForm.service),
-        destinationCountry: protectionAssignmentForm.isDefault ? null : optionalText(protectionAssignmentForm.destinationCountry),
-        destinationRegion: protectionAssignmentForm.isDefault ? null : optionalText(protectionAssignmentForm.destinationRegion),
-        minShipmentValueCents: protectionAssignmentForm.isDefault ? null : optionalCurrencyInputToCents(protectionAssignmentForm.minShipmentValue, "minimum shipment value"),
-        maxShipmentValueCents: protectionAssignmentForm.isDefault ? null : optionalCurrencyInputToCents(protectionAssignmentForm.maxShipmentValue, "maximum shipment value"),
+        priority: requiredInteger(
+          protectionAssignmentForm.priority,
+          "priority",
+        ),
+        channelId: protectionAssignmentForm.isDefault
+          ? null
+          : optionalPositiveInteger(protectionAssignmentForm.channelId),
+        warehouseId: protectionAssignmentForm.isDefault
+          ? null
+          : optionalPositiveInteger(protectionAssignmentForm.warehouseId),
+        carrier: protectionAssignmentForm.isDefault
+          ? null
+          : optionalText(protectionAssignmentForm.carrier),
+        service: protectionAssignmentForm.isDefault
+          ? null
+          : optionalText(protectionAssignmentForm.service),
+        destinationCountry: protectionAssignmentForm.isDefault
+          ? null
+          : optionalText(protectionAssignmentForm.destinationCountry),
+        destinationRegion: protectionAssignmentForm.isDefault
+          ? null
+          : optionalText(protectionAssignmentForm.destinationRegion),
+        minShipmentValueCents: protectionAssignmentForm.isDefault
+          ? null
+          : optionalCurrencyInputToCents(
+              protectionAssignmentForm.minShipmentValue,
+              "minimum shipment value",
+            ),
+        maxShipmentValueCents: protectionAssignmentForm.isDefault
+          ? null
+          : optionalCurrencyInputToCents(
+              protectionAssignmentForm.maxShipmentValue,
+              "maximum shipment value",
+            ),
         isDefault: protectionAssignmentForm.isDefault,
-        idempotencyKey: createDropshipIdempotencyKey("carrier-protection-assignment"),
+        idempotencyKey: createDropshipIdempotencyKey(
+          "carrier-protection-assignment",
+        ),
       });
       setProtectionAssignmentForm(emptyCarrierProtectionAssignmentForm);
       setMessage("Carrier-protection assignment created.");
@@ -4402,46 +6248,98 @@ function ShippingConfigTab() {
   }
 
   async function retireProtectionPolicy(policy: CarrierProtectionPolicyConfig) {
-    await runShippingAction(`retire-protection-${policy.policyId}`, async () => {
-      await postJson(`/api/dropship/admin/carrier-protection/policies/${policy.policyId}/retire`, { idempotencyKey: createDropshipIdempotencyKey("carrier-protection-retire") });
-      setMessage(`${policy.name} v${policy.version} retired.`);
-    });
+    await runShippingAction(
+      `retire-protection-${policy.policyId}`,
+      async () => {
+        await postJson(
+          `/api/dropship/admin/carrier-protection/policies/${policy.policyId}/retire`,
+          {
+            idempotencyKey: createDropshipIdempotencyKey(
+              "carrier-protection-retire",
+            ),
+          },
+        );
+        setMessage(`${policy.name} v${policy.version} retired.`);
+      },
+    );
   }
 
-  async function activateProtectionPolicy(policy: CarrierProtectionPolicyConfig) {
-    await runShippingAction(`activate-protection-${policy.policyId}`, async () => {
-      await postJson(`/api/dropship/admin/carrier-protection/policies/${policy.policyId}/activate`, { idempotencyKey: createDropshipIdempotencyKey("carrier-protection-activate") });
-      setMessage(`${policy.name} v${policy.version} activated.`);
-    });
+  async function activateProtectionPolicy(
+    policy: CarrierProtectionPolicyConfig,
+  ) {
+    await runShippingAction(
+      `activate-protection-${policy.policyId}`,
+      async () => {
+        await postJson(
+          `/api/dropship/admin/carrier-protection/policies/${policy.policyId}/activate`,
+          {
+            idempotencyKey: createDropshipIdempotencyKey(
+              "carrier-protection-activate",
+            ),
+          },
+        );
+        setMessage(`${policy.name} v${policy.version} activated.`);
+      },
+    );
   }
 
-  async function deactivateProtectionAssignment(assignment: CarrierProtectionAssignmentConfig) {
-    await runShippingAction(`deactivate-protection-assignment-${assignment.assignmentId}`, async () => {
-      await postJson(`/api/dropship/admin/carrier-protection/assignments/${assignment.assignmentId}/deactivate`, { idempotencyKey: createDropshipIdempotencyKey("carrier-protection-assignment-deactivate") });
-      setMessage(`${assignment.name} deactivated.`);
-    });
+  async function deactivateProtectionAssignment(
+    assignment: CarrierProtectionAssignmentConfig,
+  ) {
+    await runShippingAction(
+      `deactivate-protection-assignment-${assignment.assignmentId}`,
+      async () => {
+        await postJson(
+          `/api/dropship/admin/carrier-protection/assignments/${assignment.assignmentId}/deactivate`,
+          {
+            idempotencyKey: createDropshipIdempotencyKey(
+              "carrier-protection-assignment-deactivate",
+            ),
+          },
+        );
+        setMessage(`${assignment.name} deactivated.`);
+      },
+    );
   }
 
   async function deactivatePolicy() {
     if (!policyToDeactivate) return;
     const policy = policyToDeactivate;
-    await runShippingAction(`deactivate-${policy.kind}-${policy.policyId}`, async () => {
-      await postJson(
-        `/api/dropship/admin/shipping/${policy.kind === "markup" ? "markup" : "insurance"}-policies/${policy.policyId}/deactivate`,
-        { idempotencyKey: createDropshipIdempotencyKey(`shipping-${policy.kind}-policy-deactivate`) },
-      );
-      setMessage(`${policy.name} deactivated.`);
-      setPolicyToDeactivate(null);
-    });
+    await runShippingAction(
+      `deactivate-${policy.kind}-${policy.policyId}`,
+      async () => {
+        await postJson(
+          `/api/dropship/admin/shipping/${policy.kind === "markup" ? "markup" : "insurance"}-policies/${policy.policyId}/deactivate`,
+          {
+            idempotencyKey: createDropshipIdempotencyKey(
+              `shipping-${policy.kind}-policy-deactivate`,
+            ),
+          },
+        );
+        setMessage(`${policy.name} deactivated.`);
+        setPolicyToDeactivate(null);
+      },
+    );
   }
 
   return (
     <div className="space-y-5">
-      {(shippingQuery.error || protectionQuery.error || channelsQuery.error || warehousesQuery.error || error) && (
+      {(shippingQuery.error ||
+        protectionQuery.error ||
+        channelsQuery.error ||
+        warehousesQuery.error ||
+        error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(shippingQuery.error ?? protectionQuery.error ?? channelsQuery.error ?? warehousesQuery.error, "Unable to load dropship shipping config.")}
+            {error ||
+              queryErrorMessage(
+                shippingQuery.error ??
+                  protectionQuery.error ??
+                  channelsQuery.error ??
+                  warehousesQuery.error,
+                "Unable to load dropship shipping config.",
+              )}
           </AlertDescription>
         </Alert>
       )}
@@ -4453,12 +6351,18 @@ function ShippingConfigTab() {
       )}
       <Tabs
         value={activeSection}
-        onValueChange={(value) => setActiveSection(value as ShippingConfigSectionKey)}
+        onValueChange={(value) =>
+          setActiveSection(value as ShippingConfigSectionKey)
+        }
         className="space-y-5"
       >
         <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto rounded-md border bg-muted/50 p-1">
           {shippingConfigSections.map((section) => (
-            <TabsTrigger key={section.key} value={section.key} className="shrink-0 px-4 py-2">
+            <TabsTrigger
+              key={section.key}
+              value={section.key}
+              className="shrink-0 px-4 py-2"
+            >
               {section.label}
             </TabsTrigger>
           ))}
@@ -4466,12 +6370,31 @@ function ShippingConfigTab() {
 
         <TabsContent value="overview" className="m-0 space-y-5">
           <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active boxes" value={String(activeCount(config?.boxes))} />
-            <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Variant overrides" value={String(config?.packageProfiles.length ?? 0)} />
-            <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Zone rules" value={String(activeCount(config?.zoneRules))} />
-            <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Active rate tables" value={String(activeRateTableCount(config))} />
+            <CatalogMetric
+              icon={<Boxes className="h-4 w-4" />}
+              label="Active boxes"
+              value={String(activeCount(config?.boxes))}
+            />
+            <CatalogMetric
+              icon={<Truck className="h-4 w-4" />}
+              label="Variant overrides"
+              value={String(config?.packageProfiles.length ?? 0)}
+            />
+            <CatalogMetric
+              icon={<FileSearch className="h-4 w-4" />}
+              label="Zone rules"
+              value={String(activeCount(config?.zoneRules))}
+            />
+            <CatalogMetric
+              icon={<Wallet className="h-4 w-4" />}
+              label="Active rate tables"
+              value={String(activeRateTableCount(config))}
+            />
           </section>
-          <ShippingConfigOverviewDashboard config={config ?? null} isLoading={shippingQuery.isLoading} />
+          <ShippingConfigOverviewDashboard
+            config={config ?? null}
+            isLoading={shippingQuery.isLoading}
+          />
         </TabsContent>
 
         <TabsContent value="boxes" className="m-0">
@@ -4482,7 +6405,10 @@ function ShippingConfigTab() {
               onChange={setBoxForm}
               onSave={saveBox}
             />
-            <ShippingBoxesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
+            <ShippingBoxesTable
+              config={config ?? null}
+              isLoading={shippingQuery.isLoading}
+            />
           </div>
         </TabsContent>
 
@@ -4498,7 +6424,10 @@ function ShippingConfigTab() {
               variants={productVariantOptions}
               variantsLoading={variantsQuery.isLoading}
             />
-            <ShippingProductProfilesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
+            <ShippingProductProfilesTable
+              config={config ?? null}
+              isLoading={shippingQuery.isLoading}
+            />
           </div>
         </TabsContent>
 
@@ -4510,9 +6439,14 @@ function ShippingConfigTab() {
               onChange={setZoneForm}
               onSave={saveZoneRule}
               warehouses={warehouseOptions}
-              warehousesLoading={warehousesQuery.isLoading || warehousesQuery.isFetching}
+              warehousesLoading={
+                warehousesQuery.isLoading || warehousesQuery.isFetching
+              }
             />
-            <ShippingZonesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
+            <ShippingZonesTable
+              config={config ?? null}
+              isLoading={shippingQuery.isLoading}
+            />
           </div>
         </TabsContent>
 
@@ -4524,9 +6458,14 @@ function ShippingConfigTab() {
               onChange={setRateForm}
               onSave={saveRateTable}
               warehouses={warehouseOptions}
-              warehousesLoading={warehousesQuery.isLoading || warehousesQuery.isFetching}
+              warehousesLoading={
+                warehousesQuery.isLoading || warehousesQuery.isFetching
+              }
             />
-            <ShippingRateTablesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
+            <ShippingRateTablesTable
+              config={config ?? null}
+              isLoading={shippingQuery.isLoading}
+            />
           </div>
         </TabsContent>
 
@@ -4544,7 +6483,13 @@ function ShippingConfigTab() {
               generatedAt={config?.generatedAt}
               policies={config?.markupPolicies ?? []}
               isLoading={shippingQuery.isLoading}
-              onDeactivate={(policy) => setPolicyToDeactivate({ kind: "markup", policyId: policy.policyId, name: policy.name })}
+              onDeactivate={(policy) =>
+                setPolicyToDeactivate({
+                  kind: "markup",
+                  policyId: policy.policyId,
+                  name: policy.name,
+                })
+              }
             />
           </div>
         </TabsContent>
@@ -4563,13 +6508,21 @@ function ShippingConfigTab() {
               generatedAt={config?.generatedAt}
               policies={config?.insurancePolicies ?? []}
               isLoading={shippingQuery.isLoading}
-              onDeactivate={(policy) => setPolicyToDeactivate({ kind: "insurance", policyId: policy.policyId, name: policy.name })}
+              onDeactivate={(policy) =>
+                setPolicyToDeactivate({
+                  kind: "insurance",
+                  policyId: policy.policyId,
+                  name: policy.name,
+                })
+              }
             />
           </div>
           <CarrierProtectionAdmin
             assignments={protectionQuery.data?.config.assignments ?? []}
             assignmentForm={protectionAssignmentForm}
-            channels={(channelsQuery.data ?? []).filter((channel) => channel.status === "active")}
+            channels={(channelsQuery.data ?? []).filter(
+              (channel) => channel.status === "active",
+            )}
             isLoading={protectionQuery.isLoading}
             pendingAction={pendingAction}
             policies={protectionQuery.data?.config.policies ?? []}
@@ -4586,18 +6539,36 @@ function ShippingConfigTab() {
         </TabsContent>
       </Tabs>
 
-      <Dialog open={policyToDeactivate !== null} onOpenChange={(open) => { if (!open && pendingAction === null) setPolicyToDeactivate(null); }}>
+      <Dialog
+        open={policyToDeactivate !== null}
+        onOpenChange={(open) => {
+          if (!open && pendingAction === null) setPolicyToDeactivate(null);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Deactivate shipping policy?</DialogTitle>
             <DialogDescription>
-              {policyToDeactivate?.name} will stop applying to new quotes. Existing quote snapshots and audit history will remain unchanged.
+              {policyToDeactivate?.name} will stop applying to new quotes.
+              Existing quote snapshots and audit history will remain unchanged.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPolicyToDeactivate(null)} disabled={pendingAction !== null}>Cancel</Button>
-            <Button variant="destructive" onClick={() => void deactivatePolicy()} disabled={pendingAction !== null}>
-              {pendingAction?.startsWith("deactivate-") ? "Deactivating..." : "Deactivate policy"}
+            <Button
+              variant="outline"
+              onClick={() => setPolicyToDeactivate(null)}
+              disabled={pendingAction !== null}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void deactivatePolicy()}
+              disabled={pendingAction !== null}
+            >
+              {pendingAction?.startsWith("deactivate-")
+                ? "Deactivating..."
+                : "Deactivate policy"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -4619,18 +6590,73 @@ function ShippingBoxPanel({
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
-      <PanelHeader title="Boxes and mailers" detail="Required before any package can be cartonized." />
+      <PanelHeader
+        title="Boxes and mailers"
+        detail="Required before any package can be cartonized."
+      />
       <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <ShippingInput label="Code" value={form.code} onChange={(value) => onChange((current) => ({ ...current, code: value }))} />
-        <ShippingInput label="Name" value={form.name} onChange={(value) => onChange((current) => ({ ...current, name: value }))} />
-        <ShippingInput label="Length in" value={form.lengthIn} onChange={(value) => onChange((current) => ({ ...current, lengthIn: value }))} />
-        <ShippingInput label="Width in" value={form.widthIn} onChange={(value) => onChange((current) => ({ ...current, widthIn: value }))} />
-        <ShippingInput label="Height in" value={form.heightIn} onChange={(value) => onChange((current) => ({ ...current, heightIn: value }))} />
-        <ShippingInput label="Tare weight lb" value={form.tareWeightLb} onChange={(value) => onChange((current) => ({ ...current, tareWeightLb: value }))} />
-        <ShippingInput label="Lower box weight limit lb" value={form.maxWeightLb} placeholder="Optional; 50 lb handling cap applies" onChange={(value) => onChange((current) => ({ ...current, maxWeightLb: value }))} />
-        <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
+        <ShippingInput
+          label="Code"
+          value={form.code}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, code: value }))
+          }
+        />
+        <ShippingInput
+          label="Name"
+          value={form.name}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, name: value }))
+          }
+        />
+        <ShippingInput
+          label="Length in"
+          value={form.lengthIn}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, lengthIn: value }))
+          }
+        />
+        <ShippingInput
+          label="Width in"
+          value={form.widthIn}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, widthIn: value }))
+          }
+        />
+        <ShippingInput
+          label="Height in"
+          value={form.heightIn}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, heightIn: value }))
+          }
+        />
+        <ShippingInput
+          label="Tare weight lb"
+          value={form.tareWeightLb}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, tareWeightLb: value }))
+          }
+        />
+        <ShippingInput
+          label="Lower box weight limit lb"
+          value={form.maxWeightLb}
+          placeholder="Optional; 50 lb handling cap applies"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, maxWeightLb: value }))
+          }
+        />
+        <ShippingActiveSelect
+          value={form.isActive}
+          onChange={(isActive) =>
+            onChange((current) => ({ ...current, isActive }))
+          }
+        />
       </div>
-      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+      <Button
+        className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+        disabled={isSaving}
+        onClick={onSave}
+      >
         <Save className="h-4 w-4" />
         Save box
       </Button>
@@ -4657,8 +6683,13 @@ function ShippingPackageProfilePanel({
   variants: DropshipProductVariantOption[];
   variantsLoading: boolean;
 }) {
-  const selectedVariant = variants.find((variant) => String(variant.id) === form.productVariantId) ?? null;
-  const selectedProfile = profiles.find((profile) => String(profile.productVariantId) === form.productVariantId) ?? null;
+  const selectedVariant =
+    variants.find((variant) => String(variant.id) === form.productVariantId) ??
+    null;
+  const selectedProfile =
+    profiles.find(
+      (profile) => String(profile.productVariantId) === form.productVariantId,
+    ) ?? null;
   const packageDataComplete = hasCompleteVariantPackageData(selectedVariant);
 
   return (
@@ -4671,16 +6702,26 @@ function ShippingPackageProfilePanel({
         <ProductVariantSkuPicker
           isLoading={variantsLoading}
           onChange={(value) => {
-            const profile = profiles.find((candidate) => String(candidate.productVariantId) === value);
-            onChange(profile
-              ? {
-                  productVariantId: value,
-                  defaultCarrier: profile.defaultCarrier ?? "",
-                  defaultService: profile.defaultService ?? "",
-                  defaultBoxId: profile.defaultBoxId === null ? "" : String(profile.defaultBoxId),
-                  isActive: profile.isActive,
-                }
-              : { ...emptyShippingPackageProfileForm, productVariantId: value });
+            const profile = profiles.find(
+              (candidate) => String(candidate.productVariantId) === value,
+            );
+            onChange(
+              profile
+                ? {
+                    productVariantId: value,
+                    defaultCarrier: profile.defaultCarrier ?? "",
+                    defaultService: profile.defaultService ?? "",
+                    defaultBoxId:
+                      profile.defaultBoxId === null
+                        ? ""
+                        : String(profile.defaultBoxId),
+                    isActive: profile.isActive,
+                  }
+                : {
+                    ...emptyShippingPackageProfileForm,
+                    productVariantId: value,
+                  },
+            );
           }}
           value={form.productVariantId}
           variants={variants}
@@ -4691,7 +6732,9 @@ function ShippingPackageProfilePanel({
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="font-medium">Catalog package data</span>
-                  <Badge variant={packageDataComplete ? "outline" : "destructive"}>
+                  <Badge
+                    variant={packageDataComplete ? "outline" : "destructive"}
+                  >
                     {packageDataComplete ? "Complete" : "Missing"}
                   </Badge>
                 </div>
@@ -4702,21 +6745,47 @@ function ShippingPackageProfilePanel({
                 </p>
               </div>
               <Button asChild size="sm" variant="outline">
-                <a href={`/products/${selectedVariant.productId}?tab=variants&variantId=${selectedVariant.id}`}>
+                <a
+                  href={`/products/${selectedVariant.productId}?tab=variants&variantId=${selectedVariant.id}`}
+                >
                   <Pencil className="mr-2 h-4 w-4" />
                   Edit in Catalog
                 </a>
               </Button>
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">Select a variant to verify its catalog package data.</p>
+            <p className="text-sm text-muted-foreground">
+              Select a variant to verify its catalog package data.
+            </p>
           )}
         </div>
-        <ShippingInput label="Default carrier" value={form.defaultCarrier} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultCarrier: value }))} />
-        <ShippingInput label="Default service" value={form.defaultService} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultService: value }))} />
+        <ShippingInput
+          label="Default carrier"
+          value={form.defaultCarrier}
+          placeholder="Optional"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, defaultCarrier: value }))
+          }
+        />
+        <ShippingInput
+          label="Default service"
+          value={form.defaultService}
+          placeholder="Optional"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, defaultService: value }))
+          }
+        />
         <div>
           <label className="text-sm font-medium">Default box</label>
-          <Select value={form.defaultBoxId || "none"} onValueChange={(value) => onChange((current) => ({ ...current, defaultBoxId: value === "none" ? "" : value }))}>
+          <Select
+            value={form.defaultBoxId || "none"}
+            onValueChange={(value) =>
+              onChange((current) => ({
+                ...current,
+                defaultBoxId: value === "none" ? "" : value,
+              }))
+            }
+          >
             <SelectTrigger className="mt-2">
               <SelectValue />
             </SelectTrigger>
@@ -4730,7 +6799,12 @@ function ShippingPackageProfilePanel({
             </SelectContent>
           </Select>
         </div>
-        <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
+        <ShippingActiveSelect
+          value={form.isActive}
+          onChange={(isActive) =>
+            onChange((current) => ({ ...current, isActive }))
+          }
+        />
       </div>
       <Button
         className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
@@ -4770,7 +6844,8 @@ function SearchableOptionPicker({
   value: string;
 }) {
   const [open, setOpen] = useState(false);
-  const selectedOption = options.find((option) => option.value === value) ?? null;
+  const selectedOption =
+    options.find((option) => option.value === value) ?? null;
 
   return (
     <div>
@@ -4785,7 +6860,13 @@ function SearchableOptionPicker({
             type="button"
             variant="outline"
           >
-            <span className={selectedOption || value ? "truncate" : "truncate text-muted-foreground"}>
+            <span
+              className={
+                selectedOption || value
+                  ? "truncate"
+                  : "truncate text-muted-foreground"
+              }
+            >
               {isLoading
                 ? "Loading..."
                 : selectedOption
@@ -4822,13 +6903,20 @@ function SearchableOptionPicker({
                       onChange(option.value);
                       setOpen(false);
                     }}
-                    value={option.search ?? `${option.label} ${option.detail ?? ""} ${option.value}`}
+                    value={
+                      option.search ??
+                      `${option.label} ${option.detail ?? ""} ${option.value}`
+                    }
                   >
-                    <Check className={`mr-2 h-4 w-4 ${option.value === value ? "opacity-100" : "opacity-0"}`} />
+                    <Check
+                      className={`mr-2 h-4 w-4 ${option.value === value ? "opacity-100" : "opacity-0"}`}
+                    />
                     <div className="min-w-0">
                       <div className="truncate font-medium">{option.label}</div>
                       {option.detail && (
-                        <div className="truncate text-xs text-muted-foreground">{option.detail}</div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {option.detail}
+                        </div>
                       )}
                     </div>
                   </CommandItem>
@@ -4862,7 +6950,8 @@ function ProductVariantSkuPicker({
   variants: DropshipProductVariantOption[];
 }) {
   const [open, setOpen] = useState(false);
-  const selectedVariant = variants.find((variant) => String(variant.id) === value) ?? null;
+  const selectedVariant =
+    variants.find((variant) => String(variant.id) === value) ?? null;
 
   return (
     <div>
@@ -4877,8 +6966,16 @@ function ProductVariantSkuPicker({
             type="button"
             variant="outline"
           >
-            <span className={selectedVariant ? "truncate" : "truncate text-muted-foreground"}>
-              {isLoading ? "Loading SKUs..." : selectedVariant ? formatVariantOption(selectedVariant) : placeholder}
+            <span
+              className={
+                selectedVariant ? "truncate" : "truncate text-muted-foreground"
+              }
+            >
+              {isLoading
+                ? "Loading SKUs..."
+                : selectedVariant
+                  ? formatVariantOption(selectedVariant)
+                  : placeholder}
             </span>
             <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
           </Button>
@@ -4910,9 +7007,13 @@ function ProductVariantSkuPicker({
                     }}
                     value={variantOptionSearchValue(variant)}
                   >
-                    <Check className={`mr-2 h-4 w-4 ${String(variant.id) === value ? "opacity-100" : "opacity-0"}`} />
+                    <Check
+                      className={`mr-2 h-4 w-4 ${String(variant.id) === value ? "opacity-100" : "opacity-0"}`}
+                    />
                     <div className="min-w-0">
-                      <div className="truncate font-medium">{variant.sku || `Variant ${variant.id}`}</div>
+                      <div className="truncate font-medium">
+                        {variant.sku || `Variant ${variant.id}`}
+                      </div>
                       <div className="truncate text-xs text-muted-foreground">
                         {variant.name} - ID {variant.id}
                       </div>
@@ -4945,23 +7046,69 @@ function ShippingZoneRulePanel({
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
-      <PanelHeader title="Zones" detail="Origin warehouse and destination matching for cached rate lookups." />
+      <PanelHeader
+        title="Zones"
+        detail="Origin warehouse and destination matching for cached rate lookups."
+      />
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         <WarehouseSelect
           label="Origin warehouse"
           value={form.originWarehouseId}
-          onChange={(value) => onChange((current) => ({ ...current, originWarehouseId: value }))}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, originWarehouseId: value }))
+          }
           warehouses={warehouses}
           warehousesLoading={warehousesLoading}
         />
-        <ShippingInput label="Country" value={form.destinationCountry} onChange={(value) => onChange((current) => ({ ...current, destinationCountry: value }))} />
-        <ShippingInput label="Region" value={form.destinationRegion} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, destinationRegion: value }))} />
-        <ShippingInput label="Postal prefix" value={form.postalPrefix} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, postalPrefix: value }))} />
-        <ShippingInput label="Zone" value={form.zone} onChange={(value) => onChange((current) => ({ ...current, zone: value }))} />
-        <ShippingInput label="Priority" value={form.priority} onChange={(value) => onChange((current) => ({ ...current, priority: value }))} />
-        <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
+        <ShippingInput
+          label="Country"
+          value={form.destinationCountry}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, destinationCountry: value }))
+          }
+        />
+        <ShippingInput
+          label="Region"
+          value={form.destinationRegion}
+          placeholder="Optional"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, destinationRegion: value }))
+          }
+        />
+        <ShippingInput
+          label="Postal prefix"
+          value={form.postalPrefix}
+          placeholder="Optional"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, postalPrefix: value }))
+          }
+        />
+        <ShippingInput
+          label="Zone"
+          value={form.zone}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, zone: value }))
+          }
+        />
+        <ShippingInput
+          label="Priority"
+          value={form.priority}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, priority: value }))
+          }
+        />
+        <ShippingActiveSelect
+          value={form.isActive}
+          onChange={(isActive) =>
+            onChange((current) => ({ ...current, isActive }))
+          }
+        />
       </div>
-      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+      <Button
+        className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+        disabled={isSaving}
+        onClick={onSave}
+      >
         <Save className="h-4 w-4" />
         Save zone
       </Button>
@@ -4986,14 +7133,43 @@ function ShippingRateTablePanel({
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
-      <PanelHeader title="Rate table" detail="Create a cached rate table with an initial weight band." />
+      <PanelHeader
+        title="Rate table"
+        detail="Create a cached rate table with an initial weight band."
+      />
       <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <ShippingInput label="Carrier" value={form.carrier} onChange={(value) => onChange((current) => ({ ...current, carrier: value }))} />
-        <ShippingInput label="Service" value={form.service} onChange={(value) => onChange((current) => ({ ...current, service: value }))} />
-        <ShippingInput label="Currency" value={form.currency} onChange={(value) => onChange((current) => ({ ...current, currency: value }))} />
+        <ShippingInput
+          label="Carrier"
+          value={form.carrier}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, carrier: value }))
+          }
+        />
+        <ShippingInput
+          label="Service"
+          value={form.service}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, service: value }))
+          }
+        />
+        <ShippingInput
+          label="Currency"
+          value={form.currency}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, currency: value }))
+          }
+        />
         <div>
           <label className="text-sm font-medium">Status</label>
-          <Select value={form.status} onValueChange={(value) => onChange((current) => ({ ...current, status: value as ShippingRateTableFormState["status"] }))}>
+          <Select
+            value={form.status}
+            onValueChange={(value) =>
+              onChange((current) => ({
+                ...current,
+                status: value as ShippingRateTableFormState["status"],
+              }))
+            }
+          >
             <SelectTrigger className="mt-2">
               <SelectValue />
             </SelectTrigger>
@@ -5004,22 +7180,67 @@ function ShippingRateTablePanel({
             </SelectContent>
           </Select>
         </div>
-        <ShippingInput label="Effective from" value={form.effectiveFrom} placeholder="Optional ISO date" onChange={(value) => onChange((current) => ({ ...current, effectiveFrom: value }))} />
-        <ShippingInput label="Effective to" value={form.effectiveTo} placeholder="Optional ISO date" onChange={(value) => onChange((current) => ({ ...current, effectiveTo: value }))} />
+        <ShippingInput
+          label="Effective from"
+          value={form.effectiveFrom}
+          placeholder="Optional ISO date"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, effectiveFrom: value }))
+          }
+        />
+        <ShippingInput
+          label="Effective to"
+          value={form.effectiveTo}
+          placeholder="Optional ISO date"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, effectiveTo: value }))
+          }
+        />
         <WarehouseSelect
           label="Warehouse"
           optional
           value={form.warehouseId}
-          onChange={(value) => onChange((current) => ({ ...current, warehouseId: value }))}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, warehouseId: value }))
+          }
           warehouses={warehouses}
           warehousesLoading={warehousesLoading}
         />
-        <ShippingInput label="Destination zone" value={form.destinationZone} onChange={(value) => onChange((current) => ({ ...current, destinationZone: value }))} />
-        <ShippingInput label="Min grams" value={form.minWeightGrams} onChange={(value) => onChange((current) => ({ ...current, minWeightGrams: value }))} />
-        <ShippingInput label="Max grams" value={form.maxWeightGrams} onChange={(value) => onChange((current) => ({ ...current, maxWeightGrams: value }))} />
-        <ShippingInput label="Rate" value={form.rate} placeholder="5.25" onChange={(value) => onChange((current) => ({ ...current, rate: value }))} />
+        <ShippingInput
+          label="Destination zone"
+          value={form.destinationZone}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, destinationZone: value }))
+          }
+        />
+        <ShippingInput
+          label="Min grams"
+          value={form.minWeightGrams}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, minWeightGrams: value }))
+          }
+        />
+        <ShippingInput
+          label="Max grams"
+          value={form.maxWeightGrams}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, maxWeightGrams: value }))
+          }
+        />
+        <ShippingInput
+          label="Rate"
+          value={form.rate}
+          placeholder="5.25"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, rate: value }))
+          }
+        />
       </div>
-      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+      <Button
+        className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+        disabled={isSaving}
+        onClick={onSave}
+      >
         <Save className="h-4 w-4" />
         Create rate table
       </Button>
@@ -5042,16 +7263,64 @@ function ShippingMarkupPolicyPanel({
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
-      <PanelHeader title="Markup policy" detail={activePolicy ? `Current: ${activePolicy.markupBps} bps + ${formatCents(activePolicy.fixedMarkupCents)}` : "No active markup policy."} />
+      <PanelHeader
+        title="Markup policy"
+        detail={
+          activePolicy
+            ? `Current: ${activePolicy.markupBps} bps + ${formatCents(activePolicy.fixedMarkupCents)}`
+            : "No active markup policy."
+        }
+      />
       <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <ShippingInput label="Name" value={form.name} onChange={(value) => onChange((current) => ({ ...current, name: value }))} />
-        <ShippingInput label="Markup bps" value={form.markupBps} onChange={(value) => onChange((current) => ({ ...current, markupBps: value }))} />
-        <ShippingInput label="Fixed markup" value={form.fixedMarkup} onChange={(value) => onChange((current) => ({ ...current, fixedMarkup: value }))} />
-        <ShippingInput label="Min markup" value={form.minMarkup} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, minMarkup: value }))} />
-        <ShippingInput label="Max markup" value={form.maxMarkup} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxMarkup: value }))} />
-        <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
+        <ShippingInput
+          label="Name"
+          value={form.name}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, name: value }))
+          }
+        />
+        <ShippingInput
+          label="Markup bps"
+          value={form.markupBps}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, markupBps: value }))
+          }
+        />
+        <ShippingInput
+          label="Fixed markup"
+          value={form.fixedMarkup}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, fixedMarkup: value }))
+          }
+        />
+        <ShippingInput
+          label="Min markup"
+          value={form.minMarkup}
+          placeholder="Optional"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, minMarkup: value }))
+          }
+        />
+        <ShippingInput
+          label="Max markup"
+          value={form.maxMarkup}
+          placeholder="Optional"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, maxMarkup: value }))
+          }
+        />
+        <ShippingActiveSelect
+          value={form.isActive}
+          onChange={(isActive) =>
+            onChange((current) => ({ ...current, isActive }))
+          }
+        />
       </div>
-      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+      <Button
+        className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+        disabled={isSaving}
+        onClick={onSave}
+      >
         <Save className="h-4 w-4" />
         Create markup policy
       </Button>
@@ -5074,15 +7343,57 @@ function ShippingInsurancePolicyPanel({
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
-      <PanelHeader title="Insurance pool" detail={activePolicy ? `Current: ${activePolicy.feeBps} bps` : "No active insurance pool policy."} />
+      <PanelHeader
+        title="Insurance pool"
+        detail={
+          activePolicy
+            ? `Current: ${activePolicy.feeBps} bps`
+            : "No active insurance pool policy."
+        }
+      />
       <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <ShippingInput label="Name" value={form.name} onChange={(value) => onChange((current) => ({ ...current, name: value }))} />
-        <ShippingInput label="Fee bps" value={form.feeBps} onChange={(value) => onChange((current) => ({ ...current, feeBps: value }))} />
-        <ShippingInput label="Min fee" value={form.minFee} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, minFee: value }))} />
-        <ShippingInput label="Max fee" value={form.maxFee} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxFee: value }))} />
-        <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
+        <ShippingInput
+          label="Name"
+          value={form.name}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, name: value }))
+          }
+        />
+        <ShippingInput
+          label="Fee bps"
+          value={form.feeBps}
+          onChange={(value) =>
+            onChange((current) => ({ ...current, feeBps: value }))
+          }
+        />
+        <ShippingInput
+          label="Min fee"
+          value={form.minFee}
+          placeholder="Optional"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, minFee: value }))
+          }
+        />
+        <ShippingInput
+          label="Max fee"
+          value={form.maxFee}
+          placeholder="Optional"
+          onChange={(value) =>
+            onChange((current) => ({ ...current, maxFee: value }))
+          }
+        />
+        <ShippingActiveSelect
+          value={form.isActive}
+          onChange={(isActive) =>
+            onChange((current) => ({ ...current, isActive }))
+          }
+        />
       </div>
-      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+      <Button
+        className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+        disabled={isSaving}
+        onClick={onSave}
+      >
         <Save className="h-4 w-4" />
         Create insurance policy
       </Button>
@@ -5106,7 +7417,12 @@ function ShippingConfigOverviewDashboard({
     );
   }
   if (!config) {
-    return <EmptyState title="No shipping config" description="Dropship shipping configuration is not loaded." />;
+    return (
+      <EmptyState
+        title="No shipping config"
+        description="Dropship shipping configuration is not loaded."
+      />
+    );
   }
 
   const rows = [
@@ -5114,13 +7430,15 @@ function ShippingConfigOverviewDashboard({
       section: "Boxes",
       configured: `${activeCount(config.boxes)} active / ${config.boxes.length} loaded`,
       ready: activeCount(config.boxes) > 0,
-      detail: "Inner dimensions drive 3D placement; packed cartons are capped at 50 lb unless a lower box limit applies.",
+      detail:
+        "Inner dimensions drive 3D placement; packed cartons are capped at 50 lb unless a lower box limit applies.",
     },
     {
       section: "Variant shipping overrides",
       configured: `${activeCount(config.packageProfiles)} active / ${config.packageProfiles.length} configured`,
       ready: true,
-      detail: "Optional ship-alone, default-box, carrier, and service behavior; capacity comes from Catalog Variant dimensions.",
+      detail:
+        "Optional ship-alone, default-box, carrier, and service behavior; capacity comes from Catalog Variant dimensions.",
     },
     {
       section: "Zones",
@@ -5136,13 +7454,17 @@ function ShippingConfigOverviewDashboard({
     },
     {
       section: "Markup",
-      configured: config.activeMarkupPolicy ? config.activeMarkupPolicy.name : "No active policy",
+      configured: config.activeMarkupPolicy
+        ? config.activeMarkupPolicy.name
+        : "No active policy",
       ready: Boolean(config.activeMarkupPolicy),
       detail: "Shipping charge markup applied after base rate lookup.",
     },
     {
       section: "Insurance pool",
-      configured: config.activeInsurancePolicy ? config.activeInsurancePolicy.name : "No active policy",
+      configured: config.activeInsurancePolicy
+        ? config.activeInsurancePolicy.name
+        : "No active policy",
       ready: Boolean(config.activeInsurancePolicy),
       detail: "Configurable fee funding carrier-fault reimbursements.",
     },
@@ -5152,12 +7474,17 @@ function ShippingConfigOverviewDashboard({
     <section className="rounded-md border bg-card p-4">
       <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">Shipping configuration dashboard</h2>
+          <h2 className="text-lg font-semibold">
+            Shipping configuration dashboard
+          </h2>
           <p className="text-sm text-muted-foreground">
-            Current shipping quote inputs loaded from the admin shipping config API.
+            Current shipping quote inputs loaded from the admin shipping config
+            API.
           </p>
         </div>
-        <Badge variant="outline">Generated {formatDateTime(config.generatedAt)}</Badge>
+        <Badge variant="outline">
+          Generated {formatDateTime(config.generatedAt)}
+        </Badge>
       </div>
       <div className="mt-4 overflow-auto">
         <Table>
@@ -5173,18 +7500,24 @@ function ShippingConfigOverviewDashboard({
             {rows.map((row) => (
               <TableRow key={row.section}>
                 <TableCell className="font-medium">{row.section}</TableCell>
-                <TableCell className="text-sm text-muted-foreground">{row.configured}</TableCell>
+                <TableCell className="text-sm text-muted-foreground">
+                  {row.configured}
+                </TableCell>
                 <TableCell>
                   <Badge
                     variant="outline"
-                    className={row.ready
-                      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                      : "border-amber-200 bg-amber-50 text-amber-800"}
+                    className={
+                      row.ready
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                        : "border-amber-200 bg-amber-50 text-amber-800"
+                    }
                   >
                     {row.ready ? "Ready" : "Missing"}
                   </Badge>
                 </TableCell>
-                <TableCell className="text-sm text-muted-foreground">{row.detail}</TableCell>
+                <TableCell className="text-sm text-muted-foreground">
+                  {row.detail}
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -5202,7 +7535,13 @@ function ShippingBoxesTable({
   isLoading: boolean;
 }) {
   if (isLoading) return <ShippingTableSkeleton />;
-  if (!config) return <EmptyState title="No boxes" description="Dropship shipping boxes are not loaded." />;
+  if (!config)
+    return (
+      <EmptyState
+        title="No boxes"
+        description="Dropship shipping boxes are not loaded."
+      />
+    );
   return (
     <ShippingSimpleTable
       title="Boxes and mailers"
@@ -5226,7 +7565,13 @@ function ShippingProductProfilesTable({
   isLoading: boolean;
 }) {
   if (isLoading) return <ShippingTableSkeleton />;
-  if (!config) return <EmptyState title="No variant overrides" description="Dropship variant shipping overrides are not loaded." />;
+  if (!config)
+    return (
+      <EmptyState
+        title="No variant overrides"
+        description="Dropship variant shipping overrides are not loaded."
+      />
+    );
   return (
     <ShippingSimpleTable
       title="Variant shipping overrides"
@@ -5234,13 +7579,17 @@ function ShippingProductProfilesTable({
       headers={["SKU", "Catalog package", "Overrides", "Status"]}
       rows={config.packageProfiles.map((profile) => [
         profile.variantSku || String(profile.productVariantId),
-        profile.packageDataComplete ? formatPackageProfileData(profile) : "Missing catalog package data",
+        profile.packageDataComplete
+          ? formatPackageProfileData(profile)
+          : "Missing catalog package data",
         [
           profile.defaultCarrier,
           profile.defaultService,
           profile.defaultBoxId ? `Box ${profile.defaultBoxId}` : null,
           profile.shipsInOwnContainer ? "Ships in own container" : null,
-        ].filter(Boolean).join(" / ") || "None",
+        ]
+          .filter(Boolean)
+          .join(" / ") || "None",
         profile.isActive ? "Active" : "Inactive",
       ])}
     />
@@ -5255,7 +7604,13 @@ function ShippingZonesTable({
   isLoading: boolean;
 }) {
   if (isLoading) return <ShippingTableSkeleton />;
-  if (!config) return <EmptyState title="No zones" description="Dropship shipping zones are not loaded." />;
+  if (!config)
+    return (
+      <EmptyState
+        title="No zones"
+        description="Dropship shipping zones are not loaded."
+      />
+    );
   return (
     <ShippingSimpleTable
       title="Zones"
@@ -5263,7 +7618,9 @@ function ShippingZonesTable({
       headers={["Warehouse", "Destination", "Zone", "Priority", "Status"]}
       rows={config.zoneRules.map((rule) => [
         String(rule.originWarehouseId),
-        [rule.destinationCountry, rule.destinationRegion, rule.postalPrefix].filter(Boolean).join(" / "),
+        [rule.destinationCountry, rule.destinationRegion, rule.postalPrefix]
+          .filter(Boolean)
+          .join(" / "),
         rule.zone,
         String(rule.priority),
         rule.isActive ? "Active" : "Inactive",
@@ -5280,7 +7637,13 @@ function ShippingRateTablesTable({
   isLoading: boolean;
 }) {
   if (isLoading) return <ShippingTableSkeleton />;
-  if (!config) return <EmptyState title="No rate tables" description="Dropship rate tables are not loaded." />;
+  if (!config)
+    return (
+      <EmptyState
+        title="No rate tables"
+        description="Dropship rate tables are not loaded."
+      />
+    );
   return (
     <ShippingSimpleTable
       title="Rate tables"
@@ -5308,14 +7671,24 @@ function ShippingMarkupPolicyTable({
   generatedAt?: string;
   policies: DropshipShippingConfigOverview["markupPolicies"];
   isLoading: boolean;
-  onDeactivate: (policy: DropshipShippingConfigOverview["markupPolicies"][number]) => void;
+  onDeactivate: (
+    policy: DropshipShippingConfigOverview["markupPolicies"][number],
+  ) => void;
 }) {
   if (isLoading) return <ShippingTableSkeleton />;
   return (
     <ShippingSimpleTable
       title="Markup policies"
       emptyTitle="No markup policies"
-      headers={["Name", "Status", "Variable", "Fixed", "Range", "Effective", "Actions"]}
+      headers={[
+        "Name",
+        "Status",
+        "Variable",
+        "Fixed",
+        "Range",
+        "Effective",
+        "Actions",
+      ]}
       rows={policies.map((policy) => [
         policy.name,
         shippingPolicyStatus(policy, activePolicyId, generatedAt),
@@ -5323,7 +7696,18 @@ function ShippingMarkupPolicyTable({
         formatCents(policy.fixedMarkupCents),
         formatShippingMoneyRange(policy.minMarkupCents, policy.maxMarkupCents),
         `${formatDateTime(policy.effectiveFrom)}${policy.effectiveTo ? ` - ${formatDateTime(policy.effectiveTo)}` : " - Open"}`,
-        policy.isActive ? <Button key={policy.policyId} variant="outline" size="sm" onClick={() => onDeactivate(policy)}>Deactivate</Button> : "-",
+        policy.isActive ? (
+          <Button
+            key={policy.policyId}
+            variant="outline"
+            size="sm"
+            onClick={() => onDeactivate(policy)}
+          >
+            Deactivate
+          </Button>
+        ) : (
+          "-"
+        ),
       ])}
     />
   );
@@ -5340,7 +7724,9 @@ function ShippingInsurancePolicyTable({
   generatedAt?: string;
   policies: DropshipShippingConfigOverview["insurancePolicies"];
   isLoading: boolean;
-  onDeactivate: (policy: DropshipShippingConfigOverview["insurancePolicies"][number]) => void;
+  onDeactivate: (
+    policy: DropshipShippingConfigOverview["insurancePolicies"][number],
+  ) => void;
 }) {
   if (isLoading) return <ShippingTableSkeleton />;
   return (
@@ -5354,7 +7740,18 @@ function ShippingInsurancePolicyTable({
         `${policy.feeBps} bps`,
         formatShippingMoneyRange(policy.minFeeCents, policy.maxFeeCents),
         `${formatDateTime(policy.effectiveFrom)}${policy.effectiveTo ? ` - ${formatDateTime(policy.effectiveTo)}` : " - Open"}`,
-        policy.isActive ? <Button key={policy.policyId} variant="outline" size="sm" onClick={() => onDeactivate(policy)}>Deactivate</Button> : "-",
+        policy.isActive ? (
+          <Button
+            key={policy.policyId}
+            variant="outline"
+            size="sm"
+            onClick={() => onDeactivate(policy)}
+          >
+            Deactivate
+          </Button>
+        ) : (
+          "-"
+        ),
       ])}
     />
   );
@@ -5385,26 +7782,36 @@ function CarrierProtectionAdmin({
   policies: CarrierProtectionPolicyConfig[];
   policyForm: CarrierProtectionPolicyFormState;
   warehouses: DropshipWarehouseOption[];
-  onAssignmentChange: Dispatch<SetStateAction<CarrierProtectionAssignmentFormState>>;
+  onAssignmentChange: Dispatch<
+    SetStateAction<CarrierProtectionAssignmentFormState>
+  >;
   onActivatePolicy: (policy: CarrierProtectionPolicyConfig) => void;
-  onDeactivateAssignment: (assignment: CarrierProtectionAssignmentConfig) => void;
+  onDeactivateAssignment: (
+    assignment: CarrierProtectionAssignmentConfig,
+  ) => void;
   onPolicyChange: Dispatch<SetStateAction<CarrierProtectionPolicyFormState>>;
   onRetirePolicy: (policy: CarrierProtectionPolicyConfig) => void;
   onSaveAssignment: () => void;
   onSavePolicy: () => void;
 }) {
-  const [section, setSection] = useState<"policies" | "assignments">("policies");
-  const [selectedPolicy, setSelectedPolicy] = useState<CarrierProtectionPolicyConfig | null>(null);
+  const [section, setSection] = useState<"policies" | "assignments">(
+    "policies",
+  );
+  const [selectedPolicy, setSelectedPolicy] =
+    useState<CarrierProtectionPolicyConfig | null>(null);
   const [confirmAction, setConfirmAction] = useState<
-    { type: "retire"; policy: CarrierProtectionPolicyConfig }
+    | { type: "retire"; policy: CarrierProtectionPolicyConfig }
     | { type: "deactivate"; assignment: CarrierProtectionAssignmentConfig }
     | null
   >(null);
-  const activePolicies = policies.filter((policy) => policy.status === "active");
+  const activePolicies = policies.filter(
+    (policy) => policy.status === "active",
+  );
 
   function executeConfirmedAction() {
     if (!confirmAction) return;
-    if (confirmAction.type === "retire") void onRetirePolicy(confirmAction.policy);
+    if (confirmAction.type === "retire")
+      void onRetirePolicy(confirmAction.policy);
     else void onDeactivateAssignment(confirmAction.assignment);
     setConfirmAction(null);
   }
@@ -5415,7 +7822,13 @@ function CarrierProtectionAdmin({
         title="Carrier protection"
         detail="Configure what carrier events are covered, how credits are calculated, and where each immutable policy version applies."
       />
-      <Tabs value={section} onValueChange={(value) => setSection(value as "policies" | "assignments")} className="mt-4 space-y-4">
+      <Tabs
+        value={section}
+        onValueChange={(value) =>
+          setSection(value as "policies" | "assignments")
+        }
+        className="mt-4 space-y-4"
+      >
         <TabsList>
           <TabsTrigger value="policies">Policies</TabsTrigger>
           <TabsTrigger value="assignments">Assignment rules</TabsTrigger>
@@ -5426,42 +7839,251 @@ function CarrierProtectionAdmin({
             <div className="space-y-4 rounded-md border p-4">
               <div>
                 <h3 className="font-semibold">New policy version</h3>
-                <p className="text-sm text-muted-foreground">Published terms are immutable. Select a prior policy to create its next version.</p>
+                <p className="text-sm text-muted-foreground">
+                  Published terms are immutable. Select a prior policy to create
+                  its next version.
+                </p>
               </div>
               <div className="grid gap-3 md:grid-cols-2">
-                <ShippingInput label="Policy code" value={policyForm.policyKey} onChange={(policyKey) => onPolicyChange((current) => ({ ...current, policyKey }))} />
-                <ShippingInput label="Policy name" value={policyForm.name} onChange={(name) => onPolicyChange((current) => ({ ...current, name }))} />
-                <LabeledSelect label="New version of" value={policyForm.supersedesPolicyId || "none"} onChange={(value) => onPolicyChange((current) => ({ ...current, supersedesPolicyId: value === "none" ? "" : value }))} options={[{ value: "none", label: "New policy" }, ...policies.filter((policy) => policy.status !== "retired").map((policy) => ({ value: String(policy.policyId), label: `${policy.name} v${policy.version}` }))]} />
-                <LabeledSelect label="Initial status" value={policyForm.status} onChange={(value) => onPolicyChange((current) => ({ ...current, status: value as "draft" | "active" }))} options={[{ value: "draft", label: "Draft" }, { value: "active", label: "Active" }]} />
+                <ShippingInput
+                  label="Policy code"
+                  value={policyForm.policyKey}
+                  onChange={(policyKey) =>
+                    onPolicyChange((current) => ({ ...current, policyKey }))
+                  }
+                />
+                <ShippingInput
+                  label="Policy name"
+                  value={policyForm.name}
+                  onChange={(name) =>
+                    onPolicyChange((current) => ({ ...current, name }))
+                  }
+                />
+                <LabeledSelect
+                  label="New version of"
+                  value={policyForm.supersedesPolicyId || "none"}
+                  onChange={(value) =>
+                    onPolicyChange((current) => ({
+                      ...current,
+                      supersedesPolicyId: value === "none" ? "" : value,
+                    }))
+                  }
+                  options={[
+                    { value: "none", label: "New policy" },
+                    ...policies
+                      .filter((policy) => policy.status !== "retired")
+                      .map((policy) => ({
+                        value: String(policy.policyId),
+                        label: `${policy.name} v${policy.version}`,
+                      })),
+                  ]}
+                />
+                <LabeledSelect
+                  label="Initial status"
+                  value={policyForm.status}
+                  onChange={(value) =>
+                    onPolicyChange((current) => ({
+                      ...current,
+                      status: value as "draft" | "active",
+                    }))
+                  }
+                  options={[
+                    { value: "draft", label: "Draft" },
+                    { value: "active", label: "Active" },
+                  ]}
+                />
               </div>
 
               <FieldGroup title="Covered events">
-                <ToggleField label="Loss" checked={policyForm.coveredLoss} onChange={(coveredLoss) => onPolicyChange((current) => ({ ...current, coveredLoss }))} />
-                <ToggleField label="Misdelivery" checked={policyForm.coveredMisdelivery} onChange={(coveredMisdelivery) => onPolicyChange((current) => ({ ...current, coveredMisdelivery }))} />
-                <ToggleField label="Carrier damage" checked={policyForm.coveredDamage} onChange={(coveredDamage) => onPolicyChange((current) => ({ ...current, coveredDamage }))} />
+                <ToggleField
+                  label="Loss"
+                  checked={policyForm.coveredLoss}
+                  onChange={(coveredLoss) =>
+                    onPolicyChange((current) => ({ ...current, coveredLoss }))
+                  }
+                />
+                <ToggleField
+                  label="Misdelivery"
+                  checked={policyForm.coveredMisdelivery}
+                  onChange={(coveredMisdelivery) =>
+                    onPolicyChange((current) => ({
+                      ...current,
+                      coveredMisdelivery,
+                    }))
+                  }
+                />
+                <ToggleField
+                  label="Carrier damage"
+                  checked={policyForm.coveredDamage}
+                  onChange={(coveredDamage) =>
+                    onPolicyChange((current) => ({ ...current, coveredDamage }))
+                  }
+                />
               </FieldGroup>
 
               <div className="grid gap-3 md:grid-cols-2">
-                <ShippingInput label="Merchandise reimbursement %" value={policyForm.merchandisePercent} onChange={(merchandisePercent) => onPolicyChange((current) => ({ ...current, merchandisePercent }))} />
-                <ShippingInput label="Shipping reimbursement %" value={policyForm.shippingPercent} onChange={(shippingPercent) => onPolicyChange((current) => ({ ...current, shippingPercent }))} />
-                <ShippingInput label="Deductible" value={policyForm.deductible} onChange={(deductible) => onPolicyChange((current) => ({ ...current, deductible }))} />
-                <ShippingInput label="Maximum credit" placeholder="No cap" value={policyForm.maxCredit} onChange={(maxCredit) => onPolicyChange((current) => ({ ...current, maxCredit }))} />
-                <ShippingInput label="Loss wait days" value={policyForm.lossWaitDays} onChange={(lossWaitDays) => onPolicyChange((current) => ({ ...current, lossWaitDays }))} />
-                <ShippingInput label="Misdelivery wait days" value={policyForm.misdeliveryWaitDays} onChange={(misdeliveryWaitDays) => onPolicyChange((current) => ({ ...current, misdeliveryWaitDays }))} />
-                <LabeledSelect label="Payout trigger" value={policyForm.payoutTrigger} onChange={(value) => onPolicyChange((current) => ({ ...current, payoutTrigger: value as CarrierProtectionPolicyFormState["payoutTrigger"] }))} options={[{ value: "internal_approval", label: "Internal approval" }, { value: "carrier_claim_approved", label: "Carrier approves claim" }, { value: "carrier_payment_received", label: "Carrier payment received" }]} />
-                <LabeledSelect label="Approval" value={policyForm.approvalMode} onChange={(value) => onPolicyChange((current) => ({ ...current, approvalMode: value as "manual" | "automatic", automaticApprovalLimit: value === "manual" ? "" : current.automaticApprovalLimit }))} options={[{ value: "manual", label: "Manual" }, { value: "automatic", label: "Automatic below limit" }]} />
-                {policyForm.approvalMode === "automatic" && <ShippingInput label="Automatic approval limit" value={policyForm.automaticApprovalLimit} onChange={(automaticApprovalLimit) => onPolicyChange((current) => ({ ...current, automaticApprovalLimit }))} />}
-                <ShippingInput label="Effective from" type="datetime-local" value={policyForm.effectiveFrom} onChange={(effectiveFrom) => onPolicyChange((current) => ({ ...current, effectiveFrom }))} />
-                <ShippingInput label="Effective to" type="datetime-local" value={policyForm.effectiveTo} onChange={(effectiveTo) => onPolicyChange((current) => ({ ...current, effectiveTo }))} />
+                <ShippingInput
+                  label="Merchandise reimbursement %"
+                  value={policyForm.merchandisePercent}
+                  onChange={(merchandisePercent) =>
+                    onPolicyChange((current) => ({
+                      ...current,
+                      merchandisePercent,
+                    }))
+                  }
+                />
+                <ShippingInput
+                  label="Shipping reimbursement %"
+                  value={policyForm.shippingPercent}
+                  onChange={(shippingPercent) =>
+                    onPolicyChange((current) => ({
+                      ...current,
+                      shippingPercent,
+                    }))
+                  }
+                />
+                <ShippingInput
+                  label="Deductible"
+                  value={policyForm.deductible}
+                  onChange={(deductible) =>
+                    onPolicyChange((current) => ({ ...current, deductible }))
+                  }
+                />
+                <ShippingInput
+                  label="Maximum credit"
+                  placeholder="No cap"
+                  value={policyForm.maxCredit}
+                  onChange={(maxCredit) =>
+                    onPolicyChange((current) => ({ ...current, maxCredit }))
+                  }
+                />
+                <ShippingInput
+                  label="Loss wait days"
+                  value={policyForm.lossWaitDays}
+                  onChange={(lossWaitDays) =>
+                    onPolicyChange((current) => ({ ...current, lossWaitDays }))
+                  }
+                />
+                <ShippingInput
+                  label="Misdelivery wait days"
+                  value={policyForm.misdeliveryWaitDays}
+                  onChange={(misdeliveryWaitDays) =>
+                    onPolicyChange((current) => ({
+                      ...current,
+                      misdeliveryWaitDays,
+                    }))
+                  }
+                />
+                <LabeledSelect
+                  label="Payout trigger"
+                  value={policyForm.payoutTrigger}
+                  onChange={(value) =>
+                    onPolicyChange((current) => ({
+                      ...current,
+                      payoutTrigger:
+                        value as CarrierProtectionPolicyFormState["payoutTrigger"],
+                    }))
+                  }
+                  options={[
+                    { value: "internal_approval", label: "Internal approval" },
+                    {
+                      value: "carrier_claim_approved",
+                      label: "Carrier approves claim",
+                    },
+                    {
+                      value: "carrier_payment_received",
+                      label: "Carrier payment received",
+                    },
+                  ]}
+                />
+                <LabeledSelect
+                  label="Approval"
+                  value={policyForm.approvalMode}
+                  onChange={(value) =>
+                    onPolicyChange((current) => ({
+                      ...current,
+                      approvalMode: value as "manual" | "automatic",
+                      automaticApprovalLimit:
+                        value === "manual"
+                          ? ""
+                          : current.automaticApprovalLimit,
+                    }))
+                  }
+                  options={[
+                    { value: "manual", label: "Manual" },
+                    { value: "automatic", label: "Automatic below limit" },
+                  ]}
+                />
+                {policyForm.approvalMode === "automatic" && (
+                  <ShippingInput
+                    label="Automatic approval limit"
+                    value={policyForm.automaticApprovalLimit}
+                    onChange={(automaticApprovalLimit) =>
+                      onPolicyChange((current) => ({
+                        ...current,
+                        automaticApprovalLimit,
+                      }))
+                    }
+                  />
+                )}
+                <ShippingInput
+                  label="Effective from"
+                  type="datetime-local"
+                  value={policyForm.effectiveFrom}
+                  onChange={(effectiveFrom) =>
+                    onPolicyChange((current) => ({ ...current, effectiveFrom }))
+                  }
+                />
+                <ShippingInput
+                  label="Effective to"
+                  type="datetime-local"
+                  value={policyForm.effectiveTo}
+                  onChange={(effectiveTo) =>
+                    onPolicyChange((current) => ({ ...current, effectiveTo }))
+                  }
+                />
               </div>
               <FieldGroup title="Processing requirements">
-                <ToggleField label="Inspect damage" checked={policyForm.damageInspectionRequired} onChange={(damageInspectionRequired) => onPolicyChange((current) => ({ ...current, damageInspectionRequired }))} />
-                <ToggleField label="Track carrier claim" checked={policyForm.carrierClaimRequired} onChange={(carrierClaimRequired) => onPolicyChange((current) => ({ ...current, carrierClaimRequired }))} />
+                <ToggleField
+                  label="Inspect damage"
+                  checked={policyForm.damageInspectionRequired}
+                  onChange={(damageInspectionRequired) =>
+                    onPolicyChange((current) => ({
+                      ...current,
+                      damageInspectionRequired,
+                    }))
+                  }
+                />
+                <ToggleField
+                  label="Track carrier claim"
+                  checked={policyForm.carrierClaimRequired}
+                  onChange={(carrierClaimRequired) =>
+                    onPolicyChange((current) => ({
+                      ...current,
+                      carrierClaimRequired,
+                    }))
+                  }
+                />
               </FieldGroup>
-              <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={pendingAction !== null} onClick={onSavePolicy}><Save className="h-4 w-4" />Create policy version</Button>
+              <Button
+                className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                disabled={pendingAction !== null}
+                onClick={onSavePolicy}
+              >
+                <Save className="h-4 w-4" />
+                Create policy version
+              </Button>
             </div>
 
-            <CarrierProtectionPolicyTable policies={policies} isLoading={isLoading} onActivate={onActivatePolicy} onRetire={(policy) => setConfirmAction({ type: "retire", policy })} onView={setSelectedPolicy} />
+            <CarrierProtectionPolicyTable
+              policies={policies}
+              isLoading={isLoading}
+              onActivate={onActivatePolicy}
+              onRetire={(policy) =>
+                setConfirmAction({ type: "retire", policy })
+              }
+              onView={setSelectedPolicy}
+            />
           </div>
         </TabsContent>
 
@@ -5470,126 +8092,486 @@ function CarrierProtectionAdmin({
             <div className="space-y-4 rounded-md border p-4">
               <div>
                 <h3 className="font-semibold">New assignment rule</h3>
-                <p className="text-sm text-muted-foreground">Higher priorities match first. Keep one default rule as the fallback.</p>
+                <p className="text-sm text-muted-foreground">
+                  Higher priorities match first. Keep one default rule as the
+                  fallback.
+                </p>
               </div>
               <div className="grid gap-3 md:grid-cols-2">
-                <LabeledSelect label="Policy" value={assignmentForm.policyId || "none"} onChange={(value) => onAssignmentChange((current) => ({ ...current, policyId: value === "none" ? "" : value }))} options={[{ value: "none", label: "Select policy" }, ...activePolicies.map((policy) => ({ value: String(policy.policyId), label: `${policy.name} v${policy.version}` }))]} />
-                <ShippingInput label="Rule name" value={assignmentForm.name} onChange={(name) => onAssignmentChange((current) => ({ ...current, name }))} />
-                <ShippingInput label="Priority" value={assignmentForm.priority} onChange={(priority) => onAssignmentChange((current) => ({ ...current, priority }))} />
-                <ToggleField label="Default fallback" checked={assignmentForm.isDefault} onChange={(isDefault) => onAssignmentChange((current) => ({ ...current, isDefault }))} />
+                <LabeledSelect
+                  label="Policy"
+                  value={assignmentForm.policyId || "none"}
+                  onChange={(value) =>
+                    onAssignmentChange((current) => ({
+                      ...current,
+                      policyId: value === "none" ? "" : value,
+                    }))
+                  }
+                  options={[
+                    { value: "none", label: "Select policy" },
+                    ...activePolicies.map((policy) => ({
+                      value: String(policy.policyId),
+                      label: `${policy.name} v${policy.version}`,
+                    })),
+                  ]}
+                />
+                <ShippingInput
+                  label="Rule name"
+                  value={assignmentForm.name}
+                  onChange={(name) =>
+                    onAssignmentChange((current) => ({ ...current, name }))
+                  }
+                />
+                <ShippingInput
+                  label="Priority"
+                  value={assignmentForm.priority}
+                  onChange={(priority) =>
+                    onAssignmentChange((current) => ({ ...current, priority }))
+                  }
+                />
+                <ToggleField
+                  label="Default fallback"
+                  checked={assignmentForm.isDefault}
+                  onChange={(isDefault) =>
+                    onAssignmentChange((current) => ({ ...current, isDefault }))
+                  }
+                />
               </div>
               {!assignmentForm.isDefault && (
                 <div className="grid gap-3 md:grid-cols-2">
-                  <LabeledSelect label="Channel" value={assignmentForm.channelId || "any"} onChange={(value) => onAssignmentChange((current) => ({ ...current, channelId: value === "any" ? "" : value }))} options={[{ value: "any", label: "Any channel" }, ...channels.map((channel) => ({ value: String(channel.id), label: channel.name }))]} />
-                  <LabeledSelect label="Warehouse" value={assignmentForm.warehouseId || "any"} onChange={(value) => onAssignmentChange((current) => ({ ...current, warehouseId: value === "any" ? "" : value }))} options={[{ value: "any", label: "Any warehouse" }, ...warehouses.map((warehouse) => ({ value: String(warehouse.id), label: warehouse.name }))]} />
-                  <ShippingInput label="Carrier" placeholder="Any carrier" value={assignmentForm.carrier} onChange={(carrier) => onAssignmentChange((current) => ({ ...current, carrier }))} />
-                  <ShippingInput label="Service" placeholder="Any service" value={assignmentForm.service} onChange={(service) => onAssignmentChange((current) => ({ ...current, service }))} />
-                  <ShippingInput label="Destination country" placeholder="Any country" value={assignmentForm.destinationCountry} onChange={(destinationCountry) => onAssignmentChange((current) => ({ ...current, destinationCountry }))} />
-                  <ShippingInput label="Destination region" placeholder="Any region" value={assignmentForm.destinationRegion} onChange={(destinationRegion) => onAssignmentChange((current) => ({ ...current, destinationRegion }))} />
-                  <ShippingInput label="Minimum shipment value" placeholder="No minimum" value={assignmentForm.minShipmentValue} onChange={(minShipmentValue) => onAssignmentChange((current) => ({ ...current, minShipmentValue }))} />
-                  <ShippingInput label="Maximum shipment value" placeholder="No maximum" value={assignmentForm.maxShipmentValue} onChange={(maxShipmentValue) => onAssignmentChange((current) => ({ ...current, maxShipmentValue }))} />
+                  <LabeledSelect
+                    label="Channel"
+                    value={assignmentForm.channelId || "any"}
+                    onChange={(value) =>
+                      onAssignmentChange((current) => ({
+                        ...current,
+                        channelId: value === "any" ? "" : value,
+                      }))
+                    }
+                    options={[
+                      { value: "any", label: "Any channel" },
+                      ...channels.map((channel) => ({
+                        value: String(channel.id),
+                        label: channel.name,
+                      })),
+                    ]}
+                  />
+                  <LabeledSelect
+                    label="Warehouse"
+                    value={assignmentForm.warehouseId || "any"}
+                    onChange={(value) =>
+                      onAssignmentChange((current) => ({
+                        ...current,
+                        warehouseId: value === "any" ? "" : value,
+                      }))
+                    }
+                    options={[
+                      { value: "any", label: "Any warehouse" },
+                      ...warehouses.map((warehouse) => ({
+                        value: String(warehouse.id),
+                        label: warehouse.name,
+                      })),
+                    ]}
+                  />
+                  <ShippingInput
+                    label="Carrier"
+                    placeholder="Any carrier"
+                    value={assignmentForm.carrier}
+                    onChange={(carrier) =>
+                      onAssignmentChange((current) => ({ ...current, carrier }))
+                    }
+                  />
+                  <ShippingInput
+                    label="Service"
+                    placeholder="Any service"
+                    value={assignmentForm.service}
+                    onChange={(service) =>
+                      onAssignmentChange((current) => ({ ...current, service }))
+                    }
+                  />
+                  <ShippingInput
+                    label="Destination country"
+                    placeholder="Any country"
+                    value={assignmentForm.destinationCountry}
+                    onChange={(destinationCountry) =>
+                      onAssignmentChange((current) => ({
+                        ...current,
+                        destinationCountry,
+                      }))
+                    }
+                  />
+                  <ShippingInput
+                    label="Destination region"
+                    placeholder="Any region"
+                    value={assignmentForm.destinationRegion}
+                    onChange={(destinationRegion) =>
+                      onAssignmentChange((current) => ({
+                        ...current,
+                        destinationRegion,
+                      }))
+                    }
+                  />
+                  <ShippingInput
+                    label="Minimum shipment value"
+                    placeholder="No minimum"
+                    value={assignmentForm.minShipmentValue}
+                    onChange={(minShipmentValue) =>
+                      onAssignmentChange((current) => ({
+                        ...current,
+                        minShipmentValue,
+                      }))
+                    }
+                  />
+                  <ShippingInput
+                    label="Maximum shipment value"
+                    placeholder="No maximum"
+                    value={assignmentForm.maxShipmentValue}
+                    onChange={(maxShipmentValue) =>
+                      onAssignmentChange((current) => ({
+                        ...current,
+                        maxShipmentValue,
+                      }))
+                    }
+                  />
                 </div>
               )}
-              <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={pendingAction !== null} onClick={onSaveAssignment}><Save className="h-4 w-4" />Create assignment</Button>
+              <Button
+                className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                disabled={pendingAction !== null}
+                onClick={onSaveAssignment}
+              >
+                <Save className="h-4 w-4" />
+                Create assignment
+              </Button>
             </div>
-            <CarrierProtectionAssignmentTable assignments={assignments} isLoading={isLoading} onDeactivate={(assignment) => setConfirmAction({ type: "deactivate", assignment })} />
+            <CarrierProtectionAssignmentTable
+              assignments={assignments}
+              isLoading={isLoading}
+              onDeactivate={(assignment) =>
+                setConfirmAction({ type: "deactivate", assignment })
+              }
+            />
           </div>
         </TabsContent>
       </Tabs>
 
-      <Dialog open={confirmAction !== null} onOpenChange={(open) => { if (!open && pendingAction === null) setConfirmAction(null); }}>
+      <Dialog
+        open={confirmAction !== null}
+        onOpenChange={(open) => {
+          if (!open && pendingAction === null) setConfirmAction(null);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{confirmAction?.type === "retire" ? "Retire policy version?" : "Deactivate assignment?"}</DialogTitle>
+            <DialogTitle>
+              {confirmAction?.type === "retire"
+                ? "Retire policy version?"
+                : "Deactivate assignment?"}
+            </DialogTitle>
             <DialogDescription>
-              Existing claims and snapshots remain unchanged. This action only prevents new matches.
+              Existing claims and snapshots remain unchanged. This action only
+              prevents new matches.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmAction(null)} disabled={pendingAction !== null}>Cancel</Button>
-            <Button variant="destructive" onClick={executeConfirmedAction} disabled={pendingAction !== null}>Confirm</Button>
+            <Button
+              variant="outline"
+              onClick={() => setConfirmAction(null)}
+              disabled={pendingAction !== null}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={executeConfirmedAction}
+              disabled={pendingAction !== null}
+            >
+              Confirm
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={selectedPolicy !== null} onOpenChange={(open) => { if (!open) setSelectedPolicy(null); }}>
+      <Dialog
+        open={selectedPolicy !== null}
+        onOpenChange={(open) => {
+          if (!open) setSelectedPolicy(null);
+        }}
+      >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{selectedPolicy?.name} v{selectedPolicy?.version}</DialogTitle>
+            <DialogTitle>
+              {selectedPolicy?.name} v{selectedPolicy?.version}
+            </DialogTitle>
             <DialogDescription>{selectedPolicy?.policyKey}</DialogDescription>
           </DialogHeader>
-          {selectedPolicy && <CarrierProtectionPolicyDetails policy={selectedPolicy} />}
-          <DialogFooter><Button variant="outline" onClick={() => setSelectedPolicy(null)}>Close</Button></DialogFooter>
+          {selectedPolicy && (
+            <CarrierProtectionPolicyDetails policy={selectedPolicy} />
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSelectedPolicy(null)}>
+              Close
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </section>
   );
 }
 
-function CarrierProtectionPolicyTable({ policies, isLoading, onActivate, onRetire, onView }: { policies: CarrierProtectionPolicyConfig[]; isLoading: boolean; onActivate: (policy: CarrierProtectionPolicyConfig) => void; onRetire: (policy: CarrierProtectionPolicyConfig) => void; onView: (policy: CarrierProtectionPolicyConfig) => void }) {
+function CarrierProtectionPolicyTable({
+  policies,
+  isLoading,
+  onActivate,
+  onRetire,
+  onView,
+}: {
+  policies: CarrierProtectionPolicyConfig[];
+  isLoading: boolean;
+  onActivate: (policy: CarrierProtectionPolicyConfig) => void;
+  onRetire: (policy: CarrierProtectionPolicyConfig) => void;
+  onView: (policy: CarrierProtectionPolicyConfig) => void;
+}) {
   if (isLoading) return <ShippingTableSkeleton />;
-  return <ShippingSimpleTable title="Policy versions" emptyTitle="No carrier-protection policies" headers={["Policy", "Status", "Coverage", "Credit", "Payout", "Actions"]} rows={policies.map((policy) => [
-    <div key="policy"><div>{policy.name}</div><div className="text-xs text-muted-foreground">{policy.policyKey} v{policy.version}</div></div>,
-    formatStatus(policy.status),
-    [policy.coveredLoss && "Loss", policy.coveredMisdelivery && "Misdelivery", policy.coveredDamage && "Damage"].filter(Boolean).join(", "),
-    `${policy.merchandiseReimbursementBps / 100}% merchandise + ${policy.shippingReimbursementBps / 100}% shipping`,
-    formatStatus(policy.payoutTrigger),
-    <div key="actions" className="flex gap-2">
-      <Button variant="outline" size="sm" onClick={() => onView(policy)}>View</Button>
-      {policy.status === "draft" && <Button variant="outline" size="sm" onClick={() => onActivate(policy)}>Activate</Button>}
-      {policy.status === "active" && <Button variant="outline" size="sm" onClick={() => onRetire(policy)}>Retire</Button>}
-    </div>,
-  ])} />;
+  return (
+    <ShippingSimpleTable
+      title="Policy versions"
+      emptyTitle="No carrier-protection policies"
+      headers={["Policy", "Status", "Coverage", "Credit", "Payout", "Actions"]}
+      rows={policies.map((policy) => [
+        <div key="policy">
+          <div>{policy.name}</div>
+          <div className="text-xs text-muted-foreground">
+            {policy.policyKey} v{policy.version}
+          </div>
+        </div>,
+        formatStatus(policy.status),
+        [
+          policy.coveredLoss && "Loss",
+          policy.coveredMisdelivery && "Misdelivery",
+          policy.coveredDamage && "Damage",
+        ]
+          .filter(Boolean)
+          .join(", "),
+        `${policy.merchandiseReimbursementBps / 100}% merchandise + ${policy.shippingReimbursementBps / 100}% shipping`,
+        formatStatus(policy.payoutTrigger),
+        <div key="actions" className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => onView(policy)}>
+            View
+          </Button>
+          {policy.status === "draft" && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onActivate(policy)}
+            >
+              Activate
+            </Button>
+          )}
+          {policy.status === "active" && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onRetire(policy)}
+            >
+              Retire
+            </Button>
+          )}
+        </div>,
+      ])}
+    />
+  );
 }
 
-function CarrierProtectionPolicyDetails({ policy }: { policy: CarrierProtectionPolicyConfig }) {
+function CarrierProtectionPolicyDetails({
+  policy,
+}: {
+  policy: CarrierProtectionPolicyConfig;
+}) {
   const details = [
     ["Status", formatStatus(policy.status)],
-    ["Covered events", [policy.coveredLoss && "Loss", policy.coveredMisdelivery && "Misdelivery", policy.coveredDamage && "Damage"].filter(Boolean).join(", ")],
-    ["Merchandise reimbursement", `${policy.merchandiseReimbursementBps / 100}%`],
+    [
+      "Covered events",
+      [
+        policy.coveredLoss && "Loss",
+        policy.coveredMisdelivery && "Misdelivery",
+        policy.coveredDamage && "Damage",
+      ]
+        .filter(Boolean)
+        .join(", "),
+    ],
+    [
+      "Merchandise reimbursement",
+      `${policy.merchandiseReimbursementBps / 100}%`,
+    ],
     ["Shipping reimbursement", `${policy.shippingReimbursementBps / 100}%`],
     ["Deductible", formatCents(policy.deductibleCents)],
-    ["Maximum credit", policy.maxCreditCents == null ? "No cap" : formatCents(policy.maxCreditCents)],
+    [
+      "Maximum credit",
+      policy.maxCreditCents == null
+        ? "No cap"
+        : formatCents(policy.maxCreditCents),
+    ],
     ["Loss wait", `${policy.lossWaitDays} days`],
     ["Misdelivery wait", `${policy.misdeliveryWaitDays} days`],
-    ["Damage inspection", policy.damageInspectionRequired ? "Required" : "Not required"],
+    [
+      "Damage inspection",
+      policy.damageInspectionRequired ? "Required" : "Not required",
+    ],
     ["Payout trigger", formatStatus(policy.payoutTrigger)],
-    ["Carrier claim", policy.carrierClaimRequired ? "Track required" : "Not required"],
-    ["Approval", policy.approvalMode === "automatic" ? `Automatic through ${formatCents(policy.automaticApprovalLimitCents ?? 0)}` : "Manual"],
-    ["Effective", `${formatDateTime(policy.effectiveFrom)}${policy.effectiveTo ? ` - ${formatDateTime(policy.effectiveTo)}` : " - Open"}`],
+    [
+      "Carrier claim",
+      policy.carrierClaimRequired ? "Track required" : "Not required",
+    ],
+    [
+      "Approval",
+      policy.approvalMode === "automatic"
+        ? `Automatic through ${formatCents(policy.automaticApprovalLimitCents ?? 0)}`
+        : "Manual",
+    ],
+    [
+      "Effective",
+      `${formatDateTime(policy.effectiveFrom)}${policy.effectiveTo ? ` - ${formatDateTime(policy.effectiveTo)}` : " - Open"}`,
+    ],
   ];
-  return <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2">{details.map(([label, value]) => <div key={label}><div className="text-xs text-muted-foreground">{label}</div><div className="text-sm font-medium">{value}</div></div>)}</div>;
+  return (
+    <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
+      {details.map(([label, value]) => (
+        <div key={label}>
+          <div className="text-xs text-muted-foreground">{label}</div>
+          <div className="text-sm font-medium">{value}</div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
-function CarrierProtectionAssignmentTable({ assignments, isLoading, onDeactivate }: { assignments: CarrierProtectionAssignmentConfig[]; isLoading: boolean; onDeactivate: (assignment: CarrierProtectionAssignmentConfig) => void }) {
+function CarrierProtectionAssignmentTable({
+  assignments,
+  isLoading,
+  onDeactivate,
+}: {
+  assignments: CarrierProtectionAssignmentConfig[];
+  isLoading: boolean;
+  onDeactivate: (assignment: CarrierProtectionAssignmentConfig) => void;
+}) {
   if (isLoading) return <ShippingTableSkeleton />;
-  return <ShippingSimpleTable title="Assignment rules" emptyTitle="No carrier-protection assignments" headers={["Rule", "Policy", "Match", "Priority", "Status", "Actions"]} rows={assignments.map((assignment) => [
-    assignment.name,
-    `${assignment.policyName} v${assignment.policyVersion}`,
-    assignment.isDefault ? "Default fallback" : carrierProtectionAssignmentScope(assignment),
-    String(assignment.priority),
-    assignment.isActive ? "Active" : "Inactive",
-    assignment.isActive ? <Button key="deactivate" variant="outline" size="sm" onClick={() => onDeactivate(assignment)}>Deactivate</Button> : "-",
-  ])} />;
+  return (
+    <ShippingSimpleTable
+      title="Assignment rules"
+      emptyTitle="No carrier-protection assignments"
+      headers={["Rule", "Policy", "Match", "Priority", "Status", "Actions"]}
+      rows={assignments.map((assignment) => [
+        assignment.name,
+        `${assignment.policyName} v${assignment.policyVersion}`,
+        assignment.isDefault
+          ? "Default fallback"
+          : carrierProtectionAssignmentScope(assignment),
+        String(assignment.priority),
+        assignment.isActive ? "Active" : "Inactive",
+        assignment.isActive ? (
+          <Button
+            key="deactivate"
+            variant="outline"
+            size="sm"
+            onClick={() => onDeactivate(assignment)}
+          >
+            Deactivate
+          </Button>
+        ) : (
+          "-"
+        ),
+      ])}
+    />
+  );
 }
 
-function carrierProtectionAssignmentScope(assignment: CarrierProtectionAssignmentConfig): string {
-  const valueRange = assignment.minShipmentValueCents != null || assignment.maxShipmentValueCents != null
-    ? formatShippingMoneyRange(assignment.minShipmentValueCents, assignment.maxShipmentValueCents)
-    : null;
-  return [assignment.channelName, assignment.warehouseName, assignment.carrier, assignment.service, assignment.destinationCountry, assignment.destinationRegion, valueRange].filter(Boolean).join(" / ") || "All shipments";
+function carrierProtectionAssignmentScope(
+  assignment: CarrierProtectionAssignmentConfig,
+): string {
+  const valueRange =
+    assignment.minShipmentValueCents != null ||
+    assignment.maxShipmentValueCents != null
+      ? formatShippingMoneyRange(
+          assignment.minShipmentValueCents,
+          assignment.maxShipmentValueCents,
+        )
+      : null;
+  return (
+    [
+      assignment.channelName,
+      assignment.warehouseName,
+      assignment.carrier,
+      assignment.service,
+      assignment.destinationCountry,
+      assignment.destinationRegion,
+      valueRange,
+    ]
+      .filter(Boolean)
+      .join(" / ") || "All shipments"
+  );
 }
 
-function FieldGroup({ title, children }: { title: string; children: ReactNode }) {
-  return <div><div className="mb-2 text-sm font-medium">{title}</div><div className="flex flex-wrap gap-4">{children}</div></div>;
+function FieldGroup({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div>
+      <div className="mb-2 text-sm font-medium">{title}</div>
+      <div className="flex flex-wrap gap-4">{children}</div>
+    </div>
+  );
 }
 
-function ToggleField({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
-  return <label className="flex items-center gap-2 text-sm"><Switch checked={checked} onCheckedChange={onChange} /><span>{label}</span></label>;
+function ToggleField({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2 text-sm">
+      <Switch checked={checked} onCheckedChange={onChange} />
+      <span>{label}</span>
+    </label>
+  );
 }
 
-function LabeledSelect({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: Array<{ value: string; label: string }> }) {
-  return <div className="space-y-1"><label className="text-sm font-medium">{label}</label><Select value={value} onValueChange={onChange}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{options.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></div>;
+function LabeledSelect({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: Array<{ value: string; label: string }>;
+}) {
+  return (
+    <div className="space-y-1">
+      <label className="text-sm font-medium">{label}</label>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
 }
 
 function ShippingTableSkeleton() {
@@ -5629,14 +8611,23 @@ function ShippingSimpleTable({
           <Table>
             <TableHeader>
               <TableRow>
-                {headers.map((header) => <TableHead key={header}>{header}</TableHead>)}
+                {headers.map((header) => (
+                  <TableHead key={header}>{header}</TableHead>
+                ))}
               </TableRow>
             </TableHeader>
             <TableBody>
               {rows.map((row, rowIndex) => (
                 <TableRow key={`${title}-${rowIndex}`}>
                   {row.map((cell, cellIndex) => (
-                    <TableCell key={`${title}-${rowIndex}-${cellIndex}`} className={cellIndex === 0 ? "font-medium" : "text-sm text-muted-foreground"}>
+                    <TableCell
+                      key={`${title}-${rowIndex}-${cellIndex}`}
+                      className={
+                        cellIndex === 0
+                          ? "font-medium"
+                          : "text-sm text-muted-foreground"
+                      }
+                    >
                       {cell}
                     </TableCell>
                   ))}
@@ -5651,14 +8642,20 @@ function ShippingSimpleTable({
 }
 
 function shippingPolicyStatus(
-  policy: { policyId: number; isActive: boolean; effectiveFrom: string; effectiveTo: string | null },
+  policy: {
+    policyId: number;
+    isActive: boolean;
+    effectiveFrom: string;
+    effectiveTo: string | null;
+  },
   activePolicyId: number | null,
   generatedAt?: string,
 ): string {
   if (!policy.isActive) return "Inactive";
   const at = new Date(generatedAt ?? Date.now()).getTime();
   if (new Date(policy.effectiveFrom).getTime() > at) return "Scheduled";
-  if (policy.effectiveTo && new Date(policy.effectiveTo).getTime() <= at) return "Expired";
+  if (policy.effectiveTo && new Date(policy.effectiveTo).getTime() <= at)
+    return "Expired";
   return policy.policyId === activePolicyId ? "Effective" : "Superseded";
 }
 
@@ -5675,7 +8672,10 @@ function currencyInputToCents(value: string, label: string): number {
   return decimalInputToInteger(value, 2, label);
 }
 
-function optionalCurrencyInputToCents(value: string, label: string): number | null {
+function optionalCurrencyInputToCents(
+  value: string,
+  label: string,
+): number | null {
   return value.trim() ? currencyInputToCents(value, label) : null;
 }
 
@@ -5685,10 +8685,19 @@ function percentageInputToBps(value: string): number {
   return bps;
 }
 
-function decimalInputToInteger(value: string, scale: number, label: string): number {
+function decimalInputToInteger(
+  value: string,
+  scale: number,
+  label: string,
+): number {
   const normalized = value.trim();
-  const match = new RegExp(`^(\\d+)(?:\\.(\\d{1,${scale}}))?$`).exec(normalized);
-  if (!match) throw new Error(`${label} must be a non-negative number with at most ${scale} decimal places.`);
+  const match = new RegExp(`^(\\d+)(?:\\.(\\d{1,${scale}}))?$`).exec(
+    normalized,
+  );
+  if (!match)
+    throw new Error(
+      `${label} must be a non-negative number with at most ${scale} decimal places.`,
+    );
   const whole = match[1] ?? "0";
   const fraction = (match[2] ?? "").padEnd(scale, "0");
   const parsed = Number(`${whole}${fraction}`);
@@ -5698,7 +8707,8 @@ function decimalInputToInteger(value: string, scale: number, label: string): num
 
 function requiredInteger(value: string, label: string): number {
   const parsed = Number(value.trim());
-  if (!Number.isSafeInteger(parsed)) throw new Error(`${label} must be an integer.`);
+  if (!Number.isSafeInteger(parsed))
+    throw new Error(`${label} must be an integer.`);
   return parsed;
 }
 
@@ -5725,7 +8735,8 @@ function optionalText(value: string): string | null {
 function optionalIsoDate(value: string): string | null {
   if (!value.trim()) return null;
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) throw new Error("Effective date is invalid.");
+  if (Number.isNaN(date.getTime()))
+    throw new Error("Effective date is invalid.");
   return date.toISOString();
 }
 
@@ -5744,25 +8755,35 @@ function WarehouseSelect({
   warehouses: DropshipWarehouseOption[];
   warehousesLoading: boolean;
 }) {
-  const selectedWarehouseKnown = value === "" || warehouses.some((warehouse) => String(warehouse.id) === value);
+  const selectedWarehouseKnown =
+    value === "" ||
+    warehouses.some((warehouse) => String(warehouse.id) === value);
 
   return (
     <div>
       <label className="text-sm font-medium">{label}</label>
       <Select
         value={value || NO_DEFAULT_WAREHOUSE_VALUE}
-        onValueChange={(nextValue) => onChange(nextValue === NO_DEFAULT_WAREHOUSE_VALUE ? "" : nextValue)}
+        onValueChange={(nextValue) =>
+          onChange(nextValue === NO_DEFAULT_WAREHOUSE_VALUE ? "" : nextValue)
+        }
         disabled={warehousesLoading}
       >
         <SelectTrigger className="mt-2">
-          <SelectValue placeholder={warehousesLoading ? "Loading warehouses..." : "Select warehouse"} />
+          <SelectValue
+            placeholder={
+              warehousesLoading ? "Loading warehouses..." : "Select warehouse"
+            }
+          />
         </SelectTrigger>
         <SelectContent>
           <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>
             {optional ? "Any warehouse" : "Select warehouse"}
           </SelectItem>
           {!selectedWarehouseKnown && (
-            <SelectItem value={value}>Warehouse ID {value} (not found)</SelectItem>
+            <SelectItem value={value}>
+              Warehouse ID {value} (not found)
+            </SelectItem>
           )}
           {warehouses.map((warehouse) => (
             <SelectItem key={warehouse.id} value={String(warehouse.id)}>
@@ -5812,7 +8833,10 @@ function ShippingActiveSelect({
   return (
     <div>
       <label className="text-sm font-medium">Status</label>
-      <Select value={value ? "active" : "inactive"} onValueChange={(nextValue) => onChange(nextValue === "active")}>
+      <Select
+        value={value ? "active" : "inactive"}
+        onValueChange={(nextValue) => onChange(nextValue === "active")}
+      >
         <SelectTrigger className="mt-2">
           <SelectValue />
         </SelectTrigger>
@@ -5829,13 +8853,21 @@ function activeCount(items: Array<{ isActive: boolean }> | undefined): number {
   return items?.filter((item) => item.isActive).length ?? 0;
 }
 
-function activeRateTableCount(config: DropshipShippingConfigOverview | undefined): number {
-  return config?.rateTables.filter((table) => table.status === "active").length ?? 0;
+function activeRateTableCount(
+  config: DropshipShippingConfigOverview | undefined,
+): number {
+  return (
+    config?.rateTables.filter((table) => table.status === "active").length ?? 0
+  );
 }
 
-function formatShippingMoneyRange(minCents: number | null, maxCents: number | null): string {
+function formatShippingMoneyRange(
+  minCents: number | null,
+  maxCents: number | null,
+): string {
   if (minCents === null && maxCents === null) return "No min/max";
-  if (minCents !== null && maxCents !== null) return `${formatCents(minCents)} - ${formatCents(maxCents)}`;
+  if (minCents !== null && maxCents !== null)
+    return `${formatCents(minCents)} - ${formatCents(maxCents)}`;
   if (minCents !== null) return `Min ${formatCents(minCents)}`;
   return `Max ${formatCents(maxCents ?? 0)}`;
 }
@@ -5870,11 +8902,18 @@ function OmsChannelConfigPanel({
     );
   }
 
-  const internalDropshipChannels = config?.channels.filter((channel) => channel.isInternalDropshipChannel) ?? [];
-  const legacyMarkedChannels = config?.channels.filter((channel) => (
-    channel.isDropshipOmsChannel && !channel.isInternalDropshipChannel
-  )) ?? [];
-  const currentChannel = config?.channels.find((channel) => channel.channelId === config.currentChannelId) ?? null;
+  const internalDropshipChannels =
+    config?.channels.filter((channel) => channel.isInternalDropshipChannel) ??
+    [];
+  const legacyMarkedChannels =
+    config?.channels.filter(
+      (channel) =>
+        channel.isDropshipOmsChannel && !channel.isInternalDropshipChannel,
+    ) ?? [];
+  const currentChannel =
+    config?.channels.find(
+      (channel) => channel.channelId === config.currentChannelId,
+    ) ?? null;
   const hasAmbiguousConfig = (config?.currentChannelCount ?? 0) > 1;
 
   return (
@@ -5895,16 +8934,30 @@ function OmsChannelConfigPanel({
                 : "The static internal dropship channel is missing."}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
-            Vendor eBay and Shopify stores connect separately under Store Connections. This source only tags accepted dropship orders inside Echelon.
+            Vendor eBay and Shopify stores connect separately under Store
+            Connections. This source only tags accepted dropship orders inside
+            Echelon.
           </div>
           {internalDropshipChannels.length > 0 && (
             <div className="mt-1 text-xs text-muted-foreground">
-              Internal channel: {internalDropshipChannels.map((channel) => `${dropshipOmsSourceLabel(channel)} (${formatStatus(channel.status)})`).join(", ")}
+              Internal channel:{" "}
+              {internalDropshipChannels
+                .map(
+                  (channel) =>
+                    `${dropshipOmsSourceLabel(channel)} (${formatStatus(channel.status)})`,
+                )
+                .join(", ")}
             </div>
           )}
           {legacyMarkedChannels.length > 0 && (
             <div className="mt-1 text-xs text-muted-foreground">
-              Legacy markers: {legacyMarkedChannels.map((channel) => `${dropshipOmsSourceLabel(channel)} (${formatStatus(channel.status)})`).join(", ")}
+              Legacy markers:{" "}
+              {legacyMarkedChannels
+                .map(
+                  (channel) =>
+                    `${dropshipOmsSourceLabel(channel)} (${formatStatus(channel.status)})`,
+                )
+                .join(", ")}
             </div>
           )}
         </div>
@@ -5949,9 +9002,15 @@ function SystemReadinessPanel({
     return null;
   }
 
-  const blockedCount = checks.filter((check) => check.status === "blocked").length;
-  const warningCount = checks.filter((check) => check.status === "warning").length;
-  const notApplicableCount = checks.filter((check) => check.status === "not_applicable").length;
+  const blockedCount = checks.filter(
+    (check) => check.status === "blocked",
+  ).length;
+  const warningCount = checks.filter(
+    (check) => check.status === "warning",
+  ).length;
+  const notApplicableCount = checks.filter(
+    (check) => check.status === "not_applicable",
+  ).length;
 
   return (
     <section className="rounded-md border bg-card p-4">
@@ -5959,11 +9018,19 @@ function SystemReadinessPanel({
         <div>
           <h2 className="text-lg font-semibold">System prerequisites</h2>
           <p className="text-sm text-muted-foreground">
-            {blockedCount} blocked / {warningCount} warning / {notApplicableCount} not applicable
+            {blockedCount} blocked / {warningCount} warning /{" "}
+            {notApplicableCount} not applicable
           </p>
         </div>
-        <Badge variant="outline" className={systemReadinessTone(blockedCount, warningCount)}>
-          {blockedCount > 0 ? "Blocked" : warningCount > 0 ? "Warning" : "Ready"}
+        <Badge
+          variant="outline"
+          className={systemReadinessTone(blockedCount, warningCount)}
+        >
+          {blockedCount > 0
+            ? "Blocked"
+            : warningCount > 0
+              ? "Warning"
+              : "Ready"}
         </Badge>
       </div>
       <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -5972,17 +9039,24 @@ function SystemReadinessPanel({
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="font-medium">{check.label}</div>
-                <div className="mt-1 text-sm text-muted-foreground">{check.message}</div>
+                <div className="mt-1 text-sm text-muted-foreground">
+                  {check.message}
+                </div>
               </div>
-              <Badge variant="outline" className={systemReadinessCheckTone(check.status)}>
+              <Badge
+                variant="outline"
+                className={systemReadinessCheckTone(check.status)}
+              >
                 {formatStatus(check.status)}
               </Badge>
             </div>
-            {check.requiredEnv.length > 0 && check.status !== "ready" && check.status !== "not_applicable" && (
-              <div className="mt-2 text-xs text-muted-foreground">
-                Env: {check.requiredEnv.join(", ")}
-              </div>
-            )}
+            {check.requiredEnv.length > 0 &&
+              check.status !== "ready" &&
+              check.status !== "not_applicable" && (
+                <div className="mt-2 text-xs text-muted-foreground">
+                  Env: {check.requiredEnv.join(", ")}
+                </div>
+              )}
           </div>
         ))}
       </div>
@@ -6011,12 +9085,15 @@ function WorkerSweepPanel({
         <div className="min-w-0">
           <h2 className="text-lg font-semibold">Manual worker sweeps</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Run the same dropship worker paths used by schedulers without waiting for the next interval.
+            Run the same dropship worker paths used by schedulers without
+            waiting for the next interval.
           </p>
         </div>
         <div className="grid gap-3 sm:grid-cols-[120px_minmax(220px,1fr)] xl:w-[520px]">
           <label className="space-y-1">
-            <span className="text-xs font-medium uppercase tracking-normal text-muted-foreground">Batch</span>
+            <span className="text-xs font-medium uppercase tracking-normal text-muted-foreground">
+              Batch
+            </span>
             <Input
               inputMode="numeric"
               value={batchSize}
@@ -6025,7 +9102,9 @@ function WorkerSweepPanel({
             />
           </label>
           <label className="space-y-1">
-            <span className="text-xs font-medium uppercase tracking-normal text-muted-foreground">Reason</span>
+            <span className="text-xs font-medium uppercase tracking-normal text-muted-foreground">
+              Reason
+            </span>
             <Input
               value={reason}
               onChange={(event) => onReasonChange(event.target.value)}
@@ -6038,15 +9117,23 @@ function WorkerSweepPanel({
         {adminWorkerSweepOptions.map((option) => {
           const isPending = pendingWorker === option.worker;
           return (
-            <div key={option.worker} className="flex min-h-36 flex-col justify-between rounded-md border p-3">
+            <div
+              key={option.worker}
+              className="flex min-h-36 flex-col justify-between rounded-md border p-3"
+            >
               <div>
                 <div className="flex items-start justify-between gap-2">
                   <div className="font-medium">{option.label}</div>
-                  <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+                  <Badge
+                    variant="outline"
+                    className="border-zinc-200 bg-zinc-50 text-zinc-700"
+                  >
                     {option.worker}
                   </Badge>
                 </div>
-                <p className="mt-2 text-sm text-muted-foreground">{option.description}</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {option.description}
+                </p>
               </div>
               <Button
                 className="mt-4 gap-2"
@@ -6054,7 +9141,11 @@ function WorkerSweepPanel({
                 variant="outline"
                 onClick={() => onRunSweep(option.worker)}
               >
-                {isPending ? <RefreshCw className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
+                {isPending ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <PlayCircle className="h-4 w-4" />
+                )}
                 {isPending ? "Running" : "Run sweep"}
               </Button>
             </div>
@@ -6108,7 +9199,10 @@ function DogfoodLaunchGatePanel({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-lg font-semibold">Dogfood launch gate</h2>
-            <Badge variant="outline" className={dogfoodReadinessStatusTone(displayStatus)}>
+            <Badge
+              variant="outline"
+              className={dogfoodReadinessStatusTone(displayStatus)}
+            >
               {formatStatus(displayStatus)}
             </Badge>
           </div>
@@ -6116,22 +9210,38 @@ function DogfoodLaunchGatePanel({
         </div>
         <div className="grid w-full gap-2 sm:grid-cols-2 lg:w-auto lg:min-w-[520px] lg:grid-cols-4">
           <LaunchGateMetric label="Ready" value={gate.readyVendorStoreCount} />
-          <LaunchGateMetric label="System blocked" value={gate.systemBlockedCount} />
-          <LaunchGateMetric label="Rows blocked" value={gate.blockedVendorStoreCount} />
+          <LaunchGateMetric
+            label="System blocked"
+            value={gate.systemBlockedCount}
+          />
+          <LaunchGateMetric
+            label="Rows blocked"
+            value={gate.blockedVendorStoreCount}
+          />
           <LaunchGateMetric label="Warnings" value={gate.warningCount} />
         </div>
       </div>
       {gate.firstBlockers.length > 0 && (
         <div className="mt-4 grid gap-2 lg:grid-cols-2">
           {gate.firstBlockers.slice(0, 4).map((blocker, index) => (
-            <div key={`${blocker.scope}:${blocker.key}:${blocker.vendorId ?? "system"}:${index}`} className="rounded-md border p-3">
+            <div
+              key={`${blocker.scope}:${blocker.key}:${blocker.vendorId ?? "system"}:${index}`}
+              className="rounded-md border p-3"
+            >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="font-medium">{blocker.label}</div>
-                  <div className="mt-1 text-sm text-muted-foreground">{blocker.message}</div>
+                  <div className="mt-1 text-sm text-muted-foreground">
+                    {blocker.message}
+                  </div>
                 </div>
-                <Badge variant="outline" className="shrink-0 border-zinc-200 bg-zinc-50 text-zinc-700">
-                  {blocker.scope === "system" ? "System" : `Vendor ${blocker.vendorId}`}
+                <Badge
+                  variant="outline"
+                  className="shrink-0 border-zinc-200 bg-zinc-50 text-zinc-700"
+                >
+                  {blocker.scope === "system"
+                    ? "System"
+                    : `Vendor ${blocker.vendorId}`}
                 </Badge>
               </div>
             </div>
@@ -6141,8 +9251,13 @@ function DogfoodLaunchGatePanel({
       {candidates.length > 0 && (
         <div className="mt-4 border-t pt-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold uppercase tracking-normal text-muted-foreground">Ready dogfood candidates</h3>
-            <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-800">
+            <h3 className="text-sm font-semibold uppercase tracking-normal text-muted-foreground">
+              Ready dogfood candidates
+            </h3>
+            <Badge
+              variant="outline"
+              className="border-emerald-200 bg-emerald-50 text-emerald-800"
+            >
               {candidates.length} ready
             </Badge>
           </div>
@@ -6159,8 +9274,13 @@ function DogfoodLaunchGatePanel({
       {steps.length > 0 && (
         <div className="mt-4 border-t pt-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold uppercase tracking-normal text-muted-foreground">Launch runbook</h3>
-            <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+            <h3 className="text-sm font-semibold uppercase tracking-normal text-muted-foreground">
+              Launch runbook
+            </h3>
+            <Badge
+              variant="outline"
+              className="border-zinc-200 bg-zinc-50 text-zinc-700"
+            >
               {steps.length} step{steps.length === 1 ? "" : "s"}
             </Badge>
           </div>
@@ -6180,15 +9300,26 @@ function DogfoodLaunchCandidateCard({
 }: {
   candidate: DropshipDogfoodLaunchCandidate;
 }) {
-  const storeName = candidate.storeConnection.externalDisplayName
-    || candidate.storeConnection.shopDomain
-    || `${formatStatus(candidate.storeConnection.platform)} store ${candidate.storeConnection.storeConnectionId}`;
+  const storeName =
+    candidate.storeConnection.externalDisplayName ||
+    candidate.storeConnection.shopDomain ||
+    `${formatStatus(candidate.storeConnection.platform)} store ${candidate.storeConnection.storeConnectionId}`;
   const references = [
-    candidate.smokeReferences.latestListingId ? `Listing ${candidate.smokeReferences.latestListingId}` : null,
-    candidate.smokeReferences.latestIntakeId ? `Intake ${candidate.smokeReferences.latestIntakeId}` : null,
-    candidate.smokeReferences.latestOmsOrderId ? `OMS ${candidate.smokeReferences.latestOmsOrderId}` : null,
-    candidate.smokeReferences.latestWmsShipmentId ? `Shipment ${candidate.smokeReferences.latestWmsShipmentId}` : null,
-    candidate.smokeReferences.latestTrackingPushId ? `Tracking ${candidate.smokeReferences.latestTrackingPushId}` : null,
+    candidate.smokeReferences.latestListingId
+      ? `Listing ${candidate.smokeReferences.latestListingId}`
+      : null,
+    candidate.smokeReferences.latestIntakeId
+      ? `Intake ${candidate.smokeReferences.latestIntakeId}`
+      : null,
+    candidate.smokeReferences.latestOmsOrderId
+      ? `OMS ${candidate.smokeReferences.latestOmsOrderId}`
+      : null,
+    candidate.smokeReferences.latestWmsShipmentId
+      ? `Shipment ${candidate.smokeReferences.latestWmsShipmentId}`
+      : null,
+    candidate.smokeReferences.latestTrackingPushId
+      ? `Tracking ${candidate.smokeReferences.latestTrackingPushId}`
+      : null,
   ].filter((reference): reference is string => Boolean(reference));
 
   return (
@@ -6196,21 +9327,35 @@ function DogfoodLaunchCandidateCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate font-medium">
-            {candidate.vendor.businessName || candidate.vendor.email || `Vendor ${candidate.vendor.vendorId}`}
+            {candidate.vendor.businessName ||
+              candidate.vendor.email ||
+              `Vendor ${candidate.vendor.vendorId}`}
           </div>
-          <div className="mt-1 truncate text-xs text-muted-foreground">{storeName}</div>
+          <div className="mt-1 truncate text-xs text-muted-foreground">
+            {storeName}
+          </div>
         </div>
-        <Badge variant="outline" className="shrink-0 border-emerald-200 bg-emerald-50 text-emerald-800">
+        <Badge
+          variant="outline"
+          className="shrink-0 border-emerald-200 bg-emerald-50 text-emerald-800"
+        >
           Ready
         </Badge>
       </div>
       <div className="mt-2 text-xs text-muted-foreground">
-        Latest smoke {candidate.lastSmokeActivityAt ? formatDateTime(candidate.lastSmokeActivityAt) : "missing"}
+        Latest smoke{" "}
+        {candidate.lastSmokeActivityAt
+          ? formatDateTime(candidate.lastSmokeActivityAt)
+          : "missing"}
       </div>
       {references.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1">
           {references.map((reference) => (
-            <Badge key={reference} variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+            <Badge
+              key={reference}
+              variant="outline"
+              className="border-zinc-200 bg-zinc-50 text-zinc-700"
+            >
               {reference}
             </Badge>
           ))}
@@ -6232,27 +9377,42 @@ function LaunchRunbookStepCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+            <Badge
+              variant="outline"
+              className="border-zinc-200 bg-zinc-50 text-zinc-700"
+            >
               {index + 1}
             </Badge>
             <div className="font-medium">{step.label}</div>
           </div>
-          <div className="mt-1 text-sm text-muted-foreground">{step.message}</div>
+          <div className="mt-1 text-sm text-muted-foreground">
+            {step.message}
+          </div>
         </div>
-        <Badge variant="outline" className={dogfoodReadinessStatusTone(step.status)}>
+        <Badge
+          variant="outline"
+          className={dogfoodReadinessStatusTone(step.status)}
+        >
           {formatStatus(step.status)}
         </Badge>
       </div>
-      <div className="mt-3 rounded-md bg-muted/50 px-3 py-2 text-sm">{step.action}</div>
+      <div className="mt-3 rounded-md bg-muted/50 px-3 py-2 text-sm">
+        {step.action}
+      </div>
       {step.evidence.length > 0 && (
         <div className="mt-3 space-y-1">
           {step.evidence.slice(0, 3).map((entry, entryIndex) => (
-            <div key={`${step.key}:evidence:${entryIndex}`} className="truncate text-xs text-muted-foreground">
+            <div
+              key={`${step.key}:evidence:${entryIndex}`}
+              className="truncate text-xs text-muted-foreground"
+            >
               {entry}
             </div>
           ))}
           {step.evidence.length > 3 && (
-            <div className="text-xs text-muted-foreground">+{step.evidence.length - 3} more</div>
+            <div className="text-xs text-muted-foreground">
+              +{step.evidence.length - 3} more
+            </div>
           )}
         </div>
       )}
@@ -6260,13 +9420,7 @@ function LaunchRunbookStepCard({
   );
 }
 
-function LaunchGateMetric({
-  label,
-  value,
-}: {
-  label: string;
-  value: number;
-}) {
+function LaunchGateMetric({ label, value }: { label: string; value: number }) {
   return (
     <div className="rounded-md border px-3 py-2">
       <div className="text-xs text-muted-foreground">{label}</div>
@@ -6307,8 +9461,14 @@ function DogfoodSmokePanel({
         </div>
         <div className="grid w-full gap-2 sm:grid-cols-3 lg:w-auto lg:min-w-[420px]">
           <LaunchGateMetric label="Ready" value={smoke.readyCandidateCount} />
-          <LaunchGateMetric label="Incomplete" value={smoke.warningCandidateCount} />
-          <LaunchGateMetric label="Blocked" value={smoke.blockedCandidateCount} />
+          <LaunchGateMetric
+            label="Incomplete"
+            value={smoke.warningCandidateCount}
+          />
+          <LaunchGateMetric
+            label="Blocked"
+            value={smoke.blockedCandidateCount}
+          />
         </div>
       </div>
       {smoke.candidates.length === 0 ? (
@@ -6337,19 +9497,30 @@ function DogfoodSmokeCandidateCard({
   candidate: DropshipDogfoodSmokeCandidate;
   onOpenSmokeOpsSearch: (input: Omit<DropshipOpsSearchSignal, "nonce">) => void;
 }) {
-  const storeName = candidate.storeConnection.externalDisplayName
-    || candidate.storeConnection.shopDomain
-    || `${formatStatus(candidate.storeConnection.platform)} store ${candidate.storeConnection.storeConnectionId}`;
+  const storeName =
+    candidate.storeConnection.externalDisplayName ||
+    candidate.storeConnection.shopDomain ||
+    `${formatStatus(candidate.storeConnection.platform)} store ${candidate.storeConnection.storeConnectionId}`;
   return (
     <div className="rounded-md border p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="font-medium">{candidate.vendor.businessName || candidate.vendor.email || `Vendor ${candidate.vendor.vendorId}`}</div>
+          <div className="font-medium">
+            {candidate.vendor.businessName ||
+              candidate.vendor.email ||
+              `Vendor ${candidate.vendor.vendorId}`}
+          </div>
           <div className="mt-1 truncate text-sm text-muted-foreground">
-            {storeName} / {candidate.lastActivityAt ? formatDateTime(candidate.lastActivityAt) : "No activity"}
+            {storeName} /{" "}
+            {candidate.lastActivityAt
+              ? formatDateTime(candidate.lastActivityAt)
+              : "No activity"}
           </div>
         </div>
-        <Badge variant="outline" className={dogfoodReadinessStatusTone(candidate.status)}>
+        <Badge
+          variant="outline"
+          className={dogfoodReadinessStatusTone(candidate.status)}
+        >
           {formatStatus(candidate.status)}
         </Badge>
       </div>
@@ -6382,16 +9553,24 @@ function DogfoodSmokeStageCard({
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="text-sm font-medium">{stage.label}</div>
-          <div className="mt-1 text-xs text-muted-foreground">{stage.message}</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {stage.message}
+          </div>
         </div>
-        <Badge variant="outline" className={dogfoodReadinessStatusTone(stage.status)}>
+        <Badge
+          variant="outline"
+          className={dogfoodReadinessStatusTone(stage.status)}
+        >
           {formatStatus(stage.status)}
         </Badge>
       </div>
       {stage.evidence.length > 0 && (
         <div className="mt-2 space-y-1">
           {stage.evidence.slice(0, 2).map((entry, index) => (
-            <div key={`${stage.key}:${index}`} className="truncate text-xs text-muted-foreground">
+            <div
+              key={`${stage.key}:${index}`}
+              className="truncate text-xs text-muted-foreground"
+            >
               {entry}
             </div>
           ))}
@@ -6417,9 +9596,11 @@ function buildSmokeStageAction(
   candidate: DropshipDogfoodSmokeCandidate,
   stage: DropshipDogfoodSmokeStage,
 ): Omit<DropshipOpsSearchSignal, "nonce"> | null {
-  const platform = candidate.storeConnection.platform === "ebay" || candidate.storeConnection.platform === "shopify"
-    ? candidate.storeConnection.platform
-    : "all";
+  const platform =
+    candidate.storeConnection.platform === "ebay" ||
+    candidate.storeConnection.platform === "shopify"
+      ? candidate.storeConnection.platform
+      : "all";
   if (stage.key === "listing") {
     return {
       tab: "listing-pushes",
@@ -6462,12 +9643,15 @@ function buildSmokeStageAction(
   return null;
 }
 
-function smokeSearchValue(values: Array<string | number | null | undefined>): string {
+function smokeSearchValue(
+  values: Array<string | number | null | undefined>,
+): string {
   const value = values.find((entry) => {
-    if (typeof entry === "number") return Number.isSafeInteger(entry) && entry > 0;
+    if (typeof entry === "number")
+      return Number.isSafeInteger(entry) && entry > 0;
     return Boolean(entry?.trim());
   });
-  return typeof value === "number" ? String(value) : value?.trim() ?? "";
+  return typeof value === "number" ? String(value) : (value?.trim() ?? "");
 }
 
 function actionLabelForTab(tab: DropshipOpsSearchableTab): string {
@@ -6496,7 +9680,12 @@ function DogfoodReadinessTable({
   }
 
   if (items.length === 0) {
-    return <EmptyState title="No readiness rows" description="No dropship vendor/store rows match the current filters." />;
+    return (
+      <EmptyState
+        title="No readiness rows"
+        description="No dropship vendor/store rows match the current filters."
+      />
+    );
   }
 
   return (
@@ -6504,7 +9693,9 @@ function DogfoodReadinessTable({
       <div className="flex items-center justify-between border-b px-4 py-3">
         <div>
           <h2 className="text-lg font-semibold">Launch checklist</h2>
-          <p className="text-sm text-muted-foreground">{total} matching row{total === 1 ? "" : "s"}</p>
+          <p className="text-sm text-muted-foreground">
+            {total} matching row{total === 1 ? "" : "s"}
+          </p>
         </div>
       </div>
       <Table>
@@ -6521,90 +9712,156 @@ function DogfoodReadinessTable({
         </TableHeader>
         <TableBody>
           {items.map((item) => {
-            const blockingChecks = item.checks.filter((check) => check.status === "blocked");
-            const warningChecks = item.checks.filter((check) => check.status === "warning");
+            const blockingChecks = item.checks.filter(
+              (check) => check.status === "blocked",
+            );
+            const warningChecks = item.checks.filter(
+              (check) => check.status === "warning",
+            );
             return (
-              <TableRow key={`${item.vendor.vendorId}:${item.storeConnection.storeConnectionId ?? "none"}`}>
+              <TableRow
+                key={`${item.vendor.vendorId}:${item.storeConnection.storeConnectionId ?? "none"}`}
+              >
                 <TableCell>
-                  <div className="font-medium">{item.vendor.businessName || item.vendor.email || `Vendor ${item.vendor.vendorId}`}</div>
+                  <div className="font-medium">
+                    {item.vendor.businessName ||
+                      item.vendor.email ||
+                      `Vendor ${item.vendor.vendorId}`}
+                  </div>
                   <div className="text-xs text-muted-foreground">
-                    {[item.storeConnection.externalDisplayName, item.storeConnection.shopDomain, item.storeConnection.platform ? formatStatus(item.storeConnection.platform) : null]
+                    {[
+                      item.storeConnection.externalDisplayName,
+                      item.storeConnection.shopDomain,
+                      item.storeConnection.platform
+                        ? formatStatus(item.storeConnection.platform)
+                        : null,
+                    ]
                       .filter(Boolean)
                       .join(" / ") || item.vendor.memberId}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={dogfoodReadinessStatusTone(item.readinessStatus)}>
+                  <Badge
+                    variant="outline"
+                    className={dogfoodReadinessStatusTone(item.readinessStatus)}
+                  >
                     {formatStatus(item.readinessStatus)}
                   </Badge>
                   <div className="mt-1 text-xs text-muted-foreground">
-                    {item.blockerCount} blocker{item.blockerCount === 1 ? "" : "s"} / {item.warningCount} warning{item.warningCount === 1 ? "" : "s"}
+                    {item.blockerCount} blocker
+                    {item.blockerCount === 1 ? "" : "s"} / {item.warningCount}{" "}
+                    warning{item.warningCount === 1 ? "" : "s"}
                   </div>
                 </TableCell>
                 <TableCell>
                   {blockingChecks.length > 0 ? (
                     <div className="space-y-1">
                       {blockingChecks.slice(0, 3).map((check) => (
-                        <div key={check.key} className="max-w-[360px] truncate text-sm">
+                        <div
+                          key={check.key}
+                          className="max-w-[360px] truncate text-sm"
+                        >
                           <span className="font-medium">{check.label}:</span>{" "}
-                          <span className="text-muted-foreground">{check.message}</span>
+                          <span className="text-muted-foreground">
+                            {check.message}
+                          </span>
                         </div>
                       ))}
                       {blockingChecks.length > 3 && (
-                        <div className="text-xs text-muted-foreground">+{blockingChecks.length - 3} more blocker(s)</div>
+                        <div className="text-xs text-muted-foreground">
+                          +{blockingChecks.length - 3} more blocker(s)
+                        </div>
                       )}
                     </div>
                   ) : warningChecks.length > 0 ? (
                     <div className="space-y-1">
                       {warningChecks.slice(0, 2).map((check) => (
-                        <div key={check.key} className="max-w-[360px] truncate text-sm text-muted-foreground">
+                        <div
+                          key={check.key}
+                          className="max-w-[360px] truncate text-sm text-muted-foreground"
+                        >
                           {check.label}: {check.message}
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <div className="text-sm text-muted-foreground">All required checks ready</div>
+                    <div className="text-sm text-muted-foreground">
+                      All required checks ready
+                    </div>
                   )}
                 </TableCell>
                 <TableCell>
                   <div className="text-sm">
-                    Admin include: <span className="font-mono">{item.metrics.adminCatalogIncludeRuleCount}</span>
+                    Admin include:{" "}
+                    <span className="font-mono">
+                      {item.metrics.adminCatalogIncludeRuleCount}
+                    </span>
                   </div>
                   <div className="text-sm">
-                    Vendor include: <span className="font-mono">{item.metrics.vendorSelectionIncludeRuleCount}</span>
+                    Vendor include:{" "}
+                    <span className="font-mono">
+                      {item.metrics.vendorSelectionIncludeRuleCount}
+                    </span>
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    Warehouse {item.metrics.defaultWarehouseId ?? "missing"} / Listing config {item.metrics.listingConfigActive ? "active" : "not ready"}
+                    Warehouse {item.metrics.defaultWarehouseId ?? "missing"} /
+                    Listing config{" "}
+                    {item.metrics.listingConfigActive ? "active" : "not ready"}
                   </div>
                 </TableCell>
                 <TableCell>
                   <div className="text-sm">
-                    Package data: <span className="font-mono">{item.metrics.selectedPackageProfileCount}</span>
+                    Package data:{" "}
+                    <span className="font-mono">
+                      {item.metrics.selectedPackageProfileCount}
+                    </span>
                     {" / "}
-                    <span className={item.metrics.selectedVariantMissingPackageProfileCount > 0 ? "font-mono text-rose-700" : "font-mono"}>
+                    <span
+                      className={
+                        item.metrics.selectedVariantMissingPackageProfileCount >
+                        0
+                          ? "font-mono text-rose-700"
+                          : "font-mono"
+                      }
+                    >
                       {item.metrics.selectedVariantMissingPackageProfileCount}
                     </span>
                     {" missing"}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    Boxes {item.metrics.activeShippingBoxCount} / Zones {item.metrics.activeShippingZoneRuleCount} / Rate rows {item.metrics.activeShippingRateRowCount}
+                    Boxes {item.metrics.activeShippingBoxCount} / Zones{" "}
+                    {item.metrics.activeShippingZoneRuleCount} / Rate rows{" "}
+                    {item.metrics.activeShippingRateRowCount}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    Markup {item.metrics.activeShippingMarkupPolicyCount} / Insurance {item.metrics.activeShippingInsurancePolicyCount}
+                    Markup {item.metrics.activeShippingMarkupPolicyCount} /
+                    Insurance {item.metrics.activeShippingInsurancePolicyCount}
                     {" / "}
                     Returns {item.metrics.activeReturnPolicyCount}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    OMS {item.metrics.dropshipOmsChannelCount === 1 ? item.metrics.dropshipOmsChannelId : `${item.metrics.dropshipOmsChannelCount} marked`}
+                    OMS{" "}
+                    {item.metrics.dropshipOmsChannelCount === 1
+                      ? item.metrics.dropshipOmsChannelId
+                      : `${item.metrics.dropshipOmsChannelCount} marked`}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div className="text-sm">{formatCents(item.metrics.walletAvailableBalanceCents)}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {item.metrics.activeFundingMethodCount} funding method{item.metrics.activeFundingMethodCount === 1 ? "" : "s"} / {item.metrics.activeStripeFundingMethodCount} Stripe-ready / {item.metrics.activeUsdcBaseFundingMethodCount} USDC-ready
+                  <div className="text-sm">
+                    {formatCents(item.metrics.walletAvailableBalanceCents)}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    Auto reload {item.metrics.autoReloadEnabled ? "on" : "off"} / funding {item.metrics.autoReloadFundingMethodReady ? "ready" : "not ready"}
+                    {item.metrics.activeFundingMethodCount} funding method
+                    {item.metrics.activeFundingMethodCount === 1 ? "" : "s"} /{" "}
+                    {item.metrics.activeStripeFundingMethodCount} Stripe-ready /{" "}
+                    {item.metrics.activeUsdcBaseFundingMethodCount} USDC-ready
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    Auto reload {item.metrics.autoReloadEnabled ? "on" : "off"}{" "}
+                    / funding{" "}
+                    {item.metrics.autoReloadFundingMethodReady
+                      ? "ready"
+                      : "not ready"}
                   </div>
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
@@ -6647,7 +9904,12 @@ function ListingPushJobsTable({
   }
 
   if (jobs.length === 0) {
-    return <EmptyState title="No listing push jobs" description="No dropship listing push jobs match the current filters." />;
+    return (
+      <EmptyState
+        title="No listing push jobs"
+        description="No dropship listing push jobs match the current filters."
+      />
+    );
   }
 
   return (
@@ -6655,11 +9917,17 @@ function ListingPushJobsTable({
       <div className="flex flex-col gap-3 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h2 className="text-lg font-semibold">Listing push jobs</h2>
-          <p className="text-sm text-muted-foreground">{total} matching job{total === 1 ? "" : "s"}</p>
+          <p className="text-sm text-muted-foreground">
+            {total} matching job{total === 1 ? "" : "s"}
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           {summary.map((entry) => (
-            <Badge key={entry.status} variant="outline" className={listingPushStatusTone(entry.status)}>
+            <Badge
+              key={entry.status}
+              variant="outline"
+              className={listingPushStatusTone(entry.status)}
+            >
               {formatStatus(entry.status)} {entry.count}
             </Badge>
           ))}
@@ -6679,52 +9947,93 @@ function ListingPushJobsTable({
         </TableHeader>
         <TableBody>
           {jobs.map((job) => {
-            const retryEligibility = listingPushJobRetryEligibility(job, retryEligibilityNow);
-            const retryLabel = retryEligibility.reason === "stale_processing" ? "Recover" : "Retry";
+            const retryEligibility = listingPushJobRetryEligibility(
+              job,
+              retryEligibilityNow,
+            );
+            const retryLabel =
+              retryEligibility.reason === "stale_processing"
+                ? "Recover"
+                : "Retry";
             return (
               <TableRow key={job.jobId}>
                 <TableCell>
                   <div className="font-mono text-sm">#{job.jobId}</div>
-                  <div className="text-xs text-muted-foreground">{formatStatus(job.jobType)}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {formatStatus(job.jobType)}
+                  </div>
                 </TableCell>
                 <TableCell>
-                  <div className="font-medium">{job.vendor.businessName || job.vendor.email || `Vendor ${job.vendor.vendorId}`}</div>
+                  <div className="font-medium">
+                    {job.vendor.businessName ||
+                      job.vendor.email ||
+                      `Vendor ${job.vendor.vendorId}`}
+                  </div>
                   <div className="text-xs text-muted-foreground">
-                    {[job.storeConnection.externalDisplayName, job.storeConnection.shopDomain, formatStatus(job.platform)]
+                    {[
+                      job.storeConnection.externalDisplayName,
+                      job.storeConnection.shopDomain,
+                      formatStatus(job.platform),
+                    ]
                       .filter(Boolean)
                       .join(" / ")}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={listingPushStatusTone(job.status)}>
+                  <Badge
+                    variant="outline"
+                    className={listingPushStatusTone(job.status)}
+                  >
                     {formatStatus(job.status)}
                   </Badge>
                   <div className="mt-1 text-xs text-muted-foreground">
-                    {job.completedAt ? `Completed ${formatDateTime(job.completedAt)}` : `Created ${formatDateTime(job.createdAt)}`}
+                    {job.completedAt
+                      ? `Completed ${formatDateTime(job.completedAt)}`
+                      : `Created ${formatDateTime(job.createdAt)}`}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div className="font-medium">{job.itemSummary.total} total</div>
+                  <div className="font-medium">
+                    {job.itemSummary.total} total
+                  </div>
                   <div className="text-xs text-muted-foreground">
                     {[
-                      job.itemSummary.completed ? `${job.itemSummary.completed} done` : null,
-                      job.itemSummary.failed ? `${job.itemSummary.failed} failed` : null,
-                      job.itemSummary.blocked ? `${job.itemSummary.blocked} blocked` : null,
-                      job.itemSummary.processing ? `${job.itemSummary.processing} processing` : null,
-                      job.itemSummary.queued ? `${job.itemSummary.queued} queued` : null,
-                    ].filter(Boolean).join(" / ") || "No item counts"}
+                      job.itemSummary.completed
+                        ? `${job.itemSummary.completed} done`
+                        : null,
+                      job.itemSummary.failed
+                        ? `${job.itemSummary.failed} failed`
+                        : null,
+                      job.itemSummary.blocked
+                        ? `${job.itemSummary.blocked} blocked`
+                        : null,
+                      job.itemSummary.processing
+                        ? `${job.itemSummary.processing} processing`
+                        : null,
+                      job.itemSummary.queued
+                        ? `${job.itemSummary.queued} queued`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" / ") || "No item counts"}
                   </div>
                 </TableCell>
                 <TableCell>
                   {job.latestItemError ? (
                     <>
-                      <div className="font-medium">{job.latestItemError.errorCode || formatStatus(job.latestItemError.status)}</div>
+                      <div className="font-medium">
+                        {job.latestItemError.errorCode ||
+                          formatStatus(job.latestItemError.status)}
+                      </div>
                       <div className="max-w-[360px] truncate text-xs text-muted-foreground">
-                        {job.latestItemError.errorMessage || `Variant ${job.latestItemError.productVariantId}`}
+                        {job.latestItemError.errorMessage ||
+                          `Variant ${job.latestItemError.productVariantId}`}
                       </div>
                     </>
                   ) : job.errorMessage ? (
-                    <div className="max-w-[360px] truncate text-sm text-muted-foreground">{job.errorMessage}</div>
+                    <div className="max-w-[360px] truncate text-sm text-muted-foreground">
+                      {job.errorMessage}
+                    </div>
                   ) : (
                     <div className="text-sm text-muted-foreground">None</div>
                   )}
@@ -6738,10 +10047,18 @@ function ListingPushJobsTable({
                     size="sm"
                     variant="outline"
                     className="gap-2"
-                    disabled={!retryEligibility.canRetry || pendingRetryJobId !== null}
+                    disabled={
+                      !retryEligibility.canRetry || pendingRetryJobId !== null
+                    }
                     onClick={() => onRetry(job)}
                   >
-                    <RotateCcw className={pendingRetryJobId === job.jobId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                    <RotateCcw
+                      className={
+                        pendingRetryJobId === job.jobId
+                          ? "h-4 w-4 animate-spin"
+                          : "h-4 w-4"
+                      }
+                    />
                     {retryLabel}
                   </Button>
                 </TableCell>
@@ -6782,7 +10099,12 @@ function TrackingPushesTable({
   }
 
   if (pushes.length === 0) {
-    return <EmptyState title="No tracking pushes" description="No dropship tracking pushes match the current filters." />;
+    return (
+      <EmptyState
+        title="No tracking pushes"
+        description="No dropship tracking pushes match the current filters."
+      />
+    );
   }
 
   return (
@@ -6790,11 +10112,17 @@ function TrackingPushesTable({
       <div className="flex flex-col gap-3 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h2 className="text-lg font-semibold">Tracking pushes</h2>
-          <p className="text-sm text-muted-foreground">{total} matching push{total === 1 ? "" : "es"}</p>
+          <p className="text-sm text-muted-foreground">
+            {total} matching push{total === 1 ? "" : "es"}
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           {summary.map((entry) => (
-            <Badge key={entry.status} variant="outline" className={trackingPushStatusTone(entry.status)}>
+            <Badge
+              key={entry.status}
+              variant="outline"
+              className={trackingPushStatusTone(entry.status)}
+            >
               {formatStatus(entry.status)} {entry.count}
             </Badge>
           ))}
@@ -6815,51 +10143,84 @@ function TrackingPushesTable({
         </TableHeader>
         <TableBody>
           {pushes.map((push) => {
-            const retryEligibility = trackingPushRetryEligibility(push, retryEligibilityNow);
-            const retryLabel = retryEligibility.reason === "stale_processing" ? "Recover" : "Retry";
+            const retryEligibility = trackingPushRetryEligibility(
+              push,
+              retryEligibilityNow,
+            );
+            const retryLabel =
+              retryEligibility.reason === "stale_processing"
+                ? "Recover"
+                : "Retry";
             return (
               <TableRow key={push.pushId}>
                 <TableCell>
                   <div className="font-mono text-sm">#{push.pushId}</div>
-                  <div className="text-xs text-muted-foreground">Try {push.attemptCount}</div>
-                </TableCell>
-                <TableCell>
-                  <div className="font-medium">{push.externalOrderNumber || push.externalOrderId}</div>
                   <div className="text-xs text-muted-foreground">
-                    {[
-                      `OMS ${push.omsOrderId}`,
-                      push.wmsShipmentId ? `Shipment ${push.wmsShipmentId}` : null,
-                      `Intake ${push.intakeId}`,
-                    ].filter(Boolean).join(" / ")}
+                    Try {push.attemptCount}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div className="font-medium">{push.vendor.businessName || push.vendor.email || `Vendor ${push.vendor.vendorId}`}</div>
+                  <div className="font-medium">
+                    {push.externalOrderNumber || push.externalOrderId}
+                  </div>
                   <div className="text-xs text-muted-foreground">
-                    {[push.storeConnection.externalDisplayName, push.storeConnection.shopDomain, formatStatus(push.platform)]
+                    {[
+                      `OMS ${push.omsOrderId}`,
+                      push.wmsShipmentId
+                        ? `Shipment ${push.wmsShipmentId}`
+                        : null,
+                      `Intake ${push.intakeId}`,
+                    ]
                       .filter(Boolean)
                       .join(" / ")}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={trackingPushStatusTone(push.status)}>
+                  <div className="font-medium">
+                    {push.vendor.businessName ||
+                      push.vendor.email ||
+                      `Vendor ${push.vendor.vendorId}`}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {[
+                      push.storeConnection.externalDisplayName,
+                      push.storeConnection.shopDomain,
+                      formatStatus(push.platform),
+                    ]
+                      .filter(Boolean)
+                      .join(" / ")}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge
+                    variant="outline"
+                    className={trackingPushStatusTone(push.status)}
+                  >
                     {formatStatus(push.status)}
                   </Badge>
                   <div className="mt-1 text-xs text-muted-foreground">
-                    {push.completedAt ? `Completed ${formatDateTime(push.completedAt)}` : `Shipped ${formatDateTime(push.shippedAt)}`}
+                    {push.completedAt
+                      ? `Completed ${formatDateTime(push.completedAt)}`
+                      : `Shipped ${formatDateTime(push.shippedAt)}`}
                   </div>
                 </TableCell>
                 <TableCell>
                   <div className="font-medium">{push.carrier}</div>
-                  <div className="max-w-[220px] truncate text-xs text-muted-foreground">{push.trackingNumber}</div>
+                  <div className="max-w-[220px] truncate text-xs text-muted-foreground">
+                    {push.trackingNumber}
+                  </div>
                   {push.externalFulfillmentId && (
-                    <div className="max-w-[220px] truncate text-xs text-muted-foreground">Fulfillment {push.externalFulfillmentId}</div>
+                    <div className="max-w-[220px] truncate text-xs text-muted-foreground">
+                      Fulfillment {push.externalFulfillmentId}
+                    </div>
                   )}
                 </TableCell>
                 <TableCell>
                   {push.lastErrorCode || push.lastErrorMessage ? (
                     <>
-                      <div className="font-medium">{push.lastErrorCode || "Tracking push failed"}</div>
+                      <div className="font-medium">
+                        {push.lastErrorCode || "Tracking push failed"}
+                      </div>
                       <div className="max-w-[320px] truncate text-xs text-muted-foreground">
                         {push.lastErrorMessage || "No error message recorded"}
                       </div>
@@ -6877,10 +10238,18 @@ function TrackingPushesTable({
                     size="sm"
                     variant="outline"
                     className="gap-2"
-                    disabled={!retryEligibility.canRetry || pendingRetryPushId !== null}
+                    disabled={
+                      !retryEligibility.canRetry || pendingRetryPushId !== null
+                    }
                     onClick={() => onRetry(push)}
                   >
-                    <RotateCcw className={pendingRetryPushId === push.pushId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                    <RotateCcw
+                      className={
+                        pendingRetryPushId === push.pushId
+                          ? "h-4 w-4 animate-spin"
+                          : "h-4 w-4"
+                      }
+                    />
                     {retryLabel}
                   </Button>
                 </TableCell>
@@ -6921,7 +10290,12 @@ function NotificationEventsTable({
   }
 
   if (events.length === 0) {
-    return <EmptyState title="No notification events" description="No dropship notification events match the current filters." />;
+    return (
+      <EmptyState
+        title="No notification events"
+        description="No dropship notification events match the current filters."
+      />
+    );
   }
 
   return (
@@ -6929,16 +10303,26 @@ function NotificationEventsTable({
       <div className="flex flex-col gap-3 border-b px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
         <div>
           <h2 className="text-lg font-semibold">Notification events</h2>
-          <p className="text-sm text-muted-foreground">{total} matching event{total === 1 ? "" : "s"}</p>
+          <p className="text-sm text-muted-foreground">
+            {total} matching event{total === 1 ? "" : "s"}
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           {summary.map((entry) => (
-            <Badge key={entry.status} variant="outline" className={notificationOpsStatusTone(entry.status)}>
+            <Badge
+              key={entry.status}
+              variant="outline"
+              className={notificationOpsStatusTone(entry.status)}
+            >
               {formatStatus(entry.status)} {entry.count}
             </Badge>
           ))}
           {channelSummary.map((entry) => (
-            <Badge key={entry.channel} variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+            <Badge
+              key={entry.channel}
+              variant="outline"
+              className="border-zinc-200 bg-zinc-50 text-zinc-700"
+            >
               {formatStatus(entry.channel)} {entry.count}
             </Badge>
           ))}
@@ -6963,43 +10347,69 @@ function NotificationEventsTable({
             return (
               <TableRow key={event.notificationEventId}>
                 <TableCell>
-                  <div className="font-mono text-sm">#{event.notificationEventId}</div>
-                  <div className="max-w-[180px] truncate text-xs text-muted-foreground">{formatStatus(event.eventType)}</div>
-                </TableCell>
-                <TableCell>
-                  <div className="font-medium">{event.vendor.businessName || event.vendor.email || `Vendor ${event.vendor.vendorId}`}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {[event.vendor.email, event.vendor.memberId].filter(Boolean).join(" / ") || formatStatus(event.vendor.status)}
+                  <div className="font-mono text-sm">
+                    #{event.notificationEventId}
+                  </div>
+                  <div className="max-w-[180px] truncate text-xs text-muted-foreground">
+                    {formatStatus(event.eventType)}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={notificationOpsStatusTone(event.status)}>
+                  <div className="font-medium">
+                    {event.vendor.businessName ||
+                      event.vendor.email ||
+                      `Vendor ${event.vendor.vendorId}`}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {[event.vendor.email, event.vendor.memberId]
+                      .filter(Boolean)
+                      .join(" / ") || formatStatus(event.vendor.status)}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge
+                    variant="outline"
+                    className={notificationOpsStatusTone(event.status)}
+                  >
                     {formatStatus(event.status)}
                   </Badge>
                   {event.critical && (
-                    <Badge variant="outline" className="ml-2 border-rose-200 bg-rose-50 text-rose-800">
+                    <Badge
+                      variant="outline"
+                      className="ml-2 border-rose-200 bg-rose-50 text-rose-800"
+                    >
                       Critical
                     </Badge>
                   )}
                 </TableCell>
                 <TableCell>
-                  <div className="font-medium">{formatStatus(event.channel)}</div>
+                  <div className="font-medium">
+                    {formatStatus(event.channel)}
+                  </div>
                   <div className="max-w-[220px] truncate text-xs text-muted-foreground">
-                    {event.requestHash || event.idempotencyKey || "No request hash"}
+                    {event.requestHash ||
+                      event.idempotencyKey ||
+                      "No request hash"}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div className="max-w-[360px] truncate font-medium">{event.title}</div>
+                  <div className="max-w-[360px] truncate font-medium">
+                    {event.title}
+                  </div>
                   <div className="max-w-[360px] truncate text-xs text-muted-foreground">
                     {event.message || "No message body"}
                   </div>
                 </TableCell>
                 <TableCell>
                   <div className="text-sm">
-                    {event.deliveredAt ? `Delivered ${formatDateTime(event.deliveredAt)}` : "Not delivered"}
+                    {event.deliveredAt
+                      ? `Delivered ${formatDateTime(event.deliveredAt)}`
+                      : "Not delivered"}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    {event.readAt ? `Read ${formatDateTime(event.readAt)}` : "Unread or not tracked"}
+                    {event.readAt
+                      ? `Read ${formatDateTime(event.readAt)}`
+                      : "Unread or not tracked"}
                   </div>
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
@@ -7011,10 +10421,18 @@ function NotificationEventsTable({
                     size="sm"
                     variant="outline"
                     className="gap-2"
-                    disabled={!retryEligibility.canRetry || pendingRetryEventId !== null}
+                    disabled={
+                      !retryEligibility.canRetry || pendingRetryEventId !== null
+                    }
                     onClick={() => onRetry(event)}
                   >
-                    <RotateCcw className={pendingRetryEventId === event.notificationEventId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                    <RotateCcw
+                      className={
+                        pendingRetryEventId === event.notificationEventId
+                          ? "h-4 w-4 animate-spin"
+                          : "h-4 w-4"
+                      }
+                    />
                     Retry
                   </Button>
                 </TableCell>
@@ -7049,7 +10467,14 @@ function ReturnPolicyPanel({
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-lg font-semibold">Return policy</h2>
             {activePolicy && (
-              <Badge variant="outline" className={activePolicy.isActive ? "border-emerald-200 bg-emerald-50 text-emerald-900" : ""}>
+              <Badge
+                variant="outline"
+                className={
+                  activePolicy.isActive
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                    : ""
+                }
+              >
                 {activePolicy.isActive ? "Active" : "Inactive"}
               </Badge>
             )}
@@ -7106,7 +10531,9 @@ function ReturnPolicyPanel({
           <label className="text-sm font-medium">Status</label>
           <Select
             value={form.isActive ? "active" : "inactive"}
-            onValueChange={(value) => onChange({ isActive: value === "active" })}
+            onValueChange={(value) =>
+              onChange({ isActive: value === "active" })
+            }
             disabled={isSaving}
           >
             <SelectTrigger className="mt-2">
@@ -7133,6 +10560,9 @@ function ReturnCreatePanel({
   onItemChange,
   onRemoveItem,
   onSubmit,
+  order,
+  orderError,
+  orderLoading,
   storeConnections,
   storeConnectionsLoading,
   variants,
@@ -7149,6 +10579,9 @@ function ReturnCreatePanel({
   onItemChange: (index: number, patch: Partial<ReturnCreateItemFormState>) => void;
   onRemoveItem: (index: number) => void;
   onSubmit: () => void;
+  order: DropshipAdminReturnSourceOrder | null;
+  orderError: string | null;
+  orderLoading: boolean;
   storeConnections: DropshipAdminStoreConnectionListItem[];
   storeConnectionsLoading: boolean;
   variants: DropshipProductVariantOption[];
@@ -7156,39 +10589,110 @@ function ReturnCreatePanel({
   vendorOptions: DropshipSelectOption[];
   vendorsLoading: boolean;
 }) {
+  function formatSourceOrderPrice(cents: number | null, currency: string | null): string {
+    if (!Number.isSafeInteger(cents) || cents === null || cents < 0) return "Not recorded";
+    const dollars = Math.trunc(cents / 100);
+    const remainder = cents % 100;
+    const amount = `${dollars.toLocaleString("en-US")}.${String(remainder).padStart(2, "0")}`;
+    return currency ? `${currency} ${amount}` : amount;
+  }
+
   const storeConnectionOptions = storeConnections.map(storeConnectionSelectOption);
   const intakeOptions = intakes.map(orderIntakeSelectOption);
   const omsOrderOptions = buildOmsOrderSelectOptions(intakes);
+  const orderItems = form.items.filter((item) => item.source === "order");
+  const manualItems = form.items
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.source === "manual_exception");
 
   function selectStoreConnection(storeConnectionId: string) {
-    const connection = storeConnections.find((candidate) => String(candidate.storeConnectionId) === storeConnectionId);
+    const connection = storeConnections.find(
+      (candidate) => String(candidate.storeConnectionId) === storeConnectionId,
+    );
     onChange({
       storeConnectionId,
+      intakeId: "",
+      omsOrderId: "",
+      items: [],
       ...(connection ? { vendorId: String(connection.vendor.vendorId) } : {}),
     });
   }
 
+  function selectVendor(vendorId: string) {
+    onChange({
+      vendorId,
+      storeConnectionId: "",
+      intakeId: "",
+      omsOrderId: "",
+      items: [],
+    });
+  }
+
   function selectIntake(intakeId: string) {
-    const intake = intakes.find((candidate) => String(candidate.intakeId) === intakeId);
+    const intake = intakes.find(
+      (candidate) => String(candidate.intakeId) === intakeId,
+    );
     onChange({
       intakeId,
-      ...(intake ? {
-        vendorId: String(intake.vendor.vendorId),
-        storeConnectionId: String(intake.storeConnection.storeConnectionId),
-        omsOrderId: intake.omsOrderId === null ? "" : String(intake.omsOrderId),
-      } : {}),
+      items: [],
+      ...(intake
+        ? {
+            vendorId: String(intake.vendor.vendorId),
+            storeConnectionId: String(intake.storeConnection.storeConnectionId),
+            omsOrderId: intake.omsOrderId === null ? "" : String(intake.omsOrderId),
+          }
+        : {}),
     });
   }
 
   function selectOmsOrder(omsOrderId: string) {
-    const intake = intakes.find((candidate) => candidate.omsOrderId !== null && String(candidate.omsOrderId) === omsOrderId);
+    const intake = intakes.find(
+      (candidate) =>
+        candidate.omsOrderId !== null && String(candidate.omsOrderId) === omsOrderId,
+    );
     onChange({
       omsOrderId,
-      ...(intake ? {
-        vendorId: String(intake.vendor.vendorId),
-        storeConnectionId: String(intake.storeConnection.storeConnectionId),
-        intakeId: String(intake.intakeId),
-      } : {}),
+      items: [],
+      ...(intake
+        ? {
+            vendorId: String(intake.vendor.vendorId),
+            storeConnectionId: String(intake.storeConnection.storeConnectionId),
+            intakeId: String(intake.intakeId),
+          }
+        : {}),
+    });
+  }
+
+  function selectedOrderItemIndex(lineIndex: number): number {
+    return form.items.findIndex(
+      (item) => item.source === "order" && item.orderLineIndex === String(lineIndex),
+    );
+  }
+
+  function toggleOrderLine(
+    line: DropshipAdminReturnSourceOrderLine,
+    checked: boolean,
+  ) {
+    const selectedIndex = selectedOrderItemIndex(line.lineIndex);
+    if (!checked) {
+      if (selectedIndex >= 0) onRemoveItem(selectedIndex);
+      return;
+    }
+    if (selectedIndex >= 0) return;
+    onChange({
+      items: [
+        ...form.items,
+        {
+          source: "order",
+          orderLineIndex: String(line.lineIndex),
+          externalLineItemId: line.externalLineItemId ?? "",
+          productVariantId:
+            line.productVariantId === null ? "" : String(line.productVariantId),
+          manualDescription: line.title ?? line.sku ?? "Order item",
+          exceptionReason: "",
+          quantity: String(line.quantity),
+        },
+      ],
     });
   }
 
@@ -7197,207 +10701,181 @@ function ReturnCreatePanel({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h2 className="text-lg font-semibold">Create RMA</h2>
-          <p className="text-sm text-muted-foreground">Open a dropship return against a vendor, store, intake, or OMS order.</p>
+          <p className="text-sm text-muted-foreground">
+            Select the source order, then choose the exact lines being returned.
+          </p>
         </div>
-        <Button
-          type="button"
-          className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-          disabled={isSaving}
-          onClick={onSubmit}
-        >
+        <Button type="button" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSubmit}>
           <PlusCircle className={isSaving ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
           Create RMA
         </Button>
       </div>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_1.2fr]">
+      <div className="mt-4 grid gap-4 xl:grid-cols-[0.9fr_1.3fr]">
         <div className="grid gap-3 md:grid-cols-2">
-          <SearchableOptionPicker
-            label="Vendor"
-            value={form.vendorId}
-            disabled={isSaving}
-            options={vendorOptions}
-            isLoading={vendorsLoading}
-            placeholder="Select vendor"
-            searchPlaceholder="Search vendor, email, or member..."
-            emptyText="No dropship vendors found."
-            onChange={(value) => onChange({ vendorId: value })}
-          />
-          <AdminReturnInput
-            label="RMA number"
-            value={form.rmaNumber}
-            disabled={isSaving}
-            onChange={(value) => onChange({ rmaNumber: value })}
-          />
-          <SearchableOptionPicker
-            label="Store connection"
-            value={form.storeConnectionId}
-            disabled={isSaving}
-            clearable
-            clearLabel="No store connection"
-            options={storeConnectionOptions}
-            isLoading={storeConnectionsLoading}
-            placeholder="Optional"
-            searchPlaceholder="Search store, vendor, or email..."
-            emptyText="No store connections found."
-            onChange={selectStoreConnection}
-          />
-          <SearchableOptionPicker
-            label="Order intake"
-            value={form.intakeId}
-            disabled={isSaving}
-            clearable
-            clearLabel="No intake"
-            options={intakeOptions}
-            isLoading={intakesLoading}
-            placeholder="Optional"
-            searchPlaceholder="Search order, intake, vendor, or store..."
-            emptyText="No order intakes found."
-            onChange={selectIntake}
-          />
-          <SearchableOptionPicker
-            label="OMS order"
-            value={form.omsOrderId}
-            disabled={isSaving}
-            clearable
-            clearLabel="No OMS order"
-            options={omsOrderOptions}
-            isLoading={intakesLoading}
-            placeholder="Optional"
-            searchPlaceholder="Search OMS order, intake, or marketplace order..."
-            emptyText="No OMS orders found."
-            onChange={selectOmsOrder}
-          />
-          <AdminReturnInput
-            label="Return window days"
-            value={form.returnWindowDays}
-            disabled={isSaving}
-            onChange={(value) => onChange({ returnWindowDays: value })}
-          />
-          <AdminReturnInput
-            label="Reason code"
-            value={form.reasonCode}
-            placeholder="Optional"
-            disabled={isSaving}
-            onChange={(value) => onChange({ reasonCode: value })}
-          />
+          <SearchableOptionPicker label="Vendor" value={form.vendorId} disabled={isSaving} options={vendorOptions} isLoading={vendorsLoading} placeholder="Select vendor" searchPlaceholder="Search vendor, email, or member..." emptyText="No dropship vendors found." onChange={selectVendor} />
+          <div className="space-y-1">
+            <div className="text-sm font-medium">RMA number</div>
+            <div className="flex min-h-10 items-center rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground">
+              Assigned automatically when created
+            </div>
+          </div>
+          <SearchableOptionPicker label="Store connection" value={form.storeConnectionId} disabled={isSaving} clearable clearLabel="No store connection" options={storeConnectionOptions} isLoading={storeConnectionsLoading} placeholder="Optional" searchPlaceholder="Search store, vendor, or email..." emptyText="No store connections found." onChange={selectStoreConnection} />
+          <SearchableOptionPicker label="Source order" value={form.intakeId} disabled={isSaving} clearable clearLabel="No source order" options={intakeOptions} isLoading={intakesLoading} placeholder="Select order" searchPlaceholder="Search marketplace order, OMS order, store, or vendor..." emptyText="No dropship orders found." onChange={selectIntake} />
+          <SearchableOptionPicker label="OMS order" value={form.omsOrderId} disabled={isSaving} clearable clearLabel="No OMS order" options={omsOrderOptions} isLoading={intakesLoading} placeholder="Inferred from source order" searchPlaceholder="Search OMS order, intake, or marketplace order..." emptyText="No OMS orders found." onChange={selectOmsOrder} />
+          <AdminReturnInput label="Return window days" value={form.returnWindowDays} disabled={isSaving} onChange={(value) => onChange({ returnWindowDays: value })} />
           <div>
-            <label className="text-sm font-medium">Fault category</label>
+            <label className="text-sm font-medium">Return reason</label>
             <Select
-              value={form.faultCategory}
-              onValueChange={(value) => onChange({ faultCategory: value as DropshipReturnFaultCategory | "none" })}
+              value={form.reasonCode || "none"}
+              onValueChange={(value) =>
+                onChange({
+                  reasonCode:
+                    value === "none" ? "" : (value as DropshipAdminRmaReasonCode),
+                })
+              }
               disabled={isSaving}
             >
-              <SelectTrigger className="mt-2">
-                <SelectValue />
-              </SelectTrigger>
+              <SelectTrigger className="mt-2"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">Not specified</SelectItem>
+                <SelectItem value="buyer_return">Buyer return</SelectItem>
+                <SelectItem value="damaged">Damaged</SelectItem>
+                <SelectItem value="wrong_item">Wrong item</SelectItem>
+                <SelectItem value="other">Other</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <label className="text-sm font-medium">Fault category</label>
+            <Select value={form.faultCategory} onValueChange={(value) => onChange({ faultCategory: value as DropshipReturnFaultCategory | "none" })} disabled={isSaving}>
+              <SelectTrigger className="mt-2"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="none">Pending</SelectItem>
-                {returnFaultCategories.map((category) => (
-                  <SelectItem key={category} value={category}>{formatStatus(category)}</SelectItem>
-                ))}
+                {returnFaultCategories.map((category) => <SelectItem key={category} value={category}>{formatStatus(category)}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <label className="text-sm font-medium">Return label</label>
+            <Select
+              value={form.labelSource || "none"}
+              onValueChange={(value) => {
+                if (value === "none") {
+                  onChange({ labelSource: "", returnTrackingNumber: "" });
+                  return;
+                }
+                onChange({ labelSource: value as DropshipAdminRmaLabelSource });
+              }}
+              disabled={isSaving}
+            >
+              <SelectTrigger className="mt-2"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">No label or tracking</SelectItem>
+                <SelectItem value="marketplace">Marketplace provided</SelectItem>
+                <SelectItem value="vendor">Vendor provided</SelectItem>
+                <SelectItem value="ops">Ops provided</SelectItem>
               </SelectContent>
             </Select>
           </div>
           <AdminReturnInput
-            label="Label source"
-            value={form.labelSource}
-            placeholder="marketplace, vendor, ops"
-            disabled={isSaving}
-            onChange={(value) => onChange({ labelSource: value })}
-          />
-          <AdminReturnInput
             label="Tracking number"
             value={form.returnTrackingNumber}
-            placeholder="Optional"
-            disabled={isSaving}
+            placeholder={form.labelSource ? "Optional" : "Select a return label first"}
+            disabled={isSaving || !form.labelSource}
             onChange={(value) => onChange({ returnTrackingNumber: value })}
           />
           <div className="md:col-span-2">
             <label className="text-sm font-medium" htmlFor="dropship-return-create-notes">Vendor notes</label>
-            <Textarea
-              id="dropship-return-create-notes"
-              className="mt-2 min-h-24"
-              maxLength={5000}
-              value={form.vendorNotes}
-              onChange={(event) => onChange({ vendorNotes: event.target.value })}
-              disabled={isSaving}
-            />
+            <Textarea id="dropship-return-create-notes" className="mt-2 min-h-24" maxLength={5000} value={form.vendorNotes} onChange={(event) => onChange({ vendorNotes: event.target.value })} disabled={isSaving} />
           </div>
         </div>
 
-        <div className="space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-sm font-medium">Return items</div>
-            <Button type="button" variant="outline" size="sm" className="gap-2" disabled={isSaving} onClick={onAddItem}>
-              <PlusCircle className="h-4 w-4" />
-              Add item
-            </Button>
+        <div className="space-y-4">
+          <div className="rounded-md border p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="font-medium">Items on source order</div>
+                <p className="text-sm text-muted-foreground">Select only the lines and quantities being returned.</p>
+              </div>
+              <Badge variant="outline">{orderItems.length} selected</Badge>
+            </div>
+            {!form.intakeId ? (
+              <div className="mt-4 rounded-md border border-dashed p-5 text-center text-sm text-muted-foreground">Select a source order to load its items.</div>
+            ) : orderLoading ? (
+              <div className="mt-4 space-y-2"><Skeleton className="h-20 w-full" /><Skeleton className="h-20 w-full" /></div>
+            ) : orderError ? (
+              <Alert variant="destructive" className="mt-4"><AlertCircle className="h-4 w-4" /><AlertDescription>{orderError}</AlertDescription></Alert>
+            ) : !order || order.lines.length === 0 ? (
+              <div className="mt-4 rounded-md border border-dashed p-5 text-center text-sm text-muted-foreground">This order has no returnable item lines.</div>
+            ) : (
+              <div className="mt-4 space-y-2">
+                {order.lines.map((line) => {
+                  const itemIndex = selectedOrderItemIndex(line.lineIndex);
+                  const selectedItem = itemIndex >= 0 ? form.items[itemIndex] : null;
+                  const lineLabel = line.title ?? line.sku ?? `Order line ${line.lineIndex + 1}`;
+                  return (
+                    <div key={line.lineIndex} className="rounded-md border p-3">
+                      <div className="flex items-start gap-3">
+                        <Checkbox checked={itemIndex >= 0} disabled={isSaving} onCheckedChange={(checked) => toggleOrderLine(line, checked === true)} aria-label={`Return ${lineLabel}`} />
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium">{lineLabel}</div>
+                          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                            <span>SKU: {line.sku ?? "Not provided"}</span>
+                            <span>Ordered: {line.quantity}</span>
+                            <span>Unit price: {formatSourceOrderPrice(line.unitRetailPriceCents, order.currency)}</span>
+                            <span>Line total: {formatSourceOrderPrice(line.lineRetailTotalCents, order.currency)}</span>
+                          </div>
+                        </div>
+                      </div>
+                      {selectedItem && itemIndex >= 0 ? (
+                        <div className="mt-3 border-t pt-3 sm:max-w-xs">
+                          <div>
+                            <label className="text-xs font-medium">Return quantity</label>
+                            <Input className="mt-1" type="number" min={1} max={line.quantity} value={selectedItem.quantity} disabled={isSaving} onChange={(event) => onItemChange(itemIndex, { quantity: event.target.value })} />
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
-          <div className="rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Variant</TableHead>
-                  <TableHead className="w-[90px]">Qty</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Requested credit</TableHead>
-                  <TableHead className="w-[84px]">Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {form.items.map((item, index) => (
-                  <TableRow key={index}>
-                    <TableCell>
-                      <ProductVariantSkuPicker
-                        clearable
-                        disabled={isSaving}
-                        isLoading={variantsLoading}
-                        label=""
-                        placeholder="Optional SKU"
-                        variants={variants}
-                        value={item.productVariantId}
-                        onChange={(value) => onItemChange(index, { productVariantId: value })}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        value={item.quantity}
-                        disabled={isSaving}
-                        onChange={(event) => onItemChange(index, { quantity: event.target.value })}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        value={item.status}
-                        maxLength={40}
-                        disabled={isSaving}
-                        onChange={(event) => onItemChange(index, { status: event.target.value })}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        value={item.requestedCreditAmount}
-                        placeholder="Optional"
-                        disabled={isSaving}
-                        onChange={(event) => onItemChange(index, { requestedCreditAmount: event.target.value })}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={isSaving || form.items.length === 1}
-                        onClick={() => onRemoveItem(index)}
-                      >
-                        Remove
-                      </Button>
-                    </TableCell>
-                  </TableRow>
+
+          <div className="rounded-md border p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="font-medium">Manual exceptions</div>
+                <p className="text-sm text-muted-foreground">Use only when an item cannot be matched to the source order. A reason is required and audited.</p>
+              </div>
+              <Button type="button" variant="outline" size="sm" className="gap-2" disabled={isSaving} onClick={onAddItem}>
+                <PlusCircle className="h-4 w-4" /> Add exception
+              </Button>
+            </div>
+            {manualItems.length === 0 ? (
+              <div className="mt-4 rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">No manual exceptions.</div>
+            ) : (
+              <div className="mt-4 space-y-3">
+                {manualItems.map(({ item, index }, exceptionIndex) => (
+                  <div key={index} className="rounded-md border p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="font-medium">Manual exception {exceptionIndex + 1}</div>
+                      <Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => onRemoveItem(index)}>Remove</Button>
+                    </div>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                      <ProductVariantSkuPicker clearable disabled={isSaving} isLoading={variantsLoading} label="Catalog variant (optional)" placeholder="Search SKU" variants={variants} value={item.productVariantId} onChange={(value) => onItemChange(index, { productVariantId: value })} />
+                      <AdminReturnInput label="Item description" value={item.manualDescription} placeholder="Required when no catalog variant is selected" disabled={isSaving} onChange={(value) => onItemChange(index, { manualDescription: value })} />
+                      <AdminReturnInput label="Quantity" value={item.quantity} disabled={isSaving} onChange={(value) => onItemChange(index, { quantity: value })} />
+                      <div className="sm:col-span-2">
+                        <label className="text-sm font-medium">Exception reason *</label>
+                        <Textarea className="mt-2 min-h-20" maxLength={2000} value={item.exceptionReason} onChange={(event) => onItemChange(index, { exceptionReason: event.target.value })} disabled={isSaving} placeholder="Explain why this item cannot be tied to an order line." />
+                      </div>
+                    </div>
+                  </div>
                 ))}
-              </TableBody>
-            </Table>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -7432,6 +10910,221 @@ function AdminReturnInput({
   );
 }
 
+function NoInspectionReviewPanel({
+  error,
+  isLoading,
+  onCancel,
+  onReasonChange,
+  onSubmit,
+  pendingDecision,
+  reason,
+  rma,
+  selectedRmaId,
+}: {
+  error: unknown;
+  isLoading: boolean;
+  onCancel: () => void;
+  onReasonChange: (value: string) => void;
+  onSubmit: (decision: "approve" | "deny") => void;
+  pendingDecision: "approve" | "deny" | null;
+  reason: string;
+  rma: DropshipReturnDetail | null;
+  selectedRmaId: number | null;
+}) {
+  if (selectedRmaId === null) return null;
+  if (isLoading) return null;
+  if (error) return null;
+  if (!rma || rma.status !== "no_inspection_review") return null;
+
+  const evidence = rma.noInspectionEvidence;
+  const pending = pendingDecision !== null;
+  const denyDisabled = pending || !reason.trim();
+
+  return (
+    <section
+      className="rounded-md border border-amber-300 bg-amber-50/60 p-4"
+      data-testid="panel-no-inspection-review"
+    >
+      <div className="flex flex-col gap-3 border-b border-amber-200 pb-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">
+            Lost-in-transit review for {rma.rmaNumber}
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            {rma.vendorName || rma.vendorEmail || `Vendor ${rma.vendorId}`} /{" "}
+            {rma.platform ? formatStatus(rma.platform) : "No platform"} /{" "}
+            {rma.returnTrackingNumber || "No return tracking"}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Approving credits the vendor from the insurance pool. Denying closes
+            the RMA. Both are final.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Badge variant="outline" className={returnOpsStatusTone(rma.status)}>
+            {formatStatus(rma.status)}
+          </Badge>
+          <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
+            Close
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_320px]">
+        <div className="space-y-3">
+          <div className="rounded-md border bg-card p-3">
+            <div className="text-sm font-medium">Evidence pack</div>
+            {evidence ? (
+              <dl className="mt-2 grid gap-2 text-sm">
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Trigger</dt>
+                  <dd className="font-medium">
+                    {evidence.trigger === "carrier_lost_status"
+                      ? "Carrier reported lost"
+                      : "Delivery timeout"}
+                  </dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Tracking</dt>
+                  <dd className="font-mono text-xs">
+                    {evidence.trackingNumber || "None"}
+                  </dd>
+                </div>
+                {evidence.carrierStatus && (
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-muted-foreground">Carrier status</dt>
+                    <dd className="font-medium">
+                      {formatStatus(evidence.carrierStatus)}
+                    </dd>
+                  </div>
+                )}
+                {evidence.expectedDeliveryAt && (
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-muted-foreground">Expected delivery</dt>
+                    <dd>{formatDateTime(evidence.expectedDeliveryAt)}</dd>
+                  </div>
+                )}
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Timeout window</dt>
+                  <dd>
+                    {evidence.noInspectionTimeoutDays} days past expected
+                    delivery
+                  </dd>
+                </div>
+                {evidence.marketplaceCaseRef && (
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-muted-foreground">Marketplace case</dt>
+                    <dd className="font-mono text-xs">
+                      {evidence.marketplaceCaseRef}
+                    </dd>
+                  </div>
+                )}
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Detected</dt>
+                  <dd>{formatDateTime(evidence.detectedAt)}</dd>
+                </div>
+              </dl>
+            ) : (
+              <p className="mt-2 text-sm text-muted-foreground">
+                No evidence pack recorded on this RMA.
+              </p>
+            )}
+          </div>
+
+          {evidence?.trackingHistory && evidence.trackingHistory.length > 0 && (
+            <div className="rounded-md border bg-card p-3">
+              <div className="text-sm font-medium">Tracking history</div>
+              <ul className="mt-2 space-y-1 text-sm">
+                {evidence.trackingHistory.map((event, index) => (
+                  <li
+                    key={`${event.occurredAt}-${index}`}
+                    className="flex justify-between gap-4"
+                  >
+                    <span>
+                      {event.description || formatStatus(event.status)}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {formatDateTime(event.occurredAt)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="rounded-md border bg-card p-3">
+            <div className="text-sm font-medium">Requested items</div>
+            <ul className="mt-2 space-y-1 text-sm">
+              {rma.items.map((item) => (
+                <li key={item.rmaItemId} className="flex justify-between gap-4">
+                  <span>
+                    Variant {item.productVariantId ?? "unknown"} ×{" "}
+                    {item.quantity}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {formatStatus(item.status)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="text-sm font-medium">
+              Reason (required to deny)
+            </label>
+            <Textarea
+              value={reason}
+              onChange={(event) => onReasonChange(event.target.value)}
+              placeholder="Audit note — required when denying"
+              className="mt-2 min-h-[96px]"
+              maxLength={2000}
+              disabled={pending}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Button
+              type="button"
+              className="gap-2 bg-emerald-600 hover:bg-emerald-700"
+              disabled={pending}
+              onClick={() => onSubmit("approve")}
+              data-testid="button-no-inspection-approve"
+            >
+              <CheckCircle2
+                className={
+                  pendingDecision === "approve"
+                    ? "h-4 w-4 animate-spin"
+                    : "h-4 w-4"
+                }
+              />
+              Approve pool credit
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              className="gap-2"
+              disabled={denyDisabled}
+              onClick={() => onSubmit("deny")}
+              data-testid="button-no-inspection-deny"
+            >
+              <XCircle
+                className={
+                  pendingDecision === "deny"
+                    ? "h-4 w-4 animate-spin"
+                    : "h-4 w-4"
+                }
+              />
+              Deny and close
+            </Button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ReturnInspectionPanel({
   error,
   form,
@@ -7451,7 +11144,12 @@ function ReturnInspectionPanel({
   onFormChange: (patch: Partial<ReturnInspectionFormState>) => void;
   onItemChange: (
     rmaItemId: number,
-    patch: Partial<Pick<ReturnInspectionItemFormState, "status" | "finalCreditAmount" | "feeAmount">>,
+    patch: Partial<
+      Pick<
+        ReturnInspectionItemFormState,
+        "status" | "finalCreditAmount" | "feeAmount"
+      >
+    >,
   ) => void;
   onSave: () => void;
   pendingRmaId: number | null;
@@ -7477,30 +11175,44 @@ function ReturnInspectionPanel({
     return (
       <Alert variant="destructive">
         <AlertCircle className="h-4 w-4" />
-        <AlertDescription>{queryErrorMessage(error, "Unable to load RMA inspection detail.")}</AlertDescription>
+        <AlertDescription>
+          {queryErrorMessage(error, "Unable to load RMA inspection detail.")}
+        </AlertDescription>
       </Alert>
     );
   }
 
   if (!rma || !form) return null;
+  // RMAs queued for lost-in-transit review are handled by the
+  // NoInspectionReviewPanel — the inspection form does not apply.
+  if (rma.status === "no_inspection_review") return null;
 
   const existingInspection = rma.inspections[0] ?? null;
   const totals = returnInspectionFormTotals(form);
   const pending = pendingRmaId === rma.rmaId;
-  const saveDisabled = pending || existingInspection !== null || totals.hasInvalidAmount;
+  const saveDisabled =
+    pending || existingInspection !== null || totals.hasInvalidAmount;
 
   return (
     <section className="rounded-md border bg-card p-4">
       <div className="flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">Inspection for {rma.rmaNumber}</h2>
+          <h2 className="text-lg font-semibold">
+            Inspection for {rma.rmaNumber}
+          </h2>
           <p className="text-sm text-muted-foreground">
-            {rma.vendorName || rma.vendorEmail || `Vendor ${rma.vendorId}`} / {rma.platform ? formatStatus(rma.platform) : "No platform"} / {rma.returnTrackingNumber || "No return tracking"}
+            {rma.vendorName || rma.vendorEmail || `Vendor ${rma.vendorId}`} /{" "}
+            {rma.platform ? formatStatus(rma.platform) : "No platform"} /{" "}
+            {rma.returnTrackingNumber || "No return tracking"}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Badge variant="outline" className={returnOpsStatusTone(rma.status)}>{formatStatus(rma.status)}</Badge>
-          <Button type="button" variant="ghost" size="sm" onClick={onCancel}>Close</Button>
+          <Badge variant="outline" className={returnOpsStatusTone(rma.status)}>
+            {formatStatus(rma.status)}
+          </Badge>
+          <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
+            Close
+          </Button>
         </div>
       </div>
 
@@ -7508,7 +11220,10 @@ function ReturnInspectionPanel({
         <Alert className="mt-4 border-emerald-200 bg-emerald-50 text-emerald-900">
           <CheckCircle2 className="h-4 w-4" />
           <AlertDescription>
-            Inspection {existingInspection.rmaInspectionId} was finalized as {formatStatus(existingInspection.outcome)} with {formatCents(existingInspection.creditCents)} credit and {formatCents(existingInspection.feeCents)} fee.
+            Inspection {existingInspection.rmaInspectionId} was finalized as{" "}
+            {formatStatus(existingInspection.outcome)} with{" "}
+            {formatCents(existingInspection.creditCents)} credit and{" "}
+            {formatCents(existingInspection.feeCents)} fee.
           </AlertDescription>
         </Alert>
       )}
@@ -7519,7 +11234,9 @@ function ReturnInspectionPanel({
             <label className="text-sm font-medium">Outcome</label>
             <Select
               value={form.outcome}
-              onValueChange={(value) => onFormChange({ outcome: value as DropshipRmaInspectionOutcome })}
+              onValueChange={(value) =>
+                onFormChange({ outcome: value as DropshipRmaInspectionOutcome })
+              }
               disabled={existingInspection !== null || pending}
             >
               <SelectTrigger className="mt-2">
@@ -7536,7 +11253,11 @@ function ReturnInspectionPanel({
             <label className="text-sm font-medium">Fault category</label>
             <Select
               value={form.faultCategory}
-              onValueChange={(value) => onFormChange({ faultCategory: value as DropshipReturnFaultCategory })}
+              onValueChange={(value) =>
+                onFormChange({
+                  faultCategory: value as DropshipReturnFaultCategory,
+                })
+              }
               disabled={existingInspection !== null || pending}
             >
               <SelectTrigger className="mt-2">
@@ -7544,7 +11265,9 @@ function ReturnInspectionPanel({
               </SelectTrigger>
               <SelectContent>
                 {returnFaultCategories.map((category) => (
-                  <SelectItem key={category} value={category}>{formatStatus(category)}</SelectItem>
+                  <SelectItem key={category} value={category}>
+                    {formatStatus(category)}
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -7556,20 +11279,37 @@ function ReturnInspectionPanel({
               <div className="flex justify-between gap-3">
                 <span>Credit</span>
                 <span className="font-mono text-foreground">
-                  {totals.hasInvalidAmount ? "Invalid" : formatCents(totals.creditCents)}
+                  {totals.hasInvalidAmount
+                    ? "Invalid"
+                    : formatCents(totals.creditCents)}
                 </span>
               </div>
               <div className="flex justify-between gap-3">
                 <span>Fee</span>
                 <span className="font-mono text-foreground">
-                  {totals.hasInvalidAmount ? "Invalid" : formatCents(totals.feeCents)}
+                  {totals.hasInvalidAmount
+                    ? "Invalid"
+                    : formatCents(totals.feeCents)}
+                </span>
+              </div>
+              <div className="flex justify-between gap-3 border-t pt-1 font-medium">
+                <span>Net</span>
+                <span className="font-mono text-foreground">
+                  {totals.hasInvalidAmount
+                    ? "Invalid"
+                    : formatCents(totals.creditCents - totals.feeCents)}
                 </span>
               </div>
             </div>
           </div>
 
           <div>
-            <label className="text-sm font-medium" htmlFor="dropship-return-inspection-notes">Inspection notes</label>
+            <label
+              className="text-sm font-medium"
+              htmlFor="dropship-return-inspection-notes"
+            >
+              Inspection notes
+            </label>
             <Textarea
               id="dropship-return-inspection-notes"
               className="mt-2 min-h-28"
@@ -7597,24 +11337,46 @@ function ReturnInspectionPanel({
                 {form.items.map((item) => (
                   <TableRow key={item.rmaItemId}>
                     <TableCell>
-                      <div className="font-medium">RMA item {item.rmaItemId}</div>
+                      <div className="font-medium">
+                        RMA item {item.rmaItemId}
+                      </div>
                       <div className="text-xs text-muted-foreground">
-                        {item.productVariantId ? `Variant ${item.productVariantId}` : "Variant not linked"}
+                        {item.productVariantId
+                          ? `Variant ${item.productVariantId}`
+                          : "Variant not linked"}
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Input
+                      <Select
                         value={item.status}
-                        onChange={(event) => onItemChange(item.rmaItemId, { status: event.target.value })}
-                        maxLength={40}
+                        onValueChange={(value) =>
+                          onItemChange(item.rmaItemId, { status: value })
+                        }
                         disabled={existingInspection !== null || pending}
-                      />
+                      >
+                        <SelectTrigger className="h-9 w-[130px]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {RETURN_INSPECTION_ITEM_STATUSES.map((s) => (
+                            <SelectItem key={s} value={s}>
+                              {formatStatus(s)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </TableCell>
-                    <TableCell className="text-right font-mono">{item.quantity}</TableCell>
+                    <TableCell className="text-right font-mono">
+                      {item.quantity}
+                    </TableCell>
                     <TableCell>
                       <Input
                         value={item.finalCreditAmount}
-                        onChange={(event) => onItemChange(item.rmaItemId, { finalCreditAmount: event.target.value })}
+                        onChange={(event) =>
+                          onItemChange(item.rmaItemId, {
+                            finalCreditAmount: event.target.value,
+                          })
+                        }
                         className="text-right font-mono"
                         disabled={existingInspection !== null || pending}
                       />
@@ -7622,7 +11384,11 @@ function ReturnInspectionPanel({
                     <TableCell>
                       <Input
                         value={item.feeAmount}
-                        onChange={(event) => onItemChange(item.rmaItemId, { feeAmount: event.target.value })}
+                        onChange={(event) =>
+                          onItemChange(item.rmaItemId, {
+                            feeAmount: event.target.value,
+                          })
+                        }
                         className="text-right font-mono"
                         disabled={existingInspection !== null || pending}
                       />
@@ -7634,7 +11400,9 @@ function ReturnInspectionPanel({
           </div>
 
           {rma.items.length === 0 && (
-            <p className="text-sm text-muted-foreground">This RMA has no item rows attached.</p>
+            <p className="text-sm text-muted-foreground">
+              This RMA has no item rows attached.
+            </p>
           )}
 
           <div className="flex flex-wrap justify-end gap-2">
@@ -7647,13 +11415,17 @@ function ReturnInspectionPanel({
               disabled={saveDisabled}
               onClick={onSave}
             >
-              <CheckCircle2 className={pending ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+              <CheckCircle2
+                className={pending ? "h-4 w-4 animate-spin" : "h-4 w-4"}
+              />
               Finalize inspection
             </Button>
           </div>
 
           {totals.hasInvalidAmount && (
-            <p className="text-right text-sm text-destructive">Credit and fee inputs must be valid dollar amounts.</p>
+            <p className="text-right text-sm text-destructive">
+              Credit and fee inputs must be valid dollar amounts.
+            </p>
           )}
         </div>
       </div>
@@ -7695,7 +11467,12 @@ function ReturnOpsTable({
   }
 
   if (rmas.length === 0) {
-    return <EmptyState title="No returns" description="No dropship RMAs match the current filters." />;
+    return (
+      <EmptyState
+        title="No returns"
+        description="No dropship RMAs match the current filters."
+      />
+    );
   }
 
   return (
@@ -7703,7 +11480,9 @@ function ReturnOpsTable({
       <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
         <div>
           <h2 className="text-lg font-semibold">Returns</h2>
-          <p className="text-sm text-muted-foreground">{total} matching RMA{total === 1 ? "" : "s"}</p>
+          <p className="text-sm text-muted-foreground">
+            {total} matching RMA{total === 1 ? "" : "s"}
+          </p>
         </div>
         <RotateCcw className="h-5 w-5 text-muted-foreground" />
       </div>
@@ -7725,56 +11504,90 @@ function ReturnOpsTable({
         <TableBody>
           {rmas.map((rma) => {
             const nextStatus = statusInputs[rma.rmaId] ?? rma.status;
-            const statusActionDisabled = pendingRmaId !== null
-              || nextStatus === rma.status
-              || rma.status === "credited";
+            const allowedTransitions = legalRmaTransitions(rma.status);
+            const isTerminal = isRmaStatusTerminal(rma.status);
+            const statusActionDisabled =
+              pendingRmaId !== null || nextStatus === rma.status || isTerminal;
             return (
               <TableRow key={rma.rmaId}>
                 <TableCell>
                   <div className="font-mono text-sm">{rma.rmaNumber}</div>
-                  <div className="text-xs text-muted-foreground">Window {rma.returnWindowDays}d</div>
+                  <div className="text-xs text-muted-foreground">
+                    Window {rma.returnWindowDays}d
+                  </div>
                 </TableCell>
                 <TableCell>
-                  <div className="font-medium">{rma.vendorName || rma.vendorEmail || `Vendor ${rma.vendorId}`}</div>
+                  <div className="font-medium">
+                    {rma.vendorName ||
+                      rma.vendorEmail ||
+                      `Vendor ${rma.vendorId}`}
+                  </div>
                   <div className="text-xs text-muted-foreground">
                     {[
                       rma.platform ? formatStatus(rma.platform) : null,
                       rma.intakeId ? `Intake ${rma.intakeId}` : null,
                       rma.omsOrderId ? `OMS ${rma.omsOrderId}` : null,
-                    ].filter(Boolean).join(" / ") || "No linked order"}
+                    ]
+                      .filter(Boolean)
+                      .join(" / ") || "No linked order"}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={returnOpsStatusTone(rma.status)}>
+                  <Badge
+                    variant="outline"
+                    className={returnOpsStatusTone(rma.status)}
+                  >
                     {formatStatus(rma.status)}
                   </Badge>
                   <div className="mt-1 text-xs text-muted-foreground">
-                    {returnOpsTerminalStatuses.has(rma.status) ? "Terminal" : "Open"}
+                    {returnOpsTerminalStatuses.has(rma.status)
+                      ? "Terminal"
+                      : "Open"}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div>{rma.faultCategory ? formatStatus(rma.faultCategory) : "Pending"}</div>
-                  <div className="text-xs text-muted-foreground">{rma.reasonCode ? formatStatus(rma.reasonCode) : "No reason"}</div>
+                  <div>
+                    {rma.faultCategory
+                      ? formatStatus(rma.faultCategory)
+                      : "Pending"}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {rma.reasonCode
+                      ? formatStatus(rma.reasonCode)
+                      : "No reason"}
+                  </div>
                 </TableCell>
                 <TableCell>
                   <div className="font-mono">{rma.itemCount} lines</div>
-                  <div className="text-xs text-muted-foreground">{rma.totalQuantity} units</div>
-                </TableCell>
-                <TableCell>
-                  <div className="max-w-[220px] truncate font-mono text-xs">{rma.returnTrackingNumber || "None"}</div>
                   <div className="text-xs text-muted-foreground">
-                    {rma.returnTrackingNumber ? "Tracking recorded" : "No return tracking"}
+                    {rma.totalQuantity} units
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div className="text-xs text-muted-foreground">
-                    {rma.receivedAt ? `Received ${formatDateTime(rma.receivedAt)}` : "Not received"}
+                  <div className="max-w-[220px] truncate font-mono text-xs">
+                    {rma.returnTrackingNumber || "None"}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    {rma.inspectedAt ? `Inspected ${formatDateTime(rma.inspectedAt)}` : "Not inspected"}
+                    {rma.returnTrackingNumber
+                      ? "Tracking recorded"
+                      : "No return tracking"}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="text-xs text-muted-foreground">
+                    {rma.receivedAt
+                      ? `Received ${formatDateTime(rma.receivedAt)}`
+                      : "Not received"}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    {rma.creditedAt ? `Credited ${formatDateTime(rma.creditedAt)}` : "Not credited"}
+                    {rma.inspectedAt
+                      ? `Inspected ${formatDateTime(rma.inspectedAt)}`
+                      : "Not inspected"}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {rma.creditedAt
+                      ? `Credited ${formatDateTime(rma.creditedAt)}`
+                      : "Not credited"}
                   </div>
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
@@ -7784,26 +11597,36 @@ function ReturnOpsTable({
                   <Button
                     type="button"
                     size="sm"
-                    variant="outline"
+                    variant={
+                      rma.status === "inspecting" ? "default" : "outline"
+                    }
                     className="gap-2"
+                    disabled={
+                      rma.status !== "inspecting" &&
+                      rma.status !== "no_inspection_review"
+                    }
                     onClick={() => onInspect(rma)}
                   >
                     <FileSearch className="h-4 w-4" />
-                    Inspect
+                    {rma.status === "no_inspection_review"
+                      ? "Review"
+                      : "Inspect"}
                   </Button>
                 </TableCell>
                 <TableCell>
                   <div className="grid gap-2">
                     <Select
                       value={nextStatus}
-                      onValueChange={(value) => onStatusChange(rma.rmaId, value as DropshipRmaStatus)}
-                      disabled={rma.status === "credited"}
+                      onValueChange={(value) =>
+                        onStatusChange(rma.rmaId, value as DropshipRmaStatus)
+                      }
+                      disabled={isTerminal}
                     >
                       <SelectTrigger className="h-9">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {returnOpsUpdateStatuses.map((option) => (
+                        {allowedTransitions.map((option) => (
                           <SelectItem key={option} value={option}>
                             {formatStatus(option)}
                           </SelectItem>
@@ -7813,10 +11636,12 @@ function ReturnOpsTable({
                     <div className="flex gap-2">
                       <Input
                         value={statusNotes[rma.rmaId] ?? ""}
-                        onChange={(event) => onStatusNoteChange(rma.rmaId, event.target.value)}
+                        onChange={(event) =>
+                          onStatusNoteChange(rma.rmaId, event.target.value)
+                        }
                         placeholder="Optional audit note"
                         maxLength={5000}
-                        disabled={rma.status === "credited"}
+                        disabled={isTerminal}
                       />
                       <Button
                         type="button"
@@ -7826,7 +11651,13 @@ function ReturnOpsTable({
                         disabled={statusActionDisabled}
                         onClick={() => onStatusSave(rma)}
                       >
-                        <Save className={pendingRmaId === rma.rmaId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                        <Save
+                          className={
+                            pendingRmaId === rma.rmaId
+                              ? "h-4 w-4 animate-spin"
+                              : "h-4 w-4"
+                          }
+                        />
                         Save
                       </Button>
                     </div>
@@ -7855,9 +11686,15 @@ function StoreConnectionsTable({
   connections: DropshipAdminStoreConnectionListItem[];
   disablingConnectionId: number | null;
   isLoading: boolean;
-  onDisableStoreConnection: (connection: DropshipAdminStoreConnectionListItem) => void;
-  onOpenWarehouseConfig: (connection: DropshipAdminStoreConnectionListItem) => void;
-  onRepairShopifyWebhooks: (connection: DropshipAdminStoreConnectionListItem) => void;
+  onDisableStoreConnection: (
+    connection: DropshipAdminStoreConnectionListItem,
+  ) => void;
+  onOpenWarehouseConfig: (
+    connection: DropshipAdminStoreConnectionListItem,
+  ) => void;
+  onRepairShopifyWebhooks: (
+    connection: DropshipAdminStoreConnectionListItem,
+  ) => void;
   repairingWebhookConnectionId: number | null;
   savingWarehouseConnectionId: number | null;
   total: number;
@@ -7875,10 +11712,14 @@ function StoreConnectionsTable({
   if (connections.length === 0) {
     return (
       <Empty className="rounded-md border border-dashed p-8">
-        <EmptyMedia variant="icon"><Store /></EmptyMedia>
+        <EmptyMedia variant="icon">
+          <Store />
+        </EmptyMedia>
         <EmptyHeader>
           <EmptyTitle>No store connections</EmptyTitle>
-          <EmptyDescription>No dropship store connections match the current filters.</EmptyDescription>
+          <EmptyDescription>
+            No dropship store connections match the current filters.
+          </EmptyDescription>
         </EmptyHeader>
       </Empty>
     );
@@ -7887,7 +11728,9 @@ function StoreConnectionsTable({
   return (
     <section className="rounded-md border bg-card">
       <div className="flex items-center justify-between border-b px-4 py-3 text-sm text-muted-foreground">
-        <span>{total} store connection{total === 1 ? "" : "s"}</span>
+        <span>
+          {total} store connection{total === 1 ? "" : "s"}
+        </span>
       </div>
       <Table>
         <TableHeader>
@@ -7906,61 +11749,106 @@ function StoreConnectionsTable({
         <TableBody>
           {connections.map((connection) => {
             const disabled = storeConnectionIsDisabled(connection);
-            const canRepairShopifyWebhooks = connection.platform === "shopify" && connection.status === "connected";
+            const canRepairShopifyWebhooks =
+              connection.platform === "shopify" &&
+              connection.status === "connected";
             const ownerDetail = storeConnectionOwnerDetail(connection);
             return (
               <TableRow key={connection.storeConnectionId}>
                 <TableCell>
                   <div className="flex flex-col gap-1">
-                    <div className="font-medium">{storeConnectionDisplayName(connection)}</div>
+                    <div className="font-medium">
+                      {storeConnectionDisplayName(connection)}
+                    </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+                      <Badge
+                        variant="outline"
+                        className="border-zinc-200 bg-zinc-50 text-zinc-700"
+                      >
                         {formatStatus(connection.platform)}
                       </Badge>
                       {connection.shopDomain && (
-                        <span className="max-w-[220px] truncate text-xs text-muted-foreground">{connection.shopDomain}</span>
+                        <span className="max-w-[220px] truncate text-xs text-muted-foreground">
+                          {connection.shopDomain}
+                        </span>
                       )}
                     </div>
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div className="font-medium">{storeConnectionOwnerLabel(connection)}</div>
-                  {ownerDetail && <div className="text-xs text-muted-foreground">{ownerDetail}</div>}
+                  <div className="font-medium">
+                    {storeConnectionOwnerLabel(connection)}
+                  </div>
+                  {ownerDetail && (
+                    <div className="text-xs text-muted-foreground">
+                      {ownerDetail}
+                    </div>
+                  )}
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={subscriptionStatusTone(connection.vendor.entitlementStatus)}>
-                    {subscriptionStatusLabel(connection.vendor.entitlementStatus)}
+                  <Badge
+                    variant="outline"
+                    className={subscriptionStatusTone(
+                      connection.vendor.entitlementStatus,
+                    )}
+                  >
+                    {subscriptionStatusLabel(
+                      connection.vendor.entitlementStatus,
+                    )}
                   </Badge>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={storeConnectionStatusTone(connection.status)}>
+                  <Badge
+                    variant="outline"
+                    className={storeConnectionStatusTone(connection.status)}
+                  >
                     {formatStatus(connection.status)}
                   </Badge>
                 </TableCell>
                 <TableCell>
-                  <StoreConnectionStatusPill item={buildStoreConnectionAuthJourney(connection)} />
+                  <StoreConnectionStatusPill
+                    item={buildStoreConnectionAuthJourney(connection)}
+                  />
                 </TableCell>
                 <TableCell>
                   <div className="space-y-2">
-                    <StoreConnectionStatusPill item={buildStoreConnectionWarehouseJourney(connection)} />
+                    <StoreConnectionStatusPill
+                      item={buildStoreConnectionWarehouseJourney(connection)}
+                    />
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       className="h-8 w-full gap-2"
-                      disabled={disabled || savingWarehouseConnectionId !== null}
+                      disabled={
+                        disabled || savingWarehouseConnectionId !== null
+                      }
                       onClick={() => onOpenWarehouseConfig(connection)}
                     >
-                      <Truck className={savingWarehouseConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                      {connection.orderProcessingConfig.defaultWarehouseId === null ? "Assign" : "Change"}
+                      <Truck
+                        className={
+                          savingWarehouseConnectionId ===
+                          connection.storeConnectionId
+                            ? "h-4 w-4 animate-spin"
+                            : "h-4 w-4"
+                        }
+                      />
+                      {connection.orderProcessingConfig.defaultWarehouseId ===
+                      null
+                        ? "Assign"
+                        : "Change"}
                     </Button>
                   </div>
                 </TableCell>
                 <TableCell>
-                  <StoreConnectionStatusPill item={buildStoreConnectionListingJourney(connection)} />
+                  <StoreConnectionStatusPill
+                    item={buildStoreConnectionListingJourney(connection)}
+                  />
                 </TableCell>
                 <TableCell>
-                  <StoreConnectionStatusPill item={buildStoreConnectionSetupJourney(connection)} />
+                  <StoreConnectionStatusPill
+                    item={buildStoreConnectionSetupJourney(connection)}
+                  />
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-col gap-2">
@@ -7973,8 +11861,18 @@ function StoreConnectionsTable({
                         disabled={repairingWebhookConnectionId !== null}
                         onClick={() => onRepairShopifyWebhooks(connection)}
                       >
-                        <RefreshCw className={repairingWebhookConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                        {repairingWebhookConnectionId === connection.storeConnectionId ? "Repairing" : "Repair webhooks"}
+                        <RefreshCw
+                          className={
+                            repairingWebhookConnectionId ===
+                            connection.storeConnectionId
+                              ? "h-4 w-4 animate-spin"
+                              : "h-4 w-4"
+                          }
+                        />
+                        {repairingWebhookConnectionId ===
+                        connection.storeConnectionId
+                          ? "Repairing"
+                          : "Repair webhooks"}
                       </Button>
                     )}
                     <Button
@@ -7985,8 +11883,18 @@ function StoreConnectionsTable({
                       disabled={disabled || disablingConnectionId !== null}
                       onClick={() => onDisableStoreConnection(connection)}
                     >
-                      <ShieldAlert className={disablingConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                      {disabled ? "Disabled" : disablingConnectionId === connection.storeConnectionId ? "Disabling" : "Disable store"}
+                      <ShieldAlert
+                        className={
+                          disablingConnectionId === connection.storeConnectionId
+                            ? "h-4 w-4 animate-spin"
+                            : "h-4 w-4"
+                        }
+                      />
+                      {disabled
+                        ? "Disabled"
+                        : disablingConnectionId === connection.storeConnectionId
+                          ? "Disabling"
+                          : "Disable store"}
                     </Button>
                   </div>
                 </TableCell>
@@ -7999,9 +11907,15 @@ function StoreConnectionsTable({
   );
 }
 
-function StoreConnectionStatusPill({ item }: { item: StoreConnectionJourneyItem }) {
+function StoreConnectionStatusPill({
+  item,
+}: {
+  item: StoreConnectionJourneyItem;
+}) {
   return (
-    <div className={`rounded-md border px-3 py-2 ${storeConnectionJourneyTone(item.state)}`}>
+    <div
+      className={`rounded-md border px-3 py-2 ${storeConnectionJourneyTone(item.state)}`}
+    >
       <div className="text-sm font-semibold">{item.value}</div>
       {item.detail && <div className="text-xs opacity-80">{item.detail}</div>}
     </div>
@@ -8019,14 +11933,38 @@ function OrderIntakeSummary({
 }) {
   return (
     <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-      <CatalogMetric icon={<ClipboardList className="h-4 w-4" />} label="Matching intakes" value={String(total)} />
-      <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Payment holds" value={String(orderStatusCount(summary, "payment_hold"))} />
-      <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Retrying" value={String(orderStatusCount(summary, "retrying"))} />
-      <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Failed or exception" value={String(orderStatusCount(summary, "failed") + orderStatusCount(summary, "exception"))} />
+      <CatalogMetric
+        icon={<ClipboardList className="h-4 w-4" />}
+        label="Matching intakes"
+        value={String(total)}
+      />
+      <CatalogMetric
+        icon={<Wallet className="h-4 w-4" />}
+        label="Payment holds"
+        value={String(orderStatusCount(summary, "payment_hold"))}
+      />
+      <CatalogMetric
+        icon={<RefreshCw className="h-4 w-4" />}
+        label="Retrying"
+        value={String(orderStatusCount(summary, "retrying"))}
+      />
+      <CatalogMetric
+        icon={<AlertCircle className="h-4 w-4" />}
+        label="Failed or exception"
+        value={String(
+          orderStatusCount(summary, "failed") +
+            orderStatusCount(summary, "exception"),
+        )}
+      />
       <CatalogMetric
         icon={<RotateCcw className="h-4 w-4" />}
         label="Cancel failures"
-        value={String(orderCancellationStatusCount(cancellationSummary, "marketplace_cancellation_failed"))}
+        value={String(
+          orderCancellationStatusCount(
+            cancellationSummary,
+            "marketplace_cancellation_failed",
+          ),
+        )}
       />
     </section>
   );
@@ -8067,10 +12005,14 @@ function OrderIntakeOpsTable({
   if (items.length === 0) {
     return (
       <Empty className="rounded-md border border-dashed p-8">
-        <EmptyMedia variant="icon"><ClipboardList /></EmptyMedia>
+        <EmptyMedia variant="icon">
+          <ClipboardList />
+        </EmptyMedia>
         <EmptyHeader>
           <EmptyTitle>No order intake rows</EmptyTitle>
-          <EmptyDescription>No dropship order intake rows match the current filters.</EmptyDescription>
+          <EmptyDescription>
+            No dropship order intake rows match the current filters.
+          </EmptyDescription>
         </EmptyHeader>
       </Empty>
     );
@@ -8079,7 +12021,9 @@ function OrderIntakeOpsTable({
   return (
     <section className="rounded-md border bg-card">
       <div className="flex items-center justify-between border-b px-4 py-3 text-sm text-muted-foreground">
-        <span>{total} intake row{total === 1 ? "" : "s"}</span>
+        <span>
+          {total} intake row{total === 1 ? "" : "s"}
+        </span>
       </div>
       <Table>
         <TableHeader>
@@ -8095,36 +12039,60 @@ function OrderIntakeOpsTable({
         </TableHeader>
         <TableBody>
           {items.map((intake) => {
-            const retryEligibility = orderIntakeRetryEligibility(intake, retryEligibilityNow);
-            const cancellationRetryEligibility = orderCancellationRetryEligibility(intake);
-            const retryLabel = retryEligibility.reason === "stale_processing" ? "Recover" : "Retry";
+            const retryEligibility = orderIntakeRetryEligibility(
+              intake,
+              retryEligibilityNow,
+            );
+            const cancellationRetryEligibility =
+              orderCancellationRetryEligibility(intake);
+            const retryLabel =
+              retryEligibility.reason === "stale_processing"
+                ? "Recover"
+                : "Retry";
             const canRetryWmsSync = orderIntakeCanRetryWmsSync(intake);
             return (
               <TableRow key={intake.intakeId}>
                 <TableCell>
-                  <div className="font-medium">{intake.externalOrderNumber || intake.externalOrderId}</div>
+                  <div className="font-medium">
+                    {intake.externalOrderNumber || intake.externalOrderId}
+                  </div>
                   <div className="text-xs text-muted-foreground">
                     {formatStatus(intake.platform)} intake {intake.intakeId}
                   </div>
                   {intake.omsOrderId && (
-                    <div className="text-xs text-muted-foreground">OMS {intake.omsOrderId}</div>
+                    <div className="text-xs text-muted-foreground">
+                      OMS {intake.omsOrderId}
+                    </div>
                   )}
                 </TableCell>
                 <TableCell>
-                  <div className="font-medium">{intake.vendor.businessName || intake.vendor.email || `Vendor ${intake.vendor.vendorId}`}</div>
+                  <div className="font-medium">
+                    {intake.vendor.businessName ||
+                      intake.vendor.email ||
+                      `Vendor ${intake.vendor.vendorId}`}
+                  </div>
                   <div className="text-xs text-muted-foreground">
-                    {intake.storeConnection.externalDisplayName || intake.storeConnection.shopDomain || formatStatus(intake.storeConnection.platform)}
+                    {intake.storeConnection.externalDisplayName ||
+                      intake.storeConnection.shopDomain ||
+                      formatStatus(intake.storeConnection.platform)}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={orderIntakeStatusTone(intake.status)}>
+                  <Badge
+                    variant="outline"
+                    className={orderIntakeStatusTone(intake.status)}
+                  >
                     {formatStatus(intake.status)}
                   </Badge>
                   {intake.rejectionReason && (
-                    <div className="mt-1 max-w-[220px] truncate text-xs text-muted-foreground">{intake.rejectionReason}</div>
+                    <div className="mt-1 max-w-[220px] truncate text-xs text-muted-foreground">
+                      {intake.rejectionReason}
+                    </div>
                   )}
                   {intake.paymentHoldExpiresAt && (
-                    <div className="mt-1 text-xs text-muted-foreground">Hold expires {formatDateTime(intake.paymentHoldExpiresAt)}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      Hold expires {formatDateTime(intake.paymentHoldExpiresAt)}
+                    </div>
                   )}
                   {intake.cancellationStatus && (
                     <div className="mt-1 max-w-[220px] truncate text-xs text-muted-foreground">
@@ -8136,21 +12104,35 @@ function OrderIntakeOpsTable({
                 <TableCell>
                   {intake.latestAuditEvent ? (
                     <>
-                      <div className="font-medium">{formatStatus(intake.latestAuditEvent.eventType)}</div>
-                      <div className="text-xs text-muted-foreground">{formatDateTime(intake.latestAuditEvent.createdAt)}</div>
+                      <div className="font-medium">
+                        {formatStatus(intake.latestAuditEvent.eventType)}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {formatDateTime(intake.latestAuditEvent.createdAt)}
+                      </div>
                     </>
                   ) : (
                     <span className="text-sm text-muted-foreground">None</span>
                   )}
                 </TableCell>
-                <TableCell className="whitespace-nowrap text-sm text-muted-foreground">{formatDateTime(intake.updatedAt)}</TableCell>
+                <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
+                  {formatDateTime(intake.updatedAt)}
+                </TableCell>
                 <TableCell>
                   <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                     <Button
                       type="button"
-                      variant={selectedIntakeId === intake.intakeId ? "default" : "outline"}
+                      variant={
+                        selectedIntakeId === intake.intakeId
+                          ? "default"
+                          : "outline"
+                      }
                       size="sm"
-                      className={selectedIntakeId === intake.intakeId ? "h-8 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" : "h-8 gap-2"}
+                      className={
+                        selectedIntakeId === intake.intakeId
+                          ? "h-8 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                          : "h-8 gap-2"
+                      }
                       disabled={pendingAction !== null}
                       onClick={() => onSelectDetail(intake)}
                     >
@@ -8162,10 +12144,20 @@ function OrderIntakeOpsTable({
                       variant="outline"
                       size="sm"
                       className="h-8 gap-2"
-                      disabled={pendingAction !== null || !orderIntakeCanProcessNow(intake.status)}
+                      disabled={
+                        pendingAction !== null ||
+                        !orderIntakeCanProcessNow(intake.status)
+                      }
                       onClick={() => onRunAction(intake, "process")}
                     >
-                      <PlayCircle className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "process" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      <PlayCircle
+                        className={
+                          pendingAction?.intakeId === intake.intakeId &&
+                          pendingAction.action === "process"
+                            ? "h-4 w-4 animate-spin"
+                            : "h-4 w-4"
+                        }
+                      />
                       Process
                     </Button>
                     <Button
@@ -8173,10 +12165,19 @@ function OrderIntakeOpsTable({
                       variant="outline"
                       size="sm"
                       className="h-8 gap-2"
-                      disabled={pendingAction !== null || !retryEligibility.canRetry}
+                      disabled={
+                        pendingAction !== null || !retryEligibility.canRetry
+                      }
                       onClick={() => onRunAction(intake, "retry")}
                     >
-                      <RefreshCw className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      <RefreshCw
+                        className={
+                          pendingAction?.intakeId === intake.intakeId &&
+                          pendingAction.action === "retry"
+                            ? "h-4 w-4 animate-spin"
+                            : "h-4 w-4"
+                        }
+                      />
                       {retryLabel}
                     </Button>
                     <Button
@@ -8184,10 +12185,20 @@ function OrderIntakeOpsTable({
                       variant="outline"
                       size="sm"
                       className="h-8 gap-2"
-                      disabled={pendingAction !== null || !cancellationRetryEligibility.canRetry}
+                      disabled={
+                        pendingAction !== null ||
+                        !cancellationRetryEligibility.canRetry
+                      }
                       onClick={() => onRunAction(intake, "retry-cancellation")}
                     >
-                      <RotateCcw className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry-cancellation" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      <RotateCcw
+                        className={
+                          pendingAction?.intakeId === intake.intakeId &&
+                          pendingAction.action === "retry-cancellation"
+                            ? "h-4 w-4 animate-spin"
+                            : "h-4 w-4"
+                        }
+                      />
                       Retry cancel
                     </Button>
                     <Button
@@ -8198,7 +12209,14 @@ function OrderIntakeOpsTable({
                       disabled={pendingAction !== null || !canRetryWmsSync}
                       onClick={() => onRunAction(intake, "retry-wms-sync")}
                     >
-                      <Truck className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry-wms-sync" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      <Truck
+                        className={
+                          pendingAction?.intakeId === intake.intakeId &&
+                          pendingAction.action === "retry-wms-sync"
+                            ? "h-4 w-4 animate-spin"
+                            : "h-4 w-4"
+                        }
+                      />
                       Sync WMS
                     </Button>
                     <Button
@@ -8256,7 +12274,9 @@ function OrderIntakeDetailPanel({
     return (
       <Alert variant="destructive">
         <AlertCircle className="h-4 w-4" />
-        <AlertDescription>{queryErrorMessage(error, "Unable to load dropship order detail.")}</AlertDescription>
+        <AlertDescription>
+          {queryErrorMessage(error, "Unable to load dropship order detail.")}
+        </AlertDescription>
       </Alert>
     );
   }
@@ -8271,17 +12291,32 @@ function OrderIntakeDetailPanel({
             <h2 className="text-lg font-semibold">
               {order.externalOrderNumber || order.externalOrderId}
             </h2>
-            <Badge variant="outline" className={orderIntakeStatusTone(order.status as DropshipOpsOrderIntakeStatus)}>
+            <Badge
+              variant="outline"
+              className={orderIntakeStatusTone(
+                order.status as DropshipOpsOrderIntakeStatus,
+              )}
+            >
               {formatStatus(order.status)}
             </Badge>
             {order.cancellationStatus && (
-              <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-900">
+              <Badge
+                variant="outline"
+                className="border-amber-200 bg-amber-50 text-amber-900"
+              >
                 {formatStatus(order.cancellationStatus)}
               </Badge>
             )}
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            {formatStatus(order.platform)} intake {order.intakeId} / {order.vendor.businessName || order.vendor.email || `Vendor ${order.vendor.vendorId}`} / {order.storeConnection.externalDisplayName || order.storeConnection.shopDomain || `Store ${order.storeConnection.storeConnectionId}`}
+            {formatStatus(order.platform)} intake {order.intakeId} /{" "}
+            {order.vendor.businessName ||
+              order.vendor.email ||
+              `Vendor ${order.vendor.vendorId}`}{" "}
+            /{" "}
+            {order.storeConnection.externalDisplayName ||
+              order.storeConnection.shopDomain ||
+              `Store ${order.storeConnection.storeConnectionId}`}
           </p>
         </div>
         <Button type="button" variant="ghost" size="sm" onClick={onClose}>
@@ -8290,10 +12325,26 @@ function OrderIntakeDetailPanel({
       </div>
 
       <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <CatalogMetric icon={<ClipboardList className="h-4 w-4" />} label="Lines / units" value={`${order.lineCount} / ${order.totalQuantity}`} />
-        <CatalogMetric icon={<CircleDollarSign className="h-4 w-4" />} label="Grand total" value={formatOptionalCents(order.totals?.grandTotalCents)} />
-        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Tracking pushes" value={String(order.trackingPushes.length)} />
-        <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Wallet debit" value={formatOptionalCents(order.walletLedgerEntry?.amountCents)} />
+        <CatalogMetric
+          icon={<ClipboardList className="h-4 w-4" />}
+          label="Lines / units"
+          value={`${order.lineCount} / ${order.totalQuantity}`}
+        />
+        <CatalogMetric
+          icon={<CircleDollarSign className="h-4 w-4" />}
+          label="Grand total"
+          value={formatOptionalCents(order.totals?.grandTotalCents)}
+        />
+        <CatalogMetric
+          icon={<Truck className="h-4 w-4" />}
+          label="Tracking pushes"
+          value={String(order.trackingPushes.length)}
+        />
+        <CatalogMetric
+          icon={<Wallet className="h-4 w-4" />}
+          label="Wallet debit"
+          value={formatOptionalCents(order.walletLedgerEntry?.amountCents)}
+        />
       </div>
 
       <div className="mt-4 grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
@@ -8313,22 +12364,39 @@ function OrderIntakeDetailPanel({
             </TableHeader>
             <TableBody>
               {order.lines.map((line) => (
-                <TableRow key={`${line.lineIndex}:${line.externalLineItemId ?? line.sku ?? "line"}`}>
+                <TableRow
+                  key={`${line.lineIndex}:${line.externalLineItemId ?? line.sku ?? "line"}`}
+                >
                   <TableCell>
-                    <div className="font-medium">{line.title || `Line ${line.lineIndex + 1}`}</div>
+                    <div className="font-medium">
+                      {line.title || `Line ${line.lineIndex + 1}`}
+                    </div>
                     <div className="text-xs text-muted-foreground">
-                      {line.productVariantId ? `Variant ${line.productVariantId}` : "Variant not linked"}
+                      {line.productVariantId
+                        ? `Variant ${line.productVariantId}`
+                        : "Variant not linked"}
                     </div>
                   </TableCell>
                   <TableCell>
-                    <div className="font-mono text-sm">{line.sku || "None"}</div>
+                    <div className="font-mono text-sm">
+                      {line.sku || "None"}
+                    </div>
                     <div className="max-w-[180px] truncate text-xs text-muted-foreground">
-                      {line.externalListingId || line.externalOfferId || line.externalLineItemId || "No marketplace line id"}
+                      {line.externalListingId ||
+                        line.externalOfferId ||
+                        line.externalLineItemId ||
+                        "No marketplace line id"}
                     </div>
                   </TableCell>
-                  <TableCell className="text-right font-mono">{line.quantity}</TableCell>
-                  <TableCell className="text-right font-mono">{formatOptionalCents(line.unitRetailPriceCents)}</TableCell>
-                  <TableCell className="text-right font-mono">{formatOptionalCents(line.lineRetailTotalCents)}</TableCell>
+                  <TableCell className="text-right font-mono">
+                    {line.quantity}
+                  </TableCell>
+                  <TableCell className="text-right font-mono">
+                    {formatOptionalCents(line.unitRetailPriceCents)}
+                  </TableCell>
+                  <TableCell className="text-right font-mono">
+                    {formatOptionalCents(line.lineRetailTotalCents)}
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -8339,13 +12407,43 @@ function OrderIntakeDetailPanel({
           <div className="rounded-md border p-4">
             <h3 className="font-semibold">Money and quote</h3>
             <div className="mt-3 grid gap-2 text-sm">
-              <DetailMoneyRow label="Retail subtotal" value={order.totals?.retailSubtotalCents} />
-              <DetailMoneyRow label="Marketplace shipping" value={order.totals?.shippingPaidCents} />
-              <DetailMoneyRow label="Wholesale subtotal" value={order.economicsSnapshot?.wholesaleSubtotalCents} />
-              <DetailMoneyRow label="Shipping charged" value={order.economicsSnapshot?.shippingCents ?? order.shippingQuoteSnapshot?.totalShippingCents} />
-              <DetailMoneyRow label="Insurance pool" value={order.economicsSnapshot?.insurancePoolCents ?? order.shippingQuoteSnapshot?.insurancePoolCents} />
-              <DetailMoneyRow label="Fees" value={order.economicsSnapshot?.feesCents} />
-              <DetailMoneyRow label="Total debit" value={order.economicsSnapshot?.totalDebitCents ?? order.walletLedgerEntry?.amountCents} />
+              <DetailMoneyRow
+                label="Retail subtotal"
+                value={order.totals?.retailSubtotalCents}
+              />
+              <DetailMoneyRow
+                label="Marketplace shipping"
+                value={order.totals?.shippingPaidCents}
+              />
+              <DetailMoneyRow
+                label="Wholesale subtotal"
+                value={order.economicsSnapshot?.wholesaleSubtotalCents}
+              />
+              <DetailMoneyRow
+                label="Shipping charged"
+                value={
+                  order.economicsSnapshot?.shippingCents ??
+                  order.shippingQuoteSnapshot?.totalShippingCents
+                }
+              />
+              <DetailMoneyRow
+                label="Insurance pool"
+                value={
+                  order.economicsSnapshot?.insurancePoolCents ??
+                  order.shippingQuoteSnapshot?.insurancePoolCents
+                }
+              />
+              <DetailMoneyRow
+                label="Fees"
+                value={order.economicsSnapshot?.feesCents}
+              />
+              <DetailMoneyRow
+                label="Total debit"
+                value={
+                  order.economicsSnapshot?.totalDebitCents ??
+                  order.walletLedgerEntry?.amountCents
+                }
+              />
             </div>
             <div className="mt-3 text-xs text-muted-foreground">
               {order.shippingQuoteSnapshot
@@ -8357,12 +12455,34 @@ function OrderIntakeDetailPanel({
           <div className="rounded-md border p-4">
             <h3 className="font-semibold">State</h3>
             <div className="mt-3 grid gap-2 text-sm text-muted-foreground">
-              <div>OMS order: <span className="font-mono text-foreground">{order.omsOrderId ?? "None"}</span></div>
-              <div>Received: <span className="text-foreground">{formatDateTime(order.receivedAt)}</span></div>
-              <div>Accepted: <span className="text-foreground">{formatDateTime(order.acceptedAt)}</span></div>
-              <div>Payment hold: <span className="text-foreground">{formatDateTime(order.paymentHoldExpiresAt)}</span></div>
+              <div>
+                OMS order:{" "}
+                <span className="font-mono text-foreground">
+                  {order.omsOrderId ?? "None"}
+                </span>
+              </div>
+              <div>
+                Received:{" "}
+                <span className="text-foreground">
+                  {formatDateTime(order.receivedAt)}
+                </span>
+              </div>
+              <div>
+                Accepted:{" "}
+                <span className="text-foreground">
+                  {formatDateTime(order.acceptedAt)}
+                </span>
+              </div>
+              <div>
+                Payment hold:{" "}
+                <span className="text-foreground">
+                  {formatDateTime(order.paymentHoldExpiresAt)}
+                </span>
+              </div>
               {order.rejectionReason && (
-                <div className="text-rose-700">Rejection: {order.rejectionReason}</div>
+                <div className="text-rose-700">
+                  Rejection: {order.rejectionReason}
+                </div>
               )}
             </div>
           </div>
@@ -8375,7 +12495,9 @@ function OrderIntakeDetailPanel({
             <h3 className="font-semibold">Tracking pushes</h3>
           </div>
           {order.trackingPushes.length === 0 ? (
-            <div className="p-4 text-sm text-muted-foreground">No tracking pushes recorded.</div>
+            <div className="p-4 text-sm text-muted-foreground">
+              No tracking pushes recorded.
+            </div>
           ) : (
             <Table>
               <TableHeader>
@@ -8390,20 +12512,34 @@ function OrderIntakeDetailPanel({
                 {order.trackingPushes.map((push) => (
                   <TableRow key={push.pushId}>
                     <TableCell>
-                      <div className="font-mono text-sm">{push.trackingNumber}</div>
-                      <div className="text-xs text-muted-foreground">{push.carrier} / {formatStatus(push.platform)}</div>
+                      <div className="font-mono text-sm">
+                        {push.trackingNumber}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {push.carrier} / {formatStatus(push.platform)}
+                      </div>
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline" className={trackingPushStatusTone(push.status)}>
+                      <Badge
+                        variant="outline"
+                        className={trackingPushStatusTone(push.status)}
+                      >
                         {formatStatus(push.status)}
                       </Badge>
                       {push.lastErrorMessage && (
-                        <div className="mt-1 max-w-[220px] truncate text-xs text-muted-foreground">{push.lastErrorMessage}</div>
+                        <div className="mt-1 max-w-[220px] truncate text-xs text-muted-foreground">
+                          {push.lastErrorMessage}
+                        </div>
                       )}
                     </TableCell>
                     <TableCell>
-                      <div className="font-mono text-sm">{push.wmsShipmentId ?? "None"}</div>
-                      <div className="text-xs text-muted-foreground">{push.externalFulfillmentId || "No marketplace fulfillment"}</div>
+                      <div className="font-mono text-sm">
+                        {push.wmsShipmentId ?? "None"}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {push.externalFulfillmentId ||
+                          "No marketplace fulfillment"}
+                      </div>
                     </TableCell>
                     <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                       {formatDateTime(push.updatedAt)}
@@ -8420,7 +12556,9 @@ function OrderIntakeDetailPanel({
             <h3 className="font-semibold">Audit trail</h3>
           </div>
           {order.auditEvents.length === 0 ? (
-            <div className="p-4 text-sm text-muted-foreground">No audit events recorded.</div>
+            <div className="p-4 text-sm text-muted-foreground">
+              No audit events recorded.
+            </div>
           ) : (
             <Table>
               <TableHeader>
@@ -8433,15 +12571,24 @@ function OrderIntakeDetailPanel({
               </TableHeader>
               <TableBody>
                 {order.auditEvents.slice(0, 8).map((event, index) => (
-                  <TableRow key={`${event.eventType}:${event.createdAt}:${index}`}>
+                  <TableRow
+                    key={`${event.eventType}:${event.createdAt}:${index}`}
+                  >
                     <TableCell>
-                      <Badge variant="outline" className={riskSeverityTone(event.severity)}>
+                      <Badge
+                        variant="outline"
+                        className={riskSeverityTone(event.severity)}
+                      >
                         {formatStatus(event.eventType)}
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      <div className="text-sm">{formatStatus(event.actorType)}</div>
-                      <div className="max-w-[160px] truncate text-xs text-muted-foreground">{event.actorId || "System"}</div>
+                      <div className="text-sm">
+                        {formatStatus(event.actorType)}
+                      </div>
+                      <div className="max-w-[160px] truncate text-xs text-muted-foreground">
+                        {event.actorId || "System"}
+                      </div>
                     </TableCell>
                     <TableCell className="max-w-[260px] truncate text-xs text-muted-foreground">
                       {compactJsonPayload(event.payload)}
@@ -8476,7 +12623,9 @@ function DetailMoneyRow({
 }
 
 function formatOptionalCents(value: number | null | undefined): string {
-  return typeof value === "number" && Number.isSafeInteger(value) ? formatCents(value) : "None";
+  return typeof value === "number" && Number.isSafeInteger(value)
+    ? formatCents(value)
+    : "None";
 }
 
 function compactJsonPayload(payload: Record<string, unknown>): string {
@@ -8515,11 +12664,16 @@ function CatalogRuleTargetInput({
       <SearchableOptionPicker
         label="Product line"
         value={ruleForm.productLineId}
-        onChange={(value) => setRuleForm((current) => ({ ...current, productLineId: value }))}
+        onChange={(value) =>
+          setRuleForm((current) => ({ ...current, productLineId: value }))
+        }
         options={productLineOptions.map((line) => ({
           value: String(line.id),
           label: line.name,
-          detail: typeof line.productCount === "number" ? `${line.productCount} product${line.productCount === 1 ? "" : "s"}` : undefined,
+          detail:
+            typeof line.productCount === "number"
+              ? `${line.productCount} product${line.productCount === 1 ? "" : "s"}`
+              : undefined,
           search: `${line.name} ${line.id}`,
         }))}
         isLoading={isLoadingProductLines}
@@ -8535,7 +12689,9 @@ function CatalogRuleTargetInput({
       <SearchableOptionPicker
         label="Product"
         value={ruleForm.productId}
-        onChange={(value) => setRuleForm((current) => ({ ...current, productId: value }))}
+        onChange={(value) =>
+          setRuleForm((current) => ({ ...current, productId: value }))
+        }
         options={productOptions.map((product) => {
           const sku = product.sku ?? product.baseSku ?? "";
           return {
@@ -8558,7 +12714,9 @@ function CatalogRuleTargetInput({
       <ProductVariantSkuPicker
         isLoading={isLoadingVariants}
         label="SKU / variant"
-        onChange={(value) => setRuleForm((current) => ({ ...current, productVariantId: value }))}
+        onChange={(value) =>
+          setRuleForm((current) => ({ ...current, productVariantId: value }))
+        }
         value={ruleForm.productVariantId}
         variants={variantOptions}
       />
@@ -8569,11 +12727,16 @@ function CatalogRuleTargetInput({
     <SearchableOptionPicker
       label="Category"
       value={ruleForm.category}
-      onChange={(value) => setRuleForm((current) => ({ ...current, category: value }))}
+      onChange={(value) =>
+        setRuleForm((current) => ({ ...current, category: value }))
+      }
       options={categoryOptions.map((category) => ({
         value: category.name,
         label: category.name,
-        detail: typeof category.productCount === "number" ? `${category.productCount} product${category.productCount === 1 ? "" : "s"}` : undefined,
+        detail:
+          typeof category.productCount === "number"
+            ? `${category.productCount} product${category.productCount === 1 ? "" : "s"}`
+            : undefined,
         search: `${category.name} ${category.id}`,
       }))}
       isLoading={isLoadingCategories}
@@ -8626,7 +12789,8 @@ function CatalogRuleDialog({
           <DialogHeader>
             <DialogTitle>Add exposure rule</DialogTitle>
             <DialogDescription>
-              Add a broad rule or an exception. Place exceptions lower in the run order when they should override broader rules.
+              Add a broad rule or an exception. Place exceptions lower in the
+              run order when they should override broader rules.
             </DialogDescription>
           </DialogHeader>
 
@@ -8635,10 +12799,12 @@ function CatalogRuleDialog({
               <label className="text-sm font-medium">Scope</label>
               <Select
                 value={ruleForm.scopeType}
-                onValueChange={(value) => setRuleForm((current) => ({
-                  ...current,
-                  scopeType: value as CatalogExposureScopeFilter,
-                }))}
+                onValueChange={(value) =>
+                  setRuleForm((current) => ({
+                    ...current,
+                    scopeType: value as CatalogExposureScopeFilter,
+                  }))
+                }
               >
                 <SelectTrigger className="mt-2">
                   <SelectValue />
@@ -8656,10 +12822,12 @@ function CatalogRuleDialog({
               <label className="text-sm font-medium">Action</label>
               <Select
                 value={ruleForm.action}
-                onValueChange={(value) => setRuleForm((current) => ({
-                  ...current,
-                  action: value as CatalogExposureActionFilter,
-                }))}
+                onValueChange={(value) =>
+                  setRuleForm((current) => ({
+                    ...current,
+                    action: value as CatalogExposureActionFilter,
+                  }))
+                }
               >
                 <SelectTrigger className="mt-2">
                   <SelectValue />
@@ -8685,22 +12853,39 @@ function CatalogRuleDialog({
             />
 
             <div className="md:col-span-2">
-              <label className="text-sm font-medium" htmlFor="dropship-catalog-rule-notes">Notes</label>
+              <label
+                className="text-sm font-medium"
+                htmlFor="dropship-catalog-rule-notes"
+              >
+                Notes
+              </label>
               <Input
                 id="dropship-catalog-rule-notes"
                 className="mt-2"
                 value={ruleForm.notes}
-                onChange={(event) => setRuleForm((current) => ({ ...current, notes: event.target.value }))}
+                onChange={(event) =>
+                  setRuleForm((current) => ({
+                    ...current,
+                    notes: event.target.value,
+                  }))
+                }
                 placeholder="Optional admin note"
               />
             </div>
           </div>
 
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+            >
               Cancel
             </Button>
-            <Button type="submit" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]">
+            <Button
+              type="submit"
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+            >
               <PlusCircle className="h-4 w-4" />
               Add exposure rule
             </Button>
@@ -8726,7 +12911,10 @@ function CatalogDraftRulesTable({
   isLoading: boolean;
   isSaving: boolean;
   onClearRules: () => void;
-  onMoveRule: (rule: DropshipAdminCatalogExposureRuleInput, direction: -1 | 1) => void;
+  onMoveRule: (
+    rule: DropshipAdminCatalogExposureRuleInput,
+    direction: -1 | 1,
+  ) => void;
   onRemoveRule: (rule: DropshipAdminCatalogExposureRuleInput) => void;
   onSaveRules: () => void;
   rules: DropshipAdminCatalogExposureRuleInput[];
@@ -8779,11 +12967,14 @@ function CatalogDraftRulesTable({
         </div>
       ) : rules.length === 0 ? (
         <Empty className="mt-4 rounded-md border border-dashed p-8">
-          <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
+          <EmptyMedia variant="icon">
+            <Boxes />
+          </EmptyMedia>
           <EmptyHeader>
             <EmptyTitle>No exposure rules</EmptyTitle>
             <EmptyDescription>
-              Add an exposure rule before publishing. No catalog is visible without at least one expose rule.
+              Add an exposure rule before publishing. No catalog is visible
+              without at least one expose rule.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -8802,17 +12993,28 @@ function CatalogDraftRulesTable({
             <TableBody>
               {rules.map((rule, index) => (
                 <TableRow key={catalogExposureRuleKey(rule)}>
-                  <TableCell className="font-mono text-sm">#{index + 1}</TableCell>
+                  <TableCell className="font-mono text-sm">
+                    #{index + 1}
+                  </TableCell>
                   <TableCell>
-                    <Badge variant="outline" className={catalogExposureActionTone(rule.action)}>
+                    <Badge
+                      variant="outline"
+                      className={catalogExposureActionTone(rule.action)}
+                    >
                       {catalogExposureActionLabel(rule.action)}
                     </Badge>
                   </TableCell>
                   <TableCell>
-                    <div className="font-medium">{formatStatus(rule.scopeType)}</div>
-                    <div className="text-xs text-muted-foreground">{catalogRuleTargetLabel(rule, targetLabels)}</div>
+                    <div className="font-medium">
+                      {formatStatus(rule.scopeType)}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {catalogRuleTargetLabel(rule, targetLabels)}
+                    </div>
                   </TableCell>
-                  <TableCell className="max-w-[260px] truncate text-sm text-muted-foreground">{rule.notes || "None"}</TableCell>
+                  <TableCell className="max-w-[260px] truncate text-sm text-muted-foreground">
+                    {rule.notes || "None"}
+                  </TableCell>
                   <TableCell>
                     <div className="flex gap-2">
                       <Button
@@ -8894,16 +13096,20 @@ function CatalogPreviewTable({
   if (rows.length === 0) {
     return (
       <Empty className="mt-4 rounded-md border border-dashed p-8">
-        <EmptyMedia variant="icon"><FileSearch /></EmptyMedia>
+        <EmptyMedia variant="icon">
+          <FileSearch />
+        </EmptyMedia>
         <EmptyHeader>
           <EmptyTitle>No catalog rows</EmptyTitle>
-          <EmptyDescription>No catalog preview rows match the current filters.</EmptyDescription>
+          <EmptyDescription>
+            No catalog preview rows match the current filters.
+          </EmptyDescription>
         </EmptyHeader>
       </Empty>
     );
   }
 
-  const firstRow = total === 0 ? 0 : ((page - 1) * limit) + 1;
+  const firstRow = total === 0 ? 0 : (page - 1) * limit + 1;
   const lastRow = Math.min(total, firstRow + rows.length - 1);
 
   return (
@@ -8920,7 +13126,9 @@ function CatalogPreviewTable({
             <TableHead>Category</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Vendor visibility</TableHead>
-            <TableHead className="w-[180px] text-right">Exposure change</TableHead>
+            <TableHead className="w-[180px] text-right">
+              Exposure change
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -8929,41 +13137,62 @@ function CatalogPreviewTable({
               <TableCell>
                 <div className="font-medium">{row.productName}</div>
                 <div className="text-xs text-muted-foreground">
-                  {[row.productSku, row.variantSku, row.variantName].filter(Boolean).join(" / ") || `Variant ${row.productVariantId}`}
+                  {[row.productSku, row.variantSku, row.variantName]
+                    .filter(Boolean)
+                    .join(" / ") || `Variant ${row.productVariantId}`}
                 </div>
               </TableCell>
               <TableCell>
                 <div>{row.category || "None"}</div>
                 <div className="max-w-[220px] truncate text-xs text-muted-foreground">
-                  {row.productLineNames.length ? row.productLineNames.join(", ") : "No product line"}
+                  {row.productLineNames.length
+                    ? row.productLineNames.join(", ")
+                    : "No product line"}
                 </div>
               </TableCell>
               <TableCell>
-                <Badge variant="outline" className={row.productIsActive && row.variantIsActive
-                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                  : "border-amber-200 bg-amber-50 text-amber-900"}
+                <Badge
+                  variant="outline"
+                  className={
+                    row.productIsActive && row.variantIsActive
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                      : "border-amber-200 bg-amber-50 text-amber-900"
+                  }
                 >
-                  {row.productIsActive && row.variantIsActive ? "Active" : "Inactive"}
+                  {row.productIsActive && row.variantIsActive
+                    ? "Active"
+                    : "Inactive"}
                 </Badge>
               </TableCell>
               <TableCell>
-                <Badge variant="outline" className={row.decision.exposed
-                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                  : "border-zinc-200 bg-zinc-50 text-zinc-700"}
+                <Badge
+                  variant="outline"
+                  className={
+                    row.decision.exposed
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                      : "border-zinc-200 bg-zinc-50 text-zinc-700"
+                  }
                 >
                   {row.decision.exposed ? "Visible" : "Hidden"}
                 </Badge>
-                <div className="mt-1 text-xs text-muted-foreground">{catalogVisibilityReasonLabel(row.decision.reason)}</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {catalogVisibilityReasonLabel(row.decision.reason)}
+                </div>
               </TableCell>
               <TableCell>
-                <CatalogPreviewQuickRules row={row} onAddPreviewRule={onAddPreviewRule} />
+                <CatalogPreviewQuickRules
+                  row={row}
+                  onAddPreviewRule={onAddPreviewRule}
+                />
               </TableCell>
             </TableRow>
           ))}
         </TableBody>
       </Table>
       <div className="flex flex-col gap-3 border-t px-3 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-        <span>Page {page} of {totalPages}</span>
+        <span>
+          Page {page} of {totalPages}
+        </span>
         <div className="flex gap-2">
           <Button
             type="button"
@@ -9003,20 +13232,22 @@ function CatalogPreviewQuickRules({
   ) => void;
   row: DropshipAdminCatalogExposurePreviewRow;
 }) {
-  const action: CatalogExposureActionFilter = row.decision.exposed ? "exclude" : "include";
+  const action: CatalogExposureActionFilter = row.decision.exposed
+    ? "exclude"
+    : "include";
   const label = row.decision.exposed ? "Hide" : "Expose";
   const Icon = row.decision.exposed ? MinusCircle : PlusCircle;
   return (
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="ml-auto h-8 gap-2"
-        onClick={() => onAddPreviewRule(row, action)}
-      >
-        <Icon className="h-4 w-4" />
-        {label}
-      </Button>
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="ml-auto h-8 gap-2"
+      onClick={() => onAddPreviewRule(row, action)}
+    >
+      <Icon className="h-4 w-4" />
+      {label}
+    </Button>
   );
 }
 
@@ -9046,23 +13277,38 @@ function catalogRuleTargetLabel(
 ): string {
   if (rule.scopeType === "catalog") return "Entire active catalog";
   if (rule.scopeType === "product_line") {
-    return targetNameLabel("Product line", rule.productLineId, labels.productLineNamesById);
+    return targetNameLabel(
+      "Product line",
+      rule.productLineId,
+      labels.productLineNamesById,
+    );
   }
   if (rule.scopeType === "product") {
     return targetNameLabel("Product", rule.productId, labels.productLabelsById);
   }
   if (rule.scopeType === "variant") {
-    return targetNameLabel("Variant", rule.productVariantId, labels.variantLabelsById);
+    return targetNameLabel(
+      "Variant",
+      rule.productVariantId,
+      labels.variantLabelsById,
+    );
   }
   if (rule.scopeType === "category") {
     const category = rule.category?.trim();
     if (!category) return "Category not selected";
-    return labels.categoryLabelsByKey.get(normalizeCatalogRuleLabelKey(category)) ?? category;
+    return (
+      labels.categoryLabelsByKey.get(normalizeCatalogRuleLabelKey(category)) ??
+      category
+    );
   }
   return "Unknown target";
 }
 
-function targetNameLabel(prefix: string, id: number | null | undefined, namesById: Map<number, string>): string {
+function targetNameLabel(
+  prefix: string,
+  id: number | null | undefined,
+  namesById: Map<number, string>,
+): string {
   if (typeof id !== "number") return `${prefix} not selected`;
   const name = namesById.get(id);
   return name ? `${prefix}: ${name}` : `${prefix} #${id}`;
@@ -9081,25 +13327,36 @@ function normalizeCatalogRuleOrder(
   }));
 }
 
-function catalogExposureRulesStateKey(rules: DropshipAdminCatalogExposureRuleInput[]): string {
+function catalogExposureRulesStateKey(
+  rules: DropshipAdminCatalogExposureRuleInput[],
+): string {
   return rules
-    .map((rule, index) => `${index}:${catalogExposureRuleKey(rule)}:${rule.priority}:${rule.notes ?? ""}`)
+    .map(
+      (rule, index) =>
+        `${index}:${catalogExposureRuleKey(rule)}:${rule.priority}:${rule.notes ?? ""}`,
+    )
     .join("|");
 }
 
-function catalogExposureActionLabel(action: CatalogExposureActionFilter): string {
+function catalogExposureActionLabel(
+  action: CatalogExposureActionFilter,
+): string {
   return action === "include" ? "Expose" : "Hide";
 }
 
-function catalogExposureActionTone(action: CatalogExposureActionFilter): string {
-  if (action === "include") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+function catalogExposureActionTone(
+  action: CatalogExposureActionFilter,
+): string {
+  if (action === "include")
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
   return "border-rose-200 bg-rose-50 text-rose-800";
 }
 
 function catalogVisibilityReasonLabel(reason: string): string {
   if (reason === "exposed") return "Allowed by exposure rule";
   if (reason === "excluded_by_admin_rule") return "Hidden by exposure rule";
-  if (reason === "inactive_product_or_variant") return "Inactive product or variant";
+  if (reason === "inactive_product_or_variant")
+    return "Inactive product or variant";
   if (reason === "missing_include_rule") return "No exposure rule";
   return formatStatus(reason);
 }
@@ -9110,7 +13367,9 @@ function orderOpsStatusLabel(status: OrderOpsStatusFilter): string {
   return formatStatus(status);
 }
 
-function orderOpsCancellationStatusLabel(status: OrderOpsCancellationStatusFilter): string {
+function orderOpsCancellationStatusLabel(
+  status: OrderOpsCancellationStatusFilter,
+): string {
   if (status === "all") return "All cancellation states";
   return formatStatus(status);
 }
@@ -9125,14 +13384,20 @@ function orderActionMessage(
 ): string {
   if (action === "retry-wms-sync" && "retryQueued" in response) {
     if (response.outcome === "synced") {
-      const wmsOrderLabel = response.wmsOrderId ? ` WMS order ${response.wmsOrderId}` : " WMS";
+      const wmsOrderLabel = response.wmsOrderId
+        ? ` WMS order ${response.wmsOrderId}`
+        : " WMS";
       return `Order intake ${response.intakeId} synced to${wmsOrderLabel}.`;
     }
-    const suffix = response.failureMessage ? `: ${response.failureMessage}` : ".";
+    const suffix = response.failureMessage
+      ? `: ${response.failureMessage}`
+      : ".";
     return `Order intake ${response.intakeId} WMS sync retry queued${suffix}`;
   }
   if (action === "process" && "failureCode" in response) {
-    const suffix = response.failureCode ? ` (${formatStatus(response.failureCode)})` : "";
+    const suffix = response.failureCode
+      ? ` (${formatStatus(response.failureCode)})`
+      : "";
     return `Order intake ${response.intakeId} processing returned ${formatStatus(response.outcome)}${suffix}.`;
   }
   if (action === "retry-cancellation" && "cancellationStatus" in response) {
@@ -9144,11 +13409,17 @@ function orderActionMessage(
   return `Order intake ${response.intakeId} action completed.`;
 }
 
-function orderIntakeCanProcessNow(status: DropshipOpsOrderIntakeStatus): boolean {
-  return status === "received" || status === "retrying" || status === "payment_hold";
+function orderIntakeCanProcessNow(
+  status: DropshipOpsOrderIntakeStatus,
+): boolean {
+  return (
+    status === "received" || status === "retrying" || status === "payment_hold"
+  );
 }
 
-function orderIntakeCanRetryWmsSync(intake: DropshipAdminOrderOpsIntakeListItem): boolean {
+function orderIntakeCanRetryWmsSync(
+  intake: DropshipAdminOrderOpsIntakeListItem,
+): boolean {
   return intake.status === "accepted" && intake.omsOrderId !== null;
 }
 
@@ -9171,18 +13442,24 @@ function trackingPushStatusLabel(status: TrackingPushStatusFilter): string {
   return formatStatus(status);
 }
 
-function notificationOpsStatusLabel(status: NotificationOpsStatusFilter): string {
+function notificationOpsStatusLabel(
+  status: NotificationOpsStatusFilter,
+): string {
   if (status === "default") return "Needs attention";
   if (status === "all") return "All statuses";
   return formatStatus(status);
 }
 
-function notificationOpsChannelLabel(channel: NotificationOpsChannelFilter): string {
+function notificationOpsChannelLabel(
+  channel: NotificationOpsChannelFilter,
+): string {
   if (channel === "all") return "All channels";
   return formatStatus(channel);
 }
 
-function notificationOpsCriticalLabel(critical: NotificationOpsCriticalFilter): string {
+function notificationOpsCriticalLabel(
+  critical: NotificationOpsCriticalFilter,
+): string {
   if (critical === "critical") return "Critical only";
   if (critical === "noncritical") return "Non-critical only";
   return "All criticality";
@@ -9205,30 +13482,40 @@ function orderCancellationStatusCount(
   summary: DropshipAdminOrderOpsListResponse["cancellationSummary"],
   status: DropshipOrderCancellationStatus,
 ): number {
-  return summary.find((entry) => entry.cancellationStatus === status)?.count ?? 0;
+  return (
+    summary.find((entry) => entry.cancellationStatus === status)?.count ?? 0
+  );
 }
 
 function orderShipToLabel(intake: DropshipAdminOrderOpsIntakeListItem): string {
   const shipTo = intake.shipTo;
   if (!shipTo) return "None";
-  const locality = [shipTo.city, shipTo.region, shipTo.postalCode].filter(Boolean).join(", ");
+  const locality = [shipTo.city, shipTo.region, shipTo.postalCode]
+    .filter(Boolean)
+    .join(", ");
   return locality || shipTo.country || shipTo.name || "Available";
 }
 
-function buildReturnInspectionFormState(rma: DropshipReturnDetail): ReturnInspectionFormState {
+function buildReturnInspectionFormState(
+  rma: DropshipReturnDetail,
+): ReturnInspectionFormState {
   return {
     rmaId: rma.rmaId,
     outcome: rma.status === "rejected" ? "rejected" : "approved",
     faultCategory: rma.faultCategory ?? "card_shellz",
     notes: rma.inspections[0]?.notes ?? "",
     items: rma.items.map((item) => {
-      const finalCreditCents = item.finalCreditCents ?? item.requestedCreditCents ?? 0;
+      const finalCreditCents =
+        item.finalCreditCents ?? item.requestedCreditCents ?? 0;
       const feeCents = item.feeCents ?? 0;
       return {
         rmaItemId: item.rmaItemId,
         productVariantId: item.productVariantId,
         quantity: item.quantity,
-        status: item.finalCreditCents !== null || item.feeCents !== null ? item.status : "approved",
+        status:
+          item.finalCreditCents !== null || item.feeCents !== null
+            ? item.status
+            : "resellable",
         finalCreditAmount: centsToDollarInput(finalCreditCents),
         feeAmount: centsToDollarInput(feeCents),
       };
@@ -9245,15 +13532,19 @@ function returnInspectionFormTotals(form: ReturnInspectionFormState): {
     creditCents: number;
     feeCents: number;
     hasInvalidAmount: boolean;
-  }>((totals, item) => {
-    const creditCents = parseDollarInputForDisplay(item.finalCreditAmount);
-    const feeCents = parseDollarInputForDisplay(item.feeAmount);
-    return {
-      creditCents: totals.creditCents + (creditCents ?? 0),
-      feeCents: totals.feeCents + (feeCents ?? 0),
-      hasInvalidAmount: totals.hasInvalidAmount || creditCents === null || feeCents === null,
-    };
-  }, { creditCents: 0, feeCents: 0, hasInvalidAmount: false });
+  }>(
+    (totals, item) => {
+      const creditCents = parseDollarInputForDisplay(item.finalCreditAmount);
+      const feeCents = parseDollarInputForDisplay(item.feeAmount);
+      return {
+        creditCents: totals.creditCents + (creditCents ?? 0),
+        feeCents: totals.feeCents + (feeCents ?? 0),
+        hasInvalidAmount:
+          totals.hasInvalidAmount || creditCents === null || feeCents === null,
+      };
+    },
+    { creditCents: 0, feeCents: 0, hasInvalidAmount: false },
+  );
 }
 
 function parseDollarInputForDisplay(value: string): number | null {
@@ -9261,7 +13552,7 @@ function parseDollarInputForDisplay(value: string): number | null {
   if (!normalized) return 0;
   if (!/^\d+(\.\d{1,2})?$/.test(normalized)) return null;
   const [dollars, cents = ""] = normalized.split(".");
-  const result = (Number(dollars) * 100) + Number(cents.padEnd(2, "0"));
+  const result = Number(dollars) * 100 + Number(cents.padEnd(2, "0"));
   return Number.isSafeInteger(result) ? result : null;
 }
 
@@ -9276,27 +13567,45 @@ function orderIntakeStatusTone(status: DropshipOpsOrderIntakeStatus): string {
   if (status === "accepted" || status === "processing") {
     return "border-emerald-200 bg-emerald-50 text-emerald-800";
   }
-  if (status === "payment_hold" || status === "retrying" || status === "received") {
+  if (
+    status === "payment_hold" ||
+    status === "retrying" ||
+    status === "received"
+  ) {
     return "border-amber-200 bg-amber-50 text-amber-900";
   }
-  if (status === "failed" || status === "exception" || status === "rejected" || status === "cancelled") {
+  if (
+    status === "failed" ||
+    status === "exception" ||
+    status === "rejected" ||
+    status === "cancelled"
+  ) {
     return "border-rose-200 bg-rose-50 text-rose-800";
   }
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
 }
 
-function dogfoodReadinessStatusTone(status: DropshipDogfoodReadinessStatus): string {
-  if (status === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-800";
-  if (status === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
+function dogfoodReadinessStatusTone(
+  status: DropshipDogfoodReadinessStatus,
+): string {
+  if (status === "ready")
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (status === "warning")
+    return "border-amber-200 bg-amber-50 text-amber-900";
   return "border-rose-200 bg-rose-50 text-rose-800";
 }
 
-function systemReadinessCheckTone(status: DropshipSystemReadinessCheck["status"]): string {
-  if (status === "not_applicable") return "border-zinc-200 bg-zinc-50 text-zinc-700";
+function systemReadinessCheckTone(
+  status: DropshipSystemReadinessCheck["status"],
+): string {
+  if (status === "not_applicable")
+    return "border-zinc-200 bg-zinc-50 text-zinc-700";
   return dogfoodReadinessStatusTone(status);
 }
 
-function workerSweepMessageForResponse(response: DropshipAdminWorkerSweepResponse): string {
+function workerSweepMessageForResponse(
+  response: DropshipAdminWorkerSweepResponse,
+): string {
   const metrics = Object.entries(response.metrics)
     .filter(([, value]) => value !== 0)
     .map(([key, value]) => `${formatStatus(key)} ${value}`);
@@ -9305,24 +13614,36 @@ function workerSweepMessageForResponse(response: DropshipAdminWorkerSweepRespons
 }
 
 function workerSweepLabel(worker: DropshipAdminWorkerSweepName): string {
-  return adminWorkerSweepOptions.find((option) => option.worker === worker)?.label ?? formatStatus(worker);
+  return (
+    adminWorkerSweepOptions.find((option) => option.worker === worker)?.label ??
+    formatStatus(worker)
+  );
 }
 
-function omsChannelConfigLabel(config: DropshipOmsChannelConfigOverview | null): string {
+function omsChannelConfigLabel(
+  config: DropshipOmsChannelConfigOverview | null,
+): string {
   if (!config) return "Loading";
   if (config.currentChannelCount === 1) return "Ready";
   if (config.currentChannelCount > 1) return "Ambiguous";
   return "Missing";
 }
 
-function omsChannelConfigTone(config: DropshipOmsChannelConfigOverview | null): string {
+function omsChannelConfigTone(
+  config: DropshipOmsChannelConfigOverview | null,
+): string {
   if (!config) return "border-zinc-200 bg-zinc-50 text-zinc-700";
-  if (config.currentChannelCount === 1) return "border-emerald-200 bg-emerald-50 text-emerald-800";
-  if (config.currentChannelCount > 1) return "border-amber-200 bg-amber-50 text-amber-900";
+  if (config.currentChannelCount === 1)
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (config.currentChannelCount > 1)
+    return "border-amber-200 bg-amber-50 text-amber-900";
   return "border-rose-200 bg-rose-50 text-rose-800";
 }
 
-function systemReadinessTone(blockedCount: number, warningCount: number): string {
+function systemReadinessTone(
+  blockedCount: number,
+  warningCount: number,
+): string {
   if (blockedCount > 0) return "border-rose-200 bg-rose-50 text-rose-800";
   if (warningCount > 0) return "border-amber-200 bg-amber-50 text-amber-900";
   return "border-emerald-200 bg-emerald-50 text-emerald-800";
@@ -9354,7 +13675,9 @@ function trackingPushStatusTone(status: DropshipTrackingPushStatus): string {
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
 }
 
-function notificationOpsStatusTone(status: DropshipNotificationOpsStatus): string {
+function notificationOpsStatusTone(
+  status: DropshipNotificationOpsStatus,
+): string {
   if (status === "delivered") {
     return "border-emerald-200 bg-emerald-50 text-emerald-800";
   }
@@ -9371,7 +13694,11 @@ function returnOpsStatusTone(status: DropshipRmaStatus): string {
   if (status === "credited" || status === "closed") {
     return "border-emerald-200 bg-emerald-50 text-emerald-800";
   }
-  if (status === "approved" || status === "received" || status === "inspecting") {
+  if (
+    status === "approved" ||
+    status === "received" ||
+    status === "inspecting"
+  ) {
     return "border-amber-200 bg-amber-50 text-amber-900";
   }
   if (status === "rejected") {
@@ -9390,7 +13717,9 @@ interface StoreConnectionJourneyItem {
   state: StoreConnectionJourneyState;
 }
 
-function buildStoreConnectionSummary(connections: DropshipAdminStoreConnectionListItem[]): {
+function buildStoreConnectionSummary(
+  connections: DropshipAdminStoreConnectionListItem[],
+): {
   ready: number;
   setupIncomplete: number;
   authAttention: number;
@@ -9398,42 +13727,90 @@ function buildStoreConnectionSummary(connections: DropshipAdminStoreConnectionLi
 } {
   return {
     ready: connections.filter((connection) => connection.launchReady).length,
-    setupIncomplete: connections.filter((connection) => !connection.launchReady && !storeConnectionIsDisabled(connection)).length,
-    authAttention: connections.filter((connection) => !storeConnectionIsDisabled(connection) && storeConnectionNeedsAuthAttention(connection)).length,
-    disabled: connections.filter((connection) => storeConnectionIsDisabled(connection)).length,
+    setupIncomplete: connections.filter(
+      (connection) =>
+        !connection.launchReady && !storeConnectionIsDisabled(connection),
+    ).length,
+    authAttention: connections.filter(
+      (connection) =>
+        !storeConnectionIsDisabled(connection) &&
+        storeConnectionNeedsAuthAttention(connection),
+    ).length,
+    disabled: connections.filter((connection) =>
+      storeConnectionIsDisabled(connection),
+    ).length,
   };
 }
 
-function storeConnectionIsDisabled(connection: DropshipAdminStoreConnectionListItem): boolean {
-  return connection.status === "grace_period"
-    || connection.status === "paused"
-    || connection.status === "disconnected";
+function storeConnectionIsDisabled(
+  connection: DropshipAdminStoreConnectionListItem,
+): boolean {
+  return (
+    connection.status === "grace_period" ||
+    connection.status === "paused" ||
+    connection.status === "disconnected"
+  );
 }
 
-function storeConnectionNeedsAuthAttention(connection: DropshipAdminStoreConnectionListItem): boolean {
-  return connection.status === "needs_reauth"
-    || connection.status === "refresh_failed"
-    || !connection.hasAccessToken
-    || (connection.platform === "ebay" && !connection.hasRefreshToken);
+function storeConnectionNeedsAuthAttention(
+  connection: DropshipAdminStoreConnectionListItem,
+): boolean {
+  return (
+    connection.status === "needs_reauth" ||
+    connection.status === "refresh_failed" ||
+    !connection.hasAccessToken ||
+    (connection.platform === "ebay" && !connection.hasRefreshToken)
+  );
 }
 
-function buildStoreConnectionAuthJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+function buildStoreConnectionAuthJourney(
+  connection: DropshipAdminStoreConnectionListItem,
+): StoreConnectionJourneyItem {
   if (storeConnectionIsDisabled(connection)) {
-    return { key: "auth", label: "Auth", value: "Disabled", detail: "Authorization removed", state: "disabled" };
+    return {
+      key: "auth",
+      label: "Auth",
+      value: "Disabled",
+      detail: "Authorization removed",
+      state: "disabled",
+    };
   }
-  if (connection.status === "needs_reauth" || connection.status === "refresh_failed") {
-    return { key: "auth", label: "Auth", value: "Reconnect", detail: formatStatus(connection.status), state: "blocked" };
+  if (
+    connection.status === "needs_reauth" ||
+    connection.status === "refresh_failed"
+  ) {
+    return {
+      key: "auth",
+      label: "Auth",
+      value: "Reconnect",
+      detail: formatStatus(connection.status),
+      state: "blocked",
+    };
   }
   if (!connection.hasAccessToken) {
-    return { key: "auth", label: "Auth", value: "Missing", detail: "Reconnect required", state: "blocked" };
+    return {
+      key: "auth",
+      label: "Auth",
+      value: "Missing",
+      detail: "Reconnect required",
+      state: "blocked",
+    };
   }
   if (connection.platform === "ebay" && !connection.hasRefreshToken) {
-    return { key: "auth", label: "Auth", value: "Missing", detail: "Reconnect required", state: "blocked" };
+    return {
+      key: "auth",
+      label: "Auth",
+      value: "Missing",
+      detail: "Reconnect required",
+      state: "blocked",
+    };
   }
   return { key: "auth", label: "Auth", value: "Authorized", state: "ready" };
 }
 
-function buildStoreConnectionSetupJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+function buildStoreConnectionSetupJourney(
+  connection: DropshipAdminStoreConnectionListItem,
+): StoreConnectionJourneyItem {
   if (connection.setupCheckSummary.errorCount > 0) {
     return {
       key: "setup",
@@ -9455,28 +13832,63 @@ function buildStoreConnectionSetupJourney(connection: DropshipAdminStoreConnecti
   if (connection.setupStatus === "ready") {
     return { key: "setup", label: "Setup", value: "Ready", state: "ready" };
   }
-  return { key: "setup", label: "Setup", value: formatStatus(connection.setupStatus), state: "warning" };
+  return {
+    key: "setup",
+    label: "Setup",
+    value: formatStatus(connection.setupStatus),
+    state: "warning",
+  };
 }
 
-function buildStoreConnectionWarehouseJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+function buildStoreConnectionWarehouseJourney(
+  connection: DropshipAdminStoreConnectionListItem,
+): StoreConnectionJourneyItem {
   if (connection.orderProcessingConfig.defaultWarehouseId !== null) {
-    return { key: "warehouse", label: "Warehouse", value: "Set", state: "ready" };
+    return {
+      key: "warehouse",
+      label: "Warehouse",
+      value: "Set",
+      state: "ready",
+    };
   }
-  return { key: "warehouse", label: "Warehouse", value: "Missing", detail: "Order routing not assigned", state: "blocked" };
+  return {
+    key: "warehouse",
+    label: "Warehouse",
+    value: "Missing",
+    detail: "Order routing not assigned",
+    state: "blocked",
+  };
 }
 
-function buildStoreConnectionListingJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+function buildStoreConnectionListingJourney(
+  connection: DropshipAdminStoreConnectionListItem,
+): StoreConnectionJourneyItem {
   if (!connection.listingConfig.isConfigured) {
-    return { key: "listing", label: "Listing", value: "Missing", detail: "Push policy not configured", state: "blocked" };
+    return {
+      key: "listing",
+      label: "Listing",
+      value: "Missing",
+      detail: "Push policy not configured",
+      state: "blocked",
+    };
   }
   if (!connection.listingConfig.isActive) {
-    return { key: "listing", label: "Listing", value: "Inactive", detail: "Pushes disabled", state: "warning" };
+    return {
+      key: "listing",
+      label: "Listing",
+      value: "Inactive",
+      detail: "Pushes disabled",
+      state: "warning",
+    };
   }
   return { key: "listing", label: "Listing", value: "Ready", state: "ready" };
 }
 
-function storeConnectionJourneyTone(state: StoreConnectionJourneyState): string {
-  if (state === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-900";
+function storeConnectionJourneyTone(
+  state: StoreConnectionJourneyState,
+): string {
+  if (state === "ready")
+    return "border-emerald-200 bg-emerald-50 text-emerald-900";
   if (state === "warning") return "border-amber-200 bg-amber-50 text-amber-950";
   if (state === "blocked") return "border-rose-200 bg-rose-50 text-rose-900";
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
@@ -9491,9 +13903,14 @@ function subscriptionStatusLabel(status: string): string {
 }
 
 function subscriptionStatusTone(status: string): string {
-  if (status === "active") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (status === "active")
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
   if (status === "grace") return "border-amber-200 bg-amber-50 text-amber-900";
-  if (status === "suspended" || status === "lapsed" || status === "not_entitled") {
+  if (
+    status === "suspended" ||
+    status === "lapsed" ||
+    status === "not_entitled"
+  ) {
     return "border-rose-200 bg-rose-50 text-rose-800";
   }
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
@@ -9504,13 +13921,17 @@ function formatWarehouseOption(warehouse: DropshipWarehouseOption): string {
   return `${warehouse.name} (${warehouse.code}) - ID ${warehouse.id}${defaultSuffix}`;
 }
 
-function buildVendorSelectOptions(items: DropshipDogfoodReadinessItem[]): DropshipSelectOption[] {
+function buildVendorSelectOptions(
+  items: DropshipDogfoodReadinessItem[],
+): DropshipSelectOption[] {
   const vendors = new Map<number, DropshipDogfoodReadinessItem["vendor"]>();
   for (const item of items) {
     vendors.set(item.vendor.vendorId, item.vendor);
   }
   return Array.from(vendors.values())
-    .sort((first, second) => vendorDisplayName(first).localeCompare(vendorDisplayName(second)))
+    .sort((first, second) =>
+      vendorDisplayName(first).localeCompare(vendorDisplayName(second)),
+    )
     .map((vendor) => ({
       value: String(vendor.vendorId),
       label: vendorDisplayName(vendor),
@@ -9519,7 +13940,9 @@ function buildVendorSelectOptions(items: DropshipDogfoodReadinessItem[]): Dropsh
         vendor.memberId,
         formatStatus(vendor.status),
         formatStatus(vendor.entitlementStatus),
-      ].filter(Boolean).join(" / "),
+      ]
+        .filter(Boolean)
+        .join(" / "),
       search: [
         vendor.vendorId,
         vendor.businessName,
@@ -9527,32 +13950,52 @@ function buildVendorSelectOptions(items: DropshipDogfoodReadinessItem[]): Dropsh
         vendor.memberId,
         vendor.status,
         vendor.entitlementStatus,
-      ].filter(Boolean).join(" "),
+      ]
+        .filter(Boolean)
+        .join(" "),
     }));
 }
 
-function vendorDisplayName(vendor: DropshipDogfoodReadinessItem["vendor"] | DropshipAdminOrderOpsVendorSummary): string {
+function vendorDisplayName(
+  vendor:
+    DropshipDogfoodReadinessItem["vendor"] | DropshipAdminOrderOpsVendorSummary,
+): string {
   return vendor.businessName || vendor.email || `Vendor ${vendor.vendorId}`;
 }
 
-function storeConnectionDisplayName(connection: DropshipAdminStoreConnectionListItem | DropshipAdminOrderOpsStoreSummary): string {
-  return connection.externalDisplayName
-    || connection.shopDomain
-    || `${formatStatus(connection.platform)} store`;
+function storeConnectionDisplayName(
+  connection:
+    DropshipAdminStoreConnectionListItem | DropshipAdminOrderOpsStoreSummary,
+): string {
+  return (
+    connection.externalDisplayName ||
+    connection.shopDomain ||
+    `${formatStatus(connection.platform)} store`
+  );
 }
 
-function storeConnectionOwnerLabel(connection: DropshipAdminStoreConnectionListItem): string {
-  return connection.vendor.businessName || connection.vendor.email || `Vendor ${connection.vendor.vendorId}`;
+function storeConnectionOwnerLabel(
+  connection: DropshipAdminStoreConnectionListItem,
+): string {
+  return (
+    connection.vendor.businessName ||
+    connection.vendor.email ||
+    `Vendor ${connection.vendor.vendorId}`
+  );
 }
 
-function storeConnectionOwnerDetail(connection: DropshipAdminStoreConnectionListItem): string {
+function storeConnectionOwnerDetail(
+  connection: DropshipAdminStoreConnectionListItem,
+): string {
   if (connection.vendor.businessName && connection.vendor.email) {
     return connection.vendor.email;
   }
   return "";
 }
 
-function storeConnectionSelectOption(connection: DropshipAdminStoreConnectionListItem): DropshipSelectOption {
+function storeConnectionSelectOption(
+  connection: DropshipAdminStoreConnectionListItem,
+): DropshipSelectOption {
   const storeLabel = storeConnectionDisplayName(connection);
   const vendorLabel = vendorDisplayName(connection.vendor);
   return {
@@ -9575,12 +14018,19 @@ function storeConnectionSelectOption(connection: DropshipAdminStoreConnectionLis
       connection.vendor.email,
       connection.vendor.memberId,
       connection.vendor.vendorId,
-    ].filter(Boolean).join(" "),
+    ]
+      .filter(Boolean)
+      .join(" "),
   };
 }
 
-function orderIntakeSelectOption(intake: DropshipAdminOrderOpsIntakeListItem): DropshipSelectOption {
-  const orderLabel = intake.externalOrderNumber || intake.externalOrderId || `Intake ${intake.intakeId}`;
+function orderIntakeSelectOption(
+  intake: DropshipAdminOrderOpsIntakeListItem,
+): DropshipSelectOption {
+  const orderLabel =
+    intake.externalOrderNumber ||
+    intake.externalOrderId ||
+    `Intake ${intake.intakeId}`;
   const storeLabel = storeConnectionDisplayName(intake.storeConnection);
   const vendorLabel = vendorDisplayName(intake.vendor);
   return {
@@ -9592,7 +14042,9 @@ function orderIntakeSelectOption(intake: DropshipAdminOrderOpsIntakeListItem): D
       storeLabel,
       intake.omsOrderId === null ? "" : `OMS ${intake.omsOrderId}`,
       formatStatus(intake.status),
-    ].filter(Boolean).join(" / "),
+    ]
+      .filter(Boolean)
+      .join(" / "),
     search: [
       intake.intakeId,
       intake.omsOrderId,
@@ -9605,11 +14057,15 @@ function orderIntakeSelectOption(intake: DropshipAdminOrderOpsIntakeListItem): D
       intake.vendor.memberId,
       storeLabel,
       intake.storeConnection.storeConnectionId,
-    ].filter(Boolean).join(" "),
+    ]
+      .filter(Boolean)
+      .join(" "),
   };
 }
 
-function buildOmsOrderSelectOptions(intakes: DropshipAdminOrderOpsIntakeListItem[]): DropshipSelectOption[] {
+function buildOmsOrderSelectOptions(
+  intakes: DropshipAdminOrderOpsIntakeListItem[],
+): DropshipSelectOption[] {
   const options = new Map<number, DropshipSelectOption>();
   for (const intake of intakes) {
     if (intake.omsOrderId === null) continue;
@@ -9621,7 +14077,9 @@ function buildOmsOrderSelectOptions(intakes: DropshipAdminOrderOpsIntakeListItem
       search: `${intake.omsOrderId} ${intakeOption.search}`,
     });
   }
-  return Array.from(options.values()).sort((first, second) => Number(second.value) - Number(first.value));
+  return Array.from(options.values()).sort(
+    (first, second) => Number(second.value) - Number(first.value),
+  );
 }
 
 function truncateMiddle(value: string, maxLength: number): string {
@@ -9634,7 +14092,9 @@ function formatVariantOption(variant: DropshipProductVariantOption): string {
   return `${variant.sku || `Variant ${variant.id}`} - ${variant.name}`;
 }
 
-function variantOptionSearchValue(variant: DropshipProductVariantOption): string {
+function variantOptionSearchValue(
+  variant: DropshipProductVariantOption,
+): string {
   return `${variant.sku ?? ""} ${variant.name} ${variant.id}`;
 }
 
@@ -9668,32 +14128,42 @@ function formatMmAsInches(value: number): string {
   return formatMeasurement(value / 25.4);
 }
 
-function hasCompleteVariantPackageData(variant: DropshipProductVariantOption | null): variant is DropshipProductVariantOption & {
+function hasCompleteVariantPackageData(
+  variant: DropshipProductVariantOption | null,
+): variant is DropshipProductVariantOption & {
   weightGrams: number;
   lengthMm: number;
   widthMm: number;
   heightMm: number;
 } {
   if (!variant) return false;
-  return [variant.weightGrams, variant.lengthMm, variant.widthMm, variant.heightMm]
-    .every((value) => Number.isInteger(value) && Number(value) > 0);
+  return [
+    variant.weightGrams,
+    variant.lengthMm,
+    variant.widthMm,
+    variant.heightMm,
+  ].every((value) => Number.isInteger(value) && Number(value) > 0);
 }
 
-function formatVariantPackageData(variant: DropshipProductVariantOption & {
-  weightGrams: number;
-  lengthMm: number;
-  widthMm: number;
-  heightMm: number;
-}): string {
+function formatVariantPackageData(
+  variant: DropshipProductVariantOption & {
+    weightGrams: number;
+    lengthMm: number;
+    widthMm: number;
+    heightMm: number;
+  },
+): string {
   return `${formatGramsAsPounds(variant.weightGrams)} lb / ${formatMmAsInches(variant.lengthMm)} x ${formatMmAsInches(variant.widthMm)} x ${formatMmAsInches(variant.heightMm)} in`;
 }
 
-function formatPackageProfileData(profile: DropshipShippingConfigOverview["packageProfiles"][number]): string {
+function formatPackageProfileData(
+  profile: DropshipShippingConfigOverview["packageProfiles"][number],
+): string {
   if (
-    profile.weightGrams === null
-    || profile.lengthMm === null
-    || profile.widthMm === null
-    || profile.heightMm === null
+    profile.weightGrams === null ||
+    profile.lengthMm === null ||
+    profile.widthMm === null ||
+    profile.heightMm === null
   ) {
     return "Missing catalog package data";
   }
@@ -9708,9 +14178,16 @@ function formatMeasurement(value: number): string {
   return value.toFixed(2).replace(/\.?0+$/, "");
 }
 
-function storeConnectionStatusTone(status: DropshipStoreConnectionLifecycleStatus): string {
-  if (status === "connected") return "border-emerald-200 bg-emerald-50 text-emerald-800";
-  if (status === "needs_reauth" || status === "refresh_failed" || status === "grace_period") {
+function storeConnectionStatusTone(
+  status: DropshipStoreConnectionLifecycleStatus,
+): string {
+  if (status === "connected")
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (
+    status === "needs_reauth" ||
+    status === "refresh_failed" ||
+    status === "grace_period"
+  ) {
     return "border-rose-200 bg-rose-50 text-rose-800";
   }
   if (status === "paused") return "border-amber-200 bg-amber-50 text-amber-900";
@@ -9724,7 +14201,9 @@ function OverviewTab({ overview }: { overview: DropshipAdminOpsOverview }) {
         <MetricTile
           icon={<Store className="h-4 w-4" />}
           label="Store connections needing attention"
-          value={String(riskCount(overview.riskBuckets, "store_connections_attention"))}
+          value={String(
+            riskCount(overview.riskBuckets, "store_connections_attention"),
+          )}
         />
         <MetricTile
           icon={<Wallet className="h-4 w-4" />}
@@ -9734,17 +14213,26 @@ function OverviewTab({ overview }: { overview: DropshipAdminOpsOverview }) {
         <MetricTile
           icon={<Truck className="h-4 w-4" />}
           label="Tracking push failures"
-          value={String(riskCount(overview.riskBuckets, "tracking_push_failures"))}
+          value={String(
+            riskCount(overview.riskBuckets, "tracking_push_failures"),
+          )}
         />
         <MetricTile
           icon={<Bell className="h-4 w-4" />}
           label="Notification failures"
-          value={String(riskCount(overview.riskBuckets, "notification_delivery_failures"))}
+          value={String(
+            riskCount(overview.riskBuckets, "notification_delivery_failures"),
+          )}
         />
         <MetricTile
           icon={<RotateCcw className="h-4 w-4" />}
           label="Cancellation failures"
-          value={String(riskCount(overview.riskBuckets, "marketplace_cancellation_failures"))}
+          value={String(
+            riskCount(
+              overview.riskBuckets,
+              "marketplace_cancellation_failures",
+            ),
+          )}
         />
       </div>
 
@@ -9753,10 +14241,16 @@ function OverviewTab({ overview }: { overview: DropshipAdminOpsOverview }) {
           <div className="flex items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold">Risk buckets</h2>
-              <p className="text-sm text-muted-foreground">Launch-critical blockers and exceptions</p>
+              <p className="text-sm text-muted-foreground">
+                Launch-critical blockers and exceptions
+              </p>
             </div>
             <Badge variant="outline">
-              {overview.riskBuckets.reduce((sum, bucket) => sum + bucket.count, 0)} open
+              {overview.riskBuckets.reduce(
+                (sum, bucket) => sum + bucket.count,
+                0,
+              )}{" "}
+              open
             </Badge>
           </div>
           <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -9769,17 +14263,51 @@ function OverviewTab({ overview }: { overview: DropshipAdminOpsOverview }) {
         <section className="rounded-md border bg-card p-4">
           <div>
             <h2 className="text-lg font-semibold">Status counts</h2>
-            <p className="text-sm text-muted-foreground">Current state by dropship subsystem</p>
+            <p className="text-sm text-muted-foreground">
+              Current state by dropship subsystem
+            </p>
           </div>
           <div className="mt-4 grid gap-3">
-            <StatusCountGroup title="Vendors" counts={overview.vendorStatusCounts} icon={<ShieldAlert className="h-4 w-4" />} />
-            <StatusCountGroup title="Store connections" counts={overview.storeConnectionStatusCounts} icon={<Store className="h-4 w-4" />} />
-            <StatusCountGroup title="Order intake" counts={overview.orderIntakeStatusCounts} icon={<ClipboardList className="h-4 w-4" />} />
-            <StatusCountGroup title="Marketplace cancellations" counts={overview.orderCancellationStatusCounts} icon={<RotateCcw className="h-4 w-4" />} />
-            <StatusCountGroup title="Listing push jobs" counts={overview.listingPushJobStatusCounts} icon={<RefreshCw className="h-4 w-4" />} />
-            <StatusCountGroup title="Tracking pushes" counts={overview.trackingPushStatusCounts} icon={<Truck className="h-4 w-4" />} />
-            <StatusCountGroup title="Returns" counts={overview.rmaStatusCounts} icon={<RotateCcw className="h-4 w-4" />} />
-            <StatusCountGroup title="Notifications" counts={overview.notificationStatusCounts} icon={<Bell className="h-4 w-4" />} />
+            <StatusCountGroup
+              title="Vendors"
+              counts={overview.vendorStatusCounts}
+              icon={<ShieldAlert className="h-4 w-4" />}
+            />
+            <StatusCountGroup
+              title="Store connections"
+              counts={overview.storeConnectionStatusCounts}
+              icon={<Store className="h-4 w-4" />}
+            />
+            <StatusCountGroup
+              title="Order intake"
+              counts={overview.orderIntakeStatusCounts}
+              icon={<ClipboardList className="h-4 w-4" />}
+            />
+            <StatusCountGroup
+              title="Marketplace cancellations"
+              counts={overview.orderCancellationStatusCounts}
+              icon={<RotateCcw className="h-4 w-4" />}
+            />
+            <StatusCountGroup
+              title="Listing push jobs"
+              counts={overview.listingPushJobStatusCounts}
+              icon={<RefreshCw className="h-4 w-4" />}
+            />
+            <StatusCountGroup
+              title="Tracking pushes"
+              counts={overview.trackingPushStatusCounts}
+              icon={<Truck className="h-4 w-4" />}
+            />
+            <StatusCountGroup
+              title="Returns"
+              counts={overview.rmaStatusCounts}
+              icon={<RotateCcw className="h-4 w-4" />}
+            />
+            <StatusCountGroup
+              title="Notifications"
+              counts={overview.notificationStatusCounts}
+              icon={<Bell className="h-4 w-4" />}
+            />
           </div>
         </section>
       </div>
@@ -9788,11 +14316,18 @@ function OverviewTab({ overview }: { overview: DropshipAdminOpsOverview }) {
         <div className="flex items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold">Recent audit events</h2>
-            <p className="text-sm text-muted-foreground">Latest dropship operational trail</p>
+            <p className="text-sm text-muted-foreground">
+              Latest dropship operational trail
+            </p>
           </div>
           <History className="h-5 w-5 text-muted-foreground" />
         </div>
-        <AuditEventsTable events={overview.recentAuditEvents} isLoading={false} total={overview.recentAuditEvents.length} compact />
+        <AuditEventsTable
+          events={overview.recentAuditEvents}
+          isLoading={false}
+          total={overview.recentAuditEvents.length}
+          compact
+        />
       </section>
     </>
   );
@@ -9824,7 +14359,9 @@ function RiskBucketCard({ bucket }: { bucket: DropshipOpsRiskBucket }) {
       <div className="flex items-start justify-between gap-3">
         <div>
           <h3 className="font-semibold">{bucket.label}</h3>
-          <p className="mt-1 text-sm text-muted-foreground">{formatStatus(bucket.severity)} severity</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {formatStatus(bucket.severity)} severity
+          </p>
         </div>
         <Badge variant="outline" className={riskSeverityTone(bucket.severity)}>
           {bucket.count}
@@ -9887,13 +14424,20 @@ function AuditEventsTable({
   }
 
   if (events.length === 0) {
-    return <EmptyState title="No audit events" description="No matching dropship audit events were found." />;
+    return (
+      <EmptyState
+        title="No audit events"
+        description="No matching dropship audit events were found."
+      />
+    );
   }
 
   return (
     <div className="mt-4 rounded-md border">
       <div className="flex items-center justify-between border-b px-3 py-2 text-sm text-muted-foreground">
-        <span>{total} event{total === 1 ? "" : "s"}</span>
+        <span>
+          {total} event{total === 1 ? "" : "s"}
+        </span>
       </div>
       <Table>
         <TableHeader>
@@ -9912,21 +14456,39 @@ function AuditEventsTable({
                 {formatDateTime(event.createdAt)}
               </TableCell>
               <TableCell>
-                <div className="font-medium">{formatStatus(event.eventType)}</div>
-                <div className="text-xs text-muted-foreground">{event.actorType}{event.actorId ? `: ${event.actorId}` : ""}</div>
+                <div className="font-medium">
+                  {formatStatus(event.eventType)}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {event.actorType}
+                  {event.actorId ? `: ${event.actorId}` : ""}
+                </div>
               </TableCell>
               <TableCell>
-                <div className="font-medium">{event.vendorBusinessName || event.vendorEmail || "System"}</div>
-                {event.storeDisplayName && <div className="text-xs text-muted-foreground">{event.storeDisplayName}</div>}
+                <div className="font-medium">
+                  {event.vendorBusinessName || event.vendorEmail || "System"}
+                </div>
+                {event.storeDisplayName && (
+                  <div className="text-xs text-muted-foreground">
+                    {event.storeDisplayName}
+                  </div>
+                )}
               </TableCell>
               {!compact && (
                 <TableCell>
-                  <div className="font-medium">{formatStatus(event.entityType)}</div>
-                  <div className="max-w-[220px] truncate text-xs text-muted-foreground">{event.entityId || "None"}</div>
+                  <div className="font-medium">
+                    {formatStatus(event.entityType)}
+                  </div>
+                  <div className="max-w-[220px] truncate text-xs text-muted-foreground">
+                    {event.entityId || "None"}
+                  </div>
                 </TableCell>
               )}
               <TableCell>
-                <Badge variant="outline" className={riskSeverityTone(event.severity)}>
+                <Badge
+                  variant="outline"
+                  className={riskSeverityTone(event.severity)}
+                >
                   {formatStatus(event.severity)}
                 </Badge>
               </TableCell>
@@ -9938,7 +14500,13 @@ function AuditEventsTable({
   );
 }
 
-function EmptyState({ description, title }: { description: string; title: string }) {
+function EmptyState({
+  description,
+  title,
+}: {
+  description: string;
+  title: string;
+}) {
   return (
     <Empty className="mt-4 rounded-md border border-dashed">
       <EmptyMedia variant="icon">
@@ -9976,5 +14544,7 @@ function riskCount(buckets: DropshipOpsRiskBucket[], key: string): number {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Dropship ops request failed.";
+  return error instanceof Error
+    ? error.message
+    : "Dropship ops request failed.";
 }

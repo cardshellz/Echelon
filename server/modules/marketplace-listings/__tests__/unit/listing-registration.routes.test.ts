@@ -107,6 +107,41 @@ describe("marketplace listing registration routes", () => {
     });
   });
 
+  it("builds a server-owned Channel verified-state command", async () => {
+    const response = await jsonRequest(
+      server.url + "/api/marketplace-listings/registrations/channel/ebay/verify",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channelId: 44,
+          productId: 88,
+          marketplaceId: "EBAY_US",
+          externalListingId: "36412213011",
+          providerPublicationKey: null,
+          expectedObservationHash: "a".repeat(64),
+          expectedIncludedVariantIds: [501, 502],
+          idempotencyKey: "verify-channel-44-product-88",
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.result).toMatchObject({ kind: "verified" });
+    expect(resolver.service.verifyInput).toMatchObject({
+      owner: {
+        kind: "channel",
+        channelId: 44,
+        productId: 88,
+        provider: "ebay",
+        marketplaceId: "EBAY_US",
+      },
+      expectedObservationHash: "a".repeat(64),
+      expectedIncludedVariantIds: [501, 502],
+      requestedBy: { type: "user", id: "admin-1" },
+    });
+  });
+
   it("loads persisted Channel registrations for multiple products in one service call", async () => {
     const response = await jsonRequest(
       server.url
@@ -290,6 +325,7 @@ class FakeRegistrationService {
   previewInput: unknown = null;
   confirmInput: unknown = null;
   statusOwners: unknown = null;
+  verifyInput: unknown = null;
   confirmError: Error | null = null;
 
   async preview(input: unknown): Promise<any> {
@@ -308,6 +344,16 @@ class FakeRegistrationService {
         providerAccountId: 3,
         publicationId: 4,
       },
+    };
+  }
+
+  async verifyExisting(input: unknown): Promise<any> {
+    this.verifyInput = input;
+    return {
+      kind: "verified",
+      publicationId: 4,
+      externalListingId: "36412213011",
+      verifiedAt: new Date("2026-08-08T12:00:00.000Z"),
     };
   }
 

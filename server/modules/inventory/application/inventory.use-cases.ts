@@ -8,13 +8,34 @@ import type { InventoryLevel, InsertInventoryTransaction, InventoryTransaction }
 import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { IntegrityError, ValidationError } from "../../../../shared/errors";
 import { resolveCost } from "../cost-resolver";
-import { centsToMills } from "../../../../shared/utils/money";
+import { centsToMills, millsToCents } from "../../../../shared/utils/money";
 import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-item-commands";
 
 export class FreezeViolationError extends Error {
   code = "LOCATION_FROZEN";
   constructor(locationId: number) {
     super(`Location ${locationId} is frozen for cycle counting — mutation blocked`);
+  }
+}
+
+/**
+ * Raised when a receipt reversal cannot post because the lot/location on-hand
+ * is already consumed or sold. The caller decides whether to surface this as
+ * a block (default) or retry with the audited allowNegative override.
+ */
+export class InsufficientOnHandForReversalError extends IntegrityError {
+  constructor(context: {
+    receivingLineId: number;
+    qty: number;
+    available: number;
+  }) {
+    super(
+      `Insufficient on-hand to reverse ${context.qty} unit(s) for receiving line ` +
+        `${context.receivingLineId}: only ${context.available} available (quantity already ` +
+        `consumed or sold). Pass allowNegative to override.`,
+      { ...context, code: "REVERSAL_INSUFFICIENT_ON_HAND" },
+    );
+    this.code = "REVERSAL_INSUFFICIENT_ON_HAND";
   }
 }
 
@@ -231,6 +252,185 @@ export class InventoryUseCases {
     }
 
     this.triggerNotifyChange(params.productVariantId, "receive");
+  }
+
+  // ---------------------------------------------------------------------------
+  // REVERSE RECEIPT (Spec D — compensating decrement for a posted receipt)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Reverse the inventory effects of a posted receiving line:
+   *   1. Decrement the lot(s) created by that line at their ORIGINAL cost
+   *      (exact mills round-trip — never re-costed).
+   *   2. Decrement the location level by the variant qty.
+   *   3. Write a 'receipt_reversal' ledger row referencing the reversal.
+   *
+   * Ownership: this is the ONLY writer path for receipt reversals into
+   * inventory.inventory_lots / inventory_levels / inventory_transactions
+   * (writer-ratchet P2.1 — procurement calls this public API, never the
+   * tables directly).
+   *
+   * Insufficient on-hand throws InsufficientOnHandForReversalError unless
+   * allowNegative is set (elevated-permission override; the caller audits it
+   * on the reversal row).
+   *
+   * Returns the original lot unit cost (mills, per variant unit) so the
+   * caller can snapshot it on the reversal record, or null when no lot was
+   * found (legacy receipts predating lot tracking).
+   */
+  async reverseReceiptInventory(params: {
+    receivingLineId: number;
+    receivingOrderId: number;
+    productVariantId: number;
+    warehouseLocationId: number | null;
+    qty: number;
+    reversalId: number;
+    reason: string;
+    userId?: string | null;
+    allowNegative?: boolean;
+  }, externalTx?: any): Promise<{ lotUnitCostMills: number | null }> {
+    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) {
+      throw new ValidationError("qty must be a positive integer");
+    }
+    const allowNegative = params.allowNegative === true;
+
+    const doWork = async (tx: any): Promise<{ lotUnitCostMills: number | null }> => {
+      if (params.warehouseLocationId !== null) {
+        await this.assertNotFrozen(params.warehouseLocationId, tx);
+      }
+
+      // 1. Lots created by this receiving line (resolved through the ledger —
+      //    the receipt transaction row carries the exact lot linkage).
+      const lotRows = await tx.execute(sql`
+        SELECT l.id, l.qty_on_hand, l.unit_cost_mills
+        FROM inventory.inventory_lots l
+        JOIN inventory.inventory_transactions t
+          ON t.inventory_lot_id = l.id
+        WHERE t.receiving_line_id = ${params.receivingLineId}
+          AND t.transaction_type = 'receipt'
+          AND t.voided_at IS NULL
+        ORDER BY l.id
+        FOR UPDATE OF l
+      `);
+
+      let lotUnitCostMills: number | null = null;
+      if (lotRows.rows.length > 0) {
+        // Pre-check total availability BEFORE any mutation (Rule #7: the
+        // transaction would roll back anyway, but failing fast keeps the
+        // error deterministic and avoids lock churn).
+        if (!allowNegative) {
+          const totalOnHand = lotRows.rows.reduce(
+            (sum: number, lot: any) => sum + Math.max(0, Number(lot.qty_on_hand) || 0),
+            0,
+          );
+          if (totalOnHand < params.qty) {
+            throw new InsufficientOnHandForReversalError({
+              receivingLineId: params.receivingLineId,
+              qty: params.qty,
+              available: totalOnHand,
+            });
+          }
+        }
+
+        let remainingToReverse = params.qty;
+        for (const lot of lotRows.rows) {
+          if (remainingToReverse <= 0) break;
+          const lotId = Number(lot.id);
+          const onHand = Number(lot.qty_on_hand) || 0;
+          const decrement = Math.min(
+            remainingToReverse,
+            allowNegative ? remainingToReverse : onHand,
+          );
+          if (decrement <= 0) continue;
+
+          if (lotUnitCostMills === null && lot.unit_cost_mills !== null) {
+            lotUnitCostMills = Number(lot.unit_cost_mills);
+          }
+
+          const updated = await tx.execute(sql`
+            UPDATE inventory.inventory_lots
+            SET qty_on_hand = qty_on_hand - ${decrement},
+                status = CASE
+                  WHEN qty_on_hand - ${decrement} <= 0 THEN 'depleted'::varchar
+                  ELSE status
+                END
+            WHERE id = ${lotId}
+            RETURNING qty_on_hand
+          `);
+          const newOnHand = Number(updated.rows?.[0]?.qty_on_hand);
+          if (newOnHand < 0 && !allowNegative) {
+            throw new InsufficientOnHandForReversalError({
+              receivingLineId: params.receivingLineId,
+              qty: params.qty,
+              available: onHand,
+            });
+          }
+          remainingToReverse -= decrement;
+        }
+      }
+
+      // 2. Location level decrement.
+      let qtyBefore: number | null = null;
+      if (params.warehouseLocationId !== null) {
+        const levelRows = await tx.execute(sql`
+          SELECT id, variant_qty
+          FROM inventory.inventory_levels
+          WHERE product_variant_id = ${params.productVariantId}
+            AND warehouse_location_id = ${params.warehouseLocationId}
+          FOR UPDATE
+        `);
+        const level = levelRows.rows?.[0];
+        if (level) {
+          const currentQty = Number(level.variant_qty) || 0;
+          if (currentQty < params.qty && !allowNegative) {
+            throw new InsufficientOnHandForReversalError({
+              receivingLineId: params.receivingLineId,
+              qty: params.qty,
+              available: currentQty,
+            });
+          }
+          qtyBefore = currentQty;
+          await tx.execute(sql`
+            UPDATE inventory.inventory_levels
+            SET variant_qty = variant_qty - ${params.qty},
+                updated_at = NOW()
+            WHERE id = ${level.id}
+          `);
+        }
+      }
+
+      // 3. Ledger audit row (Rule #8).
+      await tx.execute(sql`
+        INSERT INTO inventory.inventory_transactions
+          (product_variant_id, from_location_id, transaction_type, variant_qty_delta,
+           variant_qty_before, variant_qty_after,
+           source_state, target_state, reference_type, reference_id,
+           receiving_order_id, receiving_line_id, notes, user_id, unit_cost_cents)
+        VALUES (
+          ${params.productVariantId},
+          ${params.warehouseLocationId},
+          'receipt_reversal',
+          ${-params.qty},
+          ${qtyBefore},
+          ${qtyBefore === null ? null : qtyBefore - params.qty},
+          'on_hand',
+          'external',
+          'receipt_reversal',
+          ${`REV-${params.reversalId}`},
+          ${params.receivingOrderId},
+          ${params.receivingLineId},
+          ${params.reason},
+          ${params.userId ?? null},
+          ${lotUnitCostMills === null ? null : millsToCents(lotUnitCostMills)}
+        )
+      `);
+
+      return { lotUnitCostMills };
+    };
+
+    const result = externalTx ? await doWork(externalTx) : await this.db.transaction(doWork);
+    this.triggerNotifyChange(params.productVariantId, "receipt_reversal");
+    return result;
   }
 
   // ---------------------------------------------------------------------------

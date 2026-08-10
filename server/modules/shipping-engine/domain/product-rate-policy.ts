@@ -1,6 +1,9 @@
 import { startedPoundsFromGrams } from "./rate-selection";
 import type { ShipmentWeightSource } from "./shipment";
-import { sumRateSelectionWeightGrams } from "./weight-measurement";
+import {
+  normalizePhysicalWeightGramsForRating,
+  sumRateSelectionWeightGrams,
+} from "./weight-measurement";
 
 export type ProductRateRuleKind =
   | "restriction"
@@ -462,7 +465,11 @@ function calculateRuleCharge(
       let total = 0;
       for (const index of indexes) {
         const line = lines[index];
-        const rate = rateForBand(rule.bands, line.unitWeightGrams ?? 0);
+        const measure = line.unitWeightGrams === null
+          ? 0
+          : normalizePhysicalWeightGramsForRating(line.unitWeightGrams);
+        if (measure === null) return null;
+        const rate = rateForBand(rule.bands, measure);
         if (rate === null) return null;
         const lineTotal = safeMultiply(rate, line.quantity);
         if (lineTotal === null) return null;
@@ -480,7 +487,11 @@ function calculateRuleCharge(
       let total = 0;
       for (const index of indexes) {
         const line = lines[index];
-        const pounds = startedPoundsFromGrams(line.unitWeightGrams ?? 0);
+        const measure = line.unitWeightGrams === null
+          ? 0
+          : normalizePhysicalWeightGramsForRating(line.unitWeightGrams);
+        if (measure === null) return null;
+        const pounds = startedPoundsFromGrams(measure);
         if (pounds === null) return null;
         const variableCharge = safeMultiply(rule.perStartedPoundCents, pounds);
         if (variableCharge === null) return null;
@@ -587,10 +598,6 @@ function isMoney(value: number | null | undefined): value is number {
   return Number.isSafeInteger(value) && value! >= 0;
 }
 
-function isWeight(value: number | null | undefined): value is number {
-  return Number.isSafeInteger(value) && value! > 0;
-}
-
 function lineLabel(line: ProductRateLine, index: number): string {
   return line.sku?.trim() || `Line ${index + 1}`;
 }
@@ -662,7 +669,10 @@ function validateProductRateLines(lines: readonly ProductRateLine[]): string[] {
     ) {
       errors.push(`${lineLabel(line, index)} has an invalid product variant identifier.`);
     }
-    if (line.unitWeightGrams !== null && !isWeight(line.unitWeightGrams)) {
+    if (
+      line.unitWeightGrams !== null
+      && normalizePhysicalWeightGramsForRating(line.unitWeightGrams) === null
+    ) {
       errors.push(`${lineLabel(line, index)} has an invalid unit weight.`);
     }
     if (line.unitPriceCents !== null && !isMoney(line.unitPriceCents)) {

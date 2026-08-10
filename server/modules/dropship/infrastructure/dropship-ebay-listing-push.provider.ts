@@ -10,13 +10,18 @@ import type {
 } from "./dropship-marketplace-credentials";
 import {
   EbayMarketplaceListingConnector,
-  type EbayListingConnectorClient,
+  type EbayListingConnectorDraft,
+  type EbayListingLifecycleClient,
+  type EbayListingRebuildPreview,
+  type EbayListingRebuildResult,
 } from "../../channels/listing-connectors/ebay-listing.connector";
 import {
   EbayListingBuilder,
   type EbayListingConfig as SharedEbayListingConfig,
 } from "../../channels/adapters/ebay/ebay-listing-builder";
 import type {
+  EbayBulkPriceQuantityRequest,
+  EbayBulkPriceQuantityResponse,
   EbayInventoryItem,
   EbayInventoryItemGroup,
   EbayOffer,
@@ -54,10 +59,11 @@ interface EbayOfferResponse {
   >;
 }
 
-export interface DropshipEbayListingLifecycleClient extends EbayListingConnectorClient {
+export interface DropshipEbayListingLifecycleClient extends EbayListingLifecycleClient {
   getInventoryItemGroup(
     groupKey: string,
   ): Promise<(EbayInventoryItemGroup & { variantSKUs?: string[] }) | null>;
+  deleteInventoryItemGroup(groupKey: string): Promise<void>;
   withdrawOffer(offerId: string): Promise<void>;
   withdrawOfferByInventoryItemGroup(
     groupKey: string,
@@ -68,6 +74,13 @@ export interface DropshipEbayListingLifecycleClient extends EbayListingConnector
 export interface DropshipEbayReplacementSession {
   readonly marketplaceId: string;
   readonly client: DropshipEbayListingLifecycleClient;
+}
+
+export interface DropshipEbayListingRebuildRequest {
+  readonly vendorId: number;
+  readonly storeConnectionId: number;
+  readonly marketplaceConfig: Record<string, unknown>;
+  readonly draft: EbayListingConnectorDraft;
 }
 
 interface EbayTokenResponse {
@@ -173,6 +186,29 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     };
   }
 
+  async previewListingRebuild(
+    input: DropshipEbayListingRebuildRequest & { readonly currentExternalListingId: string },
+  ): Promise<EbayListingRebuildPreview> {
+    const session = await this.createReplacementLifecycleClient(input);
+    assertRebuildMarketplaceMatches(input.draft, session.marketplaceId);
+    return this.listingConnector.previewListingRebuild({
+      client: session.client,
+      draft: input.draft,
+      currentExternalListingId: input.currentExternalListingId,
+    });
+  }
+
+  async executeListingRebuild(
+    input: DropshipEbayListingRebuildRequest & { readonly preview: EbayListingRebuildPreview },
+  ): Promise<EbayListingRebuildResult> {
+    const session = await this.createReplacementLifecycleClient(input);
+    assertRebuildMarketplaceMatches(input.draft, session.marketplaceId);
+    return this.listingConnector.executeListingRebuild({
+      client: session.client,
+      draft: input.draft,
+      preview: input.preview,
+    });
+  }
   async createReplacementLifecycleClient(input: {
     vendorId: number;
     storeConnectionId: number;
@@ -312,6 +348,16 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
           baseUrl: input.baseUrl,
         });
       },
+      deleteInventoryItemGroup: async (groupKey) => {
+        await this.requestEbay({
+          credential: input.credential,
+          config: input.config,
+          method: "DELETE",
+          path: `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
+          expectNoContent: true,
+          baseUrl: input.baseUrl,
+        });
+      },
       publishOffer: async (offerId) => {
         return await this.requestEbay<{ listingId?: string }>({
           credential: input.credential,
@@ -328,6 +374,16 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
           method: "POST",
           path: "/sell/inventory/v1/offer/publish_by_inventory_item_group",
           body: { inventoryItemGroupKey: groupKey, marketplaceId },
+          baseUrl: input.baseUrl,
+        });
+      },
+      bulkUpdatePriceQuantity: async (body: EbayBulkPriceQuantityRequest) => {
+        return await this.requestEbay<EbayBulkPriceQuantityResponse>({
+          credential: input.credential,
+          config: input.config,
+          method: "POST",
+          path: "/sell/inventory/v1/bulk_update_price_quantity",
+          body,
           baseUrl: input.baseUrl,
         });
       },
@@ -456,7 +512,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
   private async requestEbay<T = Record<string, unknown>>(input: {
     credential: DropshipMarketplaceStoreCredentials;
     config: EbayListingConfig;
-    method: "GET" | "POST" | "PUT";
+    method: "GET" | "POST" | "PUT" | "DELETE";
     path: string;
     body?: unknown;
     expectNoContent?: boolean;
@@ -530,6 +586,22 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
   }
 }
 
+function assertRebuildMarketplaceMatches(
+  draft: EbayListingConnectorDraft,
+  configuredMarketplaceId: string,
+): void {
+  if (draft.marketplaceId !== configuredMarketplaceId) {
+    throw new DropshipError(
+      "DROPSHIP_EBAY_REBUILD_MARKETPLACE_MISMATCH",
+      "The requested rebuild marketplace does not match the store connection.",
+      {
+        requestedMarketplaceId: draft.marketplaceId,
+        configuredMarketplaceId,
+        retryable: false,
+      },
+    );
+  }
+}
 function parseEbayListingConfig(
   intentConfig: Record<string, unknown>,
   connectionConfig: Record<string, unknown>,

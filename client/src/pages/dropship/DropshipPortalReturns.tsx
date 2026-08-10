@@ -59,7 +59,6 @@ const returnFaultOptions: Array<DropshipReturnFaultCategory | "none"> = [
 let returnItemClientCounter = 0;
 
 interface PortalReturnCreateFormState {
-  rmaNumber: string;
   intakeId: string;
   reasonCode: string;
   faultCategory: DropshipReturnFaultCategory | "none";
@@ -74,12 +73,10 @@ interface PortalReturnCreateItemFormState {
   orderLineIndex: string;
   productVariantId: string;
   quantity: string;
-  requestedCreditAmount: string;
 }
 
 function createInitialReturnCreateForm(): PortalReturnCreateFormState {
   return {
-    rmaNumber: "",
     intakeId: "",
     reasonCode: "",
     faultCategory: "none",
@@ -96,7 +93,6 @@ function createInitialReturnItem(): PortalReturnCreateItemFormState {
     orderLineIndex: "",
     productVariantId: "",
     quantity: "",
-    requestedCreditAmount: "",
   };
 }
 
@@ -165,11 +161,9 @@ export default function DropshipPortalReturns() {
           productVariantId: item.productVariantId,
           quantity: item.quantity,
           status: "requested",
-          requestedCreditAmount: item.requestedCreditAmount,
         }));
       const input = buildPortalReturnCreateInput({
         idempotencyKey: createDropshipIdempotencyKey("portal-rma-create"),
-        rmaNumber: createForm.rmaNumber,
         intakeId: createForm.intakeId,
         reasonCode: createForm.reasonCode,
         faultCategory: createForm.faultCategory,
@@ -464,14 +458,10 @@ function CreateReturnSheet({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label htmlFor="portal-rma-number">RMA number</Label>
-              <Input
-                id="portal-rma-number"
-                value={form.rmaNumber}
-                onChange={(event) => onChange("rmaNumber", event.target.value)}
-                maxLength={80}
-                required
-              />
+              <Label>RMA number</Label>
+              <div className="flex min-h-10 items-center rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground">
+                Assigned automatically when submitted
+              </div>
             </div>
             <div className="space-y-2">
               <Label htmlFor="portal-return-tracking">Return tracking</Label>
@@ -559,7 +549,7 @@ function CreateReturnSheet({
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
-                  <div className="grid gap-4 sm:grid-cols-3">
+                  <div className="grid gap-4 sm:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor={`portal-rma-line-${item.clientId}`}>Order line</Label>
                       <Select
@@ -604,15 +594,6 @@ function CreateReturnSheet({
                         inputMode="numeric"
                         value={item.quantity}
                         onChange={(event) => onItemChange(item.clientId, "quantity", event.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor={`portal-rma-credit-${item.clientId}`}>Requested credit</Label>
-                      <Input
-                        id={`portal-rma-credit-${item.clientId}`}
-                        inputMode="decimal"
-                        value={item.requestedCreditAmount}
-                        onChange={(event) => onItemChange(item.clientId, "requestedCreditAmount", event.target.value)}
                       />
                     </div>
                   </div>
@@ -717,9 +698,6 @@ function ReturnDetailSheet({
                         <TableHead>Item</TableHead>
                         <TableHead>Status</TableHead>
                         <TableHead className="text-right">Qty</TableHead>
-                        <TableHead className="text-right">Requested</TableHead>
-                        <TableHead className="text-right">Final</TableHead>
-                        <TableHead className="text-right">Fee</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -733,9 +711,6 @@ function ReturnDetailSheet({
                           </TableCell>
                           <TableCell><Badge variant="outline" className={statusTone(item.status)}>{formatStatus(item.status)}</Badge></TableCell>
                           <TableCell className="text-right font-mono">{item.quantity}</TableCell>
-                          <TableCell className="text-right">{formatNullableCents(item.requestedCreditCents)}</TableCell>
-                          <TableCell className="text-right">{formatNullableCents(item.finalCreditCents)}</TableCell>
-                          <TableCell className="text-right">{formatNullableCents(item.feeCents)}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -935,8 +910,7 @@ function formatNullableCents(value: number | null | undefined): string {
 
 function returnItemFormIsBlank(item: PortalReturnCreateItemFormState): boolean {
   return !item.productVariantId.trim()
-    && !item.quantity.trim()
-    && !item.requestedCreditAmount.trim();
+    && !item.quantity.trim();
 }
 
 function statusTone(status: string): string {

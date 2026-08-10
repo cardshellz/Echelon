@@ -37,6 +37,8 @@ export interface ListingReplacementExecutionContext {
   readonly targetProviderPublicationKey: string | null;
   readonly targetExternalListingId: string | null;
   readonly desiredStateHash: string;
+  /** Provider-owned recovery state captured durably during preflight. */
+  readonly sourceProviderSnapshot: CanonicalJsonValue | null;
   readonly sourceMembers: readonly ListingReplacementExecutionMember[];
   readonly targetMembers: readonly ListingReplacementExecutionMember[];
   readonly actor: ListingActor;
@@ -82,6 +84,7 @@ export interface MarketplaceListingReplacementExecutionRepository {
     readonly leaseToken: string | null;
     readonly now: Date;
     readonly leaseDurationMs: number;
+    readonly recoveryAuthorized: boolean;
   }): Promise<
     ClaimedListingReplacementStep | TerminalListingReplacementOperation
   >;

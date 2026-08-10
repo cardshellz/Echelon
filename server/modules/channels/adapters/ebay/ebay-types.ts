@@ -132,6 +132,7 @@ export interface EbayInventoryItemGroup {
   inventoryItemGroupKey: string;
   imageUrls: string[];
   title: string;
+  variantSKUs?: string[];
   variesBy: EbayVariesBy;
 }
 

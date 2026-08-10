@@ -6,10 +6,20 @@ import type {
 } from "../../../application/execution-ports";
 import type { ListingOwnerRef } from "../../../domain/listing-replacement-plan";
 import { MarketplaceListingReplacementError } from "../../../domain/errors";
+import {
+  canonicalJson,
+  type CanonicalJsonValue,
+} from "../../../domain/canonical-hash";
 
 export interface EbayReplacementItemGroup {
   readonly variantSKUs?: readonly string[];
   readonly [key: string]: unknown;
+}
+
+export interface EbayReplacementInventoryItem {
+  readonly product?: {
+    readonly aspects?: Readonly<Record<string, readonly string[]>>;
+  };
 }
 
 export interface EbayReplacementOffer extends Record<string, unknown> {
@@ -27,6 +37,8 @@ export interface EbayListingReplacementClient {
     groupKey: string,
     group: EbayReplacementItemGroup,
   ): Promise<void>;
+  deleteInventoryItemGroup(groupKey: string): Promise<void>;
+  getInventoryItem(sku: string): Promise<EbayReplacementInventoryItem | null>;
   getOffers(
     sku: string,
     marketplaceId: string,
@@ -49,9 +61,23 @@ export interface EbayListingReplacementClientResolver {
 }
 
 const ACTIVE_OFFER_STATUSES = new Set(["ACTIVE", "PUBLISHED"]);
+const GROUP_REASSIGNMENT_DELAYS_MS = [250, 750, 1_500] as const;
+
+export interface EbayListingReplacementConsistencyPolicy {
+  sleep(delayMs: number): Promise<void>;
+}
+
+const DEFAULT_CONSISTENCY_POLICY: EbayListingReplacementConsistencyPolicy = {
+  sleep: async (delayMs) =>
+    await new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
+};
 
 export class EbayMarketplaceListingReplacementProvider implements MarketplaceListingReplacementProvider {
-  constructor(private readonly clients: EbayListingReplacementClientResolver) {}
+  constructor(
+    private readonly clients: EbayListingReplacementClientResolver,
+    private readonly consistency: EbayListingReplacementConsistencyPolicy =
+      DEFAULT_CONSISTENCY_POLICY,
+  ) {}
 
   async preflight(
     context: ListingReplacementExecutionContext,
@@ -59,15 +85,18 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
   ): Promise<ListingReplacementStepSuccess> {
     validateContext(context, idempotencyKey);
     const client = await this.clients.forOwner(context.owner);
-    const members = included(context.targetMembers);
+    const targetMembers = included(context.targetMembers);
+    const sourceMembers = included(context.sourceMembers);
     const sourceKey = context.sourcePublication.providerPublicationKey;
+    let sourceProviderSnapshot: EbayReplacementItemGroup | null = null;
     if (sourceKey) {
       const group = await requireGroup(client, sourceKey, "source");
-      assertGroupContains(group, members, false);
+      sourceProviderSnapshot = group;
+      assertGroupContains(group, sourceMembers, false);
     }
     await requireListingState({
       client,
-      members: sourceKey ? members : included(context.sourceMembers),
+      members: sourceMembers,
       marketplaceId: context.owner.marketplaceId,
       expectedListingId: context.sourcePublication.externalListingId,
       expectedActive: true,
@@ -77,8 +106,9 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
       evidence: {
         sourceListingId: context.sourcePublication.externalListingId,
         sourcePublicationKey: sourceKey,
+        sourceProviderSnapshot: toCanonicalSnapshot(sourceProviderSnapshot),
         targetPublicationKey: targetGroupKey(context),
-        includedSkus: members.map((member) => member.skuSnapshot),
+        includedSkus: targetMembers.map((member) => member.skuSnapshot),
       },
     };
   }
@@ -90,9 +120,7 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
     validateContext(context, idempotencyKey);
     const client = await this.clients.forOwner(context.owner);
     const sourceKey = context.sourcePublication.providerPublicationKey;
-    const sourceMembers = sourceKey
-      ? included(context.targetMembers)
-      : included(context.sourceMembers);
+    const sourceMembers = included(context.sourceMembers);
     const state = await inspectListingState(
       client,
       sourceMembers,
@@ -149,10 +177,16 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
         }
       }
       const source = await requireGroup(client, sourceKey, "source");
-      assertGroupContains(source, members, false);
-      await client.createOrReplaceInventoryItemGroup(targetKey, {
-        ...source,
-        variantSKUs: members.map((member) => member.skuSnapshot),
+      assertGroupContains(source, included(context.sourceMembers), false);
+      const snapshot = requireSourceGroupSnapshot(context);
+      const target = await buildTargetGroup(client, snapshot, members);
+      await client.deleteInventoryItemGroup(sourceKey);
+      await createTargetGroupAfterSourceDeletion({
+        client,
+        sourceKey,
+        targetKey,
+        target,
+        consistency: this.consistency,
       });
       const published = await client.publishOfferByInventoryItemGroup(
         targetKey,
@@ -252,6 +286,21 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
     validateContext(context, idempotencyKey);
     const client = await this.clients.forOwner(context.owner);
     const members = included(context.targetMembers);
+    const targetKey =
+      context.targetProviderPublicationKey ?? targetGroupKey(context);
+    if (
+      context.sourcePublication.providerPublicationKey &&
+      !(await client.getInventoryItemGroup(targetKey))
+    ) {
+      return {
+        evidence: {
+          targetNotSellable: true,
+          alreadyNotSellable: true,
+          targetGroupAbsent: true,
+          withdrawnOfferIds: [],
+        },
+      };
+    }
     const listingId = normalizedText(context.targetExternalListingId);
     const state = listingId
       ? await inspectListingState(
@@ -260,10 +309,12 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
           context.owner.marketplaceId,
           listingId,
         )
-      : { activeOfferIds: [], offers: [] };
+      : await inspectActiveOffersAcrossListings(
+          client,
+          members,
+          context.owner.marketplaceId,
+        );
     if (state.activeOfferIds.length > 0) {
-      const targetKey =
-        context.targetProviderPublicationKey ?? targetGroupKey(context);
       if (context.sourcePublication.providerPublicationKey) {
         await client.withdrawOfferByInventoryItemGroup(
           targetKey,
@@ -273,6 +324,9 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
         for (const offerId of state.activeOfferIds)
           await client.withdrawOffer(offerId);
       }
+    }
+    if (context.sourcePublication.providerPublicationKey) {
+      await client.deleteInventoryItemGroup(targetKey);
     }
     return {
       evidence: {
@@ -290,16 +344,49 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
     validateContext(context, idempotencyKey);
     const client = await this.clients.forOwner(context.owner);
     const sourceKey = context.sourcePublication.providerPublicationKey;
-    const members = sourceKey
-      ? included(context.targetMembers)
-      : included(context.sourceMembers);
-    const state = await inspectListingState(
+    const members = included(context.sourceMembers);
+    const activeSource = await inspectAnyActiveListing(
       client,
       members,
       context.owner.marketplaceId,
-      context.sourcePublication.externalListingId,
     );
-    if (state.activeOfferIds.length === 0) {
+    if (
+      activeSource.listingId &&
+      activeSource.offers.length === members.length
+    ) {
+      const observed = publicationResult(
+        sourceKey,
+        activeSource.listingId,
+        members,
+        activeSource.offers,
+        true,
+      );
+      return {
+        ...observed,
+        evidence: {
+          ...observed.evidence,
+          sourceLive: true,
+          alreadyLive: true,
+          previousSourceListingId: context.sourcePublication.externalListingId,
+          sourceListingId: activeSource.listingId,
+        },
+      };
+    }
+    if (sourceKey && !(await client.getInventoryItemGroup(sourceKey))) {
+      await client.createOrReplaceInventoryItemGroup(
+        sourceKey,
+        requireSourceGroupSnapshot(context),
+      );
+    }
+    let listingId = context.sourcePublication.externalListingId;
+    let state = await inspectListingState(
+      client,
+      members,
+      context.owner.marketplaceId,
+      listingId,
+    );
+    const alreadyLive = state.activeOfferIds.length === members.length;
+    if (!alreadyLive) {
       const restored = sourceKey
         ? await client.publishOfferByInventoryItemGroup(
             sourceKey,
@@ -308,31 +395,154 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
         : await client.publishOffer(
             requireSingleSourceOfferId(context.sourceMembers),
           );
-      const restoredListingId = normalizedText(restored.listingId);
-      if (
-        restoredListingId &&
-        restoredListingId !== context.sourcePublication.externalListingId
-      ) {
+      listingId = normalizedText(restored.listingId) ?? "";
+      if (!listingId) {
         throw providerError(
-          "SOURCE_IDENTITY_CHANGED",
-          "eBay restored the source under a different listing ID; manual recovery is required.",
-          {
-            expectedListingId: context.sourcePublication.externalListingId,
-            restoredListingId,
-          },
+          "SOURCE_LISTING_ID_MISSING",
+          "eBay restored the source without returning a listing ID.",
         );
       }
+      state = await requireListingState({
+        client,
+        members,
+        marketplaceId: context.owner.marketplaceId,
+        expectedListingId: listingId,
+        expectedActive: true,
+        label: "source",
+      });
     }
+    const restored = publicationResult(
+      sourceKey,
+      listingId,
+      members,
+      state.offers,
+      alreadyLive,
+    );
     return {
+      ...restored,
       evidence: {
+        ...restored.evidence,
         sourceLive: true,
-        alreadyLive: state.activeOfferIds.length > 0,
-        sourceListingId: context.sourcePublication.externalListingId,
+        alreadyLive,
+        previousSourceListingId: context.sourcePublication.externalListingId,
+        sourceListingId: listingId,
       },
     };
   }
 }
 
+async function createTargetGroupAfterSourceDeletion(input: {
+  readonly client: EbayListingReplacementClient;
+  readonly sourceKey: string;
+  readonly targetKey: string;
+  readonly target: EbayReplacementItemGroup;
+  readonly consistency: EbayListingReplacementConsistencyPolicy;
+}): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await input.client.createOrReplaceInventoryItemGroup(
+        input.targetKey,
+        input.target,
+      );
+      return;
+    } catch (error: unknown) {
+      const delayMs = GROUP_REASSIGNMENT_DELAYS_MS[attempt];
+      if (
+        delayMs === undefined ||
+        !isSkuStillAssignedError(error) ||
+        (await input.client.getInventoryItemGroup(input.sourceKey)) !== null
+      ) {
+        throw error;
+      }
+      await input.consistency.sleep(delayMs);
+    }
+  }
+}
+
+function isSkuStillAssignedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('"errorId":25703');
+}
+
+async function buildTargetGroup(
+  client: EbayListingReplacementClient,
+  source: EbayReplacementItemGroup,
+  members: readonly ListingReplacementExecutionMember[],
+): Promise<EbayReplacementItemGroup> {
+  const names = variationSpecificationNames(source);
+  const items = await Promise.all(
+    members.map(async (member) => {
+      const item = await client.getInventoryItem(member.skuSnapshot);
+      if (!item) {
+        throw providerError(
+          "TARGET_INVENTORY_ITEM_MISSING",
+          "A selected target inventory item is missing on eBay.",
+          { sku: member.skuSnapshot },
+        );
+      }
+      return { sku: member.skuSnapshot, item };
+    }),
+  );
+  const specifications = names.map((name) => {
+    const values = [
+      ...new Set(
+        items.flatMap(({ item }) => item.product?.aspects?.[name] ?? []),
+      ),
+    ];
+    if (values.length !== members.length) {
+      throw providerError(
+        "TARGET_VARIATION_SPECIFICS_INVALID",
+        "Every selected target item must provide one unique value for each variation specific.",
+        { name, values, skus: items.map(({ sku }) => sku) },
+      );
+    }
+    return { name, values };
+  });
+  return {
+    ...source,
+    variantSKUs: members.map((member) => member.skuSnapshot),
+    variesBy: { specifications },
+  };
+}
+
+function variationSpecificationNames(
+  group: EbayReplacementItemGroup,
+): string[] {
+  const variesBy = group.variesBy;
+  if (!variesBy || typeof variesBy !== "object" || Array.isArray(variesBy))
+    return [];
+  const specifications = (variesBy as { specifications?: unknown })
+    .specifications;
+  if (!Array.isArray(specifications)) return [];
+  return specifications.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const name = normalizedText((value as { name?: unknown }).name);
+    return name ? [name] : [];
+  });
+}
+
+function toCanonicalSnapshot(
+  group: EbayReplacementItemGroup | null,
+): CanonicalJsonValue {
+  if (group === null) return null;
+  const snapshot = JSON.parse(JSON.stringify(group)) as CanonicalJsonValue;
+  canonicalJson(snapshot);
+  return snapshot;
+}
+function requireSourceGroupSnapshot(
+  context: ListingReplacementExecutionContext,
+): EbayReplacementItemGroup {
+  const snapshot = context.sourceProviderSnapshot;
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw providerError(
+      "SOURCE_SNAPSHOT_MISSING",
+      "The durable eBay source-group snapshot is unavailable; automatic recovery cannot proceed safely.",
+    );
+  }
+  const group = snapshot as EbayReplacementItemGroup;
+  assertGroupContains(group, included(context.sourceMembers), false);
+  return group;
+}
 function validateContext(
   context: ListingReplacementExecutionContext,
   idempotencyKey: string,
@@ -457,6 +667,23 @@ async function inspectListingState(
   return { offers, activeOfferIds };
 }
 
+async function inspectActiveOffersAcrossListings(
+  client: EbayListingReplacementClient,
+  members: readonly ListingReplacementExecutionMember[],
+  marketplaceId: string,
+): Promise<{ offers: EbayReplacementOffer[]; activeOfferIds: string[] }> {
+  const offers = (
+    await Promise.all(
+      members.map((member) =>
+        client.getOffers(member.skuSnapshot, marketplaceId),
+      ),
+    )
+  ).flat();
+  return {
+    offers,
+    activeOfferIds: offers.filter(isActive).map((offer) => offer.offerId),
+  };
+}
 async function inspectAnyActiveListing(
   client: EbayListingReplacementClient,
   members: readonly ListingReplacementExecutionMember[],

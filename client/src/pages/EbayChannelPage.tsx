@@ -71,7 +71,7 @@ import { AspectEditor } from "@/components/ebay/AspectEditor";
 import { PushProgressModal } from "@/components/ebay/PushProgressModal";
 import { SyncProgressModal } from "@/components/ebay/SyncProgressModal";
 import { MarketplaceListingRegistrationDialog } from "@/components/marketplace/MarketplaceListingRegistrationDialog";
-import { MarketplaceListingReplacementDialog } from "@/components/marketplace/MarketplaceListingReplacementDialog";
+import { MarketplaceListingChangesDialog } from "@/components/marketplace/MarketplaceListingChangesDialog";
 import {
   fetchChannelEbayMarketplaceListingRegistrationStatuses,
   type MarketplaceListingRegistrationStatus,
@@ -494,22 +494,22 @@ export default function EbayChannelPage() {
   const [feedSearch, setFeedSearch] = useState("");
   const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
   const [registrationTarget, setRegistrationTarget] = useState<FeedItem | null>(null);
-  const [replacementTarget, setReplacementTarget] = useState<FeedItem | null>(null);
-  const activeReplacementVariants = useMemo(
+  const [listingChangesTarget, setListingChangesTarget] = useState<FeedItem | null>(null);
+  const activeListingChangeVariants = useMemo(
     () =>
-      replacementTarget?.variants.map((variant) => ({
-      id: variant.id,
-      sku: variant.sku,
-      name: variant.name,
-      included: variant.effectivelyListed,
+      listingChangesTarget?.variants.map((variant) => ({
+        id: variant.id,
+        sku: variant.sku,
+        name: variant.name,
+        included: variant.effectivelyListed,
       })) ?? [],
-    [replacementTarget],
+    [listingChangesTarget],
   );
-  const replacementVariants = useMemo(() => {
-    if (!replacementTarget) return [];
-    const activeVariantIds = new Set(activeReplacementVariants.map((variant) => variant.id));
+  const listingChangeVariants = useMemo(() => {
+    if (!listingChangesTarget) return [];
+    const activeVariantIds = new Set(activeListingChangeVariants.map((variant) => variant.id));
     const registeredVariants = registrationStatusByProductId
-      .get(replacementTarget.id)?.registeredVariants ?? [];
+      .get(listingChangesTarget.id)?.registeredVariants ?? [];
     const archivedVariants = registeredVariants
       .filter((variant) => !activeVariantIds.has(variant.productVariantId))
       .map((variant) => ({
@@ -519,11 +519,11 @@ export default function EbayChannelPage() {
         included: false,
         lockedExcluded: true,
       }));
-    return [...activeReplacementVariants, ...archivedVariants];
-  }, [activeReplacementVariants, registrationStatusByProductId, replacementTarget]);
+    return [...activeListingChangeVariants, ...archivedVariants];
+  }, [activeListingChangeVariants, registrationStatusByProductId, listingChangesTarget]);
   const registrationOwner = useMemo(() => {
     const marketplaceId = config?.config.marketplaceId?.trim();
-    const target = registrationTarget ?? replacementTarget;
+    const target = registrationTarget ?? listingChangesTarget;
     if (!target || !config?.channel || !marketplaceId) return null;
     return {
       kind: "channel" as const,
@@ -531,15 +531,15 @@ export default function EbayChannelPage() {
       productId: target.id,
       marketplaceId,
     };
-  }, [config?.channel, config?.config.marketplaceId, registrationTarget, replacementTarget]);
-  const handleReplacementComplete = useCallback(() => {
+  }, [config?.channel, config?.config.marketplaceId, registrationTarget, listingChangesTarget]);
+  const handleListingChangesComplete = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
     if (registrationStatusQueryInput) {
       void queryClient.invalidateQueries({ queryKey: registrationStatusQueryKey, exact: true });
     }
     toast({
-      title: "eBay listing replaced",
-      description: "The replacement listing is live and is now Echelon's controlled baseline.",
+      title: "eBay listing changes saved",
+      description: "Echelon refreshed the live listing and its verified comparison state.",
     });
   }, [queryClient, registrationStatusQueryInput, registrationStatusQueryKey, toast]);
 
@@ -552,7 +552,7 @@ export default function EbayChannelPage() {
     }
     toast({
       title: "Listing analyzed",
-      description: "Echelon recorded the live listing and can now choose the correct update or replacement flow.",
+      description: "Echelon read the live listing and can now identify whether it needs an update or a rebuild.",
     });
   }, [queryClient, registrationStatusQueryInput, registrationStatusQueryKey, toast]);
 
@@ -1905,30 +1905,33 @@ export default function EbayChannelPage() {
                               .map((variant) => variant.id),
                             registration: registrationStatus,
                           });
-                      const reconciliationAction = reconciliation?.kind === "replacement_required"
-                        ? "Review replacement"
-                        : reconciliation?.kind === "update_available"
-                          ? "Update listing"
-                          : reconciliation?.kind === "verification_required"
-                            ? "Verify listing"
-                            : reconciliation?.kind === "normal" && item.status === "error"
-                              ? "Analyze listing"
-                              : null;
+                      const hasProvenListingChanges = Boolean(
+                        item.externalListingId
+                        && (
+                          reconciliation?.kind === "replacement_required"
+                          || reconciliation?.kind === "update_available"
+                          || reconciliation?.kind === "verification_required"
+                        )
+                      );
+                      const needsInitialVariantCheck = Boolean(
+                        item.externalListingId
+                        && reconciliation?.kind === "normal"
+                        && someExcluded
+                      );
+                      const reconciliationAction = hasProvenListingChanges
+                        ? "Review listing changes"
+                        : needsInitialVariantCheck
+                          ? "Check eBay variants"
+                          : reconciliation?.kind === "normal" && item.status === "error"
+                            ? "Analyze listing"
+                            : null;
                       const runReconciliationAction = () => {
-                        if (reconciliation?.kind === "replacement_required") {
-                          setReplacementTarget(item);
+                        if (hasProvenListingChanges || needsInitialVariantCheck) {
+                          setListingChangesTarget(item);
                           return;
-                        }
-                        if (reconciliation?.kind === "update_available") {
-                          handlePushSingle(item.id);
-                          return;
-                        }
-                        if (reconciliation?.kind === "verification_required") {
-                          handleSyncProduct(item.id);
                         }
                         if (reconciliation?.kind === "normal") {
                           setRegistrationTarget(item);
-                          return;
                         }
                       };
 
@@ -2754,16 +2757,16 @@ export default function EbayChannelPage() {
         />
       )}
 
-      {replacementTarget && registrationOwner && (
-        <MarketplaceListingReplacementDialog
+      {listingChangesTarget && registrationOwner && (
+        <MarketplaceListingChangesDialog
           open
           onOpenChange={(nextOpen) => {
-            if (!nextOpen) setReplacementTarget(null);
+            if (!nextOpen) setListingChangesTarget(null);
           }}
           owner={registrationOwner}
-          productName={replacementTarget.name}
-          variants={replacementVariants}
-          onCompleted={handleReplacementComplete}
+          productName={listingChangesTarget.name}
+          variants={listingChangeVariants}
+          onCompleted={handleListingChangesComplete}
         />
       )}
 

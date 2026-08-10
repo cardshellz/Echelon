@@ -116,6 +116,18 @@ export function createMarketplaceListingReplacementResolverFromEnv(): Marketplac
           }
           return execution.execute(input);
         },
+        async recover(
+          input: ExecuteListingReplacementInput,
+        ): Promise<ExecuteListingReplacementResult> {
+          assertSameOwner(input.expectedOwner, boundOwner);
+          if (!executionEnabled) {
+            throw new MarketplaceListingReplacementError(
+              "MARKETPLACE_LISTING_REPLACEMENT_EXECUTION_DISABLED",
+              "Marketplace listing replacement execution is disabled until provider sandbox validation is complete.",
+            );
+          }
+          return execution.recover(input);
+        },
       };
     },
   };
@@ -161,6 +173,9 @@ function adaptLifecycleClient(
       (await client.getInventoryItemGroup(
         groupKey,
       )) as EbayReplacementItemGroup | null,
+    getInventoryItem: async (sku) => await client.getInventoryItem(sku),
+    deleteInventoryItemGroup: async (groupKey) =>
+      await client.deleteInventoryItemGroup(groupKey),
     createOrReplaceInventoryItemGroup: async (groupKey, group) => {
       const { inventoryItemGroupKey: _ignored, ...payload } = group;
       await client.createOrReplaceInventoryItemGroup(
@@ -169,7 +184,9 @@ function adaptLifecycleClient(
       );
     },
     getOffers: async (sku, marketplaceId) =>
-      (await client.getOffers(sku, marketplaceId)).offers.map(normalizeOffer),
+      (await client.getOffers(sku, marketplaceId)).offers.map(
+        normalizeEbayReplacementOffer,
+      ),
     createOffer: async (offer) => client.createOffer(offer as never),
     publishOffer: async (offerId) => client.publishOffer(offerId),
     publishOfferByInventoryItemGroup: async (groupKey, marketplaceId) =>
@@ -180,8 +197,8 @@ function adaptLifecycleClient(
   };
 }
 
-function normalizeOffer(value: unknown) {
-  if (!value || typeof value !== "object") {
+export function normalizeEbayReplacementOffer(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new MarketplaceListingReplacementError(
       "MARKETPLACE_LISTING_REPLACEMENT_EBAY_RESPONSE_INVALID",
       "eBay returned an invalid offer during replacement.",
@@ -194,7 +211,35 @@ function normalizeOffer(value: unknown) {
       "eBay returned an offer without a stable offer ID.",
     );
   }
-  return { ...offer, offerId: offer.offerId.trim() };
+  const listing =
+    offer.listing &&
+    typeof offer.listing === "object" &&
+    !Array.isArray(offer.listing)
+      ? (offer.listing as Record<string, unknown>)
+      : null;
+  const topLevelListingId = normalizedOptionalText(offer.listingId);
+  const nestedListingId = normalizedOptionalText(listing?.listingId);
+  if (
+    topLevelListingId !== null &&
+    nestedListingId !== null &&
+    topLevelListingId !== nestedListingId
+  ) {
+    throw new MarketplaceListingReplacementError(
+      "MARKETPLACE_LISTING_REPLACEMENT_EBAY_RESPONSE_INVALID",
+      "eBay returned conflicting listing identities for an offer.",
+      { offerId: offer.offerId.trim(), topLevelListingId, nestedListingId },
+    );
+  }
+  const listingId = topLevelListingId ?? nestedListingId;
+  return {
+    ...offer,
+    offerId: offer.offerId.trim(),
+    ...(listingId === null ? {} : { listingId }),
+  };
+}
+
+function normalizedOptionalText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 function assertInputOwner(input: unknown, expected: ListingOwnerRef): void {
   if (!input || typeof input !== "object" || !("owner" in input)) {

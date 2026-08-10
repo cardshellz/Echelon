@@ -147,10 +147,16 @@
   "dropship.dropship_catalog_rules": [
     "modules/dropship"
   ],
+  "dropship.dropship_collection_attempts": [
+    "modules/dropship"
+  ],
   "dropship.dropship_funding_methods": [
     "modules/dropship"
   ],
   "dropship.dropship_insurance_pool_config": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_insurance_pool_ledger": [
     "modules/dropship"
   ],
   "dropship.dropship_listing_push_job_items": [
@@ -190,6 +196,9 @@
     "modules/dropship"
   ],
   "dropship.dropship_return_fee_schedule": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_return_intake_exceptions": [
     "modules/dropship"
   ],
   "dropship.dropship_return_policies": [
@@ -387,6 +396,12 @@
   "marketplace.listing_scopes": [
     "modules/marketplace-listings"
   ],
+  "marketplace.listing_verification_members": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_verification_snapshots": [
+    "modules/marketplace-listings"
+  ],
   "marketplace.provider_accounts": [
     "modules/marketplace-listings"
   ],
@@ -574,6 +589,9 @@
     "modules/procurement"
   ],
   "procurement.purchasing_recommendation_po_handoffs": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_reversals": [
     "modules/procurement"
   ],
   "procurement.receiving_lines": [

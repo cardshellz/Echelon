@@ -16,11 +16,15 @@ import {
   listingRegistrationResultSchema,
   marketplaceObservedListingPublicationSchema,
   previewListingRegistrationInputSchema,
+  verifyExistingListingInputSchema,
+  listingVerificationResultSchema,
   providerAccountClaimResultSchema,
   type ConfirmListingRegistrationInput,
   type ListingRegistrationResult,
   type ListingRegistrationStatus,
+  type ListingVerificationResult,
   type PreviewListingRegistrationInput,
+  type VerifyExistingListingInput,
   type ProviderAccountClaimResult,
 } from "./registration-dtos";
 import { listingOwnerRefSchema } from "./dtos";
@@ -116,6 +120,74 @@ export class MarketplaceListingRegistrationService {
       "Listing registration preview request is invalid.",
     );
     return this.loadFreshPlan(command);
+  }
+
+  async verifyExisting(
+    input: VerifyExistingListingInput,
+  ): Promise<ListingVerificationResult> {
+    const command = parseBoundary(
+      verifyExistingListingInputSchema,
+      input,
+      "MARKETPLACE_LISTING_REGISTRATION_REQUEST_INVALID",
+      "Listing verification request is invalid.",
+    );
+    const plan = await this.loadFreshPlan(command);
+    if (plan.observationHash !== command.expectedObservationHash) {
+      throw new MarketplaceListingRegistrationError(
+        "MARKETPLACE_LISTING_REGISTRATION_OBSERVATION_CHANGED",
+        "The marketplace listing changed after preview; review a fresh preview before saving verification.",
+        {
+          expectedObservationHash: command.expectedObservationHash,
+          actualObservationHash: plan.observationHash,
+        },
+      );
+    }
+    const observedIncludedIds = plan.members
+      .filter((member) => member.disposition === "included")
+      .map((member) => member.productVariantId)
+      .sort((left, right) => left - right);
+    const expectedIncludedIds = [...command.expectedIncludedVariantIds].sort(
+      (left, right) => left - right,
+    );
+    if (
+      observedIncludedIds.length !== expectedIncludedIds.length ||
+      observedIncludedIds.some((id, index) => id !== expectedIncludedIds[index])
+    ) {
+      throw new MarketplaceListingRegistrationError(
+        "MARKETPLACE_LISTING_VERIFICATION_MEMBERSHIP_CHANGED",
+        "The live marketplace variants no longer match the variants selected for verification.",
+        { observedIncludedIds, expectedIncludedIds },
+      );
+    }
+    const currentRegistration = await this.repository.findCurrentRegistration(plan.owner);
+    if (!currentRegistration) {
+      const {
+        expectedIncludedVariantIds: _expectedIncludedVariantIds,
+        ...confirmationInput
+      } = command;
+      const registration = await this.confirm(confirmationInput);
+      return listingVerificationResultSchema.parse({
+        kind: "verified",
+        publicationId: registration.receipt.publicationId,
+        externalListingId: plan.externalListingId,
+        verifiedAt: registration.receipt.registeredAt,
+      });
+    }
+    try {
+      return listingVerificationResultSchema.parse(
+        await this.repository.verifyExistingPublication({
+          plan,
+          verifiedAt: this.clock.now(),
+        }),
+      );
+    } catch (error) {
+      throw classifyBoundaryError(
+        error,
+        "MARKETPLACE_LISTING_VERIFICATION_PERSISTENCE_FAILED",
+        "Verified marketplace listing state could not be persisted.",
+        { ownerKind: plan.owner.kind, productId: plan.owner.productId },
+      );
+    }
   }
 
   async confirm(

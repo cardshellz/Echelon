@@ -37,6 +37,17 @@ describe("EbayMarketplaceListingReplacementProvider", () => {
       "ARM-ENV-SGL-C750",
       "ARM-ENV-SGL-P50",
     ]);
+    expect(harness.groups.get("ARM-ENV-SGL-V1-R52")?.variesBy).toEqual({
+      specifications: [
+        { name: "Style", values: ["Case of 750", "Pack of 50"] },
+      ],
+    });
+    expect(
+      harness.client.deleteInventoryItemGroup.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.client.createOrReplaceInventoryItemGroup.mock
+        .invocationCallOrder[0],
+    );
 
     await expect(
       harness.provider.verifyTarget(stagedContext(), "verify-key"),
@@ -45,16 +56,56 @@ describe("EbayMarketplaceListingReplacementProvider", () => {
     });
   });
 
+  it("recognizes an already-live restored source under a new listing ID", async () => {
+    const harness = makeHarness();
+    const staleContext = {
+      ...context(),
+      sourcePublication: {
+        ...context().sourcePublication,
+        externalListingId: "withdrawn-listing",
+      },
+    };
+
+    await expect(
+      harness.provider.ensureSourceLive(staleContext, "recovery-key"),
+    ).resolves.toMatchObject({
+      externalListingId: "source-listing",
+      evidence: {
+        sourceLive: true,
+        alreadyLive: true,
+        previousSourceListingId: "withdrawn-listing",
+        sourceListingId: "source-listing",
+      },
+    });
+    expect(
+      harness.client.publishOfferByInventoryItemGroup,
+    ).not.toHaveBeenCalled();
+  });
+  it("treats an absent target group as already not sellable", async () => {
+    const harness = makeHarness();
+
+    await expect(
+      harness.provider.ensureTargetNotSellable(context(), "target-off-key"),
+    ).resolves.toMatchObject({
+      evidence: {
+        targetNotSellable: true,
+        alreadyNotSellable: true,
+        targetGroupAbsent: true,
+        withdrawnOfferIds: [],
+      },
+    });
+    expect(
+      harness.client.withdrawOfferByInventoryItemGroup,
+    ).not.toHaveBeenCalled();
+  });
+
   it("compensates by withdrawing the target and restoring the original listing", async () => {
     const harness = makeHarness();
     await harness.provider.quiesceSource(context(), "quiesce-key");
     await harness.provider.createTarget(context(), "create-key");
 
     await expect(
-      harness.provider.ensureTargetNotSellable(
-        stagedContext(),
-        "target-off-key",
-      ),
+      harness.provider.ensureTargetNotSellable(context(), "target-off-key"),
     ).resolves.toMatchObject({ evidence: { targetNotSellable: true } });
     expect(
       harness.client.withdrawOfferByInventoryItemGroup,
@@ -66,6 +117,28 @@ describe("EbayMarketplaceListingReplacementProvider", () => {
     expect(
       harness.client.publishOfferByInventoryItemGroup,
     ).toHaveBeenLastCalledWith("ARM-ENV-SGL-V1", "EBAY_US");
+    expect(harness.groups.has("ARM-ENV-SGL-V1-R52")).toBe(false);
+    expect(harness.groups.get("ARM-ENV-SGL-V1")?.variantSKUs).toEqual([
+      "ARM-ENV-SGL-C700",
+      "ARM-ENV-SGL-P50",
+    ]);
+  });
+
+  it("retries a target group create while eBay releases deleted source membership", async () => {
+    const harness = makeHarness();
+    harness.client.createOrReplaceInventoryItemGroup.mockImplementationOnce(
+      async () => {
+        throw new Error('{"errorId":25703}');
+      },
+    );
+
+    await expect(
+      harness.provider.createTarget(context(), "create-key"),
+    ).resolves.toMatchObject({ externalListingId: "target-listing" });
+    expect(
+      harness.client.createOrReplaceInventoryItemGroup,
+    ).toHaveBeenCalledTimes(2);
+    expect(harness.consistency.sleep).toHaveBeenCalledWith(250);
   });
 
   it("rejects a target group containing an excluded stale SKU", async () => {
@@ -107,7 +180,23 @@ function context(): ListingReplacementExecutionContext {
     targetProviderPublicationKey: null,
     targetExternalListingId: null,
     desiredStateHash: "b".repeat(64),
-    sourceMembers: [member(12, "ARM-ENV-SGL-C750", "offer-c750")],
+    sourceProviderSnapshot: {
+      inventoryItemGroupKey: "ARM-ENV-SGL-V1",
+      title: "Armaloope Envelope Single Pocket",
+      description: "Envelope",
+      aspects: {},
+      imageUrls: [],
+      variesBy: {
+        specifications: [
+          { name: "Style", values: ["Case of 700", "Pack of 50"] },
+        ],
+      },
+      variantSKUs: ["ARM-ENV-SGL-C700", "ARM-ENV-SGL-P50"],
+    },
+    sourceMembers: [
+      member(11, "ARM-ENV-SGL-C700", "offer-c700"),
+      member(13, "ARM-ENV-SGL-P50", "offer-p50"),
+    ],
     targetMembers: [
       member(12, "ARM-ENV-SGL-C750", null),
       member(13, "ARM-ENV-SGL-P50", null),
@@ -161,15 +250,12 @@ function makeHarness() {
         aspects: {},
         imageUrls: [],
         variesBy: { specifications: [] },
-        variantSKUs: [
-          "ARM-ENV-SGL-C700",
-          "ARM-ENV-SGL-C750",
-          "ARM-ENV-SGL-P50",
-        ],
+        variantSKUs: ["ARM-ENV-SGL-C700", "ARM-ENV-SGL-P50"],
       },
     ],
   ]);
   const offers = new Map<string, EbayReplacementOffer[]>([
+    ["ARM-ENV-SGL-C700", [offer("offer-c700", "ARM-ENV-SGL-C700")]],
     ["ARM-ENV-SGL-C750", [offer("offer-c750", "ARM-ENV-SGL-C750")]],
     ["ARM-ENV-SGL-P50", [offer("offer-p50", "ARM-ENV-SGL-P50")]],
   ]);
@@ -184,6 +270,7 @@ function makeHarness() {
       );
     }
   };
+  const consistency = { sleep: vi.fn(async () => undefined) };
   const client = {
     getInventoryItemGroup: vi.fn(
       async (key: string) => groups.get(key) ?? null,
@@ -193,6 +280,22 @@ function makeHarness() {
         groups.set(key, { ...group, inventoryItemGroupKey: key });
       },
     ),
+    getInventoryItem: vi.fn(async (sku: string) => ({
+      product: {
+        aspects: {
+          Style: [
+            sku.endsWith("C750")
+              ? "Case of 750"
+              : sku.endsWith("C700")
+                ? "Case of 700"
+                : "Pack of 50",
+          ],
+        },
+      },
+    })),
+    deleteInventoryItemGroup: vi.fn(async (key: string) => {
+      groups.delete(key);
+    }),
     getOffers: vi.fn(async (sku: string) => offers.get(sku) ?? []),
     createOffer: vi.fn(async () => "new-offer"),
     publishOffer: vi.fn(async () => ({ listingId: "target-listing" })),
@@ -213,9 +316,11 @@ function makeHarness() {
     groups,
     offers,
     client,
-    provider: new EbayMarketplaceListingReplacementProvider({
-      forOwner: async () => client,
-    }),
+    consistency,
+    provider: new EbayMarketplaceListingReplacementProvider(
+      { forOwner: async () => client },
+      consistency,
+    ),
   };
 }
 

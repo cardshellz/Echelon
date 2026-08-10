@@ -2118,7 +2118,7 @@ function FlowOverview(props: {
       { key: "shipped", label: "Shipped", count: snapshot.funnel.shipped, icon: Truck, issueStages: ["shipped"] as FlowIssueStage[] },
       { key: "confirmed", label: "Channel updated", count: snapshot.funnel.trackingConfirmed, icon: CheckCircle2, issueStages: ["writeback"] as FlowIssueStage[] },
     ].map((stage) => {
-      const issues = snapshot.issues
+      const issues = (snapshotIsCurrent ? snapshot.issues : [])
         .filter((issue) => stage.issueStages.includes(issue.stage))
         .sort((left, right) => FLOW_SEVERITY_ORDER[left.severity] - FLOW_SEVERITY_ORDER[right.severity] || right.count - left.count);
       return {
@@ -2127,7 +2127,7 @@ function FlowOverview(props: {
         monitorMatches: issues.reduce((total, issue) => total + issue.count, 0),
       };
     });
-  }, [snapshot]);
+  }, [snapshot, snapshotIsCurrent]);
   const channelIntake = useMemo(() => {
     if (!snapshot) return [];
     if (snapshot.channelIntake) return snapshot.channelIntake;
@@ -2288,12 +2288,11 @@ function FlowOverview(props: {
                   {gap !== null && <div className="mt-1 text-xs text-orange-700">{gap.toLocaleString()} not yet advanced</div>}
                   {stage.issues.length > 0 ? (
                     <div className={cn("mt-2 text-xs font-medium", snapshotIsCurrent ? "text-red-700" : "text-amber-800")}>
-                      {snapshotIsCurrent ? "" : "Last scan: "}
                       {stage.issues.length.toLocaleString()} exception type{stage.issues.length === 1 ? "" : "s"} · {stage.monitorMatches.toLocaleString()} monitor matches
                     </div>
                   ) : (
                     <div className={cn("mt-2 text-xs", snapshotIsCurrent ? "text-emerald-700" : "text-muted-foreground")}>
-                      {snapshotIsCurrent ? "No open exceptions" : "No exceptions in the last scan"}
+                      {snapshotIsCurrent ? "No open exceptions" : "Live issue evidence unavailable"}
                     </div>
                   )}
                   {index < stages.length - 1 && <ArrowRight className="absolute -right-2.5 top-1/2 z-10 hidden h-5 w-5 -translate-y-1/2 bg-background text-muted-foreground md:block" />}

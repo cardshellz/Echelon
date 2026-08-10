@@ -61,6 +61,18 @@ export const confirmListingRegistrationInputSchema = z
   })
   .strict();
 
+export const verifyExistingListingInputSchema = z
+  .object({
+    ...listingRegistrationBaseInputShape,
+    expectedObservationHash: sha256Schema,
+    expectedIncludedVariantIds: z
+      .array(positivePostgresIntegerSchema)
+      .min(1)
+      .max(10_000)
+      .refine((ids) => new Set(ids).size === ids.length, "Included variant IDs must be unique."),
+  })
+  .strict();
+
 export const listingRegistrationOwnerSnapshotSchema: z.ZodType<ListingRegistrationOwnerSnapshot> =
   z
     .object({
@@ -209,6 +221,15 @@ export const listingRegistrationResultSchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
+export const listingVerificationResultSchema = z
+  .object({
+    kind: z.enum(["verified", "adopted_replacement"]),
+    publicationId: positiveSafeIntegerSchema,
+    externalListingId: trimmedText(255),
+    verifiedAt: z.date(),
+  })
+  .strict();
+
 export const providerAccountClaimResultSchema = z
   .object({
     kind: z.enum(["claimed", "replay"]),
@@ -226,6 +247,12 @@ export type PreviewListingRegistrationInput = z.infer<
 >;
 export type ConfirmListingRegistrationInput = z.infer<
   typeof confirmListingRegistrationInputSchema
+>;
+export type VerifyExistingListingInput = z.infer<
+  typeof verifyExistingListingInputSchema
+>;
+export type ListingVerificationResult = z.infer<
+  typeof listingVerificationResultSchema
 >;
 export type ListingRegistrationReceipt = z.infer<
   typeof listingRegistrationReceiptSchema
