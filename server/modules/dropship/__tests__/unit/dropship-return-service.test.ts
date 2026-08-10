@@ -45,6 +45,36 @@ describe("DropshipReturnService", () => {
     });
   });
 
+  it("returns a vendor-scoped source order reference for administrators", async () => {
+    const repository = new FakeReturnRepository();
+    const service = makeService(repository, []);
+
+    const result = await service.getOrderReferenceForAdmin({
+      vendorId: 10,
+      intakeId: 44,
+    });
+
+    expect(repository.lastOrderReferenceInput).toEqual({
+      vendorId: 10,
+      intakeId: 44,
+    });
+    expect(result).toEqual(makeOrderReference());
+  });
+
+  it("rejects missing vendor-scoped source order references", async () => {
+    const repository = new FakeReturnRepository();
+    repository.orderReference = null;
+    const service = makeService(repository, []);
+
+    await expect(service.getOrderReferenceForAdmin({
+      vendorId: 10,
+      intakeId: 44,
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_INTAKE_NOT_FOUND",
+      context: { vendorId: 10, intakeId: 44 },
+    });
+  });
+
   it("creates member-scoped RMAs without trusting vendor or policy fields from the portal", async () => {
     const repository = new FakeReturnRepository();
     repository.activePolicy = makeReturnPolicy();
@@ -373,6 +403,40 @@ describe("DropshipReturnService", () => {
         status: "requested",
       },
     });
+  });
+
+  it("rejects uncontrolled admin reason and label values", async () => {
+    const service = makeService(new FakeReturnRepository(), []);
+    const base = {
+      vendorId: 10,
+      rmaNumber: "RMA-CONTROLLED-FIELDS",
+      returnWindowDays: 30,
+      items: [{
+        source: "manual_exception" as const,
+        quantity: 1,
+        manualDescription: "Unmapped marketplace item",
+        exceptionReason: "Marketplace line was absent from intake payload",
+      }],
+      actor: { actorType: "admin" as const, actorId: "admin-1" },
+    };
+
+    await expect(service.createRma({
+      ...base,
+      reasonCode: "free-form-reason",
+      idempotencyKey: "admin-rma-invalid-reason",
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+
+    await expect(service.createRma({
+      ...base,
+      labelSource: "free-form-label",
+      idempotencyKey: "admin-rma-invalid-label",
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+
+    await expect(service.createRma({
+      ...base,
+      returnTrackingNumber: "1Z999",
+      idempotencyKey: "admin-rma-tracking-without-label",
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
   });
 
   it("rejects empty administrator-created RMAs", async () => {
@@ -1606,12 +1670,16 @@ function makeOrderReference(
         lineIndex: 0,
         externalLineItemId: "line-20",
         productVariantId: 20,
+        sku: "SKU-20",
+        title: "Order item 20",
         quantity: 2,
       },
       {
         lineIndex: 1,
         externalLineItemId: "line-21",
         productVariantId: 21,
+        sku: "SKU-21",
+        title: "Order item 21",
         quantity: 1,
       },
     ],

@@ -28,6 +28,7 @@ import {
   buildAdminReturnInspectionInput,
   buildAdminReturnPolicyInput,
   buildAdminReturnPolicyUrl,
+  buildAdminReturnSourceOrderUrl,
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
   buildAdminShippingConfigUrl,
@@ -648,6 +649,13 @@ describe("dropship ops surface client helpers", () => {
     expect(buildAdminReturnPolicyUrl()).toBe(
       "/api/dropship/admin/returns/policy",
     );
+    expect(buildAdminReturnSourceOrderUrl({ vendorId: 12, intakeId: 44 })).toBe(
+      "/api/dropship/admin/returns/source-orders/44?vendorId=12",
+    );
+    expect(() => buildAdminReturnSourceOrderUrl({ vendorId: 0, intakeId: 44 }))
+      .toThrow("vendorId must be a positive integer.");
+    expect(() => buildAdminReturnSourceOrderUrl({ vendorId: 12, intakeId: 0 }))
+      .toThrow("intakeId must be a positive integer.");
   });
 
   it("builds admin return policy bodies with bounded return windows", () => {
@@ -723,7 +731,7 @@ describe("dropship ops surface client helpers", () => {
         reasonCode: "damaged",
         faultCategory: "carrier",
         returnWindowDays: "30",
-        labelSource: " marketplace ",
+        labelSource: "marketplace",
         returnTrackingNumber: " 1Z999 ",
         vendorNotes: " package lost ",
         items: [
@@ -811,6 +819,17 @@ describe("dropship ops surface client helpers", () => {
     expect(() =>
       buildAdminReturnCreateInput({ ...base, items: [] }),
     ).toThrow("At least one return item is required.");
+    expect(() =>
+      buildAdminReturnCreateInput({
+        ...base,
+        returnTrackingNumber: "1Z999",
+        items: [{
+          source: "order", orderLineIndex: "0", externalLineItemId: "line-20",
+          productVariantId: "20", manualDescription: "", exceptionReason: "",
+          quantity: "1", requestedCreditAmount: "",
+        }],
+      }),
+    ).toThrow("Select a label source before entering return tracking.");
     expect(() =>
       buildAdminReturnCreateInput({
         ...base,

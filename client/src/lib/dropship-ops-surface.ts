@@ -2248,16 +2248,57 @@ export interface DropshipAdminReturnCreateItemInput {
   requestedCreditCents: number | null;
 }
 
+export const DROPSHIP_ADMIN_RMA_REASON_CODES = [
+  "buyer_return",
+  "damaged",
+  "wrong_item",
+  "other",
+] as const;
+
+export type DropshipAdminRmaReasonCode =
+  (typeof DROPSHIP_ADMIN_RMA_REASON_CODES)[number];
+
+export const DROPSHIP_ADMIN_RMA_LABEL_SOURCES = [
+  "marketplace",
+  "vendor",
+  "ops",
+] as const;
+
+export type DropshipAdminRmaLabelSource =
+  (typeof DROPSHIP_ADMIN_RMA_LABEL_SOURCES)[number];
+
+export interface DropshipAdminReturnSourceOrderLine {
+  lineIndex: number;
+  externalLineItemId: string | null;
+  productVariantId: number | null;
+  sku: string | null;
+  title: string | null;
+  quantity: number;
+}
+
+export interface DropshipAdminReturnSourceOrder {
+  intakeId: number;
+  storeConnectionId: number;
+  status: DropshipOpsOrderIntakeStatus;
+  omsOrderId: number | null;
+  acceptedAt: string | null;
+  lines: DropshipAdminReturnSourceOrderLine[];
+}
+
+export interface DropshipAdminReturnSourceOrderResponse {
+  order: DropshipAdminReturnSourceOrder;
+}
+
 export interface DropshipAdminReturnCreateInput {
   vendorId: number;
   rmaNumber: string;
   storeConnectionId?: number | null;
   intakeId?: number | null;
   omsOrderId?: number | null;
-  reasonCode?: string | null;
+  reasonCode?: DropshipAdminRmaReasonCode | null;
   faultCategory?: DropshipReturnFaultCategory | null;
   returnWindowDays: number;
-  labelSource?: string | null;
+  labelSource?: DropshipAdminRmaLabelSource | null;
   returnTrackingNumber?: string | null;
   vendorNotes?: string | null;
   items: DropshipAdminReturnCreateItemInput[];
@@ -2656,6 +2697,22 @@ export function buildAdminReturnsUrl(input: {
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
+}
+
+export function buildAdminReturnSourceOrderUrl(input: {
+  vendorId: number;
+  intakeId: number;
+}): string {
+  if (!Number.isSafeInteger(input.vendorId) || input.vendorId <= 0) {
+    throw new Error("vendorId must be a positive integer.");
+  }
+  if (!Number.isSafeInteger(input.intakeId) || input.intakeId <= 0) {
+    throw new Error("intakeId must be a positive integer.");
+  }
+  return "/api/dropship/admin/returns/source-orders/" +
+    input.intakeId +
+    "?vendorId=" +
+    input.vendorId;
 }
 
 export function buildAdminReturnPolicyUrl(): string {
@@ -3164,10 +3221,10 @@ export function buildAdminReturnCreateInput(input: {
   storeConnectionId: string;
   intakeId: string;
   omsOrderId: string;
-  reasonCode: string;
+  reasonCode: DropshipAdminRmaReasonCode | "";
   faultCategory: DropshipReturnFaultCategory | "none";
   returnWindowDays: string;
-  labelSource: string;
+  labelSource: DropshipAdminRmaLabelSource | "";
   returnTrackingNumber: string;
   vendorNotes: string;
   items: Array<{
@@ -3183,6 +3240,12 @@ export function buildAdminReturnCreateInput(input: {
 }): DropshipAdminReturnCreateInput {
   const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
   const rmaNumber = requiredTrimmedString(input.rmaNumber, "rmaNumber", 80);
+  const reasonCode = input.reasonCode || null;
+  const labelSource = input.labelSource || null;
+  const returnTrackingNumber = input.returnTrackingNumber.trim() || null;
+  if (returnTrackingNumber && !labelSource) {
+    throw new Error("Select a label source before entering return tracking.");
+  }
   const vendorNotes = input.vendorNotes.trim();
   if (vendorNotes.length > 5000) {
     throw new Error("vendorNotes must be 5000 characters or fewer.");
@@ -3260,15 +3323,15 @@ export function buildAdminReturnCreateInput(input: {
     ),
     intakeId: parseOptionalPositiveInteger(input.intakeId, "intakeId"),
     omsOrderId: parseOptionalPositiveInteger(input.omsOrderId, "omsOrderId"),
-    reasonCode: input.reasonCode.trim() || null,
+    reasonCode,
     faultCategory:
       input.faultCategory === "none" ? null : input.faultCategory,
     returnWindowDays: parsePositiveInteger(
       input.returnWindowDays,
       "returnWindowDays",
     ),
-    labelSource: input.labelSource.trim() || null,
-    returnTrackingNumber: input.returnTrackingNumber.trim() || null,
+    labelSource,
+    returnTrackingNumber,
     vendorNotes: vendorNotes || null,
     items,
     idempotencyKey,

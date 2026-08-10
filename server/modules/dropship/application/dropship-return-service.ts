@@ -147,16 +147,47 @@ const createDropshipRmaRequestSchema = z
   })
   .strict();
 
+export const DROPSHIP_ADMIN_RMA_REASON_CODES = [
+  "buyer_return",
+  "damaged",
+  "wrong_item",
+  "other",
+] as const;
+
+export const DROPSHIP_ADMIN_RMA_LABEL_SOURCES = [
+  "marketplace",
+  "vendor",
+  "ops",
+] as const;
+
 const createDropshipRmaInputSchema = createDropshipRmaRequestSchema
   .extend({
     vendorId: positiveIdSchema,
     policyVersionId: positiveIdSchema.nullable().optional(),
+    reasonCode: z.enum(DROPSHIP_ADMIN_RMA_REASON_CODES).nullable().optional(),
+    labelSource: z.enum(DROPSHIP_ADMIN_RMA_LABEL_SOURCES).nullable().optional(),
     actor: z
       .object({
         actorType: z.enum(["vendor", "admin", "system"]),
         actorId: z.string().trim().min(1).max(255).optional(),
       })
       .strict(),
+  })
+  .strict()
+  .superRefine((input, ctx) => {
+    if (input.returnTrackingNumber && !input.labelSource) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["labelSource"],
+        message: "A label source is required when return tracking is provided.",
+      });
+    }
+  });
+
+const getDropshipRmaOrderReferenceInputSchema = z
+  .object({
+    vendorId: positiveIdSchema,
+    intakeId: positiveIdSchema,
   })
   .strict();
 
@@ -502,6 +533,8 @@ export interface DropshipRmaOrderLineReference {
   lineIndex: number;
   externalLineItemId: string | null;
   productVariantId: number | null;
+  sku: string | null;
+  title: string | null;
   quantity: number;
 }
 
@@ -728,6 +761,25 @@ export class DropshipReturnService {
 
   async getForAdmin(rmaId: number): Promise<DropshipRmaDetail> {
     return this.requireRma({ rmaId });
+  }
+
+  async getOrderReferenceForAdmin(
+    input: unknown,
+  ): Promise<DropshipRmaOrderReference> {
+    const parsed = parseReturnInput(
+      getDropshipRmaOrderReferenceInputSchema,
+      input,
+      "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+    );
+    const orderReference = await this.deps.repository.getOrderReference(parsed);
+    if (!orderReference) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_INTAKE_NOT_FOUND",
+        "Dropship order intake was not found for the vendor.",
+        parsed,
+      );
+    }
+    return orderReference;
   }
 
   async createRmaForMember(
