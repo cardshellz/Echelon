@@ -90,7 +90,7 @@ describe("DropshipReturnService", () => {
       returnTrackingNumber: "9400",
       vendorNotes: "Buyer return opened in marketplace.",
       items: [
-        { productVariantId: 20, quantity: 1, requestedCreditCents: 1500 },
+        { productVariantId: 20, quantity: 1 },
       ],
       idempotencyKey: "vendor-rma-100",
     });
@@ -124,6 +124,31 @@ describe("DropshipReturnService", () => {
         idempotencyKey: "vendor-rma-spoof",
       }),
     ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+  });
+
+  it("rejects vendor-controlled credit terms at the RMA intake boundary", async () => {
+    const repository = new FakeReturnRepository();
+    repository.activePolicy = makeReturnPolicy();
+    const service = makeService(repository, []);
+
+    await expect(service.createRmaForMember("member-1", {
+      rmaNumber: "RMA-VENDOR-CREDIT",
+      intakeId: 44,
+      reasonCode: "buyer_return",
+      faultCategory: "marketplace",
+      labelSource: "vendor",
+      returnTrackingNumber: "9400",
+      vendorNotes: null,
+      items: [
+        {
+          productVariantId: 20,
+          quantity: 1,
+          requestedCreditCents: 1500,
+        },
+      ],
+      idempotencyKey: "vendor-rma-credit",
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+    expect(repository.lastCreateInput).toBeNull();
   });
 
   it("uses the active return policy window for member RMA enforcement", async () => {
@@ -374,7 +399,6 @@ describe("DropshipReturnService", () => {
           externalLineItemId: "line-20",
           productVariantId: 20,
           quantity: 2,
-          requestedCreditCents: 1500,
         },
       ],
       idempotencyKey: "create-rma-100",
@@ -1665,6 +1689,7 @@ function makeOrderReference(
     status: "accepted",
     omsOrderId: 9001,
     acceptedAt: new Date("2026-05-01T19:00:00.000Z"),
+    currency: "USD",
     lines: [
       {
         lineIndex: 0,
@@ -1673,6 +1698,8 @@ function makeOrderReference(
         sku: "SKU-20",
         title: "Order item 20",
         quantity: 2,
+        unitRetailPriceCents: 1_500,
+        lineRetailTotalCents: 3_000,
       },
       {
         lineIndex: 1,
@@ -1681,6 +1708,8 @@ function makeOrderReference(
         sku: "SKU-21",
         title: "Order item 21",
         quantity: 1,
+        unitRetailPriceCents: 2_000,
+        lineRetailTotalCents: 2_000,
       },
     ],
     ...overrides,

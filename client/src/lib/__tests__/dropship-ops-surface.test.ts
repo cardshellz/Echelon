@@ -758,7 +758,6 @@ describe("dropship ops surface client helpers", () => {
             manualDescription: "ignored",
             exceptionReason: "",
             quantity: "2",
-            requestedCreditAmount: "12.50",
           },
           {
             source: "manual_exception",
@@ -768,7 +767,6 @@ describe("dropship ops surface client helpers", () => {
             manualDescription: "Unmapped bonus item",
             exceptionReason: "Marketplace included an item absent from intake",
             quantity: "1",
-            requestedCreditAmount: "",
           },
         ],
       }),
@@ -795,7 +793,6 @@ describe("dropship ops surface client helpers", () => {
           exceptionReason: null,
           quantity: 2,
           status: "requested",
-          requestedCreditCents: 1250,
         },
         {
           source: "manual_exception",
@@ -806,7 +803,6 @@ describe("dropship ops surface client helpers", () => {
           exceptionReason: "Marketplace included an item absent from intake",
           quantity: 1,
           status: "requested",
-          requestedCreditCents: null,
         },
       ],
     });
@@ -841,7 +837,7 @@ describe("dropship ops surface client helpers", () => {
         items: [{
           source: "order", orderLineIndex: "0", externalLineItemId: "line-20",
           productVariantId: "20", manualDescription: "", exceptionReason: "",
-          quantity: "1", requestedCreditAmount: "",
+          quantity: "1",
         }],
       }),
     ).toThrow("Select a label source before entering return tracking.");
@@ -851,7 +847,7 @@ describe("dropship ops surface client helpers", () => {
         items: [{
           source: "order", orderLineIndex: "", externalLineItemId: "",
           productVariantId: "20", manualDescription: "", exceptionReason: "",
-          quantity: "1", requestedCreditAmount: "",
+          quantity: "1",
         }],
       }),
     ).toThrow("items.0.orderLineIndex");
@@ -861,7 +857,7 @@ describe("dropship ops surface client helpers", () => {
         items: [{
           source: "manual_exception", orderLineIndex: "", externalLineItemId: "",
           productVariantId: "", manualDescription: "", exceptionReason: "Needs review",
-          quantity: "1", requestedCreditAmount: "",
+          quantity: "1",
         }],
       }),
     ).toThrow("requires a catalog variant or item description");
@@ -883,13 +879,11 @@ describe("dropship ops surface client helpers", () => {
             productVariantId: "123",
             quantity: "1",
             status: "",
-            requestedCreditAmount: "15.00",
           },
           {
             productVariantId: "456",
             quantity: "2",
             status: "requested",
-            requestedCreditAmount: "",
           },
         ],
       }),
@@ -907,13 +901,11 @@ describe("dropship ops surface client helpers", () => {
           productVariantId: 123,
           quantity: 1,
           status: "requested",
-          requestedCreditCents: 1500,
         },
         {
           productVariantId: 456,
           quantity: 2,
           status: "requested",
-          requestedCreditCents: null,
         },
       ],
     });
@@ -958,7 +950,6 @@ describe("dropship ops surface client helpers", () => {
             productVariantId: "123",
             quantity: "1",
             status: "requested",
-            requestedCreditAmount: "",
           },
         ],
       }),
