@@ -2487,6 +2487,16 @@ export function queryErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+export function optionalQueryErrorMessage(
+  error: unknown,
+  fallback: string,
+): string | null {
+  if (error === null || error === undefined) {
+    return null;
+  }
+  return queryErrorMessage(error, fallback);
+}
+
 export function buildAdminCatalogExposurePreviewUrl(input: {
   search: string;
   visibility?: "all" | "visible" | "hidden";

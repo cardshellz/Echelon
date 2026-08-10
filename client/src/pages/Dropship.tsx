@@ -143,6 +143,7 @@ import {
   orderCancellationRetryEligibility,
   postJson,
   putJson,
+  optionalQueryErrorMessage,
   queryErrorMessage,
   riskSeverityTone,
   orderIntakeRetryEligibility,
@@ -3972,7 +3973,7 @@ function ReturnOpsTab() {
         form={createForm}
         isSaving={creatingRma}
         order={returnCreateOrderQuery.data?.order ?? null}
-        orderError={queryErrorMessage(
+        orderError={optionalQueryErrorMessage(
           returnCreateOrderQuery.error,
           "Unable to load the selected order.",
         )}
@@ -10578,7 +10579,7 @@ function ReturnCreatePanel({
   onRemoveItem: (index: number) => void;
   onSubmit: () => void;
   order: DropshipAdminReturnSourceOrder | null;
-  orderError: string;
+  orderError: string | null;
   orderLoading: boolean;
   storeConnections: DropshipAdminStoreConnectionListItem[];
   storeConnectionsLoading: boolean;
