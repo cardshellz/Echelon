@@ -9,6 +9,7 @@ import {
 } from "@shared/schema";
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
+import { createExpectedWmsReturn } from "../../wms/expected-return-commands";
 import {
   OpenReturnCaseError,
   type LockedReturnSourceContext,
@@ -222,36 +223,26 @@ class PostgresOpenReturnCaseTransaction implements OpenReturnCaseTransaction {
   }
 
   async persist(input: PersistOpenReturnCaseInput): Promise<OpenReturnCaseResult> {
-    const returnResult = await this.tx.execute(sql`
-      INSERT INTO wms.returns (
-        order_id, source, source_event_key, reason, restocked, status,
-        notes, created_at, updated_at
-      ) VALUES (
-        ${input.source.wmsOrderId}, 'returns_admin', ${`manual-return:${input.idempotencyKey}`},
-        ${input.reasonCode}, false, 'expected', ${input.notes}, ${input.now}, ${input.now}
-      )
-      RETURNING id
-    `);
-    const wmsReturnId = readPositiveInteger(rowsOf<InsertedIdRow>(returnResult)[0]?.id, "WMS return id");
-
-    const wmsReturnItems: Array<{ item: PersistOpenReturnCaseInput["selectedItems"][number]; id: number }> = [];
-    for (const item of input.selectedItems) {
-      const itemResult = await this.tx.execute(sql`
-        INSERT INTO wms.return_items (
-          return_id, order_item_id, oms_order_line_id, external_line_item_id,
-          sku, expected_qty, received_qty, restock_policy, status, created_at, updated_at
-        ) VALUES (
-          ${wmsReturnId}, ${item.wmsOrderItemId}, ${item.omsOrderLineId},
-          ${item.externalLineItemId}, ${item.sku}, ${item.quantity}, 0,
-          'return', 'expected', ${input.now}, ${input.now}
-        )
-        RETURNING id
-      `);
-      wmsReturnItems.push({
-        item,
-        id: readPositiveInteger(rowsOf<InsertedIdRow>(itemResult)[0]?.id, "WMS return item id"),
-      });
-    }
+    const expectedReturn = await createExpectedWmsReturn(this.tx, {
+      orderId: input.source.wmsOrderId,
+      source: "returns_admin",
+      sourceEventKey: `manual-return:${input.idempotencyKey}`,
+      reason: input.reasonCode,
+      notes: input.notes,
+      items: input.selectedItems.map((item) => ({
+        orderItemId: item.wmsOrderItemId,
+        omsOrderLineId: item.omsOrderLineId,
+        externalLineItemId: item.externalLineItemId,
+        sku: item.sku,
+        expectedQuantity: item.quantity,
+        restockPolicy: "return",
+      })),
+      now: input.now,
+    });
+    const wmsReturnId = expectedReturn.returnId;
+    const wmsReturnItemIdByOrderItemId = new Map(
+      expectedReturn.items.map((item) => [item.orderItemId, item.id]),
+    );
 
     const caseResult = await this.tx.execute(sql`
       INSERT INTO returns.return_cases (
@@ -275,7 +266,11 @@ class PostgresOpenReturnCaseTransaction implements OpenReturnCaseTransaction {
     const caseId = readPositiveInteger(returnCase?.id, "return case id");
     const caseNumber = readText(returnCase?.case_number, "return case number");
 
-    for (const { item, id } of wmsReturnItems) {
+    for (const item of input.selectedItems) {
+      const wmsReturnItemId = wmsReturnItemIdByOrderItemId.get(item.wmsOrderItemId);
+      if (wmsReturnItemId == null) {
+        throw new Error(`Missing WMS return item for order item ${item.wmsOrderItemId}`);
+      }
       const sourceLineTotalCents = multiplyMoney(item.unitPaidPriceCents, item.quantity);
       await this.tx.execute(sql`
         INSERT INTO returns.return_case_items (
@@ -283,7 +278,7 @@ class PostgresOpenReturnCaseTransaction implements OpenReturnCaseTransaction {
           external_line_item_id, sku, title, quantity, unit_paid_price_cents,
           source_line_total_cents, created_at
         ) VALUES (
-          ${caseId}, ${id}, ${item.omsOrderLineId}, ${item.wmsOrderItemId},
+          ${caseId}, ${wmsReturnItemId}, ${item.omsOrderLineId}, ${item.wmsOrderItemId},
           ${item.externalLineItemId}, ${item.sku}, ${item.title}, ${item.quantity},
           ${item.unitPaidPriceCents}, ${sourceLineTotalCents}, ${input.now}
         )

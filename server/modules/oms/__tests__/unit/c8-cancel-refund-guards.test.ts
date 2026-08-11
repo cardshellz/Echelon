@@ -32,6 +32,13 @@ const REFUND_CASCADE_SRC = readFileSync(
   "utf8",
 );
 
+const EXPECTED_RETURN_COMMAND_SRC = readFileSync(
+  fileURLToPath(
+    new URL("../../../wms/expected-return-commands.ts", import.meta.url),
+  ),
+  "utf8",
+);
+
 // ─── D-SYNCANCEL structural checks ────────────────────────────────
 
 function extractSyncCancelFn(): string {
@@ -212,8 +219,9 @@ describe("D-REFUNDREL: line-level refund reservation and return boundaries", () 
 
   it("does not convert Shopify return intent into an inventory receipt", () => {
     expect(REFUND_CASCADE_SRC).toContain('const returnPolicies = new Set(["return", "restock"])');
-    expect(REFUND_CASCADE_SRC).toContain("status, received_at, refunded_at");
-    expect(REFUND_CASCADE_SRC).toContain("false, 'expected', NULL");
+    expect(REFUND_CASCADE_SRC).toContain("createExpectedWmsReturn");
+    expect(EXPECTED_RETURN_COMMAND_SRC).toContain("status, received_at, refunded_at");
+    expect(EXPECTED_RETURN_COMMAND_SRC).toContain("false, 'expected', NULL");
     expect(REFUND_CASCADE_SRC).not.toContain("receiveInventory");
   });
 });

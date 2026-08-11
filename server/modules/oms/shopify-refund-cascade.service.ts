@@ -15,6 +15,7 @@ import {
 import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
 import { recordOmsWmsAuthorityCleanupAudit } from "../wms/oms-wms-authority-cleanup-audit.repository";
 import { applyRefundAuthorityToWmsOrderItem } from "../wms/order-item-commands";
+import { createExpectedWmsReturn } from "../wms/expected-return-commands";
 
 const REFUND_LOCK_NAMESPACE = 918413;
 
@@ -838,64 +839,32 @@ async function createExpectedReturn(
     ? args.refundPayload.note
     : null;
 
-  const insertedReturn = await tx.execute(sql`
-    INSERT INTO wms.returns (
-      shipment_id, order_id, source, source_event_key, reason,
-      refund_external_id, restocked, status, received_at, refunded_at,
-      notes, created_at, updated_at
-    ) VALUES (
-      ${shipmentId}, ${args.wmsOrderId}, 'shopify_webhook', ${eventKey},
-      ${reason}, ${args.refundExternalId}, false, 'expected', NULL,
-      ${refundedAt}, ${notes}, ${args.now}, ${args.now}
-    )
-    ON CONFLICT (source_event_key) WHERE NULLIF(BTRIM(source_event_key), '') IS NOT NULL
-    DO NOTHING
-    RETURNING id
-  `);
-  let returnId = rowsOf<any>(insertedReturn)[0]?.id;
-  if (!returnId) {
-    const existingReturn = await tx.execute(sql`
-      SELECT id
-      FROM wms.returns
-      WHERE source_event_key = ${eventKey}
-      LIMIT 1
-      FOR UPDATE
-    `);
-    returnId = rowsOf<any>(existingReturn)[0]?.id;
-  }
-  if (!returnId) {
-    throw new Error(`Could not resolve expected return for ${eventKey}`);
-  }
-
-  let itemsCreated = 0;
-  for (const expected of expectedItems) {
-    const locationId = expected.adjustment.raw.location_id == null
-      ? null
-      : String(expected.adjustment.raw.location_id);
-    const insertedItem = await tx.execute(sql`
-      INSERT INTO wms.return_items (
-        return_id, order_item_id, oms_order_line_id,
-        external_line_item_id, sku, expected_qty, received_qty,
-        restock_policy, location_id, status, created_at, updated_at
-      )
-      SELECT
-        ${Number(returnId)}, ${expected.item.id}, ${expected.item.omsOrderLineId},
-        ${expected.adjustment.externalLineItemId},
-        (SELECT sku FROM wms.order_items WHERE id = ${expected.item.id}),
-        ${expected.expectedQuantity}, 0, ${expected.adjustment.restockPolicy},
-        ${locationId}, 'expected', ${args.now}, ${args.now}
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM wms.return_items existing
-        WHERE existing.return_id = ${Number(returnId)}
-          AND existing.external_line_item_id = ${expected.adjustment.externalLineItemId}
-      )
-      RETURNING id
-    `);
-    itemsCreated += rowsOf(insertedItem).length;
-  }
-
-  return { returnId: Number(returnId), itemsCreated, warnings };
+  const expectedReturn = await createExpectedWmsReturn(tx, {
+    shipmentId: shipmentId == null ? null : Number(shipmentId),
+    orderId: args.wmsOrderId,
+    source: "shopify_webhook",
+    sourceEventKey: eventKey,
+    reason,
+    refundExternalId: args.refundExternalId,
+    refundedAt,
+    notes,
+    items: expectedItems.map((expected) => ({
+      orderItemId: expected.item.id,
+      omsOrderLineId: expected.item.omsOrderLineId,
+      externalLineItemId: expected.adjustment.externalLineItemId,
+      expectedQuantity: expected.expectedQuantity,
+      restockPolicy: expected.adjustment.restockPolicy,
+      locationId: expected.adjustment.raw.location_id == null
+        ? null
+        : String(expected.adjustment.raw.location_id),
+    })),
+    now: args.now,
+  });
+  return {
+    returnId: expectedReturn.returnId,
+    itemsCreated: expectedReturn.items.filter((item) => item.created).length,
+    warnings,
+  };
 }
 
 async function applyInternalRefundState(
