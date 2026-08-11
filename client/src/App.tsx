@@ -65,6 +65,7 @@ import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
 import PurchaseOrderEdit from "@/pages/PurchaseOrderEdit";
 import PurchasingDashboard from "@/pages/PurchasingDashboard";
 import Returns from "@/pages/Returns";
+import ReturnCases from "@/pages/ReturnCases";
 import ReturnPolicies from "@/pages/ReturnPolicies";
 import InboundShipments from "@/pages/InboundShipments";
 import OutboundShipments from "@/pages/OutboundShipments";
@@ -450,8 +451,14 @@ function Router() {
         <Route path="/replenishment">
           <ProtectedRoute component={Replenishment} allowedRoles={["admin", "lead"]} />
         </Route>
-        <Route path="/returns">
+        <Route path="/returns/cases">
+          <ProtectedRoute component={ReturnCases} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/returns/receiving">
           <ProtectedRoute component={Returns} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/returns">
+          <Redirect to="/returns/cases" />
         </Route>
         <Route path="/return-policies">
           <ProtectedRoute component={ReturnPolicies} allowedRoles={["admin"]} />

@@ -31,6 +31,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useLocation, useSearch } from "wouter";
+import { legacyDropshipReturnDestination } from "@/lib/returns-admin-navigation";
 import { toast } from "@/hooks/use-toast";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -291,8 +292,6 @@ type DropshipOpsTabValue =
   | "listing-pushes"
   | "tracking-pushes"
   | "notifications"
-  | "returns"
-  | "return-policies"
   | "audit";
 type CatalogExposureScopeFilter =
   DropshipAdminCatalogExposureRuleInput["scopeType"];
@@ -374,8 +373,6 @@ const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
   "listing-pushes",
   "tracking-pushes",
   "notifications",
-  "returns",
-  "return-policies",
   "audit",
 ]);
 
@@ -941,6 +938,11 @@ export default function Dropship() {
     setActiveTab(locationTab);
   }, [locationTab]);
 
+  useEffect(() => {
+    const destination = legacyDropshipReturnDestination(searchString);
+    if (destination) navigate(destination, { replace: true });
+  }, [navigate, searchString]);
+
   function applyAuditFilters() {
     setAppliedAuditFilters({
       search: auditSearch,
@@ -979,8 +981,8 @@ export default function Dropship() {
             </h1>
             <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
               Monitor .ops setup blockers, store health, order intake
-              exceptions, listing pushes, tracking pushes, returns,
-              notifications, and audit history.
+              exceptions, listing pushes, tracking pushes, notifications, and
+              audit history.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1086,14 +1088,6 @@ export default function Dropship() {
 
           <TabsContent value="notifications" className="m-0">
             <NotificationOpsTab />
-          </TabsContent>
-
-          <TabsContent value="returns" className="m-0">
-            <ReturnOpsTab />
-          </TabsContent>
-
-          <TabsContent value="return-policies" className="m-0">
-            <ReturnPoliciesTab />
           </TabsContent>
 
           <TabsContent value="audit" className="m-0 space-y-4">
@@ -3252,7 +3246,11 @@ function ReturnPoliciesTab() {
   );
 }
 
-function ReturnOpsTab() {
+export function ReturnOpsTab({
+  showLegacyPolicyPanel = true,
+}: {
+  showLegacyPolicyPanel?: boolean;
+}) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<ReturnOpsStatusFilter>("default");
@@ -3343,6 +3341,7 @@ function ReturnOpsTab() {
     queryKey: [returnPolicyUrl],
     queryFn: () =>
       fetchJson<DropshipAdminReturnPolicyResponse>(returnPolicyUrl),
+    enabled: showLegacyPolicyPanel,
   });
   const returnDetailQuery = useQuery<DropshipReturnDetailResponse>({
     queryKey: ["dropship-admin-return-detail", selectedInspectionRmaId],
@@ -3842,7 +3841,7 @@ function ReturnOpsTab() {
   return (
     <div className="space-y-5">
       {(returnsQuery.error ||
-        returnPolicyQuery.error ||
+        (showLegacyPolicyPanel && returnPolicyQuery.error) ||
         returnVendorOptionsQuery.error ||
         returnStoreConnectionsQuery.error ||
         returnOrderIntakesQuery.error ||
@@ -3858,7 +3857,7 @@ function ReturnOpsTab() {
                     "Unable to load dropship returns.",
                   )
                 : queryErrorMessage(
-                    returnPolicyQuery.error ??
+                    (showLegacyPolicyPanel ? returnPolicyQuery.error : null) ??
                       returnVendorOptionsQuery.error ??
                       returnStoreConnectionsQuery.error ??
                       returnOrderIntakesQuery.error ??
@@ -3922,7 +3921,11 @@ function ReturnOpsTab() {
         </div>
       </section>
 
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+      <section
+        className={`grid gap-3 md:grid-cols-2 ${
+          showLegacyPolicyPanel ? "xl:grid-cols-5" : "xl:grid-cols-4"
+        }`}
+      >
         <CatalogMetric
           icon={<RotateCcw className="h-4 w-4" />}
           label="Matching RMAs"
@@ -3950,25 +3953,29 @@ function ReturnOpsTab() {
           label="Visible credited"
           value={String(rmas.filter((rma) => rma.status === "credited").length)}
         />
-        <CatalogMetric
-          icon={<History className="h-4 w-4" />}
-          label="Return window"
-          value={
-            activeReturnPolicy
-              ? `${activeReturnPolicy.returnWindowDays}d`
-              : "Not set"
-          }
-        />
+        {showLegacyPolicyPanel && (
+          <CatalogMetric
+            icon={<History className="h-4 w-4" />}
+            label="Return window"
+            value={
+              activeReturnPolicy
+                ? `${activeReturnPolicy.returnWindowDays}d`
+                : "Not set"
+            }
+          />
+        )}
       </section>
 
-      <ReturnPolicyPanel
-        activePolicy={activeReturnPolicy}
-        form={policyForm}
-        isLoading={returnPolicyQuery.isLoading || returnPolicyQuery.isFetching}
-        isSaving={savingPolicy}
-        onChange={updateReturnPolicyForm}
-        onSave={saveReturnPolicy}
-      />
+      {showLegacyPolicyPanel && (
+        <ReturnPolicyPanel
+          activePolicy={activeReturnPolicy}
+          form={policyForm}
+          isLoading={returnPolicyQuery.isLoading || returnPolicyQuery.isFetching}
+          isSaving={savingPolicy}
+          onChange={updateReturnPolicyForm}
+          onSave={saveReturnPolicy}
+        />
+      )}
 
       <ReturnCreatePanel
         form={createForm}
