@@ -26,7 +26,6 @@ import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import { RotateCcw, Search, Package, AlertCircle } from "lucide-react";
 import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
-import { ReturnCaseAdminPanel } from "@/components/returns/ReturnCaseAdminPanel";
 
 interface OrderLookup {
   order: {
@@ -223,14 +222,12 @@ export default function Returns() {
       <div>
         <h1 className="text-xl md:text-2xl font-bold flex items-center gap-2">
           <RotateCcw className="h-5 w-5 md:h-6 md:w-6" />
-          Returns
+          Return Receiving
         </h1>
         <p className="text-sm text-muted-foreground">
-          Process customer returns and restock inventory
+          Receive approved returns and post inspected inventory disposition.
         </p>
       </div>
-
-      <ReturnCaseAdminPanel />
 
       {/* Order Search */}
       <Card>

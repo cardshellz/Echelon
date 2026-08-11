@@ -160,9 +160,17 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Orders", icon: Globe, href: "/oms/orders" },
-      { label: "Return Receiving", icon: RotateCcw, href: "/returns" },
-      { label: "Return Policies", icon: FileText, href: "/return-policies", roles: ["admin"] },
       { label: "Order History", icon: History, href: "/order-history" },
+    ],
+  },
+  {
+    label: "Returns",
+    icon: RotateCcw,
+    roles: ["admin", "lead"],
+    children: [
+      { label: "Cases", icon: ClipboardList, href: "/returns/cases" },
+      { label: "Policies", icon: FileText, href: "/return-policies", roles: ["admin"] },
+      { label: "Receiving", icon: PackageCheck, href: "/returns/receiving" },
     ],
   },
   {
@@ -213,8 +221,6 @@ const navStructure: NavEntry[] = [
       { label: "Listing Pushes", icon: Tag, href: "/dropship?tab=listing-pushes" },
       { label: "Tracking Pushes", icon: Truck, href: "/dropship?tab=tracking-pushes" },
       { label: "Wallet Ops", icon: CreditCard, href: "/dropship?tab=wallet-ops" },
-      { label: "Returns", icon: RotateCcw, href: "/dropship?tab=returns" },
-      { label: "Return Policies", icon: FileText, href: "/dropship?tab=return-policies" },
       { label: "Notifications", icon: Bell, href: "/dropship?tab=notifications" },
       { label: "Audit", icon: History, href: "/dropship?tab=audit" },
     ],
