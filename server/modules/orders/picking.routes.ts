@@ -248,7 +248,7 @@ export function registerPickingRoutes(app: Express) {
         JOIN warehouse.warehouse_locations wl
           ON wl.code = oi.location
          AND (o.warehouse_id IS NULL OR wl.warehouse_id = o.warehouse_id)
-        WHERE oi.id = ANY(${itemIds})
+        WHERE oi.id = ANY(ARRAY[${sql.join(itemIds, sql`, `)}]::integer[])
           AND oi.location IS NOT NULL
           AND oi.location NOT IN ('UNASSIGNED', 'U')
         ORDER BY oi.id, pv.id
