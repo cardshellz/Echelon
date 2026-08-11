@@ -11,6 +11,7 @@ import { registerFinancialCommandOperationsRoutes } from "./platform/commands/fi
 import { registerShopifyRoutes } from "./routes/shopify.routes";
 import { registerWarehouseRoutes } from "./modules/warehouse/warehouse.routes";
 import { registerProductRoutes } from "./modules/catalog/catalog.routes";
+import { registerCatalogExportRoutes } from "./modules/catalog-export/interfaces/http/catalog-export.routes";
 import { registerInventoryRoutes } from "./modules/inventory/inventory.routes";
 import { registerReplenishmentRoutes } from "./modules/inventory";
 import { registerNotificationRoutes } from "./modules/notifications";
@@ -60,6 +61,8 @@ import { registerDropshipWalletRoutes } from "./modules/dropship/interfaces/http
 import { registerDropshipOrderRoutes } from "./modules/dropship/interfaces/http/dropship-order.routes";
 import { registerDropshipNotificationRoutes } from "./modules/dropship/interfaces/http/dropship-notification.routes";
 import { registerDropshipReturnRoutes } from "./modules/dropship/interfaces/http/dropship-return.routes";
+import { registerReturnPolicyAdminRoutes } from "./modules/returns/interfaces/http/return-policy-admin.routes";
+import { registerReturnCaseAdminRoutes } from "./modules/returns/interfaces/http/return-case-admin.routes";
 import { registerDropshipOpsSurfaceRoutes } from "./modules/dropship/interfaces/http/dropship-ops-surface.routes";
 import { registerDropshipMarketplaceOrderIntakeRoutes } from "./modules/dropship/interfaces/http/dropship-marketplace-order-intake.routes";
 import { registerShippingAdminRoutes } from "./modules/shipping-engine/shipping-admin.routes";
@@ -128,6 +131,8 @@ export async function registerRoutes(
   registerDropshipOrderRoutes(app);
   registerDropshipNotificationRoutes(app);
   registerDropshipReturnRoutes(app);
+  registerReturnPolicyAdminRoutes(app);
+  registerReturnCaseAdminRoutes(app);
   registerDropshipOpsSurfaceRoutes(app);
   registerDropshipListingRoutes(app);
   registerLocationRoutes(app);
@@ -138,6 +143,7 @@ export async function registerRoutes(
   registerShopifyRoutes(app);
   registerWarehouseRoutes(app);
   await registerProductRoutes(app);
+  registerCatalogExportRoutes(app);
   registerInventoryRoutes(app);
   registerReplenishmentRoutes(app);
   registerChannelRoutes(app);

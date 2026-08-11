@@ -18,7 +18,9 @@ import type { DropshipLogEvent } from "../../application/dropship-ports";
 
 const now = new Date("2026-08-05T19:00:00.000Z");
 
-function candidate(overrides: Partial<ReturnPolicyScopeCandidate> = {}): ReturnPolicyScopeCandidate {
+function candidate(
+  overrides: Partial<ReturnPolicyScopeCandidate> = {},
+): ReturnPolicyScopeCandidate {
   return {
     id: 1,
     vendorId: null,
@@ -33,27 +35,68 @@ function candidate(overrides: Partial<ReturnPolicyScopeCandidate> = {}): ReturnP
 
 describe("return-policy domain precedence", () => {
   it("classifies scope from vendor/store columns", () => {
-    expect(returnPolicyScopeFor({ vendorId: null, storeConnectionId: null })).toBe("global");
-    expect(returnPolicyScopeFor({ vendorId: null, storeConnectionId: 7 })).toBe("store");
-    expect(returnPolicyScopeFor({ vendorId: 3, storeConnectionId: null })).toBe("vendor");
-    expect(returnPolicyScopeFor({ vendorId: 3, storeConnectionId: 7 })).toBe("vendor_store");
+    expect(
+      returnPolicyScopeFor({ vendorId: null, storeConnectionId: null }),
+    ).toBe("global");
+    expect(returnPolicyScopeFor({ vendorId: null, storeConnectionId: 7 })).toBe(
+      "store",
+    );
+    expect(returnPolicyScopeFor({ vendorId: 3, storeConnectionId: null })).toBe(
+      "vendor",
+    );
+    expect(returnPolicyScopeFor({ vendorId: 3, storeConnectionId: 7 })).toBe(
+      "vendor_store",
+    );
   });
 
   it("matches candidates against the requested scope", () => {
     const scope = { vendorId: 3, storeConnectionId: 7 };
     expect(returnPolicyScopeMatches(candidate({}), scope)).toBe(true);
-    expect(returnPolicyScopeMatches(candidate({ storeConnectionId: 7 }), scope)).toBe(true);
-    expect(returnPolicyScopeMatches(candidate({ storeConnectionId: 8 }), scope)).toBe(false);
-    expect(returnPolicyScopeMatches(candidate({ vendorId: 3 }), scope)).toBe(true);
-    expect(returnPolicyScopeMatches(candidate({ vendorId: 4 }), scope)).toBe(false);
-    expect(returnPolicyScopeMatches(candidate({ vendorId: 3, storeConnectionId: 7 }), scope)).toBe(true);
-    expect(returnPolicyScopeMatches(candidate({ vendorId: 3, storeConnectionId: 8 }), scope)).toBe(false);
+    expect(
+      returnPolicyScopeMatches(candidate({ storeConnectionId: 7 }), scope),
+    ).toBe(true);
+    expect(
+      returnPolicyScopeMatches(candidate({ storeConnectionId: 8 }), scope),
+    ).toBe(false);
+    expect(returnPolicyScopeMatches(candidate({ vendorId: 3 }), scope)).toBe(
+      true,
+    );
+    expect(returnPolicyScopeMatches(candidate({ vendorId: 4 }), scope)).toBe(
+      false,
+    );
+    expect(
+      returnPolicyScopeMatches(
+        candidate({ vendorId: 3, storeConnectionId: 7 }),
+        scope,
+      ),
+    ).toBe(true);
+    expect(
+      returnPolicyScopeMatches(
+        candidate({ vendorId: 3, storeConnectionId: 8 }),
+        scope,
+      ),
+    ).toBe(false);
   });
 
   it("store-scoped candidates do not match vendor-only lookups and vice versa", () => {
-    expect(returnPolicyScopeMatches(candidate({ storeConnectionId: 7 }), { vendorId: 3, storeConnectionId: null })).toBe(false);
-    expect(returnPolicyScopeMatches(candidate({ vendorId: 3 }), { vendorId: null, storeConnectionId: 7 })).toBe(false);
-    expect(returnPolicyScopeMatches(candidate({ vendorId: 3, storeConnectionId: 7 }), { vendorId: 3, storeConnectionId: null })).toBe(false);
+    expect(
+      returnPolicyScopeMatches(candidate({ storeConnectionId: 7 }), {
+        vendorId: 3,
+        storeConnectionId: null,
+      }),
+    ).toBe(false);
+    expect(
+      returnPolicyScopeMatches(candidate({ vendorId: 3 }), {
+        vendorId: null,
+        storeConnectionId: 7,
+      }),
+    ).toBe(false);
+    expect(
+      returnPolicyScopeMatches(
+        candidate({ vendorId: 3, storeConnectionId: 7 }),
+        { vendorId: 3, storeConnectionId: null },
+      ),
+    ).toBe(false);
   });
 
   it("vendor+store beats vendor beats store beats global", () => {
@@ -63,9 +106,19 @@ describe("return-policy domain precedence", () => {
     const vendorStore = candidate({ id: 4, vendorId: 3, storeConnectionId: 7 });
     const scope = { vendorId: 3, storeConnectionId: 7 };
 
-    expect(selectReturnPolicyCandidate([global, store, vendor, vendorStore], scope, now)?.id).toBe(4);
-    expect(selectReturnPolicyCandidate([global, store, vendor], scope, now)?.id).toBe(3);
-    expect(selectReturnPolicyCandidate([global, store], scope, now)?.id).toBe(2);
+    expect(
+      selectReturnPolicyCandidate(
+        [global, store, vendor, vendorStore],
+        scope,
+        now,
+      )?.id,
+    ).toBe(4);
+    expect(
+      selectReturnPolicyCandidate([global, store, vendor], scope, now)?.id,
+    ).toBe(3);
+    expect(selectReturnPolicyCandidate([global, store], scope, now)?.id).toBe(
+      2,
+    );
     expect(selectReturnPolicyCandidate([global], scope, now)?.id).toBe(1);
   });
 
@@ -76,31 +129,73 @@ describe("return-policy domain precedence", () => {
     const scope = { vendorId: 3, storeConnectionId: null };
 
     expect(selectReturnPolicyCandidate([low, high], scope, now)?.id).toBe(2);
-    expect(selectReturnPolicyCandidate([high, samePriorityNewer], scope, now)?.id).toBe(5);
-    expect(compareReturnPolicyPrecedence(high, samePriorityNewer)).toBeGreaterThan(0);
-    expect(compareReturnPolicyPrecedence(samePriorityNewer, high)).toBeLessThan(0);
+    expect(
+      selectReturnPolicyCandidate([high, samePriorityNewer], scope, now)?.id,
+    ).toBe(5);
+    expect(
+      compareReturnPolicyPrecedence(high, samePriorityNewer),
+    ).toBeGreaterThan(0);
+    expect(compareReturnPolicyPrecedence(samePriorityNewer, high)).toBeLessThan(
+      0,
+    );
   });
 
   it("excludes inactive rows and rows outside their effective window", () => {
     const at = new Date("2026-06-01T00:00:00.000Z");
-    expect(isReturnPolicyEffectiveAt(candidate({ isActive: false }), at)).toBe(false);
-    expect(isReturnPolicyEffectiveAt(candidate({ effectiveFrom: new Date("2026-07-01T00:00:00.000Z") }), at)).toBe(false);
-    expect(isReturnPolicyEffectiveAt(candidate({ effectiveTo: new Date("2026-05-01T00:00:00.000Z") }), at)).toBe(false);
-    expect(isReturnPolicyEffectiveAt(candidate({ effectiveTo: new Date("2026-06-01T00:00:00.000Z") }), at)).toBe(false);
-    expect(isReturnPolicyEffectiveAt(candidate({ effectiveTo: new Date("2026-07-01T00:00:00.000Z") }), at)).toBe(true);
+    expect(isReturnPolicyEffectiveAt(candidate({ isActive: false }), at)).toBe(
+      false,
+    );
+    expect(
+      isReturnPolicyEffectiveAt(
+        candidate({ effectiveFrom: new Date("2026-07-01T00:00:00.000Z") }),
+        at,
+      ),
+    ).toBe(false);
+    expect(
+      isReturnPolicyEffectiveAt(
+        candidate({ effectiveTo: new Date("2026-05-01T00:00:00.000Z") }),
+        at,
+      ),
+    ).toBe(false);
+    expect(
+      isReturnPolicyEffectiveAt(
+        candidate({ effectiveTo: new Date("2026-06-01T00:00:00.000Z") }),
+        at,
+      ),
+    ).toBe(false);
+    expect(
+      isReturnPolicyEffectiveAt(
+        candidate({ effectiveTo: new Date("2026-07-01T00:00:00.000Z") }),
+        at,
+      ),
+    ).toBe(true);
 
     const scope = { vendorId: null, storeConnectionId: null };
-    const expired = candidate({ id: 1, effectiveTo: new Date("2026-05-01T00:00:00.000Z") });
-    const future = candidate({ id: 2, effectiveFrom: new Date("2026-07-01T00:00:00.000Z") });
+    const expired = candidate({
+      id: 1,
+      effectiveTo: new Date("2026-05-01T00:00:00.000Z"),
+    });
+    const future = candidate({
+      id: 2,
+      effectiveFrom: new Date("2026-07-01T00:00:00.000Z"),
+    });
     const current = candidate({ id: 3 });
-    expect(selectReturnPolicyCandidate([expired, future, current], scope, at)?.id).toBe(3);
-    expect(selectReturnPolicyCandidate([expired, future], scope, at)).toBeNull();
+    expect(
+      selectReturnPolicyCandidate([expired, future, current], scope, at)?.id,
+    ).toBe(3);
+    expect(
+      selectReturnPolicyCandidate([expired, future], scope, at),
+    ).toBeNull();
   });
 
   it("falls back to global when no scoped row matches", () => {
     const global = candidate({ id: 9 });
     const otherVendor = candidate({ id: 2, vendorId: 99 });
-    const selected = selectReturnPolicyCandidate([global, otherVendor], { vendorId: 3, storeConnectionId: null }, now);
+    const selected = selectReturnPolicyCandidate(
+      [global, otherVendor],
+      { vendorId: 3, storeConnectionId: null },
+      now,
+    );
     expect(selected?.id).toBe(9);
   });
 });
@@ -113,14 +208,22 @@ describe("DropshipReturnPolicyService", () => {
 
     await service.resolveReturnPolicy({ vendorId: 3, storeConnectionId: 7 });
 
-    expect(repository.lastResolvePolicyInput).toEqual({ vendorId: 3, storeConnectionId: 7, at: now });
+    expect(repository.lastResolvePolicyInput).toEqual({
+      vendorId: 3,
+      storeConnectionId: 7,
+      at: now,
+    });
   });
 
   it("delegates fee resolution with the fault category", async () => {
     const repository = new FakeReturnPolicyRepository();
     const service = makeService(repository, []);
 
-    await service.resolveReturnFees({ vendorId: 3, storeConnectionId: 7, faultCategory: "vendor" });
+    await service.resolveReturnFees({
+      vendorId: 3,
+      storeConnectionId: 7,
+      faultCategory: "vendor",
+    });
 
     expect(repository.lastResolveFeesInput).toEqual({
       vendorId: 3,
@@ -130,16 +233,34 @@ describe("DropshipReturnPolicyService", () => {
     });
   });
 
+  it("delegates default fee resolution with parsed scope and clock time", async () => {
+    const repository = new FakeReturnPolicyRepository();
+    const service = makeService(repository, []);
+
+    await service.resolveDefaultReturnFees({
+      vendorId: 3,
+      storeConnectionId: 7,
+    });
+
+    expect(repository.lastResolveDefaultFeesInput).toEqual({
+      vendorId: 3,
+      storeConnectionId: 7,
+      at: now,
+    });
+  });
+
   it("rejects store-scoped policies without a vendor", async () => {
     const repository = new FakeReturnPolicyRepository();
     const service = makeService(repository, []);
 
-    await expect(service.createPolicyVersion({
-      returnWindowDays: 30,
-      storeConnectionId: 7,
-      idempotencyKey: "policy-no-vendor",
-      actor: { actorType: "admin" },
-    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_POLICY_INVALID_INPUT" });
+    await expect(
+      service.createPolicyVersion({
+        returnWindowDays: 30,
+        storeConnectionId: 7,
+        idempotencyKey: "policy-no-vendor",
+        actor: { actorType: "admin" },
+      }),
+    ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_POLICY_INVALID_INPUT" });
     expect(repository.lastCreatePolicyInput).toBeNull();
   });
 
@@ -147,23 +268,48 @@ describe("DropshipReturnPolicyService", () => {
     const repository = new FakeReturnPolicyRepository();
     const service = makeService(repository, []);
 
-    await expect(service.createFeeVersion({
-      feeType: "restocking_fee",
-      faultCategory: "vendor",
-      amountType: "flat_cents",
-      amount: 10.5,
-      idempotencyKey: "fee-fractional",
-      actor: { actorType: "admin" },
-    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_FEE_INVALID_INPUT" });
+    await expect(
+      service.createFeeVersion({
+        feeType: "restocking_fee",
+        faultCategory: "vendor",
+        amountType: "flat_cents",
+        amount: 10.5,
+        idempotencyKey: "fee-fractional",
+        actor: { actorType: "admin" },
+      }),
+    ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_FEE_INVALID_INPUT" });
 
-    await expect(service.createFeeVersion({
-      feeType: "restocking_fee",
-      faultCategory: "vendor",
-      amountType: "percent",
-      amount: 120,
-      idempotencyKey: "fee-over-100",
-      actor: { actorType: "admin" },
-    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_FEE_INVALID_INPUT" });
+    await expect(
+      service.createFeeVersion({
+        feeType: "restocking_fee",
+        faultCategory: "vendor",
+        amountType: "percent",
+        amount: 120,
+        idempotencyKey: "fee-over-100",
+        actor: { actorType: "admin" },
+      }),
+    ).rejects.toMatchObject({ code: "DROPSHIP_RETURN_FEE_INVALID_INPUT" });
+    expect(repository.lastCreateFeeInput).toBeNull();
+  });
+
+  it("rejects future-dated defaults without displacing the current default", async () => {
+    const repository = new FakeReturnPolicyRepository();
+    const service = makeService(repository, []);
+
+    await expect(
+      service.createFeeVersion({
+        feeType: "restocking_fee",
+        faultCategory: "vendor",
+        amountType: "flat_cents",
+        amount: 500,
+        isDefault: true,
+        effectiveFrom: new Date("2026-08-06T19:00:00.000Z"),
+        idempotencyKey: "future-default-fee",
+        actor: { actorType: "admin" },
+      }),
+    ).rejects.toMatchObject({
+      code: "DROPSHIP_RETURN_FEE_FUTURE_DEFAULT_UNSUPPORTED",
+    });
     expect(repository.lastCreateFeeInput).toBeNull();
   });
 
@@ -191,7 +337,9 @@ describe("DropshipReturnPolicyService", () => {
       actor: { actorType: "admin", actorId: "admin-1" },
       now,
     });
-    expect(logs[0]).toMatchObject({ code: "DROPSHIP_RETURN_POLICY_VERSION_CREATED" });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_RETURN_POLICY_VERSION_CREATED",
+    });
   });
 
   it("does not log a creation event for idempotent replays", async () => {
@@ -219,6 +367,7 @@ describe("DropshipReturnPolicyService", () => {
       faultCategory: "customer",
       amountType: "flat_cents",
       amount: 500,
+      isDefault: true,
       idempotencyKey: "fee-version-1",
       actor: { actorType: "admin", actorId: "admin-1" },
     });
@@ -229,10 +378,13 @@ describe("DropshipReturnPolicyService", () => {
       faultCategory: "customer",
       amountType: "flat_cents",
       amount: 500,
+      isDefault: true,
       idempotencyKey: "fee-version-1",
       now,
     });
-    expect(logs[0]).toMatchObject({ code: "DROPSHIP_RETURN_FEE_VERSION_CREATED" });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_RETURN_FEE_VERSION_CREATED",
+    });
   });
 
   it("deactivates policies and fees idempotently", async () => {
@@ -240,11 +392,25 @@ describe("DropshipReturnPolicyService", () => {
     const logs: DropshipLogEvent[] = [];
     const service = makeService(repository, logs);
 
-    await service.deactivatePolicy({ policyId: 11, idempotencyKey: "deactivate-policy", actor: { actorType: "admin" } });
-    await service.deactivateFee({ feeId: 21, idempotencyKey: "deactivate-fee", actor: { actorType: "admin" } });
+    await service.deactivatePolicy({
+      policyId: 11,
+      idempotencyKey: "deactivate-policy",
+      actor: { actorType: "admin" },
+    });
+    await service.deactivateFee({
+      feeId: 21,
+      idempotencyKey: "deactivate-fee",
+      actor: { actorType: "admin" },
+    });
 
-    expect(repository.lastDeactivatePolicyInput).toMatchObject({ policyId: 11, idempotencyKey: "deactivate-policy" });
-    expect(repository.lastDeactivateFeeInput).toMatchObject({ feeId: 21, idempotencyKey: "deactivate-fee" });
+    expect(repository.lastDeactivatePolicyInput).toMatchObject({
+      policyId: 11,
+      idempotencyKey: "deactivate-policy",
+    });
+    expect(repository.lastDeactivateFeeInput).toMatchObject({
+      feeId: 21,
+      idempotencyKey: "deactivate-fee",
+    });
     expect(logs.map((event) => event.code)).toEqual([
       "DROPSHIP_RETURN_POLICY_DEACTIVATED",
       "DROPSHIP_RETURN_FEE_DEACTIVATED",
@@ -253,7 +419,16 @@ describe("DropshipReturnPolicyService", () => {
 });
 
 class FakeReturnPolicyRepository implements DropshipReturnPolicyRepository {
-  lastResolvePolicyInput: { vendorId: number | null; storeConnectionId: number | null; at: Date } | null = null;
+  lastResolvePolicyInput: {
+    vendorId: number | null;
+    storeConnectionId: number | null;
+    at: Date;
+  } | null = null;
+  lastResolveDefaultFeesInput: {
+    vendorId: number | null;
+    storeConnectionId: number | null;
+    at: Date;
+  } | null = null;
   lastResolveFeesInput: {
     vendorId: number | null;
     storeConnectionId: number | null;
@@ -262,11 +437,19 @@ class FakeReturnPolicyRepository implements DropshipReturnPolicyRepository {
   } | null = null;
   lastCreatePolicyInput: Record<string, unknown> | null = null;
   lastCreateFeeInput: Record<string, unknown> | null = null;
-  lastDeactivatePolicyInput: { policyId: number; idempotencyKey: string } | null = null;
-  lastDeactivateFeeInput: { feeId: number; idempotencyKey: string } | null = null;
+  lastDeactivatePolicyInput: {
+    policyId: number;
+    idempotencyKey: string;
+  } | null = null;
+  lastDeactivateFeeInput: { feeId: number; idempotencyKey: string } | null =
+    null;
   nextPolicyReplay = false;
 
-  async resolveReturnPolicy(input: { vendorId: number | null; storeConnectionId: number | null; at: Date }) {
+  async resolveReturnPolicy(input: {
+    vendorId: number | null;
+    storeConnectionId: number | null;
+    at: Date;
+  }) {
     this.lastResolvePolicyInput = input;
     return makePolicyRecord();
   }
@@ -278,7 +461,24 @@ class FakeReturnPolicyRepository implements DropshipReturnPolicyRepository {
     at: Date;
   }): Promise<DropshipResolvedReturnFees> {
     this.lastResolveFeesInput = input;
-    return { restockingFee: null, processingFee: null, returnShippingFee: null };
+    return {
+      restockingFee: null,
+      processingFee: null,
+      returnShippingFee: null,
+    };
+  }
+
+  async resolveDefaultReturnFees(input: {
+    vendorId: number | null;
+    storeConnectionId: number | null;
+    at: Date;
+  }): Promise<DropshipResolvedReturnFees> {
+    this.lastResolveDefaultFeesInput = input;
+    return {
+      restockingFee: null,
+      processingFee: null,
+      returnShippingFee: null,
+    };
   }
 
   async listPolicies() {
@@ -289,7 +489,9 @@ class FakeReturnPolicyRepository implements DropshipReturnPolicyRepository {
     return [makeFeeRecord()];
   }
 
-  async createPolicyVersion(input: Record<string, unknown> & { returnWindowDays: number }) {
+  async createPolicyVersion(
+    input: Record<string, unknown> & { returnWindowDays: number },
+  ) {
     this.lastCreatePolicyInput = input;
     return {
       policy: makePolicyRecord({ returnWindowDays: input.returnWindowDays }),
@@ -299,12 +501,18 @@ class FakeReturnPolicyRepository implements DropshipReturnPolicyRepository {
 
   async createFeeVersion(input: Record<string, unknown> & { amount: number }) {
     this.lastCreateFeeInput = input;
-    return { fee: makeFeeRecord({ amount: input.amount }), idempotentReplay: false };
+    return {
+      fee: makeFeeRecord({ amount: input.amount }),
+      idempotentReplay: false,
+    };
   }
 
   async deactivatePolicy(input: { policyId: number; idempotencyKey: string }) {
     this.lastDeactivatePolicyInput = input;
-    return { policy: makePolicyRecord({ isActive: false }), idempotentReplay: false };
+    return {
+      policy: makePolicyRecord({ isActive: false }),
+      idempotentReplay: false,
+    };
   }
 
   async deactivateFee(input: { feeId: number; idempotencyKey: string }) {
@@ -328,7 +536,9 @@ function makeService(
   });
 }
 
-function makePolicyRecord(overrides: Partial<DropshipReturnPolicyVersionRecord> = {}): DropshipReturnPolicyVersionRecord {
+function makePolicyRecord(
+  overrides: Partial<DropshipReturnPolicyVersionRecord> = {},
+): DropshipReturnPolicyVersionRecord {
   return {
     policyId: 1,
     version: 1,
@@ -345,7 +555,9 @@ function makePolicyRecord(overrides: Partial<DropshipReturnPolicyVersionRecord> 
   };
 }
 
-function makeFeeRecord(overrides: Partial<DropshipReturnFeeScheduleRecord> = {}): DropshipReturnFeeScheduleRecord {
+function makeFeeRecord(
+  overrides: Partial<DropshipReturnFeeScheduleRecord> = {},
+): DropshipReturnFeeScheduleRecord {
   return {
     feeId: 1,
     version: 1,
@@ -357,6 +569,7 @@ function makeFeeRecord(overrides: Partial<DropshipReturnFeeScheduleRecord> = {})
     storeConnectionId: null,
     priority: 0,
     isActive: true,
+    isDefault: false,
     effectiveFrom: now,
     effectiveTo: null,
     createdAt: now,

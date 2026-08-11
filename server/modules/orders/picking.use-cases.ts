@@ -1853,6 +1853,15 @@ export class PickingUseCases {
       return { success: true, noVariant: true, productVariantId: 0, locationId: 0, locationCode: null, systemQtyAfter: 0 };
     }
 
+    // Non-stock item (standard WMS exception flow): track_inventory=false
+    // means "we sell and ship this, but do not inventory-manage it" — one-off
+    // goods, inserts, occasional stock. The pick is confirmation-only: the
+    // picking log keeps the audit trail; no level/lot/reservation writes.
+    if (productVariant.trackInventory === false) {
+      console.log(`[Inventory] ${productVariant.sku} is non-stock (track_inventory=false) — confirmation-only pick, no deduction`);
+      return { success: true, noVariant: true, productVariantId: productVariant.id, locationId: 0, locationCode: null, systemQtyAfter: 0 };
+    }
+
     console.log(`[Inventory] Picking ${pickedQty} x ${productVariant.sku} (${productVariant.unitsPerVariant} units each)`);
 
     const levels = await this.storage.getInventoryLevelsByProductVariantId(productVariant.id);

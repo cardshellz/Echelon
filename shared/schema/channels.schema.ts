@@ -135,6 +135,7 @@ export const channelFeeds = channelsSchema.table("channel_feeds", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("channel_feeds_channel_pv_idx").on(table.channelId, table.productVariantId),
+  index("channel_feeds_product_variant_active_idx").on(table.productVariantId, table.isActive),
 ]);
 
 export const insertChannelFeedSchema = createInsertSchema(channelFeeds).omit({

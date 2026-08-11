@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import {
   AlertCircle,
   CheckCircle2,
@@ -38,6 +38,7 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import {
+  buildAdminDefaultReturnFeesUrl,
   buildAdminEffectiveReturnFeesUrl,
   buildAdminReturnInspectionInput,
   createDropshipIdempotencyKey,
@@ -55,6 +56,7 @@ import type {
   DropshipReturnDetailResponse,
   DropshipReturnFaultCategory,
   DropshipReturnFeeScheduleRecord,
+  DropshipReturnFeeType,
   DropshipRmaInspectionOutcome,
   DropshipRmaStatus,
 } from "@/lib/dropship-ops-surface";
@@ -78,21 +80,24 @@ interface InspectionFormState {
   items: InspectionItemFormState[];
 }
 
-/** A single fee line in the breakdown, with optional override. */
+/** One auditable RMA-level fee decision. */
 interface FeeLine {
-  key: string;
+  feeType: DropshipReturnFeeType;
   label: string;
-  sourceLabel: string;
-  amountCents: number;
-  overridden: boolean;
-  overrideAmount: string;
+  defaultResponsibility: DropshipReturnFaultCategory;
+  responsibility: DropshipReturnFaultCategory;
+  policyFeeId: number;
+  amountType: DropshipReturnFeeScheduleRecord["amountType"];
+  policyAmount: number;
+  proposedAmountCents: number;
+  amount: string;
+  overrideReason: string;
 }
 
 const RETURN_INSPECTION_ITEM_STATUSES = [
-  "inspected",
-  "damaged",
-  "missing",
-  "wrong_item",
+  "resellable",
+  "warehouse_deals",
+  "damaged_defective",
 ] as const;
 
 const FAULT_CATEGORIES: DropshipReturnFaultCategory[] = [
@@ -127,7 +132,8 @@ function buildFormState(rma: DropshipReturnDetail): InspectionFormState {
     faultCategory: rma.faultCategory ?? "card_shellz",
     notes: rma.inspections[0]?.notes ?? "",
     items: rma.items.map((item) => {
-      const creditCents = item.finalCreditCents ?? item.requestedCreditCents ?? 0;
+      const creditCents =
+        item.finalCreditCents ?? item.requestedCreditCents ?? 0;
       const feeCents = item.feeCents ?? 0;
       return {
         rmaItemId: item.rmaItemId,
@@ -136,7 +142,7 @@ function buildFormState(rma: DropshipReturnDetail): InspectionFormState {
         status:
           item.finalCreditCents !== null || item.feeCents !== null
             ? item.status
-            : "inspected",
+            : "resellable",
         finalCreditAmount: centsToDollarInput(creditCents),
         feeAmount: centsToDollarInput(feeCents),
       };
@@ -181,35 +187,71 @@ function feeTypeLabel(feeType: string): string {
   }
 }
 
+function feeRecordForType(
+  fees: DropshipAdminEffectiveReturnFeesResponse["fees"],
+  feeType: DropshipReturnFeeType,
+): DropshipReturnFeeScheduleRecord | null {
+  if (feeType === "restocking_fee") return fees.restockingFee;
+  if (feeType === "processing_fee") return fees.processingFee;
+  return fees.returnShippingFee;
+}
+
+function policyAmountCents(
+  record: DropshipReturnFeeScheduleRecord,
+  creditCents: number,
+): number {
+  if (record.amountType === "flat_cents") return record.amount;
+  return Math.floor((creditCents * record.amount) / 100);
+}
+
 function buildFeeLines(
-  fees: DropshipAdminEffectiveReturnFeesResponse["fees"] | null | undefined,
+  defaults: DropshipAdminEffectiveReturnFeesResponse["fees"],
+  responsibilityFees: Map<
+    DropshipReturnFaultCategory,
+    DropshipAdminEffectiveReturnFeesResponse["fees"]
+  >,
+  creditCents: number,
 ): FeeLine[] {
-  if (!fees) return [];
-  const lines: FeeLine[] = [];
-  const entries: Array<[string, DropshipReturnFeeScheduleRecord | null]> = [
-    ["restocking_fee", fees.restockingFee],
-    ["processing_fee", fees.processingFee],
-    ["return_shipping_fee", fees.returnShippingFee],
+  const feeTypes: DropshipReturnFeeType[] = [
+    "restocking_fee",
+    "processing_fee",
+    "return_shipping_fee",
   ];
-  for (const [key, record] of entries) {
-    if (!record) continue;
-    lines.push({
-      key,
-      label: feeTypeLabel(record.feeType),
-      sourceLabel: "fee schedule",
-      amountCents: record.amountType === "flat_cents" ? record.amount : 0,
-      overridden: false,
-      overrideAmount: "",
-    });
-  }
-  return lines;
+  return feeTypes.flatMap((feeType) => {
+    const defaultRecord = feeRecordForType(defaults, feeType);
+    if (!defaultRecord) return [];
+    const selectedRecord = feeRecordForType(
+      responsibilityFees.get(defaultRecord.faultCategory) ?? defaults,
+      feeType,
+    );
+    if (!selectedRecord) return [];
+    const proposedAmountCents = policyAmountCents(selectedRecord, creditCents);
+    return [
+      {
+        feeType,
+        label: feeTypeLabel(feeType),
+        defaultResponsibility: defaultRecord.faultCategory,
+        responsibility: defaultRecord.faultCategory,
+        policyFeeId: selectedRecord.feeId,
+        amountType: selectedRecord.amountType,
+        policyAmount: selectedRecord.amount,
+        proposedAmountCents,
+        amount: centsToDollarInput(proposedAmountCents),
+        overrideReason: "",
+      },
+    ];
+  });
 }
 
 function statusTone(status: DropshipRmaStatus): string {
   if (status === "credited" || status === "closed") {
     return "border-emerald-200 bg-emerald-50 text-emerald-800";
   }
-  if (status === "approved" || status === "received" || status === "inspecting") {
+  if (
+    status === "approved" ||
+    status === "received" ||
+    status === "inspecting"
+  ) {
     return "border-amber-200 bg-amber-50 text-amber-900";
   }
   if (status === "rejected") {
@@ -271,68 +313,138 @@ export function ReturnInspectionModal({
     }
   }, [open]);
 
-  // Fetch effective fees when fault category changes
-  const faultCategory = form?.faultCategory ?? null;
-  const feesUrl = useMemo(() => {
-    if (!rma || !faultCategory) return null;
-    return buildAdminEffectiveReturnFeesUrl({
-      vendorId: rma.vendorId,
-      faultCategory,
-    });
-  }, [rma, faultCategory]);
+  const defaultsUrl = useMemo(
+    () =>
+      rma
+        ? buildAdminDefaultReturnFeesUrl({
+            vendorId: rma.vendorId,
+            storeConnectionId: rma.storeConnectionId,
+          })
+        : null,
+    [rma],
+  );
 
-  const feesQuery = useQuery<DropshipAdminEffectiveReturnFeesResponse>({
-    queryKey: [feesUrl],
+  const defaultsQuery = useQuery<DropshipAdminEffectiveReturnFeesResponse>({
+    queryKey: [defaultsUrl],
     queryFn: () => {
-      if (!feesUrl) throw new Error("Missing effective fees URL.");
-      return fetchJson<DropshipAdminEffectiveReturnFeesResponse>(feesUrl);
+      if (!defaultsUrl) throw new Error("Missing default fee policy URL.");
+      return fetchJson<DropshipAdminEffectiveReturnFeesResponse>(defaultsUrl);
     },
-    enabled: feesUrl !== null && open,
+    enabled: defaultsUrl !== null && open,
   });
 
-  // Update fee lines when fee data arrives
+  const responsibilityQueries = useQueries({
+    queries: FAULT_CATEGORIES.map((responsibility) => {
+      const url = rma
+        ? buildAdminEffectiveReturnFeesUrl({
+            vendorId: rma.vendorId,
+            storeConnectionId: rma.storeConnectionId,
+            faultCategory: responsibility,
+          })
+        : null;
+      return {
+        queryKey: [url],
+        queryFn: () => {
+          if (!url) throw new Error("Missing responsibility fee policy URL.");
+          return fetchJson<DropshipAdminEffectiveReturnFeesResponse>(url);
+        },
+        enabled: url !== null && open,
+      };
+    }),
+  });
+  const responsibilityData = FAULT_CATEGORIES.map(
+    (_, index) => responsibilityQueries[index]?.data?.fees,
+  );
+
   useEffect(() => {
-    const fees = feesQuery.data?.fees;
-    if (!fees) return;
-    setFeeLines((current) => {
-      const newLines = buildFeeLines(fees);
-      // Preserve overrides for lines that already exist
-      return newLines.map((line) => {
-        const existing = current.find((c) => c.key === line.key);
-        if (existing?.overridden) {
-          return { ...line, overridden: true, overrideAmount: existing.overrideAmount };
-        }
-        return line;
-      });
+    const defaults = defaultsQuery.data?.fees;
+    if (!defaults || responsibilityData.some((fees) => !fees) || !form) return;
+    const byResponsibility = new Map<
+      DropshipReturnFaultCategory,
+      DropshipAdminEffectiveReturnFeesResponse["fees"]
+    >();
+    FAULT_CATEGORIES.forEach((responsibility, index) => {
+      const fees = responsibilityData[index];
+      if (fees) byResponsibility.set(responsibility, fees);
     });
-  }, [feesQuery.data?.fees]);
+    setFeeLines((current) =>
+      current.length > 0
+        ? current
+        : buildFeeLines(
+            defaults,
+            byResponsibility,
+            formTotals(form).creditCents,
+          ),
+    );
+  }, [defaultsQuery.data?.fees, form?.rmaId, ...responsibilityData]);
+
+  const currentCreditCents = form ? formTotals(form).creditCents : 0;
+  useEffect(() => {
+    setFeeLines((current) =>
+      current.map((line) => {
+        if (line.amountType !== "percent") return line;
+        const nextProposal = Math.floor(
+          (currentCreditCents * line.policyAmount) / 100,
+        );
+        const enteredAmountCents = parseDollarInput(line.amount);
+        return {
+          ...line,
+          proposedAmountCents: nextProposal,
+          amount:
+            enteredAmountCents === line.proposedAmountCents
+              ? centsToDollarInput(nextProposal)
+              : line.amount,
+        };
+      }),
+    );
+  }, [currentCreditCents]);
 
   if (!open) return null;
 
   const isLoading = rmaQuery.isLoading || rmaQuery.isFetching;
   const loadError = rmaQuery.error;
   const existingInspection = rma?.inspections[0] ?? null;
-  const totals = form ? formTotals(form) : { creditCents: 0, feeCents: 0, hasInvalidAmount: false };
+  const totals = form
+    ? formTotals(form)
+    : { creditCents: 0, feeCents: 0, hasInvalidAmount: false };
 
-  // Fee totals from fee lines (with overrides)
+  const feePolicyLoading =
+    defaultsQuery.isLoading ||
+    responsibilityQueries.some((query) => query.isLoading);
+  const feePolicyError =
+    defaultsQuery.error ??
+    responsibilityQueries.find((query) => query.error)?.error ??
+    null;
   const feeLineTotals = feeLines.reduce(
     (acc, line) => {
-      const effectiveCents = line.overridden
-        ? parseDollarInput(line.overrideAmount) ?? 0
-        : line.amountCents;
+      const amountCents = parseDollarInput(line.amount);
+      const needsReason =
+        line.responsibility !== line.defaultResponsibility ||
+        amountCents !== line.proposedAmountCents;
       return {
-        totalCents: acc.totalCents + effectiveCents,
-        hasInvalid: acc.hasInvalid || (line.overridden && parseDollarInput(line.overrideAmount) === null),
+        totalCents: acc.totalCents + (amountCents ?? 0),
+        hasInvalid: acc.hasInvalid || amountCents === null,
+        hasMissingReason:
+          acc.hasMissingReason || (needsReason && !line.overrideReason.trim()),
       };
     },
-    { totalCents: 0, hasInvalid: false },
+    { totalCents: 0, hasInvalid: false, hasMissingReason: false },
   );
-
-  const totalFeeCents = feeLines.length > 0 ? feeLineTotals.totalCents : totals.feeCents;
+  const totalFeeCents = feeLineTotals.totalCents;
   const netCents = totals.creditCents - totalFeeCents;
   const hasInvalidFee = feeLineTotals.hasInvalid;
   const saveDisabled =
-    pending || existingInspection !== null || totals.hasInvalidAmount || hasInvalidFee;
+    pending ||
+    existingInspection !== null ||
+    totals.hasInvalidAmount ||
+    form?.items.length === 0 ||
+    hasInvalidFee ||
+    feeLineTotals.hasMissingReason ||
+    feePolicyLoading ||
+    feePolicyError !== null ||
+    feeLines.length !== 3;
+  const rejectDisabled =
+    pending || existingInspection !== null || totals.hasInvalidAmount;
 
   function updateForm(patch: Partial<InspectionFormState>) {
     setForm((current) => (current ? { ...current, ...patch } : current));
@@ -340,7 +452,12 @@ export function ReturnInspectionModal({
 
   function updateItem(
     rmaItemId: number,
-    patch: Partial<Pick<InspectionItemFormState, "status" | "finalCreditAmount" | "feeAmount">>,
+    patch: Partial<
+      Pick<
+        InspectionItemFormState,
+        "status" | "finalCreditAmount" | "feeAmount"
+      >
+    >,
   ) {
     setForm((current) => {
       if (!current) return current;
@@ -353,24 +470,51 @@ export function ReturnInspectionModal({
     });
   }
 
-  function toggleFeeOverride(key: string) {
+  function updateFeeResponsibility(
+    feeType: DropshipReturnFeeType,
+    responsibility: DropshipReturnFaultCategory,
+  ) {
+    const fees =
+      responsibilityQueries[FAULT_CATEGORIES.indexOf(responsibility)]?.data
+        ?.fees;
+    const selectedRecord = fees ? feeRecordForType(fees, feeType) : null;
+    if (!selectedRecord || !form) return;
+    const proposedAmountCents = policyAmountCents(
+      selectedRecord,
+      formTotals(form).creditCents,
+    );
     setFeeLines((current) =>
-      current.map((line) => {
-        if (line.key !== key) return line;
-        if (line.overridden) {
-          // Remove override — revert to schedule amount
-          return { ...line, overridden: false, overrideAmount: "" };
-        }
-        // Enable override — pre-fill with current amount
-        return { ...line, overridden: true, overrideAmount: centsToDollarInput(line.amountCents) };
-      }),
+      current.map((line) =>
+        line.feeType === feeType
+          ? {
+              ...line,
+              responsibility,
+              policyFeeId: selectedRecord.feeId,
+              amountType: selectedRecord.amountType,
+              policyAmount: selectedRecord.amount,
+              proposedAmountCents,
+              amount: centsToDollarInput(proposedAmountCents),
+            }
+          : line,
+      ),
     );
   }
 
-  function updateFeeOverride(key: string, amount: string) {
+  function updateFeeAmount(feeType: DropshipReturnFeeType, amount: string) {
     setFeeLines((current) =>
       current.map((line) =>
-        line.key === key ? { ...line, overrideAmount: amount } : line,
+        line.feeType === feeType ? { ...line, amount } : line,
+      ),
+    );
+  }
+
+  function updateFeeReason(
+    feeType: DropshipReturnFeeType,
+    overrideReason: string,
+  ) {
+    setFeeLines((current) =>
+      current.map((line) =>
+        line.feeType === feeType ? { ...line, overrideReason } : line,
       ),
     );
   }
@@ -390,14 +534,16 @@ export function ReturnInspectionModal({
         feeAmount: item.feeAmount,
       }));
 
-      // If fee lines exist, distribute total fees across items
-      if (feeLines.length > 0) {
+      // Approved RMA-level fees are allocated across items for the existing item ledger contract.
+      if (outcome === "approved" && feeLines.length > 0 && items.length > 0) {
         const totalFee = feeLineTotals.totalCents;
         const perItem = Math.floor(totalFee / items.length);
         const remainder = totalFee - perItem * items.length;
         items = items.map((item, index) => ({
           ...item,
-          feeAmount: centsToDollarInput(perItem + (index === 0 ? remainder : 0)),
+          feeAmount: centsToDollarInput(
+            perItem + (index === 0 ? remainder : 0),
+          ),
         }));
       }
 
@@ -409,6 +555,20 @@ export function ReturnInspectionModal({
         faultCategory: form.faultCategory,
         notes: form.notes,
         items,
+        feeDecisions:
+          outcome === "approved"
+            ? feeLines.map((line) => ({
+                feeType: line.feeType,
+                responsibility: line.responsibility,
+                amount: line.amount,
+                overrideReason: line.overrideReason,
+              }))
+            : undefined,
+        returnShippingActualAmount:
+          outcome === "approved"
+            ? feeLines.find((line) => line.feeType === "return_shipping_fee")
+                ?.amount
+            : undefined,
       });
 
       const response = await postJson<DropshipAdminReturnInspectionResponse>(
@@ -464,7 +624,10 @@ export function ReturnInspectionModal({
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {queryErrorMessage(loadError, "Unable to load RMA inspection detail.")}
+              {queryErrorMessage(
+                loadError,
+                "Unable to load RMA inspection detail.",
+              )}
             </AlertDescription>
           </Alert>
         )}
@@ -500,24 +663,36 @@ export function ReturnInspectionModal({
             {/* Context bar */}
             <div className="flex flex-wrap gap-4 rounded-md bg-muted p-3 max-sm:flex-col max-sm:gap-2">
               <div className="flex flex-col gap-0.5">
-                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Status</span>
+                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                  Status
+                </span>
                 <Badge variant="outline" className={statusTone(rma.status)}>
                   {formatStatus(rma.status)}
                 </Badge>
               </div>
               <div className="flex flex-col gap-0.5">
-                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Reason</span>
+                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                  Reason
+                </span>
                 <span className="text-sm font-medium">
                   {rma.reasonCode ? formatStatus(rma.reasonCode) : "None"}
                 </span>
               </div>
               <div className="flex flex-col gap-0.5">
-                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Requested</span>
-                <span className="text-sm font-medium">{formatDateTime(rma.requestedAt)}</span>
+                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                  Requested
+                </span>
+                <span className="text-sm font-medium">
+                  {formatDateTime(rma.requestedAt)}
+                </span>
               </div>
               <div className="flex flex-col gap-0.5">
-                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Window</span>
-                <span className="text-sm font-medium">{rma.returnWindowDays} days</span>
+                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                  Window
+                </span>
+                <span className="text-sm font-medium">
+                  {rma.returnWindowDays} days
+                </span>
               </div>
             </div>
 
@@ -601,7 +776,7 @@ export function ReturnInspectionModal({
               <div className="flex flex-wrap items-end gap-3">
                 <div className="flex flex-col gap-1">
                   <label className="text-xs font-medium text-muted-foreground">
-                    Fault Category
+                    Overall Return Responsibility
                   </label>
                   <Select
                     value={form.faultCategory}
@@ -626,71 +801,133 @@ export function ReturnInspectionModal({
                 </div>
               </div>
 
-              {/* Fee breakdown */}
-              {feesQuery.isLoading && faultCategory && (
+              {/* Fee decisions */}
+              {feePolicyLoading && (
                 <div className="mt-3 space-y-2">
-                  <Skeleton className="h-6 w-full" />
-                  <Skeleton className="h-6 w-full" />
+                  <Skeleton className="h-24 w-full" />
+                  <Skeleton className="h-24 w-full" />
+                  <Skeleton className="h-24 w-full" />
                 </div>
               )}
-
-              {!feesQuery.isLoading && feeLines.length > 0 && (
-                <div className="mt-3 rounded-md bg-muted p-3 space-y-1">
-                  {feeLines.map((line) => (
-                    <div
-                      key={line.key}
-                      className="flex items-center justify-between py-1 text-sm"
-                    >
-                      <div>
-                        <span>{line.label}</span>
-                        <span className="ml-2 text-[11px] text-muted-foreground">
-                          {line.sourceLabel}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {line.overridden ? (
-                          <Input
-                            value={line.overrideAmount}
-                            onChange={(e) =>
-                              updateFeeOverride(line.key, e.target.value)
-                            }
-                            className="h-7 w-24 text-right font-mono text-sm"
-                            disabled={existingInspection !== null || pending}
-                          />
-                        ) : (
-                          <span className="font-mono text-amber-700">
-                            {formatCents(line.amountCents)}
+              {feePolicyError && (
+                <Alert variant="destructive" className="mt-3">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    {queryErrorMessage(
+                      feePolicyError,
+                      "Unable to load return fee policies.",
+                    )}
+                  </AlertDescription>
+                </Alert>
+              )}
+              {!feePolicyLoading && !feePolicyError && feeLines.length > 0 && (
+                <div className="mt-3 space-y-3">
+                  {feeLines.map((line) => {
+                    const amountCents = parseDollarInput(line.amount);
+                    const needsReason =
+                      line.responsibility !== line.defaultResponsibility ||
+                      amountCents !== line.proposedAmountCents;
+                    return (
+                      <div key={line.feeType} className="rounded-md border p-3">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <div>
+                            <div className="font-medium">{line.label}</div>
+                            <div className="text-xs text-muted-foreground">
+                              Policy default:{" "}
+                              {formatStatus(line.defaultResponsibility)}
+                            </div>
+                          </div>
+                          <span className="font-mono text-sm text-amber-700">
+                            {amountCents === null
+                              ? "Invalid"
+                              : formatCents(amountCents)}
                           </span>
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium text-muted-foreground">
+                              Responsibility
+                            </label>
+                            <Select
+                              value={line.responsibility}
+                              onValueChange={(value) =>
+                                updateFeeResponsibility(
+                                  line.feeType,
+                                  value as DropshipReturnFaultCategory,
+                                )
+                              }
+                              disabled={existingInspection !== null || pending}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {FAULT_CATEGORIES.map((category) => (
+                                  <SelectItem key={category} value={category}>
+                                    {formatStatus(category)}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium text-muted-foreground">
+                              Fee amount
+                            </label>
+                            <Input
+                              value={line.amount}
+                              onChange={(event) =>
+                                updateFeeAmount(
+                                  line.feeType,
+                                  event.target.value,
+                                )
+                              }
+                              className="text-right font-mono"
+                              disabled={existingInspection !== null || pending}
+                            />
+                          </div>
+                        </div>
+                        {needsReason && (
+                          <div className="mt-3 space-y-1">
+                            <label className="text-xs font-medium text-muted-foreground">
+                              Override reason
+                            </label>
+                            <Textarea
+                              value={line.overrideReason}
+                              onChange={(event) =>
+                                updateFeeReason(
+                                  line.feeType,
+                                  event.target.value,
+                                )
+                              }
+                              placeholder="Required because responsibility or amount differs from policy"
+                              maxLength={1000}
+                              className="min-h-[60px]"
+                              disabled={existingInspection !== null || pending}
+                            />
+                          </div>
                         )}
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-6 px-2 text-[11px]"
-                          onClick={() => toggleFeeOverride(line.key)}
-                          disabled={existingInspection !== null || pending}
-                        >
-                          {line.overridden ? "reset" : "override"}
-                        </Button>
                       </div>
-                    </div>
-                  ))}
-                  <div className="flex items-center justify-between border-t pt-2 font-semibold text-sm">
+                    );
+                  })}
+                  <div className="flex items-center justify-between border-t pt-2 text-sm font-semibold">
                     <span>Total Fees</span>
                     <span className="font-mono text-amber-700">
-                      {hasInvalidFee ? "Invalid" : formatCents(feeLineTotals.totalCents)}
+                      {hasInvalidFee ? "Invalid" : formatCents(totalFeeCents)}
                     </span>
                   </div>
                 </div>
               )}
-
-              {!feesQuery.isLoading &&
-                faultCategory &&
-                feeLines.length === 0 &&
-                feesQuery.data && (
-                  <p className="mt-3 text-sm italic text-muted-foreground">
-                    No fees configured for this fault category.
-                  </p>
+              {!feePolicyLoading &&
+                !feePolicyError &&
+                feeLines.length !== 3 && (
+                  <Alert variant="destructive" className="mt-3">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>
+                      A default policy is required for each return fee type
+                      before inspection can be finalized.
+                    </AlertDescription>
+                  </Alert>
                 )}
             </div>
 
@@ -739,9 +976,14 @@ export function ReturnInspectionModal({
               </h3>
               <div className="rounded-md border border-primary/20 bg-primary/5 p-3 space-y-1">
                 <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Credit to vendor</span>
+                  <span className="text-muted-foreground">
+                    Credit to vendor
+                  </span>
                   <span className="font-mono font-medium text-emerald-700">
-                    +{totals.hasInvalidAmount ? "—" : formatCents(totals.creditCents)}
+                    +
+                    {totals.hasInvalidAmount
+                      ? "—"
+                      : formatCents(totals.creditCents)}
                   </span>
                 </div>
                 <div className="flex justify-between text-sm">
@@ -781,9 +1023,12 @@ export function ReturnInspectionModal({
               />
             </div>
 
-            {(totals.hasInvalidAmount || hasInvalidFee) && (
+            {(totals.hasInvalidAmount ||
+              hasInvalidFee ||
+              feeLineTotals.hasMissingReason) && (
               <p className="text-sm text-destructive">
-                Credit and fee inputs must be valid dollar amounts.
+                Credit and fee inputs must be valid dollar amounts, and every
+                policy override requires a reason.
               </p>
             )}
           </div>
@@ -802,13 +1047,8 @@ export function ReturnInspectionModal({
             <Button
               type="button"
               variant="destructive"
-              disabled={saveDisabled || form?.outcome !== "rejected"}
-              onClick={() => {
-                if (form) {
-                  updateForm({ outcome: "rejected" });
-                  handleSave("rejected");
-                }
-              }}
+              disabled={rejectDisabled}
+              onClick={() => handleSave("rejected")}
               className="gap-2 max-sm:w-full"
             >
               {pending && <Loader2 className="h-4 w-4 animate-spin" />}

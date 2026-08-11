@@ -28,6 +28,7 @@ import {
   buildAdminReturnInspectionInput,
   buildAdminReturnPolicyInput,
   buildAdminReturnPolicyUrl,
+  buildAdminReturnSourceOrderUrl,
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
   buildAdminShippingConfigUrl,
@@ -67,6 +68,7 @@ import {
   normalizePortalReturnPath,
   normalizeShopifyShopDomainInput,
   orderIntakeRetryEligibility,
+  optionalQueryErrorMessage,
   parseDollarInputToCents,
   queryErrorMessage,
   riskSeverityTone,
@@ -94,19 +96,43 @@ describe("dropship ops surface client helpers", () => {
   });
 
   it("surfaces common API error body shapes", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => ({
-      ok: false,
-      status: 401,
-      statusText: "Unauthorized",
-      json: async () => ({ error: "Unauthorized dropship session." }),
-    } as Response)));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          ({
+            ok: false,
+            status: 401,
+            statusText: "Unauthorized",
+            json: async () => ({ error: "Unauthorized dropship session." }),
+          }) as Response,
+      ),
+    );
 
-    await expect(fetchJson("/api/dropship/orders")).rejects.toThrow("Unauthorized dropship session.");
+    await expect(fetchJson("/api/dropship/orders")).rejects.toThrow(
+      "Unauthorized dropship session.",
+    );
   });
 
   it("falls back to explicit query error messages", () => {
-    expect(queryErrorMessage(new Error("Store connection failed."), "Fallback")).toBe("Store connection failed.");
+    expect(
+      queryErrorMessage(new Error("Store connection failed."), "Fallback"),
+    ).toBe("Store connection failed.");
     expect(queryErrorMessage({ code: "UNKNOWN" }, "Fallback")).toBe("Fallback");
+  });
+
+  it("does not manufacture a query error before a request fails", () => {
+    expect(optionalQueryErrorMessage(null, "Fallback")).toBeNull();
+    expect(optionalQueryErrorMessage(undefined, "Fallback")).toBeNull();
+    expect(
+      optionalQueryErrorMessage(
+        new Error("Source order failed."),
+        "Fallback",
+      ),
+    ).toBe("Source order failed.");
+    expect(optionalQueryErrorMessage({ code: "UNKNOWN" }, "Fallback")).toBe(
+      "Fallback",
+    );
   });
 
   it("normalizes API status tokens for display", () => {
@@ -151,199 +177,281 @@ describe("dropship ops surface client helpers", () => {
   });
 
   it("builds query URLs without empty filters", () => {
-    expect(buildQueryUrl("/api/dropship/orders", {
-      search: "",
-      statuses: "accepted",
-      page: 1,
-      selectedOnly: false,
-      vendorId: undefined,
-    })).toBe("/api/dropship/orders?statuses=accepted&page=1&selectedOnly=false");
+    expect(
+      buildQueryUrl("/api/dropship/orders", {
+        search: "",
+        statuses: "accepted",
+        page: 1,
+        selectedOnly: false,
+        vendorId: undefined,
+      }),
+    ).toBe("/api/dropship/orders?statuses=accepted&page=1&selectedOnly=false");
   });
 
   it("builds dropship order acceptance requests with a normalized idempotency key", () => {
-    expect(buildDropshipOrderAcceptInput({
-      idempotencyKey: " accept-order-1 ",
-    })).toEqual({
+    expect(
+      buildDropshipOrderAcceptInput({
+        idempotencyKey: " accept-order-1 ",
+      }),
+    ).toEqual({
       idempotencyKey: "accept-order-1",
     });
-    expect(() => buildDropshipOrderAcceptInput({
-      idempotencyKey: "short",
-    })).toThrow("idempotencyKey must be between 8 and 200 characters.");
+    expect(() =>
+      buildDropshipOrderAcceptInput({
+        idempotencyKey: "short",
+      }),
+    ).toThrow("idempotencyKey must be between 8 and 200 characters.");
   });
 
   it("builds dropship order rejection requests with a reason", () => {
-    expect(buildDropshipOrderRejectInput({
-      idempotencyKey: " reject-order-1 ",
-      reason: " Cannot fulfill the selected SKU. ",
-    })).toEqual({
+    expect(
+      buildDropshipOrderRejectInput({
+        idempotencyKey: " reject-order-1 ",
+        reason: " Cannot fulfill the selected SKU. ",
+      }),
+    ).toEqual({
       idempotencyKey: "reject-order-1",
       reason: "Cannot fulfill the selected SKU.",
     });
-    expect(() => buildDropshipOrderRejectInput({
-      idempotencyKey: "reject-order-2",
-      reason: "no",
-    })).toThrow("reason must be at least 3 characters.");
+    expect(() =>
+      buildDropshipOrderRejectInput({
+        idempotencyKey: "reject-order-2",
+        reason: "no",
+      }),
+    ).toThrow("reason must be at least 3 characters.");
   });
 
   it("builds admin catalog exposure preview URLs with explicit filters", () => {
-    expect(buildAdminCatalogExposurePreviewUrl({
-      search: " pack ",
-      exposedOnly: true,
-      includeInactiveCatalog: false,
-    })).toBe("/api/dropship/admin/catalog/preview?search=pack&visibility=visible&catalogStatus=active&page=1&limit=50");
-    expect(buildAdminCatalogExposurePreviewUrl({
-      search: "",
-      visibility: "hidden",
-      catalogStatus: "inactive",
-      page: 3,
-      limit: 100,
-    })).toBe("/api/dropship/admin/catalog/preview?visibility=hidden&catalogStatus=inactive&page=3&limit=100");
-    expect(buildAdminCatalogExposurePreviewUrl({
-      search: "",
-      exposedOnly: false,
-      includeInactiveCatalog: true,
-    })).toBe("/api/dropship/admin/catalog/preview?visibility=all&catalogStatus=all&page=1&limit=50");
+    expect(
+      buildAdminCatalogExposurePreviewUrl({
+        search: " pack ",
+        exposedOnly: true,
+        includeInactiveCatalog: false,
+      }),
+    ).toBe(
+      "/api/dropship/admin/catalog/preview?search=pack&visibility=visible&catalogStatus=active&page=1&limit=50",
+    );
+    expect(
+      buildAdminCatalogExposurePreviewUrl({
+        search: "",
+        visibility: "hidden",
+        catalogStatus: "inactive",
+        page: 3,
+        limit: 100,
+      }),
+    ).toBe(
+      "/api/dropship/admin/catalog/preview?visibility=hidden&catalogStatus=inactive&page=3&limit=100",
+    );
+    expect(
+      buildAdminCatalogExposurePreviewUrl({
+        search: "",
+        exposedOnly: false,
+        includeInactiveCatalog: true,
+      }),
+    ).toBe(
+      "/api/dropship/admin/catalog/preview?visibility=all&catalogStatus=all&page=1&limit=50",
+    );
   });
 
   it("builds admin dogfood readiness URLs with optional filters", () => {
-    expect(buildAdminDogfoodReadinessUrl({
-      search: " vendor ",
-      status: "blocked",
-      platform: "ebay",
-    })).toBe("/api/dropship/admin/dogfood-readiness?search=vendor&status=blocked&platform=ebay&page=1&limit=50");
-    expect(buildAdminDogfoodReadinessUrl({
-      search: "",
-      status: "all",
-      platform: "all",
-      page: 2,
-      limit: 25,
-    })).toBe("/api/dropship/admin/dogfood-readiness?page=2&limit=25");
+    expect(
+      buildAdminDogfoodReadinessUrl({
+        search: " vendor ",
+        status: "blocked",
+        platform: "ebay",
+      }),
+    ).toBe(
+      "/api/dropship/admin/dogfood-readiness?search=vendor&status=blocked&platform=ebay&page=1&limit=50",
+    );
+    expect(
+      buildAdminDogfoodReadinessUrl({
+        search: "",
+        status: "all",
+        platform: "all",
+        page: 2,
+        limit: 25,
+      }),
+    ).toBe("/api/dropship/admin/dogfood-readiness?page=2&limit=25");
   });
 
   it("builds admin dogfood smoke URLs with freshness filters", () => {
-    expect(buildAdminDogfoodSmokeUrl({
-      search: " vendor ",
-      platform: "shopify",
-      limit: 25,
-      staleAfterHours: 24,
-    })).toBe("/api/dropship/admin/dogfood-smoke?search=vendor&platform=shopify&limit=25&staleAfterHours=24");
-    expect(buildAdminDogfoodSmokeUrl({
-      search: "",
-      platform: "all",
-    })).toBe("/api/dropship/admin/dogfood-smoke?limit=10");
+    expect(
+      buildAdminDogfoodSmokeUrl({
+        search: " vendor ",
+        platform: "shopify",
+        limit: 25,
+        staleAfterHours: 24,
+      }),
+    ).toBe(
+      "/api/dropship/admin/dogfood-smoke?search=vendor&platform=shopify&limit=25&staleAfterHours=24",
+    );
+    expect(
+      buildAdminDogfoodSmokeUrl({
+        search: "",
+        platform: "all",
+      }),
+    ).toBe("/api/dropship/admin/dogfood-smoke?limit=10");
   });
 
   it("builds admin dogfood launch status URLs with shared filters", () => {
-    expect(buildAdminDogfoodLaunchStatusUrl({
-      search: " vendor ",
-      platform: "ebay",
-      staleAfterHours: 24,
-    })).toBe("/api/dropship/admin/dogfood-launch-status?search=vendor&platform=ebay&staleAfterHours=24");
-    expect(buildAdminDogfoodLaunchStatusUrl({
-      search: "",
-      platform: "all",
-    })).toBe("/api/dropship/admin/dogfood-launch-status");
+    expect(
+      buildAdminDogfoodLaunchStatusUrl({
+        search: " vendor ",
+        platform: "ebay",
+        staleAfterHours: 24,
+      }),
+    ).toBe(
+      "/api/dropship/admin/dogfood-launch-status?search=vendor&platform=ebay&staleAfterHours=24",
+    );
+    expect(
+      buildAdminDogfoodLaunchStatusUrl({
+        search: "",
+        platform: "all",
+      }),
+    ).toBe("/api/dropship/admin/dogfood-launch-status");
   });
 
   it("builds admin worker sweep requests with bounded manual controls", () => {
-    expect(buildAdminWorkerSweepRunUrl("listing_push")).toBe("/api/dropship/admin/worker-sweeps/listing_push/run");
-    expect(buildAdminWorkerSweepInput({
-      idempotencyKey: " worker-sweep-1 ",
-      batchSize: " 25 ",
-      reason: " Dogfood catch-up ",
-    })).toEqual({
+    expect(buildAdminWorkerSweepRunUrl("listing_push")).toBe(
+      "/api/dropship/admin/worker-sweeps/listing_push/run",
+    );
+    expect(
+      buildAdminWorkerSweepInput({
+        idempotencyKey: " worker-sweep-1 ",
+        batchSize: " 25 ",
+        reason: " Dogfood catch-up ",
+      }),
+    ).toEqual({
       idempotencyKey: "worker-sweep-1",
       batchSize: 25,
       reason: "Dogfood catch-up",
     });
-    expect(buildAdminWorkerSweepInput({
-      idempotencyKey: "worker-sweep-2",
-      batchSize: "",
-    })).toEqual({
+    expect(
+      buildAdminWorkerSweepInput({
+        idempotencyKey: "worker-sweep-2",
+        batchSize: "",
+      }),
+    ).toEqual({
       idempotencyKey: "worker-sweep-2",
     });
-    expect(() => buildAdminWorkerSweepInput({
-      idempotencyKey: "worker-sweep-3",
-      batchSize: "101",
-    })).toThrow("batchSize must be a positive integer no greater than 100.");
+    expect(() =>
+      buildAdminWorkerSweepInput({
+        idempotencyKey: "worker-sweep-3",
+        batchSize: "101",
+      }),
+    ).toThrow("batchSize must be a positive integer no greater than 100.");
   });
 
   it("builds admin OMS channel config requests", () => {
-    expect(buildAdminOmsChannelConfigUrl()).toBe("/api/dropship/admin/oms-channel-config");
-    expect(buildAdminOmsChannelConfigureInput({
-      channelId: " 7 ",
-      idempotencyKey: "oms-config-001",
-    })).toEqual({
+    expect(buildAdminOmsChannelConfigUrl()).toBe(
+      "/api/dropship/admin/oms-channel-config",
+    );
+    expect(
+      buildAdminOmsChannelConfigureInput({
+        channelId: " 7 ",
+        idempotencyKey: "oms-config-001",
+      }),
+    ).toEqual({
       channelId: 7,
       idempotencyKey: "oms-config-001",
     });
   });
 
   it("builds admin shipping config URLs with bounded list parameters", () => {
-    expect(buildAdminShippingConfigUrl({
-      packageProfileLimit: 25,
-      rateTableLimit: 10,
-    })).toBe("/api/dropship/admin/shipping/config?packageProfileLimit=25&rateTableLimit=10");
+    expect(
+      buildAdminShippingConfigUrl({
+        packageProfileLimit: 25,
+        rateTableLimit: 10,
+      }),
+    ).toBe(
+      "/api/dropship/admin/shipping/config?packageProfileLimit=25&rateTableLimit=10",
+    );
   });
 
   it("builds admin order intake URLs without forcing default status filters", () => {
-    expect(buildAdminOrderIntakeUrl({
-      search: " EXT-1 ",
-      status: "default",
-    })).toBe("/api/dropship/admin/order-intake?search=EXT-1&page=1&limit=50");
-    expect(buildAdminOrderIntakeUrl({
-      search: "",
-      status: "failed",
-      cancellationStatus: "marketplace_cancellation_failed",
-      page: 2,
-      limit: 25,
-    })).toBe(
+    expect(
+      buildAdminOrderIntakeUrl({
+        search: " EXT-1 ",
+        status: "default",
+      }),
+    ).toBe("/api/dropship/admin/order-intake?search=EXT-1&page=1&limit=50");
+    expect(
+      buildAdminOrderIntakeUrl({
+        search: "",
+        status: "failed",
+        cancellationStatus: "marketplace_cancellation_failed",
+        page: 2,
+        limit: 25,
+      }),
+    ).toBe(
       "/api/dropship/admin/order-intake?statuses=failed&cancellationStatuses=marketplace_cancellation_failed&page=2&limit=25",
     );
-    expect(buildAdminOrderIntakeUrl({
-      search: "",
-      status: "all",
-    })).toBe("/api/dropship/admin/order-intake?statuses=received%2Cprocessing%2Caccepted%2Crejected%2Cretrying%2Cfailed%2Cpayment_hold%2Ccancelled%2Cexception&page=1&limit=50");
+    expect(
+      buildAdminOrderIntakeUrl({
+        search: "",
+        status: "all",
+      }),
+    ).toBe(
+      "/api/dropship/admin/order-intake?statuses=received%2Cprocessing%2Caccepted%2Crejected%2Cretrying%2Cfailed%2Cpayment_hold%2Ccancelled%2Cexception&page=1&limit=50",
+    );
   });
 
   it("builds admin listing push job URLs with optional operational filters", () => {
-    expect(buildAdminListingPushJobsUrl({
-      search: " vendor ",
-      status: "default",
-      platform: "all",
-    })).toBe("/api/dropship/admin/listing-push-jobs?search=vendor&page=1&limit=50");
-    expect(buildAdminListingPushJobsUrl({
-      search: "",
-      status: "failed",
-      platform: "ebay",
-      page: 2,
-      limit: 25,
-    })).toBe("/api/dropship/admin/listing-push-jobs?statuses=failed&platform=ebay&page=2&limit=25");
-    expect(buildAdminListingPushJobsUrl({
-      search: "",
-      status: "all",
-      platform: "shopify",
-    })).toBe("/api/dropship/admin/listing-push-jobs?statuses=queued%2Cprocessing%2Ccompleted%2Cfailed%2Ccancelled&platform=shopify&page=1&limit=50");
+    expect(
+      buildAdminListingPushJobsUrl({
+        search: " vendor ",
+        status: "default",
+        platform: "all",
+      }),
+    ).toBe(
+      "/api/dropship/admin/listing-push-jobs?search=vendor&page=1&limit=50",
+    );
+    expect(
+      buildAdminListingPushJobsUrl({
+        search: "",
+        status: "failed",
+        platform: "ebay",
+        page: 2,
+        limit: 25,
+      }),
+    ).toBe(
+      "/api/dropship/admin/listing-push-jobs?statuses=failed&platform=ebay&page=2&limit=25",
+    );
+    expect(
+      buildAdminListingPushJobsUrl({
+        search: "",
+        status: "all",
+        platform: "shopify",
+      }),
+    ).toBe(
+      "/api/dropship/admin/listing-push-jobs?statuses=queued%2Cprocessing%2Ccompleted%2Cfailed%2Ccancelled&platform=shopify&page=1&limit=50",
+    );
   });
 
   it("builds admin listing push job retry bodies with optional audit reasons", () => {
-    expect(buildAdminListingPushJobRetryInput({
-      idempotencyKey: "listing-job-retry-1",
-      reason: " marketplace outage resolved ",
-    })).toEqual({
+    expect(
+      buildAdminListingPushJobRetryInput({
+        idempotencyKey: "listing-job-retry-1",
+        reason: " marketplace outage resolved ",
+      }),
+    ).toEqual({
       idempotencyKey: "listing-job-retry-1",
       reason: "marketplace outage resolved",
     });
-    expect(buildAdminListingPushJobRetryInput({
-      idempotencyKey: "listing-job-retry-2",
-      reason: " ",
-    })).toEqual({
+    expect(
+      buildAdminListingPushJobRetryInput({
+        idempotencyKey: "listing-job-retry-2",
+        reason: " ",
+      }),
+    ).toEqual({
       idempotencyKey: "listing-job-retry-2",
     });
-    expect(() => buildAdminListingPushJobRetryInput({
-      idempotencyKey: "short",
-      reason: "",
-    })).toThrow();
+    expect(() =>
+      buildAdminListingPushJobRetryInput({
+        idempotencyKey: "short",
+        reason: "",
+      }),
+    ).toThrow();
   });
 
   it("identifies retryable failed and stale processing listing push jobs", () => {
@@ -358,149 +466,224 @@ describe("dropship ops surface client helpers", () => {
       cancelled: 0,
     };
 
-    expect(listingPushJobRetryEligibility({
-      status: "failed",
-      itemSummary,
-      updatedAt: "2026-05-03T11:59:00.000Z",
-    }, now)).toEqual({
+    expect(
+      listingPushJobRetryEligibility(
+        {
+          status: "failed",
+          itemSummary,
+          updatedAt: "2026-05-03T11:59:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: true,
       reason: "failed_items_present",
     });
-    expect(listingPushJobRetryEligibility({
-      status: "failed",
-      itemSummary: { ...itemSummary, failed: 0, blocked: 2 },
-      updatedAt: "2026-05-03T11:59:00.000Z",
-    }, now)).toEqual({
+    expect(
+      listingPushJobRetryEligibility(
+        {
+          status: "failed",
+          itemSummary: { ...itemSummary, failed: 0, blocked: 2 },
+          updatedAt: "2026-05-03T11:59:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: false,
       reason: "failed_without_failed_items",
     });
-    expect(listingPushJobRetryEligibility({
-      status: "processing",
-      itemSummary,
-      updatedAt: "2026-05-03T11:30:00.000Z",
-    }, now)).toEqual({
+    expect(
+      listingPushJobRetryEligibility(
+        {
+          status: "processing",
+          itemSummary,
+          updatedAt: "2026-05-03T11:30:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: true,
       reason: "stale_processing",
     });
-    expect(listingPushJobRetryEligibility({
-      status: "processing",
-      itemSummary,
-      updatedAt: "2026-05-03T11:45:00.000Z",
-    }, now)).toEqual({
+    expect(
+      listingPushJobRetryEligibility(
+        {
+          status: "processing",
+          itemSummary,
+          updatedAt: "2026-05-03T11:45:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: false,
       reason: "processing_not_stale",
     });
   });
 
   it("builds admin tracking push URLs with optional operational filters", () => {
-    expect(buildAdminTrackingPushesUrl({
-      search: " tracking ",
-      status: "default",
-      platform: "all",
-    })).toBe("/api/dropship/admin/tracking-pushes?search=tracking&page=1&limit=50");
-    expect(buildAdminTrackingPushesUrl({
-      search: "",
-      status: "failed",
-      platform: "shopify",
-      page: 2,
-      limit: 25,
-    })).toBe("/api/dropship/admin/tracking-pushes?statuses=failed&platform=shopify&page=2&limit=25");
-    expect(buildAdminTrackingPushesUrl({
-      search: "",
-      status: "all",
-      platform: "ebay",
-    })).toBe("/api/dropship/admin/tracking-pushes?statuses=queued%2Cprocessing%2Csucceeded%2Cfailed&platform=ebay&page=1&limit=50");
+    expect(
+      buildAdminTrackingPushesUrl({
+        search: " tracking ",
+        status: "default",
+        platform: "all",
+      }),
+    ).toBe(
+      "/api/dropship/admin/tracking-pushes?search=tracking&page=1&limit=50",
+    );
+    expect(
+      buildAdminTrackingPushesUrl({
+        search: "",
+        status: "failed",
+        platform: "shopify",
+        page: 2,
+        limit: 25,
+      }),
+    ).toBe(
+      "/api/dropship/admin/tracking-pushes?statuses=failed&platform=shopify&page=2&limit=25",
+    );
+    expect(
+      buildAdminTrackingPushesUrl({
+        search: "",
+        status: "all",
+        platform: "ebay",
+      }),
+    ).toBe(
+      "/api/dropship/admin/tracking-pushes?statuses=queued%2Cprocessing%2Csucceeded%2Cfailed&platform=ebay&page=1&limit=50",
+    );
   });
 
   it("builds admin notification event URLs with optional operational filters", () => {
-    expect(buildAdminNotificationEventsUrl({
-      search: " payment ",
-      status: "default",
-      channel: "all",
-      critical: "all",
-    })).toBe("/api/dropship/admin/notifications?search=payment&page=1&limit=50");
-    expect(buildAdminNotificationEventsUrl({
-      search: "",
-      status: "failed",
-      channel: "email",
-      critical: "critical",
-      page: 2,
-      limit: 25,
-    })).toBe("/api/dropship/admin/notifications?statuses=failed&channel=email&critical=true&page=2&limit=25");
-    expect(buildAdminNotificationEventsUrl({
-      search: "",
-      status: "all",
-      channel: "in_app",
-      critical: "noncritical",
-    })).toBe("/api/dropship/admin/notifications?statuses=pending%2Cdelivered%2Cfailed&channel=in_app&critical=false&page=1&limit=50");
+    expect(
+      buildAdminNotificationEventsUrl({
+        search: " payment ",
+        status: "default",
+        channel: "all",
+        critical: "all",
+      }),
+    ).toBe("/api/dropship/admin/notifications?search=payment&page=1&limit=50");
+    expect(
+      buildAdminNotificationEventsUrl({
+        search: "",
+        status: "failed",
+        channel: "email",
+        critical: "critical",
+        page: 2,
+        limit: 25,
+      }),
+    ).toBe(
+      "/api/dropship/admin/notifications?statuses=failed&channel=email&critical=true&page=2&limit=25",
+    );
+    expect(
+      buildAdminNotificationEventsUrl({
+        search: "",
+        status: "all",
+        channel: "in_app",
+        critical: "noncritical",
+      }),
+    ).toBe(
+      "/api/dropship/admin/notifications?statuses=pending%2Cdelivered%2Cfailed&channel=in_app&critical=false&page=1&limit=50",
+    );
   });
 
   it("builds vendor notification URLs with unread filtering", () => {
-    expect(buildDropshipNotificationsUrl({
-      view: "all",
-    })).toBe("/api/dropship/notifications?page=1&limit=50");
-    expect(buildDropshipNotificationsUrl({
-      view: "unread",
-      page: 2,
-      limit: 25,
-    })).toBe("/api/dropship/notifications?unreadOnly=true&page=2&limit=25");
+    expect(
+      buildDropshipNotificationsUrl({
+        view: "all",
+      }),
+    ).toBe("/api/dropship/notifications?page=1&limit=50");
+    expect(
+      buildDropshipNotificationsUrl({
+        view: "unread",
+        page: 2,
+        limit: 25,
+      }),
+    ).toBe("/api/dropship/notifications?unreadOnly=true&page=2&limit=25");
   });
 
   it("builds notification preference updates with critical delivery guardrails", () => {
-    expect(buildNotificationPreferenceUpdateInput({
-      critical: false,
-      emailEnabled: false,
-      inAppEnabled: true,
-    })).toEqual({
+    expect(
+      buildNotificationPreferenceUpdateInput({
+        critical: false,
+        emailEnabled: false,
+        inAppEnabled: true,
+      }),
+    ).toEqual({
       critical: false,
       emailEnabled: false,
       inAppEnabled: true,
       smsEnabled: false,
       webhookEnabled: false,
     });
-    expect(buildNotificationPreferenceUpdateInput({
-      critical: true,
-      emailEnabled: true,
-      inAppEnabled: true,
-    })).toMatchObject({
+    expect(
+      buildNotificationPreferenceUpdateInput({
+        critical: true,
+        emailEnabled: true,
+        inAppEnabled: true,
+      }),
+    ).toMatchObject({
       critical: true,
       emailEnabled: true,
       inAppEnabled: true,
     });
-    expect(() => buildNotificationPreferenceUpdateInput({
-      critical: true,
-      emailEnabled: false,
-      inAppEnabled: true,
-    })).toThrow("Critical notifications must keep email and in-app delivery enabled.");
+    expect(() =>
+      buildNotificationPreferenceUpdateInput({
+        critical: true,
+        emailEnabled: false,
+        inAppEnabled: true,
+      }),
+    ).toThrow(
+      "Critical notifications must keep email and in-app delivery enabled.",
+    );
   });
 
   it("builds admin return URLs with optional operational filters", () => {
-    expect(buildAdminReturnsUrl({
-      search: " rma ",
-      status: "default",
-    })).toBe("/api/dropship/admin/returns?search=rma&statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected%2Cdisputed%2Cno_inspection_review&page=1&limit=50");
-    expect(buildAdminReturnsUrl({
-      search: "",
-      status: "inspecting",
-      page: 2,
-      limit: 25,
-    })).toBe("/api/dropship/admin/returns?statuses=inspecting&page=2&limit=25");
-    expect(buildAdminReturnsUrl({
-      search: "",
-      status: "all",
-    })).toBe("/api/dropship/admin/returns?statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected%2Cdisputed%2Cno_inspection_review%2Ccredited%2Cclosed&page=1&limit=50");
-    expect(buildAdminReturnPolicyUrl()).toBe("/api/dropship/admin/returns/policy");
+    expect(
+      buildAdminReturnsUrl({
+        search: " rma ",
+        status: "default",
+      }),
+    ).toBe(
+      "/api/dropship/admin/returns?search=rma&statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected%2Cdisputed%2Cno_inspection_review&page=1&limit=50",
+    );
+    expect(
+      buildAdminReturnsUrl({
+        search: "",
+        status: "inspecting",
+        page: 2,
+        limit: 25,
+      }),
+    ).toBe("/api/dropship/admin/returns?statuses=inspecting&page=2&limit=25");
+    expect(
+      buildAdminReturnsUrl({
+        search: "",
+        status: "all",
+      }),
+    ).toBe(
+      "/api/dropship/admin/returns?statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected%2Cdisputed%2Cno_inspection_review%2Ccredited%2Cclosed&page=1&limit=50",
+    );
+    expect(buildAdminReturnPolicyUrl()).toBe(
+      "/api/dropship/admin/returns/policy",
+    );
+    expect(buildAdminReturnSourceOrderUrl({ vendorId: 12, intakeId: 44 })).toBe(
+      "/api/dropship/admin/returns/source-orders/44?vendorId=12",
+    );
+    expect(() => buildAdminReturnSourceOrderUrl({ vendorId: 0, intakeId: 44 }))
+      .toThrow("vendorId must be a positive integer.");
+    expect(() => buildAdminReturnSourceOrderUrl({ vendorId: 12, intakeId: 0 }))
+      .toThrow("intakeId must be a positive integer.");
   });
 
   it("builds admin return policy bodies with bounded return windows", () => {
-    expect(buildAdminReturnPolicyInput({
-      name: " Ops returns ",
-      returnWindowDays: "45",
-      isActive: true,
-      effectiveFrom: "2026-05-01T00:00:00.000Z",
-      effectiveTo: " ",
-      idempotencyKey: "return-policy-45-days",
-    })).toEqual({
+    expect(
+      buildAdminReturnPolicyInput({
+        name: " Ops returns ",
+        returnWindowDays: "45",
+        isActive: true,
+        effectiveFrom: "2026-05-01T00:00:00.000Z",
+        effectiveTo: " ",
+        idempotencyKey: "return-policy-45-days",
+      }),
+    ).toEqual({
       name: "Ops returns",
       returnWindowDays: 45,
       isActive: true,
@@ -508,75 +691,89 @@ describe("dropship ops surface client helpers", () => {
       effectiveTo: null,
       idempotencyKey: "return-policy-45-days",
     });
-    expect(() => buildAdminReturnPolicyInput({
-      name: "Too long",
-      returnWindowDays: "366",
-      isActive: true,
-      effectiveFrom: "",
-      effectiveTo: "",
-      idempotencyKey: "return-policy-too-long",
-    })).toThrow("returnWindowDays must be 365 or fewer.");
+    expect(() =>
+      buildAdminReturnPolicyInput({
+        name: "Too long",
+        returnWindowDays: "366",
+        isActive: true,
+        effectiveFrom: "",
+        effectiveTo: "",
+        idempotencyKey: "return-policy-too-long",
+      }),
+    ).toThrow("returnWindowDays must be 365 or fewer.");
   });
 
   it("builds admin return status update bodies with optional audit notes", () => {
-    expect(buildAdminReturnStatusUpdateInput({
-      idempotencyKey: "return-status-1",
-      status: "received",
-      notes: " package arrived ",
-    })).toEqual({
+    expect(
+      buildAdminReturnStatusUpdateInput({
+        idempotencyKey: "return-status-1",
+        status: "received",
+        notes: " package arrived ",
+      }),
+    ).toEqual({
       idempotencyKey: "return-status-1",
       status: "received",
       notes: "package arrived",
     });
-    expect(buildAdminReturnStatusUpdateInput({
-      idempotencyKey: "return-status-2",
-      status: "closed",
-      notes: " ",
-    })).toEqual({
+    expect(
+      buildAdminReturnStatusUpdateInput({
+        idempotencyKey: "return-status-2",
+        status: "closed",
+        notes: " ",
+      }),
+    ).toEqual({
       idempotencyKey: "return-status-2",
       status: "closed",
     });
-    expect(() => buildAdminReturnStatusUpdateInput({
-      idempotencyKey: "short",
-      status: "closed",
-      notes: "",
-    })).toThrow();
+    expect(() =>
+      buildAdminReturnStatusUpdateInput({
+        idempotencyKey: "short",
+        status: "closed",
+        notes: "",
+      }),
+    ).toThrow();
   });
 
-  it("builds admin return create bodies with explicit RMA fields and item rows", () => {
-    expect(buildAdminReturnCreateInput({
-      idempotencyKey: "return-create-1",
-      vendorId: " 12 ",
-      rmaNumber: " RMA-1001 ",
-      storeConnectionId: "34",
-      intakeId: "",
-      omsOrderId: "56",
-      reasonCode: "damaged",
-      faultCategory: "carrier",
-      returnWindowDays: "30",
-      labelSource: " marketplace ",
-      returnTrackingNumber: " 1Z999 ",
-      vendorNotes: " package lost ",
-      items: [
-        {
-          productVariantId: "789",
-          quantity: "2",
-          status: "requested",
-          requestedCreditAmount: "12.50",
-        },
-        {
-          productVariantId: "",
-          quantity: "1",
-          status: "",
-          requestedCreditAmount: "",
-        },
-      ],
-    })).toEqual({
+  it("builds admin RMAs from exact order lines and audited manual exceptions", () => {
+    expect(
+      buildAdminReturnCreateInput({
+        idempotencyKey: "return-create-1",
+        vendorId: " 12 ",
+        storeConnectionId: "34",
+        intakeId: "44",
+        omsOrderId: "56",
+        reasonCode: "damaged",
+        faultCategory: "carrier",
+        returnWindowDays: "30",
+        labelSource: "marketplace",
+        returnTrackingNumber: " 1Z999 ",
+        vendorNotes: " package lost ",
+        items: [
+          {
+            source: "order",
+            orderLineIndex: "0",
+            externalLineItemId: " line-100 ",
+            productVariantId: "789",
+            manualDescription: "ignored",
+            exceptionReason: "",
+            quantity: "2",
+          },
+          {
+            source: "manual_exception",
+            orderLineIndex: "",
+            externalLineItemId: "",
+            productVariantId: "",
+            manualDescription: "Unmapped bonus item",
+            exceptionReason: "Marketplace included an item absent from intake",
+            quantity: "1",
+          },
+        ],
+      }),
+    ).toEqual({
       idempotencyKey: "return-create-1",
       vendorId: 12,
-      rmaNumber: "RMA-1001",
       storeConnectionId: 34,
-      intakeId: null,
+      intakeId: 44,
       omsOrderId: 56,
       reasonCode: "damaged",
       faultCategory: "carrier",
@@ -585,70 +782,106 @@ describe("dropship ops surface client helpers", () => {
       returnTrackingNumber: "1Z999",
       vendorNotes: "package lost",
       items: [
-        { productVariantId: 789, quantity: 2, status: "requested", requestedCreditCents: 1250 },
-        { productVariantId: null, quantity: 1, status: "requested", requestedCreditCents: null },
+        {
+          source: "order",
+          orderLineIndex: 0,
+          externalLineItemId: "line-100",
+          productVariantId: 789,
+          manualDescription: null,
+          exceptionReason: null,
+          quantity: 2,
+          status: "requested",
+        },
+        {
+          source: "manual_exception",
+          orderLineIndex: null,
+          externalLineItemId: null,
+          productVariantId: null,
+          manualDescription: "Unmapped bonus item",
+          exceptionReason: "Marketplace included an item absent from intake",
+          quantity: 1,
+          status: "requested",
+        },
       ],
     });
+  });
 
-    expect(() => buildAdminReturnCreateInput({
+  it("rejects incomplete admin RMA item selections", () => {
+    const base = {
       idempotencyKey: "return-create-2",
       vendorId: "12",
-      rmaNumber: "",
-      storeConnectionId: "",
-      intakeId: "",
-      omsOrderId: "",
+      storeConnectionId: "34",
+      intakeId: "44",
+      omsOrderId: "56",
       reasonCode: "",
-      faultCategory: "none",
+      faultCategory: "none" as const,
       returnWindowDays: "30",
       labelSource: "",
       returnTrackingNumber: "",
       vendorNotes: "",
-      items: [],
-    })).toThrow("rmaNumber is required.");
-    expect(() => buildAdminReturnCreateInput({
-      idempotencyKey: "return-create-3",
-      vendorId: "12",
-      rmaNumber: "RMA-1002",
-      storeConnectionId: "",
-      intakeId: "",
-      omsOrderId: "",
-      reasonCode: "",
-      faultCategory: "none",
-      returnWindowDays: "30",
-      labelSource: "",
-      returnTrackingNumber: "",
-      vendorNotes: "",
-      items: [{ productVariantId: "", quantity: "0", status: "requested", requestedCreditAmount: "" }],
-    })).toThrow("items.0.quantity must be a positive integer.");
+    };
+
+    expect(() =>
+      buildAdminReturnCreateInput({ ...base, items: [] }),
+    ).toThrow("At least one return item is required.");
+    expect(() =>
+      buildAdminReturnCreateInput({
+        ...base,
+        returnTrackingNumber: "1Z999",
+        items: [{
+          source: "order", orderLineIndex: "0", externalLineItemId: "line-20",
+          productVariantId: "20", manualDescription: "", exceptionReason: "",
+          quantity: "1",
+        }],
+      }),
+    ).toThrow("Select a label source before entering return tracking.");
+    expect(() =>
+      buildAdminReturnCreateInput({
+        ...base,
+        items: [{
+          source: "order", orderLineIndex: "", externalLineItemId: "",
+          productVariantId: "20", manualDescription: "", exceptionReason: "",
+          quantity: "1",
+        }],
+      }),
+    ).toThrow("items.0.orderLineIndex");
+    expect(() =>
+      buildAdminReturnCreateInput({
+        ...base,
+        items: [{
+          source: "manual_exception", orderLineIndex: "", externalLineItemId: "",
+          productVariantId: "", manualDescription: "", exceptionReason: "Needs review",
+          quantity: "1",
+        }],
+      }),
+    ).toThrow("requires a catalog variant or item description");
   });
 
   it("builds portal return create bodies without vendor-controlled financial policy", () => {
-    expect(buildPortalReturnCreateInput({
+    expect(
+      buildPortalReturnCreateInput({
+        idempotencyKey: "portal-return-create-1",
+        intakeId: "44",
+        reasonCode: " wrong_item ",
+        faultCategory: "marketplace",
+        labelSource: " vendor ",
+        returnTrackingNumber: " 9400 ",
+        vendorNotes: " buyer opened return ",
+        items: [
+          {
+            productVariantId: "123",
+            quantity: "1",
+            status: "",
+          },
+          {
+            productVariantId: "456",
+            quantity: "2",
+            status: "requested",
+          },
+        ],
+      }),
+    ).toEqual({
       idempotencyKey: "portal-return-create-1",
-      rmaNumber: " RMA-VENDOR-1 ",
-      intakeId: "44",
-      reasonCode: " wrong_item ",
-      faultCategory: "marketplace",
-      labelSource: " vendor ",
-      returnTrackingNumber: " 9400 ",
-      vendorNotes: " buyer opened return ",
-      items: [
-        {
-          productVariantId: "123",
-          quantity: "1",
-          status: "",
-          requestedCreditAmount: "15.00",
-        },
-        {
-          productVariantId: "456",
-          quantity: "2",
-          status: "requested",
-          requestedCreditAmount: "",
-        },
-      ],
-    })).toEqual({
-      idempotencyKey: "portal-return-create-1",
-      rmaNumber: "RMA-VENDOR-1",
       intakeId: 44,
       reasonCode: "wrong_item",
       faultCategory: "marketplace",
@@ -656,66 +889,85 @@ describe("dropship ops surface client helpers", () => {
       returnTrackingNumber: "9400",
       vendorNotes: "buyer opened return",
       items: [
-        { productVariantId: 123, quantity: 1, status: "requested", requestedCreditCents: 1500 },
-        { productVariantId: 456, quantity: 2, status: "requested", requestedCreditCents: null },
+        {
+          productVariantId: 123,
+          quantity: 1,
+          status: "requested",
+        },
+        {
+          productVariantId: 456,
+          quantity: 2,
+          status: "requested",
+        },
       ],
     });
-    expect(buildPortalReturnCreateInput({
-      idempotencyKey: "portal-return-create-2",
-      rmaNumber: "RMA-VENDOR-2",
-      intakeId: "45",
-      reasonCode: "",
-      faultCategory: "none",
-      labelSource: "",
-      returnTrackingNumber: "",
-      vendorNotes: "",
-      items: [],
-    })).not.toHaveProperty("returnWindowDays");
-    expect(buildPortalReturnCreateInput({
-      idempotencyKey: "portal-return-create-3",
-      rmaNumber: "RMA-VENDOR-3",
-      intakeId: "45",
-      reasonCode: "",
-      faultCategory: "none",
-      labelSource: "",
-      returnTrackingNumber: "",
-      vendorNotes: "",
-      items: [],
-    })).not.toHaveProperty("omsOrderId");
-    expect(() => buildPortalReturnCreateInput({
-      idempotencyKey: "portal-return-create-4",
-      rmaNumber: "RMA-VENDOR-4",
-      intakeId: "",
-      reasonCode: "",
-      faultCategory: "none",
-      labelSource: "",
-      returnTrackingNumber: "",
-      vendorNotes: "",
-      items: [{ productVariantId: "123", quantity: "1", status: "requested", requestedCreditAmount: "" }],
-    })).toThrow("intakeId must be a positive integer.");
+    expect(
+      buildPortalReturnCreateInput({
+        idempotencyKey: "portal-return-create-2",
+        intakeId: "45",
+        reasonCode: "",
+        faultCategory: "none",
+        labelSource: "",
+        returnTrackingNumber: "",
+        vendorNotes: "",
+        items: [],
+      }),
+    ).not.toHaveProperty("returnWindowDays");
+    expect(
+      buildPortalReturnCreateInput({
+        idempotencyKey: "portal-return-create-3",
+        intakeId: "45",
+        reasonCode: "",
+        faultCategory: "none",
+        labelSource: "",
+        returnTrackingNumber: "",
+        vendorNotes: "",
+        items: [],
+      }),
+    ).not.toHaveProperty("omsOrderId");
+    expect(() =>
+      buildPortalReturnCreateInput({
+        idempotencyKey: "portal-return-create-4",
+        intakeId: "",
+        reasonCode: "",
+        faultCategory: "none",
+        labelSource: "",
+        returnTrackingNumber: "",
+        vendorNotes: "",
+        items: [
+          {
+            productVariantId: "123",
+            quantity: "1",
+            status: "requested",
+          },
+        ],
+      }),
+    ).toThrow("intakeId must be a positive integer.");
   });
 
   it("builds admin return inspection bodies from item credit and fee rows", () => {
-    expect(buildAdminReturnInspectionInput({
-      idempotencyKey: "return-inspection-1",
-      outcome: "approved",
-      faultCategory: "carrier",
-      notes: " carrier loss approved ",
-      items: [
-        {
-          rmaItemId: 10,
-          status: "approved",
-          finalCreditAmount: "12.50",
-          feeAmount: "",
-        },
-        {
-          rmaItemId: 11,
-          status: "approved",
-          finalCreditAmount: "$3.25",
-          feeAmount: "1.00",
-        },
-      ],
-    })).toEqual({
+    expect(
+      buildAdminReturnInspectionInput({
+        idempotencyKey: "return-inspection-1",
+        outcome: "approved",
+        faultCategory: "carrier",
+        notes: " carrier loss approved ",
+        items: [
+          {
+            rmaItemId: 10,
+            status: "approved",
+            finalCreditAmount: "12.50",
+            feeAmount: "",
+          },
+          {
+            rmaItemId: 11,
+            status: "approved",
+            finalCreditAmount: "$3.25",
+            feeAmount: "1.00",
+          },
+        ],
+      }),
+    ).toEqual({
       idempotencyKey: "return-inspection-1",
       outcome: "approved",
       faultCategory: "carrier",
@@ -724,39 +976,148 @@ describe("dropship ops surface client helpers", () => {
       notes: "carrier loss approved",
       photos: [],
       items: [
-        { rmaItemId: 10, status: "approved", finalCreditCents: 1250, feeCents: 0 },
-        { rmaItemId: 11, status: "approved", finalCreditCents: 325, feeCents: 100 },
+        {
+          rmaItemId: 10,
+          status: "approved",
+          finalCreditCents: 1250,
+          feeCents: 0,
+        },
+        {
+          rmaItemId: 11,
+          status: "approved",
+          finalCreditCents: 325,
+          feeCents: 100,
+        },
       ],
     });
 
-    expect(() => buildAdminReturnInspectionInput({
-      idempotencyKey: "short",
-      outcome: "approved",
-      faultCategory: "carrier",
-      notes: "",
-      items: [],
-    })).toThrow("idempotencyKey must be between 8 and 200 characters.");
-    expect(() => buildAdminReturnInspectionInput({
-      idempotencyKey: "return-inspection-2",
-      outcome: "approved",
-      faultCategory: "carrier",
-      notes: "",
-      items: [{ rmaItemId: 12, status: "approved", finalCreditAmount: "1.001", feeAmount: "0" }],
-    })).toThrow("items.0.finalCreditAmount must be a non-negative dollar amount with no more than two decimal places.");
+    expect(() =>
+      buildAdminReturnInspectionInput({
+        idempotencyKey: "short",
+        outcome: "approved",
+        faultCategory: "carrier",
+        notes: "",
+        items: [],
+      }),
+    ).toThrow("idempotencyKey must be between 8 and 200 characters.");
+    expect(() =>
+      buildAdminReturnInspectionInput({
+        idempotencyKey: "return-inspection-2",
+        outcome: "approved",
+        faultCategory: "carrier",
+        notes: "",
+        items: [
+          {
+            rmaItemId: 12,
+            status: "approved",
+            finalCreditAmount: "1.001",
+            feeAmount: "0",
+          },
+        ],
+      }),
+    ).toThrow(
+      "items.0.finalCreditAmount must be a non-negative dollar amount with no more than two decimal places.",
+    );
+  });
+
+  it("builds per-fee inspection decisions and actual return shipping in cents", () => {
+    expect(
+      buildAdminReturnInspectionInput({
+        idempotencyKey: "return-inspection-fees",
+        outcome: "approved",
+        faultCategory: "customer",
+        notes: " inspected ",
+        returnShippingActualAmount: "$6.50",
+        items: [
+          {
+            rmaItemId: 10,
+            status: "resellable",
+            finalCreditAmount: "20.00",
+            feeAmount: "3.00",
+          },
+        ],
+        feeDecisions: [
+          {
+            feeType: "restocking_fee",
+            responsibility: "vendor",
+            amount: "3.00",
+            overrideReason: " Vendor responsibility confirmed. ",
+          },
+          {
+            feeType: "processing_fee",
+            responsibility: "card_shellz",
+            amount: "0",
+          },
+          {
+            feeType: "return_shipping_fee",
+            responsibility: "carrier",
+            amount: "0",
+          },
+        ],
+      }),
+    ).toMatchObject({
+      creditCents: 2_000,
+      feeCents: 300,
+      returnShippingActualCents: 650,
+      feeDecisions: [
+        {
+          feeType: "restocking_fee",
+          responsibility: "vendor",
+          amountCents: 300,
+          overrideReason: "Vendor responsibility confirmed.",
+        },
+        {
+          feeType: "processing_fee",
+          responsibility: "card_shellz",
+          amountCents: 0,
+          overrideReason: null,
+        },
+        {
+          feeType: "return_shipping_fee",
+          responsibility: "carrier",
+          amountCents: 0,
+          overrideReason: null,
+        },
+      ],
+    });
+
+    expect(() =>
+      buildAdminReturnInspectionInput({
+        idempotencyKey: "return-inspection-duplicate-fees",
+        outcome: "approved",
+        faultCategory: "customer",
+        notes: "",
+        items: [],
+        feeDecisions: [
+          {
+            feeType: "restocking_fee",
+            responsibility: "vendor",
+            amount: "1.00",
+          },
+          {
+            feeType: "restocking_fee",
+            responsibility: "customer",
+            amount: "1.00",
+          },
+        ],
+      }),
+    ).toThrow("Fee decisions must contain each fee type at most once.");
   });
 
   it("builds admin shipping config mutation bodies", () => {
-    expect(buildShippingBoxInput({
-      code: " small mailer ",
-      name: "Small Mailer",
-      lengthMm: "230",
-      widthMm: "160",
-      heightMm: "10",
-      tareWeightGrams: "12",
-      maxWeightGrams: "1000",
-      isActive: true,
-      idempotencyKey: "shipping-box-1",
-    })).toEqual({
+    expect(
+      buildShippingBoxInput({
+        code: " small mailer ",
+        name: "Small Mailer",
+        lengthMm: "230",
+        widthMm: "160",
+        heightMm: "10",
+        tareWeightGrams: "12",
+        maxWeightGrams: "1000",
+        isActive: true,
+        idempotencyKey: "shipping-box-1",
+      }),
+    ).toEqual({
       code: "small mailer",
       name: "Small Mailer",
       lengthMm: 230,
@@ -768,50 +1129,62 @@ describe("dropship ops surface client helpers", () => {
       idempotencyKey: "shipping-box-1",
     });
 
-    expect(buildShippingPackageProfileInput({
-      productVariantId: "10",
-      defaultCarrier: "USPS",
-      defaultService: "",
-      defaultBoxId: "",
-      isActive: true,
-      idempotencyKey: "package-profile-1",
-    })).toMatchObject({
+    expect(
+      buildShippingPackageProfileInput({
+        productVariantId: "10",
+        defaultCarrier: "USPS",
+        defaultService: "",
+        defaultBoxId: "",
+        isActive: true,
+        idempotencyKey: "package-profile-1",
+      }),
+    ).toMatchObject({
       productVariantId: 10,
       defaultCarrier: "USPS",
       defaultService: null,
       defaultBoxId: null,
     });
 
-    expect(buildShippingBoxInput({
-      code: "unbounded",
-      name: "Unbounded box",
-      lengthMm: "230",
-      widthMm: "160",
-      heightMm: "10",
-      tareWeightGrams: "12",
-      maxWeightGrams: "",
-      isActive: true,
-      idempotencyKey: "shipping-box-unbounded",
-    })).toMatchObject({ maxWeightGrams: null });
-    expect(buildShippingPackageProfileInput({
-      productVariantId: "10",
-      defaultCarrier: "",
-      defaultService: "",
-      defaultBoxId: "",
-      isActive: true,
-      idempotencyKey: "package-profile-unbounded",
-    })).toMatchObject({ defaultCarrier: null, defaultService: null, defaultBoxId: null });
+    expect(
+      buildShippingBoxInput({
+        code: "unbounded",
+        name: "Unbounded box",
+        lengthMm: "230",
+        widthMm: "160",
+        heightMm: "10",
+        tareWeightGrams: "12",
+        maxWeightGrams: "",
+        isActive: true,
+        idempotencyKey: "shipping-box-unbounded",
+      }),
+    ).toMatchObject({ maxWeightGrams: null });
+    expect(
+      buildShippingPackageProfileInput({
+        productVariantId: "10",
+        defaultCarrier: "",
+        defaultService: "",
+        defaultBoxId: "",
+        isActive: true,
+        idempotencyKey: "package-profile-unbounded",
+      }),
+    ).toMatchObject({
+      defaultCarrier: null,
+      defaultService: null,
+      defaultBoxId: null,
+    });
 
-    expect(buildShippingZoneRuleInput({
-      originWarehouseId: "1",
-      destinationCountry: "us",
-      destinationRegion: "",
-      postalPrefix: "15",
-      zone: "zone 2",
-      priority: "10",
-      isActive: true,
-      idempotencyKey: "zone-rule-1",
-    })).toMatchObject({
+    expect(
+      buildShippingZoneRuleInput({
+        originWarehouseId: "1",
+        destinationCountry: "us",
+        destinationRegion: "",
+        postalPrefix: "15",
+        zone: "zone 2",
+        priority: "10",
+        isActive: true,
+        idempotencyKey: "zone-rule-1",
+      }),
+    ).toMatchObject({
       originWarehouseId: 1,
       destinationCountry: "US",
       postalPrefix: "15",
@@ -819,141 +1192,187 @@ describe("dropship ops surface client helpers", () => {
       priority: 10,
     });
 
-    expect(buildShippingRateTableInput({
-      carrier: "USPS",
-      service: "Ground Advantage",
-      currency: "usd",
-      status: "active",
-      effectiveFrom: "",
-      effectiveTo: "",
-      warehouseId: "",
-      destinationZone: "2",
-      minWeightGrams: "0",
-      maxWeightGrams: "450",
-      rate: "5.25",
-      idempotencyKey: "rate-table-1",
-    })).toMatchObject({
+    expect(
+      buildShippingRateTableInput({
+        carrier: "USPS",
+        service: "Ground Advantage",
+        currency: "usd",
+        status: "active",
+        effectiveFrom: "",
+        effectiveTo: "",
+        warehouseId: "",
+        destinationZone: "2",
+        minWeightGrams: "0",
+        maxWeightGrams: "450",
+        rate: "5.25",
+        idempotencyKey: "rate-table-1",
+      }),
+    ).toMatchObject({
       carrier: "USPS",
       currency: "USD",
-      rows: [{ warehouseId: null, destinationZone: "2", minWeightGrams: 0, maxWeightGrams: 450, rateCents: 525 }],
+      rows: [
+        {
+          warehouseId: null,
+          destinationZone: "2",
+          minWeightGrams: 0,
+          maxWeightGrams: 450,
+          rateCents: 525,
+        },
+      ],
     });
 
-    expect(buildShippingInsurancePolicyInput({
-      name: "Carrier pool",
-      feeBps: "200",
-      minFee: "",
-      maxFee: "",
-      isActive: true,
-      effectiveFrom: "",
-      effectiveTo: "",
-      idempotencyKey: "insurance-policy-1",
-    })).toMatchObject({ feeBps: 200, minFeeCents: null, maxFeeCents: null });
+    expect(
+      buildShippingInsurancePolicyInput({
+        name: "Carrier pool",
+        feeBps: "200",
+        minFee: "",
+        maxFee: "",
+        isActive: true,
+        effectiveFrom: "",
+        effectiveTo: "",
+        idempotencyKey: "insurance-policy-1",
+      }),
+    ).toMatchObject({ feeBps: 200, minFeeCents: null, maxFeeCents: null });
 
-    expect(buildShippingMarkupPolicyInput({
-      name: "Default markup",
-      markupBps: "0",
-      fixedMarkup: "0",
-      minMarkup: "",
-      maxMarkup: "",
-      isActive: true,
-      effectiveFrom: "",
-      effectiveTo: "",
-      idempotencyKey: "markup-policy-1",
-    })).toMatchObject({ markupBps: 0, fixedMarkupCents: 0 });
+    expect(
+      buildShippingMarkupPolicyInput({
+        name: "Default markup",
+        markupBps: "0",
+        fixedMarkup: "0",
+        minMarkup: "",
+        maxMarkup: "",
+        isActive: true,
+        effectiveFrom: "",
+        effectiveTo: "",
+        idempotencyKey: "markup-policy-1",
+      }),
+    ).toMatchObject({ markupBps: 0, fixedMarkupCents: 0 });
   });
 
   it("rejects malformed admin shipping config mutation bodies", () => {
-    expect(() => buildShippingRateTableInput({
-      carrier: "USPS",
-      service: "Ground Advantage",
-      currency: "USD",
-      status: "active",
-      effectiveFrom: "",
-      effectiveTo: "",
-      warehouseId: "",
-      destinationZone: "2",
-      minWeightGrams: "500",
-      maxWeightGrams: "100",
-      rate: "5.25",
-      idempotencyKey: "rate-table-2",
-    })).toThrow();
-    expect(() => buildShippingInsurancePolicyInput({
-      name: "Carrier pool",
-      feeBps: "10001",
-      minFee: "",
-      maxFee: "",
-      isActive: true,
-      effectiveFrom: "",
-      effectiveTo: "",
-      idempotencyKey: "insurance-policy-2",
-    })).toThrow();
+    expect(() =>
+      buildShippingRateTableInput({
+        carrier: "USPS",
+        service: "Ground Advantage",
+        currency: "USD",
+        status: "active",
+        effectiveFrom: "",
+        effectiveTo: "",
+        warehouseId: "",
+        destinationZone: "2",
+        minWeightGrams: "500",
+        maxWeightGrams: "100",
+        rate: "5.25",
+        idempotencyKey: "rate-table-2",
+      }),
+    ).toThrow();
+    expect(() =>
+      buildShippingInsurancePolicyInput({
+        name: "Carrier pool",
+        feeBps: "10001",
+        minFee: "",
+        maxFee: "",
+        isActive: true,
+        effectiveFrom: "",
+        effectiveTo: "",
+        idempotencyKey: "insurance-policy-2",
+      }),
+    ).toThrow();
   });
 
   it("builds admin tracking push retry bodies with optional audit reasons", () => {
-    expect(buildAdminTrackingPushRetryInput({
-      idempotencyKey: "tracking-retry-1",
-      reason: " marketplace timeout ",
-    })).toEqual({
+    expect(
+      buildAdminTrackingPushRetryInput({
+        idempotencyKey: "tracking-retry-1",
+        reason: " marketplace timeout ",
+      }),
+    ).toEqual({
       idempotencyKey: "tracking-retry-1",
       reason: "marketplace timeout",
     });
-    expect(buildAdminTrackingPushRetryInput({
-      idempotencyKey: "tracking-retry-2",
-      reason: " ",
-    })).toEqual({
+    expect(
+      buildAdminTrackingPushRetryInput({
+        idempotencyKey: "tracking-retry-2",
+        reason: " ",
+      }),
+    ).toEqual({
       idempotencyKey: "tracking-retry-2",
     });
-    expect(() => buildAdminTrackingPushRetryInput({
-      idempotencyKey: "short",
-      reason: "",
-    })).toThrow();
+    expect(() =>
+      buildAdminTrackingPushRetryInput({
+        idempotencyKey: "short",
+        reason: "",
+      }),
+    ).toThrow();
   });
 
   it("builds admin notification retry bodies with optional audit reasons", () => {
-    expect(buildAdminNotificationRetryInput({
-      idempotencyKey: "notification-retry-1",
-      reason: " SMTP recovered ",
-    })).toEqual({
+    expect(
+      buildAdminNotificationRetryInput({
+        idempotencyKey: "notification-retry-1",
+        reason: " SMTP recovered ",
+      }),
+    ).toEqual({
       idempotencyKey: "notification-retry-1",
       reason: "SMTP recovered",
     });
-    expect(buildAdminNotificationRetryInput({
-      idempotencyKey: "notification-retry-2",
-      reason: " ",
-    })).toEqual({
+    expect(
+      buildAdminNotificationRetryInput({
+        idempotencyKey: "notification-retry-2",
+        reason: " ",
+      }),
+    ).toEqual({
       idempotencyKey: "notification-retry-2",
     });
-    expect(() => buildAdminNotificationRetryInput({
-      idempotencyKey: "short",
-      reason: "",
-    })).toThrow();
+    expect(() =>
+      buildAdminNotificationRetryInput({
+        idempotencyKey: "short",
+        reason: "",
+      }),
+    ).toThrow();
   });
 
   it("only allows failed email notification retries", () => {
-    expect(notificationRetryEligibility({ channel: "email", status: "failed" })).toEqual({
+    expect(
+      notificationRetryEligibility({ channel: "email", status: "failed" }),
+    ).toEqual({
       canRetry: true,
       reason: "failed_email",
     });
-    expect(notificationRetryEligibility({ channel: "email", status: "pending" })).toEqual({
+    expect(
+      notificationRetryEligibility({ channel: "email", status: "pending" }),
+    ).toEqual({
       canRetry: false,
       reason: "status_not_retryable",
     });
-    expect(notificationRetryEligibility({ channel: "in_app", status: "failed" })).toEqual({
+    expect(
+      notificationRetryEligibility({ channel: "in_app", status: "failed" }),
+    ).toEqual({
       canRetry: false,
       reason: "channel_not_retryable",
     });
   });
 
   it("only allows failed marketplace cancellation retries", () => {
-    expect(orderCancellationRetryEligibility({ cancellationStatus: "marketplace_cancellation_failed" })).toEqual({
+    expect(
+      orderCancellationRetryEligibility({
+        cancellationStatus: "marketplace_cancellation_failed",
+      }),
+    ).toEqual({
       canRetry: true,
       reason: "failed_cancellation",
     });
-    expect(orderCancellationRetryEligibility({ cancellationStatus: "marketplace_cancellation_retrying" })).toEqual({
+    expect(
+      orderCancellationRetryEligibility({
+        cancellationStatus: "marketplace_cancellation_retrying",
+      }),
+    ).toEqual({
       canRetry: false,
       reason: "already_retrying",
     });
-    expect(orderCancellationRetryEligibility({ cancellationStatus: null })).toEqual({
+    expect(
+      orderCancellationRetryEligibility({ cancellationStatus: null }),
+    ).toEqual({
       canRetry: false,
       reason: "status_not_retryable",
     });
@@ -962,53 +1381,79 @@ describe("dropship ops surface client helpers", () => {
   it("identifies retryable failed and stale processing tracking pushes", () => {
     const now = new Date("2026-05-03T12:00:00.000Z");
 
-    expect(trackingPushRetryEligibility({
-      status: "failed",
-      retryable: true,
-      updatedAt: "2026-05-03T11:59:00.000Z",
-    }, now)).toEqual({
+    expect(
+      trackingPushRetryEligibility(
+        {
+          status: "failed",
+          retryable: true,
+          updatedAt: "2026-05-03T11:59:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: true,
       reason: "failed_retryable",
     });
-    expect(trackingPushRetryEligibility({
-      status: "failed",
-      retryable: false,
-      updatedAt: "2026-05-03T11:59:00.000Z",
-    }, now)).toEqual({
+    expect(
+      trackingPushRetryEligibility(
+        {
+          status: "failed",
+          retryable: false,
+          updatedAt: "2026-05-03T11:59:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: false,
       reason: "failed_not_retryable",
     });
-    expect(trackingPushRetryEligibility({
-      status: "processing",
-      retryable: true,
-      updatedAt: "2026-05-03T11:30:00.000Z",
-    }, now)).toEqual({
+    expect(
+      trackingPushRetryEligibility(
+        {
+          status: "processing",
+          retryable: true,
+          updatedAt: "2026-05-03T11:30:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: true,
       reason: "stale_processing",
     });
-    expect(trackingPushRetryEligibility({
-      status: "processing",
-      retryable: true,
-      updatedAt: "2026-05-03T11:45:00.000Z",
-    }, now)).toEqual({
+    expect(
+      trackingPushRetryEligibility(
+        {
+          status: "processing",
+          retryable: true,
+          updatedAt: "2026-05-03T11:45:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: false,
       reason: "processing_not_stale",
     });
   });
 
   it("builds admin store connection URLs with optional filters", () => {
-    expect(buildAdminStoreConnectionsUrl({
-      search: " vendor ",
-      status: "needs_reauth",
-      platform: "ebay",
-    })).toBe("/api/dropship/admin/store-connections?search=vendor&statuses=needs_reauth&platform=ebay&page=1&limit=50");
-    expect(buildAdminStoreConnectionsUrl({
-      search: "",
-      status: "all",
-      platform: "all",
-      page: 2,
-      limit: 25,
-    })).toBe("/api/dropship/admin/store-connections?page=2&limit=25");
+    expect(
+      buildAdminStoreConnectionsUrl({
+        search: " vendor ",
+        status: "needs_reauth",
+        platform: "ebay",
+      }),
+    ).toBe(
+      "/api/dropship/admin/store-connections?search=vendor&statuses=needs_reauth&platform=ebay&page=1&limit=50",
+    );
+    expect(
+      buildAdminStoreConnectionsUrl({
+        search: "",
+        status: "all",
+        platform: "all",
+        page: 2,
+        limit: 25,
+      }),
+    ).toBe("/api/dropship/admin/store-connections?page=2&limit=25");
   });
 
   it("filters store connections to launch-ready records only", () => {
@@ -1024,36 +1469,45 @@ describe("dropship ops surface client helpers", () => {
   });
 
   it("builds store order processing config inputs with nullable warehouse ids", () => {
-    expect(buildStoreOrderProcessingConfigInput({
-      defaultWarehouseId: " 3 ",
-      idempotencyKey: "warehouse-config-1",
-    })).toEqual({
+    expect(
+      buildStoreOrderProcessingConfigInput({
+        defaultWarehouseId: " 3 ",
+        idempotencyKey: "warehouse-config-1",
+      }),
+    ).toEqual({
       defaultWarehouseId: 3,
       idempotencyKey: "warehouse-config-1",
     });
-    expect(buildStoreOrderProcessingConfigInput({
-      defaultWarehouseId: " ",
-      idempotencyKey: "warehouse-config-2",
-    })).toEqual({
+    expect(
+      buildStoreOrderProcessingConfigInput({
+        defaultWarehouseId: " ",
+        idempotencyKey: "warehouse-config-2",
+      }),
+    ).toEqual({
       defaultWarehouseId: null,
       idempotencyKey: "warehouse-config-2",
     });
-    expect(() => buildStoreOrderProcessingConfigInput({
-      defaultWarehouseId: "0",
-      idempotencyKey: "warehouse-config-3",
-    })).toThrow();
+    expect(() =>
+      buildStoreOrderProcessingConfigInput({
+        defaultWarehouseId: "0",
+        idempotencyKey: "warehouse-config-3",
+      }),
+    ).toThrow();
   });
 
   it("builds store listing config inputs from explicit admin form state", () => {
-    expect(buildStoreListingConfigInput({
-      listingMode: "draft_first",
-      inventoryMode: "managed_quantity_sync",
-      priceMode: "vendor_defined",
-      marketplaceConfigJson: "{ \"marketplaceId\": \"EBAY_US\" }",
-      requiredConfigKeys: " marketplaceId, marketplaceId, businessPolicies.paymentPolicyId ",
-      requiredProductFields: "sku, title",
-      isActive: true,
-    })).toEqual({
+    expect(
+      buildStoreListingConfigInput({
+        listingMode: "draft_first",
+        inventoryMode: "managed_quantity_sync",
+        priceMode: "vendor_defined",
+        marketplaceConfigJson: '{ "marketplaceId": "EBAY_US" }',
+        requiredConfigKeys:
+          " marketplaceId, marketplaceId, businessPolicies.paymentPolicyId ",
+        requiredProductFields: "sku, title",
+        isActive: true,
+      }),
+    ).toEqual({
       listingMode: "draft_first",
       inventoryMode: "managed_quantity_sync",
       priceMode: "vendor_defined",
@@ -1065,123 +1519,168 @@ describe("dropship ops surface client helpers", () => {
   });
 
   it("rejects invalid store listing config form state", () => {
-    expect(() => buildStoreListingConfigInput({
-      listingMode: "draft_first",
-      inventoryMode: "managed_quantity_sync",
-      priceMode: "vendor_defined",
-      marketplaceConfigJson: "[]",
-      requiredConfigKeys: "",
-      requiredProductFields: "",
-      isActive: true,
-    })).toThrow();
-    expect(() => buildStoreListingConfigInput({
-      listingMode: "draft_first",
-      inventoryMode: "managed_quantity_sync",
-      priceMode: "vendor_defined",
-      marketplaceConfigJson: "{}",
-      requiredConfigKeys: "bad key",
-      requiredProductFields: "",
-      isActive: true,
-    })).toThrow();
-    expect(() => buildStoreListingConfigInput({
-      listingMode: "draft_first",
-      inventoryMode: "managed_quantity_sync",
-      priceMode: "vendor_defined",
-      marketplaceConfigJson: "{}",
-      requiredConfigKeys: "",
-      requiredProductFields: "unsupported",
-      isActive: true,
-    })).toThrow();
+    expect(() =>
+      buildStoreListingConfigInput({
+        listingMode: "draft_first",
+        inventoryMode: "managed_quantity_sync",
+        priceMode: "vendor_defined",
+        marketplaceConfigJson: "[]",
+        requiredConfigKeys: "",
+        requiredProductFields: "",
+        isActive: true,
+      }),
+    ).toThrow();
+    expect(() =>
+      buildStoreListingConfigInput({
+        listingMode: "draft_first",
+        inventoryMode: "managed_quantity_sync",
+        priceMode: "vendor_defined",
+        marketplaceConfigJson: "{}",
+        requiredConfigKeys: "bad key",
+        requiredProductFields: "",
+        isActive: true,
+      }),
+    ).toThrow();
+    expect(() =>
+      buildStoreListingConfigInput({
+        listingMode: "draft_first",
+        inventoryMode: "managed_quantity_sync",
+        priceMode: "vendor_defined",
+        marketplaceConfigJson: "{}",
+        requiredConfigKeys: "",
+        requiredProductFields: "unsupported",
+        isActive: true,
+      }),
+    ).toThrow();
   });
 
   it("builds admin store webhook repair inputs with idempotency guardrails", () => {
-    expect(buildAdminStoreWebhookRepairInput({
-      idempotencyKey: " repair-shopify-webhooks-1 ",
-    })).toEqual({
+    expect(
+      buildAdminStoreWebhookRepairInput({
+        idempotencyKey: " repair-shopify-webhooks-1 ",
+      }),
+    ).toEqual({
       idempotencyKey: "repair-shopify-webhooks-1",
     });
-    expect(() => buildAdminStoreWebhookRepairInput({
-      idempotencyKey: "short",
-    })).toThrow();
+    expect(() =>
+      buildAdminStoreWebhookRepairInput({
+        idempotencyKey: "short",
+      }),
+    ).toThrow();
   });
 
   it("builds admin order ops action bodies with required reason guardrails", () => {
-    expect(buildAdminOrderOpsActionInput({
-      idempotencyKey: "retry-intake-1",
-      reason: " repaired config ",
-      requireReason: false,
-    })).toEqual({
+    expect(
+      buildAdminOrderOpsActionInput({
+        idempotencyKey: "retry-intake-1",
+        reason: " repaired config ",
+        requireReason: false,
+      }),
+    ).toEqual({
       idempotencyKey: "retry-intake-1",
       reason: "repaired config",
     });
-    expect(buildAdminOrderOpsActionInput({
-      idempotencyKey: "retry-intake-2",
-      reason: " ",
-      requireReason: false,
-    })).toEqual({
+    expect(
+      buildAdminOrderOpsActionInput({
+        idempotencyKey: "retry-intake-2",
+        reason: " ",
+        requireReason: false,
+      }),
+    ).toEqual({
       idempotencyKey: "retry-intake-2",
     });
-    expect(() => buildAdminOrderOpsActionInput({
-      idempotencyKey: "short",
-      reason: "valid",
-      requireReason: false,
-    })).toThrow();
-    expect(() => buildAdminOrderOpsActionInput({
-      idempotencyKey: "exception-intake-1",
-      reason: " ",
-      requireReason: true,
-    })).toThrow();
+    expect(() =>
+      buildAdminOrderOpsActionInput({
+        idempotencyKey: "short",
+        reason: "valid",
+        requireReason: false,
+      }),
+    ).toThrow();
+    expect(() =>
+      buildAdminOrderOpsActionInput({
+        idempotencyKey: "exception-intake-1",
+        reason: " ",
+        requireReason: true,
+      }),
+    ).toThrow();
   });
 
   it("identifies retryable failed and stale processing order intakes", () => {
     const now = new Date("2026-05-03T12:00:00.000Z");
 
-    expect(orderIntakeRetryEligibility({
-      status: "failed",
-      updatedAt: "2026-05-03T11:59:00.000Z",
-    }, now)).toEqual({
+    expect(
+      orderIntakeRetryEligibility(
+        {
+          status: "failed",
+          updatedAt: "2026-05-03T11:59:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: true,
       reason: "retryable_status",
     });
-    expect(orderIntakeRetryEligibility({
-      status: "exception",
-      updatedAt: "2026-05-03T11:59:00.000Z",
-    }, now)).toEqual({
+    expect(
+      orderIntakeRetryEligibility(
+        {
+          status: "exception",
+          updatedAt: "2026-05-03T11:59:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: true,
       reason: "retryable_status",
     });
-    expect(orderIntakeRetryEligibility({
-      status: "processing",
-      updatedAt: "2026-05-03T11:30:00.000Z",
-    }, now)).toEqual({
+    expect(
+      orderIntakeRetryEligibility(
+        {
+          status: "processing",
+          updatedAt: "2026-05-03T11:30:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: true,
       reason: "stale_processing",
     });
-    expect(orderIntakeRetryEligibility({
-      status: "processing",
-      updatedAt: "2026-05-03T11:45:00.000Z",
-    }, now)).toEqual({
+    expect(
+      orderIntakeRetryEligibility(
+        {
+          status: "processing",
+          updatedAt: "2026-05-03T11:45:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: false,
       reason: "processing_not_stale",
     });
-    expect(orderIntakeRetryEligibility({
-      status: "payment_hold",
-      updatedAt: "2026-05-03T11:00:00.000Z",
-    }, now)).toEqual({
+    expect(
+      orderIntakeRetryEligibility(
+        {
+          status: "payment_hold",
+          updatedAt: "2026-05-03T11:00:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({
       canRetry: false,
       reason: "status_not_retryable",
     });
   });
 
   it("builds catalog exposure rule inputs with exact scope targets", () => {
-    expect(buildCatalogExposureRuleInput({
-      scopeType: "variant",
-      action: "exclude",
-      productVariantId: "42",
-      category: "ignored",
-      priority: "200",
-      notes: "  hold for review ",
-    })).toEqual({
+    expect(
+      buildCatalogExposureRuleInput({
+        scopeType: "variant",
+        action: "exclude",
+        productVariantId: "42",
+        category: "ignored",
+        priority: "200",
+        notes: "  hold for review ",
+      }),
+    ).toEqual({
       scopeType: "variant",
       action: "exclude",
       productLineId: null,
@@ -1194,20 +1693,26 @@ describe("dropship ops surface client helpers", () => {
       notes: "hold for review",
       metadata: {},
     });
-    expect(buildCatalogExposureRuleInput({
-      scopeType: "category",
-      action: "include",
-      category: " Supplies ",
-    })).toEqual(expect.objectContaining({
-      scopeType: "category",
-      action: "include",
-      category: "Supplies",
-    }));
-    expect(() => buildCatalogExposureRuleInput({
-      scopeType: "product_line",
-      action: "include",
-      productLineId: "",
-    })).toThrow();
+    expect(
+      buildCatalogExposureRuleInput({
+        scopeType: "category",
+        action: "include",
+        category: " Supplies ",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        scopeType: "category",
+        action: "include",
+        category: "Supplies",
+      }),
+    );
+    expect(() =>
+      buildCatalogExposureRuleInput({
+        scopeType: "product_line",
+        action: "include",
+        productLineId: "",
+      }),
+    ).toThrow();
   });
 
   it("builds catalog exposure draft rules from preview rows", () => {
@@ -1223,44 +1728,56 @@ describe("dropship ops surface client helpers", () => {
       variantName: "Clear",
     };
 
-    expect(buildCatalogExposureRuleFromPreviewRow({
-      row,
-      scopeType: "product_line",
-      productLineId: 8,
-      action: "include",
-    })).toEqual(expect.objectContaining({
-      scopeType: "product_line",
-      action: "include",
-      productLineId: 8,
-      productId: null,
-      productVariantId: null,
-      category: null,
-      priority: 100,
-      notes: "Expose Display",
-      metadata: { source: "admin_catalog_preview" },
-    }));
+    expect(
+      buildCatalogExposureRuleFromPreviewRow({
+        row,
+        scopeType: "product_line",
+        productLineId: 8,
+        action: "include",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        scopeType: "product_line",
+        action: "include",
+        productLineId: 8,
+        productId: null,
+        productVariantId: null,
+        category: null,
+        priority: 100,
+        notes: "Expose Display",
+        metadata: { source: "admin_catalog_preview" },
+      }),
+    );
 
-    expect(buildCatalogExposureRuleFromPreviewRow({
-      row,
-      scopeType: "category",
-      action: "exclude",
-    })).toEqual(expect.objectContaining({
-      scopeType: "category",
-      action: "exclude",
-      category: "Cases",
-      priority: 200,
-      notes: "Hide category Cases",
-    }));
+    expect(
+      buildCatalogExposureRuleFromPreviewRow({
+        row,
+        scopeType: "category",
+        action: "exclude",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        scopeType: "category",
+        action: "exclude",
+        category: "Cases",
+        priority: 200,
+        notes: "Hide category Cases",
+      }),
+    );
 
-    expect(buildCatalogExposureRuleFromPreviewRow({
-      row,
-      scopeType: "product",
-      action: "include",
-    })).toEqual(expect.objectContaining({
-      scopeType: "product",
-      productId: 14,
-      notes: "Expose PROD-14",
-    }));
+    expect(
+      buildCatalogExposureRuleFromPreviewRow({
+        row,
+        scopeType: "product",
+        action: "include",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        scopeType: "product",
+        productId: 14,
+        notes: "Expose PROD-14",
+      }),
+    );
   });
 
   it("requires a concrete preview row target for scoped catalog exposure rules", () => {
@@ -1276,48 +1793,62 @@ describe("dropship ops surface client helpers", () => {
       variantName: "Clear",
     };
 
-    expect(() => buildCatalogExposureRuleFromPreviewRow({
-      row,
-      scopeType: "category",
-      action: "include",
-    })).toThrow("category is required");
+    expect(() =>
+      buildCatalogExposureRuleFromPreviewRow({
+        row,
+        scopeType: "category",
+        action: "include",
+      }),
+    ).toThrow("category is required");
 
-    expect(() => buildCatalogExposureRuleFromPreviewRow({
-      row,
-      scopeType: "product_line",
-      action: "include",
-    })).toThrow("productLineId is required");
+    expect(() =>
+      buildCatalogExposureRuleFromPreviewRow({
+        row,
+        scopeType: "product_line",
+        action: "include",
+      }),
+    ).toThrow("productLineId is required");
   });
 
   it("dedupes catalog exposure rules by scope, action, and normalized target", () => {
-    expect(catalogExposureRuleKey(buildCatalogExposureRuleInput({
-      scopeType: "category",
-      action: "include",
-      category: " Supplies ",
-    }))).toBe(catalogExposureRuleKey(buildCatalogExposureRuleInput({
-      scopeType: "category",
-      action: "include",
-      category: "supplies",
-    })));
+    expect(
+      catalogExposureRuleKey(
+        buildCatalogExposureRuleInput({
+          scopeType: "category",
+          action: "include",
+          category: " Supplies ",
+        }),
+      ),
+    ).toBe(
+      catalogExposureRuleKey(
+        buildCatalogExposureRuleInput({
+          scopeType: "category",
+          action: "include",
+          category: "supplies",
+        }),
+      ),
+    );
   });
 
   it("preserves catalog exposure effective windows when loading records into draft rules", () => {
-    expect(catalogExposureRecordToInput({
-      id: 1,
-      revisionId: 2,
-      scopeType: "catalog",
-      action: "include",
-      productLineId: null,
-      productId: null,
-      productVariantId: null,
-      category: null,
-      priority: 0,
-      startsAt: "2026-05-01T00:00:00.000Z",
-      endsAt: "2026-06-01T00:00:00.000Z",
-      isActive: true,
-      notes: " launch ",
-      metadata: { source: "test" },
-    })).toEqual({
+    expect(
+      catalogExposureRecordToInput({
+        id: 1,
+        revisionId: 2,
+        scopeType: "catalog",
+        action: "include",
+        productLineId: null,
+        productId: null,
+        productVariantId: null,
+        category: null,
+        priority: 0,
+        startsAt: "2026-05-01T00:00:00.000Z",
+        endsAt: "2026-06-01T00:00:00.000Z",
+        isActive: true,
+        notes: " launch ",
+        metadata: { source: "test" },
+      }),
+    ).toEqual({
       scopeType: "catalog",
       action: "include",
       productLineId: null,
@@ -1333,21 +1864,25 @@ describe("dropship ops surface client helpers", () => {
   });
 
   it("builds store OAuth start payloads with platform-specific fields", () => {
-    expect(buildStoreConnectionOAuthStartInput({
-      platform: "ebay",
-      shopDomain: "ignored",
-      returnTo: " /onboarding ",
-    })).toEqual({
+    expect(
+      buildStoreConnectionOAuthStartInput({
+        platform: "ebay",
+        shopDomain: "ignored",
+        returnTo: " /onboarding ",
+      }),
+    ).toEqual({
       platform: "ebay",
       intent: "connect",
       returnTo: "/onboarding",
     });
-    expect(buildStoreConnectionOAuthStartInput({
-      platform: "shopify",
-      intent: "change_store",
-      shopDomain: "Vendor-Test",
-      returnTo: "/onboarding",
-    })).toEqual({
+    expect(
+      buildStoreConnectionOAuthStartInput({
+        platform: "shopify",
+        intent: "change_store",
+        shopDomain: "Vendor-Test",
+        returnTo: "/onboarding",
+      }),
+    ).toEqual({
       platform: "shopify",
       intent: "change_store",
       shopDomain: "vendor-test.myshopify.com",
@@ -1356,34 +1891,46 @@ describe("dropship ops surface client helpers", () => {
   });
 
   it("builds store disconnect bodies with required confirmation fields", () => {
-    expect(buildStoreConnectionDisconnectInput({
-      reason: " vendor requested disconnect ",
-      idempotencyKey: "disconnect-store-1",
-    })).toEqual({
+    expect(
+      buildStoreConnectionDisconnectInput({
+        reason: " vendor requested disconnect ",
+        idempotencyKey: "disconnect-store-1",
+      }),
+    ).toEqual({
       reason: "vendor requested disconnect",
       confirmed: true,
       idempotencyKey: "disconnect-store-1",
     });
-    expect(() => buildStoreConnectionDisconnectInput({
-      reason: " ",
-      idempotencyKey: "disconnect-store-2",
-    })).toThrow("reason is required.");
-    expect(() => buildStoreConnectionDisconnectInput({
-      reason: "valid reason",
-      idempotencyKey: "short",
-    })).toThrow("idempotencyKey must be between 8 and 200 characters.");
+    expect(() =>
+      buildStoreConnectionDisconnectInput({
+        reason: " ",
+        idempotencyKey: "disconnect-store-2",
+      }),
+    ).toThrow("reason is required.");
+    expect(() =>
+      buildStoreConnectionDisconnectInput({
+        reason: "valid reason",
+        idempotencyKey: "short",
+      }),
+    ).toThrow("idempotencyKey must be between 8 and 200 characters.");
   });
 
   it("keeps portal return paths relative", () => {
     expect(normalizePortalReturnPath("/settings")).toBe("/settings");
-    expect(() => normalizePortalReturnPath("https://attacker.example")).toThrow();
+    expect(() =>
+      normalizePortalReturnPath("https://attacker.example"),
+    ).toThrow();
     expect(() => normalizePortalReturnPath("//attacker.example")).toThrow();
     expect(() => normalizePortalReturnPath(`/${"x".repeat(501)}`)).toThrow();
   });
 
   it("normalizes Shopify shop domains before OAuth start", () => {
-    expect(normalizeShopifyShopDomainInput("https://Vendor-Test.myshopify.com/")).toBe("vendor-test.myshopify.com");
-    expect(normalizeShopifyShopDomainInput("Vendor-Test")).toBe("vendor-test.myshopify.com");
+    expect(
+      normalizeShopifyShopDomainInput("https://Vendor-Test.myshopify.com/"),
+    ).toBe("vendor-test.myshopify.com");
+    expect(normalizeShopifyShopDomainInput("Vendor-Test")).toBe(
+      "vendor-test.myshopify.com",
+    );
     expect(normalizeShopifyShopDomainInput(" ")).toBe("");
   });
 
@@ -1391,8 +1938,18 @@ describe("dropship ops surface client helpers", () => {
     const replacement = buildVariantSelectionReplacement({
       existingRules: [
         makeSelectionRule({ id: 1, scopeType: "catalog", action: "include" }),
-        makeSelectionRule({ id: 2, scopeType: "variant", action: "exclude", productVariantId: 42 }),
-        makeSelectionRule({ id: 3, scopeType: "variant", action: "include", productVariantId: 99 }),
+        makeSelectionRule({
+          id: 2,
+          scopeType: "variant",
+          action: "exclude",
+          productVariantId: 42,
+        }),
+        makeSelectionRule({
+          id: 3,
+          scopeType: "variant",
+          action: "include",
+          productVariantId: 99,
+        }),
       ],
       rows: [makeCatalogRow({ productVariantId: 42 })],
       action: "include",
@@ -1400,37 +1957,73 @@ describe("dropship ops surface client helpers", () => {
 
     expect(replacement).toEqual([
       expect.objectContaining({ scopeType: "catalog", action: "include" }),
-      expect.objectContaining({ scopeType: "variant", action: "include", productVariantId: 99 }),
-      expect.objectContaining({ scopeType: "variant", action: "include", productVariantId: 42 }),
+      expect.objectContaining({
+        scopeType: "variant",
+        action: "include",
+        productVariantId: 99,
+      }),
+      expect.objectContaining({
+        scopeType: "variant",
+        action: "include",
+        productVariantId: 42,
+      }),
     ]);
-    expect(replacement.some((rule) => rule.action === "exclude" && rule.productVariantId === 42)).toBe(false);
+    expect(
+      replacement.some(
+        (rule) => rule.action === "exclude" && rule.productVariantId === 42,
+      ),
+    ).toBe(false);
   });
 
   it("builds variant exclude replacements for visible deselection", () => {
     const replacement = buildVariantSelectionReplacement({
-      existingRules: [makeSelectionRule({ id: 1, scopeType: "catalog", action: "include" })],
-      rows: [makeCatalogRow({ productVariantId: 42 }), makeCatalogRow({ productVariantId: 42 })],
+      existingRules: [
+        makeSelectionRule({ id: 1, scopeType: "catalog", action: "include" }),
+      ],
+      rows: [
+        makeCatalogRow({ productVariantId: 42 }),
+        makeCatalogRow({ productVariantId: 42 }),
+      ],
       action: "exclude",
     });
 
     expect(replacement).toEqual([
       expect.objectContaining({ scopeType: "catalog", action: "include" }),
-      expect.objectContaining({ scopeType: "variant", action: "exclude", productVariantId: 42 }),
+      expect.objectContaining({
+        scopeType: "variant",
+        action: "exclude",
+        productVariantId: 42,
+      }),
     ]);
   });
 
   it("builds broad catalog selection replacements without stale opposite scope rules", () => {
     const replacement = buildScopedSelectionReplacement({
       existingRules: [
-        makeSelectionRule({ id: 1, scopeType: "category", action: "exclude", productVariantId: null, category: "Supplies" }),
-        makeSelectionRule({ id: 2, scopeType: "variant", action: "include", productVariantId: 99 }),
+        makeSelectionRule({
+          id: 1,
+          scopeType: "category",
+          action: "exclude",
+          productVariantId: null,
+          category: "Supplies",
+        }),
+        makeSelectionRule({
+          id: 2,
+          scopeType: "variant",
+          action: "include",
+          productVariantId: 99,
+        }),
       ],
       target: { scopeType: "category", category: " supplies " },
       action: "include",
     });
 
     expect(replacement).toEqual([
-      expect.objectContaining({ scopeType: "variant", action: "include", productVariantId: 99 }),
+      expect.objectContaining({
+        scopeType: "variant",
+        action: "include",
+        productVariantId: 99,
+      }),
       expect.objectContaining({
         scopeType: "category",
         action: "include",
@@ -1439,15 +2032,21 @@ describe("dropship ops surface client helpers", () => {
         autoListNewSkus: false,
       }),
     ]);
-    expect(replacement.some((rule) => rule.action === "exclude" && rule.category === "Supplies")).toBe(false);
+    expect(
+      replacement.some(
+        (rule) => rule.action === "exclude" && rule.category === "Supplies",
+      ),
+    ).toBe(false);
   });
 
   it("builds catalog-wide and product-line selection replacements", () => {
-    expect(buildScopedSelectionReplacement({
-      existingRules: [],
-      target: { scopeType: "catalog" },
-      action: "include",
-    })).toEqual([
+    expect(
+      buildScopedSelectionReplacement({
+        existingRules: [],
+        target: { scopeType: "catalog" },
+        action: "include",
+      }),
+    ).toEqual([
       expect.objectContaining({
         scopeType: "catalog",
         action: "include",
@@ -1458,11 +2057,21 @@ describe("dropship ops surface client helpers", () => {
       }),
     ]);
 
-    expect(buildScopedSelectionReplacement({
-      existingRules: [makeSelectionRule({ id: 1, scopeType: "product_line", action: "include", productLineId: 12, productVariantId: null })],
-      target: { scopeType: "product_line", productLineId: 12 },
-      action: "exclude",
-    })).toEqual([
+    expect(
+      buildScopedSelectionReplacement({
+        existingRules: [
+          makeSelectionRule({
+            id: 1,
+            scopeType: "product_line",
+            action: "include",
+            productLineId: 12,
+            productVariantId: null,
+          }),
+        ],
+        target: { scopeType: "product_line", productLineId: 12 },
+        action: "exclude",
+      }),
+    ).toEqual([
       expect.objectContaining({
         scopeType: "product_line",
         action: "exclude",
@@ -1473,18 +2082,29 @@ describe("dropship ops surface client helpers", () => {
   });
 
   it("builds listing preview requests from selected catalog rows only", () => {
-    expect(buildListingPreviewRequest({
-      storeConnectionId: 12,
-      rows: [
-        makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(true) }),
-        makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(true) }),
-        makeCatalogRow({ productVariantId: 99, selectionDecision: makeSelectionDecision(false) }),
-      ],
-      retailPriceByVariantId: {
-        "42": "19.99",
-        "99": "9.00",
-      },
-    })).toEqual({
+    expect(
+      buildListingPreviewRequest({
+        storeConnectionId: 12,
+        rows: [
+          makeCatalogRow({
+            productVariantId: 42,
+            selectionDecision: makeSelectionDecision(true),
+          }),
+          makeCatalogRow({
+            productVariantId: 42,
+            selectionDecision: makeSelectionDecision(true),
+          }),
+          makeCatalogRow({
+            productVariantId: 99,
+            selectionDecision: makeSelectionDecision(false),
+          }),
+        ],
+        retailPriceByVariantId: {
+          "42": "19.99",
+          "99": "9.00",
+        },
+      }),
+    ).toEqual({
       storeConnectionId: 12,
       productVariantIds: [42],
       requestedRetailPricesByVariantId: {
@@ -1497,22 +2117,30 @@ describe("dropship ops surface client helpers", () => {
     const preview = makeListingPreview({
       rows: [
         makeListingPreviewRow({ productVariantId: 42, previewStatus: "ready" }),
-        makeListingPreviewRow({ productVariantId: 99, previewStatus: "warning" }),
-        makeListingPreviewRow({ productVariantId: 100, previewStatus: "blocked" }),
+        makeListingPreviewRow({
+          productVariantId: 99,
+          previewStatus: "warning",
+        }),
+        makeListingPreviewRow({
+          productVariantId: 100,
+          previewStatus: "blocked",
+        }),
       ],
     });
 
     expect(listingPreviewPushableCount(preview)).toBe(2);
-    expect(buildListingPushRequest({
-      storeConnectionId: 12,
-      preview,
-      idempotencyKey: "push-1",
-      retailPriceByVariantId: {
-        "42": "10.00",
-        "99": "11.50",
-        "100": "9.00",
-      },
-    })).toEqual({
+    expect(
+      buildListingPushRequest({
+        storeConnectionId: 12,
+        preview,
+        idempotencyKey: "push-1",
+        retailPriceByVariantId: {
+          "42": "10.00",
+          "99": "11.50",
+          "100": "9.00",
+        },
+      }),
+    ).toEqual({
       storeConnectionId: 12,
       productVariantIds: [42, 99],
       idempotencyKey: "push-1",
@@ -1531,11 +2159,15 @@ describe("dropship ops surface client helpers", () => {
       ],
     });
 
-    expect(() => buildListingPushRequest({
-      storeConnectionId: 13,
-      preview,
-      idempotencyKey: "push-1",
-    })).toThrow("Listing preview store connection must match the selected store connection.");
+    expect(() =>
+      buildListingPushRequest({
+        storeConnectionId: 13,
+        preview,
+        idempotencyKey: "push-1",
+      }),
+    ).toThrow(
+      "Listing preview store connection must match the selected store connection.",
+    );
   });
 
   it("parses dollar input to integer cents without floating point math", () => {
@@ -1547,55 +2179,65 @@ describe("dropship ops surface client helpers", () => {
   });
 
   it("builds auto-reload config input with integer cents and guardrails", () => {
-    expect(buildAutoReloadConfigInput({
-      enabled: true,
-      fundingMethodId: "99",
-      minimumBalance: "$50.00",
-      maxSingleReload: "250.00",
-      paymentHoldTimeoutMinutes: "2880",
-    })).toEqual({
+    expect(
+      buildAutoReloadConfigInput({
+        enabled: true,
+        fundingMethodId: "99",
+        minimumBalance: "$50.00",
+        maxSingleReload: "250.00",
+        paymentHoldTimeoutMinutes: "2880",
+      }),
+    ).toEqual({
       enabled: true,
       fundingMethodId: 99,
       minimumBalanceCents: 5000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
     });
-    expect(buildAutoReloadConfigInput({
-      enabled: false,
-      fundingMethodId: "",
-      minimumBalance: "0",
-      maxSingleReload: "",
-      paymentHoldTimeoutMinutes: "2880",
-    })).toEqual({
+    expect(
+      buildAutoReloadConfigInput({
+        enabled: false,
+        fundingMethodId: "",
+        minimumBalance: "0",
+        maxSingleReload: "",
+        paymentHoldTimeoutMinutes: "2880",
+      }),
+    ).toEqual({
       enabled: false,
       fundingMethodId: null,
       minimumBalanceCents: 0,
       maxSingleReloadCents: null,
       paymentHoldTimeoutMinutes: 2880,
     });
-    expect(() => buildAutoReloadConfigInput({
-      enabled: true,
-      fundingMethodId: "",
-      minimumBalance: "50",
-      maxSingleReload: "250",
-      paymentHoldTimeoutMinutes: "2880",
-    })).toThrow();
-    expect(() => buildAutoReloadConfigInput({
-      enabled: true,
-      fundingMethodId: "99",
-      minimumBalance: "250",
-      maxSingleReload: "50",
-      paymentHoldTimeoutMinutes: "2880",
-    })).toThrow();
+    expect(() =>
+      buildAutoReloadConfigInput({
+        enabled: true,
+        fundingMethodId: "",
+        minimumBalance: "50",
+        maxSingleReload: "250",
+        paymentHoldTimeoutMinutes: "2880",
+      }),
+    ).toThrow();
+    expect(() =>
+      buildAutoReloadConfigInput({
+        enabled: true,
+        fundingMethodId: "99",
+        minimumBalance: "250",
+        maxSingleReload: "50",
+        paymentHoldTimeoutMinutes: "2880",
+      }),
+    ).toThrow();
   });
 
   it("builds admin manual wallet credit input with integer cents and audit reason", () => {
-    expect(buildAdminWalletManualCreditInput({
-      vendorId: "10",
-      amount: "$125.50",
-      reason: " Internal dogfood seed ",
-      idempotencyKey: "manual-credit-1",
-    })).toEqual({
+    expect(
+      buildAdminWalletManualCreditInput({
+        vendorId: "10",
+        amount: "$125.50",
+        reason: " Internal dogfood seed ",
+        idempotencyKey: "manual-credit-1",
+      }),
+    ).toEqual({
       vendorId: 10,
       amountCents: 12550,
       currency: "USD",
@@ -1603,164 +2245,219 @@ describe("dropship ops surface client helpers", () => {
       idempotencyKey: "manual-credit-1",
     });
 
-    expect(() => buildAdminWalletManualCreditInput({
-      vendorId: "10",
-      amount: "0",
-      reason: "seed",
-      idempotencyKey: "manual-credit-1",
-    })).toThrow();
-    expect(() => buildAdminWalletManualCreditInput({
-      vendorId: "10",
-      amount: "125.00",
-      reason: "",
-      idempotencyKey: "manual-credit-1",
-    })).toThrow();
+    expect(() =>
+      buildAdminWalletManualCreditInput({
+        vendorId: "10",
+        amount: "0",
+        reason: "seed",
+        idempotencyKey: "manual-credit-1",
+      }),
+    ).toThrow();
+    expect(() =>
+      buildAdminWalletManualCreditInput({
+        vendorId: "10",
+        amount: "125.00",
+        reason: "",
+        idempotencyKey: "manual-credit-1",
+      }),
+    ).toThrow();
   });
 
   it("builds admin confirmed USDC credit input with exact atomic units", () => {
-    expect(buildAdminWalletConfirmedUsdcCreditInput({
-      vendorId: "10",
-      fundingMethodId: "101",
-      amount: "$125.50",
-      usdcAmount: "125.50",
-      transactionHash: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      fromAddress: "0x2222222222222222222222222222222222222222",
-      toAddress: "0x1111111111111111111111111111111111111111",
-      confirmations: "12",
-      idempotencyKey: "usdc-credit-1",
-    })).toEqual({
+    expect(
+      buildAdminWalletConfirmedUsdcCreditInput({
+        vendorId: "10",
+        fundingMethodId: "101",
+        amount: "$125.50",
+        usdcAmount: "125.50",
+        transactionHash:
+          "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        fromAddress: "0x2222222222222222222222222222222222222222",
+        toAddress: "0x1111111111111111111111111111111111111111",
+        confirmations: "12",
+        idempotencyKey: "usdc-credit-1",
+      }),
+    ).toEqual({
       vendorId: 10,
       fundingMethodId: 101,
       amountCents: 12550,
       currency: "USD",
       amountAtomicUnits: "125500000",
       chainId: 8453,
-      transactionHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      transactionHash:
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       fromAddress: "0x2222222222222222222222222222222222222222",
       toAddress: "0x1111111111111111111111111111111111111111",
       confirmations: 12,
       idempotencyKey: "usdc-credit-1",
     });
 
-    expect(buildAdminWalletConfirmedUsdcCreditInput({
-      vendorId: "10",
-      fundingMethodId: "",
-      amount: "1",
-      usdcAmount: "0.000001",
-      transactionHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      fromAddress: "",
-      toAddress: "0x1111111111111111111111111111111111111111",
-      confirmations: "1",
-      idempotencyKey: "usdc-credit-2",
-    })).toMatchObject({
+    expect(
+      buildAdminWalletConfirmedUsdcCreditInput({
+        vendorId: "10",
+        fundingMethodId: "",
+        amount: "1",
+        usdcAmount: "0.000001",
+        transactionHash:
+          "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        fromAddress: "",
+        toAddress: "0x1111111111111111111111111111111111111111",
+        confirmations: "1",
+        idempotencyKey: "usdc-credit-2",
+      }),
+    ).toMatchObject({
       amountAtomicUnits: "1",
       fromAddress: null,
     });
 
-    expect(() => buildAdminWalletConfirmedUsdcCreditInput({
-      vendorId: "10",
-      fundingMethodId: "",
-      amount: "1",
-      usdcAmount: "1.0000001",
-      transactionHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      fromAddress: "",
-      toAddress: "0x1111111111111111111111111111111111111111",
-      confirmations: "1",
-      idempotencyKey: "usdc-credit-3",
-    })).toThrow();
-    expect(() => buildAdminWalletConfirmedUsdcCreditInput({
-      vendorId: "10",
-      fundingMethodId: "",
-      amount: "1",
-      usdcAmount: "1",
-      transactionHash: "not-a-hash",
-      fromAddress: "",
-      toAddress: "0x1111111111111111111111111111111111111111",
-      confirmations: "1",
-      idempotencyKey: "usdc-credit-4",
-    })).toThrow();
-    expect(() => buildAdminWalletConfirmedUsdcCreditInput({
-      vendorId: "10",
-      fundingMethodId: "",
-      amount: "1",
-      usdcAmount: "1",
-      transactionHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      fromAddress: "",
-      toAddress: "0x1111111111111111111111111111111111111111",
-      confirmations: "10001",
-      idempotencyKey: "usdc-credit-5",
-    })).toThrow();
+    expect(() =>
+      buildAdminWalletConfirmedUsdcCreditInput({
+        vendorId: "10",
+        fundingMethodId: "",
+        amount: "1",
+        usdcAmount: "1.0000001",
+        transactionHash:
+          "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        fromAddress: "",
+        toAddress: "0x1111111111111111111111111111111111111111",
+        confirmations: "1",
+        idempotencyKey: "usdc-credit-3",
+      }),
+    ).toThrow();
+    expect(() =>
+      buildAdminWalletConfirmedUsdcCreditInput({
+        vendorId: "10",
+        fundingMethodId: "",
+        amount: "1",
+        usdcAmount: "1",
+        transactionHash: "not-a-hash",
+        fromAddress: "",
+        toAddress: "0x1111111111111111111111111111111111111111",
+        confirmations: "1",
+        idempotencyKey: "usdc-credit-4",
+      }),
+    ).toThrow();
+    expect(() =>
+      buildAdminWalletConfirmedUsdcCreditInput({
+        vendorId: "10",
+        fundingMethodId: "",
+        amount: "1",
+        usdcAmount: "1",
+        transactionHash:
+          "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        fromAddress: "",
+        toAddress: "0x1111111111111111111111111111111111111111",
+        confirmations: "10001",
+        idempotencyKey: "usdc-credit-5",
+      }),
+    ).toThrow();
   });
 
   it("builds Stripe funding setup session input with relative return path guardrails", () => {
-    expect(buildStripeFundingSetupSessionInput({
-      rail: "stripe_card",
-      returnTo: "/wallet",
-    })).toEqual({
+    expect(
+      buildStripeFundingSetupSessionInput({
+        rail: "stripe_card",
+        returnTo: "/wallet",
+      }),
+    ).toEqual({
       rail: "stripe_card",
       returnTo: "/wallet",
     });
-    expect(buildStripeFundingSetupSessionInput({
-      rail: "stripe_ach",
-      returnTo: "/dropship-portal/wallet?tab=funding",
-    })).toEqual({
+    expect(
+      buildStripeFundingSetupSessionInput({
+        rail: "stripe_ach",
+        returnTo: "/dropship-portal/wallet?tab=funding",
+      }),
+    ).toEqual({
       rail: "stripe_ach",
       returnTo: "/dropship-portal/wallet?tab=funding",
     });
-    expect(() => buildStripeFundingSetupSessionInput({
-      rail: "manual",
-      returnTo: "/wallet",
-    })).toThrow();
-    expect(() => buildStripeFundingSetupSessionInput({
-      rail: "stripe_card",
-      returnTo: "https://attacker.example/wallet",
-    })).toThrow();
+    expect(() =>
+      buildStripeFundingSetupSessionInput({
+        rail: "manual",
+        returnTo: "/wallet",
+      }),
+    ).toThrow();
+    expect(() =>
+      buildStripeFundingSetupSessionInput({
+        rail: "stripe_card",
+        returnTo: "https://attacker.example/wallet",
+      }),
+    ).toThrow();
   });
 
   it("builds Stripe wallet funding session input with integer cents", () => {
-    expect(buildStripeWalletFundingSessionInput({
-      fundingMethodId: "99",
-      amount: "$250.00",
-      returnTo: "/wallet",
-    })).toEqual({
+    expect(
+      buildStripeWalletFundingSessionInput({
+        fundingMethodId: "99",
+        amount: "$250.00",
+        returnTo: "/wallet",
+      }),
+    ).toEqual({
       fundingMethodId: 99,
       amountCents: 25000,
       returnTo: "/wallet",
     });
-    expect(() => buildStripeWalletFundingSessionInput({
-      fundingMethodId: "",
-      amount: "250",
-      returnTo: "/wallet",
-    })).toThrow();
-    expect(() => buildStripeWalletFundingSessionInput({
-      fundingMethodId: "99",
-      amount: "250.555",
-      returnTo: "/wallet",
-    })).toThrow();
-    expect(() => buildStripeWalletFundingSessionInput({
-      fundingMethodId: "99",
-      amount: "250",
-      returnTo: "https://attacker.example/wallet",
-    })).toThrow();
+    expect(() =>
+      buildStripeWalletFundingSessionInput({
+        fundingMethodId: "",
+        amount: "250",
+        returnTo: "/wallet",
+      }),
+    ).toThrow();
+    expect(() =>
+      buildStripeWalletFundingSessionInput({
+        fundingMethodId: "99",
+        amount: "250.555",
+        returnTo: "/wallet",
+      }),
+    ).toThrow();
+    expect(() =>
+      buildStripeWalletFundingSessionInput({
+        fundingMethodId: "99",
+        amount: "250",
+        returnTo: "https://attacker.example/wallet",
+      }),
+    ).toThrow();
   });
 
   describe("RMA state machine transitions", () => {
     it("exposes the D4 transition map", () => {
-      expect(DROPSHIP_RMA_TRANSITIONS.requested).toEqual(["in_transit", "no_inspection_review", "closed"]);
-      expect(DROPSHIP_RMA_TRANSITIONS.in_transit).toEqual(["received", "no_inspection_review"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.requested).toEqual([
+        "in_transit",
+        "no_inspection_review",
+        "closed",
+      ]);
+      expect(DROPSHIP_RMA_TRANSITIONS.in_transit).toEqual([
+        "received",
+        "no_inspection_review",
+      ]);
       expect(DROPSHIP_RMA_TRANSITIONS.received).toEqual(["inspecting"]);
-      expect(DROPSHIP_RMA_TRANSITIONS.inspecting).toEqual(["approved", "rejected"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.inspecting).toEqual([
+        "approved",
+        "rejected",
+      ]);
       expect(DROPSHIP_RMA_TRANSITIONS.approved).toEqual(["credited"]);
       expect(DROPSHIP_RMA_TRANSITIONS.rejected).toEqual(["disputed", "closed"]);
       expect(DROPSHIP_RMA_TRANSITIONS.disputed).toEqual(["credited", "closed"]);
-      expect(DROPSHIP_RMA_TRANSITIONS.no_inspection_review).toEqual(["credited", "closed"]);
+      expect(DROPSHIP_RMA_TRANSITIONS.no_inspection_review).toEqual([
+        "credited",
+        "closed",
+      ]);
       expect(DROPSHIP_RMA_TRANSITIONS.credited).toEqual(["closed"]);
       expect(DROPSHIP_RMA_TRANSITIONS.closed).toEqual([]);
     });
 
     it("returns legal transitions for each status", () => {
-      expect(legalRmaTransitions("requested")).toEqual(["in_transit", "no_inspection_review", "closed"]);
-      expect(legalRmaTransitions("inspecting")).toEqual(["approved", "rejected"]);
+      expect(legalRmaTransitions("requested")).toEqual([
+        "in_transit",
+        "no_inspection_review",
+        "closed",
+      ]);
+      expect(legalRmaTransitions("inspecting")).toEqual([
+        "approved",
+        "rejected",
+      ]);
       expect(legalRmaTransitions("closed")).toEqual([]);
     });
 
@@ -1780,7 +2477,9 @@ describe("dropship ops surface client helpers", () => {
   });
 });
 
-function makeSelectionRule(overrides: Partial<DropshipVendorSelectionRule>): DropshipVendorSelectionRule {
+function makeSelectionRule(
+  overrides: Partial<DropshipVendorSelectionRule>,
+): DropshipVendorSelectionRule {
   return {
     scopeType: "variant",
     action: "include",
@@ -1796,7 +2495,9 @@ function makeSelectionRule(overrides: Partial<DropshipVendorSelectionRule>): Dro
   };
 }
 
-function makeCatalogRow(overrides: Partial<DropshipCatalogRow>): DropshipCatalogRow {
+function makeCatalogRow(
+  overrides: Partial<DropshipCatalogRow>,
+): DropshipCatalogRow {
   return {
     productId: 10,
     productVariantId: 1,
@@ -1813,7 +2514,9 @@ function makeCatalogRow(overrides: Partial<DropshipCatalogRow>): DropshipCatalog
   };
 }
 
-function makeSelectionDecision(selected: boolean): DropshipCatalogRow["selectionDecision"] {
+function makeSelectionDecision(
+  selected: boolean,
+): DropshipCatalogRow["selectionDecision"] {
   return {
     selected,
     reason: selected ? "selected" : "missing_vendor_include_rule",
@@ -1824,7 +2527,9 @@ function makeSelectionDecision(selected: boolean): DropshipCatalogRow["selection
   };
 }
 
-function makeListingPreview(overrides: Partial<DropshipListingPreviewResult>): DropshipListingPreviewResult {
+function makeListingPreview(
+  overrides: Partial<DropshipListingPreviewResult>,
+): DropshipListingPreviewResult {
   return {
     vendorId: 1,
     storeConnectionId: 12,

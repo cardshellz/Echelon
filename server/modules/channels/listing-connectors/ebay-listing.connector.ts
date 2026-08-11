@@ -383,6 +383,8 @@ export class EbayMarketplaceListingConnector {
     const result = await this.updateExistingVariationGroup({
       client: input.client,
       draft: alignedDraft,
+      currentGroup: liveGroup,
+      addedSkus: currentPreview.addedSkus,
       removedSkus: currentPreview.removedSkus,
     });
     if (result.externalProductId !== currentPreview.currentExternalListingId) {
@@ -399,55 +401,109 @@ export class EbayMarketplaceListingConnector {
   private async updateExistingVariationGroup(input: {
     client: EbayListingLifecycleClient;
     draft: EbayListingConnectorDraft & { itemGroup: BuiltItemGroup };
+    currentGroup: EbayInventoryItemGroup & { variantSKUs?: string[] };
+    addedSkus: readonly string[];
     removedSkus: readonly string[];
   }): Promise<EbayListingConnectorResult> {
     const resolvedOffers = await this.resolvePushOffers(input.client, input.draft);
     const offerIdsByVariantId: Record<number, string> = {};
+    const originalGroup = toWritableGroupPayload(input.currentGroup);
+    let workingGroup = input.currentGroup;
+    let temporaryTransitionApplied = false;
+    let targetGroupApplied = false;
+    const addedSkus = new Set(normalizedSkus(input.addedSkus));
+    const inventoryItemsToPrepare = input.draft.inventoryItems.filter((item) =>
+      addedSkus.has(item.sku),
+    );
 
-    for (const item of input.draft.inventoryItems) {
-      await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
-      await this.delay(this.inventoryDelayMs);
-    }
-
-    let retainedRemovedSkus: string[] = [];
     try {
-      await input.client.createOrReplaceInventoryItemGroup(
-        input.draft.itemGroup.groupKey,
-        input.draft.itemGroup.payload,
-      );
+      for (const item of inventoryItemsToPrepare) {
+        try {
+          await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
+        } catch (error) {
+          const currentMembers = normalizedSkus(workingGroup.variantSKUs);
+          if (!isVariationSpecificsMismatchError(error) || !currentMembers.includes(item.sku)) {
+            throw error;
+          }
+
+          const transitionGroup = buildGroupWithoutVariation({
+            currentGroup: workingGroup,
+            item,
+          });
+          await input.client.createOrReplaceInventoryItemGroup(
+            input.draft.itemGroup.groupKey,
+            transitionGroup,
+          );
+          temporaryTransitionApplied = true;
+          workingGroup = {
+            ...transitionGroup,
+            inventoryItemGroupKey: input.draft.itemGroup.groupKey,
+          };
+          await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
+        }
+        await this.delay(this.inventoryDelayMs);
+      }
+
+      let retainedRemovedSkus: string[] = [];
+      try {
+        await input.client.createOrReplaceInventoryItemGroup(
+          input.draft.itemGroup.groupKey,
+          input.draft.itemGroup.payload,
+        );
+        targetGroupApplied = true;
+      } catch (error) {
+        if (input.removedSkus.length === 0 || !isInvalidInventoryItemGroupError(error)) {
+          throw error;
+        }
+        const currentGroup = await input.client.getInventoryItemGroup(
+          input.draft.itemGroup.groupKey,
+        );
+        if (!currentGroup) throw error;
+
+        retainedRemovedSkus = normalizedSkus(input.removedSkus);
+        await input.client.createOrReplaceInventoryItemGroup(
+          input.draft.itemGroup.groupKey,
+          buildRetainedVariationGroupPayload({
+            desiredGroup: input.draft.itemGroup.payload,
+            currentGroup,
+            retainedSkus: retainedRemovedSkus,
+          }),
+        );
+        targetGroupApplied = true;
+      }
+
+      for (const { offer, existingOfferId } of resolvedOffers) {
+        const offerId = existingOfferId
+          ? existingOfferId
+          : await input.client.createOffer(offer.payload);
+        if (existingOfferId || input.draft.updateOfferAfterCreate) {
+          await input.client.updateOffer(offerId, withOfferId(offer.payload, offerId));
+        }
+        offerIdsByVariantId[offer.variantId] = offerId;
+        await this.delay(this.offerDelayMs);
+      }
+
+      for (const sku of retainedRemovedSkus) {
+        await this.disableRetainedVariation(input.client, sku, input.draft.marketplaceId);
+      }
     } catch (error) {
-      if (input.removedSkus.length === 0 || !isInvalidInventoryItemGroupError(error)) {
-        throw error;
+      if (temporaryTransitionApplied && !targetGroupApplied) {
+        try {
+          await input.client.createOrReplaceInventoryItemGroup(
+            input.draft.itemGroup.groupKey,
+            originalGroup,
+          );
+        } catch (recoveryError) {
+          const recoveryMessage = recoveryError instanceof Error
+            ? recoveryError.message
+            : String(recoveryError);
+          throw new Error(
+            `eBay variation schema transition failed and the original group could not be restored: ${recoveryMessage}`,
+            { cause: error },
+          );
+        }
       }
-      const currentGroup = await input.client.getInventoryItemGroup(
-        input.draft.itemGroup.groupKey,
-      );
-      if (!currentGroup) throw error;
-
-      retainedRemovedSkus = normalizedSkus(input.removedSkus);
-      await input.client.createOrReplaceInventoryItemGroup(
-        input.draft.itemGroup.groupKey,
-        buildRetainedVariationGroupPayload({
-          desiredGroup: input.draft.itemGroup.payload,
-          currentGroup,
-          retainedSkus: retainedRemovedSkus,
-        }),
-      );
-    }
-
-    for (const { offer, existingOfferId } of resolvedOffers) {
-      const offerId = existingOfferId
-        ? existingOfferId
-        : await input.client.createOffer(offer.payload);
-      if (existingOfferId || input.draft.updateOfferAfterCreate) {
-        await input.client.updateOffer(offerId, withOfferId(offer.payload, offerId));
-      }
-      offerIdsByVariantId[offer.variantId] = offerId;
-      await this.delay(this.offerDelayMs);
-    }
-
-    for (const sku of retainedRemovedSkus) {
-      await this.disableRetainedVariation(input.client, sku, input.draft.marketplaceId);
+      throw error;
     }
 
     const publishResult = await this.publishGroupWithConsistencyRetry({
@@ -685,6 +741,69 @@ function validateDraft(draft: EbayListingConnectorDraft): void {
   }
 }
 
+function toWritableGroupPayload(
+  group: EbayInventoryItemGroup & { variantSKUs?: string[] },
+): Omit<EbayInventoryItemGroup, "inventoryItemGroupKey"> {
+  return {
+    aspects: Object.fromEntries(
+      Object.entries(group.aspects).map(([name, values]) => [name, [...values]]),
+    ),
+    description: group.description,
+    imageUrls: [...group.imageUrls],
+    title: group.title,
+    variantSKUs: normalizedSkus(group.variantSKUs),
+    variesBy: {
+      ...(group.variesBy.aspectsImageVariesBy
+        ? { aspectsImageVariesBy: [...group.variesBy.aspectsImageVariesBy] }
+        : {}),
+      specifications: group.variesBy.specifications.map((specification) => ({
+        name: specification.name,
+        values: [...specification.values],
+      })),
+    },
+  };
+}
+
+function buildGroupWithoutVariation(input: {
+  currentGroup: EbayInventoryItemGroup & { variantSKUs?: string[] };
+  item: BuiltInventoryItem;
+}): Omit<EbayInventoryItemGroup, "inventoryItemGroupKey"> {
+  const currentMembers = normalizedSkus(input.currentGroup.variantSKUs);
+  const remainingMembers = currentMembers.filter((sku) => sku !== input.item.sku);
+  if (remainingMembers.length < 2) {
+    throw new Error(
+      `Cannot transition eBay variation ${input.item.sku} because temporarily detaching it would leave fewer than two group members.`,
+    );
+  }
+
+  const itemAspects = input.item.payload.product.aspects ?? {};
+  const specifications = input.currentGroup.variesBy.specifications.map((specification) => {
+    const itemValues = normalizedSkus(itemAspects[specification.name]);
+    if (itemValues.length !== 1) {
+      throw new Error(
+        `Cannot transition eBay variation ${input.item.sku} because it does not define exactly one ${specification.name} value.`,
+      );
+    }
+    const values = specification.values.filter((value) => value !== itemValues[0]);
+    if (values.length === 0) {
+      throw new Error(
+        `Cannot transition eBay variation ${input.item.sku} because removing its ${specification.name} value would empty the group schema.`,
+      );
+    }
+    return { ...specification, values };
+  });
+
+  const writableGroup = toWritableGroupPayload(input.currentGroup);
+  return {
+    ...writableGroup,
+    variantSKUs: remainingMembers,
+    variesBy: {
+      ...writableGroup.variesBy,
+      specifications,
+    },
+  };
+}
+
 function alignDraftVariationSchemaToLiveGroup(input: {
   draft: EbayListingConnectorDraft & { itemGroup: BuiltItemGroup };
   liveGroup: EbayInventoryItemGroup & { variantSKUs?: string[] };
@@ -821,6 +940,12 @@ function assertBulkQuantityUpdateSucceeded(
 function isInvalidInventoryItemGroupError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /(?:errorId["']?\s*:\s*25013|\b25013\b|invalid data in the inventory item group)/i.test(message);
+}
+
+function isVariationSpecificsMismatchError(error: unknown): boolean {
+  if (!isInvalidInventoryItemGroupError(error)) return false;
+  const message = error instanceof Error ? error.message : String(error);
+  return /variation specifics.+does not match/i.test(message);
 }
 
 function validateMaintenanceDraft(
