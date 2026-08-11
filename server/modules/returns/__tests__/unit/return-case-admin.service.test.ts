@@ -17,6 +17,7 @@ describe("ReturnCaseAdminService", () => {
       search: null,
       caseStatus: null,
       sourceProvider: null,
+      channelId: null,
       page: 2,
       limit: 25,
     };
@@ -37,7 +38,14 @@ describe("ReturnCaseAdminService", () => {
     store.list.mockResolvedValue({ rows: [], total: 0 });
     const service = new ReturnCaseAdminService(store);
 
-    const result = await service.list({ search: null, caseStatus: null, sourceProvider: null, page: 1, limit: 25 });
+    const result = await service.list({
+      search: null,
+      caseStatus: null,
+      sourceProvider: null,
+      channelId: null,
+      page: 1,
+      limit: 25,
+    });
 
     expect(result.pagination.totalPages).toBe(0);
   });

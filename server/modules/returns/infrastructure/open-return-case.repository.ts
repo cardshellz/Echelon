@@ -17,6 +17,7 @@ import {
   type OpenReturnCaseStore,
   type OpenReturnCaseTransaction,
   type PersistOpenReturnCaseInput,
+  type ReturnSourceOrderChannel,
   type ReturnSourceOrderDetail,
   type ReturnSourceOrderItem,
   type ReturnSourceOrderPartition,
@@ -77,11 +78,19 @@ interface ExistingCaseRow {
 
 interface InsertedIdRow { id: unknown }
 interface InsertedCaseRow extends InsertedIdRow { case_number: unknown }
+interface SourceOrderCountRow { total: unknown }
+interface SourceOrderChannelRow { id: unknown; name: unknown; order_count: unknown }
 
 export class PostgresOpenReturnCaseStore implements OpenReturnCaseStore {
-  async searchSourceOrders(query: ReturnSourceOrderSearchQuery): Promise<ReturnSourceOrderSearchRow[]> {
+  async searchSourceOrders(query: ReturnSourceOrderSearchQuery): Promise<{
+    rows: ReturnSourceOrderSearchRow[];
+    total: number;
+    channels: ReturnSourceOrderChannel[];
+  }> {
     const pattern = `%${escapeLike(query.search.trim())}%`;
-    const result = await db.execute(sql`
+    const offset = (query.page - 1) * query.limit;
+    const [result, countResult, channelResult] = await Promise.all([
+      db.execute(sql`
       WITH expected AS (
         SELECT ri.order_item_id, SUM(ri.expected_qty)::int AS expected_qty
         FROM wms.return_items ri
@@ -112,18 +121,77 @@ export class PostgresOpenReturnCaseStore implements OpenReturnCaseStore {
       JOIN eligible_orders eo ON eo.oms_order_id = oo.id
       JOIN channels.channels c ON c.id = oo.channel_id
 
-      WHERE ${query.search.trim() === ""} OR (
+      WHERE (${query.channelId}::int IS NULL OR oo.channel_id = ${query.channelId})
+        AND (${query.search.trim() === ""} OR (
         COALESCE(oo.external_order_number, '') ILIKE ${pattern} ESCAPE '\\'
         OR oo.external_order_id ILIKE ${pattern} ESCAPE '\\'
         OR oo.id::text ILIKE ${pattern} ESCAPE '\\'
         OR COALESCE(oo.customer_name, '') ILIKE ${pattern} ESCAPE '\\'
         OR COALESCE(oo.customer_email, '') ILIKE ${pattern} ESCAPE '\\'
-      )
+      ))
       GROUP BY oo.id, c.name
       ORDER BY oo.ordered_at DESC, oo.id DESC
       LIMIT ${query.limit}
-    `);
-    return rowsOf<SourceHeaderRow>(result).map(mapSourceHeader);
+      OFFSET ${offset}
+    `),
+      db.execute(sql`
+        WITH expected AS (
+          SELECT ri.order_item_id, SUM(ri.expected_qty)::int AS expected_qty
+          FROM wms.return_items ri
+          WHERE ri.order_item_id IS NOT NULL
+          GROUP BY ri.order_item_id
+        ), eligible_orders AS (
+          SELECT DISTINCT wo.oms_fulfillment_order_id::bigint AS oms_order_id
+          FROM wms.orders wo
+          JOIN wms.order_items oi ON oi.order_id = wo.id
+          LEFT JOIN expected e ON e.order_item_id = oi.id
+          WHERE wo.oms_fulfillment_order_id ~ '^[0-9]+$'
+            AND oi.fulfilled_quantity > COALESCE(e.expected_qty, 0)
+        )
+        SELECT COUNT(DISTINCT oo.id)::int AS total
+        FROM oms.oms_orders oo
+        JOIN eligible_orders eo ON eo.oms_order_id = oo.id
+        WHERE (${query.channelId}::int IS NULL OR oo.channel_id = ${query.channelId})
+          AND (${query.search.trim() === ""} OR (
+            COALESCE(oo.external_order_number, '') ILIKE ${pattern} ESCAPE '\\'
+            OR oo.external_order_id ILIKE ${pattern} ESCAPE '\\'
+            OR oo.id::text ILIKE ${pattern} ESCAPE '\\'
+            OR COALESCE(oo.customer_name, '') ILIKE ${pattern} ESCAPE '\\'
+            OR COALESCE(oo.customer_email, '') ILIKE ${pattern} ESCAPE '\\'
+          ))
+      `),
+      db.execute(sql`
+        WITH expected AS (
+          SELECT ri.order_item_id, SUM(ri.expected_qty)::int AS expected_qty
+          FROM wms.return_items ri
+          WHERE ri.order_item_id IS NOT NULL
+          GROUP BY ri.order_item_id
+        ), eligible_orders AS (
+          SELECT DISTINCT wo.oms_fulfillment_order_id::bigint AS oms_order_id
+          FROM wms.orders wo
+          JOIN wms.order_items oi ON oi.order_id = wo.id
+          LEFT JOIN expected e ON e.order_item_id = oi.id
+          WHERE wo.oms_fulfillment_order_id ~ '^[0-9]+$'
+            AND oi.fulfilled_quantity > COALESCE(e.expected_qty, 0)
+        )
+        SELECT c.id, c.name, COUNT(DISTINCT oo.id)::int AS order_count
+        FROM oms.oms_orders oo
+        JOIN eligible_orders eo ON eo.oms_order_id = oo.id
+        JOIN channels.channels c ON c.id = oo.channel_id
+        GROUP BY c.id, c.name
+        ORDER BY c.name, c.id
+      `),
+    ]);
+    const countRow = rowsOf<SourceOrderCountRow>(countResult)[0];
+    return {
+      rows: rowsOf<SourceHeaderRow>(result).map(mapSourceHeader),
+      total: readNonNegativeInteger(countRow?.total, "source order total"),
+      channels: rowsOf<SourceOrderChannelRow>(channelResult).map((row) => ({
+        id: readPositiveInteger(row.id, "channel id"),
+        name: readText(row.name, "channel name"),
+        orderCount: readNonNegativeInteger(row.order_count, "channel order count"),
+      })),
+    };
   }
 
   async getSourceOrder(omsOrderId: number): Promise<ReturnSourceOrderDetail | null> {
@@ -409,7 +477,7 @@ async function loadSourceItems(
       wo.id AS wms_order_id,
       wo.order_number AS wms_order_number,
       wo.fulfillment_partition_key,
-      wo.status AS warehouse_status,
+      wo.warehouse_status AS warehouse_status,
       oi.id AS wms_order_item_id,
       oi.oms_order_line_id,
       oi.source_item_id AS external_line_item_id,

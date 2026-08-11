@@ -27,7 +27,15 @@ export type ManualReturnReasonCode = typeof manualReturnReasonCodes[number];
 
 export interface ReturnSourceOrderSearchQuery {
   search: string;
+  channelId: number | null;
+  page: number;
   limit: number;
+}
+
+export interface ReturnSourceOrderChannel {
+  id: number;
+  name: string;
+  orderCount: number;
 }
 
 export interface ReturnSourceOrderSearchRow {
@@ -122,7 +130,11 @@ export interface OpenReturnCaseTransaction {
 }
 
 export interface OpenReturnCaseStore {
-  searchSourceOrders(query: ReturnSourceOrderSearchQuery): Promise<ReturnSourceOrderSearchRow[]>;
+  searchSourceOrders(query: ReturnSourceOrderSearchQuery): Promise<{
+    rows: ReturnSourceOrderSearchRow[];
+    total: number;
+    channels: ReturnSourceOrderChannel[];
+  }>;
   getSourceOrder(omsOrderId: number): Promise<ReturnSourceOrderDetail | null>;
   transaction<T>(work: (tx: OpenReturnCaseTransaction) => Promise<T>): Promise<T>;
 }
@@ -146,8 +158,16 @@ export class OpenReturnCaseService {
   ) {}
 
   async searchSourceOrders(query: ReturnSourceOrderSearchQuery) {
+    const result = await this.store.searchSourceOrders(query);
     return {
-      orders: (await this.store.searchSourceOrders(query)).map(serializeSourceOrder),
+      orders: result.rows.map(serializeSourceOrder),
+      channels: result.channels,
+      pagination: {
+        page: query.page,
+        limit: query.limit,
+        total: result.total,
+        totalPages: result.total === 0 ? 0 : Math.ceil(result.total / query.limit),
+      },
     };
   }
 

@@ -48,6 +48,7 @@ describe("return case admin routes", () => {
       search: "RMA-1",
       caseStatus: "open",
       sourceProvider: "shopify",
+      channelId: null,
       page: 2,
       limit: 10,
     });
@@ -91,12 +92,21 @@ describe("return case admin routes", () => {
   });
 
   it("normalizes source-order search and requires view permission", async () => {
-    openService.searchSourceOrders.mockResolvedValue({ orders: [] });
+    openService.searchSourceOrders.mockResolvedValue({
+      orders: [],
+      channels: [],
+      pagination: { page: 3, limit: 10, total: 0, totalPages: 0 },
+    });
 
-    const response = await jsonRequest(`${server.url}/api/returns/admin/source-orders?search=%20ORDER-1%20&limit=10`);
+    const response = await jsonRequest(`${server.url}/api/returns/admin/source-orders?search=%20ORDER-1%20&channelId=36&page=3&limit=10`);
 
     expect(response.status).toBe(200);
-    expect(openService.searchSourceOrders).toHaveBeenCalledWith({ search: "ORDER-1", limit: 10 });
+    expect(openService.searchSourceOrders).toHaveBeenCalledWith({
+      search: "ORDER-1",
+      channelId: 36,
+      page: 3,
+      limit: 10,
+    });
     expect(requirePermissionMock).toHaveBeenCalledWith("inventory", "view");
   });
 
