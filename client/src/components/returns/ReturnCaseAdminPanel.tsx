@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronLeft, ChevronRight, Plus, Search } from "lucide-react";
+import { OpenReturnCaseDialog } from "./OpenReturnCaseDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -98,6 +99,8 @@ export function ReturnCaseAdminPanel() {
   const [caseStatus, setCaseStatus] = useState("all");
   const [page, setPage] = useState(1);
   const [selectedCaseId, setSelectedCaseId] = useState<number | null>(null);
+  const [openCaseDialog, setOpenCaseDialog] = useState(false);
+  const queryClient = useQueryClient();
 
   const listUrl = useMemo(() => {
     const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) });
@@ -107,12 +110,12 @@ export function ReturnCaseAdminPanel() {
   }, [caseStatus, page, search]);
 
   const listQuery = useQuery<ReturnCaseListResponse>({
-    queryKey: [listUrl],
+    queryKey: ["return-cases", listUrl],
     queryFn: () => fetchJson<ReturnCaseListResponse>(listUrl),
   });
 
   const detailQuery = useQuery<ReturnCaseDetail>({
-    queryKey: ["/api/returns/admin/cases", selectedCaseId],
+    queryKey: ["return-case", selectedCaseId],
     queryFn: () => fetchJson<ReturnCaseDetail>(`/api/returns/admin/cases/${selectedCaseId}`),
     enabled: selectedCaseId !== null,
   });
@@ -159,9 +162,13 @@ export function ReturnCaseAdminPanel() {
                   <SelectItem value="cancelled">Cancelled</SelectItem>
                 </SelectContent>
               </Select>
-              <Button onClick={applyFilters} size="sm" className="h-9">
+              <Button onClick={applyFilters} size="sm" variant="outline" className="h-9">
                 <Search className="mr-2 h-4 w-4" />
                 Apply
+              </Button>
+              <Button onClick={() => setOpenCaseDialog(true)} size="sm" className="h-9">
+                <Plus className="mr-2 h-4 w-4" />
+                Open case
               </Button>
             </div>
           </div>
@@ -277,6 +284,16 @@ export function ReturnCaseAdminPanel() {
           )}
         </DialogContent>
       </Dialog>
+
+      <OpenReturnCaseDialog
+        open={openCaseDialog}
+        onOpenChange={setOpenCaseDialog}
+        onCreated={(result) => {
+          setOpenCaseDialog(false);
+          setSelectedCaseId(result.caseId);
+          void queryClient.invalidateQueries({ queryKey: ["return-cases"] });
+        }}
+      />
     </>
   );
 }

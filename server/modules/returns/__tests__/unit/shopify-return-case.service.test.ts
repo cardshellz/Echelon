@@ -109,9 +109,9 @@ describe("recordShopifyRefundReturnCase", () => {
       replayed: false,
     });
     const itemSnapshotQuery = mock.calls.find((text) => text.includes("FROM wms.return_items ri"));
-+    expect(itemSnapshotQuery).toContain("ri.order_item_id IS NULL OR oi.order_id =");
-+    expect(itemSnapshotQuery).toContain("ri.oms_order_line_id IS NULL OR ol.order_id =");
-+    expect(mock.calls.filter((text) => text.includes("INSERT INTO returns.return_cases"))).toHaveLength(1);
+    expect(itemSnapshotQuery).toContain("ri.order_item_id IS NULL OR oi.order_id =");
+    expect(itemSnapshotQuery).toContain("ri.oms_order_line_id IS NULL OR ol.order_id =");
+    expect(mock.calls.filter((text) => text.includes("INSERT INTO returns.return_cases"))).toHaveLength(1);
     expect(mock.calls.filter((text) => text.includes("INSERT INTO returns.return_case_items"))).toHaveLength(1);
     expect(mock.calls.filter((text) => text.includes("INSERT INTO returns.return_case_events"))).toHaveLength(1);
     expect(mock.calls.find((text) => text.includes("INSERT INTO returns.return_cases")))
