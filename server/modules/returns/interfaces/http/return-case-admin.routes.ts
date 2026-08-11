@@ -16,6 +16,7 @@ const listQuerySchema = z.object({
   search: z.string().trim().max(160).optional().transform((value) => value || null),
   caseStatus: z.enum(returnCaseStatuses).optional().transform((value) => value ?? null),
   sourceProvider: z.string().trim().min(1).max(40).optional().transform((value) => value ?? null),
+  channelId: z.coerce.number().int().positive().safe().optional().transform((value) => value ?? null),
   page: z.coerce.number().int().positive().max(1_000_000).default(1),
   limit: z.coerce.number().int().positive().max(100).default(25),
 });
@@ -23,7 +24,9 @@ const listQuerySchema = z.object({
 const caseIdSchema = z.coerce.number().int().positive().safe();
 const sourceOrderSearchSchema = z.object({
   search: z.string().trim().max(160).default(""),
-  limit: z.coerce.number().int().positive().max(50).default(20),
+  channelId: z.coerce.number().int().positive().safe().optional().transform((value) => value ?? null),
+  page: z.coerce.number().int().positive().max(1_000_000).default(1),
+  limit: z.coerce.number().int().positive().max(100).default(25),
 });
 const openCaseSchema = z.object({
   idempotencyKey: z.string().trim().min(1).max(160),

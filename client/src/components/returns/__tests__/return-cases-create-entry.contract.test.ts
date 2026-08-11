@@ -11,6 +11,10 @@ const DROPSHIP_SOURCE = readFileSync(
   resolve(process.cwd(), "client/src/pages/Dropship.tsx"),
   "utf8",
 );
+const OPEN_RETURN_CASE_SOURCE = readFileSync(
+  resolve(process.cwd(), "client/src/components/returns/OpenReturnCaseDialog.tsx"),
+  "utf8",
+);
 
 describe("first-class returns create entry", () => {
   it("uses the canonical case creator and limits legacy dropship UI to inspection", () => {
@@ -28,5 +32,13 @@ describe("first-class returns create entry", () => {
     expect(DROPSHIP_SOURCE).toMatch(
       /showCreatePanel\s*&&\s*selectedReturnVendorId !== null/,
     );
+  });
+
+  it("paginates returnable orders on the server and exposes a sales-channel filter", () => {
+    expect(OPEN_RETURN_CASE_SOURCE).toContain('const SOURCE_ORDER_PAGE_SIZE = 25');
+    expect(OPEN_RETURN_CASE_SOURCE).toContain('params.set("channelId", channelId)');
+    expect(OPEN_RETURN_CASE_SOURCE).toContain('All sales channels');
+    expect(OPEN_RETURN_CASE_SOURCE).toContain('Previous');
+    expect(OPEN_RETURN_CASE_SOURCE).toContain('Next');
   });
 });

@@ -96,6 +96,32 @@ function command() {
 }
 
 describe("OpenReturnCaseService", () => {
+  it("returns paginated source orders and stable channel filters", async () => {
+    const { service, store } = fixture();
+    vi.mocked(store.searchSourceOrders).mockResolvedValue({
+      rows: [],
+      total: 51,
+      channels: [{ id: 36, name: "Shopify", orderCount: 40 }],
+    });
+
+    await expect(service.searchSourceOrders({
+      search: "ORDER-1",
+      channelId: 36,
+      page: 2,
+      limit: 25,
+    })).resolves.toEqual({
+      orders: [],
+      channels: [{ id: 36, name: "Shopify", orderCount: 40 }],
+      pagination: { page: 2, limit: 25, total: 51, totalPages: 3 },
+    });
+    expect(store.searchSourceOrders).toHaveBeenCalledWith({
+      search: "ORDER-1",
+      channelId: 36,
+      page: 2,
+      limit: 25,
+    });
+  });
+
   it("locks, resolves policy, and persists a normalized policy-snapshotted case", async () => {
     const { service, tx } = fixture();
 

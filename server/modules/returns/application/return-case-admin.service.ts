@@ -11,6 +11,7 @@ export interface ReturnCaseListQuery {
   search: string | null;
   caseStatus: ReturnCaseStatus | null;
   sourceProvider: string | null;
+  channelId: number | null;
   page: number;
   limit: number;
 }

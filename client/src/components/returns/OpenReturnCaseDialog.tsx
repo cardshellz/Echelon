@@ -42,6 +42,23 @@ interface SourceOrderSummary {
   wmsPartitionCount: number;
 }
 
+interface SourceOrderChannel {
+  id: number;
+  name: string;
+  orderCount: number;
+}
+
+interface SourceOrderSearchResponse {
+  orders: SourceOrderSummary[];
+  channels: SourceOrderChannel[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
 interface SourceOrderItem {
   wmsOrderItemId: number;
   omsOrderLineId: number | null;
@@ -84,6 +101,8 @@ const REASONS = [
   ["other", "Other"],
 ] as const;
 
+const SOURCE_ORDER_PAGE_SIZE = 25;
+
 export function OpenReturnCaseDialog({
   open,
   onOpenChange,
@@ -95,6 +114,8 @@ export function OpenReturnCaseDialog({
 }) {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+  const [channelId, setChannelId] = useState("all");
+  const [sourcePage, setSourcePage] = useState(1);
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
   const [selectedWmsOrderId, setSelectedWmsOrderId] = useState<number | null>(null);
   const [selectedQuantities, setSelectedQuantities] = useState<Record<number, number>>({});
@@ -106,6 +127,8 @@ export function OpenReturnCaseDialog({
     if (!open) return;
     setSearchInput("");
     setSearch("");
+    setChannelId("all");
+    setSourcePage(1);
     setSelectedOrderId(null);
     setSelectedWmsOrderId(null);
     setSelectedQuantities({});
@@ -115,10 +138,15 @@ export function OpenReturnCaseDialog({
   }, [open]);
 
   const searchUrl = useMemo(() => {
-    const params = new URLSearchParams({ search, limit: "20" });
+    const params = new URLSearchParams({
+      search,
+      page: String(sourcePage),
+      limit: String(SOURCE_ORDER_PAGE_SIZE),
+    });
+    if (channelId !== "all") params.set("channelId", channelId);
     return `/api/returns/admin/source-orders?${params.toString()}`;
-  }, [search]);
-  const searchQuery = useQuery<{ orders: SourceOrderSummary[] }>({
+  }, [channelId, search, sourcePage]);
+  const searchQuery = useQuery<SourceOrderSearchResponse>({
     queryKey: [searchUrl],
     queryFn: () => fetchJson(searchUrl),
     enabled: open,
@@ -128,6 +156,7 @@ export function OpenReturnCaseDialog({
     queryFn: () => fetchJson(`/api/returns/admin/source-orders/${selectedOrderId}`),
     enabled: open && selectedOrderId !== null,
   });
+  const sourceOrderData = searchQuery.data;
 
   useEffect(() => {
     const partitions = detailQuery.data?.partitions ?? [];
@@ -169,6 +198,26 @@ export function OpenReturnCaseDialog({
     setSelectedQuantities({});
     openMutation.reset();
   };
+  const applySourceSearch = () => {
+    setSearch(searchInput.trim());
+    setSourcePage(1);
+    setSelectedOrderId(null);
+    setSelectedWmsOrderId(null);
+    setSelectedQuantities({});
+  };
+  const changeChannel = (value: string) => {
+    setChannelId(value);
+    setSourcePage(1);
+    setSelectedOrderId(null);
+    setSelectedWmsOrderId(null);
+    setSelectedQuantities({});
+  };
+  const changeSourcePage = (page: number) => {
+    setSourcePage(page);
+    setSelectedOrderId(null);
+    setSelectedWmsOrderId(null);
+    setSelectedQuantities({});
+  };
   const changePartition = (value: string) => {
     setSelectedWmsOrderId(Number(value));
     setSelectedQuantities({});
@@ -197,14 +246,27 @@ export function OpenReturnCaseDialog({
         <div className="space-y-5">
           <section className="space-y-2">
             <h3 className="text-sm font-semibold">1. Source order</h3>
-            <div className="flex gap-2">
+            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_220px_auto]">
               <Input
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.target.value)}
-                onKeyDown={(event) => event.key === "Enter" && setSearch(searchInput.trim())}
+                onKeyDown={(event) => event.key === "Enter" && applySourceSearch()}
                 placeholder="Order number, OMS ID, customer, or email"
               />
-              <Button type="button" variant="outline" onClick={() => setSearch(searchInput.trim())}>
+              <Select value={channelId} onValueChange={changeChannel}>
+                <SelectTrigger aria-label="Sales channel">
+                  <SelectValue placeholder="All sales channels" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All sales channels</SelectItem>
+                  {(sourceOrderData?.channels ?? []).map((channel) => (
+                    <SelectItem key={channel.id} value={String(channel.id)}>
+                      {channel.name} ({channel.orderCount})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button type="button" variant="outline" onClick={applySourceSearch}>
                 <Search className="mr-2 h-4 w-4" />
                 Search
               </Button>
@@ -213,27 +275,53 @@ export function OpenReturnCaseDialog({
               <Message>Loading returnable orders...</Message>
             ) : searchQuery.isError ? (
               <Message error>Source orders could not be loaded.</Message>
-            ) : searchQuery.data?.orders.length === 0 ? (
+            ) : !sourceOrderData || sourceOrderData.orders.length === 0 ? (
               <Message>No fulfilled, returnable orders match this search.</Message>
             ) : (
-              <div className="max-h-52 overflow-y-auto border">
-                {searchQuery.data?.orders.map((order) => (
-                  <button
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>{formatResultRange(sourceOrderData.pagination)}</span>
+                  <span>Page {sourceOrderData.pagination.page} of {Math.max(sourceOrderData.pagination.totalPages, 1)}</span>
+                </div>
+                <div className="max-h-80 overflow-y-auto border">
+                  {sourceOrderData.orders.map((order) => (
+                    <button
+                      type="button"
+                      key={order.omsOrderId}
+                      onClick={() => selectOrder(order.omsOrderId)}
+                      className={`grid w-full gap-1 border-b px-3 py-2 text-left last:border-b-0 sm:grid-cols-[1fr_1fr_150px] ${
+                        selectedOrderId === order.omsOrderId ? "bg-muted" : "hover:bg-muted/50"
+                      }`}
+                    >
+                      <span>
+                        <span className="block font-medium">{order.externalOrderNumber || order.externalOrderId}</span>
+                        <span className="block text-xs text-muted-foreground">OMS {order.omsOrderId} / {order.channelName}</span>
+                      </span>
+                      <span className="text-sm">{order.customerName || order.customerEmail || "Customer not provided"}</span>
+                      <span className="text-xs text-muted-foreground">{formatDate(order.orderedAt)}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button
                     type="button"
-                    key={order.omsOrderId}
-                    onClick={() => selectOrder(order.omsOrderId)}
-                    className={`grid w-full gap-1 border-b px-3 py-2 text-left last:border-b-0 sm:grid-cols-[1fr_1fr_150px] ${
-                      selectedOrderId === order.omsOrderId ? "bg-muted" : "hover:bg-muted/50"
-                    }`}
+                    variant="outline"
+                    size="sm"
+                    disabled={sourceOrderData.pagination.page <= 1}
+                    onClick={() => changeSourcePage(sourceOrderData.pagination.page - 1)}
                   >
-                    <span>
-                      <span className="block font-medium">{order.externalOrderNumber || order.externalOrderId}</span>
-                      <span className="block text-xs text-muted-foreground">OMS {order.omsOrderId} / {order.channelName}</span>
-                    </span>
-                    <span className="text-sm">{order.customerName || order.customerEmail || "Customer not provided"}</span>
-                    <span className="text-xs text-muted-foreground">{formatDate(order.orderedAt)}</span>
-                  </button>
-                ))}
+                    Previous
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={sourceOrderData.pagination.page >= sourceOrderData.pagination.totalPages}
+                    onClick={() => changeSourcePage(sourceOrderData.pagination.page + 1)}
+                  >
+                    Next
+                  </Button>
+                </div>
               </div>
             )}
           </section>
@@ -421,6 +509,13 @@ function errorMessage(error: unknown): string {
 
 function formatDate(value: string): string {
   return new Date(value).toLocaleString();
+}
+
+function formatResultRange(pagination: SourceOrderSearchResponse["pagination"]): string {
+  if (pagination.total === 0) return "No returnable orders";
+  const first = (pagination.page - 1) * pagination.limit + 1;
+  const last = Math.min(pagination.page * pagination.limit, pagination.total);
+  return `Showing ${first}-${last} of ${pagination.total} returnable orders`;
 }
 
 function formatCents(cents: number): string {

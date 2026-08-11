@@ -22,8 +22,8 @@ import type {
 const itemSummary = db
   .select({
     returnCaseId: returnCaseItems.returnCaseId,
-    itemCount: count(returnCaseItems.id).as("item_count"),
-    unitCount: sum(returnCaseItems.quantity).as("unit_count"),
+    itemCount: count(returnCaseItems.id).as("return_case_item_count"),
+    unitCount: sum(returnCaseItems.quantity).as("return_case_unit_count"),
   })
   .from(returnCaseItems)
   .groupBy(returnCaseItems.returnCaseId)
@@ -136,6 +136,7 @@ function buildWhere(query: ReturnCaseListQuery) {
   const conditions = [];
   if (query.caseStatus) conditions.push(eq(returnCases.caseStatus, query.caseStatus));
   if (query.sourceProvider) conditions.push(eq(returnCases.sourceProvider, query.sourceProvider));
+  if (query.channelId) conditions.push(eq(returnCases.channelId, query.channelId));
   if (query.search) {
     const search = `%${query.search}%`;
     conditions.push(or(
