@@ -3248,8 +3248,10 @@ function ReturnPoliciesTab() {
 
 export function ReturnOpsTab({
   showLegacyPolicyPanel = true,
+  showCreatePanel = true,
 }: {
   showLegacyPolicyPanel?: boolean;
+  showCreatePanel?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
@@ -3358,6 +3360,7 @@ export function ReturnOpsTab({
     queryKey: [returnVendorOptionsUrl, "return-vendors"],
     queryFn: () =>
       fetchJson<DropshipDogfoodReadinessResponse>(returnVendorOptionsUrl),
+    enabled: showCreatePanel,
   });
   const returnStoreConnectionsQuery =
     useQuery<DropshipAdminStoreConnectionListResponse>({
@@ -3366,16 +3369,19 @@ export function ReturnOpsTab({
         fetchJson<DropshipAdminStoreConnectionListResponse>(
           returnStoreConnectionsUrl,
         ),
+      enabled: showCreatePanel,
     });
   const returnOrderIntakesQuery = useQuery<DropshipAdminOrderOpsListResponse>({
     queryKey: [returnOrderIntakeUrl, "return-order-intakes"],
     queryFn: () =>
       fetchJson<DropshipAdminOrderOpsListResponse>(returnOrderIntakeUrl),
+    enabled: showCreatePanel,
   });
   const returnVariantsQuery = useQuery<DropshipProductVariantOption[]>({
     queryKey: ["/api/product-variants", "return-options"],
     queryFn: () =>
       fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
+    enabled: showCreatePanel,
   });
   const selectedReturnVendorId = /^\d+$/.test(createForm.vendorId)
     ? Number(createForm.vendorId)
@@ -3401,7 +3407,9 @@ export function ReturnOpsTab({
       );
     },
     enabled:
-      selectedReturnVendorId !== null && selectedReturnIntakeId !== null,
+      showCreatePanel &&
+      selectedReturnVendorId !== null &&
+      selectedReturnIntakeId !== null,
   });
 
   const rmas = returnsQuery.data?.items ?? [];
@@ -3842,10 +3850,11 @@ export function ReturnOpsTab({
     <div className="space-y-5">
       {(returnsQuery.error ||
         (showLegacyPolicyPanel && returnPolicyQuery.error) ||
-        returnVendorOptionsQuery.error ||
-        returnStoreConnectionsQuery.error ||
-        returnOrderIntakesQuery.error ||
-        returnVariantsQuery.error ||
+        (showCreatePanel &&
+          (returnVendorOptionsQuery.error ||
+            returnStoreConnectionsQuery.error ||
+            returnOrderIntakesQuery.error ||
+            returnVariantsQuery.error)) ||
         error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
@@ -3858,10 +3867,12 @@ export function ReturnOpsTab({
                   )
                 : queryErrorMessage(
                     (showLegacyPolicyPanel ? returnPolicyQuery.error : null) ??
-                      returnVendorOptionsQuery.error ??
-                      returnStoreConnectionsQuery.error ??
-                      returnOrderIntakesQuery.error ??
-                      returnVariantsQuery.error,
+                      (showCreatePanel
+                        ? (returnVendorOptionsQuery.error ??
+                          returnStoreConnectionsQuery.error ??
+                          returnOrderIntakesQuery.error ??
+                          returnVariantsQuery.error)
+                        : null),
                     "Unable to load dropship return setup data.",
                   ))}
           </AlertDescription>
@@ -3977,8 +3988,9 @@ export function ReturnOpsTab({
         />
       )}
 
-      <ReturnCreatePanel
-        form={createForm}
+      {showCreatePanel && (
+        <ReturnCreatePanel
+          form={createForm}
         isSaving={creatingRma}
         order={returnCreateOrderQuery.data?.order ?? null}
         orderError={optionalQueryErrorMessage(
@@ -4012,7 +4024,8 @@ export function ReturnOpsTab({
           returnVendorOptionsQuery.isLoading ||
           returnVendorOptionsQuery.isFetching
         }
-      />
+        />
+      )}
 
       <ReturnOpsTable
         isLoading={returnsQuery.isLoading || returnsQuery.isFetching}
