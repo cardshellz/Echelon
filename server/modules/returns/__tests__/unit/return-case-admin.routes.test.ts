@@ -6,6 +6,10 @@ import {
   ReturnCaseAdminError,
   type ReturnCaseAdminService,
 } from "../../application/return-case-admin.service";
+import {
+  OpenReturnCaseError,
+  type OpenReturnCaseService,
+} from "../../application/open-return-case.service";
 import { registerReturnCaseAdminRoutes } from "../../interfaces/http/return-case-admin.routes";
 
 const { requirePermissionMock } = vi.hoisted(() => ({
@@ -23,11 +27,13 @@ vi.mock("../../../../routes/middleware", () => ({ requirePermission: requirePerm
 describe("return case admin routes", () => {
   let server: { url: string; close: () => Promise<void> };
   let service: ReturnType<typeof fakeService>;
+  let openService: ReturnType<typeof fakeOpenService>;
 
   beforeEach(async () => {
     requirePermissionMock.mockClear();
     service = fakeService();
-    server = await startServer(buildApp(service));
+    openService = fakeOpenService();
+    server = await startServer(buildApp(service, openService));
   });
 
   afterEach(async () => server.close());
@@ -83,16 +89,116 @@ describe("return case admin routes", () => {
       },
     });
   });
+
+  it("normalizes source-order search and requires view permission", async () => {
+    openService.searchSourceOrders.mockResolvedValue({ orders: [] });
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/source-orders?search=%20ORDER-1%20&limit=10`);
+
+    expect(response.status).toBe(200);
+    expect(openService.searchSourceOrders).toHaveBeenCalledWith({ search: "ORDER-1", limit: 10 });
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory", "view");
+  });
+
+  it("opens a case with the authenticated actor and edit permission", async () => {
+    openService.open.mockResolvedValue({ caseId: 9, caseNumber: "RMA-00000009", wmsReturnId: 10, replayed: false });
+    const body = {
+      idempotencyKey: "command-1",
+      omsOrderId: 101,
+      wmsOrderId: 201,
+      reasonCode: "buyer_return",
+      notes: "customer request",
+      items: [{ wmsOrderItemId: 301, quantity: 1 }],
+    };
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases`, { method: "POST", body });
+
+    expect(response.status).toBe(201);
+    expect(openService.open).toHaveBeenCalledWith({ ...body, actor: "user:7" });
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory", "edit");
+  });
+
+  it("returns 200 for an idempotent replay", async () => {
+    openService.open.mockResolvedValue({ caseId: 9, caseNumber: "RMA-00000009", wmsReturnId: 10, replayed: true });
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases`, {
+      method: "POST",
+      body: {
+        idempotencyKey: "command-1",
+        omsOrderId: 101,
+        wmsOrderId: 201,
+        reasonCode: "buyer_return",
+        notes: null,
+        items: [{ wmsOrderItemId: 301, quantity: 1 }],
+      },
+    });
+
+    expect(response.status).toBe(200);
+  });
+
+  it("rejects malformed create commands before calling the service", async () => {
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases`, {
+      method: "POST",
+      body: {
+        idempotencyKey: "command-1",
+        omsOrderId: 101,
+        wmsOrderId: 201,
+        reasonCode: "made_up",
+        items: [],
+      },
+    });
+
+    expect(response).toMatchObject({ status: 400, body: { error: { code: "RETURN_CASE_QUERY_INVALID" } } });
+    expect(openService.open).not.toHaveBeenCalled();
+  });
+
+  it("preserves classified create conflicts", async () => {
+    openService.open.mockRejectedValue(new OpenReturnCaseError(
+      "RETURN_CASE_QUANTITY_UNAVAILABLE",
+      "The requested quantity is unavailable.",
+      409,
+      { wmsOrderItemId: 301 },
+    ));
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases`, {
+      method: "POST",
+      body: {
+        idempotencyKey: "command-1",
+        omsOrderId: 101,
+        wmsOrderId: 201,
+        reasonCode: "buyer_return",
+        notes: null,
+        items: [{ wmsOrderItemId: 301, quantity: 2 }],
+      },
+    });
+
+    expect(response).toMatchObject({ status: 409, body: { error: { code: "RETURN_CASE_QUANTITY_UNAVAILABLE" } } });
+  });
 });
 
 function fakeService() {
   return { list: vi.fn(), getById: vi.fn() };
 }
 
-function buildApp(service: ReturnType<typeof fakeService>): express.Express {
+function fakeOpenService() {
+  return { searchSourceOrders: vi.fn(), getSourceOrder: vi.fn(), open: vi.fn() };
+}
+
+function buildApp(
+  service: ReturnType<typeof fakeService>,
+  openService: ReturnType<typeof fakeOpenService>,
+): express.Express {
   const app = express();
   app.use(express.json());
-  registerReturnCaseAdminRoutes(app, service as unknown as ReturnCaseAdminService);
+  app.use((req, _res, next) => {
+    (req as unknown as { session: { user: { id: number } } }).session = { user: { id: 7 } };
+    next();
+  });
+  registerReturnCaseAdminRoutes(
+    app,
+    service as unknown as ReturnCaseAdminService,
+    openService as unknown as OpenReturnCaseService,
+  );
   return app;
 }
 
@@ -108,14 +214,22 @@ async function startServer(app: express.Express): Promise<{ url: string; close: 
   };
 }
 
-async function jsonRequest(url: string): Promise<{ status: number; body: Record<string, unknown> }> {
+async function jsonRequest(
+  url: string,
+  options: { method?: "GET" | "POST"; body?: unknown } = {},
+): Promise<{ status: number; body: Record<string, any> }> {
   const target = new URL(url);
+  const rawRequestBody = options.body === undefined ? null : JSON.stringify(options.body);
   return new Promise((resolve, reject) => {
     const request = http.request({
       hostname: target.hostname,
       port: target.port,
       path: `${target.pathname}${target.search}`,
-      method: "GET",
+      method: options.method ?? "GET",
+      headers: rawRequestBody === null ? undefined : {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(rawRequestBody),
+      },
     }, (response) => {
       const chunks: Buffer[] = [];
       response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
@@ -123,11 +237,12 @@ async function jsonRequest(url: string): Promise<{ status: number; body: Record<
         const rawBody = Buffer.concat(chunks).toString("utf8");
         resolve({
           status: response.statusCode ?? 0,
-          body: rawBody === "" ? {} : JSON.parse(rawBody) as Record<string, unknown>,
+          body: rawBody === "" ? {} : JSON.parse(rawBody) as Record<string, any>,
         });
       });
     });
     request.on("error", reject);
+    if (rawRequestBody !== null) request.write(rawRequestBody);
     request.end();
   });
 }

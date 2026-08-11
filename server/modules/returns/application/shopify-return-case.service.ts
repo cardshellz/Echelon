@@ -177,7 +177,7 @@ async function loadItemSnapshots(
     WHERE ri.return_id = ${args.wmsReturnId}
       AND r.order_id = ${args.wmsOrderId}
       AND (ri.order_item_id IS NULL OR oi.order_id = ${args.wmsOrderId})
-+      AND (ri.oms_order_line_id IS NULL OR ol.order_id = ${args.omsOrderId})
+      AND (ri.oms_order_line_id IS NULL OR ol.order_id = ${args.omsOrderId})
     ORDER BY ri.id
   `);
   return rowsOf<ItemSnapshotRow>(result).map((row) => ({

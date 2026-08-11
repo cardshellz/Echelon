@@ -1,12 +1,21 @@
-import type { ReturnPolicy } from "@shared/schema";
+import type {
+  ReturnApprovalStatus,
+  ReturnBusinessContext,
+  ReturnCaseStatus,
+  ReturnCustomerRefundStatus,
+  ReturnInspectionStatus,
+  ReturnLogisticsStatus,
+  ReturnPolicy,
+  ReturnVendorSettlementStatus,
+} from "@shared/schema";
 
 export interface ReturnCaseLifecycle {
-  caseStatus: "open";
-  approvalStatus: "approved";
-  logisticsStatus: "awaiting_return";
-  inspectionStatus: "not_required" | "pending";
-  customerRefundStatus: "completed";
-  vendorSettlementStatus: "not_applicable";
+  caseStatus: ReturnCaseStatus;
+  approvalStatus: ReturnApprovalStatus;
+  logisticsStatus: ReturnLogisticsStatus;
+  inspectionStatus: ReturnInspectionStatus;
+  customerRefundStatus: ReturnCustomerRefundStatus;
+  vendorSettlementStatus: ReturnVendorSettlementStatus;
 }
 
 export interface ReturnPolicySnapshot {
@@ -39,12 +48,7 @@ export class ReturnCaseDomainError extends Error {
 }
 
 export function deriveShopifyRefundReturnLifecycle(policy: ReturnPolicy): ReturnCaseLifecycle {
-  if (!Number.isInteger(policy.id) || policy.id <= 0 || !Number.isInteger(policy.version) || policy.version <= 0) {
-    throw new ReturnCaseDomainError("RETURN_CASE_POLICY_INVALID", "Resolved return policy identity is invalid.", {
-      policyId: policy.id,
-      policyVersion: policy.version,
-    });
-  }
+  validatePolicyIdentity(policy);
   return {
     caseStatus: "open",
     approvalStatus: "approved",
@@ -52,6 +56,24 @@ export function deriveShopifyRefundReturnLifecycle(policy: ReturnPolicy): Return
     inspectionStatus: policy.inspectionRequirement === "none" ? "not_required" : "pending",
     customerRefundStatus: "completed",
     vendorSettlementStatus: "not_applicable",
+  };
+}
+
+export function deriveManualReturnLifecycle(
+  policy: ReturnPolicy,
+  businessContext: ReturnBusinessContext,
+): ReturnCaseLifecycle {
+  validatePolicyIdentity(policy);
+  return {
+    caseStatus: "open",
+    approvalStatus: "approved",
+    logisticsStatus: "awaiting_return",
+    inspectionStatus: policy.inspectionRequirement === "none" ? "not_required" : "pending",
+    customerRefundStatus: "pending",
+    vendorSettlementStatus:
+      businessContext === "dropship" && policy.vendorSettlementTrigger !== "none"
+        ? "pending"
+        : "not_applicable",
   };
 }
 
@@ -73,4 +95,13 @@ export function snapshotReturnPolicy(policy: ReturnPolicy): ReturnPolicySnapshot
     vendorSettlementTrigger: policy.vendorSettlementTrigger,
     returnlessRefundAllowed: policy.returnlessRefundAllowed,
   };
+}
+
+function validatePolicyIdentity(policy: ReturnPolicy): void {
+  if (!Number.isInteger(policy.id) || policy.id <= 0 || !Number.isInteger(policy.version) || policy.version <= 0) {
+    throw new ReturnCaseDomainError("RETURN_CASE_POLICY_INVALID", "Resolved return policy identity is invalid.", {
+      policyId: policy.id,
+      policyVersion: policy.version,
+    });
+  }
 }
