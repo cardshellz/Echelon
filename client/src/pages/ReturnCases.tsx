@@ -19,13 +19,15 @@ export default function ReturnCases() {
 
       <section className="space-y-3 border-t pt-6">
         <div>
-          <h2 className="text-lg font-semibold">Dropship RMA operations</h2>
+          <h2 className="text-lg font-semibold">
+            Dropship receiving and inspection
+          </h2>
           <p className="text-sm text-muted-foreground">
-            Create and inspect dropship RMAs while legacy records are adapted to
-            canonical return cases.
+            Receive and inspect legacy dropship RMAs while their records are
+            adapted to canonical return cases. Open new cases above.
           </p>
         </div>
-        <ReturnOpsTab showLegacyPolicyPanel={false} />
+        <ReturnOpsTab showCreatePanel={false} showLegacyPolicyPanel={false} />
       </section>
     </div>
   );
