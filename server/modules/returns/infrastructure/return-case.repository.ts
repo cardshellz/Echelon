@@ -17,6 +17,7 @@ import type {
   ReturnCaseItemRow,
   ReturnCaseListQuery,
   ReturnCaseListRow,
+  ReturnCaseSummaryMetrics,
 } from "../application/return-case-admin.service";
 
 const itemSummary = db
@@ -30,17 +31,22 @@ const itemSummary = db
   .as("return_case_item_summary");
 
 export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
-  async list(query: ReturnCaseListQuery): Promise<{ rows: ReturnCaseListRow[]; total: number }> {
+  async list(query: ReturnCaseListQuery): Promise<{ rows: ReturnCaseListRow[]; summary: ReturnCaseSummaryMetrics }> {
     const where = buildWhere(query);
     const offset = (query.page - 1) * query.limit;
-    const [rows, totalRows] = await Promise.all([
+    const [rows, summaryRows] = await Promise.all([
       selectCaseRows()
         .where(where)
         .orderBy(desc(returnCases.openedAt), desc(returnCases.id))
         .limit(query.limit)
         .offset(offset),
       db
-        .select({ total: count(returnCases.id) })
+        .select({
+          total: count(returnCases.id),
+          open: sql<number>`COUNT(*) FILTER (WHERE ${returnCases.caseStatus} = 'open')`,
+          awaitingInspection: sql<number>`COUNT(*) FILTER (WHERE ${returnCases.caseStatus} = 'open' AND ${returnCases.inspectionStatus} = 'pending')`,
+          closed: sql<number>`COUNT(*) FILTER (WHERE ${returnCases.caseStatus} = 'closed')`,
+        })
         .from(returnCases)
         .innerJoin(channels, eq(channels.id, returnCases.channelId))
         .leftJoin(dropshipVendors, eq(dropshipVendors.id, returnCases.vendorId))
@@ -51,7 +57,12 @@ export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
     ]);
     return {
       rows: rows.map(mapListRow),
-      total: readNonNegativeInteger(totalRows[0]?.total, "total"),
+      summary: {
+        total: readNonNegativeInteger(summaryRows[0]?.total, "total"),
+        open: readNonNegativeInteger(summaryRows[0]?.open, "open total"),
+        awaitingInspection: readNonNegativeInteger(summaryRows[0]?.awaitingInspection, "awaiting inspection total"),
+        closed: readNonNegativeInteger(summaryRows[0]?.closed, "closed total"),
+      },
     };
   }
 

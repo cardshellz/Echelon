@@ -59,6 +59,12 @@ interface ReturnCaseSummary {
 
 interface ReturnCaseListResponse {
   cases: ReturnCaseSummary[];
+  summary: {
+    total: number;
+    open: number;
+    awaitingInspection: number;
+    closed: number;
+  };
   pagination: {
     page: number;
     limit: number;
@@ -127,13 +133,19 @@ export function ReturnCaseAdminPanel() {
 
   return (
     <>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <SummaryCard label="All RMAs" value={listQuery.data?.summary.total ?? 0} />
+        <SummaryCard label="Open" value={listQuery.data?.summary.open ?? 0} />
+        <SummaryCard label="Awaiting inspection" value={listQuery.data?.summary.awaitingInspection ?? 0} />
+        <SummaryCard label="Closed" value={listQuery.data?.summary.closed ?? 0} />
+      </div>
       <Card>
         <CardHeader className="p-3 pb-2 md:p-4 md:pb-2">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
-              <CardTitle className="text-base">Return cases</CardTitle>
+              <CardTitle className="text-base">RMAs</CardTitle>
               <p className="mt-1 text-sm text-muted-foreground">
-                Canonical lifecycle records across sales channels. Receiving remains below.
+                Lifecycle records across all sales channels.
               </p>
             </div>
             <div className="flex w-full flex-col gap-2 sm:flex-row md:w-auto">
@@ -141,7 +153,7 @@ export function ReturnCaseAdminPanel() {
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.target.value)}
                 onKeyDown={(event) => event.key === "Enter" && applyFilters()}
-                placeholder="Case, order, source, vendor, or store"
+                placeholder="RMA, order, source, vendor, or store"
                 className="h-9 sm:w-72"
               />
               <Select
@@ -168,27 +180,27 @@ export function ReturnCaseAdminPanel() {
               </Button>
               <Button onClick={() => setOpenCaseDialog(true)} size="sm" className="h-9">
                 <Plus className="mr-2 h-4 w-4" />
-                Open case
+                Create RMA
               </Button>
             </div>
           </div>
         </CardHeader>
         <CardContent className="p-0">
           {listQuery.isLoading ? (
-            <PanelMessage>Loading return cases...</PanelMessage>
+            <PanelMessage>Loading RMAs...</PanelMessage>
           ) : listQuery.isError ? (
-            <PanelMessage tone="error">Return cases could not be loaded.</PanelMessage>
+            <PanelMessage tone="error">RMAs could not be loaded.</PanelMessage>
           ) : listQuery.data?.cases.length === 0 ? (
-            <PanelMessage>No canonical return cases match the current filters.</PanelMessage>
+            <PanelMessage>No RMAs match the current filters.</PanelMessage>
           ) : (
             <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Case</TableHead>
+                    <TableHead>RMA</TableHead>
                     <TableHead>Source</TableHead>
                     <TableHead>Order</TableHead>
-                    <TableHead>Case</TableHead>
+                    <TableHead>Status</TableHead>
                     <TableHead>Return</TableHead>
                     <TableHead>Inspection</TableHead>
                     <TableHead>Refund</TableHead>
@@ -237,7 +249,7 @@ export function ReturnCaseAdminPanel() {
           {listQuery.data && listQuery.data.pagination.total > 0 && (
             <div className="flex items-center justify-between border-t px-3 py-2 text-sm md:px-4">
               <span className="text-muted-foreground">
-                {listQuery.data.pagination.total} case{plural(listQuery.data.pagination.total)}
+                {listQuery.data.pagination.total} RMA{plural(listQuery.data.pagination.total)}
               </span>
               <div className="flex items-center gap-2">
                 <Button
@@ -270,15 +282,15 @@ export function ReturnCaseAdminPanel() {
       <Dialog open={selectedCaseId !== null} onOpenChange={(open) => !open && setSelectedCaseId(null)}>
         <DialogContent className="max-h-[90vh] max-w-5xl overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{detailQuery.data?.caseNumber ?? "Return case"}</DialogTitle>
+            <DialogTitle>{detailQuery.data?.caseNumber ?? "RMA"}</DialogTitle>
             <DialogDescription>
               Read-only source, lifecycle, policy, item, and event evidence.
             </DialogDescription>
           </DialogHeader>
           {detailQuery.isLoading ? (
-            <PanelMessage>Loading case details...</PanelMessage>
+            <PanelMessage>Loading RMA details...</PanelMessage>
           ) : detailQuery.isError || !detailQuery.data ? (
-            <PanelMessage tone="error">Return case details could not be loaded.</PanelMessage>
+            <PanelMessage tone="error">RMA details could not be loaded.</PanelMessage>
           ) : (
             <ReturnCaseDetailBody detail={detailQuery.data} />
           )}
@@ -300,7 +312,7 @@ export function ReturnCaseAdminPanel() {
 
 function ReturnCaseDetailBody({ detail }: { detail: ReturnCaseDetail }) {
   const lifecycle = [
-    ["Case", detail.caseStatus],
+    ["RMA", detail.caseStatus],
     ["Approval", detail.approvalStatus],
     ["Return", detail.logisticsStatus],
     ["Inspection", detail.inspectionStatus],
@@ -386,6 +398,17 @@ function ReturnCaseDetailBody({ detail }: { detail: ReturnCaseDetail }) {
         </div>
       </section>
     </div>
+  );
+}
+
+function SummaryCard({ label, value }: { label: string; value: number }) {
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="text-sm text-muted-foreground">{label}</div>
+        <div className="mt-1 text-2xl font-semibold">{value}</div>
+      </CardContent>
+    </Card>
   );
 }
 

@@ -237,9 +237,9 @@ export function OpenReturnCaseDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[92vh] max-w-6xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Open return case</DialogTitle>
+          <DialogTitle>Create RMA</DialogTitle>
           <DialogDescription>
-            Select the source order and fulfilled units. Channel and dropship ownership are inferred from the order.
+            Select the source order and fulfilled physical units. Channel and dropship ownership are inferred from the order.
           </DialogDescription>
         </DialogHeader>
 
@@ -473,7 +473,7 @@ export function OpenReturnCaseDialog({
             }
             onClick={() => openMutation.mutate()}
           >
-            {openMutation.isPending ? "Opening..." : "Open return case"}
+            {openMutation.isPending ? "Creating..." : "Create RMA"}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -15,6 +15,12 @@ export interface ReturnCaseListQuery {
   page: number;
   limit: number;
 }
+export interface ReturnCaseSummaryMetrics {
+  total: number;
+  open: number;
+  awaitingInspection: number;
+  closed: number;
+}
 
 export interface ReturnCaseListRow {
   id: number;
@@ -80,7 +86,10 @@ export interface ReturnCaseDetailRow extends ReturnCaseListRow {
 }
 
 export interface ReturnCaseAdminStore {
-  list(query: ReturnCaseListQuery): Promise<{ rows: ReturnCaseListRow[]; total: number }>;
+  list(query: ReturnCaseListQuery): Promise<{
+    rows: ReturnCaseListRow[];
+    summary: ReturnCaseSummaryMetrics;
+  }>;
   getById(id: number): Promise<ReturnCaseDetailRow | null>;
 }
 
@@ -101,13 +110,14 @@ export class ReturnCaseAdminService {
 
   async list(query: ReturnCaseListQuery) {
     const result = await this.store.list(query);
-    const totalPages = result.total === 0 ? 0 : Math.ceil(result.total / query.limit);
+    const totalPages = result.summary.total === 0 ? 0 : Math.ceil(result.summary.total / query.limit);
     return {
       cases: result.rows.map(serializeListRow),
+      summary: result.summary,
       pagination: {
         page: query.page,
         limit: query.limit,
-        total: result.total,
+        total: result.summary.total,
         totalPages,
       },
     };

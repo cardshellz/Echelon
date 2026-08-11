@@ -11,7 +11,10 @@ import {
 describe("ReturnCaseAdminService", () => {
   it("serializes list timestamps and returns deterministic pagination", async () => {
     const store = fakeStore();
-    store.list.mockResolvedValue({ rows: [listRow()], total: 51 });
+    store.list.mockResolvedValue({
+      rows: [listRow()],
+      summary: { total: 51, open: 40, awaitingInspection: 12, closed: 11 },
+    });
     const service = new ReturnCaseAdminService(store);
     const query: ReturnCaseListQuery = {
       search: null,
@@ -25,6 +28,7 @@ describe("ReturnCaseAdminService", () => {
     const result = await service.list(query);
 
     expect(store.list).toHaveBeenCalledWith(query);
+    expect(result.summary).toEqual({ total: 51, open: 40, awaitingInspection: 12, closed: 11 });
     expect(result.pagination).toEqual({ page: 2, limit: 25, total: 51, totalPages: 3 });
     expect(result.cases[0]).toMatchObject({
       id: 8,
@@ -35,7 +39,10 @@ describe("ReturnCaseAdminService", () => {
 
   it("returns zero total pages for an empty result", async () => {
     const store = fakeStore();
-    store.list.mockResolvedValue({ rows: [], total: 0 });
+    store.list.mockResolvedValue({
+      rows: [],
+      summary: { total: 0, open: 0, awaitingInspection: 0, closed: 0 },
+    });
     const service = new ReturnCaseAdminService(store);
 
     const result = await service.list({

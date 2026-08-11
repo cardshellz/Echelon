@@ -3888,10 +3888,10 @@ export function ReturnOpsTab({
       <section className="rounded-md border bg-card p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h2 className="text-lg font-semibold">Return operations</h2>
+            <h2 className="text-lg font-semibold">Receiving &amp; inspection</h2>
             <p className="text-sm text-muted-foreground">
-              Review RMAs, return tracking, fault assignment, inspection
-              progress, and final credit state.
+              Receive and inspect legacy dropship RMAs while their records are
+              migrated into the unified RMA lifecycle.
             </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row">
@@ -11489,7 +11489,7 @@ function ReturnOpsTable({
   if (rmas.length === 0) {
     return (
       <EmptyState
-        title="No returns"
+        title="No RMAs"
         description="No dropship RMAs match the current filters."
       />
     );
@@ -11499,7 +11499,7 @@ function ReturnOpsTable({
     <section className="rounded-md border bg-card">
       <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
         <div>
-          <h2 className="text-lg font-semibold">Returns</h2>
+          <h2 className="text-lg font-semibold">RMAs</h2>
           <p className="text-sm text-muted-foreground">
             {total} matching RMA{total === 1 ? "" : "s"}
           </p>
