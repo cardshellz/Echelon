@@ -46,13 +46,39 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
       .from(omsOrderLines)
       .where(eq(omsOrderLines.orderId, orderId));
 
+    // product_id must be the CHANNEL's product id (externalProductId), not our
+    // internal variant id — MC's recommendations mining joins on Shopify product ids.
+    // price_cents is the pre-discount unit price (mirrors Shopify line_items[].price).
     const lineItems = lines.map((l) => ({
       sku: l.sku || null,
       title: l.title || null,
+      variant_title: l.variantTitle || null,
       quantity: l.quantity,
-      price_cents: (l as any).priceCents || 0,
-      product_id: l.productVariantId || null,
+      price_cents: l.retailPriceCents || 0,
+      discount_cents: l.totalDiscountCents || 0,
+      gift_card: l.giftCard ?? false,
+      requires_shipping: l.requiresShipping ?? true,
+      fulfillment_status: l.fulfillmentStatus || null,
+      product_id: l.externalProductId ? Number(l.externalProductId) || null : null,
     }));
+
+    // tags column holds a JSON array string; MC stores Shopify's comma-separated form
+    let tags: string | null = null;
+    if (order.tags) {
+      try {
+        const parsed = JSON.parse(order.tags);
+        tags = Array.isArray(parsed) ? parsed.join(", ") : String(order.tags);
+      } catch {
+        tags = String(order.tags);
+      }
+    }
+
+    // Discount codes live only in the original channel payload (Shopify format:
+    // [{code, amount, type}] with amount as a dollar string — MC consumes it as-is)
+    const rawCodes = (order.rawPayload as any)?.discount_codes;
+    const discountCodes = Array.isArray(rawCodes) && rawCodes.length > 0
+      ? rawCodes.map((dc: any) => ({ code: dc.code, amount: dc.amount, type: dc.type }))
+      : null;
 
     // 4. Build payload
     const payload = {
@@ -69,6 +95,10 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
         shipping_cents: order.shippingCents,
         tax_cents: order.taxCents,
         discount_cents: order.discountCents,
+        refund_cents: order.refundAmountCents || 0,
+        discount_codes: discountCodes,
+        tags,
+        currency: order.currency || "USD",
         financial_status: order.financialStatus || "paid",
         fulfillment_status: order.fulfillmentStatus || "unfulfilled",
         status: order.status,
