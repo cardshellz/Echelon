@@ -31,20 +31,23 @@ import {
 } from "@/components/ui/table";
 
 interface ReturnCaseSummary {
+  recordOrigin: "canonical" | "legacy_dropship";
+  recordKey: string;
+  legacyRmaId: number | null;
   id: number;
   caseNumber: string;
   sourceProvider: string;
   sourceEventType: string;
   sourceEventId: string;
   businessContext: string;
-  channelName: string;
+  channelName: string | null;
   vendorName: string | null;
   storeName: string | null;
-  omsOrderId: number;
+  omsOrderId: number | null;
   omsOrderNumber: string | null;
-  wmsOrderId: number;
-  wmsOrderNumber: string;
-  wmsReturnId: number;
+  wmsOrderId: number | null;
+  wmsOrderNumber: string | null;
+  wmsReturnId: number | null;
   caseStatus: string;
   approvalStatus: string;
   logisticsStatus: string;
@@ -99,7 +102,11 @@ interface ReturnCaseDetail extends ReturnCaseSummary {
 
 const PAGE_SIZE = 25;
 
-export function ReturnCaseAdminPanel() {
+export function ReturnCaseAdminPanel({
+  onOpenLegacyRma,
+}: {
+  onOpenLegacyRma?: (rmaId: number) => void;
+}) {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [caseStatus, setCaseStatus] = useState("all");
@@ -129,6 +136,15 @@ export function ReturnCaseAdminPanel() {
   const applyFilters = () => {
     setPage(1);
     setSearch(searchInput.trim());
+  };
+
+  const openRma = (returnCase: ReturnCaseSummary) => {
+    if (returnCase.recordOrigin === "legacy_dropship") {
+      if (returnCase.legacyRmaId === null || !onOpenLegacyRma) return;
+      onOpenLegacyRma(returnCase.legacyRmaId);
+      return;
+    }
+    setSelectedCaseId(returnCase.id);
   };
 
   return (
@@ -210,30 +226,37 @@ export function ReturnCaseAdminPanel() {
                 <TableBody>
                   {listQuery.data?.cases.map((returnCase) => (
                     <TableRow
-                      key={returnCase.id}
+                      key={returnCase.recordKey}
                       className="cursor-pointer"
                       tabIndex={0}
-                      onClick={() => setSelectedCaseId(returnCase.id)}
+                      onClick={() => openRma(returnCase)}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault();
-                          setSelectedCaseId(returnCase.id);
+                          openRma(returnCase);
                         }
                       }}
                     >
                       <TableCell>
-                        <div className="font-medium">{returnCase.caseNumber}</div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{returnCase.caseNumber}</span>
+                          {returnCase.recordOrigin === "legacy_dropship" && (
+                            <Badge variant="outline">Historical</Badge>
+                          )}
+                        </div>
                         <div className="text-xs text-muted-foreground">
                           {returnCase.itemCount} line{plural(returnCase.itemCount)} / {returnCase.unitCount} unit{plural(returnCase.unitCount)}
                         </div>
                       </TableCell>
                       <TableCell>
                         <div>{titleCase(returnCase.sourceProvider)}</div>
-                        <div className="text-xs text-muted-foreground">{returnCase.channelName}</div>
+                        <div className="text-xs text-muted-foreground">{returnCase.channelName ?? "Channel not recorded"}</div>
                       </TableCell>
                       <TableCell>
-                        <div>{returnCase.omsOrderNumber || `OMS ${returnCase.omsOrderId}`}</div>
-                        <div className="text-xs text-muted-foreground">WMS {returnCase.wmsOrderNumber}</div>
+                        <div>{returnCase.omsOrderNumber ?? (returnCase.omsOrderId ? `OMS ${returnCase.omsOrderId}` : "Order not linked")}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {returnCase.wmsOrderNumber ? `WMS ${returnCase.wmsOrderNumber}` : "WMS order not linked"}
+                        </div>
                       </TableCell>
                       <TableCell><StatusBadge value={returnCase.caseStatus} /></TableCell>
                       <TableCell><StatusBadge value={returnCase.logisticsStatus} /></TableCell>
@@ -335,10 +358,10 @@ function ReturnCaseDetailBody({ detail }: { detail: ReturnCaseDetail }) {
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Reference label="Source" value={`${titleCase(detail.sourceProvider)} ${detail.sourceEventType} ${detail.sourceEventId}`} />
-        <Reference label="OMS order" value={detail.omsOrderNumber || String(detail.omsOrderId)} />
-        <Reference label="WMS order" value={detail.wmsOrderNumber} />
-        <Reference label="WMS return" value={String(detail.wmsReturnId)} />
-        <Reference label="Channel" value={detail.channelName} />
+        <Reference label="OMS order" value={detail.omsOrderNumber ?? (detail.omsOrderId ? String(detail.omsOrderId) : "Not linked")} />
+        <Reference label="WMS order" value={detail.wmsOrderNumber ?? "Not linked"} />
+        <Reference label="WMS return" value={detail.wmsReturnId ? String(detail.wmsReturnId) : "Not linked"} />
+        <Reference label="Channel" value={detail.channelName ?? "Not recorded"} />
         <Reference label="Vendor" value={detail.vendorName || "Not applicable"} />
         <Reference label="Store" value={detail.storeName || "Not applicable"} />
         <Reference label="Opened" value={formatDateTime(detail.openedAt)} />

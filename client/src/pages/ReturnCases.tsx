@@ -1,9 +1,15 @@
+import { useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { ReturnCaseAdminPanel } from "@/components/returns/ReturnCaseAdminPanel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ReturnOpsTab } from "@/pages/Dropship";
 
 export default function ReturnCases() {
+  const [activeTab, setActiveTab] = useState("rmas");
+  const [selectedLegacyRmaId, setSelectedLegacyRmaId] = useState<number | null>(
+    null,
+  );
+
   return (
     <div className="space-y-6 p-2 md:p-6">
       <div>
@@ -16,16 +22,29 @@ export default function ReturnCases() {
         </p>
       </div>
 
-      <Tabs defaultValue="rmas" className="space-y-4">
+      <Tabs
+        value={activeTab}
+        onValueChange={setActiveTab}
+        className="space-y-4"
+      >
         <TabsList>
           <TabsTrigger value="rmas">RMAs</TabsTrigger>
           <TabsTrigger value="receiving">Receiving &amp; inspection</TabsTrigger>
         </TabsList>
         <TabsContent value="rmas">
-          <ReturnCaseAdminPanel />
+          <ReturnCaseAdminPanel
+            onOpenLegacyRma={(rmaId) => {
+              setSelectedLegacyRmaId(rmaId);
+              setActiveTab("receiving");
+            }}
+          />
         </TabsContent>
         <TabsContent value="receiving">
-          <ReturnOpsTab showCreatePanel={false} showLegacyPolicyPanel={false} />
+          <ReturnOpsTab
+            showCreatePanel={false}
+            showLegacyPolicyPanel={false}
+            initialRmaId={selectedLegacyRmaId}
+          />
         </TabsContent>
       </Tabs>
     </div>

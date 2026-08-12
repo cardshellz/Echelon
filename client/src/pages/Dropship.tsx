@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -3249,9 +3249,11 @@ function ReturnPoliciesTab() {
 export function ReturnOpsTab({
   showLegacyPolicyPanel = true,
   showCreatePanel = true,
+  initialRmaId = null,
 }: {
   showLegacyPolicyPanel?: boolean;
   showCreatePanel?: boolean;
+  initialRmaId?: number | null;
 }) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
@@ -3277,6 +3279,7 @@ export function ReturnOpsTab({
     number | null
   >(null);
   const [inspectionModalOpen, setInspectionModalOpen] = useState(false);
+  const consumedInitialRmaIdRef = useRef<number | null>(null);
   const [inspectionForm, setInspectionForm] =
     useState<ReturnInspectionFormState | null>(null);
   const [inspectionPendingRmaId, setInspectionPendingRmaId] = useState<
@@ -3462,13 +3465,32 @@ export function ReturnOpsTab({
   );
 
   useEffect(() => {
+    if (
+      initialRmaId === null ||
+      consumedInitialRmaIdRef.current === initialRmaId
+    ) {
+      return;
+    }
+    consumedInitialRmaIdRef.current = initialRmaId;
+    setSelectedInspectionRmaId(initialRmaId);
+    setInspectionForm(null);
+    setInspectionModalOpen(false);
+    setReviewReason("");
+    setError("");
+    setMessage("");
+  }, [initialRmaId]);
+
+  useEffect(() => {
     const rma = returnDetailQuery.data?.rma;
     if (!rma) return;
     setInspectionForm((current) => {
       if (current?.rmaId === rma.rmaId) return current;
       return buildReturnInspectionFormState(rma);
     });
-  }, [returnDetailQuery.data?.rma]);
+    if (rma.rmaId === initialRmaId && rma.status === "inspecting") {
+      setInspectionModalOpen(true);
+    }
+  }, [initialRmaId, returnDetailQuery.data?.rma]);
 
   // Auto-fill fees when fault category changes and fee data is available.
   useEffect(() => {

@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, ilike, inArray, or, sql, sum } from "drizzle-orm";
+import { asc, count, eq, sql, sum } from "drizzle-orm";
 import {
   channels,
   dropshipStoreConnections,
@@ -9,7 +9,7 @@ import {
   returnCaseItems,
   returnCases,
 } from "@shared/schema";
-import { db } from "../../../db";
+import { db, pool } from "../../../db";
 import type {
   ReturnCaseAdminStore,
   ReturnCaseDetailRow,
@@ -30,38 +30,205 @@ const itemSummary = db
   .groupBy(returnCaseItems.returnCaseId)
   .as("return_case_item_summary");
 
+
+const UNIFIED_RETURN_CASES_CTE = `
+WITH canonical_item_summary AS (
+  SELECT return_case_id, COUNT(*)::integer AS item_count, COALESCE(SUM(quantity), 0)::integer AS unit_count
+  FROM returns.return_case_items
+  GROUP BY return_case_id
+),
+legacy_item_summary AS (
+  SELECT rma_id, COUNT(*)::integer AS item_count, COALESCE(SUM(quantity), 0)::integer AS unit_count
+  FROM dropship.dropship_rma_items
+  GROUP BY rma_id
+),
+unified_returns AS (
+  SELECT
+    'canonical'::text AS record_origin,
+    'canonical:' || rc.id::text AS record_key,
+    NULL::integer AS legacy_rma_id,
+    rc.id, rc.case_number, rc.source_provider, rc.source_event_type, rc.source_event_id,
+    rc.business_context, rc.channel_id, channel.name AS channel_name, rc.vendor_id,
+    COALESCE(vendor.business_name, vendor.email, vendor.member_id) AS vendor_name,
+    rc.store_connection_id, COALESCE(store.external_display_name, store.shop_domain) AS store_name,
+    rc.oms_order_id, oms.external_order_number AS oms_order_number, rc.wms_order_id,
+    wms.order_number AS wms_order_number, rc.wms_return_id, rc.case_status, rc.approval_status,
+    rc.logistics_status, rc.inspection_status, rc.customer_refund_status, rc.vendor_settlement_status,
+    rc.opened_at, rc.closed_at, COALESCE(items.item_count, 0)::integer AS item_count,
+    COALESCE(items.unit_count, 0)::integer AS unit_count,
+    CONCAT_WS(' ', rc.case_number, rc.source_event_id, oms.external_order_number, wms.order_number,
+      vendor.business_name, vendor.email, store.external_display_name, store.shop_domain) AS searchable
+  FROM returns.return_cases rc
+  LEFT JOIN channels.channels channel ON channel.id = rc.channel_id
+  LEFT JOIN dropship.dropship_vendors vendor ON vendor.id = rc.vendor_id
+  LEFT JOIN dropship.dropship_store_connections store ON store.id = rc.store_connection_id
+  LEFT JOIN oms.oms_orders oms ON oms.id = rc.oms_order_id
+  LEFT JOIN wms.orders wms ON wms.id = rc.wms_order_id
+  LEFT JOIN canonical_item_summary items ON items.return_case_id = rc.id
+
+  UNION ALL
+
+  SELECT
+    'legacy_dropship'::text AS record_origin,
+    'legacy_dropship:' || rma.id::text AS record_key,
+    rma.id AS legacy_rma_id,
+    rma.id, rma.rma_number AS case_number,
+    COALESCE(store.platform, intake.platform, 'dropship') AS source_provider,
+    'legacy_rma'::text AS source_event_type, rma.id::text AS source_event_id,
+    'dropship'::text AS business_context, COALESCE(intake.channel_id, oms.channel_id) AS channel_id,
+    COALESCE(channel.name, store.platform, intake.platform) AS channel_name, rma.vendor_id,
+    COALESCE(vendor.business_name, vendor.email, vendor.member_id) AS vendor_name,
+    rma.store_connection_id, COALESCE(store.external_display_name, store.shop_domain) AS store_name,
+    rma.oms_order_id,
+    COALESCE(oms.external_order_number, intake.external_order_number, intake.external_order_id) AS oms_order_number,
+    NULL::integer AS wms_order_id, NULL::text AS wms_order_number, NULL::integer AS wms_return_id,
+    CASE
+      WHEN rma.status IN ('closed', 'rejected') THEN 'closed'
+      WHEN rma.status = 'disputed' THEN 'exception'
+      ELSE 'open'
+    END AS case_status,
+    CASE
+      WHEN rma.status = 'rejected' THEN 'rejected'
+      WHEN rma.status = 'requested' THEN 'pending'
+      ELSE 'approved'
+    END AS approval_status,
+    CASE
+      WHEN rma.status = 'no_inspection_review' THEN 'not_required'
+      WHEN rma.received_at IS NOT NULL THEN 'received'
+      WHEN rma.status = 'in_transit' THEN 'in_transit'
+      ELSE 'awaiting_return'
+    END AS logistics_status,
+    CASE
+      WHEN rma.status = 'no_inspection_review' THEN 'not_required'
+      WHEN rma.status = 'rejected' THEN 'rejected'
+      WHEN rma.inspected_at IS NOT NULL AND rma.status IN ('approved', 'credited', 'closed') THEN 'approved'
+      ELSE 'pending'
+    END AS inspection_status,
+    CASE
+      WHEN rma.credited_at IS NOT NULL THEN 'completed'
+      WHEN rma.status = 'rejected' THEN 'not_required'
+      ELSE 'pending'
+    END AS customer_refund_status,
+    CASE
+      WHEN rma.credited_at IS NOT NULL THEN 'completed'
+      WHEN rma.status = 'rejected' THEN 'not_applicable'
+      ELSE 'pending'
+    END AS vendor_settlement_status,
+    rma.requested_at AS opened_at,
+    CASE WHEN rma.status IN ('closed', 'rejected')
+      THEN COALESCE(rma.credited_at, rma.inspected_at, rma.received_at, rma.updated_at)
+      ELSE NULL
+    END AS closed_at,
+    COALESCE(items.item_count, 0)::integer AS item_count,
+    COALESCE(items.unit_count, 0)::integer AS unit_count,
+    CONCAT_WS(' ', rma.rma_number, rma.id::text, oms.external_order_number,
+      intake.external_order_number, intake.external_order_id, vendor.business_name, vendor.email,
+      store.external_display_name, store.shop_domain, rma.return_tracking_number) AS searchable
+  FROM dropship.dropship_rmas rma
+  LEFT JOIN dropship.dropship_vendors vendor ON vendor.id = rma.vendor_id
+  LEFT JOIN dropship.dropship_store_connections store ON store.id = rma.store_connection_id
+  LEFT JOIN dropship.dropship_order_intake intake ON intake.id = rma.intake_id
+  LEFT JOIN oms.oms_orders oms ON oms.id = rma.oms_order_id
+  LEFT JOIN channels.channels channel ON channel.id = COALESCE(intake.channel_id, oms.channel_id)
+  LEFT JOIN legacy_item_summary items ON items.rma_id = rma.id
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM returns.return_cases adopted
+    WHERE adopted.source_provider = 'dropship'
+      AND adopted.source_event_type = 'legacy_rma'
+      AND adopted.source_event_id = rma.id::text
+  )
+),
+filtered_returns AS (
+  SELECT *
+  FROM unified_returns
+  WHERE ($1::text IS NULL OR case_status = $1)
+    AND ($2::text IS NULL OR source_provider = $2)
+    AND ($3::integer IS NULL OR channel_id = $3)
+    AND ($4::text IS NULL OR searchable ILIKE '%' || $4 || '%')
+)
+`;
+
+interface UnifiedReturnCaseRow {
+  record_origin: "canonical" | "legacy_dropship";
+  record_key: string;
+  legacy_rma_id: number | string | null;
+  id: number | string;
+  case_number: string;
+  source_provider: string;
+  source_event_type: string;
+  source_event_id: string;
+  business_context: string;
+  channel_id: number | string | null;
+  channel_name: string | null;
+  vendor_id: number | string | null;
+  vendor_name: string | null;
+  store_connection_id: number | string | null;
+  store_name: string | null;
+  oms_order_id: number | string | null;
+  oms_order_number: string | null;
+  wms_order_id: number | string | null;
+  wms_order_number: string | null;
+  wms_return_id: number | string | null;
+  case_status: string;
+  approval_status: string;
+  logistics_status: string;
+  inspection_status: string;
+  customer_refund_status: string;
+  vendor_settlement_status: string;
+  opened_at: Date | string;
+  closed_at: Date | string | null;
+  item_count: number | string;
+  unit_count: number | string;
+  searchable: string;
+}
+
+interface UnifiedReturnSummaryRow {
+  total: number | string;
+  open: number | string;
+  awaiting_inspection: number | string;
+  closed: number | string;
+}
 export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
   async list(query: ReturnCaseListQuery): Promise<{ rows: ReturnCaseListRow[]; summary: ReturnCaseSummaryMetrics }> {
-    const where = buildWhere(query);
     const offset = (query.page - 1) * query.limit;
-    const [rows, summaryRows] = await Promise.all([
-      selectCaseRows()
-        .where(where)
-        .orderBy(desc(returnCases.openedAt), desc(returnCases.id))
-        .limit(query.limit)
-        .offset(offset),
-      db
-        .select({
-          total: count(returnCases.id),
-          open: sql<number>`COUNT(*) FILTER (WHERE ${returnCases.caseStatus} = 'open')`,
-          awaitingInspection: sql<number>`COUNT(*) FILTER (WHERE ${returnCases.caseStatus} = 'open' AND ${returnCases.inspectionStatus} = 'pending')`,
-          closed: sql<number>`COUNT(*) FILTER (WHERE ${returnCases.caseStatus} = 'closed')`,
-        })
-        .from(returnCases)
-        .innerJoin(channels, eq(channels.id, returnCases.channelId))
-        .leftJoin(dropshipVendors, eq(dropshipVendors.id, returnCases.vendorId))
-        .leftJoin(dropshipStoreConnections, eq(dropshipStoreConnections.id, returnCases.storeConnectionId))
-        .innerJoin(omsOrders, eq(omsOrders.id, returnCases.omsOrderId))
-        .innerJoin(orders, eq(orders.id, returnCases.wmsOrderId))
-        .where(where),
+    const filters = [query.caseStatus, query.sourceProvider, query.channelId, query.search];
+
+    const [pageResult, summaryResult] = await Promise.all([
+      pool.query<UnifiedReturnCaseRow>(
+        `${UNIFIED_RETURN_CASES_CTE}
+        SELECT *
+        FROM filtered_returns
+        ORDER BY opened_at DESC, record_origin ASC, id DESC
+        LIMIT $5 OFFSET $6
+        `,
+        [...filters, query.limit, offset],
+      ),
+      pool.query<UnifiedReturnSummaryRow>(
+        `${UNIFIED_RETURN_CASES_CTE}
+        SELECT
+          COUNT(*)::integer AS total,
+          COUNT(*) FILTER (WHERE case_status = 'open')::integer AS open,
+          COUNT(*) FILTER (
+            WHERE case_status = 'open'
+              AND logistics_status = 'received'
+              AND inspection_status = 'pending'
+          )::integer AS awaiting_inspection,
+          COUNT(*) FILTER (WHERE case_status = 'closed')::integer AS closed
+        FROM filtered_returns
+        `,
+        filters,
+      ),
     ]);
+
+    const summary = summaryResult.rows[0];
     return {
-      rows: rows.map(mapListRow),
+      rows: pageResult.rows.map(mapUnifiedListRow),
       summary: {
-        total: readNonNegativeInteger(summaryRows[0]?.total, "total"),
-        open: readNonNegativeInteger(summaryRows[0]?.open, "open total"),
-        awaitingInspection: readNonNegativeInteger(summaryRows[0]?.awaitingInspection, "awaiting inspection total"),
-        closed: readNonNegativeInteger(summaryRows[0]?.closed, "closed total"),
+        total: readNonNegativeInteger(summary?.total ?? 0, "total"),
+        open: readNonNegativeInteger(summary?.open ?? 0, "open total"),
+        awaitingInspection: readNonNegativeInteger(summary?.awaiting_inspection ?? 0, "awaiting inspection total"),
+        closed: readNonNegativeInteger(summary?.closed ?? 0, "closed total"),
       },
     };
   }
@@ -143,31 +310,47 @@ function selectCaseRows() {
     .leftJoin(itemSummary, eq(itemSummary.returnCaseId, returnCases.id));
 }
 
-function buildWhere(query: ReturnCaseListQuery) {
-  const conditions = [];
-  if (query.caseStatus) conditions.push(eq(returnCases.caseStatus, query.caseStatus));
-  if (query.sourceProvider) conditions.push(eq(returnCases.sourceProvider, query.sourceProvider));
-  if (query.channelId) conditions.push(eq(returnCases.channelId, query.channelId));
-  if (query.search) {
-    const search = `%${query.search}%`;
-    conditions.push(or(
-      ilike(returnCases.caseNumber, search),
-      ilike(returnCases.sourceEventId, search),
-      ilike(omsOrders.externalOrderNumber, search),
-      ilike(orders.orderNumber, search),
-      ilike(dropshipVendors.businessName, search),
-      ilike(dropshipVendors.email, search),
-      ilike(dropshipStoreConnections.externalDisplayName, search),
-      ilike(dropshipStoreConnections.shopDomain, search),
-    ));
-  }
-  return conditions.length === 0 ? undefined : and(...conditions);
+function mapUnifiedListRow(row: UnifiedReturnCaseRow): ReturnCaseListRow {
+  return {
+    recordOrigin: row.record_origin,
+    recordKey: row.record_key,
+    legacyRmaId: readNullablePositiveSafeInteger(row.legacy_rma_id, "legacy RMA id"),
+    id: readPositiveSafeInteger(row.id, "return record id"),
+    caseNumber: row.case_number,
+    sourceProvider: row.source_provider,
+    sourceEventType: row.source_event_type,
+    sourceEventId: row.source_event_id,
+    businessContext: row.business_context,
+    channelId: readNullablePositiveSafeInteger(row.channel_id, "channel id"),
+    channelName: row.channel_name,
+    vendorId: readNullablePositiveSafeInteger(row.vendor_id, "vendor id"),
+    vendorName: row.vendor_name,
+    storeConnectionId: readNullablePositiveSafeInteger(row.store_connection_id, "store connection id"),
+    storeName: row.store_name,
+    omsOrderId: readNullablePositiveSafeInteger(row.oms_order_id, "OMS order id"),
+    omsOrderNumber: row.oms_order_number,
+    wmsOrderId: readNullablePositiveSafeInteger(row.wms_order_id, "WMS order id"),
+    wmsOrderNumber: row.wms_order_number,
+    wmsReturnId: readNullablePositiveSafeInteger(row.wms_return_id, "WMS return id"),
+    caseStatus: row.case_status as ReturnCaseListRow["caseStatus"],
+    approvalStatus: row.approval_status as ReturnCaseListRow["approvalStatus"],
+    logisticsStatus: row.logistics_status as ReturnCaseListRow["logisticsStatus"],
+    inspectionStatus: row.inspection_status as ReturnCaseListRow["inspectionStatus"],
+    customerRefundStatus: row.customer_refund_status as ReturnCaseListRow["customerRefundStatus"],
+    vendorSettlementStatus: row.vendor_settlement_status as ReturnCaseListRow["vendorSettlementStatus"],
+    openedAt: readDate(row.opened_at, "opened at"),
+    closedAt: readNullableDate(row.closed_at, "closed at"),
+    itemCount: readNonNegativeInteger(row.item_count, "item count"),
+    unitCount: readNonNegativeInteger(row.unit_count, "unit count"),
+  };
 }
-
 type SelectedCaseRow = Awaited<ReturnType<ReturnType<typeof selectCaseRows>["limit"]>>[number];
 
 function mapListRow(row: SelectedCaseRow): ReturnCaseListRow {
   return {
+    recordOrigin: "canonical",
+    recordKey: `canonical:${readPositiveSafeInteger(row.id, "return case id")}`,
+    legacyRmaId: null,
     id: readPositiveSafeInteger(row.id, "return case id"),
     caseNumber: row.caseNumber,
     sourceProvider: row.sourceProvider,
@@ -180,11 +363,11 @@ function mapListRow(row: SelectedCaseRow): ReturnCaseListRow {
     vendorName: row.vendorBusinessName ?? row.vendorEmail ?? row.vendorMemberId ?? null,
     storeConnectionId: row.storeConnectionId,
     storeName: row.storeDisplayName ?? row.storeDomain ?? null,
-    omsOrderId: readPositiveSafeInteger(row.omsOrderId, "OMS order id"),
+    omsOrderId: readNullablePositiveSafeInteger(row.omsOrderId, "OMS order id"),
     omsOrderNumber: row.omsOrderNumber,
     wmsOrderId: row.wmsOrderId,
     wmsOrderNumber: row.wmsOrderNumber,
-    wmsReturnId: readPositiveSafeInteger(row.wmsReturnId, "WMS return id"),
+    wmsReturnId: readNullablePositiveSafeInteger(row.wmsReturnId, "WMS return id"),
     caseStatus: row.caseStatus as ReturnCaseListRow["caseStatus"],
     approvalStatus: row.approvalStatus as ReturnCaseListRow["approvalStatus"],
     logisticsStatus: row.logisticsStatus as ReturnCaseListRow["logisticsStatus"],
@@ -237,6 +420,17 @@ function readNullablePositiveSafeInteger(value: unknown, field: string): number 
   return value === null || value === undefined ? null : readPositiveSafeInteger(value, field);
 }
 
+function readDate(value: Date | string, field: string): Date {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`Invalid ${field} returned by the database.`);
+  }
+  return parsed;
+}
+
+function readNullableDate(value: Date | string | null, field: string): Date | null {
+  return value === null ? null : readDate(value, field);
+}
 function readNonNegativeInteger(value: unknown, field: string): number {
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 0) {

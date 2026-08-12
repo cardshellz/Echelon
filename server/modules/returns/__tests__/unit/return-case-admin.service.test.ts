@@ -31,12 +31,61 @@ describe("ReturnCaseAdminService", () => {
     expect(result.summary).toEqual({ total: 51, open: 40, awaitingInspection: 12, closed: 11 });
     expect(result.pagination).toEqual({ page: 2, limit: 25, total: 51, totalPages: 3 });
     expect(result.cases[0]).toMatchObject({
+      recordOrigin: "canonical",
+      recordKey: "canonical:8",
+      legacyRmaId: null,
       id: 8,
       openedAt: "2026-08-10T12:00:00.000Z",
       closedAt: null,
     });
   });
 
+  it("serializes historical dropship RMAs without requiring canonical order links", async () => {
+    const store = fakeStore();
+    store.list.mockResolvedValue({
+      rows: [{
+        ...listRow(),
+        recordOrigin: "legacy_dropship",
+        recordKey: "legacy_dropship:12",
+        legacyRmaId: 12,
+        id: 12,
+        caseNumber: "RMA-DF-0012",
+        sourceProvider: "ebay",
+        sourceEventType: "legacy_rma",
+        sourceEventId: "12",
+        businessContext: "dropship",
+        channelId: null,
+        channelName: null,
+        omsOrderId: null,
+        omsOrderNumber: null,
+        wmsOrderId: null,
+        wmsOrderNumber: null,
+        wmsReturnId: null,
+      }],
+      summary: { total: 1, open: 1, awaitingInspection: 0, closed: 0 },
+    });
+    const service = new ReturnCaseAdminService(store);
+
+    const result = await service.list({
+      search: null,
+      caseStatus: null,
+      sourceProvider: null,
+      channelId: null,
+      page: 1,
+      limit: 25,
+    });
+
+    expect(result.cases[0]).toMatchObject({
+      recordOrigin: "legacy_dropship",
+      recordKey: "legacy_dropship:12",
+      legacyRmaId: 12,
+      channelId: null,
+      omsOrderId: null,
+      wmsOrderId: null,
+      wmsReturnId: null,
+      openedAt: "2026-08-10T12:00:00.000Z",
+    });
+  });
   it("returns zero total pages for an empty result", async () => {
     const store = fakeStore();
     store.list.mockResolvedValue({
@@ -97,6 +146,9 @@ function fakeStore() {
 
 function listRow(): ReturnCaseListRow {
   return {
+    recordOrigin: "canonical",
+    recordKey: "canonical:8",
+    legacyRmaId: null,
     id: 8,
     caseNumber: "RMA-000008",
     sourceProvider: "shopify",
