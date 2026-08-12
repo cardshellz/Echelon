@@ -39,7 +39,11 @@ describe("return case admin routes", () => {
   afterEach(async () => server.close());
 
   it("validates and forwards normalized list filters", async () => {
-    service.list.mockResolvedValue({ cases: [], pagination: { page: 2, limit: 10, total: 0, totalPages: 0 } });
+    service.list.mockResolvedValue({
+      cases: [],
+      summary: { total: 0, open: 0, awaitingInspection: 0, closed: 0 },
+      pagination: { page: 2, limit: 10, total: 0, totalPages: 0 },
+    });
 
     const response = await jsonRequest(`${server.url}/api/returns/admin/cases?search=%20RMA-1%20&caseStatus=open&sourceProvider=shopify&page=2&limit=10`);
 

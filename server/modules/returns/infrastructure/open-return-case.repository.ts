@@ -104,6 +104,7 @@ export class PostgresOpenReturnCaseStore implements OpenReturnCaseStore {
         JOIN wms.order_items oi ON oi.order_id = wo.id
         LEFT JOIN expected e ON e.order_item_id = oi.id
         WHERE wo.oms_fulfillment_order_id ~ '^[0-9]+$'
+          AND oi.requires_shipping <> 0
           AND oi.fulfilled_quantity > COALESCE(e.expected_qty, 0)
       )
       SELECT
@@ -146,6 +147,7 @@ export class PostgresOpenReturnCaseStore implements OpenReturnCaseStore {
           JOIN wms.order_items oi ON oi.order_id = wo.id
           LEFT JOIN expected e ON e.order_item_id = oi.id
           WHERE wo.oms_fulfillment_order_id ~ '^[0-9]+$'
+            AND oi.requires_shipping <> 0
             AND oi.fulfilled_quantity > COALESCE(e.expected_qty, 0)
         )
         SELECT COUNT(DISTINCT oo.id)::int AS total
@@ -172,6 +174,7 @@ export class PostgresOpenReturnCaseStore implements OpenReturnCaseStore {
           JOIN wms.order_items oi ON oi.order_id = wo.id
           LEFT JOIN expected e ON e.order_item_id = oi.id
           WHERE wo.oms_fulfillment_order_id ~ '^[0-9]+$'
+            AND oi.requires_shipping <> 0
             AND oi.fulfilled_quantity > COALESCE(e.expected_qty, 0)
         )
         SELECT c.id, c.name, COUNT(DISTINCT oo.id)::int AS order_count
@@ -493,6 +496,7 @@ async function loadSourceItems(
     WHERE wo.oms_fulfillment_order_id = ${String(omsOrderId)}
       AND (${wmsOrderId}::int IS NULL OR wo.id = ${wmsOrderId})
       AND (${itemIds.length === 0} OR oi.id = ANY(ARRAY[${sql.join(itemIds.length === 0 ? [0] : itemIds, sql`, `)}]::int[]))
+      AND oi.requires_shipping <> 0
       AND oi.fulfilled_quantity > COALESCE(e.expected_qty, 0)
     ORDER BY wo.id, oi.id
     ${forUpdate ? sql`FOR UPDATE OF wo, oi` : sql``}
