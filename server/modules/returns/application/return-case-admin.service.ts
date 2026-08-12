@@ -23,23 +23,26 @@ export interface ReturnCaseSummaryMetrics {
 }
 
 export interface ReturnCaseListRow {
+  recordOrigin: "canonical" | "legacy_dropship";
+  recordKey: string;
+  legacyRmaId: number | null;
   id: number;
   caseNumber: string;
   sourceProvider: string;
   sourceEventType: string;
   sourceEventId: string;
   businessContext: string;
-  channelId: number;
-  channelName: string;
+  channelId: number | null;
+  channelName: string | null;
   vendorId: number | null;
   vendorName: string | null;
   storeConnectionId: number | null;
   storeName: string | null;
-  omsOrderId: number;
+  omsOrderId: number | null;
   omsOrderNumber: string | null;
-  wmsOrderId: number;
-  wmsOrderNumber: string;
-  wmsReturnId: number;
+  wmsOrderId: number | null;
+  wmsOrderNumber: string | null;
+  wmsReturnId: number | null;
   caseStatus: ReturnCaseStatus;
   approvalStatus: ReturnApprovalStatus;
   logisticsStatus: ReturnLogisticsStatus;
