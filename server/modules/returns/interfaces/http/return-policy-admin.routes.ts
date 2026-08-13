@@ -2,29 +2,30 @@ import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import {
   returnApprovalAuthorities,
-  returnBusinessContexts,
   returnDestinations,
   returnInspectionOwners,
   returnInspectionRequirements,
   returnLabelProviders,
-  returnPolicyScopeKinds,
   returnRefundAuthorities,
   returnShippingPayers,
   returnVendorSettlementTriggers,
 } from "@shared/schema";
 import { requirePermission } from "../../../../routes/middleware";
-import { ReturnPolicyAdminError, ReturnPolicyAdminService } from "../../application/return-policy-admin.service";
+import {
+  returnPolicyAppliesToKinds,
+  ReturnPolicyAdminError,
+  ReturnPolicyAdminService,
+} from "../../application/return-policy-admin.service";
 import { PostgresReturnPolicyAdminStore } from "../../infrastructure/return-policy.repository";
 
 const nullablePositiveInteger = z.number().int().positive().nullable();
-const scopeSchema = z.object({
-  scopeKind: z.enum(returnPolicyScopeKinds),
-  businessContext: z.enum(returnBusinessContexts).nullable(),
+const publicScopeSchema = z.object({
+  appliesTo: z.enum(returnPolicyAppliesToKinds),
   channelId: nullablePositiveInteger,
   vendorId: nullablePositiveInteger,
   storeConnectionId: nullablePositiveInteger,
 });
-const createPolicySchema = scopeSchema.extend({
+const createPolicySchema = publicScopeSchema.extend({
   name: z.string().trim().min(1).max(160),
   returnWindowDays: z.number().int().min(0).max(3650),
   returnDestination: z.enum(returnDestinations),
@@ -39,10 +40,16 @@ const createPolicySchema = scopeSchema.extend({
   notes: z.string().trim().max(4000).nullable(),
 });
 const resolutionSchema = z.object({
-  businessContext: z.enum(returnBusinessContexts),
   channelId: z.number().int().positive(),
   vendorId: nullablePositiveInteger,
   storeConnectionId: nullablePositiveInteger,
+});
+const searchSchema = z.object({
+  search: z.string().trim().max(160).default(""),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+const storeSearchSchema = searchSchema.extend({
+  vendorId: z.coerce.number().int().positive(),
 });
 
 export function registerReturnPolicyAdminRoutes(
@@ -54,6 +61,26 @@ export function registerReturnPolicyAdminRoutes(
       return res.json(await service.listOverview());
     } catch (error) {
       return sendError(res, error, "RETURN_POLICY_OVERVIEW_FAILED", "Return policies could not be loaded.");
+    }
+  });
+
+  app.get("/api/returns/admin/policies/vendors", requirePermission("settings", "view"), async (req, res) => {
+    const parsed = searchSchema.safeParse(req.query);
+    if (!parsed.success) return sendValidationError(res, parsed.error);
+    try {
+      return res.json({ vendors: await service.searchVendors(parsed.data.search, parsed.data.limit) });
+    } catch (error) {
+      return sendError(res, error, "RETURN_POLICY_VENDOR_SEARCH_FAILED", "Vendors could not be loaded.");
+    }
+  });
+
+  app.get("/api/returns/admin/policies/stores", requirePermission("settings", "view"), async (req, res) => {
+    const parsed = storeSearchSchema.safeParse(req.query);
+    if (!parsed.success) return sendValidationError(res, parsed.error);
+    try {
+      return res.json({ stores: await service.searchStores(parsed.data.vendorId, parsed.data.search, parsed.data.limit) });
+    } catch (error) {
+      return sendError(res, error, "RETURN_POLICY_STORE_SEARCH_FAILED", "Store connections could not be loaded.");
     }
   });
 
@@ -83,11 +110,7 @@ export function registerReturnPolicyAdminRoutes(
       });
     }
     try {
-      const result = await service.createVersion({
-        ...parsed.data,
-        idempotencyKey,
-        actor,
-      });
+      const result = await service.createVersion({ ...parsed.data, idempotencyKey, actor });
       return res.status(result.replayed ? 200 : 201).json(result);
     } catch (error) {
       return sendError(res, error, "RETURN_POLICY_CREATE_FAILED", "Return policy version could not be created.");
