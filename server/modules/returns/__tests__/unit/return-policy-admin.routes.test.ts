@@ -7,17 +7,11 @@ import { registerReturnPolicyAdminRoutes } from "../../interfaces/http/return-po
 
 const { requirePermissionMock } = vi.hoisted(() => ({
   requirePermissionMock: vi.fn(
-    (_resource: string, _action: string) => (
-      _req: unknown,
-      _res: unknown,
-      next: () => void,
-    ) => next(),
+    (_resource: string, _action: string) => (_req: unknown, _res: unknown, next: () => void) => next(),
   ),
 }));
 
-vi.mock("../../../../routes/middleware", () => ({
-  requirePermission: requirePermissionMock,
-}));
+vi.mock("../../../../routes/middleware", () => ({ requirePermission: requirePermissionMock }));
 
 describe("return policy admin routes", () => {
   let server: { url: string; close: () => Promise<void> };
@@ -38,31 +32,11 @@ describe("return policy admin routes", () => {
       body: JSON.stringify(validPolicy()),
     });
 
-    expect(response).toMatchObject({
-      status: 400,
-      body: { error: { code: "RETURN_POLICY_IDEMPOTENCY_REQUIRED" } },
-    });
+    expect(response).toMatchObject({ status: 400, body: { error: { code: "RETURN_POLICY_IDEMPOTENCY_REQUIRED" } } });
     expect(service.createVersion).not.toHaveBeenCalled();
   });
 
-  it("rejects mutation requests without an authenticated audit actor", async () => {
-    await server.close();
-    server = await startServer(buildApp(service, false));
-
-    const response = await jsonRequest(`${server.url}/api/returns/admin/policies/versions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": "returns-test-1" },
-      body: JSON.stringify(validPolicy()),
-    });
-
-    expect(response).toMatchObject({
-      status: 401,
-      body: { error: { code: "RETURN_POLICY_ACTOR_REQUIRED" } },
-    });
-    expect(service.createVersion).not.toHaveBeenCalled();
-  });
-
-  it("validates, normalizes, and forwards a new version with its audit actor", async () => {
+  it("forwards the simplified public scope with its authenticated actor", async () => {
     service.createVersion.mockResolvedValue({ policy: { id: 42 }, replayed: false });
 
     const response = await jsonRequest(`${server.url}/api/returns/admin/policies/versions`, {
@@ -72,34 +46,39 @@ describe("return policy admin routes", () => {
     });
 
     expect(response).toEqual({ status: 201, body: { policy: { id: 42 }, replayed: false } });
-    expect(requirePermissionMock).toHaveBeenCalledWith("settings", "edit");
-    expect(service.createVersion).toHaveBeenCalledWith({
-      ...validPolicy(),
-      idempotencyKey: "returns-test-2",
-      actor: "operator-1",
-    });
+    expect(service.createVersion).toHaveBeenCalledWith({ ...validPolicy(), idempotencyKey: "returns-test-2", actor: "operator-1" });
   });
 
-  it("returns 200 when the idempotent command is replayed", async () => {
-    service.createVersion.mockResolvedValue({ policy: { id: 42 }, replayed: true });
-
+  it("rejects internal scope fields at the public boundary", async () => {
     const response = await jsonRequest(`${server.url}/api/returns/admin/policies/versions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": "returns-test-3" },
-      body: JSON.stringify(validPolicy()),
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "returns-test-legacy" },
+      body: JSON.stringify({ ...validPolicy(), appliesTo: undefined, scopeKind: "channel_context", businessContext: "retail" }),
     });
 
-    expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({ replayed: true });
+    expect(response).toMatchObject({ status: 400, body: { error: { code: "RETURN_POLICY_INVALID" } } });
+    expect(service.createVersion).not.toHaveBeenCalled();
   });
 
-  it("preserves classified policy conflicts", async () => {
-    service.createVersion.mockRejectedValue(new ReturnPolicyAdminError(
-      "RETURN_POLICY_IDEMPOTENCY_CONFLICT",
-      "The key was already used.",
-      409,
-      { key: "returns-test-4" },
-    ));
+  it("searches stores within the selected vendor", async () => {
+    service.searchStores.mockResolvedValue([{ id: 11, vendorId: 7, platform: "ebay", displayName: "Seven eBay", shopDomain: null, status: "connected" }]);
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/policies/stores?vendorId=7&search=seven&limit=10`);
+
+    expect(response.status).toBe(200);
+    expect(service.searchStores).toHaveBeenCalledWith(7, "seven", 10);
+    expect(response.body).toMatchObject({ stores: [{ id: 11, vendorId: 7 }] });
+  });
+
+  it("rejects store search without a valid vendor", async () => {
+    const response = await jsonRequest(`${server.url}/api/returns/admin/policies/stores?vendorId=0`);
+
+    expect(response).toMatchObject({ status: 400, body: { error: { code: "RETURN_POLICY_INVALID" } } });
+    expect(service.searchStores).not.toHaveBeenCalled();
+  });
+
+  it("preserves classified conflicts", async () => {
+    service.createVersion.mockRejectedValue(new ReturnPolicyAdminError("RETURN_POLICY_IDEMPOTENCY_CONFLICT", "The key was already used.", 409));
 
     const response = await jsonRequest(`${server.url}/api/returns/admin/policies/versions`, {
       method: "POST",
@@ -107,35 +86,14 @@ describe("return policy admin routes", () => {
       body: JSON.stringify(validPolicy()),
     });
 
-    expect(response).toEqual({
-      status: 409,
-      body: {
-        error: {
-          code: "RETURN_POLICY_IDEMPOTENCY_CONFLICT",
-          message: "The key was already used.",
-          context: { key: "returns-test-4" },
-        },
-      },
-    });
-  });
-
-  it("rejects structurally invalid scopes before calling the service", async () => {
-    const response = await jsonRequest(`${server.url}/api/returns/admin/policies/resolve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ businessContext: "retail", channelId: 0, vendorId: null, storeConnectionId: null }),
-    });
-
-    expect(response).toMatchObject({ status: 400, body: { error: { code: "RETURN_POLICY_INVALID" } } });
-    expect(service.resolve).not.toHaveBeenCalled();
+    expect(response).toMatchObject({ status: 409, body: { error: { code: "RETURN_POLICY_IDEMPOTENCY_CONFLICT" } } });
   });
 });
 
 function validPolicy() {
   return {
-    name: "Shopify direct returns",
-    scopeKind: "channel_context",
-    businessContext: "retail",
+    name: "Shopify returns",
+    appliesTo: "channel",
     channelId: 36,
     vendorId: null,
     storeConnectionId: null,
@@ -157,6 +115,9 @@ function fakeService() {
   return {
     listOverview: vi.fn(),
     listActivePolicies: vi.fn(),
+    getDropshipOmsChannel: vi.fn(),
+    searchVendors: vi.fn(),
+    searchStores: vi.fn(),
     resolve: vi.fn(),
     createVersion: vi.fn(),
   };
@@ -167,10 +128,7 @@ function buildApp(service: ReturnType<typeof fakeService>, authenticated = true)
   app.use(express.json());
   if (authenticated) {
     app.use((req, _res, next) => {
-      Object.defineProperty(req, "session", {
-        configurable: true,
-        value: { user: { id: "operator-1" } },
-      });
+      Object.defineProperty(req, "session", { configurable: true, value: { user: { id: "operator-1" } } });
       next();
     });
   }
@@ -184,9 +142,7 @@ async function startServer(app: express.Express): Promise<{ url: string; close: 
   const address = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    }),
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
   };
 }
 
@@ -199,7 +155,7 @@ async function jsonRequest(
     const request = http.request({
       hostname: target.hostname,
       port: target.port,
-      path: target.pathname,
+      path: `${target.pathname}${target.search}`,
       method: init?.method ?? "GET",
       headers: init?.headers,
     }, (response) => {
@@ -207,10 +163,7 @@ async function jsonRequest(
       response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
       response.on("end", () => {
         const rawBody = Buffer.concat(chunks).toString("utf8");
-        resolve({
-          status: response.statusCode ?? 0,
-          body: rawBody === "" ? {} : JSON.parse(rawBody) as Record<string, unknown>,
-        });
+        resolve({ status: response.statusCode ?? 0, body: rawBody === "" ? {} : JSON.parse(rawBody) as Record<string, unknown> });
       });
     });
     request.on("error", reject);

@@ -1,4 +1,4 @@
-import { asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
 import {
   channels,
   dropshipStoreConnections,
@@ -9,30 +9,83 @@ import {
 } from "@shared/schema";
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
-import type {
-  ReturnPolicyAdminStore,
-  ReturnPolicyAdminTransaction,
-  ReturnPolicyCommandRecord,
-  ReturnPolicyOverview,
-  ScopeReferences,
+import {
+  ReturnPolicyAdminError,
+  type PublicReturnPolicyScopeInput,
+  type ReturnPolicyAdminStore,
+  type ReturnPolicyAdminTransaction,
+  type ReturnPolicyChannelReference,
+  type ReturnPolicyCommandRecord,
+  type ReturnPolicyOverview,
+  type ReturnPolicyStoreReference,
+  type ReturnPolicyVendorReference,
+  type ScopeReferences,
 } from "../application/return-policy-admin.service";
-import type { ReturnPolicyScopeInput } from "../domain/return-policy";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type QueryExecutor = typeof db | Transaction;
 
 export class PostgresReturnPolicyAdminStore implements ReturnPolicyAdminStore {
   async listOverview(): Promise<ReturnPolicyOverview> {
-    const [policies, channelRows, vendorRows, storeRows] = await Promise.all([
+    const [policies, channelRows, dropshipOmsChannel] = await Promise.all([
       db.select().from(returnPolicies).orderBy(asc(returnPolicies.scopeKey), desc(returnPolicies.version)),
-      db.select({ id: channels.id, name: channels.name, provider: channels.provider, status: channels.status }).from(channels).orderBy(asc(channels.name)),
-      db.select({ id: dropshipVendors.id, memberId: dropshipVendors.memberId, businessName: dropshipVendors.businessName }).from(dropshipVendors).orderBy(asc(dropshipVendors.memberId)),
-      db.select({ id: dropshipStoreConnections.id, vendorId: dropshipStoreConnections.vendorId, platform: dropshipStoreConnections.platform, displayName: dropshipStoreConnections.externalDisplayName }).from(dropshipStoreConnections).orderBy(asc(dropshipStoreConnections.externalDisplayName), asc(dropshipStoreConnections.id)),
+      db.select(channelSelection).from(channels).orderBy(asc(channels.name)),
+      loadDropshipOmsChannel(db),
     ]);
-    return { policies, channels: channelRows, vendors: vendorRows, stores: storeRows };
+    const vendorIds = uniqueIds(policies.map((policy) => policy.vendorId));
+    const storeIds = uniqueIds(policies.map((policy) => policy.storeConnectionId));
+    const [referencedVendors, referencedStores] = await Promise.all([
+      vendorIds.length === 0
+        ? Promise.resolve([])
+        : db.select(vendorSelection).from(dropshipVendors).where(inArray(dropshipVendors.id, vendorIds)).orderBy(asc(dropshipVendors.businessName), asc(dropshipVendors.email)),
+      storeIds.length === 0
+        ? Promise.resolve([])
+        : db.select(storeSelection).from(dropshipStoreConnections).where(inArray(dropshipStoreConnections.id, storeIds)).orderBy(asc(dropshipStoreConnections.externalDisplayName), asc(dropshipStoreConnections.id)),
+    ]);
+    return {
+      policies,
+      channels: channelRows,
+      referencedVendors,
+      referencedStores,
+      dropshipOmsChannelId: dropshipOmsChannel.id,
+    };
   }
 
   listActivePolicies(): Promise<ReturnPolicy[]> {
     return db.select().from(returnPolicies).where(eq(returnPolicies.status, "active"));
+  }
+
+  getDropshipOmsChannel(): Promise<ReturnPolicyChannelReference> {
+    return loadDropshipOmsChannel(db);
+  }
+
+  searchVendors(search: string, limit: number): Promise<ReturnPolicyVendorReference[]> {
+    const pattern = `%${search}%`;
+    return db.select(vendorSelection)
+      .from(dropshipVendors)
+      .where(search ? or(
+        ilike(dropshipVendors.businessName, pattern),
+        ilike(dropshipVendors.email, pattern),
+        ilike(dropshipVendors.memberId, pattern),
+      ) : undefined)
+      .orderBy(asc(dropshipVendors.businessName), asc(dropshipVendors.email), asc(dropshipVendors.id))
+      .limit(limit);
+  }
+
+  searchStores(vendorId: number, search: string, limit: number): Promise<ReturnPolicyStoreReference[]> {
+    const pattern = `%${search}%`;
+    return db.select(storeSelection)
+      .from(dropshipStoreConnections)
+      .where(and(
+        eq(dropshipStoreConnections.vendorId, vendorId),
+        search ? or(
+          ilike(dropshipStoreConnections.externalDisplayName, pattern),
+          ilike(dropshipStoreConnections.shopDomain, pattern),
+          ilike(dropshipStoreConnections.platform, pattern),
+        ) : undefined,
+      ))
+      .orderBy(asc(dropshipStoreConnections.externalDisplayName), asc(dropshipStoreConnections.id))
+      .limit(limit);
   }
 
   transaction<T>(work: (tx: ReturnPolicyAdminTransaction) => Promise<T>): Promise<T> {
@@ -57,19 +110,20 @@ class PostgresReturnPolicyAdminTransaction implements ReturnPolicyAdminTransacti
     return { requestHash: row.requestHash, response: hydratePolicy(row.response) };
   }
 
-  async getScopeReferences(scope: ReturnPolicyScopeInput): Promise<ScopeReferences> {
-    const [channel, vendor, store] = await Promise.all([
+  async getScopeReferences(scope: PublicReturnPolicyScopeInput): Promise<ScopeReferences> {
+    const [channel, vendor, store, dropshipOmsChannel] = await Promise.all([
       scope.channelId === null
         ? Promise.resolve(null)
-        : this.tx.select({ id: channels.id, name: channels.name, provider: channels.provider }).from(channels).where(eq(channels.id, scope.channelId)).limit(1).then((rows) => rows[0] ?? null),
+        : this.tx.select(channelSelection).from(channels).where(eq(channels.id, scope.channelId)).limit(1).then((rows) => rows[0] ?? null),
       scope.vendorId === null
         ? Promise.resolve(null)
-        : this.tx.select({ id: dropshipVendors.id, memberId: dropshipVendors.memberId }).from(dropshipVendors).where(eq(dropshipVendors.id, scope.vendorId)).limit(1).then((rows) => rows[0] ?? null),
+        : this.tx.select(vendorSelection).from(dropshipVendors).where(eq(dropshipVendors.id, scope.vendorId)).limit(1).then((rows) => rows[0] ?? null),
       scope.storeConnectionId === null
         ? Promise.resolve(null)
-        : this.tx.select({ id: dropshipStoreConnections.id, vendorId: dropshipStoreConnections.vendorId, platform: dropshipStoreConnections.platform }).from(dropshipStoreConnections).where(eq(dropshipStoreConnections.id, scope.storeConnectionId)).limit(1).then((rows) => rows[0] ?? null),
+        : this.tx.select(storeSelection).from(dropshipStoreConnections).where(eq(dropshipStoreConnections.id, scope.storeConnectionId)).limit(1).then((rows) => rows[0] ?? null),
+      loadDropshipOmsChannel(this.tx),
     ]);
-    return { channel, vendor, store };
+    return { channel, vendor, store, dropshipOmsChannel };
   }
 
   async getActivePolicyForUpdate(scopeKey: string): Promise<ReturnPolicy | null> {
@@ -119,6 +173,62 @@ class PostgresReturnPolicyAdminTransaction implements ReturnPolicyAdminTransacti
       },
     }, { timestamp: input.now });
   }
+}
+
+const channelSelection = {
+  id: channels.id,
+  name: channels.name,
+  type: channels.type,
+  provider: channels.provider,
+  status: channels.status,
+};
+
+const vendorSelection = {
+  id: dropshipVendors.id,
+  memberId: dropshipVendors.memberId,
+  businessName: dropshipVendors.businessName,
+  email: dropshipVendors.email,
+  status: dropshipVendors.status,
+};
+
+const storeSelection = {
+  id: dropshipStoreConnections.id,
+  vendorId: dropshipStoreConnections.vendorId,
+  platform: dropshipStoreConnections.platform,
+  displayName: dropshipStoreConnections.externalDisplayName,
+  shopDomain: dropshipStoreConnections.shopDomain,
+  status: dropshipStoreConnections.status,
+};
+
+async function loadDropshipOmsChannel(executor: QueryExecutor): Promise<ReturnPolicyChannelReference> {
+  const rows = await executor.select(channelSelection)
+    .from(channels)
+    .where(and(
+      eq(channels.name, "Dropship OMS"),
+      eq(channels.type, "internal"),
+      eq(channels.provider, "manual"),
+      eq(channels.status, "active"),
+    ))
+    .limit(2);
+  if (rows.length === 0) {
+    throw new ReturnPolicyAdminError(
+      "RETURN_POLICY_DROPSHIP_CHANNEL_NOT_CONFIGURED",
+      "The canonical Dropship OMS channel is not configured.",
+      500,
+    );
+  }
+  if (rows.length > 1) {
+    throw new ReturnPolicyAdminError(
+      "RETURN_POLICY_DROPSHIP_CHANNEL_AMBIGUOUS",
+      "More than one canonical Dropship OMS channel is configured.",
+      500,
+    );
+  }
+  return rows[0];
+}
+
+function uniqueIds(values: Array<number | null>): number[] {
+  return [...new Set(values.filter((value): value is number => value !== null))];
 }
 
 function auditRecord(policy: ReturnPolicy): Record<string, unknown> {
