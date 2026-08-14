@@ -15,6 +15,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import {
+  deriveReturnPolicyResolutionInput,
   isSameReturnPolicyResolutionInput,
   snapshotReturnPolicyResolutionInput,
   type ReturnPolicyResolutionInput,
@@ -340,14 +341,20 @@ function ResolutionPreview({ overview, value, onChange, onResolve, loading, resu
   const dropship = value.channelId === overview.dropshipOmsChannelId;
   const [vendor, setVendor] = useState<VendorReference | null>(null);
   const [store, setStore] = useState<StoreReference | null>(null);
+  const currentInput = deriveReturnPolicyResolutionInput({
+    channelId: value.channelId,
+    dropshipOmsChannelId: overview.dropshipOmsChannelId,
+    selectedVendorId: vendor?.id ?? null,
+    selectedStoreConnectionId: store?.id ?? null,
+  });
   return <div className="space-y-4">
     <Card>
       <CardHeader><CardTitle>Test which policy applies</CardTitle><CardDescription>Select the order channel. Dropship orders can then be narrowed to a vendor or store.</CardDescription></CardHeader>
       <CardContent className="grid gap-4 md:grid-cols-4">
         <SelectField label="Sales channel" value={value.channelId?.toString() ?? "none"} options={overview.channels.filter((item) => item.status === "active").map((item) => ({ value: item.id.toString(), label: item.name }))} onChange={(channelId) => { const id = Number(channelId); setVendor(null); setStore(null); onChange({ channelId: id, vendorId: null, storeConnectionId: null }); }} />
-        {dropship && <VendorPicker label="Dropship vendor (optional)" selected={vendor} onSelect={(next) => { setVendor(next); setStore(null); onChange({ ...value, vendorId: next?.id ?? null, storeConnectionId: null }); }} />}
-        {dropship && vendor && <StorePicker label="Dropship store (optional)" vendorId={vendor.id} selected={store} onSelect={(next) => { setStore(next); onChange({ ...value, storeConnectionId: next?.id ?? null }); }} />}
-        <div className="flex items-end"><Button className="w-full" disabled={!value.channelId || loading} onClick={() => onResolve(snapshotReturnPolicyResolutionInput(value))}>{loading ? "Testing..." : "Test policy"}</Button></div>
+        {dropship && <VendorPicker label="Dropship vendor (optional)" selected={vendor} onSelect={(next) => { setVendor(next); setStore(null); onChange(deriveReturnPolicyResolutionInput({ channelId: value.channelId, dropshipOmsChannelId: overview.dropshipOmsChannelId, selectedVendorId: next?.id ?? null, selectedStoreConnectionId: null })); }} />}
+        {dropship && vendor && <StorePicker label="Dropship store (optional)" vendorId={vendor.id} selected={store} onSelect={(next) => { setStore(next); onChange(deriveReturnPolicyResolutionInput({ channelId: value.channelId, dropshipOmsChannelId: overview.dropshipOmsChannelId, selectedVendorId: vendor.id, selectedStoreConnectionId: next?.id ?? null })); }} />}
+        <div className="flex items-end"><Button className="w-full" disabled={!currentInput.channelId || loading} onClick={() => onResolve(snapshotReturnPolicyResolutionInput(currentInput))}>{loading ? "Testing..." : "Test policy"}</Button></div>
       </CardContent>
     </Card>
     {result && <Card><CardHeader><CardTitle>Applies: {result.winner.name}</CardTitle><CardDescription>Version {result.winner.version} is the closest policy for this order.</CardDescription></CardHeader><CardContent className="space-y-2">{result.matched.map((match) => <div key={match.policy.id} className={`border p-3 ${match.policy.id === result.winner.id ? "border-green-500 bg-green-50" : ""}`}><div className="font-medium">{match.policy.name} / Version {match.policy.version}</div><div className="text-sm text-muted-foreground">{match.reason}</div></div>)}</CardContent></Card>}
