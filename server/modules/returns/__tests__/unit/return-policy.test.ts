@@ -67,6 +67,18 @@ describe("return policy resolution", () => {
     ]);
   });
 
+  it("does not carry vendor or store policies into a channel-only resolution", () => {
+    const result = resolveReturnPolicy(stack, {
+      businessContext: "dropship",
+      channelId: 67,
+      vendorId: null,
+      storeConnectionId: null,
+    });
+
+    expect(result?.winner.id).toBe(3);
+    expect(result?.matched.map(({ policy }) => policy.id)).toEqual([3, 2, 1]);
+  });
+
   it("does not match inactive or dimensionally different policies", () => {
     const result = resolveReturnPolicy([
       candidate({ id: 1, scopeKind: "global" }),

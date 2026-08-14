@@ -14,6 +14,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
+import {
+  isSameReturnPolicyResolutionInput,
+  snapshotReturnPolicyResolutionInput,
+  type ReturnPolicyResolutionInput,
+} from "@/lib/return-policy-resolution";
 
 type InternalScopeKind = "global" | "business_context" | "channel_context" | "vendor_context" | "vendor_channel_context" | "store";
 type AppliesTo = "all_orders" | "channel" | "vendor" | "store";
@@ -94,10 +99,12 @@ interface Draft {
   notes: string | null;
 }
 
-interface ResolutionInput {
-  channelId: number | null;
-  vendorId: number | null;
-  storeConnectionId: number | null;
+type ResolutionInput = ReturnPolicyResolutionInput;
+
+interface ResolutionResult {
+  input: ResolutionInput;
+  winner: ReturnPolicy;
+  matched: Array<{ policy: ReturnPolicy; reason: string }>;
 }
 
 const APPLIES_TO_LABELS: Record<AppliesTo, string> = {
@@ -223,15 +230,28 @@ export default function ReturnPolicies() {
     onError: (error: Error) => toast({ variant: "destructive", title: "Policy not saved", description: error.message }),
   });
 
-  const resolutionMutation = useMutation({
-    mutationFn: async () => readJson<{ winner: ReturnPolicy; matched: Array<{ policy: ReturnPolicy; reason: string }> }>(await fetch("/api/returns/admin/policies/resolve", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(resolution),
-    })),
+  const resolutionMutation = useMutation<ResolutionResult, Error, ResolutionInput>({
+    mutationFn: async (input) => {
+      const requestInput = snapshotReturnPolicyResolutionInput(input);
+      const result = await readJson<Omit<ResolutionResult, "input">>(await fetch("/api/returns/admin/policies/resolve", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestInput),
+      }));
+      return { input: requestInput, ...result };
+    },
     onError: (error: Error) => toast({ variant: "destructive", title: "Policy could not be resolved", description: error.message }),
   });
+
+  const changeResolution = (next: ResolutionInput) => {
+    resolutionMutation.reset();
+    setResolution(next);
+  };
+  const visibleResolution = resolutionMutation.data
+    && isSameReturnPolicyResolutionInput(resolutionMutation.data.input, resolution)
+    ? resolutionMutation.data
+    : undefined;
 
   const openNew = () => {
     const next = emptyDraft();
@@ -300,7 +320,7 @@ export default function ReturnPolicies() {
           </Card>
         </TabsContent>
         <TabsContent value="preview" className="mt-4">
-          <ResolutionPreview overview={overview} value={resolution} onChange={setResolution} onResolve={() => resolutionMutation.mutate()} loading={resolutionMutation.isPending} result={resolutionMutation.data} />
+          <ResolutionPreview overview={overview} value={resolution} onChange={changeResolution} onResolve={(input) => resolutionMutation.mutate(input)} loading={resolutionMutation.isPending} result={visibleResolution} />
         </TabsContent>
       </Tabs>
 
@@ -313,9 +333,9 @@ function ResolutionPreview({ overview, value, onChange, onResolve, loading, resu
   overview: Overview;
   value: ResolutionInput;
   onChange: (value: ResolutionInput) => void;
-  onResolve: () => void;
+  onResolve: (input: ResolutionInput) => void;
   loading: boolean;
-  result?: { winner: ReturnPolicy; matched: Array<{ policy: ReturnPolicy; reason: string }> };
+  result?: ResolutionResult;
 }) {
   const dropship = value.channelId === overview.dropshipOmsChannelId;
   const [vendor, setVendor] = useState<VendorReference | null>(null);
@@ -327,7 +347,7 @@ function ResolutionPreview({ overview, value, onChange, onResolve, loading, resu
         <SelectField label="Sales channel" value={value.channelId?.toString() ?? "none"} options={overview.channels.filter((item) => item.status === "active").map((item) => ({ value: item.id.toString(), label: item.name }))} onChange={(channelId) => { const id = Number(channelId); setVendor(null); setStore(null); onChange({ channelId: id, vendorId: null, storeConnectionId: null }); }} />
         {dropship && <VendorPicker label="Dropship vendor (optional)" selected={vendor} onSelect={(next) => { setVendor(next); setStore(null); onChange({ ...value, vendorId: next?.id ?? null, storeConnectionId: null }); }} />}
         {dropship && vendor && <StorePicker label="Dropship store (optional)" vendorId={vendor.id} selected={store} onSelect={(next) => { setStore(next); onChange({ ...value, storeConnectionId: next?.id ?? null }); }} />}
-        <div className="flex items-end"><Button className="w-full" disabled={!value.channelId || loading} onClick={onResolve}>{loading ? "Testing..." : "Test policy"}</Button></div>
+        <div className="flex items-end"><Button className="w-full" disabled={!value.channelId || loading} onClick={() => onResolve(snapshotReturnPolicyResolutionInput(value))}>{loading ? "Testing..." : "Test policy"}</Button></div>
       </CardContent>
     </Card>
     {result && <Card><CardHeader><CardTitle>Applies: {result.winner.name}</CardTitle><CardDescription>Version {result.winner.version} is the closest policy for this order.</CardDescription></CardHeader><CardContent className="space-y-2">{result.matched.map((match) => <div key={match.policy.id} className={`border p-3 ${match.policy.id === result.winner.id ? "border-green-500 bg-green-50" : ""}`}><div className="font-medium">{match.policy.name} / Version {match.policy.version}</div><div className="text-sm text-muted-foreground">{match.reason}</div></div>)}</CardContent></Card>}
