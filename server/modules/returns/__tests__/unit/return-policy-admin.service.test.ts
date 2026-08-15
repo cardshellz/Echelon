@@ -71,9 +71,10 @@ class FakeTransaction implements ReturnPolicyAdminTransaction {
 }
 
 class FakeStore implements ReturnPolicyAdminStore {
+  readonly overviewPolicies: ReturnPolicy[] = [];
   constructor(readonly tx = new FakeTransaction()) {}
   async listOverview() {
-    return { policies: [], channels: [SHOPIFY, DROPSHIP_OMS], referencedVendors: [], referencedStores: [], dropshipOmsChannelId: DROPSHIP_OMS.id };
+    return { policies: this.overviewPolicies, channels: [SHOPIFY, DROPSHIP_OMS], referencedVendors: [], referencedStores: [], dropshipOmsChannelId: DROPSHIP_OMS.id };
   }
   async listActivePolicies() { return this.tx.active ? [this.tx.active] : []; }
   async getDropshipOmsChannel() { return DROPSHIP_OMS; }
@@ -83,6 +84,17 @@ class FakeStore implements ReturnPolicyAdminStore {
 }
 
 describe("ReturnPolicyAdminService", () => {
+  it("excludes retired versions from the active policy overview", async () => {
+    const store = new FakeStore();
+    store.overviewPolicies.push(
+      policy({ id: 42, version: 2 }),
+      policy({ id: 41, version: 1, status: "retired", retiredBy: "admin-1", retiredAt: NOW }),
+    );
+
+    const result = await new ReturnPolicyAdminService(store, () => NOW).listOverview();
+
+    expect(result.policies.map(({ id }) => id)).toEqual([42]);
+  });
   it("maps a sales-channel policy onto the existing channel scope and versions it atomically", async () => {
     const store = new FakeStore();
     store.tx.active = policy({ id: 41, version: 1, supersedesPolicyId: null });
