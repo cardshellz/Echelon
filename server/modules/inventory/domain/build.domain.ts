@@ -8,6 +8,24 @@ export type BuildCostLayer = BuildCostTotals & {
   qty: number;
   totalMills: bigint;
 };
+export const BUILD_RECIPE_TYPES = ["conversion", "assembly"] as const;
+
+export type BuildRecipeType = (typeof BUILD_RECIPE_TYPES)[number];
+
+export type BuildVariantFacts = {
+  variantId: number;
+  productId: number;
+  unitsPerVariant: number;
+};
+
+export type BuildVariantSnapshot = BuildVariantFacts;
+
+export type BuildRecipeConservation = {
+  recipeType: BuildRecipeType;
+  sameProduct: boolean;
+  inputBaseUnits: number;
+  outputBaseUnits: number;
+};
 
 export class BuildDomainError extends Error {
   constructor(
@@ -29,6 +47,147 @@ export function requirePositiveInteger(value: unknown, field: string): number {
     );
   }
   return value;
+}
+export function requireBuildRecipeType(value: unknown): BuildRecipeType {
+  if (value !== "conversion" && value !== "assembly") {
+    throw new BuildDomainError(
+      "INVALID_BUILD_RECIPE_TYPE",
+      "recipeType must be conversion or assembly",
+      { field: "recipeType", value },
+    );
+  }
+  return value;
+}
+
+function multiplyBaseUnits(quantity: number, unitsPerVariant: number, field: string): number {
+  const normalizedQuantity = requirePositiveInteger(quantity, field + ".quantity");
+  const normalizedUnits = requirePositiveInteger(unitsPerVariant, field + ".unitsPerVariant");
+  const result = normalizedQuantity * normalizedUnits;
+  if (!Number.isSafeInteger(result)) {
+    throw new BuildDomainError(
+      "BUILD_QUANTITY_OVERFLOW",
+      field + " base-unit quantity exceeds the safe integer range",
+      { field, quantity: normalizedQuantity, unitsPerVariant: normalizedUnits },
+    );
+  }
+  return result;
+}
+
+export function validateBuildRecipeDefinition(input: {
+  recipeType: unknown;
+  output: BuildVariantFacts & { qtyPerBuild: number };
+  components: Array<BuildVariantFacts & { qtyPerBuild: number }>;
+}): BuildRecipeConservation {
+  const recipeType = requireBuildRecipeType(input.recipeType);
+  if (input.components.length === 0) {
+    throw new BuildDomainError("BUILD_RECIPE_EMPTY", "A build recipe must contain at least one component");
+  }
+
+  const outputVariantId = requirePositiveInteger(input.output.variantId, "output.variantId");
+  const outputProductId = requirePositiveInteger(input.output.productId, "output.productId");
+  const outputBaseUnits = multiplyBaseUnits(
+    input.output.qtyPerBuild,
+    input.output.unitsPerVariant,
+    "output",
+  );
+  let inputBaseUnits = 0;
+  let sameProduct = true;
+
+  const componentVariantIds = new Set<number>();
+  for (const [index, component] of input.components.entries()) {
+    const componentVariantId = requirePositiveInteger(
+      component.variantId,
+      "components[" + index + "].variantId",
+    );
+    if (componentVariantId === outputVariantId) {
+      throw new BuildDomainError(
+        "BUILD_OUTPUT_IS_COMPONENT",
+        "A build output cannot also be one of its own components",
+        { outputVariantId },
+      );
+    }
+    if (componentVariantIds.has(componentVariantId)) {
+      throw new BuildDomainError(
+        "DUPLICATE_BUILD_COMPONENT",
+        "Component variant " + componentVariantId + " appears more than once",
+        { componentVariantId },
+      );
+    }
+    componentVariantIds.add(componentVariantId);
+    const productId = requirePositiveInteger(component.productId, "components[" + index + "].productId");
+    const componentBaseUnits = multiplyBaseUnits(
+      component.qtyPerBuild,
+      component.unitsPerVariant,
+      "components[" + index + "]",
+    );
+    inputBaseUnits += componentBaseUnits;
+    if (!Number.isSafeInteger(inputBaseUnits)) {
+      throw new BuildDomainError(
+        "BUILD_QUANTITY_OVERFLOW",
+        "Component base-unit quantity exceeds the safe integer range",
+      );
+    }
+    sameProduct = sameProduct && productId === outputProductId;
+  }
+
+  if (recipeType === "conversion") {
+    if (!sameProduct) {
+      throw new BuildDomainError(
+        "BUILD_CONVERSION_PRODUCT_MISMATCH",
+        "A conversion must use variants from the same catalog product",
+        { outputVariantId },
+      );
+    }
+    if (inputBaseUnits !== outputBaseUnits) {
+      throw new BuildDomainError(
+        "BUILD_CONVERSION_NOT_CONSERVED",
+        "A conversion must preserve the exact number of base units",
+        { outputVariantId, inputBaseUnits, outputBaseUnits },
+      );
+    }
+  } else if (sameProduct) {
+    throw new BuildDomainError(
+      "BUILD_ASSEMBLY_REQUIRES_CROSS_PRODUCT_COMPONENT",
+      "A same-product recipe must be classified as a conversion",
+      { outputVariantId },
+    );
+  }
+
+  return { recipeType, sameProduct, inputBaseUnits, outputBaseUnits };
+}
+
+export function assertBuildVariantSnapshotsCurrent(input: {
+  snapshots: BuildVariantSnapshot[];
+  currentVariants: ReadonlyMap<number, BuildVariantFacts>;
+  context?: Record<string, unknown>;
+}): void {
+  for (const snapshot of input.snapshots) {
+    const current = input.currentVariants.get(snapshot.variantId);
+    if (!current) {
+      throw new BuildDomainError(
+        "BUILD_VARIANT_UNAVAILABLE",
+        "Build variant " + snapshot.variantId + " is unavailable",
+        { ...input.context, variantId: snapshot.variantId },
+      );
+    }
+    if (
+      current.productId !== snapshot.productId
+      || current.unitsPerVariant !== snapshot.unitsPerVariant
+    ) {
+      throw new BuildDomainError(
+        "BUILD_CATALOG_CONFIGURATION_CHANGED",
+        "Catalog configuration changed for build variant " + snapshot.variantId,
+        {
+          ...input.context,
+          variantId: snapshot.variantId,
+          snapshotProductId: snapshot.productId,
+          currentProductId: current.productId,
+          snapshotUnitsPerVariant: snapshot.unitsPerVariant,
+          currentUnitsPerVariant: current.unitsPerVariant,
+        },
+      );
+    }
+  }
 }
 
 export function calculateBuildQuantities(input: {

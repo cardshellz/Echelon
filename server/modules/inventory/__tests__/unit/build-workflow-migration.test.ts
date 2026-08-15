@@ -10,6 +10,10 @@ const migration616 = fs.readFileSync(
   path.resolve(process.cwd(), "migrations/0616_build_order_number_sequence.sql"),
   "utf8",
 );
+const migration617 = fs.readFileSync(
+  path.resolve(process.cwd(), "migrations/0617_inventory_build_conversion_safety.sql"),
+  "utf8",
+);
 const namedSchemaIntegrationFixture = fs.readFileSync(
   path.resolve(process.cwd(), "test/fixtures/named-schema-integration.sql"),
   "utf8",
@@ -38,6 +42,26 @@ describe("inventory build workflow migrations", () => {
     expect(migration615).toContain("inventory_lots_build_order_idx");
   });
 
+  it("classifies build recipes and snapshots product UOM facts", () => {
+    expect(migration617).toContain("ADD COLUMN IF NOT EXISTS recipe_type varchar(20)");
+    expect(migration617).toContain("ADD COLUMN IF NOT EXISTS output_product_id integer");
+    expect(migration617).toContain("ADD COLUMN IF NOT EXISTS output_units_per_variant integer");
+    expect(migration617).toContain("ADD COLUMN IF NOT EXISTS component_product_id integer");
+    expect(migration617).toContain("ADD COLUMN IF NOT EXISTS component_units_per_variant integer");
+    expect(migration617).toContain("WHEN evidence.same_product AND evidence.base_units_conserved THEN 'conversion'");
+  });
+
+  it("makes recipe and order snapshot evidence required and bounded", () => {
+    expect(migration617).toContain("ALTER COLUMN output_units_per_variant SET NOT NULL");
+    expect(migration617).toContain("ALTER COLUMN component_units_per_variant SET NOT NULL");
+    expect(migration617).not.toContain("recipe_type SET DEFAULT");
+    expect(migration617).toContain("build_recipes_recipe_type_chk");
+    expect(migration617).toContain("build_orders_recipe_type_chk");
+    expect(migration617).toContain("CHECK (recipe_type IN ('conversion', 'assembly'))");
+    expect(migration617).toContain("CHECK (output_product_id > 0 AND output_units_per_variant > 0)");
+    expect(migration617).toContain("Cannot enforce build conversion snapshots");
+    expect(migration617).toContain("legacy rows have missing or non-positive catalog product/UOM data");
+  });
   it("keeps the disposable integration schema aligned with transaction linkage", () => {
     expect(namedSchemaIntegrationFixture).toContain("build_order_id integer");
     expect(namedSchemaIntegrationFixture).toContain("build_order_component_id integer");

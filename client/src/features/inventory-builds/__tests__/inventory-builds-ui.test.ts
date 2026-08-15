@@ -20,6 +20,19 @@ describe("Inventory Builds UI contract", () => {
     expect(builds).not.toContain("variant.variantId");
   });
 
+  it("requires explicit recipe classification and shows conservation evidence", () => {
+    expect(builds).toContain('type RecipeType = "conversion" | "assembly"');
+    expect(builds).toContain("productId: number");
+    expect(builds).toContain("unitsPerVariant: number");
+    expect(builds).toContain("<ToggleGroup");
+    expect(builds).toContain('value="conversion"');
+    expect(builds).toContain('value="assembly"');
+    expect(builds).toContain("recipeType,");
+    expect(builds).toContain("Base units conserved.");
+    expect(builds).toContain("recipeEvidence?.valid");
+    expect(builds).toContain("Each component variant can only be added once.");
+    expect(builds).toContain("The output variant cannot also be a component.");
+  });
   it("requires an explicit confirmation before posting a released build", () => {
     expect(builds).toContain("setExecuteOrder(order)");
     expect(builds).toContain("Verify the physical build is complete before continuing.");
