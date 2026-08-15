@@ -84,8 +84,8 @@ const NON_ONHAND_TYPES = new Set([
  *     sku_correction → from(-) / to(+) as two separate single-loc rows
  *                      (use-cases.ts:849/873, routes.ts:257/277)
  *     csv_upload→ single-location signed (routes.ts)
- *     break/assemble/replenish → emitted as `adjustment` rows via adjustInventory,
- *       so they never appear under their own type here.
+ *     break/assemble/replenish -> may be emitted as signed, single-location
+ *       rows under their own transaction type or as adjustment rows.
  */
 export function ledgerRowToCellDeltas(row: LedgerRow): CellDelta[] {
   if (row.productVariantId == null) return []; // cannot attribute to a cell

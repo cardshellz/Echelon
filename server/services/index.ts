@@ -31,6 +31,7 @@ import {
   createCOGSService,
   createInventoryAtpService,
   createBreakAssemblyService,
+  createBuildUseCases,
   createReplenishmentService,
   createCycleCountService,
   createInventoryAlertService,
@@ -120,6 +121,7 @@ export function createServices(db: any) {
 
   // Depends on inventoryCore (+ channelSync for reservation)
   const breakAssembly = createBreakAssemblyService(db, inventoryCore);
+  const builds = createBuildUseCases(db);
   const reservation = createReservationService(db, inventoryCore as any, channelSync, atp);
   const replenishment = createReplenishmentService(db, inventoryCore);
   const returns = createReturnsService(db, inventoryCore as any);
@@ -302,6 +304,13 @@ export function createServices(db: any) {
     );
   });
 
+  builds.onInventoryChange((variantId: number, trigger: "build_completed") => {
+    inventoryCore.triggerNotifyChange(variantId, trigger);
+    channelSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
+      console.warn(`[Build] Post-${trigger} sync failed for variant ${variantId}:`, err),
+    );
+  });
+
   // Bin assignment (depends on catalog + warehouse storage)
   const binAssignment = createBinAssignmentService(db, {
     ...catalogStorage,
@@ -412,6 +421,7 @@ export function createServices(db: any) {
     atp,
     cogs,
     breakAssembly,
+    builds,
     reservation,
     replenishment,
     picking,

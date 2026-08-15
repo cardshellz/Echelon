@@ -94,6 +94,17 @@ describe("ledgerRowToCellDeltas — per-type conventions", () => {
     );
     expect(out).toEqual([{ productVariantId: 200, warehouseLocationId: 9, delta: 5 }]);
   });
+  it("assemble: consumes components and produces output as signed single-location rows", () => {
+    const componentOut = ledgerRowToCellDeltas(
+      row({ transactionType: "assemble", variantQtyDelta: -5, fromLocationId: 11, productVariantId: 100 }),
+    );
+    const outputIn = ledgerRowToCellDeltas(
+      row({ transactionType: "assemble", variantQtyDelta: 1, toLocationId: 22, productVariantId: 200 }),
+    );
+
+    expect(componentOut).toEqual([{ productVariantId: 100, warehouseLocationId: 11, delta: -5 }]);
+    expect(outputIn).toEqual([{ productVariantId: 200, warehouseLocationId: 22, delta: 1 }]);
+  });
 });
 
 describe("ledgerRowToCellDeltas — skipped (non-on-hand) types", () => {

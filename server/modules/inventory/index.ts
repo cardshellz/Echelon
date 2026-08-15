@@ -34,8 +34,10 @@ export { createInventoryAlertService } from "./alerts.service";
 export { createReplenishmentService, ReplenishmentUseCases as ReplenishmentService } from "./application/replenishment.use-cases";
 export { createCycleCountService, CycleCountUseCases as CycleCountService } from "./application/cycle-count.use-cases";
 export { createBreakAssemblyService, BreakAssemblyUseCases as BreakAssemblyService } from "./application/break-assembly.use-cases";
+export { createBuildUseCases, BuildUseCases } from "./application/build.use-cases";
 export { createCOGSService, COGSService } from "./cogs.service";
 export { registerReplenishmentRoutes } from "./replenishment.routes";
+export { registerBuildRoutes } from "./build.routes";
 
 // Service types
 export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary } from "./atp.service";

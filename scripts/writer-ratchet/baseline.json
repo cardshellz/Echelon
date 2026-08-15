@@ -304,6 +304,18 @@
     "modules/identity",
     "modules/inventory"
   ],
+  "inventory.build_order_components": [
+    "modules/inventory"
+  ],
+  "inventory.build_orders": [
+    "modules/inventory"
+  ],
+  "inventory.build_recipe_components": [
+    "modules/inventory"
+  ],
+  "inventory.build_recipes": [
+    "modules/inventory"
+  ],
   "inventory.cost_adjustment_log": [
     "modules/inventory"
   ],

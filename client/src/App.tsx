@@ -29,6 +29,7 @@ import DropshipPortalSettings from "@/pages/dropship/DropshipPortalSettings";
 import DropshipPortalWallet from "@/pages/dropship/DropshipPortalWallet";
 import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
+import Builds from "@/pages/Builds";
 import Orders from "@/pages/Orders";
 import Dropship from "@/pages/Dropship";
 import Subscriptions from "@/pages/Subscriptions";
@@ -295,6 +296,9 @@ function Router() {
         </Route>
         <Route path="/inventory">
           <ProtectedRoute component={Inventory} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/inventory/builds">
+          <ProtectedRoute component={Builds} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/cycle-counts">
           <ProtectedRoute component={CycleCounts} allowedRoles={["admin", "lead"]} />

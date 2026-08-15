@@ -144,6 +144,7 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Stock Levels", icon: Box, href: "/inventory" },
+      { label: "Builds", icon: PackageCheck, href: "/inventory/builds" },
       { label: "Warehouses", icon: Building2, href: "/warehouse" },
       { label: "Pick Zones", icon: MapIcon, href: "/pick-zones" },
       { label: "Slotting Setup", icon: MapPin, href: "/slotting-setup" },
