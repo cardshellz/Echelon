@@ -1,9 +1,13 @@
 import { sql } from "drizzle-orm";
 import {
   allocateBuildCostLayers,
+  assertBuildVariantSnapshotsCurrent,
   BuildDomainError,
   calculateBuildQuantities,
+  validateBuildRecipeDefinition,
   type BuildCostTotals,
+  type BuildRecipeType,
+  type BuildVariantFacts,
 } from "../domain/build.domain";
 
 type Db = {
@@ -19,6 +23,7 @@ export type BuildRecipeComponentInput = {
 export type CreateBuildRecipeInput = {
   code: string;
   name: string;
+  recipeType: BuildRecipeType;
   outputVariantId: number;
   outputQty: number;
   components: BuildRecipeComponentInput[];
@@ -77,25 +82,26 @@ export function buildMillsToRoundedCents(value: bigint): bigint {
   return (value + BigInt(50)) / BigInt(100);
 }
 
-export async function assertBuildVariantsActive(
+export async function loadActiveBuildVariantFacts(
   tx: Pick<Db, "execute">,
   variantIds: number[],
   context: Record<string, unknown> = {},
-): Promise<void> {
+): Promise<Map<number, BuildVariantFacts>> {
   const uniqueVariantIds = [...new Set(variantIds)];
   if (uniqueVariantIds.length === 0) {
     throw new BuildDomainError("INVALID_BUILD_INPUT", "A build requires at least one catalog variant");
   }
 
   const variants = await tx.execute(sql`
-    SELECT id, is_active
+    SELECT id, is_active, product_id, units_per_variant
     FROM catalog.product_variants
     WHERE id IN (${sql.join(uniqueVariantIds.map((id) => sql`${id}`), sql`, `)})
     FOR SHARE
   `);
-  const activeIds = new Set(
-    variants.rows.filter((row) => row.is_active === true).map((row) => Number(row.id)),
+  const activeRows = variants.rows.filter(
+    (row) => row.is_active === true || Number(row.is_active) === 1,
   );
+  const activeIds = new Set(activeRows.map((row) => Number(row.id)));
   const unavailableVariantIds = uniqueVariantIds.filter((id) => !activeIds.has(id));
   if (unavailableVariantIds.length > 0) {
     throw new BuildDomainError("BUILD_VARIANT_UNAVAILABLE", "All build variants must exist and be active", {
@@ -103,6 +109,38 @@ export async function assertBuildVariantsActive(
       variantIds: unavailableVariantIds,
     });
   }
+
+  return new Map(activeRows.map((row) => {
+    const facts: BuildVariantFacts = {
+      variantId: Number(row.id),
+      productId: Number(row.product_id),
+      unitsPerVariant: Number(row.units_per_variant),
+    };
+    return [facts.variantId, facts];
+  }));
+}
+
+export async function assertBuildVariantsActive(
+  tx: Pick<Db, "execute">,
+  variantIds: number[],
+  context: Record<string, unknown> = {},
+): Promise<void> {
+  await loadActiveBuildVariantFacts(tx, variantIds, context);
+}
+
+function getVariantFacts(
+  variants: ReadonlyMap<number, BuildVariantFacts>,
+  variantId: number,
+  context: Record<string, unknown> = {},
+): BuildVariantFacts {
+  const facts = variants.get(variantId);
+  if (!facts) {
+    throw new BuildDomainError("BUILD_VARIANT_UNAVAILABLE", "Build variant is unavailable", {
+      ...context,
+      variantId,
+    });
+  }
+  return facts;
 }
 
 
@@ -212,39 +250,47 @@ export class BuildRepository {
 
 
   async createRecipe(input: CreateBuildRecipeInput): Promise<any> {
-    const quantities = calculateBuildQuantities({
+    calculateBuildQuantities({
       plannedBuilds: 1,
       outputQtyPerBuild: input.outputQty,
       components: input.components,
     });
-    if (quantities.components.some((component) => component.componentVariantId === input.outputVariantId)) {
-      throw new BuildDomainError(
-        "BUILD_OUTPUT_IS_COMPONENT",
-        "A build output cannot also be one of its own components",
-        { outputVariantId: input.outputVariantId },
-      );
-    }
 
     return this.db.transaction(async (tx) => {
-      await assertBuildVariantsActive(
+      const variantFacts = await loadActiveBuildVariantFacts(
         tx,
         [input.outputVariantId, ...input.components.map((item) => item.componentVariantId)],
       );
+      const outputFacts = getVariantFacts(variantFacts, input.outputVariantId);
+      const componentDefinitions = input.components.map((component) => ({
+        ...getVariantFacts(variantFacts, component.componentVariantId),
+        qtyPerBuild: component.qtyPerBuild,
+      }));
+      validateBuildRecipeDefinition({
+        recipeType: input.recipeType,
+        output: { ...outputFacts, qtyPerBuild: input.outputQty },
+        components: componentDefinitions,
+      });
 
       const recipeResult = await tx.execute(sql`
         INSERT INTO inventory.build_recipes
-          (code, name, version, status, output_variant_id, output_qty, notes, created_by)
+          (code, name, version, status, recipe_type, output_variant_id,
+           output_product_id, output_units_per_variant, output_qty, notes, created_by)
         VALUES
-          (${input.code}, ${input.name}, 1, ${input.status}, ${input.outputVariantId},
+          (${input.code}, ${input.name}, 1, ${input.status}, ${input.recipeType},
+           ${input.outputVariantId}, ${outputFacts.productId}, ${outputFacts.unitsPerVariant},
            ${input.outputQty}, ${input.notes ?? null}, ${input.actorId ?? null})
         RETURNING *
       `);
       const recipe = recipeResult.rows[0];
-      for (const component of input.components) {
+      for (const component of componentDefinitions) {
         await tx.execute(sql`
           INSERT INTO inventory.build_recipe_components
-            (recipe_id, component_variant_id, qty)
-          VALUES (${recipe.id}, ${component.componentVariantId}, ${component.qtyPerBuild})
+            (recipe_id, component_variant_id, component_product_id,
+             component_units_per_variant, qty)
+          VALUES
+            (${recipe.id}, ${component.variantId}, ${component.productId},
+             ${component.unitsPerVariant}, ${component.qtyPerBuild})
         `);
       }
       return recipe;
@@ -283,12 +329,13 @@ export class BuildRepository {
       }
 
       const componentResult = await tx.execute(sql`
-        SELECT id, component_variant_id, qty
+        SELECT id, component_variant_id, component_product_id,
+               component_units_per_variant, qty
         FROM inventory.build_recipe_components
         WHERE recipe_id = ${input.recipeId}
         ORDER BY component_variant_id
       `);
-      await assertBuildVariantsActive(
+      const variantFacts = await loadActiveBuildVariantFacts(
         tx,
         [
           Number(recipe.output_variant_id),
@@ -296,6 +343,28 @@ export class BuildRepository {
         ],
         { recipeId: input.recipeId },
       );
+      const outputSnapshot: BuildVariantFacts & { qtyPerBuild: number } = {
+        variantId: Number(recipe.output_variant_id),
+        productId: Number(recipe.output_product_id),
+        unitsPerVariant: Number(recipe.output_units_per_variant),
+        qtyPerBuild: Number(recipe.output_qty),
+      };
+      const componentDefinitions = componentResult.rows.map((row) => ({
+        variantId: Number(row.component_variant_id),
+        productId: Number(row.component_product_id),
+        unitsPerVariant: Number(row.component_units_per_variant),
+        qtyPerBuild: Number(row.qty),
+      }));
+      assertBuildVariantSnapshotsCurrent({
+        snapshots: [outputSnapshot, ...componentDefinitions],
+        currentVariants: variantFacts,
+        context: { recipeId: input.recipeId },
+      });
+      validateBuildRecipeDefinition({
+        recipeType: recipe.recipe_type,
+        output: outputSnapshot,
+        components: componentDefinitions,
+      });
       const quantities = calculateBuildQuantities({
         plannedBuilds: input.plannedBuilds,
         outputQtyPerBuild: Number(recipe.output_qty),
@@ -343,12 +412,15 @@ export class BuildRepository {
 
       const inserted = await tx.execute(sql`
         INSERT INTO inventory.build_orders
-          (recipe_id, recipe_code, recipe_version, output_variant_id, output_qty_per_build,
+          (recipe_id, recipe_code, recipe_version, recipe_type, output_variant_id,
+           output_product_id, output_units_per_variant, output_qty_per_build,
            planned_builds, warehouse_id, output_location_id, idempotency_key, created_by)
         VALUES
-          (${recipe.id}, ${recipe.code}, ${recipe.version}, ${recipe.output_variant_id},
-           ${recipe.output_qty}, ${input.plannedBuilds}, ${input.warehouseId},
-           ${input.outputLocationId}, ${input.idempotencyKey}, ${input.actorId ?? null})
+          (${recipe.id}, ${recipe.code}, ${recipe.version}, ${recipe.recipe_type},
+           ${recipe.output_variant_id}, ${recipe.output_product_id},
+           ${recipe.output_units_per_variant}, ${recipe.output_qty},
+           ${input.plannedBuilds}, ${input.warehouseId}, ${input.outputLocationId},
+           ${input.idempotencyKey}, ${input.actorId ?? null})
         ON CONFLICT (idempotency_key) DO NOTHING
         RETURNING *
       `);
@@ -364,11 +436,14 @@ export class BuildRepository {
         const qtyPerBuild = Number(component.qty);
         await tx.execute(sql`
           INSERT INTO inventory.build_order_components
-            (build_order_id, recipe_component_id, component_variant_id, qty_per_build,
+            (build_order_id, recipe_component_id, component_variant_id,
+             component_product_id, component_units_per_variant, qty_per_build,
              planned_qty, source_location_id)
           VALUES
-            (${order.id}, ${component.id}, ${componentVariantId}, ${qtyPerBuild},
-             ${qtyPerBuild * input.plannedBuilds}, ${sourceLocationMap.get(componentVariantId)!})
+            (${order.id}, ${component.id}, ${componentVariantId},
+             ${component.component_product_id}, ${component.component_units_per_variant},
+             ${qtyPerBuild}, ${qtyPerBuild * input.plannedBuilds},
+             ${sourceLocationMap.get(componentVariantId)!})
         `);
       }
       return order;
@@ -437,7 +512,7 @@ export class BuildRepository {
         ORDER BY component_variant_id, source_location_id
         FOR UPDATE
       `);
-      await assertBuildVariantsActive(
+      const variantFacts = await loadActiveBuildVariantFacts(
         tx,
         [
           Number(order.output_variant_id),
@@ -445,6 +520,28 @@ export class BuildRepository {
         ],
         { buildOrderId },
       );
+      const outputSnapshot: BuildVariantFacts & { qtyPerBuild: number } = {
+        variantId: Number(order.output_variant_id),
+        productId: Number(order.output_product_id),
+        unitsPerVariant: Number(order.output_units_per_variant),
+        qtyPerBuild: Number(order.output_qty_per_build),
+      };
+      const componentDefinitions = components.rows.map((component) => ({
+        variantId: Number(component.component_variant_id),
+        productId: Number(component.component_product_id),
+        unitsPerVariant: Number(component.component_units_per_variant),
+        qtyPerBuild: Number(component.qty_per_build),
+      }));
+      assertBuildVariantSnapshotsCurrent({
+        snapshots: [outputSnapshot, ...componentDefinitions],
+        currentVariants: variantFacts,
+        context: { buildOrderId },
+      });
+      validateBuildRecipeDefinition({
+        recipeType: order.recipe_type,
+        output: outputSnapshot,
+        components: componentDefinitions,
+      });
       await tx.execute(sql`
         UPDATE inventory.build_orders
         SET status = 'in_progress', started_at = now(), updated_at = now()

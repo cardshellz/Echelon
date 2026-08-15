@@ -11,6 +11,7 @@ type BuildRecipeRelationship = {
   name: string;
   version: number;
   status: string;
+  recipeType: string;
   quantityPerBuild: number;
   outputVariantId: number;
   outputSku: string | null;
@@ -75,6 +76,7 @@ function RelationshipList({
             <div key={`${relationship}-${recipe.recipeId}`} className="rounded border px-3 py-2">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-mono text-xs font-medium">{recipeLabel(recipe)}</span>
+                <Badge variant="outline">{recipe.recipeType}</Badge>
                 {recipeStatusBadge(recipe.status)}
               </div>
               <p className="mt-1 text-sm">{recipe.name}</p>

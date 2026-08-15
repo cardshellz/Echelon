@@ -1,6 +1,16 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Check, Loader2, PackageCheck, Plus, Search, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeftRight,
+  Check,
+  Hammer,
+  Loader2,
+  PackageCheck,
+  Plus,
+  Search,
+  X,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -10,11 +20,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useToast } from "@/hooks/use-toast";
 import { useSearch } from "wouter";
 
 type VariantResult = {
   productVariantId: number;
+  productId: number;
+  unitsPerVariant: number;
   sku: string;
   name: string;
 };
@@ -22,6 +35,8 @@ type VariantResult = {
 type RecipeComponent = {
   id: number;
   componentVariantId: number;
+  componentProductId: number;
+  componentUnitsPerVariant: number;
   sku: string | null;
   name: string;
   qtyPerBuild: number;
@@ -33,7 +48,10 @@ type BuildRecipe = {
   name: string;
   version: number;
   status: string;
+  recipeType: RecipeType;
   outputVariantId: number;
+  outputProductId: number;
+  outputUnitsPerVariant: number;
   outputSku: string | null;
   outputName: string;
   outputQty: number;
@@ -54,7 +72,10 @@ type BuildOrder = {
   recipeId: number;
   recipeCode: string;
   recipeVersion: number;
+  recipeType: RecipeType;
   outputVariantId: number;
+  outputProductId: number;
+  outputUnitsPerVariant: number;
   outputSku: string | null;
   outputName: string;
   outputQtyPerBuild: number;
@@ -90,6 +111,105 @@ type RecipeComponentDraft = {
   variant: VariantResult | null;
   qtyPerBuild: string;
 };
+
+type RecipeType = "conversion" | "assembly";
+
+type RecipeEvidence = {
+  valid: boolean;
+  inputBaseUnits: bigint;
+  outputBaseUnits: bigint;
+  message: string;
+};
+
+function calculateRecipeEvidence(input: {
+  recipeType: RecipeType;
+  outputVariant: VariantResult | null;
+  outputQty: string;
+  components: RecipeComponentDraft[];
+}): RecipeEvidence | null {
+  const outputQty = Number(input.outputQty);
+  if (
+    !input.outputVariant
+    || !Number.isSafeInteger(outputQty)
+    || outputQty <= 0
+    || !Number.isSafeInteger(input.outputVariant.unitsPerVariant)
+    || input.outputVariant.unitsPerVariant <= 0
+    || input.components.length === 0
+  ) {
+    return null;
+  }
+
+  let inputBaseUnits = BigInt(0);
+  let sameProduct = true;
+  let duplicateComponent = false;
+  let outputUsedAsComponent = false;
+  const componentVariantIds = new Set<number>();
+  for (const component of input.components) {
+    const qty = Number(component.qtyPerBuild);
+    if (
+      !component.variant
+      || !Number.isSafeInteger(qty)
+      || qty <= 0
+      || !Number.isSafeInteger(component.variant.unitsPerVariant)
+      || component.variant.unitsPerVariant <= 0
+    ) {
+      return null;
+    }
+    outputUsedAsComponent = outputUsedAsComponent
+      || component.variant.productVariantId === input.outputVariant.productVariantId;
+    duplicateComponent = duplicateComponent
+      || componentVariantIds.has(component.variant.productVariantId);
+    componentVariantIds.add(component.variant.productVariantId);
+    inputBaseUnits += BigInt(qty) * BigInt(component.variant.unitsPerVariant);
+    sameProduct = sameProduct && component.variant.productId === input.outputVariant.productId;
+  }
+
+  const outputBaseUnits = BigInt(outputQty) * BigInt(input.outputVariant.unitsPerVariant);
+  if (outputUsedAsComponent) {
+    return {
+      valid: false,
+      inputBaseUnits,
+      outputBaseUnits,
+      message: "The output variant cannot also be a component.",
+    };
+  }
+  if (duplicateComponent) {
+    return {
+      valid: false,
+      inputBaseUnits,
+      outputBaseUnits,
+      message: "Each component variant can only be added once.",
+    };
+  }
+  if (input.recipeType === "conversion") {
+    if (!sameProduct) {
+      return {
+        valid: false,
+        inputBaseUnits,
+        outputBaseUnits,
+        message: "Conversion variants must belong to one catalog product.",
+      };
+    }
+    const valid = inputBaseUnits === outputBaseUnits;
+    return {
+      valid,
+      inputBaseUnits,
+      outputBaseUnits,
+      message: valid
+        ? "Base units conserved."
+        : "Input and output base units must match exactly.",
+    };
+  }
+
+  return {
+    valid: !sameProduct,
+    inputBaseUnits,
+    outputBaseUnits,
+    message: sameProduct
+      ? "Same-product repacks must use Conversion."
+      : "Cross-product assembly.",
+  };
+}
 
 async function responseJson<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => ({}));
@@ -226,6 +346,7 @@ export default function Builds() {
   const [recipeName, setRecipeName] = useState("");
   const [recipeNotes, setRecipeNotes] = useState("");
   const [recipeStatus, setRecipeStatus] = useState("active");
+  const [recipeType, setRecipeType] = useState<RecipeType>("conversion");
   const [outputVariant, setOutputVariant] = useState<VariantResult | null>(null);
   const [outputQty, setOutputQty] = useState("1");
   const [componentKey, setComponentKey] = useState(2);
@@ -255,7 +376,7 @@ export default function Builds() {
 
   const resetRecipe = () => {
     setRecipeCode(""); setRecipeName(""); setRecipeNotes(""); setRecipeStatus("active");
-    setOutputVariant(null); setOutputQty("1");
+    setRecipeType("conversion"); setOutputVariant(null); setOutputQty("1");
     setComponents([{ key: componentKey, variant: null, qtyPerBuild: "1" }]);
     setComponentKey((value) => value + 1);
   };
@@ -273,6 +394,7 @@ export default function Builds() {
         code: recipeCode,
         name: recipeName,
         status: recipeStatus,
+        recipeType,
         outputVariantId: outputVariant?.productVariantId,
         outputQty: Number(outputQty),
         notes: recipeNotes || undefined,
@@ -330,10 +452,17 @@ export default function Builds() {
     onError: (error: Error) => toast({ title: "Build action failed", description: error.message, variant: "destructive" }),
   });
 
-  const recipeValid = recipeCode.trim() && recipeName.trim() && outputVariant
-    && Number.isSafeInteger(Number(outputQty)) && Number(outputQty) > 0
-    && components.length > 0
-    && components.every((component) => component.variant && Number.isSafeInteger(Number(component.qtyPerBuild)) && Number(component.qtyPerBuild) > 0);
+  const recipeEvidence = calculateRecipeEvidence({
+    recipeType,
+    outputVariant,
+    outputQty,
+    components,
+  });
+  const recipeValid = Boolean(
+    recipeCode.trim()
+    && recipeName.trim()
+    && recipeEvidence?.valid,
+  );
   const orderValid = selectedRecipe && warehouseId && outputLocationId
     && Number.isSafeInteger(Number(plannedBuilds)) && Number(plannedBuilds) > 0
     && selectedRecipe.components.every((component) => sourceLocations[component.componentVariantId]);
@@ -375,7 +504,7 @@ export default function Builds() {
                 {!ordersLoading && orders.length === 0 && <TableRow><TableCell colSpan={7} className="py-10 text-center text-muted-foreground">No build orders yet.</TableCell></TableRow>}
                 {orders.map((order) => (
                   <TableRow key={order.id}>
-                    <TableCell><div className="font-medium">{order.systemNumber}</div><div className="text-xs text-muted-foreground">{order.recipeCode} v{order.recipeVersion}</div></TableCell>
+                    <TableCell><div className="font-medium">{order.systemNumber}</div><div className="flex items-center gap-2 text-xs text-muted-foreground">{order.recipeCode} v{order.recipeVersion}<Badge variant="outline">{order.recipeType}</Badge></div></TableCell>
                     <TableCell><div>{order.outputSku ?? order.outputName}</div><div className="text-xs text-muted-foreground">{order.outputQtyPerBuild * order.plannedBuilds} units to {order.outputLocationCode}</div></TableCell>
                     <TableCell>{order.components.map((component) => <div key={component.id} className="text-xs">{component.plannedQty} {component.sku ?? component.name} from {component.sourceLocationCode ?? "-"}</div>)}</TableCell>
                     <TableCell>{order.warehouseName}</TableCell><TableCell>{statusBadge(order.status)}</TableCell>
@@ -399,7 +528,7 @@ export default function Builds() {
                 {recipesLoading && <TableRow><TableCell colSpan={4}>Loading recipes...</TableCell></TableRow>}
                 {!recipesLoading && recipes.length === 0 && <TableRow><TableCell colSpan={4} className="py-10 text-center text-muted-foreground">Create a recipe to define how component units become an output SKU.</TableCell></TableRow>}
                 {recipes.map((recipe) => <TableRow key={recipe.id}>
-                  <TableCell><div className="font-medium">{recipe.code}</div><div className="text-xs text-muted-foreground">{recipe.name} / v{recipe.version}</div></TableCell>
+                  <TableCell><div className="font-medium">{recipe.code}</div><div className="flex items-center gap-2 text-xs text-muted-foreground">{recipe.name} / v{recipe.version}<Badge variant="outline">{recipe.recipeType}</Badge></div></TableCell>
                   <TableCell>{recipe.outputQty} x {recipe.outputSku ?? recipe.outputName}</TableCell>
                   <TableCell>{recipe.components.map((component) => <div key={component.id} className="text-xs">{component.qtyPerBuild} x {component.sku ?? component.name}</div>)}</TableCell>
                   <TableCell><Badge variant={recipe.status === "active" ? "default" : "secondary"}>{recipe.status}</Badge></TableCell>
@@ -416,10 +545,45 @@ export default function Builds() {
           <div className="grid gap-4 sm:grid-cols-2">
             <div><Label>Recipe code</Label><Input value={recipeCode} onChange={(e) => setRecipeCode(e.target.value)} placeholder="STORAGE-BOX-P5" /></div>
             <div><Label>Name</Label><Input value={recipeName} onChange={(e) => setRecipeName(e.target.value)} placeholder="Build pack of 5" /></div>
+            <div className="sm:col-span-2">
+              <Label>Recipe type</Label>
+              <ToggleGroup
+                type="single"
+                value={recipeType}
+                onValueChange={(value) => {
+                  if (value === "conversion" || value === "assembly") setRecipeType(value);
+                }}
+                variant="outline"
+                className="grid grid-cols-2 justify-stretch"
+              >
+                <ToggleGroupItem value="conversion" className="w-full">
+                  <ArrowLeftRight className="mr-2 h-4 w-4" />Conversion
+                </ToggleGroupItem>
+                <ToggleGroupItem value="assembly" className="w-full">
+                  <Hammer className="mr-2 h-4 w-4" />Assembly
+                </ToggleGroupItem>
+              </ToggleGroup>
+            </div>
             <div className="sm:col-span-2"><Label>Output variant</Label><VariantSearch value={outputVariant} onChange={setOutputVariant} label="Search output SKU" /></div>
             <div><Label>Output units per build</Label><Input type="number" min="1" step="1" value={outputQty} onChange={(e) => setOutputQty(e.target.value)} /></div>
             <div><Label>Status</Label><Select value={recipeStatus} onValueChange={setRecipeStatus}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="draft">Draft</SelectItem></SelectContent></Select></div>
           </div>
+          {recipeEvidence && (
+            <div className={recipeEvidence.valid
+              ? "flex items-start gap-2 border border-green-300 bg-green-50 p-3 text-sm text-green-900"
+              : "flex items-start gap-2 border border-red-300 bg-red-50 p-3 text-sm text-red-900"}
+            >
+              {recipeEvidence.valid
+                ? <Check className="mt-0.5 h-4 w-4 shrink-0" />
+                : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />}
+              <div>
+                <div className="font-medium">{recipeEvidence.message}</div>
+                <div className="text-xs">
+                  {recipeEvidence.inputBaseUnits.toString()} input / {recipeEvidence.outputBaseUnits.toString()} output base units
+                </div>
+              </div>
+            </div>
+          )}
           <div className="space-y-3 border-t pt-4">
             <div className="flex items-center justify-between"><Label>Components per build</Label><Button type="button" size="sm" variant="outline" onClick={() => { setComponents((items) => [...items, { key: componentKey, variant: null, qtyPerBuild: "1" }]); setComponentKey((value) => value + 1); }}><Plus className="mr-1 h-4 w-4" />Component</Button></div>
             {components.map((component, index) => <div key={component.key} className="grid gap-2 border p-3 sm:grid-cols-[1fr_120px_40px]">

@@ -1,5 +1,6 @@
 import {
   BuildDomainError,
+  requireBuildRecipeType,
   requirePositiveInteger,
 } from "../domain/build.domain";
 import {
@@ -75,6 +76,7 @@ export class BuildUseCases {
       code,
       name: requiredText(input.name, "name", 150),
       status,
+      recipeType: requireBuildRecipeType(input.recipeType),
       outputVariantId: requirePositiveInteger(input.outputVariantId, "outputVariantId"),
       outputQty: requirePositiveInteger(input.outputQty, "outputQty"),
       notes: input.notes?.trim() || undefined,

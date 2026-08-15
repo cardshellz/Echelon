@@ -24,6 +24,7 @@ describe("BuildUseCases input boundary", () => {
     await subject.createRecipe({
       code: " storage-box-5 ",
       name: "Pack five storage boxes",
+      recipeType: "conversion",
       outputVariantId: 20,
       outputQty: 1,
       components: [{ componentVariantId: 10, qtyPerBuild: 5 }],
@@ -42,6 +43,7 @@ describe("BuildUseCases input boundary", () => {
     await expect(subject.createRecipe({
       code: "BOX-5",
       name: "Pack five",
+      recipeType: "conversion",
       outputVariantId: 20,
       outputQty: 1,
       components: undefined as any,
@@ -50,6 +52,20 @@ describe("BuildUseCases input boundary", () => {
     expect(repository.createRecipe).not.toHaveBeenCalled();
   });
 
+  it("rejects a recipe without an explicit classification", async () => {
+    const { subject, repository } = createSubject();
+
+    await expect(subject.createRecipe({
+      code: "BOX-5",
+      name: "Pack five",
+      recipeType: undefined as any,
+      outputVariantId: 20,
+      outputQty: 1,
+      components: [{ componentVariantId: 10, qtyPerBuild: 5 }],
+      status: "draft",
+    })).rejects.toMatchObject({ code: "INVALID_BUILD_RECIPE_TYPE" });
+    expect(repository.createRecipe).not.toHaveBeenCalled();
+  });
   it("classifies missing source locations before repository access", async () => {
     const { subject, repository } = createSubject();
 

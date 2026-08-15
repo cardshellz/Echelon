@@ -8,6 +8,8 @@ type QueryDb = {
 export type BuildRecipeComponentView = {
   id: number;
   componentVariantId: number;
+  componentProductId: number;
+  componentUnitsPerVariant: number;
   sku: string | null;
   name: string;
   qtyPerBuild: number;
@@ -19,7 +21,10 @@ export type BuildRecipeView = {
   name: string;
   version: number;
   status: string;
+  recipeType: string;
   outputVariantId: number;
+  outputProductId: number;
+  outputUnitsPerVariant: number;
   outputSku: string | null;
   outputName: string;
   outputQty: number;
@@ -34,6 +39,7 @@ export type BuildRecipeRelationshipView = {
   name: string;
   version: number;
   status: string;
+  recipeType: string;
   quantityPerBuild: number;
   outputVariantId: number;
   outputSku: string | null;
@@ -52,6 +58,8 @@ export type ProductVariantBuildRelationshipsView = {
 export type BuildOrderComponentView = {
   id: number;
   componentVariantId: number;
+  componentProductId: number;
+  componentUnitsPerVariant: number;
   sku: string | null;
   name: string;
   qtyPerBuild: number;
@@ -67,6 +75,9 @@ export type BuildOrderView = {
   recipeId: number;
   recipeCode: string;
   recipeVersion: number;
+  recipeType: string;
+  outputProductId: number;
+  outputUnitsPerVariant: number;
   outputVariantId: number;
   outputSku: string | null;
   outputName: string;
@@ -92,6 +103,9 @@ function recipeFromRow(row: any): BuildRecipeView {
     name: String(row.name),
     version: Number(row.version),
     status: String(row.status),
+    recipeType: String(row.recipe_type),
+    outputProductId: Number(row.output_product_id),
+    outputUnitsPerVariant: Number(row.output_units_per_variant),
     outputVariantId: Number(row.output_variant_id),
     outputSku: row.output_sku ?? null,
     outputName: String(row.output_name),
@@ -109,6 +123,9 @@ function orderFromRow(row: any): BuildOrderView {
     recipeId: Number(row.recipe_id),
     recipeCode: String(row.recipe_code),
     recipeVersion: Number(row.recipe_version),
+    recipeType: String(row.recipe_type),
+    outputProductId: Number(row.output_product_id),
+    outputUnitsPerVariant: Number(row.output_units_per_variant),
     outputVariantId: Number(row.output_variant_id),
     outputSku: row.output_sku ?? null,
     outputName: String(row.output_name),
@@ -145,6 +162,7 @@ export class BuildQueryRepository {
 
     const components = await this.db.execute(sql`
       SELECT brc.id, brc.recipe_id, brc.component_variant_id, brc.qty,
+             brc.component_product_id, brc.component_units_per_variant,
              component.sku, component.name
       FROM inventory.build_recipe_components brc
       JOIN catalog.product_variants component ON component.id = brc.component_variant_id
@@ -158,6 +176,8 @@ export class BuildQueryRepository {
       items.push({
         id: Number(row.id),
         componentVariantId: Number(row.component_variant_id),
+        componentProductId: Number(row.component_product_id),
+        componentUnitsPerVariant: Number(row.component_units_per_variant),
         sku: row.sku ?? null,
         name: String(row.name),
         qtyPerBuild: Number(row.qty),
@@ -195,6 +215,7 @@ export class BuildQueryRepository {
              br.output_qty AS quantity_per_build,
              br.id AS recipe_id, br.code AS recipe_code, br.name AS recipe_name,
              br.version AS recipe_version, br.status AS recipe_status,
+             br.recipe_type,
              br.output_variant_id, output.sku AS output_sku,
              output.name AS output_name, br.output_qty
       FROM inventory.build_recipes br
@@ -208,6 +229,7 @@ export class BuildQueryRepository {
              brc.qty AS quantity_per_build,
              br.id AS recipe_id, br.code AS recipe_code, br.name AS recipe_name,
              br.version AS recipe_version, br.status AS recipe_status,
+             br.recipe_type,
              br.output_variant_id, output.sku AS output_sku,
              output.name AS output_name, br.output_qty
       FROM inventory.build_recipe_components brc
@@ -231,6 +253,7 @@ export class BuildQueryRepository {
         name: String(row.recipe_name),
         version: Number(row.recipe_version),
         status: String(row.recipe_status),
+        recipeType: String(row.recipe_type),
         quantityPerBuild: Number(row.quantity_per_build),
         outputVariantId: Number(row.output_variant_id),
         outputSku: row.output_sku ?? null,
@@ -275,6 +298,8 @@ export class BuildQueryRepository {
     order.components = components.rows.map((component) => ({
       id: Number(component.id),
       componentVariantId: Number(component.component_variant_id),
+      componentProductId: Number(component.component_product_id),
+      componentUnitsPerVariant: Number(component.component_units_per_variant),
       sku: component.sku ?? null,
       name: String(component.name),
       qtyPerBuild: Number(component.qty_per_build),
@@ -316,6 +341,8 @@ export class BuildQueryRepository {
       items.push({
         id: Number(component.id),
         componentVariantId: Number(component.component_variant_id),
+        componentProductId: Number(component.component_product_id),
+        componentUnitsPerVariant: Number(component.component_units_per_variant),
         sku: component.sku ?? null,
         name: String(component.name),
         qtyPerBuild: Number(component.qty_per_build),

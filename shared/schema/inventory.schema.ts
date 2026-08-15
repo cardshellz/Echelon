@@ -156,7 +156,10 @@ export const buildRecipes = inventorySchema.table("build_recipes", {
   name: varchar("name", { length: 150 }).notNull(),
   version: integer("version").notNull().default(1),
   status: varchar("status", { length: 20 }).notNull().default("draft"),
+  recipeType: varchar("recipe_type", { length: 20 }).notNull(),
   outputVariantId: integer("output_variant_id").notNull().references(() => productVariants.id),
+  outputProductId: integer("output_product_id").notNull(),
+  outputUnitsPerVariant: integer("output_units_per_variant").notNull(),
   outputQty: integer("output_qty").notNull().default(1),
   notes: text("notes"),
   createdBy: varchar("created_by", { length: 100 }),
@@ -167,18 +170,32 @@ export const buildRecipes = inventorySchema.table("build_recipes", {
   versionPositive: check("build_recipes_version_chk", sql`${table.version} > 0`),
   outputQtyPositive: check("build_recipes_output_qty_chk", sql`${table.outputQty} > 0`),
   statusValid: check("build_recipes_status_chk", sql`${table.status} IN ('draft', 'active', 'retired')`),
+  recipeTypeValid: check(
+    "build_recipes_recipe_type_chk",
+    sql`${table.recipeType} IN ('conversion', 'assembly')`,
+  ),
+  snapshotValid: check(
+    "build_recipes_snapshot_chk",
+    sql`${table.outputProductId} > 0 AND ${table.outputUnitsPerVariant} > 0`,
+  ),
 }));
 
 export const buildRecipeComponents = inventorySchema.table("build_recipe_components", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   recipeId: integer("recipe_id").notNull().references(() => buildRecipes.id, { onDelete: "cascade" }),
   componentVariantId: integer("component_variant_id").notNull().references(() => productVariants.id),
+  componentProductId: integer("component_product_id").notNull(),
+  componentUnitsPerVariant: integer("component_units_per_variant").notNull(),
   qty: integer("qty").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   recipeVariantUnique: uniqueIndex("build_recipe_components_recipe_variant_uidx")
     .on(table.recipeId, table.componentVariantId),
   qtyPositive: check("build_recipe_components_qty_chk", sql`${table.qty} > 0`),
+  snapshotValid: check(
+    "build_recipe_components_snapshot_chk",
+    sql`${table.componentProductId} > 0 AND ${table.componentUnitsPerVariant} > 0`,
+  ),
 }));
 
 export const buildOrders = inventorySchema.table("build_orders", {
@@ -187,6 +204,9 @@ export const buildOrders = inventorySchema.table("build_orders", {
   recipeId: integer("recipe_id").notNull().references(() => buildRecipes.id),
   recipeCode: varchar("recipe_code", { length: 50 }).notNull(),
   recipeVersion: integer("recipe_version").notNull(),
+  recipeType: varchar("recipe_type", { length: 20 }).notNull(),
+  outputProductId: integer("output_product_id").notNull(),
+  outputUnitsPerVariant: integer("output_units_per_variant").notNull(),
   outputVariantId: integer("output_variant_id").notNull().references(() => productVariants.id),
   outputQtyPerBuild: integer("output_qty_per_build").notNull(),
   plannedBuilds: integer("planned_builds").notNull(),
@@ -222,6 +242,14 @@ export const buildOrders = inventorySchema.table("build_orders", {
     "build_orders_status_chk",
     sql`${table.status} IN ('draft', 'released', 'in_progress', 'completed', 'cancelled', 'failed')`,
   ),
+  recipeTypeValid: check(
+    "build_orders_recipe_type_chk",
+    sql`${table.recipeType} IN ('conversion', 'assembly')`,
+  ),
+  snapshotValid: check(
+    "build_orders_snapshot_chk",
+    sql`${table.outputProductId} > 0 AND ${table.outputUnitsPerVariant} > 0`,
+  ),
 }));
 
 export const buildOrderComponents = inventorySchema.table("build_order_components", {
@@ -229,6 +257,8 @@ export const buildOrderComponents = inventorySchema.table("build_order_component
   buildOrderId: integer("build_order_id").notNull().references(() => buildOrders.id, { onDelete: "cascade" }),
   recipeComponentId: integer("recipe_component_id").notNull().references(() => buildRecipeComponents.id),
   componentVariantId: integer("component_variant_id").notNull().references(() => productVariants.id),
+  componentProductId: integer("component_product_id").notNull(),
+  componentUnitsPerVariant: integer("component_units_per_variant").notNull(),
   qtyPerBuild: integer("qty_per_build").notNull(),
   plannedQty: integer("planned_qty").notNull(),
   consumedQty: integer("consumed_qty").notNull().default(0),
@@ -243,6 +273,10 @@ export const buildOrderComponents = inventorySchema.table("build_order_component
   consumedQtyValid: check(
     "build_order_components_consumed_qty_chk",
     sql`${table.consumedQty} >= 0 AND ${table.consumedQty} <= ${table.plannedQty}`,
+  ),
+  snapshotValid: check(
+    "build_order_components_snapshot_chk",
+    sql`${table.componentProductId} > 0 AND ${table.componentUnitsPerVariant} > 0`,
   ),
 }));
 

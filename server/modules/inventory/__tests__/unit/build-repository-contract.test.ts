@@ -32,6 +32,15 @@ describe("build repository transaction contract", () => {
     expect(source).toContain("${unitCostCents}, ${lot.id}");
     expect(source).toContain("levelQtyAfterConsumption -= take");
   });
+  it("validates immutable catalog snapshots before inventory mutation", () => {
+    expect(source).toContain("assertBuildVariantSnapshotsCurrent");
+    expect(source).toContain("validateBuildRecipeDefinition");
+    expect(source).toContain("component_product_id, component_units_per_variant");
+    expect(source).toContain("output_product_id, output_units_per_variant");
+    expect(source).toMatch(
+      /const components = await tx\.execute[\s\S]*assertBuildVariantSnapshotsCurrent\([\s\S]*validateBuildRecipeDefinition\([\s\S]*SET status = 'in_progress'/,
+    );
+  });
   it("persists authoritative integer-mill output cost layers", () => {
     expect(source).toContain("po_unit_cost_mills");
     expect(source).toContain("packaging_cost_mills");
