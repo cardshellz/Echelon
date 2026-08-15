@@ -270,7 +270,13 @@ export default function ReturnPolicies() {
     setDialogOpen(true);
   };
 
-  const sortedPolicies = useMemo(() => [...(overview?.policies ?? [])].sort((a, b) => a.name.localeCompare(b.name) || b.version - a.version), [overview?.policies]);
+  const sortedPolicies = useMemo(
+    () =>
+      [...(overview?.policies ?? [])]
+        .filter((policy) => policy.status === "active")
+        .sort((a, b) => a.name.localeCompare(b.name) || b.version - a.version),
+    [overview?.policies],
+  );
 
   if (overviewQuery.isLoading) return <div className="p-8 text-sm text-muted-foreground">Loading return policies...</div>;
   if (!overview) return <div className="p-8 text-sm text-destructive">Return policies could not be loaded.</div>;
