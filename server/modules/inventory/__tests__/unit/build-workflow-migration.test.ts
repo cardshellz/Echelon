@@ -10,6 +10,10 @@ const migration616 = fs.readFileSync(
   path.resolve(process.cwd(), "migrations/0616_build_order_number_sequence.sql"),
   "utf8",
 );
+const namedSchemaIntegrationFixture = fs.readFileSync(
+  path.resolve(process.cwd(), "test/fixtures/named-schema-integration.sql"),
+  "utf8",
+);
 
 describe("inventory build workflow migrations", () => {
   it("creates versioned recipes and immutable order snapshots", () => {
@@ -32,6 +36,11 @@ describe("inventory build workflow migrations", () => {
     expect(migration615).toContain("ADD COLUMN IF NOT EXISTS build_order_component_id integer");
     expect(migration615).toContain("inventory_transactions_build_order_idx");
     expect(migration615).toContain("inventory_lots_build_order_idx");
+  });
+
+  it("keeps the disposable integration schema aligned with transaction linkage", () => {
+    expect(namedSchemaIntegrationFixture).toContain("build_order_id integer");
+    expect(namedSchemaIntegrationFixture).toContain("build_order_component_id integer");
   });
 
   it("uses a database sequence for concurrency-safe build numbers", () => {

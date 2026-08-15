@@ -224,6 +224,8 @@ CREATE TABLE inventory.inventory_transactions (
   shipment_item_id integer,
   reference_type varchar(30),
   reference_id varchar(100),
+  build_order_id integer,
+  build_order_component_id integer,
   notes text,
   is_implicit integer NOT NULL DEFAULT 0,
   user_id varchar(100),
