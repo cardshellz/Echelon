@@ -14,6 +14,7 @@ import { registerProductRoutes } from "./modules/catalog/catalog.routes";
 import { registerCatalogExportRoutes } from "./modules/catalog-export/interfaces/http/catalog-export.routes";
 import { registerInventoryRoutes } from "./modules/inventory/inventory.routes";
 import { registerReplenishmentRoutes } from "./modules/inventory";
+import { registerBuildRoutes } from "./modules/inventory/build.routes";
 import { registerNotificationRoutes } from "./modules/notifications";
 import { registerFinanceAnalyticsRoutes } from "./modules/oms/finance-analytics.routes";
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
@@ -146,6 +147,7 @@ export async function registerRoutes(
   registerCatalogExportRoutes(app);
   registerInventoryRoutes(app);
   registerReplenishmentRoutes(app);
+  registerBuildRoutes(app);
   registerChannelRoutes(app);
   registerMarketplaceListingRegistrationRoutes(
     app,

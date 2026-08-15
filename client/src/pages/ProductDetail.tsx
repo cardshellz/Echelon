@@ -67,6 +67,7 @@ import {
   type VendorCatalogQuoteDraft,
   type VendorCatalogQuoteSnapshot,
 } from "@/features/supplier-catalog/VendorCatalogQuoteEditor";
+import { ProductBuildRelationships } from "@/features/inventory-builds/ProductBuildRelationships";
 
 const HIERARCHY_TYPES = [
   { level: 1, label: "Pack", prefix: "P" },
@@ -3450,7 +3451,7 @@ export default function ProductDetail() {
             </TabsContent>
 
             {/* ===== VARIANTS TAB ===== */}
-            <TabsContent value="variants" className="mt-4">
+            <TabsContent value="variants" className="mt-4 space-y-4">
               <Card>
                 <CardHeader className="p-3 md:p-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
@@ -3661,6 +3662,12 @@ export default function ProductDetail() {
                   )}
                 </CardContent>
               </Card>
+              {product?.productId && (
+                <ProductBuildRelationships
+                  enabled={activeTab === "variants"}
+                  productId={product.productId}
+                />
+              )}
             </TabsContent>
 
             {/* ===== SUPPLIERS TAB ===== */}

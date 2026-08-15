@@ -1,0 +1,460 @@
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle, Check, Loader2, PackageCheck, Plus, Search, X } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/hooks/use-toast";
+import { useSearch } from "wouter";
+
+type VariantResult = {
+  productVariantId: number;
+  sku: string;
+  name: string;
+};
+
+type RecipeComponent = {
+  id: number;
+  componentVariantId: number;
+  sku: string | null;
+  name: string;
+  qtyPerBuild: number;
+};
+
+type BuildRecipe = {
+  id: number;
+  code: string;
+  name: string;
+  version: number;
+  status: string;
+  outputVariantId: number;
+  outputSku: string | null;
+  outputName: string;
+  outputQty: number;
+  notes: string | null;
+  components: RecipeComponent[];
+};
+
+type BuildOrderComponent = RecipeComponent & {
+  plannedQty: number;
+  consumedQty: number;
+  sourceLocationId: number | null;
+  sourceLocationCode: string | null;
+};
+
+type BuildOrder = {
+  id: number;
+  systemNumber: string;
+  recipeId: number;
+  recipeCode: string;
+  recipeVersion: number;
+  outputVariantId: number;
+  outputSku: string | null;
+  outputName: string;
+  outputQtyPerBuild: number;
+  plannedBuilds: number;
+  completedBuilds: number;
+  warehouseId: number;
+  warehouseName: string;
+  outputLocationId: number;
+  outputLocationCode: string;
+  status: string;
+  totalComponentCostMills: string | null;
+  components: BuildOrderComponent[];
+  createdAt: string;
+};
+
+type Warehouse = { id: number; name: string; code: string };
+type WarehouseLocation = {
+  id: number;
+  code: string;
+  name: string | null;
+  warehouseId: number | null;
+  isActive: number;
+  locationType: string;
+};
+type VariantLocationLevel = {
+  variantQty: number;
+  reservedQty: number;
+  location: WarehouseLocation | null;
+};
+
+type RecipeComponentDraft = {
+  key: number;
+  variant: VariantResult | null;
+  qtyPerBuild: string;
+};
+
+async function responseJson<T>(response: Response): Promise<T> {
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = body?.error?.message ?? body?.error ?? `Request failed (${response.status})`;
+    throw new Error(message);
+  }
+  return body as T;
+}
+
+function statusBadge(status: string) {
+  if (status === "completed") return <Badge className="bg-green-600">Completed</Badge>;
+  if (status === "released") return <Badge className="bg-blue-600">Released</Badge>;
+  if (status === "in_progress") return <Badge className="bg-amber-600">In progress</Badge>;
+  if (status === "failed" || status === "cancelled") return <Badge variant="destructive">{status}</Badge>;
+  return <Badge variant="secondary">Draft</Badge>;
+}
+
+function formatTotalMills(value: string | null): string {
+  if (value == null) return "-";
+  const mills = BigInt(value);
+  const dollars = mills / BigInt(10000);
+  const fraction = (mills % BigInt(10000)).toString().padStart(4, "0");
+  return `$${dollars}.${fraction}`;
+}
+
+function VariantSearch({ value, onChange, label }: {
+  value: VariantResult | null;
+  onChange: (variant: VariantResult | null) => void;
+  label: string;
+}) {
+  const [search, setSearch] = useState("");
+  const { data = [], isFetching } = useQuery<VariantResult[]>({
+    queryKey: ["/api/inventory/skus/search", "build", search],
+    queryFn: async () => {
+      const response = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(search)}&limit=12`, {
+        credentials: "include",
+      });
+      return responseJson<VariantResult[]>(response);
+    },
+    enabled: !value && search.trim().length >= 2,
+  });
+
+  if (value) {
+    return (
+      <div className="flex min-w-0 items-center justify-between gap-2 border px-3 py-2">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium">{value.sku}</div>
+          <div className="truncate text-xs text-muted-foreground">{value.name}</div>
+        </div>
+        <Button type="button" variant="ghost" size="icon" onClick={() => onChange(null)} title={`Clear ${label}`}>
+          <X className="h-4 w-4" />
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="relative">
+        <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+        <Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-9" placeholder={label} />
+      </div>
+      {search.trim().length >= 2 && (
+        <div className="max-h-44 overflow-y-auto border bg-background">
+          {isFetching && <div className="p-3 text-sm text-muted-foreground">Searching...</div>}
+          {!isFetching && data.length === 0 && <div className="p-3 text-sm text-muted-foreground">No variants found</div>}
+          {data.map((variant) => (
+            <button
+              key={variant.productVariantId}
+              type="button"
+              className="block w-full border-b px-3 py-2 text-left last:border-b-0 hover:bg-muted"
+              onClick={() => { onChange(variant); setSearch(""); }}
+            >
+              <div className="text-sm font-medium">{variant.sku}</div>
+              <div className="text-xs text-muted-foreground">{variant.name}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ComponentSourceSelect({ component, warehouseId, value, onChange }: {
+  component: RecipeComponent;
+  warehouseId: number;
+  value: number | null;
+  onChange: (locationId: number) => void;
+}) {
+  const { data = [], isLoading } = useQuery<VariantLocationLevel[]>({
+    queryKey: ["/api/inventory/variants", component.componentVariantId, "build-source", warehouseId],
+    queryFn: async () => responseJson<VariantLocationLevel[]>(await fetch(
+      `/api/inventory/variants/${component.componentVariantId}/locations`,
+      { credentials: "include" },
+    )),
+    enabled: warehouseId > 0,
+  });
+  const locations = data
+    .filter((level) => level.location?.warehouseId === warehouseId && level.location.isActive === 1)
+    .map((level) => ({
+      id: level.location!.id,
+      code: level.location!.code,
+      available: level.variantQty - level.reservedQty,
+    }))
+    .filter((location) => location.available > 0)
+    .sort((a, b) => a.code.localeCompare(b.code));
+
+  return (
+    <Select value={value == null ? "" : String(value)} onValueChange={(next) => onChange(Number(next))}>
+      <SelectTrigger><SelectValue placeholder={isLoading ? "Loading..." : "Select source"} /></SelectTrigger>
+      <SelectContent>
+        {locations.map((location) => (
+          <SelectItem key={location.id} value={String(location.id)}>
+            {location.code} ({location.available} available)
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+export default function Builds() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  const search = useSearch();
+  const [activeBuildsTab, setActiveBuildsTab] = useState<"orders" | "recipes">(
+    () => new URLSearchParams(search).get("tab") === "recipes" ? "recipes" : "orders",
+  );
+  const [recipeOpen, setRecipeOpen] = useState(false);
+  const [orderOpen, setOrderOpen] = useState(false);
+  const [executeOrder, setExecuteOrder] = useState<BuildOrder | null>(null);
+  const [recipeCode, setRecipeCode] = useState("");
+  const [recipeName, setRecipeName] = useState("");
+  const [recipeNotes, setRecipeNotes] = useState("");
+  const [recipeStatus, setRecipeStatus] = useState("active");
+  const [outputVariant, setOutputVariant] = useState<VariantResult | null>(null);
+  const [outputQty, setOutputQty] = useState("1");
+  const [componentKey, setComponentKey] = useState(2);
+  const [components, setComponents] = useState<RecipeComponentDraft[]>([
+    { key: 1, variant: null, qtyPerBuild: "1" },
+  ]);
+  const [selectedRecipeId, setSelectedRecipeId] = useState<number | null>(null);
+  const [plannedBuilds, setPlannedBuilds] = useState("1");
+  const [warehouseId, setWarehouseId] = useState<number | null>(null);
+  const [outputLocationId, setOutputLocationId] = useState<number | null>(null);
+  const [sourceLocations, setSourceLocations] = useState<Record<number, number>>({});
+  const [orderCommandKey, setOrderCommandKey] = useState("");
+
+  const { data: recipes = [], isLoading: recipesLoading } = useQuery<BuildRecipe[]>({
+    queryKey: ["/api/inventory/build-recipes"],
+  });
+  const { data: orders = [], isLoading: ordersLoading } = useQuery<BuildOrder[]>({
+    queryKey: ["/api/inventory/build-orders"],
+  });
+  const { data: warehouses = [] } = useQuery<Warehouse[]>({ queryKey: ["/api/warehouses"] });
+  const { data: allLocations = [] } = useQuery<WarehouseLocation[]>({ queryKey: ["/api/warehouse/locations"] });
+
+  const selectedRecipe = recipes.find((recipe) => recipe.id === selectedRecipeId) ?? null;
+  const outputLocations = useMemo(() => allLocations
+    .filter((location) => location.warehouseId === warehouseId && location.isActive === 1)
+    .sort((a, b) => a.code.localeCompare(b.code)), [allLocations, warehouseId]);
+
+  const resetRecipe = () => {
+    setRecipeCode(""); setRecipeName(""); setRecipeNotes(""); setRecipeStatus("active");
+    setOutputVariant(null); setOutputQty("1");
+    setComponents([{ key: componentKey, variant: null, qtyPerBuild: "1" }]);
+    setComponentKey((value) => value + 1);
+  };
+  const resetOrder = () => {
+    setSelectedRecipeId(null); setPlannedBuilds("1"); setWarehouseId(null);
+    setOutputLocationId(null); setSourceLocations({}); setOrderCommandKey(crypto.randomUUID());
+  };
+
+  const createRecipe = useMutation({
+    mutationFn: async () => responseJson(await fetch("/api/inventory/build-recipes", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: recipeCode,
+        name: recipeName,
+        status: recipeStatus,
+        outputVariantId: outputVariant?.productVariantId,
+        outputQty: Number(outputQty),
+        notes: recipeNotes || undefined,
+        components: components.map((component) => ({
+          componentVariantId: component.variant?.productVariantId,
+          qtyPerBuild: Number(component.qtyPerBuild),
+        })),
+      }),
+    })),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/inventory/build-recipes"] });
+      setRecipeOpen(false); resetRecipe();
+      toast({ title: "Build recipe created" });
+    },
+    onError: (error: Error) => toast({ title: "Recipe creation failed", description: error.message, variant: "destructive" }),
+  });
+
+  const createOrder = useMutation({
+    mutationFn: async () => responseJson(await fetch("/api/inventory/build-orders", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": orderCommandKey },
+      body: JSON.stringify({
+        recipeId: selectedRecipeId,
+        plannedBuilds: Number(plannedBuilds),
+        warehouseId,
+        outputLocationId,
+        sourceLocations: selectedRecipe?.components.map((component) => ({
+          componentVariantId: component.componentVariantId,
+          sourceLocationId: sourceLocations[component.componentVariantId],
+        })) ?? [],
+      }),
+    })),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/inventory/build-orders"] });
+      setOrderOpen(false); resetOrder();
+      toast({ title: "Build order created" });
+    },
+    onError: (error: Error) => toast({ title: "Build order failed", description: error.message, variant: "destructive" }),
+  });
+
+  const transition = useMutation({
+    mutationFn: async ({ id, action }: { id: number; action: "release" | "execute" }) => responseJson(
+      await fetch(`/api/inventory/build-orders/${id}/${action}`, { method: "POST", credentials: "include" }),
+    ),
+    onSuccess: async (_result, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/inventory/build-orders"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/inventory/summary"] }),
+      ]);
+      setExecuteOrder(null);
+      toast({ title: variables.action === "release" ? "Build released" : "Build completed" });
+    },
+    onError: (error: Error) => toast({ title: "Build action failed", description: error.message, variant: "destructive" }),
+  });
+
+  const recipeValid = recipeCode.trim() && recipeName.trim() && outputVariant
+    && Number.isSafeInteger(Number(outputQty)) && Number(outputQty) > 0
+    && components.length > 0
+    && components.every((component) => component.variant && Number.isSafeInteger(Number(component.qtyPerBuild)) && Number(component.qtyPerBuild) > 0);
+  const orderValid = selectedRecipe && warehouseId && outputLocationId
+    && Number.isSafeInteger(Number(plannedBuilds)) && Number(plannedBuilds) > 0
+    && selectedRecipe.components.every((component) => sourceLocations[component.componentVariantId]);
+
+  return (
+    <div className="space-y-5 p-3 md:p-6">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+        <div>
+          <h1 className="text-2xl font-bold">Inventory Builds</h1>
+          <p className="text-sm text-muted-foreground">Convert component inventory into sellable packs, cases, and assembled products.</p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => { resetRecipe(); setRecipeOpen(true); }}><Plus className="mr-2 h-4 w-4" />Recipe</Button>
+          <Button onClick={() => { resetOrder(); setOrderOpen(true); }} disabled={!recipes.some((recipe) => recipe.status === "active")}>
+            <PackageCheck className="mr-2 h-4 w-4" />Create Build
+          </Button>
+        </div>
+      </div>
+
+      <Tabs
+        value={activeBuildsTab}
+        onValueChange={(value) => {
+          if (value === "orders" || value === "recipes") setActiveBuildsTab(value);
+        }}
+      >
+        <TabsList>
+          <TabsTrigger value="orders">Build Orders ({orders.length})</TabsTrigger>
+          <TabsTrigger value="recipes">Recipes ({recipes.length})</TabsTrigger>
+        </TabsList>
+        <TabsContent value="orders" className="mt-4">
+          <div className="overflow-x-auto border">
+            <Table>
+              <TableHeader><TableRow>
+                <TableHead>Build</TableHead><TableHead>Output</TableHead><TableHead>Components</TableHead>
+                <TableHead>Warehouse</TableHead><TableHead>Status</TableHead><TableHead>Cost</TableHead><TableHead className="text-right">Actions</TableHead>
+              </TableRow></TableHeader>
+              <TableBody>
+                {ordersLoading && <TableRow><TableCell colSpan={7}>Loading builds...</TableCell></TableRow>}
+                {!ordersLoading && orders.length === 0 && <TableRow><TableCell colSpan={7} className="py-10 text-center text-muted-foreground">No build orders yet.</TableCell></TableRow>}
+                {orders.map((order) => (
+                  <TableRow key={order.id}>
+                    <TableCell><div className="font-medium">{order.systemNumber}</div><div className="text-xs text-muted-foreground">{order.recipeCode} v{order.recipeVersion}</div></TableCell>
+                    <TableCell><div>{order.outputSku ?? order.outputName}</div><div className="text-xs text-muted-foreground">{order.outputQtyPerBuild * order.plannedBuilds} units to {order.outputLocationCode}</div></TableCell>
+                    <TableCell>{order.components.map((component) => <div key={component.id} className="text-xs">{component.plannedQty} {component.sku ?? component.name} from {component.sourceLocationCode ?? "-"}</div>)}</TableCell>
+                    <TableCell>{order.warehouseName}</TableCell><TableCell>{statusBadge(order.status)}</TableCell>
+                    <TableCell>{formatTotalMills(order.totalComponentCostMills)}</TableCell>
+                    <TableCell className="text-right">
+                      {order.status === "draft" && <Button size="sm" variant="outline" onClick={() => transition.mutate({ id: order.id, action: "release" })}>Release</Button>}
+                      {order.status === "released" && <Button size="sm" onClick={() => setExecuteOrder(order)}>Execute</Button>}
+                      {order.status === "completed" && <span className="inline-flex items-center gap-1 text-sm text-green-700"><Check className="h-4 w-4" />Posted</span>}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </TabsContent>
+        <TabsContent value="recipes" className="mt-4">
+          <div className="overflow-x-auto border">
+            <Table>
+              <TableHeader><TableRow><TableHead>Recipe</TableHead><TableHead>Output</TableHead><TableHead>Components per build</TableHead><TableHead>Status</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {recipesLoading && <TableRow><TableCell colSpan={4}>Loading recipes...</TableCell></TableRow>}
+                {!recipesLoading && recipes.length === 0 && <TableRow><TableCell colSpan={4} className="py-10 text-center text-muted-foreground">Create a recipe to define how component units become an output SKU.</TableCell></TableRow>}
+                {recipes.map((recipe) => <TableRow key={recipe.id}>
+                  <TableCell><div className="font-medium">{recipe.code}</div><div className="text-xs text-muted-foreground">{recipe.name} / v{recipe.version}</div></TableCell>
+                  <TableCell>{recipe.outputQty} x {recipe.outputSku ?? recipe.outputName}</TableCell>
+                  <TableCell>{recipe.components.map((component) => <div key={component.id} className="text-xs">{component.qtyPerBuild} x {component.sku ?? component.name}</div>)}</TableCell>
+                  <TableCell><Badge variant={recipe.status === "active" ? "default" : "secondary"}>{recipe.status}</Badge></TableCell>
+                </TableRow>)}
+              </TableBody>
+            </Table>
+          </div>
+        </TabsContent>
+      </Tabs>
+
+      <Dialog open={recipeOpen} onOpenChange={setRecipeOpen}>
+        <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
+          <DialogHeader><DialogTitle>Create build recipe</DialogTitle></DialogHeader>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div><Label>Recipe code</Label><Input value={recipeCode} onChange={(e) => setRecipeCode(e.target.value)} placeholder="STORAGE-BOX-P5" /></div>
+            <div><Label>Name</Label><Input value={recipeName} onChange={(e) => setRecipeName(e.target.value)} placeholder="Build pack of 5" /></div>
+            <div className="sm:col-span-2"><Label>Output variant</Label><VariantSearch value={outputVariant} onChange={setOutputVariant} label="Search output SKU" /></div>
+            <div><Label>Output units per build</Label><Input type="number" min="1" step="1" value={outputQty} onChange={(e) => setOutputQty(e.target.value)} /></div>
+            <div><Label>Status</Label><Select value={recipeStatus} onValueChange={setRecipeStatus}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="draft">Draft</SelectItem></SelectContent></Select></div>
+          </div>
+          <div className="space-y-3 border-t pt-4">
+            <div className="flex items-center justify-between"><Label>Components per build</Label><Button type="button" size="sm" variant="outline" onClick={() => { setComponents((items) => [...items, { key: componentKey, variant: null, qtyPerBuild: "1" }]); setComponentKey((value) => value + 1); }}><Plus className="mr-1 h-4 w-4" />Component</Button></div>
+            {components.map((component, index) => <div key={component.key} className="grid gap-2 border p-3 sm:grid-cols-[1fr_120px_40px]">
+              <VariantSearch value={component.variant} onChange={(variant) => setComponents((items) => items.map((item) => item.key === component.key ? { ...item, variant } : item))} label="Search component SKU" />
+              <div><Label className="text-xs">Qty</Label><Input type="number" min="1" step="1" value={component.qtyPerBuild} onChange={(e) => setComponents((items) => items.map((item) => item.key === component.key ? { ...item, qtyPerBuild: e.target.value } : item))} /></div>
+              <Button type="button" variant="ghost" size="icon" disabled={components.length === 1} onClick={() => setComponents((items) => items.filter((item) => item.key !== component.key))} title={`Remove component ${index + 1}`}><X className="h-4 w-4" /></Button>
+            </div>)}
+          </div>
+          <div><Label>Notes</Label><Textarea value={recipeNotes} onChange={(e) => setRecipeNotes(e.target.value)} /></div>
+          <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setRecipeOpen(false)}>Cancel</Button><Button disabled={!recipeValid || createRecipe.isPending} onClick={() => createRecipe.mutate()}>{createRecipe.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Create recipe</Button></div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={orderOpen} onOpenChange={setOrderOpen}>
+        <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
+          <DialogHeader><DialogTitle>Create build order</DialogTitle></DialogHeader>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="sm:col-span-2"><Label>Recipe</Label><Select value={selectedRecipeId == null ? "" : String(selectedRecipeId)} onValueChange={(value) => { setSelectedRecipeId(Number(value)); setSourceLocations({}); }}><SelectTrigger><SelectValue placeholder="Select active recipe" /></SelectTrigger><SelectContent>{recipes.filter((recipe) => recipe.status === "active").map((recipe) => <SelectItem key={recipe.id} value={String(recipe.id)}>{recipe.code} v{recipe.version} - {recipe.outputSku ?? recipe.outputName}</SelectItem>)}</SelectContent></Select></div>
+            <div><Label>Number of builds</Label><Input type="number" min="1" step="1" value={plannedBuilds} onChange={(e) => setPlannedBuilds(e.target.value)} /></div>
+            <div><Label>Warehouse</Label><Select value={warehouseId == null ? "" : String(warehouseId)} onValueChange={(value) => { setWarehouseId(Number(value)); setOutputLocationId(null); setSourceLocations({}); }}><SelectTrigger><SelectValue placeholder="Select warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={warehouse.id} value={String(warehouse.id)}>{warehouse.name}</SelectItem>)}</SelectContent></Select></div>
+            <div className="sm:col-span-2"><Label>Output location</Label><Select value={outputLocationId == null ? "" : String(outputLocationId)} onValueChange={(value) => setOutputLocationId(Number(value))} disabled={!warehouseId}><SelectTrigger><SelectValue placeholder="Select output location" /></SelectTrigger><SelectContent>{outputLocations.map((location) => <SelectItem key={location.id} value={String(location.id)}>{location.code} {location.name ? `- ${location.name}` : ""}</SelectItem>)}</SelectContent></Select></div>
+          </div>
+          {selectedRecipe && warehouseId && <div className="space-y-3 border-t pt-4"><Label>Component source locations</Label>{selectedRecipe.components.map((component) => <div key={component.id} className="grid items-center gap-2 sm:grid-cols-[1fr_1fr]"><div><div className="text-sm font-medium">{component.sku ?? component.name}</div><div className="text-xs text-muted-foreground">Need {component.qtyPerBuild * Number(plannedBuilds || 0)} units</div></div><ComponentSourceSelect component={component} warehouseId={warehouseId} value={sourceLocations[component.componentVariantId] ?? null} onChange={(locationId) => setSourceLocations((current) => ({ ...current, [component.componentVariantId]: locationId }))} /></div>)}</div>}
+          <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setOrderOpen(false)}>Cancel</Button><Button disabled={!orderValid || createOrder.isPending} onClick={() => createOrder.mutate()}>{createOrder.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Create draft</Button></div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={executeOrder != null} onOpenChange={(open) => !open && setExecuteOrder(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Execute {executeOrder?.systemNumber}?</DialogTitle></DialogHeader>
+          <div className="flex gap-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"><AlertTriangle className="h-5 w-5 shrink-0" /><p>This posts component consumption and creates output inventory. Verify the physical build is complete before continuing.</p></div>
+          {executeOrder && <div className="space-y-1 text-sm"><p><strong>Output:</strong> {executeOrder.outputQtyPerBuild * executeOrder.plannedBuilds} {executeOrder.outputSku ?? executeOrder.outputName}</p>{executeOrder.components.map((component) => <p key={component.id}><strong>Consume:</strong> {component.plannedQty} {component.sku ?? component.name} from {component.sourceLocationCode}</p>)}</div>}
+          <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setExecuteOrder(null)}>Cancel</Button><Button onClick={() => executeOrder && transition.mutate({ id: executeOrder.id, action: "execute" })} disabled={transition.isPending}>{transition.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Post build</Button></div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

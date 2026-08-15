@@ -63,6 +63,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
         }
         return { orphanedQty: 0, consumedCostCents: 0, consumedQty: 0 };
       }),
+      withTx: vi.fn(function () { return this; }),
     };
 
     const db = makeVariantDb([sourceVariant, targetVariant]);
@@ -108,6 +109,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
         }
         return { orphanedQty: 0, consumedCostCents: 0, consumedQty: 0 };
       }),
+      withTx: vi.fn(function () { return this; }),
     };
 
     const db = makeVariantDb([sourceVariant, targetVariant]);
@@ -127,5 +129,6 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
     // 1000 cents / 1 case = 1000 cents per case
     expect(adjustCalls[1].qtyDelta).toBe(1);
     expect(adjustCalls[1].unitCostCents).toBe(1000);
+    expect(inventoryUseCases.withTx).toHaveBeenCalledTimes(1);
   });
 });

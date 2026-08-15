@@ -135,6 +135,122 @@ export const insertCycleCountSchema = createInsertSchema(cycleCounts).omit({
 export type InsertCycleCount = z.infer<typeof insertCycleCountSchema>;
 export type CycleCount = typeof cycleCounts.$inferSelect;
 
+export const buildRecipeStatusEnum = ["draft", "active", "retired"] as const;
+export type BuildRecipeStatus = typeof buildRecipeStatusEnum[number];
+
+export const buildOrderStatusEnum = [
+  "draft",
+  "released",
+  "in_progress",
+  "completed",
+  "cancelled",
+  "failed",
+] as const;
+export type BuildOrderStatus = typeof buildOrderStatusEnum[number];
+
+// Versioned build master data. Build orders snapshot recipe quantities so
+// edits to a future recipe version cannot rewrite operational history.
+export const buildRecipes = inventorySchema.table("build_recipes", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 50 }).notNull(),
+  name: varchar("name", { length: 150 }).notNull(),
+  version: integer("version").notNull().default(1),
+  status: varchar("status", { length: 20 }).notNull().default("draft"),
+  outputVariantId: integer("output_variant_id").notNull().references(() => productVariants.id),
+  outputQty: integer("output_qty").notNull().default(1),
+  notes: text("notes"),
+  createdBy: varchar("created_by", { length: 100 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  codeVersionUnique: uniqueIndex("build_recipes_code_version_uidx").on(table.code, table.version),
+  versionPositive: check("build_recipes_version_chk", sql`${table.version} > 0`),
+  outputQtyPositive: check("build_recipes_output_qty_chk", sql`${table.outputQty} > 0`),
+  statusValid: check("build_recipes_status_chk", sql`${table.status} IN ('draft', 'active', 'retired')`),
+}));
+
+export const buildRecipeComponents = inventorySchema.table("build_recipe_components", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  recipeId: integer("recipe_id").notNull().references(() => buildRecipes.id, { onDelete: "cascade" }),
+  componentVariantId: integer("component_variant_id").notNull().references(() => productVariants.id),
+  qty: integer("qty").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  recipeVariantUnique: uniqueIndex("build_recipe_components_recipe_variant_uidx")
+    .on(table.recipeId, table.componentVariantId),
+  qtyPositive: check("build_recipe_components_qty_chk", sql`${table.qty} > 0`),
+}));
+
+export const buildOrders = inventorySchema.table("build_orders", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  systemNumber: varchar("system_number", { length: 40 }).notNull().unique(),
+  recipeId: integer("recipe_id").notNull().references(() => buildRecipes.id),
+  recipeCode: varchar("recipe_code", { length: 50 }).notNull(),
+  recipeVersion: integer("recipe_version").notNull(),
+  outputVariantId: integer("output_variant_id").notNull().references(() => productVariants.id),
+  outputQtyPerBuild: integer("output_qty_per_build").notNull(),
+  plannedBuilds: integer("planned_builds").notNull(),
+  completedBuilds: integer("completed_builds").notNull().default(0),
+  warehouseId: integer("warehouse_id").notNull().references(() => warehouses.id),
+  outputLocationId: integer("output_location_id").notNull().references(() => warehouseLocations.id),
+  status: varchar("status", { length: 20 }).notNull().default("draft"),
+  idempotencyKey: varchar("idempotency_key", { length: 100 }).notNull().unique(),
+  totalComponentCostMills: bigint("total_component_cost_mills", { mode: "bigint" }),
+  failureCode: varchar("failure_code", { length: 50 }),
+  failureMessage: text("failure_message"),
+  createdBy: varchar("created_by", { length: 100 }),
+  releasedBy: varchar("released_by", { length: 100 }),
+  completedBy: varchar("completed_by", { length: 100 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  releasedAt: timestamp("released_at", { withTimezone: true }),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  statusCreatedIndex: index("build_orders_status_created_idx").on(table.status, table.createdAt),
+  warehouseStatusIndex: index("build_orders_warehouse_status_idx")
+    .on(table.warehouseId, table.status, table.createdAt),
+  recipeVersionPositive: check("build_orders_recipe_version_chk", sql`${table.recipeVersion} > 0`),
+  outputQtyPositive: check("build_orders_output_qty_chk", sql`${table.outputQtyPerBuild} > 0`),
+  plannedBuildsPositive: check("build_orders_planned_builds_chk", sql`${table.plannedBuilds} > 0`),
+  completedBuildsValid: check(
+    "build_orders_completed_builds_chk",
+    sql`${table.completedBuilds} >= 0 AND ${table.completedBuilds} <= ${table.plannedBuilds}`,
+  ),
+  statusValid: check(
+    "build_orders_status_chk",
+    sql`${table.status} IN ('draft', 'released', 'in_progress', 'completed', 'cancelled', 'failed')`,
+  ),
+}));
+
+export const buildOrderComponents = inventorySchema.table("build_order_components", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  buildOrderId: integer("build_order_id").notNull().references(() => buildOrders.id, { onDelete: "cascade" }),
+  recipeComponentId: integer("recipe_component_id").notNull().references(() => buildRecipeComponents.id),
+  componentVariantId: integer("component_variant_id").notNull().references(() => productVariants.id),
+  qtyPerBuild: integer("qty_per_build").notNull(),
+  plannedQty: integer("planned_qty").notNull(),
+  consumedQty: integer("consumed_qty").notNull().default(0),
+  sourceLocationId: integer("source_location_id").references(() => warehouseLocations.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orderVariantUnique: uniqueIndex("build_order_components_order_variant_uidx")
+    .on(table.buildOrderId, table.componentVariantId),
+  qtyPerBuildPositive: check("build_order_components_qty_per_build_chk", sql`${table.qtyPerBuild} > 0`),
+  plannedQtyPositive: check("build_order_components_planned_qty_chk", sql`${table.plannedQty} > 0`),
+  consumedQtyValid: check(
+    "build_order_components_consumed_qty_chk",
+    sql`${table.consumedQty} >= 0 AND ${table.consumedQty} <= ${table.plannedQty}`,
+  ),
+}));
+
+export type BuildRecipe = typeof buildRecipes.$inferSelect;
+export type BuildRecipeComponent = typeof buildRecipeComponents.$inferSelect;
+export type BuildOrder = typeof buildOrders.$inferSelect;
+export type BuildOrderComponent = typeof buildOrderComponents.$inferSelect;
+
 // Inventory transactions ledger (audit trail) - Full WMS
 // Every inventory movement is logged here for complete audit trail
 export const inventoryTransactions = inventorySchema.table("inventory_transactions", {
@@ -175,6 +291,8 @@ export const inventoryTransactions = inventorySchema.table("inventory_transactio
   shipmentId: integer("shipment_id").references(() => outboundShipments.id), // Link to shipment
   shipmentItemId: integer("shipment_item_id").references(() => outboundShipmentItems.id, { onDelete: "set null" }),
 
+  buildOrderId: integer("build_order_id").references(() => buildOrders.id, { onDelete: "set null" }),
+  buildOrderComponentId: integer("build_order_component_id").references(() => buildOrderComponents.id, { onDelete: "set null" }),
   referenceType: varchar("reference_type", { length: 30 }), // "order", "receiving", "cycle_count", "manual"
   referenceId: varchar("reference_id", { length: 100 }), // External reference ID
   notes: text("notes"),
@@ -635,6 +753,7 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id),
   receivingOrderId: integer("receiving_order_id").references(() => receivingOrders.id, { onDelete: "set null" }),
   purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id, { onDelete: "set null" }),
+  buildOrderId: integer("build_order_id").references(() => buildOrders.id, { onDelete: "set null" }),
   unitCostCents: bigint("unit_cost_cents", { mode: "number" }).notNull().default(0), // Cost per variant unit
   qtyOnHand: integer("qty_on_hand").notNull().default(0),
   qtyReserved: integer("qty_reserved").notNull().default(0),
