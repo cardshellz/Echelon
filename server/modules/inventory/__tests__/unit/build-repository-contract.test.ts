@@ -2,50 +2,80 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-const source = fs.readFileSync(
+const repositorySource = fs.readFileSync(
   path.resolve(process.cwd(), "server/modules/inventory/infrastructure/build.repository.ts"),
+  "utf8",
+);
+const executionSource = fs.readFileSync(
+  path.resolve(process.cwd(), "server/modules/inventory/infrastructure/build-execution.repository.ts"),
+  "utf8",
+);
+const querySource = fs.readFileSync(
+  path.resolve(process.cwd(), "server/modules/inventory/infrastructure/build-query.repository.ts"),
   "utf8",
 );
 
 describe("build repository transaction contract", () => {
-  it("locks the order, component balances, and FIFO lots before mutation", () => {
-    expect(source).toMatch(/build_orders[\s\S]*FOR UPDATE/);
-    expect(source).toMatch(/inventory_levels[\s\S]*FOR UPDATE/);
-    expect(source).toMatch(/inventory_lots[\s\S]*ORDER BY received_at, id[\s\S]*FOR UPDATE/);
+  it("keeps recipe configuration separate from execution orchestration", () => {
+    expect(repositorySource).toContain("new BuildExecutionRepository");
+    expect(repositorySource).toContain("return this.execution.executeOrder(input)");
+    expect(repositorySource).not.toContain("INSERT INTO inventory.build_runs");
   });
 
-  it("does not consume reserved component stock", () => {
-    expect(source).toContain("Number(level.variant_qty) - Number(level.reserved_qty)");
-    expect(source).toContain("Number(lot.qty_on_hand) - Number(lot.qty_reserved)");
+  it("locks the order, components, levels, reservations, and FIFO lots before mutation", () => {
+    expect(executionSource).toMatch(/build_orders[\s\S]*FOR UPDATE/);
+    expect(executionSource).toMatch(/build_order_components[\s\S]*FOR UPDATE/);
+    expect(executionSource).toMatch(/inventory_levels[\s\S]*FOR UPDATE/);
+    expect(executionSource).toMatch(/ORDER BY lot\.received_at, lot\.id[\s\S]*FOR UPDATE OF reservation, lot/);
   });
 
-  it("posts linked assemble ledger rows for inputs and outputs", () => {
-    expect(source).toContain("'assemble'");
-    expect(source).toContain("build_order_id, build_order_component_id");
-    expect(source).toContain("build_order_id, notes, user_id");
-    expect(source).toContain("reference_type, reference_id");
+  it("owns exact component reservations at release", () => {
+    expect(executionSource).toContain("inventory.build_component_reservations");
+    expect(executionSource).toContain("reserved_qty - consumed_qty - released_qty");
+    expect(executionSource).toContain("SET reserved_qty = reserved_qty +");
+    expect(executionSource).toContain("'reserve'");
   });
 
-  it("records each consumed FIFO lot on its own immutable ledger row", () => {
-    expect(source).toContain("let levelQtyAfterConsumption = Number(level.variant_qty)");
-    expect(source).toContain("unit_cost_cents, inventory_lot_id");
-    expect(source).toContain("${unitCostCents}, ${lot.id}");
-    expect(source).toContain("levelQtyAfterConsumption -= take");
+  it("posts independently idempotent partial runs", () => {
+    expect(executionSource).toContain("calculateBuildRunQuantities");
+    expect(executionSource).toContain("WHERE idempotency_key =");
+    expect(executionSource).toContain("INSERT INTO inventory.build_runs");
+    expect(executionSource).toContain("builds_completed");
+    expect(executionSource).toContain("alreadyPosted");
   });
-  it("validates immutable catalog snapshots before inventory mutation", () => {
-    expect(source).toContain("assertBuildVariantSnapshotsCurrent");
-    expect(source).toContain("validateBuildRecipeDefinition");
-    expect(source).toContain("component_product_id, component_units_per_variant");
-    expect(source).toContain("output_product_id, output_units_per_variant");
-    expect(source).toMatch(
-      /const components = await tx\.execute[\s\S]*assertBuildVariantSnapshotsCurrent\([\s\S]*validateBuildRecipeDefinition\([\s\S]*SET status = 'in_progress'/,
-    );
+
+  it("records immutable FIFO consumption and exact integer-mill output cost layers", () => {
+    expect(executionSource).toContain("inventory.build_run_consumptions");
+    expect(executionSource).toContain("allocateBuildCostLayers(consumedCost, quantities.outputQty)");
+    expect(executionSource).toContain("po_unit_cost_mills");
+    expect(executionSource).toContain("packaging_cost_mills");
+    expect(executionSource).toContain("landed_cost_mills");
+    expect(executionSource).toContain("build_run_id");
   });
-  it("persists authoritative integer-mill output cost layers", () => {
-    expect(source).toContain("po_unit_cost_mills");
-    expect(source).toContain("packaging_cost_mills");
-    expect(source).toContain("landed_cost_mills");
-    expect(source).toContain("total_unit_cost_mills");
-    expect(source).toContain("allocateBuildCostLayers(consumedCost, outputQty)");
+
+  it("cancels only open reservations and records unreserve ledger evidence", () => {
+    expect(executionSource).toContain("releaseOpenReservations");
+    expect(executionSource).toContain("reserved_qty > reservation.consumed_qty + reservation.released_qty");
+    expect(executionSource).toContain("'unreserve'");
+    expect(executionSource).toContain("cancellation_reason");
+    expect(executionSource).toContain("BUILD_CANCELLATION_CONFLICT");
+    expect(executionSource).toContain("cancelled_reservation_qty");
+    expect(executionSource).toContain('String(order.cancellation_reason ?? "") !== input.reason');
+  });
+
+  it("hydrates order components and runs sequentially on a single pg client", () => {
+    expect(querySource).toContain("await this.loadOrderComponents(orderIds)");
+    expect(querySource).toContain("await this.loadOrderRuns(orderIds)");
+    expect(querySource).not.toMatch(/componentsByOrder, runsByOrder.*Promise\.all/);
+  });
+
+  it("uses compensating reversal instead of rewriting posted evidence", () => {
+    expect(executionSource).toContain("assertBuildRunOutputUntouched");
+    expect(executionSource).toContain("inventory.build_run_reversals");
+    expect(executionSource).toContain("'build_reversal'");
+    expect(executionSource).toContain("latestPostedRunId");
+    expect(executionSource).toContain("resultingOrderStatus");
+    expect(executionSource).toContain("resulting_completed_builds");
+    expect(executionSource).toContain("SET status = 'reversed'");
   });
 });

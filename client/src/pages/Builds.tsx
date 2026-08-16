@@ -3,11 +3,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowLeftRight,
+  Ban,
   Check,
   Hammer,
   Loader2,
   PackageCheck,
   Plus,
+  RotateCcw,
   Search,
   X,
 } from "lucide-react";
@@ -62,8 +64,25 @@ type BuildRecipe = {
 type BuildOrderComponent = RecipeComponent & {
   plannedQty: number;
   consumedQty: number;
+  reservedQty: number;
   sourceLocationId: number | null;
   sourceLocationCode: string | null;
+};
+
+type BuildRun = {
+  id: number;
+  runNumber: number;
+  status: string;
+  buildsCompleted: number;
+  outputQty: number;
+  outputQtyOnHand: number;
+  totalComponentCostMills: string;
+  postedAt: string | null;
+  reversalId: number | null;
+  reversalReason: string | null;
+  reversedAt: string | null;
+  canReverse: boolean;
+  reversalBlocker: string | null;
 };
 
 type BuildOrder = {
@@ -81,13 +100,21 @@ type BuildOrder = {
   outputQtyPerBuild: number;
   plannedBuilds: number;
   completedBuilds: number;
+  remainingBuilds: number;
   warehouseId: number;
   warehouseName: string;
   outputLocationId: number;
   outputLocationCode: string;
   status: string;
   totalComponentCostMills: string | null;
+  failureCode: string | null;
+  failureMessage: string | null;
+  failureCount: number;
+  lastFailureAt: string | null;
+  cancellationReason: string | null;
+  cancelledReservationQty: number | null;
   components: BuildOrderComponent[];
+  runs: BuildRun[];
   createdAt: string;
 };
 
@@ -342,6 +369,13 @@ export default function Builds() {
   const [recipeOpen, setRecipeOpen] = useState(false);
   const [orderOpen, setOrderOpen] = useState(false);
   const [executeOrder, setExecuteOrder] = useState<BuildOrder | null>(null);
+  const [executeBuilds, setExecuteBuilds] = useState("1");
+  const [executeCommandKey, setExecuteCommandKey] = useState("");
+  const [cancelOrder, setCancelOrder] = useState<BuildOrder | null>(null);
+  const [cancelReason, setCancelReason] = useState("");
+  const [reverseSelection, setReverseSelection] = useState<{ order: BuildOrder; run: BuildRun } | null>(null);
+  const [reverseReason, setReverseReason] = useState("");
+  const [reverseCommandKey, setReverseCommandKey] = useState("");
   const [recipeCode, setRecipeCode] = useState("");
   const [recipeName, setRecipeName] = useState("");
   const [recipeNotes, setRecipeNotes] = useState("");
@@ -383,6 +417,27 @@ export default function Builds() {
   const resetOrder = () => {
     setSelectedRecipeId(null); setPlannedBuilds("1"); setWarehouseId(null);
     setOutputLocationId(null); setSourceLocations({}); setOrderCommandKey(crypto.randomUUID());
+  };
+  const openExecuteDialog = (order: BuildOrder) => {
+    setExecuteOrder(order);
+    setExecuteBuilds(String(order.remainingBuilds));
+    setExecuteCommandKey(crypto.randomUUID());
+  };
+  const openCancelDialog = (order: BuildOrder) => {
+    setCancelOrder(order);
+    setCancelReason("");
+  };
+  const openReverseDialog = (order: BuildOrder, run: BuildRun) => {
+    setReverseSelection({ order, run });
+    setReverseReason("");
+    setReverseCommandKey(crypto.randomUUID());
+  };
+  const refreshBuildData = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/build-orders"] }),
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] }),
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/summary"] }),
+    ]);
   };
 
   const createRecipe = useMutation({
@@ -436,20 +491,98 @@ export default function Builds() {
     onError: (error: Error) => toast({ title: "Build order failed", description: error.message, variant: "destructive" }),
   });
 
-  const transition = useMutation({
-    mutationFn: async ({ id, action }: { id: number; action: "release" | "execute" }) => responseJson(
-      await fetch(`/api/inventory/build-orders/${id}/${action}`, { method: "POST", credentials: "include" }),
+  const releaseBuild = useMutation({
+    mutationFn: async (id: number) => responseJson(
+      await fetch(`/api/inventory/build-orders/${id}/release`, {
+        method: "POST",
+        credentials: "include",
+      }),
     ),
-    onSuccess: async (_result, variables) => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["/api/inventory/build-orders"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/inventory/summary"] }),
-      ]);
-      setExecuteOrder(null);
-      toast({ title: variables.action === "release" ? "Build released" : "Build completed" });
+    onSuccess: async () => {
+      await refreshBuildData();
+      toast({ title: "Build released", description: "Component inventory is reserved for this build." });
     },
-    onError: (error: Error) => toast({ title: "Build action failed", description: error.message, variant: "destructive" }),
+    onError: (error: Error) => toast({
+      title: "Build release failed",
+      description: error.message,
+      variant: "destructive",
+    }),
+  });
+
+  const executeBuild = useMutation({
+    mutationFn: async () => {
+      if (!executeOrder) throw new Error("No build order is selected");
+      return responseJson(await fetch(`/api/inventory/build-orders/${executeOrder.id}/execute`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": executeCommandKey,
+        },
+        body: JSON.stringify({ buildsCompleted: Number(executeBuilds) }),
+      }));
+    },
+    onSuccess: async () => {
+      await refreshBuildData();
+      setExecuteOrder(null);
+      toast({ title: "Build run posted" });
+    },
+    onError: (error: Error) => toast({
+      title: "Build posting failed",
+      description: error.message,
+      variant: "destructive",
+    }),
+  });
+
+  const cancelBuild = useMutation({
+    mutationFn: async () => {
+      if (!cancelOrder) throw new Error("No build order is selected");
+      return responseJson(await fetch(`/api/inventory/build-orders/${cancelOrder.id}/cancel`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: cancelReason }),
+      }));
+    },
+    onSuccess: async () => {
+      await refreshBuildData();
+      setCancelOrder(null);
+      toast({ title: "Remaining build work cancelled" });
+    },
+    onError: (error: Error) => toast({
+      title: "Build cancellation failed",
+      description: error.message,
+      variant: "destructive",
+    }),
+  });
+
+  const reverseBuild = useMutation({
+    mutationFn: async () => {
+      if (!reverseSelection) throw new Error("No build run is selected");
+      const { order, run } = reverseSelection;
+      return responseJson(await fetch(
+        `/api/inventory/build-orders/${order.id}/runs/${run.id}/reverse`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": reverseCommandKey,
+          },
+          body: JSON.stringify({ reason: reverseReason }),
+        },
+      ));
+    },
+    onSuccess: async () => {
+      await refreshBuildData();
+      setReverseSelection(null);
+      toast({ title: "Build run reversed" });
+    },
+    onError: (error: Error) => toast({
+      title: "Build reversal failed",
+      description: error.message,
+      variant: "destructive",
+    }),
   });
 
   const recipeEvidence = calculateRecipeEvidence({
@@ -466,6 +599,13 @@ export default function Builds() {
   const orderValid = selectedRecipe && warehouseId && outputLocationId
     && Number.isSafeInteger(Number(plannedBuilds)) && Number(plannedBuilds) > 0
     && selectedRecipe.components.every((component) => sourceLocations[component.componentVariantId]);
+  const executeBuildCount = Number(executeBuilds);
+  const executeValid = executeOrder != null
+    && Number.isSafeInteger(executeBuildCount)
+    && executeBuildCount > 0
+    && executeBuildCount <= executeOrder.remainingBuilds;
+  const cancelValid = cancelReason.trim().length > 0 && cancelReason.trim().length <= 2000;
+  const reverseValid = reverseReason.trim().length > 0 && reverseReason.trim().length <= 2000;
 
   return (
     <div className="space-y-5 p-3 md:p-6">
@@ -497,25 +637,102 @@ export default function Builds() {
             <Table>
               <TableHeader><TableRow>
                 <TableHead>Build</TableHead><TableHead>Output</TableHead><TableHead>Components</TableHead>
-                <TableHead>Warehouse</TableHead><TableHead>Status</TableHead><TableHead>Cost</TableHead><TableHead className="text-right">Actions</TableHead>
+                <TableHead>Warehouse</TableHead><TableHead>Progress</TableHead><TableHead>Status</TableHead>
+                <TableHead>Cost</TableHead><TableHead className="text-right">Actions</TableHead>
               </TableRow></TableHeader>
               <TableBody>
-                {ordersLoading && <TableRow><TableCell colSpan={7}>Loading builds...</TableCell></TableRow>}
-                {!ordersLoading && orders.length === 0 && <TableRow><TableCell colSpan={7} className="py-10 text-center text-muted-foreground">No build orders yet.</TableCell></TableRow>}
-                {orders.map((order) => (
-                  <TableRow key={order.id}>
-                    <TableCell><div className="font-medium">{order.systemNumber}</div><div className="flex items-center gap-2 text-xs text-muted-foreground">{order.recipeCode} v{order.recipeVersion}<Badge variant="outline">{order.recipeType}</Badge></div></TableCell>
-                    <TableCell><div>{order.outputSku ?? order.outputName}</div><div className="text-xs text-muted-foreground">{order.outputQtyPerBuild * order.plannedBuilds} units to {order.outputLocationCode}</div></TableCell>
-                    <TableCell>{order.components.map((component) => <div key={component.id} className="text-xs">{component.plannedQty} {component.sku ?? component.name} from {component.sourceLocationCode ?? "-"}</div>)}</TableCell>
-                    <TableCell>{order.warehouseName}</TableCell><TableCell>{statusBadge(order.status)}</TableCell>
-                    <TableCell>{formatTotalMills(order.totalComponentCostMills)}</TableCell>
-                    <TableCell className="text-right">
-                      {order.status === "draft" && <Button size="sm" variant="outline" onClick={() => transition.mutate({ id: order.id, action: "release" })}>Release</Button>}
-                      {order.status === "released" && <Button size="sm" onClick={() => setExecuteOrder(order)}>Execute</Button>}
-                      {order.status === "completed" && <span className="inline-flex items-center gap-1 text-sm text-green-700"><Check className="h-4 w-4" />Posted</span>}
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {ordersLoading && <TableRow><TableCell colSpan={8}>Loading builds...</TableCell></TableRow>}
+                {!ordersLoading && orders.length === 0 && <TableRow><TableCell colSpan={8} className="py-10 text-center text-muted-foreground">No build orders yet.</TableCell></TableRow>}
+                {orders.map((order) => {
+                  const latestReversibleRun = order.runs.find((run) => run.canReverse);
+                  const canContinue = ["released", "in_progress", "failed"].includes(order.status)
+                    && order.remainingBuilds > 0;
+                  const canCancel = ["draft", "released", "in_progress", "failed"].includes(order.status);
+                  return (
+                    <TableRow key={order.id}>
+                      <TableCell>
+                        <div className="font-medium">{order.systemNumber}</div>
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          {order.recipeCode} v{order.recipeVersion}<Badge variant="outline">{order.recipeType}</Badge>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div>{order.outputSku ?? order.outputName}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {order.outputQtyPerBuild * order.plannedBuilds} planned units to {order.outputLocationCode}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {order.components.map((component) => (
+                          <div key={component.id} className="text-xs">
+                            {component.consumedQty}/{component.plannedQty} consumed, {component.reservedQty} reserved
+                            {" "}{component.sku ?? component.name} from {component.sourceLocationCode ?? "-"}
+                          </div>
+                        ))}
+                      </TableCell>
+                      <TableCell>{order.warehouseName}</TableCell>
+                      <TableCell>
+                        <div className="font-medium">{order.completedBuilds} / {order.plannedBuilds} builds</div>
+                        <div className="text-xs text-muted-foreground">
+                          {order.remainingBuilds} remaining, {order.runs.length} run{order.runs.length === 1 ? "" : "s"}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {statusBadge(order.status)}
+                        {order.failureMessage && (
+                          <div className="mt-1 max-w-56 text-xs text-red-700" title={order.failureCode ?? undefined}>
+                            {order.failureMessage}
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell>{formatTotalMills(order.totalComponentCostMills)}</TableCell>
+                      <TableCell>
+                        <div className="flex justify-end gap-1">
+                          {order.status === "draft" && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => releaseBuild.mutate(order.id)}
+                              disabled={releaseBuild.isPending}
+                            >
+                              Release
+                            </Button>
+                          )}
+                          {canContinue && (
+                            <Button size="sm" onClick={() => openExecuteDialog(order)}>
+                              {order.status === "failed" ? "Retry" : "Post run"}
+                            </Button>
+                          )}
+                          {latestReversibleRun && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => openReverseDialog(order, latestReversibleRun)}
+                              title={"Reverse run " + latestReversibleRun.runNumber}
+                            >
+                              <RotateCcw className="mr-1 h-4 w-4" />Reverse
+                            </Button>
+                          )}
+                          {canCancel && (
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={() => openCancelDialog(order)}
+                              title={order.completedBuilds > 0 ? "Cancel remaining build work" : "Cancel build order"}
+                            >
+                              <Ban className="h-4 w-4" />
+                            </Button>
+                          )}
+                          {order.status === "completed" && !latestReversibleRun && (
+                            <span className="inline-flex items-center gap-1 text-sm text-green-700">
+                              <Check className="h-4 w-4" />Posted
+                            </span>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>
@@ -613,12 +830,118 @@ export default function Builds() {
 
       <Dialog open={executeOrder != null} onOpenChange={(open) => !open && setExecuteOrder(null)}>
         <DialogContent>
-          <DialogHeader><DialogTitle>Execute {executeOrder?.systemNumber}?</DialogTitle></DialogHeader>
-          <div className="flex gap-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"><AlertTriangle className="h-5 w-5 shrink-0" /><p>This posts component consumption and creates output inventory. Verify the physical build is complete before continuing.</p></div>
-          {executeOrder && <div className="space-y-1 text-sm"><p><strong>Output:</strong> {executeOrder.outputQtyPerBuild * executeOrder.plannedBuilds} {executeOrder.outputSku ?? executeOrder.outputName}</p>{executeOrder.components.map((component) => <p key={component.id}><strong>Consume:</strong> {component.plannedQty} {component.sku ?? component.name} from {component.sourceLocationCode}</p>)}</div>}
-          <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setExecuteOrder(null)}>Cancel</Button><Button onClick={() => executeOrder && transition.mutate({ id: executeOrder.id, action: "execute" })} disabled={transition.isPending}>{transition.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Post build</Button></div>
+          <DialogHeader><DialogTitle>Post {executeOrder?.systemNumber} run</DialogTitle></DialogHeader>
+          <div className="flex gap-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+            <AlertTriangle className="h-5 w-5 shrink-0" />
+            <p>Post only the quantity physically completed. This consumes reserved components and creates output inventory atomically.</p>
+          </div>
+          {executeOrder && (
+            <div className="space-y-3">
+              <div>
+                <Label htmlFor="builds-completed">Completed builds</Label>
+                <Input
+                  id="builds-completed"
+                  type="number"
+                  min="1"
+                  max={executeOrder.remainingBuilds}
+                  step="1"
+                  value={executeBuilds}
+                  onChange={(event) => setExecuteBuilds(event.target.value)}
+                />
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {executeOrder.remainingBuilds} builds remain on this order.
+                </div>
+              </div>
+              {executeValid && (
+                <div className="space-y-1 text-sm">
+                  <p><strong>Produce:</strong> {executeOrder.outputQtyPerBuild * executeBuildCount} {executeOrder.outputSku ?? executeOrder.outputName}</p>
+                  {executeOrder.components.map((component) => (
+                    <p key={component.id}>
+                      <strong>Consume:</strong> {component.qtyPerBuild * executeBuildCount} {component.sku ?? component.name}
+                      {" "}from {component.sourceLocationCode}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setExecuteOrder(null)}>Cancel</Button>
+            <Button disabled={!executeValid || executeBuild.isPending} onClick={() => executeBuild.mutate()}>
+              {executeBuild.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Post run
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={cancelOrder != null} onOpenChange={(open) => !open && setCancelOrder(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Cancel {cancelOrder?.systemNumber}</DialogTitle></DialogHeader>
+          <div className="text-sm text-muted-foreground">
+            Posted runs remain immutable. This cancels only unfinished work and releases its component reservations.
+          </div>
+          <div>
+            <Label htmlFor="build-cancellation-reason">Reason</Label>
+            <Textarea
+              id="build-cancellation-reason"
+              value={cancelReason}
+              onChange={(event) => setCancelReason(event.target.value)}
+              maxLength={2000}
+              placeholder="Why is the remaining build work being cancelled?"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setCancelOrder(null)}>Keep build</Button>
+            <Button
+              variant="destructive"
+              disabled={!cancelValid || cancelBuild.isPending}
+              onClick={() => cancelBuild.mutate()}
+            >
+              {cancelBuild.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Cancel remaining
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={reverseSelection != null} onOpenChange={(open) => !open && setReverseSelection(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              Reverse {reverseSelection?.order.systemNumber} run {reverseSelection?.run.runNumber}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex gap-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+            <AlertTriangle className="h-5 w-5 shrink-0" />
+            <p>The server verified this is the latest posted run and its output is untouched. Reversal removes that output and restores the exact component lots as reserved.</p>
+          </div>
+          {reverseSelection && (
+            <div className="text-sm">
+              {reverseSelection.run.buildsCompleted} builds, {reverseSelection.run.outputQty} output units
+            </div>
+          )}
+          <div>
+            <Label htmlFor="build-reversal-reason">Correction reason</Label>
+            <Textarea
+              id="build-reversal-reason"
+              value={reverseReason}
+              onChange={(event) => setReverseReason(event.target.value)}
+              maxLength={2000}
+              placeholder="Why must this posted run be reversed?"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setReverseSelection(null)}>Keep posted</Button>
+            <Button
+              variant="destructive"
+              disabled={!reverseValid || reverseBuild.isPending}
+              onClick={() => reverseBuild.mutate()}
+            >
+              {reverseBuild.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Reverse run
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
     </div>
   );
 }

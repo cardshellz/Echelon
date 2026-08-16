@@ -304,6 +304,9 @@
     "modules/identity",
     "modules/inventory"
   ],
+  "inventory.build_component_reservations": [
+    "modules/inventory"
+  ],
   "inventory.build_order_components": [
     "modules/inventory"
   ],
@@ -314,6 +317,15 @@
     "modules/inventory"
   ],
   "inventory.build_recipes": [
+    "modules/inventory"
+  ],
+  "inventory.build_run_consumptions": [
+    "modules/inventory"
+  ],
+  "inventory.build_run_reversals": [
+    "modules/inventory"
+  ],
+  "inventory.build_runs": [
     "modules/inventory"
   ],
   "inventory.cost_adjustment_log": [

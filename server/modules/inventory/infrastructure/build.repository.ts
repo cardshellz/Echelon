@@ -1,6 +1,5 @@
 import { sql } from "drizzle-orm";
 import {
-  allocateBuildCostLayers,
   assertBuildVariantSnapshotsCurrent,
   BuildDomainError,
   calculateBuildQuantities,
@@ -9,6 +8,24 @@ import {
   type BuildRecipeType,
   type BuildVariantFacts,
 } from "../domain/build.domain";
+import {
+  BuildExecutionRepository,
+  type BuildCancellationResult,
+  type BuildExecutionResult,
+  type BuildReversalResult,
+  type CancelBuildOrderInput,
+  type ExecuteBuildRunInput,
+  type ReverseBuildRunInput,
+} from "./build-execution.repository";
+
+export type {
+  BuildCancellationResult,
+  BuildExecutionResult,
+  BuildReversalResult,
+  CancelBuildOrderInput,
+  ExecuteBuildRunInput,
+  ReverseBuildRunInput,
+} from "./build-execution.repository";
 
 type Db = {
   execute: (query: unknown) => Promise<{ rows: any[] }>;
@@ -42,17 +59,6 @@ export type CreateBuildOrderInput = {
   actorId?: string;
 };
 
-export type BuildExecutionResult = {
-  buildOrderId: number;
-  systemNumber: string;
-  status: "completed";
-  outputVariantId: number;
-  outputQty: number;
-  totalComponentCostMills: string;
-  alreadyCompleted: boolean;
-};
-
-type CostAccumulator = BuildCostTotals & { totalMills: bigint };
 
 function toBigInt(value: unknown, field: string): bigint {
   try {
@@ -200,16 +206,17 @@ export function normalizeBuildLotCosts(lot: any): BuildCostTotals & { totalMills
   return { poMills, packagingMills, landedMills, totalMills };
 }
 
-function addConsumedCost(total: CostAccumulator, unit: ReturnType<typeof normalizeBuildLotCosts>, qty: number): void {
-  const multiplier = BigInt(qty);
-  total.poMills += unit.poMills * multiplier;
-  total.packagingMills += unit.packagingMills * multiplier;
-  total.landedMills += unit.landedMills * multiplier;
-  total.totalMills += unit.totalMills * multiplier;
-}
 
 export class BuildRepository {
-  constructor(private readonly db: Db) {}
+  private readonly execution: BuildExecutionRepository;
+
+  constructor(private readonly db: Db) {
+    this.execution = new BuildExecutionRepository(db, {
+      loadActiveBuildVariantFacts,
+      normalizeBuildLotCosts,
+      buildMillsToRoundedCents,
+    });
+  }
   private async findIdempotentOrder(
     tx: Db,
     input: CreateBuildOrderInput,
@@ -451,278 +458,19 @@ export class BuildRepository {
   }
 
   async releaseOrder(buildOrderId: number, actorId?: string): Promise<any> {
-    return this.db.transaction(async (tx) => {
-      const locked = await tx.execute(sql`
-        SELECT * FROM inventory.build_orders WHERE id = ${buildOrderId} FOR UPDATE
-      `);
-      const order = locked.rows[0];
-      if (!order) throw new BuildDomainError("BUILD_ORDER_NOT_FOUND", `Build order ${buildOrderId} was not found`);
-      if (order.status === "released" || order.status === "completed") return order;
-      if (order.status !== "draft") {
-        throw new BuildDomainError("INVALID_BUILD_STATUS", `Build order ${buildOrderId} cannot be released`, {
-          status: order.status,
-        });
-      }
-      const missing = await tx.execute(sql`
-        SELECT id FROM inventory.build_order_components
-        WHERE build_order_id = ${buildOrderId} AND source_location_id IS NULL
-        LIMIT 1
-      `);
-      if (missing.rows.length > 0) {
-        throw new BuildDomainError("BUILD_SOURCE_LOCATION_REQUIRED", "Every component requires a source location");
-      }
-      const updated = await tx.execute(sql`
-        UPDATE inventory.build_orders
-        SET status = 'released', released_by = ${actorId ?? null}, released_at = now(), updated_at = now()
-        WHERE id = ${buildOrderId}
-        RETURNING *
-      `);
-      return updated.rows[0];
-    });
+    return this.execution.releaseOrder(buildOrderId, actorId);
   }
 
-  async executeOrder(buildOrderId: number, actorId?: string): Promise<BuildExecutionResult> {
-    return this.db.transaction(async (tx) => {
-      const locked = await tx.execute(sql`
-        SELECT * FROM inventory.build_orders WHERE id = ${buildOrderId} FOR UPDATE
-      `);
-      const order = locked.rows[0];
-      if (!order) throw new BuildDomainError("BUILD_ORDER_NOT_FOUND", `Build order ${buildOrderId} was not found`);
-      const outputQty = Number(order.output_qty_per_build) * Number(order.planned_builds);
-      if (order.status === "completed") {
-        return {
-          buildOrderId,
-          systemNumber: order.system_number,
-          status: "completed",
-          outputVariantId: Number(order.output_variant_id),
-          outputQty,
-          totalComponentCostMills: String(order.total_component_cost_mills ?? 0),
-          alreadyCompleted: true,
-        };
-      }
-      if (order.status !== "released") {
-        throw new BuildDomainError("INVALID_BUILD_STATUS", `Build order ${buildOrderId} is not released`, {
-          status: order.status,
-        });
-      }
+  async executeOrder(input: ExecuteBuildRunInput): Promise<BuildExecutionResult> {
+    return this.execution.executeOrder(input);
+  }
 
-      const components = await tx.execute(sql`
-        SELECT * FROM inventory.build_order_components
-        WHERE build_order_id = ${buildOrderId}
-        ORDER BY component_variant_id, source_location_id
-        FOR UPDATE
-      `);
-      const variantFacts = await loadActiveBuildVariantFacts(
-        tx,
-        [
-          Number(order.output_variant_id),
-          ...components.rows.map((row) => Number(row.component_variant_id)),
-        ],
-        { buildOrderId },
-      );
-      const outputSnapshot: BuildVariantFacts & { qtyPerBuild: number } = {
-        variantId: Number(order.output_variant_id),
-        productId: Number(order.output_product_id),
-        unitsPerVariant: Number(order.output_units_per_variant),
-        qtyPerBuild: Number(order.output_qty_per_build),
-      };
-      const componentDefinitions = components.rows.map((component) => ({
-        variantId: Number(component.component_variant_id),
-        productId: Number(component.component_product_id),
-        unitsPerVariant: Number(component.component_units_per_variant),
-        qtyPerBuild: Number(component.qty_per_build),
-      }));
-      assertBuildVariantSnapshotsCurrent({
-        snapshots: [outputSnapshot, ...componentDefinitions],
-        currentVariants: variantFacts,
-        context: { buildOrderId },
-      });
-      validateBuildRecipeDefinition({
-        recipeType: order.recipe_type,
-        output: outputSnapshot,
-        components: componentDefinitions,
-      });
-      await tx.execute(sql`
-        UPDATE inventory.build_orders
-        SET status = 'in_progress', started_at = now(), updated_at = now()
-        WHERE id = ${buildOrderId}
-      `);
-      const consumedCost: CostAccumulator = {
-        poMills: BigInt(0),
-        packagingMills: BigInt(0),
-        landedMills: BigInt(0),
-        totalMills: BigInt(0),
-      };
+  async cancelOrder(input: CancelBuildOrderInput): Promise<BuildCancellationResult> {
+    return this.execution.cancelOrder(input);
+  }
 
-      for (const component of components.rows) {
-        const requiredQty = Number(component.planned_qty) - Number(component.consumed_qty);
-        const variantId = Number(component.component_variant_id);
-        const locationId = Number(component.source_location_id);
-        const levelResult = await tx.execute(sql`
-          SELECT id, variant_qty, reserved_qty
-          FROM inventory.inventory_levels
-          WHERE product_variant_id = ${variantId}
-            AND warehouse_location_id = ${locationId}
-          FOR UPDATE
-        `);
-        const level = levelResult.rows[0];
-        const availableQty = level ? Number(level.variant_qty) - Number(level.reserved_qty) : 0;
-        if (requiredQty <= 0 || availableQty < requiredQty) {
-          throw new BuildDomainError(
-            "INSUFFICIENT_BUILD_COMPONENT",
-            `Component variant ${variantId} has ${availableQty} unreserved units but requires ${requiredQty}`,
-            { buildOrderId, componentVariantId: variantId, locationId, availableQty, requiredQty },
-          );
-        }
-
-        const lots = await tx.execute(sql`
-          SELECT id, qty_on_hand, qty_reserved,
-                 unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
-                 landed_cost_cents, total_unit_cost_cents,
-                 unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
-                 landed_cost_mills, total_unit_cost_mills
-          FROM inventory.inventory_lots
-          WHERE product_variant_id = ${variantId}
-            AND warehouse_location_id = ${locationId}
-            AND status = 'active'
-            AND qty_on_hand > qty_reserved
-          ORDER BY received_at, id
-          FOR UPDATE
-        `);
-        let remaining = requiredQty;
-        let levelQtyAfterConsumption = Number(level.variant_qty);
-        for (const lot of lots.rows) {
-          if (remaining === 0) break;
-          const available = Number(lot.qty_on_hand) - Number(lot.qty_reserved);
-          const take = Math.min(available, remaining);
-          if (take <= 0) continue;
-          const lotCosts = normalizeBuildLotCosts(lot);
-          addConsumedCost(consumedCost, lotCosts, take);
-          await tx.execute(sql`
-            UPDATE inventory.inventory_lots
-            SET qty_on_hand = qty_on_hand - ${take},
-                qty_consumed = COALESCE(qty_consumed, 0) + ${take},
-                status = CASE
-                  WHEN qty_on_hand - ${take} = 0 AND qty_reserved = 0 AND qty_picked = 0
-                    THEN 'depleted'
-                  ELSE status
-                END
-            WHERE id = ${lot.id}
-          `);
-          const unitCostCents = buildMillsToRoundedCents(lotCosts.totalMills);
-          await tx.execute(sql`
-            INSERT INTO inventory.inventory_transactions
-              (product_variant_id, from_location_id, transaction_type, variant_qty_delta,
-               variant_qty_before, variant_qty_after, batch_id, source_state, target_state,
-               unit_cost_cents, inventory_lot_id, reference_type, reference_id,
-               build_order_id, build_order_component_id, notes, user_id)
-            VALUES
-              (${variantId}, ${locationId}, 'assemble', ${-take}, ${levelQtyAfterConsumption},
-               ${levelQtyAfterConsumption - take}, ${order.system_number}, 'on_hand', 'consumed',
-               ${unitCostCents}, ${lot.id}, 'build_order', ${order.system_number},
-               ${buildOrderId}, ${component.id}, ${`Consumed by build ${order.system_number}`},
-               ${actorId ?? null})
-          `);
-          levelQtyAfterConsumption -= take;
-          remaining -= take;
-        }
-        if (remaining !== 0) {
-          throw new BuildDomainError(
-            "BUILD_LOT_LEVEL_MISMATCH",
-            `Inventory levels show sufficient component ${variantId}, but FIFO lots are short by ${remaining}`,
-            { buildOrderId, componentVariantId: variantId, locationId, remaining },
-          );
-        }
-
-        await tx.execute(sql`
-          UPDATE inventory.inventory_levels
-          SET variant_qty = variant_qty - ${requiredQty}, updated_at = now()
-          WHERE id = ${level.id}
-        `);
-        await tx.execute(sql`
-          UPDATE inventory.build_order_components
-          SET consumed_qty = planned_qty, updated_at = now()
-          WHERE id = ${component.id}
-        `);
-      }
-
-      if (consumedCost.totalMills !== consumedCost.poMills + consumedCost.packagingMills + consumedCost.landedMills) {
-        throw new BuildDomainError("BUILD_COST_NOT_CONSERVED", "Consumed cost breakdown does not reconcile");
-      }
-      const outputLayers = allocateBuildCostLayers(consumedCost, outputQty);
-      const outputLevel = await tx.execute(sql`
-        INSERT INTO inventory.inventory_levels
-          (product_variant_id, warehouse_location_id, variant_qty, reserved_qty, picked_qty,
-           packed_qty, backorder_qty, updated_at)
-        VALUES (${order.output_variant_id}, ${order.output_location_id}, 0, 0, 0, 0, 0, now())
-        ON CONFLICT (product_variant_id, warehouse_location_id) DO UPDATE SET updated_at = now()
-        RETURNING id, variant_qty
-      `);
-      let outputBefore = Number(outputLevel.rows[0].variant_qty);
-      await tx.execute(sql`
-        UPDATE inventory.inventory_levels
-        SET variant_qty = variant_qty + ${outputQty}, updated_at = now()
-        WHERE id = ${outputLevel.rows[0].id}
-      `);
-
-      for (let index = 0; index < outputLayers.length; index += 1) {
-        const layer = outputLayers[index];
-        const lotNumber = `${order.system_number}-${String(index + 1).padStart(2, "0")}`;
-        const totalCostCents = buildMillsToRoundedCents(layer.totalMills);
-        const poCostCents = buildMillsToRoundedCents(layer.poMills);
-        const packagingCostCents = buildMillsToRoundedCents(layer.packagingMills);
-        const landedCostCents = buildMillsToRoundedCents(layer.landedMills);
-        const lot = await tx.execute(sql`
-          INSERT INTO inventory.inventory_lots
-            (lot_number, product_variant_id, warehouse_location_id, build_order_id,
-             unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
-             landed_cost_cents, total_unit_cost_cents, unit_cost_mills,
-             po_unit_cost_mills, packaging_cost_mills, landed_cost_mills,
-             total_unit_cost_mills, qty_received, qty_on_hand, qty_reserved,
-             qty_picked, received_at, status, cost_provisional, cost_source, notes)
-          VALUES
-            (${lotNumber}, ${order.output_variant_id}, ${order.output_location_id}, ${buildOrderId},
-             ${totalCostCents}, ${poCostCents}, ${packagingCostCents}, ${landedCostCents},
-             ${totalCostCents}, ${layer.totalMills.toString()}::bigint,
-             ${layer.poMills.toString()}::bigint, ${layer.packagingMills.toString()}::bigint,
-             ${layer.landedMills.toString()}::bigint, ${layer.totalMills.toString()}::bigint,
-             ${layer.qty}, ${layer.qty}, 0, 0, now(), 'active', 0, 'build',
-             ${`Output from build ${order.system_number}`})
-          RETURNING id
-        `);
-        await tx.execute(sql`
-          INSERT INTO inventory.inventory_transactions
-            (product_variant_id, to_location_id, transaction_type, variant_qty_delta,
-             variant_qty_before, variant_qty_after, batch_id, source_state, target_state,
-             unit_cost_cents, inventory_lot_id, reference_type, reference_id,
-             build_order_id, notes, user_id)
-          VALUES
-            (${order.output_variant_id}, ${order.output_location_id}, 'assemble', ${layer.qty},
-             ${outputBefore}, ${outputBefore + layer.qty}, ${order.system_number}, 'built', 'on_hand',
-             ${totalCostCents}, ${lot.rows[0].id}, 'build_order',
-             ${order.system_number}, ${buildOrderId}, ${`Produced by build ${order.system_number}`},
-             ${actorId ?? null})
-        `);
-        outputBefore += layer.qty;
-      }
-
-      await tx.execute(sql`
-        UPDATE inventory.build_orders
-        SET status = 'completed', completed_builds = planned_builds,
-            total_component_cost_mills = ${consumedCost.totalMills.toString()}::bigint,
-            completed_by = ${actorId ?? null}, completed_at = now(), updated_at = now()
-        WHERE id = ${buildOrderId}
-      `);
-      return {
-        buildOrderId,
-        systemNumber: order.system_number,
-        status: "completed",
-        outputVariantId: Number(order.output_variant_id),
-        outputQty,
-        totalComponentCostMills: consumedCost.totalMills.toString(),
-        alreadyCompleted: false,
-      };
-    });
+  async reverseRun(input: ReverseBuildRunInput): Promise<BuildReversalResult> {
+    return this.execution.reverseRun(input);
   }
 }
 

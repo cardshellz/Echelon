@@ -304,7 +304,7 @@ export function createServices(db: any) {
     );
   });
 
-  builds.onInventoryChange((variantId: number, trigger: "build_completed") => {
+  builds.onInventoryChange((variantId, trigger) => {
     inventoryCore.triggerNotifyChange(variantId, trigger);
     channelSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
       console.warn(`[Build] Post-${trigger} sync failed for variant ${variantId}:`, err),
