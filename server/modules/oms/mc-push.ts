@@ -7,11 +7,34 @@ import { eq } from "drizzle-orm";
 import { db } from "../../db";
 import { omsOrders, omsOrderLines } from "@shared/schema";
 import { channels } from "@shared/schema";
+import { extractMarketingConsent } from "./marketing-consent";
 
 const MC_URL = process.env.MC_WEBHOOK_URL || "https://archon-os-20aa790cd70d.herokuapp.com";
 const MC_WEBHOOK_SECRET = process.env.MC_WEBHOOK_SECRET || "echelon-to-mc-sync-2026";
 
 const LOG_PREFIX = "[MC Push]";
+
+export interface ChannelDiscountCode {
+  code: string;
+  amount: string;
+  type: string;
+}
+
+/**
+ * Discount codes live only in the original channel payload (Shopify format:
+ * [{code, amount, type}] with amount as a dollar string — MC consumes it
+ * as-is). Exported so the backfill script can decide which historical orders
+ * are worth re-pushing without duplicating the shape knowledge.
+ *
+ * Pure: no IO, no mutation of the input.
+ */
+export function extractDiscountCodes(rawPayload: unknown): ChannelDiscountCode[] {
+  const raw = (rawPayload as any)?.discount_codes;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((dc: any) => dc && typeof dc.code === "string" && dc.code.trim() !== "")
+    .map((dc: any) => ({ code: dc.code, amount: dc.amount, type: dc.type }));
+}
 
 export async function pushToMissionControl(orderId: number, eventType: string): Promise<void> {
   try {
@@ -73,12 +96,14 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
       }
     }
 
-    // Discount codes live only in the original channel payload (Shopify format:
-    // [{code, amount, type}] with amount as a dollar string — MC consumes it as-is)
-    const rawCodes = (order.rawPayload as any)?.discount_codes;
-    const discountCodes = Array.isArray(rawCodes) && rawCodes.length > 0
-      ? rawCodes.map((dc: any) => ({ code: dc.code, amount: dc.amount, type: dc.type }))
-      : null;
+    const codes = extractDiscountCodes(order.rawPayload);
+    const discountCodes = codes.length > 0 ? codes : null;
+
+    // Marketing consent lives only in the raw checkout payload — no
+    // oms_orders column carries it. MC needs it to decide whether a
+    // purchaser is mailable; without it every buyer lands in the CRM as an
+    // unmailable profile. Pass-through only: we extract, MC decides.
+    const marketingConsent = extractMarketingConsent(order.rawPayload);
 
     // 4. Build payload
     const payload = {
@@ -90,6 +115,12 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
         channel_name: channelName,
         customer_name: order.customerName || null,
         customer_email: order.customerEmail || null,
+        customer_phone: order.customerPhone || null,
+        // Channel-scoped customer id (Shopify customer id for Shopify orders)
+        // — MC uses it as a CRM identity so a buyer who changes email still
+        // resolves to one profile.
+        external_customer_id: order.externalCustomerId || null,
+        marketing_consent: marketingConsent,
         total_cents: order.totalCents,
         subtotal_cents: order.subtotalCents,
         shipping_cents: order.shippingCents,
