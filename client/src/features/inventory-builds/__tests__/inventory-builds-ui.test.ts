@@ -33,10 +33,27 @@ describe("Inventory Builds UI contract", () => {
     expect(builds).toContain("Each component variant can only be added once.");
     expect(builds).toContain("The output variant cannot also be a component.");
   });
-  it("requires an explicit confirmation before posting a released build", () => {
-    expect(builds).toContain("setExecuteOrder(order)");
-    expect(builds).toContain("Verify the physical build is complete before continuing.");
-    expect(builds).toContain('action: "execute"');
+  it("posts explicit partial run quantities with a stable idempotency key", () => {
+    expect(builds).toContain("openExecuteDialog(order)");
+    expect(builds).toContain("Post only the quantity physically completed.");
+    expect(builds).toContain('"Idempotency-Key": executeCommandKey');
+    expect(builds).toContain("buildsCompleted: Number(executeBuilds)");
+    expect(builds).toContain("executeBuildCount <= executeOrder.remainingBuilds");
+  });
+
+  it("exposes reasoned cancellation and only server-approved reversal", () => {
+    expect(builds).toContain("cancelReason");
+    expect(builds).toContain("reason: cancelReason");
+    expect(builds).toContain("order.runs.find((run) => run.canReverse)");
+    expect(builds).toContain('"Idempotency-Key": reverseCommandKey');
+    expect(builds).toContain("reason: reverseReason");
+  });
+
+  it("shows consumed and reserved component progress", () => {
+    expect(builds).toContain("component.consumedQty");
+    expect(builds).toContain("component.plannedQty");
+    expect(builds).toContain("component.reservedQty");
+    expect(builds).toContain("order.remainingBuilds");
   });
 
   it("creates build orders with a stable command idempotency key", () => {

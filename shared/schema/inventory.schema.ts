@@ -54,6 +54,7 @@ export const transactionTypeEnum = [
   "adjustment",   // Manual count adjustment
   "break",        // Case/pack broken into smaller units
   "assemble",     // Smaller units assembled into larger pack (future)
+  "build_reversal", // Compensating reversal of a posted build run
   "replenish",    // Moved from bulk to pick location
   "transfer",     // Moved between locations
   "reserve_move", // Reserved allocation moved between locations alongside a stock transfer
@@ -218,9 +219,14 @@ export const buildOrders = inventorySchema.table("build_orders", {
   totalComponentCostMills: bigint("total_component_cost_mills", { mode: "bigint" }),
   failureCode: varchar("failure_code", { length: 50 }),
   failureMessage: text("failure_message"),
+  failureCount: integer("failure_count").notNull().default(0),
+  lastFailureAt: timestamp("last_failure_at", { withTimezone: true }),
   createdBy: varchar("created_by", { length: 100 }),
   releasedBy: varchar("released_by", { length: 100 }),
   completedBy: varchar("completed_by", { length: 100 }),
+  cancelledBy: varchar("cancelled_by", { length: 100 }),
+  cancellationReason: text("cancellation_reason"),
+  cancelledReservationQty: integer("cancelled_reservation_qty"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   releasedAt: timestamp("released_at", { withTimezone: true }),
   startedAt: timestamp("started_at", { withTimezone: true }),
@@ -237,6 +243,15 @@ export const buildOrders = inventorySchema.table("build_orders", {
   completedBuildsValid: check(
     "build_orders_completed_builds_chk",
     sql`${table.completedBuilds} >= 0 AND ${table.completedBuilds} <= ${table.plannedBuilds}`,
+  ),
+  failureCountValid: check("build_orders_failure_count_chk", sql`${table.failureCount} >= 0`),
+  cancellationReasonValid: check(
+    "build_orders_cancellation_reason_chk",
+    sql`${table.cancellationReason} IS NULL OR char_length(btrim(${table.cancellationReason})) BETWEEN 1 AND 2000`,
+  ),
+  cancelledReservationQtyValid: check(
+    "build_orders_cancelled_reservation_qty_chk",
+    sql`${table.cancelledReservationQty} IS NULL OR ${table.cancelledReservationQty} >= 0`,
   ),
   statusValid: check(
     "build_orders_status_chk",
@@ -280,10 +295,58 @@ export const buildOrderComponents = inventorySchema.table("build_order_component
   ),
 }));
 
+
+export const buildRuns = inventorySchema.table("build_runs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  buildOrderId: integer("build_order_id").notNull().references(() => buildOrders.id, { onDelete: "restrict" }),
+  runNumber: integer("run_number").notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 100 }).notNull().unique(),
+  buildsCompleted: integer("builds_completed").notNull(),
+  outputQty: integer("output_qty").notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("posting"),
+  totalComponentCostMills: bigint("total_component_cost_mills", { mode: "bigint" }).notNull().default(BigInt(0)),
+  postedBy: varchar("posted_by", { length: 100 }),
+  postedAt: timestamp("posted_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orderNumberUnique: uniqueIndex("build_runs_order_number_uidx").on(table.buildOrderId, table.runNumber),
+  orderCreatedIndex: index("build_runs_order_created_idx").on(table.buildOrderId, table.createdAt),
+  runNumberPositive: check("build_runs_number_chk", sql`${table.runNumber} > 0`),
+  buildsCompletedPositive: check("build_runs_builds_completed_chk", sql`${table.buildsCompleted} > 0`),
+  outputQtyPositive: check("build_runs_output_qty_chk", sql`${table.outputQty} > 0`),
+  statusValid: check("build_runs_status_chk", sql`${table.status} IN ('posting', 'posted', 'reversed')`),
+  costValid: check("build_runs_cost_chk", sql`${table.totalComponentCostMills} >= 0`),
+}));
+
+export const buildRunReversals = inventorySchema.table("build_run_reversals", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  buildRunId: integer("build_run_id").notNull().unique().references(() => buildRuns.id, { onDelete: "restrict" }),
+  idempotencyKey: varchar("idempotency_key", { length: 100 }).notNull().unique(),
+  reason: text("reason").notNull(),
+  resultingCompletedBuilds: integer("resulting_completed_builds").notNull(),
+  resultingOrderStatus: varchar("resulting_order_status", { length: 20 }).notNull(),
+  createdBy: varchar("created_by", { length: 100 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  reasonValid: check(
+    "build_run_reversals_reason_chk",
+    sql`char_length(btrim(${table.reason})) BETWEEN 1 AND 2000`,
+  ),
+  progressValid: check(
+    "build_run_reversals_progress_chk",
+    sql`${table.resultingCompletedBuilds} >= 0`,
+  ),
+  orderStatusValid: check(
+    "build_run_reversals_order_status_chk",
+    sql`${table.resultingOrderStatus} IN ('released', 'in_progress')`,
+  ),
+}));
 export type BuildRecipe = typeof buildRecipes.$inferSelect;
 export type BuildRecipeComponent = typeof buildRecipeComponents.$inferSelect;
 export type BuildOrder = typeof buildOrders.$inferSelect;
 export type BuildOrderComponent = typeof buildOrderComponents.$inferSelect;
+export type BuildRun = typeof buildRuns.$inferSelect;
+export type BuildRunReversal = typeof buildRunReversals.$inferSelect;
 
 // Inventory transactions ledger (audit trail) - Full WMS
 // Every inventory movement is logged here for complete audit trail
@@ -333,6 +396,8 @@ export const inventoryTransactions = inventorySchema.table("inventory_transactio
   isImplicit: integer("is_implicit").notNull().default(0), // 1 = auto-generated, 0 = explicit scan
   userId: varchar("user_id", { length: 100 }), // Who performed the action
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  buildRunId: integer("build_run_id").references(() => buildRuns.id, { onDelete: "set null" }),
+  buildReversalId: integer("build_reversal_id").references(() => buildRunReversals.id, { onDelete: "set null" }),
   voidedAt: timestamp("voided_at"),
 });
 
@@ -794,6 +859,7 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   qtyPicked: integer("qty_picked").notNull().default(0),
   receivedAt: timestamp("received_at").notNull(), // FIFO sort key
   expiryDate: timestamp("expiry_date"), // Future (perishables)
+  buildRunId: integer("build_run_id").references(() => buildRuns.id, { onDelete: "set null" }),
   status: varchar("status", { length: 20 }).default("active"), // active, depleted, expired
   inboundShipmentId: integer("inbound_shipment_id").references(() => inboundShipments.id, { onDelete: "set null" }), // FK to inbound_shipments (added post-definition)
   costProvisional: integer("cost_provisional").notNull().default(0), // 1 = landed cost not yet finalized
@@ -836,6 +902,62 @@ export type InsertInventoryLot = z.infer<typeof insertInventoryLotSchema>;
 export type InventoryLot = typeof inventoryLots.$inferSelect;
 
 
+
+export const buildComponentReservations = inventorySchema.table("build_component_reservations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  buildOrderComponentId: integer("build_order_component_id").notNull()
+    .references(() => buildOrderComponents.id, { onDelete: "restrict" }),
+  inventoryLotId: integer("inventory_lot_id").notNull()
+    .references(() => inventoryLots.id, { onDelete: "restrict" }),
+  reservedQty: integer("reserved_qty").notNull(),
+  consumedQty: integer("consumed_qty").notNull().default(0),
+  releasedQty: integer("released_qty").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  componentLotUnique: uniqueIndex("build_component_reservations_component_lot_uidx")
+    .on(table.buildOrderComponentId, table.inventoryLotId),
+  componentIndex: index("build_component_reservations_component_idx")
+    .on(table.buildOrderComponentId, table.inventoryLotId),
+  reservedPositive: check("build_component_reservations_reserved_chk", sql`${table.reservedQty} > 0`),
+  consumedValid: check("build_component_reservations_consumed_chk", sql`${table.consumedQty} >= 0`),
+  releasedValid: check("build_component_reservations_released_chk", sql`${table.releasedQty} >= 0`),
+  balanceValid: check(
+    "build_component_reservations_balance_chk",
+    sql`${table.consumedQty} + ${table.releasedQty} <= ${table.reservedQty}`,
+  ),
+}));
+
+export const buildRunConsumptions = inventorySchema.table("build_run_consumptions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  buildRunId: integer("build_run_id").notNull().references(() => buildRuns.id, { onDelete: "restrict" }),
+  buildOrderComponentId: integer("build_order_component_id").notNull()
+    .references(() => buildOrderComponents.id, { onDelete: "restrict" }),
+  inventoryLotId: integer("inventory_lot_id").notNull()
+    .references(() => inventoryLots.id, { onDelete: "restrict" }),
+  qty: integer("qty").notNull(),
+  poUnitCostMills: bigint("po_unit_cost_mills", { mode: "bigint" }).notNull(),
+  packagingUnitCostMills: bigint("packaging_unit_cost_mills", { mode: "bigint" }).notNull(),
+  landedUnitCostMills: bigint("landed_unit_cost_mills", { mode: "bigint" }).notNull(),
+  totalUnitCostMills: bigint("total_unit_cost_mills", { mode: "bigint" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  runComponentLotUnique: uniqueIndex("build_run_consumptions_run_component_lot_uidx")
+    .on(table.buildRunId, table.buildOrderComponentId, table.inventoryLotId),
+  runIndex: index("build_run_consumptions_run_idx").on(table.buildRunId, table.id),
+  qtyPositive: check("build_run_consumptions_qty_chk", sql`${table.qty} > 0`),
+  costsValid: check(
+    "build_run_consumptions_costs_chk",
+    sql`${table.poUnitCostMills} >= 0
+      AND ${table.packagingUnitCostMills} >= 0
+      AND ${table.landedUnitCostMills} >= 0
+      AND ${table.totalUnitCostMills} = ${table.poUnitCostMills}
+        + ${table.packagingUnitCostMills} + ${table.landedUnitCostMills}`,
+  ),
+}));
+
+export type BuildComponentReservation = typeof buildComponentReservations.$inferSelect;
+export type BuildRunConsumption = typeof buildRunConsumptions.$inferSelect;
 
 export const orderLineCosts = inventorySchema.table('order_line_costs', {
   id: integer('id').primaryKey().generatedAlwaysAsIdentity(),

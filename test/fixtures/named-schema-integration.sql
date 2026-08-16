@@ -226,6 +226,8 @@ CREATE TABLE inventory.inventory_transactions (
   reference_id varchar(100),
   build_order_id integer,
   build_order_component_id integer,
+  build_run_id integer,
+  build_reversal_id integer,
   notes text,
   is_implicit integer NOT NULL DEFAULT 0,
   user_id varchar(100),

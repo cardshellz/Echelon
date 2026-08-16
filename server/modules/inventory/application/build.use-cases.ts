@@ -5,10 +5,15 @@ import {
 } from "../domain/build.domain";
 import {
   createBuildRepository,
+  type BuildCancellationResult,
   type BuildExecutionResult,
   type BuildRepository,
+  type BuildReversalResult,
+  type CancelBuildOrderInput,
   type CreateBuildOrderInput,
   type CreateBuildRecipeInput,
+  type ExecuteBuildRunInput,
+  type ReverseBuildRunInput,
 } from "../infrastructure/build.repository";
 import {
   createBuildChangeRepository,
@@ -20,7 +25,13 @@ import {
 } from "../infrastructure/build-query.repository";
 
 type BuildDb = ConstructorParameters<typeof BuildRepository>[0];
-type InventoryChangedCallback = (variantId: number, trigger: "build_completed") => void;
+export type BuildInventoryChangeTrigger =
+  | "build_released"
+  | "build_completed"
+  | "build_cancelled"
+  | "build_reversed";
+
+type InventoryChangedCallback = (variantId: number, trigger: BuildInventoryChangeTrigger) => void;
 
 function requiredText(value: unknown, field: string, maxLength: number): string {
   if (typeof value !== "string" || value.trim().length === 0 || value.trim().length > maxLength) {
@@ -31,6 +42,18 @@ function requiredText(value: unknown, field: string, maxLength: number): string 
     );
   }
   return value.trim();
+}
+
+function requiredIdempotencyKey(value: unknown): string {
+  const key = requiredText(value, "idempotencyKey", 100);
+  if (key.length < 8) {
+    throw new BuildDomainError(
+      "INVALID_BUILD_INPUT",
+      "idempotencyKey must contain at least 8 characters",
+      { field: "idempotencyKey" },
+    );
+  }
+  return key;
 }
 
 function requiredArray<T>(value: unknown, field: string): T[] {
@@ -91,18 +114,11 @@ export class BuildUseCases {
   }
 
   async createOrder(input: CreateBuildOrderInput): Promise<any> {
-    const idempotencyKey = requiredText(input.idempotencyKey, "idempotencyKey", 100);
+    const idempotencyKey = requiredIdempotencyKey(input.idempotencyKey);
     const sourceLocations = requiredArray<CreateBuildOrderInput["sourceLocations"][number]>(
       input.sourceLocations,
       "sourceLocations",
     );
-    if (idempotencyKey.length < 8) {
-      throw new BuildDomainError(
-        "INVALID_BUILD_INPUT",
-        "idempotencyKey must contain at least 8 characters",
-        { field: "idempotencyKey" },
-      );
-    }
     return this.repository.createOrder({
       ...input,
       recipeId: requirePositiveInteger(input.recipeId, "recipeId"),
@@ -143,28 +159,105 @@ export class BuildUseCases {
   }
 
 
-  async releaseOrder(buildOrderId: number, actorId?: string): Promise<any> {
-    return this.repository.releaseOrder(requirePositiveInteger(buildOrderId, "buildOrderId"), actorId);
-  }
-
-  async executeOrder(buildOrderId: number, actorId?: string): Promise<BuildExecutionResult> {
-    const id = requirePositiveInteger(buildOrderId, "buildOrderId");
-    const result = await this.repository.executeOrder(id, actorId);
-    if (!result.alreadyCompleted && this.inventoryChangedCallback) {
-      const affectedVariantIds = await this.changes.listAffectedVariantIds(id);
-      for (const variantId of affectedVariantIds) {
-        try {
-          this.inventoryChangedCallback(variantId, "build_completed");
-        } catch (error: any) {
-          console.warn(JSON.stringify({
-            event: "build_inventory_notification_failed",
-            buildOrderId: id,
-            productVariantId: variantId,
-            error: error?.message ?? String(error),
-          }));
-        }
+  private async notifyInventoryChanged(
+    buildOrderId: number,
+    trigger: BuildInventoryChangeTrigger,
+  ): Promise<void> {
+    if (!this.inventoryChangedCallback) return;
+    const affectedVariantIds = await this.changes.listAffectedVariantIds(buildOrderId);
+    for (const variantId of affectedVariantIds) {
+      try {
+        this.inventoryChangedCallback(variantId, trigger);
+      } catch (error: any) {
+        console.warn(JSON.stringify({
+          event: "build_inventory_notification_failed",
+          buildOrderId,
+          productVariantId: variantId,
+          trigger,
+          error: error?.message ?? String(error),
+        }));
       }
     }
+  }
+
+  async releaseOrder(buildOrderId: number, actorId?: string): Promise<any> {
+    const id = requirePositiveInteger(buildOrderId, "buildOrderId");
+    const result = await this.repository.releaseOrder(id, actorId);
+    await this.notifyInventoryChanged(id, "build_released");
+    console.info(JSON.stringify({
+      event: "build_order_released",
+      buildOrderId: id,
+      actorId: actorId ?? null,
+      status: result.status,
+    }));
+    return result;
+  }
+
+  async executeOrder(input: ExecuteBuildRunInput): Promise<BuildExecutionResult> {
+    const command: ExecuteBuildRunInput = {
+      buildOrderId: requirePositiveInteger(input.buildOrderId, "buildOrderId"),
+      buildsCompleted: requirePositiveInteger(input.buildsCompleted, "buildsCompleted"),
+      idempotencyKey: requiredIdempotencyKey(input.idempotencyKey),
+      actorId: input.actorId,
+    };
+    const result = await this.repository.executeOrder(command);
+    if (!result.alreadyPosted) {
+      await this.notifyInventoryChanged(command.buildOrderId, "build_completed");
+    }
+    console.info(JSON.stringify({
+      event: result.alreadyPosted ? "build_run_reused" : "build_run_posted",
+      buildOrderId: result.buildOrderId,
+      buildRunId: result.buildRunId,
+      runNumber: result.runNumber,
+      buildsCompleted: result.buildsCompleted,
+      completedBuilds: result.completedBuilds,
+      plannedBuilds: result.plannedBuilds,
+      status: result.status,
+      actorId: command.actorId ?? null,
+    }));
+    return result;
+  }
+
+  async cancelOrder(input: CancelBuildOrderInput): Promise<BuildCancellationResult> {
+    const command: CancelBuildOrderInput = {
+      buildOrderId: requirePositiveInteger(input.buildOrderId, "buildOrderId"),
+      reason: requiredText(input.reason, "reason", 2000),
+      actorId: input.actorId,
+    };
+    const result = await this.repository.cancelOrder(command);
+    if (!result.alreadyCancelled && result.releasedReservationQty > 0) {
+      await this.notifyInventoryChanged(command.buildOrderId, "build_cancelled");
+    }
+    console.info(JSON.stringify({
+      event: result.alreadyCancelled ? "build_cancellation_reused" : "build_order_cancelled",
+      buildOrderId: result.buildOrderId,
+      releasedReservationQty: result.releasedReservationQty,
+      actorId: command.actorId ?? null,
+    }));
+    return result;
+  }
+
+  async reverseRun(input: ReverseBuildRunInput): Promise<BuildReversalResult> {
+    const command: ReverseBuildRunInput = {
+      buildOrderId: requirePositiveInteger(input.buildOrderId, "buildOrderId"),
+      buildRunId: requirePositiveInteger(input.buildRunId, "buildRunId"),
+      idempotencyKey: requiredIdempotencyKey(input.idempotencyKey),
+      reason: requiredText(input.reason, "reason", 2000),
+      actorId: input.actorId,
+    };
+    const result = await this.repository.reverseRun(command);
+    if (!result.alreadyReversed) {
+      await this.notifyInventoryChanged(command.buildOrderId, "build_reversed");
+    }
+    console.info(JSON.stringify({
+      event: result.alreadyReversed ? "build_reversal_reused" : "build_run_reversed",
+      buildOrderId: result.buildOrderId,
+      buildRunId: result.buildRunId,
+      reversalId: result.reversalId,
+      restoredComponentQty: result.restoredComponentQty,
+      removedOutputQty: result.removedOutputQty,
+      actorId: command.actorId ?? null,
+    }));
     return result;
   }
 }

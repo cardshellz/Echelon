@@ -14,6 +14,10 @@ const migration617 = fs.readFileSync(
   path.resolve(process.cwd(), "migrations/0617_inventory_build_conversion_safety.sql"),
   "utf8",
 );
+const migration618 = fs.readFileSync(
+  path.resolve(process.cwd(), "migrations/0618_inventory_build_execution_runs.sql"),
+  "utf8",
+);
 const namedSchemaIntegrationFixture = fs.readFileSync(
   path.resolve(process.cwd(), "test/fixtures/named-schema-integration.sql"),
   "utf8",
@@ -65,6 +69,8 @@ describe("inventory build workflow migrations", () => {
   it("keeps the disposable integration schema aligned with transaction linkage", () => {
     expect(namedSchemaIntegrationFixture).toContain("build_order_id integer");
     expect(namedSchemaIntegrationFixture).toContain("build_order_component_id integer");
+    expect(namedSchemaIntegrationFixture).toContain("build_run_id integer");
+    expect(namedSchemaIntegrationFixture).toContain("build_reversal_id integer");
   });
 
   it("uses a database sequence for concurrency-safe build numbers", () => {
@@ -72,4 +78,25 @@ describe("inventory build workflow migrations", () => {
     expect(migration616).toContain("nextval('inventory.build_order_number_seq')");
     expect(migration616).toContain("ALTER COLUMN system_number SET DEFAULT");
   });
+
+  it("adds idempotent runs, exact reservations, and immutable consumption evidence", () => {
+    expect(migration618).toContain("CREATE TABLE IF NOT EXISTS inventory.build_runs");
+    expect(migration618).toContain("idempotency_key varchar(100) NOT NULL UNIQUE");
+    expect(migration618).toContain("CREATE TABLE IF NOT EXISTS inventory.build_component_reservations");
+    expect(migration618).toContain("consumed_qty + released_qty <= reserved_qty");
+    expect(migration618).toContain("CREATE TABLE IF NOT EXISTS inventory.build_run_consumptions");
+    expect(migration618).toContain("total_unit_cost_mills = po_unit_cost_mills");
+  });
+
+  it("links run and compensating reversal evidence into inventory ledgers", () => {
+    expect(migration618).toContain("CREATE TABLE IF NOT EXISTS inventory.build_run_reversals");
+    expect(migration618).toContain("ADD COLUMN IF NOT EXISTS build_run_id integer");
+    expect(migration618).toContain("ADD COLUMN IF NOT EXISTS build_reversal_id integer");
+    expect(migration618).toContain("inventory_transactions_build_reversal_idx");
+    expect(migration618).toContain("resulting_completed_builds integer NOT NULL");
+    expect(migration618).toContain("resulting_order_status varchar(20) NOT NULL");
+    expect(migration618).toContain("cancelled_reservation_qty integer");
+    expect(migration618).toMatch(/DO \$\$[\s\S]*END\s+\$\$;/);
+  });
+
 });

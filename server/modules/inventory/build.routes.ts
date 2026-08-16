@@ -6,11 +6,31 @@ function actorId(req: Request): string | undefined {
   return req.session.user?.id;
 }
 
+const BUILD_CONFLICT_CODES = new Set([
+  "BUILD_CANCELLATION_CONFLICT",
+  "BUILD_COST_NOT_CONSERVED",
+  "BUILD_LOT_LEVEL_MISMATCH",
+  "BUILD_OUTPUT_ALREADY_USED",
+  "BUILD_OUTPUT_LEVEL_DRIFT",
+  "BUILD_OUTPUT_LOTS_MISSING",
+  "BUILD_RESERVATION_DRIFT",
+  "BUILD_RESERVATION_MISSING",
+  "BUILD_RESERVATION_OVERALLOCATED",
+  "BUILD_REVERSAL_LEVEL_MISSING",
+  "BUILD_REVERSAL_NOT_LATEST_RUN",
+  "BUILD_REVERSAL_SOURCE_DRIFT",
+  "BUILD_RUN_ALREADY_REVERSED",
+  "BUILD_RUN_INCOMPLETE",
+  "IDEMPOTENCY_KEY_REUSED",
+  "INSUFFICIENT_BUILD_COMPONENT",
+  "INVALID_BUILD_STATUS",
+]);
+
 function respondWithBuildError(res: Response, error: unknown): void {
   if (error instanceof BuildDomainError) {
     const status = error.code.endsWith("_NOT_FOUND")
       ? 404
-      : error.code === "IDEMPOTENCY_KEY_REUSED" || error.code === "INVALID_BUILD_STATUS"
+      : BUILD_CONFLICT_CODES.has(error.code)
         ? 409
         : 400;
     res.status(status).json({
@@ -124,10 +144,49 @@ export function registerBuildRoutes(app: Express): void {
 
   app.post("/api/inventory/build-orders/:id/execute", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const result = await req.app.locals.services.builds.executeOrder(Number(req.params.id), actorId(req));
+      const idempotencyKey = req.get("Idempotency-Key") ?? req.body?.idempotencyKey;
+      const result = await req.app.locals.services.builds.executeOrder({
+        buildOrderId: Number(req.params.id),
+        buildsCompleted: req.body?.buildsCompleted,
+        idempotencyKey,
+        actorId: actorId(req),
+      });
       res.json(result);
     } catch (error) {
       respondWithBuildError(res, error);
     }
   });
+
+  app.post("/api/inventory/build-orders/:id/cancel", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const result = await req.app.locals.services.builds.cancelOrder({
+        buildOrderId: Number(req.params.id),
+        reason: req.body?.reason,
+        actorId: actorId(req),
+      });
+      res.json(result);
+    } catch (error) {
+      respondWithBuildError(res, error);
+    }
+  });
+
+  app.post(
+    "/api/inventory/build-orders/:id/runs/:runId/reverse",
+    requirePermission("inventory", "adjust"),
+    async (req, res) => {
+      try {
+        const idempotencyKey = req.get("Idempotency-Key") ?? req.body?.idempotencyKey;
+        const result = await req.app.locals.services.builds.reverseRun({
+          buildOrderId: Number(req.params.id),
+          buildRunId: Number(req.params.runId),
+          idempotencyKey,
+          reason: req.body?.reason,
+          actorId: actorId(req),
+        });
+        res.json(result);
+      } catch (error) {
+        respondWithBuildError(res, error);
+      }
+    },
+  );
 }

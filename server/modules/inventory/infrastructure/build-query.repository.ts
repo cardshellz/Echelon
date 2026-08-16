@@ -65,8 +65,27 @@ export type BuildOrderComponentView = {
   qtyPerBuild: number;
   plannedQty: number;
   consumedQty: number;
+  reservedQty: number;
   sourceLocationId: number | null;
   sourceLocationCode: string | null;
+};
+
+export type BuildRunView = {
+  id: number;
+  runNumber: number;
+  status: string;
+  buildsCompleted: number;
+  outputQty: number;
+  outputQtyOnHand: number;
+  totalComponentCostMills: string;
+  postedBy: string | null;
+  postedAt: string | null;
+  createdAt: string;
+  reversalId: number | null;
+  reversalReason: string | null;
+  reversedAt: string | null;
+  canReverse: boolean;
+  reversalBlocker: string | null;
 };
 
 export type BuildOrderView = {
@@ -84,16 +103,26 @@ export type BuildOrderView = {
   outputQtyPerBuild: number;
   plannedBuilds: number;
   completedBuilds: number;
+  remainingBuilds: number;
   warehouseId: number;
   warehouseName: string;
   outputLocationId: number;
   outputLocationCode: string;
   status: string;
   totalComponentCostMills: string | null;
+  failureCode: string | null;
+  failureMessage: string | null;
+  failureCount: number;
+  lastFailureAt: string | null;
+  cancellationReason: string | null;
+  cancelledReservationQty: number | null;
   components: BuildOrderComponentView[];
+  runs: BuildRunView[];
   createdAt: string;
   releasedAt: string | null;
+  startedAt: string | null;
   completedAt: string | null;
+  cancelledAt: string | null;
 };
 
 function recipeFromRow(row: any): BuildRecipeView {
@@ -132,6 +161,7 @@ function orderFromRow(row: any): BuildOrderView {
     outputQtyPerBuild: Number(row.output_qty_per_build),
     plannedBuilds: Number(row.planned_builds),
     completedBuilds: Number(row.completed_builds),
+    remainingBuilds: Number(row.planned_builds) - Number(row.completed_builds),
     warehouseId: Number(row.warehouse_id),
     warehouseName: String(row.warehouse_name),
     outputLocationId: Number(row.output_location_id),
@@ -140,10 +170,58 @@ function orderFromRow(row: any): BuildOrderView {
     totalComponentCostMills: row.total_component_cost_mills == null
       ? null
       : String(row.total_component_cost_mills),
+    failureCode: row.failure_code ?? null,
+    failureMessage: row.failure_message ?? null,
+    failureCount: Number(row.failure_count ?? 0),
+    lastFailureAt: row.last_failure_at == null ? null : String(row.last_failure_at),
+    cancellationReason: row.cancellation_reason ?? null,
+    cancelledReservationQty: row.cancelled_reservation_qty == null
+      ? null
+      : Number(row.cancelled_reservation_qty),
     components: [],
+    runs: [],
     createdAt: String(row.created_at),
     releasedAt: row.released_at == null ? null : String(row.released_at),
+    startedAt: row.started_at == null ? null : String(row.started_at),
     completedAt: row.completed_at == null ? null : String(row.completed_at),
+    cancelledAt: row.cancelled_at == null ? null : String(row.cancelled_at),
+  };
+}
+
+function componentFromRow(row: any): BuildOrderComponentView {
+  return {
+    id: Number(row.id),
+    componentVariantId: Number(row.component_variant_id),
+    componentProductId: Number(row.component_product_id),
+    componentUnitsPerVariant: Number(row.component_units_per_variant),
+    sku: row.sku ?? null,
+    name: String(row.name),
+    qtyPerBuild: Number(row.qty_per_build),
+    plannedQty: Number(row.planned_qty),
+    consumedQty: Number(row.consumed_qty),
+    reservedQty: Number(row.active_reserved_qty ?? 0),
+    sourceLocationId: row.source_location_id == null ? null : Number(row.source_location_id),
+    sourceLocationCode: row.source_location_code ?? null,
+  };
+}
+
+function runFromRow(row: any): BuildRunView {
+  return {
+    id: Number(row.id),
+    runNumber: Number(row.run_number),
+    status: String(row.status),
+    buildsCompleted: Number(row.builds_completed),
+    outputQty: Number(row.output_qty),
+    outputQtyOnHand: Number(row.output_qty_on_hand ?? 0),
+    totalComponentCostMills: String(row.total_component_cost_mills ?? 0),
+    postedBy: row.posted_by ?? null,
+    postedAt: row.posted_at == null ? null : String(row.posted_at),
+    createdAt: String(row.created_at),
+    reversalId: row.reversal_id == null ? null : Number(row.reversal_id),
+    reversalReason: row.reversal_reason ?? null,
+    reversedAt: row.reversed_at == null ? null : String(row.reversed_at),
+    canReverse: row.can_reverse === true,
+    reversalBlocker: row.reversal_blocker ?? null,
   };
 }
 
@@ -271,6 +349,114 @@ export class BuildQueryRepository {
 
     return [...relationships.values()];
   }
+  private async loadOrderComponents(
+    orderIds: number[],
+  ): Promise<Map<number, BuildOrderComponentView[]>> {
+    if (orderIds.length === 0) return new Map();
+    const components = await this.db.execute(sql`
+      SELECT boc.*, component.sku, component.name,
+             source_location.code AS source_location_code,
+             COALESCE(reservations.active_reserved_qty, 0) AS active_reserved_qty
+      FROM inventory.build_order_components boc
+      JOIN catalog.product_variants component ON component.id = boc.component_variant_id
+      LEFT JOIN warehouse.warehouse_locations source_location ON source_location.id = boc.source_location_id
+      LEFT JOIN (
+        SELECT build_order_component_id,
+               SUM(reserved_qty - consumed_qty - released_qty) AS active_reserved_qty
+        FROM inventory.build_component_reservations
+        GROUP BY build_order_component_id
+      ) reservations ON reservations.build_order_component_id = boc.id
+      WHERE boc.build_order_id IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+      ORDER BY boc.build_order_id, component.sku NULLS LAST, component.name
+    `);
+    const byOrder = new Map<number, BuildOrderComponentView[]>();
+    for (const row of components.rows) {
+      const orderId = Number(row.build_order_id);
+      const items = byOrder.get(orderId) ?? [];
+      items.push(componentFromRow(row));
+      byOrder.set(orderId, items);
+    }
+    return byOrder;
+  }
+
+  private async loadOrderRuns(orderIds: number[]): Promise<Map<number, BuildRunView[]>> {
+    if (orderIds.length === 0) return new Map();
+    const runs = await this.db.execute(sql`
+      WITH latest_posted AS (
+        SELECT build_order_id, MAX(run_number) AS latest_run_number
+        FROM inventory.build_runs
+        WHERE status = 'posted'
+          AND build_order_id IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+        GROUP BY build_order_id
+      ),
+      lot_evidence AS (
+        SELECT lot.build_run_id,
+               COUNT(*) AS lot_count,
+               COALESCE(SUM(lot.qty_on_hand), 0) AS output_qty_on_hand,
+               COUNT(*) FILTER (
+                 WHERE lot.warehouse_location_id <> bo.output_location_id
+                    OR lot.qty_on_hand <> lot.qty_received
+                    OR lot.qty_reserved <> 0
+                    OR lot.qty_picked <> 0
+               ) AS changed_lot_count
+        FROM inventory.inventory_lots lot
+        JOIN inventory.build_runs run ON run.id = lot.build_run_id
+        JOIN inventory.build_orders bo ON bo.id = run.build_order_id
+        WHERE run.build_order_id IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+        GROUP BY lot.build_run_id
+      )
+      SELECT run.*,
+             reversal.id AS reversal_id,
+             reversal.reason AS reversal_reason,
+             reversal.created_at AS reversed_at,
+             COALESCE(lot_evidence.output_qty_on_hand, 0) AS output_qty_on_hand,
+             (
+               run.status = 'posted'
+               AND run.run_number = latest_posted.latest_run_number
+               AND COALESCE(lot_evidence.lot_count, 0) > 0
+               AND COALESCE(lot_evidence.changed_lot_count, 0) = 0
+             ) AS can_reverse,
+             CASE
+               WHEN run.status = 'reversed' THEN 'Run already reversed'
+               WHEN run.status <> 'posted' THEN 'Run posting is incomplete'
+               WHEN run.run_number <> latest_posted.latest_run_number
+                 THEN 'Only the latest posted run can be reversed'
+               WHEN COALESCE(lot_evidence.lot_count, 0) = 0 THEN 'Output lots are missing'
+               WHEN COALESCE(lot_evidence.changed_lot_count, 0) > 0
+                 THEN 'Output inventory was moved, reserved, picked, or consumed'
+               ELSE NULL
+             END AS reversal_blocker
+      FROM inventory.build_runs run
+      LEFT JOIN latest_posted ON latest_posted.build_order_id = run.build_order_id
+      LEFT JOIN lot_evidence ON lot_evidence.build_run_id = run.id
+      LEFT JOIN inventory.build_run_reversals reversal ON reversal.build_run_id = run.id
+      WHERE run.build_order_id IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+      ORDER BY run.build_order_id, run.run_number DESC
+    `);
+    const byOrder = new Map<number, BuildRunView[]>();
+    for (const row of runs.rows) {
+      const orderId = Number(row.build_order_id);
+      const items = byOrder.get(orderId) ?? [];
+      items.push(runFromRow(row));
+      byOrder.set(orderId, items);
+    }
+    return byOrder;
+  }
+
+  private async hydrateOrders(orders: BuildOrderView[]): Promise<BuildOrderView[]> {
+    if (orders.length === 0) return [];
+    const orderIds = orders.map((order) => order.id);
+    // This repository can be backed by one pg client. Keep its queries sequential
+    // so hydration remains compatible with pg@9's single-query client contract.
+    const componentsByOrder = await this.loadOrderComponents(orderIds);
+    const runsByOrder = await this.loadOrderRuns(orderIds);
+    return orders.map((order) => ({
+      ...order,
+      components: componentsByOrder.get(order.id) ?? [],
+      runs: runsByOrder.get(order.id) ?? [],
+    }));
+  }
+
   async getOrder(buildOrderId: number): Promise<BuildOrderView> {
     const result = await this.db.execute(sql`
       SELECT bo.*, output.sku AS output_sku, output.name AS output_name,
@@ -285,29 +471,7 @@ export class BuildQueryRepository {
     if (!row) {
       throw new BuildDomainError("BUILD_ORDER_NOT_FOUND", `Build order ${buildOrderId} was not found`);
     }
-    const order = orderFromRow(row);
-    const components = await this.db.execute(sql`
-      SELECT boc.*, component.sku, component.name,
-             source_location.code AS source_location_code
-      FROM inventory.build_order_components boc
-      JOIN catalog.product_variants component ON component.id = boc.component_variant_id
-      LEFT JOIN warehouse.warehouse_locations source_location ON source_location.id = boc.source_location_id
-      WHERE boc.build_order_id = ${buildOrderId}
-      ORDER BY component.sku NULLS LAST, component.name
-    `);
-    order.components = components.rows.map((component) => ({
-      id: Number(component.id),
-      componentVariantId: Number(component.component_variant_id),
-      componentProductId: Number(component.component_product_id),
-      componentUnitsPerVariant: Number(component.component_units_per_variant),
-      sku: component.sku ?? null,
-      name: String(component.name),
-      qtyPerBuild: Number(component.qty_per_build),
-      plannedQty: Number(component.planned_qty),
-      consumedQty: Number(component.consumed_qty),
-      sourceLocationId: component.source_location_id == null ? null : Number(component.source_location_id),
-      sourceLocationCode: component.source_location_code ?? null,
-    }));
+    const [order] = await this.hydrateOrders([orderFromRow(row)]);
     return order;
   }
 
@@ -323,38 +487,9 @@ export class BuildQueryRepository {
       ORDER BY bo.created_at DESC, bo.id DESC
       LIMIT 200
     `);
-    const orders = result.rows.map(orderFromRow);
-    if (orders.length === 0) return [];
-    const components = await this.db.execute(sql`
-      SELECT boc.*, component.sku, component.name,
-             source_location.code AS source_location_code
-      FROM inventory.build_order_components boc
-      JOIN catalog.product_variants component ON component.id = boc.component_variant_id
-      LEFT JOIN warehouse.warehouse_locations source_location ON source_location.id = boc.source_location_id
-      WHERE boc.build_order_id IN (${sql.join(orders.map((order) => sql`${order.id}`), sql`, `)})
-      ORDER BY boc.build_order_id, component.sku NULLS LAST, component.name
-    `);
-    const byOrder = new Map<number, BuildOrderComponentView[]>();
-    for (const component of components.rows) {
-      const orderId = Number(component.build_order_id);
-      const items = byOrder.get(orderId) ?? [];
-      items.push({
-        id: Number(component.id),
-        componentVariantId: Number(component.component_variant_id),
-        componentProductId: Number(component.component_product_id),
-        componentUnitsPerVariant: Number(component.component_units_per_variant),
-        sku: component.sku ?? null,
-        name: String(component.name),
-        qtyPerBuild: Number(component.qty_per_build),
-        plannedQty: Number(component.planned_qty),
-        consumedQty: Number(component.consumed_qty),
-        sourceLocationId: component.source_location_id == null ? null : Number(component.source_location_id),
-        sourceLocationCode: component.source_location_code ?? null,
-      });
-      byOrder.set(orderId, items);
-    }
-    return orders.map((order) => ({ ...order, components: byOrder.get(order.id) ?? [] }));
+    return this.hydrateOrders(result.rows.map(orderFromRow));
   }
+
 }
 
 export function createBuildQueryRepository(db: QueryDb): BuildQueryRepository {
