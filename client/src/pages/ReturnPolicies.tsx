@@ -15,6 +15,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import {
+  selectReturnPolicyVersions,
+  type ReturnPolicyVersionView,
+} from "@/lib/return-policy-version-view";
+import {
   deriveReturnPolicyResolutionInput,
   isSameReturnPolicyResolutionInput,
   snapshotReturnPolicyResolutionInput,
@@ -146,6 +150,12 @@ function humanize(value: string): string {
   return value.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 }
 
+function formatAuditTimestamp(value: string | null): string {
+  if (!value) return "Not recorded";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Invalid timestamp" : date.toLocaleString();
+}
+
 function publicScope(policy: ReturnPolicy): AppliesTo | null {
   switch (policy.scopeKind) {
     case "global": return "all_orders";
@@ -209,6 +219,7 @@ function scopeSummary(policy: ReturnPolicy, overview: Overview): string {
 export default function ReturnPolicies() {
   const { toast } = useToast();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [policyView, setPolicyView] = useState<ReturnPolicyVersionView>("active");
   const [scopeLocked, setScopeLocked] = useState(false);
   const [draft, setDraft] = useState<Draft>(emptyDraft());
   const [resolution, setResolution] = useState<ResolutionInput>({ channelId: null, vendorId: null, storeConnectionId: null });
@@ -270,11 +281,16 @@ export default function ReturnPolicies() {
     setDialogOpen(true);
   };
 
-  const sortedPolicies = useMemo(
-    () =>
-      [...(overview?.policies ?? [])]
-        .filter((policy) => policy.status === "active")
-        .sort((a, b) => a.name.localeCompare(b.name) || b.version - a.version),
+  const visiblePolicies = useMemo(
+    () => selectReturnPolicyVersions(overview?.policies ?? [], policyView),
+    [overview?.policies, policyView],
+  );
+  const activePolicyCount = useMemo(
+    () => selectReturnPolicyVersions(overview?.policies ?? [], "active").length,
+    [overview?.policies],
+  );
+  const retiredPolicyCount = useMemo(
+    () => selectReturnPolicyVersions(overview?.policies ?? [], "history").length,
     [overview?.policies],
   );
 
@@ -298,15 +314,29 @@ export default function ReturnPolicies() {
         <TabsList><TabsTrigger value="policies">Policies</TabsTrigger><TabsTrigger value="preview">Test a policy</TabsTrigger></TabsList>
         <TabsContent value="policies" className="mt-4">
           <Card>
-            <CardHeader>
-              <CardTitle>Active policy versions</CardTitle>
-              <CardDescription>The closest matching policy applies: store, then vendor, then sales channel, then all orders.</CardDescription>
+            <CardHeader className="flex flex-row items-start justify-between gap-4">
+              <div>
+                <CardTitle>{policyView === "active" ? "Active policy versions" : "Policy history"}</CardTitle>
+                <CardDescription>
+                  {policyView === "active"
+                    ? "The closest matching policy applies: store, then vendor, then sales channel, then all orders."
+                    : "Retired versions are immutable audit history and never participate in policy resolution."}
+                </CardDescription>
+              </div>
+              <div className="flex shrink-0 gap-2">
+                <Button type="button" size="sm" variant={policyView === "active" ? "default" : "outline"} onClick={() => setPolicyView("active")}>
+                  Active ({activePolicyCount})
+                </Button>
+                <Button type="button" size="sm" variant={policyView === "history" ? "default" : "outline"} onClick={() => setPolicyView("history")}>
+                  History ({retiredPolicyCount})
+                </Button>
+              </div>
             </CardHeader>
             <CardContent>
               <Table>
-                <TableHeader><TableRow><TableHead>Policy</TableHead><TableHead>Applies to</TableHead><TableHead>Target</TableHead><TableHead>Return decisions</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader>
+                <TableHeader><TableRow><TableHead>Policy</TableHead><TableHead>Applies to</TableHead><TableHead>Target</TableHead><TableHead>Return decisions</TableHead><TableHead className="text-right">{policyView === "active" ? "Action" : "Status"}</TableHead></TableRow></TableHeader>
                 <TableBody>
-                  {sortedPolicies.map((policy) => {
+                  {visiblePolicies.map((policy) => {
                     const appliesTo = publicScope(policy);
                     return (
                       <TableRow key={policy.id}>
@@ -315,12 +345,16 @@ export default function ReturnPolicies() {
                         <TableCell><div className="max-w-xs text-sm">{scopeSummary(policy, overview)}</div></TableCell>
                         <TableCell className="text-sm"><div>{policy.returnWindowDays} days / {humanize(policy.returnDestination)}</div><div className="text-muted-foreground">Approval: {humanize(policy.approvalAuthority)} / Label: {humanize(policy.labelProvider)}</div></TableCell>
                         <TableCell className="text-right">
-                          <Button variant="outline" size="sm" disabled={!appliesTo} title={appliesTo ? undefined : "Legacy policies must be replaced with a new simplified policy."} onClick={() => openVersion(policy)}><FileText className="mr-2 h-4 w-4" />New version</Button>
+                          {policyView === "active" ? (
+                            <Button variant="outline" size="sm" disabled={!appliesTo} title={appliesTo ? undefined : "Legacy policies must be replaced with a new simplified policy."} onClick={() => openVersion(policy)}><FileText className="mr-2 h-4 w-4" />New version</Button>
+                          ) : (
+                            <Badge variant="secondary">Retired</Badge>
+                          )}
                         </TableCell>
                       </TableRow>
                     );
                   })}
-                  {sortedPolicies.length === 0 && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No active return policies. Start with an all-orders policy.</TableCell></TableRow>}
+                  {visiblePolicies.length === 0 && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">{policyView === "active" ? "No active return policies. Start with an all-orders policy." : "No retired policy versions."}</TableCell></TableRow>}
                 </TableBody>
               </Table>
             </CardContent>
