@@ -28,7 +28,7 @@ type QueryExecutor = typeof db | Transaction;
 export class PostgresReturnPolicyAdminStore implements ReturnPolicyAdminStore {
   async listOverview(): Promise<ReturnPolicyOverview> {
     const [policies, channelRows, dropshipOmsChannel] = await Promise.all([
-      db.select().from(returnPolicies).where(eq(returnPolicies.status, "active")).orderBy(asc(returnPolicies.scopeKey), desc(returnPolicies.version)),
+      db.select().from(returnPolicies).orderBy(asc(returnPolicies.scopeKey), desc(returnPolicies.version)),
       db.select(channelSelection).from(channels).orderBy(asc(channels.name)),
       loadDropshipOmsChannel(db),
     ]);

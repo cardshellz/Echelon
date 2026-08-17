@@ -84,7 +84,7 @@ class FakeStore implements ReturnPolicyAdminStore {
 }
 
 describe("ReturnPolicyAdminService", () => {
-  it("excludes retired versions from the active policy overview", async () => {
+  it("returns active and retired versions in the policy overview", async () => {
     const store = new FakeStore();
     store.overviewPolicies.push(
       policy({ id: 42, version: 2 }),
@@ -93,7 +93,7 @@ describe("ReturnPolicyAdminService", () => {
 
     const result = await new ReturnPolicyAdminService(store, () => NOW).listOverview();
 
-    expect(result.policies.map(({ id }) => id)).toEqual([42]);
+    expect(result.policies.map(({ id }) => id)).toEqual([42, 41]);
   });
   it("maps a sales-channel policy onto the existing channel scope and versions it atomically", async () => {
     const store = new FakeStore();

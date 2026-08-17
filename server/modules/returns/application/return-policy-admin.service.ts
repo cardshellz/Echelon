@@ -128,12 +128,8 @@ export class ReturnPolicyAdminService {
     private readonly clock: () => Date = () => new Date(),
   ) {}
 
-  async listOverview(): Promise<ReturnPolicyOverview> {
-    const overview = await this.store.listOverview();
-    return {
-      ...overview,
-      policies: overview.policies.filter((policy) => policy.status === "active"),
-    };
+  listOverview(): Promise<ReturnPolicyOverview> {
+    return this.store.listOverview();
   }
 
   searchVendors(search: string, limit: number): Promise<ReturnPolicyVendorReference[]> {
