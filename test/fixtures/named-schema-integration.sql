@@ -55,6 +55,7 @@ CREATE TABLE catalog.product_variants (
   product_id integer NOT NULL REFERENCES catalog.products(id),
   sku varchar(100),
   name text NOT NULL,
+  uom_type varchar(20) NOT NULL DEFAULT 'pack',
   units_per_variant integer NOT NULL DEFAULT 1,
   hierarchy_level integer NOT NULL DEFAULT 1,
   parent_variant_id integer,
@@ -92,7 +93,19 @@ CREATE TABLE catalog.product_variants (
   ebay_payment_policy_override varchar(100),
   dropship_eligible boolean DEFAULT false,
   created_at timestamp NOT NULL DEFAULT now(),
-  updated_at timestamp NOT NULL DEFAULT now()
+  updated_at timestamp NOT NULL DEFAULT now(),
+  CONSTRAINT product_variants_uom_type_chk
+    CHECK (uom_type IN ('each', 'pack', 'inner_pack', 'case', 'skid')),
+  CONSTRAINT product_variants_each_invariants_chk
+    CHECK (
+      uom_type <> 'each'
+      OR (
+        units_per_variant = 1
+        AND hierarchy_level = 1
+        AND parent_variant_id IS NULL
+        AND is_base_unit = true
+      )
+    )
 );
 
 CREATE TABLE catalog.product_lines (
