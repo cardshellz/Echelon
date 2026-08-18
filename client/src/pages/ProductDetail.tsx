@@ -68,20 +68,15 @@ import {
   type VendorCatalogQuoteSnapshot,
 } from "@/features/supplier-catalog/VendorCatalogQuoteEditor";
 import { ProductBuildRelationships } from "@/features/inventory-builds/ProductBuildRelationships";
+import {
+  VARIANT_UOM_DEFINITIONS,
+  getVariantUomDefinition,
+  inferLegacyVariantUomType,
+  type VariantUomType,
+} from "@shared/catalog/variant-uom";
 
-const HIERARCHY_TYPES = [
-  { level: 1, label: "Pack", prefix: "P" },
-  { level: 2, label: "Box", prefix: "B" },
-  { level: 3, label: "Case", prefix: "C" },
-  { level: 4, label: "Skid", prefix: "SK" },
-] as const;
-
-function getHierarchyLabel(level: number) {
-  return HIERARCHY_TYPES.find((t) => t.level === level)?.label || `Level ${level}`;
-}
-
-function getHierarchyPrefix(level: number) {
-  return HIERARCHY_TYPES.find((t) => t.level === level)?.prefix || "X";
+function getVariantUomType(variant: Pick<ProductVariantRow, "uomType" | "hierarchyLevel" | "unitsPerVariant" | "isBaseUnit" | "parentVariantId">): VariantUomType {
+  return variant.uomType ?? inferLegacyVariantUomType(variant);
 }
 
 function parsePositiveInt(value: string | null): number | null {
@@ -336,6 +331,7 @@ interface ProductVariantRow {
   shipsInOwnContainer: boolean;
   maxUnitsPerPackage: number | null;
   hierarchyLevel: number;
+  uomType?: VariantUomType | null;
   parentVariantId: number | null;
   isBaseUnit: boolean;
   isActive: boolean;
@@ -1176,7 +1172,11 @@ function ProductInventoryTab({ productId }: { productId: number }) {
               const totalQty = levels.reduce((sum, l) => sum + (l.variant_qty || 0), 0);
               const totalReserved = levels.reduce((sum, l) => sum + (l.reserved_qty || 0), 0);
               const available = totalQty - totalReserved;
-              const hierLabel = getHierarchyLabel(variant.hierarchy_level);
+              const hierLabel = getVariantUomDefinition(inferLegacyVariantUomType({
+                hierarchyLevel: variant.hierarchy_level,
+                unitsPerVariant: variant.units_per_variant,
+                isBaseUnit: variant.is_base_unit,
+              })).label;
 
               return (
                 <div key={variant.variant_id} className="border rounded-lg">
@@ -2089,13 +2089,14 @@ export default function ProductDetail() {
   const [editingVariant, setEditingVariant] = useState<ProductVariantRow | null>(null);
   const [unitsInputRaw, setUnitsInputRaw] = useState<string | null>(null);
   const [variantForm, setVariantForm] = useState({
+    uomType: "each" as VariantUomType,
     hierarchyLevel: 1,
     unitsPerVariant: 1,
     sku: "",
     name: "",
     barcode: "",
     parentVariantId: null as number | null,
-    isBaseUnit: false,
+    isBaseUnit: true,
     package: emptyVariantPackageInput(),
     shipsInOwnContainer: false,
     maxUnitsPerPackage: "",
@@ -2104,29 +2105,38 @@ export default function ProductDetail() {
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
 
   const computeAutoSku = useCallback(
-    (level: number, units: number) => {
+    (uomType: VariantUomType, units: number) => {
       const baseSku = product?.sku || "";
-      const prefix = getHierarchyPrefix(level);
-      return `${baseSku}-${prefix}${units}`;
+      const prefix = getVariantUomDefinition(uomType).skuPrefix;
+      return prefix ? `${baseSku}-${prefix}${units}` : baseSku;
     },
     [product?.sku],
   );
 
   const computeAutoName = useCallback(
-    (level: number, units: number) => {
-      const productName = product?.name || "";
-      const typeLabel = getHierarchyLabel(level);
-      return `${typeLabel} of ${units}`;
+    (uomType: VariantUomType, units: number) => {
+      const typeLabel = getVariantUomDefinition(uomType).label;
+      return uomType === "each" ? "Each" : `${typeLabel} of ${units}`;
     },
-    [product?.name],
+    [],
   );
 
   const handleTypeChange = useCallback(
-    (level: number) => {
+    (uomType: VariantUomType) => {
+      setUnitsInputRaw(null);
       setVariantForm((prev) => {
-        const next = { ...prev, hierarchyLevel: level };
-        if (!skuManuallyEdited) next.sku = computeAutoSku(level, prev.unitsPerVariant);
-        if (!nameManuallyEdited) next.name = computeAutoName(level, prev.unitsPerVariant);
+        const definition = getVariantUomDefinition(uomType);
+        const unitsPerVariant = uomType === "each" ? 1 : prev.unitsPerVariant;
+        const next = {
+          ...prev,
+          uomType,
+          hierarchyLevel: definition.defaultHierarchyLevel,
+          unitsPerVariant,
+          parentVariantId: uomType === "each" ? null : prev.parentVariantId,
+          isBaseUnit: uomType === "each" ? true : prev.uomType === "each" ? false : prev.isBaseUnit,
+        };
+        if (!skuManuallyEdited) next.sku = computeAutoSku(uomType, unitsPerVariant);
+        if (!nameManuallyEdited) next.name = computeAutoName(uomType, unitsPerVariant);
         return next;
       });
     },
@@ -2137,8 +2147,8 @@ export default function ProductDetail() {
     (units: number) => {
       setVariantForm((prev) => {
         const next = { ...prev, unitsPerVariant: units };
-        if (!skuManuallyEdited) next.sku = computeAutoSku(prev.hierarchyLevel, units);
-        if (!nameManuallyEdited) next.name = computeAutoName(prev.hierarchyLevel, units);
+        if (!skuManuallyEdited) next.sku = computeAutoSku(prev.uomType, units);
+        if (!nameManuallyEdited) next.name = computeAutoName(prev.uomType, units);
         return next;
       });
     },
@@ -2149,16 +2159,17 @@ export default function ProductDetail() {
     setEditingVariant(null);
     setSkuManuallyEdited(false);
     setNameManuallyEdited(false);
-    const defaultLevel = 1;
+    const defaultUomType: VariantUomType = "each";
     const defaultUnits = 1;
     setVariantForm({
-      hierarchyLevel: defaultLevel,
+      uomType: defaultUomType,
+      hierarchyLevel: getVariantUomDefinition(defaultUomType).defaultHierarchyLevel,
       unitsPerVariant: defaultUnits,
-      sku: computeAutoSku(defaultLevel, defaultUnits),
-      name: computeAutoName(defaultLevel, defaultUnits),
+      sku: computeAutoSku(defaultUomType, defaultUnits),
+      name: computeAutoName(defaultUomType, defaultUnits),
       barcode: "",
       parentVariantId: null,
-      isBaseUnit: false,
+      isBaseUnit: true,
       package: emptyVariantPackageInput(),
       shipsInOwnContainer: false,
       maxUnitsPerPackage: "",
@@ -2179,16 +2190,18 @@ export default function ProductDetail() {
     receiptSetupAutoOpenRef.current = setupKey;
 
     const hierarchyLevel = parsePositiveInt(searchParams.get("hierarchyLevel")) ?? 3;
+    const uomType = inferLegacyVariantUomType({ hierarchyLevel, unitsPerVariant, isBaseUnit: false });
     setActiveTab("variants");
     setEditingVariant(null);
     setSkuManuallyEdited(false);
     setNameManuallyEdited(false);
     setUnitsInputRaw(null);
     setVariantForm({
+      uomType,
       hierarchyLevel,
       unitsPerVariant,
-      sku: computeAutoSku(hierarchyLevel, unitsPerVariant),
-      name: computeAutoName(hierarchyLevel, unitsPerVariant),
+      sku: computeAutoSku(uomType, unitsPerVariant),
+      name: computeAutoName(uomType, unitsPerVariant),
       barcode: "",
       parentVariantId: null,
       isBaseUnit: false,
@@ -2208,6 +2221,7 @@ export default function ProductDetail() {
     setSkuManuallyEdited(true);
     setNameManuallyEdited(true);
     setVariantForm({
+      uomType: getVariantUomType(variant),
       hierarchyLevel: variant.hierarchyLevel,
       unitsPerVariant: variant.unitsPerVariant,
       sku: variant.sku || "",
@@ -2262,6 +2276,7 @@ export default function ProductDetail() {
           name: data.name,
           unitsPerVariant: data.unitsPerVariant,
           hierarchyLevel: data.hierarchyLevel,
+          uomType: data.uomType,
           barcode: data.barcode || null,
           parentVariantId: data.parentVariantId,
           isBaseUnit: data.isBaseUnit,
@@ -2321,6 +2336,7 @@ export default function ProductDetail() {
           name: data.name,
           unitsPerVariant: data.unitsPerVariant,
           hierarchyLevel: data.hierarchyLevel,
+          uomType: data.uomType,
           barcode: data.barcode || null,
           parentVariantId: data.parentVariantId,
           isBaseUnit: data.isBaseUnit,
@@ -3493,7 +3509,7 @@ export default function ProductDetail() {
                                   </Badge>
                                 )}
                                 <Badge variant="outline" className="text-xs">
-                                  {getHierarchyLabel(variant.hierarchyLevel)}
+                                  {getVariantUomDefinition(getVariantUomType(variant)).label}
                                 </Badge>
                               </div>
                             </div>
@@ -3573,7 +3589,7 @@ export default function ProductDetail() {
                                 <TableCell>{variant.name}</TableCell>
                                 <TableCell>
                                   <Badge variant="outline" className="text-xs">
-                                    {getHierarchyLabel(variant.hierarchyLevel)}
+                                    {getVariantUomDefinition(getVariantUomType(variant)).label}
                                   </Badge>
                                 </TableCell>
                                 <TableCell>{variant.unitsPerVariant}</TableCell>
@@ -3933,16 +3949,16 @@ export default function ProductDetail() {
             <div className="space-y-1.5">
               <Label>Type</Label>
               <Select
-                value={String(variantForm.hierarchyLevel)}
-                onValueChange={(v) => handleTypeChange(parseInt(v))}
+                value={variantForm.uomType}
+                onValueChange={(value) => handleTypeChange(value as VariantUomType)}
               >
                 <SelectTrigger className="h-11">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {HIERARCHY_TYPES.map((t) => (
-                    <SelectItem key={t.level} value={String(t.level)}>
-                      {t.label}
+                  {VARIANT_UOM_DEFINITIONS.map((definition) => (
+                    <SelectItem key={definition.type} value={definition.type}>
+                      {definition.label}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -3967,7 +3983,11 @@ export default function ProductDetail() {
                   handleUnitsChange(num);
                 }}
                 className="h-11"
+                disabled={variantForm.uomType === "each"}
               />
+              {variantForm.uomType === "each" && (
+                <p className="text-xs text-muted-foreground">Each is always one inventory unit.</p>
+              )}
             </div>
 
             <div className="space-y-1.5">
@@ -4105,7 +4125,11 @@ export default function ProductDetail() {
 
             <div className="space-y-1.5">
               <Label>Breaks Into (Parent Variant)</Label>
-              {variantForm.hierarchyLevel >= 2 && (
+              {variantForm.uomType === "each" ? (
+                <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+                  Each is the smallest inventory unit and does not break down further.
+                </p>
+              ) : (
                 <div className="flex items-center gap-2">
                   <Checkbox
                     id="isBaseUnit"
@@ -4117,7 +4141,7 @@ export default function ProductDetail() {
                     }))}
                   />
                   <label htmlFor="isBaseUnit" className="text-sm text-muted-foreground cursor-pointer">
-                    This is the base (smallest sellable) unit — does not break down further
+                    This is the smallest inventory unit and does not break down further
                   </label>
                 </div>
               )}
@@ -4143,7 +4167,7 @@ export default function ProductDetail() {
               )}
               <p className="text-xs text-muted-foreground">
                 {variantForm.isBaseUnit
-                  ? "This variant is marked as the smallest sellable unit for this product."
+                  ? "This variant is marked as the smallest inventory unit for this product."
                   : "Which smaller variant does this break down into?"}
               </p>
             </div>

@@ -46,6 +46,12 @@ import {
   type VariantPackagePayload,
 } from "@/lib/variant-package";
 import { formatShopifyMappingRepairError } from "@/lib/shopify-product-mapping";
+import {
+  VARIANT_UOM_DEFINITIONS,
+  getVariantUomDefinition,
+  inferLegacyVariantUomType,
+  type VariantUomType,
+} from "@shared/catalog/variant-uom";
 
 interface Product {
   id: number;
@@ -66,6 +72,8 @@ interface ProductVariant {
   name: string;
   unitsPerVariant: number;
   hierarchyLevel: number;
+  uomType?: VariantUomType | null;
+  isBaseUnit?: boolean | null;
   parentVariantId: number | null;
   barcode: string | null;
   shopifyVariantId: string | null;
@@ -178,6 +186,7 @@ export default function Variants() {
     sku: "",
     name: "",
     unitsPerVariant: 1,
+    uomType: "each" as VariantUomType,
     hierarchyLevel: 1,
     barcode: "",
   });
@@ -431,6 +440,9 @@ export default function Variants() {
           name: data.name,
           unitsPerVariant: data.unitsPerVariant,
           hierarchyLevel: data.hierarchyLevel,
+          uomType: data.uomType,
+          isBaseUnit: data.uomType === "each",
+          parentVariantId: null,
           barcode: data.barcode || null,
         }),
       });
@@ -452,7 +464,7 @@ export default function Variants() {
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       toast({ title: "Variant created successfully" });
       setCreateDialogOpen(false);
-      setNewVariant({ productId: "", sku: "", name: "", unitsPerVariant: 1, hierarchyLevel: 1, barcode: "" });
+      setNewVariant({ productId: "", sku: "", name: "", unitsPerVariant: 1, uomType: "each", hierarchyLevel: 1, barcode: "" });
     },
     onError: (error) => {
       if (error.message === "SKU_CONFLICT") return; // handled by conflict dialog
@@ -857,14 +869,9 @@ export default function Variants() {
     return product?.shopifyProductId || null;
   };
 
-  const getHierarchyLabel = (level: number) => {
-    switch (level) {
-      case 1: return "Pack";
-      case 2: return "Box";
-      case 3: return "Case";
-      default: return `Level ${level}`;
-    }
-  };
+  const getUomLabel = (variant: ProductVariant) => getVariantUomDefinition(
+    variant.uomType ?? inferLegacyVariantUomType(variant),
+  ).label;
 
   const variantSkuMap = new Map<number, string>();
   for (const v of allVariants) {
@@ -1133,7 +1140,7 @@ export default function Variants() {
                             <div className="font-mono text-sm">{variant.sku || "-"}</div>
                             <div className="text-sm font-medium">{variant.name}</div>
                             <div className="flex items-center gap-2">
-                              <Badge variant="outline" className="text-xs">{getHierarchyLabel(variant.hierarchyLevel)}</Badge>
+                              <Badge variant="outline" className="text-xs">{getUomLabel(variant)}</Badge>
                               <span className="text-xs text-muted-foreground">{variant.unitsPerVariant} units</span>
                             </div>
                           </div>
@@ -1244,7 +1251,7 @@ export default function Variants() {
                     </Badge>
                   </div>
                   <div className="flex items-center gap-2 mb-2">
-                    <Badge variant="outline" className="text-xs">{getHierarchyLabel(variant.hierarchyLevel)}</Badge>
+                    <Badge variant="outline" className="text-xs">{getUomLabel(variant)}</Badge>
                     <span className="text-xs text-muted-foreground">Units: {variant.unitsPerVariant}</span>
                   </div>
                   {variant.productId ? (
@@ -1353,7 +1360,7 @@ export default function Variants() {
                     <TableCell>{variant.name}</TableCell>
                     <TableCell>{variant.unitsPerVariant}</TableCell>
                     <TableCell>
-                      <Badge variant="outline">{getHierarchyLabel(variant.hierarchyLevel)}</Badge>
+                      <Badge variant="outline">{getUomLabel(variant)}</Badge>
                     </TableCell>
                     <TableCell>
                       {parentSku ? (
@@ -1910,6 +1917,7 @@ export default function Variants() {
                   value={newVariant.unitsPerVariant}
                   onChange={(e) => setNewVariant({ ...newVariant, unitsPerVariant: parseInt(e.target.value) || 1 })}
                   className="h-11"
+                  disabled={newVariant.uomType === "each"}
                   autoComplete="off"
                   autoCorrect="off"
                   autoCapitalize="off"
@@ -1918,18 +1926,28 @@ export default function Variants() {
               </div>
               <div className="space-y-2">
                 <Label className="text-sm">Type</Label>
-                <Select 
-                  value={newVariant.hierarchyLevel.toString()} 
-                  onValueChange={(val) => setNewVariant({ ...newVariant, hierarchyLevel: parseInt(val) })}
+                <Select
+                  value={newVariant.uomType}
+                  onValueChange={(value) => {
+                    const uomType = value as VariantUomType;
+                    const definition = getVariantUomDefinition(uomType);
+                    setNewVariant({
+                      ...newVariant,
+                      uomType,
+                      hierarchyLevel: definition.defaultHierarchyLevel,
+                      unitsPerVariant: uomType === "each" ? 1 : newVariant.unitsPerVariant,
+                    });
+                  }}
                 >
                   <SelectTrigger className="h-11">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="1">Pack</SelectItem>
-                    <SelectItem value="2">Box</SelectItem>
-                    <SelectItem value="3">Case</SelectItem>
-                    <SelectItem value="4">Pallet</SelectItem>
+                    {VARIANT_UOM_DEFINITIONS.map((definition) => (
+                      <SelectItem key={definition.type} value={definition.type}>
+                        {definition.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>

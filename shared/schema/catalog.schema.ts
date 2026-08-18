@@ -2,6 +2,7 @@ import { pgTable, text, varchar, integer, bigint, numeric, timestamp, jsonb, boo
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+import { VARIANT_UOM_TYPES, type VariantUomType } from "../catalog/variant-uom";
 
 export const catalogSchema = pgSchema("catalog");
 
@@ -131,13 +132,14 @@ export type InsertProduct = z.infer<typeof insertProductSchema>;
 export type Product = typeof products.$inferSelect;
 
 // ============================================================================
-// PRODUCT VARIANTS - Sellable/purchasable SKUs with pack sizes
+// PRODUCT VARIANTS - Inventory identities and sellable/purchasable package configurations
 // ============================================================================
 export const productVariants = catalogSchema.table("product_variants", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productId: integer("product_id").notNull().references(() => products.id),
   sku: varchar("sku", { length: 100 }),
   name: text("name").notNull(),
+  uomType: varchar("uom_type", { length: 20 }).$type<VariantUomType>().notNull().default("pack"),
   unitsPerVariant: integer("units_per_variant").notNull().default(1),
   hierarchyLevel: integer("hierarchy_level").notNull().default(1),
   parentVariantId: integer("parent_variant_id"),
@@ -186,9 +188,17 @@ export const productVariants = catalogSchema.table("product_variants", {
 }, (table) => [
   uniqueIndex("product_variants_id_product_uidx").on(table.id, table.productId),
   check("product_variants_max_units_per_package_chk", sql`${table.maxUnitsPerPackage} IS NULL OR ${table.maxUnitsPerPackage} > 0`),
+  check("product_variants_each_invariants_chk", sql`${table.uomType} <> 'each' OR (
+    ${table.unitsPerVariant} = 1
+    AND ${table.hierarchyLevel} = 1
+    AND ${table.parentVariantId} IS NULL
+    AND ${table.isBaseUnit} = true
+  )`),
 ]);
 
-export const insertProductVariantSchema = createInsertSchema(productVariants).omit({
+export const insertProductVariantSchema = createInsertSchema(productVariants, {
+  uomType: z.enum(VARIANT_UOM_TYPES),
+}).omit({
   id: true,
   createdAt: true,
   updatedAt: true,
