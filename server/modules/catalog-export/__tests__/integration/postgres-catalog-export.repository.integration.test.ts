@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-import { productVariants, products } from "@shared/schema";
+import {
+  channelConnections,
+  channelFeeds,
+  channels,
+  productVariants,
+  products,
+} from "@shared/schema";
 import {
   closeTestDb,
   describeWithDisposableDb,
@@ -80,5 +86,68 @@ describeWithDisposableDb("catalog export PostgreSQL repository", () => {
       variantIsActive: true,
     });
     expect(rows[1].variantIsActive).toBe(false);
+  });
+
+  it("exports inactive channel mappings as historical accounting identity evidence", async () => {
+    const [product] = await db.insert(products).values({
+      sku: "DONATION-FAMILY",
+      name: "Customer donation",
+      inventoryType: "non_inventory",
+      status: "active",
+      isActive: true,
+    }).returning();
+    const [variant] = await db.insert(productVariants).values({
+      productId: product.id,
+      sku: "SHOPIFY-WWP",
+      name: "Wounded Warrior Project",
+      isActive: true,
+    }).returning();
+    const [channel] = await db.insert(channels).values({
+      name: "Card Shellz Shopify",
+      type: "internal",
+      provider: "shopify",
+      status: "active",
+    }).returning();
+    await db.insert(channelConnections).values({
+      channelId: channel.id,
+      shopDomain: "Card-Shellz.MyShopify.com",
+    });
+    await db.insert(channelFeeds).values({
+      channelId: channel.id,
+      productVariantId: variant.id,
+      channelType: "shopify",
+      channelVariantId: "62621541925023",
+      channelProductId: "9000000000001",
+      channelSku: "SHOPIFY-WWP",
+      isActive: 0,
+    });
+    const repository = new PostgresCatalogExportRepository(db);
+
+    const rows = await repository.listVariantSnapshots({
+      afterVariantId: null,
+      limit: 10,
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].externalIdentifiers).toEqual([
+      {
+        provider: "shopify",
+        scope: "card-shellz.myshopify.com",
+        identifierType: "variant_id",
+        value: "62621541925023",
+      },
+      {
+        provider: "shopify",
+        scope: "card-shellz.myshopify.com",
+        identifierType: "product_id",
+        value: "9000000000001",
+      },
+      {
+        provider: "shopify",
+        scope: "card-shellz.myshopify.com",
+        identifierType: "sku",
+        value: "SHOPIFY-WWP",
+      },
+    ]);
   });
 });

@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, inArray } from "drizzle-orm";
+import { asc, eq, gt, inArray } from "drizzle-orm";
 import {
   channelConnections,
   channelFeeds,
@@ -58,10 +58,11 @@ export class PostgresCatalogExportRepository implements CatalogExportRepository 
       .from(channelFeeds)
       .innerJoin(channels, eq(channels.id, channelFeeds.channelId))
       .leftJoin(channelConnections, eq(channelConnections.channelId, channels.id))
-      .where(and(
-        inArray(channelFeeds.productVariantId, variantIds),
-        eq(channelFeeds.isActive, 1),
-      ))
+      // Channel-feed activation controls future operational synchronization. It
+      // does not invalidate the provider identity previously assigned to this
+      // canonical variant. Accounting consumers need that historical identity
+      // to resolve retained sales and refunds after a listing is deactivated.
+      .where(inArray(channelFeeds.productVariantId, variantIds))
       .orderBy(asc(channelFeeds.productVariantId), asc(channels.id));
 
     const identifiersByVariant = new Map<number, CatalogExternalIdentifier[]>();
