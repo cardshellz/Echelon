@@ -34,6 +34,7 @@ import {
   serializePackageAttributeUpdates,
 } from "./package-attributes";
 import { z } from "zod";
+import { validateVariantUomWrite } from "./variant-uom";
 
 // Physical packing facts beyond weight/dims. Canonical on the variant since
 // migration 185; validated here because the variant PUT spreads req.body.
@@ -1497,10 +1498,12 @@ export async function registerProductRoutes(app: Express) {
       }
       const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
       const packingFlags = coercePackingFlagsOnVariantPayload(req.body);
+      const uomAttributes = validateVariantUomWrite(req.body);
       const variant = await storage.createProductVariant({
         ...req.body,
         ...packageAttributes,
         ...packingFlags,
+        ...uomAttributes,
         productId,
       });
       res.json(variant);
@@ -1568,6 +1571,7 @@ export async function registerProductRoutes(app: Express) {
           ...req.body,
           ...packageAttributes,
           ...packingFlags,
+          ...validateVariantUomWrite(req.body, existing),
           ...(normalizedNewSku ? { sku: normalizedNewSku } : {}),
         };
         const updatedVariant = await storage.updateProductVariant(id, payload, tx);
