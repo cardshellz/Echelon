@@ -7,6 +7,10 @@ import {
   readBoundedResponseText,
   ShipStationTrackingResponseReadError,
 } from "./shipstation-tracking-http";
+import {
+  parseExactPositiveWmsShipmentItems,
+  type ExactWmsShipmentItem,
+} from "./shipstation-provider-contents.domain";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 const DEFAULT_MINIMUM_REQUEST_INTERVAL_MS = 500;
@@ -18,10 +22,12 @@ const MAX_PAGES_PER_QUERY = 10;
 
 const seIdSchema = z.string().trim().min(4).max(25).regex(/^se-[a-z0-9-]+$/);
 const nullableText = z.string().trim().max(500).nullable().optional();
+const nullableItemIdentity = z.string().max(500).nullable().optional();
 const shipmentItemSchema = z.object({
-  external_order_item_id: nullableText,
-  line_item_key: nullableText,
-  lineItemKey: nullableText,
+  external_order_item_id: nullableItemIdentity,
+  line_item_key: nullableItemIdentity,
+  lineItemKey: nullableItemIdentity,
+  quantity: z.unknown().optional(),
 }).passthrough();
 const shipmentSchema = z.object({
   shipment_id: seIdSchema,
@@ -39,7 +45,7 @@ const labelSchema = z.object({
   status: z.enum(["processing", "completed", "error", "voided"]),
   shipment_id: seIdSchema,
   tracking_number: z.string().trim().min(1).max(200),
-  is_return_label: z.boolean().optional().default(false),
+  is_return_label: z.boolean(),
   ship_date: nullableText,
   carrier_code: nullableText,
   service_code: nullableText,
@@ -58,7 +64,8 @@ export interface ShipStationCompletedPhysicalPackage {
   shipDate: string | null;
   carrierCode: string | null;
   serviceCode: string | null;
-  wmsShipmentItemIds: number[];
+  isReturnLabel: false;
+  wmsShipmentItems: readonly ExactWmsShipmentItem[];
 }
 
 export interface ShipStationPhysicalRecoveryClient {
@@ -105,17 +112,18 @@ function parsePositiveSeNumericId(value: string): number | null {
 }
 
 export function parseWmsShipmentItemIdentity(value: unknown): number | null {
-  if (typeof value !== "string") return null;
-  const match = /^wms-item-([1-9][0-9]*)$/.exec(value.trim());
-  if (!match) return null;
-  const parsed = Number(match[1]);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+  return parseExactPositiveWmsShipmentItems([{
+    lineItemKey: value,
+    quantity: 1,
+  }])?.[0]?.sourceShipmentItemId ?? null;
 }
 
-function shipmentItemIdentity(item: z.infer<typeof shipmentItemSchema>): number | null {
-  return parseWmsShipmentItemIdentity(
-    item.external_order_item_id ?? item.line_item_key ?? item.lineItemKey,
-  );
+function shipmentItemIdentity(
+  item: z.infer<typeof shipmentItemSchema>,
+): unknown {
+  return item.external_order_item_id
+    ?? item.line_item_key
+    ?? item.lineItemKey;
 }
 
 function validateIntegerRange(
@@ -302,12 +310,13 @@ export function createShipStationPhysicalRecoveryClient(
 
       const packages = new Map<number, ShipStationCompletedPhysicalPackage>();
       for (const shipment of shipmentRows) {
-        const wmsShipmentItemIds = [...new Set(
-          shipment.items
-            .map(shipmentItemIdentity)
-            .filter((id): id is number => id !== null),
-        )].sort((left, right) => left - right);
-        if (wmsShipmentItemIds.length === 0) continue;
+        const wmsShipmentItems = parseExactPositiveWmsShipmentItems(
+          shipment.items.map((item) => ({
+            lineItemKey: shipmentItemIdentity(item),
+            quantity: item.quantity,
+          })),
+        );
+        if (!wmsShipmentItems) continue;
 
         const labelRows = await listAllPages(
           (page) => `/labels?${new URLSearchParams({
@@ -332,7 +341,8 @@ export function createShipStationPhysicalRecoveryClient(
             shipDate: label.ship_date ?? null,
             carrierCode: label.carrier_code ?? null,
             serviceCode: label.service_code ?? null,
-            wmsShipmentItemIds,
+            isReturnLabel: false,
+            wmsShipmentItems,
           });
         }
       }

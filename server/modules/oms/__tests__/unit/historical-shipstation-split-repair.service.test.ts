@@ -110,18 +110,17 @@ describe("historical ShipStation split repair", () => {
     expect(HISTORICAL_SPLIT_REPAIR_SOURCE.length).toBeLessThanOrEqual(30);
   });
 
-  it("parses and aggregates exact positive wms-item package evidence", () => {
+  it("parses exact unique positive wms-item package evidence", () => {
     const parsed = parseHistoricalProviderPackage(providerShipment({
       shipmentItems: [
         { lineItemKey: "wms-item-9001", quantity: 1 },
-        { lineItemKey: "wms-item-9001", quantity: 2 },
-        { lineItemKey: "wms-item-9002", quantity: 1 },
+        { lineItemKey: "wms-item-9002", quantity: 2 },
       ],
     }));
     expect(parsed.providerShipmentId).toBe(442730042);
     expect(parsed.items).toEqual([
-      { sourceShipmentItemId: 9001, quantity: 3 },
-      { sourceShipmentItemId: 9002, quantity: 1 },
+      { sourceShipmentItemId: 9001, quantity: 1 },
+      { sourceShipmentItemId: 9002, quantity: 2 },
     ]);
   });
 
@@ -130,6 +129,22 @@ describe("historical ShipStation split repair", () => {
     [{ shipmentItems: [{ lineItemKey: "sku-only", quantity: 1 }] }, "PROVIDER_PACKAGE_ITEM_IDENTITY_INCOMPLETE"],
     [{ shipmentItems: [{ lineItemKey: "wms-item-9001", quantity: 0 }] }, "PROVIDER_PACKAGE_ITEM_IDENTITY_INCOMPLETE"],
     [{ trackingNumber: "" }, "PROVIDER_PACKAGE_IDENTITY_INCOMPLETE"],
+    [{ shipmentItems: [{ lineItemKey: "wms-item-9001", quantity: "1" }] }, "PROVIDER_PACKAGE_ITEM_IDENTITY_INCOMPLETE"],
+    [{ shipmentItems: [{ lineItemKey: " wms-item-9001 ", quantity: 1 }] }, "PROVIDER_PACKAGE_ITEM_IDENTITY_INCOMPLETE"],
+    [{ shipmentItems: [{ lineItemKey: "wms-item-2147483648", quantity: 1 }] }, "PROVIDER_PACKAGE_ITEM_IDENTITY_INCOMPLETE"],
+    [{ shipmentItems: [{ lineItemKey: "wms-item-9001", quantity: 2_147_483_648 }] }, "PROVIDER_PACKAGE_ITEM_IDENTITY_INCOMPLETE"],
+    [{
+      shipmentItems: [
+        { lineItemKey: "wms-item-9001", quantity: 1 },
+        { lineItemKey: "wms-item-9001", quantity: 1 },
+      ],
+    }, "PROVIDER_PACKAGE_ITEM_IDENTITY_INCOMPLETE"],
+    [{
+      shipmentItems: [
+        { lineItemKey: "wms-item-9001", quantity: 2_147_483_647 },
+        { lineItemKey: "wms-item-9001", quantity: 1 },
+      ],
+    }, "PROVIDER_PACKAGE_ITEM_IDENTITY_INCOMPLETE"],
   ])("rejects incomplete provider proof %#", (override, code) => {
     expect(() => parseHistoricalProviderPackage(providerShipment(override))).toThrowError(
       expect.objectContaining({ code }),

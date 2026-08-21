@@ -46,6 +46,11 @@ import {
   resolveShipStationHandoffCommands,
 } from "./shipstation-order-adoption";
 import { ReplacementInventoryUnavailableError } from "../inventory/application/inventory.use-cases";
+import {
+  type ExactWmsShipmentItem,
+  isPositivePostgresInteger,
+  parseExactPositiveWmsShipmentItems,
+} from "../shipping/shipstation-provider-contents.domain";
 
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
@@ -80,6 +85,15 @@ interface ShipNotifyV2Result {
   legacyWmsShipmentIds?: readonly number[];
 }
 
+interface ProviderExactShipmentContentsAuthority {
+  readonly source: "provider_exact";
+  readonly items: readonly ExactWmsShipmentItem[];
+}
+
+type ShipmentContentsAuthority =
+  | ProviderExactShipmentContentsAuthority
+  | ManualShipmentContentsAuthority;
+
 interface ShipmentAuthorityContext {
   source: "shipstation_manual_remediation" | "carrier_tracking_confirmed_dispatch";
   dispatchOccurredAt: Date | null;
@@ -87,11 +101,32 @@ interface ShipmentAuthorityContext {
   carrierDispatchCommandId: number | null;
   actor: string;
   reason: string;
+  contentsAuthority: ShipmentContentsAuthority | null;
+}
+
+export interface ManualShipmentContentsAuthorityLine {
+  orderItemId: number | null;
+  correctionForShipmentItemId: number | null;
+  productVariantId: number;
+  quantity: number;
+  fromLocationId: number | null;
+  shipmentItemPurpose: "replacement" | "concession" | "omission_correction";
+}
+
+export interface ManualShipmentContentsAuthority {
+  source: "manual_remediation";
+  exceptionId: number;
+  candidateShipmentId: number;
+  providerShipmentId: number;
+  lines: readonly ManualShipmentContentsAuthorityLine[];
 }
 
 export interface ManualShipmentNotificationInput {
   operator: string;
   reason: string;
+  contentsAuthority:
+    | ManualShipmentContentsAuthority
+    | { readonly source: "provider_exact" };
 }
 
 // ---------------------------------------------------------------------------
@@ -775,6 +810,7 @@ export interface ShipStationShipment {
   trackingNumber: string;
   carrierCode: string;
   serviceCode: string;
+  createDate?: string | null;
   shipDate: string;
   voidDate: string | null;
   shipmentCost: number;
@@ -827,42 +863,14 @@ function buildShipStationUrl(baseUrl: string, path: string): string {
   return parsed.toString();
 }
 
-function parseWmsShipmentItemLineKey(lineItemKey: string | null | undefined): number | null {
-  if (typeof lineItemKey !== "string") return null;
-  const match = /^wms-item-([1-9][0-9]*)$/.exec(lineItemKey.trim());
-  if (!match) return null;
-  const id = Number(match[1]);
-  return Number.isInteger(id) && id > 0 ? id : null;
-}
-
-function parsePositiveWmsShipmentItemsFromShipStation(
+export function parsePositiveWmsShipmentItemsFromShipStation(
   shipment: ShipStationShipment,
 ): Array<{ sourceShipmentItemId: number; qty: number }> | null {
-  const ssItems = Array.isArray(shipment.shipmentItems)
-    ? shipment.shipmentItems
-    : [];
-  if (ssItems.length === 0) return null;
-
-  const quantitiesBySourceItemId = new Map<number, number>();
-  for (const item of ssItems) {
-    const sourceShipmentItemId = parseWmsShipmentItemLineKey(item.lineItemKey);
-    const qty = Number(item.quantity);
-    if (
-      sourceShipmentItemId === null ||
-      !Number.isInteger(qty) ||
-      qty <= 0
-    ) {
-      return null;
-    }
-    quantitiesBySourceItemId.set(
-      sourceShipmentItemId,
-      (quantitiesBySourceItemId.get(sourceShipmentItemId) ?? 0) + qty,
-    );
-  }
-
-  return [...quantitiesBySourceItemId.entries()].map(
-    ([sourceShipmentItemId, qty]) => ({ sourceShipmentItemId, qty }),
-  );
+  const items = parseExactPositiveWmsShipmentItems(shipment.shipmentItems);
+  return items?.map(({ sourceShipmentItemId, quantity }) => ({
+    sourceShipmentItemId,
+    qty: quantity,
+  })) ?? null;
 }
 
 function hasSameShipmentItemSet(
@@ -1232,6 +1240,7 @@ export function createShipStationService(
    */
   async function resolveWmsShipmentForShipNotify(
     shipment: ShipStationShipment,
+    expectedPhysicalShipmentId: number | null,
   ): Promise<{
     row: any | null;
     fallback: boolean;
@@ -1250,6 +1259,9 @@ export function createShipStationService(
                replaces_shipment_id, replacement_reason
         FROM wms.outbound_shipments
         WHERE external_fulfillment_id = ${externalFulfillmentId}
+          AND (
+            ${expectedPhysicalShipmentId}::integer IS NULL OR id = ${expectedPhysicalShipmentId}
+          )
         LIMIT 1
       `);
       const existing = byPhysicalShipment?.rows?.[0];
@@ -1262,6 +1274,16 @@ export function createShipStationService(
           combinedOwnership: null,
         };
       }
+    }
+
+    if (expectedPhysicalShipmentId !== null) {
+      return {
+        row: null,
+        fallback: false,
+        handled: true,
+        matchedByPhysicalIdentity: false,
+        combinedOwnership: null,
+      };
     }
 
     const parsed = parseEchelonOrderKey(shipment.orderKey);
@@ -1281,7 +1303,7 @@ export function createShipStationService(
     }
 
     const ssOrderId = shipment.orderId;
-    if (Number.isInteger(ssOrderId) && ssOrderId > 0) {
+    if (isPositivePostgresInteger(ssOrderId)) {
       const byOrderId: any = await db.execute(sql`
         SELECT id, order_id, source, status, shipstation_order_id,
                external_fulfillment_id, tracking_number,
@@ -1719,10 +1741,13 @@ export function createShipStationService(
     shipment: ShipStationShipment,
     allowedSourceShipmentItemIds?: Set<number>,
   ): Promise<void> {
-    const ssItems = Array.isArray(shipment.shipmentItems)
-      ? shipment.shipmentItems
-      : [];
-    if (ssItems.length === 0) return;
+    let parsedItems = parsePositiveWmsShipmentItemsFromShipStation(shipment);
+    if (!parsedItems) {
+      throw new ShipStationUnmappedItemsError(
+        `shipstation_split_items_unmapped: ShipStation shipment ` +
+          `${shipment.shipmentId} lacks exact unique wms-item quantity evidence`,
+      );
+    }
 
     const targetItems: any = await executor.execute(sql`
       SELECT osi.id, osi.order_item_id, osi.replacement_for_order_item_id,
@@ -1738,49 +1763,6 @@ export function createShipStationService(
         ON catalog_variant.id = osi.product_variant_id
       WHERE osi.shipment_id = ${targetShipmentId}
     `);
-
-
-    let parsedItems = parsePositiveWmsShipmentItemsFromShipStation(shipment) ?? [];
-    if (parsedItems.length === 0) {
-      const remainingTargets = [...(targetItems?.rows ?? [])];
-      const fallbackItems: Array<{ sourceShipmentItemId: number; qty: number }> = [];
-
-      for (const ssItem of ssItems) {
-        const sku = typeof ssItem.sku === "string" ? ssItem.sku.trim() : "";
-        const qty = Number(ssItem.quantity);
-        if (!sku || !Number.isInteger(qty) || qty <= 0) {
-          continue;
-        }
-
-        const matchIndex = remainingTargets.findIndex((row: any) =>
-          String(row.sku ?? "").trim() === sku &&
-          Number(row.qty) === qty &&
-          Number.isInteger(Number(row.id)) &&
-          Number(row.id) > 0
-        );
-        if (matchIndex === -1) {
-          continue;
-        }
-
-        const [matched] = remainingTargets.splice(matchIndex, 1);
-        fallbackItems.push({
-          sourceShipmentItemId: Number(matched.id),
-          qty,
-        });
-      }
-
-      if (fallbackItems.length === ssItems.length && fallbackItems.length > 0) {
-        parsedItems = fallbackItems;
-        console.warn(
-          `[ShipStation Webhook V2] Shipment ${targetShipmentId} received ShipStation shipment ${shipment.shipmentId} without parseable lineItemKey values; matched items by exact SKU/qty.`,
-        );
-      } else {
-        throw new ShipStationUnmappedItemsError(
-          `shipstation_split_items_unmapped: ShipStation shipment ` +
-            `${shipment.shipmentId} has no parseable wms-item lineItemKey values`,
-        );
-      }
-    }
     if (allowedSourceShipmentItemIds && allowedSourceShipmentItemIds.size > 0) {
       parsedItems = parsedItems.filter((item) =>
         allowedSourceShipmentItemIds.has(item.sourceShipmentItemId),
@@ -2823,7 +2805,12 @@ export function createShipStationService(
     }
 
 
-    const resolved = await resolveWmsShipmentForShipNotify(shipment);
+    const resolved = await resolveWmsShipmentForShipNotify(
+      shipment,
+      authorityContext.contentsAuthority?.source === "manual_remediation"
+        ? authorityContext.contentsAuthority.candidateShipmentId
+        : null,
+    );
     if (event.kind === "shipped" && resolved.combinedOwnership) {
       return processMultiOrderShippedPackageBeforeSingleParentResolution(
         shipment,
@@ -3004,34 +2991,44 @@ export function createShipStationService(
     );
   }
 
-  function hasUsablePositiveProviderItems(shipment: ShipStationShipment): boolean {
-    const items = Array.isArray(shipment.shipmentItems)
-      ? shipment.shipmentItems
-      : [];
-    return items.length > 0 && items.every((item) => {
-      const quantity = Number(item.quantity);
-      const sku = String(item.sku ?? "").trim();
-      const lineItemKey = String(item.lineItemKey ?? "").trim();
-      return Number.isSafeInteger(quantity)
-        && quantity > 0
-        && (sku.length > 0 || lineItemKey.length > 0);
-    });
+  function hasAuthoritativeProviderItems(shipment: ShipStationShipment): boolean {
+    return parseExactPositiveWmsShipmentItems(shipment.shipmentItems) !== null;
   }
 
-  async function hasPositiveCustomerShipmentItemAuthority(
+  async function providerItemsExactlyMatchCustomerShipment(
     shipmentId: number,
+    shipment: ShipStationShipment,
   ): Promise<boolean> {
     if (!Number.isSafeInteger(shipmentId) || shipmentId <= 0) return false;
+    const providerItems = parseExactPositiveWmsShipmentItems(
+      shipment.shipmentItems,
+    );
+    if (!providerItems) return false;
     const result: any = await db.execute(sql`
-      SELECT EXISTS (
-        SELECT 1
-        FROM wms.outbound_shipment_items AS shipment_item
-        WHERE shipment_item.shipment_id = ${shipmentId}
-          AND shipment_item.order_item_id IS NOT NULL
-          AND shipment_item.qty > 0
-      ) AS has_positive_item_authority
+      SELECT shipment_item.id, shipment_item.qty
+      FROM wms.outbound_shipment_items AS shipment_item
+      WHERE shipment_item.shipment_id = ${shipmentId}
+        AND shipment_item.order_item_id IS NOT NULL
+        AND shipment_item.qty > 0
+        AND COALESCE(
+          shipment_item.shipment_item_purpose,
+          'customer_fulfillment'
+        ) = 'customer_fulfillment'
+      ORDER BY shipment_item.id
     `);
-    return result?.rows?.[0]?.has_positive_item_authority === true;
+    const rows = Array.isArray(result?.rows) ? result.rows : [];
+    const wmsItems = parseExactPositiveWmsShipmentItems(
+      rows.map((row: any) => ({
+        lineItemKey: `wms-item-${String(row.id)}`,
+        quantity: row.qty,
+      })),
+    );
+    return wmsItems !== null
+      && wmsItems.length === providerItems.length
+      && wmsItems.every((item, index) =>
+        item.sourceShipmentItemId === providerItems[index]?.sourceShipmentItemId
+        && item.quantity === providerItems[index]?.quantity
+      );
   }
   async function applyShipNotifyV2EventToResolvedShipment(
     wmsShipmentRow: any,
@@ -3054,9 +3051,9 @@ export function createShipStationService(
         currentTrackingNumber: wmsShipmentRow.tracking_number,
       });
     const exactPhysicalShipmentReplay = exactPhysicalIdentityReplay
-      && hasUsablePositiveProviderItems(shipment)
-      && await hasPositiveCustomerShipmentItemAuthority(
+      && await providerItemsExactlyMatchCustomerShipment(
         Number(wmsShipmentRow.id),
+        shipment,
       );
 
     if (exactPhysicalShipmentReplay) {
@@ -3087,7 +3084,7 @@ export function createShipStationService(
           && wmsShipmentRow.requires_review === true;
         if (
           isUnmappedProviderFirstShell
-          && !hasUsablePositiveProviderItems(shipment)
+          && !hasAuthoritativeProviderItems(shipment)
         ) {
           throw new ShipStationUnmappedItemsError(
             "shipstation_package_contents_missing: ShipStation shipment "
@@ -3117,6 +3114,26 @@ export function createShipStationService(
         return { processed: false, fallback: false, handled: true };
       }
     }
+    if (event.kind === "shipped" && isReplacementShipment) {
+      if (authorityContext.contentsAuthority?.source !== "manual_remediation") {
+        throw new ShipStationUnmappedItemsError(
+          "Replacement fulfillment requires explicit reviewed local package contents",
+        );
+      }
+      const candidateShipmentId = Number(wmsShipmentRow.id);
+      if (
+        candidateShipmentId !== authorityContext.contentsAuthority.candidateShipmentId
+        || !await manualAuthorityMatchesPersistedCandidate(
+          shipment,
+          authorityContext.contentsAuthority,
+        )
+      ) {
+        throw new ShipStationUnmappedItemsError(
+          "Manual remediation contents no longer match the complete persisted replacement package",
+        );
+      }
+    }
+
     const inventoryItemsToRecord = event.kind === "shipped" && inventoryCore
       ? await loadValidatedInventoryShipmentItems(wmsShipmentRow.id)
       : [];
@@ -3616,10 +3633,252 @@ export function createShipStationService(
     }
   }
 
+  function normalizeManualShipmentContentsAuthority(
+    shipment: ShipStationShipment,
+    authority: ManualShipmentContentsAuthority,
+  ): ManualShipmentContentsAuthority {
+    if (!authority || authority.source !== "manual_remediation") {
+      throw new Error("Manual shipment contents authority is required");
+    }
+    if (!isPositivePostgresInteger(authority.exceptionId)) {
+      throw new Error("Manual shipment contents authority exceptionId is invalid");
+    }
+    if (!isPositivePostgresInteger(authority.candidateShipmentId)) {
+      throw new Error("Manual shipment contents authority candidateShipmentId is invalid");
+    }
+    const providerShipmentId = Number(shipment.shipmentId);
+    if (
+      !Number.isSafeInteger(providerShipmentId)
+      || providerShipmentId <= 0
+      || authority.providerShipmentId !== providerShipmentId
+    ) {
+      throw new Error("Manual shipment contents authority does not match the provider shipment");
+    }
+    if (!Array.isArray(authority.lines) || authority.lines.length === 0 || authority.lines.length > 500) {
+      throw new Error("Manual shipment contents authority requires 1 through 500 exact lines");
+    }
+
+    const seen = new Set<string>();
+    const lines = authority.lines.map((line, index) => {
+      if (!line || typeof line !== "object") {
+        throw new Error(`Manual shipment contents authority line ${index} is invalid`);
+      }
+      const orderItemId = line.orderItemId === null
+        ? null
+        : isPositivePostgresInteger(line.orderItemId)
+          ? line.orderItemId
+          : null;
+      const correctionForShipmentItemId = line.correctionForShipmentItemId === null
+        ? null
+        : isPositivePostgresInteger(line.correctionForShipmentItemId)
+          ? line.correctionForShipmentItemId
+          : null;
+      const fromLocationId = line.fromLocationId === null
+        ? null
+        : isPositivePostgresInteger(line.fromLocationId)
+          ? line.fromLocationId
+          : null;
+      if (!isPositivePostgresInteger(line.productVariantId) || !isPositivePostgresInteger(line.quantity)) {
+        throw new Error(`Manual shipment contents authority line ${index} has invalid product or quantity`);
+      }
+      if (line.orderItemId !== orderItemId || line.correctionForShipmentItemId !== correctionForShipmentItemId) {
+        throw new Error(`Manual shipment contents authority line ${index} has an invalid item reference`);
+      }
+      if (line.fromLocationId !== fromLocationId) {
+        throw new Error(`Manual shipment contents authority line ${index} has an invalid location reference`);
+      }
+
+      let identity: string;
+      if (line.shipmentItemPurpose === "replacement" && orderItemId !== null && correctionForShipmentItemId === null) {
+        identity = `replacement:${orderItemId}`;
+      } else if (
+        line.shipmentItemPurpose === "omission_correction"
+        && orderItemId === null
+        && correctionForShipmentItemId !== null
+      ) {
+        identity = `omission_correction:${correctionForShipmentItemId}`;
+      } else if (
+        line.shipmentItemPurpose === "concession"
+        && orderItemId === null
+        && correctionForShipmentItemId === null
+      ) {
+        identity = `concession:${line.productVariantId}`;
+      } else {
+        throw new Error(`Manual shipment contents authority line ${index} has inconsistent purpose fields`);
+      }
+      if (seen.has(identity)) {
+        throw new Error(`Manual shipment contents authority contains duplicate line ${identity}`);
+      }
+      seen.add(identity);
+      return Object.freeze({
+        orderItemId,
+        correctionForShipmentItemId,
+        productVariantId: line.productVariantId,
+        quantity: line.quantity,
+        fromLocationId,
+        shipmentItemPurpose: line.shipmentItemPurpose,
+      });
+    });
+
+    return Object.freeze({
+      source: "manual_remediation" as const,
+      exceptionId: authority.exceptionId,
+      candidateShipmentId: authority.candidateShipmentId,
+      providerShipmentId,
+      lines: Object.freeze(lines),
+    });
+  }
+
+  function normalizeProviderExactShipmentContentsAuthority(
+    shipment: ShipStationShipment,
+  ): ProviderExactShipmentContentsAuthority {
+    const items = parseExactPositiveWmsShipmentItems(shipment.shipmentItems);
+    if (items === null) {
+      throw new ShipStationUnmappedItemsError(
+        "Fulfillment requires exact ShipStation item IDs and quantities",
+      );
+    }
+    return Object.freeze({
+      source: "provider_exact" as const,
+      items,
+    });
+  }
+
+  function providerExactAuthorityMatchesShipment(
+    shipment: ShipStationShipment,
+    authority: ProviderExactShipmentContentsAuthority,
+  ): boolean {
+    const current = parseExactPositiveWmsShipmentItems(shipment.shipmentItems);
+    return current !== null
+      && current.length === authority.items.length
+      && current.every((item, index) =>
+        item.sourceShipmentItemId === authority.items[index]?.sourceShipmentItemId
+        && item.quantity === authority.items[index]?.quantity
+      );
+  }
+
+  function manualAuthorityLineSignatures(
+    lines: readonly ManualShipmentContentsAuthorityLine[],
+  ): readonly string[] {
+    return Object.freeze(lines.map((line) => JSON.stringify([
+      line.shipmentItemPurpose,
+      line.orderItemId,
+      line.correctionForShipmentItemId,
+      line.productVariantId,
+      line.quantity,
+      line.fromLocationId,
+    ])).sort());
+  }
+
+  async function manualAuthorityMatchesPersistedCandidate(
+    shipment: ShipStationShipment,
+    authority: ManualShipmentContentsAuthority,
+  ): Promise<boolean> {
+    const result: any = await db.execute(sql`
+      SELECT
+        candidate.id,
+        candidate.external_fulfillment_id,
+        candidate.source,
+        candidate.shipment_purpose,
+        EXISTS (
+          SELECT 1
+          FROM wms.reconciliation_exceptions exception
+          WHERE exception.id = ${authority.exceptionId}
+            AND exception.status IN ('open', 'acknowledged')
+        ) AS authority_exception_open,
+        item.id AS shipment_item_id,
+        item.replacement_for_order_item_id,
+        item.correction_for_shipment_item_id,
+        item.shipment_item_purpose,
+        item.product_variant_id,
+        item.qty,
+        item.from_location_id
+      FROM wms.outbound_shipments candidate
+      LEFT JOIN wms.outbound_shipment_items item
+        ON item.shipment_id = candidate.id
+      WHERE candidate.id = ${authority.candidateShipmentId}
+      ORDER BY item.id
+    `);
+    const rows = Array.isArray(result?.rows) ? result.rows : [];
+    const first = rows[0];
+    if (
+      !first
+      || Number(first.id) !== authority.candidateShipmentId
+      || String(first.external_fulfillment_id ?? "") !== `shipstation_shipment:${authority.providerShipmentId}`
+      || String(first.source ?? "") !== "shipstation_reship_adopted"
+      || String(first.shipment_purpose ?? "") !== "replacement"
+      || (first.authority_exception_open !== true && first.authority_exception_open !== "t")
+      || first.shipment_item_id == null
+    ) {
+      return false;
+    }
+
+    let persisted: ManualShipmentContentsAuthority;
+    try {
+      persisted = normalizeManualShipmentContentsAuthority(shipment, {
+        ...authority,
+        lines: rows.map((row: any) => ({
+          orderItemId: row.replacement_for_order_item_id == null
+            ? null
+            : Number(row.replacement_for_order_item_id),
+          correctionForShipmentItemId: row.correction_for_shipment_item_id == null
+            ? null
+            : Number(row.correction_for_shipment_item_id),
+          productVariantId: Number(row.product_variant_id),
+          quantity: Number(row.qty),
+          fromLocationId: row.from_location_id == null
+            ? null
+            : Number(row.from_location_id),
+          shipmentItemPurpose: String(row.shipment_item_purpose) as ManualShipmentContentsAuthorityLine["shipmentItemPurpose"],
+        })),
+      });
+    } catch {
+      return false;
+    }
+
+    const expectedSignatures = manualAuthorityLineSignatures(authority.lines);
+    const persistedSignatures = manualAuthorityLineSignatures(persisted.lines);
+    return expectedSignatures.length === persistedSignatures.length
+      && expectedSignatures.every((value, index) => value === persistedSignatures[index]);
+  }
+
   async function processShipmentNotification(
     shipment: ShipStationShipment,
     authorityContext: ShipmentAuthorityContext,
   ): Promise<{ processed: boolean }> {
+    if (shipment.orderId != null && !isPositivePostgresInteger(shipment.orderId)) {
+      throw new Error("ShipStation orderId does not fit the WMS PostgreSQL integer column");
+    }
+
+    const authorityEvent = deriveEventFromSSShipment(
+      shipment,
+      mapShipStationCarrier(shipment.carrierCode),
+    );
+    if (authorityEvent?.kind === "shipped") {
+      if (
+        authorityContext.source === "carrier_tracking_confirmed_dispatch"
+        && authorityContext.contentsAuthority?.source !== "provider_exact"
+      ) {
+        throw new Error("Automatic carrier authority requires exact provider contents");
+      }
+      if (authorityContext.contentsAuthority === null) {
+        throw new ShipStationUnmappedItemsError(
+          "Shipped fulfillment requires explicit package contents authority",
+        );
+      }
+      if (
+        authorityContext.contentsAuthority.source === "provider_exact"
+        && !providerExactAuthorityMatchesShipment(
+          shipment,
+          authorityContext.contentsAuthority,
+        )
+      ) {
+        throw new ShipStationUnmappedItemsError(
+          "Fulfillment requires exact ShipStation item IDs and quantities",
+        );
+      }
+    }
+
     const v2Result = await processShipNotifyV2(shipment, authorityContext);
     if (v2Result.processed) {
       await resolveRecoveredNoMatchException(shipment);
@@ -3674,6 +3933,15 @@ export function createShipStationService(
   ): Promise<{ processed: boolean }> {
     const operator = requiredAuthorityText(input.operator, "operator", 200);
     const reason = requiredAuthorityText(input.reason, "reason", 120);
+    const notificationEvent = deriveEventFromSSShipment(
+      shipment,
+      mapShipStationCarrier(shipment.carrierCode),
+    );
+    const contentsAuthority = input.contentsAuthority.source === "provider_exact"
+      ? notificationEvent?.kind === "shipped"
+        ? normalizeProviderExactShipmentContentsAuthority(shipment)
+        : null
+      : normalizeManualShipmentContentsAuthority(shipment, input.contentsAuthority);
     return processShipmentNotification(shipment, {
       source: "shipstation_manual_remediation",
       dispatchOccurredAt: null,
@@ -3681,6 +3949,7 @@ export function createShipStationService(
       carrierDispatchCommandId: null,
       actor: operator,
       reason,
+      contentsAuthority,
     });
   }
 
@@ -3852,6 +4121,17 @@ export function createShipStationService(
         },
       );
     }
+    try {
+      await observeProviderLabel(shipment);
+    } catch (error) {
+      throw shipStationDispatchError(
+        "CARRIER_DISPATCH_PROVIDER_OBSERVATION_FAILED",
+        "ShipStation shipment evidence could not be persisted before confirmed carrier dispatch",
+        input,
+        error,
+      );
+    }
+
     if (shipment.voidDate) {
       throw new CarrierDispatchAuthorityError(
         "CARRIER_DISPATCH_PROVIDER_LABEL_VOIDED",
@@ -3866,7 +4146,7 @@ export function createShipStationService(
         },
       );
     }
-    if (shipment.isReturnLabel === true) {
+    if (shipment.isReturnLabel !== false) {
       throw new CarrierDispatchAuthorityError(
         "CARRIER_DISPATCH_RETURN_LABEL_NOT_OUTBOUND",
         "Carrier possession matched a ShipStation return label, which cannot authorize outbound fulfillment",
@@ -3933,9 +4213,26 @@ export function createShipStationService(
         carrierDispatchCommandId: input.commandId,
         actor: "system:carrier_tracking",
         reason: "carrier_possession_confirmed",
+        contentsAuthority: normalizeProviderExactShipmentContentsAuthority(
+          authoritativeShipment,
+        ),
       });
     } catch (error) {
       if (error instanceof CarrierDispatchAuthorityError) throw error;
+      if (error instanceof ShipStationUnmappedItemsError) {
+        throw new CarrierDispatchAuthorityError(
+          "CARRIER_DISPATCH_PACKAGE_CONTENTS_UNPROVEN",
+          error.message,
+          {
+            retryable: false,
+            context: {
+              commandId: input.commandId,
+              providerLabelId: input.providerLabelId,
+            },
+            cause: error,
+          },
+        );
+      }
       throw shipStationDispatchError(
         "CARRIER_DISPATCH_APPLICATION_FAILED",
         "Confirmed carrier dispatch could not be applied to WMS fulfillment",

@@ -1344,12 +1344,22 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               serviceCode: observation.serviceCode ?? existing[0].serviceCode,
               labelCreatedAt: observation.labelCreatedAt ?? existing[0].labelCreatedAt,
               voidedAt: observation.voidedAt ?? existing[0].voidedAt,
-              lastObservedAt: observation.observedAt,
+              firstObservedAt: sql`LEAST(
+                ${shippingProviderLabels.firstObservedAt},
+                ${observation.observedAt}
+              )`,
+              lastObservedAt: sql`GREATEST(
+                ${shippingProviderLabels.lastObservedAt},
+                ${observation.observedAt}
+              )`,
               metadata: {
                 authorityMode: "carrier_dispatch_cutover",
                 labelDirection: effectiveLabelDirection,
               },
-              updatedAt: observation.observedAt,
+              updatedAt: sql`GREATEST(
+                ${shippingProviderLabels.updatedAt},
+                ${observation.observedAt}
+              )`,
             })
             .where(eq(shippingProviderLabels.id, existing[0].id))
             .returning({ id: shippingProviderLabels.id });
@@ -1372,7 +1382,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               voidedAt: observation.voidedAt,
               firstObservedAt: observation.observedAt,
               lastObservedAt: observation.observedAt,
-              source: "shipstation_shipment_observation",
+              source: observation.observationSource,
               metadata: {
                 authorityMode: "carrier_dispatch_cutover",
                 labelDirection: effectiveLabelDirection,
@@ -1534,12 +1544,21 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               legacy.id AS legacy_wms_shipment_id,
               'legacy_provider_order_key'::text AS source
             FROM label
-            JOIN wms.outbound_shipments AS legacy
-              ON legacy.id = CASE
-                WHEN label.provider_order_key ~ '^echelon-wms-shp-[1-9][0-9]*$'
-                THEN substring(label.provider_order_key FROM '([1-9][0-9]*)$')::integer
+            CROSS JOIN LATERAL (
+              SELECT CASE
+                WHEN bounded_order_key.legacy_wms_shipment_id_text::bigint <= 2147483647
+                THEN bounded_order_key.legacy_wms_shipment_id_text::integer
                 ELSE NULL
-              END
+              END AS legacy_wms_shipment_id
+              FROM (
+                SELECT substring(
+                  label.provider_order_key
+                  FROM '^echelon-wms-shp-([1-9][0-9]{0,9})$'
+                ) AS legacy_wms_shipment_id_text
+              ) AS bounded_order_key
+            ) AS provider_order_identity
+            JOIN wms.outbound_shipments AS legacy
+              ON legacy.id = provider_order_identity.legacy_wms_shipment_id
             WHERE NOT EXISTS (SELECT 1 FROM legacy_identity_targets)
           ),
           legacy_targets AS (
@@ -1565,12 +1584,23 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                 ELSE '[]'::jsonb
               END
             ) AS provider_item
-            JOIN wms.outbound_shipment_items AS source_item
-              ON source_item.id = CASE
-                WHEN provider_item->>'lineItemKey' ~ '^wms-item-[1-9][0-9]*$'
-                THEN substring(provider_item->>'lineItemKey' FROM '^wms-item-([1-9][0-9]*)$')::integer
+            -- Historical v1 events were not DB-range validated. Extract at most
+            -- ten digits before any cast, then cast to integer only after the bound.
+            CROSS JOIN LATERAL (
+              SELECT CASE
+                WHEN bounded_key.wms_shipment_item_id_text::bigint <= 2147483647
+                THEN bounded_key.wms_shipment_item_id_text::integer
                 ELSE NULL
-              END
+              END AS shipment_item_id
+              FROM (
+                SELECT substring(
+                  provider_item->>'lineItemKey'
+                  FROM '^wms-item-([1-9][0-9]{0,9})$'
+                ) AS wms_shipment_item_id_text
+              ) AS bounded_key
+            ) AS provider_identity
+            JOIN wms.outbound_shipment_items AS source_item
+              ON source_item.id = provider_identity.shipment_item_id
             WHERE NOT EXISTS (SELECT 1 FROM legacy_identity_targets)
           ),
           request_targets AS (

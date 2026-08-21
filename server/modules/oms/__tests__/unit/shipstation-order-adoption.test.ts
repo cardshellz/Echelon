@@ -61,6 +61,21 @@ describe("proveShipStationOrderAdoption", () => {
         items: [
           { lineItemKey: "wms-item-17466", quantity: 1 },
           { lineItemKey: "wms-item-17466", quantity: 1 },
+    [
+      "string item quantity",
+      { items: [{ lineItemKey: "wms-item-17466", quantity: "2" }] },
+      "item_signature_mismatch",
+    ],
+    [
+      "trimmed item key",
+      { items: [{ lineItemKey: " wms-item-17466 ", quantity: 2 }] },
+      "item_signature_mismatch",
+    ],
+    [
+      "out-of-range item key",
+      { items: [{ lineItemKey: "wms-item-2147483648", quantity: 2 }] },
+      "item_signature_mismatch",
+    ],
         ],
       },
       "item_signature_mismatch",

@@ -46,6 +46,10 @@ describe("SHIP_NOTIFY provider-label authority boundary", () => {
     );
   });
 
+  it("retains ShipStation createDate in the local shipment response contract", () => {
+    expect(source).toContain("createDate?: string | null;");
+  });
+
   it("requires explicit operator identity for manual shipment remediation", () => {
     expect(source).toContain("async function processManualShipmentNotification(");
     expect(source).toContain('source: "shipstation_manual_remediation"');

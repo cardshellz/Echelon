@@ -1,4 +1,8 @@
 import { sql } from "drizzle-orm";
+import {
+  isPositivePostgresInteger,
+  parseExactPositiveWmsShipmentItems,
+} from "../shipping/shipstation-provider-contents.domain";
 
 export interface ExpectedShipStationOrderIdentity {
   shipmentId: number;
@@ -47,25 +51,10 @@ export type ShipStationAdoptionResult =
 function normalizeItemSignature(
   items: ReadonlyArray<{ lineItemKey?: string | null; quantity?: number | null }>,
 ): string[] | null {
-  const normalized: string[] = [];
-  const seenKeys = new Set<string>();
-
-  for (const item of items) {
-    const lineItemKey = String(item.lineItemKey ?? "").trim();
-    const quantity = Number(item.quantity);
-    if (
-      lineItemKey.length === 0 ||
-      !Number.isSafeInteger(quantity) ||
-      quantity <= 0 ||
-      seenKeys.has(lineItemKey)
-    ) {
-      return null;
-    }
-    seenKeys.add(lineItemKey);
-    normalized.push(`${lineItemKey}:${quantity}`);
-  }
-
-  return normalized.sort();
+  const exactItems = parseExactPositiveWmsShipmentItems(items);
+  return exactItems?.map((item) =>
+    `wms-item-${item.sourceShipmentItemId}:${item.quantity}`
+  ) ?? null;
 }
 
 /**
@@ -80,7 +69,7 @@ export function proveShipStationOrderAdoption(
   evidence: ShipStationOrderIdentityEvidence,
 ): ShipStationAdoptionProof {
   const providerOrderId = Number(evidence.orderId);
-  if (!Number.isSafeInteger(providerOrderId) || providerOrderId <= 0) {
+  if (!isPositivePostgresInteger(providerOrderId)) {
     return { matched: false, reason: "invalid_provider_order_id" };
   }
 
@@ -133,6 +122,12 @@ export async function adoptProvenShipStationOrder(
     orderKey: string;
   },
 ): Promise<ShipStationAdoptionResult> {
+  if (!isPositivePostgresInteger(input.shipmentId)) {
+    throw new Error("shipmentId must fit the WMS PostgreSQL integer column");
+  }
+  if (!isPositivePostgresInteger(input.providerOrderId)) {
+    throw new Error("providerOrderId must fit the WMS PostgreSQL integer column");
+  }
   const updated = await dbArg.execute(sql`
     UPDATE wms.outbound_shipments
     SET shipstation_order_id = ${input.providerOrderId},

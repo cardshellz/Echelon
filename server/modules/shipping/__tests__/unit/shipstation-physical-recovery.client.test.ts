@@ -14,8 +14,9 @@ function jsonResponse(body: unknown): Response {
 describe("shipstation physical recovery client", () => {
   it.each([
     ["wms-item-9638", 9638],
-    [" wms-item-9638 ", 9638],
+    [" wms-item-9638 ", null],
     ["wms-item-0", null],
+    ["wms-item-2147483648", null],
     ["prefix-wms-item-9638", null],
     ["9638", null],
     [null, null],
@@ -36,9 +37,8 @@ describe("shipstation physical recovery client", () => {
             shipment_number: "#59563",
             external_shipment_id: "echelon-wms-shp-4840",
             items: [
-              { external_order_item_id: "wms-item-9636" },
-              { external_order_item_id: "wms-item-9638" },
-              { external_order_item_id: "shopify-line-9638" },
+              { external_order_item_id: "wms-item-9636", quantity: 1 },
+              { external_order_item_id: "wms-item-9638", quantity: 2 },
             ],
           }],
         });
@@ -86,7 +86,11 @@ describe("shipstation physical recovery client", () => {
       shipDate: "2026-07-01",
       carrierCode: "stamps_com",
       serviceCode: "usps_ground_advantage",
-      wmsShipmentItemIds: [9636, 9638],
+      isReturnLabel: false,
+      wmsShipmentItems: [
+        { sourceShipmentItemId: 9636, quantity: 1 },
+        { sourceShipmentItemId: 9638, quantity: 2 },
+      ],
     }]);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls[0]?.[1]).toMatchObject({
@@ -102,7 +106,7 @@ describe("shipstation physical recovery client", () => {
       shipments: [{
         shipment_id: "se-755791888",
         shipment_number: "#59564",
-        items: [{ external_order_item_id: "external-item-9638" }],
+        items: [{ external_order_item_id: "external-item-9638", quantity: 1 }],
       }],
     }));
     const client = createShipStationPhysicalRecoveryClient({
@@ -114,5 +118,74 @@ describe("shipstation physical recovery client", () => {
 
     await expect(client.listCompletedPackagesForOrder("#59564")).resolves.toEqual([]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["missing quantity", [{ external_order_item_id: "wms-item-9638" }]],
+    ["string quantity", [{ external_order_item_id: "wms-item-9638", quantity: "1" }]],
+    ["trimmed identity", [{ external_order_item_id: " wms-item-9638 ", quantity: 1 }]],
+    ["partial contents", [
+      { external_order_item_id: "wms-item-9638", quantity: 1 },
+      { external_order_item_id: "external-item-1", quantity: 1 },
+    ]],
+  ])("does not fetch labels for %s", async (_case, items) => {
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      page: 1,
+      pages: 1,
+      shipments: [{
+        shipment_id: "se-755791888",
+        shipment_number: "#59564",
+        items,
+      }],
+    }));
+    const client = createShipStationPhysicalRecoveryClient({
+      apiKey: "test-api-key",
+      minimumRequestIntervalMs: 0,
+      maxRetries: 0,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    await expect(client.listCompletedPackagesForOrder("#59564")).resolves.toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a label whose return direction is omitted", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v2/shipments") {
+        return jsonResponse({
+          page: 1,
+          pages: 1,
+          shipments: [{
+            shipment_id: "se-755791888",
+            shipment_number: "#59564",
+            items: [{
+              external_order_item_id: "wms-item-9638",
+              quantity: 1,
+            }],
+          }],
+        });
+      }
+      return jsonResponse({
+        page: 1,
+        pages: 1,
+        labels: [{
+          label_id: "se-442730042",
+          status: "completed",
+          shipment_id: "se-755791888",
+          tracking_number: "TRACKING",
+        }],
+      });
+    });
+    const client = createShipStationPhysicalRecoveryClient({
+      apiKey: "test-api-key",
+      minimumRequestIntervalMs: 0,
+      maxRetries: 0,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    await expect(client.listCompletedPackagesForOrder("#59564")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
   });
 });

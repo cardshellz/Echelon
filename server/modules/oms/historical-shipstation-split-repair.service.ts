@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import type { ShipStationShipment } from "./shipstation.service";
+import { parseExactPositiveWmsShipmentItems } from "../shipping/shipstation-provider-contents.domain";
 
 export const HISTORICAL_SPLIT_REPAIR_SOURCE =
   "historical_ss_split_repair";
@@ -268,7 +269,6 @@ export function parseHistoricalProviderPackage(
     );
   }
 
-  const quantities = new Map<number, number>();
   const shipmentItems = Array.isArray(shipment.shipmentItems)
     ? shipment.shipmentItems
     : [];
@@ -279,23 +279,13 @@ export function parseHistoricalProviderPackage(
     );
   }
 
-  for (const item of shipmentItems) {
-    const match = typeof item.lineItemKey === "string"
-      ? /^wms-item-([1-9][0-9]*)$/.exec(item.lineItemKey.trim())
-      : null;
-    const sourceShipmentItemId = match ? positiveInteger(match[1]) : null;
-    const quantity = positiveInteger(item.quantity);
-    if (sourceShipmentItemId === null || quantity === null) {
-      throw Object.assign(
-        new Error(
-          `ShipStation shipment ${providerShipmentId} contains an item without an exact positive wms-item identity and quantity`,
-        ),
-        { code: "PROVIDER_PACKAGE_ITEM_IDENTITY_INCOMPLETE" },
-      );
-    }
-    quantities.set(
-      sourceShipmentItemId,
-      (quantities.get(sourceShipmentItemId) ?? 0) + quantity,
+  const exactItems = parseExactPositiveWmsShipmentItems(shipmentItems);
+  if (!exactItems) {
+    throw Object.assign(
+      new Error(
+        `ShipStation shipment ${providerShipmentId} contains non-authoritative wms-item identity or quantity evidence`,
+      ),
+      { code: "PROVIDER_PACKAGE_ITEM_IDENTITY_INCOMPLETE" },
     );
   }
 
@@ -309,11 +299,9 @@ export function parseHistoricalProviderPackage(
     serviceCode: String(shipment.serviceCode ?? "").trim() || null,
     shippedAt,
     items: Object.freeze(
-      [...quantities.entries()]
-        .sort(([left], [right]) => left - right)
-        .map(([sourceShipmentItemId, quantity]) =>
-          Object.freeze({ sourceShipmentItemId, quantity })
-        ),
+      exactItems.map(({ sourceShipmentItemId, quantity }) =>
+        Object.freeze({ sourceShipmentItemId, quantity })
+      ),
     ),
   });
 }

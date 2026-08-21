@@ -5,6 +5,7 @@ import {
   ShippingProviderLabelIdentityConflictError,
   assertStableShippingProviderLabelIdentity,
   normalizeShipStationLabelObservation,
+  normalizeShipStationShipmentContentsEvidence,
   normalizeShipStationTrackingWebhook,
   resolveCarrierTrackingMatch,
   type CarrierTrackingMatchCandidate,
@@ -244,6 +245,264 @@ describe("carrier tracking normalization", () => {
   });
 });
 
+describe("ShipStation declared-contents evidence", () => {
+  it("retains exact positive quantities in deterministic WMS-line order", () => {
+    expect(normalizeShipStationShipmentContentsEvidence([
+      { lineItemKey: "wms-item-20", quantity: 2, sku: "REDACT-ME" },
+      { lineItemKey: "wms-item-3", quantity: 4, unitPrice: 19.99 },
+    ])).toEqual({
+      status: "authoritative",
+      providerItemCount: 2,
+      recognizedProviderItemCount: 2,
+      malformedItemCount: 0,
+      unrecognizedItemCount: 0,
+      duplicateLineItemCount: 0,
+      shipmentItems: [
+        { lineItemKey: "wms-item-3", quantity: 4 },
+        { lineItemKey: "wms-item-20", quantity: 2 },
+      ],
+    });
+  });
+
+  it.each([
+    [undefined, "omitted"],
+    [[], "empty"],
+    [null, "malformed"],
+    [[{ lineItemKey: "external-line", quantity: 1 }], "unrecognized"],
+    [[{ lineItemKey: "wms-item-10", quantity: "1" }], "malformed"],
+    [[{ lineItemKey: "wms-item-10", quantity: 0 }], "malformed"],
+    [[{ lineItemKey: "wms-item-10", quantity: 1.5 }], "malformed"],
+    [[{ lineItemKey: "wms-item-2147483648", quantity: 1 }], "unrecognized"],
+  ])("classifies non-authoritative input %# as %s", (rawItems, status) => {
+    expect(normalizeShipStationShipmentContentsEvidence(rawItems)).toMatchObject({
+      status,
+      shipmentItems: [],
+    });
+  });
+
+  it("keeps recognized review evidence but quarantines mixed and duplicate rows", () => {
+    expect(normalizeShipStationShipmentContentsEvidence([
+      { lineItemKey: "wms-item-10", quantity: 1 },
+      { lineItemKey: "wms-item-10", quantity: 2 },
+      { lineItemKey: "external-line", quantity: 1 },
+      { lineItemKey: "wms-item-11", quantity: -1 },
+    ])).toEqual({
+      status: "mixed",
+      providerItemCount: 4,
+      recognizedProviderItemCount: 2,
+      malformedItemCount: 1,
+      unrecognizedItemCount: 1,
+      duplicateLineItemCount: 1,
+      shipmentItems: [{ lineItemKey: "wms-item-10", quantity: 3 }],
+    });
+  });
+
+  it.each([
+    [[2_147_483_647, 1, 1]],
+    [[1, 2_147_483_647, 1]],
+    [[1, 1, 2_147_483_647]],
+  ])(
+    "quarantines every row of an overflowing duplicate line regardless of row order %#",
+    (quantities) => {
+      const evidence = normalizeShipStationShipmentContentsEvidence([
+        ...quantities.map((quantity) => ({
+          lineItemKey: "wms-item-10",
+          quantity,
+        })),
+        { lineItemKey: "wms-item-11", quantity: 2 },
+      ]);
+
+      expect(evidence).toEqual({
+        status: "mixed",
+        providerItemCount: 4,
+        recognizedProviderItemCount: 1,
+        malformedItemCount: 3,
+        unrecognizedItemCount: 0,
+        duplicateLineItemCount: 2,
+        shipmentItems: [{ lineItemKey: "wms-item-11", quantity: 2 }],
+      });
+    },
+  );
+
+  it("quarantines whitespace-modified keys instead of silently normalizing authority", () => {
+    expect(normalizeShipStationShipmentContentsEvidence([
+      { lineItemKey: " wms-item-10 ", quantity: 1 },
+    ])).toMatchObject({
+      status: "unrecognized",
+      unrecognizedItemCount: 1,
+      shipmentItems: [],
+    });
+  });
+
+  it("quarantines oversized arrays without inspecting or retaining their rows", () => {
+    const evidence = normalizeShipStationShipmentContentsEvidence(
+      Array.from({ length: 501 }, () => ({
+        lineItemKey: "wms-item-10",
+        quantity: 1,
+      })),
+    );
+    expect(evidence).toMatchObject({
+      status: "malformed",
+      providerItemCount: 501,
+      malformedItemCount: 501,
+      shipmentItems: [],
+    });
+  });
+
+  it("keeps the legacy key field while versioning exact redacted quantities", () => {
+    const base = {
+      shipmentId: 442_000_001,
+      trackingNumber: "1Z999AA10123456784",
+      isReturnLabel: false,
+    };
+    const quantityOne = normalizeShipStationLabelObservation({
+      ...base,
+      shipmentItems: [{
+        lineItemKey: "wms-item-9638",
+        quantity: 1,
+        sku: "MUST-NOT-PERSIST",
+        name: "MUST-NOT-PERSIST",
+        unitPrice: 29.99,
+        options: [{ secret: "MUST-NOT-PERSIST" }],
+      }],
+    }, receivedAt);
+    const quantityTwo = normalizeShipStationLabelObservation({
+      ...base,
+      shipmentItems: [{ lineItemKey: "wms-item-9638", quantity: 2 }],
+    }, receivedAt);
+
+    expect(quantityOne.sanitizedPayload).toMatchObject({
+      payloadSchemaVersion: 2,
+      shipmentItems: [{ lineItemKey: "wms-item-9638" }],
+      declaredContentsEvidence: {
+        evidenceSchemaVersion: 1,
+        status: "authoritative",
+        reviewRequired: false,
+        lines: [{ lineItemKey: "wms-item-9638", quantity: 1 }],
+      },
+    });
+    expect(JSON.stringify(quantityOne.sanitizedPayload)).not.toMatch(
+      /MUST-NOT-PERSIST|unitPrice|options/,
+    );
+    expect(quantityOne.eventHash).not.toBe(quantityTwo.eventHash);
+  });
+
+  it("bounds integrated legacy identities and rejects oversized raw keys before trimming", () => {
+    const oversizedRawKey = " ".repeat(201) + "wms-item-10";
+    const observation = normalizeShipStationLabelObservation({
+      shipmentId: 442_000_003,
+      trackingNumber: "1Z999AA10123456786",
+      isReturnLabel: false,
+      shipmentItems: [
+        { lineItemKey: "wms-item-2147483647", quantity: 1 },
+        { lineItemKey: "wms-item-2147483648", quantity: 1 },
+        { lineItemKey: oversizedRawKey, quantity: 1 },
+      ],
+    }, receivedAt);
+
+    expect(observation.sanitizedPayload).toMatchObject({
+      shipmentItems: [{ lineItemKey: "wms-item-2147483647" }],
+      declaredContentsEvidence: {
+        status: "mixed",
+        providerItemCount: 3,
+        recognizedProviderItemCount: 1,
+        canonicalLineCount: 1,
+        malformedItemCount: 0,
+        unrecognizedItemCount: 2,
+        duplicateLineItemCount: 0,
+        rejectedItemCount: 2,
+        reviewRequired: true,
+        lines: [{ lineItemKey: "wms-item-2147483647", quantity: 1 }],
+      },
+    });
+    expect(JSON.stringify(observation.sanitizedPayload)).not.toContain("wms-item-10");
+    expect(observation.sourceObservationHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("hashes ordered redacted source rows separately from canonical contents", () => {
+    const base = {
+      shipmentId: 442_000_004,
+      trackingNumber: "1Z999AA10123456787",
+      isReturnLabel: false,
+    };
+    const forward = normalizeShipStationLabelObservation({
+      ...base,
+      shipmentItems: [
+        { lineItemKey: "wms-item-20", quantity: 2, sku: "DO-NOT-HASH" },
+        { lineItemKey: "wms-item-3", quantity: 4 },
+      ],
+    }, receivedAt);
+    const replayWithDifferentUnknownFields = normalizeShipStationLabelObservation({
+      ...base,
+      shipmentItems: [
+        {
+          lineItemKey: "wms-item-20",
+          quantity: 2,
+          sku: "DIFFERENT-UNKNOWN-VALUE",
+          options: [{ secret: "DO-NOT-HASH" }],
+        },
+        { lineItemKey: "wms-item-3", quantity: 4, name: "DO-NOT-HASH" },
+      ],
+    }, receivedAt);
+    const reordered = normalizeShipStationLabelObservation({
+      ...base,
+      shipmentItems: [
+        { lineItemKey: "wms-item-3", quantity: 4 },
+        { lineItemKey: "wms-item-20", quantity: 2 },
+      ],
+    }, receivedAt);
+
+    expect(forward.shipmentContentsEvidence).toEqual(reordered.shipmentContentsEvidence);
+    expect(forward.sourceObservationHash).toBe(
+      replayWithDifferentUnknownFields.sourceObservationHash,
+    );
+    expect(forward.eventHash).toBe(replayWithDifferentUnknownFields.eventHash);
+    expect(forward.sourceObservationHash).not.toBe(reordered.sourceObservationHash);
+    expect(forward.eventHash).not.toBe(reordered.eventHash);
+    expect(JSON.stringify(replayWithDifferentUnknownFields.sanitizedPayload)).not.toMatch(
+      /DO-NOT-HASH|DIFFERENT-UNKNOWN-VALUE|options/,
+    );
+  });
+
+  it("does not collapse different bounded unrecognized source identities", () => {
+    const base = {
+      shipmentId: 442_000_005,
+      trackingNumber: "1Z999AA10123456788",
+      isReturnLabel: false,
+    };
+    const first = normalizeShipStationLabelObservation({
+      ...base,
+      shipmentItems: [{ lineItemKey: "external-line-a", quantity: 1 }],
+    }, receivedAt);
+    const second = normalizeShipStationLabelObservation({
+      ...base,
+      shipmentItems: [{ lineItemKey: "external-line-b", quantity: 1 }],
+    }, receivedAt);
+
+    expect(first.shipmentContentsEvidence).toEqual(second.shipmentContentsEvidence);
+    expect(first.sourceObservationHash).not.toBe(second.sourceObservationHash);
+    expect(first.eventHash).not.toBe(second.eventHash);
+  });
+
+  it("retains legacy link evidence while quarantining a missing quantity", () => {
+    const observation = normalizeShipStationLabelObservation({
+      shipmentId: 442_000_002,
+      trackingNumber: "1Z999AA10123456785",
+      isReturnLabel: false,
+      shipmentItems: [{ lineItemKey: "wms-item-9638" }],
+    }, receivedAt);
+
+    expect(observation.sanitizedPayload).toMatchObject({
+      shipmentItems: [{ lineItemKey: "wms-item-9638" }],
+      declaredContentsEvidence: {
+        status: "malformed",
+        reviewRequired: true,
+        lines: [],
+      },
+    });
+  });
+});
+
 describe("shipping-provider label normalization", () => {
   it("records a label artifact without inventing label-purchase time", () => {
     const observation = normalizeShipStationLabelObservation({
@@ -253,6 +512,7 @@ describe("shipping-provider label normalization", () => {
       trackingNumber: "1Z999AA10123456784",
       carrierCode: "ups",
       serviceCode: "ups_ground",
+      createDate: "2026-07-20T09:55:00.000Z",
       shipDate: "2026-07-20T10:00:00.000Z",
       voidDate: null,
       shipmentItems: [
@@ -269,12 +529,32 @@ describe("shipping-provider label normalization", () => {
       labelStatus: "active",
       eventType: "label_observed",
       labelCreatedAt: null,
+      observationSource: "shipstation_shipment_observation",
+      sourceObservationHash: expect.stringMatching(/^[0-9a-f]{64}$/),
       sanitizedPayload: {
+        createDate: "2026-07-20T09:55:00.000Z",
+        observationSource: "shipstation_shipment_observation",
+        sourceObservationHash: expect.stringMatching(/^[0-9a-f]{64}$/),
         shipmentItems: [{ lineItemKey: "wms-item-9638" }],
       },
     });
+    expect(observation.providerOccurredAt?.toISOString()).toBe(
+      "2026-07-20T10:00:00.000Z",
+    );
+    expect(observation.sanitizedPayload.sourceObservationHash).toBe(
+      observation.sourceObservationHash,
+    );
   });
 
+
+  it("rejects an oversized provider createDate instead of retaining it", () => {
+    expect(() => normalizeShipStationLabelObservation({
+      shipmentId: 442_000_006,
+      trackingNumber: "1Z999AA10123456789",
+      createDate: "x".repeat(81),
+      isReturnLabel: false,
+    }, receivedAt)).toThrow(CarrierTrackingPayloadError);
+  });
 
   it("preserves provider-declared return direction without changing label status", () => {
     const observation = normalizeShipStationLabelObservation({
@@ -359,6 +639,100 @@ describe("shipping-provider label normalization", () => {
       providerOrderKey: "echelon-wms-shp-4814",
       ...override,
     })).toThrow(ShippingProviderLabelIdentityConflictError);
+  });
+  it("rejects unsafe provider numeric identities before string conversion", () => {
+    const maximum = Number.MAX_SAFE_INTEGER;
+    expect(normalizeShipStationLabelObservation({
+      shipmentId: maximum,
+      orderId: maximum,
+      trackingNumber: "1Z999AA10123456784",
+      isReturnLabel: false,
+    }, receivedAt)).toMatchObject({
+      providerLabelId: String(maximum),
+      providerOrderId: String(maximum),
+    });
+
+    for (const raw of [
+      { shipmentId: Number.MAX_SAFE_INTEGER + 1 },
+      { shipmentId: 44_001, orderId: Number.MAX_SAFE_INTEGER + 1 },
+    ]) {
+      expect(() => normalizeShipStationLabelObservation({
+        ...raw,
+        trackingNumber: "1Z999AA10123456784",
+        isReturnLabel: false,
+      }, receivedAt)).toThrow(CarrierTrackingPayloadError);
+    }
+  });
+
+  it("aligns provider order keys with the persisted varchar(200) boundary", () => {
+    const maximumOrderKey = "k".repeat(200);
+    expect(normalizeShipStationLabelObservation({
+      shipmentId: 44_001,
+      orderKey: maximumOrderKey,
+      trackingNumber: "1Z999AA10123456784",
+      isReturnLabel: false,
+    }, receivedAt).providerOrderKey).toBe(maximumOrderKey);
+    expect(() => normalizeShipStationLabelObservation({
+      shipmentId: 44_001,
+      orderKey: "k".repeat(201),
+      trackingNumber: "1Z999AA10123456784",
+      isReturnLabel: false,
+    }, receivedAt)).toThrow(CarrierTrackingPayloadError);
+  });
+
+  it("distinguishes malformed containers without retaining their raw values", () => {
+    const base = {
+      shipmentId: 44_001,
+      trackingNumber: "1Z999AA10123456784",
+      isReturnLabel: false,
+    };
+    const first = normalizeShipStationLabelObservation({
+      ...base,
+      shipmentItems: "SECRET-MALFORMED-A",
+    }, receivedAt);
+    const second = normalizeShipStationLabelObservation({
+      ...base,
+      shipmentItems: "SECRET-MALFORMED-B",
+    }, receivedAt);
+
+    expect(first.shipmentContentsEvidence).toEqual(second.shipmentContentsEvidence);
+    expect(first.sourceObservationHash).not.toBe(second.sourceObservationHash);
+    expect(first.eventHash).not.toBe(second.eventHash);
+    expect(JSON.stringify(first.sanitizedPayload)).not.toContain("SECRET-MALFORMED-A");
+    expect(JSON.stringify(second.sanitizedPayload)).not.toContain("SECRET-MALFORMED-B");
+  });
+
+  it("distinguishes sampled row order in oversized arrays without retaining rows", () => {
+    const forwardItems = Array.from({ length: 501 }, (_unused, index) => ({
+      lineItemKey: `wms-item-${index + 1}`,
+      quantity: 1,
+    }));
+    const reorderedItems = forwardItems.map((item) => ({ ...item }));
+    [reorderedItems[0], reorderedItems[1]] = [reorderedItems[1], reorderedItems[0]];
+    const base = {
+      shipmentId: 44_001,
+      trackingNumber: "1Z999AA10123456784",
+      isReturnLabel: false,
+    };
+    const forward = normalizeShipStationLabelObservation({
+      ...base,
+      shipmentItems: forwardItems,
+    }, receivedAt);
+    const reordered = normalizeShipStationLabelObservation({
+      ...base,
+      shipmentItems: reorderedItems,
+    }, receivedAt);
+
+    expect(forward.shipmentContentsEvidence).toEqual(reordered.shipmentContentsEvidence);
+    expect(forward.sourceObservationHash).not.toBe(reordered.sourceObservationHash);
+    expect(forward.eventHash).not.toBe(reordered.eventHash);
+    expect(forward.sanitizedPayload).toMatchObject({
+      shipmentItems: [],
+      declaredContentsEvidence: {
+        status: "malformed",
+        providerItemCount: 501,
+      },
+    });
   });
 });
 
