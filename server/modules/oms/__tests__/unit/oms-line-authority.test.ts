@@ -87,6 +87,104 @@ describe("OMS line authority", () => {
     });
   });
 
+  it("unlocks delayed Shopify readiness only within previously paid quantity", () => {
+    const authority = deriveOmsLineAuthority({
+      sourceTopic: "orders/updated",
+      sourceEventId: "webhook_inbox:delayed-ready",
+      financialStatus: "paid",
+      quantity: 4,
+      fulfillableQuantity: 4,
+      previous: {
+        paidQuantity: 4,
+        authorityFulfillableQuantity: 0,
+        authorizationStatus: "authorized",
+        authorizedAt: NOW,
+        authorizedByEventId: "webhook_inbox:paid",
+      },
+      now: new Date("2026-06-25T13:00:00.000Z"),
+    });
+
+    expect(authority).toMatchObject({
+      paidQuantity: 4,
+      authorityFulfillableQuantity: 4,
+      authorizationStatus: "authorized",
+      authorizedByEventId: "webhook_inbox:paid",
+    });
+  });
+
+  it("never turns later Shopify readiness into authority for unpaid quantity", () => {
+    const authority = deriveOmsLineAuthority({
+      sourceTopic: "orders/updated",
+      sourceEventId: "webhook_inbox:edited",
+      financialStatus: "paid",
+      quantity: 5,
+      fulfillableQuantity: 5,
+      previous: {
+        paidQuantity: 2,
+        authorityFulfillableQuantity: 0,
+        authorizationStatus: "authorized",
+        authorizedAt: NOW,
+        authorizedByEventId: "webhook_inbox:paid",
+      },
+    });
+
+    expect(authority.paidQuantity).toBe(2);
+    expect(authority.authorityFulfillableQuantity).toBe(2);
+  });
+
+  it("does not unlock delayed readiness for refunded, cancelled, or review lines", () => {
+    const protectedStates = [
+      {
+        cancelledQuantity: 1,
+        refundedQuantity: 0,
+        authorizationStatus: "authorized",
+      },
+      {
+        cancelledQuantity: 0,
+        refundedQuantity: 1,
+        authorizationStatus: "authorized",
+      },
+      {
+        cancelledQuantity: 0,
+        refundedQuantity: 0,
+        authorizationStatus: "review",
+      },
+    ];
+
+    for (const previous of protectedStates) {
+      const authority = deriveOmsLineAuthority({
+        sourceTopic: "orders/updated",
+        sourceEventId: "webhook_inbox:protected",
+        financialStatus: "paid",
+        quantity: 4,
+        fulfillableQuantity: 4,
+        previous: {
+          paidQuantity: 4,
+          authorityFulfillableQuantity: 0,
+          ...previous,
+        },
+      });
+
+      expect(authority.authorityFulfillableQuantity).toBe(0);
+    }
+  });
+
+  it("does not unlock delayed readiness after Shopify reports a refunded status", () => {
+    const authority = deriveOmsLineAuthority({
+      sourceTopic: "orders/updated",
+      sourceEventId: "webhook_inbox:refunded",
+      financialStatus: "partially_refunded",
+      quantity: 4,
+      fulfillableQuantity: 4,
+      previous: {
+        paidQuantity: 4,
+        authorityFulfillableQuantity: 0,
+        authorizationStatus: "authorized",
+      },
+    });
+
+    expect(authority.authorityFulfillableQuantity).toBe(0);
+  });
   it("clamps existing authority down when the channel observed quantity shrinks", () => {
     const authority = deriveOmsLineAuthority({
       sourceTopic: "orders/updated",
@@ -133,7 +231,12 @@ describe("OMS line authority", () => {
 
   it("falls back to legacy raw quantity only when authority columns are absent", () => {
     expect(getOmsLineMaterializableQuantity({ quantity: 7 })).toBe(7);
-    expect(getOmsLineMaterializableQuantity({ quantity: 7, authorityFulfillableQuantity: 0 })).toBe(0);
+    expect(
+      getOmsLineMaterializableQuantity({
+        quantity: 7,
+        authorityFulfillableQuantity: 0,
+      }),
+    ).toBe(0);
   });
 
   it("subtracts WMS-materialized quantity from remaining authority", () => {

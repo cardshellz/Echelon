@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { SyncRecoveryService, type StageResult } from "../../sync-recovery.service";
+import {
+  SyncRecoveryService,
+  type StageResult,
+} from "../../sync-recovery.service";
 
 function stage(name: string, data: Record<string, number> = {}): StageResult {
   return { name, ok: true, data };
@@ -10,16 +13,18 @@ describe("SyncRecoveryService ordering", () => {
     const service = new SyncRecoveryService({}, {});
     const calls: string[] = [];
 
-    vi.spyOn(service, "runShopifyToOmsBackfill").mockImplementation(async () => {
-      calls.push("shopify_to_oms");
-      return stage("shopify_to_oms", { bridged: 17 });
-    });
-    vi.spyOn(service, "runOmsToWmsBackfill").mockImplementation(async (
-      name = "oms_to_wms",
-    ) => {
-      calls.push(name);
-      return stage(name, { synced: 17 });
-    });
+    vi.spyOn(service, "runShopifyToOmsBackfill").mockImplementation(
+      async () => {
+        calls.push("shopify_to_oms");
+        return stage("shopify_to_oms", { bridged: 17 });
+      },
+    );
+    vi.spyOn(service, "runOmsToWmsBackfill").mockImplementation(
+      async (name = "oms_to_wms") => {
+        calls.push(name);
+        return stage(name, { synced: 17 });
+      },
+    );
     vi.spyOn(service, "runWmsToShipStationBackfill").mockImplementation(
       async (name = "wms_to_shipstation") => {
         calls.push(name);
@@ -42,5 +47,37 @@ describe("SyncRecoveryService ordering", () => {
       "wms_to_shipstation_after_shopify_reconcile",
     ]);
     expect(result.allOk).toBe(true);
+  });
+  it("continues downstream recovery when Shopify readiness advances an existing order", async () => {
+    const service = new SyncRecoveryService({}, {});
+    const calls: string[] = [];
+
+    vi.spyOn(service, "runShopifyToOmsBackfill").mockResolvedValue(
+      stage("shopify_to_oms"),
+    );
+    vi.spyOn(service, "runOmsToWmsBackfill").mockImplementation(
+      async (name = "oms_to_wms") => {
+        calls.push(name);
+        return stage(name);
+      },
+    );
+    vi.spyOn(service, "runWmsToShipStationBackfill").mockImplementation(
+      async (name = "wms_to_shipstation") => {
+        calls.push(name);
+        return stage(name);
+      },
+    );
+    vi.spyOn(service, "runShopifyReconcile").mockResolvedValue(
+      stage("shopify_reconcile", { readinessAdvanced: 4, wmsSyncRequested: 1 }),
+    );
+
+    await service.runAll();
+
+    expect(calls).toEqual([
+      "oms_to_wms",
+      "wms_to_shipstation",
+      "oms_to_wms_after_shopify_reconcile",
+      "wms_to_shipstation_after_shopify_reconcile",
+    ]);
   });
 });

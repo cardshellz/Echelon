@@ -20,15 +20,11 @@ describe("reconcileCancellations is wired into the 15-min reconciliation interva
   });
 
   it("stores the wmsSyncService reference", () => {
-    expect(RECONCILE_SRC).toMatch(
-      /wmsSyncService = wmsSync \|\| null/,
-    );
+    expect(RECONCILE_SRC).toMatch(/wmsSyncService = wmsSync \|\| null/);
   });
 
   it("runCancellationReconciliation calls wmsSyncService.reconcileCancellations()", () => {
-    expect(RECONCILE_SRC).toMatch(
-      /wmsSyncService\.reconcileCancellations\(\)/,
-    );
+    expect(RECONCILE_SRC).toMatch(/wmsSyncService\.reconcileCancellations\(\)/);
   });
 
   it("cancellation sweep runs inside the periodic interval", () => {
@@ -41,5 +37,34 @@ describe("reconcileCancellations is wired into the 15-min reconciliation interva
     expect(INDEX_SRC).toMatch(
       /initReconciliation\(services\.oms,\s*services\.wmsSync\)/,
     );
+  });
+});
+
+const READINESS_SERVICE_SRC = readFileSync(
+  resolve(__dirname, "../../../oms/shopify-line-readiness.service.ts"),
+  "utf8",
+);
+
+describe("delayed Shopify fulfillability recovery", () => {
+  it("checks existing OMS orders instead of discarding them from reconciliation", () => {
+    expect(RECONCILE_SRC).toContain("reconcileExistingOmsOrderReadiness");
+    expect(RECONCILE_SRC).toContain("existingByShopifyId");
+    expect(RECONCILE_SRC).toContain("loadDelayedReadinessCandidates");
+  });
+
+  it("keeps recovery bounded and retries incomplete WMS materialization", () => {
+    expect(RECONCILE_SRC).toContain("SHOPIFY_READINESS_RECOVERY_LIMIT");
+    expect(RECONCILE_SRC).toContain("READINESS_RECOVERY_CURSOR_KEY");
+    expect(RECONCILE_SRC).toContain("CASE WHEN oo.id > ${afterOmsOrderId}");
+    expect(RECONCILE_SRC).toContain("setReadinessRecoveryCursor");
+    expect(RECONCILE_SRC).toContain("authority_fulfillable_quantity");
+    expect(RECONCILE_SRC).toContain("wms_materialized_quantity");
+    expect(RECONCILE_SRC).toContain("syncOmsOrderToWms(omsOrderId)");
+  });
+
+  it("locks OMS lines and records authority through the OMS-owned service", () => {
+    expect(READINESS_SERVICE_SRC).toContain('.for("update")');
+    expect(READINESS_SERVICE_SRC).toContain("deriveOmsLineAuthority");
+    expect(READINESS_SERVICE_SRC).toContain("recordOmsLineAuthorityEvent");
   });
 });
