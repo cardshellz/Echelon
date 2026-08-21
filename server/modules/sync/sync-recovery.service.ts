@@ -59,9 +59,7 @@ export class SyncRecoveryService {
       return {
         startedAt,
         durationMs: 0,
-        stages: [
-          { name: "skipped", ok: true, data: { reason: 0 } },
-        ],
+        stages: [{ name: "skipped", ok: true, data: { reason: 0 } }],
         allOk: true,
       };
     }
@@ -78,7 +76,11 @@ export class SyncRecoveryService {
 
       // Source reconciliation bridges recovered rows into OMS. Complete
       // their downstream handoff without waiting for the next interval.
-      if ((sourceResult.data?.reconciled ?? 0) > 0) {
+      if (
+        (sourceResult.data?.reconciled ?? 0) > 0 ||
+        (sourceResult.data?.readinessAdvanced ?? 0) > 0 ||
+        (sourceResult.data?.wmsSyncRequested ?? 0) > 0
+      ) {
         stages.push(
           await this.runOmsToWmsBackfill("oms_to_wms_after_shopify_reconcile"),
         );
@@ -94,7 +96,9 @@ export class SyncRecoveryService {
 
     const durationMs = Date.now() - started;
     const allOk = stages.every((s) => s.ok);
-    if (stages.some((s) => s.data && Object.values(s.data).some((n) => n > 0))) {
+    if (
+      stages.some((s) => s.data && Object.values(s.data).some((n) => n > 0))
+    ) {
       console.log(
         `[SyncRecovery] completed in ${durationMs}ms ${JSON.stringify(stages)}`,
       );
@@ -112,12 +116,16 @@ export class SyncRecoveryService {
         data: {
           checked: result?.checked ?? 0,
           reconciled: result?.reconciled ?? 0,
+          readinessChecked: result?.readinessChecked ?? 0,
+          readinessAdvanced: result?.readinessAdvanced ?? 0,
+          wmsSyncRequested: result?.wmsSyncRequested ?? 0,
           failed,
           skipped: result?.skipped ?? 0,
         },
-        error: failed > 0
-          ? `${failed} Shopify source order(s) failed reconciliation`
-          : undefined,
+        error:
+          failed > 0
+            ? `${failed} Shopify source order(s) failed reconciliation`
+            : undefined,
       };
     } catch (err: any) {
       console.error("[SyncRecovery] shopify_reconcile failed:", err);
@@ -151,9 +159,10 @@ export class SyncRecoveryService {
           bridged: result.bridged,
           failed: result.failed,
         },
-        error: result.failed > 0
-          ? `${result.failed} Shopify order(s) failed raw-to-OMS recovery`
-          : undefined,
+        error:
+          result.failed > 0
+            ? `${result.failed} Shopify order(s) failed raw-to-OMS recovery`
+            : undefined,
       };
     } catch (err: any) {
       console.error("[SyncRecovery] shopify_to_oms failed:", err);
@@ -200,7 +209,10 @@ export class SyncRecoveryService {
         };
       }
 
-      const shipmentLimit = envPositiveInteger("SYNC_RECOVERY_WMS_TO_SHIPSTATION_LIMIT", 25);
+      const shipmentLimit = envPositiveInteger(
+        "SYNC_RECOVERY_WMS_TO_SHIPSTATION_LIMIT",
+        25,
+      );
 
       // Find planned outbound shipments that do NOT have a ShipStation order ID.
       const result: any = await this.db.execute(sql`
@@ -211,36 +223,44 @@ export class SyncRecoveryService {
         ORDER BY created_at ASC
         LIMIT ${shipmentLimit}
       `);
-      
+
       const shipmentIds = result.rows.map((r: any) => r.id);
       if (shipmentIds.length === 0) {
         return { name, ok: true, data: { checked: 0, pushed: 0, failed: 0 } };
       }
-      
+
       let pushed = 0;
       let failed = 0;
-      
+
       for (const id of shipmentIds) {
         try {
           await this.services.shipStation.pushShipment(id);
           pushed++;
         } catch (err: any) {
-          console.warn(`[SyncRecovery] wms_to_shipstation failed to push shipment ${id}: ${err.message}`);
+          console.warn(
+            `[SyncRecovery] wms_to_shipstation failed to push shipment ${id}: ${err.message}`,
+          );
           failed++;
         }
-        await new Promise(r => setTimeout(
-          r,
-          envPositiveInteger("SYNC_RECOVERY_WMS_TO_SHIPSTATION_DELAY_MS", 1000),
-        ));
+        await new Promise((r) =>
+          setTimeout(
+            r,
+            envPositiveInteger(
+              "SYNC_RECOVERY_WMS_TO_SHIPSTATION_DELAY_MS",
+              1000,
+            ),
+          ),
+        );
       }
 
       return {
         name,
         ok: failed === 0,
         data: { checked: shipmentIds.length, pushed, failed },
-        error: failed > 0
-          ? `${failed} WMS shipment(s) failed ShipStation recovery`
-          : undefined,
+        error:
+          failed > 0
+            ? `${failed} WMS shipment(s) failed ShipStation recovery`
+            : undefined,
       };
     } catch (err: any) {
       console.error("[SyncRecovery] wms_to_shipstation sweep failed:", err);
@@ -261,7 +281,10 @@ export class SyncRecoveryService {
    */
   startScheduled(
     intervalMinutes = envPositiveInteger("SYNC_RECOVERY_INTERVAL_MINUTES", 15),
-    initialDelayMs = envPositiveInteger("SYNC_RECOVERY_INITIAL_DELAY_MS", 120_000),
+    initialDelayMs = envPositiveInteger(
+      "SYNC_RECOVERY_INITIAL_DELAY_MS",
+      120_000,
+    ),
   ) {
     const intervalMs = intervalMinutes * 60 * 1000;
     console.log(

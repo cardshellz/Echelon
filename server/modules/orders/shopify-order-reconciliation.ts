@@ -26,6 +26,7 @@ import { eq } from "drizzle-orm";
 import type { OmsService } from "../oms/oms.service";
 import type { WmsSyncService } from "../oms/wms-sync.service";
 import { bridgeShopifyOrderToOms } from "../oms/shopify-bridge";
+import { reconcileShopifyLineReadiness } from "../oms/shopify-line-readiness.service";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 import { normalizeShopifyOrderGid } from "./shopify-order-id";
 
@@ -42,6 +43,7 @@ interface ShopifyApiOrder {
   name: string; // e.g. "#54950"
   email: string | null;
   created_at: string;
+  updated_at?: string;
   cancelled_at: string | null;
   financial_status: string;
   fulfillment_status: string | null;
@@ -99,6 +101,9 @@ interface ReconciliationResult {
   reconciled: number;
   skipped: number;
   failed: number;
+  readinessChecked: number;
+  readinessAdvanced: number;
+  wmsSyncRequested: number;
   details: string[];
 }
 
@@ -107,6 +112,7 @@ interface ReconciliationResult {
 // ---------------------------------------------------------------------------
 
 const SETTINGS_KEY = "shopify_reconciliation_last_check";
+const READINESS_RECOVERY_CURSOR_KEY = "shopify_reconciliation_readiness_cursor";
 const RECONCILIATION_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const SHOPIFY_CHANNEL_ID = 36;
 const SHOPIFY_API_VERSION = "2024-10";
@@ -114,6 +120,10 @@ const RATE_LIMIT_DELAY_MS = 550; // ~2 calls/sec
 const MAX_RECONCILIATION_PAGES = envPositiveInteger(
   "SHOPIFY_RECONCILIATION_MAX_PAGES",
   100,
+);
+const READINESS_RECOVERY_LIMIT = envPositiveInteger(
+  "SHOPIFY_READINESS_RECOVERY_LIMIT",
+  25,
 );
 
 let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
@@ -127,7 +137,10 @@ let wmsSyncService: WmsSyncService | null = null;
 // Shopify API helpers (direct fetch, uses channel_connections creds)
 // ---------------------------------------------------------------------------
 
-async function getShopifyCredentials(): Promise<{ shopDomain: string; accessToken: string }> {
+async function getShopifyCredentials(): Promise<{
+  shopDomain: string;
+  accessToken: string;
+}> {
   const [conn] = await db
     .select()
     .from(channelConnections)
@@ -159,7 +172,10 @@ async function shopifyGet(
     });
 
     if (response.status === 429) {
-      const retryAfter = parseInt(response.headers.get("Retry-After") || "2", 10);
+      const retryAfter = parseInt(
+        response.headers.get("Retry-After") || "2",
+        10,
+      );
       console.warn(`[RECONCILE] Rate limited, waiting ${retryAfter}s`);
       await delay(retryAfter * 1000);
       continue;
@@ -171,7 +187,9 @@ async function shopifyGet(
         await delay(1000 * attempt);
         continue;
       }
-      throw new Error(`Shopify API ${path} failed (${response.status}): ${errorBody.slice(0, 200)}`);
+      throw new Error(
+        `Shopify API ${path} failed (${response.status}): ${errorBody.slice(0, 200)}`,
+      );
     }
 
     const data = await response.json();
@@ -188,7 +206,9 @@ function delay(ms: number): Promise<void> {
 
 function parseNextPageInfo(linkHeader: string | null): string | null {
   if (!linkHeader) return null;
-  const match = linkHeader.match(/<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/);
+  const match = linkHeader.match(
+    /<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/,
+  );
   return match ? match[1] : null;
 }
 
@@ -227,6 +247,131 @@ async function fetchOrdersFromShopify(since: Date): Promise<ShopifyApiOrder[]> {
   } while (pageInfo);
 
   return allOrders;
+}
+
+interface DelayedReadinessCandidate {
+  omsOrderId: number;
+  shopifyOrderId: string;
+}
+
+function normalizeShopifyNumericOrderId(value: string | number): string {
+  const normalized = String(value).split("/").pop()?.trim() ?? "";
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(
+      `Invalid Shopify order id for readiness recovery: ${String(value)}`,
+    );
+  }
+  return normalized;
+}
+
+async function fetchShopifyOrderById(
+  shopifyOrderId: string | number,
+): Promise<ShopifyApiOrder> {
+  const creds = await getShopifyCredentials();
+  const numericOrderId = normalizeShopifyNumericOrderId(shopifyOrderId);
+  const { data } = await shopifyGet(creds, `/orders/${numericOrderId}.json`);
+  if (!data?.order) {
+    throw new Error(
+      `Shopify order ${numericOrderId} was not returned by the API`,
+    );
+  }
+  return data.order as ShopifyApiOrder;
+}
+
+async function loadDelayedReadinessCandidates(
+  afterOmsOrderId: number,
+): Promise<DelayedReadinessCandidate[]> {
+  const candidates = await db.execute<{
+    oms_order_id: number;
+    shopify_order_id: string;
+  }>(sql`
+    SELECT
+      oo.id AS oms_order_id,
+      split_part(oo.external_order_id, '/', -1) AS shopify_order_id
+    FROM oms.oms_orders oo
+    JOIN oms.oms_order_lines ol ON ol.order_id = oo.id
+    WHERE oo.channel_id = ${SHOPIFY_CHANNEL_ID}
+      AND oo.status NOT IN ('cancelled', 'refunded', 'shipped')
+      AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
+      AND COALESCE(oo.financial_status, '') IN ('paid', 'partially_paid')
+      AND ol.requires_shipping IS DISTINCT FROM false
+      AND COALESCE(ol.cancelled_quantity, 0) = 0
+      AND COALESCE(ol.refunded_quantity, 0) = 0
+      AND COALESCE(ol.authorization_status, '') IN ('seen', 'authorized')
+      AND (
+        COALESCE(ol.paid_quantity, 0) > COALESCE(ol.authority_fulfillable_quantity, 0)
+        OR COALESCE(ol.authority_fulfillable_quantity, 0) >
+           COALESCE(ol.wms_materialized_quantity, 0)
+      )
+    GROUP BY oo.id, oo.external_order_id
+    ORDER BY
+      CASE WHEN oo.id > ${afterOmsOrderId} THEN 0 ELSE 1 END ASC,
+      oo.id ASC
+    LIMIT ${READINESS_RECOVERY_LIMIT}
+  `);
+
+  return candidates.rows.map((row) => ({
+    omsOrderId: Number(row.oms_order_id),
+    shopifyOrderId: normalizeShopifyNumericOrderId(row.shopify_order_id),
+  }));
+}
+
+function buildReadinessSourceEventId(order: ShopifyApiOrder): string {
+  const orderId = normalizeShopifyNumericOrderId(order.id);
+  const providerVersion = order.updated_at || order.created_at;
+  return `shopify-reconcile:${orderId}:${providerVersion}`.slice(0, 100);
+}
+
+async function reconcileExistingOmsOrderReadiness(
+  order: ShopifyApiOrder,
+  omsOrderId: number,
+): Promise<{
+  advancedLines: number;
+  advancedQuantity: number;
+  wmsSyncRequested: boolean;
+}> {
+  if (!wmsSyncService) {
+    throw new Error(
+      "wmsSyncService not initialized - call initReconciliation first",
+    );
+  }
+
+  const readiness = await reconcileShopifyLineReadiness({
+    db,
+    omsOrderId,
+    financialStatus: order.financial_status,
+    sourceEventId: buildReadinessSourceEventId(order),
+    lineItems: order.line_items.map((line) => ({
+      externalLineItemId: line.id,
+      quantity: line.quantity,
+      fulfillableQuantity: line.fulfillable_quantity,
+    })),
+  });
+
+  if (
+    readiness.missingLines > 0 ||
+    readiness.quantityMismatches > 0 ||
+    readiness.protectedLines > 0
+  ) {
+    console.warn(
+      `[RECONCILE] Shopify readiness for ${order.name} was partially skipped ` +
+        JSON.stringify({
+          missingLines: readiness.missingLines,
+          quantityMismatches: readiness.quantityMismatches,
+          protectedLines: readiness.protectedLines,
+        }),
+    );
+  }
+
+  if (readiness.wmsSyncRequired) {
+    await wmsSyncService.syncOmsOrderToWms(omsOrderId);
+  }
+
+  return {
+    advancedLines: readiness.advancedLines,
+    advancedQuantity: readiness.advancedQuantity,
+    wmsSyncRequested: readiness.wmsSyncRequired,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +439,9 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
   for (const item of order.line_items) {
     const lineItemId = String(item.id);
     const priceCents = Math.round(parseFloat(item.price || "0") * 100);
-    const discountCents = Math.round(parseFloat(item.total_discount || "0") * 100);
+    const discountCents = Math.round(
+      parseFloat(item.total_discount || "0") * 100,
+    );
     const totalCents = priceCents * item.quantity - discountCents;
 
     await db.execute(sql`
@@ -322,7 +469,9 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
     `);
   }
 
-  console.log(`[RECONCILE] Created shopify_orders row for ${order.name} (${shopifyId}, source: ${order.source_name})`);
+  console.log(
+    `[RECONCILE] Created shopify_orders row for ${order.name} (${shopifyId}, source: ${order.source_name})`,
+  );
   return shopifyId;
 }
 
@@ -351,6 +500,25 @@ async function setLastCheckTime(ts: Date): Promise<void> {
     ON CONFLICT (key) DO UPDATE SET value = ${isoValue}, updated_at = NOW()
   `);
 }
+async function getReadinessRecoveryCursor(): Promise<number> {
+  const result = await db.execute<{ value: string | null }>(sql`
+    SELECT value
+    FROM warehouse.echelon_settings
+    WHERE key = ${READINESS_RECOVERY_CURSOR_KEY}
+    LIMIT 1
+  `);
+  const value = Number(result.rows[0]?.value ?? 0);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+async function setReadinessRecoveryCursor(omsOrderId: number): Promise<void> {
+  const value = String(omsOrderId);
+  await db.execute(sql`
+    INSERT INTO warehouse.echelon_settings (key, value, type, category)
+    VALUES (${READINESS_RECOVERY_CURSOR_KEY}, ${value}, 'string', 'sync')
+    ON CONFLICT (key) DO UPDATE SET value = ${value}, updated_at = NOW()
+  `);
+}
 
 // ---------------------------------------------------------------------------
 // Main reconciliation logic
@@ -362,6 +530,9 @@ async function runReconciliation(): Promise<ReconciliationResult> {
     reconciled: 0,
     skipped: 0,
     failed: 0,
+    readinessChecked: 0,
+    readinessAdvanced: 0,
+    wmsSyncRequested: 0,
     details: [],
   };
 
@@ -374,87 +545,131 @@ async function runReconciliation(): Promise<ReconciliationResult> {
   const startTime = Date.now();
 
   try {
-    if (!omsService) {
-      throw new Error("omsService not initialized — call initReconciliation first");
+    if (!omsService || !wmsSyncService) {
+      throw new Error(
+        "OMS and WMS sync services must be initialized before reconciliation",
+      );
     }
 
     const lastCheck = await getLastCheckTime();
-    // Overlap by 5 minutes to catch race conditions
+    // Overlap by 5 minutes to catch race conditions.
     const fetchSince = new Date(lastCheck.getTime() - 5 * 60 * 1000);
 
-    console.log(`[RECONCILE] Fetching Shopify orders since ${fetchSince.toISOString()}`);
+    console.log(
+      `[RECONCILE] Fetching Shopify orders since ${fetchSince.toISOString()}`,
+    );
     const shopifyOrders = await fetchOrdersFromShopify(fetchSince);
     result.checked = shopifyOrders.length;
+    const recentlyCheckedOmsOrderIds = new Set<number>();
 
-    if (shopifyOrders.length === 0) {
-      await setLastCheckTime(new Date());
-      return result;
-    }
-
-    // WMS keys are internal OMS identifiers and cannot prove whether the
-    // Shopify source order reached OMS. Compare canonical source identity.
-    const shopifyIds = shopifyOrders.map((order) =>
-      normalizeShopifyOrderGid(order.id),
-    );
-    const existingOms = await db.execute<{ shopify_order_id: string }>(sql`
-      SELECT DISTINCT so.id AS shopify_order_id
-      FROM public.shopify_orders so
-      JOIN oms.oms_orders oo
-        ON oo.external_order_id IN (so.id, split_part(so.id, '/', -1))
-      WHERE so.id = ANY(
-        ARRAY[${sql.join(shopifyIds.map((id) => sql`${id}`), sql`, `)}]::text[]
-      )
-        AND oo.channel_id IN (
-          SELECT id FROM channels.channels WHERE provider = 'shopify'
-        )
-    `);
-    const existingSet = new Set(existingOms.rows.map((r) => r.shopify_order_id));
-
-    const missingOrders = shopifyOrders.filter(
-      (order) => !existingSet.has(normalizeShopifyOrderGid(order.id)),
-    );
-
-    if (missingOrders.length === 0) {
-      await setLastCheckTime(new Date());
-      return result;
-    }
-
-    console.log(`[RECONCILE] Found ${missingOrders.length} missing orders out of ${shopifyOrders.length} checked`);
-
-    for (const order of missingOrders) {
-      const orderId = normalizeShopifyOrderGid(order.id);
-
-      // Skip cancelled orders
-      if (order.cancelled_at) {
-        result.skipped++;
-        continue;
+    const reconcileReadiness = async (
+      order: ShopifyApiOrder,
+      omsOrderId: number,
+    ): Promise<void> => {
+      result.readinessChecked++;
+      const readiness = await reconcileExistingOmsOrderReadiness(
+        order,
+        omsOrderId,
+      );
+      result.readinessAdvanced += readiness.advancedQuantity;
+      if (readiness.wmsSyncRequested) {
+        result.wmsSyncRequested++;
       }
+    };
 
-      try {
-        // Step 1: Ensure shopify_orders + shopify_order_items rows exist
-        const shopifyRowId = await ensureShopifyOrderRow(order);
+    if (shopifyOrders.length > 0) {
+      // WMS keys are internal OMS identifiers and cannot prove whether the
+      // Shopify source order reached OMS. Compare canonical source identity.
+      const shopifyIds = shopifyOrders.map((order) =>
+        normalizeShopifyOrderGid(order.id),
+      );
+      const existingOms = await db.execute<{
+        shopify_order_id: string;
+        oms_order_id: number;
+      }>(sql`
+        SELECT DISTINCT
+          so.id AS shopify_order_id,
+          oo.id AS oms_order_id
+        FROM public.shopify_orders so
+        JOIN oms.oms_orders oo
+          ON oo.external_order_id IN (so.id, split_part(so.id, '/', -1))
+        WHERE so.id = ANY(
+          ARRAY[${sql.join(
+            shopifyIds.map((id) => sql`${id}`),
+            sql`, `,
+          )}]::text[]
+        )
+          AND oo.channel_id IN (
+            SELECT id FROM channels.channels WHERE provider = 'shopify'
+          )
+      `);
+      const existingByShopifyId = new Map(
+        existingOms.rows.map((row) => [
+          row.shopify_order_id,
+          Number(row.oms_order_id),
+        ]),
+      );
 
-        // Step 2: Bridge to OMS
-        if (omsService) {
-          try {
+      for (const order of shopifyOrders) {
+        const orderId = normalizeShopifyOrderGid(order.id);
+        const existingOmsOrderId = existingByShopifyId.get(orderId);
+
+        if (order.cancelled_at) {
+          result.skipped++;
+          continue;
+        }
+
+        try {
+          if (existingOmsOrderId) {
+            recentlyCheckedOmsOrderIds.add(existingOmsOrderId);
+            await reconcileReadiness(order, existingOmsOrderId);
+          } else {
+            const shopifyRowId = await ensureShopifyOrderRow(order);
             await bridgeShopifyOrderToOms(db, omsService, shopifyRowId);
             result.reconciled++;
             const source = order.source_name || "unknown";
             result.details.push(`${order.name} (${source})`);
-          } catch (err: any) {
-            result.failed++;
-            console.error(`[RECONCILE] OMS bridge failed for ${order.name}: ${err.message}`);
           }
-        } else {
-          result.skipped++;
+        } catch (err: any) {
+          result.failed++;
+          console.error(
+            `[RECONCILE] Failed to reconcile ${order.name} (${orderId}): ${err.message}`,
+          );
         }
-      } catch (err: any) {
-        result.failed++;
-        console.error(`[RECONCILE] Failed to reconcile ${order.name} (${orderId}): ${err.message}`);
+
+        await delay(100);
+      }
+    }
+
+    const readinessCursor = await getReadinessRecoveryCursor();
+    const delayedCandidates =
+      await loadDelayedReadinessCandidates(readinessCursor);
+    for (const candidate of delayedCandidates) {
+      if (recentlyCheckedOmsOrderIds.has(candidate.omsOrderId)) {
+        continue;
       }
 
-      // Rate limit between order processing
+      try {
+        const order = await fetchShopifyOrderById(candidate.shopifyOrderId);
+        if (order.cancelled_at) {
+          result.skipped++;
+          continue;
+        }
+        await reconcileReadiness(order, candidate.omsOrderId);
+      } catch (err: any) {
+        result.failed++;
+        console.error(
+          `[RECONCILE] Delayed readiness recovery failed for Shopify order ${candidate.shopifyOrderId}: ${err.message}`,
+        );
+      }
+
       await delay(100);
+    }
+
+    if (delayedCandidates.length > 0) {
+      await setReadinessRecoveryCursor(
+        delayedCandidates[delayedCandidates.length - 1].omsOrderId,
+      );
     }
 
     // A failed order stays inside the next overlapping poll window.
@@ -467,9 +682,11 @@ async function runReconciliation(): Promise<ReconciliationResult> {
     }
 
     const durationMs = Date.now() - startTime;
-    if (result.reconciled > 0) {
+    if (result.reconciled > 0 || result.readinessAdvanced > 0) {
       console.log(
-        `[RECONCILE] Reconciled ${result.reconciled} orders in ${durationMs}ms: ${result.details.join(", ")}`,
+        `[RECONCILE] Imported ${result.reconciled} order(s), advanced ` +
+          `${result.readinessAdvanced} readiness unit(s), requested ` +
+          `${result.wmsSyncRequested} WMS sync(s) in ${durationMs}ms`,
       );
     }
 
@@ -481,7 +698,6 @@ async function runReconciliation(): Promise<ReconciliationResult> {
     isRunning = false;
   }
 }
-
 // ---------------------------------------------------------------------------
 // Startup & lifecycle
 // ---------------------------------------------------------------------------
@@ -490,10 +706,7 @@ async function runReconciliation(): Promise<ReconciliationResult> {
  * Initialize the reconciliation job with references to sync services.
  * Must be called before startShopifyReconciliation().
  */
-export function initReconciliation(
-  oms?: OmsService,
-  wmsSync?: WmsSyncService,
-) {
+export function initReconciliation(oms?: OmsService, wmsSync?: WmsSyncService) {
   omsService = oms || null;
   wmsSyncService = wmsSync || null;
 }
@@ -507,7 +720,9 @@ async function runCancellationReconciliation(): Promise<void> {
   try {
     const result = await wmsSyncService.reconcileCancellations();
     if (result.cancelled > 0) {
-      console.log(`[RECONCILE] Cancellation sweep: ${result.cancelled} cancelled, ${result.failed} failed`);
+      console.log(
+        `[RECONCILE] Cancellation sweep: ${result.cancelled} cancelled, ${result.failed} failed`,
+      );
     }
   } catch (err: any) {
     console.error(`[RECONCILE] Cancellation sweep failed: ${err.message}`);
@@ -520,28 +735,33 @@ function startShopifyReconciliation() {
   }
 
   // First run after 3 minutes
-  setTimeout(async () => {
-    try {
-      await runReconciliation();
-    } catch (err: any) {
-      console.error(`[RECONCILE] Initial run failed: ${err.message}`);
-    }
-
-    await runCancellationReconciliation();
-
-    // Then every 15 minutes
-    reconciliationInterval = setInterval(async () => {
+  setTimeout(
+    async () => {
       try {
         await runReconciliation();
       } catch (err: any) {
-        console.error(`[RECONCILE] Scheduled run failed: ${err.message}`);
+        console.error(`[RECONCILE] Initial run failed: ${err.message}`);
       }
 
       await runCancellationReconciliation();
-    }, RECONCILIATION_INTERVAL_MS);
-  }, 3 * 60 * 1000);
 
-  console.log("[RECONCILE] Shopify order reconciliation scheduled (every 15 min, first run in 3 min)");
+      // Then every 15 minutes
+      reconciliationInterval = setInterval(async () => {
+        try {
+          await runReconciliation();
+        } catch (err: any) {
+          console.error(`[RECONCILE] Scheduled run failed: ${err.message}`);
+        }
+
+        await runCancellationReconciliation();
+      }, RECONCILIATION_INTERVAL_MS);
+    },
+    3 * 60 * 1000,
+  );
+
+  console.log(
+    "[RECONCILE] Shopify order reconciliation scheduled (every 15 min, first run in 3 min)",
+  );
 }
 
 /**
