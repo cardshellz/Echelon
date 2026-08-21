@@ -59,7 +59,7 @@ export const SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL = `
     FROM required_relations
   ),
   user_write_relations AS (
-    SELECT format('%I.%I', namespace.nspname, relation.relname) AS qualified_name
+    SELECT relation.oid AS relation_oid
     FROM pg_catalog.pg_class AS relation
     JOIN pg_catalog.pg_namespace AS namespace
       ON namespace.oid = relation.relnamespace
@@ -68,7 +68,7 @@ export const SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL = `
       AND namespace.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
   ),
   user_sequences AS (
-    SELECT format('%I.%I', namespace.nspname, relation.relname) AS qualified_name
+    SELECT relation.oid AS relation_oid
     FROM pg_catalog.pg_class AS relation
     JOIN pg_catalog.pg_namespace AS namespace
       ON namespace.oid = relation.relnamespace
@@ -110,7 +110,7 @@ export const SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL = `
       FROM user_write_relations
       WHERE has_table_privilege(
         current_user,
-        qualified_name,
+        relation_oid,
         'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES'
       )
     ), 0)::text AS mutable_table_count,
@@ -119,19 +119,19 @@ export const SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL = `
       FROM user_write_relations
       WHERE has_any_column_privilege(
         current_user,
-        qualified_name,
+        relation_oid,
         'INSERT,UPDATE,REFERENCES'
       )
     ), 0)::text AS mutable_column_relation_count,
     COALESCE((
       SELECT COUNT(*)
       FROM user_sequences
-      WHERE has_sequence_privilege(current_user, qualified_name, 'UPDATE')
+      WHERE has_sequence_privilege(current_user, relation_oid, 'UPDATE')
     ), 0)::text AS mutable_sequence_count,
     COALESCE((
       SELECT COUNT(*)
       FROM user_sequences
-      WHERE has_sequence_privilege(current_user, qualified_name, 'USAGE')
+      WHERE has_sequence_privilege(current_user, relation_oid, 'USAGE')
     ), 0)::text AS sequence_usage_count,
     COALESCE((
       SELECT COUNT(*)

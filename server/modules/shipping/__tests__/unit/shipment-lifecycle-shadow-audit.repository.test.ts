@@ -422,6 +422,17 @@ describe("shipment lifecycle read-only shadow repository", () => {
       .toContain("match.match_status IN ('matched', 'voided_label')");
     expect(SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL)
       .toContain("has_any_column_privilege");
+    expect(SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL.match(
+      /SELECT relation\.oid AS relation_oid/g,
+    )).toHaveLength(2);
+    expect(SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL)
+      .toMatch(/has_table_privilege\(\s*current_user,\s*relation_oid,/);
+    expect(SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL)
+      .toMatch(/has_any_column_privilege\(\s*current_user,\s*relation_oid,/);
+    expect(SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL)
+      .not.toMatch(
+        /has_(?:table|any_column|sequence)_privilege\(\s*current_user,\s*qualified_name,/,
+      );
     expect(SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL)
       .toContain("relation.relkind IN ('r', 'p', 'v', 'f')");
   });
@@ -472,7 +483,7 @@ describe("shipment lifecycle read-only shadow repository", () => {
 
   it("rejects sequence USAGE before reading operational evidence", async () => {
     expect(SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL).toContain(
-      "has_sequence_privilege(current_user, qualified_name, 'USAGE')",
+      "has_sequence_privilege(current_user, relation_oid, 'USAGE')",
     );
     const harness = repositoryHarness({ role: roleRow({ sequence_usage_count: "1" }) });
 
