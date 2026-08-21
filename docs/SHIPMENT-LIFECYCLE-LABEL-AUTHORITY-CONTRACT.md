@@ -506,7 +506,7 @@ Still unresolved and intentionally not assumed:
 | SHIP_NOTIFY does not run the shipment cascade at label time | Proven | `shipstation.service.ts:3995-4047` performs a provider GET and label observation, plus limited return-label exception handling; it has no WMS shipment, inventory, physical-package, or channel writer. |
 | Carrier-confirmed dispatch owns the normal automated full cascade | Proven, not exclusive | `shipstation.service.ts:4050-4250,2779-3239` re-fetches and durably observes current evidence before reaching the cascade. Manual reship adoption also reaches the guarded entry point at `3919-3961`; `server/index.ts:1070-1076,1511-1517` can mutate shipment status outside it. |
 | A voided label's carrier event does not currently win | Proven defect | `carrier-tracking.domain.ts:673-705` resolves it as `voided_label`; `shipstation.service.ts:4135-4147` also rejects a label found voided during the carrier-authority re-fetch. |
-| An ordinary empty provider item array could conditionally ship all existing WMS items | Proven baseline defect, closed in this Phase 0 branch | The low-level sync now throws before its first WMS item query at `shipstation.service.ts:1738-1752`; the shared fulfillment entry point independently requires exact provider item IDs and quantities for shipped automatic authority at `3845-3882`. Carrier rejection is classified nonretryably at `4221-4234`. This branch is not deployed. |
+| An ordinary empty provider item array could conditionally ship all existing WMS items | Proven baseline defect, closed in deployed Phase 0 | The low-level sync now throws before its first WMS item query at `shipstation.service.ts:1738-1752`; the shared fulfillment entry point independently requires exact provider item IDs and quantities for shipped automatic authority at `3845-3882`. Carrier rejection is classified nonretryably at `4221-4234`. Phase 0 was deployed in Heroku release `v2697` from merge commit `3123147fa51575d859c576bee460606df1dc389f`. |
 | A second package after terminal fulfillment is not automatically trusted | Proven | `shipstation.service.ts:1413-1479` quarantines it; reship adoption is a separate privileged operation at `server/routes/oms.routes.ts:258-286`. |
 | One provider package can span multiple WMS orders | Proven | `shipstation.service.ts:1970-2257` resolves exact ownership, selects an existing row whose status is neither `cancelled` nor `voided` or creates one at `2069-2130`, applies terminal checks at `2192-2232`, and finalizes one physical package at `2252-2257,2727-2764`. |
 | A fresh Shopify fulfillment mutation requests customer notification | Proven request, not delivery | `channel-fulfillment-authority.service.ts:203-217` bridges eligible execution; `fulfillment-push.service.ts:2074-2110` can return already satisfied before mutation, while `2383-2405` sets `notifyCustomer: true` on a fresh `fulfillmentCreateV2` request. `channel-fulfillment-command.ts:184-249` groups per provider/OMS order/scope, and `channel-fulfillment-authority.repository.ts:2190-2220` can suppress command creation. The 15-second worker value is only a conditional default poll interval. |
@@ -725,6 +725,13 @@ This phase changes no shipment lifecycle authority.
    shipping evidence tables and rerun the sanitized manifest queries through that
    role. Do not normalize application credentials as the audit path.
 
+Deployment status as of 2026-08-21: Phase 0 is deployed in Heroku release
+`v2697` from merge commit `3123147fa51575d859c576bee460606df1dc389f`, while
+`SHIPMENT_LIFECYCLE_SHADOW_ENABLED` is unset and the job requires exact `true`.
+The projector is therefore present but disabled. No production flag, grant,
+certificate setting, database row, or provider record was changed during the
+post-deploy proof.
+
 Activation/cutover blocker -- provider-link quantity authority (proven current
 chain):
 
@@ -758,17 +765,21 @@ Additional activation blockers proven in this branch:
   comparison. Keep this path non-authoritative until prepare, comparison, and
   transition are serialized or protected by a contents-version compare-and-set,
   with a controlled interleaving test.
-- The dedicated shadow job and credential utility now fail closed by requiring
-  certificate verification for every non-local PostgreSQL connection. Do not
-  activate or distribute the dedicated credential until the deployed database
-  presents a trusted certificate (or its CA is supplied through a separately
-  reviewed configuration) and that connection is proven without weakening
-  verification.
-- The read-only query defaults to 1,000 labels and 50 events per label, while its
-  accepted maxima are 5,000 and 500
-  (`shipment-lifecycle-shadow-audit.repository.ts:5-10,552-586`). Activation
-  needs a measured byte/runtime bound or pagination against current production
-  volumes; a row-count bound alone is not a payload-size proof.
+- A post-deploy connection using only the dedicated audit URL and strict TLS
+  verification failed with `DEPTH_ZERO_SELF_SIGNED_CERT` before `BEGIN` or any
+  SQL ran; Heroku Enhanced Certificates were off at that check. The activation
+  hardening build accepts only the reviewed verify-full/root-certificate URL
+  parameters, pins the parsed endpoint and credential fields so `PG*`
+  environment values cannot replace them, and keeps hostname verification on.
+  Activation remains blocked until that build is deployed and the dedicated
+  connection, session role, grants, transaction mode, and TLS session are proven.
+- The activation hardening query is one bounded page with conservative label,
+  per-label-event, total-event, per-event-byte, and page-byte limits. Its internal
+  continuation uses immutable label IDs and is not emitted by the command; the
+  supporting provider/ID index bounds the intended access path. Each invocation
+  is still a separate database snapshot, so this is not proof of one complete
+  cross-page scan. Production query plan, runtime, and memory remain unproven and
+  require one supervised page before any scheduling or flag activation.
 - `wms.outbound_shipments.shipstation_order_id` is a PostgreSQL `integer`
   (`shared/schema/orders.schema.ts:475`), while three remaining external-value
   paths accept wider JavaScript-safe integers: create-order response persistence
@@ -885,7 +896,7 @@ No production mutation is authorized by this matrix.
 Verification after the final contract corrections:
 
 - 9 provider/ShipStation test files / 164 tests passed;
-- 7 lifecycle projector, evidence, audit, and credential test files / 168 tests
+- 7 lifecycle projector, evidence, audit, and credential test files / 188 tests
   passed;
 - 4 dependent OMS/inventory test files / 99 tests passed, covering SHIP_NOTIFY
   V2, unmapped/reship remediation, channel-command planning, and replacement /
@@ -910,7 +921,7 @@ replace:
 Those tests must be changed only when the replacement projector, idempotent
 dependent commands, and shadow reconciliation are present together.
 
-The 36-test pure lifecycle suite proves:
+The 41-test pure lifecycle suite proves:
 
 - monotonic package-level business shipment at durable label observation,
   independent of whether exact contents are currently authoritative;

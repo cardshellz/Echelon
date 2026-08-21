@@ -11,17 +11,29 @@ import {
   SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS,
 } from "../../server/modules/shipping/shipment-lifecycle-shadow-audit.repository";
 
+const REMOTE_URL = "postgresql://audit:test-password@db.example.com:5432/echelon";
+
 describe("shipment lifecycle shadow audit credential configuration", () => {
-  it("requires certificate verification for non-local audit databases", () => {
-    expect(auditCredentialPoolConfig("postgresql://audit@db.example.com/echelon"))
-      .toMatchObject({ ssl: { rejectUnauthorized: true } });
-    expect(auditCredentialPoolConfig("postgresql://localhost@db.example.com/echelon"))
-      .toMatchObject({ ssl: { rejectUnauthorized: true } });
-    expect(auditCredentialPoolConfig("postgresql://audit@localhost/echelon").ssl)
-      .toBeUndefined();
+  it("pins the non-local endpoint and requires certificate verification", () => {
+    expect(auditCredentialPoolConfig(REMOTE_URL)).toMatchObject({
+      host: "db.example.com",
+      port: 5_432,
+      user: "audit",
+      password: "test-password",
+      database: "echelon",
+      ssl: {
+        rejectUnauthorized: true,
+        servername: "db.example.com",
+        minVersion: "TLSv1.2",
+      },
+    });
+    expect(auditCredentialPoolConfig(
+      "postgresql://audit:test-password@localhost/echelon",
+    ).ssl)
+      .toBe(false);
     expect(() => auditCredentialPoolConfig(
-      "postgresql://audit@db.example.com/echelon?sslmode=no-verify",
-    )).toThrow("must not contain query parameters");
+      `${REMOTE_URL}?sslmode=no-verify`,
+    )).toThrow("exact enhanced-certificate pair");
   });
 
   it("keeps dry-run as the default and requires explicit execute", () => {

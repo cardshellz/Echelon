@@ -1,4 +1,5 @@
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 import { Pool, type PoolClient, type PoolConfig } from "pg";
@@ -12,13 +13,21 @@ import {
   type PersistedShippingProviderLabelEventRow,
 } from "../modules/shipping/declared-package-lifecycle-shadow.domain";
 import {
+  SHIPMENT_LIFECYCLE_SHADOW_AUDIT_LIMITS,
   ShipmentLifecycleShadowAuditRepositoryError,
   loadShipmentLifecycleShadowAuditBatch,
+  normalizeShipmentLifecycleShadowAuditRepositoryOptions,
+  type NormalizedShipmentLifecycleShadowAuditRepositoryOptions,
   type ShipmentLifecycleShadowAuditBatch,
   type ShipmentLifecycleShadowAuditRepositoryOptions,
 } from "../modules/shipping/shipment-lifecycle-shadow-audit.repository";
 
 interface ShadowAuditPoolClient extends Pick<PoolClient, "query" | "release"> {}
+
+interface BoundedShadowAuditPoolConfig extends PoolConfig {
+  // pg supports this startup field at runtime, but @types/pg omits it.
+  readonly lock_timeout: number;
+}
 
 export interface ShadowAuditPool {
   connect(): Promise<ShadowAuditPoolClient>;
@@ -33,14 +42,79 @@ export interface ShipmentLifecycleShadowAuditAggregate
   readonly snapshotAt: string;
   readonly labelLimit: number;
   readonly batchLimitReached: boolean;
+  readonly nextPageAvailable: boolean;
   readonly labelEventCount: number;
+  readonly selectedEventPayloadBytes: number;
+  readonly maxEventPayloadBytes: number;
+  readonly databaseTemporaryPrivilege: boolean;
   readonly currentConfirmedCarrierEvidenceCount: number;
 }
 
+export interface ShipmentLifecycleShadowAuditRuntimeMetrics {
+  readonly setupDurationMs: number;
+  readonly connectDurationMs: number;
+  readonly repositoryDurationMs: number;
+  readonly projectionDurationMs: number;
+  readonly cleanupDurationMs: number;
+  readonly totalDurationMs: number;
+  readonly rssBeforeBytes: number;
+  readonly rssAfterLoadBytes: number;
+  readonly rssAfterProjectionBytes: number;
+  readonly rssAfterCleanupBytes: number;
+  readonly observedMaxRssBytes: number;
+}
+
 export interface VerifiedShipmentLifecycleShadowAuditAggregate
-  extends ShipmentLifecycleShadowAuditAggregate {
+  extends ShipmentLifecycleShadowAuditAggregate,
+    ShipmentLifecycleShadowAuditRuntimeMetrics {
   readonly readOnlyRoleVerified: true;
 }
+
+export interface ShipmentLifecycleShadowAuditRuntimeDependencies {
+  readonly nowMs: () => number;
+  readonly rssBytes: () => number;
+}
+
+const DEFAULT_RUNTIME_DEPENDENCIES: ShipmentLifecycleShadowAuditRuntimeDependencies = Object.freeze({
+  nowMs: () => performance.now(),
+  rssBytes: () => process.memoryUsage().rss,
+});
+
+const SERVER_STATEMENT_TIMEOUT_GRACE_MS = 5_000;
+const CLIENT_QUERY_TIMEOUT_GRACE_MS = 5_000;
+const IDLE_IN_TRANSACTION_TIMEOUT_GRACE_MS = 15_000;
+const POOL_IDLE_TIMEOUT_MS = 10_000;
+
+export type ShipmentLifecycleShadowAuditJobErrorCode =
+  | "SHIPMENT_LIFECYCLE_SHADOW_CLEANUP_FAILED"
+  | "SHIPMENT_LIFECYCLE_SHADOW_EXECUTION_AND_CLEANUP_FAILED";
+
+export class ShipmentLifecycleShadowAuditJobError extends Error {
+  readonly code: ShipmentLifecycleShadowAuditJobErrorCode;
+
+  constructor(
+    code: ShipmentLifecycleShadowAuditJobErrorCode,
+    message: string,
+    failures: readonly unknown[],
+  ) {
+    super(message, {
+      cause: new AggregateError([...failures], message),
+    });
+    this.name = "ShipmentLifecycleShadowAuditJobError";
+    this.code = code;
+  }
+}
+
+export interface ShipmentLifecycleShadowAuditCliOptions {
+  readonly help: boolean;
+  readonly repositoryOptions: NormalizedShipmentLifecycleShadowAuditRepositoryOptions;
+}
+
+const CLI_REPOSITORY_FIELDS = Object.freeze({
+  "--label-limit": "labelLimit",
+  "--max-event-payload-bytes": "maxEventPayloadBytes",
+  "--max-page-payload-bytes": "maxPagePayloadBytes",
+} as const);
 
 function safeNumericDatabaseId(value: string, field: string): number {
   if (!/^[1-9][0-9]*$/.test(value)) {
@@ -52,6 +126,7 @@ function safeNumericDatabaseId(value: string, field: string): number {
   }
   return Number(parsed);
 }
+
 function currentLabelStatus(
   value: string,
 ): PersistedDeclaredPackageEvidence["currentLabelStatus"] {
@@ -65,7 +140,6 @@ function currentLabelStatus(
   }
   throw new Error("shipping provider label status is unsupported");
 }
-
 
 function groupLabelEvents(
   batch: ShipmentLifecycleShadowAuditBatch,
@@ -155,7 +229,11 @@ export function summarizeShipmentLifecycleShadowAuditBatch(
     snapshotAt: batch.snapshotAt,
     labelLimit: batch.labelLimit,
     batchLimitReached: batch.batchLimitReached,
+    nextPageAvailable: batch.nextCursor !== null,
     labelEventCount: batch.labelEvents.length,
+    selectedEventPayloadBytes: batch.selectedEventPayloadBytes,
+    maxEventPayloadBytes: batch.maxEventPayloadBytes,
+    databaseTemporaryPrivilege: batch.databaseTemporaryPrivilege,
     currentConfirmedCarrierEvidenceCount: batch.currentCarrierMatches.length,
   });
 }
@@ -184,56 +262,289 @@ export function shipmentLifecycleShadowAuditConnectionString(
   return value;
 }
 
-
 function defaultPoolFactory(config: PoolConfig): ShadowAuditPool {
   return new Pool(config);
 }
 
 export function shipmentLifecycleShadowAuditPoolConfig(
   connectionString: string,
+  repositoryOptions: Pick<
+    NormalizedShipmentLifecycleShadowAuditRepositoryOptions,
+    "statementTimeoutMs" | "lockTimeoutMs" | "idleInTransactionTimeoutMs"
+  > = normalizeShipmentLifecycleShadowAuditRepositoryOptions(),
 ): PoolConfig {
-  return verifiedPostgresPoolConfig({
-    connectionString,
-    applicationName: "shipment-lifecycle-read-only-shadow",
-    max: 1,
+  const statementTimeoutMs = repositoryOptions.statementTimeoutMs
+    + SERVER_STATEMENT_TIMEOUT_GRACE_MS;
+  const config: BoundedShadowAuditPoolConfig = {
+    ...verifiedPostgresPoolConfig({
+      connectionString,
+      applicationName: "shipment-lifecycle-read-only-shadow",
+      max: 1,
+    }),
+    connectionTimeoutMillis: 10_000,
+    statement_timeout: statementTimeoutMs,
+    query_timeout: statementTimeoutMs + CLIENT_QUERY_TIMEOUT_GRACE_MS,
+    lock_timeout: SHIPMENT_LIFECYCLE_SHADOW_AUDIT_LIMITS.maxLockTimeoutMs,
+    idle_in_transaction_session_timeout:
+      repositoryOptions.idleInTransactionTimeoutMs + IDLE_IN_TRANSACTION_TIMEOUT_GRACE_MS,
+    idleTimeoutMillis: POOL_IDLE_TIMEOUT_MS,
+    allowExitOnIdle: true,
+  };
+  return config;
+}
+
+function safeRuntimeValue(value: number, field: string): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative finite number`);
+  }
+  return value;
+}
+
+function safeRssBytes(value: number, field: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function durationMs(start: number, end: number, field: string): number {
+  const safeStart = safeRuntimeValue(start, `${field} start`);
+  const safeEnd = safeRuntimeValue(end, `${field} end`);
+  if (safeEnd < safeStart) throw new Error(`${field} clock moved backwards`);
+  return safeEnd - safeStart;
+}
+
+function positiveCliInteger(value: string, flag: string): number {
+  if (!/^[1-9][0-9]*$/.test(value)) {
+    throw new Error(`${flag} must be a positive decimal integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${flag} exceeds JavaScript's safe integer range`);
+  }
+  return parsed;
+}
+
+export function parseShipmentLifecycleShadowAuditCliOptions(
+  argv: readonly string[],
+): ShipmentLifecycleShadowAuditCliOptions {
+  const help = argv.includes("--help") || argv.includes("-h");
+  const seen = new Set<string>();
+  const partial: ShipmentLifecycleShadowAuditRepositoryOptions = {};
+
+  for (const argument of argv) {
+    if (argument === "--help" || argument === "-h") continue;
+    const separator = argument.indexOf("=");
+    const flag = separator < 0 ? argument : argument.slice(0, separator);
+    const value = separator < 0 ? "" : argument.slice(separator + 1);
+    const field = CLI_REPOSITORY_FIELDS[flag as keyof typeof CLI_REPOSITORY_FIELDS];
+    if (field === undefined) throw new Error(`Unknown flag: ${flag}`);
+    if (seen.has(flag)) throw new Error(`Duplicate flag: ${flag}`);
+    seen.add(flag);
+    Object.assign(partial, { [field]: positiveCliInteger(value, flag) });
+  }
+
+  return Object.freeze({
+    help,
+    repositoryOptions: normalizeShipmentLifecycleShadowAuditRepositoryOptions(partial),
   });
+}
+
+function usage(): string {
+  return [
+    "Usage:",
+    "  npm run wms:audit-shipment-lifecycle-shadow -- [options]",
+    "",
+    "Options:",
+    "  --label-limit=N",
+    "  --max-event-payload-bytes=N",
+    "  --max-page-payload-bytes=N",
+    "  --help, -h",
+    "",
+    "The command is one read-only page. It never emits the next-page cursor or record identities.",
+  ].join("\n");
 }
 
 export async function runShipmentLifecycleShadowAuditJob(options: {
   readonly environment?: NodeJS.ProcessEnv;
   readonly repositoryOptions?: ShipmentLifecycleShadowAuditRepositoryOptions;
   readonly poolFactory?: ShadowAuditPoolFactory;
+  readonly runtime?: ShipmentLifecycleShadowAuditRuntimeDependencies;
 } = {}): Promise<VerifiedShipmentLifecycleShadowAuditAggregate> {
   const environment = options.environment ?? process.env;
   assertShipmentLifecycleShadowEnabled(environment);
   const connectionString = shipmentLifecycleShadowAuditConnectionString(environment);
+  const repositoryOptions = normalizeShipmentLifecycleShadowAuditRepositoryOptions(
+    options.repositoryOptions,
+  );
+  const runtime = options.runtime ?? DEFAULT_RUNTIME_DEPENDENCIES;
+  const totalStartedAtMs = safeRuntimeValue(runtime.nowMs(), "audit start time");
+  const rssBeforeBytes = safeRssBytes(runtime.rssBytes(), "rss before audit");
   const poolFactory = options.poolFactory ?? defaultPoolFactory;
-  const pool = poolFactory(shipmentLifecycleShadowAuditPoolConfig(connectionString));
 
+  let pool: ShadowAuditPool | undefined;
   let client: ShadowAuditPoolClient | null = null;
+  let projected: ShipmentLifecycleShadowAuditAggregate | undefined;
+  let setupStartedAtMs: number | undefined;
+  let setupFinishedAtMs: number | undefined;
+  let connectStartedAtMs: number | undefined;
+  let connectFinishedAtMs: number | undefined;
+  let repositoryStartedAtMs: number | undefined;
+  let repositoryFinishedAtMs: number | undefined;
+  let projectionStartedAtMs: number | undefined;
+  let projectionFinishedAtMs: number | undefined;
+  let cleanupStartedAtMs: number | undefined;
+  let cleanupFinishedAtMs: number | undefined;
+  let rssAfterLoadBytes: number | undefined;
+  let rssAfterProjectionBytes: number | undefined;
+  let primaryFailure: unknown;
+  let primaryFailed = false;
+
   try {
+    setupStartedAtMs = safeRuntimeValue(runtime.nowMs(), "setup start time");
+    pool = poolFactory(shipmentLifecycleShadowAuditPoolConfig(
+      connectionString,
+      repositoryOptions,
+    ));
+    setupFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "setup finish time");
+
+    connectStartedAtMs = safeRuntimeValue(runtime.nowMs(), "connect start time");
     client = await pool.connect();
+    connectFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "connect finish time");
+
+    repositoryStartedAtMs = safeRuntimeValue(runtime.nowMs(), "repository start time");
     const batch = await loadShipmentLifecycleShadowAuditBatch(
       client as Pick<PoolClient, "query">,
-      options.repositoryOptions,
+      repositoryOptions,
     );
-    return Object.freeze({
-      ...summarizeShipmentLifecycleShadowAuditBatch(batch),
-      // loadShipmentLifecycleShadowAuditBatch returns only after its
-      // transaction-level role assertion succeeds.
-      readOnlyRoleVerified: true,
-    });
-  } finally {
+    repositoryFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "repository finish time");
+    rssAfterLoadBytes = safeRssBytes(runtime.rssBytes(), "rss after repository load");
+
+    projectionStartedAtMs = safeRuntimeValue(runtime.nowMs(), "projection start time");
+    projected = summarizeShipmentLifecycleShadowAuditBatch(batch);
+    projectionFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "projection finish time");
+    rssAfterProjectionBytes = safeRssBytes(
+      runtime.rssBytes(),
+      "rss after lifecycle projection",
+    );
+  } catch (error: unknown) {
+    primaryFailure = error;
+    primaryFailed = true;
+  }
+
+  const cleanupFailures: unknown[] = [];
+  if (pool !== undefined) {
     try {
-      client?.release();
-    } finally {
+      cleanupStartedAtMs = safeRuntimeValue(runtime.nowMs(), "cleanup start time");
+    } catch (error: unknown) {
+      cleanupFailures.push(error);
+    }
+    if (client !== null) {
+      try {
+        client.release();
+      } catch (error: unknown) {
+        cleanupFailures.push(error);
+      }
+    }
+    try {
       await pool.end();
+    } catch (error: unknown) {
+      cleanupFailures.push(error);
+    }
+    try {
+      cleanupFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "cleanup finish time");
+    } catch (error: unknown) {
+      cleanupFailures.push(error);
     }
   }
+
+  if (primaryFailed) {
+    if (cleanupFailures.length > 0) {
+      throw new ShipmentLifecycleShadowAuditJobError(
+        "SHIPMENT_LIFECYCLE_SHADOW_EXECUTION_AND_CLEANUP_FAILED",
+        "Shipment lifecycle shadow audit execution and cleanup both failed",
+        [primaryFailure, ...cleanupFailures],
+      );
+    }
+    throw primaryFailure;
+  }
+  if (cleanupFailures.length > 0) {
+    throw new ShipmentLifecycleShadowAuditJobError(
+      "SHIPMENT_LIFECYCLE_SHADOW_CLEANUP_FAILED",
+      "Shipment lifecycle shadow audit cleanup failed",
+      cleanupFailures,
+    );
+  }
+
+  const rssAfterCleanupBytes = safeRssBytes(runtime.rssBytes(), "rss after cleanup");
+  const totalFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "audit finish time");
+  if (
+    projected === undefined
+    || setupStartedAtMs === undefined
+    || setupFinishedAtMs === undefined
+    || connectStartedAtMs === undefined
+    || connectFinishedAtMs === undefined
+    || repositoryStartedAtMs === undefined
+    || repositoryFinishedAtMs === undefined
+    || projectionStartedAtMs === undefined
+    || projectionFinishedAtMs === undefined
+    || cleanupStartedAtMs === undefined
+    || cleanupFinishedAtMs === undefined
+    || rssAfterLoadBytes === undefined
+    || rssAfterProjectionBytes === undefined
+  ) {
+    throw new Error("Shipment lifecycle shadow audit completed without required evidence");
+  }
+
+  return Object.freeze({
+    ...projected,
+    // loadShipmentLifecycleShadowAuditBatch returns only after its
+    // transaction-level role assertion succeeds.
+    readOnlyRoleVerified: true,
+    setupDurationMs: durationMs(setupStartedAtMs, setupFinishedAtMs, "setup duration"),
+    connectDurationMs: durationMs(
+      connectStartedAtMs,
+      connectFinishedAtMs,
+      "connect duration",
+    ),
+    repositoryDurationMs: durationMs(
+      repositoryStartedAtMs,
+      repositoryFinishedAtMs,
+      "repository duration",
+    ),
+    projectionDurationMs: durationMs(
+      projectionStartedAtMs,
+      projectionFinishedAtMs,
+      "projection duration",
+    ),
+    cleanupDurationMs: durationMs(
+      cleanupStartedAtMs,
+      cleanupFinishedAtMs,
+      "cleanup duration",
+    ),
+    totalDurationMs: durationMs(totalStartedAtMs, totalFinishedAtMs, "total duration"),
+    rssBeforeBytes,
+    rssAfterLoadBytes,
+    rssAfterProjectionBytes,
+    rssAfterCleanupBytes,
+    observedMaxRssBytes: Math.max(
+      rssBeforeBytes,
+      rssAfterLoadBytes,
+      rssAfterProjectionBytes,
+      rssAfterCleanupBytes,
+    ),
+  });
 }
 
-export async function main(): Promise<void> {
-  const aggregate = await runShipmentLifecycleShadowAuditJob();
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  const options = parseShipmentLifecycleShadowAuditCliOptions(argv);
+  if (options.help) {
+    process.stdout.write(`${usage()}\n`);
+    return;
+  }
+  const aggregate = await runShipmentLifecycleShadowAuditJob({
+    repositoryOptions: options.repositoryOptions,
+  });
   process.stdout.write(`${JSON.stringify(aggregate)}\n`);
 }
 
@@ -246,7 +557,9 @@ if (isDirectExecution(import.meta.url, process.argv[1])) {
   main().catch((error: unknown) => {
     const errorCode = error instanceof ShipmentLifecycleShadowAuditRepositoryError
       ? error.code
-      : "SHIPMENT_LIFECYCLE_SHADOW_AUDIT_FAILED";
+      : error instanceof ShipmentLifecycleShadowAuditJobError
+        ? error.code
+        : "SHIPMENT_LIFECYCLE_SHADOW_AUDIT_FAILED";
     process.stderr.write(JSON.stringify({ status: "failed", errorCode }) + "\n");
     process.exitCode = 1;
   });

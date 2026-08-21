@@ -341,6 +341,8 @@ export const shippingProviderLabels = wmsSchema.table("shipping_provider_labels"
 }, (table) => [
   uniqueIndex("uq_shipping_provider_labels_provider_label")
     .on(table.provider, table.providerLabelId),
+  index("idx_shipping_provider_labels_shadow_scan")
+    .on(table.provider, table.id.desc()),
   index("idx_shipping_provider_labels_tracking").on(table.provider, table.normalizedTrackingNumber),
   index("idx_shipping_provider_labels_status_observed").on(table.labelStatus, table.firstObservedAt),
   index("idx_shipping_provider_labels_direction_status")

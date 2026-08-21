@@ -2,17 +2,34 @@ import type { PoolClient } from "pg";
 
 type QueryClient = Pick<PoolClient, "query">;
 
-const DEFAULT_LABEL_LIMIT = 1_000;
-const MAX_LABEL_LIMIT = 5_000;
-const DEFAULT_MAX_EVENTS_PER_LABEL = 50;
-const MAX_EVENTS_PER_LABEL = 500;
-const DEFAULT_MAX_CURRENT_MATCHES = 50_000;
-const MAX_CURRENT_MATCHES = 100_000;
+const MEBIBYTE = 1_024 * 1_024;
+const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
+
+export const SHIPMENT_LIFECYCLE_SHADOW_AUDIT_LIMITS = Object.freeze({
+  defaultLabelLimit: 25,
+  maxLabelLimit: 5_000,
+  defaultMaxEventsPerLabel: 50,
+  maxEventsPerLabel: 500,
+  defaultMaxPageEvents: 2_500,
+  maxPageEvents: 10_000,
+  defaultMaxCurrentMatches: 5_000,
+  maxCurrentMatches: 100_000,
+  defaultMaxEventPayloadBytes: MEBIBYTE,
+  maxEventPayloadBytes: 4 * MEBIBYTE,
+  defaultMaxPagePayloadBytes: 8 * MEBIBYTE,
+  maxPagePayloadBytes: 64 * MEBIBYTE,
+  defaultStatementTimeoutMs: 30_000,
+  maxStatementTimeoutMs: 120_000,
+  defaultLockTimeoutMs: 2_000,
+  maxLockTimeoutMs: 10_000,
+  defaultIdleInTransactionTimeoutMs: 45_000,
+  maxIdleInTransactionTimeoutMs: 300_000,
+});
+
 /**
  * Application relations requiring explicit SELECT grants. The role assertion's
  * pg_catalog reads use PostgreSQL's built-in catalog visibility and are not grant targets.
  */
-
 export const SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS: readonly string[] = Object.freeze([
   "wms.carrier_tracking_event_matches",
   "wms.carrier_tracking_events",
@@ -20,17 +37,33 @@ export const SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS: readonly string[] = O
   "wms.shipping_provider_label_events",
   "wms.shipping_provider_labels",
 ]);
-const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
-const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
-const DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT_MS = 45_000;
+
+const REQUIRED_RELATION_VALUES_SQL = SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS
+  .map((relation) => `('${relation}', '${relation.split(".")[0]}')`)
+  .join(",\n      ");
 
 export const SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL = `
-  WITH user_tables AS (
+  WITH required_relations(qualified_name, schema_name) AS (
+    VALUES
+      ${REQUIRED_RELATION_VALUES_SQL}
+  ),
+  required_relation_state AS MATERIALIZED (
+    SELECT
+      qualified_name,
+      schema_name,
+      to_regclass(qualified_name) AS relation_oid
+    FROM required_relations
+  ),
+  required_schemas AS (
+    SELECT DISTINCT schema_name
+    FROM required_relations
+  ),
+  user_write_relations AS (
     SELECT format('%I.%I', namespace.nspname, relation.relname) AS qualified_name
     FROM pg_catalog.pg_class AS relation
     JOIN pg_catalog.pg_namespace AS namespace
       ON namespace.oid = relation.relnamespace
-    WHERE relation.relkind IN ('r', 'p')
+    WHERE relation.relkind IN ('r', 'p', 'v', 'f')
       AND namespace.nspname <> 'information_schema'
       AND namespace.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
   ),
@@ -53,13 +86,43 @@ export const SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL = `
     current_setting('transaction_read_only') AS transaction_read_only,
     COALESCE((
       SELECT COUNT(*)
-      FROM user_tables
+      FROM required_relation_state
+      WHERE relation_oid IS NULL
+        OR NOT COALESCE(
+          has_table_privilege(current_user, relation_oid, 'SELECT'),
+          false
+        )
+    ), 0)::text AS missing_required_select_count,
+    COALESCE((
+      SELECT COUNT(*)
+      FROM required_relation_state AS required
+      JOIN pg_catalog.pg_class AS relation
+        ON relation.oid = required.relation_oid
+      WHERE relation.relrowsecurity
+    ), 0)::text AS required_rls_count,
+    COALESCE((
+      SELECT COUNT(*)
+      FROM required_schemas
+      WHERE NOT has_schema_privilege(current_user, schema_name, 'USAGE')
+    ), 0)::text AS missing_required_schema_usage_count,
+    COALESCE((
+      SELECT COUNT(*)
+      FROM user_write_relations
       WHERE has_table_privilege(
         current_user,
         qualified_name,
         'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES'
       )
     ), 0)::text AS mutable_table_count,
+    COALESCE((
+      SELECT COUNT(*)
+      FROM user_write_relations
+      WHERE has_any_column_privilege(
+        current_user,
+        qualified_name,
+        'INSERT,UPDATE,REFERENCES'
+      )
+    ), 0)::text AS mutable_column_relation_count,
     COALESCE((
       SELECT COUNT(*)
       FROM user_sequences
@@ -76,6 +139,16 @@ export const SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL = `
       WHERE has_schema_privilege(current_user, schema_name, 'CREATE')
     ), 0)::text AS mutable_schema_count,
     has_database_privilege(current_user, current_database(), 'CREATE') AS mutable_database,
+    has_database_privilege(current_user, current_database(), 'TEMPORARY')
+      AS database_temporary_privilege,
+    COALESCE((
+      SELECT COUNT(*)
+      FROM pg_catalog.pg_roles AS candidate_role
+      WHERE candidate_role.rolname <> current_user
+        -- Reject every direct or nested membership conservatively instead of
+        -- depending on version-specific pg_auth_members option columns.
+        AND pg_catalog.pg_has_role(candidate_role.oid, 'MEMBER')
+    ), 0)::text AS other_role_membership_count,
     role.rolsuper
       OR role.rolcreaterole
       OR role.rolcreatedb
@@ -86,31 +159,51 @@ export const SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL = `
 `;
 
 export const SHIPMENT_LIFECYCLE_SHADOW_LABEL_BATCH_SQL = `
+  WITH selected_labels AS MATERIALIZED (
+    SELECT
+      label.id,
+      label.provider,
+      label.provider_label_id,
+      label.tracking_number,
+      label.label_status,
+      label.label_direction,
+      label.first_observed_at,
+      label.last_observed_at
+    FROM wms.shipping_provider_labels AS label
+    WHERE label.provider = 'shipstation'
+      AND ($2::bigint IS NULL OR label.id < $2::bigint)
+    ORDER BY label.id DESC
+    LIMIT $1
+  ),
+  event_stats AS (
+    SELECT
+      selected.id AS shipping_provider_label_id,
+      COUNT(event.id)::text AS label_event_count,
+      COALESCE(SUM(octet_length(event.sanitized_payload::text)), 0)::text
+        AS label_event_payload_bytes,
+      COALESCE(MAX(octet_length(event.sanitized_payload::text)), 0)::text
+        AS max_event_payload_bytes
+    FROM selected_labels AS selected
+    LEFT JOIN wms.shipping_provider_label_events AS event
+      ON event.shipping_provider_label_id = selected.id
+    GROUP BY selected.id
+  )
   SELECT
-    label.id::text AS shipping_provider_label_id,
-    label.provider,
-    label.provider_label_id,
-    label.tracking_number,
-    label.label_status,
-    label.label_direction,
-    label.first_observed_at,
-    label.last_observed_at,
-    COUNT(event.id)::text AS label_event_count
-  FROM wms.shipping_provider_labels AS label
-  LEFT JOIN wms.shipping_provider_label_events AS event
-    ON event.shipping_provider_label_id = label.id
-  WHERE label.provider = 'shipstation'
-  GROUP BY
-    label.id,
-    label.provider,
-    label.provider_label_id,
-    label.tracking_number,
-    label.label_status,
-    label.label_direction,
-    label.first_observed_at,
-    label.last_observed_at
-  ORDER BY label.last_observed_at DESC, label.id DESC
-  LIMIT $1
+    selected.id::text AS shipping_provider_label_id,
+    selected.provider,
+    selected.provider_label_id,
+    selected.tracking_number,
+    selected.label_status,
+    selected.label_direction,
+    selected.first_observed_at,
+    selected.last_observed_at,
+    event_stats.label_event_count,
+    event_stats.label_event_payload_bytes,
+    event_stats.max_event_payload_bytes
+  FROM selected_labels AS selected
+  JOIN event_stats
+    ON event_stats.shipping_provider_label_id = selected.id
+  ORDER BY selected.id DESC
 `;
 
 export const SHIPMENT_LIFECYCLE_SHADOW_LABEL_EVENTS_SQL = `
@@ -164,6 +257,10 @@ const SNAPSHOT_SQL = `
   SELECT transaction_timestamp() AS snapshot_at
 `;
 
+export interface ShipmentLifecycleShadowAuditCursor {
+  readonly beforeLabelId: string;
+}
+
 export interface ShipmentLifecycleShadowLabelRow {
   readonly shippingProviderLabelId: string;
   readonly provider: string;
@@ -174,6 +271,8 @@ export interface ShipmentLifecycleShadowLabelRow {
   readonly firstObservedAt: string;
   readonly lastObservedAt: string;
   readonly labelEventCount: number;
+  readonly labelEventPayloadBytes: number;
+  readonly maxEventPayloadBytes: number;
 }
 
 export interface ShipmentLifecycleShadowLabelEventRow {
@@ -202,24 +301,48 @@ export interface ShipmentLifecycleShadowAuditBatch {
   readonly snapshotAt: string;
   readonly labelLimit: number;
   readonly batchLimitReached: boolean;
+  readonly nextCursor: ShipmentLifecycleShadowAuditCursor | null;
+  readonly selectedEventPayloadBytes: number;
+  readonly maxEventPayloadBytes: number;
+  readonly databaseTemporaryPrivilege: boolean;
   readonly labels: readonly ShipmentLifecycleShadowLabelRow[];
   readonly labelEvents: readonly ShipmentLifecycleShadowLabelEventRow[];
   readonly currentCarrierMatches: readonly ShipmentLifecycleShadowCurrentCarrierMatchRow[];
 }
 
 export interface ShipmentLifecycleShadowAuditRepositoryOptions {
+  readonly cursor?: ShipmentLifecycleShadowAuditCursor | null;
   readonly labelLimit?: number;
   readonly maxEventsPerLabel?: number;
+  readonly maxPageEvents?: number;
   readonly maxCurrentMatches?: number;
+  readonly maxEventPayloadBytes?: number;
+  readonly maxPagePayloadBytes?: number;
   readonly statementTimeoutMs?: number;
   readonly lockTimeoutMs?: number;
   readonly idleInTransactionTimeoutMs?: number;
+}
+
+export interface NormalizedShipmentLifecycleShadowAuditRepositoryOptions {
+  readonly cursor: ShipmentLifecycleShadowAuditCursor | null;
+  readonly labelLimit: number;
+  readonly maxEventsPerLabel: number;
+  readonly maxPageEvents: number;
+  readonly maxCurrentMatches: number;
+  readonly maxEventPayloadBytes: number;
+  readonly maxPagePayloadBytes: number;
+  readonly statementTimeoutMs: number;
+  readonly lockTimeoutMs: number;
+  readonly idleInTransactionTimeoutMs: number;
 }
 
 export type ShipmentLifecycleShadowAuditErrorCode =
   | "HISTORY_BOUND_EXCEEDED"
   | "INVALID_DATABASE_EVIDENCE"
   | "READ_ONLY_ROLE_REQUIRED"
+  | "REQUIRED_RELATION_RLS_UNPROVEN"
+  | "REQUIRED_SCHEMA_USAGE_PRIVILEGE_MISSING"
+  | "REQUIRED_SELECT_PRIVILEGE_MISSING"
   | "ROLLBACK_FAILED";
 
 export class ShipmentLifecycleShadowAuditRepositoryError extends Error {
@@ -250,6 +373,79 @@ function boundedPositiveInteger(
   return value;
 }
 
+function normalizedCursor(
+  cursor: ShipmentLifecycleShadowAuditCursor | null | undefined,
+): ShipmentLifecycleShadowAuditCursor | null {
+  if (cursor === undefined || cursor === null) return null;
+  if (typeof cursor !== "object") throw new TypeError("cursor must be an object or null");
+  const labelId = cursor.beforeLabelId;
+  if (typeof labelId !== "string" || !/^[1-9][0-9]*$/.test(labelId)) {
+    throw new TypeError("cursor.beforeLabelId must be a positive decimal PostgreSQL bigint");
+  }
+  if (BigInt(labelId) > POSTGRES_BIGINT_MAX) {
+    throw new RangeError("cursor.beforeLabelId exceeds the PostgreSQL bigint range");
+  }
+  return Object.freeze({ beforeLabelId: labelId });
+}
+
+export function normalizeShipmentLifecycleShadowAuditRepositoryOptions(
+  options: ShipmentLifecycleShadowAuditRepositoryOptions = {},
+): NormalizedShipmentLifecycleShadowAuditRepositoryOptions {
+  const limits = SHIPMENT_LIFECYCLE_SHADOW_AUDIT_LIMITS;
+  const normalized = {
+    cursor: normalizedCursor(options.cursor),
+    labelLimit: boundedPositiveInteger(
+      options.labelLimit ?? limits.defaultLabelLimit,
+      "labelLimit",
+      limits.maxLabelLimit,
+    ),
+    maxEventsPerLabel: boundedPositiveInteger(
+      options.maxEventsPerLabel ?? limits.defaultMaxEventsPerLabel,
+      "maxEventsPerLabel",
+      limits.maxEventsPerLabel,
+    ),
+    maxPageEvents: boundedPositiveInteger(
+      options.maxPageEvents ?? limits.defaultMaxPageEvents,
+      "maxPageEvents",
+      limits.maxPageEvents,
+    ),
+    maxCurrentMatches: boundedPositiveInteger(
+      options.maxCurrentMatches ?? limits.defaultMaxCurrentMatches,
+      "maxCurrentMatches",
+      limits.maxCurrentMatches,
+    ),
+    maxEventPayloadBytes: boundedPositiveInteger(
+      options.maxEventPayloadBytes ?? limits.defaultMaxEventPayloadBytes,
+      "maxEventPayloadBytes",
+      limits.maxEventPayloadBytes,
+    ),
+    maxPagePayloadBytes: boundedPositiveInteger(
+      options.maxPagePayloadBytes ?? limits.defaultMaxPagePayloadBytes,
+      "maxPagePayloadBytes",
+      limits.maxPagePayloadBytes,
+    ),
+    statementTimeoutMs: boundedPositiveInteger(
+      options.statementTimeoutMs ?? limits.defaultStatementTimeoutMs,
+      "statementTimeoutMs",
+      limits.maxStatementTimeoutMs,
+    ),
+    lockTimeoutMs: boundedPositiveInteger(
+      options.lockTimeoutMs ?? limits.defaultLockTimeoutMs,
+      "lockTimeoutMs",
+      limits.maxLockTimeoutMs,
+    ),
+    idleInTransactionTimeoutMs: boundedPositiveInteger(
+      options.idleInTransactionTimeoutMs ?? limits.defaultIdleInTransactionTimeoutMs,
+      "idleInTransactionTimeoutMs",
+      limits.maxIdleInTransactionTimeoutMs,
+    ),
+  } satisfies NormalizedShipmentLifecycleShadowAuditRepositoryOptions;
+  if (normalized.maxEventPayloadBytes > normalized.maxPagePayloadBytes) {
+    throw new RangeError("maxEventPayloadBytes must not exceed maxPagePayloadBytes");
+  }
+  return Object.freeze(normalized);
+}
+
 function safeCount(value: unknown, field: string): number {
   const count = Number(value);
   if (!Number.isSafeInteger(count) || count < 0) {
@@ -259,6 +455,17 @@ function safeCount(value: unknown, field: string): number {
     );
   }
   return count;
+}
+
+function safeCountSum(current: number, next: number, field: string): number {
+  const sum = current + next;
+  if (!Number.isSafeInteger(sum) || sum < 0) {
+    throw new ShipmentLifecycleShadowAuditRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      `${field} exceeds the safe integer range`,
+    );
+  }
+  return sum;
 }
 
 function requiredBoolean(value: unknown, field: string): boolean {
@@ -283,10 +490,10 @@ function requiredString(value: unknown, field: string): string {
 
 function positiveIdString(value: unknown, field: string): string {
   const id = requiredString(value, field);
-  if (!/^[1-9][0-9]*$/.test(id)) {
+  if (!/^[1-9][0-9]*$/.test(id) || BigInt(id) > POSTGRES_BIGINT_MAX) {
     throw new ShipmentLifecycleShadowAuditRepositoryError(
       "INVALID_DATABASE_EVIDENCE",
-      `${field} is not a positive decimal identifier`,
+      `${field} is not a positive PostgreSQL bigint identifier`,
     );
   }
   return id;
@@ -327,9 +534,13 @@ async function evidenceQuery(
   return result.rows as Record<string, unknown>[];
 }
 
+interface VerifiedShadowRoleEvidence {
+  readonly databaseTemporaryPrivilege: boolean;
+}
+
 export async function assertShipmentLifecycleShadowRoleIsReadOnly(
   client: QueryClient,
-): Promise<void> {
+): Promise<VerifiedShadowRoleEvidence> {
   const rows = await evidenceQuery(client, SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL);
   const row = rows[0];
   if (!row) {
@@ -338,20 +549,65 @@ export async function assertShipmentLifecycleShadowRoleIsReadOnly(
       "Could not verify the shipment lifecycle shadow database role",
     );
   }
+  const missingRequiredSelectCount = safeCount(
+    row.missing_required_select_count,
+    "missing required SELECT count",
+  );
+  if (missingRequiredSelectCount !== 0) {
+    throw new ShipmentLifecycleShadowAuditRepositoryError(
+      "REQUIRED_SELECT_PRIVILEGE_MISSING",
+      "The audit role lacks SELECT on one or more required relations",
+      { missingRequiredSelectCount },
+    );
+  }
+  const requiredRlsCount = safeCount(row.required_rls_count, "required RLS count");
+  if (requiredRlsCount !== 0) {
+    throw new ShipmentLifecycleShadowAuditRepositoryError(
+      "REQUIRED_RELATION_RLS_UNPROVEN",
+      "Row-level security is enabled on one or more required audit relations",
+      { requiredRlsCount },
+    );
+  }
+  const missingRequiredSchemaUsageCount = safeCount(
+    row.missing_required_schema_usage_count,
+    "missing required schema USAGE count",
+  );
+  if (missingRequiredSchemaUsageCount !== 0) {
+    throw new ShipmentLifecycleShadowAuditRepositoryError(
+      "REQUIRED_SCHEMA_USAGE_PRIVILEGE_MISSING",
+      "The audit role lacks USAGE on one or more required schemas",
+      { missingRequiredSchemaUsageCount },
+    );
+  }
+
   const transactionReadOnly = row.transaction_read_only === "on";
   const mutableTableCount = safeCount(row.mutable_table_count, "mutable table count");
+  const mutableColumnRelationCount = safeCount(
+    row.mutable_column_relation_count,
+    "mutable column relation count",
+  );
   const mutableSequenceCount = safeCount(row.mutable_sequence_count, "mutable sequence count");
   const sequenceUsageCount = safeCount(row.sequence_usage_count, "sequence usage count");
   const mutableSchemaCount = safeCount(row.mutable_schema_count, "mutable schema count");
   const mutableDatabase = requiredBoolean(row.mutable_database, "mutable database privilege");
+  const databaseTemporaryPrivilege = requiredBoolean(
+    row.database_temporary_privilege,
+    "database temporary privilege",
+  );
+  const otherRoleMembershipCount = safeCount(
+    row.other_role_membership_count,
+    "other role membership count",
+  );
   const elevatedRole = requiredBoolean(row.elevated_role, "elevated role status");
   if (
     !transactionReadOnly
     || mutableTableCount !== 0
+    || mutableColumnRelationCount !== 0
     || mutableSequenceCount !== 0
     || sequenceUsageCount !== 0
     || mutableSchemaCount !== 0
     || mutableDatabase
+    || otherRoleMembershipCount !== 0
     || elevatedRole
   ) {
     throw new ShipmentLifecycleShadowAuditRepositoryError(
@@ -360,14 +616,18 @@ export async function assertShipmentLifecycleShadowRoleIsReadOnly(
       {
         transactionReadOnly,
         mutableTableCount,
+        mutableColumnRelationCount,
         mutableSequenceCount,
         sequenceUsageCount,
         mutableSchemaCount,
         mutableDatabase,
+        databaseTemporaryPrivilege,
+        otherRoleMembershipCount,
         elevatedRole,
       },
     );
   }
+  return Object.freeze({ databaseTemporaryPrivilege });
 }
 
 function mapLabel(row: Record<string, unknown>): ShipmentLifecycleShadowLabelRow {
@@ -384,6 +644,11 @@ function mapLabel(row: Record<string, unknown>): ShipmentLifecycleShadowLabelRow
     firstObservedAt: timestamp(row.first_observed_at, "first_observed_at"),
     lastObservedAt: timestamp(row.last_observed_at, "last_observed_at"),
     labelEventCount: safeCount(row.label_event_count, "label_event_count"),
+    labelEventPayloadBytes: safeCount(
+      row.label_event_payload_bytes,
+      "label_event_payload_bytes",
+    ),
+    maxEventPayloadBytes: safeCount(row.max_event_payload_bytes, "max_event_payload_bytes"),
   });
 }
 
@@ -440,7 +705,7 @@ function mapCurrentCarrierMatch(
 
 async function loadBatchInsideTransaction(
   client: QueryClient,
-  input: Required<ShipmentLifecycleShadowAuditRepositoryOptions>,
+  input: NormalizedShipmentLifecycleShadowAuditRepositoryOptions,
 ): Promise<ShipmentLifecycleShadowAuditBatch> {
   await client.query("SELECT set_config('statement_timeout', $1, true)", [
     `${input.statementTimeoutMs}ms`,
@@ -451,7 +716,7 @@ async function loadBatchInsideTransaction(
   await client.query("SELECT set_config('idle_in_transaction_session_timeout', $1, true)", [
     `${input.idleInTransactionTimeoutMs}ms`,
   ]);
-  await assertShipmentLifecycleShadowRoleIsReadOnly(client);
+  const roleEvidence = await assertShipmentLifecycleShadowRoleIsReadOnly(client);
 
   const snapshotRows = await evidenceQuery(client, SNAPSHOT_SQL);
   const snapshot = snapshotRows[0];
@@ -465,8 +730,14 @@ async function loadBatchInsideTransaction(
   const rawLabelRows = await evidenceQuery(
     client,
     SHIPMENT_LIFECYCLE_SHADOW_LABEL_BATCH_SQL,
-    [input.labelLimit + 1],
+    [input.labelLimit + 1, input.cursor?.beforeLabelId ?? null],
   );
+  if (rawLabelRows.length > input.labelLimit + 1) {
+    throw new ShipmentLifecycleShadowAuditRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      "Shipment lifecycle shadow label selection exceeded its SQL row bound",
+    );
+  }
   const batchLimitReached = rawLabelRows.length > input.labelLimit;
   const labels = rawLabelRows.slice(0, input.labelLimit).map(mapLabel);
   const labelIds = labels.map((label) => label.shippingProviderLabelId);
@@ -478,7 +749,10 @@ async function loadBatchInsideTransaction(
     );
   }
 
-  const expectedEventCount = labels.reduce((sum, label) => {
+  let expectedEventCount = 0;
+  let selectedEventPayloadBytes = 0;
+  let maxEventPayloadBytes = 0;
+  for (const label of labels) {
     if (label.labelEventCount > input.maxEventsPerLabel) {
       throw new ShipmentLifecycleShadowAuditRepositoryError(
         "HISTORY_BOUND_EXCEEDED",
@@ -489,8 +763,48 @@ async function loadBatchInsideTransaction(
         },
       );
     }
-    return sum + label.labelEventCount;
-  }, 0);
+    if (label.maxEventPayloadBytes > input.maxEventPayloadBytes) {
+      throw new ShipmentLifecycleShadowAuditRepositoryError(
+        "HISTORY_BOUND_EXCEEDED",
+        "A selected label event exceeds the payload byte safety bound",
+        {
+          observedEventPayloadBytes: label.maxEventPayloadBytes,
+          maxEventPayloadBytes: input.maxEventPayloadBytes,
+        },
+      );
+    }
+    expectedEventCount = safeCountSum(
+      expectedEventCount,
+      label.labelEventCount,
+      "selected event count",
+    );
+    selectedEventPayloadBytes = safeCountSum(
+      selectedEventPayloadBytes,
+      label.labelEventPayloadBytes,
+      "selected event payload bytes",
+    );
+    maxEventPayloadBytes = Math.max(maxEventPayloadBytes, label.maxEventPayloadBytes);
+  }
+  if (expectedEventCount > input.maxPageEvents) {
+    throw new ShipmentLifecycleShadowAuditRepositoryError(
+      "HISTORY_BOUND_EXCEEDED",
+      "Selected label events exceed the page row-count safety bound",
+      {
+        expectedEventCount,
+        maxPageEvents: input.maxPageEvents,
+      },
+    );
+  }
+  if (selectedEventPayloadBytes > input.maxPagePayloadBytes) {
+    throw new ShipmentLifecycleShadowAuditRepositoryError(
+      "HISTORY_BOUND_EXCEEDED",
+      "Selected label-event payloads exceed the page byte safety bound",
+      {
+        selectedEventPayloadBytes,
+        maxPagePayloadBytes: input.maxPagePayloadBytes,
+      },
+    );
+  }
 
   const labelEvents = expectedEventCount === 0
     ? []
@@ -539,10 +853,18 @@ async function loadBatchInsideTransaction(
     );
   }
 
+  const cursorLabel = batchLimitReached ? labels.at(-1) : undefined;
+  const nextCursor = cursorLabel === undefined
+    ? null
+    : Object.freeze({ beforeLabelId: cursorLabel.shippingProviderLabelId });
   return Object.freeze({
     snapshotAt: timestamp(snapshot.snapshot_at, "snapshot_at"),
     labelLimit: input.labelLimit,
     batchLimitReached,
+    nextCursor,
+    selectedEventPayloadBytes,
+    maxEventPayloadBytes,
+    databaseTemporaryPrivilege: roleEvidence.databaseTemporaryPrivilege,
     labels: Object.freeze(labels),
     labelEvents: Object.freeze(labelEvents),
     currentCarrierMatches: Object.freeze(currentCarrierMatches),
@@ -553,38 +875,7 @@ export async function loadShipmentLifecycleShadowAuditBatch(
   client: QueryClient,
   options: ShipmentLifecycleShadowAuditRepositoryOptions = {},
 ): Promise<ShipmentLifecycleShadowAuditBatch> {
-  const input: Required<ShipmentLifecycleShadowAuditRepositoryOptions> = {
-    labelLimit: boundedPositiveInteger(
-      options.labelLimit ?? DEFAULT_LABEL_LIMIT,
-      "labelLimit",
-      MAX_LABEL_LIMIT,
-    ),
-    maxEventsPerLabel: boundedPositiveInteger(
-      options.maxEventsPerLabel ?? DEFAULT_MAX_EVENTS_PER_LABEL,
-      "maxEventsPerLabel",
-      MAX_EVENTS_PER_LABEL,
-    ),
-    maxCurrentMatches: boundedPositiveInteger(
-      options.maxCurrentMatches ?? DEFAULT_MAX_CURRENT_MATCHES,
-      "maxCurrentMatches",
-      MAX_CURRENT_MATCHES,
-    ),
-    statementTimeoutMs: boundedPositiveInteger(
-      options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
-      "statementTimeoutMs",
-      120_000,
-    ),
-    lockTimeoutMs: boundedPositiveInteger(
-      options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
-      "lockTimeoutMs",
-      10_000,
-    ),
-    idleInTransactionTimeoutMs: boundedPositiveInteger(
-      options.idleInTransactionTimeoutMs ?? DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT_MS,
-      "idleInTransactionTimeoutMs",
-      300_000,
-    ),
-  };
+  const input = normalizeShipmentLifecycleShadowAuditRepositoryOptions(options);
 
   await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
   let batch: ShipmentLifecycleShadowAuditBatch | undefined;
