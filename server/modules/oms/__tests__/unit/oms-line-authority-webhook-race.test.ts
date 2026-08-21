@@ -100,9 +100,9 @@ describe("oms-line-authority — non-authorizing events must not downgrade a fre
   });
 
   it("orders/updated is intentionally NOT an authorizing topic", () => {
-    // The whole failure mode depends on this: orders/updated cannot re-authorize
-    // a line, so the ONLY protection against the race is deriving from fresh
-    // committed state. If orders/updated ever becomes authorizing, revisit this.
+    // orders/updated cannot create paid authority. It may only refresh operational
+    // readiness up to the already-committed paid quantity, so the row lock still
+    // protects the paid authority established by an authorizing event.
     const authorizingBlock = AUTHORITY_SRC.slice(
       AUTHORITY_SRC.indexOf("AUTHORIZING_TOPICS"),
       AUTHORITY_SRC.indexOf("AUTHORIZING_TOPICS") + 400,
@@ -122,11 +122,15 @@ describe("oms.service duplicate ingest", () => {
     expect(idx).toBeGreaterThan(-1);
     const block = OMS_SERVICE_SRC.slice(idx - 350, idx + 3600);
 
-    expect(block).toContain(".for(\"update\")");
+    expect(block).toContain('.for("update")');
     expect(block).toContain(marker);
-    expect(block).toContain("buildLineAuthorityState(data, item, previousAuthority)");
+    expect(block).toContain(
+      "buildLineAuthorityState(data, item, previousAuthority)",
+    );
     expect(block).toContain("previous: previousAuthority");
-    expect(block).not.toContain("buildLineAuthorityState(data, item, existingLine)");
+    expect(block).not.toContain(
+      "buildLineAuthorityState(data, item, existingLine)",
+    );
   });
 });
 
@@ -139,8 +143,10 @@ describe("oms-webhooks — matched-line update derives authority from a row-lock
     expect(idx).toBeGreaterThan(-1);
     const block = WEBHOOKS_SRC.slice(idx, idx + 3400);
     // Locked re-read inside the transaction, before the derive.
-    expect(block).toContain(".for(\"update\")");
-    expect(block).toContain("const previousAuthority = lockedLine ?? existingLine");
+    expect(block).toContain('.for("update")');
+    expect(block).toContain(
+      "const previousAuthority = lockedLine ?? existingLine",
+    );
     // Authority is derived from the fresh read, and the ledger records it too.
     expect(block).toContain("previous: previousAuthority");
     // The derive must occur inside db.transaction (after the lock), not before.

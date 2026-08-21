@@ -8,7 +8,8 @@ export const OMS_LINE_AUTHORIZATION_STATUSES = [
   "review",
 ] as const;
 
-export type OmsLineAuthorizationStatus = typeof OMS_LINE_AUTHORIZATION_STATUSES[number];
+export type OmsLineAuthorizationStatus =
+  (typeof OMS_LINE_AUTHORIZATION_STATUSES)[number];
 
 export interface OmsLineAuthorityInput {
   sourceTopic: string;
@@ -20,6 +21,8 @@ export interface OmsLineAuthorityInput {
   previous?: {
     paidQuantity?: number | null;
     authorityFulfillableQuantity?: number | null;
+    cancelledQuantity?: number | null;
+    refundedQuantity?: number | null;
     authorizationStatus?: string | null;
     authorizedAt?: Date | string | null;
     authorizedByEventId?: string | null;
@@ -59,15 +62,33 @@ const PAID_FINANCIAL_STATUSES = new Set([
   "partially_refunded",
 ]);
 
-function requireNonNegativeInteger(value: number | null | undefined, field: string): number {
+const READINESS_REFRESH_TOPICS = new Set([
+  "orders/updated",
+  "shopify/reconcile",
+]);
+
+const READINESS_REFRESH_FINANCIAL_STATUSES = new Set([
+  "paid",
+  "partially_paid",
+]);
+
+function requireNonNegativeInteger(
+  value: number | null | undefined,
+  field: string,
+): number {
   const normalized = Number(value ?? 0);
   if (!Number.isInteger(normalized) || normalized < 0) {
-    throw new Error(`OMS line authority ${field} must be a non-negative integer (got ${String(value)})`);
+    throw new Error(
+      `OMS line authority ${field} must be a non-negative integer (got ${String(value)})`,
+    );
   }
   return normalized;
 }
 
-function finiteNonNegativeIntegerOrNull(value: number | null | undefined, field: string): number | null {
+function finiteNonNegativeIntegerOrNull(
+  value: number | null | undefined,
+  field: string,
+): number | null {
   if (value === null || value === undefined) return null;
   return requireNonNegativeInteger(value, field);
 }
@@ -91,8 +112,13 @@ function coerceDate(value: Date | string | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-export function deriveOmsLineAuthority(input: OmsLineAuthorityInput): OmsLineAuthorityState {
-  const observedQuantity = requireNonNegativeInteger(input.quantity, "quantity");
+export function deriveOmsLineAuthority(
+  input: OmsLineAuthorityInput,
+): OmsLineAuthorityState {
+  const observedQuantity = requireNonNegativeInteger(
+    input.quantity,
+    "quantity",
+  );
   const eventCanAuthorize =
     canSourceTopicAuthorizeOmsLine(input.sourceTopic) &&
     isPaidFinancialStatus(input.financialStatus);
@@ -127,8 +153,36 @@ export function deriveOmsLineAuthority(input: OmsLineAuthorityInput): OmsLineAut
     input.previous?.authorityFulfillableQuantity ?? 0,
     "previous.authorityFulfillableQuantity",
   );
+  const previousCancelledQuantity = requireNonNegativeInteger(
+    input.previous?.cancelledQuantity ?? 0,
+    "previous.cancelledQuantity",
+  );
+  const previousRefundedQuantity = requireNonNegativeInteger(
+    input.previous?.refundedQuantity ?? 0,
+    "previous.refundedQuantity",
+  );
   const paidQuantity = Math.min(previousPaidQuantity, observedQuantity);
-  const authorityFulfillableQuantity = Math.min(previousFulfillableQuantity, paidQuantity);
+  const incomingFulfillableQuantity = finiteNonNegativeIntegerOrNull(
+    input.fulfillableQuantity,
+    "fulfillableQuantity",
+  );
+  const previousAuthorizationStatus = String(
+    input.previous?.authorizationStatus ??
+      statusForQuantities(previousPaidQuantity),
+  );
+  const canRefreshOperationalReadiness =
+    READINESS_REFRESH_TOPICS.has(input.sourceTopic) &&
+    READINESS_REFRESH_FINANCIAL_STATUSES.has(
+      String(input.financialStatus ?? ""),
+    ) &&
+    incomingFulfillableQuantity !== null &&
+    previousCancelledQuantity === 0 &&
+    previousRefundedQuantity === 0 &&
+    (previousAuthorizationStatus === "seen" ||
+      previousAuthorizationStatus === "authorized");
+  const authorityFulfillableQuantity = canRefreshOperationalReadiness
+    ? Math.min(paidQuantity, incomingFulfillableQuantity)
+    : Math.min(previousFulfillableQuantity, paidQuantity);
 
   return {
     channelObservedQuantity: observedQuantity,
@@ -148,7 +202,10 @@ export function getOmsLineMaterializableQuantity(line: {
 }): number {
   const explicitAuthority = line.authorityFulfillableQuantity;
   if (explicitAuthority !== null && explicitAuthority !== undefined) {
-    return requireNonNegativeInteger(explicitAuthority, "authorityFulfillableQuantity");
+    return requireNonNegativeInteger(
+      explicitAuthority,
+      "authorityFulfillableQuantity",
+    );
   }
   return requireNonNegativeInteger(line.quantity ?? 0, "quantity");
 }
