@@ -135,9 +135,60 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(reconciliationStart).toBeGreaterThan(-1);
     expect(reconciliationSource).toContain("provider_item_targets AS");
     expect(reconciliationSource).toContain("jsonb_array_elements(");
-    expect(reconciliationSource).toContain("'^wms-item-[1-9][0-9]*$'");
+    expect(reconciliationSource).toContain(
+      "FROM '^wms-item-([1-9][0-9]{0,9})$'",
+    );
+    expect(reconciliationSource).toContain("::bigint <= 2147483647");
+    expect(reconciliationSource).toContain(
+      "THEN bounded_key.wms_shipment_item_id_text::integer",
+    );
+    expect(reconciliationSource).not.toContain("'^wms-item-([1-9][0-9]*)$')::integer");
     expect(reconciliationSource).toContain("JOIN wms.outbound_shipment_items AS source_item");
+    expect(reconciliationSource).toContain(
+      "ON source_item.id = provider_identity.shipment_item_id",
+    );
     expect(reconciliationSource).toContain("'provider_line_item_identity'::text AS source");
+    expect(repositorySource).toContain("source: observation.observationSource");
+  });
+
+  it("bounds the historical provider order key before casting it to an integer", () => {
+    const reconciliationStart = repositorySource.indexOf(
+      "async reconcileProviderLabelLinks(provider, providerLabelId, reconciledAt)",
+    );
+    const reconciliationSource = repositorySource.slice(reconciliationStart);
+
+    expect(reconciliationStart).toBeGreaterThan(-1);
+    expect(reconciliationSource).toContain(
+      "FROM '^echelon-wms-shp-([1-9][0-9]{0,9})$'",
+    );
+    expect(reconciliationSource).toContain(
+      "bounded_order_key.legacy_wms_shipment_id_text::bigint <= 2147483647",
+    );
+    expect(reconciliationSource).toContain(
+      "THEN bounded_order_key.legacy_wms_shipment_id_text::integer",
+    );
+    expect(reconciliationSource).not.toContain(
+      "substring(label.provider_order_key FROM '^echelon-wms-shp-([0-9]+)$')::integer",
+    );
+  });
+
+  it("keeps provider-label observation timestamps monotonic after lock acquisition", () => {
+    const observationStart = repositorySource.indexOf("async observeProviderLabel(observation)");
+    const reconciliationStart = repositorySource.indexOf(
+      "async reconcileProviderLabelLinks(provider, providerLabelId, reconciledAt)",
+    );
+    const observationSource = repositorySource.slice(observationStart, reconciliationStart);
+
+    expect(observationStart).toBeGreaterThan(-1);
+    expect(observationSource).toMatch(
+      /firstObservedAt:\s*sql`LEAST\(\s*\$\{shippingProviderLabels\.firstObservedAt\},\s*\$\{observation\.observedAt\}\s*\)`/,
+    );
+    expect(observationSource).toMatch(
+      /lastObservedAt:\s*sql`GREATEST\(\s*\$\{shippingProviderLabels\.lastObservedAt\},\s*\$\{observation\.observedAt\}\s*\)`/,
+    );
+    expect(observationSource).toMatch(
+      /updatedAt:\s*sql`GREATEST\(\s*\$\{shippingProviderLabels\.updatedAt\},\s*\$\{observation\.observedAt\}\s*\)`/,
+    );
   });
 
   it("prefers exact package identities over stale provider order and line-item fallbacks", () => {

@@ -4,6 +4,10 @@ import type {
   ShipStationPhysicalRecoveryClient,
 } from "../shipping/shipstation-physical-recovery.client";
 import type { CarrierTrackingService } from "../shipping/carrier-tracking.service";
+import {
+  normalizeExactPositiveWmsShipmentItems,
+  type ExactWmsShipmentItem,
+} from "../shipping/shipstation-provider-contents.domain";
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 500;
@@ -28,6 +32,7 @@ export interface ShipStationPhysicalRecoveryCandidate {
   provider: "shopify" | "ebay";
   wmsShipmentIds: number[];
   wmsShipmentItemIds: number[];
+  wmsShipmentItems: readonly ExactWmsShipmentItem[];
   oldestShipmentCreatedAt: Date | string;
 }
 
@@ -122,16 +127,22 @@ function normalizeCandidate(row: Record<string, unknown>): ShipStationPhysicalRe
   if (!oldestShipmentCreatedAt || Number.isNaN(new Date(oldestShipmentCreatedAt).getTime())) {
     throw new Error("oldest_shipment_created_at must be a valid timestamp");
   }
+  const wmsShipmentItems = normalizeExactPositiveWmsShipmentItems(
+    row.wms_shipment_items,
+  );
+  if (!wmsShipmentItems) {
+    throw new Error(
+      "wms_shipment_items must contain unique positive PostgreSQL-integer item quantities",
+    );
+  }
   return {
     wmsOrderId: requiredPositiveInteger(row.wms_order_id, "wms_order_id"),
     omsOrderId: requiredPositiveInteger(row.oms_order_id, "oms_order_id"),
     orderNumber: requiredString(row.order_number, "order_number"),
     provider,
     wmsShipmentIds: parsePgIntegerArray(row.wms_shipment_ids, "wms_shipment_ids"),
-    wmsShipmentItemIds: parsePgIntegerArray(
-      row.wms_shipment_item_ids,
-      "wms_shipment_item_ids",
-    ),
+    wmsShipmentItemIds: wmsShipmentItems.map((item) => item.sourceShipmentItemId),
+    wmsShipmentItems,
     oldestShipmentCreatedAt,
   };
 }
@@ -175,10 +186,7 @@ export async function findShipStationPhysicalRecoveryCandidates(
   const result = await dbArg.execute(sql`
     WITH covered_provider_item_ids AS (
       SELECT DISTINCT
-        substring(
-          provider_item->>'lineItemKey'
-          FROM '^wms-item-([1-9][0-9]*)$'
-        )::integer AS shipment_item_id
+        provider_identity.shipment_item_id
       FROM wms.shipping_provider_labels AS label
       JOIN wms.shipping_provider_label_events AS event
         ON event.shipping_provider_label_id = label.id
@@ -189,6 +197,21 @@ export async function findShipStationPhysicalRecoveryCandidates(
           ELSE '[]'::jsonb
         END
       ) AS provider_item
+      -- Historical v1 events were not DB-range validated. Extract at most ten
+      -- digits before any cast, then cast to integer only after the bound.
+      CROSS JOIN LATERAL (
+        SELECT CASE
+          WHEN bounded_key.wms_shipment_item_id_text::bigint <= 2147483647
+          THEN bounded_key.wms_shipment_item_id_text::integer
+          ELSE NULL
+        END AS shipment_item_id
+        FROM (
+          SELECT substring(
+            provider_item->>'lineItemKey'
+            FROM '^wms-item-([1-9][0-9]{0,9})$'
+          ) AS wms_shipment_item_id_text
+        ) AS bounded_key
+      ) AS provider_identity
       WHERE label.provider = 'shipstation'
         AND label.label_status = 'active'
         AND EXISTS (
@@ -197,14 +220,15 @@ export async function findShipStationPhysicalRecoveryCandidates(
           WHERE event_match.shipping_provider_label_id = label.id
             AND event_match.match_status = 'matched'
         )
-        AND provider_item->>'lineItemKey' ~ '^wms-item-[1-9][0-9]*$'
+        AND provider_identity.shipment_item_id IS NOT NULL
     ),
     eligible_items AS (
       SELECT
         os.id AS shipment_id,
         os.order_id,
         os.created_at,
-        osi.id AS shipment_item_id
+        osi.id AS shipment_item_id,
+        osi.qty AS quantity
       FROM wms.outbound_shipments AS os
       JOIN wms.outbound_shipment_items AS osi ON osi.shipment_id = os.id
       JOIN wms.order_items AS oi ON oi.id = osi.order_item_id
@@ -234,6 +258,13 @@ export async function findShipStationPhysicalRecoveryCandidates(
         DISTINCT eligible.shipment_item_id
         ORDER BY eligible.shipment_item_id
       )::int[] AS wms_shipment_item_ids,
+      JSONB_AGG(
+        JSONB_BUILD_OBJECT(
+          'sourceShipmentItemId', eligible.shipment_item_id,
+          'quantity', eligible.quantity
+        )
+        ORDER BY eligible.shipment_item_id
+      ) AS wms_shipment_items,
       MIN(eligible.created_at) AS oldest_shipment_created_at
     FROM eligible_items AS eligible
     JOIN wms.orders AS wo ON wo.id = eligible.order_id
@@ -258,16 +289,51 @@ export async function findShipStationPhysicalRecoveryCandidates(
   return (result?.rows ?? []).map((row: Record<string, unknown>) => normalizeCandidate(row));
 }
 
+function exactPackageContents(
+  physicalPackage: ShipStationCompletedPhysicalPackage,
+): readonly ExactWmsShipmentItem[] | null {
+  if (physicalPackage.isReturnLabel !== false) return null;
+  return normalizeExactPositiveWmsShipmentItems(physicalPackage.wmsShipmentItems);
+}
+
+function eligibleQuantityByShipmentItemId(
+  candidates: readonly ShipStationPhysicalRecoveryCandidate[],
+): ReadonlyMap<number, number> {
+  const quantities = new Map<number, number>();
+  for (const candidate of candidates) {
+    for (const item of candidate.wmsShipmentItems) {
+      const prior = quantities.get(item.sourceShipmentItemId);
+      if (prior !== undefined && prior !== item.quantity) {
+        throw new Error(
+          `WMS shipment item ${item.sourceShipmentItemId} has conflicting recovery quantities`,
+        );
+      }
+      quantities.set(item.sourceShipmentItemId, item.quantity);
+    }
+  }
+  return quantities;
+}
+
 function packageBelongsToCandidate(
   physicalPackage: ShipStationCompletedPhysicalPackage,
-  candidateItemIds: Set<number>,
+  candidateItemIds: ReadonlySet<number>,
+  eligibleQuantities: ReadonlyMap<number, number>,
 ): boolean {
-  return physicalPackage.wmsShipmentItemIds.some((itemId) => candidateItemIds.has(itemId));
+  const providerItems = exactPackageContents(physicalPackage);
+  return providerItems !== null
+    && providerItems.some((item) => candidateItemIds.has(item.sourceShipmentItemId))
+    && providerItems.every(
+      (item) => eligibleQuantities.get(item.sourceShipmentItemId) === item.quantity,
+    );
 }
 
 export function buildShipStationRecoveredLabelObservation(
   physicalPackage: ShipStationCompletedPhysicalPackage,
 ): Record<string, unknown> {
+  const providerItems = exactPackageContents(physicalPackage);
+  if (!providerItems) {
+    throw new Error("Recovered provider package lacks exact positive item quantities");
+  }
   return {
     shipmentId: physicalPackage.legacyShipStationShipmentId,
     orderId: null,
@@ -277,8 +343,10 @@ export function buildShipStationRecoveredLabelObservation(
     serviceCode: physicalPackage.serviceCode,
     shipDate: physicalPackage.shipDate,
     voidDate: null,
-    shipmentItems: physicalPackage.wmsShipmentItemIds.map((shipmentItemId) => ({
-      lineItemKey: `wms-item-${shipmentItemId}`,
+    isReturnLabel: false,
+    shipmentItems: providerItems.map((item) => ({
+      lineItemKey: `wms-item-${item.sourceShipmentItemId}`,
+      quantity: item.quantity,
     })),
   };
 }
@@ -294,6 +362,7 @@ export function createShipStationPhysicalRecoveryService(
         throw new Error(`Unsupported recovery mode: ${String(mode)}`);
       }
       const candidates = await findShipStationPhysicalRecoveryCandidates(dbArg, options);
+      const eligibleQuantities = eligibleQuantityByShipmentItemId(candidates);
       const results: ShipStationPhysicalRecoveryCandidateResult[] = [];
       const processedLabels = new Map<string, {
         error: string | null;
@@ -323,12 +392,14 @@ export function createShipStationPhysicalRecoveryService(
         }
 
         try {
-          const expectedItemIds = new Set(candidate.wmsShipmentItemIds);
+          const expectedItemIds = new Set(
+            candidate.wmsShipmentItems.map((item) => item.sourceShipmentItemId),
+          );
           const providerPackages = await dependencies.client.listCompletedPackagesForOrder(
             candidate.orderNumber,
           );
           const authorizedPackages = providerPackages.filter((physicalPackage) =>
-            packageBelongsToCandidate(physicalPackage, expectedItemIds)
+            packageBelongsToCandidate(physicalPackage, expectedItemIds, eligibleQuantities)
           );
           if (authorizedPackages.length === 0) {
             noMatch += 1;

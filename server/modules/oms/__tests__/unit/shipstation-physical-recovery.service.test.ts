@@ -20,13 +20,17 @@ function candidateRow(overrides: Record<string, unknown> = {}) {
     provider: "shopify",
     wms_shipment_ids: [4842],
     wms_shipment_item_ids: [9638],
+    wms_shipment_items: [{
+      sourceShipmentItemId: 9638,
+      quantity: 1,
+    }],
     oldest_shipment_created_at: "2026-06-28T18:08:50.782Z",
     ...overrides,
   };
 }
 
 function combinedPackage(
-  wmsShipmentItemIds: number[] = [9636, 9638],
+  wmsShipmentItemIds: number[] = [9638],
 ): ShipStationCompletedPhysicalPackage {
   return {
     providerShipmentId: "se-755791888",
@@ -36,7 +40,9 @@ function combinedPackage(
     shipDate: "2026-07-01",
     carrierCode: "stamps_com",
     serviceCode: "usps_ground_advantage",
-    wmsShipmentItemIds,
+    isReturnLabel: false,
+    wmsShipmentItems: wmsShipmentItemIds.map((sourceShipmentItemId) =>
+      ({ sourceShipmentItemId, quantity: 1 })),
   };
 }
 
@@ -79,7 +85,15 @@ describe("shipstation physical recovery service", () => {
     expect(query).toContain("WITH covered_provider_item_ids AS");
     expect(query).toContain("label.label_status = 'active'");
     expect(query).toContain("event_match.match_status = 'matched'");
-    expect(query).toContain("provider_item->>'lineItemKey' ~ '^wms-item-[1-9][0-9]*$'");
+    expect(query).toContain("FROM '^wms-item-([1-9][0-9]{0,9})$'");
+    expect(query).toContain("::bigint <= 2147483647");
+    expect(query).toContain(
+      "THEN bounded_key.wms_shipment_item_id_text::integer",
+    );
+    expect(query).toContain("provider_identity.shipment_item_id IS NOT NULL");
+    expect(query).not.toMatch(
+      /FROM '\^wms-item-\(\[1-9\]\[0-9\]\*\)\$'\s*\)::integer/,
+    );
     expect(query).toContain("COALESCE(oi.picked_quantity, 0) >= COALESCE(osi.qty, 0)");
     expect(query).toContain("oi.status = 'completed'");
     expect(query).toContain("wo.warehouse_status <> 'cancelled'");
@@ -102,7 +116,9 @@ describe("shipstation physical recovery service", () => {
   });
 
   it("builds a canonical label observation with only exact WMS item identities", () => {
-    expect(buildShipStationRecoveredLabelObservation(combinedPackage())).toEqual({
+    expect(buildShipStationRecoveredLabelObservation(
+      combinedPackage([9636, 9638]),
+    )).toEqual({
       shipmentId: 442730042,
       orderId: null,
       orderKey: null,
@@ -111,9 +127,10 @@ describe("shipstation physical recovery service", () => {
       serviceCode: "usps_ground_advantage",
       shipDate: "2026-07-01",
       voidDate: null,
+      isReturnLabel: false,
       shipmentItems: [
-        { lineItemKey: "wms-item-9636" },
-        { lineItemKey: "wms-item-9638" },
+        { lineItemKey: "wms-item-9636", quantity: 1 },
+        { lineItemKey: "wms-item-9638", quantity: 1 },
       ],
     });
   });
@@ -156,13 +173,13 @@ describe("shipstation physical recovery service", () => {
     });
   });
 
-  it("does not authorize a provider package without this order's exact item identity", async () => {
+  it("does not authorize a package containing an ineligible extra item", async () => {
     const db = { execute: vi.fn(async () => ({ rows: [candidateRow()] })) };
     const tracking = carrierTracking();
     const service = createShipStationPhysicalRecoveryService(db, {
       client: {
         isConfigured: () => true,
-        listCompletedPackagesForOrder: vi.fn(async () => [combinedPackage([9636])]),
+        listCompletedPackagesForOrder: vi.fn(async () => [combinedPackage([9638, 9636])]),
       },
       carrierTracking: tracking as any,
     });
@@ -210,6 +227,10 @@ describe("shipstation physical recovery service", () => {
             order_number: "#59565",
             wms_shipment_ids: [4843],
             wms_shipment_item_ids: [9640],
+            wms_shipment_items: [{
+              sourceShipmentItemId: 9640,
+              quantity: 1,
+            }],
           }),
         ],
       })),

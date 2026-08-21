@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 
 import type {
   ShipStationService,
+  ManualShipmentContentsAuthority,
   ShipStationShipment,
   ShipStationShipmentItem,
 } from "./shipstation.service";
@@ -20,6 +21,10 @@ import {
   reconcileShipStationProviderPackageEcho,
   type ProviderPackageEchoResult,
 } from "../shipping/provider-package-echo.service";
+import {
+  isPositivePostgresInteger,
+  parseExactPositiveWmsShipmentItems,
+} from "../shipping/shipstation-provider-contents.domain";
 
 export interface ShipStationUnmappedLocator {
   exceptionId?: number;
@@ -45,7 +50,7 @@ export interface ShipStationUnmappedReshipAdoptionInput
   originalShipmentId: number;
   reason: string;
   notes?: string;
-  contentsAuthority?: ShipStationPackageContentsAuthority;
+  contentsAuthority: ShipStationPackageContentsAuthority;
   lineMappings: ShipStationUnmappedLineMapping[];
 }
 
@@ -571,26 +576,11 @@ interface ProviderWmsItemLine {
 }
 
 function providerWmsItemLines(shipment: ShipStationShipment): ProviderWmsItemLine[] | null {
-  const quantities = new Map<number, number>();
-  const items = shipment.shipmentItems ?? [];
-  if (items.length === 0) return null;
-  for (const item of items) {
-    const match = /^wms-item-([1-9][0-9]*)$/.exec(String(item.lineItemKey ?? ""));
-    const shipmentItemId = match ? Number(match[1]) : 0;
-    const quantity = Number(item.quantity);
-    if (
-      !Number.isSafeInteger(shipmentItemId)
-      || shipmentItemId <= 0
-      || !Number.isSafeInteger(quantity)
-      || quantity <= 0
-    ) {
-      return null;
-    }
-    quantities.set(shipmentItemId, (quantities.get(shipmentItemId) ?? 0) + quantity);
-  }
-  return [...quantities.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([shipmentItemId, quantity]) => ({ shipmentItemId, quantity }));
+  const exactItems = parseExactPositiveWmsShipmentItems(shipment.shipmentItems);
+  return exactItems?.map(({ sourceShipmentItemId, quantity }) => ({
+    shipmentItemId: sourceShipmentItemId,
+    quantity,
+  })) ?? null;
 }
 
 function providerWmsItemSignature(shipment: ShipStationShipment): string | null {
@@ -1181,10 +1171,19 @@ function resolveContentsAuthority(
   shipment: ShipStationShipment,
   requested: ShipStationPackageContentsAuthority | undefined,
 ): ShipStationPackageContentsAuthority {
-  if (requested !== undefined && requested !== "provider" && requested !== "operator") {
+  if (requested === undefined) {
+    throw new Error("contentsAuthority is required for manual reship adoption");
+  }
+  if (requested !== "provider" && requested !== "operator") {
     throw new Error("contentsAuthority must be provider or operator");
   }
-  return requested ?? ((shipment.shipmentItems ?? []).length === 0 ? "operator" : "provider");
+  if (
+    requested === "provider"
+    && parseExactPositiveWmsShipmentItems(shipment.shipmentItems) === null
+  ) {
+    throw new Error("provider contents authority requires exact WMS item IDs and quantities");
+  }
+  return requested;
 }
 
 function resolveLineMappings(
@@ -1195,6 +1194,7 @@ function resolveLineMappings(
   defaultOrderedLineDisposition: ShipStationOrderedLineDisposition,
 ): Array<{
   providerItemIndex: number | null;
+  sourceShipmentItemId: number | null;
   evidenceSource: "shipstation" | "original_wms" | "catalog";
   lineDisposition: ShipStationOrderedLineDisposition | null;
   orderItemId: number | null;
@@ -1223,6 +1223,7 @@ function resolveLineMappings(
         seenLines.add(key);
         return {
           providerItemIndex: null,
+          sourceShipmentItemId: null,
           evidenceSource: "catalog" as const,
           lineDisposition: null,
           orderItemId: null,
@@ -1244,6 +1245,7 @@ function resolveLineMappings(
       if (!orderItem) throw new Error(`WMS order item ${orderItemId} is not on this order`);
       return {
         providerItemIndex: null,
+        sourceShipmentItemId: null,
         evidenceSource: "original_wms" as const,
         lineDisposition: orderedLineDisposition(
           mapping.lineDisposition,
@@ -1256,15 +1258,9 @@ function resolveLineMappings(
       };
     });
   }
-  if (items.length === 0) {
-    throw new Error("ShipStation package contents are unavailable; confirm the actual contents instead");
-  }
-  if (items.some((item) => (
-    normalizeSku(item.sku).length === 0 ||
-    !Number.isSafeInteger(Number(item.quantity)) ||
-    Number(item.quantity) <= 0
-  ))) {
-    throw new Error("every ShipStation item must have a SKU and positive integer quantity");
+  const exactProviderItems = parseExactPositiveWmsShipmentItems(items);
+  if (exactProviderItems === null) {
+    throw new Error("provider contents authority requires exact WMS item IDs and quantities");
   }
   if (!Array.isArray(requested) || requested.length === 0) {
     throw new Error("explicit WMS line mappings are required for every ShipStation item");
@@ -1287,23 +1283,23 @@ function resolveLineMappings(
     }
     seenProviderItems.add(providerItemIndex);
     const providerItem = items[providerItemIndex];
+    const sourceShipmentItemId = Number(
+      String(providerItem.lineItemKey).slice("wms-item-".length),
+    );
+    const exactProviderItem = exactProviderItems.find(
+      (item) => item.sourceShipmentItemId === sourceShipmentItemId,
+    );
+    if (!exactProviderItem) {
+      throw new Error("provider item identity changed after exact contents validation");
+    }
     const quantity = positiveInteger(mapping.quantity, "quantity");
-    if (quantity !== Number(providerItem.quantity)) {
+    if (quantity !== exactProviderItem.quantity) {
       throw new Error(`mapped quantity for SKU ${providerItem.sku} must equal provider quantity`);
     }
     if (mapping.evidenceSource === "catalog") {
-      if (mapping.lineDisposition !== undefined) {
-        throw new Error("catalog items cannot claim an ordered-line disposition");
-      }
-      return {
-        providerItemIndex,
-        evidenceSource: "catalog" as const,
-        lineDisposition: null,
-        orderItemId: null,
-        productVariantId: positiveInteger(mapping.productVariantId, "productVariantId"),
-        sku: String(providerItem.sku),
-        quantity,
-      };
+      throw new Error(
+        "provider-authoritative package lines must identify existing WMS shipment items",
+      );
     }
     if (mapping.evidenceSource && mapping.evidenceSource !== "shipstation") {
       throw new Error("provider package lines require ShipStation or catalog item evidence");
@@ -1311,11 +1307,9 @@ function resolveLineMappings(
     const orderItemId = positiveInteger(mapping.orderItemId, "orderItemId");
     const orderItem = orderItems.find((item) => item.id === orderItemId);
     if (!orderItem) throw new Error(`WMS order item ${orderItemId} is not on this order`);
-    if (normalizeSku(orderItem.sku) !== normalizeSku(providerItem.sku)) {
-      throw new Error(`ShipStation SKU ${providerItem.sku} does not match WMS SKU ${orderItem.sku}`);
-    }
     return {
       providerItemIndex,
+      sourceShipmentItemId,
       evidenceSource: "shipstation" as const,
       lineDisposition: orderedLineDisposition(
           mapping.lineDisposition,
@@ -1496,6 +1490,14 @@ async function prepareLines(
     const source = resultRows(sourceResult)[0];
     if (!source) {
       throw new Error(`WMS line ${orderItemId} has no shipment-item authority to copy`);
+    }
+    if (
+      mapping.evidenceSource === "shipstation"
+      && Number(source.source_shipment_item_id) !== mapping.sourceShipmentItemId
+    ) {
+      throw new Error(
+        `ShipStation item ${mapping.sourceShipmentItemId} does not match WMS line ${orderItemId}`,
+      );
     }
     const productVariantId = optionalPositiveInteger(source.product_variant_id);
     if (productVariantId === null) {
@@ -2099,6 +2101,14 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     originalPackageIdentityRepair,
     originalProviderShipment,
   } = resolvedProvider;
+  const providerOrderIds = [
+    shipment.orderId,
+    originalPackageIdentityRepair?.providerOrderId,
+  ].filter((value): value is number => value != null);
+  if (providerOrderIds.some((value) => !isPositivePostgresInteger(value))) {
+    throw new Error("ShipStation order identity does not fit the WMS PostgreSQL integer column");
+  }
+
   if (shipment.voidDate) {
     throw new Error("a voided ShipStation shipment cannot be adopted as a reship");
   }
@@ -2153,11 +2163,29 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     originalProviderShipment,
   );
 
+  const manualContentsAuthority: ManualShipmentContentsAuthority = Object.freeze({
+    source: "manual_remediation",
+    exceptionId,
+    candidateShipmentId,
+    providerShipmentId: shipment.shipmentId,
+    lines: Object.freeze(
+      aggregatePreparedLines(lines).map((line) => Object.freeze({
+        orderItemId: line.orderItemId,
+        correctionForShipmentItemId: line.correctionForShipmentItemId,
+        productVariantId: line.productVariantId,
+        quantity: line.quantity,
+        fromLocationId: line.fromLocationId,
+        shipmentItemPurpose: line.shipmentItemPurpose,
+      })),
+    ),
+  });
+
   const processed = await shipStation.processManualShipmentNotification(
     shipment,
     {
       operator,
       reason: "adopt_unmapped_physical_as_reship",
+      contentsAuthority: manualContentsAuthority,
     },
   );
   if (!processed.processed) {

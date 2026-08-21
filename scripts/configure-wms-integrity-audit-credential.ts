@@ -1,10 +1,14 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Pool, type PoolClient } from "pg";
+import { Pool, type PoolClient, type PoolConfig } from "pg";
 import {
   connectionStringFromEnv,
   requiredWmsIntegrityAuditRelations,
 } from "./audit-wms-inventory-integrity";
+import {
+  SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS,
+} from "../server/modules/shipping/shipment-lifecycle-shadow-audit.repository";
+import { verifiedPostgresPoolConfig } from "../server/infrastructure/verified-postgres-pool-config";
 
 interface CredentialFlags {
   help: boolean;
@@ -57,7 +61,7 @@ function quoteRelation(relation: string): string {
 
 export function buildAuditCredentialStatements(credential: string): string[] {
   const role = quoteIdentifier(credential);
-  const relations = requiredWmsIntegrityAuditRelations();
+  const relations = requiredWmsIntegrityAuditCredentialRelations();
   const schemas = [...new Set(relations.map((relation) => relation.split(".")[0]))].sort();
   const statements: string[] = [];
   for (const schema of schemas) {
@@ -72,6 +76,39 @@ export function buildAuditCredentialStatements(credential: string): string[] {
   }
   statements.push(`GRANT SELECT ON ${relations.map(quoteRelation).join(", ")} TO ${role}`);
   return statements;
+}
+
+export function requiredWmsIntegrityAuditCredentialRelations(): string[] {
+  return [...new Set([
+    ...requiredWmsIntegrityAuditRelations(),
+    ...SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS,
+  ])].sort();
+}
+
+export interface AuditCredentialConfigurationPlan {
+  readonly credential: string;
+  readonly relations: readonly string[];
+  readonly statements: readonly string[];
+}
+
+export function buildAuditCredentialConfigurationPlan(
+  credential: string,
+): AuditCredentialConfigurationPlan {
+  const relations = requiredWmsIntegrityAuditCredentialRelations();
+  const statements = buildAuditCredentialStatements(credential);
+  return Object.freeze({
+    credential,
+    relations: Object.freeze(relations),
+    statements: Object.freeze(statements),
+  });
+}
+
+export function auditCredentialPoolConfig(connectionString: string): PoolConfig {
+  return verifiedPostgresPoolConfig({
+    connectionString,
+    applicationName: "wms-integrity-audit-credential-config",
+    max: 1,
+  });
 }
 
 async function assertCredentialIsLimited(
@@ -98,28 +135,23 @@ export async function main(): Promise<void> {
   }
   if (!flags.credential) throw new Error("--credential is required");
   const connectionString = connectionStringFromEnv();
-  const pool = new Pool({
-    connectionString,
-    ssl: connectionString.includes("localhost") ? undefined : { rejectUnauthorized: false },
-    max: 1,
-    application_name: "wms-integrity-audit-credential-config",
-  });
+  const pool = new Pool(auditCredentialPoolConfig(connectionString));
   const client = await pool.connect();
   try {
     await assertCredentialIsLimited(client, flags.credential);
-    const statements = buildAuditCredentialStatements(flags.credential);
+    const plan = buildAuditCredentialConfigurationPlan(flags.credential);
     if (!flags.execute) {
       console.log(JSON.stringify({
         mode: "dry-run",
-        credential: flags.credential,
-        relations: requiredWmsIntegrityAuditRelations(),
-        statementCount: statements.length,
+        credential: plan.credential,
+        relations: plan.relations,
+        statementCount: plan.statements.length,
       }, null, 2));
       return;
     }
     await client.query("BEGIN");
     try {
-      for (const statement of statements) await client.query(statement);
+      for (const statement of plan.statements) await client.query(statement);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
@@ -128,8 +160,8 @@ export async function main(): Promise<void> {
     console.log(JSON.stringify({
       mode: "execute",
       credential: flags.credential,
-      relations: requiredWmsIntegrityAuditRelations().length,
-      statementCount: statements.length,
+      relations: plan.relations.length,
+      statementCount: plan.statements.length,
     }, null, 2));
   } finally {
     client.release();

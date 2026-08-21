@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import { normalizeTrackingNumber } from "./carrier-tracking.domain";
+import { parseExactPositiveWmsShipmentItems } from "./shipstation-provider-contents.domain";
 
 interface QueryExecutor {
   execute: (query: unknown) => Promise<unknown>;
@@ -80,30 +81,11 @@ function requiredPositiveInteger(value: unknown, field: string): number {
 function parseProviderLines(
   items: readonly ShipStationProviderPackageEchoItem[],
 ): ProviderLine[] | null {
-  if (!Array.isArray(items) || items.length === 0) return null;
-  const quantities = new Map<number, number>();
-  for (const item of items) {
-    const match = /^wms-item-([1-9][0-9]*)$/.exec(
-      String(item.lineItemKey ?? "").trim(),
-    );
-    const shipmentItemId = match ? Number(match[1]) : 0;
-    const quantity = Number(item.quantity);
-    if (
-      !Number.isSafeInteger(shipmentItemId)
-      || shipmentItemId <= 0
-      || !Number.isSafeInteger(quantity)
-      || quantity <= 0
-    ) {
-      return null;
-    }
-    quantities.set(
-      shipmentItemId,
-      (quantities.get(shipmentItemId) ?? 0) + quantity,
-    );
-  }
-  return [...quantities.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([shipmentItemId, quantity]) => ({ shipmentItemId, quantity }));
+  const exactItems = parseExactPositiveWmsShipmentItems(items);
+  return exactItems?.map(({ sourceShipmentItemId, quantity }) => ({
+    shipmentItemId: sourceShipmentItemId,
+    quantity,
+  })) ?? null;
 }
 
 function sameQuantityMap<TKey>(
@@ -114,20 +96,6 @@ function sameQuantityMap<TKey>(
     && [...left.entries()].every(
       ([orderItemId, quantity]) => right.get(orderItemId) === quantity,
     );
-}
-
-function parseProviderSkuQuantities(
-  items: readonly ShipStationProviderPackageEchoItem[],
-): Map<string, number> | null {
-  if (!Array.isArray(items) || items.length === 0) return null;
-  const quantities = new Map<string, number>();
-  for (const item of items) {
-    const sku = String(item.sku ?? "").trim().toUpperCase();
-    const quantity = Number(item.quantity);
-    if (!sku || !Number.isSafeInteger(quantity) || quantity <= 0) return null;
-    quantities.set(sku, (quantities.get(sku) ?? 0) + quantity);
-  }
-  return quantities;
 }
 
 function noMatch(
@@ -193,8 +161,7 @@ async function inspectExactLegacyProviderPackageIdentity(
   ].filter((id) => Number.isSafeInteger(id) && id > 0);
   if (candidateShipmentIds.length === 0) return null;
   const providerItemQuantities = parseProviderLines(input.shipmentItems);
-  const providerSkuQuantities = parseProviderSkuQuantities(input.shipmentItems);
-  if (!providerItemQuantities && !providerSkuQuantities) return null;
+  if (!providerItemQuantities) return null;
 
   const authorityResult: any = await db.execute(sql`
     SELECT
@@ -243,13 +210,11 @@ async function inspectExactLegacyProviderPackageIdentity(
   }
 
   const actualByShipmentItemId = new Map<number, number>();
-  const actualBySku = new Map<string, number>();
   const authorityShipmentIds = new Set<number>();
   for (const row of resultRows(authorityResult) as LegacyAuthorityItemRow[]) {
     const shipmentId = Number(row.legacy_wms_shipment_id);
     const shipmentItemId = Number(row.shipment_item_id);
     const quantity = Number(row.quantity);
-    const sku = String(row.sku ?? "").trim().toUpperCase();
     if (
       !Number.isSafeInteger(shipmentId)
       || shipmentId <= 0
@@ -266,9 +231,6 @@ async function inspectExactLegacyProviderPackageIdentity(
       shipmentItemId,
       (actualByShipmentItemId.get(shipmentItemId) ?? 0) + quantity,
     );
-    if (sku) {
-      actualBySku.set(sku, (actualBySku.get(sku) ?? 0) + quantity);
-    }
   }
   if (
     authorityShipmentIds.size !== candidateShipmentIds.length
@@ -281,11 +243,7 @@ async function inspectExactLegacyProviderPackageIdentity(
     new Map(providerItemQuantities.map((item) => [item.shipmentItemId, item.quantity])),
     actualByShipmentItemId,
   );
-  const hasExactSkuProof = providerSkuQuantities !== null && sameQuantityMap(
-    providerSkuQuantities,
-    actualBySku,
-  );
-  if (!hasExactItemProof && !hasExactSkuProof) return null;
+  if (!hasExactItemProof) return null;
 
   const wmsOrderId = input.expectedWmsOrderId ?? [...wmsOrderIds][0];
   return {

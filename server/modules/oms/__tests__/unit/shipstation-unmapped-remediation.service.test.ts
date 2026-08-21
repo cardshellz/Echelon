@@ -759,6 +759,7 @@ describe("ShipStation unmapped physical remediation", () => {
       operator: "ops:test",
       originalShipmentId: 6584,
       reason: "carrier_replacement",
+      contentsAuthority: "operator",
       lineMappings: [{
         evidenceSource: "original_wms",
         orderItemId: 312293,
@@ -777,6 +778,13 @@ describe("ShipStation unmapped physical remediation", () => {
       {
         operator: "ops:test",
         reason: "adopt_unmapped_physical_as_reship",
+        contentsAuthority: expect.objectContaining({
+          source: "manual_remediation",
+          exceptionId: 77,
+          candidateShipmentId: 8000,
+          providerShipmentId: 446350792,
+          lines: expect.any(Array),
+        }),
       },
     );
     const allSql = calls.join("\n");
@@ -860,7 +868,12 @@ describe("ShipStation unmapped physical remediation", () => {
       originalShipmentId: 10,
       reason: "lost",
       notes: "Carrier confirmed the original package was lost.",
-      lineMappings: [{ providerItemIndex: 0, orderItemId: 101, quantity: 1 }],
+      contentsAuthority: "operator",
+      lineMappings: [{
+        evidenceSource: "original_wms",
+        orderItemId: 101,
+        quantity: 1,
+      }],
     });
 
     expect(result).toMatchObject({
@@ -873,6 +886,13 @@ describe("ShipStation unmapped physical remediation", () => {
       {
         operator: "ops:test",
         reason: "adopt_unmapped_physical_as_reship",
+        contentsAuthority: expect.objectContaining({
+          source: "manual_remediation",
+          exceptionId: 77,
+          candidateShipmentId: 20,
+          providerShipmentId: 900,
+          lines: expect.any(Array),
+        }),
       },
     );
     const allSql = calls.join("\n");
@@ -974,6 +994,7 @@ describe("ShipStation unmapped physical remediation", () => {
       originalShipmentId: 10,
       reason: "carrier_replacement",
       notes: "Confirmed the carrier replacement contained SKU-A.",
+      contentsAuthority: "operator",
       lineMappings: [{
         evidenceSource: "original_wms",
         orderItemId: 101,
@@ -992,6 +1013,13 @@ describe("ShipStation unmapped physical remediation", () => {
       {
         operator: "ops:test",
         reason: "adopt_unmapped_physical_as_reship",
+        contentsAuthority: expect.objectContaining({
+          source: "manual_remediation",
+          exceptionId: 77,
+          candidateShipmentId: 22,
+          providerShipmentId: 903,
+          lines: expect.any(Array),
+        }),
       },
     );
     const allSql = calls.join("\n");
@@ -1074,7 +1102,12 @@ describe("ShipStation unmapped physical remediation", () => {
       originalShipmentId: 10,
       reason: "packing_omission",
       notes: "The original box omitted SKU-A.",
-      lineMappings: [{ providerItemIndex: 0, orderItemId: 101, quantity: 1 }],
+      contentsAuthority: "operator",
+      lineMappings: [{
+        evidenceSource: "original_wms",
+        orderItemId: 101,
+        quantity: 1,
+      }],
     }, fulfillmentAuthority as any);
 
     expect(result).toMatchObject({
@@ -1087,6 +1120,13 @@ describe("ShipStation unmapped physical remediation", () => {
       {
         operator: "ops:test",
         reason: "adopt_unmapped_physical_as_reship",
+        contentsAuthority: expect.objectContaining({
+          source: "manual_remediation",
+          exceptionId: 77,
+          candidateShipmentId: 20,
+          providerShipmentId: 900,
+          lines: expect.any(Array),
+        }),
       },
     );
     const allSql = calls.join("\n");
@@ -1135,7 +1175,12 @@ describe("ShipStation unmapped physical remediation", () => {
       operator: "ops:test",
       originalShipmentId: 10,
       reason: "packing_omission",
-      lineMappings: [{ providerItemIndex: 0, orderItemId: 101, quantity: 1 }],
+      contentsAuthority: "operator",
+      lineMappings: [{
+        evidenceSource: "original_wms",
+        orderItemId: 101,
+        quantity: 1,
+      }],
     })).rejects.toThrow("SKU SKU-A has no complete original inventory shipment posting");
   });
   it("records an off-order catalog item as a concession without order-line authority", async () => {
@@ -1210,6 +1255,7 @@ describe("ShipStation unmapped physical remediation", () => {
       operator: "ops:test",
       originalShipmentId: 10,
       reason: "concession",
+      contentsAuthority: "operator",
       lineMappings: [{
         evidenceSource: "catalog",
         productVariantId: 222,
@@ -1227,6 +1273,13 @@ describe("ShipStation unmapped physical remediation", () => {
       {
         operator: "ops:test",
         reason: "adopt_unmapped_physical_as_reship",
+        contentsAuthority: expect.objectContaining({
+          source: "manual_remediation",
+          exceptionId: 77,
+          candidateShipmentId: 20,
+          providerShipmentId: 903,
+          lines: expect.any(Array),
+        }),
       },
     );
     const allSql = calls.join("\n");
@@ -1333,6 +1386,13 @@ describe("ShipStation unmapped physical remediation", () => {
       {
         operator: "ops:test",
         reason: "adopt_unmapped_physical_as_reship",
+        contentsAuthority: expect.objectContaining({
+          source: "manual_remediation",
+          exceptionId: 77,
+          candidateShipmentId: 20,
+          providerShipmentId: 900,
+          lines: expect.any(Array),
+        }),
       },
     );
     const allSql = calls.join("\n");
@@ -1372,9 +1432,41 @@ describe("ShipStation unmapped physical remediation", () => {
       operator: "ops:test",
       originalShipmentId: 10,
       reason: "carrier_replacement",
+      contentsAuthority: "operator",
       lineMappings: [],
     })).rejects.toThrow("confirm at least one item that was physically sent");
     expect(db.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects provider contents authority when exact WMS item keys are absent", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (isExactLegacyPackageQuery(text)) {
+          return { rows: [] };
+        }
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [contextRow] };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [orderItemRow] };
+        }
+        return { rows: [] };
+      }),
+    };
+
+    await expect(adoptShipStationUnmappedPhysicalAsReship(
+      db,
+      shipStation(),
+      {
+        exceptionId: 77,
+        operator: "ops:test",
+        originalShipmentId: 10,
+        reason: "lost",
+        contentsAuthority: "provider",
+        lineMappings: [{ providerItemIndex: 0, orderItemId: 101, quantity: 1 }],
+      },
+    )).rejects.toThrow("provider contents authority requires exact WMS item IDs and quantities");
   });
 
   it("atomically repairs crossed legacy identities before adopting the active reship", async () => {
@@ -1477,7 +1569,12 @@ describe("ShipStation unmapped physical remediation", () => {
       originalShipmentId: 10,
       reason: "lost",
       notes: "Confirmed active replacement package.",
-      lineMappings: [{ providerItemIndex: 0, orderItemId: 101, quantity: 1 }],
+      contentsAuthority: "operator",
+      lineMappings: [{
+        evidenceSource: "original_wms",
+        orderItemId: 101,
+        quantity: 1,
+      }],
     });
 
     expect(result).toMatchObject({
@@ -1491,6 +1588,13 @@ describe("ShipStation unmapped physical remediation", () => {
       {
         operator: "ops:test",
         reason: "adopt_unmapped_physical_as_reship",
+        contentsAuthority: expect.objectContaining({
+          source: "manual_remediation",
+          exceptionId: 77,
+          candidateShipmentId: 21,
+          providerShipmentId: 901,
+          lines: expect.any(Array),
+        }),
       },
     );
     const allSql = calls.join("\n");
@@ -1516,6 +1620,7 @@ describe("ShipStation unmapped physical remediation", () => {
             rows: [{
               order_item_id: 101,
               sku: "SKU-A",
+              source_shipment_item_id: 501,
               product_variant_id: 201,
               from_location_id: 301,
               source_quantity: 1,
@@ -1530,7 +1635,7 @@ describe("ShipStation unmapped physical remediation", () => {
     };
     const oversizedProvider = {
       ...providerShipment,
-      shipmentItems: [{ sku: "SKU-A", quantity: 2, lineItemKey: null }],
+      shipmentItems: [{ sku: "SKU-A", quantity: 2, lineItemKey: "wms-item-501" }],
     };
 
     await expect(adoptShipStationUnmappedPhysicalAsReship(
@@ -1541,13 +1646,14 @@ describe("ShipStation unmapped physical remediation", () => {
         operator: "ops:test",
         originalShipmentId: 10,
         reason: "lost",
+        contentsAuthority: "provider",
         lineMappings: [{ providerItemIndex: 0, orderItemId: 101, quantity: 2 }],
       },
     )).rejects.toThrow("replacement quantity for SKU SKU-A exceeds the original shipment");
     expect(calls.join("\n")).not.toMatch(/INSERT INTO|UPDATE /);
   });
 
-  it("refuses duplicate package lines whose combined quantity exceeds the original", async () => {
+  it("refuses duplicate operator-confirmed lines for the same original item", async () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
@@ -1571,28 +1677,21 @@ describe("ShipStation unmapped physical remediation", () => {
         return { rows: [] };
       }),
     };
-    const duplicateLineProvider = {
-      ...providerShipment,
-      shipmentItems: [
-        { sku: "SKU-A", quantity: 1, lineItemKey: null },
-        { sku: "SKU-A", quantity: 1, lineItemKey: null },
-      ],
-    };
-
     await expect(adoptShipStationUnmappedPhysicalAsReship(
       db,
-      shipStation({ getShipmentById: vi.fn(async () => duplicateLineProvider) }),
+      shipStation(),
       {
         exceptionId: 77,
         operator: "ops:test",
         originalShipmentId: 10,
         reason: "lost",
+        contentsAuthority: "operator",
         lineMappings: [
-          { providerItemIndex: 0, orderItemId: 101, quantity: 1 },
-          { providerItemIndex: 1, orderItemId: 101, quantity: 1 },
+          { evidenceSource: "original_wms", orderItemId: 101, quantity: 1 },
+          { evidenceSource: "original_wms", orderItemId: 101, quantity: 1 },
         ],
       },
-    )).rejects.toThrow("replacement quantity for SKU SKU-A exceeds the original shipment");
+    )).rejects.toThrow("each original WMS item can be confirmed only once");
   });
 
   it("refuses to adopt a voided ShipStation package", async () => {

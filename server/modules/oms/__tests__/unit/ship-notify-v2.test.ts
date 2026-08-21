@@ -34,7 +34,11 @@ import {
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { createShipStationService } from "../../shipstation.service";
+import {
+  createShipStationService,
+  type ManualShipmentContentsAuthority,
+  type ManualShipmentNotificationInput,
+} from "../../shipstation.service";
 
 // ─── Mock helpers ────────────────────────────────────────────────────
 
@@ -200,8 +204,57 @@ function makeShipmentPayload(overrides: Partial<any> = {}) {
     voidDate: null as string | null,
     isReturnLabel: false,
     shipmentCost: 0,
+    shipmentItems: [{
+      lineItemKey: "wms-item-10001",
+      sku: "SKU-A",
+      quantity: 1,
+    }],
     ...overrides,
   };
+}
+
+function makeExactShipmentPayload(overrides: Partial<any> = {}) {
+  return makeShipmentPayload({
+    shipmentItems: [{
+      lineItemKey: "wms-item-10001",
+      sku: "SKU-A",
+      quantity: 1,
+    }],
+    ...overrides,
+  });
+}
+
+function exactSingleItemSyncResponses(): Array<{ rows: any[] }> {
+  return [
+    {
+      rows: [{
+        source_shipment_item_id: 10001,
+        wms_order_id: 42,
+      }],
+    },
+    {
+      rows: [{
+        id: 10001,
+        order_item_id: 30001,
+        replacement_for_order_item_id: null,
+        sku: "SKU-A",
+        qty: 1,
+        shipment_purpose: "customer_fulfillment",
+        provider_membership_state: "authoritative",
+      }],
+    },
+    {
+      rows: [{
+        id: 10001,
+        order_item_id: 30001,
+        product_variant_id: 40001,
+        from_location_id: 50001,
+        box_id: null,
+        weight_oz: 4,
+      }],
+    },
+    { rows: [] },
+  ];
 }
 
 function makeDispatchInput(overrides: Partial<any> = {}) {
@@ -228,6 +281,7 @@ async function processTestShipment(
   mock: ReturnType<typeof makeDb>,
   shipment: ReturnType<typeof makeShipmentPayload>,
   inventoryCore?: any,
+  contentsAuthority: ManualShipmentNotificationInput["contentsAuthority"] = { source: "provider_exact" },
 ): Promise<number> {
   const result = await createTestShipStationService(
     mock,
@@ -235,8 +289,81 @@ async function processTestShipment(
   ).processManualShipmentNotification(shipment, {
     operator: "test:ship-notify-v2",
     reason: "unit_test",
+    contentsAuthority,
   });
   return result.processed ? 1 : 0;
+}
+
+function makeManualAuthorityFixture(input: {
+  shipmentId: number;
+  exceptionId: number;
+  candidateShipmentId: number;
+  shipmentItemId: number;
+  orderItemId: number | null;
+  correctionForShipmentItemId: number | null;
+  productVariantId: number;
+  quantity: number;
+  fromLocationId: number | null;
+  shipmentItemPurpose: ManualShipmentContentsAuthority["lines"][number]["shipmentItemPurpose"];
+}) {
+  const line = Object.freeze({
+    orderItemId: input.orderItemId,
+    correctionForShipmentItemId: input.correctionForShipmentItemId,
+    productVariantId: input.productVariantId,
+    quantity: input.quantity,
+    fromLocationId: input.fromLocationId,
+    shipmentItemPurpose: input.shipmentItemPurpose,
+  });
+  const authority: ManualShipmentContentsAuthority = Object.freeze({
+    source: "manual_remediation",
+    exceptionId: input.exceptionId,
+    candidateShipmentId: input.candidateShipmentId,
+    providerShipmentId: input.shipmentId,
+    lines: Object.freeze([line]),
+  });
+  return {
+    authority,
+    persistedCandidateResponse: {
+      rows: [{
+        id: input.candidateShipmentId,
+        external_fulfillment_id: `shipstation_shipment:${input.shipmentId}`,
+        source: "shipstation_reship_adopted",
+        shipment_purpose: "replacement",
+        authority_exception_open: true,
+        shipment_item_id: input.shipmentItemId,
+        replacement_for_order_item_id: input.orderItemId,
+        correction_for_shipment_item_id: input.correctionForShipmentItemId,
+        shipment_item_purpose: input.shipmentItemPurpose,
+        product_variant_id: input.productVariantId,
+        qty: input.quantity,
+        from_location_id: input.fromLocationId,
+      }],
+    },
+  };
+}
+
+async function expectCarrierPackageContentsRejection(
+  mock: ReturnType<typeof makeDb>,
+  shipment: ReturnType<typeof makeShipmentPayload>,
+): Promise<void> {
+  globalThis.fetch = mockFetchOnceOk({ shipments: [shipment] }) as any;
+  await expect(
+    createTestShipStationService(mock).confirmDispatch(makeDispatchInput({
+      providerLabelId: String(shipment.shipmentId),
+      providerOrderId: shipment.orderId == null ? null : String(shipment.orderId),
+      providerOrderKey: shipment.orderKey ?? null,
+      trackingNumber: shipment.trackingNumber,
+      normalizedTrackingNumber: shipment.trackingNumber,
+    })),
+  ).rejects.toMatchObject({
+    code: "CARRIER_DISPATCH_PACKAGE_CONTENTS_UNPROVEN",
+    retryable: false,
+  });
+  expect(mock.providerLabelObserver.observeShipStationLabel).toHaveBeenCalledWith(
+    expect.objectContaining({ shipmentId: shipment.shipmentId }),
+  );
+  expect(mock.execute).not.toHaveBeenCalled();
+  expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
 }
 
 describe("processShipNotify V2 :: shipment found by shipstation_order_id", () => {
@@ -251,7 +378,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
   });
 
   it("dispatches shipped evidence to canonical authority without direct fulfillment writes", async () => {
-    const shipmentPayload = makeShipmentPayload({ shipmentCost: 5.99 });
+    const shipmentPayload = makeExactShipmentPayload({ shipmentCost: 5.99 });
 
     // Execute queue in the exact order the V2 path reads:
     //   1. SS fetch (uses fetch mock, NOT execute)
@@ -274,6 +401,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           { id: 501, order_id: 42, status: "planned" },
         ],
       },
+      ...exactSingleItemSyncResponses(),
       // 3a. markShipmentShipped load-current
       {
         rows: [
@@ -339,36 +467,19 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     );
   });
 
-  it("quarantines an unmapped provider-first shell when ShipStation omits package contents", async () => {
+  it("rejects an unmapped provider-first shell when ShipStation omits package contents", async () => {
     const shipmentPayload = makeShipmentPayload({ shipmentItems: [] });
-    const mock = makeDb([{
-      rows: [{
-        id: 5034,
-        order_id: 203878,
-        status: "shipped",
-        source: "shipstation_split",
-        shipment_purpose: "customer_fulfillment",
-        requires_review: true,
-        external_fulfillment_id: "shipstation_shipment:77777",
-        tracking_number: "1Z12345",
-      }],
-    }]);
-    globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
+    const mock = makeDb([]);
 
-    const processed = await processTestShipment(mock, shipmentPayload);
-
-    expect(processed).toBe(0);
-    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
-    const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
-    expect(sqlText).toContain("INSERT INTO wms.reconciliation_exceptions");
-    expect(sqlText).toContain("shipstation_unmapped_physical_shipment");
+    await expectCarrierPackageContentsRejection(mock, shipmentPayload);
   });
 
   it("records a post-refund package for review without direct OMS or provider writes", async () => {
-    const shipmentPayload = makeShipmentPayload();
+    const shipmentPayload = makeExactShipmentPayload();
     const mock = makeDb([
       // shipstation_order_id lookup
       { rows: [{ id: 501, order_id: 42, status: "queued" }] },
+      ...exactSingleItemSyncResponses(),
       // markShipmentShipped load-current
       {
         rows: [
@@ -508,7 +619,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(insertCalls.length).toBe(1);
   });
 
-  it("repairs an exact package replay even when its historical provider line key is obsolete", async () => {
+  it("repairs an exact package replay only when its WMS item keys and quantities match", async () => {
     const shipmentPayload = makeShipmentPayload({
       shipmentItems: [
         { lineItemKey: "wms-item-8502", sku: "SPORTS-CARD", quantity: 1 },
@@ -528,9 +639,10 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           },
         ],
       },
-      // The historical provider line key no longer resolves. Exact package
-      // identity must prevent this stale key from creating a fake split.
+      // Resolve ownership before evaluating the exact physical replay.
       { rows: [] },
+      // Exact package contents are required before identity can bypass remapping.
+      { rows: [{ id: 8502, qty: 1 }] },
       // Resolve any previously-open unmapped-package exception.
       { rows: [{ id: 328 }] },
       // markShipmentShipped load-current with SAME tracking + carrier
@@ -862,7 +974,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(sqlText).not.toMatch(/INSERT INTO wms\.outbound_shipment_items/);
   });
 
-  it("matches ShipStation shipment items by exact SKU/qty when lineItemKey is missing", async () => {
+  it("rejects ShipStation shipment items when lineItemKey is missing", async () => {
     const shipmentPayload = makeShipmentPayload({
       shipmentId: 7002,
       orderId: 555001,
@@ -871,75 +983,47 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
         { lineItemKey: null, sku: "SKU-A", quantity: 1 },
       ],
     });
-    const inventoryCore = {
-      recordShipment: vi.fn(async () => undefined),
-    };
+    const mock = makeDb([]);
 
-    const mock = makeDb([
-      { rows: [{ id: 501, order_id: 42, status: "planned", shipstation_order_id: 555001 }] },
-      {
-        rows: [
-          { id: 10001, order_item_id: 30001, sku: "SKU-A", qty: 1 },
-        ],
-      },
-      {
-        rows: [
-          {
-            id: 10001,
-            order_item_id: 30001,
-            product_variant_id: 40001,
-            from_location_id: 50001,
-            box_id: null,
-            weight_oz: 4,
-          },
-        ],
-      },
-      { rows: [] },
-      {
-        rows: [
-          {
-            id: 10001,
-            order_item_id: 30001,
-            product_variant_id: 40001,
-            qty: 1,
-            pick_location_id: 50001,
-          },
-        ],
-      },
-      // self-heal: clear inventory_deduction_missing_item_data flag.
-      { rows: [] },
-      {
-        rows: [
-          {
-            id: 501,
-            order_id: 42,
-            status: "planned",
-            tracking_number: null,
-            carrier: null,
-            tracking_url: null,
-          },
-        ],
-      },
-      { rows: [] },
-      { rows: [{ oms_fulfillment_order_id: "9999" }] },
-      { rows: [{ status: "confirmed", financial_status: "paid" }] },
-    ]);
-
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [shipmentPayload],
-    }) as any;
-
-    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
-
-    expect(processed).toBe(1);
-    expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
-      orderItemId: 30001,
-      qty: 1,
-      shipmentId: "501",
-    }));
-    const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
-    expect(sqlText).not.toMatch(/shipstation_split_items_unmapped/);
+    await expectCarrierPackageContentsRejection(mock, shipmentPayload);
   });
+
+  it("rejects an ordinary existing shipment when package contents are omitted", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7003,
+      orderId: 555001,
+      orderKey: "echelon-wms-shp-501",
+      shipmentItems: undefined,
+    });
+    const mock = makeDb([]);
+
+    await expectCarrierPackageContentsRejection(mock, shipmentPayload);
+  });
+
+  it.each([
+    ["string quantity", [{ lineItemKey: "wms-item-10001", quantity: "1" }]],
+    ["whitespace key", [{ lineItemKey: " wms-item-10001 ", quantity: 1 }]],
+    ["out-of-range key", [{ lineItemKey: "wms-item-2147483648", quantity: 1 }]],
+    [
+      "duplicate key",
+      [
+        { lineItemKey: "wms-item-10001", quantity: 1 },
+        { lineItemKey: "wms-item-10001", quantity: 1 },
+      ],
+    ],
+  ])(
+    "rejects carrier dispatch before WMS mutation for %s evidence",
+    async (_caseName, shipmentItems) => {
+      const shipmentPayload = makeShipmentPayload({
+        shipmentId: 7010,
+        orderId: 555010,
+        shipmentItems,
+      });
+      const mock = makeDb([]);
+
+      await expectCarrierPackageContentsRejection(mock, shipmentPayload);
+    },
+  );
 
   it("records replacement inventory without repeating OMS or channel fulfillment", async () => {
     const shipmentPayload = makeShipmentPayload({
@@ -958,6 +1042,18 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       })),
       recordShipment: vi.fn(async () => undefined),
     };
+    const manual = makeManualAuthorityFixture({
+      shipmentId: 7004,
+      exceptionId: 60004,
+      candidateShipmentId: 9004,
+      shipmentItemId: 91004,
+      orderItemId: 30001,
+      correctionForShipmentItemId: null,
+      productVariantId: 40001,
+      quantity: 1,
+      fromLocationId: 50001,
+      shipmentItemPurpose: "replacement",
+    });
     const mock = makeDb([
       {
         rows: [{
@@ -972,6 +1068,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           tracking_number: "1Z-REPLACEMENT",
         }],
       },
+      manual.persistedCandidateResponse,
 
       {
         rows: [{
@@ -1006,7 +1103,12 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
+    const processed = await processTestShipment(
+      mock,
+      shipmentPayload,
+      inventoryCore,
+      manual.authority,
+    );
 
     expect(processed).toBe(1);
     expect(inventoryCore.recordReplacementShipmentFromAvailableInventory).toHaveBeenCalledWith(expect.objectContaining({
@@ -1025,6 +1127,72 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(sqlText).not.toMatch(/UPDATE oms\.oms_order_lines/);
     expect(sqlText).toMatch(/UPDATE wms\.outbound_shipment_items[\s\S]*SET from_location_id/);
     expect(mock.calls.filter((call) => call.tag === "insert")).toHaveLength(0);
+  });
+
+  it("rejects a reviewed replacement when the persisted candidate has an extra line", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7020,
+      orderId: 555020,
+      orderKey: "echelon-wms-reship-9020",
+      trackingNumber: "1Z-STALE-CANDIDATE",
+      shipmentItems: [],
+    });
+    const manual = makeManualAuthorityFixture({
+      shipmentId: 7020,
+      exceptionId: 60020,
+      candidateShipmentId: 9020,
+      shipmentItemId: 91020,
+      orderItemId: 30001,
+      correctionForShipmentItemId: null,
+      productVariantId: 40001,
+      quantity: 1,
+      fromLocationId: 50001,
+      shipmentItemPurpose: "replacement",
+    });
+    const persistedWithExtraLine = {
+      rows: [
+        ...manual.persistedCandidateResponse.rows,
+        {
+          ...manual.persistedCandidateResponse.rows[0],
+          shipment_item_id: 91021,
+          replacement_for_order_item_id: null,
+          correction_for_shipment_item_id: null,
+          shipment_item_purpose: "concession",
+          product_variant_id: 40002,
+          qty: 1,
+          from_location_id: 50002,
+        },
+      ],
+    };
+    const inventoryCore = {
+      recordReplacementShipmentFromAvailableInventory: vi.fn(),
+      recordShipment: vi.fn(),
+    };
+    const mock = makeDb([
+      {
+        rows: [{
+          id: 9020,
+          order_id: 42,
+          source: "shipstation_reship_adopted",
+          status: "shipped",
+          shipment_purpose: "replacement",
+          external_fulfillment_id: "shipstation_shipment:7020",
+          tracking_number: "1Z-STALE-CANDIDATE",
+        }],
+      },
+      persistedWithExtraLine,
+    ]);
+
+    await expect(processTestShipment(
+      mock,
+      shipmentPayload,
+      inventoryCore,
+      manual.authority,
+    )).rejects.toMatchObject({ name: "ShipStationUnmappedItemsError" });
+
+    expect(inventoryCore.recordReplacementShipmentFromAvailableInventory).not.toHaveBeenCalled();
+    expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
   });
 
   it("records provider-confirmed historical replacement evidence when current stock cannot prove its past debit", async () => {
@@ -1047,6 +1215,18 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       }),
       recordShipment: vi.fn(async () => undefined),
     };
+    const manual = makeManualAuthorityFixture({
+      shipmentId: 7005,
+      exceptionId: 60005,
+      candidateShipmentId: 9005,
+      shipmentItemId: 91005,
+      orderItemId: 30002,
+      correctionForShipmentItemId: null,
+      productVariantId: 40002,
+      quantity: 1,
+      fromLocationId: null,
+      shipmentItemPurpose: "replacement",
+    });
     const mock = makeDb([
       {
         rows: [{
@@ -1061,6 +1241,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           tracking_number: "1Z-HISTORICAL-REPLACEMENT",
         }],
       },
+      manual.persistedCandidateResponse,
       {
         rows: [{
           id: 91005,
@@ -1098,7 +1279,12 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
+    const processed = await processTestShipment(
+      mock,
+      shipmentPayload,
+      inventoryCore,
+      manual.authority,
+    );
 
     expect(processed).toBe(1);
     expect(inventoryCore.recordReplacementShipmentFromAvailableInventory).toHaveBeenCalledTimes(1);
@@ -1125,6 +1311,18 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       })),
       recordShipment: vi.fn(async () => undefined),
     };
+    const manual = makeManualAuthorityFixture({
+      shipmentId: 7007,
+      exceptionId: 60007,
+      candidateShipmentId: 9007,
+      shipmentItemId: 91007,
+      orderItemId: 30002,
+      correctionForShipmentItemId: null,
+      productVariantId: 40002,
+      quantity: 1,
+      fromLocationId: null,
+      shipmentItemPurpose: "replacement",
+    });
     const mock = makeDb([
       {
         rows: [{
@@ -1139,6 +1337,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           tracking_number: "1Z-HISTORICAL-REPLAY",
         }],
       },
+      manual.persistedCandidateResponse,
       {
         rows: [{
           id: 91007,
@@ -1171,7 +1370,12 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
+    const processed = await processTestShipment(
+      mock,
+      shipmentPayload,
+      inventoryCore,
+      manual.authority,
+    );
 
     expect(processed).toBe(1);
     expect(inventoryCore.recordReplacementShipmentFromAvailableInventory).not.toHaveBeenCalled();
@@ -1192,6 +1396,18 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     const inventoryCore = {
       recordShipment: vi.fn(async () => undefined),
     };
+    const manual = makeManualAuthorityFixture({
+      shipmentId: 7006,
+      exceptionId: 60006,
+      candidateShipmentId: 9006,
+      shipmentItemId: 91006,
+      orderItemId: null,
+      correctionForShipmentItemId: 81006,
+      productVariantId: 40001,
+      quantity: 1,
+      fromLocationId: null,
+      shipmentItemPurpose: "omission_correction",
+    });
     const mock = makeDb([
       {
         rows: [{
@@ -1206,6 +1422,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           tracking_number: "1Z-OMISSION-CORRECTION",
         }],
       },
+      manual.persistedCandidateResponse,
       // loadValidatedInventoryShipmentItems excludes omission corrections.
       { rows: [] },
       // Clear any stale inventory review marker.
@@ -1228,7 +1445,12 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
+    const processed = await processTestShipment(
+      mock,
+      shipmentPayload,
+      inventoryCore,
+      manual.authority,
+    );
 
     expect(processed).toBe(1);
     expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
@@ -1256,6 +1478,18 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       })),
       recordShipment: vi.fn(async () => undefined),
     };
+    const manual = makeManualAuthorityFixture({
+      shipmentId: 7005,
+      exceptionId: 60015,
+      candidateShipmentId: 9005,
+      shipmentItemId: 91005,
+      orderItemId: null,
+      correctionForShipmentItemId: null,
+      productVariantId: 40002,
+      quantity: 1,
+      fromLocationId: 50001,
+      shipmentItemPurpose: "concession",
+    });
     const mock = makeDb([
       {
         rows: [{
@@ -1270,6 +1504,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           tracking_number: "1Z-CONCESSION",
         }],
       },
+      manual.persistedCandidateResponse,
 
       {
         rows: [{
@@ -1305,7 +1540,12 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
+    const processed = await processTestShipment(
+      mock,
+      shipmentPayload,
+      inventoryCore,
+      manual.authority,
+    );
 
     expect(processed).toBe(1);
     expect(inventoryCore.recordReplacementShipmentFromAvailableInventory).toHaveBeenCalledWith(expect.objectContaining({
@@ -1364,8 +1604,10 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     // V2 probes by physical shipment id first, then legacy order id.
     expect(executeSqls[0]).toMatch(/external_fulfillment_id/);
     expect(executeSqls[1]).toMatch(/shipstation_order_id/);
-    // Legacy fallback then ran the OMS-by-pointer query.
-    expect(executeSqls[2]).toMatch(/oms_fulfillment_order_id/);
+    // Exact item ownership may add read-only probes before the legacy lookup.
+    expect(executeSqls.some((text) =>
+      /oms_fulfillment_order_id/.test(text)
+    )).toBe(true);
     // Final no-match is persisted as a WMS review exception.
     expect(executeSqls.join("\n")).toMatch(/INSERT INTO wms\.reconciliation_exceptions/);
 
@@ -1431,6 +1673,7 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
   function happyPathRows() {
     return [
       { rows: [{ id: 501, order_id: 42, status: "planned" }] },
+      ...exactSingleItemSyncResponses(),
       {
         rows: [{
           id: 501,
@@ -1450,10 +1693,10 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
   it("materializes the physical package and never invokes a legacy provider push", async () => {
     const mock = makeDb(happyPathRows());
     globalThis.fetch = mockFetchOnceOk({
-      shipments: [makeShipmentPayload()],
+      shipments: [makeExactShipmentPayload()],
     }) as any;
 
-    const processed = await processTestShipment(mock, makeShipmentPayload());
+    const processed = await processTestShipment(mock, makeExactShipmentPayload());
 
     expect(processed).toBe(1);
     expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledTimes(1);
@@ -1481,7 +1724,7 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
   it("promotes an exact non-voided label only after confirmed carrier possession", async () => {
     const mock = makeDb(happyPathRows());
     globalThis.fetch = mockFetchOnceOk({
-      shipments: [makeShipmentPayload()],
+      shipments: [makeExactShipmentPayload()],
     }) as any;
 
     const result = await createTestShipStationService(mock).confirmDispatch(
@@ -1509,6 +1752,12 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
       }),
       { executeImmediately: false },
     );
+    expect(mock.providerLabelObserver.observeShipStationLabel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        shipmentId: 77777,
+        isReturnLabel: false,
+      }),
+    );
   });
 
   it("rejects a voided label before any WMS or inventory transition", async () => {
@@ -1525,6 +1774,24 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
       code: "CARRIER_DISPATCH_PROVIDER_LABEL_VOIDED",
       retryable: false,
     });
+    expect(mock.providerLabelObserver.observeShipStationLabel).toHaveBeenCalledTimes(1);
+    expect(mock.execute).not.toHaveBeenCalled();
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
+  });
+
+  it("rejects carrier dispatch when outbound direction is missing", async () => {
+    const mock = makeDb([]);
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeExactShipmentPayload({ isReturnLabel: undefined })],
+    }) as any;
+
+    await expect(
+      createTestShipStationService(mock).confirmDispatch(makeDispatchInput()),
+    ).rejects.toMatchObject({
+      code: "CARRIER_DISPATCH_RETURN_LABEL_NOT_OUTBOUND",
+      retryable: false,
+    });
+    expect(mock.providerLabelObserver.observeShipStationLabel).toHaveBeenCalledTimes(1);
     expect(mock.execute).not.toHaveBeenCalled();
     expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
   });
@@ -1549,10 +1816,10 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
     process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "false";
     const mock = makeDb(happyPathRows());
     globalThis.fetch = mockFetchOnceOk({
-      shipments: [makeShipmentPayload()],
+      shipments: [makeExactShipmentPayload()],
     }) as any;
 
-    await processTestShipment(mock, makeShipmentPayload());
+    await processTestShipment(mock, makeExactShipmentPayload());
 
     expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledTimes(1);
   });
@@ -1560,15 +1827,16 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
   it("fails closed when the canonical authority is unavailable", async () => {
     const mock = makeDb(happyPathRows());
     globalThis.fetch = mockFetchOnceOk({
-      shipments: [makeShipmentPayload()],
+      shipments: [makeExactShipmentPayload()],
     }) as any;
 
     await expect(
       createShipStationService(mock.db).processManualShipmentNotification(
-        makeShipmentPayload(),
+        makeExactShipmentPayload(),
         {
           operator: "test:ship-notify-v2",
           reason: "unit_test",
+          contentsAuthority: { source: "provider_exact" },
         },
       ),
     ).rejects.toThrow(/Canonical channel fulfillment authority is not initialized/);
@@ -1631,6 +1899,26 @@ describe("processShipNotify V2 :: error resilience", () => {
     expect(mock.providerLabelObserver.observeShipStationLabel).toHaveBeenCalledTimes(3);
     expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
   });
+
+  it("persists voided-label evidence without invoking fulfillment", async () => {
+    const voided = makeShipmentPayload({
+      shipmentId: 1010,
+      orderId: 10,
+      orderKey: "echelon-wms-shp-20",
+      voidDate: "2026-04-24T15:00:00.000Z",
+    });
+    const mock = makeDb([]);
+    globalThis.fetch = mockFetchOnceOk({ shipments: [voided] }) as any;
+
+    const observed = await createTestShipStationService(mock).processShipNotify("/voided");
+
+    expect(observed).toBe(1);
+    expect(mock.providerLabelObserver.observeShipStationLabel).toHaveBeenCalledWith(
+      expect.objectContaining({ shipmentId: 1010, voidDate: voided.voidDate }),
+    );
+    expect(mock.execute).not.toHaveBeenCalled();
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
+  });
 });
 
 // ─── SHIP_NOTIFY idempotency hardening (no shipment creation) ──────
@@ -1654,7 +1942,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
     // created SS order 222 on the same key. SHIP_NOTIFY arrives with
     // orderId=222 which doesn't match our DB's 111. The handler should
     // UPDATE the existing shipment's mapping, not INSERT a new one.
-    const shipmentPayload = makeShipmentPayload({
+    const shipmentPayload = makeExactShipmentPayload({
       orderId: 222, // doesn't match the 111 in our DB
       orderKey: "echelon-wms-shp-501",
     });
@@ -1675,8 +1963,11 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
           },
         ],
       },
+      // Compare the provider package with the parent before adopting its identity.
+      { rows: [{ id: 10001, qty: 1 }] },
       // UPDATE shipment 501's mapping from 111 → 222 (+ review flag)
       { rows: [] },
+      ...exactSingleItemSyncResponses(),
       // markShipmentShipped load-current
       {
         rows: [
@@ -1778,7 +2069,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
       orderKey: "echelon-wms-shp-501",
       trackingNumber: "1Z-REPLACEMENT",
       shipmentItems: [
-        { lineItemKey: null, sku: "SKU-A", quantity: 1 },
+        { lineItemKey: "wms-item-10001", sku: "SKU-A", quantity: 1 },
       ],
     });
     const inventoryCore = {

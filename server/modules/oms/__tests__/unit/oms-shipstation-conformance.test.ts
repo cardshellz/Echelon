@@ -83,7 +83,7 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(duplicateRepairBlock).toContain("handled: false");
   });
 
-  it("allows legitimate shipped splits only when WMS item evidence is present", () => {
+  it("allows legitimate shipped splits only when exact WMS item evidence is present", () => {
     const splitResolutionBlock = sourceBlock(
       SHIPSTATION_SRC,
       "async function resolveShipmentByOrderKey",
@@ -117,7 +117,7 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(splitResolutionBlock).toContain("if (sourceQty === item.qty)");
     expect(splitResolutionBlock).toContain("SET shipment_id = ${row.id}");
     expect(splitResolutionBlock).toContain("AND qty > ${item.qty}");
-    expect(SHIPSTATION_SRC).toContain("parseWmsShipmentItemLineKey");
+    expect(SHIPSTATION_SRC).toContain("parseExactPositiveWmsShipmentItems");
     expect(SHIPSTATION_SRC).toContain("shipstation_package_contents_missing");
     expect(itemSyncBlock).toContain("shipstation_split_items_unmapped");
     expect(itemSyncBlock).toContain("shipstation_split_source_item_missing");
@@ -127,8 +127,8 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(itemSyncBlock).toContain("the remaining demand was preserved for review");
     expect(itemSyncWrapperBlock).toContain('typeof db.transaction === "function"');
     expect(itemSyncWrapperBlock).toContain("await db.transaction(syncItems)");
-    expect(SHIPSTATION_SRC).toContain("hasUsablePositiveProviderItems");
-    expect(SHIPSTATION_SRC).toContain("hasPositiveCustomerShipmentItemAuthority");
+    expect(SHIPSTATION_SRC).toContain("hasAuthoritativeProviderItems");
+    expect(SHIPSTATION_SRC).toContain("providerItemsExactlyMatchCustomerShipment");
   });
 
   it("exempts legitimate ShipStation split children from active engine identity uniqueness", () => {

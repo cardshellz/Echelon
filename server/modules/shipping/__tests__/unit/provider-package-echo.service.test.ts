@@ -86,6 +86,33 @@ describe("ShipStation provider package echo", () => {
       linkInserted: false,
     });
   });
+  it.each([
+    ["string quantity", [{ lineItemKey: "wms-item-16492", quantity: "1" }]],
+    ["trimmed key", [{ lineItemKey: " wms-item-16492 ", quantity: 1 }]],
+    ["out-of-range key", [{ lineItemKey: "wms-item-2147483648", quantity: 1 }]],
+    ["out-of-range quantity", [{ lineItemKey: "wms-item-16492", quantity: 2_147_483_648 }]],
+    ["duplicate key", [
+      { lineItemKey: "wms-item-16492", quantity: 1 },
+      { lineItemKey: "wms-item-16492", quantity: 1 },
+    ]],
+  ])("does not authorize %s provider evidence", async (_case, shipmentItems) => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        if (isExactLegacyPackageQuery(queryText(query))) return { rows: [] };
+        throw new Error("provider evidence reached a mutation-authority query");
+      }),
+    };
+
+    await expect(inspectShipStationProviderPackageEcho(db, {
+      ...input,
+      shipmentItems: shipmentItems as any,
+    })).resolves.toMatchObject({
+      status: "no_match",
+      reason: "provider_lines_not_authoritative",
+    });
+    expect(db.execute).toHaveBeenCalledOnce();
+  });
+
 
   it("recognizes combined-order children as one provider package with exact item proof", async () => {
     const db = {
@@ -360,7 +387,7 @@ describe("ShipStation provider package echo", () => {
   });
 
 
-  it("matches a combined package when one linked legacy sibling has no external fulfillment id", async () => {
+  it("does not infer combined-package authority from SKU-only evidence", async () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
@@ -393,15 +420,11 @@ describe("ShipStation provider package echo", () => {
         { sku: "GLV-MAG-130PT-P50", quantity: 1 },
       ],
       source: "unit_test",
-    })).resolves.toEqual({
-      status: "matched",
-      reason: "exact_provider_and_legacy_package_identity",
-      physicalShipmentId: null,
-      wmsOrderId: 205784,
-      authoritativeLegacyShipmentIds: [10628, 10849],
-      shippingProviderLabelId: 10,
-      linkInserted: false,
+    })).resolves.toMatchObject({
+      status: "no_match",
+      reason: "provider_lines_not_authoritative",
     });
+    expect(db.execute).toHaveBeenCalledOnce();
   });
   it("does not accept a linked provider-first shell without positive package authority", async () => {
     const db = {

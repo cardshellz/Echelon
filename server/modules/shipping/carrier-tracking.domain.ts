@@ -45,6 +45,7 @@ export type ShippingProviderLabelEventType =
   | "label_superseded";
 
 export const CARRIER_TRACKING_PARSER_VERSION = "shipstation-api-track-v2";
+export const SHIPSTATION_LABEL_OBSERVATION_SOURCE = "shipstation_shipment_observation" as const;
 
 const boundedOptionalString = (max: number) => z.preprocess(
   (value) => (
@@ -54,6 +55,11 @@ const boundedOptionalString = (max: number) => z.preprocess(
   ),
   z.string().trim().min(1).max(max).nullish(),
 );
+
+const positiveSafeIntegerSchema = z.number()
+  .int()
+  .positive()
+  .refine(Number.isSafeInteger, "must be a safe integer");
 
 const shipStationTrackingHistoryEventSchema = z.object({
   occurred_at: boundedOptionalString(80),
@@ -218,29 +224,35 @@ export interface NormalizedShippingProviderLabelObservation {
   labelCreatedAt: Date | null;
   voidedAt: Date | null;
   providerOccurredAt: Date | null;
+  shipmentContentsEvidence: ShipStationShipmentContentsEvidence;
+  observationSource: typeof SHIPSTATION_LABEL_OBSERVATION_SOURCE;
+  sourceObservationHash: string;
   eventHash: string;
   sanitizedPayload: Record<string, unknown>;
   observedAt: Date;
 }
 
 const shipStationLabelObservationSchema = z.object({
-  shipmentId: z.number().int().positive(),
-  orderId: z.number().int().positive().nullish(),
-  orderKey: boundedOptionalString(500),
+  shipmentId: positiveSafeIntegerSchema,
+  orderId: positiveSafeIntegerSchema.nullish(),
+  orderKey: boundedOptionalString(200),
   trackingNumber: z.string().trim().min(1).max(200),
   carrierCode: boundedOptionalString(100),
   serviceCode: boundedOptionalString(100),
+  createDate: boundedOptionalString(80),
   shipDate: boundedOptionalString(80),
   voidDate: boundedOptionalString(80),
   // ShipStation V1 includes these only when the caller requests
-  // includeShipmentItems=true. Keep the raw members opaque here so a malformed
-  // optional item cannot prevent us from observing the label itself; the
+  // includeShipmentItems=true. Keep the container and members opaque here so
+  // malformed optional contents cannot prevent us from observing the label; the
   // sanitizer below accepts only exact Echelon-owned line-item identities.
-  shipmentItems: z.array(z.unknown()).max(500).optional(),
+  shipmentItems: z.unknown().optional(),
   // A list response can omit this field. Missing direction must never be
   // treated as outbound authority; callers hydrate the shipment detail first.
   isReturnLabel: z.boolean().optional(),
 }).passthrough();
+const MAX_SHIPSTATION_SHIPMENT_ITEMS = 500;
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
 
 interface SanitizedShipStationShipmentItemIdentity {
   lineItemKey: string;
@@ -249,18 +261,329 @@ interface SanitizedShipStationShipmentItemIdentity {
 function sanitizeShipStationShipmentItemIdentities(
   rawItems: unknown[] | undefined,
 ): SanitizedShipStationShipmentItemIdentity[] {
+  if ((rawItems?.length ?? 0) > MAX_SHIPSTATION_SHIPMENT_ITEMS) {
+    return [];
+  }
   const identities = new Set<string>();
   for (const rawItem of rawItems ?? []) {
     if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) continue;
     const rawKey = (rawItem as Record<string, unknown>).lineItemKey;
-    if (typeof rawKey !== "string") continue;
+    if (typeof rawKey !== "string" || rawKey.length > 200) continue;
     const lineItemKey = rawKey.trim();
-    if (!/^wms-item-[1-9][0-9]*$/.test(lineItemKey) || lineItemKey.length > 200) continue;
+    const match = /^wms-item-([1-9][0-9]*)$/.exec(lineItemKey);
+    const wmsShipmentItemId = match ? Number(match[1]) : Number.NaN;
+    if (
+      !Number.isSafeInteger(wmsShipmentItemId)
+      || wmsShipmentItemId <= 0
+      || wmsShipmentItemId > POSTGRES_INTEGER_MAX
+    ) continue;
     identities.add(lineItemKey);
   }
   return [...identities]
     .sort((left, right) => left.localeCompare(right))
     .map((lineItemKey) => ({ lineItemKey }));
+}
+
+export type ShipStationShipmentContentsEvidenceStatus =
+  | "authoritative"
+  | "omitted"
+  | "empty"
+  | "unrecognized"
+  | "malformed"
+  | "mixed";
+
+export interface SanitizedShipStationShipmentItemQuantity {
+  lineItemKey: string;
+  quantity: number;
+}
+
+export interface ShipStationShipmentContentsEvidence {
+  status: ShipStationShipmentContentsEvidenceStatus;
+  providerItemCount: number;
+  recognizedProviderItemCount: number;
+  malformedItemCount: number;
+  unrecognizedItemCount: number;
+  duplicateLineItemCount: number;
+  shipmentItems: readonly SanitizedShipStationShipmentItemQuantity[];
+}
+
+function emptyShipmentContentsEvidence(
+  status: "omitted" | "empty" | "malformed",
+  providerItemCount: number,
+  malformedItemCount: number = 0,
+): ShipStationShipmentContentsEvidence {
+  return Object.freeze({
+    status,
+    providerItemCount,
+    recognizedProviderItemCount: 0,
+    malformedItemCount,
+    unrecognizedItemCount: 0,
+    duplicateLineItemCount: 0,
+    shipmentItems: Object.freeze([]),
+  });
+}
+
+/**
+ * Retains only Echelon-owned WMS line identities and exact positive quantities.
+ * Any provider line that cannot be proven from both fields prevents the whole
+ * package snapshot from becoming authoritative; recognized subsets are kept
+ * solely as review evidence. Duplicate valid rows are grouped before they are
+ * classified so quantity overflow is order-independent. An overflowing total
+ * quarantines every provider row for that line; all duplicates remain
+ * review-required until provider duplicate semantics are proven.
+ */
+export function normalizeShipStationShipmentContentsEvidence(
+  rawItems: unknown,
+): ShipStationShipmentContentsEvidence {
+  if (rawItems === undefined) {
+    return emptyShipmentContentsEvidence("omitted", 0);
+  }
+  if (!Array.isArray(rawItems)) {
+    return emptyShipmentContentsEvidence("malformed", 0, 1);
+  }
+  if (rawItems.length === 0) {
+    return emptyShipmentContentsEvidence("empty", 0);
+  }
+  if (rawItems.length > MAX_SHIPSTATION_SHIPMENT_ITEMS) {
+    return emptyShipmentContentsEvidence(
+      "malformed",
+      rawItems.length,
+      rawItems.length,
+    );
+  }
+
+  const quantitiesByLineItemKey = new Map<string, {
+    providerItemCount: number;
+    quantity: number;
+  }>();
+  let recognizedProviderItemCount = 0;
+  let malformedItemCount = 0;
+  let unrecognizedItemCount = 0;
+  let duplicateLineItemCount = 0;
+
+  for (const rawItem of rawItems) {
+    if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+      malformedItemCount += 1;
+      continue;
+    }
+    const item = rawItem as Record<string, unknown>;
+    const quantity = item.quantity;
+    if (
+      typeof quantity !== "number"
+      || !Number.isSafeInteger(quantity)
+      || quantity <= 0
+      || quantity > POSTGRES_INTEGER_MAX
+    ) {
+      malformedItemCount += 1;
+      continue;
+    }
+    const rawKey = item.lineItemKey;
+    if (typeof rawKey !== "string") {
+      unrecognizedItemCount += 1;
+      continue;
+    }
+    if (rawKey.length > 200) {
+      unrecognizedItemCount += 1;
+      continue;
+    }
+    const lineItemKey = rawKey.trim();
+    if (rawKey !== lineItemKey) {
+      unrecognizedItemCount += 1;
+      continue;
+    }
+    const match = /^wms-item-([1-9][0-9]*)$/.exec(lineItemKey);
+    const wmsShipmentItemId = match ? Number(match[1]) : Number.NaN;
+    if (
+      !Number.isSafeInteger(wmsShipmentItemId)
+      || wmsShipmentItemId <= 0
+      || wmsShipmentItemId > POSTGRES_INTEGER_MAX
+    ) {
+      unrecognizedItemCount += 1;
+      continue;
+    }
+
+    const current = quantitiesByLineItemKey.get(lineItemKey);
+    quantitiesByLineItemKey.set(lineItemKey, {
+      providerItemCount: (current?.providerItemCount ?? 0) + 1,
+      quantity: (current?.quantity ?? 0) + quantity,
+    });
+  }
+
+  const retainedShipmentItems: SanitizedShipStationShipmentItemQuantity[] = [];
+  for (const [lineItemKey, aggregate] of [...quantitiesByLineItemKey.entries()]
+    .sort(([left], [right]) => (
+      Number(left.slice("wms-item-".length))
+      - Number(right.slice("wms-item-".length))
+    ))) {
+    duplicateLineItemCount += aggregate.providerItemCount - 1;
+    if (
+      !Number.isSafeInteger(aggregate.quantity)
+      || aggregate.quantity > POSTGRES_INTEGER_MAX
+    ) {
+      malformedItemCount += aggregate.providerItemCount;
+      continue;
+    }
+    recognizedProviderItemCount += aggregate.providerItemCount;
+    retainedShipmentItems.push(Object.freeze({
+      lineItemKey,
+      quantity: aggregate.quantity,
+    }));
+  }
+  const shipmentItems = Object.freeze(retainedShipmentItems);
+  const recognizedLineCount = shipmentItems.length;
+  const status: ShipStationShipmentContentsEvidenceStatus = recognizedLineCount > 0
+    ? malformedItemCount > 0
+      || unrecognizedItemCount > 0
+      || duplicateLineItemCount > 0
+      ? "mixed"
+      : "authoritative"
+    : malformedItemCount > 0
+      ? "malformed"
+      : "unrecognized";
+
+  return Object.freeze({
+    status,
+    providerItemCount: rawItems.length,
+    recognizedProviderItemCount,
+    malformedItemCount,
+    unrecognizedItemCount,
+    duplicateLineItemCount,
+    shipmentItems,
+  });
+}
+
+const SHIPSTATION_LABEL_SOURCE_OBSERVATION_HASH_VERSION = 1;
+const MAX_SHIPSTATION_SOURCE_VALUE_LENGTH = 200;
+const MAX_OVERSIZED_SOURCE_ITEM_SAMPLES = 500;
+
+type ShipStationSourceValueKind =
+  | "array"
+  | "bigint"
+  | "boolean"
+  | "function"
+  | "null"
+  | "number"
+  | "object"
+  | "string"
+  | "symbol"
+  | "undefined";
+
+function shipStationSourceValueKind(value: unknown): ShipStationSourceValueKind {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function redactShipStationSourceValue(
+  value: unknown,
+): Readonly<Record<string, string | number | boolean>> {
+  if (typeof value === "string") {
+    return value.length <= MAX_SHIPSTATION_SOURCE_VALUE_LENGTH
+      ? Object.freeze({ kind: "string", value })
+      : Object.freeze({
+        kind: "oversized_string",
+        length: value.length,
+        boundedValueHash: sha256(canonicalJson({
+          prefix: value.slice(0, MAX_SHIPSTATION_SOURCE_VALUE_LENGTH / 2),
+          suffix: value.slice(-(MAX_SHIPSTATION_SOURCE_VALUE_LENGTH / 2)),
+          length: value.length,
+        })),
+      });
+  }
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) {
+      return Object.freeze({ kind: "number", value });
+    }
+    const classification = Number.isNaN(value)
+      ? "nan"
+      : value > 0
+        ? "positive_infinity"
+        : "negative_infinity";
+    return Object.freeze({ kind: "non_finite_number", classification });
+  }
+  if (typeof value === "boolean") {
+    return Object.freeze({ kind: "boolean", value });
+  }
+  return Object.freeze({ kind: shipStationSourceValueKind(value) });
+}
+
+function redactShipStationSourceField(
+  item: Record<string, unknown>,
+  field: "lineItemKey" | "quantity",
+): Readonly<Record<string, string | number | boolean>> {
+  if (!Object.prototype.hasOwnProperty.call(item, field)) {
+    return Object.freeze({ kind: "missing" });
+  }
+  return redactShipStationSourceValue(item[field]);
+}
+function redactShipStationSourceItem(rawItem: unknown): Readonly<Record<string, unknown>> {
+  if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+    return Object.freeze({
+      kind: "malformed_row",
+      sourceValue: redactShipStationSourceValue(rawItem),
+    });
+  }
+  const item = rawItem as Record<string, unknown>;
+  return Object.freeze({
+    kind: "item",
+    lineItemKey: redactShipStationSourceField(item, "lineItemKey"),
+    quantity: redactShipStationSourceField(item, "quantity"),
+  });
+}
+
+function malformedContainerDigest(rawItems: unknown): string {
+  const evidence = rawItems !== null
+    && typeof rawItems === "object"
+    && !Array.isArray(rawItems)
+    ? {
+      kind: "object",
+      lineItemKey: redactShipStationSourceField(
+        rawItems as Record<string, unknown>,
+        "lineItemKey",
+      ),
+      quantity: redactShipStationSourceField(
+        rawItems as Record<string, unknown>,
+        "quantity",
+      ),
+    }
+    : redactShipStationSourceValue(rawItems);
+  return sha256(canonicalJson(evidence));
+}
+
+function redactShipStationSourceItems(rawItems: unknown): Readonly<Record<string, unknown>> {
+  if (rawItems === undefined) {
+    return Object.freeze({ kind: "omitted" });
+  }
+  if (!Array.isArray(rawItems)) {
+    return Object.freeze({
+      kind: "malformed_container",
+      sourceType: shipStationSourceValueKind(rawItems),
+      sourceDigest: malformedContainerDigest(rawItems),
+    });
+  }
+  if (rawItems.length > MAX_SHIPSTATION_SHIPMENT_ITEMS) {
+    const sampleCount = Math.min(rawItems.length, MAX_OVERSIZED_SOURCE_ITEM_SAMPLES);
+    const samples = Array.from({ length: sampleCount }, (_unused, sampleIndex) => {
+      const sourceIndex = sampleCount === 1
+        ? 0
+        : Math.floor(sampleIndex * (rawItems.length - 1) / (sampleCount - 1));
+      return Object.freeze({
+        sourceIndex,
+        item: redactShipStationSourceItem(rawItems[sourceIndex]),
+      });
+    });
+    return Object.freeze({
+      kind: "oversized_array",
+      providerItemCount: rawItems.length,
+      sampledSourceDigest: sha256(canonicalJson(samples)),
+    });
+  }
+
+  return Object.freeze({
+    kind: "ordered_items",
+    providerItemCount: rawItems.length,
+    items: Object.freeze(rawItems.map(redactShipStationSourceItem)),
+  });
 }
 
 export interface CarrierTrackingMatchCandidate {
@@ -595,19 +918,63 @@ export function normalizeShipStationLabelObservation(
     ? "label_voided"
     : "label_observed";
   const shipmentItems = sanitizeShipStationShipmentItemIdentities(
+    Array.isArray(shipment.shipmentItems) ? shipment.shipmentItems : undefined,
+  );
+  const shipmentContentsEvidence = normalizeShipStationShipmentContentsEvidence(
     shipment.shipmentItems,
   );
-  const sanitizedPayload = {
+  const sourceObservationHash = sha256(canonicalJson({
+    sourceObservationSchemaVersion: SHIPSTATION_LABEL_SOURCE_OBSERVATION_HASH_VERSION,
+    observationSource: SHIPSTATION_LABEL_OBSERVATION_SOURCE,
+    provider: "shipstation",
     providerLabelId: String(shipment.shipmentId),
     providerOrderId: shipment.orderId == null ? null : String(shipment.orderId),
     providerOrderKey: nullableString(shipment.orderKey),
     trackingNumber,
     carrierCode: nullableCarrierCode(shipment.carrierCode),
     serviceCode: nullableString(shipment.serviceCode),
+    createDate: nullableString(shipment.createDate),
+    shipDate: nullableString(shipment.shipDate),
+    voidDate: nullableString(shipment.voidDate),
+    isReturnLabel: shipment.isReturnLabel ?? null,
+    shipmentItems: redactShipStationSourceItems(shipment.shipmentItems),
+  }));
+  const sanitizedPayload = {
+    payloadSchemaVersion: 2,
+    providerLabelId: String(shipment.shipmentId),
+    providerOrderId: shipment.orderId == null ? null : String(shipment.orderId),
+    providerOrderKey: nullableString(shipment.orderKey),
+    observationSource: SHIPSTATION_LABEL_OBSERVATION_SOURCE,
+    sourceObservationHash,
+    trackingNumber,
+    carrierCode: nullableCarrierCode(shipment.carrierCode),
+    serviceCode: nullableString(shipment.serviceCode),
+    // Provider artifact metadata only. No issuance or purchase-time semantics
+    // are assigned without separate proof.
+    createDate: nullableString(shipment.createDate),
     shipDate: nullableString(shipment.shipDate),
     voidDate: nullableString(shipment.voidDate),
     isReturnLabel: shipment.isReturnLabel,
+    // Compatibility field used by existing label-link reconciliation.
     shipmentItems,
+    // Versioned exact evidence for the lifecycle shadow. Rejected raw values,
+    // SKU, price, name, options, and address data are never retained here.
+    declaredContentsEvidence: {
+      evidenceSchemaVersion: 1,
+      status: shipmentContentsEvidence.status,
+      providerItemCount: shipmentContentsEvidence.providerItemCount,
+      recognizedProviderItemCount:
+        shipmentContentsEvidence.recognizedProviderItemCount,
+      canonicalLineCount: shipmentContentsEvidence.shipmentItems.length,
+      malformedItemCount: shipmentContentsEvidence.malformedItemCount,
+      unrecognizedItemCount: shipmentContentsEvidence.unrecognizedItemCount,
+      duplicateLineItemCount: shipmentContentsEvidence.duplicateLineItemCount,
+      rejectedItemCount:
+        shipmentContentsEvidence.malformedItemCount
+        + shipmentContentsEvidence.unrecognizedItemCount,
+      reviewRequired: shipmentContentsEvidence.status !== "authoritative",
+      lines: shipmentContentsEvidence.shipmentItems,
+    },
   };
   const eventIdentity = {
     provider: "shipstation",
@@ -627,11 +994,15 @@ export function normalizeShipStationLabelObservation(
     eventType,
     carrier: nullableCarrierCode(shipment.carrierCode),
     serviceCode: nullableString(shipment.serviceCode),
-    // ShipStation's shipDate is not documented as label-purchase time. Keep
-    // labelCreatedAt unknown rather than inventing a lifecycle timestamp.
+    // Neither ShipStation createDate nor shipDate is proven as label-purchase
+    // time. Retain both only as provider evidence and keep lifecycle issuance
+    // unknown rather than inventing a timestamp.
     labelCreatedAt: null,
     voidedAt,
     providerOccurredAt: voidedAt ?? shipDate,
+    shipmentContentsEvidence,
+    observationSource: SHIPSTATION_LABEL_OBSERVATION_SOURCE,
+    sourceObservationHash,
     eventHash: sha256(canonicalJson(eventIdentity)),
     sanitizedPayload,
     observedAt: new Date(observedAt),
