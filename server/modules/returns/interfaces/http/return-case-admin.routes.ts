@@ -1,4 +1,4 @@
-import type { Express, Response } from "express";
+import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { returnCaseStatuses } from "@shared/schema";
 import { requirePermission } from "../../../../routes/middleware";
@@ -9,8 +9,13 @@ import {
 import {
   manualReturnReasonCodes, OpenReturnCaseError, OpenReturnCaseService,
 } from "../../application/open-return-case.service";
+import {
+  ReturnCaseOperationError,
+  ReturnCaseOperationService,
+} from "../../application/return-case-operations.service";
 import { PostgresReturnCaseAdminStore } from "../../infrastructure/return-case.repository";
 import { PostgresOpenReturnCaseStore } from "../../infrastructure/open-return-case.repository";
+import { PostgresReturnCaseOperationStore } from "../../infrastructure/return-case-operation.repository";
 
 const listQuerySchema = z.object({
   search: z.string().trim().max(160).optional().transform((value) => value || null),
@@ -39,11 +44,27 @@ const openCaseSchema = z.object({
     quantity: z.number().int().positive().safe(),
   }).strict()).min(1).max(200),
 }).strict();
+const receiptSchema = z.object({
+  idempotencyKey: z.string().trim().min(1).max(160),
+  notes: z.string().trim().max(2_000).nullable().default(null),
+  lines: z.array(z.object({
+    returnCaseItemId: z.number().int().positive().safe(),
+    expectedCurrentReceivedQuantity: z.number().int().nonnegative().safe(),
+    quantityReceivedNow: z.number().int().positive().safe(),
+  }).strict()).min(1).max(200),
+}).strict();
+const startInspectionSchema = z.object({
+  idempotencyKey: z.string().trim().min(1).max(160),
+  notes: z.string().trim().max(2_000).nullable().default(null),
+}).strict();
 
 export function registerReturnCaseAdminRoutes(
   app: Express,
   service: ReturnCaseAdminService = new ReturnCaseAdminService(new PostgresReturnCaseAdminStore()),
   openService: OpenReturnCaseService = new OpenReturnCaseService(new PostgresOpenReturnCaseStore()),
+  operationService: ReturnCaseOperationService = new ReturnCaseOperationService(
+    new PostgresReturnCaseOperationStore(),
+  ),
 ): void {
   app.get("/api/returns/admin/cases", requirePermission("inventory", "view"), async (req, res) => {
     const parsed = listQuerySchema.safeParse(req.query);
@@ -88,21 +109,85 @@ export function registerReturnCaseAdminRoutes(
   app.post("/api/returns/admin/cases", requirePermission("inventory", "edit"), async (req, res) => {
     const parsed = openCaseSchema.safeParse(req.body);
     if (!parsed.success) return sendValidationError(res, parsed.error);
-    const actorId = req.session.user?.id;
-    if (actorId === null || actorId === undefined || String(actorId).trim() === "") {
-      return res.status(401).json({
-        error: { code: "RETURN_CASE_ACTOR_REQUIRED", message: "An authenticated admin is required." },
-      });
-    }
+    const actor = readAuthenticatedActor(req);
+    if (!actor) return sendActorRequired(res);
     try {
       const result = await openService.open({
         ...parsed.data,
-        actor: `user:${String(actorId)}`,
+        actor,
       });
       return res.status(result.replayed ? 200 : 201).json(result);
     } catch (error) {
       return sendError(res, error, "RETURN_CASE_OPEN_FAILED", "Return case could not be opened.");
     }
+  });
+
+  app.post(
+    "/api/returns/admin/cases/:id/receipt",
+    requirePermission("inventory", "adjust"),
+    async (req, res) => {
+      const parsedCaseId = caseIdSchema.safeParse(req.params.id);
+      if (!parsedCaseId.success) return sendValidationError(res, parsedCaseId.error);
+      const parsedBody = receiptSchema.safeParse(req.body);
+      if (!parsedBody.success) return sendValidationError(res, parsedBody.error);
+      const actor = readAuthenticatedActor(req);
+      if (!actor) return sendActorRequired(res);
+      try {
+        const result = await operationService.recordReceipt({
+          caseId: parsedCaseId.data,
+          ...parsedBody.data,
+          actor,
+        });
+        return res.status(result.replayed ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(
+          res,
+          error,
+          "RETURN_CASE_RECEIPT_FAILED",
+          "Return receipt could not be recorded.",
+        );
+      }
+    },
+  );
+
+  app.post(
+    "/api/returns/admin/cases/:id/inspections/start",
+    requirePermission("inventory", "adjust"),
+    async (req, res) => {
+      const parsedCaseId = caseIdSchema.safeParse(req.params.id);
+      if (!parsedCaseId.success) return sendValidationError(res, parsedCaseId.error);
+      const parsedBody = startInspectionSchema.safeParse(req.body);
+      if (!parsedBody.success) return sendValidationError(res, parsedBody.error);
+      const actor = readAuthenticatedActor(req);
+      if (!actor) return sendActorRequired(res);
+      try {
+        const result = await operationService.startInspection({
+          caseId: parsedCaseId.data,
+          ...parsedBody.data,
+          actor,
+        });
+        return res.status(result.replayed ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(
+          res,
+          error,
+          "RETURN_CASE_INSPECTION_START_FAILED",
+          "Return inspection could not be started.",
+        );
+      }
+    },
+  );
+}
+
+function readAuthenticatedActor(req: Request): string | null {
+  const actorId = req.session.user?.id;
+  if (actorId === null || actorId === undefined || String(actorId).trim() === "") return null;
+  return `user:${String(actorId)}`;
+}
+
+function sendActorRequired(res: Response): Response {
+  return res.status(401).json({
+    error: { code: "RETURN_CASE_ACTOR_REQUIRED", message: "An authenticated admin is required." },
   });
 }
 
@@ -117,7 +202,11 @@ function sendValidationError(res: Response, error: z.ZodError): Response {
 }
 
 function sendError(res: Response, error: unknown, fallbackCode: string, fallbackMessage: string): Response {
-  if (error instanceof ReturnCaseAdminError || error instanceof OpenReturnCaseError) {
+  if (
+    error instanceof ReturnCaseAdminError
+    || error instanceof OpenReturnCaseError
+    || error instanceof ReturnCaseOperationError
+  ) {
     return res.status(error.status).json({
       error: { code: error.code, message: error.message, context: error.context },
     });

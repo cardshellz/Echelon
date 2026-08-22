@@ -1,4 +1,4 @@
-import { asc, count, eq, sql, sum } from "drizzle-orm";
+import { and, asc, count, eq, sql, sum } from "drizzle-orm";
 import {
   channels,
   dropshipStoreConnections,
@@ -6,8 +6,11 @@ import {
   omsOrders,
   orders,
   returnCaseEvents,
+  returnCaseInspections,
   returnCaseItems,
   returnCases,
+  returnItems,
+  returns as wmsReturns,
 } from "@shared/schema";
 import { db, pool } from "../../../db";
 import type {
@@ -19,6 +22,12 @@ import type {
   ReturnCaseListRow,
   ReturnCaseSummaryMetrics,
 } from "../application/return-case-admin.service";
+import {
+  ReturnCaseActionDomainError,
+  parseReturnPolicySnapshot,
+  type ReturnCaseActionContext,
+  type ReturnInspectionFacts,
+} from "../domain/return-case-actions";
 
 const itemSummary = db
   .select({
@@ -234,21 +243,45 @@ export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
   }
 
   async getById(id: number): Promise<ReturnCaseDetailRow | null> {
-    const [caseRows, itemRows, eventRows] = await Promise.all([
-      selectCaseRows().where(eq(returnCases.id, id)).limit(1),
-      db
-        .select()
-        .from(returnCaseItems)
-        .where(eq(returnCaseItems.returnCaseId, id))
-        .orderBy(asc(returnCaseItems.id)),
+    const caseRows = await selectCaseRows().where(eq(returnCases.id, id)).limit(1);
+    const caseRow = caseRows[0];
+    if (!caseRow) return null;
+
+    const [itemRows, eventRows, wmsReturnRows, wmsItemRows, inspectionRows] = await Promise.all([
+      selectDetailItemRows(id),
       db
         .select()
         .from(returnCaseEvents)
         .where(eq(returnCaseEvents.returnCaseId, id))
         .orderBy(asc(returnCaseEvents.occurredAt), asc(returnCaseEvents.id)),
+      db
+        .select()
+        .from(wmsReturns)
+        .where(eq(wmsReturns.id, caseRow.wmsReturnId))
+        .limit(1),
+      db
+        .select()
+        .from(returnItems)
+        .where(eq(returnItems.returnId, caseRow.wmsReturnId))
+        .orderBy(asc(returnItems.id)),
+      db
+        .select()
+        .from(returnCaseInspections)
+        .where(and(
+          eq(returnCaseInspections.returnCaseId, id),
+          eq(returnCaseInspections.status, "in_progress"),
+        ))
+        .orderBy(asc(returnCaseInspections.id))
+        .limit(2),
     ]);
-    const caseRow = caseRows[0];
-    if (!caseRow) return null;
+
+    const actionContext = buildActionContext({
+      caseRow,
+      itemRows,
+      wmsReturn: wmsReturnRows[0] ?? null,
+      wmsItems: wmsItemRows,
+      inspectionRows,
+    });
     return {
       ...mapListRow(caseRow),
       policyId: caseRow.policyId,
@@ -258,6 +291,7 @@ export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
       updatedAt: caseRow.updatedAt,
       items: itemRows.map(mapItemRow),
       events: eventRows.map(mapEventRow),
+      actionContext,
     };
   }
 }
@@ -381,19 +415,36 @@ function mapListRow(row: SelectedCaseRow): ReturnCaseListRow {
   };
 }
 
-function mapItemRow(row: typeof returnCaseItems.$inferSelect): ReturnCaseItemRow {
+function selectDetailItemRows(returnCaseId: number) {
+  return db
+    .select({ caseItem: returnCaseItems, wmsItem: returnItems })
+    .from(returnCaseItems)
+    .innerJoin(returnItems, eq(returnItems.id, returnCaseItems.wmsReturnItemId))
+    .where(eq(returnCaseItems.returnCaseId, returnCaseId))
+    .orderBy(asc(returnCaseItems.id));
+}
+type SelectedDetailItemRow = Awaited<ReturnType<typeof selectDetailItemRows>>[number];
+
+function mapItemRow(row: SelectedDetailItemRow): ReturnCaseItemRow {
+  const expectedQuantity = readPositiveSafeInteger(row.wmsItem.expectedQty, "WMS expected quantity");
+  const receivedQuantity = readNonNegativeInteger(row.wmsItem.receivedQty, "WMS received quantity");
+  if (receivedQuantity > expectedQuantity) throw new Error("WMS received quantity exceeds expected quantity.");
   return {
-    id: readPositiveSafeInteger(row.id, "return case item id"),
-    wmsReturnItemId: readPositiveSafeInteger(row.wmsReturnItemId, "WMS return item id"),
-    omsOrderLineId: readNullablePositiveSafeInteger(row.omsOrderLineId, "OMS order line id"),
-    wmsOrderItemId: row.wmsOrderItemId,
-    externalLineItemId: row.externalLineItemId,
-    sku: row.sku,
-    title: row.title,
-    quantity: row.quantity,
-    unitPaidPriceCents: readNonNegativeInteger(row.unitPaidPriceCents, "unit paid price cents"),
-    sourceLineTotalCents: readNonNegativeInteger(row.sourceLineTotalCents, "source line total cents"),
-    createdAt: row.createdAt,
+    id: readPositiveSafeInteger(row.caseItem.id, "return case item id"),
+    wmsReturnItemId: readPositiveSafeInteger(row.caseItem.wmsReturnItemId, "WMS return item id"),
+    omsOrderLineId: readNullablePositiveSafeInteger(row.caseItem.omsOrderLineId, "OMS order line id"),
+    wmsOrderItemId: row.caseItem.wmsOrderItemId,
+    externalLineItemId: row.caseItem.externalLineItemId,
+    sku: row.caseItem.sku,
+    title: row.caseItem.title,
+    quantity: readPositiveSafeInteger(row.caseItem.quantity, "return case item quantity"),
+    expectedQuantity,
+    receivedQuantity,
+    remainingQuantity: expectedQuantity - receivedQuantity,
+    receiptStatus: readReceiptStatus(row.wmsItem.status),
+    unitPaidPriceCents: readNonNegativeInteger(row.caseItem.unitPaidPriceCents, "unit paid price cents"),
+    sourceLineTotalCents: readNonNegativeInteger(row.caseItem.sourceLineTotalCents, "source line total cents"),
+    createdAt: row.caseItem.createdAt,
   };
 }
 
@@ -406,6 +457,103 @@ function mapEventRow(row: typeof returnCaseEvents.$inferSelect): ReturnCaseEvent
     occurredAt: row.occurredAt,
     createdAt: row.createdAt,
   };
+}
+
+interface ActionContextInput {
+  caseRow: SelectedCaseRow;
+  itemRows: SelectedDetailItemRow[];
+  wmsReturn: typeof wmsReturns.$inferSelect | null;
+  wmsItems: Array<typeof returnItems.$inferSelect>;
+  inspectionRows: Array<typeof returnCaseInspections.$inferSelect>;
+}
+
+function buildActionContext(input: ActionContextInput): ReturnCaseActionContext {
+  if (input.inspectionRows.length > 1) throw new Error("Return case has more than one active inspection.");
+  const canonicalByWmsItemId = new Map(
+    input.itemRows.map(({ caseItem }) => [
+      readPositiveSafeInteger(caseItem.wmsReturnItemId, "WMS return item id"),
+      caseItem,
+    ] as const),
+  );
+  return {
+    lifecycle: {
+      caseStatus: input.caseRow.caseStatus as ReturnCaseActionContext["lifecycle"]["caseStatus"],
+      approvalStatus: input.caseRow.approvalStatus as ReturnCaseActionContext["lifecycle"]["approvalStatus"],
+      logisticsStatus: input.caseRow.logisticsStatus as ReturnCaseActionContext["lifecycle"]["logisticsStatus"],
+      inspectionStatus: input.caseRow.inspectionStatus as ReturnCaseActionContext["lifecycle"]["inspectionStatus"],
+      customerRefundStatus: input.caseRow.customerRefundStatus as ReturnCaseActionContext["lifecycle"]["customerRefundStatus"],
+      vendorSettlementStatus: input.caseRow.vendorSettlementStatus as ReturnCaseActionContext["lifecycle"]["vendorSettlementStatus"],
+    },
+    policy: parseStoredPolicy(input.caseRow.policySnapshot, input.caseRow.policyId, input.caseRow.policyVersion),
+    receipt: input.wmsReturn ? {
+      wmsReturnId: readPositiveSafeInteger(input.wmsReturn.id, "WMS return id"),
+      wmsStatus: readRequiredText(input.wmsReturn.status, "WMS return status"),
+      receivedAt: readNullableDate(input.wmsReturn.receivedAt, "WMS received at"),
+      restocked: readBoolean(input.wmsReturn.restocked, "WMS restocked"),
+      canonicalItemCount: input.itemRows.length,
+      items: input.wmsItems.map((wmsItem) => {
+        const wmsReturnItemId = readPositiveSafeInteger(wmsItem.id, "WMS return item id");
+        const canonicalItem = canonicalByWmsItemId.get(wmsReturnItemId);
+        return {
+          returnCaseItemId: canonicalItem ? readPositiveSafeInteger(canonicalItem.id, "return case item id") : null,
+          wmsReturnItemId,
+          caseExpectedQuantity: canonicalItem
+            ? readPositiveSafeInteger(canonicalItem.quantity, "return case item quantity")
+            : null,
+          wmsExpectedQuantity: readPositiveSafeInteger(wmsItem.expectedQty, "WMS expected quantity"),
+          wmsReceivedQuantity: readNonNegativeInteger(wmsItem.receivedQty, "WMS received quantity"),
+          wmsStatus: readRequiredText(wmsItem.status, "WMS return item status"),
+        };
+      }),
+    } : null,
+    inspection: input.inspectionRows[0] ? mapActiveInspection(input.inspectionRows[0]) : null,
+    conditionalInspectionDecision: null,
+  };
+}
+
+function parseStoredPolicy(
+  value: unknown,
+  policyId: number,
+  policyVersion: number,
+): ReturnCaseActionContext["policy"] {
+  try {
+    const policy = parseReturnPolicySnapshot(value);
+    return policy.id === policyId && policy.version === policyVersion ? policy : null;
+  } catch (error) {
+    if (error instanceof ReturnCaseActionDomainError && error.code === "RETURN_POLICY_SNAPSHOT_INVALID") return null;
+    throw error;
+  }
+}
+
+function mapActiveInspection(row: typeof returnCaseInspections.$inferSelect): ReturnInspectionFacts {
+  return {
+    inspectionId: readPositiveSafeInteger(row.id, "return inspection id"),
+    status: readInspectionStatus(row.status),
+    startedAt: readDate(row.startedAt, "inspection started at"),
+    startedBy: readRequiredText(row.startedBy, "inspection started by"),
+    completedAt: readNullableDate(row.completedAt, "inspection completed at"),
+    completedBy: readNullableText(row.completedBy),
+  };
+}
+
+function readReceiptStatus(value: unknown): ReturnCaseItemRow["receiptStatus"] {
+  if (value === "expected" || value === "partially_received" || value === "received") return value;
+  throw new Error("Invalid WMS return item status returned by the database.");
+}
+function readInspectionStatus(value: unknown): ReturnInspectionFacts["status"] {
+  if (value === "in_progress" || value === "approved" || value === "rejected" || value === "cancelled") return value;
+  throw new Error("Invalid return inspection status returned by the database.");
+}
+function readRequiredText(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim() === "") throw new Error("Invalid " + field + " returned by the database.");
+  return value;
+}
+function readNullableText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+function readBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") throw new Error("Invalid " + field + " returned by the database.");
+  return value;
 }
 
 function readPositiveSafeInteger(value: unknown, field: string): number {

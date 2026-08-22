@@ -18,9 +18,10 @@ const OPEN_RETURN_CASE_SOURCE = readFileSync(
 
 describe("first-class returns create entry", () => {
   it("uses the canonical case creator and limits legacy dropship UI to inspection", () => {
-    expect(RETURN_CASES_SOURCE).toContain("<ReturnCaseAdminPanel />");
+    expect(RETURN_CASES_SOURCE).toContain("<ReturnCaseAdminPanel");
+    expect(RETURN_CASES_SOURCE).toContain("onOpenLegacyRma=");
     expect(RETURN_CASES_SOURCE).toContain("showCreatePanel={false}");
-    expect(RETURN_CASES_SOURCE).toContain("Dropship receiving and inspection");
+    expect(RETURN_CASES_SOURCE).toContain("Receiving &amp; inspection");
     expect(RETURN_CASES_SOURCE).not.toContain(
       "Create and inspect dropship RMAs",
     );

@@ -113,15 +113,87 @@ describe("ReturnCaseAdminService", () => {
 
     const result = await service.getById(8);
 
+    expect(Object.keys(result).sort()).toEqual([
+      "actionPlan",
+      "approvalStatus",
+      "businessContext",
+      "caseNumber",
+      "caseStatus",
+      "channelId",
+      "channelName",
+      "closedAt",
+      "createdAt",
+      "customerRefundStatus",
+      "events",
+      "id",
+      "inspectionStatus",
+      "itemCount",
+      "items",
+      "legacyRmaId",
+      "logisticsStatus",
+      "omsOrderId",
+      "omsOrderNumber",
+      "openedAt",
+      "policyId",
+      "policySnapshot",
+      "policyVersion",
+      "recordKey",
+      "recordOrigin",
+      "sourceEventId",
+      "sourceEventType",
+      "sourceProvider",
+      "storeConnectionId",
+      "storeName",
+      "unitCount",
+      "updatedAt",
+      "vendorId",
+      "vendorName",
+      "vendorSettlementStatus",
+      "wmsOrderId",
+      "wmsOrderNumber",
+      "wmsReturnId",
+    ].sort());
     expect(result.items[0]).toMatchObject({
+      expectedQuantity: 2,
+      receivedQuantity: 0,
+      remainingQuantity: 2,
+      receiptStatus: "expected",
       unitPaidPriceCents: 1099,
       sourceLineTotalCents: 2198,
       createdAt: "2026-08-10T12:00:01.000Z",
+    });
+    expect(result.actionPlan).toMatchObject({
+      nextAction: "record_receipt",
+      receiptSummary: {
+        expectedUnits: 2,
+        receivedUnits: 0,
+        remainingUnits: 2,
+      },
+      actions: [
+        { kind: "record_receipt", state: "available" },
+        { kind: "start_inspection", state: "blocked" },
+      ],
     });
     expect(result.events[0]).toMatchObject({
       eventType: "return_case_opened",
       occurredAt: "2026-08-10T12:00:00.000Z",
     });
+  });
+
+  it("serializes a blocked action plan when immutable policy evidence is invalid", async () => {
+    const store = fakeStore();
+    const row = detailRow();
+    row.actionContext.policy = null;
+    store.getById.mockResolvedValue(row);
+    const service = new ReturnCaseAdminService(store);
+
+    const result = await service.getById(8);
+
+    expect(result.actionPlan.nextAction).toBeNull();
+    expect(result.actionPlan.actions).toEqual([
+      expect.objectContaining({ kind: "record_receipt", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
+      expect.objectContaining({ kind: "start_inspection", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
+    ]);
   });
 
   it("classifies a missing case as a 404", async () => {
@@ -184,7 +256,7 @@ function detailRow(): ReturnCaseDetailRow {
     ...listRow(),
     policyId: 7,
     policyVersion: 3,
-    policySnapshot: { returnWindowDays: 30 },
+    policySnapshot: policySnapshot(),
     createdAt: new Date("2026-08-10T12:00:00.000Z"),
     updatedAt: new Date("2026-08-10T12:00:02.000Z"),
     items: [{
@@ -196,6 +268,10 @@ function detailRow(): ReturnCaseDetailRow {
       sku: "SKU-1",
       title: "Toploader",
       quantity: 2,
+      expectedQuantity: 2,
+      receivedQuantity: 0,
+      remainingQuantity: 2,
+      receiptStatus: "expected",
       unitPaidPriceCents: 1099,
       sourceLineTotalCents: 2198,
       createdAt: new Date("2026-08-10T12:00:01.000Z"),
@@ -208,5 +284,53 @@ function detailRow(): ReturnCaseDetailRow {
       occurredAt: new Date("2026-08-10T12:00:00.000Z"),
       createdAt: new Date("2026-08-10T12:00:01.000Z"),
     }],
+    actionContext: {
+      lifecycle: {
+        caseStatus: "open",
+        approvalStatus: "approved",
+        logisticsStatus: "awaiting_return",
+        inspectionStatus: "pending",
+        customerRefundStatus: "completed",
+        vendorSettlementStatus: "not_applicable",
+      },
+      policy: policySnapshot(),
+      receipt: {
+        wmsReturnId: 300,
+        wmsStatus: "expected",
+        receivedAt: null,
+        restocked: false,
+        canonicalItemCount: 1,
+        items: [{
+          returnCaseItemId: 80,
+          wmsReturnItemId: 301,
+          caseExpectedQuantity: 2,
+          wmsExpectedQuantity: 2,
+          wmsReceivedQuantity: 0,
+          wmsStatus: "expected",
+        }],
+      },
+      inspection: null,
+      conditionalInspectionDecision: null,
+    },
+  };
+}
+
+function policySnapshot() {
+  return {
+    id: 7,
+    name: "Retail returns",
+    version: 3,
+    scopeKind: "channel_context",
+    scopeKey: "context:retail:channel:36",
+    returnWindowDays: 30,
+    returnDestination: "card_shellz" as const,
+    approvalAuthority: "card_shellz",
+    labelProvider: "shipstation",
+    returnShippingPayer: "customer",
+    inspectionRequirement: "required" as const,
+    inspectionOwner: "card_shellz" as const,
+    customerRefundAuthority: "card_shellz",
+    vendorSettlementTrigger: "none",
+    returnlessRefundAllowed: false,
   };
 }

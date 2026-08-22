@@ -674,7 +674,13 @@
   "public.reorder_exclusion_rules": [
     "modules/procurement"
   ],
+  "returns.return_case_commands": [
+    "modules/returns"
+  ],
   "returns.return_case_events": [
+    "modules/returns"
+  ],
+  "returns.return_case_inspections": [
     "modules/returns"
   ],
   "returns.return_case_items": [
