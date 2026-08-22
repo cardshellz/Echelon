@@ -1,19 +1,14 @@
+import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
 
 import { receiveExpectedWmsReturn } from "../../return-receipt-commands";
 
 const NOW = new Date("2026-08-22T15:00:00.000Z");
 
-function qtext(query: any): string {
-  return (query?.queryChunks ?? [])
-    .flatMap((chunk: any) => {
-      if (chunk == null) return [];
-      if (typeof chunk === "string") return [chunk];
-      if (Array.isArray(chunk.value)) return chunk.value;
-      if (chunk.value !== undefined) return [String(chunk.value)];
-      return [];
-    })
-    .join(" ")
+const dialect = new PgDialect();
+
+function qtext(query: unknown): string {
+  return dialect.sqlToQuery(query as any).sql
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -106,6 +101,9 @@ describe("receiveExpectedWmsReturn", () => {
     expect(calls[1]).toContain("FROM wms.return_items");
     expect(calls[1]).toContain("ORDER BY id ASC FOR UPDATE");
     expect(calls[2]).toContain("WITH targets(return_item_id, target_received_qty)");
+    expect(calls[2]).toContain(
+      "VALUES ( $1::bigint, $2::integer ), ( $3::bigint, $4::integer )",
+    );
     expect(calls[3]).toContain("UPDATE wms.return_items AS return_item SET status = CASE");
     expect(calls[4]).toContain("COALESCE(received_at,");
     expect(calls.every((text) => !text.includes("inventory."))).toBe(true);

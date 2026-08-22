@@ -353,7 +353,10 @@ export async function receiveExpectedWmsReturn(
   }
 
   const targetValues = sql.join(
-    items.map((item) => sql`(${item.returnItemId}, ${item.targetReceivedQty})`),
+    items.map((item) => sql`(
+      ${item.returnItemId}::bigint,
+      ${item.targetReceivedQty}::integer
+    )`),
     sql`, `,
   );
   const quantityUpdateRows = rowsOf<RawIdRow>(await executor.execute(sql`
