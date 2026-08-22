@@ -120,6 +120,15 @@ function previousPlanFrom(result: ReturnType<typeof planPackageAllocationGroup>)
   };
 }
 
+function allocationShapes(result: ReturnType<typeof planPackageAllocationGroup>) {
+  return result.state.allocations.map((entry) => ({
+    allocationKind: entry.allocationKind,
+    targetKind: entry.targetKind,
+    packageKey: entry.packageKey,
+    quantity: entry.quantity,
+  }));
+}
+
 describe("planPackageAllocationGroup sequential safety", () => {
   it("emits only the new carrier intent after possession and never repeats item commands", () => {
     const before = planPackageAllocationGroup(plannerInput([
@@ -293,21 +302,228 @@ describe("planPackageAllocationGroup sequential safety", () => {
     }));
   });
 
-  it("blocks a new plan when current evidence cannot reconstruct a prior applied transfer", () => {
+  it("replays a prior full transfer when voided A gains possession without duplicating commercial fulfillment", () => {
+    const action = transfer();
     const before = planPackageAllocationGroup(plannerInput([
       packageInput("A", "44001", 2, "primary", { voided: true }),
       packageInput("B", "44002", 2, "replacement_candidate"),
-    ], [transfer()]));
+    ], [action]));
 
-    expect(() => planPackageAllocationGroup(plannerInput([
+    const after = planPackageAllocationGroup(plannerInput([
       packageInput("A", "44001", 2, "primary", { voided: true, carrierPossession: true }),
       packageInput("B", "44002", 2, "replacement_candidate"),
-    ], [transfer()], {
+    ], [action], {
       expectedGroupVersion: before.proposedGroupVersion,
       previousPlan: previousPlanFrom(before),
-    }))).toThrowError(expect.objectContaining<Partial<PackageAllocationGroupError>>({
-      code: "PREVIOUS_ALLOCATION_REPLAY_BLOCKED",
     }));
+
+    expect(after.outcome).toBe("proposed");
+    expect(after.state.appliedActionKeys).toEqual([action.actionKey]);
+    expect(allocationShapes(after)).toEqual([
+      {
+        allocationKind: "additional_physical_consumption",
+        targetKind: "package",
+        packageKey: "A",
+        quantity: 2,
+      },
+      {
+        allocationKind: "primary_transfer",
+        targetKind: "package",
+        packageKey: "B",
+        quantity: 2,
+      },
+    ]);
+    expect(after.effectIntentsToAppend.map((intent) => ({
+      effectType: intent.effectType,
+      packageKey: intent.packageKey,
+      quantity: intent.quantity,
+    }))).toEqual([
+      { effectType: "carrier_tracking", packageKey: "A", quantity: null },
+      { effectType: "inventory_consumption", packageKey: "A", quantity: 2 },
+    ]);
+    expect(after.effectIntentsToAppend.some((intent) => (
+      intent.effectType === "commercial_fulfillment"
+    ))).toBe(false);
+    expect(after.state.reviews).toEqual([]);
+  });
+
+  it("counts only the transferred overlap as additional consumption after partial-transfer late possession", () => {
+    const action = transfer({
+      targets: [{ packageKey: "B", wmsShipmentItemId: 7001, quantity: 1 }],
+    });
+    const before = planPackageAllocationGroup(plannerInput([
+      packageInput("A", "44001", 2, "primary", { voided: true }),
+      packageInput("B", "44002", 1, "replacement_candidate"),
+    ], [action]));
+
+    const after = planPackageAllocationGroup(plannerInput([
+      packageInput("A", "44001", 2, "primary", { voided: true, carrierPossession: true }),
+      packageInput("B", "44002", 1, "replacement_candidate"),
+    ], [action], {
+      expectedGroupVersion: before.proposedGroupVersion,
+      previousPlan: previousPlanFrom(before),
+    }));
+
+    expect(allocationShapes(after)).toEqual([
+      {
+        allocationKind: "additional_physical_consumption",
+        targetKind: "package",
+        packageKey: "A",
+        quantity: 1,
+      },
+      {
+        allocationKind: "primary_transfer",
+        targetKind: "package",
+        packageKey: "A",
+        quantity: 1,
+      },
+      {
+        allocationKind: "primary_transfer",
+        targetKind: "package",
+        packageKey: "B",
+        quantity: 1,
+      },
+    ]);
+    expect(after.effectIntentsToAppend.filter((intent) => (
+      intent.effectType === "inventory_consumption"
+    ))).toMatchObject([{ packageKey: "A", quantity: 1 }]);
+    expect(after.state.reviews).toEqual([]);
+  });
+
+  it("retains late-possession allocation evidence but withholds its inventory intent when authority is insufficient", () => {
+    const action = transfer();
+    const sourceLines = [{
+      wmsShipmentItemId: 7001,
+      sourceQuantity: 2,
+      physicalConsumptionAuthorityQuantity: 2,
+      authorityVersion: 1,
+    }];
+    const before = planPackageAllocationGroup(plannerInput([
+      packageInput("A", "44001", 2, "primary", { voided: true }),
+      packageInput("B", "44002", 2, "replacement_candidate"),
+    ], [action], { sourceLines }));
+
+    const after = planPackageAllocationGroup(plannerInput([
+      packageInput("A", "44001", 2, "primary", { voided: true, carrierPossession: true }),
+      packageInput("B", "44002", 2, "replacement_candidate"),
+    ], [action], {
+      sourceLines,
+      expectedGroupVersion: before.proposedGroupVersion,
+      previousPlan: previousPlanFrom(before),
+    }));
+
+    expect(after.outcome).toBe("review");
+    expect(allocationShapes(after)).toEqual([
+      {
+        allocationKind: "additional_physical_consumption",
+        targetKind: "package",
+        packageKey: "A",
+        quantity: 2,
+      },
+      {
+        allocationKind: "primary_transfer",
+        targetKind: "package",
+        packageKey: "B",
+        quantity: 2,
+      },
+    ]);
+    expect(after.state.reviews).toContainEqual(expect.objectContaining({
+      code: "physical_consumption_authority_exceeded",
+      wmsShipmentItemIds: [7001],
+    }));
+    expect(after.effectIntentsToAppend.some((intent) => (
+      intent.effectType === "inventory_consumption"
+    ))).toBe(false);
+  });
+
+  it("reconstructs a prior B/C split and counts late possession only once for A", () => {
+    const action = transfer({
+      targets: [
+        { packageKey: "B", wmsShipmentItemId: 7001, quantity: 1 },
+        { packageKey: "C", wmsShipmentItemId: 7001, quantity: 1 },
+      ],
+    });
+    const before = planPackageAllocationGroup(plannerInput([
+      packageInput("A", "44001", 2, "primary", { voided: true }),
+      packageInput("B", "44002", 1, "replacement_candidate"),
+      packageInput("C", "44003", 1, "replacement_candidate"),
+    ], [action]));
+
+    const after = planPackageAllocationGroup(plannerInput([
+      packageInput("A", "44001", 2, "primary", { voided: true, carrierPossession: true }),
+      packageInput("B", "44002", 1, "replacement_candidate"),
+      packageInput("C", "44003", 1, "replacement_candidate"),
+    ], [action], {
+      expectedGroupVersion: before.proposedGroupVersion,
+      previousPlan: previousPlanFrom(before),
+    }));
+
+    expect(allocationShapes(after)).toEqual([
+      {
+        allocationKind: "additional_physical_consumption",
+        targetKind: "package",
+        packageKey: "A",
+        quantity: 2,
+      },
+      {
+        allocationKind: "primary_transfer",
+        targetKind: "package",
+        packageKey: "B",
+        quantity: 1,
+      },
+      {
+        allocationKind: "primary_transfer",
+        targetKind: "package",
+        packageKey: "C",
+        quantity: 1,
+      },
+    ]);
+    expect(after.effectIntentsToAppend.filter((intent) => (
+      intent.effectType === "inventory_consumption"
+    ))).toMatchObject([{ packageKey: "A", quantity: 2 }]);
+    expect(after.state.reviews).toEqual([]);
+  });
+
+  it("makes late possession idempotent and does not repeat A consumption when B is later scanned", () => {
+    const action = transfer();
+    const before = planPackageAllocationGroup(plannerInput([
+      packageInput("A", "44001", 2, "primary", { voided: true }),
+      packageInput("B", "44002", 2, "replacement_candidate"),
+    ], [action]));
+    const latePossessionPackages = [
+      packageInput("A", "44001", 2, "primary", { voided: true, carrierPossession: true }),
+      packageInput("B", "44002", 2, "replacement_candidate"),
+    ];
+    const latePossession = planPackageAllocationGroup(plannerInput(latePossessionPackages, [action], {
+      expectedGroupVersion: before.proposedGroupVersion,
+      previousPlan: previousPlanFrom(before),
+    }));
+
+    const replay = planPackageAllocationGroup(plannerInput(latePossessionPackages, [action], {
+      expectedGroupVersion: latePossession.proposedGroupVersion,
+      previousPlan: previousPlanFrom(latePossession),
+    }));
+    expect(replay.outcome).toBe("unchanged");
+    expect(replay.proposedGroupVersion).toBe(latePossession.proposedGroupVersion);
+    expect(replay.stateHash).toBe(latePossession.stateHash);
+    expect(replay.ledgerEntriesToAppend).toEqual([]);
+    expect(replay.effectIntentsToAppend).toEqual([]);
+
+    const replacementPossession = planPackageAllocationGroup(plannerInput([
+      latePossessionPackages[0]!,
+      packageInput("B", "44002", 2, "replacement_candidate", { carrierPossession: true }),
+    ], [action], {
+      expectedGroupVersion: latePossession.proposedGroupVersion,
+      previousPlan: previousPlanFrom(latePossession),
+    }));
+    expect(allocationShapes(replacementPossession)).toEqual(allocationShapes(latePossession));
+    expect(replacementPossession.effectIntentsToAppend.map((intent) => ({
+      effectType: intent.effectType,
+      packageKey: intent.packageKey,
+      quantity: intent.quantity,
+    }))).toEqual([
+      { effectType: "carrier_tracking", packageKey: "B", quantity: null },
+    ]);
   });
 
   it("treats a changed membership proof as evidence-only and canonicalizes group UUIDs", () => {

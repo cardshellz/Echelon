@@ -901,6 +901,19 @@ export function planPackageAllocationGroup(
   for (const pkg of projectedPackages) {
     lineMaps.set(pkg.packageKey, authoritativeLineMap(pkg, sourceIds, reviews));
   }
+  const priorTransferSourceKeys = new Set(
+    actions
+      .filter((action) => previousAppliedActionKeys.has(action.actionKey))
+      .map((action) => action.fromPackageKey),
+  );
+  const latePossessionTransferSourceKeys = new Set(
+    projectedPackages
+      .filter((pkg) => (
+        priorTransferSourceKeys.has(pkg.packageKey)
+        && pkg.projection.carrierStatus === "possession_confirmed"
+      ))
+      .map((pkg) => pkg.packageKey),
+  );
 
   const primarySegments = new Map<number, MutablePrimarySegment[]>();
   const declaredPrimaryQuantity = new Map<number, number>();
@@ -1010,6 +1023,7 @@ export function planPackageAllocationGroup(
   }));
 
   const transferredTargets = new Set<string>();
+  const latePossessionAdditionalQuantityByPackage = new Map<string, Map<number, number>>();
   const appliedActionKeys: string[] = [];
   for (const action of actionsInApplicationOrder) {
     if (competingNewActionKeys.has(action.actionKey)) continue;
@@ -1019,7 +1033,10 @@ export function planPackageAllocationGroup(
       reviews.push(review("invalid_transfer_source", [action.fromPackageKey], [], [action.actionKey]));
       continue;
     }
-    if (from.projection.carrierStatus === "possession_confirmed") {
+    const replaysLatePossessionTransfer = actionWasPreviouslyApplied
+      && latePossessionTransferSourceKeys.has(from.packageKey);
+    if (from.projection.carrierStatus === "possession_confirmed"
+        && !replaysLatePossessionTransfer) {
       reviews.push(review(
         "late_possession_requires_previous_ledger",
         [action.fromPackageKey],
@@ -1028,7 +1045,12 @@ export function planPackageAllocationGroup(
       ));
       continue;
     }
-    if (from.projection.labelStatus !== "voided" || from.projection.correctionStatus !== "awaiting_relabel") {
+    const sourceCanTransfer = from.projection.labelStatus === "voided"
+      && (
+        from.projection.correctionStatus === "awaiting_relabel"
+        || (replaysLatePossessionTransfer && from.projection.correctionStatus === "carrier_locked")
+      );
+    if (!sourceCanTransfer) {
       reviews.push(review("invalid_transfer_source", [action.fromPackageKey], [], [action.actionKey]));
       continue;
     }
@@ -1084,7 +1106,9 @@ export function planPackageAllocationGroup(
       const fromQuantity = fromLines.get(lineId) ?? 0;
       const available = (primarySegments.get(lineId) ?? [])
         .filter((segment) => segment.originPackageKey === from.packageKey
-          && segment.targetKind === "awaiting_relabel")
+          && (replaysLatePossessionTransfer
+            ? segment.targetKind === "package" && segment.packageKey === from.packageKey
+            : segment.targetKind === "awaiting_relabel"))
         .reduce((total, segment) => checkedAdd(total, segment.quantity, {
           actionKey: action.actionKey,
           wmsShipmentItemId: lineId,
@@ -1123,7 +1147,11 @@ export function planPackageAllocationGroup(
       let remaining = target.quantity;
       for (const segment of segments) {
         if (remaining === 0) break;
-        if (segment.originPackageKey !== from.packageKey || segment.targetKind !== "awaiting_relabel") continue;
+        const isTransferableSourceSegment = segment.originPackageKey === from.packageKey
+          && (replaysLatePossessionTransfer
+            ? segment.targetKind === "package" && segment.packageKey === from.packageKey
+            : segment.targetKind === "awaiting_relabel");
+        if (!isTransferableSourceSegment) continue;
         const moved = Math.min(segment.quantity, remaining);
         segment.quantity -= moved;
         segments.push({
@@ -1132,6 +1160,20 @@ export function planPackageAllocationGroup(
           packageKey: target.packageKey,
           quantity: moved,
         });
+        if (replaysLatePossessionTransfer) {
+          const additionalByLine = latePossessionAdditionalQuantityByPackage.get(from.packageKey)
+            ?? new Map<number, number>();
+          additionalByLine.set(
+            target.wmsShipmentItemId,
+            checkedAdd(additionalByLine.get(target.wmsShipmentItemId) ?? 0, moved, {
+              actionKey: action.actionKey,
+              packageKey: from.packageKey,
+              wmsShipmentItemId: target.wmsShipmentItemId,
+              reason: "late_possession_after_transfer",
+            }),
+          );
+          latePossessionAdditionalQuantityByPackage.set(from.packageKey, additionalByLine);
+        }
         remaining -= moved;
       }
       primarySegments.set(
@@ -1183,6 +1225,36 @@ export function planPackageAllocationGroup(
 
   const additionalQuantity = new Map<number, number>();
   const additionalInventoryEligiblePackageKeys = new Set<string>();
+  for (const [packageKey, additionalByLine] of latePossessionAdditionalQuantityByPackage) {
+    const pkg = packageByKey.get(packageKey);
+    if (!pkg) {
+      throw new PackageAllocationGroupError(
+        "PREVIOUS_ALLOCATION_REPLAY_BLOCKED",
+        "A late-possession source package disappeared while reconstructing its prior transfer",
+        { packageKey },
+      );
+    }
+    if (pkg.projection.inventoryPostingEligible) {
+      additionalInventoryEligiblePackageKeys.add(packageKey);
+    }
+    for (const [lineId, quantity] of additionalByLine) {
+      const allocationKey = `package-allocation:v1:${input.groupKey}:late-possession:${packageKey}:${lineId}`;
+      rawEntries.push({
+        entryKey: `${allocationKey}:package:${packageKey}`,
+        allocationKey,
+        wmsShipmentItemId: lineId,
+        allocationKind: "additional_physical_consumption",
+        targetKind: "package",
+        packageKey,
+        quantity,
+      });
+      additionalQuantity.set(lineId, checkedAdd(additionalQuantity.get(lineId) ?? 0, quantity, {
+        packageKey,
+        wmsShipmentItemId: lineId,
+        reason: "late_possession_after_transfer",
+      }));
+    }
+  }
   for (const pkg of projectedPackages.filter((candidate) => candidate.allocationRole === "additional_dispatch")) {
     const contents = lineMaps.get(pkg.packageKey);
     if (!contents || pkg.projection.businessStatus !== "shipped") continue;
