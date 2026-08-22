@@ -878,6 +878,30 @@
     "modules/wms",
     "server/index.ts"
   ],
+  "wms.package_allocation_effect_intents": [
+    "modules/shipping"
+  ],
+  "wms.package_allocation_entries": [
+    "modules/shipping"
+  ],
+  "wms.package_allocation_group_source_lines": [
+    "modules/shipping"
+  ],
+  "wms.package_allocation_groups": [
+    "modules/shipping"
+  ],
+  "wms.package_allocation_keys": [
+    "modules/shipping"
+  ],
+  "wms.package_allocation_package_bindings": [
+    "modules/shipping"
+  ],
+  "wms.package_allocation_plans": [
+    "modules/shipping"
+  ],
+  "wms.package_allocation_source_lines": [
+    "modules/shipping"
+  ],
   "wms.physical_shipment_item_quantity_adjustments": [
     "modules/oms"
   ],
