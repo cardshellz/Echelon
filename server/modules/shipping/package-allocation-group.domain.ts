@@ -128,7 +128,7 @@ const actionEvidenceSchema = z.object({
 type ParsedActionEvidence = z.infer<typeof actionEvidenceSchema>;
 
 
-const previousPlanSchema = z.object({
+export const packageAllocationGroupPreviousPlanSchema = z.object({
   groupKey: canonicalGroupKeySchema,
   groupVersion: groupVersionSchema,
   stateHash: hashSchema,
@@ -144,7 +144,7 @@ export const packageAllocationGroupPlannerInputSchema = z.object({
   authorityMode: z.literal("shadow_only"),
   groupKey: canonicalGroupKeySchema,
   expectedGroupVersion: groupVersionSchema,
-  previousPlan: previousPlanSchema.nullable(),
+  previousPlan: packageAllocationGroupPreviousPlanSchema.nullable(),
   sourceLines: z.array(sourceLineSchema).min(1).max(MAX_SOURCE_LINES),
   packages: z.array(packageSchema).min(1).max(MAX_PACKAGES),
   actions: z.array(transferActionSchema).max(500),
