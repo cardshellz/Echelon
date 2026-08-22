@@ -10,6 +10,16 @@ CREATE SCHEMA inventory;
 CREATE SCHEMA channels;
 CREATE SCHEMA wms;
 
+CREATE OR REPLACE FUNCTION wms.reject_shipping_evidence_ledger_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION '% is append-only; % is not allowed', TG_TABLE_NAME, TG_OP
+    USING ERRCODE = '55000';
+END;
+$$;
+
 CREATE TABLE catalog.products (
   id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   sku varchar(100),
@@ -210,6 +220,26 @@ CREATE TABLE wms.order_items (
   sku varchar(100),
   quantity integer NOT NULL DEFAULT 0,
   status varchar(30) NOT NULL DEFAULT 'pending'
+);
+
+CREATE TABLE wms.outbound_shipment_items (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  order_item_id integer REFERENCES wms.order_items(id),
+  replacement_for_order_item_id integer REFERENCES wms.order_items(id) ON DELETE RESTRICT,
+  correction_for_shipment_item_id integer REFERENCES wms.outbound_shipment_items(id) ON DELETE RESTRICT,
+  shipment_item_purpose varchar(30) NOT NULL DEFAULT 'customer_fulfillment',
+  product_variant_id integer REFERENCES catalog.product_variants(id),
+  qty integer NOT NULL DEFAULT 1
+);
+
+CREATE TABLE wms.shipment_request_items (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  legacy_wms_shipment_item_id integer UNIQUE
+    REFERENCES wms.outbound_shipment_items(id) ON DELETE SET NULL
+);
+
+CREATE TABLE wms.shipping_provider_labels (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY
 );
 
 CREATE TABLE inventory.inventory_transactions (

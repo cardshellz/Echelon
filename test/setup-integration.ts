@@ -78,22 +78,57 @@ export function getTestDb() {
 
 /**
  * Rebuild the test-owned schemas from a deliberately small current contract.
- * Kept under the historical name because the three integration suites already
- * call runMigrations().
+ * Kept under the historical name because the named-schema integration suites
+ * already call runMigrations().
  */
 export async function runMigrations(): Promise<void> {
   if (schemaReady) return;
 
   requireDisposableDatabase();
-  const bootstrapSql = readFileSync(
-    resolve(process.cwd(), "test/fixtures/named-schema-integration.sql"),
-    "utf8",
-  );
-  await getTestPool().query(bootstrapSql);
-  schemaReady = true;
+  const sqlArtifacts = [
+    "test/fixtures/named-schema-integration.sql",
+    "migrations/198_package_allocation_ledger_foundation.sql",
+    "migrations/199_package_allocation_persistence_foundation.sql",
+  ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
+  const client = await getTestPool().connect();
+  let discardError: Error | undefined;
+  try {
+    await client.query("BEGIN");
+    for (const artifactSql of sqlArtifacts) {
+      await client.query(artifactSql);
+    }
+    await client.query("COMMIT");
+    schemaReady = true;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      discardError = rollbackError instanceof Error
+        ? rollbackError
+        : new Error("Named-schema integration rollback failed with a non-Error value");
+      throw new AggregateError(
+        [error, rollbackError],
+        "Named-schema integration setup and rollback both failed",
+      );
+    }
+    throw error;
+  } finally {
+    client.release(discardError);
+  }
 }
 
 const TRUNCATE_TABLES = [
+  "wms.package_allocation_effect_intents",
+  "wms.package_allocation_entries",
+  "wms.package_allocation_plans",
+  "wms.package_allocation_keys",
+  "wms.package_allocation_package_bindings",
+  "wms.package_allocation_group_source_lines",
+  "wms.package_allocation_source_lines",
+  "wms.package_allocation_groups",
+  "wms.shipment_request_items",
+  "wms.shipping_provider_labels",
+  "wms.outbound_shipment_items",
   "inventory.inventory_transactions",
   "inventory.inventory_levels",
   "wms.order_items",
