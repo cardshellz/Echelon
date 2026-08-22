@@ -13,8 +13,10 @@ import {
   formatIsoDateShort,
   formatMoneyCents,
   groupReorderItems,
+  isDisplaySkipped,
   isOrderQueueSelection,
   isOverstocked,
+  isVendorGapRow,
   orderSoonDates,
   parseReorderEngineDeepLink,
   skippedAppendixRows,
@@ -191,18 +193,33 @@ describe("suggested spend (integer cents; engine pieces × supplier cost)", () =
     expect(spend.missingCostCount).toBe(1);
   });
 
-  it("never counts skipped rows — the engine dual-lists them in items but their row shows a dash", () => {
+  it("counts no-vendor demand rows but never other skipped rows (queue truth)", () => {
+    // Queue truth (PR feat/reorder-queue-truth): no_vendor rows have real
+    // demand (the skip ladder only assigns no_vendor to actionable-status rows
+    // with a positive suggestion) — the table now shows their suggestion, so
+    // the KPI counts them too; missing costs surface through the existing
+    // missing-cost qualifier. Display-skipped rows still render "—" and never
+    // count.
     const spend = computeSuggestedSpend([
       { suggestedOrderPieces: 10, estimatedCostMills: 10_000, estimatedCostCents: 1_000 }, // active, $10
-      // no_vendor rows always carry a positive suggestion (the skip ladder
-      // checks zero_suggested_quantity first) — must not count.
-      { suggestedOrderPieces: 40, estimatedCostMills: 10_000, estimatedCostCents: 1_000, skippedReason: "no_vendor" },
-      { suggestedOrderPieces: 8, estimatedCostMills: null, estimatedCostCents: null, skippedReason: "no_vendor" },
-      { suggestedOrderPieces: 5, estimatedCostMills: 10_000, estimatedCostCents: 1_000, skippedReason: "already_on_order" },
+      { suggestedOrderPieces: 40, estimatedCostMills: 10_000, estimatedCostCents: 1_000, skippedReason: "no_vendor" }, // $40
+      { suggestedOrderPieces: 8, estimatedCostMills: null, estimatedCostCents: null, skippedReason: "no_vendor" }, // missing cost
+      { suggestedOrderPieces: 5, estimatedCostMills: 10_000, estimatedCostCents: 1_000, skippedReason: "already_on_order" }, // dash
     ]);
-    expect(spend.totalCents).toBe(1_000);
-    expect(spend.skuCount).toBe(1);
-    expect(spend.missingCostCount).toBe(0);
+    expect(spend.totalCents).toBe(5_000);
+    expect(spend.skuCount).toBe(3);
+    expect(spend.missingCostCount).toBe(1);
+  });
+
+  it("splits the display-skip states: vendor-gap rows are first-class, other skips are muted", () => {
+    expect(isVendorGapRow({ skippedReason: "no_vendor" })).toBe(true);
+    expect(isVendorGapRow({ skippedReason: "excluded" })).toBe(false);
+    expect(isVendorGapRow({})).toBe(false);
+    expect(isDisplaySkipped({ skippedReason: "no_vendor" })).toBe(false);
+    expect(isDisplaySkipped({ skippedReason: "excluded" })).toBe(true);
+    expect(isDisplaySkipped({ skippedReason: "already_on_order" })).toBe(true);
+    expect(isDisplaySkipped({ skippedReason: null })).toBe(false);
+    expect(isDisplaySkipped({})).toBe(false);
   });
 
   it("values available stock for idle-capital chips", () => {
@@ -270,13 +287,30 @@ describe("grouping + rollups", () => {
     expect(rollup.onHandCents).toBe(300);
   });
 
-  it("excludes skipped rows' suggestion from the rollup's suggested $ but keeps their on-hand $", () => {
+  it("excludes display-skipped suggestions from the rollup but counts vendor-gap rows (queue truth)", () => {
+    // Queue truth (PR feat/reorder-queue-truth): the table shows no_vendor
+    // rows' suggestions now, so group rollups must agree; already_on_order
+    // (and every other display-skipped reason) still renders "—" and stays
+    // out of suggested $.
     const rollup = computeGroupRollup([
       groupable({ suggestedOrderPieces: 10, available: 2 }), // $10 suggested, $2 on hand
-      groupable({ suggestedOrderPieces: 40, available: 3, skippedReason: "no_vendor" }), // dash in the table
+      groupable({ suggestedOrderPieces: 40, available: 3, skippedReason: "no_vendor" }), // $40 suggested now
+      groupable({ suggestedOrderPieces: 25, available: 4, skippedReason: "already_on_order" }), // dash in the table
     ]);
-    expect(rollup.suggestedCents).toBe(1_000);
-    expect(rollup.onHandCents).toBe(500);
+    expect(rollup.suggestedCents).toBe(5_000);
+    expect(rollup.onHandCents).toBe(900);
+  });
+
+  it("counts vendor-gap rows toward the below-RP rollup like any active row", () => {
+    const belowRp = {
+      currentSupply: { effectiveSupplyPieces: 0 },
+      forwardDemandBasis: { adjustedReorderPoint: 50 },
+    };
+    const rollup = computeGroupRollup([
+      groupable({ ...belowRp, skippedReason: "no_vendor", available: 0 }),
+      groupable({ ...belowRp, skippedReason: "excluded", available: 0 }), // policy-skipped: never counts
+    ]);
+    expect(rollup.belowReorderPointCount).toBe(1);
   });
 });
 
@@ -374,10 +408,15 @@ describe("skip reasons", () => {
 import {
   AUTO_DECISION_NOTE,
   NEEDS_SUPPLIER_GROUP_KEY,
+  applyStagedVendors,
   buildAcceptedForPoDecisionBody,
   buildCreatePoItemBody,
   buildRfqLineBody,
+  buildVendorAssignmentBody,
   confirmPrimaryLabel,
+  effectiveVendorMode,
+  hasPoEligibleSupplierQuote,
+  parseUnitCostDollarsToMills,
   controlAckKey,
   decisionNoteForSubmit,
   exceedReasonValid,
@@ -475,6 +514,126 @@ describe("order builder — vendor grouping", () => {
     expect(vendorGroups[0].lines.map((line) => line.recommendationId)).toEqual(["a", "c"]);
     expect(needsSupplier.map((line) => line.recommendationId)).toEqual(["d"]);
     expect(NEEDS_SUPPLIER_GROUP_KEY).toBe("needs_supplier");
+  });
+});
+
+describe("order builder — inline vendor assignment (queue truth)", () => {
+  it("overlays staged vendors onto unmapped lines only, without mutating inputs", () => {
+    const unmapped = orderable({ recommendationId: "d", preferredVendorId: null, preferredVendorName: null });
+    const mapped = orderable({ recommendationId: "a", preferredVendorId: 7, preferredVendorName: "GTS" });
+    const staged = new Map([
+      ["d", { vendorId: 12, vendorName: "Magazine Exchange" }],
+      // A stale staged entry for an already-mapped line must never override
+      // the server's vendor.
+      ["a", { vendorId: 99, vendorName: "Wrong Vendor" }],
+    ]);
+    const overlaid = applyStagedVendors([unmapped, mapped], staged);
+    expect(overlaid[0]).toMatchObject({ preferredVendorId: 12, preferredVendorName: "Magazine Exchange" });
+    expect(overlaid[1]).toMatchObject({ preferredVendorId: 7, preferredVendorName: "GTS" });
+    expect(unmapped.preferredVendorId).toBeNull(); // input untouched
+    // Staged lines group under the chosen vendor for the quote-request path.
+    const selection = toggleOrderLine(new Map(), "d", 10);
+    const { vendorGroups, needsSupplier } = orderBuilderGroups(overlaid, selection);
+    expect(vendorGroups.map((group) => group.vendorId)).toEqual([12]);
+    expect(needsSupplier).toHaveLength(0);
+  });
+
+  it("mirrors the PO handoff's quote gate for per-piece and per-purchase-UOM quotes", () => {
+    const perPiece = {
+      suggestedOrderPieces: 40,
+      supplierBasis: {
+        pricingBasis: "per_piece",
+        purchaseUom: null,
+        quotedUnitCostMills: 41_250,
+        piecesPerPurchaseUom: null,
+        quotedAt: "2026-07-01T00:00:00.000Z",
+      },
+    };
+    expect(hasPoEligibleSupplierQuote(perPiece)).toBe(true);
+    // No quotedAt → not an explicit reusable quote (costless RFQ-created
+    // mappings and legacy rows land here).
+    expect(
+      hasPoEligibleSupplierQuote({
+        ...perPiece,
+        supplierBasis: { ...perPiece.supplierBasis, quotedAt: null },
+      }),
+    ).toBe(false);
+    expect(
+      hasPoEligibleSupplierQuote({
+        suggestedOrderPieces: 40,
+        supplierBasis: {
+          pricingBasis: "legacy_unknown",
+          purchaseUom: null,
+          quotedUnitCostMills: null,
+          piecesPerPurchaseUom: null,
+          quotedAt: null,
+        },
+      }),
+    ).toBe(false);
+    const perUom = {
+      suggestedOrderPieces: 72,
+      supplierBasis: {
+        pricingBasis: "per_purchase_uom",
+        purchaseUom: "case",
+        quotedUnitCostMills: 1_000_000,
+        piecesPerPurchaseUom: 36,
+        quotedAt: "2026-07-01T00:00:00.000Z",
+      },
+    };
+    expect(hasPoEligibleSupplierQuote(perUom)).toBe(true);
+    // 70 pieces is not a whole number of 36-piece cases — the handoff would
+    // reject the quantity fit, so the mirror fails it too.
+    expect(hasPoEligibleSupplierQuote({ ...perUom, suggestedOrderPieces: 70 })).toBe(false);
+    expect(hasPoEligibleSupplierQuote({ suggestedOrderPieces: 40 })).toBe(false);
+  });
+
+  it("forces vendor groups without a PO-eligible quote onto the quote-request path", () => {
+    expect(effectiveVendorMode(undefined, true)).toBe("po");
+    expect(effectiveVendorMode("rfq", true)).toBe("rfq");
+    expect(effectiveVendorMode("po", true)).toBe("po");
+    // Stored "po" can never lie its way past a group with no usable quote.
+    expect(effectiveVendorMode("po", false)).toBe("rfq");
+    expect(effectiveVendorMode(undefined, false)).toBe("rfq");
+  });
+
+  it("parses typed dollar costs into integer mills without float money math", () => {
+    expect(parseUnitCostDollarsToMills("4.125")).toBe(41_250);
+    expect(parseUnitCostDollarsToMills("0.1")).toBe(1_000);
+    expect(parseUnitCostDollarsToMills("12")).toBe(120_000);
+    expect(parseUnitCostDollarsToMills(" 3.0450 ")).toBe(30_450);
+    // Zero parses but is REJECTED: a $0 "confirmed per-piece quote" saved
+    // through the inline assignment would be fake money data — the costless
+    // path is the quote request (createRfqBatch persists null costs).
+    expect(parseUnitCostDollarsToMills("0")).toBeNull();
+    expect(parseUnitCostDollarsToMills("0.0000")).toBeNull();
+    expect(parseUnitCostDollarsToMills("")).toBeNull();
+    expect(parseUnitCostDollarsToMills("4.12345")).toBeNull(); // >4 decimals
+    expect(parseUnitCostDollarsToMills("-1")).toBeNull();
+    expect(parseUnitCostDollarsToMills("1,000")).toBeNull();
+    expect(parseUnitCostDollarsToMills("abc")).toBeNull();
+    expect(parseUnitCostDollarsToMills("4.")).toBeNull();
+  });
+
+  it("builds the vendor-products upsert body as a preferred per-piece explicit quote", () => {
+    // Exactly the fields hasCompleteExplicitRecommendationQuote needs for
+    // PO eligibility: per-piece basis + quotedAt; the server derives
+    // quoted_unit_cost_mills from the pricing block.
+    expect(
+      buildVendorAssignmentBody({
+        vendorId: 12,
+        productId: 70,
+        productVariantId: 701,
+        unitCostMills: 41_250,
+        quotedAtIso: "2026-07-29T12:00:00.000Z",
+      }),
+    ).toEqual({
+      vendorId: 12,
+      productId: 70,
+      productVariantId: 701,
+      isPreferred: true,
+      pricing: { basis: "per_piece", quantityPieces: 1, unitCostMills: 41_250 },
+      quotedAt: "2026-07-29T12:00:00.000Z",
+    });
   });
 });
 
