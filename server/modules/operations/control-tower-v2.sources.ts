@@ -137,7 +137,14 @@ function withFingerprint(item: ProjectedWithoutFingerprint): ProjectedControlTow
     severity: item.severity,
     urgency: item.urgency,
     sourceStatus: item.sourceStatus,
-    occurrenceCount: item.occurrenceCount,
+    // occurrenceCount is deliberately NOT hashed. It is a sighting counter that
+    // the source increments on every scan, so including it made the fingerprint
+    // differ on every run for every open finding - each one logged a "changed"
+    // observation with byte-identical evidence. That churn wrote ~690k rows/day
+    // into operations.control_tower_observations (37 GB / 72% of the database
+    // before it was cleaned up). The fingerprint must describe WHAT the problem
+    // is, not how many times we have seen it; occurrence_count is still tracked
+    // and stored on the work item by the repository.
     recurrenceCount: item.recurrenceCount,
     worsenedCount: item.worsenedCount,
     evidenceSummary: item.evidenceSummary,
