@@ -6,6 +6,10 @@ import type {
   ReturnLogisticsStatus,
   ReturnVendorSettlementStatus,
 } from "@shared/schema";
+import {
+  deriveReturnCaseActionPlan,
+  type ReturnCaseActionContext,
+} from "../domain/return-case-actions";
 
 export interface ReturnCaseListQuery {
   search: string | null;
@@ -55,6 +59,8 @@ export interface ReturnCaseListRow {
   unitCount: number;
 }
 
+export type ReturnCaseReceiptStatus = "expected" | "partially_received" | "received";
+
 export interface ReturnCaseItemRow {
   id: number;
   wmsReturnItemId: number;
@@ -64,6 +70,10 @@ export interface ReturnCaseItemRow {
   sku: string | null;
   title: string | null;
   quantity: number;
+  expectedQuantity: number;
+  receivedQuantity: number;
+  remainingQuantity: number;
+  receiptStatus: ReturnCaseReceiptStatus;
   unitPaidPriceCents: number;
   sourceLineTotalCents: number;
   createdAt: Date;
@@ -86,6 +96,7 @@ export interface ReturnCaseDetailRow extends ReturnCaseListRow {
   updatedAt: Date;
   items: ReturnCaseItemRow[];
   events: ReturnCaseEventRow[];
+  actionContext: ReturnCaseActionContext;
 }
 
 export interface ReturnCaseAdminStore {
@@ -152,14 +163,42 @@ export class ReturnCaseAdminService {
         occurredAt: event.occurredAt.toISOString(),
         createdAt: event.createdAt.toISOString(),
       })),
+      actionPlan: deriveReturnCaseActionPlan(row.actionContext),
     };
   }
 }
 
 function serializeListRow(row: ReturnCaseListRow) {
   return {
-    ...row,
+    recordOrigin: row.recordOrigin,
+    recordKey: row.recordKey,
+    legacyRmaId: row.legacyRmaId,
+    id: row.id,
+    caseNumber: row.caseNumber,
+    sourceProvider: row.sourceProvider,
+    sourceEventType: row.sourceEventType,
+    sourceEventId: row.sourceEventId,
+    businessContext: row.businessContext,
+    channelId: row.channelId,
+    channelName: row.channelName,
+    vendorId: row.vendorId,
+    vendorName: row.vendorName,
+    storeConnectionId: row.storeConnectionId,
+    storeName: row.storeName,
+    omsOrderId: row.omsOrderId,
+    omsOrderNumber: row.omsOrderNumber,
+    wmsOrderId: row.wmsOrderId,
+    wmsOrderNumber: row.wmsOrderNumber,
+    wmsReturnId: row.wmsReturnId,
+    caseStatus: row.caseStatus,
+    approvalStatus: row.approvalStatus,
+    logisticsStatus: row.logisticsStatus,
+    inspectionStatus: row.inspectionStatus,
+    customerRefundStatus: row.customerRefundStatus,
+    vendorSettlementStatus: row.vendorSettlementStatus,
     openedAt: row.openedAt.toISOString(),
     closedAt: row.closedAt?.toISOString() ?? null,
+    itemCount: row.itemCount,
+    unitCount: row.unitCount,
   };
 }

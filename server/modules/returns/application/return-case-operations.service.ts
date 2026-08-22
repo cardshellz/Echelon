@@ -1,0 +1,379 @@
+import { createHash } from "node:crypto";
+import {
+  deriveReturnCaseActionPlan,
+  type ReturnCaseActionContext,
+  type ReturnCaseActionKind,
+} from "../domain/return-case-actions";
+
+export interface ReturnCaseOperationAggregate {
+  caseId: number;
+  caseNumber: string;
+  omsOrderId: number;
+  wmsReturnId: number;
+  actionContext: ReturnCaseActionContext;
+}
+
+export interface RecordReturnReceiptInput {
+  caseId: number;
+  idempotencyKey: string;
+  actor: string;
+  notes: string | null;
+  lines: Array<{
+    returnCaseItemId: number;
+    expectedCurrentReceivedQuantity: number;
+    quantityReceivedNow: number;
+  }>;
+}
+
+export interface StartReturnInspectionInput {
+  caseId: number;
+  idempotencyKey: string;
+  actor: string;
+  notes: string | null;
+}
+
+export interface RecordReturnReceiptResult {
+  commandType: "record_receipt";
+  caseId: number;
+  caseNumber: string;
+  wmsReturnId: number;
+  logisticsStatus: "partially_received" | "received";
+  expectedUnits: number;
+  receivedUnits: number;
+  remainingUnits: number;
+  replayed: boolean;
+}
+
+export interface StartReturnInspectionResult {
+  commandType: "start_inspection";
+  caseId: number;
+  caseNumber: string;
+  inspectionId: number;
+  inspectionStatus: "in_progress";
+  startedAt: string;
+  replayed: boolean;
+}
+
+export type ReturnCaseOperationResult = RecordReturnReceiptResult | StartReturnInspectionResult;
+
+export interface PersistReturnReceiptInput {
+  aggregate: ReturnCaseOperationAggregate;
+  idempotencyKey: string;
+  requestHash: string;
+  actor: string;
+  notes: string | null;
+  lines: Array<{
+    returnCaseItemId: number;
+    wmsReturnItemId: number;
+    expectedCurrentReceivedQuantity: number;
+    targetReceivedQuantity: number;
+  }>;
+  now: Date;
+}
+
+export interface PersistStartInspectionInput {
+  aggregate: ReturnCaseOperationAggregate;
+  idempotencyKey: string;
+  requestHash: string;
+  actor: string;
+  notes: string | null;
+  now: Date;
+}
+
+export interface ExistingReturnCaseCommand {
+  commandType: ReturnCaseActionKind;
+  requestHash: string;
+  result: ReturnCaseOperationResult;
+}
+
+export interface ReturnCaseOperationTransaction {
+  lockCommand(idempotencyKey: string): Promise<void>;
+  findCommand(idempotencyKey: string): Promise<ExistingReturnCaseCommand | null>;
+  loadForUpdate(caseId: number): Promise<ReturnCaseOperationAggregate | null>;
+  persistReceipt(input: PersistReturnReceiptInput): Promise<RecordReturnReceiptResult>;
+  persistStartInspection(input: PersistStartInspectionInput): Promise<StartReturnInspectionResult>;
+}
+
+export interface ReturnCaseOperationStore {
+  transaction<T>(work: (tx: ReturnCaseOperationTransaction) => Promise<T>): Promise<T>;
+}
+
+export class ReturnCaseOperationError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly status: number,
+    public readonly context?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "ReturnCaseOperationError";
+  }
+}
+
+export class ReturnCaseOperationService {
+  constructor(
+    private readonly store: ReturnCaseOperationStore,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
+
+  async recordReceipt(rawInput: RecordReturnReceiptInput): Promise<RecordReturnReceiptResult> {
+    const input = normalizeReceiptInput(rawInput);
+    const requestHash = hashCommand("record_receipt", input);
+
+    return this.store.transaction(async (tx) => {
+      await tx.lockCommand(input.idempotencyKey);
+      const replay = await resolveReplay(tx, input.idempotencyKey, "record_receipt", requestHash);
+      if (replay) return requireReceiptResult(replay);
+
+      const aggregate = await loadAggregate(tx, input.caseId);
+      requireActionAvailable(aggregate.actionContext, "record_receipt");
+      const receipt = aggregate.actionContext.receipt;
+      if (!receipt) {
+        // The action resolver blocks this state. Keep the invariant explicit so
+        // persistence can never proceed if a future resolver change regresses it.
+        throw new ReturnCaseOperationError(
+          "RETURN_WMS_RETURN_MISSING",
+          "Record returned items received is not available because WMS receipt evidence is missing.",
+          409,
+          { caseId: input.caseId },
+        );
+      }
+      const receiptLines = receipt.items;
+      const receiptLineByCaseItemId = new Map(receiptLines.map((line) => [line.returnCaseItemId, line]));
+      const lines = input.lines.map((line) => {
+        const receiptLine = receiptLineByCaseItemId.get(line.returnCaseItemId);
+        if (!receiptLine) {
+          throw new ReturnCaseOperationError(
+            "RETURN_CASE_RECEIPT_ITEM_NOT_FOUND",
+            "A receipt item does not belong to this return case.",
+            409,
+            { caseId: input.caseId, returnCaseItemId: line.returnCaseItemId },
+          );
+        }
+        if (line.expectedCurrentReceivedQuantity !== receiptLine.wmsReceivedQuantity) {
+          throw new ReturnCaseOperationError(
+            "RETURN_CASE_RECEIPT_STATE_STALE",
+            "The received quantity changed after this return was reviewed. Refresh the return case and try again.",
+            409,
+            {
+              caseId: input.caseId,
+              returnCaseItemId: line.returnCaseItemId,
+              expectedCurrentReceivedQuantity: line.expectedCurrentReceivedQuantity,
+              actualCurrentReceivedQuantity: receiptLine.wmsReceivedQuantity,
+            },
+          );
+        }
+        const targetReceivedQuantity = line.expectedCurrentReceivedQuantity + line.quantityReceivedNow;
+        if (!Number.isSafeInteger(targetReceivedQuantity)
+          || targetReceivedQuantity > receiptLine.wmsExpectedQuantity) {
+          throw new ReturnCaseOperationError(
+            "RETURN_CASE_RECEIPT_QUANTITY_EXCEEDED",
+            "The receipt quantity exceeds the quantity still expected for an item.",
+            409,
+            {
+              caseId: input.caseId,
+              returnCaseItemId: line.returnCaseItemId,
+              requestedNow: line.quantityReceivedNow,
+              received: receiptLine.wmsReceivedQuantity,
+              expected: receiptLine.wmsExpectedQuantity,
+            },
+          );
+        }
+        return {
+          returnCaseItemId: line.returnCaseItemId,
+          wmsReturnItemId: receiptLine.wmsReturnItemId,
+          expectedCurrentReceivedQuantity: line.expectedCurrentReceivedQuantity,
+          targetReceivedQuantity,
+        };
+      });
+
+      const now = readClock(this.clock);
+      return tx.persistReceipt({
+        aggregate,
+        idempotencyKey: input.idempotencyKey,
+        requestHash,
+        actor: input.actor,
+        notes: input.notes,
+        lines,
+        now,
+      });
+    });
+  }
+
+  async startInspection(rawInput: StartReturnInspectionInput): Promise<StartReturnInspectionResult> {
+    const input = normalizeInspectionInput(rawInput);
+    const requestHash = hashCommand("start_inspection", input);
+
+    return this.store.transaction(async (tx) => {
+      await tx.lockCommand(input.idempotencyKey);
+      const replay = await resolveReplay(tx, input.idempotencyKey, "start_inspection", requestHash);
+      if (replay) return requireInspectionResult(replay);
+
+      const aggregate = await loadAggregate(tx, input.caseId);
+      requireActionAvailable(aggregate.actionContext, "start_inspection");
+      const now = readClock(this.clock);
+      return tx.persistStartInspection({
+        aggregate,
+        idempotencyKey: input.idempotencyKey,
+        requestHash,
+        actor: input.actor,
+        notes: input.notes,
+        now,
+      });
+    });
+  }
+}
+
+async function resolveReplay(
+  tx: ReturnCaseOperationTransaction,
+  idempotencyKey: string,
+  commandType: ReturnCaseActionKind,
+  requestHash: string,
+): Promise<ReturnCaseOperationResult | null> {
+  const existing = await tx.findCommand(idempotencyKey);
+  if (!existing) return null;
+  if (existing.commandType !== commandType || existing.requestHash !== requestHash) {
+    throw new ReturnCaseOperationError(
+      "RETURN_CASE_IDEMPOTENCY_CONFLICT",
+      "This idempotency key was already used for a different return operation.",
+      409,
+      { idempotencyKey },
+    );
+  }
+  return { ...existing.result, replayed: true };
+}
+
+async function loadAggregate(
+  tx: ReturnCaseOperationTransaction,
+  caseId: number,
+): Promise<ReturnCaseOperationAggregate> {
+  const aggregate = await tx.loadForUpdate(caseId);
+  if (!aggregate) {
+    throw new ReturnCaseOperationError(
+      "RETURN_CASE_NOT_FOUND",
+      "Return case was not found.",
+      404,
+      { caseId },
+    );
+  }
+  return aggregate;
+}
+
+function requireActionAvailable(context: ReturnCaseActionContext, kind: ReturnCaseActionKind): void {
+  const action = deriveReturnCaseActionPlan(context).actions.find((candidate) => candidate.kind === kind);
+  if (!action || action.state !== "available") {
+    throw new ReturnCaseOperationError(
+      action?.reasonCode ?? "RETURN_CASE_ACTION_NOT_AVAILABLE",
+      `${action?.label ?? "Return case action"} is not available for the current case state.`,
+      409,
+      { action: kind, state: action?.state ?? "missing" },
+    );
+  }
+}
+
+function normalizeReceiptInput(input: RecordReturnReceiptInput): RecordReturnReceiptInput {
+  const common = normalizeCommon(input);
+  if (!Array.isArray(input.lines) || input.lines.length === 0 || input.lines.length > 200) {
+    throw invalid("lines", input.lines);
+  }
+  const seen = new Set<number>();
+  const lines = input.lines.map((line) => {
+    const returnCaseItemId = requirePositiveSafeInteger(line?.returnCaseItemId, "returnCaseItemId");
+    const expectedCurrentReceivedQuantity = requireNonNegativeSafeInteger(
+      line?.expectedCurrentReceivedQuantity,
+      "expectedCurrentReceivedQuantity",
+    );
+    const quantityReceivedNow = requirePositiveSafeInteger(line?.quantityReceivedNow, "quantityReceivedNow");
+    if (seen.has(returnCaseItemId)) {
+      throw new ReturnCaseOperationError(
+        "RETURN_CASE_OPERATION_INPUT_INVALID",
+        "A return case item may only appear once in a receipt command.",
+        400,
+        { returnCaseItemId },
+      );
+    }
+    seen.add(returnCaseItemId);
+    return { returnCaseItemId, expectedCurrentReceivedQuantity, quantityReceivedNow };
+  }).sort((left, right) => left.returnCaseItemId - right.returnCaseItemId);
+  return { ...common, lines };
+}
+
+function normalizeInspectionInput(input: StartReturnInspectionInput): StartReturnInspectionInput {
+  return normalizeCommon(input);
+}
+
+function normalizeCommon<T extends {
+  caseId: number;
+  idempotencyKey: string;
+  actor: string;
+  notes: string | null;
+}>(input: T): Pick<T, "caseId" | "idempotencyKey" | "actor" | "notes"> {
+  return {
+    caseId: requirePositiveSafeInteger(input.caseId, "caseId"),
+    idempotencyKey: normalizeRequiredText(input.idempotencyKey, "idempotencyKey", 160),
+    actor: normalizeRequiredText(input.actor, "actor", 255),
+    notes: input.notes === null ? null : normalizeOptionalText(input.notes, "notes", 2_000),
+  };
+}
+
+function hashCommand(commandType: ReturnCaseActionKind, input: RecordReturnReceiptInput | StartReturnInspectionInput): string {
+  const request = "lines" in input
+    ? { commandType, caseId: input.caseId, notes: input.notes, lines: input.lines }
+    : { commandType, caseId: input.caseId, notes: input.notes };
+  return createHash("sha256").update(JSON.stringify(request)).digest("hex");
+}
+
+function readClock(clock: () => Date): Date {
+  const now = clock();
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new ReturnCaseOperationError("RETURN_CASE_CLOCK_INVALID", "Return case clock returned an invalid date.", 500);
+  }
+  return now;
+}
+
+function requireReceiptResult(result: ReturnCaseOperationResult): RecordReturnReceiptResult {
+  if (result.commandType !== "record_receipt") {
+    throw new ReturnCaseOperationError("RETURN_CASE_COMMAND_DATA_INVALID", "Stored return command data is inconsistent.", 500);
+  }
+  return result;
+}
+
+function requireInspectionResult(result: ReturnCaseOperationResult): StartReturnInspectionResult {
+  if (result.commandType !== "start_inspection") {
+    throw new ReturnCaseOperationError("RETURN_CASE_COMMAND_DATA_INVALID", "Stored return command data is inconsistent.", 500);
+  }
+  return result;
+}
+
+function requirePositiveSafeInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) <= 0) throw invalid(field, value);
+  return Number(value);
+}
+
+function requireNonNegativeSafeInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) throw invalid(field, value);
+  return Number(value);
+}
+
+function normalizeRequiredText(value: unknown, field: string, maxLength: number): string {
+  if (typeof value !== "string") throw invalid(field, value);
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maxLength) throw invalid(field, value);
+  return normalized;
+}
+
+function normalizeOptionalText(value: unknown, field: string, maxLength: number): string | null {
+  if (typeof value !== "string") throw invalid(field, value);
+  const normalized = value.trim();
+  if (normalized.length > maxLength) throw invalid(field, value);
+  return normalized || null;
+}
+
+function invalid(field: string, value: unknown): ReturnCaseOperationError {
+  return new ReturnCaseOperationError(
+    "RETURN_CASE_OPERATION_INPUT_INVALID",
+    `${field} is invalid.`,
+    400,
+    { field, value },
+  );
+}

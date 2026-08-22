@@ -3,6 +3,11 @@ import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, Plus, Search } from "lucide-react";
 import { OpenReturnCaseDialog } from "./OpenReturnCaseDialog";
+import { ReturnCaseOperationsCard } from "./ReturnCaseOperationsCard";
+import {
+  getReturnCaseDetail,
+  type ReturnCaseDetail,
+} from "./return-case-admin-api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -76,29 +81,6 @@ interface ReturnCaseListResponse {
   };
 }
 
-interface ReturnCaseDetail extends ReturnCaseSummary {
-  policyId: number;
-  policyVersion: number;
-  policySnapshot: Record<string, unknown>;
-  createdAt: string;
-  updatedAt: string;
-  items: Array<{
-    id: number;
-    sku: string | null;
-    title: string | null;
-    externalLineItemId: string | null;
-    quantity: number;
-    unitPaidPriceCents: number;
-    sourceLineTotalCents: number;
-  }>;
-  events: Array<{
-    id: number;
-    eventType: string;
-    actor: string;
-    details: unknown;
-    occurredAt: string;
-  }>;
-}
 
 const PAGE_SIZE = 25;
 
@@ -129,7 +111,12 @@ export function ReturnCaseAdminPanel({
 
   const detailQuery = useQuery<ReturnCaseDetail>({
     queryKey: ["return-case", selectedCaseId],
-    queryFn: () => fetchJson<ReturnCaseDetail>(`/api/returns/admin/cases/${selectedCaseId}`),
+    queryFn: () => {
+      if (selectedCaseId === null) {
+        throw new Error("A return case must be selected before loading its details.");
+      }
+      return getReturnCaseDetail(selectedCaseId);
+    },
     enabled: selectedCaseId !== null,
   });
 
@@ -145,6 +132,11 @@ export function ReturnCaseAdminPanel({
       return;
     }
     setSelectedCaseId(returnCase.id);
+  };
+
+  const refreshReturnCase = (caseId: number) => {
+    void queryClient.invalidateQueries({ queryKey: ["return-case", caseId], exact: true });
+    void queryClient.invalidateQueries({ queryKey: ["return-cases"] });
   };
 
   return (
@@ -307,7 +299,7 @@ export function ReturnCaseAdminPanel({
           <DialogHeader>
             <DialogTitle>{detailQuery.data?.caseNumber ?? "RMA"}</DialogTitle>
             <DialogDescription>
-              Read-only source, lifecycle, policy, item, and event evidence.
+              Operational actions, lifecycle state, source records, policy, items, and event evidence.
             </DialogDescription>
           </DialogHeader>
           {detailQuery.isLoading ? (
@@ -315,7 +307,10 @@ export function ReturnCaseAdminPanel({
           ) : detailQuery.isError || !detailQuery.data ? (
             <PanelMessage tone="error">RMA details could not be loaded.</PanelMessage>
           ) : (
-            <ReturnCaseDetailBody detail={detailQuery.data} />
+            <ReturnCaseDetailBody
+              detail={detailQuery.data}
+              onOperationCompleted={refreshReturnCase}
+            />
           )}
         </DialogContent>
       </Dialog>
@@ -333,7 +328,13 @@ export function ReturnCaseAdminPanel({
   );
 }
 
-function ReturnCaseDetailBody({ detail }: { detail: ReturnCaseDetail }) {
+function ReturnCaseDetailBody({
+  detail,
+  onOperationCompleted,
+}: {
+  detail: ReturnCaseDetail;
+  onOperationCompleted(caseId: number): void;
+}) {
   const lifecycle = [
     ["RMA", detail.caseStatus],
     ["Approval", detail.approvalStatus],
@@ -344,6 +345,13 @@ function ReturnCaseDetailBody({ detail }: { detail: ReturnCaseDetail }) {
   ];
   return (
     <div className="space-y-5">
+      <ReturnCaseOperationsCard
+        returnCaseId={detail.id}
+        actionPlan={detail.actionPlan}
+        items={detail.items}
+        onOperationCompleted={() => onOperationCompleted(detail.id)}
+      />
+
       <section>
         <h3 className="mb-2 text-sm font-semibold">Lifecycle</h3>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
