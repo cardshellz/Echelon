@@ -1,12 +1,16 @@
 import { sql } from "drizzle-orm";
 import {
   bigint,
+  boolean,
+  check,
+  foreignKey,
   index,
   integer,
   jsonb,
   text,
   timestamp,
   uniqueIndex,
+  uuid,
   varchar,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
@@ -114,6 +118,32 @@ export const channelFulfillmentReceiptStatusValues = [
   "ignored",
   "review",
 ] as const;
+export const packageAllocationSourcePurposeValues = [
+  "customer_fulfillment",
+  "replacement",
+  "concession",
+  "omission_correction",
+  "unclassified",
+] as const;
+export const packageAllocationKindValues = [
+  "primary_transfer",
+  "additional_physical_consumption",
+] as const;
+export const packageAllocationTargetKindValues = [
+  "package",
+  "awaiting_relabel",
+  "held_for_unpack",
+] as const;
+export const packageAllocationPlanOutcomeValues = ["proposed", "review"] as const;
+export const packageAllocationEffectTypeValues = [
+  "commercial_fulfillment",
+  "inventory_consumption",
+  "active_label_tracking",
+  "pre_possession_void_removal",
+  "carrier_tracking",
+  "notification_candidate",
+  "notification_reconciliation",
+] as const;
 
 export type FulfillmentPlanStatus = typeof fulfillmentPlanStatusValues[number];
 export type FulfillmentPlanLineStatus = typeof fulfillmentPlanLineStatusValues[number];
@@ -131,6 +161,11 @@ export type ChannelFulfillmentPushStatus = typeof channelFulfillmentPushStatusVa
 export type ShippingEngineOrderRequestRelationship = typeof shippingEngineOrderRequestRelationshipValues[number];
 export type ChannelFulfillmentPushAttemptOutcome = typeof channelFulfillmentPushAttemptOutcomeValues[number];
 export type ChannelFulfillmentReceiptStatus = typeof channelFulfillmentReceiptStatusValues[number];
+export type PackageAllocationSourcePurpose = typeof packageAllocationSourcePurposeValues[number];
+export type PackageAllocationKind = typeof packageAllocationKindValues[number];
+export type PackageAllocationTargetKind = typeof packageAllocationTargetKindValues[number];
+export type PackageAllocationPlanOutcome = typeof packageAllocationPlanOutcomeValues[number];
+export type PackageAllocationEffectType = typeof packageAllocationEffectTypeValues[number];
 
 export const fulfillmentPlans = wmsSchema.table("fulfillment_plans", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
@@ -393,6 +428,313 @@ export const shippingProviderLabelEvents = wmsSchema.table("shipping_provider_la
     .on(table.shippingProviderLabelId, table.eventHash),
   index("idx_shipping_provider_label_events_label")
     .on(table.shippingProviderLabelId, table.receivedAt),
+]);
+
+export const packageAllocationGroups = wmsSchema.table("package_allocation_groups", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  groupKey: uuid("group_key").notNull(),
+  currentVersion: integer("current_version").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  versionUpdatedAt: timestamp("version_updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_package_allocation_groups_key").on(table.groupKey),
+  check(
+    "package_allocation_groups_current_version_chk",
+    sql`${table.currentVersion} >= 0`,
+  ),
+]);
+
+export const packageAllocationSourceLines = wmsSchema.table("package_allocation_source_lines", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  sourceWmsShipmentItemId: integer("source_wms_shipment_item_id")
+    .notNull()
+    .references(() => outboundShipmentItems.id, { onDelete: "restrict" }),
+  shipmentRequestItemId: bigint("shipment_request_item_id", { mode: "number" })
+    .references(() => shipmentRequestItems.id, { onDelete: "restrict" }),
+  sourceQuantity: integer("source_quantity").notNull(),
+  shipmentItemPurpose: varchar("shipment_item_purpose", { length: 30 }).notNull(),
+  orderItemId: integer("order_item_id")
+    .references(() => orderItems.id, { onDelete: "restrict" }),
+  replacementForOrderItemId: integer("replacement_for_order_item_id")
+    .references(() => orderItems.id, { onDelete: "restrict" }),
+  correctionForShipmentItemId: integer("correction_for_shipment_item_id")
+    .references(() => outboundShipmentItems.id, { onDelete: "restrict" }),
+  productVariantId: integer("product_variant_id")
+    .references(() => productVariants.id, { onDelete: "restrict" }),
+  sku: varchar("sku", { length: 100 }).notNull(),
+  sourceFingerprint: varchar("source_fingerprint", { length: 64 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_package_allocation_source_lines_wms_item")
+    .on(table.sourceWmsShipmentItemId),
+  uniqueIndex("uq_package_allocation_source_lines_request_item")
+    .on(table.shipmentRequestItemId),
+  uniqueIndex("uq_package_allocation_source_lines_fingerprint")
+    .on(table.sourceFingerprint),
+  check("package_allocation_source_lines_quantity_chk", sql`${table.sourceQuantity} > 0`),
+  check(
+    "package_allocation_source_lines_purpose_chk",
+    sql`${table.shipmentItemPurpose} IN ('customer_fulfillment', 'replacement', 'concession', 'omission_correction', 'unclassified')`,
+  ),
+  check(
+    "package_allocation_source_lines_request_purpose_chk",
+    sql`${table.shipmentRequestItemId} IS NULL OR ${table.shipmentItemPurpose} = 'customer_fulfillment'`,
+  ),
+  check(
+    "package_allocation_source_lines_lineage_chk",
+    sql`
+      (
+        ${table.shipmentItemPurpose} = 'customer_fulfillment'
+        AND ${table.orderItemId} IS NOT NULL
+        AND ${table.replacementForOrderItemId} IS NULL
+        AND ${table.correctionForShipmentItemId} IS NULL
+      )
+      OR (
+        ${table.shipmentItemPurpose} = 'replacement'
+        AND ${table.orderItemId} IS NULL
+        AND ${table.replacementForOrderItemId} IS NOT NULL
+        AND ${table.correctionForShipmentItemId} IS NULL
+      )
+      OR (
+        ${table.shipmentItemPurpose} = 'concession'
+        AND ${table.orderItemId} IS NULL
+        AND ${table.replacementForOrderItemId} IS NULL
+        AND ${table.correctionForShipmentItemId} IS NULL
+        AND ${table.productVariantId} IS NOT NULL
+      )
+      OR (
+        ${table.shipmentItemPurpose} = 'omission_correction'
+        AND ${table.orderItemId} IS NULL
+        AND ${table.replacementForOrderItemId} IS NULL
+        AND ${table.correctionForShipmentItemId} IS NOT NULL
+        AND ${table.productVariantId} IS NOT NULL
+      )
+      OR (
+        ${table.shipmentItemPurpose} = 'unclassified'
+        AND ${table.orderItemId} IS NULL
+        AND ${table.replacementForOrderItemId} IS NULL
+        AND ${table.correctionForShipmentItemId} IS NULL
+      )
+    `,
+  ),
+  check("package_allocation_source_lines_sku_chk", sql`BTRIM(${table.sku}) <> ''`),
+  check(
+    "package_allocation_source_lines_fingerprint_chk",
+    sql`${table.sourceFingerprint} ~ '^[0-9a-f]{64}$'`,
+  ),
+]);
+
+export const packageAllocationKeys = wmsSchema.table("package_allocation_keys", {
+  allocationKey: varchar("allocation_key", { length: 500 }).primaryKey(),
+  packageAllocationSourceLineId: bigint("package_allocation_source_line_id", { mode: "number" })
+    .notNull()
+    .references(() => packageAllocationSourceLines.id, { onDelete: "restrict" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_package_allocation_keys_source")
+    .on(table.allocationKey, table.packageAllocationSourceLineId),
+  check("package_allocation_keys_key_chk", sql`BTRIM(${table.allocationKey}) <> ''`),
+]);
+
+export const packageAllocationGroupSourceLines = wmsSchema.table("package_allocation_group_source_lines", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  packageAllocationGroupId: bigint("package_allocation_group_id", { mode: "number" })
+    .notNull()
+    .references(() => packageAllocationGroups.id, { onDelete: "restrict" }),
+  packageAllocationSourceLineId: bigint("package_allocation_source_line_id", { mode: "number" })
+    .notNull()
+    .references(() => packageAllocationSourceLines.id, { onDelete: "restrict" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_package_allocation_group_source_lines_membership")
+    .on(table.packageAllocationGroupId, table.packageAllocationSourceLineId),
+  uniqueIndex("uq_package_allocation_group_source_lines_source")
+    .on(table.packageAllocationSourceLineId),
+]);
+
+export const packageAllocationPlans = wmsSchema.table("package_allocation_plans", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  packageAllocationGroupId: bigint("package_allocation_group_id", { mode: "number" })
+    .notNull()
+    .references(() => packageAllocationGroups.id, { onDelete: "restrict" }),
+  planVersion: integer("plan_version").notNull(),
+  expectedGroupVersion: integer("expected_group_version").notNull(),
+  inputHash: varchar("input_hash", { length: 64 }).notNull(),
+  stateHash: varchar("state_hash", { length: 64 }).notNull(),
+  outcome: varchar("outcome", { length: 20 }).notNull(),
+  plannerVersion: varchar("planner_version", { length: 100 }).notNull(),
+  reason: varchar("reason", { length: 500 }).notNull(),
+  createdBy: varchar("created_by", { length: 200 }).notNull(),
+  stateSnapshot: jsonb("state_snapshot").notNull(),
+  reviewSnapshot: jsonb("review_snapshot").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_package_allocation_plans_group_version")
+    .on(table.packageAllocationGroupId, table.planVersion),
+  uniqueIndex("uq_package_allocation_plans_group_input_hash")
+    .on(table.packageAllocationGroupId, table.inputHash),
+  uniqueIndex("uq_package_allocation_plans_id_group")
+    .on(table.id, table.packageAllocationGroupId),
+  check(
+    "package_allocation_plans_version_chk",
+    sql`${table.planVersion} > 0
+      AND ${table.expectedGroupVersion} >= 0
+      AND ${table.planVersion} = ${table.expectedGroupVersion} + 1`,
+  ),
+  check("package_allocation_plans_input_hash_chk", sql`${table.inputHash} ~ '^[0-9a-f]{64}$'`),
+  check("package_allocation_plans_state_hash_chk", sql`${table.stateHash} ~ '^[0-9a-f]{64}$'`),
+  check("package_allocation_plans_outcome_chk", sql`${table.outcome} IN ('proposed', 'review')`),
+  check(
+    "package_allocation_plans_snapshots_chk",
+    sql`jsonb_typeof(${table.stateSnapshot}) = 'object'
+      AND jsonb_typeof(${table.reviewSnapshot}) = 'object'`,
+  ),
+  check(
+    "package_allocation_plans_text_chk",
+    sql`BTRIM(${table.plannerVersion}) <> ''
+      AND BTRIM(${table.reason}) <> ''
+      AND BTRIM(${table.createdBy}) <> ''`,
+  ),
+]);
+
+export const packageAllocationEntries = wmsSchema.table("package_allocation_entries", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  packageAllocationPlanId: bigint("package_allocation_plan_id", { mode: "number" }).notNull(),
+  packageAllocationGroupId: bigint("package_allocation_group_id", { mode: "number" }).notNull(),
+  packageAllocationSourceLineId: bigint("package_allocation_source_line_id", { mode: "number" }).notNull(),
+  allocationKey: varchar("allocation_key", { length: 500 }).notNull(),
+  entryKey: varchar("entry_key", { length: 500 }).notNull(),
+  allocationKind: varchar("allocation_kind", { length: 40 }).notNull(),
+  targetKind: varchar("target_kind", { length: 40 }).notNull(),
+  shippingProviderLabelId: bigint("shipping_provider_label_id", { mode: "number" })
+    .references(() => shippingProviderLabels.id, { onDelete: "restrict" }),
+  quantity: integer("quantity").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_package_allocation_entries_key")
+    .on(table.packageAllocationPlanId, table.entryKey),
+  uniqueIndex("uq_package_allocation_entries_semantic_target").on(
+    table.packageAllocationPlanId,
+    table.allocationKey,
+    table.packageAllocationSourceLineId,
+    table.allocationKind,
+    table.targetKind,
+    sql`COALESCE(${table.shippingProviderLabelId}, 0)`,
+  ),
+  foreignKey({
+    columns: [table.packageAllocationPlanId, table.packageAllocationGroupId],
+    foreignColumns: [packageAllocationPlans.id, packageAllocationPlans.packageAllocationGroupId],
+    name: "fk_package_allocation_entries_plan_group",
+  }).onDelete("restrict"),
+  foreignKey({
+    columns: [table.allocationKey, table.packageAllocationSourceLineId],
+    foreignColumns: [
+      packageAllocationKeys.allocationKey,
+      packageAllocationKeys.packageAllocationSourceLineId,
+    ],
+    name: "fk_package_allocation_entries_allocation_key",
+  }).onDelete("restrict"),
+  foreignKey({
+    columns: [table.packageAllocationGroupId, table.packageAllocationSourceLineId],
+    foreignColumns: [
+      packageAllocationGroupSourceLines.packageAllocationGroupId,
+      packageAllocationGroupSourceLines.packageAllocationSourceLineId,
+    ],
+    name: "fk_package_allocation_entries_group_source",
+  }).onDelete("restrict"),
+  check("package_allocation_entries_key_chk", sql`BTRIM(${table.entryKey}) <> ''`),
+  check(
+    "package_allocation_entries_allocation_key_chk",
+    sql`BTRIM(${table.allocationKey}) <> ''`,
+  ),
+  check("package_allocation_entries_quantity_chk", sql`${table.quantity} > 0`),
+  check(
+    "package_allocation_entries_kind_chk",
+    sql`${table.allocationKind} IN ('primary_transfer', 'additional_physical_consumption')`,
+  ),
+  check(
+    "package_allocation_entries_target_chk",
+    sql`${table.targetKind} IN ('package', 'awaiting_relabel', 'held_for_unpack')`,
+  ),
+  check(
+    "package_allocation_entries_target_shape_chk",
+    sql`
+      (${table.targetKind} = 'package' AND ${table.shippingProviderLabelId} IS NOT NULL)
+      OR (
+        ${table.targetKind} IN ('awaiting_relabel', 'held_for_unpack')
+        AND ${table.shippingProviderLabelId} IS NULL
+      )
+    `,
+  ),
+  check(
+    "package_allocation_entries_consumption_target_chk",
+    sql`${table.allocationKind} <> 'additional_physical_consumption'
+      OR ${table.targetKind} = 'package'`,
+  ),
+]);
+
+export const packageAllocationEffectIntents = wmsSchema.table("package_allocation_effect_intents", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  packageAllocationPlanId: bigint("package_allocation_plan_id", { mode: "number" }).notNull(),
+  packageAllocationGroupId: bigint("package_allocation_group_id", { mode: "number" }).notNull(),
+  packageAllocationSourceLineId: bigint("package_allocation_source_line_id", { mode: "number" }),
+  shippingProviderLabelId: bigint("shipping_provider_label_id", { mode: "number" })
+    .references(() => shippingProviderLabels.id, { onDelete: "restrict" }),
+  intentKey: varchar("intent_key", { length: 500 }).notNull(),
+  effectType: varchar("effect_type", { length: 80 }).notNull(),
+  payloadHash: varchar("payload_hash", { length: 64 }).notNull(),
+  quantity: integer("quantity"),
+  payload: jsonb("payload").notNull().default({}),
+  executable: boolean("executable").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_package_allocation_effect_intents_key").on(table.intentKey),
+  foreignKey({
+    columns: [table.packageAllocationPlanId, table.packageAllocationGroupId],
+    foreignColumns: [packageAllocationPlans.id, packageAllocationPlans.packageAllocationGroupId],
+    name: "fk_package_allocation_effect_intents_plan_group",
+  }).onDelete("restrict"),
+  foreignKey({
+    columns: [table.packageAllocationGroupId, table.packageAllocationSourceLineId],
+    foreignColumns: [
+      packageAllocationGroupSourceLines.packageAllocationGroupId,
+      packageAllocationGroupSourceLines.packageAllocationSourceLineId,
+    ],
+    name: "fk_package_allocation_effect_intents_group_source",
+  }).onDelete("restrict"),
+  check("package_allocation_effect_intents_key_chk", sql`BTRIM(${table.intentKey}) <> ''`),
+  check(
+    "package_allocation_effect_intents_type_chk",
+    sql`${table.effectType} IN (
+      'commercial_fulfillment',
+      'inventory_consumption',
+      'active_label_tracking',
+      'pre_possession_void_removal',
+      'carrier_tracking',
+      'notification_candidate',
+      'notification_reconciliation'
+    )`,
+  ),
+  check(
+    "package_allocation_effect_intents_payload_hash_chk",
+    sql`${table.payloadHash} ~ '^[0-9a-f]{64}$'`,
+  ),
+  check(
+    "package_allocation_effect_intents_quantity_chk",
+    sql`${table.quantity} IS NULL OR ${table.quantity} > 0`,
+  ),
+  check(
+    "package_allocation_effect_intents_source_quantity_chk",
+    sql`
+      (${table.packageAllocationSourceLineId} IS NULL AND ${table.quantity} IS NULL)
+      OR (${table.packageAllocationSourceLineId} IS NOT NULL AND ${table.quantity} IS NOT NULL)
+    `,
+  ),
+  check(
+    "package_allocation_effect_intents_payload_chk",
+    sql`jsonb_typeof(${table.payload}) = 'object'`,
+  ),
+  check("package_allocation_effect_intents_inert_chk", sql`${table.executable} = FALSE`),
 ]);
 
 export const carrierTrackingSubscriptions = wmsSchema.table("carrier_tracking_subscriptions", {
@@ -892,6 +1234,13 @@ export const insertPhysicalShipmentItemSchema = createInsertSchema(physicalShipm
 export const insertShippingProviderLabelSchema = createInsertSchema(shippingProviderLabels).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertShippingProviderLabelLinkSchema = createInsertSchema(shippingProviderLabelLinks).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertShippingProviderLabelEventSchema = createInsertSchema(shippingProviderLabelEvents).omit({ id: true });
+export const insertPackageAllocationGroupSchema = createInsertSchema(packageAllocationGroups).omit({ id: true, createdAt: true, versionUpdatedAt: true });
+export const insertPackageAllocationSourceLineSchema = createInsertSchema(packageAllocationSourceLines).omit({ id: true, createdAt: true });
+export const insertPackageAllocationKeySchema = createInsertSchema(packageAllocationKeys).omit({ createdAt: true });
+export const insertPackageAllocationGroupSourceLineSchema = createInsertSchema(packageAllocationGroupSourceLines).omit({ id: true, createdAt: true });
+export const insertPackageAllocationPlanSchema = createInsertSchema(packageAllocationPlans).omit({ id: true, createdAt: true });
+export const insertPackageAllocationEntrySchema = createInsertSchema(packageAllocationEntries).omit({ id: true, createdAt: true });
+export const insertPackageAllocationEffectIntentSchema = createInsertSchema(packageAllocationEffectIntents).omit({ id: true, createdAt: true });
 export const insertCarrierTrackingSubscriptionSchema = createInsertSchema(carrierTrackingSubscriptions).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertCarrierTrackingSubscriptionLabelSchema = createInsertSchema(carrierTrackingSubscriptionLabels).omit({ id: true, createdAt: true });
 export const insertCarrierTrackingSubscriptionAttemptSchema = createInsertSchema(carrierTrackingSubscriptionAttempts).omit({ id: true, createdAt: true });
@@ -935,6 +1284,20 @@ export type InsertShippingProviderLabelLink = z.infer<typeof insertShippingProvi
 export type ShippingProviderLabelLink = typeof shippingProviderLabelLinks.$inferSelect;
 export type InsertShippingProviderLabelEvent = z.infer<typeof insertShippingProviderLabelEventSchema>;
 export type ShippingProviderLabelEvent = typeof shippingProviderLabelEvents.$inferSelect;
+export type InsertPackageAllocationGroup = z.infer<typeof insertPackageAllocationGroupSchema>;
+export type PackageAllocationGroup = typeof packageAllocationGroups.$inferSelect;
+export type InsertPackageAllocationSourceLine = z.infer<typeof insertPackageAllocationSourceLineSchema>;
+export type PackageAllocationSourceLine = typeof packageAllocationSourceLines.$inferSelect;
+export type InsertPackageAllocationKey = z.infer<typeof insertPackageAllocationKeySchema>;
+export type PackageAllocationKey = typeof packageAllocationKeys.$inferSelect;
+export type InsertPackageAllocationGroupSourceLine = z.infer<typeof insertPackageAllocationGroupSourceLineSchema>;
+export type PackageAllocationGroupSourceLine = typeof packageAllocationGroupSourceLines.$inferSelect;
+export type InsertPackageAllocationPlan = z.infer<typeof insertPackageAllocationPlanSchema>;
+export type PackageAllocationPlan = typeof packageAllocationPlans.$inferSelect;
+export type InsertPackageAllocationEntry = z.infer<typeof insertPackageAllocationEntrySchema>;
+export type PackageAllocationEntry = typeof packageAllocationEntries.$inferSelect;
+export type InsertPackageAllocationEffectIntent = z.infer<typeof insertPackageAllocationEffectIntentSchema>;
+export type PackageAllocationEffectIntent = typeof packageAllocationEffectIntents.$inferSelect;
 export type InsertCarrierTrackingSubscription = z.infer<typeof insertCarrierTrackingSubscriptionSchema>;
 export type CarrierTrackingSubscription = typeof carrierTrackingSubscriptions.$inferSelect;
 export type InsertCarrierTrackingSubscriptionLabel = z.infer<typeof insertCarrierTrackingSubscriptionLabelSchema>;
