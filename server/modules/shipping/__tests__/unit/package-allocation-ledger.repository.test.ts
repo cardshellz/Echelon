@@ -301,6 +301,12 @@ describe("PgPackageAllocationLedgerRepository", () => {
     expect(discoveryQuery?.text).toContain("wms.physical_shipment_items");
     expect(discoveryQuery?.text).toContain("physical_item.shipment_request_item_id");
     expect(discoveryQuery?.text).toContain("physical.shipment_request_id");
+    expect(discoveryQuery?.text).toMatch(
+      /anchor_engine_orders AS MATERIALIZED \([\s\S]*?JOIN anchor_requests AS request[\s\S]*?WHERE physical\.shipping_engine_order_id IS NOT NULL\s*\),\s*scope_requests AS MATERIALIZED/,
+    );
+    expect(discoveryQuery?.text).not.toMatch(
+      /anchor_engine_orders AS MATERIALIZED \([\s\S]*?\),\s*UNION\s+SELECT physical\.shipping_engine_order_id/,
+    );
     expect(discoveryQuery?.text).toContain("wms.shipping_provider_label_links");
     expect(discoveryQuery?.text).not.toContain("JOIN wms.orders");
     expect(discoveryQuery?.text).not.toContain("wms_order_id");

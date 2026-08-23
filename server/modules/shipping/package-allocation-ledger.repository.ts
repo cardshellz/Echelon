@@ -563,13 +563,13 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
          JOIN source_physical_shipments AS source_physical
            ON source_physical.id = physical.id
          WHERE physical.shipping_engine_order_id IS NOT NULL
-       ),
          UNION
          SELECT physical.shipping_engine_order_id
          FROM wms.physical_shipments AS physical
          JOIN anchor_requests AS request
            ON request.id = physical.shipment_request_id
          WHERE physical.shipping_engine_order_id IS NOT NULL
+       ),
        scope_requests AS MATERIALIZED (
          SELECT request.id
          FROM anchor_requests AS request
