@@ -68,6 +68,14 @@ function postgresErrorCode(error: unknown): string | null {
   return typeof code === "string" ? code : null;
 }
 
+function positiveSafeIntegerFromPostgres(value: unknown, field: string): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${field} is not a positive safe integer`);
+  }
+  return parsed;
+}
+
 function instrumentedPool(
   basePool: Pool,
   telemetry: RepositoryTelemetry,
@@ -246,15 +254,18 @@ async function seedAuthorityReadinessLabel(pool: Pool, sourceId: number): Promis
       lines: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 2 }],
     },
   };
-  const label = await pool.query<{ id: number }>(
+  const label = await pool.query<{ id: string }>(
     `INSERT INTO wms.shipping_provider_labels (
        provider, provider_label_id, tracking_number, label_status,
        label_direction, first_observed_at, last_observed_at
      ) VALUES ('shipstation', $1, $2, 'active', 'outbound', $3, $3)
-     RETURNING id`,
+     RETURNING id::text AS id`,
     [providerLabelId, trackingNumber, receivedAt],
   );
-  const labelId = label.rows[0].id;
+  const labelId = positiveSafeIntegerFromPostgres(
+    label.rows[0].id,
+    "shipping_provider_labels.id",
+  );
   const eventHash = createHash("sha256").update(canonicalJson({
     provider: "shipstation",
     ...payload,
