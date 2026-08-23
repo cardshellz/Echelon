@@ -6,13 +6,19 @@ import type {
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import {
+  applyReturnRestock,
+  ReturnRestockError,
+} from "../../inventory/application/return-restock.use-case";
+import {
   receiveExpectedWmsReturn,
   WmsReturnReceiptCommandError,
 } from "../../wms/return-receipt-commands";
 import {
   ReturnCaseOperationError,
+  type ApplyReturnInventoryTreatmentResult,
   type CompleteReturnInspectionResult,
   type ExistingReturnCaseCommand,
+  type PersistReturnInventoryTreatmentInput,
   type PersistCompleteInspectionInput,
   type PersistReturnDispositionInput,
   type PersistReturnReceiptInput,
@@ -27,6 +33,7 @@ import {
 } from "../application/return-case-operations.service";
 import {
   ReturnCaseActionDomainError,
+  deriveReturnCaseActionPlan,
   parseReturnPolicySnapshot,
   type ReturnInspectionFacts,
   type ReturnReceiptItemFacts,
@@ -42,6 +49,7 @@ interface CaseRow {
   id: unknown;
   case_number: unknown;
   oms_order_id: unknown;
+  wms_order_id: unknown;
   wms_return_id: unknown;
   case_status: unknown;
   approval_status: unknown;
@@ -93,10 +101,29 @@ interface DispositionHeaderRow {
 }
 
 interface DispositionItemRow {
+  id: unknown;
   disposition_id: unknown;
   return_case_item_id: unknown;
   treatment: unknown;
   quantity: unknown;
+}
+
+interface OperationItemRow {
+  return_case_item_id: unknown;
+  oms_order_line_id: unknown;
+  wms_order_item_id: unknown;
+  product_variant_id: unknown;
+}
+
+interface InventoryTreatmentHeaderRow { id: unknown }
+interface InventoryTreatmentItemRow {
+  disposition_item_id: unknown;
+  return_case_item_id: unknown;
+  treatment: unknown;
+  quantity: unknown;
+  warehouse_location_id: unknown;
+  inventory_transaction_id: unknown;
+  inventory_lot_id: unknown;
 }
 
 interface InsertedDispositionRow { id: unknown }
@@ -152,7 +179,7 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
 
     const caseResult = await this.tx.execute(sql`
       SELECT
-        id, case_number, oms_order_id, wms_return_id, case_status,
+        id, case_number, oms_order_id, wms_order_id, wms_return_id, case_status,
         approval_status, logistics_status, inspection_status,
         customer_refund_status, vendor_settlement_status,
         policy_id, policy_version, policy_snapshot
@@ -203,6 +230,19 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
       FROM returns.return_case_items
       WHERE return_case_id = ${caseId}
     `);
+    const operationItemResult = await this.tx.execute(sql`
+      SELECT
+        case_item.id AS return_case_item_id,
+        case_item.oms_order_line_id,
+        case_item.wms_order_item_id,
+        oms_line.product_variant_id
+      FROM returns.return_case_items case_item
+      LEFT JOIN oms.oms_order_lines oms_line
+        ON oms_line.id = case_item.oms_order_line_id
+      WHERE case_item.return_case_id = ${caseId}
+      ORDER BY case_item.id
+      FOR UPDATE OF case_item
+    `);
     const inspectionResult = await this.tx.execute(sql`
       SELECT id, status, started_at, started_by, completed_at, completed_by
       FROM returns.return_case_inspections
@@ -223,6 +263,7 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
     `);
     const dispositionItemResult = await this.tx.execute(sql`
       SELECT
+        item.id,
         item.disposition_id,
         item.return_case_item_id,
         item.treatment,
@@ -234,6 +275,29 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
       ORDER BY item.disposition_id, item.id
       FOR UPDATE OF item
     `);
+    const inventoryTreatmentResult = await this.tx.execute(sql`
+      SELECT id
+      FROM returns.return_case_inventory_treatments
+      WHERE return_case_id = ${caseId}
+      ORDER BY id
+      FOR UPDATE
+    `);
+    const inventoryTreatmentItemResult = await this.tx.execute(sql`
+      SELECT
+        item.disposition_item_id,
+        item.return_case_item_id,
+        item.treatment,
+        item.quantity,
+        item.warehouse_location_id,
+        item.inventory_transaction_id,
+        item.inventory_lot_id
+      FROM returns.return_case_inventory_treatment_items item
+      JOIN returns.return_case_inventory_treatments treatment
+        ON treatment.id = item.inventory_treatment_id
+      WHERE treatment.return_case_id = ${caseId}
+      ORDER BY item.disposition_item_id
+      FOR UPDATE OF item
+    `);
 
     const receiptItems = rowsOf<ReceiptItemRow>(receiptResult).map(mapReceiptItem);
     const canonicalItemCount = readNonNegativeInteger(
@@ -241,20 +305,40 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
       "canonical return item count",
     );
     const inspections = rowsOf<InspectionRow>(inspectionResult);
+    const operationItems = rowsOf<OperationItemRow>(operationItemResult).map((item) => ({
+      returnCaseItemId: readPositiveInteger(item.return_case_item_id, "operation return case item id"),
+      omsOrderLineId: readNullablePositiveInteger(item.oms_order_line_id, "operation OMS order line id"),
+      wmsOrderItemId: readNullablePositiveInteger(item.wms_order_item_id, "operation WMS order item id"),
+      productVariantId: readNullablePositiveInteger(item.product_variant_id, "operation product variant id"),
+    }));
     const dispositionIds = rowsOf<DispositionHeaderRow>(dispositionResult)
       .map((row) => readPositiveInteger(row.id, "disposition id"));
     const dispositionLines = rowsOf<DispositionItemRow>(dispositionItemResult).map((line) => ({
+      dispositionItemId: readPositiveInteger(line.id, "disposition item id"),
       dispositionId: readPositiveInteger(line.disposition_id, "disposition id"),
       returnCaseItemId: readPositiveInteger(line.return_case_item_id, "disposition case item id"),
       treatment: readDispositionTreatment(line.treatment, "disposition treatment"),
       quantity: readPositiveInteger(line.quantity, "disposition quantity"),
+    }));
+    const inventoryTreatmentIds = rowsOf<InventoryTreatmentHeaderRow>(inventoryTreatmentResult)
+      .map((header) => readPositiveInteger(header.id, "inventory treatment id"));
+    const inventoryTreatmentLines = rowsOf<InventoryTreatmentItemRow>(inventoryTreatmentItemResult).map((line) => ({
+      dispositionItemId: readPositiveInteger(line.disposition_item_id, "inventory treatment disposition item id"),
+      returnCaseItemId: readPositiveInteger(line.return_case_item_id, "inventory treatment return case item id"),
+      treatment: readDispositionTreatment(line.treatment, "inventory treatment"),
+      quantity: readPositiveInteger(line.quantity, "inventory treatment quantity"),
+      warehouseLocationId: readNullablePositiveInteger(line.warehouse_location_id, "inventory treatment warehouse location id"),
+      inventoryTransactionId: readNullablePositiveInteger(line.inventory_transaction_id, "inventory treatment transaction id"),
+      inventoryLotId: readNullablePositiveInteger(line.inventory_lot_id, "inventory treatment lot id"),
     }));
 
     return {
       caseId: readPositiveInteger(row.id, "return case id"),
       caseNumber: readText(row.case_number, "return case number"),
       omsOrderId,
+      wmsOrderId: readPositiveInteger(row.wms_order_id, "WMS order id"),
       wmsReturnId,
+      items: operationItems,
       actionContext: {
         lifecycle: {
           caseStatus: readText(row.case_status, "case status") as ReturnCaseOperationAggregate["actionContext"]["lifecycle"]["caseStatus"],
@@ -279,6 +363,10 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
         disposition: dispositionIds.length > 0 ? {
           recordCount: dispositionIds.length,
           lines: dispositionLines,
+        } : null,
+        inventoryTreatment: inventoryTreatmentIds.length > 0 ? {
+          recordCount: inventoryTreatmentIds.length,
+          lines: inventoryTreatmentLines,
         } : null,
         conditionalInspectionDecision: null,
       },
@@ -610,6 +698,163 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
     }, { timestamp: input.now, emitStructuredLog: false });
     return result;
   }
+
+  async persistInventoryTreatment(
+    input: PersistReturnInventoryTreatmentInput,
+  ): Promise<ApplyReturnInventoryTreatmentResult> {
+    const headerResult = await this.tx.execute(sql`
+      INSERT INTO returns.return_case_inventory_treatments (
+        return_case_id, idempotency_key, request_hash, applied_by,
+        notes, applied_at, created_at
+      ) VALUES (
+        ${input.aggregate.caseId}, ${input.idempotencyKey}, ${input.requestHash},
+        ${input.actor}, ${input.notes}, ${input.now}, ${input.now}
+      )
+      RETURNING id
+    `);
+    const inventoryTreatmentId = readPositiveInteger(
+      rowsOf<{ id: unknown }>(headerResult)[0]?.id,
+      "return inventory treatment id",
+    );
+
+    const aggregateItemById = new Map(
+      input.aggregate.items.map((item) => [item.returnCaseItemId, item] as const),
+    );
+    const resultLines: ApplyReturnInventoryTreatmentResult["lines"] = [];
+    for (const line of input.lines) {
+      const caseItem = aggregateItemById.get(line.returnCaseItemId);
+      if (!caseItem) {
+        throw new ReturnCaseOperationError(
+          "RETURN_INVENTORY_TREATMENT_STATE_STALE",
+          "The returned item changed while inventory treatment was being applied.",
+          409,
+          { caseId: input.aggregate.caseId, returnCaseItemId: line.returnCaseItemId },
+        );
+      }
+
+      let inventoryTransactionId: number | null = null;
+      let inventoryLotId: number | null = null;
+      if (line.treatment === "restock_sellable") {
+        if (line.productVariantId === null || line.warehouseLocationId === null) {
+          throw new ReturnCaseOperationError(
+            "RETURN_INVENTORY_TREATMENT_VARIANT_MISSING",
+            "Sellable restock requires an exact catalog variant and pickable warehouse location.",
+            409,
+            { caseId: input.aggregate.caseId, dispositionItemId: line.dispositionItemId },
+          );
+        }
+        try {
+          const restock = await applyReturnRestock(this.tx, {
+            dispositionItemId: line.dispositionItemId,
+            returnCaseId: input.aggregate.caseId,
+            caseNumber: input.aggregate.caseNumber,
+            productVariantId: line.productVariantId,
+            warehouseLocationId: line.warehouseLocationId,
+            quantity: line.quantity,
+            omsOrderId: input.aggregate.omsOrderId,
+            wmsOrderId: input.aggregate.wmsOrderId,
+            wmsOrderItemId: caseItem.wmsOrderItemId,
+            actor: input.actor,
+            notes: input.notes,
+            now: input.now,
+          });
+          inventoryTransactionId = restock.inventoryTransactionId;
+          inventoryLotId = restock.inventoryLotId;
+        } catch (error) {
+          if (error instanceof ReturnRestockError) throw mapReturnRestockError(error, input);
+          throw error;
+        }
+      }
+
+      await this.tx.execute(sql`
+        INSERT INTO returns.return_case_inventory_treatment_items (
+          inventory_treatment_id, disposition_item_id, return_case_item_id,
+          treatment, quantity, warehouse_location_id,
+          inventory_transaction_id, inventory_lot_id, created_at
+        ) VALUES (
+          ${inventoryTreatmentId}, ${line.dispositionItemId}, ${line.returnCaseItemId},
+          ${line.treatment}, ${line.quantity}, ${line.warehouseLocationId},
+          ${inventoryTransactionId}, ${inventoryLotId}, ${input.now}
+        )
+      `);
+      resultLines.push({
+        dispositionItemId: line.dispositionItemId,
+        returnCaseItemId: line.returnCaseItemId,
+        productVariantId: line.productVariantId,
+        treatment: line.treatment,
+        quantity: line.quantity,
+        warehouseLocationId: line.warehouseLocationId,
+        inventoryTransactionId,
+        inventoryLotId,
+      });
+    }
+
+    const existing = input.aggregate.actionContext.inventoryTreatment;
+    const inventoryTreatmentSummary = deriveReturnCaseActionPlan({
+      ...input.aggregate.actionContext,
+      inventoryTreatment: {
+        recordCount: (existing?.recordCount ?? 0) + 1,
+        lines: [
+          ...(existing?.lines ?? []),
+          ...resultLines.map((line) => ({
+            dispositionItemId: line.dispositionItemId,
+            returnCaseItemId: line.returnCaseItemId,
+            treatment: line.treatment,
+            quantity: line.quantity,
+            warehouseLocationId: line.warehouseLocationId,
+            inventoryTransactionId: line.inventoryTransactionId,
+            inventoryLotId: line.inventoryLotId,
+          })),
+        ],
+      },
+    }).inventoryTreatmentSummary;
+    const result: ApplyReturnInventoryTreatmentResult = {
+      commandType: "apply_inventory_treatment",
+      caseId: input.aggregate.caseId,
+      caseNumber: input.aggregate.caseNumber,
+      inventoryTreatmentId,
+      lines: resultLines,
+      inventoryTreatmentSummary,
+      appliedAt: input.now.toISOString(),
+      replayed: false,
+    };
+    const details = {
+      requestHash: input.requestHash,
+      inventoryTreatmentId,
+      notes: input.notes,
+      lines: resultLines,
+      inventoryTreatmentSummary,
+    };
+    await appendEvent(this.tx, input.aggregate.caseId, "return_inventory_treatment_applied", input.actor, details, input.now);
+    await persistCommand(this.tx, input.aggregate.caseId, input.idempotencyKey, input.requestHash, result, input.actor, input.now);
+    await persistAuditEvent(this.tx, {
+      actor: input.actor,
+      action: "RETURN_CASE_INVENTORY_TREATMENT_APPLIED",
+      target: `returns.return_cases:${input.aggregate.caseId}`,
+      changes: {
+        before: input.aggregate.actionContext.inventoryTreatment,
+        after: { inventoryTreatmentId, inventoryTreatmentSummary },
+      },
+      context: details,
+    }, { timestamp: input.now, emitStructuredLog: false });
+    return result;
+  }
+}
+
+function mapReturnRestockError(
+  error: ReturnRestockError,
+  input: PersistReturnInventoryTreatmentInput,
+): ReturnCaseOperationError {
+  const integrityFailure = error.code.includes("DATA_INVALID")
+    || error.code.includes("INSERT_FAILED")
+    || error.code.includes("LEVEL_MISSING")
+    || error.code.includes("OVERFLOW");
+  return new ReturnCaseOperationError(
+    error.code,
+    error.message,
+    integrityFailure ? 500 : 409,
+    { ...error.context, caseId: input.aggregate.caseId },
+  );
 }
 
 function requireSingleInspectionMutation(
@@ -739,6 +984,9 @@ function readStoredResult(value: unknown, commandType: ExistingReturnCaseCommand
   }
   if (commandType === "record_disposition") {
     return readStoredDispositionResult(row);
+  }
+  if (commandType === "apply_inventory_treatment") {
+    return readStoredInventoryTreatmentResult(row);
   }
   if (commandType === "start_inspection") {
     const inspectionStatus = readText(row.inspectionStatus, "stored inspection status");
@@ -884,6 +1132,90 @@ function readStoredDispositionSummary(value: unknown): RecordReturnDispositionRe
   return { receivedUnits, recordedUnits, remainingUnits, fullyRecorded, partiallyRecorded, items };
 }
 
+function readStoredInventoryTreatmentResult(
+  row: Record<string, unknown>,
+): ApplyReturnInventoryTreatmentResult {
+  const seenDispositionItems = new Set<number>();
+  const lines = readStoredObjectArray(row.lines, "stored inventory treatment lines").map((line) => {
+    const dispositionItemId = readPositiveInteger(line.dispositionItemId, "stored disposition item id");
+    if (seenDispositionItems.has(dispositionItemId)) {
+      throw storedCommandInvalid("Stored inventory treatment contains a duplicate disposition item.");
+    }
+    seenDispositionItems.add(dispositionItemId);
+    const treatment = readDispositionTreatment(line.treatment, "stored inventory treatment");
+    const productVariantId = readNullablePositiveInteger(line.productVariantId, "stored product variant id");
+    const warehouseLocationId = readNullablePositiveInteger(line.warehouseLocationId, "stored warehouse location id");
+    const inventoryTransactionId = readNullablePositiveInteger(line.inventoryTransactionId, "stored inventory transaction id");
+    const inventoryLotId = readNullablePositiveInteger(line.inventoryLotId, "stored inventory lot id");
+    if (treatment === "restock_sellable"
+      ? productVariantId === null || warehouseLocationId === null || inventoryTransactionId === null || inventoryLotId === null
+      : productVariantId !== null || warehouseLocationId !== null || inventoryTransactionId !== null || inventoryLotId !== null) {
+      throw storedCommandInvalid("Stored inventory treatment evidence is inconsistent.", { dispositionItemId });
+    }
+    return {
+      dispositionItemId,
+      returnCaseItemId: readPositiveInteger(line.returnCaseItemId, "stored return case item id"),
+      productVariantId,
+      treatment,
+      quantity: readPositiveInteger(line.quantity, "stored inventory treatment quantity"),
+      warehouseLocationId,
+      inventoryTransactionId,
+      inventoryLotId,
+    };
+  });
+  if (lines.length === 0) throw storedCommandInvalid("Stored inventory treatment lines are empty.");
+  const inventoryTreatmentSummary = readStoredInventoryTreatmentSummary(row.inventoryTreatmentSummary);
+  if (lines.some((line) => !inventoryTreatmentSummary.items.some(
+    (item) => item.dispositionItemId === line.dispositionItemId && item.applied,
+  ))) {
+    throw storedCommandInvalid("Stored inventory treatment lines do not match the stored summary.");
+  }
+  return {
+    commandType: "apply_inventory_treatment",
+    caseId: readPositiveInteger(row.caseId, "stored case id"),
+    caseNumber: readText(row.caseNumber, "stored case number"),
+    inventoryTreatmentId: readPositiveInteger(row.inventoryTreatmentId, "stored inventory treatment id"),
+    lines,
+    inventoryTreatmentSummary,
+    appliedAt: readDate(row.appliedAt, "stored inventory treatment timestamp").toISOString(),
+    replayed: readBoolean(row.replayed, "stored replayed"),
+  };
+}
+
+function readStoredInventoryTreatmentSummary(
+  value: unknown,
+): ApplyReturnInventoryTreatmentResult["inventoryTreatmentSummary"] {
+  const row = readStoredObject(value, "stored inventory treatment summary");
+  const items = readStoredObjectArray(row.items, "stored inventory treatment summary items").map((item) => ({
+    dispositionItemId: readPositiveInteger(item.dispositionItemId, "stored summary disposition item id"),
+    returnCaseItemId: readPositiveInteger(item.returnCaseItemId, "stored summary return case item id"),
+    treatment: readDispositionTreatment(item.treatment, "stored summary inventory treatment"),
+    quantity: readPositiveInteger(item.quantity, "stored summary inventory treatment quantity"),
+    warehouseLocationId: readNullablePositiveInteger(item.warehouseLocationId, "stored summary warehouse location id"),
+    inventoryTransactionId: readNullablePositiveInteger(item.inventoryTransactionId, "stored summary transaction id"),
+    inventoryLotId: readNullablePositiveInteger(item.inventoryLotId, "stored summary lot id"),
+    applied: readBoolean(item.applied, "stored summary applied"),
+  }));
+  if (items.length === 0 || new Set(items.map((item) => item.dispositionItemId)).size !== items.length) {
+    throw storedCommandInvalid("Stored inventory treatment summary items are invalid.");
+  }
+  const dispositionUnits = readPositiveInteger(row.dispositionUnits, "stored disposition units");
+  const appliedUnits = readNonNegativeInteger(row.appliedUnits, "stored applied units");
+  const remainingUnits = readNonNegativeInteger(row.remainingUnits, "stored remaining units");
+  const fullyApplied = readBoolean(row.fullyApplied, "stored fully applied");
+  const partiallyApplied = readBoolean(row.partiallyApplied, "stored partially applied");
+  const actualDispositionUnits = checkedSum(items.map((item) => item.quantity), "stored disposition units");
+  const actualAppliedUnits = checkedSum(items.filter((item) => item.applied).map((item) => item.quantity), "stored applied units");
+  if (dispositionUnits !== actualDispositionUnits
+    || appliedUnits !== actualAppliedUnits
+    || remainingUnits !== dispositionUnits - appliedUnits
+    || fullyApplied !== (remainingUnits === 0)
+    || partiallyApplied !== (appliedUnits > 0 && remainingUnits > 0)) {
+    throw storedCommandInvalid("Stored inventory treatment summary totals are inconsistent.");
+  }
+  return { dispositionUnits, appliedUnits, remainingUnits, fullyApplied, partiallyApplied, items };
+}
+
 function readStoredObject(value: unknown, field: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw storedCommandInvalid(`${field} is invalid.`, { field });
@@ -906,7 +1238,8 @@ function readCommandType(value: unknown): ExistingReturnCaseCommand["commandType
   if (value === "record_receipt"
     || value === "start_inspection"
     || value === "complete_inspection"
-    || value === "record_disposition") return value;
+    || value === "record_disposition"
+    || value === "apply_inventory_treatment") return value;
   throw new ReturnCaseOperationError("RETURN_CASE_COMMAND_DATA_INVALID", "Stored return command type is invalid.", 500);
 }
 

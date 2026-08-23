@@ -689,6 +689,12 @@
   "returns.return_case_inspections": [
     "modules/returns"
   ],
+  "returns.return_case_inventory_treatment_items": [
+    "modules/returns"
+  ],
+  "returns.return_case_inventory_treatments": [
+    "modules/returns"
+  ],
   "returns.return_case_items": [
     "modules/returns"
   ],

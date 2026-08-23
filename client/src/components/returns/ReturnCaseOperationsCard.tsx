@@ -41,6 +41,7 @@ import {
   type ReturnCaseOperationResult,
   type StartReturnInspectionResult,
 } from "./return-case-admin-api";
+import { ApplyReturnInventoryTreatmentDialog } from "./ApplyReturnInventoryTreatmentDialog";
 
 export interface ReturnCaseOperationsCardProps {
   returnCaseId: number;
@@ -125,10 +126,14 @@ export function ReturnCaseOperationsCard({
   const [inspectionAction, setInspectionAction] = useState<ReturnCaseAction | null>(null);
   const [completionDialogOpen, setCompletionDialogOpen] = useState(false);
   const [dispositionDialogOpen, setDispositionDialogOpen] = useState(false);
+  const [inventoryTreatmentDialogOpen, setInventoryTreatmentDialogOpen] = useState(false);
   const [lastResult, setLastResult] = useState<ReturnCaseOperationResult | null>(null);
   const completionContext = resolveInspectionCompletionContext(actionPlan);
   const dispositionAction = actionPlan.actions.find(
     (action) => action.kind === "record_disposition" && action.state === "available",
+  ) ?? null;
+  const inventoryTreatmentAction = actionPlan.actions.find(
+    (action) => action.kind === "apply_inventory_treatment" && action.state === "available",
   ) ?? null;
 
   useEffect(() => {
@@ -137,6 +142,11 @@ export function ReturnCaseOperationsCard({
   useEffect(() => {
     if (dispositionDialogOpen && dispositionAction === null) setDispositionDialogOpen(false);
   }, [dispositionAction, dispositionDialogOpen]);
+  useEffect(() => {
+    if (inventoryTreatmentDialogOpen && inventoryTreatmentAction === null) {
+      setInventoryTreatmentDialogOpen(false);
+    }
+  }, [inventoryTreatmentAction, inventoryTreatmentDialogOpen]);
 
   const complete = (result: ReturnCaseOperationResult) => {
     setLastResult(result);
@@ -208,6 +218,12 @@ export function ReturnCaseOperationsCard({
                     {action.label}
                   </Button>
                 )}
+                {inventoryTreatmentAction === action && (
+                  <Button type="button" size="sm" onClick={() => setInventoryTreatmentDialogOpen(true)}>
+                    <PackageCheck />
+                    {action.label}
+                  </Button>
+                )}
               </div>
             ))}
           </div>
@@ -262,6 +278,21 @@ export function ReturnCaseOperationsCard({
           complete(result);
         }}
       />
+      {inventoryTreatmentAction && (
+        <ApplyReturnInventoryTreatmentDialog
+          open={inventoryTreatmentDialogOpen}
+          onOpenChange={setInventoryTreatmentDialogOpen}
+          returnCaseId={returnCaseId}
+          action={inventoryTreatmentAction}
+          items={items}
+          summary={actionPlan.inventoryTreatmentSummary}
+          onRefreshRequested={onRefreshRequested}
+          onCompleted={(result) => {
+            setInventoryTreatmentDialogOpen(false);
+            complete(result);
+          }}
+        />
+      )}
     </Card>
   );
 }
@@ -1498,6 +1529,12 @@ function operationSuccessContent(result: ReturnCaseOperationResult): { title: st
     return {
       title: result.replayed ? "Disposition decision already recorded" : "Disposition decision recorded",
       message: `${result.dispositionSummary.recordedUnits} of ${result.dispositionSummary.receivedUnits} received units now have treatment decisions; ${result.dispositionSummary.remainingUnits} remain. No inventory was moved.`,
+    };
+  }
+  if (result.commandType === "apply_inventory_treatment") {
+    return {
+      title: result.replayed ? "Inventory treatment already applied" : "Inventory treatment applied",
+      message: `${result.inventoryTreatmentSummary.appliedUnits} of ${result.inventoryTreatmentSummary.dispositionUnits} decided units have been applied; ${result.inventoryTreatmentSummary.remainingUnits} remain.`,
     };
   }
   const outcome = result.inspectionStatus === "approved" ? "approved" : "rejected";

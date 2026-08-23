@@ -747,6 +747,156 @@ describe("ReturnCaseOperationService", () => {
     expect(tx.persistDisposition).not.toHaveBeenCalled();
   });
 
+  it("normalizes reviewed inventory treatment, persists exact source evidence, and notifies sellable variants after commit", async () => {
+    const notify = vi.fn();
+    const order: string[] = [];
+    const treatmentService = new ReturnCaseOperationService({
+      transaction: (work) => work(tx as unknown as ReturnCaseOperationTransaction),
+    }, () => {
+      order.push("clock");
+      return NOW;
+    }, { notify: (productVariantId) => {
+      order.push(`notify:${productVariantId}`);
+      notify(productVariantId);
+    } });
+    tx.loadForUpdate.mockImplementation(async () => {
+      order.push("state");
+      return treatmentReadyAggregate();
+    });
+    tx.persistInventoryTreatment.mockImplementation(async (input) => {
+      order.push("persist");
+      return inventoryTreatmentResult(treatmentSummary(), false);
+    });
+
+    const result = await treatmentService.applyInventoryTreatment({
+      caseId: 1,
+      idempotencyKey: " treatment-1 ",
+      actor: " user:7 ",
+      notes: " inspected units ",
+      lines: [
+        { dispositionItemId: 92, expectedTreatment: "hold_non_sellable", expectedQuantity: 3, warehouseLocationId: null },
+        { dispositionItemId: 91, expectedTreatment: "restock_sellable", expectedQuantity: 2, warehouseLocationId: 17 },
+      ],
+    });
+
+    expect(result).toMatchObject({ commandType: "apply_inventory_treatment", replayed: false });
+    expect(tx.lockCommand).toHaveBeenCalledWith("treatment-1");
+    expect(tx.persistInventoryTreatment).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: "treatment-1",
+      actor: "user:7",
+      notes: "inspected units",
+      now: NOW,
+      lines: [
+        {
+          dispositionItemId: 91,
+          returnCaseItemId: 1,
+          productVariantId: 1001,
+          treatment: "restock_sellable",
+          quantity: 2,
+          warehouseLocationId: 17,
+        },
+        {
+          dispositionItemId: 92,
+          returnCaseItemId: 2,
+          productVariantId: null,
+          treatment: "hold_non_sellable",
+          quantity: 3,
+          warehouseLocationId: null,
+        },
+      ],
+    }));
+    expect(order).toEqual(["state", "clock", "persist", "notify:1001"]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(1001);
+  });
+
+  it("replays inventory treatment before state loading and does not notify again", async () => {
+    const notify = vi.fn();
+    const clock = vi.fn(() => NOW);
+    const replayService = new ReturnCaseOperationService({
+      transaction: (work) => work(tx as unknown as ReturnCaseOperationTransaction),
+    }, clock, { notify });
+    const input = inventoryTreatmentInput();
+    tx.loadForUpdate.mockResolvedValue(treatmentReadyAggregate());
+    tx.persistInventoryTreatment.mockRejectedValueOnce(new Error("capture"));
+    await expect(replayService.applyInventoryTreatment(input)).rejects.toThrow("capture");
+    const persisted = tx.persistInventoryTreatment.mock.calls[0][0];
+    tx.findCommand.mockResolvedValue({
+      commandType: "apply_inventory_treatment",
+      requestHash: persisted.requestHash,
+      result: inventoryTreatmentResult(treatmentSummary(), false),
+    });
+    tx.loadForUpdate.mockClear();
+    tx.persistInventoryTreatment.mockClear();
+    clock.mockClear();
+
+    expect(await replayService.applyInventoryTreatment(input)).toMatchObject({ replayed: true });
+    expect(tx.loadForUpdate).not.toHaveBeenCalled();
+    expect(tx.persistInventoryTreatment).not.toHaveBeenCalled();
+    expect(clock).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+    await expect(replayService.applyInventoryTreatment({ ...input, notes: "different" }))
+      .rejects.toMatchObject({ code: "RETURN_CASE_IDEMPOTENCY_CONFLICT", status: 409 });
+  });
+
+  it.each([
+    {
+      name: "changed treatment",
+      input: inventoryTreatmentInput({ lines: [{ dispositionItemId: 91, expectedTreatment: "hold_non_sellable", expectedQuantity: 2, warehouseLocationId: null }] }),
+      code: "RETURN_INVENTORY_TREATMENT_STATE_STALE",
+      status: 409,
+    },
+    {
+      name: "changed quantity",
+      input: inventoryTreatmentInput({ lines: [{ dispositionItemId: 91, expectedTreatment: "restock_sellable", expectedQuantity: 1, warehouseLocationId: 17 }] }),
+      code: "RETURN_INVENTORY_TREATMENT_STATE_STALE",
+      status: 409,
+    },
+    {
+      name: "sellable treatment without a location",
+      input: inventoryTreatmentInput({ lines: [{ dispositionItemId: 91, expectedTreatment: "restock_sellable", expectedQuantity: 2, warehouseLocationId: null }] }),
+      code: "RETURN_CASE_OPERATION_INPUT_INVALID",
+      status: 400,
+    },
+    {
+      name: "held treatment with a sellable location",
+      input: inventoryTreatmentInput({ lines: [{ dispositionItemId: 92, expectedTreatment: "hold_non_sellable", expectedQuantity: 3, warehouseLocationId: 17 }] }),
+      code: "RETURN_CASE_OPERATION_INPUT_INVALID",
+      status: 400,
+    },
+  ])("rejects $name before inventory treatment persistence", async ({ input, code, status }) => {
+    tx.loadForUpdate.mockResolvedValue(treatmentReadyAggregate());
+
+    await expect(service.applyInventoryTreatment(input)).rejects.toMatchObject({ code, status });
+    expect(tx.persistInventoryTreatment).not.toHaveBeenCalled();
+  });
+
+  it("rejects sellable restock when the canonical return item has no exact catalog variant", async () => {
+    tx.loadForUpdate.mockResolvedValue(treatmentReadyAggregate({
+      items: [
+        { returnCaseItemId: 1, omsOrderLineId: 11, wmsOrderItemId: 21, productVariantId: null },
+        { returnCaseItemId: 2, omsOrderLineId: 12, wmsOrderItemId: 22, productVariantId: 1002 },
+      ],
+    }));
+
+    await expect(service.applyInventoryTreatment(inventoryTreatmentInput())).rejects.toMatchObject({
+      code: "RETURN_INVENTORY_TREATMENT_VARIANT_MISSING",
+      status: 409,
+    });
+    expect(tx.persistInventoryTreatment).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate disposition item ids at the input boundary", async () => {
+    await expect(service.applyInventoryTreatment(inventoryTreatmentInput({
+      lines: [
+        { dispositionItemId: 91, expectedTreatment: "restock_sellable", expectedQuantity: 2, warehouseLocationId: 17 },
+        { dispositionItemId: 91, expectedTreatment: "restock_sellable", expectedQuantity: 2, warehouseLocationId: 17 },
+      ],
+    }))).rejects.toMatchObject({ code: "RETURN_CASE_OPERATION_INPUT_INVALID", status: 400 });
+    expect(tx.loadForUpdate).not.toHaveBeenCalled();
+    expect(tx.persistInventoryTreatment).not.toHaveBeenCalled();
+  });
+
   it("rejects duplicate receipt lines and invalid clocks deterministically", async () => {
     await expect(service.recordReceipt({
       caseId: 1,
@@ -788,6 +938,7 @@ function fakeTransaction() {
     persistStartInspection: vi.fn(),
     persistCompleteInspection: vi.fn(),
     persistDisposition: vi.fn(),
+    persistInventoryTreatment: vi.fn(),
   };
 }
 
@@ -803,6 +954,8 @@ function aggregate(input: {
   receivedAt?: Date;
   inspection?: ReturnCaseOperationAggregate["actionContext"]["inspection"];
   disposition?: ReturnCaseOperationAggregate["actionContext"]["disposition"];
+  inventoryTreatment?: ReturnCaseOperationAggregate["actionContext"]["inventoryTreatment"];
+  items?: ReturnCaseOperationAggregate["items"];
 } = {}): ReturnCaseOperationAggregate {
   const firstExpected = input.firstExpected ?? 2;
   const firstReceived = input.firstReceived ?? 0;
@@ -814,6 +967,11 @@ function aggregate(input: {
     caseNumber: "RET-0000000001",
     omsOrderId: 50,
     wmsReturnId: 230,
+    wmsOrderId: 60,
+    items: input.items ?? [
+      { returnCaseItemId: 1, omsOrderLineId: 11, wmsOrderItemId: 21, productVariantId: 1001 },
+      { returnCaseItemId: 2, omsOrderLineId: 12, wmsOrderItemId: 22, productVariantId: 1002 },
+    ],
     actionContext: {
       lifecycle: {
         caseStatus: "open",
@@ -868,6 +1026,7 @@ function aggregate(input: {
       },
       inspection: input.inspection ?? null,
       disposition: input.disposition ?? null,
+      inventoryTreatment: input.inventoryTreatment ?? null,
       conditionalInspectionDecision: null,
     },
   };
@@ -916,6 +1075,116 @@ function dispositionInput(
       expectedCurrentDisposedQuantity: 0,
     }],
     ...override,
+  };
+}
+
+function treatmentReadyAggregate(
+  override: { items?: ReturnCaseOperationAggregate["items"] } = {},
+): ReturnCaseOperationAggregate {
+  return aggregate({
+    firstExpected: 2,
+    firstReceived: 2,
+    secondExpected: 3,
+    secondReceived: 3,
+    logisticsStatus: "received",
+    wmsStatus: "received",
+    inspectionStatus: "approved",
+    inspection: terminalInspection(8, "approved"),
+    disposition: {
+      recordCount: 2,
+      lines: [
+        { dispositionItemId: 91, dispositionId: 81, returnCaseItemId: 1, treatment: "restock_sellable", quantity: 2 },
+        { dispositionItemId: 92, dispositionId: 82, returnCaseItemId: 2, treatment: "hold_non_sellable", quantity: 3 },
+      ],
+    },
+    items: override.items,
+  });
+}
+
+function inventoryTreatmentInput(
+  override: Partial<Parameters<ReturnCaseOperationService["applyInventoryTreatment"]>[0]> = {},
+): Parameters<ReturnCaseOperationService["applyInventoryTreatment"]>[0] {
+  return {
+    caseId: 1,
+    idempotencyKey: "inventory-treatment-test",
+    actor: "user:7",
+    notes: null,
+    lines: [{
+      dispositionItemId: 91,
+      expectedTreatment: "restock_sellable",
+      expectedQuantity: 2,
+      warehouseLocationId: 17,
+    }],
+    ...override,
+  };
+}
+
+function inventoryTreatmentResult(
+  summary: ReturnType<typeof treatmentSummary>,
+  replayed: boolean,
+) {
+  return {
+    commandType: "apply_inventory_treatment" as const,
+    caseId: 1,
+    caseNumber: "RET-0000000001",
+    inventoryTreatmentId: 101,
+    lines: [
+      {
+        dispositionItemId: 91,
+        returnCaseItemId: 1,
+        productVariantId: 1001,
+        treatment: "restock_sellable" as const,
+        quantity: 2,
+        warehouseLocationId: 17,
+        inventoryTransactionId: 401,
+        inventoryLotId: 501,
+      },
+      {
+        dispositionItemId: 92,
+        returnCaseItemId: 2,
+        productVariantId: null,
+        treatment: "hold_non_sellable" as const,
+        quantity: 3,
+        warehouseLocationId: null,
+        inventoryTransactionId: null,
+        inventoryLotId: null,
+      },
+    ],
+    inventoryTreatmentSummary: summary,
+    appliedAt: NOW.toISOString(),
+    replayed,
+  };
+}
+
+function treatmentSummary() {
+  return {
+    dispositionUnits: 5,
+    appliedUnits: 5,
+    remainingUnits: 0,
+    fullyApplied: true,
+    partiallyApplied: false,
+    items: [
+      {
+        dispositionItemId: 91,
+        returnCaseItemId: 1,
+        treatment: "restock_sellable" as const,
+        quantity: 2,
+        warehouseLocationId: 17,
+        inventoryTransactionId: 401,
+        inventoryLotId: 501,
+        applied: true,
+      },
+      {
+        dispositionItemId: 92,
+        returnCaseItemId: 2,
+        treatment: "hold_non_sellable" as const,
+        quantity: 3,
+        warehouseLocationId: null,
+        inventoryTransactionId: null,
+        inventoryLotId: null,
+        applied: true,
+      },
+    ],
   };
 }
 

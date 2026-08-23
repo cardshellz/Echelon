@@ -23,7 +23,13 @@ const ZERO_RECEIPT_LOGISTICS_STATUSES = new Set([
   "delivered",
 ]);
 
-export const returnCaseActionKinds = ["record_receipt", "start_inspection", "complete_inspection", "record_disposition"] as const;
+export const returnCaseActionKinds = [
+  "record_receipt",
+  "start_inspection",
+  "complete_inspection",
+  "record_disposition",
+  "apply_inventory_treatment",
+] as const;
 export type ReturnCaseActionKind = typeof returnCaseActionKinds[number];
 export type ReturnCaseActionState = "available" | "blocked" | "completed" | "not_applicable";
 
@@ -69,6 +75,7 @@ export interface ReturnInspectionFacts {
 }
 
 export interface ReturnDispositionLineFacts {
+  dispositionItemId: number;
   dispositionId: number;
   returnCaseItemId: number;
   treatment: ReturnDispositionTreatment;
@@ -78,6 +85,21 @@ export interface ReturnDispositionLineFacts {
 export interface ReturnDispositionFacts {
   recordCount: number;
   lines: ReturnDispositionLineFacts[];
+}
+
+export interface ReturnInventoryTreatmentLineFacts {
+  dispositionItemId: number;
+  returnCaseItemId: number;
+  treatment: ReturnDispositionTreatment;
+  quantity: number;
+  warehouseLocationId: number | null;
+  inventoryTransactionId: number | null;
+  inventoryLotId: number | null;
+}
+
+export interface ReturnInventoryTreatmentFacts {
+  recordCount: number;
+  lines: ReturnInventoryTreatmentLineFacts[];
 }
 
 export interface ReturnCaseReceiptSummary {
@@ -105,6 +127,19 @@ export interface ReturnCaseDispositionSummary {
   partiallyRecorded: boolean;
   items: ReturnCaseDispositionItemSummary[];
 }
+
+export interface ReturnCaseInventoryTreatmentItemSummary extends ReturnInventoryTreatmentLineFacts {
+  applied: boolean;
+}
+
+export interface ReturnCaseInventoryTreatmentSummary {
+  dispositionUnits: number;
+  appliedUnits: number;
+  remainingUnits: number;
+  fullyApplied: boolean;
+  partiallyApplied: boolean;
+  items: ReturnCaseInventoryTreatmentItemSummary[];
+}
 export interface ReturnCaseActionContext {
 
   lifecycle: ReturnCaseLifecycle;
@@ -112,6 +147,7 @@ export interface ReturnCaseActionContext {
   receipt: ReturnReceiptFacts | null;
   inspection: ReturnInspectionFacts | null;
   disposition: ReturnDispositionFacts | null;
+  inventoryTreatment: ReturnInventoryTreatmentFacts | null;
   conditionalInspectionDecision: "required" | "waived" | null;
 }
 
@@ -121,6 +157,7 @@ export interface ReturnCaseActionPlan {
   inspectionSummary: ReturnInspectionFacts | null;
   actions: ReturnCaseAction[];
   dispositionSummary: ReturnCaseDispositionSummary;
+  inventoryTreatmentSummary: ReturnCaseInventoryTreatmentSummary;
 }
 
 interface ReceiptAnalysis {
@@ -130,6 +167,10 @@ interface ReceiptAnalysis {
 
 interface DispositionAnalysis {
   summary: ReturnCaseDispositionSummary;
+  blocker: string | null;
+}
+interface InventoryTreatmentAnalysis {
+  summary: ReturnCaseInventoryTreatmentSummary;
   blocker: string | null;
 }
 export class ReturnCaseActionDomainError extends Error {
@@ -188,17 +229,20 @@ export function parseReturnPolicySnapshot(value: unknown): ReturnPolicySnapshotF
 export function deriveReturnCaseActionPlan(context: ReturnCaseActionContext): ReturnCaseActionPlan {
   const receipt = analyzeReceipt(context);
   const disposition = analyzeDisposition(context);
+  const inventoryTreatment = analyzeInventoryTreatment(context, disposition);
   const actions = [
     deriveReceiptAction(context, receipt),
     deriveInspectionAction(context, receipt),
     deriveCompleteInspectionAction(context, receipt),
     deriveDispositionAction(context, receipt, disposition),
+    deriveInventoryTreatmentAction(context, receipt, disposition, inventoryTreatment),
   ];
   return {
     nextAction: actions.find((action) => action.state === "available")?.kind ?? null,
     receiptSummary: receipt.summary,
     inspectionSummary: cloneInspectionSummary(context.inspection),
     dispositionSummary: disposition.summary,
+    inventoryTreatmentSummary: inventoryTreatment.summary,
     actions,
   };
 }
@@ -314,6 +358,36 @@ function deriveDispositionAction(
   const inspectionBlocker = deriveDispositionInspectionBlocker(context);
   if (inspectionBlocker) return blocked(base, inspectionBlocker);
 
+  return available(base);
+}
+
+function deriveInventoryTreatmentAction(
+  context: ReturnCaseActionContext,
+  receipt: ReceiptAnalysis,
+  disposition: DispositionAnalysis,
+  inventoryTreatment: InventoryTreatmentAnalysis,
+): ReturnCaseAction {
+  const base = {
+    kind: "apply_inventory_treatment" as const,
+    label: "Apply inventory treatment",
+    description: "Apply recorded treatment decisions. Sellable units enter inventory at the selected pickable location; held units remain outside sellable inventory.",
+  };
+  if (!context.policy) return blocked(base, "RETURN_POLICY_SNAPSHOT_INVALID");
+  if (context.policy.returnDestination !== "card_shellz") {
+    return notApplicable(base, "RETURN_DESTINATION_EXTERNAL");
+  }
+  if (disposition.blocker) return blocked(base, disposition.blocker);
+  if (inventoryTreatment.blocker) return blocked(base, inventoryTreatment.blocker);
+  if (inventoryTreatment.summary.fullyApplied) return completed(base);
+  if (context.lifecycle.caseStatus !== "open") return blocked(base, "RETURN_CASE_NOT_OPEN");
+  if (context.lifecycle.approvalStatus !== "approved") return blocked(base, "RETURN_CASE_NOT_APPROVED");
+  if (receipt.blocker) return blocked(base, receipt.blocker);
+  if (!receipt.summary.fullyReceived || context.lifecycle.logisticsStatus !== "received") {
+    return blocked(base, "RETURN_NOT_FULLY_RECEIVED");
+  }
+  if (!disposition.summary.fullyRecorded) {
+    return blocked(base, "RETURN_DISPOSITION_NOT_COMPLETE");
+  }
   return available(base);
 }
 function deriveDispositionInspectionBlocker(context: ReturnCaseActionContext): string | null {
@@ -479,9 +553,11 @@ function analyzeDisposition(context: ReturnCaseActionContext): DispositionAnalys
   }
 
   const dispositionIds = new Set<number>();
+  const dispositionItemIds = new Set<number>();
   const lineKeys = new Set<string>();
   for (const line of evidence.lines) {
-    if (!isPositiveInteger(line.dispositionId)
+    if (!isPositiveInteger(line.dispositionItemId)
+      || !isPositiveInteger(line.dispositionId)
       || !isPositiveInteger(line.returnCaseItemId)
       || !isPositiveInteger(line.quantity)
       || !isDispositionTreatment(line.treatment)) {
@@ -489,9 +565,10 @@ function analyzeDisposition(context: ReturnCaseActionContext): DispositionAnalys
     }
     const item = itemById.get(line.returnCaseItemId);
     const lineKey = `${line.dispositionId}:${line.returnCaseItemId}`;
-    if (!item || lineKeys.has(lineKey)) {
+    if (!item || lineKeys.has(lineKey) || dispositionItemIds.has(line.dispositionItemId)) {
       return { summary: empty, blocker: "RETURN_DISPOSITION_STATE_CONFLICT" };
     }
+    dispositionItemIds.add(line.dispositionItemId);
     lineKeys.add(lineKey);
     dispositionIds.add(line.dispositionId);
     if (line.treatment === "restock_sellable") {
@@ -528,6 +605,102 @@ function analyzeDisposition(context: ReturnCaseActionContext): DispositionAnalys
       fullyRecorded: receivedUnits > 0 && remainingUnits === 0,
       partiallyRecorded: recordedUnits > 0 && remainingUnits > 0,
       items: Array.from(itemById.values()),
+    },
+    blocker: null,
+  };
+}
+
+function analyzeInventoryTreatment(
+  context: ReturnCaseActionContext,
+  disposition: DispositionAnalysis,
+): InventoryTreatmentAnalysis {
+  const empty: ReturnCaseInventoryTreatmentSummary = {
+    dispositionUnits: 0,
+    appliedUnits: 0,
+    remainingUnits: 0,
+    fullyApplied: false,
+    partiallyApplied: false,
+    items: [],
+  };
+  if (disposition.blocker || !context.disposition) {
+    return {
+      summary: empty,
+      blocker: context.inventoryTreatment ? "RETURN_INVENTORY_TREATMENT_STATE_CONFLICT" : null,
+    };
+  }
+
+  const sourceById = new Map<number, ReturnCaseInventoryTreatmentItemSummary>();
+  let dispositionUnits = 0;
+  for (const line of context.disposition.lines) {
+    if (sourceById.has(line.dispositionItemId)) {
+      return { summary: empty, blocker: "RETURN_INVENTORY_TREATMENT_STATE_CONFLICT" };
+    }
+    dispositionUnits = checkedAdd(dispositionUnits, line.quantity);
+    sourceById.set(line.dispositionItemId, {
+      dispositionItemId: line.dispositionItemId,
+      returnCaseItemId: line.returnCaseItemId,
+      treatment: line.treatment,
+      quantity: line.quantity,
+      warehouseLocationId: null,
+      inventoryTransactionId: null,
+      inventoryLotId: null,
+      applied: false,
+    });
+  }
+
+  const evidence = context.inventoryTreatment;
+  if (!evidence) {
+    return {
+      summary: { ...empty, dispositionUnits, remainingUnits: dispositionUnits, items: Array.from(sourceById.values()) },
+      blocker: null,
+    };
+  }
+  if (!isNonNegativeInteger(evidence.recordCount)
+    || (evidence.recordCount === 0) !== (evidence.lines.length === 0)) {
+    return { summary: empty, blocker: "RETURN_INVENTORY_TREATMENT_STATE_CONFLICT" };
+  }
+
+  const appliedSourceIds = new Set<number>();
+  for (const line of evidence.lines) {
+    const source = sourceById.get(line.dispositionItemId);
+    if (!source
+      || appliedSourceIds.has(line.dispositionItemId)
+      || line.returnCaseItemId !== source.returnCaseItemId
+      || line.treatment !== source.treatment
+      || line.quantity !== source.quantity) {
+      return { summary: empty, blocker: "RETURN_INVENTORY_TREATMENT_STATE_CONFLICT" };
+    }
+    const sellableEvidenceValid = line.treatment === "restock_sellable"
+      && isPositiveInteger(line.warehouseLocationId)
+      && isPositiveInteger(line.inventoryTransactionId)
+      && isPositiveInteger(line.inventoryLotId);
+    const holdEvidenceValid = line.treatment === "hold_non_sellable"
+      && line.warehouseLocationId === null
+      && line.inventoryTransactionId === null
+      && line.inventoryLotId === null;
+    if (!sellableEvidenceValid && !holdEvidenceValid) {
+      return { summary: empty, blocker: "RETURN_INVENTORY_TREATMENT_STATE_CONFLICT" };
+    }
+    appliedSourceIds.add(line.dispositionItemId);
+    Object.assign(source, { ...line, applied: true });
+  }
+  if (evidence.recordCount > evidence.lines.length) {
+    return { summary: empty, blocker: "RETURN_INVENTORY_TREATMENT_STATE_CONFLICT" };
+  }
+
+  let appliedUnits = 0;
+  for (const item of sourceById.values()) {
+    if (item.applied) appliedUnits = checkedAdd(appliedUnits, item.quantity);
+  }
+  const remainingUnits = dispositionUnits - appliedUnits;
+  return {
+    summary: {
+      dispositionUnits,
+      appliedUnits,
+      remainingUnits,
+      fullyApplied: dispositionUnits > 0 && remainingUnits === 0,
+      partiallyApplied: appliedUnits > 0 && remainingUnits > 0,
+      items: Array.from(sourceById.values()),
     },
     blocker: null,
   };

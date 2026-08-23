@@ -74,6 +74,16 @@ const dispositionSchema = z.object({
     expectedCurrentDisposedQuantity: z.number().int().nonnegative().safe(),
   }).strict()).min(1).max(200),
 }).strict();
+const inventoryTreatmentSchema = z.object({
+  idempotencyKey: z.string().trim().min(1).max(160),
+  notes: z.string().trim().max(2_000).nullable().default(null),
+  lines: z.array(z.object({
+    dispositionItemId: z.number().int().positive().safe(),
+    expectedTreatment: z.enum(returnDispositionTreatments),
+    expectedQuantity: z.number().int().positive().safe(),
+    warehouseLocationId: z.number().int().positive().safe().nullable(),
+  }).strict()).min(1).max(200),
+}).strict();
 
 
 export function registerReturnCaseAdminRoutes(
@@ -82,6 +92,9 @@ export function registerReturnCaseAdminRoutes(
   openService: OpenReturnCaseService = new OpenReturnCaseService(new PostgresOpenReturnCaseStore()),
   operationService: ReturnCaseOperationService = new ReturnCaseOperationService(
     new PostgresReturnCaseOperationStore(),
+    () => new Date(),
+    { notify: (productVariantId) => app.locals.services.inventoryCore
+      .triggerNotifyChange(productVariantId, "return_inventory_treatment") },
   ),
 ): void {
   app.get("/api/returns/admin/cases", requirePermission("inventory", "view"), async (req, res) => {
@@ -250,6 +263,34 @@ export function registerReturnCaseAdminRoutes(
           error,
           "RETURN_CASE_DISPOSITION_FAILED",
           "Return item disposition could not be recorded.",
+        );
+      }
+    },
+  );
+
+  app.post(
+    "/api/returns/admin/cases/:id/inventory-treatments",
+    requirePermission("inventory", "adjust"),
+    async (req, res) => {
+      const parsedCaseId = caseIdSchema.safeParse(req.params.id);
+      if (!parsedCaseId.success) return sendValidationError(res, parsedCaseId.error);
+      const parsedBody = inventoryTreatmentSchema.safeParse(req.body);
+      if (!parsedBody.success) return sendValidationError(res, parsedBody.error);
+      const actor = readAuthenticatedActor(req);
+      if (!actor) return sendActorRequired(res);
+      try {
+        const result = await operationService.applyInventoryTreatment({
+          caseId: parsedCaseId.data,
+          ...parsedBody.data,
+          actor,
+        });
+        return res.status(result.replayed ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(
+          res,
+          error,
+          "RETURN_CASE_INVENTORY_TREATMENT_FAILED",
+          "Return inventory treatment could not be applied.",
         );
       }
     },

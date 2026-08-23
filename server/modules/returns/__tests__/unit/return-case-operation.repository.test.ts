@@ -42,7 +42,12 @@ describe("PostgresReturnCaseOperationStore", () => {
       caseId: 42,
       caseNumber: "RET-0000000042",
       omsOrderId: 50,
+      wmsOrderId: 60,
       wmsReturnId: 230,
+      items: [
+        { returnCaseItemId: 11, omsOrderLineId: 501, wmsOrderItemId: 701, productVariantId: 901 },
+        { returnCaseItemId: 12, omsOrderLineId: 502, wmsOrderItemId: 702, productVariantId: 902 },
+      ],
       actionContext: {
         policy: { id: 6, version: 2, labelProvider: "shipstation" },
         receipt: {
@@ -54,6 +59,7 @@ describe("PostgresReturnCaseOperationStore", () => {
           ],
         },
         disposition: null,
+        inventoryTreatment: null,
       },
     });
 
@@ -290,6 +296,125 @@ describe("PostgresReturnCaseOperationStore", () => {
     }));
   });
 
+  it("records held treatment evidence atomically without creating sellable inventory or changing lifecycle state", async () => {
+    const execute = vi.fn(async (query: any) => {
+      const text = qtext(query);
+      if (text.startsWith("INSERT INTO returns.return_case_inventory_treatments")) {
+        return { rows: [{ id: 27 }] };
+      }
+      return { rows: [] };
+    });
+    const auditValues = vi.fn().mockResolvedValue(undefined);
+    const insert = vi.fn(() => ({ values: auditValues }));
+    mocks.transaction.mockImplementation(async (work) => work({ execute, insert }));
+    const store = new PostgresReturnCaseOperationStore();
+
+    const result = await store.transaction((tx) => tx.persistInventoryTreatment({
+      aggregate: inventoryTreatmentAggregate(),
+      idempotencyKey: "inventory-treatment-27",
+      requestHash: "f".repeat(64),
+      actor: "user:7",
+      notes: "damaged packaging",
+      lines: [{
+        dispositionItemId: 100,
+        returnCaseItemId: 11,
+        productVariantId: null,
+        treatment: "hold_non_sellable",
+        quantity: 1,
+        warehouseLocationId: null,
+      }],
+      now: NOW,
+    }));
+
+    expect(result).toEqual({
+      commandType: "apply_inventory_treatment",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      inventoryTreatmentId: 27,
+      lines: [{
+        dispositionItemId: 100,
+        returnCaseItemId: 11,
+        productVariantId: null,
+        treatment: "hold_non_sellable",
+        quantity: 1,
+        warehouseLocationId: null,
+        inventoryTransactionId: null,
+        inventoryLotId: null,
+      }],
+      inventoryTreatmentSummary: {
+        dispositionUnits: 1,
+        appliedUnits: 1,
+        remainingUnits: 0,
+        fullyApplied: true,
+        partiallyApplied: false,
+        items: [{
+          dispositionItemId: 100,
+          returnCaseItemId: 11,
+          treatment: "hold_non_sellable",
+          quantity: 1,
+          warehouseLocationId: null,
+          inventoryTransactionId: null,
+          inventoryLotId: null,
+          applied: true,
+        }],
+      },
+      appliedAt: NOW.toISOString(),
+      replayed: false,
+    });
+    const statements = execute.mock.calls.map(([query]) => qtext(query));
+    const header = statements.findIndex((text) => text.startsWith("INSERT INTO returns.return_case_inventory_treatments"));
+    const item = statements.findIndex((text) => text.startsWith("INSERT INTO returns.return_case_inventory_treatment_items"));
+    const event = statements.findIndex((text) => text.startsWith("INSERT INTO returns.return_case_events"));
+    const command = statements.findIndex((text) => text.startsWith("INSERT INTO returns.return_case_commands"));
+    expect([header, item, event, command].every((index) => index >= 0)).toBe(true);
+    expect(header).toBeLessThan(item);
+    expect(item).toBeLessThan(event);
+    expect(event).toBeLessThan(command);
+    const allSql = statements.join(" ").toLowerCase();
+    expect(allSql).not.toMatch(/\b(?:inventory|wms|oms)\./);
+    expect(allSql).not.toMatch(/customer_refund|vendor_settlement|closed_at|case_status|restocked/);
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(auditValues).toHaveBeenCalledWith(expect.objectContaining({
+      actor: "user:7",
+      action: "RETURN_CASE_INVENTORY_TREATMENT_APPLIED",
+      target: "returns.return_cases:42",
+      context: expect.objectContaining({
+        requestHash: "f".repeat(64),
+        inventoryTreatmentId: 27,
+      }),
+    }));
+  });
+
+  it("parses exact persisted inventory treatment results for idempotent replay", async () => {
+    const response = inventoryTreatmentReplayResponse();
+    const execute = vi.fn(async () => ({
+      rows: [{ command_type: "apply_inventory_treatment", request_hash: "1".repeat(64), response }],
+    }));
+    mocks.transaction.mockImplementation(async (work) => work({ execute }));
+    const store = new PostgresReturnCaseOperationStore();
+
+    const command = await store.transaction((tx) => tx.findCommand("inventory-treatment-27"));
+
+    expect(command).toEqual({
+      commandType: "apply_inventory_treatment",
+      requestHash: "1".repeat(64),
+      result: response,
+    });
+  });
+
+  it("rejects internally inconsistent stored inventory treatment replay evidence", async () => {
+    const response = inventoryTreatmentReplayResponse();
+    response.inventoryTreatmentSummary.appliedUnits = 0;
+    const execute = vi.fn(async () => ({
+      rows: [{ command_type: "apply_inventory_treatment", request_hash: "2".repeat(64), response }],
+    }));
+    mocks.transaction.mockImplementation(async (work) => work({ execute }));
+    const store = new PostgresReturnCaseOperationStore();
+
+    await expect(store.transaction((tx) => tx.findCommand("inventory-treatment-corrupt")))
+      .rejects.toMatchObject({ code: "RETURN_CASE_COMMAND_DATA_INVALID", status: 500 });
+  });
+
   it("parses exact persisted disposition results for idempotent replay", async () => {
     const response = dispositionReplayResponse();
     const execute = vi.fn(async () => ({
@@ -373,7 +498,7 @@ function operationReader(
       return { rows: [{ oms_order_id: 50 }] };
     }
     if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [{}] };
-    if (text.includes("SELECT id, case_number, oms_order_id, wms_return_id")) {
+    if (text.includes("SELECT id, case_number, oms_order_id, wms_order_id, wms_return_id")) {
       return { rows: [{ ...caseRow(), ...caseOverride }] };
     }
     if (text.startsWith("SELECT id, status, received_at, restocked FROM wms.returns")) {
@@ -404,11 +529,24 @@ function operationReader(
     if (text.startsWith("SELECT COUNT(*)::integer AS total FROM returns.return_case_items")) {
       return { rows: [{ total: 2 }] };
     }
+    if (text.includes("FROM returns.return_case_items case_item")
+      && text.includes("LEFT JOIN oms.oms_order_lines")) {
+      return { rows: [
+        { return_case_item_id: 11, oms_order_line_id: 501, wms_order_item_id: 701, product_variant_id: 901 },
+        { return_case_item_id: 12, oms_order_line_id: 502, wms_order_item_id: 702, product_variant_id: 902 },
+      ] };
+    }
     if (text.includes("FROM returns.return_case_inspections")) return { rows: inspectionRows };
     if (text.startsWith("SELECT id FROM returns.return_case_dispositions")) {
       return { rows: [] };
     }
     if (text.includes("FROM returns.return_case_disposition_items item")) {
+      return { rows: [] };
+    }
+    if (text.startsWith("SELECT id FROM returns.return_case_inventory_treatments")) {
+      return { rows: [] };
+    }
+    if (text.includes("FROM returns.return_case_inventory_treatment_items item")) {
       return { rows: [] };
     }
     throw new Error(`Unexpected SQL: ${text}`);
@@ -420,7 +558,14 @@ function completionAggregate(): ReturnCaseOperationAggregate {
     caseId: 42,
     caseNumber: "RET-0000000042",
     omsOrderId: 50,
+    wmsOrderId: 60,
     wmsReturnId: 230,
+    items: [{
+      returnCaseItemId: 11,
+      omsOrderLineId: 501,
+      wmsOrderItemId: 701,
+      productVariantId: 901,
+    }],
     actionContext: {
       lifecycle: {
         caseStatus: "open",
@@ -455,6 +600,7 @@ function completionAggregate(): ReturnCaseOperationAggregate {
         completedBy: null,
       },
       disposition: null,
+      inventoryTreatment: null,
       conditionalInspectionDecision: null,
     },
   };
@@ -474,6 +620,27 @@ function dispositionAggregate(): ReturnCaseOperationAggregate {
         completedAt: new Date("2026-08-22T14:45:00.000Z"),
         completedBy: "user:7",
       },
+    },
+  };
+}
+
+function inventoryTreatmentAggregate(): ReturnCaseOperationAggregate {
+  const base = dispositionAggregate();
+  return {
+    ...base,
+    actionContext: {
+      ...base.actionContext,
+      disposition: {
+        recordCount: 1,
+        lines: [{
+          dispositionItemId: 100,
+          dispositionId: 17,
+          returnCaseItemId: 11,
+          treatment: "hold_non_sellable",
+          quantity: 1,
+        }],
+      },
+      inventoryTreatment: null,
     },
   };
 }
@@ -507,11 +674,50 @@ function dispositionReplayResponse() {
   };
 }
 
+function inventoryTreatmentReplayResponse() {
+  return {
+    commandType: "apply_inventory_treatment" as const,
+    caseId: 42,
+    caseNumber: "RET-0000000042",
+    inventoryTreatmentId: 27,
+    lines: [{
+      dispositionItemId: 100,
+      returnCaseItemId: 11,
+      productVariantId: null,
+      treatment: "hold_non_sellable" as const,
+      quantity: 1,
+      warehouseLocationId: null,
+      inventoryTransactionId: null,
+      inventoryLotId: null,
+    }],
+    inventoryTreatmentSummary: {
+      dispositionUnits: 1,
+      appliedUnits: 1,
+      remainingUnits: 0,
+      fullyApplied: true,
+      partiallyApplied: false,
+      items: [{
+        dispositionItemId: 100,
+        returnCaseItemId: 11,
+        treatment: "hold_non_sellable" as const,
+        quantity: 1,
+        warehouseLocationId: null,
+        inventoryTransactionId: null,
+        inventoryLotId: null,
+        applied: true,
+      }],
+    },
+    appliedAt: NOW.toISOString(),
+    replayed: false,
+  };
+}
+
 function caseRow() {
   return {
     id: 42,
     case_number: "RET-0000000042",
     oms_order_id: 50,
+    wms_order_id: 60,
     wms_return_id: 230,
     case_status: "open",
     approval_status: "approved",

@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const MAX_RECEIPT_LINES = 200;
 const MAX_DISPOSITION_LINES = 200;
+const MAX_INVENTORY_TREATMENT_LINES = 200;
 const MAX_NOTES_LENGTH = 2_000;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 160;
 
@@ -27,6 +28,7 @@ export const returnCaseActionKindSchema = z.enum([
   "start_inspection",
   "complete_inspection",
   "record_disposition",
+  "apply_inventory_treatment",
 ]);
 export const returnCaseActionStateSchema = z.enum([
   "available",
@@ -200,11 +202,78 @@ export const returnCaseDispositionSummarySchema = z.object({
   }
 });
 
+export const returnCaseInventoryTreatmentSummaryItemSchema = z.object({
+  dispositionItemId: positiveSafeIntegerSchema,
+  returnCaseItemId: positiveSafeIntegerSchema,
+  treatment: returnCaseDispositionTreatmentSchema,
+  quantity: positiveSafeIntegerSchema,
+  warehouseLocationId: positiveSafeIntegerSchema.nullable(),
+  inventoryTransactionId: positiveSafeIntegerSchema.nullable(),
+  inventoryLotId: positiveSafeIntegerSchema.nullable(),
+  applied: z.boolean(),
+}).strict().superRefine((item, context) => {
+  const hasSellableEvidence = item.warehouseLocationId !== null
+    && item.inventoryTransactionId !== null
+    && item.inventoryLotId !== null;
+  const hasNoInventoryEvidence = item.warehouseLocationId === null
+    && item.inventoryTransactionId === null
+    && item.inventoryLotId === null;
+  const evidenceIsCoherent = item.applied
+    ? item.treatment === "restock_sellable" ? hasSellableEvidence : hasNoInventoryEvidence
+    : hasNoInventoryEvidence;
+  if (!evidenceIsCoherent) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Inventory treatment evidence is inconsistent with its state.",
+      path: ["applied"],
+    });
+  }
+});
+
+export const returnCaseInventoryTreatmentSummarySchema = z.object({
+  dispositionUnits: nonNegativeSafeIntegerSchema,
+  appliedUnits: nonNegativeSafeIntegerSchema,
+  remainingUnits: nonNegativeSafeIntegerSchema,
+  fullyApplied: z.boolean(),
+  partiallyApplied: z.boolean(),
+  items: z.array(returnCaseInventoryTreatmentSummaryItemSchema),
+}).strict().superRefine((summary, context) => {
+  const seenIds = new Set<number>();
+  let dispositionUnits = 0;
+  let appliedUnits = 0;
+  for (const [index, item] of summary.items.entries()) {
+    if (seenIds.has(item.dispositionItemId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "An inventory treatment source may only appear once.",
+        path: ["items", index, "dispositionItemId"],
+      });
+    }
+    seenIds.add(item.dispositionItemId);
+    dispositionUnits += item.quantity;
+    if (item.applied) appliedUnits += item.quantity;
+  }
+  if (!Number.isSafeInteger(dispositionUnits)
+    || !Number.isSafeInteger(appliedUnits)
+    || dispositionUnits !== summary.dispositionUnits
+    || appliedUnits !== summary.appliedUnits
+    || summary.remainingUnits !== dispositionUnits - appliedUnits
+    || summary.fullyApplied !== (dispositionUnits > 0 && summary.remainingUnits === 0)
+    || summary.partiallyApplied !== (appliedUnits > 0 && summary.remainingUnits > 0)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Inventory treatment summary totals are inconsistent.",
+      path: ["items"],
+    });
+  }
+});
+
 export const returnCaseActionPlanSchema = z.object({
   nextAction: returnCaseActionKindSchema.nullable(),
   receiptSummary: returnCaseReceiptSummarySchema,
   inspectionSummary: returnCaseInspectionSummarySchema.nullable(),
   dispositionSummary: returnCaseDispositionSummarySchema,
+  inventoryTreatmentSummary: returnCaseInventoryTreatmentSummarySchema,
   actions: z.array(returnCaseActionSchema).length(
     returnCaseActionKindSchema.options.length,
   ),
@@ -394,6 +463,21 @@ export const returnCaseDetailSchema = z.object({
       });
     }
   }
+  const inventorySummary = detail.actionPlan.inventoryTreatmentSummary;
+  const inventoryAction = detail.actionPlan.actions.find(
+    (action) => action.kind === "apply_inventory_treatment",
+  );
+  const hasExplicitInventoryEvidenceConflict = inventorySummary.items.length === 0
+    && inventoryAction?.state === "blocked"
+    && inventoryAction.reasonCode === "RETURN_INVENTORY_TREATMENT_STATE_CONFLICT";
+  if (!hasExplicitInventoryEvidenceConflict
+    && inventorySummary.dispositionUnits !== detail.actionPlan.dispositionSummary.recordedUnits) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Inventory treatment sources do not match the recorded disposition quantity.",
+      path: ["actionPlan", "inventoryTreatmentSummary"],
+    });
+  }
 });
 
 const notesSchema = z.string().trim().max(MAX_NOTES_LENGTH).nullable().optional()
@@ -421,6 +505,16 @@ const dispositionLineInputSchema = z.object({
       message: "Disposition quantity exceeds the reviewed received quantity.",
       path: ["quantity"],
     });
+  }
+});
+const inventoryTreatmentLineInputSchema = z.object({
+  dispositionItemId: positiveSafeIntegerSchema,
+  expectedTreatment: returnCaseDispositionTreatmentSchema,
+  expectedQuantity: positiveSafeIntegerSchema,
+  warehouseLocationId: positiveSafeIntegerSchema.nullable(),
+}).strict().superRefine((line, context) => {
+  if ((line.expectedTreatment === "restock_sellable") !== (line.warehouseLocationId !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Warehouse location does not match the treatment.", path: ["warehouseLocationId"] });
   }
 });
 
@@ -469,6 +563,19 @@ export const recordReturnDispositionInputSchema = z.object({
       });
     }
     seenIds.add(line.returnCaseItemId);
+  }
+});
+export const applyReturnInventoryTreatmentInputSchema = z.object({
+  idempotencyKey: idempotencyKeySchema,
+  notes: notesSchema,
+  lines: z.array(inventoryTreatmentLineInputSchema).min(1).max(MAX_INVENTORY_TREATMENT_LINES),
+}).strict().superRefine((input, context) => {
+  const seen = new Set<number>();
+  for (const [index, line] of input.lines.entries()) {
+    if (seen.has(line.dispositionItemId)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "A disposition item may only appear once.", path: ["lines", index, "dispositionItemId"] });
+    }
+    seen.add(line.dispositionItemId);
   }
 });
 
@@ -574,11 +681,39 @@ export const recordReturnDispositionResultSchema = z.object({
     }
   }
 });
+const returnInventoryTreatmentResultLineSchema = z.object({
+  dispositionItemId: positiveSafeIntegerSchema,
+  returnCaseItemId: positiveSafeIntegerSchema,
+  productVariantId: positiveSafeIntegerSchema.nullable(),
+  treatment: returnCaseDispositionTreatmentSchema,
+  quantity: positiveSafeIntegerSchema,
+  warehouseLocationId: positiveSafeIntegerSchema.nullable(),
+  inventoryTransactionId: positiveSafeIntegerSchema.nullable(),
+  inventoryLotId: positiveSafeIntegerSchema.nullable(),
+}).strict().superRefine((line, context) => {
+  const coherent = line.treatment === "restock_sellable"
+    ? line.productVariantId !== null && line.warehouseLocationId !== null
+      && line.inventoryTransactionId !== null && line.inventoryLotId !== null
+    : line.productVariantId === null && line.warehouseLocationId === null
+      && line.inventoryTransactionId === null && line.inventoryLotId === null;
+  if (!coherent) context.addIssue({ code: z.ZodIssueCode.custom, message: "Inventory result evidence is inconsistent.", path: ["treatment"] });
+});
+export const applyReturnInventoryTreatmentResultSchema = z.object({
+  commandType: z.literal("apply_inventory_treatment"),
+  caseId: positiveSafeIntegerSchema,
+  caseNumber: requiredTextSchema,
+  inventoryTreatmentId: positiveSafeIntegerSchema,
+  lines: z.array(returnInventoryTreatmentResultLineSchema).min(1).max(MAX_INVENTORY_TREATMENT_LINES),
+  inventoryTreatmentSummary: returnCaseInventoryTreatmentSummarySchema,
+  appliedAt: dateTimeSchema,
+  replayed: z.boolean(),
+}).strict();
 
 export type ReturnCaseActionKind = z.infer<typeof returnCaseActionKindSchema>;
 export type ReturnCaseAction = z.infer<typeof returnCaseActionSchema>;
 export type ReturnCaseActionPlan = z.infer<typeof returnCaseActionPlanSchema>;
 export type ReturnCaseDispositionSummary = z.infer<typeof returnCaseDispositionSummarySchema>;
+export type ReturnCaseInventoryTreatmentSummary = z.infer<typeof returnCaseInventoryTreatmentSummarySchema>;
 export type ReturnCaseDispositionTreatment = z.infer<typeof returnCaseDispositionTreatmentSchema>;
 export type ReturnCaseDetailItem = z.infer<typeof returnCaseDetailItemSchema>;
 export type ReturnCaseDetail = z.infer<typeof returnCaseDetailSchema>;
@@ -590,11 +725,24 @@ export type CompleteReturnInspectionInput = z.input<typeof completeReturnInspect
 export type CompleteReturnInspectionResult = z.infer<typeof completeReturnInspectionResultSchema>;
 export type RecordReturnDispositionInput = z.input<typeof recordReturnDispositionInputSchema>;
 export type RecordReturnDispositionResult = z.infer<typeof recordReturnDispositionResultSchema>;
+export type ApplyReturnInventoryTreatmentInput = z.input<typeof applyReturnInventoryTreatmentInputSchema>;
+export type ApplyReturnInventoryTreatmentResult = z.infer<typeof applyReturnInventoryTreatmentResultSchema>;
 export type ReturnCaseOperationResult =
   | RecordReturnReceiptResult
   | StartReturnInspectionResult
   | CompleteReturnInspectionResult
-  | RecordReturnDispositionResult;
+  | RecordReturnDispositionResult
+  | ApplyReturnInventoryTreatmentResult;
+export const returnWarehouseLocationSchema = z.object({
+  id: positiveSafeIntegerSchema,
+  code: requiredTextSchema,
+  name: nullableTextSchema.optional().default(null),
+  warehouseId: positiveSafeIntegerSchema.nullable(),
+  isActive: z.union([z.literal(0), z.literal(1)]),
+  isPickable: z.union([z.literal(0), z.literal(1)]),
+  cycleCountFreezeId: positiveSafeIntegerSchema.nullable(),
+}).passthrough();
+export type ReturnWarehouseLocation = z.infer<typeof returnWarehouseLocationSchema>;
 
 export type ReturnCaseAdminApiErrorCode =
   | "RETURN_CASE_CLIENT_INPUT_INVALID"
@@ -634,6 +782,17 @@ export async function getReturnCaseDetail(
     `/api/returns/admin/cases/${parsedCaseId}`,
     { method: "GET", credentials: "include", headers: { Accept: "application/json" } },
     returnCaseDetailSchema,
+    transport,
+  );
+}
+
+export async function getReturnWarehouseLocations(
+  transport: ReturnCaseAdminTransport = fetch,
+): Promise<ReturnWarehouseLocation[]> {
+  return requestJson(
+    "/api/warehouse/locations",
+    { method: "GET", credentials: "include", headers: { Accept: "application/json" } },
+    z.array(returnWarehouseLocationSchema),
     transport,
   );
 }
@@ -780,6 +939,53 @@ export async function recordReturnDisposition(
   });
   return requestJson(
     `/api/returns/admin/cases/${parsedCaseId}/dispositions`,
+    jsonPost(body),
+    correlatedResultSchema,
+    transport,
+  );
+}
+
+export async function applyReturnInventoryTreatment(
+  caseId: number,
+  input: ApplyReturnInventoryTreatmentInput,
+  transport: ReturnCaseAdminTransport = fetch,
+): Promise<ApplyReturnInventoryTreatmentResult> {
+  const parsedCaseId = parseCaseId(caseId);
+  const parsedInput = parseOutboundInput(applyReturnInventoryTreatmentInputSchema, input);
+  const body = {
+    ...parsedInput,
+    lines: [...parsedInput.lines].sort((left, right) => left.dispositionItemId - right.dispositionItemId),
+  };
+  const correlatedResultSchema = applyReturnInventoryTreatmentResultSchema.superRefine((result, context) => {
+    if (result.caseId !== parsedCaseId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Inventory treatment response caseId does not match the request.", path: ["caseId"] });
+    }
+    const resultLines = [...result.lines].sort((left, right) => left.dispositionItemId - right.dispositionItemId);
+    if (resultLines.length !== body.lines.length) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Inventory treatment response lines do not match the request.", path: ["lines"] });
+      return;
+    }
+    for (const [index, expected] of body.lines.entries()) {
+      const actual = resultLines[index];
+      if (actual.dispositionItemId !== expected.dispositionItemId
+        || actual.treatment !== expected.expectedTreatment
+        || actual.quantity !== expected.expectedQuantity
+        || actual.warehouseLocationId !== expected.warehouseLocationId) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: "Inventory treatment response line does not match the request.", path: ["lines", index] });
+      }
+      const summaryItem = result.inventoryTreatmentSummary.items.find(
+        (item) => item.dispositionItemId === expected.dispositionItemId,
+      );
+      if (!summaryItem || !summaryItem.applied
+        || summaryItem.treatment !== expected.expectedTreatment
+        || summaryItem.quantity !== expected.expectedQuantity
+        || summaryItem.warehouseLocationId !== expected.warehouseLocationId) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: "Inventory treatment summary does not match the request.", path: ["inventoryTreatmentSummary", "items"] });
+      }
+    }
+  });
+  return requestJson(
+    `/api/returns/admin/cases/${parsedCaseId}/inventory-treatments`,
     jsonPost(body),
     correlatedResultSchema,
     transport,

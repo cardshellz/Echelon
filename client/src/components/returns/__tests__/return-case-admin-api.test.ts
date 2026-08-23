@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ReturnCaseAdminApiError,
+  applyReturnInventoryTreatment,
   completeReturnInspection,
   getReturnCaseDetail,
+  getReturnWarehouseLocations,
   recordReturnDisposition,
   recordReturnReceipt,
   startReturnInspection,
@@ -659,6 +661,111 @@ describe("return case admin API client", () => {
     expect(transport).toHaveBeenCalledTimes(1);
   });
 
+  it("normalizes, sorts, and strictly correlates an inventory treatment command", async () => {
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(inventoryTreatmentResultFixture()));
+
+    const result = await applyReturnInventoryTreatment(42, {
+      idempotencyKey: " treatment-key ",
+      notes: " putaway evidence ",
+      lines: [
+        { dispositionItemId: 92, expectedTreatment: "hold_non_sellable", expectedQuantity: 1, warehouseLocationId: null },
+        { dispositionItemId: 91, expectedTreatment: "restock_sellable", expectedQuantity: 2, warehouseLocationId: 17 },
+      ],
+    }, transport);
+
+    expect(result.inventoryTreatmentSummary).toMatchObject({ appliedUnits: 3, remainingUnits: 0 });
+    expect(transport).toHaveBeenCalledWith(
+      "/api/returns/admin/cases/42/inventory-treatments",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          idempotencyKey: "treatment-key",
+          notes: "putaway evidence",
+          lines: [
+            { dispositionItemId: 91, expectedTreatment: "restock_sellable", expectedQuantity: 2, warehouseLocationId: 17 },
+            { dispositionItemId: 92, expectedTreatment: "hold_non_sellable", expectedQuantity: 1, warehouseLocationId: null },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it("rejects incoherent or uncorrelated inventory treatment success evidence", async () => {
+    const wrongCase = inventoryTreatmentResultFixture();
+    wrongCase.caseId = 43;
+    const wrongCaseTransport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(wrongCase));
+    const input = {
+      idempotencyKey: "treatment-key",
+      notes: null,
+      lines: [
+        { dispositionItemId: 91, expectedTreatment: "restock_sellable" as const, expectedQuantity: 2, warehouseLocationId: 17 },
+        { dispositionItemId: 92, expectedTreatment: "hold_non_sellable" as const, expectedQuantity: 1, warehouseLocationId: null },
+      ],
+    };
+
+    await expect(applyReturnInventoryTreatment(42, input, wrongCaseTransport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+    });
+
+    const incoherent = inventoryTreatmentResultFixture();
+    incoherent.lines[0].inventoryTransactionId = null;
+    const incoherentTransport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(incoherent));
+    await expect(applyReturnInventoryTreatment(42, input, incoherentTransport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+    });
+  });
+
+  it("rejects duplicate sources and treatment/location mismatches before transport", async () => {
+    const transport = vi.fn<ReturnCaseAdminTransport>();
+    const duplicate = {
+      idempotencyKey: "treatment-key",
+      notes: null,
+      lines: [
+        { dispositionItemId: 91, expectedTreatment: "restock_sellable" as const, expectedQuantity: 2, warehouseLocationId: 17 },
+        { dispositionItemId: 91, expectedTreatment: "restock_sellable" as const, expectedQuantity: 2, warehouseLocationId: 17 },
+      ],
+    };
+
+    await expect(applyReturnInventoryTreatment(42, duplicate, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_CLIENT_INPUT_INVALID",
+    });
+    await expect(applyReturnInventoryTreatment(42, {
+      idempotencyKey: "treatment-key",
+      notes: null,
+      lines: [{ dispositionItemId: 91, expectedTreatment: "hold_non_sellable", expectedQuantity: 1, warehouseLocationId: 17 }],
+    }, transport)).rejects.toMatchObject({ code: "RETURN_CASE_CLIENT_INPUT_INVALID" });
+    expect(transport).not.toHaveBeenCalled();
+  });
+
+  it("loads and validates warehouse locations with one read-only request", async () => {
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse([{
+      id: 17,
+      code: "A-01",
+      name: "Primary",
+      warehouseId: 3,
+      isActive: 1,
+      isPickable: 1,
+      cycleCountFreezeId: null,
+      extraProviderField: true,
+    }]));
+
+    await expect(getReturnWarehouseLocations(transport)).resolves.toMatchObject([{ id: 17, code: "A-01" }]);
+    expect(transport).toHaveBeenCalledWith("/api/warehouse/locations", {
+      method: "GET",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+
+    const malformed = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse([{
+      id: 17, code: "A-01", name: null, warehouseId: 3, isActive: 1, isPickable: 2, cycleCountFreezeId: null,
+    }]));
+    await expect(getReturnWarehouseLocations(malformed)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+    });
+  });
+
 
   it("classifies invalid JSON and transport failures with one attempted request", async () => {
     const invalidJsonTransport = vi.fn<ReturnCaseAdminTransport>(async () =>
@@ -798,6 +905,14 @@ function detailFixture() {
           },
         ],
       },
+      inventoryTreatmentSummary: {
+        dispositionUnits: 0,
+        appliedUnits: 0,
+        remainingUnits: 0,
+        fullyApplied: false,
+        partiallyApplied: false,
+        items: [],
+      },
       actions: [
         {
           kind: "record_receipt" as const,
@@ -824,6 +939,13 @@ function detailFixture() {
           kind: "record_disposition" as const,
           label: "Resolve returned items",
           description: "Record explicit disposition intent for received items.",
+          state: "blocked" as const,
+          reasonCode: "RETURN_NOT_FULLY_RECEIVED",
+        },
+        {
+          kind: "apply_inventory_treatment" as const,
+          label: "Apply inventory treatment",
+          description: "Apply recorded treatment decisions.",
           state: "blocked" as const,
           reasonCode: "RETURN_NOT_FULLY_RECEIVED",
         },
@@ -877,6 +999,50 @@ function dispositionResultFixture() {
       ],
     },
     recordedAt: "2026-08-23T12:00:00.000Z",
+    replayed: false,
+  };
+}
+
+function inventoryTreatmentResultFixture() {
+  return {
+    commandType: "apply_inventory_treatment" as const,
+    caseId: 42,
+    caseNumber: "RET-0000000042",
+    inventoryTreatmentId: 101,
+    lines: [
+      {
+        dispositionItemId: 91,
+        returnCaseItemId: 11,
+        productVariantId: 301,
+        treatment: "restock_sellable" as const,
+        quantity: 2,
+        warehouseLocationId: 17,
+        inventoryTransactionId: 401,
+        inventoryLotId: 501,
+      },
+      {
+        dispositionItemId: 92,
+        returnCaseItemId: 12,
+        productVariantId: null,
+        treatment: "hold_non_sellable" as const,
+        quantity: 1,
+        warehouseLocationId: null,
+        inventoryTransactionId: null,
+        inventoryLotId: null,
+      },
+    ],
+    inventoryTreatmentSummary: {
+      dispositionUnits: 3,
+      appliedUnits: 3,
+      remainingUnits: 0,
+      fullyApplied: true,
+      partiallyApplied: false,
+      items: [
+        { dispositionItemId: 91, returnCaseItemId: 11, treatment: "restock_sellable" as const, quantity: 2, warehouseLocationId: 17, inventoryTransactionId: 401, inventoryLotId: 501, applied: true },
+        { dispositionItemId: 92, returnCaseItemId: 12, treatment: "hold_non_sellable" as const, quantity: 1, warehouseLocationId: null, inventoryTransactionId: null, inventoryLotId: null, applied: true },
+      ],
+    },
+    appliedAt: "2026-08-23T16:00:00.000Z",
     replayed: false,
   };
 }
