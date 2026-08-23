@@ -448,6 +448,142 @@ describe("return case admin routes", () => {
     expect(operationService.recordDisposition).not.toHaveBeenCalled();
   });
 
+  it("applies reviewed inventory treatment with the authenticated actor", async () => {
+    operationService.applyInventoryTreatment.mockResolvedValue({
+      commandType: "apply_inventory_treatment",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      inventoryTreatmentId: 101,
+      lines: [{
+        dispositionItemId: 91,
+        returnCaseItemId: 9,
+        productVariantId: 301,
+        treatment: "restock_sellable",
+        quantity: 2,
+        warehouseLocationId: 17,
+        inventoryTransactionId: 401,
+        inventoryLotId: 501,
+      }],
+      inventoryTreatmentSummary: {
+        dispositionUnits: 2,
+        appliedUnits: 2,
+        remainingUnits: 0,
+        fullyApplied: true,
+        partiallyApplied: false,
+        items: [{
+          dispositionItemId: 91,
+          returnCaseItemId: 9,
+          treatment: "restock_sellable",
+          quantity: 2,
+          warehouseLocationId: 17,
+          inventoryTransactionId: 401,
+          inventoryLotId: 501,
+          applied: true,
+        }],
+      },
+      appliedAt: "2026-08-23T16:00:00.000Z",
+      replayed: false,
+    });
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/inventory-treatments`, {
+      method: "POST",
+      body: {
+        idempotencyKey: " treatment-command-1 ",
+        notes: " received sellable ",
+        lines: [{
+          dispositionItemId: 91,
+          expectedTreatment: "restock_sellable",
+          expectedQuantity: 2,
+          warehouseLocationId: 17,
+        }],
+      },
+    });
+
+    expect(response.status).toBe(201);
+    expect(operationService.applyInventoryTreatment).toHaveBeenCalledWith({
+      caseId: 42,
+      idempotencyKey: "treatment-command-1",
+      notes: "received sellable",
+      lines: [{
+        dispositionItemId: 91,
+        expectedTreatment: "restock_sellable",
+        expectedQuantity: 2,
+        warehouseLocationId: 17,
+      }],
+      actor: "user:7",
+    });
+  });
+
+  it("returns 200 for an inventory treatment replay", async () => {
+    operationService.applyInventoryTreatment.mockResolvedValue({
+      commandType: "apply_inventory_treatment",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      inventoryTreatmentId: 101,
+      lines: [],
+      inventoryTreatmentSummary: {
+        dispositionUnits: 1,
+        appliedUnits: 1,
+        remainingUnits: 0,
+        fullyApplied: true,
+        partiallyApplied: false,
+        items: [],
+      },
+      appliedAt: "2026-08-23T16:00:00.000Z",
+      replayed: true,
+    });
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/inventory-treatments`, {
+      method: "POST",
+      body: {
+        idempotencyKey: "treatment-replay",
+        notes: null,
+        lines: [{
+          dispositionItemId: 91,
+          expectedTreatment: "hold_non_sellable",
+          expectedQuantity: 1,
+          warehouseLocationId: null,
+        }],
+      },
+    });
+
+    expect(response.status).toBe(200);
+  });
+
+  it.each([
+    { name: "missing reviewed treatment", line: { dispositionItemId: 91, expectedQuantity: 1, warehouseLocationId: null } },
+    { name: "invalid quantity", line: { dispositionItemId: 91, expectedTreatment: "hold_non_sellable", expectedQuantity: 0, warehouseLocationId: null } },
+    { name: "forged actor", line: { dispositionItemId: 91, expectedTreatment: "hold_non_sellable", expectedQuantity: 1, warehouseLocationId: null }, extra: { actor: "user:999" } },
+  ])("strictly rejects $name before inventory treatment service calls", async ({ line, extra }) => {
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/inventory-treatments`, {
+      method: "POST",
+      body: { idempotencyKey: "treatment-invalid", notes: null, lines: [line], ...extra },
+    });
+
+    expect(response).toMatchObject({ status: 400, body: { error: { code: "RETURN_CASE_QUERY_INVALID" } } });
+    expect(operationService.applyInventoryTreatment).not.toHaveBeenCalled();
+  });
+
+  it("preserves classified inventory treatment conflicts", async () => {
+    operationService.applyInventoryTreatment.mockRejectedValue(new ReturnCaseOperationError(
+      "RETURN_INVENTORY_TREATMENT_STATE_STALE",
+      "The recorded disposition changed after this return was reviewed.",
+      409,
+      { caseId: 42, dispositionItemId: 91 },
+    ));
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/inventory-treatments`, {
+      method: "POST",
+      body: { idempotencyKey: "treatment-conflict", notes: null, lines: [{ dispositionItemId: 91, expectedTreatment: "hold_non_sellable", expectedQuantity: 1, warehouseLocationId: null }] },
+    });
+
+    expect(response).toEqual({ status: 409, body: { error: {
+      code: "RETURN_INVENTORY_TREATMENT_STATE_STALE",
+      message: "The recorded disposition changed after this return was reviewed.",
+      context: { caseId: 42, dispositionItemId: 91 },
+    } } });
+  });
+
   it("returns 200 for receipt and inspection command replays", async () => {
     operationService.recordReceipt.mockResolvedValue({
       commandType: "record_receipt",
@@ -576,6 +712,7 @@ describe("return case admin routes", () => {
       ["inventory", "adjust"],
       ["inventory", "adjust"],
       ["inventory", "adjust"],
+      ["inventory", "adjust"],
     ]);
   });
 });
@@ -594,6 +731,7 @@ function fakeOperationService() {
     startInspection: vi.fn(),
     completeInspection: vi.fn(),
     recordDisposition: vi.fn(),
+    applyInventoryTreatment: vi.fn(),
   };
 }
 

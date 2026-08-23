@@ -2,8 +2,10 @@ import { sql } from "drizzle-orm";
 import { bigint, boolean, check, index, integer, jsonb, pgSchema, text, timestamp, uniqueIndex, varchar } from "drizzle-orm/pg-core";
 import { channels } from "./channels.schema";
 import { dropshipStoreConnections, dropshipVendors } from "./dropship.schema";
+import { inventoryLots, inventoryTransactions } from "./inventory.schema";
 import { omsOrderLines, omsOrders } from "./oms.schema";
 import { orderItems, orders, returnItems, returns } from "./orders.schema";
+import { warehouseLocations } from "./warehouse.schema";
 
 export const returnsSchema = pgSchema("returns");
 export const returnPolicyScopeKinds = ["global", "business_context", "channel_context", "vendor_context", "vendor_channel_context", "store"] as const;
@@ -223,6 +225,57 @@ export const returnCaseDispositionItems = returnsSchema.table("return_case_dispo
   check("return_case_disposition_items_quantity_chk", sql`${table.quantity} > 0`),
 ]);
 
+export const returnCaseInventoryTreatments = returnsSchema.table("return_case_inventory_treatments", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  returnCaseId: bigint("return_case_id", { mode: "number" }).notNull().references(() => returnCases.id),
+  idempotencyKey: varchar("idempotency_key", { length: 160 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  appliedBy: varchar("applied_by", { length: 255 }).notNull(),
+  notes: text("notes"),
+  appliedAt: timestamp("applied_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("return_case_inventory_treatments_idempotency_uq").on(table.idempotencyKey),
+  index("return_case_inventory_treatments_case_idx").on(table.returnCaseId, table.appliedAt, table.id),
+  check("return_case_inventory_treatments_idempotency_key_chk", sql`btrim(${table.idempotencyKey}) <> ''`),
+  check("return_case_inventory_treatments_request_hash_chk", sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`),
+  check("return_case_inventory_treatments_actor_chk", sql`btrim(${table.appliedBy}) <> ''`),
+]);
+
+export const returnCaseInventoryTreatmentItems = returnsSchema.table("return_case_inventory_treatment_items", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  inventoryTreatmentId: bigint("inventory_treatment_id", { mode: "number" }).notNull()
+    .references(() => returnCaseInventoryTreatments.id),
+  dispositionItemId: bigint("disposition_item_id", { mode: "number" }).notNull()
+    .references(() => returnCaseDispositionItems.id),
+  returnCaseItemId: bigint("return_case_item_id", { mode: "number" }).notNull()
+    .references(() => returnCaseItems.id),
+  treatment: varchar("treatment", { length: 32 }).$type<ReturnDispositionTreatment>().notNull(),
+  quantity: integer("quantity").notNull(),
+  warehouseLocationId: integer("warehouse_location_id")
+    .references(() => warehouseLocations.id),
+  inventoryTransactionId: integer("inventory_transaction_id")
+    .references(() => inventoryTransactions.id),
+  inventoryLotId: integer("inventory_lot_id")
+    .references(() => inventoryLots.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("return_case_inventory_treatment_items_source_uq").on(table.dispositionItemId),
+  index("return_case_inventory_treatment_items_case_item_idx").on(table.returnCaseItemId, table.id),
+  check("return_case_inventory_treatment_items_treatment_chk", sql`${table.treatment} IN ('restock_sellable','hold_non_sellable')`),
+  check("return_case_inventory_treatment_items_quantity_chk", sql`${table.quantity} > 0`),
+  check("return_case_inventory_treatment_items_effect_chk", sql`
+    (${table.treatment} = 'restock_sellable'
+      AND ${table.warehouseLocationId} IS NOT NULL
+      AND ${table.inventoryTransactionId} IS NOT NULL
+      AND ${table.inventoryLotId} IS NOT NULL)
+    OR (${table.treatment} = 'hold_non_sellable'
+      AND ${table.warehouseLocationId} IS NULL
+      AND ${table.inventoryTransactionId} IS NULL
+      AND ${table.inventoryLotId} IS NULL)
+  `),
+]);
+
 export const returnCaseCommands = returnsSchema.table("return_case_commands", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   returnCaseId: bigint("return_case_id", { mode: "number" }).notNull().references(() => returnCases.id, { onDelete: "cascade" }),
@@ -235,7 +288,7 @@ export const returnCaseCommands = returnsSchema.table("return_case_commands", {
 }, (table) => [
   uniqueIndex("return_case_commands_idempotency_uq").on(table.idempotencyKey),
   index("return_case_commands_case_idx").on(table.returnCaseId, table.createdAt, table.id),
-  check("return_case_commands_type_chk", sql`${table.commandType} IN ('record_receipt','start_inspection','complete_inspection','record_disposition')`),
+  check("return_case_commands_type_chk", sql`${table.commandType} IN ('record_receipt','start_inspection','complete_inspection','record_disposition','apply_inventory_treatment')`),
   check("return_case_commands_hash_chk", sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`),
   check("return_case_commands_response_chk", sql`jsonb_typeof(${table.response}) = 'object'`),
 ]);
@@ -263,3 +316,7 @@ export type ReturnCaseDisposition = typeof returnCaseDispositions.$inferSelect;
 export type InsertReturnCaseDisposition = typeof returnCaseDispositions.$inferInsert;
 export type ReturnCaseDispositionItem = typeof returnCaseDispositionItems.$inferSelect;
 export type InsertReturnCaseDispositionItem = typeof returnCaseDispositionItems.$inferInsert;
+export type ReturnCaseInventoryTreatment = typeof returnCaseInventoryTreatments.$inferSelect;
+export type InsertReturnCaseInventoryTreatment = typeof returnCaseInventoryTreatments.$inferInsert;
+export type ReturnCaseInventoryTreatmentItem = typeof returnCaseInventoryTreatmentItems.$inferSelect;
+export type InsertReturnCaseInventoryTreatmentItem = typeof returnCaseInventoryTreatmentItems.$inferInsert;

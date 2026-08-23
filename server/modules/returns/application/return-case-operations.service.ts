@@ -8,6 +8,7 @@ import {
   type ReturnCaseActionContext,
   type ReturnCaseActionKind,
   type ReturnCaseDispositionSummary,
+  type ReturnCaseInventoryTreatmentSummary,
 } from "../domain/return-case-actions";
 
 export interface ReturnCaseOperationAggregate {
@@ -15,6 +16,13 @@ export interface ReturnCaseOperationAggregate {
   caseNumber: string;
   omsOrderId: number;
   wmsReturnId: number;
+  wmsOrderId: number;
+  items: Array<{
+    returnCaseItemId: number;
+    omsOrderLineId: number | null;
+    wmsOrderItemId: number | null;
+    productVariantId: number | null;
+  }>;
   actionContext: ReturnCaseActionContext;
 }
 
@@ -60,6 +68,19 @@ export interface RecordReturnDispositionInput {
     treatment: ReturnDispositionTreatment;
     expectedCurrentReceivedQuantity: number;
     expectedCurrentDisposedQuantity: number;
+  }>;
+}
+
+export interface ApplyReturnInventoryTreatmentInput {
+  caseId: number;
+  idempotencyKey: string;
+  actor: string;
+  notes: string | null;
+  lines: Array<{
+    dispositionItemId: number;
+    expectedTreatment: ReturnDispositionTreatment;
+    expectedQuantity: number;
+    warehouseLocationId: number | null;
   }>;
 }
 
@@ -112,11 +133,32 @@ export interface RecordReturnDispositionResult {
   replayed: boolean;
 }
 
+export interface ApplyReturnInventoryTreatmentResult {
+  commandType: "apply_inventory_treatment";
+  caseId: number;
+  caseNumber: string;
+  inventoryTreatmentId: number;
+  lines: Array<{
+    dispositionItemId: number;
+    returnCaseItemId: number;
+    productVariantId: number | null;
+    treatment: ReturnDispositionTreatment;
+    quantity: number;
+    warehouseLocationId: number | null;
+    inventoryTransactionId: number | null;
+    inventoryLotId: number | null;
+  }>;
+  inventoryTreatmentSummary: ReturnCaseInventoryTreatmentSummary;
+  appliedAt: string;
+  replayed: boolean;
+}
+
 export type ReturnCaseOperationResult =
   | RecordReturnReceiptResult
   | StartReturnInspectionResult
   | CompleteReturnInspectionResult
-  | RecordReturnDispositionResult;
+  | RecordReturnDispositionResult
+  | ApplyReturnInventoryTreatmentResult;
 
 export interface PersistReturnReceiptInput {
   aggregate: ReturnCaseOperationAggregate;
@@ -172,6 +214,23 @@ export interface PersistReturnDispositionInput {
   now: Date;
 }
 
+export interface PersistReturnInventoryTreatmentInput {
+  aggregate: ReturnCaseOperationAggregate;
+  idempotencyKey: string;
+  requestHash: string;
+  actor: string;
+  notes: string | null;
+  lines: Array<{
+    dispositionItemId: number;
+    returnCaseItemId: number;
+    productVariantId: number | null;
+    treatment: ReturnDispositionTreatment;
+    quantity: number;
+    warehouseLocationId: number | null;
+  }>;
+  now: Date;
+}
+
 export interface ExistingReturnCaseCommand {
   commandType: ReturnCaseActionKind;
   requestHash: string;
@@ -186,6 +245,7 @@ export interface ReturnCaseOperationTransaction {
   persistStartInspection(input: PersistStartInspectionInput): Promise<StartReturnInspectionResult>;
   persistCompleteInspection(input: PersistCompleteInspectionInput): Promise<CompleteReturnInspectionResult>;
   persistDisposition(input: PersistReturnDispositionInput): Promise<RecordReturnDispositionResult>;
+  persistInventoryTreatment(input: PersistReturnInventoryTreatmentInput): Promise<ApplyReturnInventoryTreatmentResult>;
 }
 
 export interface ReturnCaseOperationStore {
@@ -204,10 +264,15 @@ export class ReturnCaseOperationError extends Error {
   }
 }
 
+export interface ReturnInventoryChangeNotifier {
+  notify(productVariantId: number): void;
+}
+
 export class ReturnCaseOperationService {
   constructor(
     private readonly store: ReturnCaseOperationStore,
     private readonly clock: () => Date = () => new Date(),
+    private readonly inventoryNotifier: ReturnInventoryChangeNotifier | null = null,
   ) {}
 
   async recordReceipt(rawInput: RecordReturnReceiptInput): Promise<RecordReturnReceiptResult> {
@@ -431,6 +496,85 @@ export class ReturnCaseOperationService {
       });
     });
   }
+
+  async applyInventoryTreatment(
+    rawInput: ApplyReturnInventoryTreatmentInput,
+  ): Promise<ApplyReturnInventoryTreatmentResult> {
+    const input = normalizeInventoryTreatmentInput(rawInput);
+    const requestHash = hashCommand("apply_inventory_treatment", input);
+    const result = await this.store.transaction(async (tx) => {
+      await tx.lockCommand(input.idempotencyKey);
+      const replay = await resolveReplay(tx, input.idempotencyKey, "apply_inventory_treatment", requestHash);
+      if (replay) return requireInventoryTreatmentResult(replay);
+
+      const aggregate = await loadAggregate(tx, input.caseId);
+      requireActionAvailable(aggregate.actionContext, "apply_inventory_treatment");
+      const plan = deriveReturnCaseActionPlan(aggregate.actionContext);
+      const sourceById = new Map(
+        plan.inventoryTreatmentSummary.items.map((item) => [item.dispositionItemId, item] as const),
+      );
+      const caseItemById = new Map(aggregate.items.map((item) => [item.returnCaseItemId, item] as const));
+      const lines = input.lines.map((line) => {
+        const source = sourceById.get(line.dispositionItemId);
+        if (!source || source.applied) {
+          throw new ReturnCaseOperationError(
+            "RETURN_INVENTORY_TREATMENT_STATE_STALE",
+            "The recorded disposition changed after this return was reviewed. Refresh and try again.",
+            409,
+            { caseId: input.caseId, dispositionItemId: line.dispositionItemId },
+          );
+        }
+        if (source.treatment !== line.expectedTreatment || source.quantity !== line.expectedQuantity) {
+          throw new ReturnCaseOperationError(
+            "RETURN_INVENTORY_TREATMENT_STATE_STALE",
+            "The recorded disposition changed after this return was reviewed. Refresh and try again.",
+            409,
+            { caseId: input.caseId, dispositionItemId: line.dispositionItemId },
+          );
+        }
+        if ((source.treatment === "restock_sellable") !== (line.warehouseLocationId !== null)) {
+          throw new ReturnCaseOperationError(
+            "RETURN_CASE_OPERATION_INPUT_INVALID",
+            source.treatment === "restock_sellable"
+              ? "A pickable warehouse location is required for sellable restock."
+              : "Held non-sellable inventory must not specify a sellable location.",
+            400,
+            { dispositionItemId: line.dispositionItemId },
+          );
+        }
+        const caseItem = caseItemById.get(source.returnCaseItemId);
+        if (!caseItem || (source.treatment === "restock_sellable" && caseItem.productVariantId === null)) {
+          throw new ReturnCaseOperationError(
+            "RETURN_INVENTORY_TREATMENT_VARIANT_MISSING",
+            "Sellable restock requires an exact catalog variant for the returned item.",
+            409,
+            { caseId: input.caseId, returnCaseItemId: source.returnCaseItemId },
+          );
+        }
+        return {
+          dispositionItemId: source.dispositionItemId,
+          returnCaseItemId: source.returnCaseItemId,
+          // Product identity on this result represents a sellable inventory effect.
+          // Held evidence remains linked through returnCaseItemId and never enters ATP.
+          productVariantId: source.treatment === "restock_sellable" ? caseItem.productVariantId : null,
+          treatment: source.treatment,
+          quantity: source.quantity,
+          warehouseLocationId: line.warehouseLocationId,
+        };
+      });
+      return tx.persistInventoryTreatment({
+        aggregate, idempotencyKey: input.idempotencyKey, requestHash,
+        actor: input.actor, notes: input.notes, lines, now: readClock(this.clock),
+      });
+    });
+    if (!result.replayed && this.inventoryNotifier) {
+      for (const variantId of new Set(result.lines.flatMap((line) =>
+        line.inventoryTransactionId !== null && line.productVariantId !== null ? [line.productVariantId] : []))) {
+        this.inventoryNotifier.notify(variantId);
+      }
+    }
+    return result;
+  }
 }
 
 async function resolveReplay(
@@ -553,6 +697,35 @@ function normalizeDispositionInput(input: RecordReturnDispositionInput): RecordR
   return { ...common, inspectionId: requireNullablePositiveSafeInteger(input.inspectionId, "inspectionId"), lines };
 }
 
+function normalizeInventoryTreatmentInput(
+  input: ApplyReturnInventoryTreatmentInput,
+): ApplyReturnInventoryTreatmentInput {
+  const common = normalizeCommon(input);
+  if (!Array.isArray(input.lines) || input.lines.length === 0 || input.lines.length > 200) {
+    throw invalid("lines", input.lines);
+  }
+  const seen = new Set<number>();
+  const lines = input.lines.map((line) => {
+    const dispositionItemId = requirePositiveSafeInteger(line?.dispositionItemId, "dispositionItemId");
+    if (seen.has(dispositionItemId)) {
+      throw new ReturnCaseOperationError(
+        "RETURN_CASE_OPERATION_INPUT_INVALID",
+        "A disposition item may only appear once in an inventory-treatment command.",
+        400,
+        { dispositionItemId },
+      );
+    }
+    seen.add(dispositionItemId);
+    return {
+      dispositionItemId,
+      expectedTreatment: requireDispositionTreatment(line?.expectedTreatment),
+      expectedQuantity: requirePositiveSafeInteger(line?.expectedQuantity, "expectedQuantity"),
+      warehouseLocationId: requireNullablePositiveSafeInteger(line?.warehouseLocationId, "warehouseLocationId"),
+    };
+  }).sort((left, right) => left.dispositionItemId - right.dispositionItemId);
+  return { ...common, lines };
+}
+
 function normalizeCommon<T extends {
   caseId: number;
   idempotencyKey: string;
@@ -573,7 +746,8 @@ function hashCommand(
     | RecordReturnReceiptInput
     | StartReturnInspectionInput
     | CompleteReturnInspectionInput
-    | RecordReturnDispositionInput,
+    | RecordReturnDispositionInput
+    | ApplyReturnInventoryTreatmentInput,
 ): string {
   const request = "lines" in input && "inspectionId" in input
     ? { commandType, caseId: input.caseId, inspectionId: input.inspectionId, notes: input.notes, lines: input.lines }
@@ -622,6 +796,19 @@ function requireCompleteInspectionResult(result: ReturnCaseOperationResult): Com
 
 function requireDispositionResult(result: ReturnCaseOperationResult): RecordReturnDispositionResult {
   if (result.commandType !== "record_disposition") {
+    throw new ReturnCaseOperationError(
+      "RETURN_CASE_COMMAND_DATA_INVALID",
+      "Stored return command data is inconsistent.",
+      500,
+    );
+  }
+  return result;
+}
+
+function requireInventoryTreatmentResult(
+  result: ReturnCaseOperationResult,
+): ApplyReturnInventoryTreatmentResult {
+  if (result.commandType !== "apply_inventory_treatment") {
     throw new ReturnCaseOperationError(
       "RETURN_CASE_COMMAND_DATA_INVALID",
       "Stored return command data is inconsistent.",

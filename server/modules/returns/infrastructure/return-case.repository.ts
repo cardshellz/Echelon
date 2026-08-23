@@ -8,6 +8,8 @@ import {
   returnCaseEvents,
   returnCaseDispositionItems,
   returnCaseDispositions,
+  returnCaseInventoryTreatmentItems,
+  returnCaseInventoryTreatments,
   type ReturnDispositionTreatment,
   returnCaseInspections,
   returnCaseItems,
@@ -258,6 +260,8 @@ export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
       inspectionRows,
       dispositionRows,
       dispositionItemRows,
+      inventoryTreatmentRows,
+      inventoryTreatmentItemRows,
     ] = await Promise.all([
       selectDetailItemRows(id),
       db
@@ -294,6 +298,7 @@ export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
         .orderBy(asc(returnCaseDispositions.id)),
       db
         .select({
+          dispositionItemId: returnCaseDispositionItems.id,
           dispositionId: returnCaseDispositionItems.dispositionId,
           returnCaseItemId: returnCaseDispositionItems.returnCaseItemId,
           treatment: returnCaseDispositionItems.treatment,
@@ -309,6 +314,28 @@ export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
           asc(returnCaseDispositionItems.dispositionId),
           asc(returnCaseDispositionItems.id),
         ),
+      db
+        .select({ id: returnCaseInventoryTreatments.id })
+        .from(returnCaseInventoryTreatments)
+        .where(eq(returnCaseInventoryTreatments.returnCaseId, id))
+        .orderBy(asc(returnCaseInventoryTreatments.id)),
+      db
+        .select({
+          dispositionItemId: returnCaseInventoryTreatmentItems.dispositionItemId,
+          returnCaseItemId: returnCaseInventoryTreatmentItems.returnCaseItemId,
+          treatment: returnCaseInventoryTreatmentItems.treatment,
+          quantity: returnCaseInventoryTreatmentItems.quantity,
+          warehouseLocationId: returnCaseInventoryTreatmentItems.warehouseLocationId,
+          inventoryTransactionId: returnCaseInventoryTreatmentItems.inventoryTransactionId,
+          inventoryLotId: returnCaseInventoryTreatmentItems.inventoryLotId,
+        })
+        .from(returnCaseInventoryTreatmentItems)
+        .innerJoin(
+          returnCaseInventoryTreatments,
+          eq(returnCaseInventoryTreatments.id, returnCaseInventoryTreatmentItems.inventoryTreatmentId),
+        )
+        .where(eq(returnCaseInventoryTreatments.returnCaseId, id))
+        .orderBy(asc(returnCaseInventoryTreatmentItems.dispositionItemId)),
     ]);
 
     const actionContext = buildActionContext({
@@ -319,6 +346,8 @@ export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
       inspectionRows,
       dispositionRows,
       dispositionItemRows,
+      inventoryTreatmentRows,
+      inventoryTreatmentItemRows,
     });
     return {
       ...mapListRow(caseRow),
@@ -505,10 +534,21 @@ interface ActionContextInput {
   inspectionRows: Array<typeof returnCaseInspections.$inferSelect>;
   dispositionRows: Array<{ id: number }>;
   dispositionItemRows: Array<{
+    dispositionItemId: number;
     dispositionId: number;
     returnCaseItemId: number;
     treatment: string;
     quantity: number;
+  }>;
+  inventoryTreatmentRows: Array<{ id: number }>;
+  inventoryTreatmentItemRows: Array<{
+    dispositionItemId: number;
+    returnCaseItemId: number;
+    treatment: string;
+    quantity: number;
+    warehouseLocationId: number | null;
+    inventoryTransactionId: number | null;
+    inventoryLotId: number | null;
   }>;
 }
 
@@ -532,12 +572,27 @@ function buildActionContext(input: ActionContextInput): ReturnCaseActionContext 
       throw new Error("Disposition item without a matching disposition returned by the database.");
     }
     return {
+      dispositionItemId: readPositiveSafeInteger(row.dispositionItemId, "return disposition item id"),
       dispositionId,
       returnCaseItemId: readPositiveSafeInteger(row.returnCaseItemId, "disposition return case item id"),
       treatment: readDispositionTreatment(row.treatment, "return disposition treatment"),
       quantity: readPositiveSafeInteger(row.quantity, "return disposition quantity"),
     };
   });
+  const inventoryTreatmentIds = input.inventoryTreatmentRows.map((row) =>
+    readPositiveSafeInteger(row.id, "return inventory treatment id"));
+  if (new Set(inventoryTreatmentIds).size !== inventoryTreatmentIds.length) {
+    throw new Error("Duplicate return inventory treatment id returned by the database.");
+  }
+  const inventoryTreatmentLines = input.inventoryTreatmentItemRows.map((row) => ({
+    dispositionItemId: readPositiveSafeInteger(row.dispositionItemId, "inventory treatment disposition item id"),
+    returnCaseItemId: readPositiveSafeInteger(row.returnCaseItemId, "inventory treatment return case item id"),
+    treatment: readDispositionTreatment(row.treatment, "inventory treatment"),
+    quantity: readPositiveSafeInteger(row.quantity, "inventory treatment quantity"),
+    warehouseLocationId: readNullablePositiveSafeInteger(row.warehouseLocationId, "inventory treatment warehouse location id"),
+    inventoryTransactionId: readNullablePositiveSafeInteger(row.inventoryTransactionId, "inventory treatment transaction id"),
+    inventoryLotId: readNullablePositiveSafeInteger(row.inventoryLotId, "inventory treatment lot id"),
+  }));
   return {
     lifecycle: {
       caseStatus: input.caseRow.caseStatus as ReturnCaseActionContext["lifecycle"]["caseStatus"],
@@ -574,6 +629,10 @@ function buildActionContext(input: ActionContextInput): ReturnCaseActionContext 
     disposition: dispositionIds.length > 0 ? {
       recordCount: dispositionIds.length,
       lines: dispositionLines,
+    } : null,
+    inventoryTreatment: inventoryTreatmentIds.length > 0 ? {
+      recordCount: inventoryTreatmentIds.length,
+      lines: inventoryTreatmentLines,
     } : null,
   };
 }

@@ -23,6 +23,7 @@ describe("return case action plan", () => {
       expect.objectContaining({ kind: "start_inspection", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
       expect.objectContaining({ kind: "complete_inspection", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
       expect.objectContaining({ kind: "record_disposition", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
+      expect.objectContaining({ kind: "apply_inventory_treatment", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
     ]);
   });
 
@@ -175,6 +176,7 @@ describe("return case action plan", () => {
       disposition: {
         recordCount: 1,
         lines: [{
+          dispositionItemId: 100,
           dispositionId: 10,
           returnCaseItemId: 1,
           treatment: "restock_sellable",
@@ -343,6 +345,7 @@ describe("return case action plan", () => {
       disposition: {
         recordCount: 1,
         lines: [{
+          dispositionItemId: 100,
           dispositionId: 10,
           returnCaseItemId: 1,
           treatment: "hold_non_sellable",
@@ -380,12 +383,14 @@ describe("return case action plan", () => {
         recordCount: 2,
         lines: [
           {
+            dispositionItemId: 100,
             dispositionId: 10,
             returnCaseItemId: 1,
             treatment: "restock_sellable",
             quantity: 1,
           },
           {
+            dispositionItemId: 101,
             dispositionId: 11,
             returnCaseItemId: 1,
             treatment: "hold_non_sellable",
@@ -395,8 +400,9 @@ describe("return case action plan", () => {
       },
     }));
 
-    expect(plan.nextAction).toBeNull();
+    expect(plan.nextAction).toBe("apply_inventory_treatment");
     expect(plan.actions[3]).toMatchObject({ state: "completed", reasonCode: null });
+    expect(plan.actions[4]).toMatchObject({ state: "available", reasonCode: null });
     expect(plan.dispositionSummary).toMatchObject({
       receivedUnits: 2,
       recordedUnits: 2,
@@ -406,11 +412,148 @@ describe("return case action plan", () => {
     });
   });
 
+  it("keeps partially applied inventory treatment available with exact source evidence", () => {
+    const disposition = completeDisposition();
+    const plan = deriveReturnCaseActionPlan(context({
+      lifecycle: { ...lifecycle(), logisticsStatus: "received", inspectionStatus: "approved" },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+      inspection: completedInspection("approved"),
+      disposition,
+      inventoryTreatment: {
+        recordCount: 1,
+        lines: [{
+          dispositionItemId: 100,
+          returnCaseItemId: 1,
+          treatment: "restock_sellable",
+          quantity: 1,
+          warehouseLocationId: 17,
+          inventoryTransactionId: 501,
+          inventoryLotId: 601,
+        }],
+      },
+    }));
+
+    expect(plan.nextAction).toBe("apply_inventory_treatment");
+    expect(plan.actions[4]).toMatchObject({ state: "available", reasonCode: null });
+    expect(plan.inventoryTreatmentSummary).toEqual({
+      dispositionUnits: 2,
+      appliedUnits: 1,
+      remainingUnits: 1,
+      fullyApplied: false,
+      partiallyApplied: true,
+      items: [
+        {
+          dispositionItemId: 100,
+          returnCaseItemId: 1,
+          treatment: "restock_sellable",
+          quantity: 1,
+          warehouseLocationId: 17,
+          inventoryTransactionId: 501,
+          inventoryLotId: 601,
+          applied: true,
+        },
+        {
+          dispositionItemId: 101,
+          returnCaseItemId: 1,
+          treatment: "hold_non_sellable",
+          quantity: 1,
+          warehouseLocationId: null,
+          inventoryTransactionId: null,
+          inventoryLotId: null,
+          applied: false,
+        },
+      ],
+    });
+  });
+
+  it("preserves completed immutable treatment evidence after later case closure and WMS restock", () => {
+    const disposition = completeDisposition();
+    const plan = deriveReturnCaseActionPlan(context({
+      lifecycle: { ...lifecycle(), caseStatus: "closed", logisticsStatus: "received", inspectionStatus: "approved" },
+      receipt: { ...receipt({ receivedQuantity: 2, status: "received" }), restocked: true },
+      inspection: completedInspection("approved"),
+      disposition,
+      inventoryTreatment: {
+        recordCount: 2,
+        lines: [
+          {
+            dispositionItemId: 100,
+            returnCaseItemId: 1,
+            treatment: "restock_sellable",
+            quantity: 1,
+            warehouseLocationId: 17,
+            inventoryTransactionId: 501,
+            inventoryLotId: 601,
+          },
+          {
+            dispositionItemId: 101,
+            returnCaseItemId: 1,
+            treatment: "hold_non_sellable",
+            quantity: 1,
+            warehouseLocationId: null,
+            inventoryTransactionId: null,
+            inventoryLotId: null,
+          },
+        ],
+      },
+    }));
+
+    expect(plan.nextAction).toBeNull();
+    expect(plan.actions[3]).toMatchObject({ state: "completed", reasonCode: null });
+    expect(plan.actions[4]).toMatchObject({ state: "completed", reasonCode: null });
+    expect(plan.inventoryTreatmentSummary).toMatchObject({
+      dispositionUnits: 2,
+      appliedUnits: 2,
+      remainingUnits: 0,
+      fullyApplied: true,
+      partiallyApplied: false,
+    });
+  });
+
+  it("fails closed for unknown, mismatched, duplicate, or incomplete inventory treatment evidence", () => {
+    const validSellable = {
+      dispositionItemId: 100,
+      returnCaseItemId: 1,
+      treatment: "restock_sellable" as const,
+      quantity: 1,
+      warehouseLocationId: 17,
+      inventoryTransactionId: 501,
+      inventoryLotId: 601,
+    };
+    const invalidEvidence: NonNullable<ReturnCaseActionContext["inventoryTreatment"]>[] = [
+      { recordCount: 1, lines: [{ ...validSellable, dispositionItemId: 999 }] },
+      { recordCount: 1, lines: [{ ...validSellable, returnCaseItemId: 999 }] },
+      { recordCount: 1, lines: [{ ...validSellable, quantity: 2 }] },
+      { recordCount: 1, lines: [{ ...validSellable, treatment: "hold_non_sellable" }] },
+      { recordCount: 1, lines: [{ ...validSellable, warehouseLocationId: null }] },
+      { recordCount: 1, lines: [{ ...validSellable }, { ...validSellable }] },
+      { recordCount: 2, lines: [{ ...validSellable }] },
+      { recordCount: 1, lines: [{ ...validSellable, dispositionItemId: 101, treatment: "hold_non_sellable", inventoryTransactionId: 501, inventoryLotId: 601 }] },
+    ];
+
+    for (const inventoryTreatment of invalidEvidence) {
+      const plan = deriveReturnCaseActionPlan(context({
+        lifecycle: { ...lifecycle(), logisticsStatus: "received", inspectionStatus: "approved" },
+        receipt: receipt({ receivedQuantity: 2, status: "received" }),
+        inspection: completedInspection("approved"),
+        disposition: completeDisposition(),
+        inventoryTreatment,
+      }));
+      expect(plan.nextAction).toBeNull();
+      expect(plan.actions[4]).toMatchObject({
+        state: "blocked",
+        reasonCode: "RETURN_INVENTORY_TREATMENT_STATE_CONFLICT",
+      });
+      expect(plan.inventoryTreatmentSummary.items).toEqual([]);
+    }
+  });
+
   it("fails closed for malformed, unknown, or excessive disposition evidence", () => {
     const invalidEvidence: NonNullable<ReturnCaseActionContext["disposition"]>[] = [
       {
         recordCount: 1,
         lines: [{
+          dispositionItemId: 100,
           dispositionId: 10,
           returnCaseItemId: 1,
           treatment: "restock_sellable",
@@ -420,6 +563,7 @@ describe("return case action plan", () => {
       {
         recordCount: 1,
         lines: [{
+          dispositionItemId: 100,
           dispositionId: 10,
           returnCaseItemId: 999,
           treatment: "hold_non_sellable",
@@ -429,6 +573,7 @@ describe("return case action plan", () => {
       {
         recordCount: 1,
         lines: [{
+          dispositionItemId: 100,
           dispositionId: 10,
           returnCaseItemId: 1,
           treatment: "destroy" as "restock_sellable",
@@ -438,6 +583,7 @@ describe("return case action plan", () => {
       {
         recordCount: 2,
         lines: [{
+          dispositionItemId: 100,
           dispositionId: 10,
           returnCaseItemId: 1,
           treatment: "restock_sellable",
@@ -448,12 +594,14 @@ describe("return case action plan", () => {
         recordCount: 1,
         lines: [
           {
+            dispositionItemId: 100,
             dispositionId: 10,
             returnCaseItemId: 1,
             treatment: "restock_sellable",
             quantity: 1,
           },
           {
+            dispositionItemId: 101,
             dispositionId: 10,
             returnCaseItemId: 1,
             treatment: "hold_non_sellable",
@@ -487,7 +635,30 @@ function context(overrides: Partial<ReturnCaseActionContext> = {}): ReturnCaseAc
     inspection: null,
     conditionalInspectionDecision: null,
     disposition: null,
+    inventoryTreatment: null,
     ...overrides,
+  };
+}
+
+function completeDisposition(): NonNullable<ReturnCaseActionContext["disposition"]> {
+  return {
+    recordCount: 2,
+    lines: [
+      {
+        dispositionItemId: 100,
+        dispositionId: 10,
+        returnCaseItemId: 1,
+        treatment: "restock_sellable",
+        quantity: 1,
+      },
+      {
+        dispositionItemId: 101,
+        dispositionId: 11,
+        returnCaseItemId: 1,
+        treatment: "hold_non_sellable",
+        quantity: 1,
+      },
+    ],
   };
 }
 
