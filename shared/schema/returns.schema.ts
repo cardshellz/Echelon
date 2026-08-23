@@ -30,6 +30,10 @@ export const returnLogisticsStatuses = ["not_required", "awaiting_return", "labe
 export type ReturnLogisticsStatus = typeof returnLogisticsStatuses[number];
 export const returnInspectionStatuses = ["not_required", "pending", "in_progress", "approved", "rejected"] as const;
 export type ReturnInspectionStatus = typeof returnInspectionStatuses[number];
+export const returnDispositionTreatments = ["restock_sellable", "hold_non_sellable"] as const;
+export type ReturnDispositionTreatment = typeof returnDispositionTreatments[number];
+export const returnDispositionInspectionResolutions = ["approved", "rejected", "not_required"] as const;
+export type ReturnDispositionInspectionResolution = typeof returnDispositionInspectionResolutions[number];
 export const returnCustomerRefundStatuses = ["pending", "completed", "failed", "not_required"] as const;
 export type ReturnCustomerRefundStatus = typeof returnCustomerRefundStatuses[number];
 export const returnVendorSettlementStatuses = ["not_applicable", "pending", "eligible", "completed", "held", "failed"] as const;
@@ -174,6 +178,51 @@ export const returnCaseInspections = returnsSchema.table("return_case_inspection
   check("return_case_inspections_time_chk", sql`${table.completedAt} IS NULL OR ${table.completedAt} >= ${table.startedAt}`),
 ]);
 
+// Append-only operator evidence describing the intended physical treatment of
+// received units. Recording this evidence does not mutate inventory, refund a
+// customer, settle a vendor balance, or close the Return Case.
+export const returnCaseDispositions = returnsSchema.table("return_case_dispositions", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  returnCaseId: bigint("return_case_id", { mode: "number" }).notNull().references(() => returnCases.id),
+  inspectionId: bigint("inspection_id", { mode: "number" }).references(() => returnCaseInspections.id),
+  inspectionResolution: varchar("inspection_resolution", { length: 24 }).notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 160 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  recordedBy: varchar("recorded_by", { length: 255 }).notNull(),
+  notes: text("notes"),
+  recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("return_case_dispositions_idempotency_uq").on(table.idempotencyKey),
+  index("return_case_dispositions_case_idx").on(table.returnCaseId, table.recordedAt, table.id),
+  index("return_case_dispositions_inspection_idx").on(table.inspectionId),
+  check("return_case_dispositions_inspection_resolution_chk", sql`${table.inspectionResolution} IN ('approved','rejected','not_required')`),
+  check("return_case_dispositions_inspection_evidence_chk", sql`
+    (${table.inspectionResolution} IN ('approved','rejected') AND ${table.inspectionId} IS NOT NULL)
+    OR (${table.inspectionResolution} = 'not_required' AND ${table.inspectionId} IS NULL)
+  `),
+  check("return_case_dispositions_idempotency_key_chk", sql`btrim(${table.idempotencyKey}) <> ''`),
+  check("return_case_dispositions_request_hash_chk", sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`),
+  check("return_case_dispositions_actor_chk", sql`btrim(${table.recordedBy}) <> ''`),
+]);
+
+export const returnCaseDispositionItems = returnsSchema.table("return_case_disposition_items", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  dispositionId: bigint("disposition_id", { mode: "number" }).notNull().references(() => returnCaseDispositions.id),
+  returnCaseItemId: bigint("return_case_item_id", { mode: "number" }).notNull().references(() => returnCaseItems.id),
+  treatment: varchar("treatment", { length: 32 }).notNull(),
+  quantity: integer("quantity").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("return_case_disposition_items_item_uq").on(
+    table.dispositionId,
+    table.returnCaseItemId,
+  ),
+  index("return_case_disposition_items_case_item_idx").on(table.returnCaseItemId, table.id),
+  check("return_case_disposition_items_treatment_chk", sql`${table.treatment} IN ('restock_sellable','hold_non_sellable')`),
+  check("return_case_disposition_items_quantity_chk", sql`${table.quantity} > 0`),
+]);
+
 export const returnCaseCommands = returnsSchema.table("return_case_commands", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   returnCaseId: bigint("return_case_id", { mode: "number" }).notNull().references(() => returnCases.id, { onDelete: "cascade" }),
@@ -186,7 +235,7 @@ export const returnCaseCommands = returnsSchema.table("return_case_commands", {
 }, (table) => [
   uniqueIndex("return_case_commands_idempotency_uq").on(table.idempotencyKey),
   index("return_case_commands_case_idx").on(table.returnCaseId, table.createdAt, table.id),
-  check("return_case_commands_type_chk", sql`${table.commandType} IN ('record_receipt','start_inspection','complete_inspection')`),
+  check("return_case_commands_type_chk", sql`${table.commandType} IN ('record_receipt','start_inspection','complete_inspection','record_disposition')`),
   check("return_case_commands_hash_chk", sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`),
   check("return_case_commands_response_chk", sql`jsonb_typeof(${table.response}) = 'object'`),
 ]);
@@ -210,3 +259,7 @@ export type ReturnCaseInspection = typeof returnCaseInspections.$inferSelect;
 export type InsertReturnCaseInspection = typeof returnCaseInspections.$inferInsert;
 export type ReturnCaseCommand = typeof returnCaseCommands.$inferSelect;
 export type InsertReturnCaseCommand = typeof returnCaseCommands.$inferInsert;
+export type ReturnCaseDisposition = typeof returnCaseDispositions.$inferSelect;
+export type InsertReturnCaseDisposition = typeof returnCaseDispositions.$inferInsert;
+export type ReturnCaseDispositionItem = typeof returnCaseDispositionItems.$inferSelect;
+export type InsertReturnCaseDispositionItem = typeof returnCaseDispositionItems.$inferInsert;

@@ -1,4 +1,8 @@
 import { sql, type SQL } from "drizzle-orm";
+import type {
+  ReturnDispositionInspectionResolution,
+  ReturnDispositionTreatment,
+} from "@shared/schema";
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import {
@@ -10,8 +14,10 @@ import {
   type CompleteReturnInspectionResult,
   type ExistingReturnCaseCommand,
   type PersistCompleteInspectionInput,
+  type PersistReturnDispositionInput,
   type PersistReturnReceiptInput,
   type PersistStartInspectionInput,
+  type RecordReturnDispositionResult,
   type RecordReturnReceiptResult,
   type ReturnCaseOperationAggregate,
   type ReturnCaseOperationResult,
@@ -82,6 +88,19 @@ interface CommandRow {
 }
 
 interface InsertedInspectionRow { id: unknown }
+interface DispositionHeaderRow {
+  id: unknown;
+}
+
+interface DispositionItemRow {
+  disposition_id: unknown;
+  return_case_item_id: unknown;
+  treatment: unknown;
+  quantity: unknown;
+}
+
+interface InsertedDispositionRow { id: unknown }
+
 
 const RETURN_QUANTITY_LOCK_NAMESPACE = 918413;
 
@@ -195,6 +214,26 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
       LIMIT 1
       FOR UPDATE
     `);
+    const dispositionResult = await this.tx.execute(sql`
+      SELECT id
+      FROM returns.return_case_dispositions
+      WHERE return_case_id = ${caseId}
+      ORDER BY id
+      FOR UPDATE
+    `);
+    const dispositionItemResult = await this.tx.execute(sql`
+      SELECT
+        item.disposition_id,
+        item.return_case_item_id,
+        item.treatment,
+        item.quantity
+      FROM returns.return_case_disposition_items item
+      JOIN returns.return_case_dispositions disposition
+        ON disposition.id = item.disposition_id
+      WHERE disposition.return_case_id = ${caseId}
+      ORDER BY item.disposition_id, item.id
+      FOR UPDATE OF item
+    `);
 
     const receiptItems = rowsOf<ReceiptItemRow>(receiptResult).map(mapReceiptItem);
     const canonicalItemCount = readNonNegativeInteger(
@@ -202,6 +241,14 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
       "canonical return item count",
     );
     const inspections = rowsOf<InspectionRow>(inspectionResult);
+    const dispositionIds = rowsOf<DispositionHeaderRow>(dispositionResult)
+      .map((row) => readPositiveInteger(row.id, "disposition id"));
+    const dispositionLines = rowsOf<DispositionItemRow>(dispositionItemResult).map((line) => ({
+      dispositionId: readPositiveInteger(line.disposition_id, "disposition id"),
+      returnCaseItemId: readPositiveInteger(line.return_case_item_id, "disposition case item id"),
+      treatment: readDispositionTreatment(line.treatment, "disposition treatment"),
+      quantity: readPositiveInteger(line.quantity, "disposition quantity"),
+    }));
 
     return {
       caseId: readPositiveInteger(row.id, "return case id"),
@@ -229,6 +276,10 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
             }
           : null,
         inspection: inspections[0] ? mapInspection(inspections[0]) : null,
+        disposition: dispositionIds.length > 0 ? {
+          recordCount: dispositionIds.length,
+          lines: dispositionLines,
+        } : null,
         conditionalInspectionDecision: null,
       },
     };
@@ -460,6 +511,105 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
     }, { timestamp: input.now, emitStructuredLog: false });
     return result;
   }
+
+  async persistDisposition(input: PersistReturnDispositionInput): Promise<RecordReturnDispositionResult> {
+    const dispositionResult = await this.tx.execute(sql`
+      INSERT INTO returns.return_case_dispositions (
+        return_case_id, inspection_id, inspection_resolution,
+        idempotency_key, request_hash, recorded_by, notes, recorded_at, created_at
+      ) VALUES (
+        ${input.aggregate.caseId}, ${input.inspectionId}, ${input.inspectionResolution},
+        ${input.idempotencyKey}, ${input.requestHash}, ${input.actor}, ${input.notes},
+        ${input.now}, ${input.now}
+      )
+      RETURNING id
+    `);
+    const insertedRows = rowsOf<InsertedDispositionRow>(dispositionResult);
+    if (insertedRows.length !== 1) {
+      throw new ReturnCaseOperationError(
+        "RETURN_CASE_DATABASE_RESULT_INVALID",
+        "Disposition evidence insert did not return exactly one record.",
+        500,
+        { caseId: input.aggregate.caseId, affectedRows: insertedRows.length },
+      );
+    }
+    const dispositionId = readPositiveInteger(insertedRows[0].id, "return disposition id");
+
+    for (const line of input.lines) {
+      await this.tx.execute(sql`
+        INSERT INTO returns.return_case_disposition_items (
+          disposition_id, return_case_item_id, treatment, quantity, created_at
+        ) VALUES (
+          ${dispositionId}, ${line.returnCaseItemId}, ${line.treatment}, ${line.quantity}, ${input.now}
+        )
+      `);
+    }
+
+    const resultLines = input.lines.map((line) => ({
+      returnCaseItemId: line.returnCaseItemId,
+      quantity: line.quantity,
+      treatment: line.treatment,
+    }));
+    const details = {
+      requestHash: input.requestHash,
+      dispositionId,
+      inspectionId: input.inspectionId,
+      inspectionResolution: input.inspectionResolution,
+      notes: input.notes,
+      lines: input.lines.map((line) => ({
+        returnCaseItemId: line.returnCaseItemId,
+        quantity: line.quantity,
+        treatment: line.treatment,
+        expectedCurrentReceivedQuantity: line.expectedCurrentReceivedQuantity,
+        expectedCurrentDisposedQuantity: line.expectedCurrentDisposedQuantity,
+      })),
+      dispositionSummary: input.dispositionSummary,
+    };
+    await appendEvent(
+      this.tx,
+      input.aggregate.caseId,
+      "return_disposition_recorded",
+      input.actor,
+      details,
+      input.now,
+    );
+
+    const result: RecordReturnDispositionResult = {
+      commandType: "record_disposition",
+      caseId: input.aggregate.caseId,
+      caseNumber: input.aggregate.caseNumber,
+      dispositionId,
+      inspectionId: input.inspectionId,
+      inspectionResolution: input.inspectionResolution,
+      lines: resultLines,
+      dispositionSummary: input.dispositionSummary,
+      recordedAt: input.now.toISOString(),
+      replayed: false,
+    };
+    await persistCommand(
+      this.tx,
+      input.aggregate.caseId,
+      input.idempotencyKey,
+      input.requestHash,
+      result,
+      input.actor,
+      input.now,
+    );
+    await persistAuditEvent(this.tx, {
+      actor: input.actor,
+      action: "RETURN_CASE_DISPOSITION_RECORDED",
+      target: `returns.return_cases:${input.aggregate.caseId}`,
+      changes: {
+        before: {
+          dispositionRecordCount: input.aggregate.actionContext.disposition?.recordCount ?? 0,
+          dispositionLineCount: input.aggregate.actionContext.disposition?.lines.length ?? 0,
+        },
+        after: { dispositionId, dispositionSummary: input.dispositionSummary },
+      },
+      context: details,
+    }, { timestamp: input.now, emitStructuredLog: false });
+    return result;
+  }
 }
 
 function requireSingleInspectionMutation(
@@ -587,6 +737,9 @@ function readStoredResult(value: unknown, commandType: ExistingReturnCaseCommand
       replayed: readBoolean(row.replayed, "stored replayed"),
     };
   }
+  if (commandType === "record_disposition") {
+    return readStoredDispositionResult(row);
+  }
   if (commandType === "start_inspection") {
     const inspectionStatus = readText(row.inspectionStatus, "stored inspection status");
     if (inspectionStatus !== "in_progress") {
@@ -617,9 +770,157 @@ function readStoredResult(value: unknown, commandType: ExistingReturnCaseCommand
   };
 }
 
+
+function readStoredDispositionResult(row: Record<string, unknown>): RecordReturnDispositionResult {
+  const inspectionResolution = readDispositionInspectionResolution(
+    row.inspectionResolution,
+    "stored disposition inspection resolution",
+  );
+  const inspectionId = readNullablePositiveInteger(row.inspectionId, "stored disposition inspection id");
+  if ((inspectionResolution === "not_required") !== (inspectionId === null)) {
+    throw storedCommandInvalid("Stored disposition inspection evidence is inconsistent.");
+  }
+
+  const seenCaseItemIds = new Set<number>();
+  const lines = readStoredObjectArray(row.lines, "stored disposition lines").map((line) => {
+    const returnCaseItemId = readPositiveInteger(line.returnCaseItemId, "stored disposition case item id");
+    if (seenCaseItemIds.has(returnCaseItemId)) {
+      throw storedCommandInvalid("Stored disposition lines contain a duplicate return case item.", {
+        returnCaseItemId,
+      });
+    }
+    seenCaseItemIds.add(returnCaseItemId);
+    return {
+      returnCaseItemId,
+      quantity: readPositiveInteger(line.quantity, "stored disposition quantity"),
+      treatment: readDispositionTreatment(line.treatment, "stored disposition treatment"),
+    };
+  });
+  if (lines.length === 0) {
+    throw storedCommandInvalid("Stored disposition lines are empty.");
+  }
+
+  const dispositionSummary = readStoredDispositionSummary(row.dispositionSummary);
+  const summaryItemIds = new Set(dispositionSummary.items.map((item) => item.returnCaseItemId));
+  if (lines.some((line) => !summaryItemIds.has(line.returnCaseItemId))) {
+    throw storedCommandInvalid("Stored disposition lines do not match the stored summary.");
+  }
+
+  return {
+    commandType: "record_disposition",
+    caseId: readPositiveInteger(row.caseId, "stored case id"),
+    caseNumber: readText(row.caseNumber, "stored case number"),
+    dispositionId: readPositiveInteger(row.dispositionId, "stored disposition id"),
+    inspectionId,
+    inspectionResolution,
+    lines,
+    dispositionSummary,
+    recordedAt: readDate(row.recordedAt, "stored disposition recorded at").toISOString(),
+    replayed: readBoolean(row.replayed, "stored replayed"),
+  };
+}
+
+function readStoredDispositionSummary(value: unknown): RecordReturnDispositionResult["dispositionSummary"] {
+  const row = readStoredObject(value, "stored disposition summary");
+  const itemRows = readStoredObjectArray(row.items, "stored disposition summary items");
+  if (itemRows.length === 0) {
+    throw storedCommandInvalid("Stored disposition summary items are empty.");
+  }
+  const seenCaseItemIds = new Set<number>();
+  const items = itemRows.map((item) => {
+    const returnCaseItemId = readPositiveInteger(item.returnCaseItemId, "stored summary case item id");
+    if (seenCaseItemIds.has(returnCaseItemId)) {
+      throw storedCommandInvalid("Stored disposition summary contains a duplicate return case item.", {
+        returnCaseItemId,
+      });
+    }
+    seenCaseItemIds.add(returnCaseItemId);
+    const receivedQuantity = readNonNegativeInteger(item.receivedQuantity, "stored received quantity");
+    const restockSellableQuantity = readNonNegativeInteger(
+      item.restockSellableQuantity,
+      "stored restock sellable quantity",
+    );
+    const holdNonSellableQuantity = readNonNegativeInteger(
+      item.holdNonSellableQuantity,
+      "stored hold non-sellable quantity",
+    );
+    const recordedQuantity = readNonNegativeInteger(item.recordedQuantity, "stored recorded quantity");
+    const remainingQuantity = readNonNegativeInteger(item.remainingQuantity, "stored remaining quantity");
+    if (checkedSum([restockSellableQuantity, holdNonSellableQuantity], "stored treatment quantity")
+      !== recordedQuantity
+      || checkedSum([recordedQuantity, remainingQuantity], "stored item quantity") !== receivedQuantity) {
+      throw storedCommandInvalid("Stored disposition item summary totals are inconsistent.", {
+        returnCaseItemId,
+      });
+    }
+    return {
+      returnCaseItemId,
+      receivedQuantity,
+      restockSellableQuantity,
+      holdNonSellableQuantity,
+      recordedQuantity,
+      remainingQuantity,
+    };
+  });
+
+  const receivedUnits = readNonNegativeInteger(row.receivedUnits, "stored disposition received units");
+  const recordedUnits = readNonNegativeInteger(row.recordedUnits, "stored disposition recorded units");
+  const remainingUnits = readNonNegativeInteger(row.remainingUnits, "stored disposition remaining units");
+  const actualReceivedUnits = checkedSum(items.map((item) => item.receivedQuantity), "stored received units");
+  const actualRecordedUnits = checkedSum(items.map((item) => item.recordedQuantity), "stored recorded units");
+  const actualRemainingUnits = checkedSum(items.map((item) => item.remainingQuantity), "stored remaining units");
+  const fullyRecorded = readBoolean(row.fullyRecorded, "stored fully recorded");
+  const partiallyRecorded = readBoolean(row.partiallyRecorded, "stored partially recorded");
+  if (receivedUnits <= 0
+    || receivedUnits !== actualReceivedUnits
+    || recordedUnits !== actualRecordedUnits
+    || remainingUnits !== actualRemainingUnits
+    || checkedSum([recordedUnits, remainingUnits], "stored disposition units") !== receivedUnits
+    || fullyRecorded !== (remainingUnits === 0)
+    || partiallyRecorded !== (recordedUnits > 0 && remainingUnits > 0)) {
+    throw storedCommandInvalid("Stored disposition summary totals are inconsistent.");
+  }
+
+  return { receivedUnits, recordedUnits, remainingUnits, fullyRecorded, partiallyRecorded, items };
+}
+
+function readStoredObject(value: unknown, field: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw storedCommandInvalid(`${field} is invalid.`, { field });
+  }
+  return value as Record<string, unknown>;
+}
+
+function readStoredObjectArray(value: unknown, field: string): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) throw storedCommandInvalid(`${field} is invalid.`, { field });
+  return value.map((item) => readStoredObject(item, field));
+}
+
+function storedCommandInvalid(
+  message: string,
+  context?: Record<string, unknown>,
+): ReturnCaseOperationError {
+  return new ReturnCaseOperationError("RETURN_CASE_COMMAND_DATA_INVALID", message, 500, context);
+}
 function readCommandType(value: unknown): ExistingReturnCaseCommand["commandType"] {
-  if (value === "record_receipt" || value === "start_inspection" || value === "complete_inspection") return value;
+  if (value === "record_receipt"
+    || value === "start_inspection"
+    || value === "complete_inspection"
+    || value === "record_disposition") return value;
   throw new ReturnCaseOperationError("RETURN_CASE_COMMAND_DATA_INVALID", "Stored return command type is invalid.", 500);
+}
+
+function readDispositionTreatment(value: unknown, field: string): ReturnDispositionTreatment {
+  if (value === "restock_sellable" || value === "hold_non_sellable") return value;
+  throw new ReturnCaseOperationError("RETURN_CASE_DATA_INVALID", `${field} is invalid.`, 500, { field, value });
+}
+
+function readDispositionInspectionResolution(
+  value: unknown,
+  field: string,
+): ReturnDispositionInspectionResolution {
+  if (value === "approved" || value === "rejected" || value === "not_required") return value;
+  throw new ReturnCaseOperationError("RETURN_CASE_DATA_INVALID", `${field} is invalid.`, 500, { field, value });
 }
 
 function readHash(value: unknown): string {

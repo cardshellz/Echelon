@@ -6,6 +6,9 @@ import {
   omsOrders,
   orders,
   returnCaseEvents,
+  returnCaseDispositionItems,
+  returnCaseDispositions,
+  type ReturnDispositionTreatment,
   returnCaseInspections,
   returnCaseItems,
   returnCases,
@@ -247,7 +250,15 @@ export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
     const caseRow = caseRows[0];
     if (!caseRow) return null;
 
-    const [itemRows, eventRows, wmsReturnRows, wmsItemRows, inspectionRows] = await Promise.all([
+    const [
+      itemRows,
+      eventRows,
+      wmsReturnRows,
+      wmsItemRows,
+      inspectionRows,
+      dispositionRows,
+      dispositionItemRows,
+    ] = await Promise.all([
       selectDetailItemRows(id),
       db
         .select()
@@ -276,6 +287,28 @@ export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
           sql`${returnCaseInspections.id} DESC`,
         )
         .limit(1),
+      db
+        .select({ id: returnCaseDispositions.id })
+        .from(returnCaseDispositions)
+        .where(eq(returnCaseDispositions.returnCaseId, id))
+        .orderBy(asc(returnCaseDispositions.id)),
+      db
+        .select({
+          dispositionId: returnCaseDispositionItems.dispositionId,
+          returnCaseItemId: returnCaseDispositionItems.returnCaseItemId,
+          treatment: returnCaseDispositionItems.treatment,
+          quantity: returnCaseDispositionItems.quantity,
+        })
+        .from(returnCaseDispositionItems)
+        .innerJoin(
+          returnCaseDispositions,
+          eq(returnCaseDispositions.id, returnCaseDispositionItems.dispositionId),
+        )
+        .where(eq(returnCaseDispositions.returnCaseId, id))
+        .orderBy(
+          asc(returnCaseDispositionItems.dispositionId),
+          asc(returnCaseDispositionItems.id),
+        ),
     ]);
 
     const actionContext = buildActionContext({
@@ -284,6 +317,8 @@ export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
       wmsReturn: wmsReturnRows[0] ?? null,
       wmsItems: wmsItemRows,
       inspectionRows,
+      dispositionRows,
+      dispositionItemRows,
     });
     return {
       ...mapListRow(caseRow),
@@ -468,7 +503,15 @@ interface ActionContextInput {
   wmsReturn: typeof wmsReturns.$inferSelect | null;
   wmsItems: Array<typeof returnItems.$inferSelect>;
   inspectionRows: Array<typeof returnCaseInspections.$inferSelect>;
+  dispositionRows: Array<{ id: number }>;
+  dispositionItemRows: Array<{
+    dispositionId: number;
+    returnCaseItemId: number;
+    treatment: string;
+    quantity: number;
+  }>;
 }
+
 
 function buildActionContext(input: ActionContextInput): ReturnCaseActionContext {
   const canonicalByWmsItemId = new Map(
@@ -477,6 +520,24 @@ function buildActionContext(input: ActionContextInput): ReturnCaseActionContext 
       caseItem,
     ] as const),
   );
+  const dispositionIds = input.dispositionRows.map((row) =>
+    readPositiveSafeInteger(row.id, "return disposition id"));
+  if (new Set(dispositionIds).size !== dispositionIds.length) {
+    throw new Error("Duplicate return disposition id returned by the database.");
+  }
+  const dispositionIdSet = new Set(dispositionIds);
+  const dispositionLines = input.dispositionItemRows.map((row) => {
+    const dispositionId = readPositiveSafeInteger(row.dispositionId, "return disposition id");
+    if (!dispositionIdSet.has(dispositionId)) {
+      throw new Error("Disposition item without a matching disposition returned by the database.");
+    }
+    return {
+      dispositionId,
+      returnCaseItemId: readPositiveSafeInteger(row.returnCaseItemId, "disposition return case item id"),
+      treatment: readDispositionTreatment(row.treatment, "return disposition treatment"),
+      quantity: readPositiveSafeInteger(row.quantity, "return disposition quantity"),
+    };
+  });
   return {
     lifecycle: {
       caseStatus: input.caseRow.caseStatus as ReturnCaseActionContext["lifecycle"]["caseStatus"],
@@ -510,6 +571,10 @@ function buildActionContext(input: ActionContextInput): ReturnCaseActionContext 
     } : null,
     inspection: input.inspectionRows[0] ? mapActiveInspection(input.inspectionRows[0]) : null,
     conditionalInspectionDecision: null,
+    disposition: dispositionIds.length > 0 ? {
+      recordCount: dispositionIds.length,
+      lines: dispositionLines,
+    } : null,
   };
 }
 
@@ -557,6 +622,11 @@ function readBoolean(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") throw new Error("Invalid " + field + " returned by the database.");
   return value;
 }
+function readDispositionTreatment(value: unknown, field: string): ReturnDispositionTreatment {
+  if (value === "restock_sellable" || value === "hold_non_sellable") return value;
+  throw new Error(`Invalid ${field} returned by the database.`);
+}
+
 
 function readPositiveSafeInteger(value: unknown, field: string): number {
   const parsed = typeof value === "number" ? value : Number(value);

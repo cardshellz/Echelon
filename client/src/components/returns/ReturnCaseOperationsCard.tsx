@@ -4,6 +4,7 @@ import { CheckCircle2, ClipboardCheck, Loader2, PackageCheck } from "lucide-reac
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
@@ -15,18 +16,29 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   ReturnCaseAdminApiError,
   completeReturnInspection,
   createReturnCaseIdempotencyKey,
+  recordReturnDisposition,
   recordReturnReceipt,
   startReturnInspection,
   type CompleteReturnInspectionResult,
+  type RecordReturnDispositionResult,
   type RecordReturnReceiptResult,
   type ReturnCaseAction,
   type ReturnCaseActionPlan,
   type ReturnCaseDetailItem,
+  type ReturnCaseDispositionSummary,
+  type ReturnCaseDispositionTreatment,
   type ReturnCaseOperationResult,
   type StartReturnInspectionResult,
 } from "./return-case-admin-api";
@@ -67,6 +79,37 @@ export type ReceiptDraftValidation =
       formError: string;
     };
 
+export interface DispositionDraftLine {
+  returnCaseItemId: number;
+  title: string;
+  sku: string | null;
+  receivedQuantity: number;
+  recordedQuantity: number;
+  remainingQuantity: number;
+  treatment: ReturnCaseDispositionTreatment | "";
+  quantity: string;
+}
+
+export type DispositionDraftValidation =
+  | {
+      success: true;
+      lines: Array<{
+        returnCaseItemId: number;
+        quantity: number;
+        treatment: ReturnCaseDispositionTreatment;
+        expectedCurrentReceivedQuantity: number;
+        expectedCurrentDisposedQuantity: number;
+      }>;
+      fieldErrors: Readonly<Record<number, string>>;
+      formError: null;
+    }
+  | {
+      success: false;
+      lines: [];
+      fieldErrors: Readonly<Record<number, string>>;
+      formError: string;
+    };
+
 /**
  * The server owns action availability. This component only renders and invokes
  * actions present in the supplied action plan; it never re-derives lifecycle
@@ -82,12 +125,19 @@ export function ReturnCaseOperationsCard({
   const [receiptAction, setReceiptAction] = useState<ReturnCaseAction | null>(null);
   const [inspectionAction, setInspectionAction] = useState<ReturnCaseAction | null>(null);
   const [completionDialogOpen, setCompletionDialogOpen] = useState(false);
+  const [dispositionDialogOpen, setDispositionDialogOpen] = useState(false);
   const [lastResult, setLastResult] = useState<ReturnCaseOperationResult | null>(null);
   const completionContext = resolveInspectionCompletionContext(actionPlan);
+  const dispositionAction = actionPlan.actions.find(
+    (action) => action.kind === "record_disposition" && action.state === "available",
+  ) ?? null;
 
   useEffect(() => {
     if (completionDialogOpen && completionContext === null) setCompletionDialogOpen(false);
   }, [completionContext, completionDialogOpen]);
+  useEffect(() => {
+    if (dispositionDialogOpen && dispositionAction === null) setDispositionDialogOpen(false);
+  }, [dispositionAction, dispositionDialogOpen]);
 
   const complete = (result: ReturnCaseOperationResult) => {
     setLastResult(result);
@@ -153,6 +203,12 @@ export function ReturnCaseOperationsCard({
                     {action.label}
                   </Button>
                 )}
+                {dispositionAction === action && (
+                  <Button type="button" size="sm" onClick={() => setDispositionDialogOpen(true)}>
+                    <PackageCheck />
+                    {action.label}
+                  </Button>
+                )}
               </div>
             ))}
           </div>
@@ -190,6 +246,20 @@ export function ReturnCaseOperationsCard({
         onRefreshRequested={onRefreshRequested}
         onCompleted={(result) => {
           setCompletionDialogOpen(false);
+          complete(result);
+        }}
+      />
+      <RecordReturnDispositionDialog
+        open={dispositionDialogOpen && dispositionAction !== null}
+        onOpenChange={setDispositionDialogOpen}
+        returnCaseId={returnCaseId}
+        action={dispositionAction}
+        inspectionId={actionPlan.inspectionSummary?.inspectionId ?? null}
+        items={items}
+        dispositionSummary={actionPlan.dispositionSummary}
+        onRefreshRequested={onRefreshRequested}
+        onCompleted={(result) => {
+          setDispositionDialogOpen(false);
           complete(result);
         }}
       />
@@ -835,6 +905,469 @@ export function CompleteReturnInspectionReview({
   );
 }
 
+type DispositionRefreshState = "idle" | "refreshing" | "refreshed" | "failed";
+
+export function shouldInitializeDispositionCommand(
+  open: boolean,
+  currentVersion: string | null,
+  nextVersion: string,
+): boolean {
+  return open && currentVersion !== nextVersion;
+}
+
+interface RecordReturnDispositionDialogProps {
+  open: boolean;
+  onOpenChange(open: boolean): void;
+  returnCaseId: number;
+  action: ReturnCaseAction | null;
+  inspectionId: number | null;
+  items: readonly ReturnCaseDetailItem[];
+  dispositionSummary: ReturnCaseDispositionSummary;
+  onCompleted(result: RecordReturnDispositionResult): void;
+  onRefreshRequested(): Promise<void>;
+}
+
+export function RecordReturnDispositionDialog({
+  open,
+  onOpenChange,
+  returnCaseId,
+  action,
+  inspectionId,
+  items,
+  dispositionSummary,
+  onCompleted,
+  onRefreshRequested,
+}: RecordReturnDispositionDialogProps) {
+  const openVersion = useRef<string | null>(null);
+  const dispositionVersion = [
+    inspectionId ?? "not-required",
+    ...dispositionSummary.items.map(
+      (item) => `${item.returnCaseItemId}:${item.receivedQuantity}:${item.recordedQuantity}`,
+    ),
+  ].join("|");
+  const [draft, setDraft] = useState<DispositionDraftLine[]>(() =>
+    createDispositionDraft(items, dispositionSummary));
+  const [notes, setNotes] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
+  const [attempted, setAttempted] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [refreshState, setRefreshState] = useState<DispositionRefreshState>("idle");
+  const validation = useMemo(() => validateDispositionDraft(draft), [draft]);
+
+  useEffect(() => {
+    if (!shouldInitializeDispositionCommand(open, openVersion.current, dispositionVersion)) return;
+    openVersion.current = dispositionVersion;
+    setDraft(createDispositionDraft(items, dispositionSummary));
+    setNotes("");
+    setConfirmed(false);
+    setAttempted(false);
+    setPending(false);
+    setError(null);
+    setRefreshState("idle");
+    try {
+      setIdempotencyKey(createReturnCaseIdempotencyKey("record_disposition"));
+    } catch (caught) {
+      setIdempotencyKey(null);
+      setError(caught);
+    }
+  }, [dispositionSummary, dispositionVersion, items, open]);
+
+  const refreshAfterConflict = async (operationError: unknown) => {
+    if (!isReturnCaseConflict(operationError)) return;
+    setRefreshState("refreshing");
+    const nextState = await refreshReturnCaseAfterConflict(operationError, onRefreshRequested);
+    setRefreshState(nextState === "not_requested" ? "idle" : nextState);
+  };
+
+  const payloadChanged = () => {
+    setError(null);
+    setRefreshState("idle");
+    if (!attempted) return;
+    setAttempted(false);
+    try {
+      setIdempotencyKey(createReturnCaseIdempotencyKey("record_disposition"));
+    } catch (caught) {
+      setIdempotencyKey(null);
+      setError(caught);
+    }
+  };
+
+  const submit = async () => {
+    const parsed = validateDispositionDraft(draft);
+    if (!parsed.success || !confirmed || idempotencyKey === null) return;
+    setAttempted(true);
+    setPending(true);
+    setError(null);
+    try {
+      const result = await recordReturnDisposition(returnCaseId, {
+        idempotencyKey,
+        inspectionId,
+        lines: parsed.lines,
+        notes,
+      });
+      onCompleted(result);
+    } catch (caught) {
+      setError(caught);
+      await refreshAfterConflict(caught);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => !pending && onOpenChange(nextOpen)}>
+      <DialogContent className="max-h-[90vh] max-w-5xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{action?.label ?? "Resolve returned items"}</DialogTitle>
+          <DialogDescription>
+            Record how physically received units should be treated. Select a treatment and quantity
+            explicitly for each line you want to resolve now.
+          </DialogDescription>
+        </DialogHeader>
+
+        <DispositionDecisionNotice />
+
+        <DispositionReview
+          draft={draft}
+          validation={validation}
+          pending={pending}
+          confirmed={confirmed}
+          onConfirmedChange={setConfirmed}
+          onLineChange={(index, change) => {
+            setDraft((current) => current.map((line, lineIndex) => (
+              lineIndex === index ? { ...line, ...change } : line
+            )));
+            payloadChanged();
+          }}
+        />
+
+        <div>
+          <label htmlFor="return-disposition-notes" className="mb-1 block text-sm font-medium">
+            Decision notes (optional)
+          </label>
+          <Textarea
+            id="return-disposition-notes"
+            value={notes}
+            maxLength={2_000}
+            disabled={pending}
+            placeholder="Condition evidence or reason for the selected treatment"
+            onChange={(event) => {
+              setNotes(event.target.value);
+              payloadChanged();
+            }}
+          />
+        </div>
+
+        {!validation.success && validation.formError && (
+          <InlineError>{validation.formError}</InlineError>
+        )}
+        {error !== null && <OperationError error={error} />}
+        {refreshState === "refreshing" && (
+          <Alert>
+            <Loader2 className="animate-spin" />
+            <AlertTitle>Refreshing return case</AlertTitle>
+            <AlertDescription>Loading the latest received and recorded quantities.</AlertDescription>
+          </Alert>
+        )}
+        {refreshState === "refreshed" && (
+          <Alert>
+            <CheckCircle2 />
+            <AlertTitle>Return case refreshed</AlertTitle>
+            <AlertDescription>Review the current quantities before submitting another command.</AlertDescription>
+          </Alert>
+        )}
+        {refreshState === "failed" && (
+          <Alert variant="destructive">
+            <AlertTitle>Return case could not be refreshed</AlertTitle>
+            <AlertDescription>Close this dialog and reopen the return case before trying again.</AlertDescription>
+          </Alert>
+        )}
+
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          {isReturnCaseConflict(error) && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending || refreshState === "refreshing"}
+              onClick={() => void refreshAfterConflict(error)}
+            >
+              {refreshState === "refreshing" && <Loader2 className="animate-spin" />}
+              Refresh return case
+            </Button>
+          )}
+          <Button
+            type="button"
+            disabled={
+              pending
+              || refreshState === "refreshing"
+              || !validation.success
+              || !confirmed
+              || idempotencyKey === null
+            }
+            onClick={() => void submit()}
+          >
+            {pending && <Loader2 className="animate-spin" />}
+            {pending ? "Recording..." : (action?.label ?? "Resolve returned items")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+export function DispositionDecisionNotice() {
+  return (
+    <Alert>
+      <ClipboardCheck />
+      <AlertTitle>This records a decision only</AlertTitle>
+      <AlertDescription>
+        This action does not move inventory, issue a customer refund, settle a vendor balance,
+        or close the return case. Recorded decisions are append-only; a later correction requires
+        a separate compensating action.
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+
+interface DispositionReviewProps {
+  draft: readonly DispositionDraftLine[];
+  validation: DispositionDraftValidation;
+  pending: boolean;
+  confirmed: boolean;
+  onConfirmedChange(value: boolean): void;
+  onLineChange(
+    index: number,
+    change: Partial<Pick<DispositionDraftLine, "treatment" | "quantity">>,
+  ): void;
+}
+
+export function DispositionReview({
+  draft,
+  validation,
+  pending,
+  confirmed,
+  onConfirmedChange,
+  onLineChange,
+}: DispositionReviewProps) {
+  return (
+    <>
+      <div className="overflow-x-auto border">
+        <table className="w-full min-w-[760px] text-sm">
+          <thead className="border-b bg-muted/40 text-left">
+            <tr>
+              <th className="px-3 py-2 font-medium">Returned item</th>
+              <th className="px-3 py-2 text-right font-medium">Received</th>
+              <th className="px-3 py-2 text-right font-medium">Recorded</th>
+              <th className="px-3 py-2 text-right font-medium">Remaining to resolve</th>
+              <th className="w-52 px-3 py-2 font-medium">Treatment</th>
+              <th className="w-32 px-3 py-2 font-medium">Quantity</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {draft.map((line, index) => (
+              <tr key={line.returnCaseItemId}>
+                <td className="px-3 py-2">
+                  <div className="font-medium">{line.title}</div>
+                  <div className="text-xs text-muted-foreground">{line.sku ?? "SKU not provided"}</div>
+                </td>
+                <td className="px-3 py-2 text-right">{line.receivedQuantity}</td>
+                <td className="px-3 py-2 text-right">{line.recordedQuantity}</td>
+                <td className="px-3 py-2 text-right">{line.remainingQuantity}</td>
+                <td className="px-3 py-2 align-top">
+                  <Select
+                    value={line.treatment || undefined}
+                    disabled={pending}
+                    onValueChange={(value) => {
+                      if (value === "restock_sellable" || value === "hold_non_sellable") {
+                        onLineChange(index, { treatment: value });
+                      }
+                    }}
+                  >
+                    <SelectTrigger aria-label={`Treatment for ${line.title}`}>
+                      <SelectValue placeholder="Select treatment" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="restock_sellable">Restock as sellable</SelectItem>
+                      <SelectItem value="hold_non_sellable">Hold as non-sellable</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </td>
+                <td className="px-3 py-2 align-top">
+                  <Input
+                    aria-label={`Disposition quantity for ${line.title}`}
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={line.remainingQuantity}
+                    step={1}
+                    value={line.quantity}
+                    disabled={pending}
+                    aria-invalid={validation.fieldErrors[line.returnCaseItemId] ? true : undefined}
+                    onChange={(event) => onLineChange(index, { quantity: event.target.value })}
+                  />
+                  {validation.fieldErrors[line.returnCaseItemId] && (
+                    <p className="mt-1 text-xs text-destructive">
+                      {validation.fieldErrors[line.returnCaseItemId]}
+                    </p>
+                  )}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="mt-1 h-auto px-0 py-1 text-xs"
+                    disabled={pending || (line.treatment === "" && line.quantity === "")}
+                    aria-label={`Clear disposition decision for ${line.title}`}
+                    onClick={() => onLineChange(index, {
+                      treatment: "",
+                      quantity: "",
+                    })}
+                  >
+                    Clear / skip
+                  </Button>
+                </td>
+              </tr>
+            ))}
+            {draft.length === 0 && (
+              <tr>
+                <td colSpan={6} className="p-4 text-center text-muted-foreground">
+                  No received units remain to be resolved.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <label className="flex items-start gap-3 border p-3 text-sm">
+        <Checkbox
+          checked={confirmed}
+          disabled={pending}
+          onCheckedChange={(value) => onConfirmedChange(value === true)}
+          aria-label="Confirm append-only disposition decision"
+        />
+        <span>
+          I understand these decisions are append-only. Any later correction must be recorded
+          through a separate compensating action.
+        </span>
+      </label>
+    </>
+  );
+}
+
+export function createDispositionDraft(
+  items: readonly ReturnCaseDetailItem[],
+  summary: ReturnCaseDispositionSummary,
+): DispositionDraftLine[] {
+  const itemsById = new Map(items.map((item) => [item.id, item]));
+  return summary.items
+    .filter((summaryItem) => summaryItem.remainingQuantity > 0)
+    .map((summaryItem) => {
+      const item = itemsById.get(summaryItem.returnCaseItemId);
+      return {
+        returnCaseItemId: summaryItem.returnCaseItemId,
+        title: item?.title || item?.externalLineItemId || `Return item #${summaryItem.returnCaseItemId}`,
+        sku: item?.sku ?? null,
+        receivedQuantity: summaryItem.receivedQuantity,
+        recordedQuantity: summaryItem.recordedQuantity,
+        remainingQuantity: summaryItem.remainingQuantity,
+        treatment: "" as const,
+        quantity: "",
+      };
+    })
+    .sort((left, right) => left.returnCaseItemId - right.returnCaseItemId);
+}
+
+export function validateDispositionDraft(
+  draft: readonly DispositionDraftLine[],
+): DispositionDraftValidation {
+  const fieldErrors: Record<number, string> = {};
+  const lines: Array<{
+    returnCaseItemId: number;
+    quantity: number;
+    treatment: ReturnCaseDispositionTreatment;
+    expectedCurrentReceivedQuantity: number;
+    expectedCurrentDisposedQuantity: number;
+  }> = [];
+  const seenIds = new Set<number>();
+
+  for (const line of draft) {
+    if (!Number.isSafeInteger(line.returnCaseItemId) || line.returnCaseItemId <= 0) {
+      fieldErrors[line.returnCaseItemId] = "Return item identity is invalid.";
+      continue;
+    }
+    if (seenIds.has(line.returnCaseItemId)) {
+      fieldErrors[line.returnCaseItemId] = "This return item appears more than once.";
+      continue;
+    }
+    seenIds.add(line.returnCaseItemId);
+
+    if (!Number.isSafeInteger(line.receivedQuantity) || line.receivedQuantity < 0
+      || !Number.isSafeInteger(line.recordedQuantity) || line.recordedQuantity < 0
+      || !Number.isSafeInteger(line.remainingQuantity) || line.remainingQuantity < 0
+      || line.recordedQuantity + line.remainingQuantity !== line.receivedQuantity) {
+      fieldErrors[line.returnCaseItemId] = "Displayed disposition quantities are invalid. Refresh the return case.";
+      continue;
+    }
+
+    const normalizedQuantity = line.quantity.trim();
+    const hasQuantity = normalizedQuantity !== "";
+    if (line.treatment === "" && !hasQuantity) continue;
+    if (line.treatment === "") {
+      fieldErrors[line.returnCaseItemId] = "Select a treatment for this quantity.";
+      continue;
+    }
+    if (!hasQuantity) {
+      fieldErrors[line.returnCaseItemId] = "Enter a quantity for this treatment.";
+      continue;
+    }
+    const quantity = Number(normalizedQuantity);
+    if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+      fieldErrors[line.returnCaseItemId] = "Enter a positive whole-number quantity.";
+      continue;
+    }
+    if (quantity > line.remainingQuantity) {
+      fieldErrors[line.returnCaseItemId] =
+        `No more than ${line.remainingQuantity} unit${plural(line.remainingQuantity)} remain to dispose.`;
+      continue;
+    }
+    lines.push({
+      returnCaseItemId: line.returnCaseItemId,
+      quantity,
+      treatment: line.treatment,
+      expectedCurrentReceivedQuantity: line.receivedQuantity,
+      expectedCurrentDisposedQuantity: line.recordedQuantity,
+    });
+  }
+
+  if (Object.keys(fieldErrors).length > 0) {
+    return {
+      success: false,
+      lines: [],
+      fieldErrors: Object.freeze(fieldErrors),
+      formError: "Correct the disposition decisions before continuing.",
+    };
+  }
+  if (lines.length === 0) {
+    return {
+      success: false,
+      lines: [],
+      fieldErrors: Object.freeze(fieldErrors),
+      formError: "Select a treatment and quantity for at least one returned item.",
+    };
+  }
+  return {
+    success: true,
+    lines: lines.sort((left, right) => left.returnCaseItemId - right.returnCaseItemId),
+    fieldErrors: Object.freeze(fieldErrors),
+    formError: null,
+  };
+}
+
 export function createReceiptDraft(
   items: readonly ReturnCaseDetailItem[],
 ): ReceiptDraftLine[] {
@@ -982,6 +1515,12 @@ function operationSuccessContent(result: ReturnCaseOperationResult): { title: st
     return {
       title: result.replayed ? "Inspection was already started" : "Inspection started",
       message: `Inspection ${result.inspectionId} was started at ${new Date(result.startedAt).toLocaleString()}.`,
+    };
+  }
+  if (result.commandType === "record_disposition") {
+    return {
+      title: result.replayed ? "Disposition decision already recorded" : "Disposition decision recorded",
+      message: `${result.dispositionSummary.recordedUnits} of ${result.dispositionSummary.receivedUnits} received units now have treatment decisions; ${result.dispositionSummary.remainingUnits} remain. No inventory was moved.`,
     };
   }
   const outcome = result.inspectionStatus === "approved" ? "approved" : "rejected";

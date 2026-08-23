@@ -4,11 +4,17 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   CompleteReturnInspectionReview,
+  DispositionDecisionNotice,
+  DispositionReview,
   ReturnCaseOperationsCard,
+  createDispositionDraft,
   createReceiptDraft,
   refreshReturnCaseAfterConflict,
   resolveInspectionCompletionContext,
+  shouldInitializeDispositionCommand,
+  validateDispositionDraft,
   validateReceiptDraft,
+  type DispositionDraftLine,
   type ReceiptDraftLine,
 } from "../ReturnCaseOperationsCard";
 import {
@@ -238,7 +244,7 @@ describe("ReturnCaseOperationsCard", () => {
 
   it("refreshes exactly once after a 409 conflict and classifies refresh failure", async () => {
     const conflict = new ReturnCaseAdminApiError({
-      code: "RETURN_CASE_INSPECTION_STATE_STALE",
+      code: "RETURN_DISPOSITION_STATE_CONFLICT",
       message: "Refresh the return case and try again.",
       status: 409,
     });
@@ -282,6 +288,96 @@ describe("ReturnCaseOperationsCard", () => {
     expect(markup).not.toContain("<button");
   });
 });
+describe("return disposition operation", () => {
+  it("renders a server-authorized disposition action without requiring inspection evidence", () => {
+    const markup = renderToStaticMarkup(createElement(ReturnCaseOperationsCard, {
+      returnCaseId: 42,
+      actionPlan: actionPlan({
+        nextAction: "record_disposition",
+        receiptSummary: {
+          expectedUnits: 2,
+          receivedUnits: 2,
+          remainingUnits: 0,
+          fullyReceived: true,
+          partiallyReceived: false,
+        },
+        inspectionSummary: null,
+        dispositionSummary: {
+          receivedUnits: 2,
+          recordedUnits: 0,
+          remainingUnits: 2,
+          fullyRecorded: false,
+          partiallyRecorded: false,
+          items: [{
+            returnCaseItemId: 11,
+            receivedQuantity: 2,
+            restockSellableQuantity: 0,
+            holdNonSellableQuantity: 0,
+            recordedQuantity: 0,
+            remainingQuantity: 2,
+          }],
+        },
+        actions: [{
+          kind: "record_disposition",
+          label: "Resolve returned items",
+          description: "Record explicit disposition intent without moving inventory.",
+          state: "available",
+          reasonCode: null,
+        }],
+      }),
+      items: [item({
+        expectedQuantity: 2,
+        receivedQuantity: 2,
+        remainingQuantity: 0,
+        receiptStatus: "received",
+      })],
+      onRefreshRequested: async () => undefined,
+    }));
+
+    expect(markup).toContain("Resolve returned items");
+    expect(markup).toContain("Record explicit disposition intent without moving inventory.");
+    expect(markup).toContain(">Next<");
+    expect(markup).toContain("<button");
+  });
+
+  it("renders explicit decision-only and append-only disposition warnings", () => {
+    const noticeMarkup = renderToStaticMarkup(createElement(DispositionDecisionNotice));
+    const reviewMarkup = renderToStaticMarkup(createElement(DispositionReview, {
+      draft: [dispositionLine({ treatment: "", quantity: "" })],
+      validation: validateDispositionDraft([dispositionLine({ treatment: "", quantity: "" })]),
+      pending: false,
+      confirmed: false,
+      onConfirmedChange: () => undefined,
+      onLineChange: () => undefined,
+    }));
+
+    expect(noticeMarkup).toContain("This records a decision only");
+    expect(noticeMarkup).toContain("does not move inventory");
+    expect(noticeMarkup).toContain("issue a customer refund");
+    expect(noticeMarkup).toContain("settle a vendor balance");
+    expect(noticeMarkup).toContain("close the return case");
+    expect(noticeMarkup).toContain("separate compensating action");
+    expect(reviewMarkup).toContain("Remaining to resolve");
+    expect(reviewMarkup).toContain("Select treatment");
+    expect(reviewMarkup).toContain("Clear / skip");
+    expect(reviewMarkup).toContain("decisions are append-only");
+    expect(reviewMarkup).toContain("separate compensating action");
+  });
+  it("preserves command state across unchanged close and reopen", () => {
+    expect(shouldInitializeDispositionCommand(false, "inspection:null|11:2:0", "inspection:null|11:2:0"))
+      .toBe(false);
+    expect(shouldInitializeDispositionCommand(false, "inspection:null|11:2:0", "inspection:91|11:2:0"))
+      .toBe(false);
+    expect(shouldInitializeDispositionCommand(true, "inspection:null|11:2:0", "inspection:null|11:2:0"))
+      .toBe(false);
+    expect(shouldInitializeDispositionCommand(true, null, "inspection:null|11:2:0"))
+      .toBe(true);
+    expect(shouldInitializeDispositionCommand(true, "inspection:null|11:2:0", "inspection:91|11:2:0"))
+      .toBe(true);
+  });
+});
+
+
 
 describe("receipt draft", () => {
   it("starts each outstanding line blank and preserves its displayed receipt version", () => {
@@ -358,6 +454,188 @@ describe("receipt draft", () => {
     });
   });
 });
+describe("disposition draft", () => {
+  it("starts every unresolved line with no treatment or quantity selected", () => {
+    const draft = createDispositionDraft(
+      [
+        item({ id: 12, title: "Already resolved", receivedQuantity: 2 }),
+        item({ id: 11, title: "Needs decision", receivedQuantity: 2 }),
+      ],
+      {
+        receivedUnits: 4,
+        recordedUnits: 2,
+        remainingUnits: 2,
+        fullyRecorded: false,
+        partiallyRecorded: true,
+        items: [
+          {
+            returnCaseItemId: 12,
+            receivedQuantity: 2,
+            restockSellableQuantity: 2,
+            holdNonSellableQuantity: 0,
+            recordedQuantity: 2,
+            remainingQuantity: 0,
+          },
+          {
+            returnCaseItemId: 11,
+            receivedQuantity: 2,
+            restockSellableQuantity: 0,
+            holdNonSellableQuantity: 0,
+            recordedQuantity: 0,
+            remainingQuantity: 2,
+          },
+        ],
+      },
+    );
+
+    expect(draft).toEqual([expect.objectContaining({
+      returnCaseItemId: 11,
+      title: "Needs decision",
+      receivedQuantity: 2,
+      recordedQuantity: 0,
+      remainingQuantity: 2,
+      treatment: "",
+      quantity: "",
+    })]);
+  });
+
+  it("emits deterministic partial disposition deltas with exact optimistic evidence", () => {
+    const result = validateDispositionDraft([
+      dispositionLine({
+        returnCaseItemId: 12,
+        receivedQuantity: 3,
+        recordedQuantity: 1,
+        remainingQuantity: 2,
+        treatment: "hold_non_sellable",
+        quantity: "1",
+      }),
+      dispositionLine({
+        returnCaseItemId: 11,
+        receivedQuantity: 2,
+        recordedQuantity: 0,
+        remainingQuantity: 2,
+        treatment: "restock_sellable",
+        quantity: "2",
+      }),
+    ]);
+
+    expect(result).toEqual({
+      success: true,
+      lines: [
+        {
+          returnCaseItemId: 11,
+          quantity: 2,
+          treatment: "restock_sellable",
+          expectedCurrentReceivedQuantity: 2,
+          expectedCurrentDisposedQuantity: 0,
+        },
+        {
+          returnCaseItemId: 12,
+          quantity: 1,
+          treatment: "hold_non_sellable",
+          expectedCurrentReceivedQuantity: 3,
+          expectedCurrentDisposedQuantity: 1,
+        },
+      ],
+      fieldErrors: {},
+      formError: null,
+    });
+  });
+  it("skips a cleared line while another explicit decision submits", () => {
+    const result = validateDispositionDraft([
+      dispositionLine({
+        returnCaseItemId: 11,
+        treatment: "",
+        quantity: "",
+      }),
+      dispositionLine({
+        returnCaseItemId: 12,
+        treatment: "hold_non_sellable",
+        quantity: "1",
+      }),
+    ]);
+
+    expect(result).toEqual({
+      success: true,
+      lines: [{
+        returnCaseItemId: 12,
+        quantity: 1,
+        treatment: "hold_non_sellable",
+        expectedCurrentReceivedQuantity: 2,
+        expectedCurrentDisposedQuantity: 0,
+      }],
+      fieldErrors: {},
+      formError: null,
+    });
+  });
+
+
+  it.each([
+    {
+      name: "quantity without treatment",
+      draft: [dispositionLine({ treatment: "", quantity: "1" })],
+      error: "Select a treatment for this quantity.",
+    },
+    {
+      name: "treatment without quantity",
+      draft: [dispositionLine({ treatment: "restock_sellable", quantity: "" })],
+      error: "Enter a quantity for this treatment.",
+    },
+    {
+      name: "non-positive quantity",
+      draft: [dispositionLine({ treatment: "restock_sellable", quantity: "0" })],
+      error: "Enter a positive whole-number quantity.",
+    },
+    {
+      name: "fractional quantity",
+      draft: [dispositionLine({ treatment: "restock_sellable", quantity: "1.5" })],
+      error: "Enter a positive whole-number quantity.",
+    },
+    {
+      name: "quantity above remaining",
+      draft: [dispositionLine({ treatment: "hold_non_sellable", quantity: "3" })],
+      error: "No more than 2 units remain to dispose.",
+    },
+    {
+      name: "inconsistent displayed evidence",
+      draft: [dispositionLine({
+        receivedQuantity: 3,
+        recordedQuantity: 0,
+        remainingQuantity: 2,
+        treatment: "hold_non_sellable",
+        quantity: "1",
+      })],
+      error: "Displayed disposition quantities are invalid. Refresh the return case.",
+    },
+    {
+      name: "duplicate return item",
+      draft: [
+        dispositionLine({ treatment: "restock_sellable", quantity: "1" }),
+        dispositionLine({ treatment: "hold_non_sellable", quantity: "1" }),
+      ],
+      error: "This return item appears more than once.",
+    },
+  ])("rejects $name", ({ draft, error }) => {
+    const result = validateDispositionDraft(draft);
+
+    expect(result.success).toBe(false);
+    expect(Object.values(result.fieldErrors)).toContain(error);
+    expect(result.formError).toBe("Correct the disposition decisions before continuing.");
+  });
+
+  it("requires at least one explicit complete decision", () => {
+    const result = validateDispositionDraft([
+      dispositionLine({ treatment: "", quantity: "" }),
+    ]);
+
+    expect(result).toMatchObject({
+      success: false,
+      fieldErrors: {},
+      formError: "Select a treatment and quantity for at least one returned item.",
+    });
+  });
+});
+
 
 function actionPlan(overrides: Partial<ReturnCaseActionPlan>): ReturnCaseActionPlan {
   return {
@@ -368,6 +646,14 @@ function actionPlan(overrides: Partial<ReturnCaseActionPlan>): ReturnCaseActionP
       remainingUnits: 0,
       fullyReceived: false,
       partiallyReceived: false,
+    },
+    dispositionSummary: {
+      receivedUnits: 0,
+      recordedUnits: 0,
+      remainingUnits: 0,
+      fullyRecorded: false,
+      partiallyRecorded: false,
+      items: [],
     },
     inspectionSummary: null,
     actions: [],
@@ -405,6 +691,20 @@ function draftLine(overrides: Partial<ReceiptDraftLine>): ReceiptDraftLine {
     receivedQuantity: 0,
     remainingQuantity: 3,
     quantityReceivedNow: "1",
+    ...overrides,
+  };
+}
+
+function dispositionLine(overrides: Partial<DispositionDraftLine>): DispositionDraftLine {
+  return {
+    returnCaseItemId: 11,
+    title: "Item 11",
+    sku: "SKU-11",
+    receivedQuantity: 2,
+    recordedQuantity: 0,
+    remainingQuantity: 2,
+    treatment: "",
+    quantity: "",
     ...overrides,
   };
 }

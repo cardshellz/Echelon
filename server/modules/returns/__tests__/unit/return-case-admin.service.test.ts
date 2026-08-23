@@ -173,6 +173,7 @@ describe("ReturnCaseAdminService", () => {
         { kind: "record_receipt", state: "available" },
         { kind: "start_inspection", state: "blocked" },
         { kind: "complete_inspection", state: "blocked" },
+        { kind: "record_disposition", state: "blocked" },
       ],
     });
     expect(result.events[0]).toMatchObject({
@@ -233,6 +234,7 @@ describe("ReturnCaseAdminService", () => {
       expect.objectContaining({ kind: "record_receipt", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
       expect.objectContaining({ kind: "start_inspection", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
       expect.objectContaining({ kind: "complete_inspection", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
+      expect.objectContaining({ kind: "record_disposition", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
     ]);
   });
 
