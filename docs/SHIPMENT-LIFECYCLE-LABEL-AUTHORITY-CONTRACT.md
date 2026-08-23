@@ -625,9 +625,15 @@ Still unproven:
 
 ## Schema Direction for Runtime Phase
 
-Status: recommended shape only. No migration is authorized. Provider-facing
-field names and timestamp semantics remain provisional until each operation is
-proven through durable natural-traffic or controlled evidence.
+Status: the inert Phase 1 ledger and persistence foundation is installed by
+`198_package_allocation_ledger_foundation.sql` and
+`199_package_allocation_persistence_foundation.sql`. Its planner and repository
+remain unwired from production runtime paths, and every stored effect intent is
+database-constrained to `executable = FALSE`. This foundation does not authorize
+runtime projection, provider mutation, inventory posting, commercial
+fulfillment, or customer notification. Provider-facing field names and
+timestamp semantics remain provisional until each enabled operation is proven
+through durable natural-traffic or controlled evidence.
 
 The current model already has useful immutable label-event evidence, physical
 package rows, exact physical lines, replacement-purpose lineage, and durable

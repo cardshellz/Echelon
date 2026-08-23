@@ -24,6 +24,7 @@ import {
   type PersistedPackageAllocationIntent,
 } from "../../package-allocation-ledger.repository";
 import {
+  PACKAGE_ALLOCATION_PLANNER_VERSION,
   PackageAllocationPlanningService,
   type PersistPackageAllocationPlanCommand,
   type PersistPackageAllocationPlanResult,
@@ -422,6 +423,162 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       provider: "shipstation",
       provider_physical_shipment_id: "44001",
     }]);
+  });
+
+  it("persists a partial cancellation with exact action evidence and replays without duplicates", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-CANCEL", 2);
+    const baseCommand = commandFor(sourceId);
+    const sourcePackage = baseCommand.packages[0];
+    const initialCommand: PersistPackageAllocationPlanCommand = {
+      ...baseCommand,
+      packages: [{
+        ...sourcePackage,
+        lifecycle: {
+          ...sourcePackage.lifecycle,
+          events: [
+            ...sourcePackage.lifecycle.events,
+            {
+              kind: "outbound_label_voided",
+              eventKey: "shipstation:44001:voided",
+              observedAt: "2026-08-22T14:01:00.000Z",
+              providerOccurredAt: "2026-08-22T14:00:30.000Z",
+            },
+          ],
+        },
+      }],
+    };
+    const cancellationAction = {
+      kind: "cancel_awaiting_allocation" as const,
+      actionKey: "fulfillment-cancellation:7001:1",
+      fromPackageKey: "package-a",
+      wmsShipmentItemId: sourceId,
+      quantity: 1,
+      authorization: {
+        kind: "lead_approved" as const,
+        actor: "shipping-lead-42",
+        reason: "Cancel one exact unit before carrier possession",
+      },
+    };
+    const cancellationCommand: PersistPackageAllocationPlanCommand = {
+      ...initialCommand,
+      expectedGroupVersion: 1,
+      actions: [cancellationAction],
+      writeContext: {
+        createdBy: "package-allocation-postgres-integration",
+        reason: "Persist exact pre-possession fulfillment cancellation evidence",
+      },
+    };
+    const repository = new PgPackageAllocationLedgerRepository(pool);
+    const service = new PackageAllocationPlanningService(repository);
+
+    const initial = await service.persist(initialCommand);
+    const cancelled = await service.persist(cancellationCommand);
+
+    expect(initial).toMatchObject({
+      kind: "created",
+      persistedPlanVersion: 1,
+      currentGroupVersion: 1,
+    });
+    expect(cancelled).toMatchObject({
+      kind: "created",
+      persistedPlanVersion: 2,
+      currentGroupVersion: 2,
+      plannerResult: {
+        outcome: "proposed",
+        state: {
+          appliedActionKeys: [cancellationAction.actionKey],
+          reviews: [],
+        },
+      },
+    });
+    expect(cancelled.planId).not.toBeNull();
+    expect(cancelled.plannerResult.state.actionEvidence).toHaveLength(1);
+    expect(cancelled.plannerResult.state.actionEvidence[0]).toMatchObject({
+      actionKey: cancellationAction.actionKey,
+      action: cancellationAction,
+    });
+    expect(cancelled.plannerResult.state.actionEvidence[0].actionHash).toMatch(/^[0-9a-f]{64}$/);
+
+    const persistedGraph = await repository.withSerializableTransaction(async (transaction) => ({
+      plan: await transaction.loadPlanByVersion(cancelled.groupId, 2),
+      entries: await transaction.loadPlanEntries(cancelled.planId!),
+      intents: await transaction.loadPlanIntents(cancelled.planId!),
+    }));
+    expect(persistedGraph.plan).not.toBeNull();
+    expect(persistedGraph.plan?.plannerVersion).toBe(PACKAGE_ALLOCATION_PLANNER_VERSION);
+    expect(persistedGraph.plan?.plannerVersion).toBe("package-allocation-group-v2");
+    expect(persistedGraph.plan?.stateSnapshot).toEqual(cancelled.plannerResult.state);
+    expect(persistedGraph.plan?.reviewSnapshot).toEqual({
+      contractVersion: 1,
+      reviews: [],
+    });
+    expect(persistedGraph.entries).toEqual(
+      cancelled.plannerResult.ledgerEntriesToAppend.map(expectedEntry),
+    );
+    expect(persistedGraph.intents).toEqual(
+      cancelled.plannerResult.effectIntentsToAppend.map(expectedIntent),
+    );
+
+    const conservation = await pool.query<{
+      source_wms_shipment_item_id: number;
+      total_primary_quantity: number;
+      awaiting_relabel_quantity: number;
+      held_for_unpack_quantity: number;
+    }>(
+      `SELECT
+         source.source_wms_shipment_item_id,
+         COALESCE(SUM(entry.quantity) FILTER (
+           WHERE entry.allocation_kind = 'primary_transfer'
+         ), 0)::integer AS total_primary_quantity,
+         COALESCE(SUM(entry.quantity) FILTER (
+           WHERE entry.allocation_kind = 'primary_transfer'
+             AND entry.target_kind = 'awaiting_relabel'
+         ), 0)::integer AS awaiting_relabel_quantity,
+         COALESCE(SUM(entry.quantity) FILTER (
+           WHERE entry.allocation_kind = 'primary_transfer'
+             AND entry.target_kind = 'held_for_unpack'
+         ), 0)::integer AS held_for_unpack_quantity
+       FROM wms.package_allocation_entries AS entry
+       JOIN wms.package_allocation_source_lines AS source
+         ON source.id = entry.package_allocation_source_line_id
+       WHERE entry.package_allocation_plan_id = $1::bigint
+       GROUP BY source.source_wms_shipment_item_id`,
+      [cancelled.planId],
+    );
+    expect(conservation.rows).toEqual([{
+      source_wms_shipment_item_id: sourceId,
+      total_primary_quantity: 2,
+      awaiting_relabel_quantity: 1,
+      held_for_unpack_quantity: 1,
+    }]);
+
+    const countsBeforeReplay = await loadLedgerCounts(pool);
+    expect(countsBeforeReplay).toEqual({
+      groups: 1,
+      sourceLines: 1,
+      memberships: 1,
+      allocationKeys: 1,
+      packageBindings: 1,
+      plans: 2,
+      entries:
+        initial.plannerResult.ledgerEntriesToAppend.length
+        + cancelled.plannerResult.ledgerEntriesToAppend.length,
+      intents:
+        initial.plannerResult.effectIntentsToAppend.length
+        + cancelled.plannerResult.effectIntentsToAppend.length,
+    });
+
+    const replay = await service.persist(structuredClone(cancellationCommand));
+
+    expect(replay).toMatchObject({
+      kind: "already_persisted",
+      groupId: cancelled.groupId,
+      planId: cancelled.planId,
+      persistedPlanVersion: 2,
+      currentGroupVersion: 2,
+    });
+    expect(replay.plannerResult.state).toEqual(cancelled.plannerResult.state);
+    expect(await loadLedgerCounts(pool)).toEqual(countsBeforeReplay);
   });
 
   it("rolls back every ledger row when a deferred failure occurs after CAS", async () => {

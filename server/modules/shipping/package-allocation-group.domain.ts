@@ -101,12 +101,14 @@ const transferTargetSchema = z.object({
   quantity: positivePostgresInteger,
 }).strict();
 
+const leadApprovedAuthorizationSchema = z.object({
+  kind: z.literal("lead_approved"),
+  actor: boundedIdentifier("authorization.actor", 200),
+  reason: boundedIdentifier("authorization.reason", 500),
+}).strict();
+
 const transferAuthorizationSchema = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("lead_approved"),
-    actor: boundedIdentifier("authorization.actor", 200),
-    reason: boundedIdentifier("authorization.reason", 500),
-  }).strict(),
+  leadApprovedAuthorizationSchema,
   z.object({
     kind: z.literal("authenticated_provider_correction"),
     evidenceKey: boundedIdentifier("authorization.evidenceKey", 300),
@@ -120,10 +122,22 @@ const transferActionSchema = z.object({
   targets: z.array(transferTargetSchema).min(1).max(500),
   authorization: transferAuthorizationSchema,
 }).strict();
+const cancellationActionSchema = z.object({
+  kind: z.literal("cancel_awaiting_allocation"),
+  actionKey: boundedIdentifier("actionKey", 300),
+  fromPackageKey: boundedIdentifier("fromPackageKey", 180),
+  wmsShipmentItemId: positivePostgresInteger,
+  quantity: positivePostgresInteger,
+  authorization: leadApprovedAuthorizationSchema,
+}).strict();
+const packageAllocationGroupActionSchema = z.discriminatedUnion("kind", [
+  transferActionSchema,
+  cancellationActionSchema,
+]);
 const actionEvidenceSchema = z.object({
   actionKey: boundedIdentifier("previousPlan.actionEvidence.actionKey", 300),
   actionHash: hashSchema,
-  action: transferActionSchema,
+  action: packageAllocationGroupActionSchema,
 }).strict();
 type ParsedActionEvidence = z.infer<typeof actionEvidenceSchema>;
 
@@ -147,12 +161,18 @@ export const packageAllocationGroupPlannerInputSchema = z.object({
   previousPlan: packageAllocationGroupPreviousPlanSchema.nullable(),
   sourceLines: z.array(sourceLineSchema).min(1).max(MAX_SOURCE_LINES),
   packages: z.array(packageSchema).min(1).max(MAX_PACKAGES),
-  actions: z.array(transferActionSchema).max(500),
+  actions: z.array(packageAllocationGroupActionSchema).max(500),
 }).strict();
 
 type ParsedPlannerInput = z.infer<typeof packageAllocationGroupPlannerInputSchema>;
 export type PackageAllocationGroupSourceLine = z.infer<typeof sourceLineSchema>;
-export type PackageAllocationGroupAction = z.infer<typeof transferActionSchema>;
+type PackageAllocationGroupTransferAction = z.infer<typeof transferActionSchema>;
+type PackageAllocationGroupCancellationAction = z.infer<typeof cancellationActionSchema>;
+export type PackageAllocationGroupAction =
+  | PackageAllocationGroupTransferAction
+  | (PackageAllocationGroupCancellationAction & {
+    readonly targets?: never;
+  });
 
 export interface PackageAllocationGroupActionEvidenceV1 {
   readonly actionKey: string;
@@ -243,7 +263,12 @@ export interface PackageAllocationEffectIntentV1 {
 }
 
 export type PackageAllocationReviewCode =
+  | "cancellation_after_carrier_lock"
+  | "cancellation_exceeds_awaiting_relabel"
+  | "cancellation_superseded_by_carrier_possession"
+  | "competing_allocation_actions"
   | "competing_transfer_actions"
+  | "invalid_cancellation_source"
   | "invalid_transfer_source"
   | "invalid_transfer_target"
   | "late_possession_requires_previous_ledger"
@@ -351,7 +376,7 @@ interface ProjectedPackage {
 
 interface MutablePrimarySegment {
   readonly originPackageKey: string | null;
-  targetKind: "package" | "awaiting_relabel";
+  targetKind: PackageAllocationTargetKind;
   packageKey: string | null;
   quantity: number;
 }
@@ -451,29 +476,34 @@ function normalizeActions(
 ): readonly PackageAllocationGroupAction[] {
   const byKey = new Map<string, { canonical: string; action: PackageAllocationGroupAction }>();
   for (const action of actions) {
-    const targetIdentities = new Set<string>();
-    for (const target of action.targets) {
-      const targetIdentity = canonicalJson([target.packageKey, target.wmsShipmentItemId]);
-      if (targetIdentities.has(targetIdentity)) {
-        throw new PackageAllocationGroupError(
-          "DUPLICATE_IDENTITY",
-          "A transfer action may identify a package line only once",
-          {
-            actionKey: action.actionKey,
-            packageKey: target.packageKey,
-            wmsShipmentItemId: target.wmsShipmentItemId,
-          },
-        );
+    let normalized: PackageAllocationGroupAction;
+    if (action.kind === "transfer_awaiting_allocation") {
+      const targetIdentities = new Set<string>();
+      for (const target of action.targets) {
+        const targetIdentity = canonicalJson([target.packageKey, target.wmsShipmentItemId]);
+        if (targetIdentities.has(targetIdentity)) {
+          throw new PackageAllocationGroupError(
+            "DUPLICATE_IDENTITY",
+            "A transfer action may identify a package line only once",
+            {
+              actionKey: action.actionKey,
+              packageKey: target.packageKey,
+              wmsShipmentItemId: target.wmsShipmentItemId,
+            },
+          );
+        }
+        targetIdentities.add(targetIdentity);
       }
-      targetIdentities.add(targetIdentity);
+      normalized = {
+        ...action,
+        targets: [...action.targets]
+          .sort((left, right) => compareText(left.packageKey, right.packageKey)
+            || left.wmsShipmentItemId - right.wmsShipmentItemId
+            || left.quantity - right.quantity),
+      };
+    } else {
+      normalized = { ...action };
     }
-    const normalized: PackageAllocationGroupAction = {
-      ...action,
-      targets: [...action.targets]
-        .sort((left, right) => compareText(left.packageKey, right.packageKey)
-          || left.wmsShipmentItemId - right.wmsShipmentItemId
-          || left.quantity - right.quantity),
-    };
     const canonical = canonicalJson(normalized);
     const existing = byKey.get(normalized.actionKey);
     if (existing && existing.canonical !== canonical) {
@@ -903,7 +933,10 @@ export function planPackageAllocationGroup(
   }
   const priorTransferSourceKeys = new Set(
     actions
-      .filter((action) => previousAppliedActionKeys.has(action.actionKey))
+      .filter((action) => (
+        action.kind === "transfer_awaiting_allocation"
+        && previousAppliedActionKeys.has(action.actionKey)
+      ))
       .map((action) => action.fromPackageKey),
   );
   const latePossessionTransferSourceKeys = new Set(
@@ -990,19 +1023,33 @@ export function planPackageAllocationGroup(
     readonly wmsShipmentItemId: number;
     readonly actionKeys: Set<string>;
     readonly targetPackageKeys: Set<string>;
+    readonly actionKinds: Set<PackageAllocationGroupAction["kind"]>;
   }>();
   for (const action of actions) {
     if (previousAppliedActionKeys.has(action.actionKey)) continue;
-    for (const target of action.targets) {
-      const claimKey = canonicalJson([action.fromPackageKey, target.wmsShipmentItemId]);
+    const actionClaims = action.kind === "transfer_awaiting_allocation"
+      ? action.targets.map((target) => ({
+        wmsShipmentItemId: target.wmsShipmentItemId,
+        targetPackageKey: target.packageKey as string | null,
+      }))
+      : [{
+        wmsShipmentItemId: action.wmsShipmentItemId,
+        targetPackageKey: null,
+      }];
+    for (const actionClaim of actionClaims) {
+      const claimKey = canonicalJson([action.fromPackageKey, actionClaim.wmsShipmentItemId]);
       const claim = newClaims.get(claimKey) ?? {
         fromPackageKey: action.fromPackageKey,
-        wmsShipmentItemId: target.wmsShipmentItemId,
+        wmsShipmentItemId: actionClaim.wmsShipmentItemId,
         actionKeys: new Set<string>(),
         targetPackageKeys: new Set<string>(),
+        actionKinds: new Set<PackageAllocationGroupAction["kind"]>(),
       };
       claim.actionKeys.add(action.actionKey);
-      claim.targetPackageKeys.add(target.packageKey);
+      claim.actionKinds.add(action.kind);
+      if (actionClaim.targetPackageKey !== null) {
+        claim.targetPackageKeys.add(actionClaim.targetPackageKey);
+      }
       newClaims.set(claimKey, claim);
     }
   }
@@ -1010,7 +1057,10 @@ export function planPackageAllocationGroup(
     if (claim.actionKeys.size < 2) continue;
     for (const actionKey of claim.actionKeys) competingNewActionKeys.add(actionKey);
     reviews.push(review(
-      "competing_transfer_actions",
+      claim.actionKinds.size === 1
+        && claim.actionKinds.has("transfer_awaiting_allocation")
+        ? "competing_transfer_actions"
+        : "competing_allocation_actions",
       [claim.fromPackageKey, ...claim.targetPackageKeys],
       [claim.wmsShipmentItemId],
       [...claim.actionKeys],
@@ -1029,6 +1079,109 @@ export function planPackageAllocationGroup(
     if (competingNewActionKeys.has(action.actionKey)) continue;
     const actionWasPreviouslyApplied = previousAppliedActionKeys.has(action.actionKey);
     const from = packageByKey.get(action.fromPackageKey);
+
+    if (action.kind === "cancel_awaiting_allocation") {
+      if (!from || from.allocationRole !== "primary" || from.membership.status !== "proven") {
+        reviews.push(review(
+          "invalid_cancellation_source",
+          [action.fromPackageKey],
+          [action.wmsShipmentItemId],
+          [action.actionKey],
+        ));
+        continue;
+      }
+
+      if (actionWasPreviouslyApplied
+          && from.projection.carrierStatus === "possession_confirmed") {
+        reviews.push(review(
+          "cancellation_superseded_by_carrier_possession",
+          [from.packageKey],
+          [action.wmsShipmentItemId],
+          [action.actionKey],
+        ));
+        appliedActionKeys.push(action.actionKey);
+        continue;
+      }
+
+      if (from.projection.carrierStatus === "possession_confirmed") {
+        reviews.push(review(
+          "cancellation_after_carrier_lock",
+          [from.packageKey],
+          [action.wmsShipmentItemId],
+          [action.actionKey],
+        ));
+        continue;
+      }
+
+      if (from.projection.labelStatus !== "voided"
+          || from.projection.correctionStatus !== "awaiting_relabel") {
+        reviews.push(review(
+          "invalid_cancellation_source",
+          [from.packageKey],
+          [action.wmsShipmentItemId],
+          [action.actionKey],
+        ));
+        continue;
+      }
+
+      const fromLines = lineMaps.get(from.packageKey);
+      if (!fromLines || !fromLines.has(action.wmsShipmentItemId)) {
+        reviews.push(review(
+          "invalid_cancellation_source",
+          [from.packageKey],
+          [action.wmsShipmentItemId],
+          [action.actionKey],
+        ));
+        continue;
+      }
+
+      const segments = primarySegments.get(action.wmsShipmentItemId) ?? [];
+      const available = segments
+        .filter((segment) => (
+          segment.originPackageKey === from.packageKey
+          && segment.targetKind === "awaiting_relabel"
+        ))
+        .reduce((total, segment) => checkedAdd(total, segment.quantity, {
+          actionKey: action.actionKey,
+          wmsShipmentItemId: action.wmsShipmentItemId,
+        }), 0);
+      const sourceQuantity = fromLines.get(action.wmsShipmentItemId) ?? 0;
+      if (action.quantity > sourceQuantity || action.quantity > available) {
+        reviews.push(review(
+          "cancellation_exceeds_awaiting_relabel",
+          [from.packageKey],
+          [action.wmsShipmentItemId],
+          [action.actionKey],
+        ));
+        continue;
+      }
+
+      let remaining = action.quantity;
+      const heldSegments: MutablePrimarySegment[] = [];
+      for (const segment of segments) {
+        if (remaining === 0) break;
+        if (segment.originPackageKey !== from.packageKey
+            || segment.targetKind !== "awaiting_relabel") {
+          continue;
+        }
+        const moved = Math.min(segment.quantity, remaining);
+        segment.quantity -= moved;
+        heldSegments.push({
+          originPackageKey: from.packageKey,
+          targetKind: "held_for_unpack",
+          packageKey: null,
+          quantity: moved,
+        });
+        remaining -= moved;
+      }
+      primarySegments.set(
+        action.wmsShipmentItemId,
+        [...segments, ...heldSegments].filter((segment) => segment.quantity > 0),
+      );
+      appliedActionKeys.push(action.actionKey);
+      continue;
+    }
+
     if (!from || from.allocationRole !== "primary" || from.membership.status !== "proven") {
       reviews.push(review("invalid_transfer_source", [action.fromPackageKey], [], [action.actionKey]));
       continue;
