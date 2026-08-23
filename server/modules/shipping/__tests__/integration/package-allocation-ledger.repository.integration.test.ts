@@ -21,6 +21,7 @@ import type {
   PackageAllocationEffectIntentV1,
   PackageAllocationEntryV1,
 } from "../../package-allocation-group.domain";
+import { packageAllocationPackageKey } from "../../package-allocation-authority-resolution.domain";
 import { PackageAllocationAuthorityReadinessService } from "../../package-allocation-authority-readiness.service";
 import { PackageAllocationAuthorityResolutionPreviewService } from "../../package-allocation-authority-resolution.service";
 import {
@@ -180,6 +181,8 @@ async function installAuthorityReadinessTestRelations(pool: Pool): Promise<void>
     ALTER TABLE wms.shipping_provider_labels
       ADD COLUMN provider varchar(40) NOT NULL,
       ADD COLUMN provider_label_id varchar(200) NOT NULL,
+      ADD COLUMN provider_order_id varchar(200),
+      ADD COLUMN provider_order_key varchar(200),
       ADD COLUMN tracking_number varchar(200) NOT NULL,
       ADD COLUMN label_status varchar(30) NOT NULL,
       ADD COLUMN label_direction varchar(20) NOT NULL,
@@ -227,10 +230,20 @@ async function installAuthorityReadinessTestRelations(pool: Pool): Promise<void>
   `);
 }
 
-async function seedAuthorityReadinessLabel(pool: Pool, sourceId: number): Promise<number> {
-  const trackingNumber = "1Z999AA10123456784";
-  const providerLabelId = "44001";
+async function seedAuthorityReadinessLabel(
+  pool: Pool,
+  sourceId: number,
+  options: {
+    readonly providerLabelId?: string;
+    readonly trackingNumber?: string;
+    readonly providerOrderId?: string;
+    readonly contentsStatus?: "authoritative" | "empty";
+  } = {},
+): Promise<number> {
+  const trackingNumber = options.trackingNumber ?? "1Z999AA10123456784";
+  const providerLabelId = options.providerLabelId ?? "44001";
   const receivedAt = "2026-08-23T14:00:00.000Z";
+  const hasAuthoritativeContents = (options.contentsStatus ?? "authoritative") === "authoritative";
   const payload = {
     payloadSchemaVersion: 2,
     providerLabelId,
@@ -243,25 +256,27 @@ async function seedAuthorityReadinessLabel(pool: Pool, sourceId: number): Promis
     isReturnLabel: false,
     declaredContentsEvidence: {
       evidenceSchemaVersion: 1,
-      status: "authoritative",
-      providerItemCount: 1,
-      recognizedProviderItemCount: 1,
-      canonicalLineCount: 1,
+      status: hasAuthoritativeContents ? "authoritative" : "empty",
+      providerItemCount: hasAuthoritativeContents ? 1 : 0,
+      recognizedProviderItemCount: hasAuthoritativeContents ? 1 : 0,
+      canonicalLineCount: hasAuthoritativeContents ? 1 : 0,
       malformedItemCount: 0,
       unrecognizedItemCount: 0,
       duplicateLineItemCount: 0,
       rejectedItemCount: 0,
-      reviewRequired: false,
-      lines: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 2 }],
+      reviewRequired: !hasAuthoritativeContents,
+      lines: hasAuthoritativeContents
+        ? [{ lineItemKey: `wms-item-${sourceId}`, quantity: 2 }]
+        : [],
     },
   };
   const label = await pool.query<{ id: string }>(
     `INSERT INTO wms.shipping_provider_labels (
-       provider, provider_label_id, tracking_number, label_status,
-       label_direction, first_observed_at, last_observed_at
-     ) VALUES ('shipstation', $1, $2, 'active', 'outbound', $3, $3)
+       provider, provider_label_id, provider_order_id, tracking_number,
+       label_status, label_direction, first_observed_at, last_observed_at
+     ) VALUES ('shipstation', $1, $2, $3, 'active', 'outbound', $4, $4)
      RETURNING id::text AS id`,
-    [providerLabelId, trackingNumber, receivedAt],
+    [providerLabelId, options.providerOrderId ?? null, trackingNumber, receivedAt],
   );
   const labelId = positiveSafeIntegerFromPostgres(
     label.rows[0].id,
@@ -280,6 +295,54 @@ async function seedAuthorityReadinessLabel(pool: Pool, sourceId: number): Promis
     [labelId, eventHash, trackingNumber, receivedAt, JSON.stringify(payload)],
   );
   return labelId;
+}
+
+async function seedAuthorityDiscoveryRelations(
+  pool: Pool,
+  sourceId: number,
+  linkedLabelId: number,
+  providerOrderId: string,
+): Promise<void> {
+  const shipment = await pool.query<{ id: number }>(
+    "INSERT INTO wms.outbound_shipments DEFAULT VALUES RETURNING id",
+  );
+  await pool.query(
+    `UPDATE wms.outbound_shipment_items
+     SET shipment_id = $1::integer
+     WHERE id = $2::integer`,
+    [shipment.rows[0].id, sourceId],
+  );
+  const request = await pool.query<{ id: string }>(
+    `INSERT INTO wms.shipment_requests (legacy_wms_shipment_id)
+     VALUES ($1::integer)
+     RETURNING id::text AS id`,
+    [shipment.rows[0].id],
+  );
+  await pool.query(
+    `INSERT INTO wms.shipment_request_items (
+       shipment_request_id, legacy_wms_shipment_item_id
+     ) VALUES ($1::bigint, $2::integer)`,
+    [request.rows[0].id, sourceId],
+  );
+  const engineOrder = await pool.query<{ id: string }>(
+    `INSERT INTO wms.shipping_engine_orders (
+       shipment_request_id, provider, provider_order_id
+     ) VALUES ($1::bigint, 'shipstation', $2)
+     RETURNING id::text AS id`,
+    [request.rows[0].id, providerOrderId],
+  );
+  await pool.query(
+    `INSERT INTO wms.shipping_engine_order_requests (
+       shipping_engine_order_id, shipment_request_id
+     ) VALUES ($1::bigint, $2::bigint)`,
+    [engineOrder.rows[0].id, request.rows[0].id],
+  );
+  await pool.query(
+    `INSERT INTO wms.shipping_provider_label_links (
+       shipping_provider_label_id, shipping_engine_order_id
+     ) VALUES ($1::bigint, $2::bigint)`,
+    [linkedLabelId, engineOrder.rows[0].id],
+  );
 }
 
 function commandFor(
@@ -496,6 +559,81 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         }),
       ]),
     );
+    expect(result.resolution?.plannerResult.state.desiredEffectIntents.every(
+      (intent) => intent.executable === false,
+    )).toBe(true);
+    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
+  });
+
+  it("discovers a related empty sibling package without granting it item authority", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-DISCOVERY", 2);
+    const providerOrderId = "provider-order-discovery-1";
+    const primaryLabelId = await seedAuthorityReadinessLabel(pool, sourceId, {
+      providerLabelId: "44001",
+      trackingNumber: "1Z999AA10123456784",
+      providerOrderId,
+      contentsStatus: "authoritative",
+    });
+    const emptySiblingLabelId = await seedAuthorityReadinessLabel(pool, sourceId, {
+      providerLabelId: "44002",
+      trackingNumber: "1Z999AA10123456785",
+      providerOrderId,
+      contentsStatus: "empty",
+    });
+    await seedAuthorityDiscoveryRelations(
+      pool,
+      sourceId,
+      primaryLabelId,
+      providerOrderId,
+    );
+    const service = new PackageAllocationAuthorityResolutionPreviewService(
+      new PgPackageAllocationLedgerRepository(pool),
+    );
+
+    const result = await service.previewDiscovered({
+      contractVersion: 1,
+      authorityMode: "shadow_only",
+      previewMode: "bootstrap_relationship_discovery",
+      groupKey: PRIMARY_GROUP_KEY,
+      sourceWmsShipmentItemIds: [sourceId],
+    });
+
+    expect(result).toMatchObject({
+      contractVersion: 1,
+      authority: "none",
+      outcome: "review",
+      previewMode: "bootstrap_relationship_discovery",
+      selectionAuthority: "database_relationship_closure",
+      selectionCompleteness: "unproven_outside_persisted_relationships",
+      selectedShippingProviderLabelIds: [primaryLabelId, emptySiblingLabelId],
+      groupState: "absent",
+      readiness: {
+        authority: "none",
+        packageAssessments: [
+          { lifecycleStatus: "projected" },
+          { lifecycleStatus: "projected" },
+        ],
+      },
+      resolution: {
+        authority: "shadow_only",
+        outcome: "review",
+        reviews: [{ code: "package_contents_unavailable" }],
+      },
+    });
+    const emptyPackageKey = packageAllocationPackageKey(
+      "shipstation",
+      "44002",
+    );
+    expect(result.resolution?.plannerResult.state.packageSnapshots.some(
+      (snapshot) => snapshot.packageKey === emptyPackageKey,
+    )).toBe(true);
+    expect(result.resolution?.plannerResult.state.allocations.some(
+      (entry) => entry.packageKey === emptyPackageKey,
+    )).toBe(false);
+    expect(result.resolution?.plannerResult.state.desiredEffectIntents.some(
+      (intent) => intent.packageKey === emptyPackageKey
+        && intent.wmsShipmentItemId !== null,
+    )).toBe(false);
     expect(result.resolution?.plannerResult.state.desiredEffectIntents.every(
       (intent) => intent.executable === false,
     )).toBe(true);

@@ -266,6 +266,107 @@ describe("PgPackageAllocationLedgerRepository", () => {
       .toContain("FOR UPDATE OF shipment_item");
   });
 
+  it("discovers a bounded label set through exact persisted shipment relationships", async () => {
+    const client = new FakeClient();
+    client.handler = ({ text }) => text.includes("WITH selected_sources AS MATERIALIZED")
+      ? [
+          {
+            source_count: 2,
+            found_source_ids: [7001, 7002],
+            shipping_provider_label_id: "42",
+          },
+          {
+            source_count: 2,
+            found_source_ids: [7001, 7002],
+            shipping_provider_label_id: "43",
+          },
+        ]
+      : [];
+    const repository = repositoryWith(client);
+
+    const labelIds = await repository.withSerializableTransaction((transaction) => (
+      transaction.discoverAuthorityReadinessPackageLabelIds([7002, 7001, 7002])
+    ));
+
+    expect(labelIds).toEqual([42, 43]);
+    expect(Object.isFrozen(labelIds)).toBe(true);
+    const discoveryQuery = client.queries.find((query) =>
+      query.text.includes("WITH selected_sources AS MATERIALIZED"),
+    );
+    expect(discoveryQuery?.values).toEqual([[7001, 7002], 201]);
+    expect(discoveryQuery?.text).toContain("wms.shipment_request_items");
+    expect(discoveryQuery?.text).toContain("wms.shipment_requests");
+    expect(discoveryQuery?.text).toContain("wms.shipping_engine_order_requests");
+    expect(discoveryQuery?.text).toContain("wms.shipping_engine_order_provider_refs");
+    expect(discoveryQuery?.text).toContain("wms.physical_shipment_items");
+    expect(discoveryQuery?.text).toContain("physical_item.shipment_request_item_id");
+    expect(discoveryQuery?.text).toContain("physical.shipment_request_id");
+    expect(discoveryQuery?.text).toContain("wms.shipping_provider_label_links");
+    expect(discoveryQuery?.text).not.toContain("JOIN wms.orders");
+    expect(discoveryQuery?.text).not.toContain("wms_order_id");
+  });
+
+  it("fails closed when no outbound label is related to the source set", async () => {
+    const client = new FakeClient();
+    client.handler = ({ text }) => text.includes("WITH selected_sources AS MATERIALIZED")
+      ? [{
+          source_count: 1,
+          found_source_ids: [7001],
+          shipping_provider_label_id: null,
+        }]
+      : [];
+    const repository = repositoryWith(client);
+
+    await expect(repository.withSerializableTransaction((transaction) => (
+      transaction.discoverAuthorityReadinessPackageLabelIds([7001])
+    ))).rejects.toMatchObject({
+      code: "PACKAGE_EVIDENCE_NOT_FOUND",
+      context: { sourceWmsShipmentItemIds: [7001] },
+    });
+    expect(client.queries.at(-1)?.text).toBe("ROLLBACK");
+  });
+
+  it("fails closed when a source disappears or the package bound is exceeded", async () => {
+    const missingSourceClient = new FakeClient();
+    missingSourceClient.handler = ({ text }) =>
+      text.includes("WITH selected_sources AS MATERIALIZED")
+        ? [{
+            source_count: 1,
+            found_source_ids: [7001],
+            shipping_provider_label_id: "42",
+          }]
+        : [];
+    const missingSourceRepository = repositoryWith(missingSourceClient);
+
+    await expect(missingSourceRepository.withSerializableTransaction((transaction) => (
+      transaction.discoverAuthorityReadinessPackageLabelIds([7001, 7002])
+    ))).rejects.toMatchObject({
+      code: "SOURCE_EVIDENCE_NOT_FOUND",
+      context: { missingWmsShipmentItemIds: [7002] },
+    });
+
+    const oversizedClient = new FakeClient();
+    oversizedClient.handler = ({ text }) =>
+      text.includes("WITH selected_sources AS MATERIALIZED")
+        ? Array.from({ length: 201 }, (_unused, index) => ({
+            source_count: 1,
+            found_source_ids: [7001],
+            shipping_provider_label_id: String(index + 1),
+          }))
+        : [];
+    const oversizedRepository = repositoryWith(oversizedClient);
+
+    await expect(oversizedRepository.withSerializableTransaction((transaction) => (
+      transaction.discoverAuthorityReadinessPackageLabelIds([7001])
+    ))).rejects.toMatchObject({
+      code: "INVALID_DATABASE_EVIDENCE",
+      context: {
+        observedPackageCount: 201,
+        maxPackageCount: 200,
+      },
+    });
+  });
+
   it("serializes source and membership batches with the SQL record field names", async () => {
     const client = new FakeClient();
     const registration = derivePackageAllocationSourceRegistration({
