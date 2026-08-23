@@ -4,6 +4,7 @@ import { Loader2, PackageCheck } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { InventoryLocationCombobox } from "@/components/inventory/InventoryLocationCombobox";
 import {
   Dialog,
   DialogContent,
@@ -12,13 +13,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   ReturnCaseAdminApiError,
@@ -199,26 +193,23 @@ export function ApplyReturnInventoryTreatmentDialog({
                   <td className="px-3 py-2 align-middle">
                     {line.treatment === "restock_sellable" ? (
                       <>
-                        <Select
-                          value={line.warehouseLocationId}
+                        <InventoryLocationCombobox
+                          locations={pickableLocations}
+                          value={line.warehouseLocationId === "" ? null : Number(line.warehouseLocationId)}
                           disabled={pending || locationsQuery.isLoading}
-                          onValueChange={(value) => {
+                          loading={locationsQuery.isLoading}
+                          ariaLabel={`Inventory destination for ${line.title}`}
+                          placeholder="Select pickable location"
+                          searchPlaceholder="Search pickable locations..."
+                          emptyMessage="No matching pickable locations found."
+                          onValueChange={(locationId) => {
                             setDraft((current) => current.map((candidate, candidateIndex) =>
-                              candidateIndex === index ? { ...candidate, warehouseLocationId: value } : candidate));
+                              candidateIndex === index
+                                ? { ...candidate, warehouseLocationId: locationId === null ? "" : String(locationId) }
+                                : candidate));
                             payloadChanged();
                           }}
-                        >
-                          <SelectTrigger aria-label={`Inventory destination for ${line.title}`}>
-                            <SelectValue placeholder={locationsQuery.isLoading ? "Loading locations..." : "Select pickable location"} />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {pickableLocations.map((location) => (
-                              <SelectItem key={location.id} value={String(location.id)}>
-                                {location.code}{location.name ? ` — ${location.name}` : ""}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        />
                         {validation.fieldErrors[line.dispositionItemId] && (
                           <p className="mt-1 text-xs text-destructive">{validation.fieldErrors[line.dispositionItemId]}</p>
                         )}

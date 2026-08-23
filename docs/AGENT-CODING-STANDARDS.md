@@ -28,6 +28,24 @@ Before finishing:
 - Remove dead code, misleading comments, and unnecessary complexity.
 - Ensure the final result is cohesive, production-ready, and understandable by another engineer.
 
+## Inventory Location Selector Standard
+
+Any interactive warehouse or inventory-location picker must use
+`client/src/components/inventory/InventoryLocationCombobox.tsx`. Do not introduce a raw
+`Select` or a one-off location typeahead.
+
+The shared selector guarantees:
+
+- A visible search field covering location code, name, zone, and location type.
+- A viewport-bounded popover with an internally scrollable option list.
+- Keyboard navigation, an accessible combobox trigger, and an explicit empty state.
+- Every supplied option remains reachable; callers must not truncate options with `slice`.
+- Clearing is opt-in and must be enabled only when the workflow permits no location.
+
+The calling workflow remains responsible for eligibility. It must pass only locations allowed
+for that operation (for example active, warehouse-bound, pickable, and unfrozen locations for a
+sellable return). The shared selector must not guess business eligibility or choose a default.
+
 ## Evidence Discipline
 
 Do not guess. Do not infer missing implementation details unless they are clearly labeled as assumptions.
