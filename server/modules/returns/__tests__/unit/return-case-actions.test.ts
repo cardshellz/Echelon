@@ -22,6 +22,7 @@ describe("return case action plan", () => {
       expect.objectContaining({ kind: "record_receipt", state: "available", reasonCode: null }),
       expect.objectContaining({ kind: "start_inspection", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
       expect.objectContaining({ kind: "complete_inspection", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
+      expect.objectContaining({ kind: "record_disposition", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
     ]);
   });
 
@@ -140,9 +141,10 @@ describe("return case action plan", () => {
         },
       }));
 
-      expect(plan.nextAction).toBeNull();
+      expect(plan.nextAction).toBe("record_disposition");
       expect(plan.actions[1]).toMatchObject({ state: "completed", reasonCode: null });
       expect(plan.actions[2]).toMatchObject({ state: "completed", reasonCode: null });
+      expect(plan.actions[3]).toMatchObject({ state: "available", reasonCode: null });
       expect(plan.inspectionSummary).toMatchObject({ inspectionId: 8, status: outcome });
       expect(plan.inspectionSummary?.completedAt).not.toBe(completedAt);
       expect(plan.inspectionSummary?.completedAt?.getTime()).toBe(completedAt.getTime());
@@ -170,12 +172,22 @@ describe("return case action plan", () => {
         restocked: true,
       },
       inspection,
+      disposition: {
+        recordCount: 1,
+        lines: [{
+          dispositionId: 10,
+          returnCaseItemId: 1,
+          treatment: "restock_sellable",
+          quantity: 2,
+        }],
+      },
     }));
 
     expect(plan.nextAction).toBeNull();
     expect(plan.actions[1]).toMatchObject({ state: "completed", reasonCode: null });
     expect(plan.actions[2]).toMatchObject({ state: "completed", reasonCode: null });
     expect(plan.inspectionSummary).not.toBe(inspection);
+    expect(plan.actions[3]).toMatchObject({ state: "completed", reasonCode: null });
     expect(plan.inspectionSummary?.startedAt).not.toBe(inspection.startedAt);
     expect(plan.inspectionSummary?.startedAt.getTime()).toBe(inspection.startedAt.getTime());
     expect(plan.inspectionSummary?.completedAt).not.toBe(inspection.completedAt);
@@ -194,6 +206,10 @@ describe("return case action plan", () => {
       reasonCode: "RETURN_INSPECTION_STATE_CONFLICT",
     });
     expect(plan.actions[2]).toMatchObject({
+      state: "blocked",
+      reasonCode: "RETURN_INSPECTION_STATE_CONFLICT",
+    });
+    expect(plan.actions[3]).toMatchObject({
       state: "blocked",
       reasonCode: "RETURN_INSPECTION_STATE_CONFLICT",
     });
@@ -277,6 +293,190 @@ describe("return case action plan", () => {
       [field]: value,
     })).toThrowError(expect.objectContaining({ code: "RETURN_POLICY_SNAPSHOT_INVALID" }));
   });
+
+
+  it.each(["none", "conditional"] as const)(
+    "offers disposition when %s inspection is resolved without fabricated evidence",
+    (inspectionRequirement) => {
+      const plan = deriveReturnCaseActionPlan(context({
+        lifecycle: {
+          ...lifecycle(),
+          logisticsStatus: "received",
+          inspectionStatus: "not_required",
+        },
+        policy: { ...policy(), inspectionRequirement },
+        receipt: receipt({ receivedQuantity: 2, status: "received" }),
+        conditionalInspectionDecision: inspectionRequirement === "conditional" ? "waived" : null,
+      }));
+
+      expect(plan.nextAction).toBe("record_disposition");
+      expect(plan.actions[1]).toMatchObject({
+        state: "not_applicable",
+        reasonCode: "RETURN_INSPECTION_NOT_REQUIRED",
+      });
+      expect(plan.actions[2]).toMatchObject({
+        state: "not_applicable",
+        reasonCode: "RETURN_INSPECTION_NOT_REQUIRED",
+      });
+      expect(plan.actions[3]).toMatchObject({ state: "available", reasonCode: null });
+    },
+  );
+
+  it("does not treat external inspection ownership alone as resolved evidence", () => {
+    const plan = deriveReturnCaseActionPlan(context({
+      lifecycle: { ...lifecycle(), logisticsStatus: "received" },
+      policy: { ...policy(), inspectionOwner: "vendor" },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+    }));
+
+    expect(plan.actions[3]).toMatchObject({
+      state: "blocked",
+      reasonCode: "RETURN_INSPECTION_OWNED_EXTERNALLY",
+    });
+  });
+
+  it("keeps partial append-only disposition evidence available", () => {
+    const plan = deriveReturnCaseActionPlan(context({
+      lifecycle: { ...lifecycle(), logisticsStatus: "received", inspectionStatus: "approved" },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+      inspection: completedInspection("approved"),
+      disposition: {
+        recordCount: 1,
+        lines: [{
+          dispositionId: 10,
+          returnCaseItemId: 1,
+          treatment: "hold_non_sellable",
+          quantity: 1,
+        }],
+      },
+    }));
+
+    expect(plan.nextAction).toBe("record_disposition");
+    expect(plan.actions[3]).toMatchObject({ state: "available", reasonCode: null });
+    expect(plan.actions[3].description).toContain("does not restock inventory");
+    expect(plan.dispositionSummary).toEqual({
+      receivedUnits: 2,
+      recordedUnits: 1,
+      remainingUnits: 1,
+      fullyRecorded: false,
+      partiallyRecorded: true,
+      items: [{
+        returnCaseItemId: 1,
+        receivedQuantity: 2,
+        restockSellableQuantity: 0,
+        holdNonSellableQuantity: 1,
+        recordedQuantity: 1,
+        remainingQuantity: 1,
+      }],
+    });
+  });
+
+  it("completes disposition only after every received unit has a treatment", () => {
+    const plan = deriveReturnCaseActionPlan(context({
+      lifecycle: { ...lifecycle(), logisticsStatus: "received", inspectionStatus: "rejected" },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+      inspection: completedInspection("rejected"),
+      disposition: {
+        recordCount: 2,
+        lines: [
+          {
+            dispositionId: 10,
+            returnCaseItemId: 1,
+            treatment: "restock_sellable",
+            quantity: 1,
+          },
+          {
+            dispositionId: 11,
+            returnCaseItemId: 1,
+            treatment: "hold_non_sellable",
+            quantity: 1,
+          },
+        ],
+      },
+    }));
+
+    expect(plan.nextAction).toBeNull();
+    expect(plan.actions[3]).toMatchObject({ state: "completed", reasonCode: null });
+    expect(plan.dispositionSummary).toMatchObject({
+      receivedUnits: 2,
+      recordedUnits: 2,
+      remainingUnits: 0,
+      fullyRecorded: true,
+      partiallyRecorded: false,
+    });
+  });
+
+  it("fails closed for malformed, unknown, or excessive disposition evidence", () => {
+    const invalidEvidence: NonNullable<ReturnCaseActionContext["disposition"]>[] = [
+      {
+        recordCount: 1,
+        lines: [{
+          dispositionId: 10,
+          returnCaseItemId: 1,
+          treatment: "restock_sellable",
+          quantity: 3,
+        }],
+      },
+      {
+        recordCount: 1,
+        lines: [{
+          dispositionId: 10,
+          returnCaseItemId: 999,
+          treatment: "hold_non_sellable",
+          quantity: 1,
+        }],
+      },
+      {
+        recordCount: 1,
+        lines: [{
+          dispositionId: 10,
+          returnCaseItemId: 1,
+          treatment: "destroy" as "restock_sellable",
+          quantity: 1,
+        }],
+      },
+      {
+        recordCount: 2,
+        lines: [{
+          dispositionId: 10,
+          returnCaseItemId: 1,
+          treatment: "restock_sellable",
+          quantity: 1,
+        }],
+      },
+      {
+        recordCount: 1,
+        lines: [
+          {
+            dispositionId: 10,
+            returnCaseItemId: 1,
+            treatment: "restock_sellable",
+            quantity: 1,
+          },
+          {
+            dispositionId: 10,
+            returnCaseItemId: 1,
+            treatment: "hold_non_sellable",
+            quantity: 1,
+          },
+        ],
+      },
+    ];
+
+    for (const disposition of invalidEvidence) {
+      const plan = deriveReturnCaseActionPlan(context({
+        lifecycle: { ...lifecycle(), logisticsStatus: "received", inspectionStatus: "approved" },
+        receipt: receipt({ receivedQuantity: 2, status: "received" }),
+        inspection: completedInspection("approved"),
+        disposition,
+      }));
+      expect(plan.nextAction).toBeNull();
+      expect(plan.actions[3]).toMatchObject({
+        state: "blocked",
+        reasonCode: "RETURN_DISPOSITION_STATE_CONFLICT",
+      });
+    }
+  });
 });
 
 function context(overrides: Partial<ReturnCaseActionContext> = {}): ReturnCaseActionContext {
@@ -286,10 +486,24 @@ function context(overrides: Partial<ReturnCaseActionContext> = {}): ReturnCaseAc
     receipt: receipt(),
     inspection: null,
     conditionalInspectionDecision: null,
+    disposition: null,
     ...overrides,
   };
 }
 
+
+function completedInspection(
+  outcome: "approved" | "rejected",
+): NonNullable<ReturnCaseActionContext["inspection"]> {
+  return {
+    inspectionId: 8,
+    status: outcome,
+    startedAt: new Date("2026-08-22T12:00:00.000Z"),
+    startedBy: "user:7",
+    completedAt: new Date("2026-08-22T12:15:00.000Z"),
+    completedBy: "user:9",
+  };
+}
 function lifecycle(): ReturnCaseActionContext["lifecycle"] {
   return {
     caseStatus: "open",

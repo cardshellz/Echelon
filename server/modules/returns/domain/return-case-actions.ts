@@ -1,6 +1,7 @@
 import {
   returnApprovalAuthorities,
   returnDestinations,
+  returnDispositionTreatments,
   returnInspectionOwners,
   returnInspectionRequirements,
   returnLabelProviders,
@@ -11,6 +12,7 @@ import {
   type ReturnInspectionOwner,
   type ReturnInspectionRequirement,
   type ReturnDestination,
+  type ReturnDispositionTreatment,
 } from "@shared/schema";
 import type { ReturnCaseLifecycle, ReturnPolicySnapshot } from "./return-case";
 
@@ -21,7 +23,7 @@ const ZERO_RECEIPT_LOGISTICS_STATUSES = new Set([
   "delivered",
 ]);
 
-export const returnCaseActionKinds = ["record_receipt", "start_inspection", "complete_inspection"] as const;
+export const returnCaseActionKinds = ["record_receipt", "start_inspection", "complete_inspection", "record_disposition"] as const;
 export type ReturnCaseActionKind = typeof returnCaseActionKinds[number];
 export type ReturnCaseActionState = "available" | "blocked" | "completed" | "not_applicable";
 
@@ -66,6 +68,18 @@ export interface ReturnInspectionFacts {
   completedBy: string | null;
 }
 
+export interface ReturnDispositionLineFacts {
+  dispositionId: number;
+  returnCaseItemId: number;
+  treatment: ReturnDispositionTreatment;
+  quantity: number;
+}
+
+export interface ReturnDispositionFacts {
+  recordCount: number;
+  lines: ReturnDispositionLineFacts[];
+}
+
 export interface ReturnCaseReceiptSummary {
   expectedUnits: number;
   receivedUnits: number;
@@ -74,11 +88,30 @@ export interface ReturnCaseReceiptSummary {
   partiallyReceived: boolean;
 }
 
+export interface ReturnCaseDispositionItemSummary {
+  returnCaseItemId: number;
+  receivedQuantity: number;
+  restockSellableQuantity: number;
+  holdNonSellableQuantity: number;
+  recordedQuantity: number;
+  remainingQuantity: number;
+}
+
+export interface ReturnCaseDispositionSummary {
+  receivedUnits: number;
+  recordedUnits: number;
+  remainingUnits: number;
+  fullyRecorded: boolean;
+  partiallyRecorded: boolean;
+  items: ReturnCaseDispositionItemSummary[];
+}
 export interface ReturnCaseActionContext {
+
   lifecycle: ReturnCaseLifecycle;
   policy: ReturnPolicySnapshotFacts | null;
   receipt: ReturnReceiptFacts | null;
   inspection: ReturnInspectionFacts | null;
+  disposition: ReturnDispositionFacts | null;
   conditionalInspectionDecision: "required" | "waived" | null;
 }
 
@@ -87,6 +120,7 @@ export interface ReturnCaseActionPlan {
   receiptSummary: ReturnCaseReceiptSummary;
   inspectionSummary: ReturnInspectionFacts | null;
   actions: ReturnCaseAction[];
+  dispositionSummary: ReturnCaseDispositionSummary;
 }
 
 interface ReceiptAnalysis {
@@ -94,8 +128,13 @@ interface ReceiptAnalysis {
   blocker: string | null;
 }
 
+interface DispositionAnalysis {
+  summary: ReturnCaseDispositionSummary;
+  blocker: string | null;
+}
 export class ReturnCaseActionDomainError extends Error {
   constructor(
+
     public readonly code: string,
     message: string,
     public readonly context?: Record<string, unknown>,
@@ -148,15 +187,18 @@ export function parseReturnPolicySnapshot(value: unknown): ReturnPolicySnapshotF
 // inspection evidence. Callers render this plan and never recreate its rules.
 export function deriveReturnCaseActionPlan(context: ReturnCaseActionContext): ReturnCaseActionPlan {
   const receipt = analyzeReceipt(context);
+  const disposition = analyzeDisposition(context);
   const actions = [
     deriveReceiptAction(context, receipt),
     deriveInspectionAction(context, receipt),
     deriveCompleteInspectionAction(context, receipt),
+    deriveDispositionAction(context, receipt, disposition),
   ];
   return {
     nextAction: actions.find((action) => action.state === "available")?.kind ?? null,
     receiptSummary: receipt.summary,
     inspectionSummary: cloneInspectionSummary(context.inspection),
+    dispositionSummary: disposition.summary,
     actions,
   };
 }
@@ -168,7 +210,7 @@ function deriveReceiptAction(
   const base = {
     kind: "record_receipt" as const,
     label: "Record returned items received",
-    description: "Record physical receipt against the expected WMS return. Inventory remains unavailable until inspection determines its disposition.",
+    description: "Record physical receipt against the expected WMS return. Inventory remains unavailable until a later inventory-treatment action is applied.",
   };
   if (!context.policy) return blocked(base, "RETURN_POLICY_SNAPSHOT_INVALID");
   if (context.policy.returnDestination !== "card_shellz") {
@@ -232,6 +274,65 @@ function deriveCompleteInspectionAction(
 interface InspectionPrerequisiteFailure {
   state: "blocked" | "not_applicable";
   reasonCode: string;
+}
+
+function deriveDispositionAction(
+  context: ReturnCaseActionContext,
+  receipt: ReceiptAnalysis,
+  disposition: DispositionAnalysis,
+): ReturnCaseAction {
+  const base = {
+    kind: "record_disposition" as const,
+    label: "Resolve returned items",
+    description: "Record physical treatment intent for received units. This does not restock inventory, issue a refund, settle a vendor balance, or close the return.",
+  };
+  if (!context.policy) return blocked(base, "RETURN_POLICY_SNAPSHOT_INVALID");
+  if (disposition.blocker) return blocked(base, disposition.blocker);
+  if (context.policy.returnDestination !== "card_shellz") {
+    return notApplicable(base, "RETURN_DESTINATION_EXTERNAL");
+  }
+
+  // Once complete, immutable disposition evidence remains complete even if a
+  // later action closes the case or applies the recorded inventory treatment.
+  const receiptWithoutAppliedRestock = context.receipt?.restocked
+    ? analyzeReceipt({ ...context, receipt: { ...context.receipt, restocked: false } })
+    : receipt;
+  if (disposition.summary.fullyRecorded
+    && receiptWithoutAppliedRestock.blocker === null
+    && receiptWithoutAppliedRestock.summary.fullyReceived) {
+    const inspectionBlocker = deriveDispositionInspectionBlocker(context);
+    if (inspectionBlocker) return blocked(base, inspectionBlocker);
+    return completed(base);
+  }
+
+  if (context.lifecycle.caseStatus !== "open") return blocked(base, "RETURN_CASE_NOT_OPEN");
+  if (context.lifecycle.approvalStatus !== "approved") return blocked(base, "RETURN_CASE_NOT_APPROVED");
+  if (receipt.blocker) return blocked(base, receipt.blocker);
+  if (!receipt.summary.fullyReceived || context.lifecycle.logisticsStatus !== "received") {
+    return blocked(base, "RETURN_NOT_FULLY_RECEIVED");
+  }
+  const inspectionBlocker = deriveDispositionInspectionBlocker(context);
+  if (inspectionBlocker) return blocked(base, inspectionBlocker);
+
+  return available(base);
+}
+function deriveDispositionInspectionBlocker(context: ReturnCaseActionContext): string | null {
+  if (!context.policy) return "RETURN_POLICY_SNAPSHOT_INVALID";
+  if (context.inspection && isCoherentTerminalInspection(context, context.inspection)) return null;
+  if (context.policy.inspectionRequirement === "conditional"
+    && context.conditionalInspectionDecision === null) {
+    return "RETURN_CONDITIONAL_INSPECTION_UNRESOLVED";
+  }
+  if (context.policy.inspectionRequirement === "none"
+    || context.conditionalInspectionDecision === "waived") {
+    return context.inspection === null && context.lifecycle.inspectionStatus === "not_required"
+      ? null
+      : "RETURN_INSPECTION_STATE_CONFLICT";
+  }
+  if (context.policy.inspectionOwner !== "card_shellz") {
+    return "RETURN_INSPECTION_OWNED_EXTERNALLY";
+  }
+  return "RETURN_INSPECTION_STATE_CONFLICT";
 }
 
 function deriveInspectionPolicyFailure(
@@ -321,6 +422,122 @@ function cloneInspectionSummary(inspection: ReturnInspectionFacts | null): Retur
   };
 }
 
+function analyzeDisposition(context: ReturnCaseActionContext): DispositionAnalysis {
+  const empty: ReturnCaseDispositionSummary = {
+    receivedUnits: 0,
+    recordedUnits: 0,
+    remainingUnits: 0,
+    fullyRecorded: false,
+    partiallyRecorded: false,
+    items: [],
+  };
+  const receipt = context.receipt;
+  if (!receipt) {
+    return {
+      summary: empty,
+      blocker: context.disposition ? "RETURN_DISPOSITION_STATE_CONFLICT" : null,
+    };
+  }
+
+  const itemById = new Map<number, ReturnCaseDispositionItemSummary>();
+  let receivedUnits = 0;
+  for (const receiptItem of receipt.items) {
+    if (!isPositiveInteger(receiptItem.returnCaseItemId)
+      || !isNonNegativeInteger(receiptItem.wmsReceivedQuantity)
+      || itemById.has(Number(receiptItem.returnCaseItemId))) {
+      return { summary: empty, blocker: "RETURN_DISPOSITION_STATE_CONFLICT" };
+    }
+    receivedUnits += receiptItem.wmsReceivedQuantity;
+    if (!Number.isSafeInteger(receivedUnits)) {
+      return { summary: empty, blocker: "RETURN_DISPOSITION_STATE_CONFLICT" };
+    }
+    itemById.set(Number(receiptItem.returnCaseItemId), {
+      returnCaseItemId: Number(receiptItem.returnCaseItemId),
+      receivedQuantity: receiptItem.wmsReceivedQuantity,
+      restockSellableQuantity: 0,
+      holdNonSellableQuantity: 0,
+      recordedQuantity: 0,
+      remainingQuantity: receiptItem.wmsReceivedQuantity,
+    });
+  }
+
+  const evidence = context.disposition;
+  if (!evidence) {
+    return {
+      summary: {
+        ...empty,
+        receivedUnits,
+        remainingUnits: receivedUnits,
+        items: Array.from(itemById.values()),
+      },
+      blocker: null,
+    };
+  }
+  if (!isNonNegativeInteger(evidence.recordCount)
+    || (evidence.recordCount === 0) !== (evidence.lines.length === 0)) {
+    return { summary: empty, blocker: "RETURN_DISPOSITION_STATE_CONFLICT" };
+  }
+
+  const dispositionIds = new Set<number>();
+  const lineKeys = new Set<string>();
+  for (const line of evidence.lines) {
+    if (!isPositiveInteger(line.dispositionId)
+      || !isPositiveInteger(line.returnCaseItemId)
+      || !isPositiveInteger(line.quantity)
+      || !isDispositionTreatment(line.treatment)) {
+      return { summary: empty, blocker: "RETURN_DISPOSITION_STATE_CONFLICT" };
+    }
+    const item = itemById.get(line.returnCaseItemId);
+    const lineKey = `${line.dispositionId}:${line.returnCaseItemId}`;
+    if (!item || lineKeys.has(lineKey)) {
+      return { summary: empty, blocker: "RETURN_DISPOSITION_STATE_CONFLICT" };
+    }
+    lineKeys.add(lineKey);
+    dispositionIds.add(line.dispositionId);
+    if (line.treatment === "restock_sellable") {
+      item.restockSellableQuantity += line.quantity;
+    } else {
+      item.holdNonSellableQuantity += line.quantity;
+    }
+    item.recordedQuantity += line.quantity;
+    if (!Number.isSafeInteger(item.recordedQuantity)
+      || !Number.isSafeInteger(item.restockSellableQuantity)
+      || !Number.isSafeInteger(item.holdNonSellableQuantity)
+      || item.recordedQuantity > item.receivedQuantity) {
+      return { summary: empty, blocker: "RETURN_DISPOSITION_STATE_CONFLICT" };
+    }
+    item.remainingQuantity = item.receivedQuantity - item.recordedQuantity;
+  }
+  if (dispositionIds.size !== evidence.recordCount) {
+    return { summary: empty, blocker: "RETURN_DISPOSITION_STATE_CONFLICT" };
+  }
+
+  let recordedUnits = 0;
+  for (const item of itemById.values()) {
+    recordedUnits += item.recordedQuantity;
+    if (!Number.isSafeInteger(recordedUnits)) {
+      return { summary: empty, blocker: "RETURN_DISPOSITION_STATE_CONFLICT" };
+    }
+  }
+  const remainingUnits = receivedUnits - recordedUnits;
+  return {
+    summary: {
+      receivedUnits,
+      recordedUnits,
+      remainingUnits,
+      fullyRecorded: receivedUnits > 0 && remainingUnits === 0,
+      partiallyRecorded: recordedUnits > 0 && remainingUnits > 0,
+      items: Array.from(itemById.values()),
+    },
+    blocker: null,
+  };
+}
+
+function isDispositionTreatment(value: unknown): value is ReturnDispositionTreatment {
+  return typeof value === "string"
+    && returnDispositionTreatments.includes(value as ReturnDispositionTreatment);
+}
+
 function analyzeReceipt(context: ReturnCaseActionContext): ReceiptAnalysis {
   const empty = {
     expectedUnits: 0,
@@ -328,6 +545,7 @@ function analyzeReceipt(context: ReturnCaseActionContext): ReceiptAnalysis {
     remainingUnits: 0,
     fullyReceived: false,
     partiallyReceived: false,
+
   };
   const receipt = context.receipt;
   if (!receipt) return { summary: empty, blocker: "RETURN_WMS_RETURN_MISSING" };

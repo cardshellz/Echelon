@@ -498,6 +498,255 @@ describe("ReturnCaseOperationService", () => {
     expect(tx.persistStartInspection).not.toHaveBeenCalled();
   });
 
+  it("records a reviewed disposition against exact terminal inspection evidence", async () => {
+    tx.loadForUpdate.mockResolvedValue(aggregate({
+      firstReceived: 2,
+      secondReceived: 3,
+      logisticsStatus: "received",
+      wmsStatus: "received",
+      inspectionStatus: "approved",
+      inspection: terminalInspection(8, "approved"),
+    }));
+    tx.persistDisposition.mockImplementation(async (input) => ({
+      commandType: "record_disposition",
+      caseId: input.aggregate.caseId,
+      caseNumber: input.aggregate.caseNumber,
+      dispositionId: 17,
+      inspectionId: input.inspectionId,
+      inspectionResolution: input.inspectionResolution,
+      lines: input.lines.map(({ returnCaseItemId, quantity, treatment }) => ({
+        returnCaseItemId,
+        quantity,
+        treatment,
+      })),
+      dispositionSummary: input.dispositionSummary,
+      recordedAt: input.now.toISOString(),
+      replayed: false,
+    }));
+
+    const result = await service.recordDisposition({
+      caseId: 1,
+      inspectionId: 8,
+      idempotencyKey: " disposition-1 ",
+      actor: " user:7 ",
+      notes: " inspected ",
+      lines: [
+        {
+          returnCaseItemId: 2,
+          quantity: 3,
+          treatment: "hold_non_sellable",
+          expectedCurrentReceivedQuantity: 3,
+          expectedCurrentDisposedQuantity: 0,
+        },
+        {
+          returnCaseItemId: 1,
+          quantity: 2,
+          treatment: "restock_sellable",
+          expectedCurrentReceivedQuantity: 2,
+          expectedCurrentDisposedQuantity: 0,
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      inspectionId: 8,
+      inspectionResolution: "approved",
+      dispositionSummary: {
+        receivedUnits: 5,
+        recordedUnits: 5,
+        remainingUnits: 0,
+        fullyRecorded: true,
+        partiallyRecorded: false,
+      },
+    });
+    expect(tx.persistDisposition).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: "disposition-1",
+      actor: "user:7",
+      notes: "inspected",
+      inspectionId: 8,
+      inspectionResolution: "approved",
+      now: NOW,
+      lines: [
+        expect.objectContaining({ returnCaseItemId: 1, treatment: "restock_sellable" }),
+        expect.objectContaining({ returnCaseItemId: 2, treatment: "hold_non_sellable" }),
+      ],
+    }));
+  });
+
+  it("records no-inspection disposition without fabricating inspection evidence", async () => {
+    tx.loadForUpdate.mockResolvedValue(aggregate({
+      firstReceived: 2,
+      secondReceived: 3,
+      logisticsStatus: "received",
+      wmsStatus: "received",
+      inspectionStatus: "not_required",
+      inspectionRequirement: "none",
+    }));
+    tx.persistDisposition.mockImplementation(async (input) => ({
+      commandType: "record_disposition",
+      caseId: input.aggregate.caseId,
+      caseNumber: input.aggregate.caseNumber,
+      dispositionId: 18,
+      inspectionId: input.inspectionId,
+      inspectionResolution: input.inspectionResolution,
+      lines: input.lines.map(({ returnCaseItemId, quantity, treatment }) => ({ returnCaseItemId, quantity, treatment })),
+      dispositionSummary: input.dispositionSummary,
+      recordedAt: input.now.toISOString(),
+      replayed: false,
+    }));
+
+    await service.recordDisposition({
+      caseId: 1,
+      inspectionId: null,
+      idempotencyKey: "disposition-no-inspection",
+      actor: "user:7",
+      notes: null,
+      lines: [{
+        returnCaseItemId: 1,
+        quantity: 1,
+        treatment: "restock_sellable",
+        expectedCurrentReceivedQuantity: 2,
+        expectedCurrentDisposedQuantity: 0,
+      }],
+    });
+
+    expect(tx.persistDisposition).toHaveBeenCalledWith(expect.objectContaining({
+      inspectionId: null,
+      inspectionResolution: "not_required",
+    }));
+  });
+
+  it("rejects stale reviewed inspection evidence before reading the clock or persisting", async () => {
+    const clock = vi.fn(() => NOW);
+    const staleService = new ReturnCaseOperationService({
+      transaction: (work) => work(tx as unknown as ReturnCaseOperationTransaction),
+    }, clock);
+    tx.loadForUpdate.mockResolvedValue(aggregate({
+      firstReceived: 2,
+      secondReceived: 3,
+      logisticsStatus: "received",
+      wmsStatus: "received",
+      inspectionStatus: "approved",
+      inspection: terminalInspection(8, "approved"),
+    }));
+
+    await expect(staleService.recordDisposition(dispositionInput({ inspectionId: 9 })))
+      .rejects.toMatchObject({
+        code: "RETURN_CASE_INSPECTION_STATE_STALE",
+        status: 409,
+        context: { expectedInspectionId: 9, actualInspectionId: 8 },
+      });
+    expect(clock).not.toHaveBeenCalled();
+    expect(tx.persistDisposition).not.toHaveBeenCalled();
+  });
+
+  it("rejects disposition evidence that predates receipt or terminal inspection", async () => {
+    const beforeReceipt = new ReturnCaseOperationService({
+      transaction: (work) => work(tx as unknown as ReturnCaseOperationTransaction),
+    }, () => new Date(NOW.getTime() - 1));
+    tx.loadForUpdate.mockResolvedValue(aggregate({
+      firstReceived: 2,
+      secondReceived: 3,
+      logisticsStatus: "received",
+      wmsStatus: "received",
+      inspectionStatus: "approved",
+      inspection: terminalInspection(8, "approved", new Date(NOW.getTime() - 2)),
+    }));
+    await expect(beforeReceipt.recordDisposition(dispositionInput()))
+      .rejects.toMatchObject({ code: "RETURN_CASE_DISPOSITION_TIME_INVALID", status: 500 });
+
+    const beforeInspection = new ReturnCaseOperationService({
+      transaction: (work) => work(tx as unknown as ReturnCaseOperationTransaction),
+    }, () => new Date(NOW.getTime() - 1));
+    tx.loadForUpdate.mockResolvedValue(aggregate({
+      firstReceived: 2,
+      secondReceived: 3,
+      logisticsStatus: "received",
+      wmsStatus: "received",
+      receivedAt: new Date(NOW.getTime() - 2),
+      inspectionStatus: "approved",
+      inspection: terminalInspection(8, "approved", NOW),
+    }));
+    await expect(beforeInspection.recordDisposition(dispositionInput()))
+      .rejects.toMatchObject({ code: "RETURN_CASE_DISPOSITION_TIME_INVALID", status: 500 });
+    expect(tx.persistDisposition).not.toHaveBeenCalled();
+  });
+
+  it("replays disposition before mutable state and hashes the reviewed inspection id", async () => {
+    const clock = vi.fn(() => NOW);
+    const replayService = new ReturnCaseOperationService({
+      transaction: (work) => work(tx as unknown as ReturnCaseOperationTransaction),
+    }, clock);
+    const input = dispositionInput();
+    tx.loadForUpdate.mockResolvedValue(aggregate({
+      firstReceived: 2,
+      secondReceived: 3,
+      logisticsStatus: "received",
+      wmsStatus: "received",
+      inspectionStatus: "approved",
+      inspection: terminalInspection(8, "approved"),
+    }));
+    tx.persistDisposition.mockRejectedValueOnce(new Error("capture"));
+    await expect(replayService.recordDisposition(input)).rejects.toThrow("capture");
+    const persisted = tx.persistDisposition.mock.calls[0][0];
+    const replayResult = {
+      commandType: "record_disposition" as const,
+      caseId: 1,
+      caseNumber: "RET-0000000001",
+      dispositionId: 17,
+      inspectionId: 8,
+      inspectionResolution: "approved" as const,
+      lines: [{ returnCaseItemId: 1, quantity: 1, treatment: "restock_sellable" as const }],
+      dispositionSummary: persisted.dispositionSummary,
+      recordedAt: NOW.toISOString(),
+      replayed: false,
+    };
+    tx.findCommand.mockResolvedValue({
+      commandType: "record_disposition",
+      requestHash: persisted.requestHash,
+      result: replayResult,
+    });
+    tx.loadForUpdate.mockClear();
+    tx.persistDisposition.mockClear();
+    clock.mockClear();
+
+    expect(await replayService.recordDisposition(input)).toMatchObject({ replayed: true });
+    expect(tx.loadForUpdate).not.toHaveBeenCalled();
+    expect(tx.persistDisposition).not.toHaveBeenCalled();
+    expect(clock).not.toHaveBeenCalled();
+    await expect(replayService.recordDisposition({ ...input, inspectionId: 9 }))
+      .rejects.toMatchObject({ code: "RETURN_CASE_IDEMPOTENCY_CONFLICT", status: 409 });
+  });
+
+  it.each([
+    ["RETURN_CASE_DISPOSITION_STATE_STALE", 1, 0, 1],
+    ["RETURN_CASE_DISPOSITION_QUANTITY_EXCEEDED", 2, 0, 3],
+  ] as const)("rejects %s before disposition persistence", async (
+    code,
+    expectedCurrentReceivedQuantity,
+    expectedCurrentDisposedQuantity,
+    quantity,
+  ) => {
+    tx.loadForUpdate.mockResolvedValue(aggregate({
+      firstReceived: 2,
+      secondReceived: 3,
+      logisticsStatus: "received",
+      wmsStatus: "received",
+      inspectionStatus: "approved",
+      inspection: terminalInspection(8, "approved"),
+    }));
+    await expect(service.recordDisposition(dispositionInput({
+      lines: [{
+        returnCaseItemId: 1,
+        quantity,
+        treatment: "restock_sellable",
+        expectedCurrentReceivedQuantity,
+        expectedCurrentDisposedQuantity,
+      }],
+    }))).rejects.toMatchObject({ code, status: 409 });
+    expect(tx.persistDisposition).not.toHaveBeenCalled();
+  });
+
   it("rejects duplicate receipt lines and invalid clocks deterministically", async () => {
     await expect(service.recordReceipt({
       caseId: 1,
@@ -538,6 +787,7 @@ function fakeTransaction() {
     persistReceipt: vi.fn(),
     persistStartInspection: vi.fn(),
     persistCompleteInspection: vi.fn(),
+    persistDisposition: vi.fn(),
   };
 }
 
@@ -548,8 +798,11 @@ function aggregate(input: {
   secondReceived?: number;
   logisticsStatus?: "awaiting_return" | "partially_received" | "received";
   wmsStatus?: "expected" | "partially_received" | "received";
-  inspectionStatus?: "pending" | "in_progress" | "approved" | "rejected";
+  inspectionStatus?: "pending" | "in_progress" | "approved" | "rejected" | "not_required";
+  inspectionRequirement?: "required" | "conditional_required" | "none";
+  receivedAt?: Date;
   inspection?: ReturnCaseOperationAggregate["actionContext"]["inspection"];
+  disposition?: ReturnCaseOperationAggregate["actionContext"]["disposition"];
 } = {}): ReturnCaseOperationAggregate {
   const firstExpected = input.firstExpected ?? 2;
   const firstReceived = input.firstReceived ?? 0;
@@ -581,7 +834,7 @@ function aggregate(input: {
         approvalAuthority: "card_shellz",
         labelProvider: "shipstation",
         returnShippingPayer: "customer",
-        inspectionRequirement: "required",
+        inspectionRequirement: input.inspectionRequirement ?? "required",
         inspectionOwner: "card_shellz",
         customerRefundAuthority: "card_shellz",
         vendorSettlementTrigger: "none",
@@ -590,7 +843,8 @@ function aggregate(input: {
       receipt: {
         wmsReturnId: 230,
         wmsStatus,
-        receivedAt: firstReceived + secondReceived > 0 ? NOW : null,
+        receivedAt: input.receivedAt
+          ?? (firstReceived + secondReceived > 0 ? NOW : null),
         restocked: false,
         canonicalItemCount: 2,
         items: [
@@ -613,6 +867,7 @@ function aggregate(input: {
         ],
       },
       inspection: input.inspection ?? null,
+      disposition: input.disposition ?? null,
       conditionalInspectionDecision: null,
     },
   };
@@ -626,6 +881,41 @@ function activeInspection(inspectionId: number): NonNullable<ReturnCaseOperation
     startedBy: "user:6",
     completedAt: null,
     completedBy: null,
+  };
+}
+
+function terminalInspection(
+  inspectionId: number,
+  status: "approved" | "rejected",
+  completedAt: Date = NOW,
+): NonNullable<ReturnCaseOperationAggregate["actionContext"]["inspection"]> {
+  return {
+    inspectionId,
+    status,
+    startedAt: new Date("2026-08-22T10:00:00.000Z"),
+    startedBy: "user:6",
+    completedAt,
+    completedBy: "user:7",
+  };
+}
+
+function dispositionInput(
+  override: Partial<Parameters<ReturnCaseOperationService["recordDisposition"]>[0]> = {},
+): Parameters<ReturnCaseOperationService["recordDisposition"]>[0] {
+  return {
+    caseId: 1,
+    inspectionId: 8,
+    idempotencyKey: "disposition-test",
+    actor: "user:7",
+    notes: null,
+    lines: [{
+      returnCaseItemId: 1,
+      quantity: 1,
+      treatment: "restock_sellable",
+      expectedCurrentReceivedQuantity: 2,
+      expectedCurrentDisposedQuantity: 0,
+    }],
+    ...override,
   };
 }
 

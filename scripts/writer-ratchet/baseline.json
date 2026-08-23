@@ -677,6 +677,12 @@
   "returns.return_case_commands": [
     "modules/returns"
   ],
+  "returns.return_case_disposition_items": [
+    "modules/returns"
+  ],
+  "returns.return_case_dispositions": [
+    "modules/returns"
+  ],
   "returns.return_case_events": [
     "modules/returns"
   ],

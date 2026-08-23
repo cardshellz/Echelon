@@ -4,6 +4,7 @@ import {
   ReturnCaseAdminApiError,
   completeReturnInspection,
   getReturnCaseDetail,
+  recordReturnDisposition,
   recordReturnReceipt,
   startReturnInspection,
   type ReturnCaseAdminTransport,
@@ -131,6 +132,195 @@ describe("return case admin API client", () => {
       notes: "seal intact",
     });
   });
+  it("normalizes, orders, and strictly validates a disposition command", async () => {
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () =>
+      jsonResponse(dispositionResultFixture()),
+    );
+
+    const result = await recordReturnDisposition(42, {
+      idempotencyKey: " disposition-command-1 ",
+      inspectionId: null,
+      notes: " seal intact ",
+      lines: [
+        {
+          returnCaseItemId: 12,
+          quantity: 1,
+          treatment: "hold_non_sellable",
+          expectedCurrentReceivedQuantity: 2,
+          expectedCurrentDisposedQuantity: 0,
+        },
+        {
+          returnCaseItemId: 11,
+          quantity: 1,
+          treatment: "restock_sellable",
+          expectedCurrentReceivedQuantity: 1,
+          expectedCurrentDisposedQuantity: 0,
+        },
+      ],
+    }, transport);
+
+    expect(result).toMatchObject({
+      commandType: "record_disposition",
+      caseId: 42,
+      inspectionId: null,
+      inspectionResolution: "not_required",
+      dispositionSummary: { recordedUnits: 2, remainingUnits: 1 },
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+    const [url, init] = transport.mock.calls[0];
+    expect(url).toBe("/api/returns/admin/cases/42/dispositions");
+    expect(init).toMatchObject({
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+    });
+    expect(JSON.parse(String(init?.body))).toEqual({
+      idempotencyKey: "disposition-command-1",
+      inspectionId: null,
+      notes: "seal intact",
+      lines: [
+        {
+          returnCaseItemId: 11,
+          quantity: 1,
+          treatment: "restock_sellable",
+          expectedCurrentReceivedQuantity: 1,
+          expectedCurrentDisposedQuantity: 0,
+        },
+        {
+          returnCaseItemId: 12,
+          quantity: 1,
+          treatment: "hold_non_sellable",
+          expectedCurrentReceivedQuantity: 2,
+          expectedCurrentDisposedQuantity: 0,
+        },
+      ],
+    });
+  });
+
+  it("rejects a disposition response for a different return case", async () => {
+    const fixture = dispositionResultFixture();
+    fixture.caseId = 43;
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    await expect(recordReturnDisposition(42, {
+      idempotencyKey: "disposition-command-identity",
+      inspectionId: null,
+      lines: [{
+        returnCaseItemId: 11,
+        quantity: 1,
+        treatment: "restock_sellable",
+        expectedCurrentReceivedQuantity: 1,
+        expectedCurrentDisposedQuantity: 0,
+      }],
+    }, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+      context: {
+        issues: expect.arrayContaining([expect.objectContaining({ path: "caseId" })]),
+      },
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("rejects a disposition response for a different reviewed inspection", async () => {
+    const fixture = dispositionResultFixture();
+    fixture.inspectionId = 91;
+    fixture.inspectionResolution = "approved";
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    await expect(recordReturnDisposition(42, {
+      idempotencyKey: "disposition-command-inspection-identity",
+      inspectionId: 92,
+      lines: [
+        {
+          returnCaseItemId: 12,
+          quantity: 1,
+          treatment: "hold_non_sellable",
+          expectedCurrentReceivedQuantity: 2,
+          expectedCurrentDisposedQuantity: 0,
+        },
+        {
+          returnCaseItemId: 11,
+          quantity: 1,
+          treatment: "restock_sellable",
+          expectedCurrentReceivedQuantity: 1,
+          expectedCurrentDisposedQuantity: 0,
+        },
+      ],
+    }, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+      context: {
+        issues: expect.arrayContaining([expect.objectContaining({ path: "inspectionId" })]),
+      },
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a disposition summary that differs from submitted optimistic quantities", async () => {
+    const fixture = dispositionResultFixture();
+    fixture.lines = [{
+      returnCaseItemId: 11,
+      quantity: 1,
+      treatment: "restock_sellable",
+    }];
+    fixture.dispositionSummary.receivedUnits = 4;
+    fixture.dispositionSummary.remainingUnits = 2;
+    fixture.dispositionSummary.items[0].receivedQuantity = 2;
+    fixture.dispositionSummary.items[0].remainingQuantity = 1;
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    await expect(recordReturnDisposition(42, {
+      idempotencyKey: "disposition-command-summary-identity",
+      inspectionId: null,
+      lines: [{
+        returnCaseItemId: 11,
+        quantity: 1,
+        treatment: "restock_sellable",
+        expectedCurrentReceivedQuantity: 1,
+        expectedCurrentDisposedQuantity: 0,
+      }],
+    }, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+      context: {
+        issues: expect.arrayContaining([
+          expect.objectContaining({ path: "dispositionSummary.items" }),
+        ]),
+      },
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+
+  it("rejects disposition response lines that differ from the submitted command", async () => {
+    const fixture = dispositionResultFixture();
+    fixture.lines = [{
+      returnCaseItemId: 11,
+      quantity: 2,
+      treatment: "restock_sellable",
+    }];
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    await expect(recordReturnDisposition(42, {
+      idempotencyKey: "disposition-command-line-identity",
+      inspectionId: null,
+      lines: [{
+        returnCaseItemId: 11,
+        quantity: 1,
+        treatment: "restock_sellable",
+        expectedCurrentReceivedQuantity: 1,
+        expectedCurrentDisposedQuantity: 0,
+      }],
+    }, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+      context: {
+        issues: expect.arrayContaining([expect.objectContaining({ path: "lines.0" })]),
+      },
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
 
   it.each([
     { name: "case", caseId: 43, inspectionId: 91, expectedPath: "caseId" },
@@ -193,6 +383,29 @@ describe("return case admin API client", () => {
       execute: (transport: ReturnCaseAdminTransport) => recordReturnReceipt(42, {
         idempotencyKey: "receipt-command-1",
         lines: [{ returnCaseItemId: 11, expectedCurrentReceivedQuantity: -1, quantityReceivedNow: 1 }],
+      }, transport),
+    },
+    {
+      name: "duplicate disposition line",
+      execute: (transport: ReturnCaseAdminTransport) => recordReturnDisposition(42, {
+        idempotencyKey: "disposition-command-duplicate",
+        inspectionId: null,
+        lines: [
+          {
+            returnCaseItemId: 11,
+            quantity: 1,
+            treatment: "restock_sellable",
+            expectedCurrentReceivedQuantity: 1,
+            expectedCurrentDisposedQuantity: 0,
+          },
+          {
+            returnCaseItemId: 11,
+            quantity: 1,
+            treatment: "hold_non_sellable",
+            expectedCurrentReceivedQuantity: 1,
+            expectedCurrentDisposedQuantity: 0,
+          },
+        ],
       }, transport),
     },
     {
@@ -278,6 +491,77 @@ describe("return case admin API client", () => {
     });
     expect(transport).toHaveBeenCalledTimes(1);
   });
+  it("rejects a server action plan that omits a required action kind", async () => {
+    const fixture = detailFixture();
+    fixture.actionPlan.actions = fixture.actionPlan.actions.filter(
+      (action) => action.kind !== "record_disposition",
+    );
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    await expect(getReturnCaseDetail(42, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("accepts an empty disposition summary only for the explicit evidence-conflict blocker", async () => {
+    const fixture = detailFixture();
+    fixture.actionPlan.dispositionSummary = {
+      receivedUnits: 0,
+      recordedUnits: 0,
+      remainingUnits: 0,
+      fullyRecorded: false,
+      partiallyRecorded: false,
+      items: [],
+    };
+    const dispositionAction = fixture.actionPlan.actions.find(
+      (action) => action.kind === "record_disposition",
+    );
+    if (!dispositionAction) throw new Error("Disposition action fixture is missing.");
+    dispositionAction.state = "blocked";
+    dispositionAction.reasonCode = "RETURN_DISPOSITION_STATE_CONFLICT";
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    const detail = await getReturnCaseDetail(42, transport);
+
+    expect(detail.actionPlan.dispositionSummary.items).toEqual([]);
+    expect(detail.actionPlan.actions.find(
+      (action) => action.kind === "record_disposition",
+    )).toMatchObject({
+      state: "blocked",
+      reasonCode: "RETURN_DISPOSITION_STATE_CONFLICT",
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an empty disposition summary without the exact evidence-conflict blocker", async () => {
+    const fixture = detailFixture();
+    fixture.actionPlan.dispositionSummary = {
+      receivedUnits: 0,
+      recordedUnits: 0,
+      remainingUnits: 0,
+      fullyRecorded: false,
+      partiallyRecorded: false,
+      items: [],
+    };
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    await expect(getReturnCaseDetail(42, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+      context: {
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            path: "actionPlan.dispositionSummary.items",
+          }),
+        ]),
+      },
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+
+
 
   it("accepts a strict in-progress inspection summary from the action plan", async () => {
     const fixture = detailFixture();
@@ -353,6 +637,28 @@ describe("return case admin API client", () => {
     });
     expect(transport).toHaveBeenCalledTimes(1);
   });
+  it("rejects a disposition summary whose received evidence differs from the return item", async () => {
+    const fixture = detailFixture();
+    fixture.actionPlan.dispositionSummary.receivedUnits = 2;
+    fixture.actionPlan.dispositionSummary.remainingUnits = 2;
+    fixture.actionPlan.dispositionSummary.items[0].receivedQuantity = 2;
+    fixture.actionPlan.dispositionSummary.items[0].remainingQuantity = 2;
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    await expect(getReturnCaseDetail(42, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+      context: {
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            path: "actionPlan.dispositionSummary.items.0.receivedQuantity",
+          }),
+        ]),
+      },
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
 
   it("classifies invalid JSON and transport failures with one attempted request", async () => {
     const invalidJsonTransport = vi.fn<ReturnCaseAdminTransport>(async () =>
@@ -467,6 +773,31 @@ function detailFixture() {
         partiallyReceived: true,
       },
       inspectionSummary: null,
+      dispositionSummary: {
+        receivedUnits: 1,
+        recordedUnits: 0,
+        remainingUnits: 1,
+        fullyRecorded: false,
+        partiallyRecorded: false,
+        items: [
+          {
+            returnCaseItemId: 11,
+            receivedQuantity: 1,
+            restockSellableQuantity: 0,
+            holdNonSellableQuantity: 0,
+            recordedQuantity: 0,
+            remainingQuantity: 1,
+          },
+          {
+            returnCaseItemId: 12,
+            receivedQuantity: 0,
+            restockSellableQuantity: 0,
+            holdNonSellableQuantity: 0,
+            recordedQuantity: 0,
+            remainingQuantity: 0,
+          },
+        ],
+      },
       actions: [
         {
           kind: "record_receipt" as const,
@@ -482,10 +813,74 @@ function detailFixture() {
           state: "blocked" as const,
           reasonCode: "RETURN_NOT_FULLY_RECEIVED",
         },
+        {
+          kind: "complete_inspection" as const,
+          label: "Complete inspection",
+          description: "Record the final inspection outcome.",
+          state: "blocked" as const,
+          reasonCode: "RETURN_NOT_FULLY_RECEIVED",
+        },
+        {
+          kind: "record_disposition" as const,
+          label: "Resolve returned items",
+          description: "Record explicit disposition intent for received items.",
+          state: "blocked" as const,
+          reasonCode: "RETURN_NOT_FULLY_RECEIVED",
+        },
       ],
     },
   };
 }
+function dispositionResultFixture() {
+  return {
+    commandType: "record_disposition" as const,
+    caseId: 42,
+    caseNumber: "RET-0000000042",
+    dispositionId: 77,
+    inspectionId: null,
+    inspectionResolution: "not_required" as const,
+    lines: [
+      {
+        returnCaseItemId: 12,
+        treatment: "hold_non_sellable" as const,
+        quantity: 1,
+      },
+      {
+        returnCaseItemId: 11,
+        treatment: "restock_sellable" as const,
+        quantity: 1,
+      },
+    ],
+    dispositionSummary: {
+      receivedUnits: 3,
+      recordedUnits: 2,
+      remainingUnits: 1,
+      fullyRecorded: false,
+      partiallyRecorded: true,
+      items: [
+        {
+          returnCaseItemId: 11,
+          receivedQuantity: 1,
+          restockSellableQuantity: 1,
+          holdNonSellableQuantity: 0,
+          recordedQuantity: 1,
+          remainingQuantity: 0,
+        },
+        {
+          returnCaseItemId: 12,
+          receivedQuantity: 2,
+          restockSellableQuantity: 0,
+          holdNonSellableQuantity: 1,
+          recordedQuantity: 1,
+          remainingQuantity: 1,
+        },
+      ],
+    },
+    recordedAt: "2026-08-23T12:00:00.000Z",
+    replayed: false,
+  };
+}
+
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {

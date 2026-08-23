@@ -53,6 +53,7 @@ describe("PostgresReturnCaseOperationStore", () => {
             { returnCaseItemId: 12, wmsReturnItemId: 102, wmsReceivedQuantity: 1 },
           ],
         },
+        disposition: null,
       },
     });
 
@@ -62,11 +63,18 @@ describe("PostgresReturnCaseOperationStore", () => {
     const caseLock = statements.findIndex((text) => text.includes("FROM returns.return_cases") && text.endsWith("FOR UPDATE"));
     const wmsHeaderLock = statements.findIndex((text) => text.startsWith("SELECT id, status, received_at, restocked FROM wms.returns"));
     const wmsItemLock = statements.findIndex((text) => text.includes("FROM wms.return_items ri"));
-    expect([identityRead, advisoryLock, caseLock, wmsHeaderLock, wmsItemLock].every((index) => index >= 0)).toBe(true);
+    const dispositionHeaderLock = statements.findIndex((text) => text.includes("FROM returns.return_case_dispositions") && text.endsWith("FOR UPDATE"));
+    const dispositionItemLock = statements.findIndex((text) => text.includes("FROM returns.return_case_disposition_items item"));
+    expect([
+      identityRead, advisoryLock, caseLock, wmsHeaderLock, wmsItemLock,
+      dispositionHeaderLock, dispositionItemLock,
+    ].every((index) => index >= 0)).toBe(true);
     expect(identityRead).toBeLessThan(advisoryLock);
     expect(advisoryLock).toBeLessThan(caseLock);
     expect(caseLock).toBeLessThan(wmsHeaderLock);
     expect(wmsHeaderLock).toBeLessThan(wmsItemLock);
+    expect(wmsItemLock).toBeLessThan(dispositionHeaderLock);
+    expect(dispositionHeaderLock).toBeLessThan(dispositionItemLock);
   });
 
   it("uses the same active-first, latest-terminal, cancelled-excluding selection in the detail repository", () => {
@@ -196,6 +204,109 @@ describe("PostgresReturnCaseOperationStore", () => {
     expect(execute).toHaveBeenCalledTimes(expectedCalls);
   });
 
+  it("persists disposition evidence, event, command, and audit atomically without downstream side effects", async () => {
+    const execute = vi.fn(async (query: any) => {
+      const text = qtext(query);
+      if (text.startsWith("INSERT INTO returns.return_case_dispositions")) {
+        return { rows: [{ id: 17 }] };
+      }
+      return { rows: [] };
+    });
+    const auditValues = vi.fn().mockResolvedValue(undefined);
+    const insert = vi.fn(() => ({ values: auditValues }));
+    mocks.transaction.mockImplementation(async (work) => work({ execute, insert }));
+    const store = new PostgresReturnCaseOperationStore();
+    const summary = {
+      receivedUnits: 1,
+      recordedUnits: 1,
+      remainingUnits: 0,
+      fullyRecorded: true,
+      partiallyRecorded: false,
+      items: [{
+        returnCaseItemId: 11,
+        receivedQuantity: 1,
+        restockSellableQuantity: 1,
+        holdNonSellableQuantity: 0,
+        recordedQuantity: 1,
+        remainingQuantity: 0,
+      }],
+    };
+
+    const result = await store.transaction((tx) => tx.persistDisposition({
+      aggregate: dispositionAggregate(),
+      idempotencyKey: "disposition-17",
+      requestHash: "d".repeat(64),
+      actor: "user:7",
+      notes: "sealed",
+      inspectionId: 9,
+      inspectionResolution: "approved",
+      lines: [{
+        returnCaseItemId: 11,
+        quantity: 1,
+        treatment: "restock_sellable",
+        expectedCurrentReceivedQuantity: 1,
+        expectedCurrentDisposedQuantity: 0,
+      }],
+      dispositionSummary: summary,
+      now: NOW,
+    }));
+
+    expect(result).toEqual({
+      commandType: "record_disposition",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      dispositionId: 17,
+      inspectionId: 9,
+      inspectionResolution: "approved",
+      lines: [{ returnCaseItemId: 11, quantity: 1, treatment: "restock_sellable" }],
+      dispositionSummary: summary,
+      recordedAt: NOW.toISOString(),
+      replayed: false,
+    });
+    const statements = execute.mock.calls.map(([query]) => qtext(query));
+    const header = statements.findIndex((text) => text.startsWith("INSERT INTO returns.return_case_dispositions"));
+    const item = statements.findIndex((text) => text.startsWith("INSERT INTO returns.return_case_disposition_items"));
+    const event = statements.findIndex((text) => text.startsWith("INSERT INTO returns.return_case_events"));
+    const command = statements.findIndex((text) => text.startsWith("INSERT INTO returns.return_case_commands"));
+    expect([header, item, event, command].every((index) => index >= 0)).toBe(true);
+    expect(header).toBeLessThan(item);
+    expect(item).toBeLessThan(event);
+    expect(event).toBeLessThan(command);
+    const sqlText = statements.join(" ").toLowerCase();
+    expect(sqlText).not.toMatch(/\bupdate\b/);
+    expect(sqlText).not.toMatch(/\b(?:inventory|wms|oms)\./);
+    expect(sqlText).not.toMatch(/customer_refund|vendor_settlement|closed_at|case_status/);
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(auditValues).toHaveBeenCalledWith(expect.objectContaining({
+      actor: "user:7",
+      action: "RETURN_CASE_DISPOSITION_RECORDED",
+      target: "returns.return_cases:42",
+      context: expect.objectContaining({
+        requestHash: "d".repeat(64),
+        dispositionId: 17,
+        inspectionId: 9,
+        inspectionResolution: "approved",
+      }),
+    }));
+  });
+
+  it("parses exact persisted disposition results for idempotent replay", async () => {
+    const response = dispositionReplayResponse();
+    const execute = vi.fn(async () => ({
+      rows: [{ command_type: "record_disposition", request_hash: "e".repeat(64), response }],
+    }));
+    mocks.transaction.mockImplementation(async (work) => work({ execute }));
+    const store = new PostgresReturnCaseOperationStore();
+
+    const command = await store.transaction((tx) => tx.findCommand("disposition-17"));
+
+    expect(command).toEqual({
+      commandType: "record_disposition",
+      requestHash: "e".repeat(64),
+      result: response,
+    });
+  });
+
   it("parses persisted completion results for idempotent replay", async () => {
     const execute = vi.fn(async () => ({
       rows: [{
@@ -294,6 +405,12 @@ function operationReader(
       return { rows: [{ total: 2 }] };
     }
     if (text.includes("FROM returns.return_case_inspections")) return { rows: inspectionRows };
+    if (text.startsWith("SELECT id FROM returns.return_case_dispositions")) {
+      return { rows: [] };
+    }
+    if (text.includes("FROM returns.return_case_disposition_items item")) {
+      return { rows: [] };
+    }
     throw new Error(`Unexpected SQL: ${text}`);
   });
 }
@@ -337,10 +454,59 @@ function completionAggregate(): ReturnCaseOperationAggregate {
         completedAt: null,
         completedBy: null,
       },
+      disposition: null,
       conditionalInspectionDecision: null,
     },
   };
 }
+function dispositionAggregate(): ReturnCaseOperationAggregate {
+  const base = completionAggregate();
+  return {
+    ...base,
+    actionContext: {
+      ...base.actionContext,
+      lifecycle: { ...base.actionContext.lifecycle, inspectionStatus: "approved" },
+      inspection: {
+        inspectionId: 9,
+        status: "approved",
+        startedAt: new Date("2026-08-22T14:30:00.000Z"),
+        startedBy: "user:6",
+        completedAt: new Date("2026-08-22T14:45:00.000Z"),
+        completedBy: "user:7",
+      },
+    },
+  };
+}
+
+function dispositionReplayResponse() {
+  return {
+    commandType: "record_disposition" as const,
+    caseId: 42,
+    caseNumber: "RET-0000000042",
+    dispositionId: 17,
+    inspectionId: 9,
+    inspectionResolution: "approved" as const,
+    lines: [{ returnCaseItemId: 11, quantity: 1, treatment: "restock_sellable" as const }],
+    dispositionSummary: {
+      receivedUnits: 1,
+      recordedUnits: 1,
+      remainingUnits: 0,
+      fullyRecorded: true,
+      partiallyRecorded: false,
+      items: [{
+        returnCaseItemId: 11,
+        receivedQuantity: 1,
+        restockSellableQuantity: 1,
+        holdNonSellableQuantity: 0,
+        recordedQuantity: 1,
+        remainingQuantity: 0,
+      }],
+    },
+    recordedAt: NOW.toISOString(),
+    replayed: false,
+  };
+}
+
 function caseRow() {
   return {
     id: 42,

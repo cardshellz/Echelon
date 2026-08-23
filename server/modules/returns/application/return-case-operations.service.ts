@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto";
+import type {
+  ReturnDispositionInspectionResolution,
+  ReturnDispositionTreatment,
+} from "@shared/schema";
 import {
   deriveReturnCaseActionPlan,
   type ReturnCaseActionContext,
   type ReturnCaseActionKind,
+  type ReturnCaseDispositionSummary,
 } from "../domain/return-case-actions";
 
 export interface ReturnCaseOperationAggregate {
@@ -43,6 +48,21 @@ export interface CompleteReturnInspectionInput {
   notes: string | null;
 }
 
+export interface RecordReturnDispositionInput {
+  caseId: number;
+  inspectionId: number | null;
+  idempotencyKey: string;
+  actor: string;
+  notes: string | null;
+  lines: Array<{
+    returnCaseItemId: number;
+    quantity: number;
+    treatment: ReturnDispositionTreatment;
+    expectedCurrentReceivedQuantity: number;
+    expectedCurrentDisposedQuantity: number;
+  }>;
+}
+
 export interface RecordReturnReceiptResult {
   commandType: "record_receipt";
   caseId: number;
@@ -75,10 +95,28 @@ export interface CompleteReturnInspectionResult {
   replayed: boolean;
 }
 
+export interface RecordReturnDispositionResult {
+  commandType: "record_disposition";
+  caseId: number;
+  caseNumber: string;
+  dispositionId: number;
+  inspectionId: number | null;
+  inspectionResolution: ReturnDispositionInspectionResolution;
+  lines: Array<{
+    returnCaseItemId: number;
+    quantity: number;
+    treatment: ReturnDispositionTreatment;
+  }>;
+  dispositionSummary: ReturnCaseDispositionSummary;
+  recordedAt: string;
+  replayed: boolean;
+}
+
 export type ReturnCaseOperationResult =
   | RecordReturnReceiptResult
   | StartReturnInspectionResult
-  | CompleteReturnInspectionResult;
+  | CompleteReturnInspectionResult
+  | RecordReturnDispositionResult;
 
 export interface PersistReturnReceiptInput {
   aggregate: ReturnCaseOperationAggregate;
@@ -115,6 +153,25 @@ export interface PersistCompleteInspectionInput {
   now: Date;
 }
 
+export interface PersistReturnDispositionInput {
+  aggregate: ReturnCaseOperationAggregate;
+  idempotencyKey: string;
+  requestHash: string;
+  actor: string;
+  notes: string | null;
+  inspectionId: number | null;
+  inspectionResolution: ReturnDispositionInspectionResolution;
+  lines: Array<{
+    returnCaseItemId: number;
+    quantity: number;
+    treatment: ReturnDispositionTreatment;
+    expectedCurrentReceivedQuantity: number;
+    expectedCurrentDisposedQuantity: number;
+  }>;
+  dispositionSummary: ReturnCaseDispositionSummary;
+  now: Date;
+}
+
 export interface ExistingReturnCaseCommand {
   commandType: ReturnCaseActionKind;
   requestHash: string;
@@ -128,6 +185,7 @@ export interface ReturnCaseOperationTransaction {
   persistReceipt(input: PersistReturnReceiptInput): Promise<RecordReturnReceiptResult>;
   persistStartInspection(input: PersistStartInspectionInput): Promise<StartReturnInspectionResult>;
   persistCompleteInspection(input: PersistCompleteInspectionInput): Promise<CompleteReturnInspectionResult>;
+  persistDisposition(input: PersistReturnDispositionInput): Promise<RecordReturnDispositionResult>;
 }
 
 export interface ReturnCaseOperationStore {
@@ -297,6 +355,82 @@ export class ReturnCaseOperationService {
       });
     });
   }
+
+  async recordDisposition(rawInput: RecordReturnDispositionInput): Promise<RecordReturnDispositionResult> {
+    const input = normalizeDispositionInput(rawInput);
+    const requestHash = hashCommand("record_disposition", input);
+
+    return this.store.transaction(async (tx) => {
+      await tx.lockCommand(input.idempotencyKey);
+      const replay = await resolveReplay(tx, input.idempotencyKey, "record_disposition", requestHash);
+      if (replay) return requireDispositionResult(replay);
+
+      const aggregate = await loadAggregate(tx, input.caseId);
+      requireActionAvailable(aggregate.actionContext, "record_disposition");
+      const inspectionEvidence = resolveDispositionInspectionEvidence(aggregate.actionContext, input.caseId);
+      if (input.inspectionId !== inspectionEvidence.inspectionId) {
+        throw new ReturnCaseOperationError(
+          "RETURN_CASE_INSPECTION_STATE_STALE",
+          "The inspection evidence changed after this return was reviewed. Refresh the return case and try again.",
+          409,
+          {
+            caseId: input.caseId,
+            expectedInspectionId: input.inspectionId,
+            actualInspectionId: inspectionEvidence.inspectionId,
+          },
+        );
+      }
+      const dispositionSummary = buildDispositionSummary(aggregate.actionContext, input.lines, input.caseId);
+      const now = readClock(this.clock);
+      const receiptReceivedAt = aggregate.actionContext.receipt?.receivedAt;
+      if (!(receiptReceivedAt instanceof Date) || Number.isNaN(receiptReceivedAt.getTime())) {
+        throw new ReturnCaseOperationError(
+          "RETURN_CASE_DATA_INVALID",
+          "Disposition recording requires valid persisted return receipt evidence.",
+          500,
+          { caseId: input.caseId },
+        );
+      }
+      if (now.getTime() < receiptReceivedAt.getTime()) {
+        throw new ReturnCaseOperationError(
+          "RETURN_CASE_DISPOSITION_TIME_INVALID",
+          "Disposition evidence cannot predate the return receipt it depends on.",
+          500,
+          {
+            caseId: input.caseId,
+            receiptReceivedAt: receiptReceivedAt.toISOString(),
+            dispositionRecordedAt: now.toISOString(),
+          },
+        );
+      }
+      if (inspectionEvidence.completedAt !== null
+        && now.getTime() < inspectionEvidence.completedAt.getTime()) {
+        throw new ReturnCaseOperationError(
+          "RETURN_CASE_DISPOSITION_TIME_INVALID",
+          "Disposition evidence cannot predate the terminal inspection it depends on.",
+          500,
+          {
+            caseId: input.caseId,
+            inspectionId: inspectionEvidence.inspectionId,
+            inspectionCompletedAt: inspectionEvidence.completedAt.toISOString(),
+            dispositionRecordedAt: now.toISOString(),
+          },
+        );
+      }
+      return tx.persistDisposition({
+        aggregate,
+        idempotencyKey: input.idempotencyKey,
+        requestHash,
+        actor: input.actor,
+        notes: input.notes,
+        inspectionId: inspectionEvidence.inspectionId,
+        inspectionResolution: inspectionEvidence.inspectionResolution,
+        lines: input.lines,
+        dispositionSummary,
+        now,
+      });
+    });
+  }
 }
 
 async function resolveReplay(
@@ -385,6 +519,40 @@ function normalizeCompleteInspectionInput(input: CompleteReturnInspectionInput):
   };
 }
 
+function normalizeDispositionInput(input: RecordReturnDispositionInput): RecordReturnDispositionInput {
+  const common = normalizeCommon(input);
+  if (!Array.isArray(input.lines) || input.lines.length === 0 || input.lines.length > 200) {
+    throw invalid("lines", input.lines);
+  }
+  const seen = new Set<number>();
+  const lines = input.lines.map((line) => {
+    const returnCaseItemId = requirePositiveSafeInteger(line?.returnCaseItemId, "returnCaseItemId");
+    if (seen.has(returnCaseItemId)) {
+      throw new ReturnCaseOperationError(
+        "RETURN_CASE_OPERATION_INPUT_INVALID",
+        "A return case item may only appear once in a disposition command.",
+        400,
+        { returnCaseItemId },
+      );
+    }
+    seen.add(returnCaseItemId);
+    return {
+      returnCaseItemId,
+      quantity: requirePositiveSafeInteger(line?.quantity, "quantity"),
+      treatment: requireDispositionTreatment(line?.treatment),
+      expectedCurrentReceivedQuantity: requireNonNegativeSafeInteger(
+        line?.expectedCurrentReceivedQuantity,
+        "expectedCurrentReceivedQuantity",
+      ),
+      expectedCurrentDisposedQuantity: requireNonNegativeSafeInteger(
+        line?.expectedCurrentDisposedQuantity,
+        "expectedCurrentDisposedQuantity",
+      ),
+    };
+  }).sort((left, right) => left.returnCaseItemId - right.returnCaseItemId);
+  return { ...common, inspectionId: requireNullablePositiveSafeInteger(input.inspectionId, "inspectionId"), lines };
+}
+
 function normalizeCommon<T extends {
   caseId: number;
   idempotencyKey: string;
@@ -401,11 +569,17 @@ function normalizeCommon<T extends {
 
 function hashCommand(
   commandType: ReturnCaseActionKind,
-  input: RecordReturnReceiptInput | StartReturnInspectionInput | CompleteReturnInspectionInput,
+  input:
+    | RecordReturnReceiptInput
+    | StartReturnInspectionInput
+    | CompleteReturnInspectionInput
+    | RecordReturnDispositionInput,
 ): string {
-  const request = "lines" in input
-    ? { commandType, caseId: input.caseId, notes: input.notes, lines: input.lines }
-    : "outcome" in input
+  const request = "lines" in input && "inspectionId" in input
+    ? { commandType, caseId: input.caseId, inspectionId: input.inspectionId, notes: input.notes, lines: input.lines }
+    : "lines" in input
+      ? { commandType, caseId: input.caseId, notes: input.notes, lines: input.lines }
+      : "outcome" in input
       ? {
           commandType,
           caseId: input.caseId,
@@ -446,6 +620,193 @@ function requireCompleteInspectionResult(result: ReturnCaseOperationResult): Com
   return result;
 }
 
+function requireDispositionResult(result: ReturnCaseOperationResult): RecordReturnDispositionResult {
+  if (result.commandType !== "record_disposition") {
+    throw new ReturnCaseOperationError(
+      "RETURN_CASE_COMMAND_DATA_INVALID",
+      "Stored return command data is inconsistent.",
+      500,
+    );
+  }
+  return result;
+}
+
+function resolveDispositionInspectionEvidence(
+  context: ReturnCaseActionContext,
+  caseId: number,
+): {
+  inspectionId: number | null;
+  inspectionResolution: ReturnDispositionInspectionResolution;
+  completedAt: Date | null;
+} {
+  if (context.lifecycle.inspectionStatus === "not_required") {
+    if (context.inspection !== null) {
+      throw inspectionStateStale(caseId, context);
+    }
+    return { inspectionId: null, inspectionResolution: "not_required", completedAt: null };
+  }
+
+  const inspection = context.inspection;
+  if (!inspection
+    || (inspection.status !== "approved" && inspection.status !== "rejected")
+    || context.lifecycle.inspectionStatus !== inspection.status
+    || !Number.isSafeInteger(inspection.inspectionId)
+    || inspection.inspectionId <= 0
+    || !(inspection.startedAt instanceof Date)
+    || Number.isNaN(inspection.startedAt.getTime())
+    || !(inspection.completedAt instanceof Date)
+    || Number.isNaN(inspection.completedAt.getTime())
+    || inspection.completedAt.getTime() < inspection.startedAt.getTime()
+    || typeof inspection.startedBy !== "string"
+    || inspection.startedBy.trim() === ""
+    || typeof inspection.completedBy !== "string"
+    || inspection.completedBy.trim() === "") {
+    throw inspectionStateStale(caseId, context);
+  }
+
+  return {
+    inspectionId: inspection.inspectionId,
+    inspectionResolution: inspection.status,
+    completedAt: inspection.completedAt,
+  };
+}
+
+function inspectionStateStale(
+  caseId: number,
+  context: ReturnCaseActionContext,
+): ReturnCaseOperationError {
+  return new ReturnCaseOperationError(
+    "RETURN_CASE_INSPECTION_STATE_STALE",
+    "The inspection evidence changed after this return was reviewed. Refresh the return case and try again.",
+    409,
+    {
+      caseId,
+      lifecycleInspectionStatus: context.lifecycle.inspectionStatus,
+      inspectionId: context.inspection?.inspectionId ?? null,
+      inspectionStatus: context.inspection?.status ?? null,
+    },
+  );
+}
+
+function buildDispositionSummary(
+  context: ReturnCaseActionContext,
+  lines: RecordReturnDispositionInput["lines"],
+  caseId: number,
+): ReturnCaseDispositionSummary {
+  const current = deriveReturnCaseActionPlan(context).dispositionSummary;
+  const itemById = new Map<number, ReturnCaseDispositionSummary["items"][number]>(
+    current.items.map((item): [number, ReturnCaseDispositionSummary["items"][number]] =>
+      [item.returnCaseItemId, { ...item }]),
+  );
+
+  for (const line of lines) {
+    const item = itemById.get(line.returnCaseItemId);
+    if (!item) {
+      throw new ReturnCaseOperationError(
+        "RETURN_CASE_DISPOSITION_ITEM_NOT_FOUND",
+        "A disposition item does not belong to this return case.",
+        409,
+        { caseId, returnCaseItemId: line.returnCaseItemId },
+      );
+    }
+    if (line.expectedCurrentReceivedQuantity !== item.receivedQuantity
+      || line.expectedCurrentDisposedQuantity !== item.recordedQuantity) {
+      throw new ReturnCaseOperationError(
+        "RETURN_CASE_DISPOSITION_STATE_STALE",
+        "The received or disposition quantity changed after this return was reviewed. Refresh the return case and try again.",
+        409,
+        {
+          caseId,
+          returnCaseItemId: line.returnCaseItemId,
+          expectedCurrentReceivedQuantity: line.expectedCurrentReceivedQuantity,
+          actualCurrentReceivedQuantity: item.receivedQuantity,
+          expectedCurrentDisposedQuantity: line.expectedCurrentDisposedQuantity,
+          actualCurrentDisposedQuantity: item.recordedQuantity,
+        },
+      );
+    }
+    if (line.quantity > item.remainingQuantity) {
+      throw new ReturnCaseOperationError(
+        "RETURN_CASE_DISPOSITION_QUANTITY_EXCEEDED",
+        "The disposition quantity exceeds the received quantity still awaiting treatment.",
+        409,
+        {
+          caseId,
+          returnCaseItemId: line.returnCaseItemId,
+          requestedQuantity: line.quantity,
+          receivedQuantity: item.receivedQuantity,
+          recordedQuantity: item.recordedQuantity,
+          remainingQuantity: item.remainingQuantity,
+        },
+      );
+    }
+
+    if (line.treatment === "restock_sellable") {
+      item.restockSellableQuantity = checkedEvidenceAdd(
+        item.restockSellableQuantity,
+        line.quantity,
+        "restock sellable quantity",
+      );
+    } else {
+      item.holdNonSellableQuantity = checkedEvidenceAdd(
+        item.holdNonSellableQuantity,
+        line.quantity,
+        "hold non-sellable quantity",
+      );
+    }
+    item.recordedQuantity = checkedEvidenceAdd(
+      item.recordedQuantity,
+      line.quantity,
+      "recorded disposition quantity",
+    );
+    item.remainingQuantity = item.receivedQuantity - item.recordedQuantity;
+  }
+
+  const items = Array.from(itemById.values())
+    .sort((left, right) => left.returnCaseItemId - right.returnCaseItemId);
+  const recordedUnits = checkedEvidenceSum(
+    items.map((item) => item.recordedQuantity),
+    "recorded disposition units",
+  );
+  const receivedUnits = checkedEvidenceSum(
+    items.map((item) => item.receivedQuantity),
+    "received disposition units",
+  );
+  const remainingUnits = receivedUnits - recordedUnits;
+  return {
+    receivedUnits,
+    recordedUnits,
+    remainingUnits,
+    fullyRecorded: receivedUnits > 0 && remainingUnits === 0,
+    partiallyRecorded: recordedUnits > 0 && remainingUnits > 0,
+    items,
+  };
+}
+
+function requireDispositionTreatment(value: unknown): ReturnDispositionTreatment {
+  if (value === "restock_sellable" || value === "hold_non_sellable") return value;
+  throw invalid("treatment", value);
+}
+
+function checkedEvidenceAdd(left: number, right: number, field: string): number {
+  const result = left + right;
+  if (!Number.isSafeInteger(result) || result < 0) {
+    throw new ReturnCaseOperationError(
+      "RETURN_CASE_DATA_INVALID",
+      field + " exceeds the supported range.",
+      500,
+    );
+  }
+  return result;
+}
+
+function checkedEvidenceSum(values: readonly number[], field: string): number {
+  return values.reduce(
+    (total, value) => checkedEvidenceAdd(total, value, field),
+    0,
+  );
+}
+
 function requireInspectionOutcome(value: unknown): ReturnInspectionOutcome {
   if (value === "approved" || value === "rejected") return value;
   throw invalid("outcome", value);
@@ -460,6 +821,11 @@ function requireNonNegativeSafeInteger(value: unknown, field: string): number {
   if (!Number.isSafeInteger(value) || Number(value) < 0) throw invalid(field, value);
   return Number(value);
 }
+function requireNullablePositiveSafeInteger(value: unknown, field: string): number | null {
+  if (value === null) return null;
+  return requirePositiveSafeInteger(value, field);
+}
+
 
 function normalizeRequiredText(value: unknown, field: string, maxLength: number): string {
   if (typeof value !== "string") throw invalid(field, value);

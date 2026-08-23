@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const MAX_RECEIPT_LINES = 200;
+const MAX_DISPOSITION_LINES = 200;
 const MAX_NOTES_LENGTH = 2_000;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 160;
 
@@ -25,6 +26,7 @@ export const returnCaseActionKindSchema = z.enum([
   "record_receipt",
   "start_inspection",
   "complete_inspection",
+  "record_disposition",
 ]);
 export const returnCaseActionStateSchema = z.enum([
   "available",
@@ -36,6 +38,10 @@ export const returnCaseReceiptStatusSchema = z.enum([
   "expected",
   "partially_received",
   "received",
+]);
+export const returnCaseDispositionTreatmentSchema = z.enum([
+  "restock_sellable",
+  "hold_non_sellable",
 ]);
 
 export const returnCaseActionSchema = z.object({
@@ -107,11 +113,101 @@ export const returnCaseInspectionSummarySchema = z.object({
   }
 });
 
+export const returnCaseDispositionSummaryItemSchema = z.object({
+  returnCaseItemId: positiveSafeIntegerSchema,
+  receivedQuantity: nonNegativeSafeIntegerSchema,
+  restockSellableQuantity: nonNegativeSafeIntegerSchema,
+  holdNonSellableQuantity: nonNegativeSafeIntegerSchema,
+  recordedQuantity: nonNegativeSafeIntegerSchema,
+  remainingQuantity: nonNegativeSafeIntegerSchema,
+}).strict().superRefine((item, context) => {
+  if (!Number.isSafeInteger(item.restockSellableQuantity + item.holdNonSellableQuantity)
+    || item.recordedQuantity !== item.restockSellableQuantity + item.holdNonSellableQuantity) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Recorded disposition quantity is inconsistent with its treatments.",
+      path: ["recordedQuantity"],
+    });
+  }
+  if (!Number.isSafeInteger(item.recordedQuantity + item.remainingQuantity)
+    || item.receivedQuantity !== item.recordedQuantity + item.remainingQuantity) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Disposition quantities are inconsistent with the received quantity.",
+      path: ["receivedQuantity"],
+    });
+  }
+});
+
+export const returnCaseDispositionSummarySchema = z.object({
+  receivedUnits: nonNegativeSafeIntegerSchema,
+  recordedUnits: nonNegativeSafeIntegerSchema,
+  remainingUnits: nonNegativeSafeIntegerSchema,
+  fullyRecorded: z.boolean(),
+  partiallyRecorded: z.boolean(),
+  items: z.array(returnCaseDispositionSummaryItemSchema),
+}).strict().superRefine((summary, context) => {
+  const seenIds = new Set<number>();
+  const itemTotals = summary.items.reduce(
+    (totals, item, index) => {
+      if (seenIds.has(item.returnCaseItemId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A disposition summary item may only appear once.",
+          path: ["items", index, "returnCaseItemId"],
+        });
+      }
+      seenIds.add(item.returnCaseItemId);
+      return {
+        received: totals.received + item.receivedQuantity,
+        recorded: totals.recorded + item.recordedQuantity,
+        remaining: totals.remaining + item.remainingQuantity,
+      };
+    },
+    { received: 0, recorded: 0, remaining: 0 },
+  );
+  if (!Object.values(itemTotals).every(Number.isSafeInteger)
+    || itemTotals.received !== summary.receivedUnits
+    || itemTotals.recorded !== summary.recordedUnits
+    || itemTotals.remaining !== summary.remainingUnits) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Disposition summary totals do not match its item lines.",
+      path: ["items"],
+    });
+  }
+  if (!Number.isSafeInteger(summary.recordedUnits + summary.remainingUnits)
+    || summary.receivedUnits !== summary.recordedUnits + summary.remainingUnits) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Disposition summary totals are inconsistent.",
+      path: ["receivedUnits"],
+    });
+  }
+  if (summary.fullyRecorded !== (summary.receivedUnits > 0 && summary.remainingUnits === 0)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "fullyRecorded is inconsistent with the disposition totals.",
+      path: ["fullyRecorded"],
+    });
+  }
+  if (summary.partiallyRecorded !== (summary.recordedUnits > 0 && summary.remainingUnits > 0)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "partiallyRecorded is inconsistent with the disposition totals.",
+      path: ["partiallyRecorded"],
+    });
+  }
+});
+
 export const returnCaseActionPlanSchema = z.object({
   nextAction: returnCaseActionKindSchema.nullable(),
   receiptSummary: returnCaseReceiptSummarySchema,
   inspectionSummary: returnCaseInspectionSummarySchema.nullable(),
-  actions: z.array(returnCaseActionSchema).max(returnCaseActionKindSchema.options.length),
+  dispositionSummary: returnCaseDispositionSummarySchema,
+  actions: z.array(returnCaseActionSchema).length(
+    returnCaseActionKindSchema.options.length,
+  ),
 }).strict().superRefine((plan, context) => {
   const seenKinds = new Set<string>();
   for (const [index, action] of plan.actions.entries()) {
@@ -265,6 +361,39 @@ export const returnCaseDetailSchema = z.object({
       path: ["actionPlan", "receiptSummary"],
     });
   }
+  const dispositionItems = detail.actionPlan.dispositionSummary.items;
+  const detailItemsById = new Map(detail.items.map((item) => [item.id, item]));
+  const dispositionAction = detail.actionPlan.actions.find(
+    (action) => action.kind === "record_disposition",
+  );
+  const hasExplicitDispositionEvidenceConflict = dispositionItems.length === 0
+    && dispositionAction?.state === "blocked"
+    && dispositionAction.reasonCode === "RETURN_DISPOSITION_STATE_CONFLICT";
+  if (dispositionItems.length !== detail.items.length && !hasExplicitDispositionEvidenceConflict) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "The disposition summary does not cover every return item.",
+      path: ["actionPlan", "dispositionSummary", "items"],
+    });
+  }
+  for (const [index, dispositionItem] of dispositionItems.entries()) {
+    const detailItem = detailItemsById.get(dispositionItem.returnCaseItemId);
+    if (!detailItem) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "The disposition summary contains an unknown return item.",
+        path: ["actionPlan", "dispositionSummary", "items", index, "returnCaseItemId"],
+      });
+      continue;
+    }
+    if (detailItem.receivedQuantity !== dispositionItem.receivedQuantity) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "The disposition summary received quantity does not match the return item.",
+        path: ["actionPlan", "dispositionSummary", "items", index, "receivedQuantity"],
+      });
+    }
+  }
 });
 
 const notesSchema = z.string().trim().max(MAX_NOTES_LENGTH).nullable().optional()
@@ -275,6 +404,25 @@ const receiptLineInputSchema = z.object({
   expectedCurrentReceivedQuantity: nonNegativeSafeIntegerSchema,
   quantityReceivedNow: positiveSafeIntegerSchema,
 }).strict();
+
+const dispositionLineInputSchema = z.object({
+  returnCaseItemId: positiveSafeIntegerSchema,
+  quantity: positiveSafeIntegerSchema,
+  treatment: returnCaseDispositionTreatmentSchema,
+  expectedCurrentReceivedQuantity: nonNegativeSafeIntegerSchema,
+  expectedCurrentDisposedQuantity: nonNegativeSafeIntegerSchema,
+}).strict().superRefine((line, context) => {
+  const recordedAfterCommand = line.expectedCurrentDisposedQuantity + line.quantity;
+  if (!Number.isSafeInteger(recordedAfterCommand)
+    || line.expectedCurrentDisposedQuantity > line.expectedCurrentReceivedQuantity
+    || recordedAfterCommand > line.expectedCurrentReceivedQuantity) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Disposition quantity exceeds the reviewed received quantity.",
+      path: ["quantity"],
+    });
+  }
+});
 
 export const recordReturnReceiptInputSchema = z.object({
   idempotencyKey: idempotencyKeySchema,
@@ -304,6 +452,25 @@ export const completeReturnInspectionInputSchema = z.object({
   outcome: z.enum(["approved", "rejected"]),
   notes: notesSchema,
 }).strict();
+
+export const recordReturnDispositionInputSchema = z.object({
+  idempotencyKey: idempotencyKeySchema,
+  inspectionId: positiveSafeIntegerSchema.nullable(),
+  lines: z.array(dispositionLineInputSchema).min(1).max(MAX_DISPOSITION_LINES),
+  notes: notesSchema,
+}).strict().superRefine((input, context) => {
+  const seenIds = new Set<number>();
+  for (const [index, line] of input.lines.entries()) {
+    if (seenIds.has(line.returnCaseItemId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A return case item may only appear once.",
+        path: ["lines", index, "returnCaseItemId"],
+      });
+    }
+    seenIds.add(line.returnCaseItemId);
+  }
+});
 
 export const recordReturnReceiptResultSchema = z.object({
   commandType: z.literal("record_receipt"),
@@ -354,9 +521,65 @@ export const completeReturnInspectionResultSchema = z.object({
   replayed: z.boolean(),
 }).strict();
 
+const returnDispositionResultLineSchema = z.object({
+  returnCaseItemId: positiveSafeIntegerSchema,
+  treatment: returnCaseDispositionTreatmentSchema,
+  quantity: positiveSafeIntegerSchema,
+}).strict();
+
+export const recordReturnDispositionResultSchema = z.object({
+  commandType: z.literal("record_disposition"),
+  caseId: positiveSafeIntegerSchema,
+  caseNumber: requiredTextSchema,
+  dispositionId: positiveSafeIntegerSchema,
+  inspectionId: positiveSafeIntegerSchema.nullable(),
+  inspectionResolution: z.enum(["approved", "rejected", "not_required"]),
+  lines: z.array(returnDispositionResultLineSchema).min(1).max(MAX_DISPOSITION_LINES),
+  dispositionSummary: returnCaseDispositionSummarySchema,
+  recordedAt: dateTimeSchema,
+  replayed: z.boolean(),
+}).strict().superRefine((result, context) => {
+  const hasInspection = result.inspectionId !== null;
+  const resolutionHasInspection = result.inspectionResolution !== "not_required";
+  if (hasInspection !== resolutionHasInspection) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Disposition inspection evidence is inconsistent with its resolution.",
+      path: ["inspectionResolution"],
+    });
+  }
+  const seenIds = new Set<number>();
+  for (const [index, line] of result.lines.entries()) {
+    if (seenIds.has(line.returnCaseItemId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A disposition result item may only appear once.",
+        path: ["lines", index, "returnCaseItemId"],
+      });
+    }
+    seenIds.add(line.returnCaseItemId);
+    const summaryItem = result.dispositionSummary.items.find(
+      (item) => item.returnCaseItemId === line.returnCaseItemId,
+    );
+    const recordedTreatmentQuantity = line.treatment === "restock_sellable"
+      ? summaryItem?.restockSellableQuantity
+      : summaryItem?.holdNonSellableQuantity;
+    if (!summaryItem || recordedTreatmentQuantity === undefined
+      || recordedTreatmentQuantity < line.quantity) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Disposition summary does not reflect the recorded result line.",
+        path: ["dispositionSummary", "items"],
+      });
+    }
+  }
+});
+
 export type ReturnCaseActionKind = z.infer<typeof returnCaseActionKindSchema>;
 export type ReturnCaseAction = z.infer<typeof returnCaseActionSchema>;
 export type ReturnCaseActionPlan = z.infer<typeof returnCaseActionPlanSchema>;
+export type ReturnCaseDispositionSummary = z.infer<typeof returnCaseDispositionSummarySchema>;
+export type ReturnCaseDispositionTreatment = z.infer<typeof returnCaseDispositionTreatmentSchema>;
 export type ReturnCaseDetailItem = z.infer<typeof returnCaseDetailItemSchema>;
 export type ReturnCaseDetail = z.infer<typeof returnCaseDetailSchema>;
 export type RecordReturnReceiptInput = z.input<typeof recordReturnReceiptInputSchema>;
@@ -365,10 +588,13 @@ export type StartReturnInspectionInput = z.input<typeof startReturnInspectionInp
 export type StartReturnInspectionResult = z.infer<typeof startReturnInspectionResultSchema>;
 export type CompleteReturnInspectionInput = z.input<typeof completeReturnInspectionInputSchema>;
 export type CompleteReturnInspectionResult = z.infer<typeof completeReturnInspectionResultSchema>;
+export type RecordReturnDispositionInput = z.input<typeof recordReturnDispositionInputSchema>;
+export type RecordReturnDispositionResult = z.infer<typeof recordReturnDispositionResultSchema>;
 export type ReturnCaseOperationResult =
   | RecordReturnReceiptResult
   | StartReturnInspectionResult
-  | CompleteReturnInspectionResult;
+  | CompleteReturnInspectionResult
+  | RecordReturnDispositionResult;
 
 export type ReturnCaseAdminApiErrorCode =
   | "RETURN_CASE_CLIENT_INPUT_INVALID"
@@ -476,6 +702,85 @@ export async function completeReturnInspection(
   return requestJson(
     `/api/returns/admin/cases/${parsedCaseId}/inspections/${parsedInspectionId}/complete`,
     jsonPost(parsedInput),
+    correlatedResultSchema,
+    transport,
+  );
+}
+
+export async function recordReturnDisposition(
+  caseId: number,
+  input: RecordReturnDispositionInput,
+  transport: ReturnCaseAdminTransport = fetch,
+): Promise<RecordReturnDispositionResult> {
+  const parsedCaseId = parseCaseId(caseId);
+  const parsedInput = parseOutboundInput(recordReturnDispositionInputSchema, input);
+  const body = {
+    ...parsedInput,
+    lines: [...parsedInput.lines].sort(
+      (left, right) => left.returnCaseItemId - right.returnCaseItemId,
+    ),
+  };
+  const correlatedResultSchema = recordReturnDispositionResultSchema.superRefine((result, context) => {
+    if (result.caseId !== parsedCaseId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Disposition response caseId does not match the requested return case.",
+        path: ["caseId"],
+      });
+    }
+    if (result.inspectionId !== body.inspectionId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Disposition response inspectionId does not match the reviewed inspection.",
+        path: ["inspectionId"],
+      });
+    }
+    const resultLines = [...result.lines].sort(
+      (left, right) => left.returnCaseItemId - right.returnCaseItemId,
+    );
+    if (resultLines.length !== body.lines.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Disposition response lines do not match the submitted command.",
+        path: ["lines"],
+      });
+      return;
+    }
+    for (const [index, expectedLine] of body.lines.entries()) {
+      const resultLine = resultLines[index];
+      if (resultLine.returnCaseItemId !== expectedLine.returnCaseItemId
+        || resultLine.treatment !== expectedLine.treatment
+        || resultLine.quantity !== expectedLine.quantity) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Disposition response line does not match the submitted command.",
+          path: ["lines", index],
+        });
+      }
+      const summaryItem = result.dispositionSummary.items.find(
+        (item) => item.returnCaseItemId === expectedLine.returnCaseItemId,
+      );
+      const expectedRecordedQuantity =
+        expectedLine.expectedCurrentDisposedQuantity + expectedLine.quantity;
+      const expectedRemainingQuantity =
+        expectedLine.expectedCurrentReceivedQuantity - expectedRecordedQuantity;
+      if (!summaryItem
+        || !Number.isSafeInteger(expectedRecordedQuantity)
+        || expectedRemainingQuantity < 0
+        || summaryItem.receivedQuantity !== expectedLine.expectedCurrentReceivedQuantity
+        || summaryItem.recordedQuantity !== expectedRecordedQuantity
+        || summaryItem.remainingQuantity !== expectedRemainingQuantity) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Disposition summary does not match the submitted optimistic evidence.",
+          path: ["dispositionSummary", "items"],
+        });
+      }
+    }
+  });
+  return requestJson(
+    `/api/returns/admin/cases/${parsedCaseId}/dispositions`,
+    jsonPost(body),
     correlatedResultSchema,
     transport,
   );

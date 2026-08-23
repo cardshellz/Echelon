@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
-import { returnCaseStatuses } from "@shared/schema";
+import { returnCaseStatuses, returnDispositionTreatments } from "@shared/schema";
 import { requirePermission } from "../../../../routes/middleware";
 import {
   ReturnCaseAdminError,
@@ -62,6 +62,19 @@ const completeInspectionSchema = z.object({
   outcome: z.enum(["approved", "rejected"]),
   notes: z.string().trim().max(2_000).nullable().default(null),
 }).strict();
+const dispositionSchema = z.object({
+  idempotencyKey: z.string().trim().min(1).max(160),
+  inspectionId: z.number().int().positive().safe().nullable(),
+  notes: z.string().trim().max(2_000).nullable().default(null),
+  lines: z.array(z.object({
+    returnCaseItemId: z.number().int().positive().safe(),
+    quantity: z.number().int().positive().safe(),
+    treatment: z.enum(returnDispositionTreatments),
+    expectedCurrentReceivedQuantity: z.number().int().nonnegative().safe(),
+    expectedCurrentDisposedQuantity: z.number().int().nonnegative().safe(),
+  }).strict()).min(1).max(200),
+}).strict();
+
 
 export function registerReturnCaseAdminRoutes(
   app: Express,
@@ -209,6 +222,34 @@ export function registerReturnCaseAdminRoutes(
           error,
           "RETURN_CASE_INSPECTION_COMPLETE_FAILED",
           "Return inspection could not be completed.",
+        );
+      }
+    },
+  );
+
+  app.post(
+    "/api/returns/admin/cases/:id/dispositions",
+    requirePermission("inventory", "adjust"),
+    async (req, res) => {
+      const parsedCaseId = caseIdSchema.safeParse(req.params.id);
+      if (!parsedCaseId.success) return sendValidationError(res, parsedCaseId.error);
+      const parsedBody = dispositionSchema.safeParse(req.body);
+      if (!parsedBody.success) return sendValidationError(res, parsedBody.error);
+      const actor = readAuthenticatedActor(req);
+      if (!actor) return sendActorRequired(res);
+      try {
+        const result = await operationService.recordDisposition({
+          caseId: parsedCaseId.data,
+          ...parsedBody.data,
+          actor,
+        });
+        return res.status(result.replayed ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(
+          res,
+          error,
+          "RETURN_CASE_DISPOSITION_FAILED",
+          "Return item disposition could not be recorded.",
         );
       }
     },

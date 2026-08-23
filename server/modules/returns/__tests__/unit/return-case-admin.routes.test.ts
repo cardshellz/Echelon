@@ -318,6 +318,136 @@ describe("return case admin routes", () => {
     expect(operationService.completeInspection).not.toHaveBeenCalled();
   });
 
+  it("records disposition with strict reviewed evidence and the authenticated actor", async () => {
+    operationService.recordDisposition.mockResolvedValue({
+      commandType: "record_disposition",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      dispositionId: 91,
+      inspectionId: 81,
+      inspectionResolution: "approved",
+      lines: [{ returnCaseItemId: 9, quantity: 2, treatment: "restock_sellable" }],
+      dispositionSummary: {
+        receivedUnits: 2,
+        recordedUnits: 2,
+        remainingUnits: 0,
+        fullyRecorded: true,
+        partiallyRecorded: false,
+        items: [{
+          returnCaseItemId: 9,
+          receivedQuantity: 2,
+          restockSellableQuantity: 2,
+          holdNonSellableQuantity: 0,
+          recordedQuantity: 2,
+          remainingQuantity: 0,
+        }],
+      },
+      recordedAt: "2026-08-22T18:00:00.000Z",
+      replayed: false,
+    });
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/dispositions`, {
+      method: "POST",
+      body: {
+        idempotencyKey: " disposition-command-1 ",
+        inspectionId: 81,
+        notes: " sellable ",
+        lines: [{
+          returnCaseItemId: 9,
+          quantity: 2,
+          treatment: "restock_sellable",
+          expectedCurrentReceivedQuantity: 2,
+          expectedCurrentDisposedQuantity: 0,
+        }],
+      },
+    });
+
+    expect(response.status).toBe(201);
+    expect(operationService.recordDisposition).toHaveBeenCalledWith({
+      caseId: 42,
+      idempotencyKey: "disposition-command-1",
+      inspectionId: 81,
+      notes: "sellable",
+      lines: [{
+        returnCaseItemId: 9,
+        quantity: 2,
+        treatment: "restock_sellable",
+        expectedCurrentReceivedQuantity: 2,
+        expectedCurrentDisposedQuantity: 0,
+      }],
+      actor: "user:7",
+    });
+  });
+
+  it("returns 200 for a disposition replay", async () => {
+    operationService.recordDisposition.mockResolvedValue({
+      commandType: "record_disposition",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      dispositionId: 91,
+      inspectionId: null,
+      inspectionResolution: "not_required",
+      lines: [{ returnCaseItemId: 9, quantity: 1, treatment: "hold_non_sellable" }],
+      dispositionSummary: {
+        receivedUnits: 2,
+        recordedUnits: 1,
+        remainingUnits: 1,
+        fullyRecorded: false,
+        partiallyRecorded: true,
+        items: [],
+      },
+      recordedAt: "2026-08-22T18:00:00.000Z",
+      replayed: true,
+    });
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/dispositions`, {
+      method: "POST",
+      body: {
+        idempotencyKey: "disposition-replay",
+        inspectionId: null,
+        notes: null,
+        lines: [{
+          returnCaseItemId: 9,
+          quantity: 1,
+          treatment: "hold_non_sellable",
+          expectedCurrentReceivedQuantity: 2,
+          expectedCurrentDisposedQuantity: 0,
+        }],
+      },
+    });
+
+    expect(response.status).toBe(200);
+  });
+
+  it.each([
+    { name: "missing reviewed inspection id", omitInspection: true, treatment: "restock_sellable", extra: {} },
+    { name: "invalid treatment", omitInspection: false, treatment: "destroy", extra: {} },
+    { name: "forged actor", omitInspection: false, treatment: "restock_sellable", extra: { actor: "user:999" } },
+  ])("strictly rejects $name before disposition service calls", async ({ omitInspection, treatment, extra }) => {
+    const body: Record<string, unknown> = {
+      idempotencyKey: "disposition-invalid",
+      inspectionId: 81,
+      notes: null,
+      lines: [{
+        returnCaseItemId: 9,
+        quantity: 1,
+        treatment,
+        expectedCurrentReceivedQuantity: 2,
+        expectedCurrentDisposedQuantity: 0,
+      }],
+      ...extra,
+    };
+    if (omitInspection) delete body.inspectionId;
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/dispositions`, {
+      method: "POST",
+      body,
+    });
+
+    expect(response).toMatchObject({ status: 400, body: { error: { code: "RETURN_CASE_QUERY_INVALID" } } });
+    expect(operationService.recordDisposition).not.toHaveBeenCalled();
+  });
+
   it("returns 200 for receipt and inspection command replays", async () => {
     operationService.recordReceipt.mockResolvedValue({
       commandType: "record_receipt",
@@ -445,6 +575,7 @@ describe("return case admin routes", () => {
       ["inventory", "adjust"],
       ["inventory", "adjust"],
       ["inventory", "adjust"],
+      ["inventory", "adjust"],
     ]);
   });
 });
@@ -458,7 +589,12 @@ function fakeOpenService() {
 }
 
 function fakeOperationService() {
-  return { recordReceipt: vi.fn(), startInspection: vi.fn(), completeInspection: vi.fn() };
+  return {
+    recordReceipt: vi.fn(),
+    startInspection: vi.fn(),
+    completeInspection: vi.fn(),
+    recordDisposition: vi.fn(),
+  };
 }
 
 function buildApp(
