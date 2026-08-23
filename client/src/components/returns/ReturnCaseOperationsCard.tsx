@@ -4,7 +4,6 @@ import { CheckCircle2, ClipboardCheck, Loader2, PackageCheck } from "lucide-reac
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
@@ -906,6 +905,7 @@ export function CompleteReturnInspectionReview({
 }
 
 type DispositionRefreshState = "idle" | "refreshing" | "refreshed" | "failed";
+const DISPOSITION_RESOLVE_LATER_VALUE = "resolve_later" as const;
 
 export function shouldInitializeDispositionCommand(
   open: boolean,
@@ -948,7 +948,6 @@ export function RecordReturnDispositionDialog({
   const [draft, setDraft] = useState<DispositionDraftLine[]>(() =>
     createDispositionDraft(items, dispositionSummary));
   const [notes, setNotes] = useState("");
-  const [confirmed, setConfirmed] = useState(false);
   const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
   const [attempted, setAttempted] = useState(false);
   const [pending, setPending] = useState(false);
@@ -961,7 +960,6 @@ export function RecordReturnDispositionDialog({
     openVersion.current = dispositionVersion;
     setDraft(createDispositionDraft(items, dispositionSummary));
     setNotes("");
-    setConfirmed(false);
     setAttempted(false);
     setPending(false);
     setError(null);
@@ -996,7 +994,7 @@ export function RecordReturnDispositionDialog({
 
   const submit = async () => {
     const parsed = validateDispositionDraft(draft);
-    if (!parsed.success || !confirmed || idempotencyKey === null) return;
+    if (!parsed.success || idempotencyKey === null) return;
     setAttempted(true);
     setPending(true);
     setError(null);
@@ -1033,8 +1031,6 @@ export function RecordReturnDispositionDialog({
           draft={draft}
           validation={validation}
           pending={pending}
-          confirmed={confirmed}
-          onConfirmedChange={setConfirmed}
           onLineChange={(index, change) => {
             setDraft((current) => current.map((line, lineIndex) => (
               lineIndex === index ? { ...line, ...change } : line
@@ -1106,7 +1102,6 @@ export function RecordReturnDispositionDialog({
               pending
               || refreshState === "refreshing"
               || !validation.success
-              || !confirmed
               || idempotencyKey === null
             }
             onClick={() => void submit()}
@@ -1138,8 +1133,6 @@ interface DispositionReviewProps {
   draft: readonly DispositionDraftLine[];
   validation: DispositionDraftValidation;
   pending: boolean;
-  confirmed: boolean;
-  onConfirmedChange(value: boolean): void;
   onLineChange(
     index: number,
     change: Partial<Pick<DispositionDraftLine, "treatment" | "quantity">>,
@@ -1150,8 +1143,6 @@ export function DispositionReview({
   draft,
   validation,
   pending,
-  confirmed,
-  onConfirmedChange,
   onLineChange,
 }: DispositionReviewProps) {
   return (
@@ -1171,33 +1162,33 @@ export function DispositionReview({
           <tbody className="divide-y">
             {draft.map((line, index) => (
               <tr key={line.returnCaseItemId}>
-                <td className="px-3 py-2">
+                <td className="px-3 py-2 align-middle">
                   <div className="font-medium">{line.title}</div>
                   <div className="text-xs text-muted-foreground">{line.sku ?? "SKU not provided"}</div>
                 </td>
-                <td className="px-3 py-2 text-right">{line.receivedQuantity}</td>
-                <td className="px-3 py-2 text-right">{line.recordedQuantity}</td>
-                <td className="px-3 py-2 text-right">{line.remainingQuantity}</td>
-                <td className="px-3 py-2 align-top">
+                <td className="px-3 py-2 text-right align-middle">{line.receivedQuantity}</td>
+                <td className="px-3 py-2 text-right align-middle">{line.recordedQuantity}</td>
+                <td className="px-3 py-2 text-right align-middle">{line.remainingQuantity}</td>
+                <td className="px-3 py-2 align-middle">
                   <Select
-                    value={line.treatment || undefined}
+                    value={line.treatment || DISPOSITION_RESOLVE_LATER_VALUE}
                     disabled={pending}
                     onValueChange={(value) => {
-                      if (value === "restock_sellable" || value === "hold_non_sellable") {
-                        onLineChange(index, { treatment: value });
-                      }
+                      const change = resolveDispositionTreatmentChange(value);
+                      if (change !== null) onLineChange(index, change);
                     }}
                   >
                     <SelectTrigger aria-label={`Treatment for ${line.title}`}>
-                      <SelectValue placeholder="Select treatment" />
+                      <SelectValue placeholder="Resolve later" />
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value={DISPOSITION_RESOLVE_LATER_VALUE}>Resolve later</SelectItem>
                       <SelectItem value="restock_sellable">Restock as sellable</SelectItem>
                       <SelectItem value="hold_non_sellable">Hold as non-sellable</SelectItem>
                     </SelectContent>
                   </Select>
                 </td>
-                <td className="px-3 py-2 align-top">
+                <td className="px-3 py-2 align-middle">
                   <Input
                     aria-label={`Disposition quantity for ${line.title}`}
                     type="number"
@@ -1206,7 +1197,7 @@ export function DispositionReview({
                     max={line.remainingQuantity}
                     step={1}
                     value={line.quantity}
-                    disabled={pending}
+                    disabled={pending || line.treatment === ""}
                     aria-invalid={validation.fieldErrors[line.returnCaseItemId] ? true : undefined}
                     onChange={(event) => onLineChange(index, { quantity: event.target.value })}
                   />
@@ -1215,20 +1206,6 @@ export function DispositionReview({
                       {validation.fieldErrors[line.returnCaseItemId]}
                     </p>
                   )}
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="mt-1 h-auto px-0 py-1 text-xs"
-                    disabled={pending || (line.treatment === "" && line.quantity === "")}
-                    aria-label={`Clear disposition decision for ${line.title}`}
-                    onClick={() => onLineChange(index, {
-                      treatment: "",
-                      quantity: "",
-                    })}
-                  >
-                    Clear / skip
-                  </Button>
                 </td>
               </tr>
             ))}
@@ -1243,20 +1220,20 @@ export function DispositionReview({
         </table>
       </div>
 
-      <label className="flex items-start gap-3 border p-3 text-sm">
-        <Checkbox
-          checked={confirmed}
-          disabled={pending}
-          onCheckedChange={(value) => onConfirmedChange(value === true)}
-          aria-label="Confirm append-only disposition decision"
-        />
-        <span>
-          I understand these decisions are append-only. Any later correction must be recorded
-          through a separate compensating action.
-        </span>
-      </label>
     </>
   );
+}
+
+export function resolveDispositionTreatmentChange(
+  value: string,
+): Partial<Pick<DispositionDraftLine, "treatment" | "quantity">> | null {
+  if (value === DISPOSITION_RESOLVE_LATER_VALUE) {
+    return { treatment: "", quantity: "" };
+  }
+  if (value === "restock_sellable" || value === "hold_non_sellable") {
+    return { treatment: value };
+  }
+  return null;
 }
 
 export function createDispositionDraft(
