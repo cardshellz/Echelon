@@ -1,4 +1,6 @@
 import {
+  getVariantUomDefinition,
+  isSingleUnitVariantUomType,
   isVariantUomType,
   type VariantUomType,
 } from "@shared/catalog/variant-uom";
@@ -24,14 +26,15 @@ export function validateVariantUomWrite(
   const hasUomType = Object.prototype.hasOwnProperty.call(source, "uomType");
 
   if (hasUomType && !isVariantUomType(source.uomType)) {
-    throw badRequest("uomType must be one of: each, pack, inner_pack, case, skid");
+    throw badRequest("uomType must be one of: piece, each, pack, inner_pack, case, skid");
   }
 
   const effectiveUomType = hasUomType
     ? source.uomType as VariantUomType
     : existing?.uomType ?? undefined;
 
-  if (effectiveUomType === "each") {
+  if (effectiveUomType && isSingleUnitVariantUomType(effectiveUomType)) {
+    const label = getVariantUomDefinition(effectiveUomType).label;
     const unitsPerVariant = source.unitsPerVariant ?? existing?.unitsPerVariant;
     const hierarchyLevel = source.hierarchyLevel ?? existing?.hierarchyLevel;
     const parentVariantId = Object.prototype.hasOwnProperty.call(source, "parentVariantId")
@@ -39,12 +42,12 @@ export function validateVariantUomWrite(
       : existing?.parentVariantId;
     const isBaseUnit = source.isBaseUnit ?? existing?.isBaseUnit;
 
-    if (unitsPerVariant !== 1) throw badRequest("Each variants must contain exactly 1 unit");
-    if (hierarchyLevel !== 1) throw badRequest("Each variants must use hierarchy level 1");
+    if (unitsPerVariant !== 1) throw badRequest(`${label} variants must contain exactly 1 unit`);
+    if (hierarchyLevel !== 1) throw badRequest(`${label} variants must use hierarchy level 1`);
     if (parentVariantId !== null && parentVariantId !== undefined) {
-      throw badRequest("Each variants cannot break into a parent variant");
+      throw badRequest(`${label} variants cannot break into a parent variant`);
     }
-    if (isBaseUnit !== true) throw badRequest("Each variants must be marked as the base inventory unit");
+    if (isBaseUnit !== true) throw badRequest(`${label} variants must be marked as the base inventory unit`);
   }
 
   return hasUomType ? { uomType: source.uomType as VariantUomType } : {};

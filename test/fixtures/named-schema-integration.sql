@@ -105,10 +105,10 @@ CREATE TABLE catalog.product_variants (
   created_at timestamp NOT NULL DEFAULT now(),
   updated_at timestamp NOT NULL DEFAULT now(),
   CONSTRAINT product_variants_uom_type_chk
-    CHECK (uom_type IN ('each', 'pack', 'inner_pack', 'case', 'skid')),
-  CONSTRAINT product_variants_each_invariants_chk
+    CHECK (uom_type IN ('piece', 'each', 'pack', 'inner_pack', 'case', 'skid')),
+  CONSTRAINT product_variants_single_unit_uom_invariants_chk
     CHECK (
-      uom_type <> 'each'
+      uom_type NOT IN ('piece', 'each')
       OR (
         units_per_variant = 1
         AND hierarchy_level = 1

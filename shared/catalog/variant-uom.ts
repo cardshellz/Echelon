@@ -1,4 +1,4 @@
-export const VARIANT_UOM_TYPES = ["each", "pack", "inner_pack", "case", "skid"] as const;
+export const VARIANT_UOM_TYPES = ["piece", "each", "pack", "inner_pack", "case", "skid"] as const;
 
 export type VariantUomType = (typeof VARIANT_UOM_TYPES)[number];
 
@@ -8,6 +8,7 @@ export const VARIANT_UOM_DEFINITIONS: ReadonlyArray<{
   skuPrefix: string | null;
   defaultHierarchyLevel: number;
 }> = [
+  { type: "piece", label: "Piece", skuPrefix: "PC", defaultHierarchyLevel: 1 },
   { type: "each", label: "Each", skuPrefix: null, defaultHierarchyLevel: 1 },
   { type: "pack", label: "Pack", skuPrefix: "P", defaultHierarchyLevel: 1 },
   { type: "inner_pack", label: "Box / Inner Pack", skuPrefix: "B", defaultHierarchyLevel: 2 },
@@ -17,6 +18,10 @@ export const VARIANT_UOM_DEFINITIONS: ReadonlyArray<{
 
 export function isVariantUomType(value: unknown): value is VariantUomType {
   return typeof value === "string" && VARIANT_UOM_TYPES.includes(value as VariantUomType);
+}
+
+export function isSingleUnitVariantUomType(type: VariantUomType): boolean {
+  return type === "piece" || type === "each";
 }
 
 export function getVariantUomDefinition(type: VariantUomType) {

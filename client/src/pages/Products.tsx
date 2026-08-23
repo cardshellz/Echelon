@@ -624,6 +624,7 @@ export default function Products() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="piece">Piece</SelectItem>
+                  <SelectItem value="each">Each</SelectItem>
                   <SelectItem value="pack">Pack</SelectItem>
                   <SelectItem value="box">Box</SelectItem>
                   <SelectItem value="case">Case</SelectItem>
