@@ -8,3 +8,4 @@ vite.config.ts.*
 .env.test
 
 .claude/settings.local.json
+.claude/worktrees/
