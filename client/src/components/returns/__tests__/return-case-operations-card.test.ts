@@ -37,6 +37,9 @@ describe("ReturnCaseOperationsCard", () => {
 
     expect(markup).toContain("Inspect received return");
     expect(markup).toContain("Server-authorized inspection action.");
+    expect(markup).toContain(">Next<");
+    expect(markup).not.toContain(">Available<");
+    expect(markup).toContain("border-blue-200");
     expect(markup).not.toContain("Record receipt");
     expect(markup.match(/<button/g)).toHaveLength(1);
   });
@@ -77,8 +80,80 @@ describe("ReturnCaseOperationsCard", () => {
 
     expect(markup).toContain("Begin inspection");
     expect(markup).toContain(">Started<");
+    expect(markup).toContain("border-emerald-200");
     expect(markup).toContain("Complete inspection");
+    expect(markup).toContain(">Next<");
+    expect(markup).not.toContain(">Available<");
     expect(markup.match(/<button/g)).toHaveLength(1);
+  });
+
+  it("uses a coherent semantic color for each operation state", () => {
+    const markup = renderToStaticMarkup(createElement(ReturnCaseOperationsCard, {
+      returnCaseId: 42,
+      actionPlan: actionPlan({
+        nextAction: null,
+        actions: [
+          {
+            kind: "record_receipt",
+            label: "Record receipt",
+            description: "Receipt is complete.",
+            state: "completed",
+            reasonCode: null,
+          },
+          {
+            kind: "start_inspection",
+            label: "Begin inspection",
+            description: "Inspection is blocked.",
+            state: "blocked",
+            reasonCode: "RETURN_INSPECTION_BLOCKED",
+          },
+          {
+            kind: "complete_inspection",
+            label: "Complete inspection",
+            description: "Inspection is not required.",
+            state: "not_applicable",
+            reasonCode: "RETURN_INSPECTION_NOT_REQUIRED",
+          },
+        ],
+      }),
+      items: [],
+      onRefreshRequested: async () => undefined,
+    }));
+
+    expect(markup).toMatch(/border-emerald-200[^>]*>Completed<\/div>/);
+    expect(markup).toMatch(/border-amber-200[^>]*>Blocked<\/div>/);
+    expect(markup).toMatch(/border-slate-200[^>]*>Not applicable<\/div>/);
+  });
+
+  it("labels only the designated available action as Next", () => {
+    const markup = renderToStaticMarkup(createElement(ReturnCaseOperationsCard, {
+      returnCaseId: 42,
+      actionPlan: actionPlan({
+        nextAction: "record_receipt",
+        actions: [
+          {
+            kind: "record_receipt",
+            label: "Record receipt",
+            description: "Recommended action.",
+            state: "available",
+            reasonCode: null,
+          },
+          {
+            kind: "start_inspection",
+            label: "Begin inspection",
+            description: "Another executable action.",
+            state: "available",
+            reasonCode: null,
+          },
+        ],
+      }),
+      items: [],
+      onRefreshRequested: async () => undefined,
+    }));
+
+    expect(markup.match(/>Next<\/div>/g)).toHaveLength(1);
+    expect(markup.match(/>Available<\/div>/g)).toHaveLength(1);
+    expect(markup.match(/border-blue-200/g)).toHaveLength(2);
   });
 
   it("does not manufacture a completion control without an exact active inspection identity", () => {

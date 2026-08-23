@@ -125,10 +125,10 @@ export function ReturnCaseOperationsCard({
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium">{action.label}</span>
-                    <ActionStateBadge action={action} />
-                    {actionPlan.nextAction === action.kind && action.state === "available" && (
-                      <Badge>Next</Badge>
-                    )}
+                    <ActionStateBadge
+                      action={action}
+                      isNext={actionPlan.nextAction === action.kind}
+                    />
                   </div>
                   <p className="mt-1 text-sm text-muted-foreground">{action.description}</p>
                   {action.reasonCode && (
@@ -931,14 +931,33 @@ function ReceiptMetric({ label, value }: { label: string; value: number }) {
   );
 }
 
-function ActionStateBadge({ action }: { action: ReturnCaseAction }) {
-  const label = action.kind === "start_inspection" && action.state === "completed"
-    ? "Started"
-    : action.state === "not_applicable"
-      ? "Not applicable"
-      : titleCase(action.state);
-  const variant = action.state === "available" ? "default" : "outline";
-  return <Badge variant={variant}>{label}</Badge>;
+const ACTION_STATE_BADGE_CLASS_NAMES: Record<ReturnCaseAction["state"], string> = {
+  available: "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-300",
+  blocked: "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300",
+  completed: "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300",
+  not_applicable: "border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300",
+};
+
+function ActionStateBadge({
+  action,
+  isNext,
+}: {
+  action: ReturnCaseAction;
+  isNext: boolean;
+}) {
+  const label = action.state === "available" && isNext
+    ? "Next"
+    : action.kind === "start_inspection" && action.state === "completed"
+      ? "Started"
+      : action.state === "not_applicable"
+        ? "Not applicable"
+        : titleCase(action.state);
+
+  return (
+    <Badge variant="outline" className={ACTION_STATE_BADGE_CLASS_NAMES[action.state]}>
+      {label}
+    </Badge>
+  );
 }
 
 function OperationSuccess({ result }: { result: ReturnCaseOperationResult }) {
