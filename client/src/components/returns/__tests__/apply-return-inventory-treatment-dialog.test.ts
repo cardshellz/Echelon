@@ -133,5 +133,7 @@ describe("return inventory treatment dialog contract", () => {
     expect(source).not.toMatch(/\bCheckbox\b|I understand/);
     expect(source).toContain("This changes inventory only where explicitly shown");
     expect(source).toContain("does not issue a customer refund, settle a vendor balance, or close the return case");
+    expect(source).toContain("<InventoryLocationCombobox");
+    expect(source).not.toContain("<Select");
   });
 });

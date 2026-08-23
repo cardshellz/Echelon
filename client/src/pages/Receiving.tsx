@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { InventoryLocationCombobox } from "@/components/inventory/InventoryLocationCombobox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -171,86 +172,35 @@ interface WarehouseLocation {
   isActive?: number | null;
 }
 
-function LocationTypeahead({ 
-  locations, 
-  value, 
+function LocationTypeahead({
+  locations,
+  value,
   onChange,
-  disabled = false
-}: { 
+  disabled = false,
+}: {
   locations: WarehouseLocation[];
   value: number | null;
   onChange: (locationId: number | null) => void;
   disabled?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-  
-  const selectedLocation = locations.find(l => l.id === value);
-  
-  const filteredLocations = filterActionableWarehouseLocations(locations, { search }).slice(0, 15);
-  
-  useEffect(() => {
-    if (open && inputRef.current) {
-      inputRef.current.focus();
-    }
-  }, [open]);
-  
+  const selectedLocation = locations.find((location) => location.id === value);
   if (disabled) {
     return <span className="text-sm">{selectedLocation?.code || "-"}</span>;
   }
-  
+
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button 
-          variant="outline" 
-          size="sm" 
-          className="w-28 min-h-[44px] h-10 justify-start text-left font-normal truncate"
-        >
-          {selectedLocation?.code || "Select..."}
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent className="w-48 p-0" align="start">
-        <div className="p-2 border-b">
-          <Input
-            ref={inputRef}
-            placeholder="Type to search..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="h-10"
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-            spellCheck={false}
-          />
-        </div>
-        <ScrollArea className="h-48">
-          <div className="p-1">
-            <button
-              className="w-full text-left px-2 py-3 text-sm rounded hover:bg-accent active:bg-accent/80 cursor-pointer min-h-[44px]"
-              onClick={() => { onChange(null); setOpen(false); setSearch(""); }}
-            >
-              Clear
-            </button>
-            {filteredLocations.map((loc) => (
-              <button
-                key={loc.id}
-                className={`w-full text-left px-2 py-3 text-sm rounded hover:bg-accent active:bg-accent/80 cursor-pointer min-h-[44px] ${loc.id === value ? 'bg-accent' : ''}`}
-                onClick={() => { onChange(loc.id); setOpen(false); setSearch(""); }}
-              >
-                {loc.code}
-              </button>
-            ))}
-            {filteredLocations.length === 0 && search && (
-              <div className="px-2 py-4 text-sm text-muted-foreground text-center">
-                No locations found
-              </div>
-            )}
-          </div>
-        </ScrollArea>
-      </PopoverContent>
-    </Popover>
+    <InventoryLocationCombobox
+      locations={filterActionableWarehouseLocations(locations)}
+      value={value}
+      onValueChange={onChange}
+      ariaLabel="Inventory location"
+      placeholder="Select..."
+      searchPlaceholder="Search locations..."
+      emptyMessage="No matching locations found."
+      allowClear
+      triggerClassName="h-10 min-h-11 w-28"
+      contentClassName="min-w-72"
+    />
   );
 }
 
@@ -286,7 +236,6 @@ export default function Receiving() {
   const [resolveMode, setResolveMode] = useState<'sku' | 'location'>('sku');
   const [resolveSkuSearch, setResolveSkuSearch] = useState("");
   const [resolveSkuResults, setResolveSkuResults] = useState<{sku: string; name: string; productVariantId: number}[]>([]);
-  const [resolveLocSearch, setResolveLocSearch] = useState("");
   const resolveSkuTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [newLine, setNewLine] = useState({
     sku: "",
@@ -300,9 +249,6 @@ export default function Receiving() {
   const [skuResults, setSkuResults] = useState<{sku: string; name: string; productId: number | null; productVariantId: number; unitsPerVariant: number}[]>([]);
   const [showSkuDropdown, setShowSkuDropdown] = useState(false);
   const [skuSearchTimeout, setSkuSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
-  const [locationSearch, setLocationSearch] = useState("");
-  const [locationResults, setLocationResults] = useState<WarehouseLocation[]>([]);
-  const [showLocationDropdown, setShowLocationDropdown] = useState(false);
   
   // Download CSV template
   const downloadTemplate = () => {
@@ -798,8 +744,6 @@ DEF-456,25,,,5.00,,Location TBD`;
       });
       setSkuSearch("");
       setSkuResults([]);
-      setLocationSearch("");
-      setLocationResults([]);
       toast({ title: "Line added successfully" });
     },
     onError: (error) => {
@@ -995,7 +939,6 @@ DEF-456,25,,,5.00,,Location TBD`;
         setResolveMode(mode);
         setResolveSkuSearch(nextIssue.sku || "");
         setResolveSkuResults([]);
-        setResolveLocSearch("");
       } else {
         setShowResolveDialog(false);
       }
@@ -1005,22 +948,10 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
   });
 
-  // Location search for add line dialog (local filter, no API call needed)
+  // Location eligibility remains workflow-owned; the shared combobox owns search and scrolling.
   const warehouseFilteredLocations = filterActionableWarehouseLocations(locations, {
     warehouseId: selectedReceipt?.warehouseId ?? null,
   });
-
-  const handleLocationSearch = (query: string) => {
-    setLocationSearch(query);
-    if (query.length < 1) {
-      setLocationResults([]);
-      setShowLocationDropdown(false);
-      return;
-    }
-    const filtered = filterActionableWarehouseLocations(warehouseFilteredLocations, { search: query }).slice(0, 20);
-    setLocationResults(filtered);
-    setShowLocationDropdown(filtered.length > 0);
-  };
 
   // Debounced SKU search for add line dialog
   const handleSkuSearch = (query: string) => {
@@ -1165,7 +1096,6 @@ DEF-456,25,,,5.00,,Location TBD`;
     const sku = line.sku || "";
     setResolveSkuSearch(sku);
     setResolveSkuResults([]);
-    setResolveLocSearch("");
     setShowResolveDialog(true);
     if (mode === 'sku' && sku.length >= 2) {
       fetch(`/api/inventory/skus/search?q=${encodeURIComponent(sku)}&limit=10`)
@@ -2773,58 +2703,21 @@ DEF-456,25,,,5.00,,Location TBD`;
               )}
             </div>
 
-            <div>
+            <div className="space-y-2">
               <Label className="text-sm">Put-away Location <span className="text-red-500">*</span></Label>
-              <div className="space-y-2 mt-1">
-                <div className="relative">
-                  <Input
-                    className="h-11"
-                    value={locationSearch}
-                    onChange={(e) => handleLocationSearch(e.target.value)}
-                    onFocus={() => {
-                      if (locationSearch.length > 0 && locationResults.length > 0) {
-                        setShowLocationDropdown(true);
-                      } else if (locationSearch.length === 0) {
-                        const initial = warehouseFilteredLocations.slice(0, 20);
-                        setLocationResults(initial);
-                        setShowLocationDropdown(initial.length > 0);
-                      }
-                    }}
-                    onBlur={() => setTimeout(() => setShowLocationDropdown(false), 200)}
-                    placeholder="Search location by code..."
-                    autoComplete="off"
-                    autoCorrect="off"
-                    autoCapitalize="off"
-                    spellCheck={false}
-                    data-testid="input-add-line-location"
-                  />
-                  {showLocationDropdown && locationResults.length > 0 && (
-                    <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
-                      {locationResults.map((loc) => (
-                        <button
-                          key={loc.id}
-                          type="button"
-                          className="w-full px-3 py-3 text-left hover:bg-gray-100 active:bg-gray-200 text-sm min-h-[44px]"
-                          onClick={() => {
-                            setNewLine({ ...newLine, putawayLocationId: loc.id.toString() });
-                            setLocationSearch(loc.code);
-                            setShowLocationDropdown(false);
-                          }}
-                          data-testid={`location-option-${loc.code}`}
-                        >
-                          <div className="font-mono">{loc.code}</div>
-                          {loc.name && <div className="text-xs text-muted-foreground">{loc.name}</div>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                {newLine.putawayLocationId && !locationSearch && (
-                  <div className="text-xs text-muted-foreground">
-                    Selected: {warehouseFilteredLocations.find(l => l.id.toString() === newLine.putawayLocationId)?.code}
-                  </div>
-                )}
-              </div>
+              <InventoryLocationCombobox
+                locations={warehouseFilteredLocations}
+                value={newLine.putawayLocationId ? Number(newLine.putawayLocationId) : null}
+                onValueChange={(locationId) => setNewLine({
+                  ...newLine,
+                  putawayLocationId: locationId === null ? "" : String(locationId),
+                })}
+                ariaLabel="Put-away location"
+                placeholder="Select put-away location"
+                searchPlaceholder="Search put-away locations..."
+                emptyMessage="No matching put-away locations found."
+                triggerClassName="h-11"
+              />
             </div>
 
             <div className="flex justify-end gap-2 pt-4">
@@ -2832,8 +2725,6 @@ DEF-456,25,,,5.00,,Location TBD`;
                 setShowAddLineDialog(false);
                 setSkuSearch("");
                 setSkuResults([]);
-                setLocationSearch("");
-                setLocationResults([]);
                 setNewLine({
                   sku: "",
                   productName: "",
@@ -3056,35 +2947,29 @@ DEF-456,25,,,5.00,,Location TBD`;
                   <>No CSV location recorded</>
                 )}
               </div>
-              <Input
-                placeholder="Search locations..."
-                value={resolveLocSearch}
-                onChange={(e) => setResolveLocSearch(e.target.value)}
-                className="h-10"
-                autoFocus
+              <InventoryLocationCombobox
+                locations={warehouseFilteredLocations}
+                value={resolvingLine.putawayLocationId}
+                onValueChange={(locationId) => {
+                  if (locationId === null) return;
+                  const location = warehouseFilteredLocations.find((candidate) => candidate.id === locationId);
+                  updateLineMutation.mutate({
+                    lineId: resolvingLine.id,
+                    updates: { putawayLocationId: locationId },
+                  });
+                  setShowResolveDialog(false);
+                  toast({
+                    title: "Location set",
+                    description: `${resolvingLine.sku} → ${location?.code ?? locationId}`,
+                  });
+                }}
+                ariaLabel={`Put-away location for ${resolvingLine.sku}`}
+                placeholder="Select put-away location"
+                searchPlaceholder="Search put-away locations..."
+                emptyMessage="No matching put-away locations found."
+                triggerClassName="h-11"
+                contentClassName="min-w-80"
               />
-              <ScrollArea className="h-48">
-                {locations
-                  .filter(loc => !resolveLocSearch || loc.code.toLowerCase().includes(resolveLocSearch.toLowerCase()) || (loc.name && loc.name.toLowerCase().includes(resolveLocSearch.toLowerCase())))
-                  .slice(0, 15)
-                  .map(loc => (
-                    <button
-                      key={loc.id}
-                      className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent border-b last:border-0"
-                      onClick={() => {
-                        updateLineMutation.mutate({
-                          lineId: resolvingLine.id,
-                          updates: { putawayLocationId: loc.id }
-                        });
-                        setShowResolveDialog(false);
-                        toast({ title: "Location set", description: `${resolvingLine.sku} → ${loc.code}` });
-                      }}
-                    >
-                      <div className="font-mono font-medium">{loc.code}</div>
-                      {loc.name && <div className="text-xs text-muted-foreground">{loc.name}</div>}
-                    </button>
-                  ))}
-              </ScrollArea>
               <div className="flex justify-end pt-2">
                 <Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => setShowResolveDialog(false)}>
                   Skip
