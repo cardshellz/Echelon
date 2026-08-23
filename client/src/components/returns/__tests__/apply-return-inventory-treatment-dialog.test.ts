@@ -2,19 +2,22 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
+  applySlottedLocationDefaults,
   createInventoryTreatmentDraft,
   filterPickableReturnLocations,
+  resolveReturnVariantSlots,
   validateInventoryTreatmentDraft,
 } from "../ApplyReturnInventoryTreatmentDialog";
 import type {
   ReturnCaseDetailItem,
   ReturnCaseInventoryTreatmentSummary,
+  ReturnVariantBinAssignment,
   ReturnWarehouseLocation,
 } from "../return-case-admin-api";
 
 const items = [
-  { id: 11, title: "Sellable item", sku: "SKU-SELL", externalLineItemId: "line-11" },
-  { id: 12, title: "Held item", sku: "SKU-HOLD", externalLineItemId: "line-12" },
+  { id: 11, title: "Sellable item", sku: "SKU-SELL", productVariantId: 101, externalLineItemId: "line-11" },
+  { id: 12, title: "Held item", sku: "SKU-HOLD", productVariantId: 102, externalLineItemId: "line-12" },
 ] as ReturnCaseDetailItem[];
 
 function summary(): ReturnCaseInventoryTreatmentSummary {
@@ -67,6 +70,7 @@ describe("return inventory treatment dialog contract", () => {
         returnCaseItemId: 11,
         title: "Sellable item",
         sku: "SKU-SELL",
+        productVariantId: 101,
         treatment: "restock_sellable",
         quantity: 2,
         warehouseLocationId: "",
@@ -76,6 +80,7 @@ describe("return inventory treatment dialog contract", () => {
         returnCaseItemId: 12,
         title: "Held item",
         sku: "SKU-HOLD",
+        productVariantId: 102,
         treatment: "hold_non_sellable",
         quantity: 1,
         warehouseLocationId: "",
@@ -124,6 +129,50 @@ describe("return inventory treatment dialog contract", () => {
     expect(filterPickableReturnLocations(locations).map((location) => location.id)).toEqual([2, 1]);
   });
 
+  it("prefills only an exact valid slotted pick location and preserves an operator override", () => {
+    const locations: ReturnWarehouseLocation[] = [
+      { id: 17, code: "P-01", name: "Primary", warehouseId: 3, isActive: 1, isPickable: 1, cycleCountFreezeId: null },
+      { id: 18, code: "P-02", name: "Override", warehouseId: 3, isActive: 1, isPickable: 1, cycleCountFreezeId: null },
+    ];
+    const assignments: ReturnVariantBinAssignment[] = [{
+      productVariantId: 101,
+      assignedLocationCode: "P-01",
+      assignedLocationId: 17,
+      slotStatus: "valid",
+      slotIssue: null,
+      assignmentCount: 1,
+      validAssignmentCount: 1,
+    }];
+    const resolutions = resolveReturnVariantSlots([101], assignments, locations);
+    const draft = createInventoryTreatmentDraft(items, summary());
+
+    expect(applySlottedLocationDefaults(draft, resolutions)[0].warehouseLocationId).toBe("17");
+    const overridden = draft.map((line) => line.dispositionItemId === 91
+      ? { ...line, warehouseLocationId: "18" }
+      : line);
+    expect(applySlottedLocationDefaults(overridden, resolutions)[0].warehouseLocationId).toBe("18");
+  });
+
+  it("fails closed instead of guessing for duplicate, invalid, unavailable, or missing slots", () => {
+    const locations: ReturnWarehouseLocation[] = [
+      { id: 17, code: "P-01", name: null, warehouseId: 3, isActive: 1, isPickable: 1, cycleCountFreezeId: null },
+    ];
+    const assignments: ReturnVariantBinAssignment[] = [
+      { productVariantId: 101, assignedLocationCode: "P-01", assignedLocationId: 17, slotStatus: "duplicate", slotIssue: null, assignmentCount: 2, validAssignmentCount: 2 },
+      { productVariantId: 101, assignedLocationCode: "P-02", assignedLocationId: 18, slotStatus: "duplicate", slotIssue: null, assignmentCount: 2, validAssignmentCount: 2 },
+      { productVariantId: 102, assignedLocationCode: "BAD", assignedLocationId: 19, slotStatus: "invalid", slotIssue: "location_inactive", assignmentCount: 1, validAssignmentCount: 0 },
+      { productVariantId: 103, assignedLocationCode: "FROZEN", assignedLocationId: 20, slotStatus: "valid", slotIssue: null, assignmentCount: 1, validAssignmentCount: 1 },
+      { productVariantId: 104, assignedLocationCode: null, assignedLocationId: null, slotStatus: "unassigned", slotIssue: null, assignmentCount: 0, validAssignmentCount: 0 },
+    ];
+
+    const resolutions = resolveReturnVariantSlots([101, 102, 103, 104, 105], assignments, locations);
+    expect(resolutions.get(101)?.status).toBe("duplicate");
+    expect(resolutions.get(102)?.status).toBe("invalid");
+    expect(resolutions.get(103)?.status).toBe("unavailable");
+    expect(resolutions.get(104)?.status).toBe("unassigned");
+    expect(resolutions.get(105)?.status).toBe("missing");
+  });
+
   it("uses an internal operational confirmation without an acknowledgement checkbox", () => {
     const source = readFileSync(
       "client/src/components/returns/ApplyReturnInventoryTreatmentDialog.tsx",
@@ -135,5 +184,7 @@ describe("return inventory treatment dialog contract", () => {
     expect(source).toContain("does not issue a customer refund, settle a vendor balance, or close the return case");
     expect(source).toContain("<InventoryLocationCombobox");
     expect(source).not.toContain("<Select");
+    expect(source).toContain("Slotted location:");
+    expect(source).toContain("Override selected");
   });
 });

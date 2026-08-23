@@ -79,6 +79,10 @@ import {
   procurementStorage,
   synchronizeProcurementSkuReferences,
 } from "../procurement";
+import {
+  BinAssignmentFilterError,
+  parseBinAssignmentVariantIdsQuery,
+} from "../warehouse/bin-assignment-filter";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
 
@@ -2686,15 +2690,25 @@ export async function registerProductRoutes(app: Express) {
 
   app.get("/api/bin-assignments", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const { search, unassignedOnly, zone, warehouseId } = req.query;
+      const { search, unassignedOnly, zone, warehouseId, variantIds: rawVariantIds } = req.query;
+      const variantIds = parseBinAssignmentVariantIdsQuery(rawVariantIds);
       const assignments = await binAssignment.getAssignmentsView({
         search: search as string || undefined,
         unassignedOnly: unassignedOnly === "true",
         zone: zone as string || undefined,
         warehouseId: warehouseId ? parseInt(warehouseId as string) : undefined,
+        variantIds,
       });
       res.json(assignments);
     } catch (error: any) {
+      if (error instanceof BinAssignmentFilterError) {
+        return res.status(400).json({
+          error: {
+            code: error.code,
+            message: error.message,
+          },
+        });
+      }
       console.error("Error fetching bin assignments:", error);
       res.status(500).json({ error: "Failed to fetch bin assignments" });
     }

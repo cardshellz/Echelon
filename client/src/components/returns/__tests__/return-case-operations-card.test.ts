@@ -699,6 +699,7 @@ function item(overrides: Partial<ReturnCaseDetailItem>): ReturnCaseDetailItem {
     wmsReturnItemId: 101,
     omsOrderLineId: 201,
     wmsOrderItemId: 301,
+    productVariantId: 401,
     externalLineItemId: "line-11",
     sku: "SKU-11",
     title: "Item 11",

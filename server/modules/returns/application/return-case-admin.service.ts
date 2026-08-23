@@ -66,6 +66,7 @@ export interface ReturnCaseItemRow {
   wmsReturnItemId: number;
   omsOrderLineId: number | null;
   wmsOrderItemId: number | null;
+  productVariantId: number | null;
   externalLineItemId: string | null;
   sku: string | null;
   title: string | null;
