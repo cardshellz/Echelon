@@ -7,6 +7,11 @@ import {
   warehouseLocations,
 } from "@shared/schema";
 import { calculateFungibleAtpBase } from "./domain/inventory.domain";
+import {
+  calculateSellableVariantAtp,
+  usesFungibleBaseUnitPool,
+  type ProductInventoryStrategy,
+} from "@shared/catalog/inventory-strategy";
 
 // ============================================================================
 // Types
@@ -27,9 +32,9 @@ export interface VariantAtp {
   sku: string;
   name: string;
   unitsPerVariant: number;
-  /** Sellable units of THIS variant = floor(atpBase / unitsPerVariant) */
+  /** Sellable units under the product's configured inventory strategy. */
   atpUnits: number;
-  /** Shared ATP pool in base units (same value for every variant of the product) */
+  /** Base-unit capacity represented by this variant's ATP calculation. */
   atpBase: number;
 }
 
@@ -46,6 +51,7 @@ export interface ProductAtpSummary {
   sku: string;
   name: string;
   totalOnHandBase: number;
+  inventoryStrategy: ProductInventoryStrategy;
   totalReservedBase: number;
   totalAtpBase: number;
   variants: Array<{
@@ -58,28 +64,68 @@ export interface ProductAtpSummary {
     physicalQty: number;
   }>;
 }
+interface VariantPhysicalRow {
+  productVariantId: number;
+  sku: string | null;
+  name: string;
+  unitsPerVariant: number;
+  physicalQty: number;
+  reservedQty: number;
+}
+
+interface ProductSummaryVariantWithAtp {
+  productVariantId: number;
+  sku: string;
+  name: string;
+  unitsPerVariant: number;
+  atpUnits: number;
+  physicalQty: number;
+  atpBase: number;
+}
+
+interface InventoryItemVariantSummary {
+  variantId: number;
+  sku: string;
+  name: string;
+  unitsPerVariant: number;
+  available: number;
+  variantQty: number;
+  reservedQty: number;
+  pickedQty: number;
+  atpPieces: number;
+}
+
 
 // ============================================================================
 // Service
 // ============================================================================
 
 /**
- * Read-only service that calculates fungible Available-to-Promise (ATP)
- * for a multi-UOM inventory model.
+ * Read-only service that calculates Available-to-Promise (ATP) for a
+ * strategy-aware multi-UOM inventory model.
  *
  * All inventory_levels quantities are stored in **variant units**. Base-unit
  * equivalents are computed at query time via `qty * product_variants.units_per_variant`.
  *
- * Key concept: all variants of the same product share a single pool of
- * "base units". A case, box, and pack of the same sleeve product all
- * draw from the same on-hand total expressed in the smallest sellable
- * unit (the pack). ATP is computed once in base units, then divided by
- * each variant's `unitsPerVariant` to get sellable quantities.
+ * Package-hierarchy and recipe-managed products expose alternative sellable
+ * capacities from a shared base-unit pool. Physical-only products expose each
+ * variant strictly from that variant's own unreserved stock.
  *
  * This service never writes to the database.
  */
 class InventoryAtpService {
   constructor(private readonly db: any) {}
+
+  private async getProductInventoryStrategy(productId: number): Promise<ProductInventoryStrategy> {
+    const [product] = await this.db
+      .select({ inventoryStrategy: products.inventoryStrategy })
+      .from(products)
+      .where(eq(products.id, productId));
+    if (!product) {
+      throw new Error(`Product ${productId} not found while calculating ATP`);
+    }
+    return product.inventoryStrategy;
+  }
 
   // --------------------------------------------------------------------------
   // 1. getTotalBaseUnits
@@ -232,6 +278,26 @@ class InventoryAtpService {
     return result;
   }
 
+  private async getDirectVariantAtp(variantIds: number[]): Promise<Map<number, number>> {
+    if (variantIds.length === 0) return new Map();
+    const rows = await this.db
+      .select({
+        productVariantId: inventoryLevels.productVariantId,
+        atp: sql<number>`COALESCE(SUM(GREATEST(${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty}, 0)), 0)`,
+      })
+      .from(inventoryLevels)
+      .where(inArray(inventoryLevels.productVariantId, variantIds))
+      .groupBy(inventoryLevels.productVariantId);
+    const result = new Map<number, number>();
+    for (const row of rows) {
+      result.set(Number(row.productVariantId), Math.max(0, Number(row.atp)));
+    }
+    for (const variantId of variantIds) {
+      if (!result.has(variantId)) result.set(variantId, 0);
+    }
+    return result;
+  }
+
   /**
    * Per-variant ATP scoped to a single warehouse. Returns sellable
    * variant units for each active variant based on that warehouse's
@@ -241,8 +307,8 @@ class InventoryAtpService {
     productId: number,
     warehouseId: number,
   ): Promise<VariantAtp[]> {
-    const [atpBase, variants] = await Promise.all([
-      this.getAtpBaseByWarehouse(productId, warehouseId),
+    const [inventoryStrategy, variants] = await Promise.all([
+      this.getProductInventoryStrategy(productId),
       this.db
         .select({
           id: productVariants.id,
@@ -258,6 +324,12 @@ class InventoryAtpService {
           ),
         ),
     ]);
+    const sharedAtpBase = usesFungibleBaseUnitPool(inventoryStrategy)
+      ? await this.getAtpBaseByWarehouse(productId, warehouseId)
+      : 0;
+    const directAtp = usesFungibleBaseUnitPool(inventoryStrategy)
+      ? new Map<number, number>()
+      : await this.getDirectVariantAtpByWarehouse(variants.map((variant: any) => variant.id), warehouseId);
 
     return variants.map(
       (v: {
@@ -265,14 +337,21 @@ class InventoryAtpService {
         sku: string | null;
         name: string;
         unitsPerVariant: number;
-      }) => ({
-        productVariantId: v.id,
-        sku: v.sku ?? "",
-        name: v.name,
-        unitsPerVariant: v.unitsPerVariant,
-        atpUnits: Math.floor(atpBase / v.unitsPerVariant),
-        atpBase,
-      }),
+      }) => {
+        const availability = calculateSellableVariantAtp({
+          strategy: inventoryStrategy,
+          unitsPerVariant: v.unitsPerVariant,
+          sharedAtpBase,
+          directAtpUnits: directAtp.get(v.id) ?? 0,
+        });
+        return {
+          productVariantId: v.id,
+          sku: v.sku ?? "",
+          name: v.name,
+          unitsPerVariant: v.unitsPerVariant,
+          ...availability,
+        };
+      },
     );
   }
 
@@ -285,8 +364,8 @@ class InventoryAtpService {
    * units can be promised based on the shared ATP pool.
    */
   async getAtpPerVariant(productId: number): Promise<VariantAtp[]> {
-    const [atpBase, variants] = await Promise.all([
-      this.getAtpBase(productId),
+    const [inventoryStrategy, variants] = await Promise.all([
+      this.getProductInventoryStrategy(productId),
       this.db
         .select({
           id: productVariants.id,
@@ -302,6 +381,12 @@ class InventoryAtpService {
           ),
         ),
     ]);
+    const sharedAtpBase = usesFungibleBaseUnitPool(inventoryStrategy)
+      ? await this.getAtpBase(productId)
+      : 0;
+    const directAtp = usesFungibleBaseUnitPool(inventoryStrategy)
+      ? new Map<number, number>()
+      : await this.getDirectVariantAtp(variants.map((variant: any) => variant.id));
 
     return variants.map(
       (v: {
@@ -309,14 +394,21 @@ class InventoryAtpService {
         sku: string | null;
         name: string;
         unitsPerVariant: number;
-      }) => ({
-        productVariantId: v.id,
-        sku: v.sku ?? "",
-        name: v.name,
-        unitsPerVariant: v.unitsPerVariant,
-        atpUnits: Math.floor(atpBase / v.unitsPerVariant),
-        atpBase,
-      }),
+      }) => {
+        const availability = calculateSellableVariantAtp({
+          strategy: inventoryStrategy,
+          unitsPerVariant: v.unitsPerVariant,
+          sharedAtpBase,
+          directAtpUnits: directAtp.get(v.id) ?? 0,
+        });
+        return {
+          productVariantId: v.id,
+          sku: v.sku ?? "",
+          name: v.name,
+          unitsPerVariant: v.unitsPerVariant,
+          ...availability,
+        };
+      },
     );
   }
 
@@ -328,7 +420,8 @@ class InventoryAtpService {
     productId: number,
     channelId: number,
   ): Promise<ChannelVariantAtp[]> {
-    const atpBase = await this.getAtpBase(productId);
+    const variants = await this.getAtpPerVariant(productId);
+    const atpByVariant = new Map(variants.map((variant) => [variant.productVariantId, variant.atpUnits]));
 
     const { channels } = await import("@shared/schema");
 
@@ -364,7 +457,7 @@ class InventoryAtpService {
       }) => ({
         productVariantId: r.productVariantId,
         channelVariantId: r.channelVariantId,
-        atpUnits: Math.floor(atpBase / r.unitsPerVariant),
+        atpUnits: atpByVariant.get(r.productVariantId) ?? 0,
       }),
     );
   }
@@ -381,6 +474,7 @@ class InventoryAtpService {
         id: products.id,
         sku: products.sku,
         name: products.name,
+        inventoryStrategy: products.inventoryStrategy,
       })
       .from(products)
       .where(eq(products.id, productId));
@@ -398,6 +492,8 @@ class InventoryAtpService {
           unitsPerVariant: productVariants.unitsPerVariant,
           physicalQty:
             sql<number>`COALESCE(SUM(${inventoryLevels.variantQty}), 0)`,
+          reservedQty:
+            sql<number>`COALESCE(SUM(${inventoryLevels.reservedQty}), 0)`,
         })
         .from(productVariants)
         .leftJoin(
@@ -418,29 +514,38 @@ class InventoryAtpService {
         ),
     ]);
 
+    const variants: ProductSummaryVariantWithAtp[] = variantPhysicals.map((variant: VariantPhysicalRow) => {
+      const physicalQty = Number(variant.physicalQty);
+      const reservedQty = Number(variant.reservedQty);
+      const atp = calculateSellableVariantAtp({
+        strategy: product.inventoryStrategy,
+        unitsPerVariant: variant.unitsPerVariant,
+        sharedAtpBase: atpBase,
+        directAtpUnits: Math.max(0, physicalQty - reservedQty),
+      });
+      return {
+        productVariantId: variant.productVariantId,
+        sku: variant.sku ?? "",
+        name: variant.name,
+        unitsPerVariant: variant.unitsPerVariant,
+        atpUnits: atp.atpUnits,
+        physicalQty,
+        atpBase: atp.atpBase,
+      };
+    });
+    const effectiveAtpBase = usesFungibleBaseUnitPool(product.inventoryStrategy)
+      ? atpBase
+      : variants.reduce((sum, variant) => sum + variant.atpBase, 0);
+
     return {
       productId: product.id,
       sku: product.sku ?? "",
       name: product.name,
+      inventoryStrategy: product.inventoryStrategy,
       totalOnHandBase: totals.onHand,
       totalReservedBase: totals.reserved,
-      totalAtpBase: atpBase,
-      variants: variantPhysicals.map(
-        (v: {
-          productVariantId: number;
-          sku: string | null;
-          name: string;
-          unitsPerVariant: number;
-          physicalQty: number;
-        }) => ({
-          productVariantId: v.productVariantId,
-          sku: v.sku ?? "",
-          name: v.name,
-          unitsPerVariant: v.unitsPerVariant,
-          atpUnits: Math.floor(atpBase / v.unitsPerVariant),
-          physicalQty: Number(v.physicalQty),
-        }),
-      ),
+      totalAtpBase: effectiveAtpBase,
+      variants: variants.map(({ atpBase: _atpBase, ...variant }) => variant),
     };
   }
 
@@ -468,7 +573,12 @@ class InventoryAtpService {
     }>;
   } | null> {
     const [product] = await this.db
-      .select({ id: products.id, sku: products.sku, name: products.name })
+      .select({
+        id: products.id,
+        sku: products.sku,
+        name: products.name,
+        inventoryStrategy: products.inventoryStrategy,
+      })
       .from(products)
       .where(eq(products.id, productId));
 
@@ -501,24 +611,37 @@ class InventoryAtpService {
         productVariants.unitsPerVariant,
       );
 
-    // Compute fungible ATP pool across ALL variants in base units (pieces)
+    // Compute the shared ATP pool across all variants in base units.
     const totalOnHand = variantRows.reduce((s: number, v: any) => s + Number(v.onHandPieces), 0);
     const totalReserved = variantRows.reduce((s: number, v: any) => s + Number(v.reservedPieces), 0);
     const totalPicked = variantRows.reduce((s: number, v: any) => s + Number(v.pickedPieces), 0);
     const totalPacked = variantRows.reduce((s: number, v: any) => s + Number(v.packedPieces), 0);
-    const totalAtpBase = totalOnHand - totalReserved - totalPicked - totalPacked;
+    const sharedAtpBase = totalOnHand - totalReserved - totalPicked - totalPacked;
 
-    const variants = variantRows.map((v: any) => ({
-      variantId: v.productVariantId,
-      sku: v.sku ?? "",
-      name: v.name,
-      unitsPerVariant: v.unitsPerVariant,
-      available: Math.floor(totalAtpBase / v.unitsPerVariant),
-      variantQty: Number(v.variantQty),
-      reservedQty: Number(v.reservedQty),
-      pickedQty: Number(v.pickedQty),
-      atpPieces: totalAtpBase,
-    }));
+    const variants: InventoryItemVariantSummary[] = variantRows.map((variant: any) => {
+      const variantQty = Number(variant.variantQty);
+      const reservedQty = Number(variant.reservedQty);
+      const atp = calculateSellableVariantAtp({
+        strategy: product.inventoryStrategy,
+        unitsPerVariant: variant.unitsPerVariant,
+        sharedAtpBase,
+        directAtpUnits: Math.max(0, variantQty - reservedQty),
+      });
+      return {
+        variantId: variant.productVariantId,
+        sku: variant.sku ?? "",
+        name: variant.name,
+        unitsPerVariant: variant.unitsPerVariant,
+        available: atp.atpUnits,
+        variantQty,
+        reservedQty,
+        pickedQty: Number(variant.pickedQty),
+        atpPieces: atp.atpBase,
+      };
+    });
+    const totalAtpBase = usesFungibleBaseUnitPool(product.inventoryStrategy)
+      ? sharedAtpBase
+      : variants.reduce((sum, variant) => sum + variant.atpPieces, 0);
 
     return {
       productId: product.id,

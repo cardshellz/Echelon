@@ -126,6 +126,37 @@ export async function loadActiveBuildVariantFacts(
   }));
 }
 
+export async function assertRecipeManagedOutputProduct(
+  tx: Pick<Db, "execute">,
+  productId: number,
+  context: Record<string, unknown> = {},
+): Promise<void> {
+  const productResult = await tx.execute(sql`
+    SELECT id, inventory_strategy
+    FROM catalog.products
+    WHERE id = ${productId}
+    FOR SHARE
+  `);
+  const product = productResult.rows[0];
+  if (!product) {
+    throw new BuildDomainError("BUILD_OUTPUT_PRODUCT_NOT_FOUND", `Build output product ${productId} was not found`, {
+      ...context,
+      productId,
+    });
+  }
+  if (product.inventory_strategy !== "recipe_managed") {
+    throw new BuildDomainError(
+      "BUILD_OUTPUT_STRATEGY_REQUIRED",
+      "Build recipes require the output product to use build-managed inventory",
+      {
+        ...context,
+        productId,
+        inventoryStrategy: product.inventory_strategy,
+      },
+    );
+  }
+}
+
 export async function assertBuildVariantsActive(
   tx: Pick<Db, "execute">,
   variantIds: number[],
@@ -269,6 +300,7 @@ export class BuildRepository {
         [input.outputVariantId, ...input.components.map((item) => item.componentVariantId)],
       );
       const outputFacts = getVariantFacts(variantFacts, input.outputVariantId);
+      await assertRecipeManagedOutputProduct(tx, outputFacts.productId, { outputVariantId: input.outputVariantId });
       const componentDefinitions = input.components.map((component) => ({
         ...getVariantFacts(variantFacts, component.componentVariantId),
         qtyPerBuild: component.qtyPerBuild,
@@ -334,6 +366,7 @@ export class BuildRepository {
           status: recipe.status,
         });
       }
+      await assertRecipeManagedOutputProduct(tx, Number(recipe.output_product_id), { recipeId: input.recipeId });
 
       const componentResult = await tx.execute(sql`
         SELECT id, component_variant_id, component_product_id,

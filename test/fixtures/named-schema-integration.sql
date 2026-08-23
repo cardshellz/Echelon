@@ -42,6 +42,7 @@ CREATE TABLE catalog.products (
   safety_stock_days integer NOT NULL DEFAULT 7,
   status varchar(20) DEFAULT 'active',
   inventory_type varchar(20) NOT NULL DEFAULT 'inventory',
+  inventory_strategy varchar(30) NOT NULL DEFAULT 'physical_fungible' CHECK (inventory_strategy IN ('physical_fungible', 'recipe_managed', 'physical_only')),
   is_active boolean NOT NULL DEFAULT true,
   condition varchar(30) DEFAULT 'new',
   country_of_origin varchar(2),
