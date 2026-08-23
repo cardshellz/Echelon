@@ -130,7 +130,7 @@ const cancellationActionSchema = z.object({
   quantity: positivePostgresInteger,
   authorization: leadApprovedAuthorizationSchema,
 }).strict();
-const packageAllocationGroupActionSchema = z.discriminatedUnion("kind", [
+export const packageAllocationGroupActionSchema = z.discriminatedUnion("kind", [
   transferActionSchema,
   cancellationActionSchema,
 ]);
