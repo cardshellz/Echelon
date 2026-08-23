@@ -22,6 +22,7 @@ import type {
   PackageAllocationEntryV1,
 } from "../../package-allocation-group.domain";
 import { PackageAllocationAuthorityReadinessService } from "../../package-allocation-authority-readiness.service";
+import { PackageAllocationAuthorityResolutionPreviewService } from "../../package-allocation-authority-resolution.service";
 import {
   PgPackageAllocationLedgerRepository,
   type PersistedPackageAllocationEntry,
@@ -446,6 +447,58 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       "package_membership_policy_unresolved",
       "physical_consumption_authority_policy_unresolved",
     ]);
+    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
+  });
+
+  it("resolves locked bootstrap evidence without creating ledger rows", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-PREVIEW", 2);
+    const labelId = await seedAuthorityReadinessLabel(pool, sourceId);
+    const repository = new PgPackageAllocationLedgerRepository(pool);
+    const service = new PackageAllocationAuthorityResolutionPreviewService(repository);
+
+    const result = await service.preview({
+      contractVersion: 1,
+      authorityMode: "shadow_only",
+      previewMode: "bootstrap_selected_scope",
+      groupKey: PRIMARY_GROUP_KEY,
+      sourceWmsShipmentItemIds: [sourceId],
+      shippingProviderLabelIds: [labelId],
+    });
+
+    expect(result).toMatchObject({
+      contractVersion: 1,
+      authority: "none",
+      outcome: "review",
+      previewMode: "bootstrap_selected_scope",
+      selectionAuthority: "caller_selected_unproven",
+      groupState: "absent",
+      readiness: {
+        authority: "none",
+        packageAssessments: [{
+          lifecycleStatus: "projected",
+          candidateSourceStatus: "within_candidate_sources",
+        }],
+      },
+      resolution: {
+        authority: "shadow_only",
+        outcome: "proposed",
+        plannerResult: {
+          state: { reviews: [] },
+        },
+      },
+    });
+    expect(result.resolution?.plannerResult.state.allocations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          allocationKind: "primary_transfer",
+          targetKind: "package",
+          quantity: 2,
+        }),
+      ]),
+    );
+    expect(result.resolution?.plannerResult.state.desiredEffectIntents.every(
+      (intent) => intent.executable === false,
+    )).toBe(true);
     expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
   });
 
