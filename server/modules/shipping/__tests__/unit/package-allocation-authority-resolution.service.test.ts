@@ -139,6 +139,16 @@ function command(): PackageAllocationAuthorityResolutionPreviewCommand {
   };
 }
 
+function discoveryCommand() {
+  return {
+    contractVersion: 1 as const,
+    authorityMode: "shadow_only" as const,
+    previewMode: "bootstrap_relationship_discovery" as const,
+    groupKey,
+    sourceWmsShipmentItemIds: [sourceId],
+  };
+}
+
 interface RepositoryFixture {
   readonly repository: PackageAllocationLedgerRepository;
   readonly calls: string[];
@@ -160,6 +170,10 @@ function repositoryFixture(
     lockSourceFacts: async (ids: readonly number[]) => {
       calls.push(`sources:${ids.join(",")}`);
       return ids.map(sourceFacts);
+    },
+    discoverAuthorityReadinessPackageLabelIds: async (ids: readonly number[]) => {
+      calls.push(`discover:${ids.join(",")}`);
+      return [42, 43];
     },
     lockAuthorityReadinessPackages: async (ids: readonly number[]) => {
       calls.push(`labels:${ids.join(",")}`);
@@ -204,6 +218,48 @@ function activePackageB(
 }
 
 describe("PackageAllocationAuthorityResolutionPreviewService", () => {
+  it("discovers related package labels between source and package locks", async () => {
+    const fixture = repositoryFixture([activePackageB(), activePackageA()]);
+    const input = discoveryCommand();
+    const before = structuredClone(input);
+
+    const result = await new PackageAllocationAuthorityResolutionPreviewService(
+      fixture.repository,
+    ).previewDiscovered(input);
+
+    expect(input).toEqual(before);
+    expect(fixture.calls).toEqual([
+      "transaction",
+      `group:${groupKey}:false`,
+      `sources:${sourceId}`,
+      `discover:${sourceId}`,
+      "labels:42,43",
+    ]);
+    expect(result).toMatchObject({
+      contractVersion: 1,
+      authority: "none",
+      outcome: "review",
+      previewMode: "bootstrap_relationship_discovery",
+      selectionAuthority: "database_relationship_closure",
+      selectionCompleteness: "unproven_outside_persisted_relationships",
+      selectedShippingProviderLabelIds: [42, 43],
+      groupState: "absent",
+      readiness: {
+        authority: "none",
+        outcome: "review",
+      },
+      resolution: {
+        authority: "shadow_only",
+        outcome: "review",
+      },
+    });
+    expect(result.resolution?.plannerResult.state.desiredEffectIntents.every(
+      (intent) => intent.executable === false,
+    )).toBe(true);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.selectedShippingProviderLabelIds)).toBe(true);
+  });
+
   it("previews exact active A+B as two physical consumptions without double fulfillment", async () => {
     const fixture = repositoryFixture([activePackageB(), activePackageA()]);
     const input = command();
@@ -376,6 +432,13 @@ describe("PackageAllocationAuthorityResolutionPreviewService", () => {
     });
     await expect(service.preview({
       ...command(),
+      sourceWmsShipmentItemIds: [sourceId, sourceId],
+    })).rejects.toMatchObject({
+      code: "DUPLICATE_SOURCE_WMS_SHIPMENT_ITEM_ID",
+      context: { sourceWmsShipmentItemId: sourceId },
+    });
+    await expect(service.previewDiscovered({
+      ...discoveryCommand(),
       sourceWmsShipmentItemIds: [sourceId, sourceId],
     })).rejects.toMatchObject({
       code: "DUPLICATE_SOURCE_WMS_SHIPMENT_ITEM_ID",

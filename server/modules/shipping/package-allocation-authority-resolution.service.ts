@@ -42,6 +42,23 @@ export type PackageAllocationAuthorityResolutionPreviewCommand = z.input<
   typeof packageAllocationAuthorityResolutionPreviewCommandSchema
 >;
 
+export const packageAllocationAuthorityResolutionDiscoveryPreviewCommandSchema = z
+  .object({
+    contractVersion: z.literal(1),
+    authorityMode: z.literal("shadow_only"),
+    previewMode: z.literal("bootstrap_relationship_discovery"),
+    groupKey: z.string().uuid().transform((value) => value.toLowerCase()),
+    sourceWmsShipmentItemIds: z
+      .array(sourceIdSchema)
+      .min(1)
+      .max(MAX_SOURCE_LINES),
+  })
+  .strict();
+
+export type PackageAllocationAuthorityResolutionDiscoveryPreviewCommand = z.input<
+  typeof packageAllocationAuthorityResolutionDiscoveryPreviewCommandSchema
+>;
+
 export type PackageAllocationAuthorityResolutionPreviewServiceErrorCode =
   | "DUPLICATE_SHIPPING_PROVIDER_LABEL_ID"
   | "DUPLICATE_SOURCE_WMS_SHIPMENT_ITEM_ID"
@@ -71,6 +88,23 @@ export interface PackageAllocationAuthorityResolutionPreviewResultV1 {
   readonly previewMode: "bootstrap_selected_scope";
   /** The caller selected these labels; this service does not prove the set is complete. */
   readonly selectionAuthority: "caller_selected_unproven";
+  readonly selectionCompleteness: "unproven_caller_selection";
+  readonly selectedShippingProviderLabelIds: readonly number[];
+  readonly groupState: "absent" | "empty";
+  readonly readiness: PackageAllocationAuthorityReadinessResultV1;
+  readonly resolution: PackageAllocationAuthorityResolutionResultV1 | null;
+}
+
+export interface PackageAllocationAuthorityResolutionDiscoveryPreviewResultV1 {
+  readonly contractVersion: 1;
+  readonly authority: "none";
+  readonly outcome: "review";
+  readonly previewMode: "bootstrap_relationship_discovery";
+  /** Labels were derived only from persisted shipment relationships. */
+  readonly selectionAuthority: "database_relationship_closure";
+  /** A provider package without any persisted relationship remains unknowable here. */
+  readonly selectionCompleteness: "unproven_outside_persisted_relationships";
+  readonly selectedShippingProviderLabelIds: readonly number[];
   readonly groupState: "absent" | "empty";
   readonly readiness: PackageAllocationAuthorityReadinessResultV1;
   readonly resolution: PackageAllocationAuthorityResolutionResultV1 | null;
@@ -84,6 +118,18 @@ interface NormalizedPackageAllocationAuthorityResolutionPreviewCommand {
   readonly sourceWmsShipmentItemIds: readonly number[];
   readonly shippingProviderLabelIds: readonly number[];
 }
+
+interface NormalizedPackageAllocationAuthorityResolutionDiscoveryPreviewCommand {
+  readonly contractVersion: 1;
+  readonly authorityMode: "shadow_only";
+  readonly previewMode: "bootstrap_relationship_discovery";
+  readonly groupKey: string;
+  readonly sourceWmsShipmentItemIds: readonly number[];
+}
+
+type NormalizedPreviewCommand =
+  | NormalizedPackageAllocationAuthorityResolutionPreviewCommand
+  | NormalizedPackageAllocationAuthorityResolutionDiscoveryPreviewCommand;
 
 function compareText(left: string, right: string): number {
   if (left < right) return -1;
@@ -177,6 +223,45 @@ function normalizeCommand(
   });
 }
 
+
+function normalizeDiscoveryCommand(
+  rawCommand: PackageAllocationAuthorityResolutionDiscoveryPreviewCommand,
+): Readonly<NormalizedPackageAllocationAuthorityResolutionDiscoveryPreviewCommand> {
+  const parsed =
+    packageAllocationAuthorityResolutionDiscoveryPreviewCommandSchema.safeParse(
+      rawCommand,
+    );
+  if (!parsed.success) {
+    throw new PackageAllocationAuthorityResolutionPreviewServiceError(
+      "INVALID_AUTHORITY_RESOLUTION_PREVIEW_COMMAND",
+      "Package-allocation authority relationship-discovery command failed validation",
+      { issues: sanitizedIssues(parsed.error) },
+    );
+  }
+
+  const duplicateSourceId = duplicateValue(
+    parsed.data.sourceWmsShipmentItemIds,
+  );
+  if (duplicateSourceId !== null) {
+    throw new PackageAllocationAuthorityResolutionPreviewServiceError(
+      "DUPLICATE_SOURCE_WMS_SHIPMENT_ITEM_ID",
+      "Package-allocation authority relationship discovery requires unique source identities",
+      { sourceWmsShipmentItemId: duplicateSourceId },
+    );
+  }
+
+  return Object.freeze({
+    contractVersion: 1 as const,
+    authorityMode: "shadow_only" as const,
+    previewMode: "bootstrap_relationship_discovery" as const,
+    groupKey: parsed.data.groupKey,
+    sourceWmsShipmentItemIds: Object.freeze(
+      [...parsed.data.sourceWmsShipmentItemIds].sort(
+        (left, right) => left - right,
+      ),
+    ),
+  });
+}
 function sortPackages(
   packages: readonly LockedPackageAllocationAuthorityEvidence[],
 ): readonly LockedPackageAllocationAuthorityEvidence[] {
@@ -188,11 +273,11 @@ function sortPackages(
 }
 
 /**
- * Produces an inert bootstrap preview from one explicitly selected package set.
- * It locks evidence in a single serializable transaction but never creates a
- * group, appends a plan, accepts operator actions, or makes an effect executable.
- * Package-set completeness remains unproven until a separate authenticated
- * discovery adapter exists.
+ * Produces an inert bootstrap preview from either an explicitly selected label
+ * set or a bounded closure of persisted shipment relationships. It never
+ * creates a group, appends a plan, accepts operator actions, or makes an effect
+ * executable. Relationship discovery cannot prove packages that have no
+ * persisted relationship, so both modes remain explicitly incomplete.
  */
 export class PackageAllocationAuthorityResolutionPreviewService {
   constructor(private readonly repository: PackageAllocationLedgerRepository) {}
@@ -200,7 +285,27 @@ export class PackageAllocationAuthorityResolutionPreviewService {
   async preview(
     rawCommand: PackageAllocationAuthorityResolutionPreviewCommand,
   ): Promise<PackageAllocationAuthorityResolutionPreviewResultV1> {
-    const command = normalizeCommand(rawCommand);
+    return this.previewNormalized(normalizeCommand(rawCommand));
+  }
+
+  async previewDiscovered(
+    rawCommand: PackageAllocationAuthorityResolutionDiscoveryPreviewCommand,
+  ): Promise<PackageAllocationAuthorityResolutionDiscoveryPreviewResultV1> {
+    return this.previewNormalized(normalizeDiscoveryCommand(rawCommand));
+  }
+
+  private previewNormalized(
+    command: NormalizedPackageAllocationAuthorityResolutionPreviewCommand,
+  ): Promise<PackageAllocationAuthorityResolutionPreviewResultV1>;
+  private previewNormalized(
+    command: NormalizedPackageAllocationAuthorityResolutionDiscoveryPreviewCommand,
+  ): Promise<PackageAllocationAuthorityResolutionDiscoveryPreviewResultV1>;
+  private async previewNormalized(
+    command: NormalizedPreviewCommand,
+  ): Promise<
+    PackageAllocationAuthorityResolutionPreviewResultV1
+    | PackageAllocationAuthorityResolutionDiscoveryPreviewResultV1
+  > {
     return this.repository.withSerializableTransaction(async (transaction) => {
       const group = await transaction.lockGroup(command.groupKey, false);
       if (group !== null && group.currentVersion !== 0) {
@@ -223,11 +328,15 @@ export class PackageAllocationAuthorityResolutionPreviewService {
             left.sourceWmsShipmentItemId - right.sourceWmsShipmentItemId,
         ),
       );
-      const packages = sortPackages(
-        await transaction.lockAuthorityReadinessPackages(
-          command.shippingProviderLabelIds,
-        ),
-      );
+      const selectedShippingProviderLabelIds =
+        command.previewMode === "bootstrap_selected_scope"
+          ? command.shippingProviderLabelIds
+          : await transaction.discoverAuthorityReadinessPackageLabelIds(
+              command.sourceWmsShipmentItemIds,
+            );
+      const packages = sortPackages(await transaction.lockAuthorityReadinessPackages(
+        selectedShippingProviderLabelIds,
+      ));
       const readiness = assessPackageAllocationAuthorityReadiness({
         contractVersion: 1,
         authorityMode: "shadow_only",
@@ -268,16 +377,28 @@ export class PackageAllocationAuthorityResolutionPreviewService {
           })
         : null;
 
-      return deepFreeze({
+      const commonResult = {
         contractVersion: 1 as const,
         authority: "none" as const,
         outcome: "review" as const,
-        previewMode: "bootstrap_selected_scope" as const,
-        selectionAuthority: "caller_selected_unproven" as const,
+        selectedShippingProviderLabelIds,
         groupState: group === null ? "absent" as const : "empty" as const,
         readiness,
         resolution,
-      });
+      };
+      return command.previewMode === "bootstrap_selected_scope"
+        ? deepFreeze({
+            ...commonResult,
+            previewMode: "bootstrap_selected_scope" as const,
+            selectionAuthority: "caller_selected_unproven" as const,
+            selectionCompleteness: "unproven_caller_selection" as const,
+          })
+        : deepFreeze({
+            ...commonResult,
+            previewMode: "bootstrap_relationship_discovery" as const,
+            selectionAuthority: "database_relationship_closure" as const,
+            selectionCompleteness: "unproven_outside_persisted_relationships" as const,
+          });
     });
   }
 }

@@ -223,8 +223,13 @@ CREATE TABLE wms.order_items (
   status varchar(30) NOT NULL DEFAULT 'pending'
 );
 
+CREATE TABLE wms.outbound_shipments (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+);
+
 CREATE TABLE wms.outbound_shipment_items (
   id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  shipment_id integer REFERENCES wms.outbound_shipments(id) ON DELETE CASCADE,
   order_item_id integer REFERENCES wms.order_items(id),
   replacement_for_order_item_id integer REFERENCES wms.order_items(id) ON DELETE RESTRICT,
   correction_for_shipment_item_id integer REFERENCES wms.outbound_shipment_items(id) ON DELETE RESTRICT,
@@ -233,14 +238,81 @@ CREATE TABLE wms.outbound_shipment_items (
   qty integer NOT NULL DEFAULT 1
 );
 
+CREATE TABLE wms.shipment_requests (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  legacy_wms_shipment_id integer UNIQUE
+    REFERENCES wms.outbound_shipments(id) ON DELETE SET NULL
+);
+
 CREATE TABLE wms.shipment_request_items (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  shipment_request_id bigint
+    REFERENCES wms.shipment_requests(id) ON DELETE CASCADE,
   legacy_wms_shipment_item_id integer UNIQUE
     REFERENCES wms.outbound_shipment_items(id) ON DELETE SET NULL
 );
 
+CREATE TABLE wms.shipping_engine_orders (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  shipment_request_id bigint
+    REFERENCES wms.shipment_requests(id) ON DELETE SET NULL,
+  provider varchar(40) NOT NULL,
+  provider_order_id varchar(200),
+  provider_order_key varchar(200)
+);
+
+CREATE TABLE wms.shipping_engine_order_provider_refs (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  shipping_engine_order_id bigint NOT NULL
+    REFERENCES wms.shipping_engine_orders(id) ON DELETE RESTRICT,
+  provider varchar(40) NOT NULL,
+  provider_order_id varchar(200) NOT NULL
+);
+
+CREATE TABLE wms.shipping_engine_order_requests (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  shipping_engine_order_id bigint NOT NULL
+    REFERENCES wms.shipping_engine_orders(id) ON DELETE RESTRICT,
+  shipment_request_id bigint NOT NULL
+    REFERENCES wms.shipment_requests(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE wms.physical_shipments (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  shipping_engine_order_id bigint
+    REFERENCES wms.shipping_engine_orders(id) ON DELETE RESTRICT,
+  shipment_request_id bigint
+    REFERENCES wms.shipment_requests(id) ON DELETE SET NULL,
+  provider varchar(40) NOT NULL,
+  provider_physical_shipment_id varchar(200) NOT NULL
+);
+
+CREATE TABLE wms.physical_shipment_items (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  physical_shipment_id bigint NOT NULL
+    REFERENCES wms.physical_shipments(id) ON DELETE RESTRICT,
+  shipment_request_item_id bigint
+    REFERENCES wms.shipment_request_items(id) ON DELETE RESTRICT,
+  legacy_wms_shipment_item_id integer
+    REFERENCES wms.outbound_shipment_items(id) ON DELETE RESTRICT
+);
+
 CREATE TABLE wms.shipping_provider_labels (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+);
+
+CREATE TABLE wms.shipping_provider_label_links (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  shipping_provider_label_id bigint NOT NULL
+    REFERENCES wms.shipping_provider_labels(id) ON DELETE RESTRICT,
+  shipment_request_id bigint
+    REFERENCES wms.shipment_requests(id) ON DELETE RESTRICT,
+  shipping_engine_order_id bigint
+    REFERENCES wms.shipping_engine_orders(id) ON DELETE RESTRICT,
+  physical_shipment_id bigint
+    REFERENCES wms.physical_shipments(id) ON DELETE RESTRICT,
+  legacy_wms_shipment_id integer
+    REFERENCES wms.outbound_shipments(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE inventory.inventory_transactions (
