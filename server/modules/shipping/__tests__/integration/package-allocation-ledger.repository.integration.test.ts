@@ -238,11 +238,12 @@ async function seedAuthorityReadinessLabel(
     readonly trackingNumber?: string;
     readonly providerOrderId?: string;
     readonly contentsStatus?: "authoritative" | "empty";
+    readonly receivedAt?: string;
   } = {},
 ): Promise<number> {
   const trackingNumber = options.trackingNumber ?? "1Z999AA10123456784";
   const providerLabelId = options.providerLabelId ?? "44001";
-  const receivedAt = "2026-08-23T14:00:00.000Z";
+  const receivedAt = options.receivedAt ?? "2026-08-23T14:00:00.000Z";
   const hasAuthoritativeContents = (options.contentsStatus ?? "authoritative") === "authoritative";
   const payload = {
     payloadSchemaVersion: 2,
@@ -579,6 +580,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       trackingNumber: "1Z999AA10123456785",
       providerOrderId,
       contentsStatus: "empty",
+      receivedAt: "2026-08-23T14:05:00.000Z",
     });
     await seedAuthorityDiscoveryRelations(
       pool,
