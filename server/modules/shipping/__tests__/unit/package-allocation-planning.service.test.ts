@@ -20,6 +20,7 @@ import type {
   RegisteredPackageAllocationSource,
 } from "../../package-allocation-ledger.repository";
 import {
+  PACKAGE_ALLOCATION_PLANNER_VERSION,
   PackageAllocationPersistenceError,
   PackageAllocationPlanningService,
   type PersistPackageAllocationPlanCommand,
@@ -300,6 +301,8 @@ describe("PackageAllocationPlanningService", () => {
     expect(persisted.entries).toEqual(result.plannerResult.ledgerEntriesToAppend);
     expect(persisted.intents).toEqual(result.plannerResult.effectIntentsToAppend);
     expect(persisted.intents.every((intent) => intent.executable === false)).toBe(true);
+    expect(persisted.plannerVersion).toBe("package-allocation-group-v2");
+    expect(persisted.plannerVersion).toBe(PACKAGE_ALLOCATION_PLANNER_VERSION);
     expect(persisted.stateSnapshot).toEqual(result.plannerResult.state);
   });
 
@@ -379,7 +382,7 @@ describe("PackageAllocationPlanningService", () => {
       inputHash: "a".repeat(64),
       stateHash: "b".repeat(64),
       outcome: "proposed",
-      plannerVersion: "package-allocation-group-v1",
+      plannerVersion: PACKAGE_ALLOCATION_PLANNER_VERSION,
       reason: "test",
       createdBy: "test",
       stateSnapshot: { actionEvidence: [] },
@@ -417,14 +420,14 @@ describe("PackageAllocationPlanningService", () => {
     expect(repository.transaction.appendCalls).toHaveLength(1);
   });
 
-  it("rejects persisted evidence from an unsupported planner version", async () => {
+  it("fails closed when a persisted v1 plan is loaded by the v2 planner", async () => {
     const repository = new InMemoryLedgerRepository();
     const service = new PackageAllocationPlanningService(repository);
     await service.persist(command());
     const plan = repository.transaction.plansByVersion.get(1)!;
     repository.transaction.plansByVersion.set(1, Object.freeze({
       ...plan,
-      plannerVersion: "package-allocation-group-v0",
+      plannerVersion: "package-allocation-group-v1",
     }));
 
     await expect(service.persist(command({ expectedGroupVersion: 1 }))).rejects.toSatisfy(
@@ -432,7 +435,8 @@ describe("PackageAllocationPlanningService", () => {
         expectPersistenceError(error, "PERSISTED_STATE_INVALID");
         expect((error as PackageAllocationPersistenceError).context).toMatchObject({
           planId: "101",
-          plannerVersion: "package-allocation-group-v0",
+          plannerVersion: "package-allocation-group-v1",
+          expectedPlannerVersion: "package-allocation-group-v2",
         });
         return true;
       },

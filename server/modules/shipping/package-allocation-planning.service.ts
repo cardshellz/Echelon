@@ -25,7 +25,7 @@ import {
   type PackageAllocationSourceRegistrationV1,
 } from "./package-allocation-source-identity.domain";
 
-export const PACKAGE_ALLOCATION_PLANNER_VERSION = "package-allocation-group-v1";
+export const PACKAGE_ALLOCATION_PLANNER_VERSION = "package-allocation-group-v2";
 const MAX_SERIALIZABLE_ATTEMPTS = 3;
 
 const writeContextSchema = z.object({
@@ -139,6 +139,7 @@ function previousPlanFromPersisted(
         planId: plan.id,
         planVersion: plan.planVersion,
         plannerVersion: plan.plannerVersion,
+        expectedPlannerVersion: PACKAGE_ALLOCATION_PLANNER_VERSION,
       },
     );
   }
