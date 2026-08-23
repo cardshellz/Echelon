@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 
+import type { PersistedDeclaredPackageEvidence } from "./declared-package-lifecycle-shadow.domain";
 import type {
   PackageAllocationEffectIntentV1,
   PackageAllocationEntryV1,
@@ -12,10 +13,17 @@ import type {
 } from "./package-allocation-source-identity.domain";
 
 const SOURCE_LOCK_NAMESPACE = 918_421;
+const LABEL_LOCK_NAMESPACE = 918_422;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS = 60_000;
 const JSON_BATCH_SIZE = 1_000;
+const MAX_AUTHORITY_PACKAGES = 200;
+const MAX_AUTHORITY_EVENTS_PER_PACKAGE = 5_000;
+const MAX_AUTHORITY_TOTAL_EVENTS = 10_000;
+const MAX_AUTHORITY_CURRENT_CARRIER_EVENTS = 5_000;
+const MAX_AUTHORITY_EVENT_PAYLOAD_BYTES = 4 * 1_024 * 1_024;
+const MAX_AUTHORITY_TOTAL_PAYLOAD_BYTES = 8 * 1_024 * 1_024;
 
 type QueryClient = Pick<PoolClient, "query">;
 
@@ -109,6 +117,11 @@ export interface PersistedPackageAllocationIntent {
   readonly executable: boolean;
 }
 
+export interface LockedPackageAllocationAuthorityEvidence {
+  readonly evidenceKey: string;
+  readonly persistedEvidence: PersistedDeclaredPackageEvidence;
+}
+
 export interface AppendPackageAllocationPlanInput {
   readonly group: LockedPackageAllocationGroup;
   readonly planVersion: number;
@@ -129,6 +142,9 @@ export interface AppendPackageAllocationPlanInput {
 export interface PackageAllocationLedgerTransaction {
   lockGroup(groupKey: string, createIfMissing: boolean): Promise<LockedPackageAllocationGroup | null>;
   lockSourceFacts(sourceWmsShipmentItemIds: readonly number[]): Promise<readonly PackageAllocationSourceFacts[]>;
+  lockAuthorityReadinessPackages(
+    shippingProviderLabelIds: readonly number[],
+  ): Promise<readonly LockedPackageAllocationAuthorityEvidence[]>;
   ensureSourceRegistrations(
     group: LockedPackageAllocationGroup,
     registrations: readonly PackageAllocationSourceRegistrationV1[],
@@ -237,6 +253,19 @@ function nonnegativeInteger(value: unknown, field: string): number {
   return numberValue;
 }
 
+function positiveSafeInteger(value: unknown, field: string): number {
+  const numberValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(numberValue) || numberValue <= 0) {
+    throw new PackageAllocationLedgerRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      `Database field ${field} is not a positive safe integer`,
+      { field },
+    );
+  }
+  return numberValue;
+}
+
+
 function nullablePositiveInteger(value: unknown, field: string): number | null {
   return value === null || value === undefined ? null : positiveInteger(value, field);
 }
@@ -271,6 +300,24 @@ function bigintText(value: unknown, field: string): string {
 function optionalBigintText(value: unknown, field: string): string | null {
   return value === null || value === undefined ? null : bigintText(value, field);
 }
+
+function timestampText(value: unknown, field: string): string {
+  const date =
+    value instanceof Date
+      ? value
+      : typeof value === "string" || typeof value === "number"
+        ? new Date(value)
+        : null;
+  if (date === null || !Number.isFinite(Date.prototype.getTime.call(date))) {
+    throw new PackageAllocationLedgerRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      `Database field ${field} is not a valid timestamp`,
+      { field },
+    );
+  }
+  return Date.prototype.toISOString.call(date);
+}
+
 
 function booleanValue(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") {
@@ -421,6 +468,366 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
         productVariantSku: nullableText(row.product_variant_sku),
       });
     }));
+  }
+
+  async lockAuthorityReadinessPackages(
+    shippingProviderLabelIds: readonly number[],
+  ): Promise<readonly LockedPackageAllocationAuthorityEvidence[]> {
+    const sortedIds = [...new Set(shippingProviderLabelIds)].sort(
+      (left, right) => left - right,
+    );
+    if (sortedIds.length === 0 || sortedIds.length > MAX_AUTHORITY_PACKAGES) {
+      throw new PackageAllocationLedgerRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "Authority readiness package selection is outside its bounded contract",
+        {
+          observedPackageCount: sortedIds.length,
+          maxPackageCount: MAX_AUTHORITY_PACKAGES,
+        },
+      );
+    }
+    for (const labelId of sortedIds) {
+      if (!Number.isSafeInteger(labelId) || labelId <= 0) {
+        throw new PackageAllocationLedgerRepositoryError(
+          "INVALID_DATABASE_EVIDENCE",
+          "Authority readiness received an invalid shipping-provider label identifier",
+          { shippingProviderLabelId: labelId },
+        );
+      }
+      await this.client.query("SELECT pg_advisory_xact_lock($1, $2)", [
+        LABEL_LOCK_NAMESPACE,
+        labelId,
+      ]);
+    }
+
+    const labelResult = await this.client.query(
+      `WITH locked_labels AS MATERIALIZED (
+         SELECT
+           label.id,
+           label.provider,
+           label.provider_label_id,
+           label.tracking_number,
+           label.label_status,
+           label.label_direction,
+           label.first_observed_at,
+           label.last_observed_at
+         FROM wms.shipping_provider_labels AS label
+         WHERE label.id = ANY($1::bigint[])
+         ORDER BY label.id
+         FOR UPDATE
+       ),
+       event_stats AS (
+         SELECT
+           locked.id AS shipping_provider_label_id,
+           COUNT(event.id)::text AS label_event_count,
+           COALESCE(SUM(octet_length(event.sanitized_payload::text)), 0)::text
+             AS label_event_payload_bytes,
+           COALESCE(MAX(octet_length(event.sanitized_payload::text)), 0)::text
+             AS max_event_payload_bytes
+         FROM locked_labels AS locked
+         LEFT JOIN wms.shipping_provider_label_events AS event
+           ON event.shipping_provider_label_id = locked.id
+         GROUP BY locked.id
+       )
+       SELECT
+         locked.id::text AS shipping_provider_label_id,
+         locked.provider,
+         locked.provider_label_id,
+         locked.tracking_number,
+         locked.label_status,
+         locked.label_direction,
+         locked.first_observed_at,
+         locked.last_observed_at,
+         event_stats.label_event_count,
+         event_stats.label_event_payload_bytes,
+         event_stats.max_event_payload_bytes
+       FROM locked_labels AS locked
+       JOIN event_stats
+         ON event_stats.shipping_provider_label_id = locked.id
+       ORDER BY locked.id`,
+      [sortedIds],
+    );
+    if (labelResult.rows.length !== sortedIds.length) {
+      const found = new Set(
+        labelResult.rows.map((row: any) =>
+          positiveSafeInteger(
+            row.shipping_provider_label_id,
+            "shipping_provider_label_id",
+          ),
+        ),
+      );
+      throw new PackageAllocationLedgerRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "One or more requested shipping-provider labels do not exist",
+        {
+          missingShippingProviderLabelIds: sortedIds.filter(
+            (id) => !found.has(id),
+          ),
+        },
+      );
+    }
+
+    let expectedEventCount = 0;
+    let totalPayloadBytes = 0;
+    for (const raw of labelResult.rows) {
+      const row = raw as Record<string, unknown>;
+      const labelId = positiveSafeInteger(
+        row.shipping_provider_label_id,
+        "shipping_provider_label_id",
+      );
+      const eventCount = nonnegativeInteger(
+        row.label_event_count,
+        "label_event_count",
+      );
+      const payloadBytes = nonnegativeInteger(
+        row.label_event_payload_bytes,
+        "label_event_payload_bytes",
+      );
+      const maxPayloadBytes = nonnegativeInteger(
+        row.max_event_payload_bytes,
+        "max_event_payload_bytes",
+      );
+      if (
+        eventCount > MAX_AUTHORITY_EVENTS_PER_PACKAGE ||
+        payloadBytes > MAX_AUTHORITY_EVENT_PAYLOAD_BYTES ||
+        maxPayloadBytes > MAX_AUTHORITY_EVENT_PAYLOAD_BYTES
+      ) {
+        throw new PackageAllocationLedgerRepositoryError(
+          "INVALID_DATABASE_EVIDENCE",
+          "A requested package exceeds its authority evidence safety bound",
+          {
+            shippingProviderLabelId: labelId,
+            eventCount,
+            payloadBytes,
+            maxPayloadBytes,
+          },
+        );
+      }
+      expectedEventCount += eventCount;
+      totalPayloadBytes += payloadBytes;
+    }
+    if (
+      expectedEventCount > MAX_AUTHORITY_TOTAL_EVENTS ||
+      totalPayloadBytes > MAX_AUTHORITY_TOTAL_PAYLOAD_BYTES
+    ) {
+      throw new PackageAllocationLedgerRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "Requested package evidence exceeds its aggregate safety bound",
+        { expectedEventCount, totalPayloadBytes },
+      );
+    }
+
+    const eventResult =
+      expectedEventCount === 0
+        ? { rows: [] as Record<string, unknown>[] }
+        : await this.client.query(
+            `SELECT
+           event.id::text AS label_event_id,
+           event.shipping_provider_label_id::text AS shipping_provider_label_id,
+           event.event_hash,
+           event.event_type,
+           event.label_status,
+           event.tracking_number,
+           event.provider_occurred_at,
+           event.received_at,
+           event.sanitized_payload
+         FROM wms.shipping_provider_label_events AS event
+         WHERE event.shipping_provider_label_id = ANY($1::bigint[])
+         ORDER BY event.shipping_provider_label_id, event.received_at, event.id
+         LIMIT $2`,
+            [sortedIds, expectedEventCount + 1],
+          );
+    if (eventResult.rows.length !== expectedEventCount) {
+      throw new PackageAllocationLedgerRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "Authority readiness did not receive one complete label-event history",
+        { expectedEventCount, observedEventCount: eventResult.rows.length },
+      );
+    }
+
+    const carrierResult = await this.client.query(
+      `SELECT
+         carrier_event.id::text AS carrier_tracking_event_id,
+         match.shipping_provider_label_id::text AS shipping_provider_label_id,
+         carrier_event.dispatch_evidence,
+         match.match_status,
+         carrier_event.event_occurred_at,
+         carrier_event.received_at
+       FROM wms.carrier_tracking_reconciliation_state AS reconciliation_state
+       JOIN wms.carrier_tracking_event_matches AS match
+         ON match.id = reconciliation_state.last_match_attempt_id
+        AND match.carrier_tracking_event_id = reconciliation_state.carrier_tracking_event_id
+        AND match.attempt_hash = reconciliation_state.last_match_attempt_hash
+        AND match.match_status = reconciliation_state.last_match_status
+       JOIN wms.carrier_tracking_events AS carrier_event
+         ON carrier_event.id = reconciliation_state.carrier_tracking_event_id
+       WHERE match.shipping_provider_label_id = ANY($1::bigint[])
+         AND carrier_event.dispatch_evidence = 'confirmed'
+         AND match.match_status IN ('matched', 'voided_label')
+       ORDER BY match.shipping_provider_label_id, carrier_event.received_at, carrier_event.id
+       LIMIT $2
+       FOR KEY SHARE OF reconciliation_state, match, carrier_event`,
+      [sortedIds, MAX_AUTHORITY_CURRENT_CARRIER_EVENTS + 1],
+    );
+    if (carrierResult.rows.length > MAX_AUTHORITY_CURRENT_CARRIER_EVENTS) {
+      throw new PackageAllocationLedgerRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "Current confirmed carrier evidence exceeds its aggregate safety bound",
+        {
+          observedCurrentCarrierEventCount: carrierResult.rows.length,
+          maxCurrentCarrierEventCount: MAX_AUTHORITY_CURRENT_CARRIER_EVENTS,
+        },
+      );
+    }
+
+    const selectedIds = new Set(sortedIds);
+    const eventsByLabelId = new Map<
+      number,
+      PersistedDeclaredPackageEvidence["labelEvents"][number][]
+    >();
+    for (const raw of eventResult.rows) {
+      const row = raw as Record<string, unknown>;
+      const labelId = positiveSafeInteger(
+        row.shipping_provider_label_id,
+        "shipping_provider_label_id",
+      );
+      if (!selectedIds.has(labelId)) {
+        throw new PackageAllocationLedgerRepositoryError(
+          "INVALID_DATABASE_EVIDENCE",
+          "Authority readiness received a label event outside the locked package set",
+        );
+      }
+      const events = eventsByLabelId.get(labelId) ?? [];
+      events.push(
+        Object.freeze({
+          id: positiveSafeInteger(row.label_event_id, "label_event_id"),
+          shippingProviderLabelId: labelId,
+          eventHash: requiredText(row.event_hash, "event_hash"),
+          eventType: requiredText(row.event_type, "event_type"),
+          labelStatus: requiredText(row.label_status, "label_status"),
+          trackingNumber: requiredText(row.tracking_number, "tracking_number"),
+          providerOccurredAt:
+            row.provider_occurred_at === null
+              ? null
+              : timestampText(row.provider_occurred_at, "provider_occurred_at"),
+          sanitizedPayload: row.sanitized_payload,
+          receivedAt: timestampText(row.received_at, "received_at"),
+        }),
+      );
+      eventsByLabelId.set(labelId, events);
+    }
+
+    const carrierByLabelId = new Map<
+      number,
+      PersistedDeclaredPackageEvidence["confirmedCarrierEvents"][number][]
+    >();
+    for (const raw of carrierResult.rows) {
+      const row = raw as Record<string, unknown>;
+      const labelId = positiveSafeInteger(
+        row.shipping_provider_label_id,
+        "shipping_provider_label_id",
+      );
+      if (!selectedIds.has(labelId)) {
+        throw new PackageAllocationLedgerRepositoryError(
+          "INVALID_DATABASE_EVIDENCE",
+          "Authority readiness received carrier evidence outside the locked package set",
+        );
+      }
+      const dispatchEvidence = requiredText(
+        row.dispatch_evidence,
+        "dispatch_evidence",
+      );
+      const currentMatchStatus = requiredText(row.match_status, "match_status");
+      if (
+        dispatchEvidence !== "confirmed" ||
+        (currentMatchStatus !== "matched" &&
+          currentMatchStatus !== "voided_label")
+      ) {
+        throw new PackageAllocationLedgerRepositoryError(
+          "INVALID_DATABASE_EVIDENCE",
+          "Authority readiness received non-current carrier evidence",
+          { shippingProviderLabelId: labelId },
+        );
+      }
+      const events = carrierByLabelId.get(labelId) ?? [];
+      events.push(
+        Object.freeze({
+          id: positiveSafeInteger(
+            row.carrier_tracking_event_id,
+            "carrier_tracking_event_id",
+          ),
+          shippingProviderLabelId: labelId,
+          dispatchEvidence,
+          currentMatchStatus,
+          eventOccurredAt:
+            row.event_occurred_at === null
+              ? null
+              : timestampText(row.event_occurred_at, "event_occurred_at"),
+          receivedAt: timestampText(row.received_at, "received_at"),
+        }),
+      );
+      carrierByLabelId.set(labelId, events);
+    }
+
+    return Object.freeze(
+      labelResult.rows.map((raw) => {
+        const row = raw as Record<string, unknown>;
+        const labelId = positiveSafeInteger(
+          row.shipping_provider_label_id,
+          "shipping_provider_label_id",
+        );
+        const currentLabelStatus = requiredText(
+          row.label_status,
+          "label_status",
+        );
+        if (
+          !["active", "voided", "superseded", "unknown"].includes(
+            currentLabelStatus,
+          )
+        ) {
+          throw new PackageAllocationLedgerRepositoryError(
+            "INVALID_DATABASE_EVIDENCE",
+            "Authority readiness received an unsupported current label status",
+            { shippingProviderLabelId: labelId },
+          );
+        }
+        const persistedEvidence: PersistedDeclaredPackageEvidence =
+          Object.freeze({
+            shippingProviderLabelId: labelId,
+            provider: requiredText(row.provider, "provider").toLowerCase(),
+            providerPhysicalShipmentId: requiredText(
+              row.provider_label_id,
+              "provider_label_id",
+            ),
+            currentTrackingNumber: requiredText(
+              row.tracking_number,
+              "tracking_number",
+            ),
+            currentLabelStatus:
+              currentLabelStatus as PersistedDeclaredPackageEvidence["currentLabelStatus"],
+            firstObservedAt: timestampText(
+              row.first_observed_at,
+              "first_observed_at",
+            ),
+            lastObservedAt: timestampText(
+              row.last_observed_at,
+              "last_observed_at",
+            ),
+            labelDirection: requiredText(
+              row.label_direction,
+              "label_direction",
+            ),
+            labelEvents: Object.freeze(eventsByLabelId.get(labelId) ?? []),
+            confirmedCarrierEvents: Object.freeze(
+              carrierByLabelId.get(labelId) ?? [],
+            ),
+          });
+        return Object.freeze({
+          evidenceKey: `shipping-provider-label:${labelId}`,
+          persistedEvidence,
+        });
+      }),
+    );
   }
 
   async ensureSourceRegistrations(
