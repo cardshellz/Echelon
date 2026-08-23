@@ -11,6 +11,7 @@ import {
   createReceiptDraft,
   refreshReturnCaseAfterConflict,
   resolveInspectionCompletionContext,
+  resolveDispositionTreatmentChange,
   shouldInitializeDispositionCommand,
   validateDispositionDraft,
   validateReceiptDraft,
@@ -346,8 +347,6 @@ describe("return disposition operation", () => {
       draft: [dispositionLine({ treatment: "", quantity: "" })],
       validation: validateDispositionDraft([dispositionLine({ treatment: "", quantity: "" })]),
       pending: false,
-      confirmed: false,
-      onConfirmedChange: () => undefined,
       onLineChange: () => undefined,
     }));
 
@@ -358,10 +357,11 @@ describe("return disposition operation", () => {
     expect(noticeMarkup).toContain("close the return case");
     expect(noticeMarkup).toContain("separate compensating action");
     expect(reviewMarkup).toContain("Remaining to resolve");
-    expect(reviewMarkup).toContain("Select treatment");
-    expect(reviewMarkup).toContain("Clear / skip");
-    expect(reviewMarkup).toContain("decisions are append-only");
-    expect(reviewMarkup).toContain("separate compensating action");
+    expect(reviewMarkup).not.toContain("Clear / skip");
+    expect(reviewMarkup).not.toContain("Confirm append-only disposition decision");
+    expect(reviewMarkup).not.toContain("align-top");
+    expect(reviewMarkup).toContain("align-middle");
+    expect(reviewMarkup).toContain("disabled=\"\"");
   });
   it("preserves command state across unchanged close and reopen", () => {
     expect(shouldInitializeDispositionCommand(false, "inspection:null|11:2:0", "inspection:null|11:2:0"))
@@ -455,6 +455,30 @@ describe("receipt draft", () => {
   });
 });
 describe("disposition draft", () => {
+  it("resets and reapplies a treatment without leaving a partial invalid decision", () => {
+    const selected = dispositionLine({ treatment: "restock_sellable", quantity: "1" });
+    const clearChange = resolveDispositionTreatmentChange("resolve_later");
+    expect(clearChange).toEqual({ treatment: "", quantity: "" });
+
+    const cleared = { ...selected, ...(clearChange ?? {}) };
+    expect(validateDispositionDraft([cleared])).toMatchObject({
+      success: false,
+      fieldErrors: {},
+      formError: "Select a treatment and quantity for at least one returned item.",
+    });
+
+    const treatmentChange = resolveDispositionTreatmentChange("hold_non_sellable");
+    expect(treatmentChange).toEqual({ treatment: "hold_non_sellable" });
+    const reapplied = { ...cleared, ...(treatmentChange ?? {}), quantity: "1" };
+    expect(validateDispositionDraft([reapplied])).toMatchObject({
+      success: true,
+      lines: [{ treatment: "hold_non_sellable", quantity: 1 }],
+      fieldErrors: {},
+      formError: null,
+    });
+    expect(resolveDispositionTreatmentChange("unsupported")).toBeNull();
+  });
+
   it("starts every unresolved line with no treatment or quantity selected", () => {
     const draft = createDispositionDraft(
       [
