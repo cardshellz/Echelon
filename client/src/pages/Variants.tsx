@@ -50,6 +50,7 @@ import {
   VARIANT_UOM_DEFINITIONS,
   getVariantUomDefinition,
   inferLegacyVariantUomType,
+  isSingleUnitVariantUomType,
   type VariantUomType,
 } from "@shared/catalog/variant-uom";
 
@@ -441,7 +442,7 @@ export default function Variants() {
           unitsPerVariant: data.unitsPerVariant,
           hierarchyLevel: data.hierarchyLevel,
           uomType: data.uomType,
-          isBaseUnit: data.uomType === "each",
+          isBaseUnit: isSingleUnitVariantUomType(data.uomType),
           parentVariantId: null,
           barcode: data.barcode || null,
         }),
@@ -1917,7 +1918,7 @@ export default function Variants() {
                   value={newVariant.unitsPerVariant}
                   onChange={(e) => setNewVariant({ ...newVariant, unitsPerVariant: parseInt(e.target.value) || 1 })}
                   className="h-11"
-                  disabled={newVariant.uomType === "each"}
+                  disabled={isSingleUnitVariantUomType(newVariant.uomType)}
                   autoComplete="off"
                   autoCorrect="off"
                   autoCapitalize="off"
@@ -1935,7 +1936,7 @@ export default function Variants() {
                       ...newVariant,
                       uomType,
                       hierarchyLevel: definition.defaultHierarchyLevel,
-                      unitsPerVariant: uomType === "each" ? 1 : newVariant.unitsPerVariant,
+                      unitsPerVariant: isSingleUnitVariantUomType(uomType) ? 1 : newVariant.unitsPerVariant,
                     });
                   }}
                 >
@@ -2110,6 +2111,7 @@ export default function Variants() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="piece">Piece</SelectItem>
+                  <SelectItem value="each">Each</SelectItem>
                   <SelectItem value="pack">Pack</SelectItem>
                   <SelectItem value="box">Box</SelectItem>
                   <SelectItem value="case">Case</SelectItem>

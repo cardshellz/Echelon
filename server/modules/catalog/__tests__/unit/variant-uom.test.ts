@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 import { validateVariantUomWrite } from "../../variant-uom";
 
 describe("validateVariantUomWrite", () => {
+  it("accepts a complete Piece definition", () => {
+    expect(validateVariantUomWrite({
+      uomType: "piece",
+      unitsPerVariant: 1,
+      hierarchyLevel: 1,
+      parentVariantId: null,
+      isBaseUnit: true,
+    })).toEqual({ uomType: "piece" });
+  });
+
   it("accepts a complete Each definition", () => {
     expect(validateVariantUomWrite({
       uomType: "each",
@@ -39,6 +49,19 @@ describe("validateVariantUomWrite", () => {
         isBaseUnit: true,
       },
     )).toThrow("exactly 1 unit");
+  });
+
+  it("validates partial updates against the stored Piece state", () => {
+    expect(() => validateVariantUomWrite(
+      { parentVariantId: 12 },
+      {
+        uomType: "piece",
+        unitsPerVariant: 1,
+        hierarchyLevel: 1,
+        parentVariantId: null,
+        isBaseUnit: true,
+      },
+    )).toThrow("Piece variants cannot break into");
   });
 
   it("rejects unknown UOM values", () => {

@@ -95,7 +95,7 @@ export const products = catalogSchema.table("products", {
   subcategory: varchar("subcategory", { length: 200 }),
   brand: varchar("brand", { length: 100 }), // Brand name
   manufacturer: varchar("manufacturer", { length: 200 }),
-  baseUnit: varchar("base_unit", { length: 20 }).notNull().default("piece"), // piece, pack, box, case, pallet
+  baseUnit: varchar("base_unit", { length: 20 }).notNull().default("piece"), // piece, each, pack, box, case, pallet
   tags: jsonb("tags"), // Array of tags
   seoTitle: varchar("seo_title", { length: 200 }),
   seoDescription: text("seo_description"),
@@ -188,7 +188,7 @@ export const productVariants = catalogSchema.table("product_variants", {
 }, (table) => [
   uniqueIndex("product_variants_id_product_uidx").on(table.id, table.productId),
   check("product_variants_max_units_per_package_chk", sql`${table.maxUnitsPerPackage} IS NULL OR ${table.maxUnitsPerPackage} > 0`),
-  check("product_variants_each_invariants_chk", sql`${table.uomType} <> 'each' OR (
+  check("product_variants_single_unit_uom_invariants_chk", sql`${table.uomType} NOT IN ('piece', 'each') OR (
     ${table.unitsPerVariant} = 1
     AND ${table.hierarchyLevel} = 1
     AND ${table.parentVariantId} IS NULL

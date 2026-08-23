@@ -72,6 +72,7 @@ import {
   VARIANT_UOM_DEFINITIONS,
   getVariantUomDefinition,
   inferLegacyVariantUomType,
+  isSingleUnitVariantUomType,
   type VariantUomType,
 } from "@shared/catalog/variant-uom";
 
@@ -2116,7 +2117,7 @@ export default function ProductDetail() {
   const computeAutoName = useCallback(
     (uomType: VariantUomType, units: number) => {
       const typeLabel = getVariantUomDefinition(uomType).label;
-      return uomType === "each" ? "Each" : `${typeLabel} of ${units}`;
+      return isSingleUnitVariantUomType(uomType) ? typeLabel : `${typeLabel} of ${units}`;
     },
     [],
   );
@@ -2126,14 +2127,16 @@ export default function ProductDetail() {
       setUnitsInputRaw(null);
       setVariantForm((prev) => {
         const definition = getVariantUomDefinition(uomType);
-        const unitsPerVariant = uomType === "each" ? 1 : prev.unitsPerVariant;
+        const isSingleUnit = isSingleUnitVariantUomType(uomType);
+        const wasSingleUnit = isSingleUnitVariantUomType(prev.uomType);
+        const unitsPerVariant = isSingleUnit ? 1 : prev.unitsPerVariant;
         const next = {
           ...prev,
           uomType,
           hierarchyLevel: definition.defaultHierarchyLevel,
           unitsPerVariant,
-          parentVariantId: uomType === "each" ? null : prev.parentVariantId,
-          isBaseUnit: uomType === "each" ? true : prev.uomType === "each" ? false : prev.isBaseUnit,
+          parentVariantId: isSingleUnit ? null : prev.parentVariantId,
+          isBaseUnit: isSingleUnit ? true : wasSingleUnit ? false : prev.isBaseUnit,
         };
         if (!skuManuallyEdited) next.sku = computeAutoSku(uomType, unitsPerVariant);
         if (!nameManuallyEdited) next.name = computeAutoName(uomType, unitsPerVariant);
@@ -3983,10 +3986,10 @@ export default function ProductDetail() {
                   handleUnitsChange(num);
                 }}
                 className="h-11"
-                disabled={variantForm.uomType === "each"}
+                disabled={isSingleUnitVariantUomType(variantForm.uomType)}
               />
-              {variantForm.uomType === "each" && (
-                <p className="text-xs text-muted-foreground">Each is always one inventory unit.</p>
+              {isSingleUnitVariantUomType(variantForm.uomType) && (
+                <p className="text-xs text-muted-foreground">{getVariantUomDefinition(variantForm.uomType).label} is always one inventory unit.</p>
               )}
             </div>
 
@@ -4125,9 +4128,9 @@ export default function ProductDetail() {
 
             <div className="space-y-1.5">
               <Label>Breaks Into (Parent Variant)</Label>
-              {variantForm.uomType === "each" ? (
+              {isSingleUnitVariantUomType(variantForm.uomType) ? (
                 <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-                  Each is the smallest inventory unit and does not break down further.
+                  {getVariantUomDefinition(variantForm.uomType).label} is a base inventory unit and does not break down further.
                 </p>
               ) : (
                 <div className="flex items-center gap-2">
