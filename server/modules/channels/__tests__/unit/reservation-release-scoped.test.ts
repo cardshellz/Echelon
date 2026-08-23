@@ -53,7 +53,10 @@ function makeHarness() {
   const mockChannelSync = {
     queueSyncAfterInventoryChange: vi.fn().mockResolvedValue(undefined),
   };
-  const mockAtpService = { getAtpPerVariant: vi.fn().mockResolvedValue([]) };
+  const mockAtpService = {
+    getAtpPerVariant: vi.fn().mockResolvedValue([]),
+    getProductInventoryStrategy: vi.fn().mockResolvedValue("physical_fungible"),
+  };
   return { mockInventoryCore, mockChannelSync, mockAtpService, releaseCalls };
 }
 

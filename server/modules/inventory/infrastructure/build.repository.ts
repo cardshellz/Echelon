@@ -11,6 +11,7 @@ import {
 import {
   BuildExecutionRepository,
   type BuildCancellationResult,
+  type BuildOrderCompletedContext,
   type BuildExecutionResult,
   type BuildReversalResult,
   type CancelBuildOrderInput,
@@ -20,6 +21,7 @@ import {
 
 export type {
   BuildCancellationResult,
+  BuildOrderCompletedContext,
   BuildExecutionResult,
   BuildReversalResult,
   CancelBuildOrderInput,
@@ -29,6 +31,7 @@ export type {
 
 type Db = {
   execute: (query: unknown) => Promise<{ rows: any[] }>;
+  update: (...args: any[]) => any;
   transaction: <T>(work: (tx: Db) => Promise<T>) => Promise<T>;
 };
 
@@ -241,11 +244,15 @@ export function normalizeBuildLotCosts(lot: any): BuildCostTotals & { totalMills
 export class BuildRepository {
   private readonly execution: BuildExecutionRepository;
 
-  constructor(private readonly db: Db) {
+  constructor(
+    private readonly db: Db,
+    options: { onBuildOrderCompleted?: (tx: Db, context: BuildOrderCompletedContext) => Promise<void> } = {},
+  ) {
     this.execution = new BuildExecutionRepository(db, {
       loadActiveBuildVariantFacts,
       normalizeBuildLotCosts,
       buildMillsToRoundedCents,
+      onBuildOrderCompleted: options.onBuildOrderCompleted,
     });
   }
   private async findIdempotentOrder(
@@ -336,7 +343,7 @@ export class BuildRepository {
     });
   }
 
-  async createOrder(input: CreateBuildOrderInput): Promise<any> {
+  async createOrder(input: CreateBuildOrderInput, txOverride?: Db): Promise<any> {
     const sourceLocationMap = new Map<number, number>();
     for (const source of input.sourceLocations) {
       if (sourceLocationMap.has(source.componentVariantId)) {
@@ -348,7 +355,7 @@ export class BuildRepository {
       }
       sourceLocationMap.set(source.componentVariantId, source.sourceLocationId);
     }
-    return this.db.transaction(async (tx) => {
+    const work = async (tx: Db) => {
       const existing = await this.findIdempotentOrder(tx, input, sourceLocationMap);
       if (existing) return existing;
 
@@ -487,19 +494,37 @@ export class BuildRepository {
         `);
       }
       return order;
-    });
+    };
+    return txOverride ? work(txOverride) : this.db.transaction(work);
   }
 
-  async releaseOrder(buildOrderId: number, actorId?: string): Promise<any> {
-    return this.execution.releaseOrder(buildOrderId, actorId);
+  async linkDependency(input: {
+    dependentBuildOrderId: number;
+    prerequisiteBuildOrderId: number;
+    componentVariantId: number;
+    requiredQty: number;
+  }, tx: Db): Promise<void> {
+    await tx.execute(sql`
+      INSERT INTO inventory.build_order_dependencies
+        (dependent_build_order_id, prerequisite_build_order_id, component_variant_id, required_qty)
+      VALUES
+        (${input.dependentBuildOrderId}, ${input.prerequisiteBuildOrderId},
+         ${input.componentVariantId}, ${input.requiredQty})
+      ON CONFLICT (dependent_build_order_id, prerequisite_build_order_id, component_variant_id)
+      DO UPDATE SET required_qty = EXCLUDED.required_qty
+    `);
+  }
+
+  async releaseOrder(buildOrderId: number, actorId?: string, txOverride?: Db): Promise<any> {
+    return this.execution.releaseOrder(buildOrderId, actorId, txOverride);
   }
 
   async executeOrder(input: ExecuteBuildRunInput): Promise<BuildExecutionResult> {
     return this.execution.executeOrder(input);
   }
 
-  async cancelOrder(input: CancelBuildOrderInput): Promise<BuildCancellationResult> {
-    return this.execution.cancelOrder(input);
+  async cancelOrder(input: CancelBuildOrderInput, txOverride?: Db): Promise<BuildCancellationResult> {
+    return this.execution.cancelOrder(input, txOverride);
   }
 
   async reverseRun(input: ReverseBuildRunInput): Promise<BuildReversalResult> {
@@ -507,6 +532,9 @@ export class BuildRepository {
   }
 }
 
-export function createBuildRepository(db: Db): BuildRepository {
-  return new BuildRepository(db);
+export function createBuildRepository(
+  db: Db,
+  options: { onBuildOrderCompleted?: (tx: Db, context: BuildOrderCompletedContext) => Promise<void> } = {},
+): BuildRepository {
+  return new BuildRepository(db, options);
 }

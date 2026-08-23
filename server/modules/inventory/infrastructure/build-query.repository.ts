@@ -88,6 +88,19 @@ export type BuildRunView = {
   reversalBlocker: string | null;
 };
 
+export type BuildOrderDemandView = {
+  id: number;
+  orderId: number;
+  orderNumber: string;
+  orderItemId: number;
+  sku: string;
+  requestedQty: number;
+  promisedQty: number;
+  status: string;
+  rootBuildOrderId: number;
+  dependencyDepth: number;
+};
+
 export type BuildOrderView = {
   id: number;
   systemNumber: string;
@@ -116,6 +129,7 @@ export type BuildOrderView = {
   lastFailureAt: string | null;
   cancellationReason: string | null;
   cancelledReservationQty: number | null;
+  demand: BuildOrderDemandView | null;
   components: BuildOrderComponentView[];
   runs: BuildRunView[];
   createdAt: string;
@@ -178,6 +192,7 @@ function orderFromRow(row: any): BuildOrderView {
     cancelledReservationQty: row.cancelled_reservation_qty == null
       ? null
       : Number(row.cancelled_reservation_qty),
+    demand: null,
     components: [],
     runs: [],
     createdAt: String(row.created_at),
@@ -443,6 +458,73 @@ export class BuildQueryRepository {
     return byOrder;
   }
 
+  private async loadOrderDemands(
+    orderIds: number[],
+  ): Promise<Map<number, BuildOrderDemandView>> {
+    if (orderIds.length === 0) return new Map();
+    const demands = await this.db.execute(sql`
+      WITH RECURSIVE demand_builds AS (
+        SELECT demand.id AS demand_id,
+               demand.root_build_order_id AS build_order_id,
+               0 AS dependency_depth,
+               ARRAY[demand.root_build_order_id]::integer[] AS path
+        FROM wms.order_build_demands demand
+        WHERE demand.root_build_order_id IS NOT NULL
+
+        UNION ALL
+
+        SELECT graph.demand_id,
+               dependency.prerequisite_build_order_id,
+               graph.dependency_depth + 1,
+               graph.path || dependency.prerequisite_build_order_id
+        FROM demand_builds graph
+        JOIN inventory.build_order_dependencies dependency
+          ON dependency.dependent_build_order_id = graph.build_order_id
+        WHERE NOT dependency.prerequisite_build_order_id = ANY(graph.path)
+      )
+      SELECT graph.build_order_id,
+             graph.dependency_depth,
+             demand.id,
+             demand.order_id,
+             order_row.order_number,
+             demand.order_item_id,
+             item.sku,
+             demand.requested_qty,
+             demand.promised_qty,
+             demand.status,
+             demand.root_build_order_id
+      FROM demand_builds graph
+      JOIN wms.order_build_demands demand ON demand.id = graph.demand_id
+      JOIN wms.orders order_row ON order_row.id = demand.order_id
+      JOIN wms.order_items item ON item.id = demand.order_item_id
+      WHERE graph.build_order_id IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+      ORDER BY graph.build_order_id, demand.id
+    `);
+    const byOrder = new Map<number, BuildOrderDemandView>();
+    for (const row of demands.rows) {
+      const buildOrderId = Number(row.build_order_id);
+      if (byOrder.has(buildOrderId)) {
+        throw new BuildDomainError(
+          "BUILD_ORDER_DEMAND_CONFLICT",
+          `Build order ${buildOrderId} is linked to more than one order demand`,
+        );
+      }
+      byOrder.set(buildOrderId, {
+        id: Number(row.id),
+        orderId: Number(row.order_id),
+        orderNumber: String(row.order_number),
+        orderItemId: Number(row.order_item_id),
+        sku: String(row.sku),
+        requestedQty: Number(row.requested_qty),
+        promisedQty: Number(row.promised_qty),
+        status: String(row.status),
+        rootBuildOrderId: Number(row.root_build_order_id),
+        dependencyDepth: Number(row.dependency_depth),
+      });
+    }
+    return byOrder;
+  }
+
   private async hydrateOrders(orders: BuildOrderView[]): Promise<BuildOrderView[]> {
     if (orders.length === 0) return [];
     const orderIds = orders.map((order) => order.id);
@@ -450,8 +532,10 @@ export class BuildQueryRepository {
     // so hydration remains compatible with pg@9's single-query client contract.
     const componentsByOrder = await this.loadOrderComponents(orderIds);
     const runsByOrder = await this.loadOrderRuns(orderIds);
+    const demandsByOrder = await this.loadOrderDemands(orderIds);
     return orders.map((order) => ({
       ...order,
+      demand: demandsByOrder.get(order.id) ?? null,
       components: componentsByOrder.get(order.id) ?? [],
       runs: runsByOrder.get(order.id) ?? [],
     }));

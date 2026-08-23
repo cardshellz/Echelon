@@ -310,6 +310,9 @@
   "inventory.build_order_components": [
     "modules/inventory"
   ],
+  "inventory.build_order_dependencies": [
+    "modules/inventory"
+  ],
   "inventory.build_orders": [
     "modules/inventory"
   ],
@@ -872,6 +875,9 @@
     "modules/oms"
   ],
   "wms.oms_wms_authority_cleanup_audit": [
+    "modules/wms"
+  ],
+  "wms.order_build_demands": [
     "modules/wms"
   ],
   "wms.order_items": [

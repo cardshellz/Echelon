@@ -21,3 +21,4 @@ export * from "./operations.schema";
 export * from "./carrier-tracking-label-poll.schema";
 export * from "./marketplace-listings.schema";
 export * from "./returns.schema";
+export * from "./build-demand.schema";

@@ -100,6 +100,18 @@ type BuildOrder = {
   lastFailureAt: string | null;
   cancellationReason: string | null;
   cancelledReservationQty: number | null;
+  demand: {
+    id: number;
+    orderId: number;
+    orderNumber: string;
+    orderItemId: number;
+    sku: string;
+    requestedQty: number;
+    promisedQty: number;
+    status: string;
+    rootBuildOrderId: number;
+    dependencyDepth: number;
+  } | null;
   components: BuildOrderComponent[];
   runs: BuildRun[];
   createdAt: string;
@@ -424,6 +436,12 @@ export default function Builds() {
                         <div className="flex items-center gap-2 text-xs text-muted-foreground">
                           {order.recipeCode} v{order.recipeVersion}<Badge variant="outline">{order.recipeType}</Badge>
                         </div>
+                        {order.demand && (
+                          <div className="mt-1 text-xs text-blue-700">
+                            Order {order.demand.orderNumber} / {order.demand.sku} / {order.demand.promisedQty} promised
+                            {order.demand.dependencyDepth === 0 ? " / root" : " / prerequisite"}
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell>
                         <div>{order.outputSku ?? order.outputName}</div>

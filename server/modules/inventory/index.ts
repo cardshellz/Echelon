@@ -28,6 +28,7 @@ export { InventoryUseCases } from "./application/inventory.use-cases";
 
 // Services
 export { createInventoryAtpService } from "./atp.service";
+export { createRecipeCapacityService, RecipeCapacityService } from "./recipe-capacity.service";
 export { createInventoryLotService, InventoryLotService } from "./lots.service";
 export { createInventoryAlertService } from "./alerts.service";
 // Application Layer (Use Cases)
