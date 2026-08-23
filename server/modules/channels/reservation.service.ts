@@ -94,9 +94,9 @@ class ReservationService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Reserve inventory for a single order item, gated entirely on fungible ATP.
+   * Reserve inventory for a single order item, gated on strategy-aware ATP.
    *
-   * 1. Calls `atpService.getAtpPerVariant(productId)` to get the shared ATP pool.
+   * 1. Calls `atpService.getAtpPerVariant(productId)` to get the configured product ATP view.
    * 2. Determines how much to reserve (full, partial, or zero).
    * 3. Increments `reserved_qty` on the variant's assigned bin (product_locations).
    * 4. Logs to `inventory_transactions`.
@@ -154,7 +154,7 @@ class ReservationService {
     userId: string | undefined,
     dbh: any,
   ): Promise<ReserveForOrderResult> {
-    // Step 1: Get fungible ATP for the ordered variant
+    // Step 1: Get strategy-aware ATP for the ordered variant
     const variantAtps = await this.atpService.getAtpPerVariant(productId);
     const variantAtp = variantAtps.find((v) => v.productVariantId === variantId);
     const atpUnits = variantAtp?.atpUnits ?? 0;

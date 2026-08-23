@@ -22,6 +22,13 @@ describe("build repository transaction contract", () => {
     expect(repositorySource).not.toContain("INSERT INTO inventory.build_runs");
   });
 
+  it("requires build-managed product policy for recipe and order creation", () => {
+    expect(repositorySource).toContain("assertRecipeManagedOutputProduct");
+    expect(repositorySource).toContain("BUILD_OUTPUT_STRATEGY_REQUIRED");
+    expect(repositorySource).toContain("outputFacts.productId");
+    expect(repositorySource).toContain("recipe.output_product_id");
+  });
+
   it("locks the order, components, levels, reservations, and FIFO lots before mutation", () => {
     expect(executionSource).toMatch(/build_orders[\s\S]*FOR UPDATE/);
     expect(executionSource).toMatch(/build_order_components[\s\S]*FOR UPDATE/);

@@ -76,6 +76,11 @@ import {
   isSingleUnitVariantUomType,
   type VariantUomType,
 } from "@shared/catalog/variant-uom";
+import {
+  DEFAULT_PRODUCT_INVENTORY_STRATEGY,
+  PRODUCT_INVENTORY_STRATEGY_DEFINITIONS,
+  type ProductInventoryStrategy,
+} from "@shared/catalog/inventory-strategy";
 
 function getVariantUomType(variant: Pick<ProductVariantRow, "uomType" | "hierarchyLevel" | "unitsPerVariant" | "isBaseUnit" | "parentVariantId">): VariantUomType {
   return variant.uomType ?? inferLegacyVariantUomType(variant);
@@ -359,6 +364,7 @@ interface ProductDetailData {
   seoDescription: string | null;
   status: string | null;
   baseUnit: string;
+  inventoryStrategy: ProductInventoryStrategy;
   isActive: boolean;
   leadTimeDays: number;
   safetyStockDays: number;
@@ -1560,6 +1566,7 @@ export default function ProductDetail() {
     name: "",
     sku: "",
     baseUnit: "",
+    inventoryStrategy: DEFAULT_PRODUCT_INVENTORY_STRATEGY,
     leadTimeDays: 120,
     safetyStockDays: 7,
   });
@@ -1593,6 +1600,7 @@ export default function ProductDetail() {
         name: product.name || "",
         sku: product.sku || "",
         baseUnit: product.baseUnit || "piece",
+        inventoryStrategy: product.inventoryStrategy ?? DEFAULT_PRODUCT_INVENTORY_STRATEGY,
         leadTimeDays: product.leadTimeDays ?? 120,
         safetyStockDays: product.safetyStockDays ?? 7,
       });
@@ -1642,6 +1650,7 @@ export default function ProductDetail() {
           name: editForm.name,
           sku: editForm.sku,
           baseUnit: editForm.baseUnit,
+          inventoryStrategy: editForm.inventoryStrategy,
           leadTimeDays: editForm.leadTimeDays,
           safetyStockDays: editForm.safetyStockDays,
           title: contentForm.title || null,
@@ -2796,6 +2805,47 @@ export default function ProductDetail() {
                         onChange={(e) => updateField("baseUnit", e.target.value)}
                         className="h-9 capitalize"
                       />
+                    </div>
+                  </div>
+                  <div className="space-y-2 border-t pt-4">
+                    <div>
+                      <Label className="text-xs md:text-sm">Inventory behavior</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Controls how variants share availability and which inventory transformations are permitted.
+                      </p>
+                    </div>
+                    <div
+                      className="grid grid-cols-1 gap-2 lg:grid-cols-3"
+                      role="radiogroup"
+                      aria-label="Inventory behavior"
+                    >
+                      {PRODUCT_INVENTORY_STRATEGY_DEFINITIONS.map((definition) => {
+                        const selected = editForm.inventoryStrategy === definition.strategy;
+                        return (
+                          <button
+                            key={definition.strategy}
+                            type="button"
+                            role="radio"
+                            aria-checked={selected}
+                            className={cn(
+                              "min-h-[76px] border px-3 py-2 text-left transition-colors",
+                              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                              selected
+                                ? "border-primary bg-primary/10 text-foreground ring-1 ring-primary"
+                                : "border-border bg-background text-foreground hover:bg-muted/50",
+                            )}
+                            onClick={() => updateField("inventoryStrategy", definition.strategy)}
+                          >
+                            <span className="flex items-center justify-between gap-2 text-sm font-semibold">
+                              {definition.label}
+                              {selected ? <Check className="h-4 w-4 text-primary" aria-hidden="true" /> : null}
+                            </span>
+                            <span className="mt-1 block text-xs leading-4 text-muted-foreground">
+                              {definition.description}
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 </CardContent>

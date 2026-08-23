@@ -35,6 +35,11 @@ import {
 } from "./package-attributes";
 import { z } from "zod";
 import { validateVariantUomWrite } from "./variant-uom";
+import {
+  ProductInventoryStrategyError,
+  assertProductInventoryStrategyTransition,
+  parseProductInventoryStrategy,
+} from "./inventory-strategy-policy";
 
 // Physical packing facts beyond weight/dims. Canonical on the variant since
 // migration 185; validated here because the variant PUT spreads req.body.
@@ -857,10 +862,12 @@ export async function registerProductRoutes(app: Express) {
   app.post("/api/products", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const { variants, ...productData } = req.body;
+      const inventoryStrategy = parseProductInventoryStrategy(productData.inventoryStrategy, { useDefaultWhenMissing: true });
       const category = await resolveProductCategory(productData);
       const product = await storage.createProduct({
         ...productData,
         ...category,
+        inventoryStrategy,
       });
       
       // Create variants if provided
@@ -876,6 +883,13 @@ export async function registerProductRoutes(app: Express) {
       const createdVariants = await storage.getProductVariantsByProductId(product.id);
       res.json({ ...product, variants: createdVariants });
     } catch (error: any) {
+      if (error instanceof ProductInventoryStrategyError) {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          code: error.code,
+          context: error.context,
+        });
+      }
       if (error?.message?.includes("category")) {
         return res.status(400).json({ error: error.message });
       }
@@ -906,6 +920,10 @@ export async function registerProductRoutes(app: Express) {
     try {
       const id = parseInt(req.params.id);
       const { variants, ...updates } = req.body;
+      const requestedInventoryStrategy = parseProductInventoryStrategy(
+        updates.inventoryStrategy,
+        { useDefaultWhenMissing: false },
+      );
 
       if (Object.prototype.hasOwnProperty.call(updates, "shopifyProductId")) {
         const existing = await storage.getProductById(id);
@@ -953,6 +971,9 @@ export async function registerProductRoutes(app: Express) {
 
       const normalizedUpdates = { ...updates };
       if (newProductSku) normalizedUpdates.sku = newProductSku;
+      if (requestedInventoryStrategy !== undefined) {
+        normalizedUpdates.inventoryStrategy = requestedInventoryStrategy;
+      }
       if ("categoryId" in updates || "category" in updates) {
         Object.assign(normalizedUpdates, await resolveProductCategory(updates));
       }
@@ -987,6 +1008,32 @@ export async function registerProductRoutes(app: Express) {
         const currentProduct = await storage.getProductById(id, tx);
         if (!currentProduct) {
           return { product: null, renamedVariants: 0, renamedFrom: null as string | null };
+        }
+
+        if (
+          requestedInventoryStrategy !== undefined
+          && currentProduct.inventoryStrategy !== requestedInventoryStrategy
+        ) {
+          let hasBuildRecipes = false;
+          if (
+            currentProduct.inventoryStrategy === "recipe_managed"
+            && requestedInventoryStrategy !== "recipe_managed"
+          ) {
+            const recipeResult = await tx.execute(sql`
+              SELECT id
+              FROM inventory.build_recipes
+              WHERE output_product_id = ${id}
+              LIMIT 1
+              FOR SHARE
+            `);
+            hasBuildRecipes = recipeResult.rows.length > 0;
+          }
+          assertProductInventoryStrategyTransition({
+            productId: id,
+            current: currentProduct.inventoryStrategy,
+            requested: requestedInventoryStrategy,
+            hasBuildRecipes,
+          });
         }
 
         if (
@@ -1078,6 +1125,24 @@ export async function registerProductRoutes(app: Express) {
           }
         }
 
+        if (
+          requestedInventoryStrategy !== undefined
+          && currentProduct.inventoryStrategy !== product.inventoryStrategy
+        ) {
+          await persistAuditEvent(tx, {
+            actor,
+            action: "catalog.inventory_strategy.changed",
+            target: `catalog.products:${id}`,
+            changes: {
+              before: { inventoryStrategy: currentProduct.inventoryStrategy },
+              after: { inventoryStrategy: product.inventoryStrategy },
+            },
+            context: {
+              productSku: product.sku,
+            },
+          });
+        }
+
         return { product, renamedVariants, renamedFrom: lockedOldSku };
       });
 
@@ -1097,6 +1162,13 @@ export async function registerProductRoutes(app: Express) {
     } catch (error: any) {
       if (error?.code === "23505" || error?.cause?.code === "23505") {
         return res.status(409).json({ error: "SKU already exists" });
+      }
+      if (error instanceof ProductInventoryStrategyError) {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          code: error.code,
+          context: error.context,
+        });
       }
       if (Number.isInteger(error?.statusCode)) {
         return res.status(error.statusCode).json({ error: error.message });

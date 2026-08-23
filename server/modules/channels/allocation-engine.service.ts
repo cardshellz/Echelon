@@ -390,24 +390,28 @@ class AllocationEngine {
         ?? allFulfillmentWarehouseIds
         ?? [];
 
-      // Calculate base ATP summed across assigned warehouses
-      let channelBaseAtp = 0;
-      const warehouseRawAtp = new Map<number, number>();
+      // Calculate each variant's ATP across assigned warehouses. Fungible
+      // strategies return the same base pool for every variant; physical-only
+      // products return an exact per-variant pool.
+      const channelBaseAtpByVariant = new Map<number, number>();
+      const warehouseRawAtpByVariant = new Map<number, Map<number, number>>();
+      for (const variant of globalVariantAtp) {
+        channelBaseAtpByVariant.set(variant.productVariantId, 0);
+        warehouseRawAtpByVariant.set(variant.productVariantId, new Map());
+      }
 
       for (const whId of assignedWarehouseIds) {
-        if (this.atpService.getAtpBaseByWarehouse) {
-          const atp = await this.atpService.getAtpBaseByWarehouse(productId, whId);
-          channelBaseAtp += atp;
-          warehouseRawAtp.set(whId, atp);
-        } else {
-          // Fallback: use per-variant-by-warehouse (first variant's atpBase)
-          const whVariants = await this.atpService.getAtpPerVariantByWarehouse(productId, whId);
-          if (whVariants.length > 0) {
-            channelBaseAtp += whVariants[0].atpBase;
-            warehouseRawAtp.set(whId, whVariants[0].atpBase);
-          } else {
-            warehouseRawAtp.set(whId, 0);
-          }
+        const whVariants = await this.atpService.getAtpPerVariantByWarehouse(productId, whId);
+        const warehouseAtpByVariant = new Map(
+          whVariants.map((variant) => [variant.productVariantId, variant.atpBase]),
+        );
+        for (const variant of globalVariantAtp) {
+          const variantAtpBase = warehouseAtpByVariant.get(variant.productVariantId) ?? 0;
+          channelBaseAtpByVariant.set(
+            variant.productVariantId,
+            (channelBaseAtpByVariant.get(variant.productVariantId) ?? 0) + variantAtpBase,
+          );
+          warehouseRawAtpByVariant.get(variant.productVariantId)!.set(whId, variantAtpBase);
         }
       }
 
@@ -496,6 +500,8 @@ class AllocationEngine {
         );
 
         const resolved = this.resolveRule(channelDefaultRule, productRule, variantRule);
+        const channelBaseAtp = channelBaseAtpByVariant.get(variant.productVariantId) ?? 0;
+        const warehouseRawAtp = warehouseRawAtpByVariant.get(variant.productVariantId) ?? new Map();
         const allocation = this.computeAllocation(
           channelBaseAtp,
           warehouseRawAtp,

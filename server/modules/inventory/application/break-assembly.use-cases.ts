@@ -1,5 +1,6 @@
 import { eq, and, sql } from "drizzle-orm";
 import {
+  products,
   productVariants,
   inventoryLevels,
   inventoryTransactions,
@@ -9,6 +10,26 @@ import {
   type InventoryLevel,
   type InsertInventoryTransaction,
 } from "@shared/schema";
+import {
+  allowsDirectPackageConversion,
+  type ProductInventoryStrategy,
+} from "@shared/catalog/inventory-strategy";
+
+export class InventoryConversionStrategyError extends Error {
+  readonly code = "DIRECT_CONVERSION_NOT_ALLOWED";
+
+  constructor(
+    readonly productId: number,
+    readonly inventoryStrategy: ProductInventoryStrategy,
+  ) {
+    super(
+      inventoryStrategy === "recipe_managed"
+        ? "This product is build managed. Use a versioned recipe and build order instead of direct break/assemble."
+        : "This product tracks each variant physically and does not allow inventory conversion.",
+    );
+    this.name = "InventoryConversionStrategyError";
+  }
+}
 
 // ============================================================================
 // Interfaces
@@ -113,6 +134,7 @@ export class BreakAssemblyUseCases {
     ]);
 
     this.validateSameProduct(sourceVariant, targetVariant);
+    await this.assertDirectConversionAllowed(sourceVariant.productId);
 
     if (sourceVariant.unitsPerVariant <= targetVariant.unitsPerVariant) {
       throw new Error(
@@ -229,6 +251,7 @@ export class BreakAssemblyUseCases {
     ]);
 
     this.validateSameProduct(sourceVariant, targetVariant);
+    await this.assertDirectConversionAllowed(sourceVariant.productId);
 
     if (sourceVariant.unitsPerVariant >= targetVariant.unitsPerVariant) {
       throw new Error(
@@ -343,20 +366,22 @@ export class BreakAssemblyUseCases {
       };
     }
 
-    const baseSku = (v: ProductVariant) => v.sku ?? v.name;
-
-    // Validate same product
-    if (sourceVariant.productId !== targetVariant.productId) {
+    try {
+      this.validateSameProduct(sourceVariant, targetVariant);
+      await this.assertDirectConversionAllowed(sourceVariant.productId);
+    } catch (err: any) {
       return {
-        sourceVariantSku: baseSku(sourceVariant),
-        targetVariantSku: baseSku(targetVariant),
+        sourceVariantSku: sourceVariant.sku ?? sourceVariant.name,
+        targetVariantSku: targetVariant.sku ?? targetVariant.name,
         sourceQtyToRemove: 0,
         targetQtyToAdd: 0,
         baseUnitsInvolved: 0,
         isValid: false,
-        validationError: "Source and target variants must belong to the same product.",
+        validationError: err.message,
       };
     }
+
+    const baseSku = (v: ProductVariant) => v.sku ?? v.name;
 
     if (direction === "break") {
       if (sourceVariant.unitsPerVariant <= targetVariant.unitsPerVariant) {
@@ -468,6 +493,12 @@ export class BreakAssemblyUseCases {
     productId: number,
     warehouseLocationId: number
   ): Promise<BreakableVariantInfo[]> {
+    try {
+      await this.assertDirectConversionAllowed(productId);
+    } catch (error) {
+      if (error instanceof InventoryConversionStrategyError) return [];
+      throw error;
+    }
     // Get all variants for this product
     const allVariants: ProductVariant[] = await this.db
       .select()
@@ -538,6 +569,20 @@ export class BreakAssemblyUseCases {
       throw new Error(`Product variant ${variantId} not found.`);
     }
     return rows[0];
+  }
+
+  private async assertDirectConversionAllowed(productId: number): Promise<void> {
+    const rows: Array<{ inventoryStrategy: ProductInventoryStrategy }> = await this.db
+      .select({ inventoryStrategy: products.inventoryStrategy })
+      .from(products)
+      .where(eq(products.id, productId));
+    const product = rows[0];
+    if (!product) {
+      throw new Error(`Product ${productId} not found.`);
+    }
+    if (!allowsDirectPackageConversion(product.inventoryStrategy)) {
+      throw new InventoryConversionStrategyError(productId, product.inventoryStrategy);
+    }
   }
 
   private validateSameProduct(a: ProductVariant, b: ProductVariant): void {

@@ -3,6 +3,11 @@ import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { VARIANT_UOM_TYPES, type VariantUomType } from "../catalog/variant-uom";
+import {
+  DEFAULT_PRODUCT_INVENTORY_STRATEGY,
+  PRODUCT_INVENTORY_STRATEGIES,
+  type ProductInventoryStrategy,
+} from "../catalog/inventory-strategy";
 
 export const catalogSchema = pgSchema("catalog");
 
@@ -96,6 +101,10 @@ export const products = catalogSchema.table("products", {
   brand: varchar("brand", { length: 100 }), // Brand name
   manufacturer: varchar("manufacturer", { length: 200 }),
   baseUnit: varchar("base_unit", { length: 20 }).notNull().default("piece"), // piece, each, pack, box, case, pallet
+  inventoryStrategy: varchar("inventory_strategy", { length: 30 })
+    .$type<ProductInventoryStrategy>()
+    .notNull()
+    .default(DEFAULT_PRODUCT_INVENTORY_STRATEGY),
   tags: jsonb("tags"), // Array of tags
   seoTitle: varchar("seo_title", { length: 200 }),
   seoDescription: text("seo_description"),
@@ -120,9 +129,16 @@ export const products = catalogSchema.table("products", {
   lastPushedAt: timestamp("last_pushed_at"), // Last time product data was pushed to channels
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  check(
+    "products_inventory_strategy_chk",
+    sql`${table.inventoryStrategy} IN (${sql.join(PRODUCT_INVENTORY_STRATEGIES.map((strategy) => sql`${strategy}`), sql`, `)})`,
+  ),
+]);
 
-export const insertProductSchema = createInsertSchema(products).omit({
+export const insertProductSchema = createInsertSchema(products, {
+  inventoryStrategy: z.enum(PRODUCT_INVENTORY_STRATEGIES),
+}).omit({
   id: true,
   createdAt: true,
   updatedAt: true,
