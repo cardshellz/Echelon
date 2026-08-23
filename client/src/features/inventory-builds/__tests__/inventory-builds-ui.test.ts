@@ -8,31 +8,49 @@ function source(path: string): string {
 
 describe("Inventory Builds UI contract", () => {
   const builds = source("client/src/pages/Builds.tsx");
+  const builder = source("client/src/pages/BuildRecipeCreate.tsx");
+  const recipeModel = source("client/src/features/inventory-builds/build-recipe-model.ts");
+  const variantSelector = source("client/src/features/inventory-builds/BuildVariantSelector.tsx");
+  const variantClient = source("client/src/features/catalog/create-product-variant.ts");
   const app = source("client/src/App.tsx");
   const shell = source("client/src/components/layout/AppShell.tsx");
   const relationships = source("client/src/features/inventory-builds/ProductBuildRelationships.tsx");
   const productDetail = source("client/src/pages/ProductDetail.tsx");
+  const variants = source("client/src/pages/Variants.tsx");
 
   it("uses the established SKU-search identifier contract", () => {
-    expect(builds).toContain("productVariantId: number");
-    expect(builds).toContain("outputVariant?.productVariantId");
-    expect(builds).toContain("component.variant?.productVariantId");
-    expect(builds).not.toContain("variant.variantId");
+    expect(recipeModel).toContain("productVariantId: number");
+    expect(builder).toContain("outputVariant?.productVariantId");
+    expect(builder).toContain("component.variant?.productVariantId");
+    expect(builder).not.toContain("variant.variantId");
   });
 
   it("requires explicit recipe classification and shows conservation evidence", () => {
-    expect(builds).toContain('type RecipeType = "conversion" | "assembly"');
-    expect(builds).toContain("productId: number");
-    expect(builds).toContain("unitsPerVariant: number");
-    expect(builds).toContain("<ToggleGroup");
-    expect(builds).toContain('value="conversion"');
-    expect(builds).toContain('value="assembly"');
-    expect(builds).toContain("recipeType,");
-    expect(builds).toContain("Base units conserved.");
-    expect(builds).toContain("recipeEvidence?.valid");
-    expect(builds).toContain("Each component variant can only be added once.");
-    expect(builds).toContain("The output variant cannot also be a component.");
+    expect(recipeModel).toContain('export type RecipeType = "conversion" | "assembly"');
+    expect(recipeModel).toContain("Base units conserved.");
+    expect(recipeModel).toContain("Each component variant can only be added once.");
+    expect(recipeModel).toContain("The output variant cannot also be a component.");
+    expect(builder).toContain("<ToggleGroup");
+    expect(builder).toContain('value="conversion"');
+    expect(builder).toContain('value="assembly"');
+    expect(builder).toContain("evidence?.valid");
   });
+
+  it("authors recipes on a dedicated page and creates missing variants in context", () => {
+    expect(builds).toContain('navigate("/inventory/builds/recipes/new")');
+    expect(builds).not.toContain("<Dialog open={recipeOpen}");
+    expect(builder).toContain("<BuildVariantSelector");
+    expect(variantSelector).toContain("Create and select");
+    expect(variantSelector).toContain("createProductVariant");
+    expect(variantSelector).toContain("onChange({");
+  });
+
+  it("shares the typed variant creation client across catalog and Builds", () => {
+    expect(variantClient).toContain("export async function createProductVariant");
+    expect(productDetail).toContain("createProductVariant(product?.productId ?? 0");
+    expect(variants).toContain("createProductVariant(Number(data.productId)");
+  });
+
   it("posts explicit partial run quantities with a stable idempotency key", () => {
     expect(builds).toContain("openExecuteDialog(order)");
     expect(builds).toContain("Post only the quantity physically completed.");
@@ -61,11 +79,14 @@ describe("Inventory Builds UI contract", () => {
     expect(builds).toContain('"Idempotency-Key": orderCommandKey');
   });
 
-  it("exposes the protected page from Inventory navigation", () => {
+  it("exposes protected build routes from Inventory navigation", () => {
     expect(app).toContain('import Builds from "@/pages/Builds"');
+    expect(app).toContain('import BuildRecipeCreate from "@/pages/BuildRecipeCreate"');
+    expect(app).toContain('<Route path="/inventory/builds/recipes/new">');
     expect(app).toContain('<Route path="/inventory/builds">');
     expect(shell).toContain('{ label: "Builds", icon: PackageCheck, href: "/inventory/builds" }');
   });
+
   it("shows catalog variant build relationships and deep-links to recipes", () => {
     expect(relationships).toContain("/api/inventory/build-relationships/products/");
     expect(relationships).toContain('href="/inventory/builds?tab=recipes"');
@@ -73,5 +94,4 @@ describe("Inventory Builds UI contract", () => {
     expect(builds).toContain('new URLSearchParams(search).get("tab") === "recipes"');
     expect(builds).toContain("value={activeBuildsTab}");
   });
-
 });
