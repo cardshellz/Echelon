@@ -30,6 +30,7 @@ import DropshipPortalWallet from "@/pages/dropship/DropshipPortalWallet";
 import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
 import Builds from "@/pages/Builds";
+import BuildRecipeCreate from "@/pages/BuildRecipeCreate";
 import Orders from "@/pages/Orders";
 import Dropship from "@/pages/Dropship";
 import Subscriptions from "@/pages/Subscriptions";
@@ -296,6 +297,9 @@ function Router() {
         </Route>
         <Route path="/inventory">
           <ProtectedRoute component={Inventory} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/inventory/builds/recipes/new">
+          <ProtectedRoute component={BuildRecipeCreate} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/inventory/builds">
           <ProtectedRoute component={Builds} allowedRoles={["admin", "lead"]} />

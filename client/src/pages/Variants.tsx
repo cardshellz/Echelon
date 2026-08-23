@@ -46,6 +46,7 @@ import {
   type VariantPackagePayload,
 } from "@/lib/variant-package";
 import { formatShopifyMappingRepairError } from "@/lib/shopify-product-mapping";
+import { createProductVariant, CreateProductVariantError } from "@/features/catalog/create-product-variant";
 import {
   VARIANT_UOM_DEFINITIONS,
   getVariantUomDefinition,
@@ -433,10 +434,8 @@ export default function Variants() {
 
   const createVariantMutation = useMutation({
     mutationFn: async (data: typeof newVariant) => {
-      const res = await fetch(`/api/products/${data.productId}/variants`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      try {
+        return await createProductVariant(Number(data.productId), {
           sku: data.sku || null,
           name: data.name,
           unitsPerVariant: data.unitsPerVariant,
@@ -445,20 +444,19 @@ export default function Variants() {
           isBaseUnit: isSingleUnitVariantUomType(data.uomType),
           parentVariantId: null,
           barcode: data.barcode || null,
-        }),
-      });
-      if (res.status === 409) {
-        const body = await res.json();
-        setSkuConflict({
-          open: true,
-          conflictVariant: body.conflictVariant,
-          action: null,
-          newSku: "",
         });
-        throw new Error("SKU_CONFLICT");
+      } catch (error) {
+        if (error instanceof CreateProductVariantError && error.status === 409) {
+          setSkuConflict({
+            open: true,
+            conflictVariant: error.conflictVariant,
+            action: null,
+            newSku: "",
+          });
+          throw new Error("SKU_CONFLICT");
+        }
+        throw error;
       }
-      if (!res.ok) throw new Error("Failed to create variant");
-      return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });

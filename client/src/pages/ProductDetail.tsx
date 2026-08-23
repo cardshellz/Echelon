@@ -68,6 +68,7 @@ import {
   type VendorCatalogQuoteSnapshot,
 } from "@/features/supplier-catalog/VendorCatalogQuoteEditor";
 import { ProductBuildRelationships } from "@/features/inventory-builds/ProductBuildRelationships";
+import { createProductVariant } from "@/features/catalog/create-product-variant";
 import {
   VARIANT_UOM_DEFINITIONS,
   getVariantUomDefinition,
@@ -2271,27 +2272,18 @@ export default function ProductDetail() {
     mutationFn: async (data: typeof variantForm) => {
       const packageAttributes = buildVariantPackagePayload(data.package, "null");
       const packingFlags = buildVariantPackingFlagsPayload(data);
-      const res = await fetch(`/api/products/${product?.productId}/variants`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sku: data.sku || null,
-          name: data.name,
-          unitsPerVariant: data.unitsPerVariant,
-          hierarchyLevel: data.hierarchyLevel,
-          uomType: data.uomType,
-          barcode: data.barcode || null,
-          parentVariantId: data.parentVariantId,
-          isBaseUnit: data.isBaseUnit,
-          ...packageAttributes,
-          ...packingFlags,
-        }),
+      return createProductVariant(product?.productId ?? 0, {
+        sku: data.sku || null,
+        name: data.name,
+        unitsPerVariant: data.unitsPerVariant,
+        hierarchyLevel: data.hierarchyLevel,
+        uomType: data.uomType,
+        barcode: data.barcode || null,
+        parentVariantId: data.parentVariantId,
+        isBaseUnit: data.isBaseUnit,
+        ...packageAttributes,
+        ...packingFlags,
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || "Failed to create variant");
-      }
-      return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });

@@ -2,16 +2,12 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
-  ArrowLeftRight,
   Ban,
   Check,
-  Hammer,
   Loader2,
   PackageCheck,
   Plus,
   RotateCcw,
-  Search,
-  X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,18 +18,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useToast } from "@/hooks/use-toast";
-import { useSearch } from "wouter";
-
-type VariantResult = {
-  productVariantId: number;
-  productId: number;
-  unitsPerVariant: number;
-  sku: string;
-  name: string;
-};
-
+import { useLocation, useSearch } from "wouter";
+import type { RecipeType } from "@/features/inventory-builds/build-recipe-model";
 type RecipeComponent = {
   id: number;
   componentVariantId: number;
@@ -133,111 +120,6 @@ type VariantLocationLevel = {
   location: WarehouseLocation | null;
 };
 
-type RecipeComponentDraft = {
-  key: number;
-  variant: VariantResult | null;
-  qtyPerBuild: string;
-};
-
-type RecipeType = "conversion" | "assembly";
-
-type RecipeEvidence = {
-  valid: boolean;
-  inputBaseUnits: bigint;
-  outputBaseUnits: bigint;
-  message: string;
-};
-
-function calculateRecipeEvidence(input: {
-  recipeType: RecipeType;
-  outputVariant: VariantResult | null;
-  outputQty: string;
-  components: RecipeComponentDraft[];
-}): RecipeEvidence | null {
-  const outputQty = Number(input.outputQty);
-  if (
-    !input.outputVariant
-    || !Number.isSafeInteger(outputQty)
-    || outputQty <= 0
-    || !Number.isSafeInteger(input.outputVariant.unitsPerVariant)
-    || input.outputVariant.unitsPerVariant <= 0
-    || input.components.length === 0
-  ) {
-    return null;
-  }
-
-  let inputBaseUnits = BigInt(0);
-  let sameProduct = true;
-  let duplicateComponent = false;
-  let outputUsedAsComponent = false;
-  const componentVariantIds = new Set<number>();
-  for (const component of input.components) {
-    const qty = Number(component.qtyPerBuild);
-    if (
-      !component.variant
-      || !Number.isSafeInteger(qty)
-      || qty <= 0
-      || !Number.isSafeInteger(component.variant.unitsPerVariant)
-      || component.variant.unitsPerVariant <= 0
-    ) {
-      return null;
-    }
-    outputUsedAsComponent = outputUsedAsComponent
-      || component.variant.productVariantId === input.outputVariant.productVariantId;
-    duplicateComponent = duplicateComponent
-      || componentVariantIds.has(component.variant.productVariantId);
-    componentVariantIds.add(component.variant.productVariantId);
-    inputBaseUnits += BigInt(qty) * BigInt(component.variant.unitsPerVariant);
-    sameProduct = sameProduct && component.variant.productId === input.outputVariant.productId;
-  }
-
-  const outputBaseUnits = BigInt(outputQty) * BigInt(input.outputVariant.unitsPerVariant);
-  if (outputUsedAsComponent) {
-    return {
-      valid: false,
-      inputBaseUnits,
-      outputBaseUnits,
-      message: "The output variant cannot also be a component.",
-    };
-  }
-  if (duplicateComponent) {
-    return {
-      valid: false,
-      inputBaseUnits,
-      outputBaseUnits,
-      message: "Each component variant can only be added once.",
-    };
-  }
-  if (input.recipeType === "conversion") {
-    if (!sameProduct) {
-      return {
-        valid: false,
-        inputBaseUnits,
-        outputBaseUnits,
-        message: "Conversion variants must belong to one catalog product.",
-      };
-    }
-    const valid = inputBaseUnits === outputBaseUnits;
-    return {
-      valid,
-      inputBaseUnits,
-      outputBaseUnits,
-      message: valid
-        ? "Base units conserved."
-        : "Input and output base units must match exactly.",
-    };
-  }
-
-  return {
-    valid: !sameProduct,
-    inputBaseUnits,
-    outputBaseUnits,
-    message: sameProduct
-      ? "Same-product repacks must use Conversion."
-      : "Cross-product assembly.",
-  };
-}
-
 async function responseJson<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -261,64 +143,6 @@ function formatTotalMills(value: string | null): string {
   const dollars = mills / BigInt(10000);
   const fraction = (mills % BigInt(10000)).toString().padStart(4, "0");
   return `$${dollars}.${fraction}`;
-}
-
-function VariantSearch({ value, onChange, label }: {
-  value: VariantResult | null;
-  onChange: (variant: VariantResult | null) => void;
-  label: string;
-}) {
-  const [search, setSearch] = useState("");
-  const { data = [], isFetching } = useQuery<VariantResult[]>({
-    queryKey: ["/api/inventory/skus/search", "build", search],
-    queryFn: async () => {
-      const response = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(search)}&limit=12`, {
-        credentials: "include",
-      });
-      return responseJson<VariantResult[]>(response);
-    },
-    enabled: !value && search.trim().length >= 2,
-  });
-
-  if (value) {
-    return (
-      <div className="flex min-w-0 items-center justify-between gap-2 border px-3 py-2">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{value.sku}</div>
-          <div className="truncate text-xs text-muted-foreground">{value.name}</div>
-        </div>
-        <Button type="button" variant="ghost" size="icon" onClick={() => onChange(null)} title={`Clear ${label}`}>
-          <X className="h-4 w-4" />
-        </Button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-2">
-      <div className="relative">
-        <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-        <Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-9" placeholder={label} />
-      </div>
-      {search.trim().length >= 2 && (
-        <div className="max-h-44 overflow-y-auto border bg-background">
-          {isFetching && <div className="p-3 text-sm text-muted-foreground">Searching...</div>}
-          {!isFetching && data.length === 0 && <div className="p-3 text-sm text-muted-foreground">No variants found</div>}
-          {data.map((variant) => (
-            <button
-              key={variant.productVariantId}
-              type="button"
-              className="block w-full border-b px-3 py-2 text-left last:border-b-0 hover:bg-muted"
-              onClick={() => { onChange(variant); setSearch(""); }}
-            >
-              <div className="text-sm font-medium">{variant.sku}</div>
-              <div className="text-xs text-muted-foreground">{variant.name}</div>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function ComponentSourceSelect({ component, warehouseId, value, onChange }: {
@@ -362,11 +186,11 @@ function ComponentSourceSelect({ component, warehouseId, value, onChange }: {
 export default function Builds() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const [, navigate] = useLocation();
   const search = useSearch();
   const [activeBuildsTab, setActiveBuildsTab] = useState<"orders" | "recipes">(
     () => new URLSearchParams(search).get("tab") === "recipes" ? "recipes" : "orders",
   );
-  const [recipeOpen, setRecipeOpen] = useState(false);
   const [orderOpen, setOrderOpen] = useState(false);
   const [executeOrder, setExecuteOrder] = useState<BuildOrder | null>(null);
   const [executeBuilds, setExecuteBuilds] = useState("1");
@@ -376,17 +200,6 @@ export default function Builds() {
   const [reverseSelection, setReverseSelection] = useState<{ order: BuildOrder; run: BuildRun } | null>(null);
   const [reverseReason, setReverseReason] = useState("");
   const [reverseCommandKey, setReverseCommandKey] = useState("");
-  const [recipeCode, setRecipeCode] = useState("");
-  const [recipeName, setRecipeName] = useState("");
-  const [recipeNotes, setRecipeNotes] = useState("");
-  const [recipeStatus, setRecipeStatus] = useState("active");
-  const [recipeType, setRecipeType] = useState<RecipeType>("conversion");
-  const [outputVariant, setOutputVariant] = useState<VariantResult | null>(null);
-  const [outputQty, setOutputQty] = useState("1");
-  const [componentKey, setComponentKey] = useState(2);
-  const [components, setComponents] = useState<RecipeComponentDraft[]>([
-    { key: 1, variant: null, qtyPerBuild: "1" },
-  ]);
   const [selectedRecipeId, setSelectedRecipeId] = useState<number | null>(null);
   const [plannedBuilds, setPlannedBuilds] = useState("1");
   const [warehouseId, setWarehouseId] = useState<number | null>(null);
@@ -408,12 +221,6 @@ export default function Builds() {
     .filter((location) => location.warehouseId === warehouseId && location.isActive === 1)
     .sort((a, b) => a.code.localeCompare(b.code)), [allLocations, warehouseId]);
 
-  const resetRecipe = () => {
-    setRecipeCode(""); setRecipeName(""); setRecipeNotes(""); setRecipeStatus("active");
-    setRecipeType("conversion"); setOutputVariant(null); setOutputQty("1");
-    setComponents([{ key: componentKey, variant: null, qtyPerBuild: "1" }]);
-    setComponentKey((value) => value + 1);
-  };
   const resetOrder = () => {
     setSelectedRecipeId(null); setPlannedBuilds("1"); setWarehouseId(null);
     setOutputLocationId(null); setSourceLocations({}); setOrderCommandKey(crypto.randomUUID());
@@ -439,33 +246,6 @@ export default function Builds() {
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/summary"] }),
     ]);
   };
-
-  const createRecipe = useMutation({
-    mutationFn: async () => responseJson(await fetch("/api/inventory/build-recipes", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        code: recipeCode,
-        name: recipeName,
-        status: recipeStatus,
-        recipeType,
-        outputVariantId: outputVariant?.productVariantId,
-        outputQty: Number(outputQty),
-        notes: recipeNotes || undefined,
-        components: components.map((component) => ({
-          componentVariantId: component.variant?.productVariantId,
-          qtyPerBuild: Number(component.qtyPerBuild),
-        })),
-      }),
-    })),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["/api/inventory/build-recipes"] });
-      setRecipeOpen(false); resetRecipe();
-      toast({ title: "Build recipe created" });
-    },
-    onError: (error: Error) => toast({ title: "Recipe creation failed", description: error.message, variant: "destructive" }),
-  });
 
   const createOrder = useMutation({
     mutationFn: async () => responseJson(await fetch("/api/inventory/build-orders", {
@@ -585,17 +365,6 @@ export default function Builds() {
     }),
   });
 
-  const recipeEvidence = calculateRecipeEvidence({
-    recipeType,
-    outputVariant,
-    outputQty,
-    components,
-  });
-  const recipeValid = Boolean(
-    recipeCode.trim()
-    && recipeName.trim()
-    && recipeEvidence?.valid,
-  );
   const orderValid = selectedRecipe && warehouseId && outputLocationId
     && Number.isSafeInteger(Number(plannedBuilds)) && Number(plannedBuilds) > 0
     && selectedRecipe.components.every((component) => sourceLocations[component.componentVariantId]);
@@ -615,7 +384,7 @@ export default function Builds() {
           <p className="text-sm text-muted-foreground">Convert component inventory into sellable packs, cases, and assembled products.</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => { resetRecipe(); setRecipeOpen(true); }}><Plus className="mr-2 h-4 w-4" />Recipe</Button>
+          <Button variant="outline" onClick={() => navigate("/inventory/builds/recipes/new")}><Plus className="mr-2 h-4 w-4" />Recipe</Button>
           <Button onClick={() => { resetOrder(); setOrderOpen(true); }} disabled={!recipes.some((recipe) => recipe.status === "active")}>
             <PackageCheck className="mr-2 h-4 w-4" />Create Build
           </Button>
@@ -755,64 +524,6 @@ export default function Builds() {
           </div>
         </TabsContent>
       </Tabs>
-
-      <Dialog open={recipeOpen} onOpenChange={setRecipeOpen}>
-        <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
-          <DialogHeader><DialogTitle>Create build recipe</DialogTitle></DialogHeader>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div><Label>Recipe code</Label><Input value={recipeCode} onChange={(e) => setRecipeCode(e.target.value)} placeholder="STORAGE-BOX-P5" /></div>
-            <div><Label>Name</Label><Input value={recipeName} onChange={(e) => setRecipeName(e.target.value)} placeholder="Build pack of 5" /></div>
-            <div className="sm:col-span-2">
-              <Label>Recipe type</Label>
-              <ToggleGroup
-                type="single"
-                value={recipeType}
-                onValueChange={(value) => {
-                  if (value === "conversion" || value === "assembly") setRecipeType(value);
-                }}
-                variant="outline"
-                className="grid grid-cols-2 justify-stretch"
-              >
-                <ToggleGroupItem value="conversion" className="w-full">
-                  <ArrowLeftRight className="mr-2 h-4 w-4" />Conversion
-                </ToggleGroupItem>
-                <ToggleGroupItem value="assembly" className="w-full">
-                  <Hammer className="mr-2 h-4 w-4" />Assembly
-                </ToggleGroupItem>
-              </ToggleGroup>
-            </div>
-            <div className="sm:col-span-2"><Label>Output variant</Label><VariantSearch value={outputVariant} onChange={setOutputVariant} label="Search output SKU" /></div>
-            <div><Label>Output units per build</Label><Input type="number" min="1" step="1" value={outputQty} onChange={(e) => setOutputQty(e.target.value)} /></div>
-            <div><Label>Status</Label><Select value={recipeStatus} onValueChange={setRecipeStatus}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="draft">Draft</SelectItem></SelectContent></Select></div>
-          </div>
-          {recipeEvidence && (
-            <div className={recipeEvidence.valid
-              ? "flex items-start gap-2 border border-green-300 bg-green-50 p-3 text-sm text-green-900"
-              : "flex items-start gap-2 border border-red-300 bg-red-50 p-3 text-sm text-red-900"}
-            >
-              {recipeEvidence.valid
-                ? <Check className="mt-0.5 h-4 w-4 shrink-0" />
-                : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />}
-              <div>
-                <div className="font-medium">{recipeEvidence.message}</div>
-                <div className="text-xs">
-                  {recipeEvidence.inputBaseUnits.toString()} input / {recipeEvidence.outputBaseUnits.toString()} output base units
-                </div>
-              </div>
-            </div>
-          )}
-          <div className="space-y-3 border-t pt-4">
-            <div className="flex items-center justify-between"><Label>Components per build</Label><Button type="button" size="sm" variant="outline" onClick={() => { setComponents((items) => [...items, { key: componentKey, variant: null, qtyPerBuild: "1" }]); setComponentKey((value) => value + 1); }}><Plus className="mr-1 h-4 w-4" />Component</Button></div>
-            {components.map((component, index) => <div key={component.key} className="grid gap-2 border p-3 sm:grid-cols-[1fr_120px_40px]">
-              <VariantSearch value={component.variant} onChange={(variant) => setComponents((items) => items.map((item) => item.key === component.key ? { ...item, variant } : item))} label="Search component SKU" />
-              <div><Label className="text-xs">Qty</Label><Input type="number" min="1" step="1" value={component.qtyPerBuild} onChange={(e) => setComponents((items) => items.map((item) => item.key === component.key ? { ...item, qtyPerBuild: e.target.value } : item))} /></div>
-              <Button type="button" variant="ghost" size="icon" disabled={components.length === 1} onClick={() => setComponents((items) => items.filter((item) => item.key !== component.key))} title={`Remove component ${index + 1}`}><X className="h-4 w-4" /></Button>
-            </div>)}
-          </div>
-          <div><Label>Notes</Label><Textarea value={recipeNotes} onChange={(e) => setRecipeNotes(e.target.value)} /></div>
-          <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setRecipeOpen(false)}>Cancel</Button><Button disabled={!recipeValid || createRecipe.isPending} onClick={() => createRecipe.mutate()}>{createRecipe.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Create recipe</Button></div>
-        </DialogContent>
-      </Dialog>
 
       <Dialog open={orderOpen} onOpenChange={setOrderOpen}>
         <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
