@@ -27,7 +27,8 @@ function makeHarness() {
   const mockAtpService = {
     getAtpPerVariant: vi.fn().mockResolvedValue([
       { productVariantId: 1, sku: "TEST-SKU", atpUnits: 10, unitsPerVariant: 1 },
-    ]),
+    ]),    getProductInventoryStrategy: vi.fn().mockResolvedValue("physical_fungible"),
+
   };
 
   return { mockInventoryCore, mockChannelSync, mockAtpService, reserveCalls };

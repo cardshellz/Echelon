@@ -7,6 +7,7 @@ import {
   warehouseLocations,
 } from "@shared/schema";
 import { calculateFungibleAtpBase } from "./domain/inventory.domain";
+import { createRecipeCapacityService, type RecipeCapacityService } from "./recipe-capacity.service";
 import {
   calculateSellableVariantAtp,
   usesFungibleBaseUnitPool,
@@ -114,10 +115,48 @@ interface InventoryItemVariantSummary {
  * This service never writes to the database.
  */
 class InventoryAtpService {
-  constructor(private readonly db: any) {}
+  constructor(
+    private readonly db: any,
+    private readonly recipeCapacity: RecipeCapacityService,
+  ) {}
 
-  private async getProductInventoryStrategy(productId: number): Promise<ProductInventoryStrategy> {
-    const [product] = await this.db
+  private async getRecipeVariantAtp(
+    variants: Array<{ id: number; sku: string | null; name: string; unitsPerVariant: number }>,
+    warehouseId?: number,
+  ): Promise<VariantAtp[]> {
+    return Promise.all(variants.map(async (variant) => {
+      let atpUnits = 0;
+      try {
+        atpUnits = await this.recipeCapacity.getVariantCapacity(variant.id, warehouseId);
+      } catch (error: any) {
+        console.error(JSON.stringify({
+          event: "recipe_atp_calculation_failed",
+          productVariantId: variant.id,
+          warehouseId: warehouseId ?? null,
+          errorCode: error?.code ?? "RECIPE_ATP_UNKNOWN_ERROR",
+          errorMessage: error?.message ?? String(error),
+        }));
+      }
+      const atpBase = atpUnits * variant.unitsPerVariant;
+      if (!Number.isSafeInteger(atpBase) || atpBase < 0) {
+        throw new RangeError(`Recipe ATP base-unit conversion overflowed for variant ${variant.id}`);
+      }
+      return {
+        productVariantId: variant.id,
+        sku: variant.sku ?? "",
+        name: variant.name,
+        unitsPerVariant: variant.unitsPerVariant,
+        atpUnits,
+        atpBase,
+      };
+    }));
+  }
+
+  async getProductInventoryStrategy(
+    productId: number,
+    dbOverride: any = this.db,
+  ): Promise<ProductInventoryStrategy> {
+    const [product] = await dbOverride
       .select({ inventoryStrategy: products.inventoryStrategy })
       .from(products)
       .where(eq(products.id, productId));
@@ -324,6 +363,9 @@ class InventoryAtpService {
           ),
         ),
     ]);
+    if (inventoryStrategy === "recipe_managed") {
+      return this.getRecipeVariantAtp(variants, warehouseId);
+    }
     const sharedAtpBase = usesFungibleBaseUnitPool(inventoryStrategy)
       ? await this.getAtpBaseByWarehouse(productId, warehouseId)
       : 0;
@@ -381,6 +423,9 @@ class InventoryAtpService {
           ),
         ),
     ]);
+    if (inventoryStrategy === "recipe_managed") {
+      return this.getRecipeVariantAtp(variants);
+    }
     const sharedAtpBase = usesFungibleBaseUnitPool(inventoryStrategy)
       ? await this.getAtpBase(productId)
       : 0;
@@ -481,7 +526,7 @@ class InventoryAtpService {
 
     if (!product) return null;
 
-    const [totals, atpBase, variantPhysicals] = await Promise.all([
+    const [totals, atpBase, variantPhysicals, variantAvailability] = await Promise.all([
       this.getTotalBaseUnits(productId),
       this.getAtpBase(productId),
       this.db
@@ -512,17 +557,22 @@ class InventoryAtpService {
           productVariants.name,
           productVariants.unitsPerVariant,
         ),
+      this.getAtpPerVariant(productId),
     ]);
 
+    const availabilityByVariant = new Map(
+      variantAvailability.map((variant) => [variant.productVariantId, variant]),
+    );
     const variants: ProductSummaryVariantWithAtp[] = variantPhysicals.map((variant: VariantPhysicalRow) => {
       const physicalQty = Number(variant.physicalQty);
       const reservedQty = Number(variant.reservedQty);
-      const atp = calculateSellableVariantAtp({
-        strategy: product.inventoryStrategy,
-        unitsPerVariant: variant.unitsPerVariant,
-        sharedAtpBase: atpBase,
-        directAtpUnits: Math.max(0, physicalQty - reservedQty),
-      });
+      const atp = availabilityByVariant.get(variant.productVariantId)
+        ?? calculateSellableVariantAtp({
+          strategy: product.inventoryStrategy,
+          unitsPerVariant: variant.unitsPerVariant,
+          sharedAtpBase: atpBase,
+          directAtpUnits: Math.max(0, physicalQty - reservedQty),
+        });
       return {
         productVariantId: variant.productVariantId,
         sku: variant.sku ?? "",
@@ -618,15 +668,19 @@ class InventoryAtpService {
     const totalPacked = variantRows.reduce((s: number, v: any) => s + Number(v.packedPieces), 0);
     const sharedAtpBase = totalOnHand - totalReserved - totalPicked - totalPacked;
 
+    const recipeAvailability = product.inventoryStrategy === "recipe_managed"
+      ? new Map((await this.getAtpPerVariant(productId)).map((variant) => [variant.productVariantId, variant]))
+      : null;
     const variants: InventoryItemVariantSummary[] = variantRows.map((variant: any) => {
       const variantQty = Number(variant.variantQty);
       const reservedQty = Number(variant.reservedQty);
-      const atp = calculateSellableVariantAtp({
-        strategy: product.inventoryStrategy,
-        unitsPerVariant: variant.unitsPerVariant,
-        sharedAtpBase,
-        directAtpUnits: Math.max(0, variantQty - reservedQty),
-      });
+      const atp = recipeAvailability?.get(variant.productVariantId)
+        ?? calculateSellableVariantAtp({
+          strategy: product.inventoryStrategy,
+          unitsPerVariant: variant.unitsPerVariant,
+          sharedAtpBase,
+          directAtpUnits: Math.max(0, variantQty - reservedQty),
+        });
       return {
         variantId: variant.productVariantId,
         sku: variant.sku ?? "",
@@ -683,6 +737,22 @@ class InventoryAtpService {
     for (const row of rows) {
       result.set(row.productId, Number(row.atp));
     }
+
+    const recipeProducts = await this.db
+      .select({ id: products.id })
+      .from(products)
+      .where(and(
+        inArray(products.id, productIds),
+        eq(products.inventoryStrategy, "recipe_managed"),
+      ));
+    for (const product of recipeProducts) {
+      const variants = await this.getAtpPerVariant(product.id);
+      const recipeAtpBase = variants.reduce(
+        (maximum, variant) => Math.max(maximum, variant.atpBase),
+        0,
+      );
+      result.set(product.id, recipeAtpBase);
+    }
     return result;
   }
 }
@@ -691,6 +761,6 @@ class InventoryAtpService {
 // Factory
 // ============================================================================
 
-export function createInventoryAtpService(db: any) {
-  return new InventoryAtpService(db);
+export function createInventoryAtpService(db: any, recipeCapacity = createRecipeCapacityService(db)) {
+  return new InventoryAtpService(db, recipeCapacity);
 }

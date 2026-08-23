@@ -30,6 +30,7 @@ import {
   createInventoryLotService,
   createCOGSService,
   createInventoryAtpService,
+  createRecipeCapacityService,
   createBreakAssemblyService,
   createBuildUseCases,
   createReplenishmentService,
@@ -37,6 +38,10 @@ import {
   createInventoryAlertService,
 } from "../modules/inventory";
 import { createReservationService } from "../modules/channels/reservation.service";
+import {
+  createRecipeBuildPromiseService,
+  type RecipeBuildPromiseService,
+} from "../modules/wms/application/recipe-build-promise.service";
 import { createChannelSyncService } from "../modules/channels/sync.service";
 import { createReturnsService } from "../modules/orders/returns.service";
 import { createFulfillmentRouterService } from "../modules/orders/fulfillment-router.service";
@@ -114,15 +119,34 @@ export function createServices(db: any) {
   const cogs = createCOGSService(db);
   const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs); // Temporary mapping
   const inventoryUseCases = inventoryCore;
-  const atp = createInventoryAtpService(db);
+  const recipeCapacity = createRecipeCapacityService(db);
+  const atp = createInventoryAtpService(db, recipeCapacity);
 
-  // Channel sync (depends on atp only — must precede fulfillment/reservation)
+  // Channel sync depends on ATP and must precede reservation wiring.
   const channelSync = createChannelSyncService(db, atp);
 
-  // Depends on inventoryCore (+ channelSync for reservation)
+  // Build completion calls back from inside the inventory-posting transaction.
+  // The closure runs only after this synchronous service wiring is complete.
+  let recipeBuildPromise: RecipeBuildPromiseService;
+  const builds = createBuildUseCases(db, {
+    onBuildOrderCompleted: (tx, context) => recipeBuildPromise.reconcileBuildCompletion(tx, context),
+  });
+  recipeBuildPromise = createRecipeBuildPromiseService(
+    db,
+    recipeCapacity,
+    builds,
+    inventoryCore as any,
+  );
+
+  // Depends on inventoryCore (+ channelSync for reservation).
   const breakAssembly = createBreakAssemblyService(db, inventoryCore);
-  const builds = createBuildUseCases(db);
-  const reservation = createReservationService(db, inventoryCore as any, channelSync, atp);
+  const reservation = createReservationService(
+    db,
+    inventoryCore as any,
+    channelSync,
+    atp,
+    recipeBuildPromise,
+  );
   const replenishment = createReplenishmentService(db, inventoryCore);
   const returns = createReturnsService(db, inventoryCore as any);
 
@@ -258,6 +282,32 @@ export function createServices(db: any) {
   // Wire inventory change → immediate channel sync
   // Every inventory mutation (receive, pick, ship, adjust) triggers allocation + push
   const pendingSyncs = new Set<number>(); // debounce by productId
+  const queueProductInventorySync = (productId: number, triggeredBy: string): void => {
+    if (pendingSyncs.has(productId)) return;
+    pendingSyncs.add(productId);
+
+    // Small delay to batch rapid changes (e.g., multi-line receive)
+    setTimeout(async () => {
+      pendingSyncs.delete(productId);
+      try {
+        await echelonOrchestrator.syncInventoryForProduct(
+          productId,
+          { dryRun: false },
+          `inventory_change:${triggeredBy}`,
+        );
+      } catch (err: any) {
+        console.warn(`[InventorySync] Auto-sync failed for product ${productId}: ${err.message}`);
+      }
+      try {
+        // Unblock and re-evaluate dependent replen tasks for this product across the warehouse
+        // after bulk receipts, transfers, or inventory adjustments
+        await replenishment.reevaluateReplenForProduct(productId);
+      } catch (err: any) {
+        console.warn(`[Replen] Auto-sync replen failed for product ${productId}: ${err.message}`);
+      }
+    }, 2000); // 2s debounce
+  };
+
   inventoryCore.onInventoryChange(async (productVariantId: number, triggeredBy: string) => {
     try {
       const [variant] = await db
@@ -267,35 +317,17 @@ export function createServices(db: any) {
         .limit(1);
       if (!variant) return;
 
-      const productId = variant.productId;
-      if (pendingSyncs.has(productId)) return; // already queued
-      pendingSyncs.add(productId);
-
-      // Small delay to batch rapid changes (e.g., multi-line receive)
-      setTimeout(async () => {
-        pendingSyncs.delete(productId);
-        try {
-          await echelonOrchestrator.syncInventoryForProduct(
-            productId,
-            { dryRun: false },
-            `inventory_change:${triggeredBy}`,
-          );
-        } catch (err: any) {
-          console.warn(`[InventorySync] Auto-sync failed for product ${productId}: ${err.message}`);
-        }
-        try {
-          // Unblock and re-evaluate dependent replen tasks for this product across the warehouse
-          // after bulk receipts, transfers, or inventory adjustments
-          await replenishment.reevaluateReplenForProduct(productId);
-        } catch (err: any) {
-          console.warn(`[Replen] Auto-sync replen failed for product ${productId}: ${err.message}`);
-        }
-      }, 2000); // 2s debounce
+      const affectedProductIds = new Set<number>([
+        Number(variant.productId),
+        ...await recipeCapacity.getAffectedOutputProductIds(productVariantId),
+      ]);
+      for (const productId of affectedProductIds) {
+        queueProductInventorySync(productId, triggeredBy);
+      }
     } catch (err: any) {
-      console.warn(`[InventorySync] Failed to resolve variant ${productVariantId}: ${err.message}`);
+      console.warn(`[InventorySync] Failed to resolve dependencies for variant ${productVariantId}: ${err.message}`);
     }
   });
-
   // Wire break/assembly inventory changes into the same sync mechanism as core
   // This ensures case breaks from replen, UI, or any other caller trigger channel sync
   breakAssembly.onInventoryChange((variantId: number, trigger: string) => {

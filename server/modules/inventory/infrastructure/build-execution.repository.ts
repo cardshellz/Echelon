@@ -13,10 +13,18 @@ import {
 
 type Db = {
   execute: (query: unknown) => Promise<{ rows: any[] }>;
+  update: (...args: any[]) => any;
   transaction: <T>(work: (tx: Db) => Promise<T>) => Promise<T>;
 };
 
 type NormalizedLotCosts = BuildCostTotals & { totalMills: bigint };
+
+export type BuildOrderCompletedContext = {
+  buildOrderId: number;
+  outputVariantId: number;
+  outputLocationId: number;
+  outputQty: number;
+};
 
 export type BuildExecutionDependencies = {
   loadActiveBuildVariantFacts: (
@@ -26,6 +34,7 @@ export type BuildExecutionDependencies = {
   ) => Promise<Map<number, BuildVariantFacts>>;
   normalizeBuildLotCosts: (lot: any) => NormalizedLotCosts;
   buildMillsToRoundedCents: (value: bigint) => bigint;
+  onBuildOrderCompleted?: (tx: Db, context: BuildOrderCompletedContext) => Promise<void>;
 };
 
 export type ExecuteBuildRunInput = {
@@ -371,8 +380,8 @@ export class BuildExecutionRepository {
     };
   }
 
-  async releaseOrder(buildOrderId: number, actorId?: string): Promise<any> {
-    return this.db.transaction(async (tx) => {
+  async releaseOrder(buildOrderId: number, actorId?: string, txOverride?: Db): Promise<any> {
+    const work = async (tx: Db) => {
       const order = await this.lockOrder(tx, buildOrderId);
       if (order.status === "completed") return order;
       if (order.status !== "draft" && order.status !== "released") {
@@ -399,7 +408,8 @@ export class BuildExecutionRepository {
         RETURNING *
       `);
       return updated.rows[0];
-    });
+    };
+    return txOverride ? work(txOverride) : this.db.transaction(work);
   }
 
   async executeOrder(input: ExecuteBuildRunInput): Promise<BuildExecutionResult> {
@@ -746,7 +756,7 @@ export class BuildExecutionRepository {
       WHERE id = ${input.buildOrderId}
       RETURNING *
     `);
-    return this.executionResult(
+    const result = this.executionResult(
       updatedOrder.rows[0],
       {
         ...run,
@@ -755,6 +765,15 @@ export class BuildExecutionRepository {
       },
       false,
     );
+    if (orderStatus === "completed" && this.dependencies.onBuildOrderCompleted) {
+      await this.dependencies.onBuildOrderCompleted(tx, {
+        buildOrderId: input.buildOrderId,
+        outputVariantId: Number(order.output_variant_id),
+        outputLocationId: Number(order.output_location_id),
+        outputQty: quantities.outputQty,
+      });
+    }
+    return result;
   }
 
   private async recordFailure(buildOrderId: number, error: unknown): Promise<void> {
@@ -862,8 +881,8 @@ export class BuildExecutionRepository {
     return releasedQty;
   }
 
-  async cancelOrder(input: CancelBuildOrderInput): Promise<BuildCancellationResult> {
-    return this.db.transaction(async (tx) => {
+  async cancelOrder(input: CancelBuildOrderInput, txOverride?: Db): Promise<BuildCancellationResult> {
+    const work = async (tx: Db): Promise<BuildCancellationResult> => {
       const order = await this.lockOrder(tx, input.buildOrderId);
       if (order.status === "cancelled") {
         if (String(order.cancellation_reason ?? "") !== input.reason) {
@@ -910,7 +929,8 @@ export class BuildExecutionRepository {
         releasedReservationQty,
         alreadyCancelled: false,
       };
-    });
+    };
+    return txOverride ? work(txOverride) : this.db.transaction(work);
   }
 
   async reverseRun(input: ReverseBuildRunInput): Promise<BuildReversalResult> {

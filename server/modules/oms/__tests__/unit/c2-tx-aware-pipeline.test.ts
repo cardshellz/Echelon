@@ -316,6 +316,7 @@ describe("ReservationService :: dbOverride threading", () => {
 
     const atpService = {
       getAtpPerVariant: vi.fn(async () => []),
+      getProductInventoryStrategy: vi.fn(async () => "physical_fungible" as const),
     };
 
     const service = createReservationService(

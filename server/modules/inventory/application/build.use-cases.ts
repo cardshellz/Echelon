@@ -6,6 +6,7 @@ import {
 import {
   createBuildRepository,
   type BuildCancellationResult,
+  type BuildOrderCompletedContext,
   type BuildExecutionResult,
   type BuildRepository,
   type BuildReversalResult,
@@ -113,7 +114,7 @@ export class BuildUseCases {
     });
   }
 
-  async createOrder(input: CreateBuildOrderInput): Promise<any> {
+  async createOrder(input: CreateBuildOrderInput, txOverride?: BuildDb): Promise<any> {
     const idempotencyKey = requiredIdempotencyKey(input.idempotencyKey);
     const sourceLocations = requiredArray<CreateBuildOrderInput["sourceLocations"][number]>(
       input.sourceLocations,
@@ -136,7 +137,7 @@ export class BuildUseCases {
           `sourceLocations[${index}].sourceLocationId`,
         ),
       })),
-    });
+    }, txOverride);
   }
   async listProductRelationships(
     productId: number,
@@ -180,9 +181,9 @@ export class BuildUseCases {
     }
   }
 
-  async releaseOrder(buildOrderId: number, actorId?: string): Promise<any> {
+  async releaseOrder(buildOrderId: number, actorId?: string, txOverride?: BuildDb): Promise<any> {
     const id = requirePositiveInteger(buildOrderId, "buildOrderId");
-    const result = await this.repository.releaseOrder(id, actorId);
+    const result = await this.repository.releaseOrder(id, actorId, txOverride);
     await this.notifyInventoryChanged(id, "build_released");
     console.info(JSON.stringify({
       event: "build_order_released",
@@ -218,13 +219,27 @@ export class BuildUseCases {
     return result;
   }
 
-  async cancelOrder(input: CancelBuildOrderInput): Promise<BuildCancellationResult> {
+  async linkDependency(input: {
+    dependentBuildOrderId: number;
+    prerequisiteBuildOrderId: number;
+    componentVariantId: number;
+    requiredQty: number;
+  }, tx: BuildDb): Promise<void> {
+    return this.repository.linkDependency({
+      dependentBuildOrderId: requirePositiveInteger(input.dependentBuildOrderId, "dependentBuildOrderId"),
+      prerequisiteBuildOrderId: requirePositiveInteger(input.prerequisiteBuildOrderId, "prerequisiteBuildOrderId"),
+      componentVariantId: requirePositiveInteger(input.componentVariantId, "componentVariantId"),
+      requiredQty: requirePositiveInteger(input.requiredQty, "requiredQty"),
+    }, tx);
+  }
+
+  async cancelOrder(input: CancelBuildOrderInput, txOverride?: BuildDb): Promise<BuildCancellationResult> {
     const command: CancelBuildOrderInput = {
       buildOrderId: requirePositiveInteger(input.buildOrderId, "buildOrderId"),
       reason: requiredText(input.reason, "reason", 2000),
       actorId: input.actorId,
     };
-    const result = await this.repository.cancelOrder(command);
+    const result = await this.repository.cancelOrder(command, txOverride);
     if (!result.alreadyCancelled && result.releasedReservationQty > 0) {
       await this.notifyInventoryChanged(command.buildOrderId, "build_cancelled");
     }
@@ -262,9 +277,12 @@ export class BuildUseCases {
   }
 }
 
-export function createBuildUseCases(db: BuildDb): BuildUseCases {
+export function createBuildUseCases(
+  db: BuildDb,
+  options: { onBuildOrderCompleted?: (tx: BuildDb, context: BuildOrderCompletedContext) => Promise<void> } = {},
+): BuildUseCases {
   return new BuildUseCases(
-    createBuildRepository(db),
+    createBuildRepository(db, options),
     createBuildChangeRepository(db),
     createBuildQueryRepository(db),
   );

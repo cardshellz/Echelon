@@ -296,6 +296,31 @@ export const buildOrderComponents = inventorySchema.table("build_order_component
 }));
 
 
+export const buildOrderDependencies = inventorySchema.table("build_order_dependencies", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  dependentBuildOrderId: integer("dependent_build_order_id").notNull()
+    .references(() => buildOrders.id, { onDelete: "cascade" }),
+  prerequisiteBuildOrderId: integer("prerequisite_build_order_id").notNull()
+    .references(() => buildOrders.id, { onDelete: "restrict" }),
+  componentVariantId: integer("component_variant_id").notNull()
+    .references(() => productVariants.id, { onDelete: "restrict" }),
+  requiredQty: integer("required_qty").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  dependencyUnique: uniqueIndex("build_order_dependencies_uidx")
+    .on(table.dependentBuildOrderId, table.prerequisiteBuildOrderId, table.componentVariantId),
+  prerequisiteIndex: index("build_order_dependencies_prerequisite_idx")
+    .on(table.prerequisiteBuildOrderId, table.dependentBuildOrderId),
+  noSelfDependency: check(
+    "build_order_dependencies_no_self_chk",
+    sql`${table.dependentBuildOrderId} <> ${table.prerequisiteBuildOrderId}`,
+  ),
+  requiredQtyPositive: check(
+    "build_order_dependencies_required_qty_chk",
+    sql`${table.requiredQty} > 0`,
+  ),
+}));
+
 export const buildRuns = inventorySchema.table("build_runs", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   buildOrderId: integer("build_order_id").notNull().references(() => buildOrders.id, { onDelete: "restrict" }),

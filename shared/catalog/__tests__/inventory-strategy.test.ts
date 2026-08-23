@@ -24,9 +24,9 @@ describe("product inventory strategy", () => {
     expect(isProductInventoryStrategy(value)).toBe(false);
   });
 
-  it("keeps shared capacity for package hierarchies and recipe-managed outputs", () => {
+  it("keeps shared capacity only for physical package hierarchies", () => {
     expect(usesFungibleBaseUnitPool("physical_fungible")).toBe(true);
-    expect(usesFungibleBaseUnitPool("recipe_managed")).toBe(true);
+    expect(usesFungibleBaseUnitPool("recipe_managed")).toBe(false);
     expect(usesFungibleBaseUnitPool("physical_only")).toBe(false);
   });
 
@@ -38,23 +38,29 @@ describe("product inventory strategy", () => {
     expect(requiresBuildRecipe("physical_fungible")).toBe(false);
   });
 
-  it.each(["physical_fungible", "recipe_managed"] as const)(
-    "advertises alternative pack capacities from one shared pool for %s",
-    (strategy) => {
-      expect(calculateSellableVariantAtp({
-        strategy,
-        unitsPerVariant: 5,
-        sharedAtpBase: 2200,
-        directAtpUnits: 0,
-      })).toEqual({ atpUnits: 440, atpBase: 2200 });
-      expect(calculateSellableVariantAtp({
-        strategy,
-        unitsPerVariant: 25,
-        sharedAtpBase: 2200,
-        directAtpUnits: 0,
-      })).toEqual({ atpUnits: 88, atpBase: 2200 });
-    },
-  );
+  it("advertises alternative pack capacities from one shared pool for physical package hierarchies", () => {
+    expect(calculateSellableVariantAtp({
+      strategy: "physical_fungible",
+      unitsPerVariant: 5,
+      sharedAtpBase: 2200,
+      directAtpUnits: 0,
+    })).toEqual({ atpUnits: 440, atpBase: 2200 });
+    expect(calculateSellableVariantAtp({
+      strategy: "physical_fungible",
+      unitsPerVariant: 25,
+      sharedAtpBase: 2200,
+      directAtpUnits: 0,
+    })).toEqual({ atpUnits: 88, atpBase: 2200 });
+  });
+
+  it("does not use the generic shared pool for recipe-managed products", () => {
+    expect(calculateSellableVariantAtp({
+      strategy: "recipe_managed",
+      unitsPerVariant: 5,
+      sharedAtpBase: 2200,
+      directAtpUnits: 3,
+    })).toEqual({ atpUnits: 3, atpBase: 15 });
+  });
 
   it("does not borrow physical-only inventory across variants", () => {
     expect(calculateSellableVariantAtp({

@@ -40,7 +40,7 @@ export function getProductInventoryStrategyDefinition(strategy: ProductInventory
 }
 
 export function usesFungibleBaseUnitPool(strategy: ProductInventoryStrategy): boolean {
-  return strategy !== "physical_only";
+  return strategy === "physical_fungible";
 }
 
 export function allowsDirectPackageConversion(strategy: ProductInventoryStrategy): boolean {

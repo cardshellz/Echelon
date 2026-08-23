@@ -9,6 +9,7 @@ import {
   warehouseLocations,
 } from "@shared/schema";
 import type { VariantAtp } from "../inventory/atp.service";
+import type { ProductInventoryStrategy } from "@shared/catalog/inventory-strategy";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -29,6 +30,30 @@ interface ChannelSync {
 
 interface AtpService {
   getAtpPerVariant(productId: number): Promise<VariantAtp[]>;
+  getProductInventoryStrategy(
+    productId: number,
+    dbOverride?: any,
+  ): Promise<ProductInventoryStrategy>;
+}
+
+interface RecipeBuildPromise {
+  claimOrderItem(input: {
+    productId: number;
+    variantId: number;
+    orderQty: number;
+    orderId: number;
+    orderItemId: number;
+    actorId?: string;
+  }, tx: any): Promise<ReserveForOrderResult>;
+  cancelOrderDemands(
+    orderId: number,
+    reason: string,
+    actorId?: string,
+  ): Promise<{
+    cancelledDemands: number;
+    cancelledBuildOrders: number;
+    failures: Array<{ buildOrderId: number; reason: string }>;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -37,16 +62,21 @@ interface AtpService {
 
 export interface ReservationResult {
   orderId: number;
-  /** Count of line items successfully reserved */
+  /** Count of line items backed by physical finished-goods reservations. */
   reserved: number;
-  /** Line items that could not be reserved */
+  /** Count of line items promised through auditable recipe build orders. */
+  promised: number;
+  /** Line items that could not be reserved or promised. */
   failed: Array<{ sku: string; orderItemId: number; reason: string }>;
-  /** Total base units reserved across all items */
+  /** Total base units physically reserved across all items. */
   totalBaseUnits: number;
+  /** Total base units represented by unfinished build promises. */
+  totalPromisedBaseUnits: number;
 }
 
 export interface ReserveForOrderResult {
   reserved: number;
+  promised: number;
   shortfall: number;
 }
 
@@ -83,6 +113,7 @@ class ReservationService {
     private readonly inventoryCore: any,
     private readonly channelSync: ChannelSync,
     private readonly atpService: AtpService,
+    private readonly recipeBuildPromise?: RecipeBuildPromise,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -113,32 +144,39 @@ class ReservationService {
     dbOverride?: any,
   ): Promise<ReserveForOrderResult> {
     if (orderQty <= 0) {
-      return { reserved: 0, shortfall: 0 };
+      return { reserved: 0, promised: 0, shortfall: 0 };
     }
 
-    // P0.1b: serialize check→reserve per product. Without this, two
-    // concurrent reservations can both read the same ATP and both reserve
-    // the last units (over-commit). pg_advisory_xact_lock pins the lock to
-    // the transaction's connection and releases automatically on commit /
-    // rollback — competing reservers for the SAME product queue here and
-    // re-read ATP only after the winner's reserve has committed.
-    if (dbOverride) {
-      // Caller supplied a transaction — bind the lock to it.
-      await dbOverride.execute(
-        sql`SELECT pg_advisory_xact_lock(${RESERVATION_LOCK_NS}, ${productId})`,
-      );
-      return this.reserveForOrderLocked(
-        productId, variantId, orderQty, orderId, orderItemId, userId, dbOverride,
-      );
-    }
-    return this.db.transaction(async (tx) => {
+    const reserveWithinTransaction = async (tx: any): Promise<ReserveForOrderResult> => {
+      const inventoryStrategy = await this.atpService.getProductInventoryStrategy(productId, tx);
+      if (inventoryStrategy === "recipe_managed") {
+        if (!this.recipeBuildPromise) {
+          throw new Error("Recipe-managed reservation requires RecipeBuildPromiseService");
+        }
+        return this.recipeBuildPromise.claimOrderItem({
+          productId,
+          variantId,
+          orderQty,
+          orderId,
+          orderItemId,
+          actorId: userId,
+        }, tx);
+      }
+
+      // Physical product reservations retain the established per-product
+      // serialization contract. Recipe-managed products lock their complete
+      // recipe graph inside RecipeBuildPromiseService instead.
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(${RESERVATION_LOCK_NS}, ${productId})`,
       );
       return this.reserveForOrderLocked(
         productId, variantId, orderQty, orderId, orderItemId, userId, tx,
       );
-    });
+    };
+
+    return dbOverride
+      ? reserveWithinTransaction(dbOverride)
+      : this.db.transaction(reserveWithinTransaction);
   }
 
   /**
@@ -184,7 +222,7 @@ class ReservationService {
     }
 
     if (toReserve === 0) {
-      return { reserved: 0, shortfall };
+      return { reserved: 0, promised: 0, shortfall };
     }
 
     // Step 3: Find the variant's assigned bin from product_locations,
@@ -247,7 +285,7 @@ class ReservationService {
         `[RESERVATION] No assigned bin or inventory_levels for variant ${variantId} — ` +
           `cannot place reservation for order #${orderId}`,
       );
-      return { reserved: 0, shortfall: orderQty };
+      return { reserved: 0, promised: 0, shortfall: orderQty };
     }
 
     // Step 4: Delegate to inventoryCore (atomic: upserts level + increments reserved_qty + logs txn)
@@ -267,10 +305,10 @@ class ReservationService {
         `[RESERVATION] inventoryCore.reserveForOrder returned false unexpectedly ` +
           `for variant ${variantId} order #${orderId}`,
       );
-      return { reserved: 0, shortfall: orderQty };
+      return { reserved: 0, promised: 0, shortfall: orderQty };
     }
 
-    return { reserved: toReserve, shortfall };
+    return { reserved: toReserve, promised: 0, shortfall };
   }
 
   // ---------------------------------------------------------------------------
@@ -293,8 +331,10 @@ class ReservationService {
     const result: ReservationResult = {
       orderId,
       reserved: 0,
+      promised: 0,
       failed: [],
       totalBaseUnits: 0,
+      totalPromisedBaseUnits: 0,
     };
 
     // Fetch all line items for this order
@@ -345,6 +385,11 @@ class ReservationService {
           result.totalBaseUnits += res.reserved * (variant.unitsPerVariant ?? 1);
           syncVariantIds.add(variant.id);
         }
+        if (res.promised > 0) {
+          result.promised++;
+          result.totalPromisedBaseUnits += res.promised * (variant.unitsPerVariant ?? 1);
+          syncVariantIds.add(variant.id);
+        }
 
         if (res.shortfall > 0) {
           result.failed.push({
@@ -352,7 +397,7 @@ class ReservationService {
             orderItemId: item.id,
             reason: res.reserved > 0
               ? `Partial reservation: reserved ${res.reserved} of ${item.quantity} variant units (shortfall: ${res.shortfall})`
-              : `No reservation: ATP insufficient (need ${item.quantity}, ATP=0)`,
+              : `No reservation or build promise: ATP insufficient (need ${item.quantity}, ATP=0)`,
           });
         }
       } catch (err) {
@@ -410,6 +455,25 @@ class ReservationService {
   ): Promise<{ released: number; failed: Array<{ sku: string; orderItemId: number; reason: string }> }> {
     const result = { released: 0, failed: [] as Array<{ sku: string; orderItemId: number; reason: string }> };
     const syncVariantIds = new Set<number>();
+
+    if (this.recipeBuildPromise) {
+      try {
+        const cancellation = await this.recipeBuildPromise.cancelOrderDemands(orderId, reason, userId);
+        for (const failure of cancellation.failures) {
+          result.failed.push({
+            sku: "[recipe-build]",
+            orderItemId: 0,
+            reason: `Build order ${failure.buildOrderId} cancellation failed: ${failure.reason}`,
+          });
+        }
+      } catch (error) {
+        result.failed.push({
+          sku: "[recipe-build]",
+          orderItemId: 0,
+          reason: `Recipe build demand cancellation failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
 
     const items = await this.db
       .select()
@@ -908,11 +972,11 @@ class ReservationService {
             userId,
           );
 
-          if (res.reserved > 0) {
+          if (res.reserved > 0 || res.promised > 0) {
             result.reallocated++;
             console.log(
               `[RESERVATION] Re-allocated order ${orderId} item ${item.id} ` +
-                `(${res.reserved} units, shortfall: ${res.shortfall})`,
+                `(reserved=${res.reserved}, promised=${res.promised}, shortfall=${res.shortfall})`,
             );
           } else {
             result.failed++;
@@ -973,7 +1037,10 @@ class ReservationService {
       sku: string;
       orderItemId: number;
       reservedQty: number;
+      promisedQty: number;
+      demandStatus: string | null;
       isReserved: boolean;
+      isPromised: boolean;
     }>
   > {
     const items = await this.db
@@ -985,48 +1052,69 @@ class ReservationService {
       sku: string;
       orderItemId: number;
       reservedQty: number;
+      promisedQty: number;
+      demandStatus: string | null;
       isReserved: boolean;
+      isPromised: boolean;
     }> = [];
 
     for (const item of items) {
-      // Resolve variant
-      const [variant] = await this.db
-        .select()
-        .from(productVariants)
-        .where(eq(productVariants.sku, item.sku))
-        .limit(1);
-
-      if (!variant) {
-        statuses.push({
-          sku: item.sku,
-          orderItemId: item.id,
-          reservedQty: 0,
-          isReserved: false,
-        });
-        continue;
+      const ledger: any = await this.db.execute(sql`
+        SELECT
+          COALESCE(SUM(reserved_qty_delta), 0)::int AS delta_sum,
+          COUNT(*) FILTER (
+            WHERE transaction_type = 'reserve' AND reserved_qty_delta IS NULL
+          )::int AS legacy_reserves,
+          COALESCE(SUM(CASE WHEN transaction_type = 'pick'
+                            THEN -variant_qty_delta ELSE 0 END), 0)::int AS picked_units,
+          COALESCE(SUM(CASE WHEN transaction_type = 'unreserve'
+                                 AND reserved_qty_delta IS NOT NULL
+                            THEN -reserved_qty_delta ELSE 0 END), 0)::int AS unreserved_units
+        FROM inventory.inventory_transactions
+        WHERE order_id = ${orderId}
+          AND order_item_id = ${item.id}
+          AND transaction_type IN ('reserve', 'unreserve', 'pick')
+          AND voided_at IS NULL
+      `);
+      const ledgerRow = ledger?.rows?.[0] ?? {};
+      let reservedQty = Math.max(0, Number(ledgerRow.delta_sum ?? 0));
+      if (Number(ledgerRow.legacy_reserves ?? 0) > 0) {
+        reservedQty = Math.max(
+          reservedQty,
+          Math.max(
+            0,
+            Number(item.quantity)
+              - Number(ledgerRow.picked_units ?? 0)
+              - Number(ledgerRow.unreserved_units ?? 0),
+          ),
+        );
       }
 
-      // Sum reserved units across all locations for this variant
-      const [aggregate] = await this.db
-        .select({
-          totalReserved: sql<number>`COALESCE(SUM(${inventoryLevels.reservedQty}), 0)`,
-        })
-        .from(inventoryLevels)
-        .where(eq(inventoryLevels.productVariantId, variant.id));
-
-      const totalReserved = Number(aggregate?.totalReserved ?? 0);
+      const demandResult: any = await this.db.execute(sql`
+        SELECT promised_qty, status
+        FROM wms.order_build_demands
+        WHERE order_item_id = ${item.id}
+        LIMIT 1
+      `);
+      const demand = demandResult?.rows?.[0] ?? null;
+      const demandStatus = demand == null ? null : String(demand.status);
+      const promisedQty = demandStatus === 'awaiting_build'
+        ? Math.max(0, Number(demand.promised_qty ?? 0))
+        : 0;
 
       statuses.push({
         sku: item.sku,
         orderItemId: item.id,
-        reservedQty: totalReserved,
-        isReserved: totalReserved >= item.quantity,
+        reservedQty,
+        promisedQty,
+        demandStatus,
+        isReserved: reservedQty >= Number(item.quantity),
+        isPromised: promisedQty >= Number(item.quantity),
       });
     }
 
     return statuses;
   }
-
   // ---------------------------------------------------------------------------
   // AUTO-RESERVE ON SYNC
   // ---------------------------------------------------------------------------
@@ -1109,7 +1197,15 @@ class ReservationService {
         )
         .limit(1);
 
-      if (!existing) {
+      const demandResult: any = await this.db.execute(sql`
+        SELECT status
+        FROM wms.order_build_demands
+        WHERE order_item_id = ${item.id}
+          AND status IN ('planning', 'awaiting_build', 'fulfilled')
+        LIMIT 1
+      `);
+      const hasBuildPromise = (demandResult?.rows?.length ?? 0) > 0;
+      if (!existing && !hasBuildPromise) {
         allReserved = false;
         break;
       }
@@ -1142,6 +1238,6 @@ class ReservationService {
  * await reservations.reserveOrder(orderId);
  * ```
  */
-export function createReservationService(db: any, inventoryCore: any, channelSync: any, atpService?: any) {
-  return new ReservationService(db, inventoryCore, channelSync, atpService);
+export function createReservationService(db: any, inventoryCore: any, channelSync: any, atpService: any, recipeBuildPromise?: RecipeBuildPromise) {
+  return new ReservationService(db, inventoryCore, channelSync, atpService, recipeBuildPromise);
 }
