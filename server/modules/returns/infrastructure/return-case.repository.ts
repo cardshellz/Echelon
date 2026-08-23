@@ -3,6 +3,7 @@ import {
   channels,
   dropshipStoreConnections,
   dropshipVendors,
+  omsOrderLines,
   omsOrders,
   orders,
   returnCaseEvents,
@@ -484,9 +485,14 @@ function mapListRow(row: SelectedCaseRow): ReturnCaseListRow {
 
 function selectDetailItemRows(returnCaseId: number) {
   return db
-    .select({ caseItem: returnCaseItems, wmsItem: returnItems })
+    .select({
+      caseItem: returnCaseItems,
+      wmsItem: returnItems,
+      productVariantId: omsOrderLines.productVariantId,
+    })
     .from(returnCaseItems)
     .innerJoin(returnItems, eq(returnItems.id, returnCaseItems.wmsReturnItemId))
+    .leftJoin(omsOrderLines, eq(omsOrderLines.id, returnCaseItems.omsOrderLineId))
     .where(eq(returnCaseItems.returnCaseId, returnCaseId))
     .orderBy(asc(returnCaseItems.id));
 }
@@ -501,6 +507,10 @@ function mapItemRow(row: SelectedDetailItemRow): ReturnCaseItemRow {
     wmsReturnItemId: readPositiveSafeInteger(row.caseItem.wmsReturnItemId, "WMS return item id"),
     omsOrderLineId: readNullablePositiveSafeInteger(row.caseItem.omsOrderLineId, "OMS order line id"),
     wmsOrderItemId: row.caseItem.wmsOrderItemId,
+    productVariantId: readNullablePositiveSafeInteger(
+      row.productVariantId,
+      "product variant id",
+    ),
     externalLineItemId: row.caseItem.externalLineItemId,
     sku: row.caseItem.sku,
     title: row.caseItem.title,

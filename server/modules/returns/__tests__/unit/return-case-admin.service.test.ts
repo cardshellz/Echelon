@@ -308,6 +308,7 @@ function detailRow(): ReturnCaseDetailRow {
       wmsReturnItemId: 301,
       omsOrderLineId: 101,
       wmsOrderItemId: 201,
+      productVariantId: 401,
       externalLineItemId: "line-1",
       sku: "SKU-1",
       title: "Toploader",

@@ -5,6 +5,7 @@ import {
   applyReturnInventoryTreatment,
   completeReturnInspection,
   getReturnCaseDetail,
+  getReturnVariantBinAssignments,
   getReturnWarehouseLocations,
   recordReturnDisposition,
   recordReturnReceipt,
@@ -25,6 +26,7 @@ describe("return case admin API client", () => {
       receivedQuantity: 1,
       remainingQuantity: 1,
       receiptStatus: "partially_received",
+      productVariantId: 901,
     });
     expect(transport).toHaveBeenCalledTimes(1);
     expect(transport).toHaveBeenCalledWith(
@@ -766,6 +768,48 @@ describe("return case admin API client", () => {
     });
   });
 
+  it("loads exact bin assignments with normalized product variant IDs", async () => {
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse([{
+      productVariantId: 11,
+      assignedLocationCode: "P-01",
+      assignedLocationId: 17,
+      slotStatus: "valid",
+      slotIssue: null,
+      assignmentCount: 1,
+      validAssignmentCount: 1,
+      extraViewField: true,
+    }]));
+
+    await expect(getReturnVariantBinAssignments([33, 11, 33], transport)).resolves.toMatchObject([
+      { productVariantId: 11, assignedLocationId: 17, slotStatus: "valid" },
+    ]);
+    expect(transport).toHaveBeenCalledWith("/api/bin-assignments?variantIds=11,33", {
+      method: "GET",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+  });
+
+  it("rejects invalid slot requests and unrequested assignment rows", async () => {
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse([{
+      productVariantId: 99,
+      assignedLocationCode: null,
+      assignedLocationId: null,
+      slotStatus: "unassigned",
+      slotIssue: null,
+      assignmentCount: 0,
+      validAssignmentCount: 0,
+    }]));
+
+    await expect(getReturnVariantBinAssignments([], transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_CLIENT_INPUT_INVALID",
+    });
+    expect(transport).not.toHaveBeenCalled();
+    await expect(getReturnVariantBinAssignments([11], transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+    });
+  });
+
 
   it("classifies invalid JSON and transport failures with one attempted request", async () => {
     const invalidJsonTransport = vi.fn<ReturnCaseAdminTransport>(async () =>
@@ -832,6 +876,7 @@ function detailFixture() {
         wmsReturnItemId: 301,
         omsOrderLineId: 501,
         wmsOrderItemId: 701,
+        productVariantId: 901,
         externalLineItemId: "line-11",
         sku: "SKU-11",
         title: "First item",
@@ -849,6 +894,7 @@ function detailFixture() {
         wmsReturnItemId: 302,
         omsOrderLineId: 502,
         wmsOrderItemId: 702,
+        productVariantId: 902,
         externalLineItemId: "line-12",
         sku: "SKU-12",
         title: "Second item",

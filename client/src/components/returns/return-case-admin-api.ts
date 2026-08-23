@@ -3,6 +3,7 @@ import { z } from "zod";
 const MAX_RECEIPT_LINES = 200;
 const MAX_DISPOSITION_LINES = 200;
 const MAX_INVENTORY_TREATMENT_LINES = 200;
+const MAX_BIN_ASSIGNMENT_VARIANT_IDS = 200;
 const MAX_NOTES_LENGTH = 2_000;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 160;
 
@@ -314,6 +315,7 @@ export const returnCaseDetailItemSchema = z.object({
   wmsReturnItemId: positiveSafeIntegerSchema,
   omsOrderLineId: positiveSafeIntegerSchema.nullable(),
   wmsOrderItemId: positiveSafeIntegerSchema.nullable(),
+  productVariantId: positiveSafeIntegerSchema.nullable(),
   externalLineItemId: nullableRequiredTextSchema,
   sku: nullableRequiredTextSchema,
   title: nullableTextSchema,
@@ -743,6 +745,16 @@ export const returnWarehouseLocationSchema = z.object({
   cycleCountFreezeId: positiveSafeIntegerSchema.nullable(),
 }).passthrough();
 export type ReturnWarehouseLocation = z.infer<typeof returnWarehouseLocationSchema>;
+export const returnVariantBinAssignmentSchema = z.object({
+  productVariantId: positiveSafeIntegerSchema,
+  assignedLocationCode: nullableRequiredTextSchema,
+  assignedLocationId: positiveSafeIntegerSchema.nullable(),
+  slotStatus: z.enum(["valid", "unassigned", "invalid", "duplicate"]),
+  slotIssue: nullableRequiredTextSchema,
+  assignmentCount: nonNegativeSafeIntegerSchema,
+  validAssignmentCount: nonNegativeSafeIntegerSchema,
+}).passthrough();
+export type ReturnVariantBinAssignment = z.infer<typeof returnVariantBinAssignmentSchema>;
 
 export type ReturnCaseAdminApiErrorCode =
   | "RETURN_CASE_CLIENT_INPUT_INVALID"
@@ -793,6 +805,36 @@ export async function getReturnWarehouseLocations(
     "/api/warehouse/locations",
     { method: "GET", credentials: "include", headers: { Accept: "application/json" } },
     z.array(returnWarehouseLocationSchema),
+    transport,
+  );
+}
+
+export async function getReturnVariantBinAssignments(
+  productVariantIds: readonly number[],
+  transport: ReturnCaseAdminTransport = fetch,
+): Promise<ReturnVariantBinAssignment[]> {
+  const parsed = z.array(positiveSafeIntegerSchema)
+    .min(1)
+    .max(MAX_BIN_ASSIGNMENT_VARIANT_IDS)
+    .safeParse(productVariantIds);
+  if (!parsed.success) throw inputError(parsed.error);
+  const normalized = [...new Set(parsed.data)].sort((left, right) => left - right);
+  const requestedIds = new Set(normalized);
+  const responseSchema = z.array(returnVariantBinAssignmentSchema).superRefine((rows, context) => {
+    rows.forEach((row, index) => {
+      if (!requestedIds.has(row.productVariantId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Bin assignment response contains an unrequested product variant.",
+          path: [index, "productVariantId"],
+        });
+      }
+    });
+  });
+  return requestJson(
+    `/api/bin-assignments?variantIds=${normalized.join(",")}`,
+    { method: "GET", credentials: "include", headers: { Accept: "application/json" } },
+    responseSchema,
     transport,
   );
 }

@@ -12,6 +12,7 @@ import type {
   ProductVariant,
   WarehouseLocation,
 } from "@shared/schema";
+import { normalizeBinAssignmentVariantIds } from "./bin-assignment-filter";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -62,6 +63,7 @@ export type AssignmentFilters = {
   unassignedOnly?: boolean;
   zone?: string;
   warehouseId?: number;
+  variantIds?: readonly number[];
 };
 
 export type ImportResult = {
@@ -90,6 +92,10 @@ export class BinAssignmentService {
    * `product_locations.location_type` column.
    */
   async getAssignmentsView(filters?: AssignmentFilters): Promise<BinAssignmentRow[]> {
+    const variantIds = filters?.variantIds === undefined
+      ? undefined
+      : normalizeBinAssignmentVariantIds(filters.variantIds);
+    if (variantIds?.length === 0) return [];
     const rows = await this.db.execute(sql`
       WITH variant_base AS (
         SELECT
@@ -103,6 +109,7 @@ export class BinAssignmentService {
         JOIN catalog.products p ON pv.product_id = p.id
         WHERE pv.is_active = true
           ${filters?.search ? sql`AND (UPPER(COALESCE(pv.sku, p.sku, '')) LIKE ${"%" + filters.search.toUpperCase() + "%"} OR UPPER(COALESCE(p.title, p.name, '')) LIKE ${"%" + filters.search.toUpperCase() + "%"})` : sql``}
+          ${variantIds ? sql`AND pv.id IN (${sql.join(variantIds.map((id) => sql`${id}`), sql`, `)})` : sql``}
       ),
       active_assignments AS (
         SELECT
