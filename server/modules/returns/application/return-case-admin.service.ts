@@ -163,9 +163,22 @@ export class ReturnCaseAdminService {
         occurredAt: event.occurredAt.toISOString(),
         createdAt: event.createdAt.toISOString(),
       })),
-      actionPlan: deriveReturnCaseActionPlan(row.actionContext),
+      actionPlan: serializeActionPlan(row.actionContext),
     };
   }
+}
+
+function serializeActionPlan(context: ReturnCaseActionContext) {
+  const plan = deriveReturnCaseActionPlan(context);
+  const inspection = plan.inspectionSummary;
+  return {
+    ...plan,
+    inspectionSummary: inspection ? {
+      ...inspection,
+      startedAt: inspection.startedAt.toISOString(),
+      completedAt: inspection.completedAt?.toISOString() ?? null,
+    } : null,
+  };
 }
 
 function serializeListRow(row: ReturnCaseListRow) {

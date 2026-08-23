@@ -21,7 +21,11 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
   z.record(jsonValueSchema),
 ]));
 
-export const returnCaseActionKindSchema = z.enum(["record_receipt", "start_inspection"]);
+export const returnCaseActionKindSchema = z.enum([
+  "record_receipt",
+  "start_inspection",
+  "complete_inspection",
+]);
 export const returnCaseActionStateSchema = z.enum([
   "available",
   "blocked",
@@ -73,9 +77,40 @@ export const returnCaseReceiptSummarySchema = z.object({
   }
 });
 
+export const returnCaseInspectionSummarySchema = z.object({
+  inspectionId: positiveSafeIntegerSchema,
+  status: z.enum(["in_progress", "approved", "rejected", "cancelled"]),
+  startedAt: dateTimeSchema,
+  startedBy: requiredTextSchema,
+  completedAt: dateTimeSchema.nullable(),
+  completedBy: nullableRequiredTextSchema,
+}).strict().superRefine((inspection, context) => {
+  const completionIsEmpty = inspection.completedAt === null && inspection.completedBy === null;
+  const completionIsComplete = inspection.completedAt !== null && inspection.completedBy !== null;
+  const evidenceIsConsistent = inspection.status === "in_progress"
+    ? completionIsEmpty
+    : completionIsComplete;
+  if (!evidenceIsConsistent) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Inspection completion evidence is inconsistent with its status.",
+      path: ["status"],
+    });
+  }
+  if (inspection.completedAt !== null
+    && Date.parse(inspection.completedAt) < Date.parse(inspection.startedAt)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Inspection completion cannot precede its start.",
+      path: ["completedAt"],
+    });
+  }
+});
+
 export const returnCaseActionPlanSchema = z.object({
   nextAction: returnCaseActionKindSchema.nullable(),
   receiptSummary: returnCaseReceiptSummarySchema,
+  inspectionSummary: returnCaseInspectionSummarySchema.nullable(),
   actions: z.array(returnCaseActionSchema).max(returnCaseActionKindSchema.options.length),
 }).strict().superRefine((plan, context) => {
   const seenKinds = new Set<string>();
@@ -98,6 +133,14 @@ export const returnCaseActionPlanSchema = z.object({
         path: ["nextAction"],
       });
     }
+  }
+  const completionAction = plan.actions.find((action) => action.kind === "complete_inspection");
+  if (completionAction?.state === "available" && plan.inspectionSummary?.status !== "in_progress") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "An available complete_inspection action requires an in-progress inspection summary.",
+      path: ["inspectionSummary"],
+    });
   }
 });
 
@@ -256,6 +299,12 @@ export const startReturnInspectionInputSchema = z.object({
   notes: notesSchema,
 }).strict();
 
+export const completeReturnInspectionInputSchema = z.object({
+  idempotencyKey: idempotencyKeySchema,
+  outcome: z.enum(["approved", "rejected"]),
+  notes: notesSchema,
+}).strict();
+
 export const recordReturnReceiptResultSchema = z.object({
   commandType: z.literal("record_receipt"),
   caseId: positiveSafeIntegerSchema,
@@ -295,6 +344,16 @@ export const startReturnInspectionResultSchema = z.object({
   replayed: z.boolean(),
 }).strict();
 
+export const completeReturnInspectionResultSchema = z.object({
+  commandType: z.literal("complete_inspection"),
+  caseId: positiveSafeIntegerSchema,
+  caseNumber: requiredTextSchema,
+  inspectionId: positiveSafeIntegerSchema,
+  inspectionStatus: z.enum(["approved", "rejected"]),
+  completedAt: dateTimeSchema,
+  replayed: z.boolean(),
+}).strict();
+
 export type ReturnCaseActionKind = z.infer<typeof returnCaseActionKindSchema>;
 export type ReturnCaseAction = z.infer<typeof returnCaseActionSchema>;
 export type ReturnCaseActionPlan = z.infer<typeof returnCaseActionPlanSchema>;
@@ -304,7 +363,12 @@ export type RecordReturnReceiptInput = z.input<typeof recordReturnReceiptInputSc
 export type RecordReturnReceiptResult = z.infer<typeof recordReturnReceiptResultSchema>;
 export type StartReturnInspectionInput = z.input<typeof startReturnInspectionInputSchema>;
 export type StartReturnInspectionResult = z.infer<typeof startReturnInspectionResultSchema>;
-export type ReturnCaseOperationResult = RecordReturnReceiptResult | StartReturnInspectionResult;
+export type CompleteReturnInspectionInput = z.input<typeof completeReturnInspectionInputSchema>;
+export type CompleteReturnInspectionResult = z.infer<typeof completeReturnInspectionResultSchema>;
+export type ReturnCaseOperationResult =
+  | RecordReturnReceiptResult
+  | StartReturnInspectionResult
+  | CompleteReturnInspectionResult;
 
 export type ReturnCaseAdminApiErrorCode =
   | "RETURN_CASE_CLIENT_INPUT_INVALID"
@@ -380,6 +444,39 @@ export async function startReturnInspection(
     `/api/returns/admin/cases/${parsedCaseId}/inspections/start`,
     jsonPost(parsedInput),
     startReturnInspectionResultSchema,
+    transport,
+  );
+}
+
+export async function completeReturnInspection(
+  caseId: number,
+  inspectionId: number,
+  input: CompleteReturnInspectionInput,
+  transport: ReturnCaseAdminTransport = fetch,
+): Promise<CompleteReturnInspectionResult> {
+  const parsedCaseId = parseCaseId(caseId);
+  const parsedInspectionId = parseCaseId(inspectionId);
+  const parsedInput = parseOutboundInput(completeReturnInspectionInputSchema, input);
+  const correlatedResultSchema = completeReturnInspectionResultSchema.superRefine((result, context) => {
+    if (result.caseId !== parsedCaseId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Completion response caseId does not match the requested return case.",
+        path: ["caseId"],
+      });
+    }
+    if (result.inspectionId !== parsedInspectionId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Completion response inspectionId does not match the requested inspection.",
+        path: ["inspectionId"],
+      });
+    }
+  });
+  return requestJson(
+    `/api/returns/admin/cases/${parsedCaseId}/inspections/${parsedInspectionId}/complete`,
+    jsonPost(parsedInput),
+    correlatedResultSchema,
     transport,
   );
 }

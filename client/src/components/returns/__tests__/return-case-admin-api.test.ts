@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ReturnCaseAdminApiError,
+  completeReturnInspection,
   getReturnCaseDetail,
   recordReturnReceipt,
   startReturnInspection,
@@ -99,6 +100,65 @@ describe("return case admin API client", () => {
     });
   });
 
+  it("posts and strictly validates a direct complete-inspection result", async () => {
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse({
+      commandType: "complete_inspection",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      inspectionId: 91,
+      inspectionStatus: "approved",
+      completedAt: "2026-08-22T15:00:00.000Z",
+      replayed: false,
+    }));
+
+    const result = await completeReturnInspection(42, 91, {
+      idempotencyKey: " completion-command-1 ",
+      outcome: "approved",
+      notes: " seal intact ",
+    }, transport);
+
+    expect(result).toMatchObject({
+      commandType: "complete_inspection",
+      inspectionId: 91,
+      inspectionStatus: "approved",
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+    const [url, init] = transport.mock.calls[0];
+    expect(url).toBe("/api/returns/admin/cases/42/inspections/91/complete");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      idempotencyKey: "completion-command-1",
+      outcome: "approved",
+      notes: "seal intact",
+    });
+  });
+
+  it.each([
+    { name: "case", caseId: 43, inspectionId: 91, expectedPath: "caseId" },
+    { name: "inspection", caseId: 42, inspectionId: 92, expectedPath: "inspectionId" },
+  ])("rejects a completion response for a different $name identity", async ({ caseId, inspectionId, expectedPath }) => {
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse({
+      commandType: "complete_inspection",
+      caseId,
+      caseNumber: "RET-0000000042",
+      inspectionId,
+      inspectionStatus: "approved",
+      completedAt: "2026-08-22T15:00:00.000Z",
+      replayed: false,
+    }));
+
+    await expect(completeReturnInspection(42, 91, {
+      idempotencyKey: "completion-command-identity",
+      outcome: "approved",
+    }, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+      context: {
+        issues: expect.arrayContaining([expect.objectContaining({ path: expectedPath })]),
+      },
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     {
       name: "invalid case id",
@@ -142,6 +202,20 @@ describe("return case admin API client", () => {
         unexpected: true,
       } as never, transport),
     },
+    {
+      name: "invalid inspection id",
+      execute: (transport: ReturnCaseAdminTransport) => completeReturnInspection(42, 0, {
+        idempotencyKey: "completion-command-1",
+        outcome: "approved",
+      }, transport),
+    },
+    {
+      name: "invalid completion outcome",
+      execute: (transport: ReturnCaseAdminTransport) => completeReturnInspection(42, 91, {
+        idempotencyKey: "completion-command-1",
+        outcome: "damaged",
+      } as never, transport),
+    },
   ])("rejects $name before issuing a request", async ({ execute }) => {
     const transport = vi.fn<ReturnCaseAdminTransport>();
 
@@ -172,6 +246,95 @@ describe("return case admin API client", () => {
       status: 409,
       message: "The receipt quantity exceeds the quantity still expected for an item.",
       context: { returnCaseItemId: 11, remaining: 1 },
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an available completion action without exact active-inspection evidence", async () => {
+    const fixture = detailFixture();
+    fixture.actionPlan = {
+      nextAction: "complete_inspection",
+      receiptSummary: {
+        expectedUnits: 5,
+        receivedUnits: 5,
+        remainingUnits: 0,
+        fullyReceived: true,
+        partiallyReceived: false,
+      },
+      inspectionSummary: null,
+      actions: [{
+        kind: "complete_inspection",
+        label: "Complete inspection",
+        description: "Record the final inspection outcome.",
+        state: "available",
+        reasonCode: null,
+      }],
+    } as never;
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    await expect(getReturnCaseDetail(42, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts a strict in-progress inspection summary from the action plan", async () => {
+    const fixture = detailFixture();
+    fixture.actionPlan.inspectionSummary = {
+      inspectionId: 91,
+      status: "in_progress",
+      startedAt: "2026-08-22T14:30:00.000Z",
+      startedBy: "user:7",
+      completedAt: null,
+      completedBy: null,
+    };
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    const detail = await getReturnCaseDetail(42, transport);
+
+    expect(detail.actionPlan.inspectionSummary).toMatchObject({
+      inspectionId: 91,
+      status: "in_progress",
+      completedAt: null,
+      completedBy: null,
+    });
+  });
+
+  it("rejects a terminal inspection summary with incomplete completion evidence", async () => {
+    const fixture = detailFixture();
+    fixture.actionPlan.inspectionSummary = {
+      inspectionId: 91,
+      status: "approved",
+      startedAt: "2026-08-22T14:30:00.000Z",
+      startedBy: "user:7",
+      completedAt: "2026-08-22T15:00:00.000Z",
+      completedBy: null,
+    };
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    await expect(getReturnCaseDetail(42, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects completion evidence dated before the inspection started", async () => {
+    const fixture = detailFixture();
+    fixture.actionPlan.inspectionSummary = {
+      inspectionId: 91,
+      status: "rejected",
+      startedAt: "2026-08-22T14:30:00.000Z",
+      startedBy: "user:7",
+      completedAt: "2026-08-22T14:29:59.999Z",
+      completedBy: "user:9",
+    };
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(fixture));
+
+    await expect(getReturnCaseDetail(42, transport)).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+      status: 200,
     });
     expect(transport).toHaveBeenCalledTimes(1);
   });
@@ -303,6 +466,7 @@ function detailFixture() {
         fullyReceived: false,
         partiallyReceived: true,
       },
+      inspectionSummary: null,
       actions: [
         {
           kind: "record_receipt" as const,

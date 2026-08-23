@@ -269,10 +269,13 @@ export class PostgresReturnCaseAdminStore implements ReturnCaseAdminStore {
         .from(returnCaseInspections)
         .where(and(
           eq(returnCaseInspections.returnCaseId, id),
-          eq(returnCaseInspections.status, "in_progress"),
+          sql`${returnCaseInspections.status} IN ('in_progress', 'approved', 'rejected')`,
         ))
-        .orderBy(asc(returnCaseInspections.id))
-        .limit(2),
+        .orderBy(
+          sql`CASE WHEN ${returnCaseInspections.status} = 'in_progress' THEN 0 ELSE 1 END`,
+          sql`${returnCaseInspections.id} DESC`,
+        )
+        .limit(1),
     ]);
 
     const actionContext = buildActionContext({
@@ -468,7 +471,6 @@ interface ActionContextInput {
 }
 
 function buildActionContext(input: ActionContextInput): ReturnCaseActionContext {
-  if (input.inspectionRows.length > 1) throw new Error("Return case has more than one active inspection.");
   const canonicalByWmsItemId = new Map(
     input.itemRows.map(({ caseItem }) => [
       readPositiveSafeInteger(caseItem.wmsReturnItemId, "WMS return item id"),

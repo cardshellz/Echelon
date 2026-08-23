@@ -134,9 +134,11 @@ export function ReturnCaseAdminPanel({
     setSelectedCaseId(returnCase.id);
   };
 
-  const refreshReturnCase = (caseId: number) => {
-    void queryClient.invalidateQueries({ queryKey: ["return-case", caseId], exact: true });
-    void queryClient.invalidateQueries({ queryKey: ["return-cases"] });
+  const refreshReturnCase = async (caseId: number): Promise<void> => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["return-case", caseId], exact: true }),
+      queryClient.invalidateQueries({ queryKey: ["return-cases"] }),
+    ]);
   };
 
   return (
@@ -333,7 +335,7 @@ function ReturnCaseDetailBody({
   onOperationCompleted,
 }: {
   detail: ReturnCaseDetail;
-  onOperationCompleted(caseId: number): void;
+  onOperationCompleted(caseId: number): Promise<void>;
 }) {
   const lifecycle = [
     ["RMA", detail.caseStatus],
@@ -349,7 +351,10 @@ function ReturnCaseDetailBody({
         returnCaseId={detail.id}
         actionPlan={detail.actionPlan}
         items={detail.items}
-        onOperationCompleted={() => onOperationCompleted(detail.id)}
+        onOperationCompleted={() => {
+          void onOperationCompleted(detail.id);
+        }}
+        onRefreshRequested={() => onOperationCompleted(detail.id)}
       />
 
       <section>

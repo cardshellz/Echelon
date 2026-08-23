@@ -57,6 +57,11 @@ const startInspectionSchema = z.object({
   idempotencyKey: z.string().trim().min(1).max(160),
   notes: z.string().trim().max(2_000).nullable().default(null),
 }).strict();
+const completeInspectionSchema = z.object({
+  idempotencyKey: z.string().trim().min(1).max(160),
+  outcome: z.enum(["approved", "rejected"]),
+  notes: z.string().trim().max(2_000).nullable().default(null),
+}).strict();
 
 export function registerReturnCaseAdminRoutes(
   app: Express,
@@ -173,6 +178,37 @@ export function registerReturnCaseAdminRoutes(
           error,
           "RETURN_CASE_INSPECTION_START_FAILED",
           "Return inspection could not be started.",
+        );
+      }
+    },
+  );
+
+  app.post(
+    "/api/returns/admin/cases/:id/inspections/:inspectionId/complete",
+    requirePermission("inventory", "adjust"),
+    async (req, res) => {
+      const parsedCaseId = caseIdSchema.safeParse(req.params.id);
+      if (!parsedCaseId.success) return sendValidationError(res, parsedCaseId.error);
+      const parsedInspectionId = caseIdSchema.safeParse(req.params.inspectionId);
+      if (!parsedInspectionId.success) return sendValidationError(res, parsedInspectionId.error);
+      const parsedBody = completeInspectionSchema.safeParse(req.body);
+      if (!parsedBody.success) return sendValidationError(res, parsedBody.error);
+      const actor = readAuthenticatedActor(req);
+      if (!actor) return sendActorRequired(res);
+      try {
+        const result = await operationService.completeInspection({
+          caseId: parsedCaseId.data,
+          inspectionId: parsedInspectionId.data,
+          ...parsedBody.data,
+          actor,
+        });
+        return res.status(result.replayed ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(
+          res,
+          error,
+          "RETURN_CASE_INSPECTION_COMPLETE_FAILED",
+          "Return inspection could not be completed.",
         );
       }
     },

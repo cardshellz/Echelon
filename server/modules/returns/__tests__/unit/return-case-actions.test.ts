@@ -17,9 +17,11 @@ describe("return case action plan", () => {
       fullyReceived: false,
       partiallyReceived: false,
     });
+    expect(plan.inspectionSummary).toBeNull();
     expect(plan.actions).toEqual([
       expect.objectContaining({ kind: "record_receipt", state: "available", reasonCode: null }),
       expect.objectContaining({ kind: "start_inspection", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
+      expect.objectContaining({ kind: "complete_inspection", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
     ]);
   });
 
@@ -75,6 +77,7 @@ describe("return case action plan", () => {
     expect(plan.nextAction).toBeNull();
     expect(plan.actions[0]).toMatchObject({ state: "not_applicable", reasonCode: "RETURN_DESTINATION_EXTERNAL" });
     expect(plan.actions[1]).toMatchObject({ state: "not_applicable", reasonCode: "RETURN_INSPECTION_OWNED_EXTERNALLY" });
+    expect(plan.actions[2]).toMatchObject({ state: "not_applicable", reasonCode: "RETURN_INSPECTION_OWNED_EXTERNALLY" });
   });
 
   it("blocks unresolved conditional inspection", () => {
@@ -85,6 +88,10 @@ describe("return case action plan", () => {
     }));
 
     expect(plan.actions[1]).toMatchObject({
+      state: "blocked",
+      reasonCode: "RETURN_CONDITIONAL_INSPECTION_UNRESOLVED",
+    });
+    expect(plan.actions[2]).toMatchObject({
       state: "blocked",
       reasonCode: "RETURN_CONDITIONAL_INSPECTION_UNRESOLVED",
     });
@@ -104,10 +111,132 @@ describe("return case action plan", () => {
       },
     }));
 
-    expect(plan.nextAction).toBeNull();
+    expect(plan.nextAction).toBe("complete_inspection");
     expect(plan.actions[1]).toMatchObject({ state: "completed", reasonCode: null });
+    expect(plan.actions[2]).toMatchObject({ state: "available", reasonCode: null });
+    expect(plan.inspectionSummary).toMatchObject({
+      inspectionId: 8,
+      status: "in_progress",
+      completedAt: null,
+      completedBy: null,
+    });
+    expect(plan.inspectionSummary?.startedAt).toBeInstanceOf(Date);
   });
 
+  it.each(["approved", "rejected"] as const)(
+    "treats coherent %s inspection evidence as completed",
+    (outcome) => {
+      const completedAt = new Date("2026-08-22T12:15:00.000Z");
+      const plan = deriveReturnCaseActionPlan(context({
+        lifecycle: { ...lifecycle(), logisticsStatus: "received", inspectionStatus: outcome },
+        receipt: receipt({ receivedQuantity: 2, status: "received" }),
+        inspection: {
+          inspectionId: 8,
+          status: outcome,
+          startedAt: new Date("2026-08-22T12:00:00.000Z"),
+          startedBy: "user:7",
+          completedAt,
+          completedBy: "user:9",
+        },
+      }));
+
+      expect(plan.nextAction).toBeNull();
+      expect(plan.actions[1]).toMatchObject({ state: "completed", reasonCode: null });
+      expect(plan.actions[2]).toMatchObject({ state: "completed", reasonCode: null });
+      expect(plan.inspectionSummary).toMatchObject({ inspectionId: 8, status: outcome });
+      expect(plan.inspectionSummary?.completedAt).not.toBe(completedAt);
+      expect(plan.inspectionSummary?.completedAt?.getTime()).toBe(completedAt.getTime());
+    },
+  );
+
+  it("keeps coherent terminal evidence completed after later case closure and restocking", () => {
+    const inspection: NonNullable<ReturnCaseActionContext["inspection"]> = {
+      inspectionId: 8,
+      status: "approved",
+      startedAt: new Date("2026-08-22T12:00:00.000Z"),
+      startedBy: "user:7",
+      completedAt: new Date("2026-08-22T12:15:00.000Z"),
+      completedBy: "user:9",
+    };
+    const plan = deriveReturnCaseActionPlan(context({
+      lifecycle: {
+        ...lifecycle(),
+        caseStatus: "closed",
+        logisticsStatus: "received",
+        inspectionStatus: "approved",
+      },
+      receipt: {
+        ...receipt({ receivedQuantity: 2, status: "received" }),
+        restocked: true,
+      },
+      inspection,
+    }));
+
+    expect(plan.nextAction).toBeNull();
+    expect(plan.actions[1]).toMatchObject({ state: "completed", reasonCode: null });
+    expect(plan.actions[2]).toMatchObject({ state: "completed", reasonCode: null });
+    expect(plan.inspectionSummary).not.toBe(inspection);
+    expect(plan.inspectionSummary?.startedAt).not.toBe(inspection.startedAt);
+    expect(plan.inspectionSummary?.startedAt.getTime()).toBe(inspection.startedAt.getTime());
+    expect(plan.inspectionSummary?.completedAt).not.toBe(inspection.completedAt);
+    expect(plan.inspectionSummary?.completedAt?.getTime()).toBe(inspection.completedAt.getTime());
+  });
+  it("requires persisted terminal inspection evidence instead of inferring completion", () => {
+    const plan = deriveReturnCaseActionPlan(context({
+      lifecycle: { ...lifecycle(), logisticsStatus: "received", inspectionStatus: "approved" },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+      inspection: null,
+    }));
+
+    expect(plan.nextAction).toBeNull();
+    expect(plan.actions[1]).toMatchObject({
+      state: "blocked",
+      reasonCode: "RETURN_INSPECTION_STATE_CONFLICT",
+    });
+    expect(plan.actions[2]).toMatchObject({
+      state: "blocked",
+      reasonCode: "RETURN_INSPECTION_STATE_CONFLICT",
+    });
+  });
+
+  it("rejects cancelled or lifecycle-mismatched inspection evidence", () => {
+    const cancelledPlan = deriveReturnCaseActionPlan(context({
+      lifecycle: { ...lifecycle(), logisticsStatus: "received", inspectionStatus: "in_progress" },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+      inspection: {
+        inspectionId: 8,
+        status: "cancelled",
+        startedAt: new Date("2026-08-22T12:00:00.000Z"),
+        startedBy: "user:7",
+        completedAt: new Date("2026-08-22T12:15:00.000Z"),
+        completedBy: "user:9",
+      },
+    }));
+    const mismatchedPlan = deriveReturnCaseActionPlan(context({
+      lifecycle: { ...lifecycle(), logisticsStatus: "received", inspectionStatus: "rejected" },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+      inspection: {
+        inspectionId: 9,
+        status: "approved",
+        startedAt: new Date("2026-08-22T12:00:00.000Z"),
+        startedBy: "user:7",
+        completedAt: new Date("2026-08-22T12:15:00.000Z"),
+        completedBy: "user:9",
+      },
+    }));
+
+    for (const plan of [cancelledPlan, mismatchedPlan]) {
+      expect(plan.nextAction).toBeNull();
+      expect(plan.actions[1]).toMatchObject({
+        state: "blocked",
+        reasonCode: "RETURN_INSPECTION_STATE_CONFLICT",
+      });
+      expect(plan.actions[2]).toMatchObject({
+        state: "blocked",
+        reasonCode: "RETURN_INSPECTION_STATE_CONFLICT",
+      });
+    }
+  });
   it("blocks inconsistent or prematurely restocked receipt evidence", () => {
     const plan = deriveReturnCaseActionPlan(context({
       receipt: { ...receipt(), restocked: true },
