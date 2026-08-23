@@ -160,6 +160,7 @@ export const returnCaseInspections = returnsSchema.table("return_case_inspection
   completedAt: timestamp("completed_at", { withTimezone: true }),
   completedBy: varchar("completed_by", { length: 255 }),
   notes: text("notes"),
+  completionNotes: text("completion_notes"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
@@ -185,7 +186,7 @@ export const returnCaseCommands = returnsSchema.table("return_case_commands", {
 }, (table) => [
   uniqueIndex("return_case_commands_idempotency_uq").on(table.idempotencyKey),
   index("return_case_commands_case_idx").on(table.returnCaseId, table.createdAt, table.id),
-  check("return_case_commands_type_chk", sql`${table.commandType} IN ('record_receipt','start_inspection')`),
+  check("return_case_commands_type_chk", sql`${table.commandType} IN ('record_receipt','start_inspection','complete_inspection')`),
   check("return_case_commands_hash_chk", sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`),
   check("return_case_commands_response_chk", sql`jsonb_typeof(${table.response}) = 'object'`),
 ]);

@@ -32,6 +32,17 @@ export interface StartReturnInspectionInput {
   notes: string | null;
 }
 
+export type ReturnInspectionOutcome = "approved" | "rejected";
+
+export interface CompleteReturnInspectionInput {
+  caseId: number;
+  inspectionId: number;
+  idempotencyKey: string;
+  actor: string;
+  outcome: ReturnInspectionOutcome;
+  notes: string | null;
+}
+
 export interface RecordReturnReceiptResult {
   commandType: "record_receipt";
   caseId: number;
@@ -54,7 +65,20 @@ export interface StartReturnInspectionResult {
   replayed: boolean;
 }
 
-export type ReturnCaseOperationResult = RecordReturnReceiptResult | StartReturnInspectionResult;
+export interface CompleteReturnInspectionResult {
+  commandType: "complete_inspection";
+  caseId: number;
+  caseNumber: string;
+  inspectionId: number;
+  inspectionStatus: ReturnInspectionOutcome;
+  completedAt: string;
+  replayed: boolean;
+}
+
+export type ReturnCaseOperationResult =
+  | RecordReturnReceiptResult
+  | StartReturnInspectionResult
+  | CompleteReturnInspectionResult;
 
 export interface PersistReturnReceiptInput {
   aggregate: ReturnCaseOperationAggregate;
@@ -80,6 +104,17 @@ export interface PersistStartInspectionInput {
   now: Date;
 }
 
+export interface PersistCompleteInspectionInput {
+  aggregate: ReturnCaseOperationAggregate;
+  inspectionId: number;
+  idempotencyKey: string;
+  requestHash: string;
+  actor: string;
+  outcome: ReturnInspectionOutcome;
+  notes: string | null;
+  now: Date;
+}
+
 export interface ExistingReturnCaseCommand {
   commandType: ReturnCaseActionKind;
   requestHash: string;
@@ -92,6 +127,7 @@ export interface ReturnCaseOperationTransaction {
   loadForUpdate(caseId: number): Promise<ReturnCaseOperationAggregate | null>;
   persistReceipt(input: PersistReturnReceiptInput): Promise<RecordReturnReceiptResult>;
   persistStartInspection(input: PersistStartInspectionInput): Promise<StartReturnInspectionResult>;
+  persistCompleteInspection(input: PersistCompleteInspectionInput): Promise<CompleteReturnInspectionResult>;
 }
 
 export interface ReturnCaseOperationStore {
@@ -222,6 +258,45 @@ export class ReturnCaseOperationService {
       });
     });
   }
+
+  async completeInspection(rawInput: CompleteReturnInspectionInput): Promise<CompleteReturnInspectionResult> {
+    const input = normalizeCompleteInspectionInput(rawInput);
+    const requestHash = hashCommand("complete_inspection", input);
+
+    return this.store.transaction(async (tx) => {
+      await tx.lockCommand(input.idempotencyKey);
+      const replay = await resolveReplay(tx, input.idempotencyKey, "complete_inspection", requestHash);
+      if (replay) return requireCompleteInspectionResult(replay);
+
+      const aggregate = await loadAggregate(tx, input.caseId);
+      requireActionAvailable(aggregate.actionContext, "complete_inspection");
+      const inspection = aggregate.actionContext.inspection;
+      if (!inspection || inspection.inspectionId !== input.inspectionId || inspection.status !== "in_progress") {
+        throw new ReturnCaseOperationError(
+          "RETURN_CASE_INSPECTION_STATE_STALE",
+          "The inspection changed after this return was reviewed. Refresh the return case and try again.",
+          409,
+          {
+            caseId: input.caseId,
+            expectedInspectionId: input.inspectionId,
+            actualInspectionId: inspection?.inspectionId ?? null,
+            actualInspectionStatus: inspection?.status ?? null,
+          },
+        );
+      }
+      const now = readClock(this.clock);
+      return tx.persistCompleteInspection({
+        aggregate,
+        inspectionId: input.inspectionId,
+        idempotencyKey: input.idempotencyKey,
+        requestHash,
+        actor: input.actor,
+        outcome: input.outcome,
+        notes: input.notes,
+        now,
+      });
+    });
+  }
 }
 
 async function resolveReplay(
@@ -302,6 +377,14 @@ function normalizeInspectionInput(input: StartReturnInspectionInput): StartRetur
   return normalizeCommon(input);
 }
 
+function normalizeCompleteInspectionInput(input: CompleteReturnInspectionInput): CompleteReturnInspectionInput {
+  return {
+    ...normalizeCommon(input),
+    inspectionId: requirePositiveSafeInteger(input.inspectionId, "inspectionId"),
+    outcome: requireInspectionOutcome(input.outcome),
+  };
+}
+
 function normalizeCommon<T extends {
   caseId: number;
   idempotencyKey: string;
@@ -316,10 +399,21 @@ function normalizeCommon<T extends {
   };
 }
 
-function hashCommand(commandType: ReturnCaseActionKind, input: RecordReturnReceiptInput | StartReturnInspectionInput): string {
+function hashCommand(
+  commandType: ReturnCaseActionKind,
+  input: RecordReturnReceiptInput | StartReturnInspectionInput | CompleteReturnInspectionInput,
+): string {
   const request = "lines" in input
     ? { commandType, caseId: input.caseId, notes: input.notes, lines: input.lines }
-    : { commandType, caseId: input.caseId, notes: input.notes };
+    : "outcome" in input
+      ? {
+          commandType,
+          caseId: input.caseId,
+          inspectionId: input.inspectionId,
+          outcome: input.outcome,
+          notes: input.notes,
+        }
+      : { commandType, caseId: input.caseId, notes: input.notes };
   return createHash("sha256").update(JSON.stringify(request)).digest("hex");
 }
 
@@ -343,6 +437,18 @@ function requireInspectionResult(result: ReturnCaseOperationResult): StartReturn
     throw new ReturnCaseOperationError("RETURN_CASE_COMMAND_DATA_INVALID", "Stored return command data is inconsistent.", 500);
   }
   return result;
+}
+
+function requireCompleteInspectionResult(result: ReturnCaseOperationResult): CompleteReturnInspectionResult {
+  if (result.commandType !== "complete_inspection") {
+    throw new ReturnCaseOperationError("RETURN_CASE_COMMAND_DATA_INVALID", "Stored return command data is inconsistent.", 500);
+  }
+  return result;
+}
+
+function requireInspectionOutcome(value: unknown): ReturnInspectionOutcome {
+  if (value === "approved" || value === "rejected") return value;
+  throw invalid("outcome", value);
 }
 
 function requirePositiveSafeInteger(value: unknown, field: string): number {

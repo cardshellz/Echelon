@@ -21,7 +21,7 @@ const ZERO_RECEIPT_LOGISTICS_STATUSES = new Set([
   "delivered",
 ]);
 
-export const returnCaseActionKinds = ["record_receipt", "start_inspection"] as const;
+export const returnCaseActionKinds = ["record_receipt", "start_inspection", "complete_inspection"] as const;
 export type ReturnCaseActionKind = typeof returnCaseActionKinds[number];
 export type ReturnCaseActionState = "available" | "blocked" | "completed" | "not_applicable";
 
@@ -85,6 +85,7 @@ export interface ReturnCaseActionContext {
 export interface ReturnCaseActionPlan {
   nextAction: ReturnCaseActionKind | null;
   receiptSummary: ReturnCaseReceiptSummary;
+  inspectionSummary: ReturnInspectionFacts | null;
   actions: ReturnCaseAction[];
 }
 
@@ -150,10 +151,12 @@ export function deriveReturnCaseActionPlan(context: ReturnCaseActionContext): Re
   const actions = [
     deriveReceiptAction(context, receipt),
     deriveInspectionAction(context, receipt),
+    deriveCompleteInspectionAction(context, receipt),
   ];
   return {
     nextAction: actions.find((action) => action.state === "available")?.kind ?? null,
     receiptSummary: receipt.summary,
+    inspectionSummary: cloneInspectionSummary(context.inspection),
     actions,
   };
 }
@@ -184,45 +187,138 @@ function deriveInspectionAction(
 ): ReturnCaseAction {
   const base = {
     kind: "start_inspection" as const,
-    label: "Start inspection",
+    label: "Begin inspection",
     description: "Begin inspection of the received items. This does not restock inventory, issue a refund, or settle a vendor balance.",
   };
-  if (!context.policy) return blocked(base, "RETURN_POLICY_SNAPSHOT_INVALID");
+  const policyFailure = deriveInspectionPolicyFailure(context);
+  if (policyFailure) return applyInspectionPrerequisiteFailure(base, policyFailure);
+
+  const inspection = context.inspection;
+  if (inspection && isCoherentTerminalInspection(context, inspection)) return completed(base);
+  if ((inspection && !isCoherentInProgressInspection(context, inspection))
+    || (!inspection && context.lifecycle.inspectionStatus !== "pending")) {
+    return blocked(base, "RETURN_INSPECTION_STATE_CONFLICT");
+  }
+
+  const operationalFailure = deriveInspectionOperationalFailure(context, receipt);
+  if (operationalFailure) return applyInspectionPrerequisiteFailure(base, operationalFailure);
+  return inspection ? completed(base) : available(base);
+}
+
+function deriveCompleteInspectionAction(
+  context: ReturnCaseActionContext,
+  receipt: ReceiptAnalysis,
+): ReturnCaseAction {
+  const base = {
+    kind: "complete_inspection" as const,
+    label: "Complete inspection",
+    description: "Record the inspection as approved or rejected. This does not restock inventory, issue a refund, or settle a vendor balance.",
+  };
+  const policyFailure = deriveInspectionPolicyFailure(context);
+  if (policyFailure) return applyInspectionPrerequisiteFailure(base, policyFailure);
+
+  const inspection = context.inspection;
+  if (inspection && isCoherentTerminalInspection(context, inspection)) return completed(base);
+  if ((inspection && !isCoherentInProgressInspection(context, inspection))
+    || (!inspection && context.lifecycle.inspectionStatus !== "pending")) {
+    return blocked(base, "RETURN_INSPECTION_STATE_CONFLICT");
+  }
+
+  const operationalFailure = deriveInspectionOperationalFailure(context, receipt);
+  if (operationalFailure) return applyInspectionPrerequisiteFailure(base, operationalFailure);
+  return inspection ? available(base) : blocked(base, "RETURN_INSPECTION_NOT_STARTED");
+}
+
+interface InspectionPrerequisiteFailure {
+  state: "blocked" | "not_applicable";
+  reasonCode: string;
+}
+
+function deriveInspectionPolicyFailure(
+  context: ReturnCaseActionContext,
+): InspectionPrerequisiteFailure | null {
+  if (!context.policy) return { state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" };
   if (context.policy.inspectionRequirement === "none"
     || context.conditionalInspectionDecision === "waived") {
-    return notApplicable(base, "RETURN_INSPECTION_NOT_REQUIRED");
+    return { state: "not_applicable", reasonCode: "RETURN_INSPECTION_NOT_REQUIRED" };
   }
   if (context.policy.inspectionOwner !== "card_shellz") {
-    return notApplicable(base, "RETURN_INSPECTION_OWNED_EXTERNALLY");
+    return { state: "not_applicable", reasonCode: "RETURN_INSPECTION_OWNED_EXTERNALLY" };
   }
   if (context.policy.inspectionRequirement === "conditional"
     && context.conditionalInspectionDecision === null) {
-    return blocked(base, "RETURN_CONDITIONAL_INSPECTION_UNRESOLVED");
+    return { state: "blocked", reasonCode: "RETURN_CONDITIONAL_INSPECTION_UNRESOLVED" };
   }
-  if (context.lifecycle.caseStatus !== "open") return blocked(base, "RETURN_CASE_NOT_OPEN");
-  if (context.lifecycle.approvalStatus !== "approved") return blocked(base, "RETURN_CASE_NOT_APPROVED");
-  if (receipt.blocker) return blocked(base, receipt.blocker);
+  return null;
+}
+
+function deriveInspectionOperationalFailure(
+  context: ReturnCaseActionContext,
+  receipt: ReceiptAnalysis,
+): InspectionPrerequisiteFailure | null {
+  if (context.lifecycle.caseStatus !== "open") {
+    return { state: "blocked", reasonCode: "RETURN_CASE_NOT_OPEN" };
+  }
+  if (context.lifecycle.approvalStatus !== "approved") {
+    return { state: "blocked", reasonCode: "RETURN_CASE_NOT_APPROVED" };
+  }
+  if (receipt.blocker) return { state: "blocked", reasonCode: receipt.blocker };
   if (!receipt.summary.fullyReceived || context.lifecycle.logisticsStatus !== "received") {
-    return blocked(base, "RETURN_NOT_FULLY_RECEIVED");
+    return { state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" };
   }
-  if (context.inspection) {
-    if (context.inspection.status !== "in_progress"
-      || context.lifecycle.inspectionStatus !== "in_progress") {
-      return blocked(base, "RETURN_INSPECTION_STATE_CONFLICT");
-    }
-    return completed(base);
-  }
-  if (context.lifecycle.inspectionStatus === "in_progress") {
-    return blocked(base, "RETURN_INSPECTION_STATE_CONFLICT");
-  }
-  if (context.lifecycle.inspectionStatus === "approved"
-    || context.lifecycle.inspectionStatus === "rejected") {
-    return completed(base);
-  }
-  if (context.lifecycle.inspectionStatus !== "pending") {
-    return blocked(base, "RETURN_INSPECTION_STATE_CONFLICT");
-  }
-  return available(base);
+  return null;
+}
+function applyInspectionPrerequisiteFailure(
+  base: Omit<ReturnCaseAction, "state" | "reasonCode">,
+  failure: InspectionPrerequisiteFailure,
+): ReturnCaseAction {
+  return failure.state === "not_applicable"
+    ? notApplicable(base, failure.reasonCode)
+    : blocked(base, failure.reasonCode);
+}
+
+function isCoherentInProgressInspection(
+  context: ReturnCaseActionContext,
+  inspection: ReturnInspectionFacts,
+): boolean {
+  return hasCoherentInspectionIdentity(inspection)
+    && inspection.status === "in_progress"
+    && context.lifecycle.inspectionStatus === "in_progress"
+    && inspection.completedAt === null
+    && inspection.completedBy === null;
+}
+
+function isCoherentTerminalInspection(
+  context: ReturnCaseActionContext,
+  inspection: ReturnInspectionFacts,
+): boolean {
+  return hasCoherentInspectionIdentity(inspection)
+    && (inspection.status === "approved" || inspection.status === "rejected")
+    && context.lifecycle.inspectionStatus === inspection.status
+    && isValidDate(inspection.completedAt)
+    && inspection.completedAt.getTime() >= inspection.startedAt.getTime()
+    && typeof inspection.completedBy === "string"
+    && inspection.completedBy.trim() !== "";
+}
+
+function hasCoherentInspectionIdentity(inspection: ReturnInspectionFacts): boolean {
+  return isPositiveInteger(inspection.inspectionId)
+    && isValidDate(inspection.startedAt)
+    && typeof inspection.startedBy === "string"
+    && inspection.startedBy.trim() !== "";
+}
+
+function isValidDate(value: unknown): value is Date {
+  return value instanceof Date && !Number.isNaN(value.getTime());
+}
+
+function cloneInspectionSummary(inspection: ReturnInspectionFacts | null): ReturnInspectionFacts | null {
+  if (!inspection) return null;
+  return {
+    ...inspection,
+    startedAt: new Date(inspection.startedAt.getTime()),
+    completedAt: inspection.completedAt ? new Date(inspection.completedAt.getTime()) : null,
+  };
 }
 
 function analyzeReceipt(context: ReturnCaseActionContext): ReceiptAnalysis {

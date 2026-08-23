@@ -1,14 +1,21 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  CompleteReturnInspectionReview,
   ReturnCaseOperationsCard,
   createReceiptDraft,
+  refreshReturnCaseAfterConflict,
+  resolveInspectionCompletionContext,
   validateReceiptDraft,
   type ReceiptDraftLine,
 } from "../ReturnCaseOperationsCard";
-import type { ReturnCaseActionPlan, ReturnCaseDetailItem } from "../return-case-admin-api";
+import {
+  ReturnCaseAdminApiError,
+  type ReturnCaseActionPlan,
+  type ReturnCaseDetailItem,
+} from "../return-case-admin-api";
 
 describe("ReturnCaseOperationsCard", () => {
   it("renders only the actions supplied by the server action plan", () => {
@@ -25,12 +32,157 @@ describe("ReturnCaseOperationsCard", () => {
         }],
       }),
       items: [],
+      onRefreshRequested: async () => undefined,
     }));
 
     expect(markup).toContain("Inspect received return");
     expect(markup).toContain("Server-authorized inspection action.");
     expect(markup).not.toContain("Record receipt");
     expect(markup.match(/<button/g)).toHaveLength(1);
+  });
+
+  it("labels the completed begin step as Started and exposes completion for the exact active inspection", () => {
+    const markup = renderToStaticMarkup(createElement(ReturnCaseOperationsCard, {
+      returnCaseId: 42,
+      actionPlan: actionPlan({
+        nextAction: "complete_inspection",
+        inspectionSummary: {
+          inspectionId: 91,
+          status: "in_progress",
+          startedAt: "2026-08-22T14:30:00.000Z",
+          startedBy: "user:7",
+          completedAt: null,
+          completedBy: null,
+        },
+        actions: [
+          {
+            kind: "start_inspection",
+            label: "Begin inspection",
+            description: "Inspection has started.",
+            state: "completed",
+            reasonCode: null,
+          },
+          {
+            kind: "complete_inspection",
+            label: "Complete inspection",
+            description: "Record the final inspection outcome.",
+            state: "available",
+            reasonCode: null,
+          },
+        ],
+      }),
+      items: [item({ receivedQuantity: 1, remainingQuantity: 0, receiptStatus: "received" })],
+      onRefreshRequested: async () => undefined,
+    }));
+
+    expect(markup).toContain("Begin inspection");
+    expect(markup).toContain(">Started<");
+    expect(markup).toContain("Complete inspection");
+    expect(markup.match(/<button/g)).toHaveLength(1);
+  });
+
+  it("does not manufacture a completion control without an exact active inspection identity", () => {
+    const markup = renderToStaticMarkup(createElement(ReturnCaseOperationsCard, {
+      returnCaseId: 42,
+      actionPlan: actionPlan({
+        nextAction: "complete_inspection",
+        inspectionSummary: null,
+        actions: [{
+          kind: "complete_inspection",
+          label: "Complete inspection",
+          description: "Server action lacks the required active inspection evidence.",
+          state: "available",
+          reasonCode: null,
+        }],
+      }),
+      items: [item({ receivedQuantity: 1, remainingQuantity: 0, receiptStatus: "received" })],
+      onRefreshRequested: async () => undefined,
+    }));
+
+    expect(markup).toContain("Complete inspection");
+    expect(markup).not.toContain("<button");
+  });
+
+  it("renders an explicit outcome decision, read-only receipt lines, and the no-side-effects warning", () => {
+    const markup = renderToStaticMarkup(createElement(CompleteReturnInspectionReview, {
+      inspection: {
+        inspectionId: 91,
+        status: "in_progress",
+        startedAt: "2026-08-22T14:30:00.000Z",
+        startedBy: "user:7",
+        completedAt: null,
+        completedBy: null,
+      },
+      returnedItems: [item({ title: "Returned item", receivedQuantity: 1, remainingQuantity: 0, receiptStatus: "received" })],
+      outcome: null,
+      pending: false,
+      notes: "",
+      onOutcomeChange: () => undefined,
+      onNotesChange: () => undefined,
+    }));
+
+    expect(markup).toContain("Inspection outcome");
+    expect(markup).toContain("Approve");
+    expect(markup).toContain("Reject");
+    expect(markup).toContain("Returned item");
+    expect(markup).toContain("does not restock inventory");
+    expect(markup).toContain("Completion notes (optional)");
+    expect(markup).toContain('id="return-inspection-outcome-label"');
+    expect(markup).toContain('aria-labelledby="return-inspection-outcome-label"');
+  });
+
+  it("derives completion only from the latest available action and exact active inspection", () => {
+    const availablePlan = actionPlan({
+      inspectionSummary: {
+        inspectionId: 91,
+        status: "in_progress",
+        startedAt: "2026-08-22T14:30:00.000Z",
+        startedBy: "user:7",
+        completedAt: null,
+        completedBy: null,
+      },
+      actions: [{
+        kind: "complete_inspection",
+        label: "Complete inspection",
+        description: "Record the final inspection outcome.",
+        state: "available",
+        reasonCode: null,
+      }],
+    });
+    const blockedPlan = actionPlan({
+      ...availablePlan,
+      actions: [{ ...availablePlan.actions[0], state: "blocked", reasonCode: "RETURN_CASE_NOT_OPEN" }],
+    });
+
+    expect(resolveInspectionCompletionContext(availablePlan)).toMatchObject({
+      action: { state: "available" },
+      inspection: { inspectionId: 91, status: "in_progress" },
+    });
+    expect(resolveInspectionCompletionContext(blockedPlan)).toBeNull();
+  });
+
+  it("refreshes exactly once after a 409 conflict and classifies refresh failure", async () => {
+    const conflict = new ReturnCaseAdminApiError({
+      code: "RETURN_CASE_INSPECTION_STATE_STALE",
+      message: "Refresh the return case and try again.",
+      status: 409,
+    });
+    const refresh = vi.fn(async () => undefined);
+
+    await expect(refreshReturnCaseAfterConflict(conflict, refresh)).resolves.toBe("refreshed");
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    const failedRefresh = vi.fn(async () => { throw new Error("refresh failed"); });
+    await expect(refreshReturnCaseAfterConflict(conflict, failedRefresh)).resolves.toBe("failed");
+    expect(failedRefresh).toHaveBeenCalledTimes(1);
+
+    const notConflict = new ReturnCaseAdminApiError({
+      code: "RETURN_CASE_CLIENT_INPUT_INVALID",
+      message: "Invalid input.",
+      status: 400,
+    });
+    await expect(refreshReturnCaseAfterConflict(notConflict, refresh)).resolves.toBe("not_requested");
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it("shows server-provided blocked actions without manufacturing an executable control", () => {
@@ -47,6 +199,7 @@ describe("ReturnCaseOperationsCard", () => {
         }],
       }),
       items: [],
+      onRefreshRequested: async () => undefined,
     }));
 
     expect(markup).toContain("Record receipt");
@@ -141,6 +294,7 @@ function actionPlan(overrides: Partial<ReturnCaseActionPlan>): ReturnCaseActionP
       fullyReceived: false,
       partiallyReceived: false,
     },
+    inspectionSummary: null,
     actions: [],
     ...overrides,
   };

@@ -172,6 +172,7 @@ describe("ReturnCaseAdminService", () => {
       actions: [
         { kind: "record_receipt", state: "available" },
         { kind: "start_inspection", state: "blocked" },
+        { kind: "complete_inspection", state: "blocked" },
       ],
     });
     expect(result.events[0]).toMatchObject({
@@ -180,6 +181,44 @@ describe("ReturnCaseAdminService", () => {
     });
   });
 
+  it("serializes active inspection evidence with exact ISO timestamps", async () => {
+    const store = fakeStore();
+    const row = detailRow();
+    row.inspectionStatus = "in_progress";
+    row.logisticsStatus = "received";
+    row.actionContext.lifecycle.inspectionStatus = "in_progress";
+    row.actionContext.lifecycle.logisticsStatus = "received";
+    if (!row.actionContext.receipt) throw new Error("Test receipt evidence is required.");
+    row.actionContext.receipt.wmsStatus = "received";
+    row.actionContext.receipt.receivedAt = new Date("2026-08-22T10:59:00.000Z");
+    row.actionContext.receipt.items[0].wmsReceivedQuantity = 2;
+    row.actionContext.receipt.items[0].wmsStatus = "received";
+    row.actionContext.inspection = {
+      inspectionId: 91,
+      status: "in_progress",
+      startedAt: new Date("2026-08-22T11:00:00.000Z"),
+      startedBy: "user:6",
+      completedAt: null,
+      completedBy: null,
+    };
+    store.getById.mockResolvedValue(row);
+    const service = new ReturnCaseAdminService(store);
+
+    const result = await service.getById(8);
+
+    expect(result.actionPlan.inspectionSummary).toEqual({
+      inspectionId: 91,
+      status: "in_progress",
+      startedAt: "2026-08-22T11:00:00.000Z",
+      startedBy: "user:6",
+      completedAt: null,
+      completedBy: null,
+    });
+    expect(result.actionPlan.actions).toContainEqual(expect.objectContaining({
+      kind: "complete_inspection",
+      state: "available",
+    }));
+  });
   it("serializes a blocked action plan when immutable policy evidence is invalid", async () => {
     const store = fakeStore();
     const row = detailRow();
@@ -193,6 +232,7 @@ describe("ReturnCaseAdminService", () => {
     expect(result.actionPlan.actions).toEqual([
       expect.objectContaining({ kind: "record_receipt", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
       expect.objectContaining({ kind: "start_inspection", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
+      expect.objectContaining({ kind: "complete_inspection", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
     ]);
   });
 

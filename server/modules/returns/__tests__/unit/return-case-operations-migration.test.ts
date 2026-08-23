@@ -7,6 +7,11 @@ const migration = readFileSync(
   "utf8",
 );
 
+const completionMigration = readFileSync(
+  resolve(process.cwd(), "migrations/201_return_case_inspection_completion.sql"),
+  "utf8",
+);
+
 describe("return case operations migration", () => {
   it("adds honest partial receipt and in-progress inspection lifecycle states", () => {
     expect(migration).toContain("'partially_received'");
@@ -28,5 +33,23 @@ describe("return case operations migration", () => {
     expect(migration).toContain("command_type IN ('record_receipt', 'start_inspection')");
     expect(migration).toContain("CREATE TRIGGER return_case_commands_immutable");
     expect(migration).toContain("BEFORE UPDATE OR DELETE ON returns.return_case_commands");
+  });
+
+  it("adds completion notes and the idempotent complete-inspection command", () => {
+    expect(completionMigration).toContain("ADD COLUMN IF NOT EXISTS completion_notes text");
+    expect(completionMigration).toContain("DROP CONSTRAINT IF EXISTS return_case_commands_type_chk");
+    expect(completionMigration).toContain(
+      "command_type IN ('record_receipt', 'start_inspection', 'complete_inspection')",
+    );
+  });
+
+  it("allows one safe terminal transition while preserving cascade-delete semantics", () => {
+    expect(completionMigration).toContain("CREATE OR REPLACE FUNCTION returns.guard_return_case_inspection_mutation()");
+    expect(completionMigration).toContain("OLD.status <> 'in_progress'");
+    expect(completionMigration).toContain("NEW.status NOT IN ('approved', 'rejected', 'cancelled')");
+    expect(completionMigration).toContain("Return case inspection identity and start evidence are immutable");
+    expect(completionMigration).toContain("Completed return case inspections are immutable");
+    expect(completionMigration).toContain("BEFORE UPDATE ON returns.return_case_inspections");
+    expect(completionMigration).not.toContain("BEFORE UPDATE OR DELETE ON returns.return_case_inspections");
   });
 });

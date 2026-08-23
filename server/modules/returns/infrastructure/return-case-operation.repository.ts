@@ -7,7 +7,9 @@ import {
 } from "../../wms/return-receipt-commands";
 import {
   ReturnCaseOperationError,
+  type CompleteReturnInspectionResult,
   type ExistingReturnCaseCommand,
+  type PersistCompleteInspectionInput,
   type PersistReturnReceiptInput,
   type PersistStartInspectionInput,
   type RecordReturnReceiptResult,
@@ -186,8 +188,11 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
       SELECT id, status, started_at, started_by, completed_at, completed_by
       FROM returns.return_case_inspections
       WHERE return_case_id = ${caseId}
-        AND status = 'in_progress'
-      ORDER BY id
+        AND status IN ('in_progress', 'approved', 'rejected')
+      ORDER BY
+        CASE WHEN status = 'in_progress' THEN 0 ELSE 1 END,
+        id DESC
+      LIMIT 1
       FOR UPDATE
     `);
 
@@ -197,14 +202,6 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
       "canonical return item count",
     );
     const inspections = rowsOf<InspectionRow>(inspectionResult);
-    if (inspections.length > 1) {
-      throw new ReturnCaseOperationError(
-        "RETURN_CASE_INSPECTION_DATA_INVALID",
-        "Return case has more than one active inspection.",
-        500,
-        { caseId, activeInspectionCount: inspections.length },
-      );
-    }
 
     return {
       caseId: readPositiveInteger(row.id, "return case id"),
@@ -377,6 +374,114 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
     }, { timestamp: input.now, emitStructuredLog: false });
     return result;
   }
+
+  async persistCompleteInspection(input: PersistCompleteInspectionInput): Promise<CompleteReturnInspectionResult> {
+    const policy = input.aggregate.actionContext.policy;
+    if (!policy) {
+      throw new ReturnCaseOperationError(
+        "RETURN_POLICY_SNAPSHOT_INVALID",
+        "Return inspection completion requires a valid immutable policy snapshot.",
+        500,
+        { caseId: input.aggregate.caseId },
+      );
+    }
+    const inspectionUpdate = await this.tx.execute(sql`
+      UPDATE returns.return_case_inspections
+      SET status = ${input.outcome},
+          completed_at = ${input.now},
+          completed_by = ${input.actor},
+          completion_notes = ${input.notes},
+          updated_at = ${input.now}
+      WHERE id = ${input.inspectionId}
+        AND return_case_id = ${input.aggregate.caseId}
+        AND status = 'in_progress'
+        AND completed_at IS NULL
+        AND completed_by IS NULL
+      RETURNING id
+    `);
+    requireSingleInspectionMutation(inspectionUpdate, input, "inspection");
+
+    const caseUpdate = await this.tx.execute(sql`
+      UPDATE returns.return_cases
+      SET inspection_status = ${input.outcome},
+          updated_at = ${input.now}
+      WHERE id = ${input.aggregate.caseId}
+        AND inspection_status = 'in_progress'
+      RETURNING id
+    `);
+    requireSingleInspectionMutation(caseUpdate, input, "case");
+
+    const details = {
+      requestHash: input.requestHash,
+      inspectionId: input.inspectionId,
+      outcome: input.outcome,
+      notes: input.notes,
+      policyId: policy.id,
+      policyVersion: policy.version,
+    };
+    await appendEvent(
+      this.tx,
+      input.aggregate.caseId,
+      "return_inspection_completed",
+      input.actor,
+      details,
+      input.now,
+    );
+    const result: CompleteReturnInspectionResult = {
+      commandType: "complete_inspection",
+      caseId: input.aggregate.caseId,
+      caseNumber: input.aggregate.caseNumber,
+      inspectionId: input.inspectionId,
+      inspectionStatus: input.outcome,
+      completedAt: input.now.toISOString(),
+      replayed: false,
+    };
+    await persistCommand(
+      this.tx,
+      input.aggregate.caseId,
+      input.idempotencyKey,
+      input.requestHash,
+      result,
+      input.actor,
+      input.now,
+    );
+    await persistAuditEvent(this.tx, {
+      actor: input.actor,
+      action: "RETURN_CASE_INSPECTION_COMPLETED",
+      target: `returns.return_cases:${input.aggregate.caseId}`,
+      changes: {
+        before: {
+          inspectionStatus: input.aggregate.actionContext.lifecycle.inspectionStatus,
+          inspectionId: input.inspectionId,
+        },
+        after: { inspectionStatus: input.outcome, inspectionId: input.inspectionId },
+      },
+      context: details,
+    }, { timestamp: input.now, emitStructuredLog: false });
+    return result;
+  }
+}
+
+function requireSingleInspectionMutation(
+  result: unknown,
+  input: PersistCompleteInspectionInput,
+  target: "inspection" | "case",
+): void {
+  const rows = rowsOf<{ id: unknown }>(result);
+  if (rows.length !== 1) {
+    throw new ReturnCaseOperationError(
+      "RETURN_CASE_INSPECTION_STATE_STALE",
+      "The inspection changed while completion was being recorded. Refresh the return case and try again.",
+      409,
+      {
+        caseId: input.aggregate.caseId,
+        inspectionId: input.inspectionId,
+        target,
+        affectedRows: rows.length,
+      },
+    );
+  }
+  readPositiveInteger(rows[0].id, `${target} completion id`);
 }
 
 async function appendEvent(
@@ -482,9 +587,24 @@ function readStoredResult(value: unknown, commandType: ExistingReturnCaseCommand
       replayed: readBoolean(row.replayed, "stored replayed"),
     };
   }
-  const inspectionStatus = readText(row.inspectionStatus, "stored inspection status");
-  if (inspectionStatus !== "in_progress") {
-    throw new ReturnCaseOperationError("RETURN_CASE_COMMAND_DATA_INVALID", "Stored inspection status is invalid.", 500);
+  if (commandType === "start_inspection") {
+    const inspectionStatus = readText(row.inspectionStatus, "stored inspection status");
+    if (inspectionStatus !== "in_progress") {
+      throw new ReturnCaseOperationError("RETURN_CASE_COMMAND_DATA_INVALID", "Stored inspection status is invalid.", 500);
+    }
+    return {
+      commandType,
+      caseId: readPositiveInteger(row.caseId, "stored case id"),
+      caseNumber: readText(row.caseNumber, "stored case number"),
+      inspectionId: readPositiveInteger(row.inspectionId, "stored inspection id"),
+      inspectionStatus,
+      startedAt: readDate(row.startedAt, "stored inspection start").toISOString(),
+      replayed: readBoolean(row.replayed, "stored replayed"),
+    };
+  }
+  const inspectionStatus = readText(row.inspectionStatus, "stored inspection completion status");
+  if (inspectionStatus !== "approved" && inspectionStatus !== "rejected") {
+    throw new ReturnCaseOperationError("RETURN_CASE_COMMAND_DATA_INVALID", "Stored inspection completion status is invalid.", 500);
   }
   return {
     commandType,
@@ -492,13 +612,13 @@ function readStoredResult(value: unknown, commandType: ExistingReturnCaseCommand
     caseNumber: readText(row.caseNumber, "stored case number"),
     inspectionId: readPositiveInteger(row.inspectionId, "stored inspection id"),
     inspectionStatus,
-    startedAt: readDate(row.startedAt, "stored inspection start").toISOString(),
+    completedAt: readDate(row.completedAt, "stored inspection completion").toISOString(),
     replayed: readBoolean(row.replayed, "stored replayed"),
   };
 }
 
 function readCommandType(value: unknown): ExistingReturnCaseCommand["commandType"] {
-  if (value === "record_receipt" || value === "start_inspection") return value;
+  if (value === "record_receipt" || value === "start_inspection" || value === "complete_inspection") return value;
   throw new ReturnCaseOperationError("RETURN_CASE_COMMAND_DATA_INVALID", "Stored return command type is invalid.", 500);
 }
 

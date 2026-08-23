@@ -318,6 +318,171 @@ describe("ReturnCaseOperationService", () => {
     }));
   });
 
+  it.each(["approved", "rejected"] as const)(
+    "completes an in-progress inspection as %s without delegating side effects",
+    async (outcome) => {
+      tx.loadForUpdate.mockResolvedValue(aggregate({
+        firstExpected: 2,
+        firstReceived: 2,
+        secondExpected: 3,
+        secondReceived: 3,
+        logisticsStatus: "received",
+        wmsStatus: "received",
+        inspectionStatus: "in_progress",
+        inspection: activeInspection(8),
+      }));
+      tx.persistCompleteInspection.mockImplementation(async (input) => ({
+        commandType: "complete_inspection",
+        caseId: input.aggregate.caseId,
+        caseNumber: input.aggregate.caseNumber,
+        inspectionId: input.inspectionId,
+        inspectionStatus: input.outcome,
+        completedAt: input.now.toISOString(),
+        replayed: false,
+      }));
+
+      const result = await service.completeInspection({
+        caseId: 1,
+        inspectionId: 8,
+        idempotencyKey: ` complete-${outcome} `,
+        actor: " user:7 ",
+        outcome,
+        notes: " inspected ",
+      });
+
+      expect(result).toMatchObject({
+        commandType: "complete_inspection",
+        inspectionId: 8,
+        inspectionStatus: outcome,
+        completedAt: NOW.toISOString(),
+        replayed: false,
+      });
+      expect(tx.persistCompleteInspection).toHaveBeenCalledWith(expect.objectContaining({
+        inspectionId: 8,
+        idempotencyKey: `complete-${outcome}`,
+        actor: "user:7",
+        outcome,
+        notes: "inspected",
+        now: NOW,
+      }));
+    },
+  );
+
+  it("replays completion before loading mutable state or reading the clock", async () => {
+    const clock = vi.fn(() => NOW);
+    const replayService = new ReturnCaseOperationService({
+      transaction: (work) => work(tx as unknown as ReturnCaseOperationTransaction),
+    }, clock);
+    const input = {
+      caseId: 1,
+      inspectionId: 8,
+      idempotencyKey: "complete-replay",
+      actor: "user:7",
+      outcome: "approved" as const,
+      notes: null,
+    };
+    tx.loadForUpdate.mockResolvedValue(aggregate({
+      firstExpected: 2,
+      firstReceived: 2,
+      secondExpected: 3,
+      secondReceived: 3,
+      logisticsStatus: "received",
+      wmsStatus: "received",
+      inspectionStatus: "in_progress",
+      inspection: activeInspection(8),
+    }));
+    tx.persistCompleteInspection.mockRejectedValueOnce(new Error("capture"));
+    await expect(replayService.completeInspection(input)).rejects.toThrow("capture");
+    const requestHash = tx.persistCompleteInspection.mock.calls[0][0].requestHash;
+    tx.findCommand.mockResolvedValue({
+      commandType: "complete_inspection",
+      requestHash,
+      result: {
+        commandType: "complete_inspection",
+        caseId: 1,
+        caseNumber: "RET-0000000001",
+        inspectionId: 8,
+        inspectionStatus: "approved",
+        completedAt: NOW.toISOString(),
+        replayed: false,
+      },
+    });
+    tx.loadForUpdate.mockClear();
+    tx.persistCompleteInspection.mockClear();
+    clock.mockClear();
+
+    const replay = await replayService.completeInspection(input);
+
+    expect(replay.replayed).toBe(true);
+    expect(tx.loadForUpdate).not.toHaveBeenCalled();
+    expect(tx.persistCompleteInspection).not.toHaveBeenCalled();
+    expect(clock).not.toHaveBeenCalled();
+  });
+
+  it("rejects completion idempotency conflicts before loading the aggregate", async () => {
+    tx.findCommand.mockResolvedValue({
+      commandType: "complete_inspection",
+      requestHash: "0".repeat(64),
+      result: {
+        commandType: "complete_inspection",
+        caseId: 1,
+        caseNumber: "RET-0000000001",
+        inspectionId: 8,
+        inspectionStatus: "approved",
+        completedAt: NOW.toISOString(),
+        replayed: false,
+      },
+    });
+
+    await expect(service.completeInspection({
+      caseId: 1,
+      inspectionId: 8,
+      idempotencyKey: "complete-conflict",
+      actor: "user:7",
+      outcome: "rejected",
+      notes: null,
+    })).rejects.toMatchObject({ code: "RETURN_CASE_IDEMPOTENCY_CONFLICT", status: 409 });
+    expect(tx.loadForUpdate).not.toHaveBeenCalled();
+    expect(tx.persistCompleteInspection).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stale inspection path id before reading the clock or persisting", async () => {
+    const clock = vi.fn(() => NOW);
+    const staleService = new ReturnCaseOperationService({
+      transaction: (work) => work(tx as unknown as ReturnCaseOperationTransaction),
+    }, clock);
+    tx.loadForUpdate.mockResolvedValue(aggregate({
+      firstExpected: 2,
+      firstReceived: 2,
+      secondExpected: 3,
+      secondReceived: 3,
+      logisticsStatus: "received",
+      wmsStatus: "received",
+      inspectionStatus: "in_progress",
+      inspection: activeInspection(8),
+    }));
+
+    await expect(staleService.completeInspection({
+      caseId: 1,
+      inspectionId: 9,
+      idempotencyKey: "complete-stale",
+      actor: "user:7",
+      outcome: "approved",
+      notes: null,
+    })).rejects.toMatchObject({
+      code: "RETURN_CASE_INSPECTION_STATE_STALE",
+      status: 409,
+      context: {
+        caseId: 1,
+        expectedInspectionId: 9,
+        actualInspectionId: 8,
+        actualInspectionStatus: "in_progress",
+      },
+    });
+    expect(tx.persistCompleteInspection).not.toHaveBeenCalled();
+    expect(clock).not.toHaveBeenCalled();
+  });
+
   it("does not start inspection before full receipt", async () => {
     tx.loadForUpdate.mockResolvedValue(aggregate());
 
@@ -372,6 +537,7 @@ function fakeTransaction() {
     loadForUpdate: vi.fn(),
     persistReceipt: vi.fn(),
     persistStartInspection: vi.fn(),
+    persistCompleteInspection: vi.fn(),
   };
 }
 
@@ -382,6 +548,8 @@ function aggregate(input: {
   secondReceived?: number;
   logisticsStatus?: "awaiting_return" | "partially_received" | "received";
   wmsStatus?: "expected" | "partially_received" | "received";
+  inspectionStatus?: "pending" | "in_progress" | "approved" | "rejected";
+  inspection?: ReturnCaseOperationAggregate["actionContext"]["inspection"];
 } = {}): ReturnCaseOperationAggregate {
   const firstExpected = input.firstExpected ?? 2;
   const firstReceived = input.firstReceived ?? 0;
@@ -398,7 +566,7 @@ function aggregate(input: {
         caseStatus: "open",
         approvalStatus: "approved",
         logisticsStatus: input.logisticsStatus ?? "awaiting_return",
-        inspectionStatus: "pending",
+        inspectionStatus: input.inspectionStatus ?? "pending",
         customerRefundStatus: "pending",
         vendorSettlementStatus: "not_applicable",
       },
@@ -444,9 +612,20 @@ function aggregate(input: {
           },
         ],
       },
-      inspection: null,
+      inspection: input.inspection ?? null,
       conditionalInspectionDecision: null,
     },
+  };
+}
+
+function activeInspection(inspectionId: number): NonNullable<ReturnCaseOperationAggregate["actionContext"]["inspection"]> {
+  return {
+    inspectionId,
+    status: "in_progress",
+    startedAt: new Date("2026-08-22T11:00:00.000Z"),
+    startedBy: "user:6",
+    completedAt: null,
+    completedBy: null,
   };
 }
 

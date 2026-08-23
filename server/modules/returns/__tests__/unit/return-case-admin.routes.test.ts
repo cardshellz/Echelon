@@ -252,6 +252,72 @@ describe("return case admin routes", () => {
     });
   });
 
+  it("completes an inspection with strict normalized input and the authenticated actor", async () => {
+    operationService.completeInspection.mockResolvedValue({
+      commandType: "complete_inspection",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      inspectionId: 81,
+      inspectionStatus: "approved",
+      completedAt: "2026-08-22T17:00:00.000Z",
+      replayed: false,
+    });
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/inspections/81/complete`, {
+      method: "POST",
+      body: { idempotencyKey: " complete-command-1 ", outcome: "approved", notes: " approved condition " },
+    });
+
+    expect(response.status).toBe(201);
+    expect(operationService.completeInspection).toHaveBeenCalledWith({
+      caseId: 42,
+      inspectionId: 81,
+      idempotencyKey: "complete-command-1",
+      outcome: "approved",
+      notes: "approved condition",
+      actor: "user:7",
+    });
+  });
+
+  it("returns 200 for a completion command replay", async () => {
+    operationService.completeInspection.mockResolvedValue({
+      commandType: "complete_inspection",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      inspectionId: 81,
+      inspectionStatus: "rejected",
+      completedAt: "2026-08-22T17:00:00.000Z",
+      replayed: true,
+    });
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/inspections/81/complete`, {
+      method: "POST",
+      body: { idempotencyKey: "complete-command-2", outcome: "rejected", notes: null },
+    });
+
+    expect(response.status).toBe(200);
+  });
+
+  it("strictly rejects malformed completion commands and unsafe inspection ids", async () => {
+    const malformed = await jsonRequest(`${server.url}/api/returns/admin/cases/42/inspections/81/complete`, {
+      method: "POST",
+      body: {
+        idempotencyKey: "complete-command-3",
+        outcome: "approved",
+        notes: null,
+        actor: "forged-actor",
+      },
+    });
+    const unsafeId = await jsonRequest(
+      `${server.url}/api/returns/admin/cases/42/inspections/9007199254740992/complete`,
+      { method: "POST", body: { idempotencyKey: "complete-command-4", outcome: "approved", notes: null } },
+    );
+
+    expect(malformed).toMatchObject({ status: 400, body: { error: { code: "RETURN_CASE_QUERY_INVALID" } } });
+    expect(unsafeId).toMatchObject({ status: 400, body: { error: { code: "RETURN_CASE_QUERY_INVALID" } } });
+    expect(operationService.completeInspection).not.toHaveBeenCalled();
+  });
+
   it("returns 200 for receipt and inspection command replays", async () => {
     operationService.recordReceipt.mockResolvedValue({
       commandType: "record_receipt",
@@ -371,11 +437,12 @@ describe("return case admin routes", () => {
     });
   });
 
-  it("requires inventory adjust permission for both operation routes", () => {
+  it("requires inventory adjust permission for all operation routes", () => {
     const adjustCalls = requirePermissionMock.mock.calls.filter(
       ([resource, action]) => resource === "inventory" && action === "adjust",
     );
     expect(adjustCalls).toEqual([
+      ["inventory", "adjust"],
       ["inventory", "adjust"],
       ["inventory", "adjust"],
     ]);
@@ -391,7 +458,7 @@ function fakeOpenService() {
 }
 
 function fakeOperationService() {
-  return { recordReceipt: vi.fn(), startInspection: vi.fn() };
+  return { recordReceipt: vi.fn(), startInspection: vi.fn(), completeInspection: vi.fn() };
 }
 
 function buildApp(
