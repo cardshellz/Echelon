@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import {
   afterAll,
@@ -6,6 +7,8 @@ import {
   expect,
   it,
 } from "vitest";
+
+import { canonicalJson } from "@shared/utils/canonical-json";
 
 import {
   closeTestDb,
@@ -18,6 +21,7 @@ import type {
   PackageAllocationEffectIntentV1,
   PackageAllocationEntryV1,
 } from "../../package-allocation-group.domain";
+import { PackageAllocationAuthorityReadinessService } from "../../package-allocation-authority-readiness.service";
 import {
   PgPackageAllocationLedgerRepository,
   type PersistedPackageAllocationEntry,
@@ -162,6 +166,110 @@ async function seedCustomerFulfillmentSource(
   return shipmentItem.rows[0].id;
 }
 
+async function installAuthorityReadinessTestRelations(pool: Pool): Promise<void> {
+  await pool.query(`
+    ALTER TABLE wms.shipping_provider_labels
+      ADD COLUMN provider varchar(40) NOT NULL,
+      ADD COLUMN provider_label_id varchar(200) NOT NULL,
+      ADD COLUMN tracking_number varchar(200) NOT NULL,
+      ADD COLUMN label_status varchar(30) NOT NULL,
+      ADD COLUMN label_direction varchar(20) NOT NULL,
+      ADD COLUMN first_observed_at timestamptz NOT NULL,
+      ADD COLUMN last_observed_at timestamptz NOT NULL;
+
+    CREATE TABLE wms.shipping_provider_label_events (
+      id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      shipping_provider_label_id bigint NOT NULL
+        REFERENCES wms.shipping_provider_labels(id) ON DELETE RESTRICT,
+      event_hash varchar(64) NOT NULL,
+      event_type varchar(40) NOT NULL,
+      label_status varchar(30) NOT NULL,
+      tracking_number varchar(200) NOT NULL,
+      provider_occurred_at timestamptz,
+      received_at timestamptz NOT NULL,
+      sanitized_payload jsonb NOT NULL
+    );
+
+    CREATE TABLE wms.carrier_tracking_events (
+      id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      dispatch_evidence varchar(30) NOT NULL,
+      event_occurred_at timestamptz,
+      received_at timestamptz NOT NULL
+    );
+
+    CREATE TABLE wms.carrier_tracking_event_matches (
+      id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      carrier_tracking_event_id bigint NOT NULL
+        REFERENCES wms.carrier_tracking_events(id) ON DELETE RESTRICT,
+      shipping_provider_label_id bigint NOT NULL
+        REFERENCES wms.shipping_provider_labels(id) ON DELETE RESTRICT,
+      attempt_hash varchar(64) NOT NULL,
+      match_status varchar(30) NOT NULL
+    );
+
+    CREATE TABLE wms.carrier_tracking_reconciliation_state (
+      carrier_tracking_event_id bigint PRIMARY KEY
+        REFERENCES wms.carrier_tracking_events(id) ON DELETE RESTRICT,
+      last_match_attempt_id bigint NOT NULL
+        REFERENCES wms.carrier_tracking_event_matches(id) ON DELETE RESTRICT,
+      last_match_attempt_hash varchar(64) NOT NULL,
+      last_match_status varchar(30) NOT NULL
+    );
+  `);
+}
+
+async function seedAuthorityReadinessLabel(pool: Pool, sourceId: number): Promise<number> {
+  const trackingNumber = "1Z999AA10123456784";
+  const providerLabelId = "44001";
+  const receivedAt = "2026-08-23T14:00:00.000Z";
+  const payload = {
+    payloadSchemaVersion: 2,
+    providerLabelId,
+    trackingNumber,
+    observationSource: "shipstation_shipment_observation",
+    sourceObservationHash: "f".repeat(64),
+    createDate: null,
+    shipDate: null,
+    voidDate: null,
+    isReturnLabel: false,
+    declaredContentsEvidence: {
+      evidenceSchemaVersion: 1,
+      status: "authoritative",
+      providerItemCount: 1,
+      recognizedProviderItemCount: 1,
+      canonicalLineCount: 1,
+      malformedItemCount: 0,
+      unrecognizedItemCount: 0,
+      duplicateLineItemCount: 0,
+      rejectedItemCount: 0,
+      reviewRequired: false,
+      lines: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 2 }],
+    },
+  };
+  const label = await pool.query<{ id: number }>(
+    `INSERT INTO wms.shipping_provider_labels (
+       provider, provider_label_id, tracking_number, label_status,
+       label_direction, first_observed_at, last_observed_at
+     ) VALUES ('shipstation', $1, $2, 'active', 'outbound', $3, $3)
+     RETURNING id`,
+    [providerLabelId, trackingNumber, receivedAt],
+  );
+  const labelId = label.rows[0].id;
+  const eventHash = createHash("sha256").update(canonicalJson({
+    provider: "shipstation",
+    ...payload,
+    labelStatus: "active",
+  })).digest("hex");
+  await pool.query(
+    `INSERT INTO wms.shipping_provider_label_events (
+       shipping_provider_label_id, event_hash, event_type, label_status,
+       tracking_number, provider_occurred_at, received_at, sanitized_payload
+     ) VALUES ($1, $2, 'label_observed', 'active', $3, NULL, $4, $5::jsonb)`,
+    [labelId, eventHash, trackingNumber, receivedAt, JSON.stringify(payload)],
+  );
+  return labelId;
+}
+
 function commandFor(
   sourceWmsShipmentItemId: number,
   overrides: {
@@ -283,6 +391,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
   beforeAll(async () => {
     await runMigrations();
     pool = getTestPool();
+    await installAuthorityReadinessTestRelations(pool);
   }, 30_000);
 
   beforeEach(async () => {
@@ -291,6 +400,42 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
   afterAll(async () => {
     await closeTestDb();
+  });
+
+  it("loads locked persisted evidence and remains shadow-only without ledger writes", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-READINESS", 2);
+    const labelId = await seedAuthorityReadinessLabel(pool, sourceId);
+    const service = new PackageAllocationAuthorityReadinessService(
+      new PgPackageAllocationLedgerRepository(pool),
+    );
+
+    const result = await service.assess({
+      contractVersion: 1,
+      authorityMode: "shadow_only",
+      sourceWmsShipmentItemIds: [sourceId],
+      shippingProviderLabelIds: [labelId],
+    });
+
+    expect(result).toMatchObject({
+      authority: "none",
+      outcome: "review",
+      plannerInput: null,
+      packageAssessments: [{
+        evidenceKey: `shipping-provider-label:${labelId}`,
+        lifecycleStatus: "projected",
+        candidateSourceStatus: "within_candidate_sources",
+        authoritativeContents: [{
+          wmsShipmentItemId: sourceId,
+          quantity: 2,
+        }],
+      }],
+    });
+    expect(result.reviews.map((review) => review.code)).toEqual([
+      "allocation_role_policy_unresolved",
+      "package_membership_policy_unresolved",
+      "physical_consumption_authority_policy_unresolved",
+    ]);
+    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
   });
 
   it("persists one complete inert plan and exact-replays it without duplicate rows", async () => {
