@@ -1,5 +1,19 @@
 export const PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES = 200;
 
+export const PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES = Object.freeze([
+  "legacy_wms_shipment_link",
+  "physical_shipment_link",
+  "provider_order_id_match",
+  "provider_order_key_match",
+  "provider_physical_shipment_match",
+  "provider_order_reference_match",
+  "shipment_request_link",
+  "shipping_engine_order_link",
+] as const);
+
+export type PackageAllocationAuthorityDiscoveryRelationshipType =
+  typeof PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES[number];
+
 /**
  * Application relations read by the package-allocation relationship discovery
  * query. PostgreSQL catalog relations used by the plan audit are intentionally
@@ -190,46 +204,60 @@ scope_physical_shipments AS MATERIALIZED (
   JOIN anchor_engine_orders AS engine_order
     ON engine_order.id = physical.shipping_engine_order_id
 ),
-candidate_labels AS MATERIALIZED (
-  SELECT link.shipping_provider_label_id AS id
+candidate_label_relationships AS MATERIALIZED (
+  SELECT
+    link.shipping_provider_label_id AS id,
+    'shipment_request_link'::text AS relationship_type
   FROM wms.shipping_provider_label_links AS link
   WHERE link.shipment_request_id IN (SELECT id FROM scope_requests)
-  UNION
-  SELECT link.shipping_provider_label_id
+  UNION ALL
+  SELECT
+    link.shipping_provider_label_id,
+    'shipping_engine_order_link'::text
   FROM wms.shipping_provider_label_links AS link
   WHERE link.shipping_engine_order_id IN (
     SELECT id FROM anchor_engine_orders
   )
-  UNION
-  SELECT link.shipping_provider_label_id
+  UNION ALL
+  SELECT
+    link.shipping_provider_label_id,
+    'physical_shipment_link'::text
   FROM wms.shipping_provider_label_links AS link
   WHERE link.physical_shipment_id IN (
     SELECT id FROM scope_physical_shipments
   )
-  UNION
-  SELECT link.shipping_provider_label_id
+  UNION ALL
+  SELECT
+    link.shipping_provider_label_id,
+    'legacy_wms_shipment_link'::text
   FROM wms.shipping_provider_label_links AS link
   WHERE link.legacy_wms_shipment_id IN (
     SELECT id FROM scope_legacy_shipments
   )
-  UNION
-  SELECT label.id
+  UNION ALL
+  SELECT
+    label.id,
+    'provider_order_id_match'::text
   FROM wms.shipping_provider_labels AS label
   JOIN wms.shipping_engine_orders AS engine_order
     ON engine_order.id IN (SELECT id FROM anchor_engine_orders)
    AND engine_order.provider = label.provider
    AND engine_order.provider_order_id = label.provider_order_id
   WHERE engine_order.provider_order_id IS NOT NULL
-  UNION
-  SELECT label.id
+  UNION ALL
+  SELECT
+    label.id,
+    'provider_order_key_match'::text
   FROM wms.shipping_provider_labels AS label
   JOIN wms.shipping_engine_orders AS engine_order
     ON engine_order.id IN (SELECT id FROM anchor_engine_orders)
    AND engine_order.provider = label.provider
    AND engine_order.provider_order_key = label.provider_order_key
   WHERE engine_order.provider_order_key IS NOT NULL
-  UNION
-  SELECT label.id
+  UNION ALL
+  SELECT
+    label.id,
+    'provider_order_reference_match'::text
   FROM wms.shipping_provider_labels AS label
   JOIN wms.shipping_engine_order_provider_refs AS provider_ref
     ON provider_ref.shipping_engine_order_id IN (
@@ -237,22 +265,37 @@ candidate_labels AS MATERIALIZED (
     )
    AND provider_ref.provider = label.provider
    AND provider_ref.provider_order_id = label.provider_order_id
-  UNION
-  SELECT label.id
+  UNION ALL
+  SELECT
+    label.id,
+    'provider_physical_shipment_match'::text
   FROM wms.shipping_provider_labels AS label
   JOIN wms.physical_shipments AS physical
     ON physical.id IN (SELECT id FROM scope_physical_shipments)
    AND physical.provider = label.provider
    AND physical.provider_physical_shipment_id = label.provider_label_id
+),
+candidate_labels AS MATERIALIZED (
+  SELECT
+    relationship.id,
+    ARRAY_AGG(
+      DISTINCT relationship.relationship_type
+      ORDER BY relationship.relationship_type
+    ) AS relationship_types
+  FROM candidate_label_relationships AS relationship
+  GROUP BY relationship.id
 )
 SELECT
   stats.source_count,
   stats.found_source_ids,
-  candidate.shipping_provider_label_id
+  candidate.shipping_provider_label_id,
+  candidate.relationship_types
 FROM source_stats AS stats
 LEFT JOIN LATERAL (
-  SELECT label.id::text AS shipping_provider_label_id,
-         label.id AS sortable_label_id
+  SELECT
+    label.id::text AS shipping_provider_label_id,
+    candidate_label.relationship_types,
+    label.id AS sortable_label_id
   FROM candidate_labels AS candidate_label
   JOIN wms.shipping_provider_labels AS label
     ON label.id = candidate_label.id

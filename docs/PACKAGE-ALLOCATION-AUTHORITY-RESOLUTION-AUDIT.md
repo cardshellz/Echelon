@@ -24,14 +24,20 @@ fallback.
 4. Relationship discovery is bounded to one source, at most 200 packages,
    10,000 label events, 5,000 current carrier events, and 8 MiB of sanitized
    payload evidence.
-5. Standard output contains aggregate counts, review codes, plan evidence, and
-   timings only. It omits the source ID, group UUID, label IDs, tracking
-   numbers, package keys, raw evidence, and planner snapshots.
+5. Standard output contains aggregate counts, fixed relationship-path counts,
+   review codes, plan evidence, and timings only. It omits the source ID, group
+   UUID, label IDs, tracking numbers, package keys, raw evidence, and planner
+   snapshots.
 6. Any executable effect intent is a hard failure.
 
 Relationship discovery is not complete authority. A package with no persisted
 relationship remains unknowable; successful output therefore retains
 `selectionCompleteness: "unproven_outside_persisted_relationships"`.
+
+`relationshipPathPackageCounts` explains which persisted path categories
+selected packages without exposing their identities. Those counts do not prove
+package contents, source membership, allocation role, or physical-consumption
+authority.
 
 ## Deployment prerequisites
 
@@ -81,6 +87,8 @@ not bounded by the PostgreSQL query timeout.
 - `databaseTemporaryPrivilege` is `false`;
 - `plannedSequentialScanCount` is zero;
 - `executableEffectIntentCount` is zero;
+- `relationshipPathPackageCounts` contains only the eight closed relationship
+  categories with nonnegative package counts;
 - selected/projected/rejected package counts and review codes are plausible for
   the privately selected case;
 - no identifier or raw evidence appears in output;

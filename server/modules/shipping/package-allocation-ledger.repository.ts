@@ -13,8 +13,10 @@ import type {
 } from "./package-allocation-source-identity.domain";
 import {
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES,
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES,
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_SQL,
+  type PackageAllocationAuthorityDiscoveryRelationshipType,
 } from "./package-allocation-authority-discovery.query";
 
 const SOURCE_LOCK_NAMESPACE = 918_421;
@@ -30,6 +32,10 @@ const MAX_AUTHORITY_TOTAL_EVENTS = 10_000;
 const MAX_AUTHORITY_CURRENT_CARRIER_EVENTS = 5_000;
 const MAX_AUTHORITY_EVENT_PAYLOAD_BYTES = 4 * 1_024 * 1_024;
 const MAX_AUTHORITY_TOTAL_PAYLOAD_BYTES = 8 * 1_024 * 1_024;
+
+const AUTHORITY_DISCOVERY_RELATIONSHIP_TYPE_SET = new Set<string>(
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES,
+);
 
 export const PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS:
 readonly string[] = Object.freeze([...new Set([
@@ -141,6 +147,11 @@ export interface LockedPackageAllocationAuthorityEvidence {
   readonly persistedEvidence: PersistedDeclaredPackageEvidence;
 }
 
+export interface PackageAllocationAuthorityDiscoveredPackageEvidence {
+  readonly shippingProviderLabelId: number;
+  readonly relationshipTypes: readonly PackageAllocationAuthorityDiscoveryRelationshipType[];
+}
+
 export interface AppendPackageAllocationPlanInput {
   readonly group: LockedPackageAllocationGroup;
   readonly planVersion: number;
@@ -161,9 +172,9 @@ export interface AppendPackageAllocationPlanInput {
 export interface PackageAllocationAuthorityPreviewTransaction {
   readGroup(groupKey: string): Promise<LockedPackageAllocationGroup | null>;
   readSourceFacts(sourceWmsShipmentItemIds: readonly number[]): Promise<readonly PackageAllocationSourceFacts[]>;
-  discoverAuthorityReadinessPackageLabelIds(
+  discoverAuthorityReadinessPackageSelection(
     sourceWmsShipmentItemIds: readonly number[],
-  ): Promise<readonly number[]>;
+  ): Promise<readonly PackageAllocationAuthorityDiscoveredPackageEvidence[]>;
   readAuthorityReadinessPackages(
     shippingProviderLabelIds: readonly number[],
   ): Promise<readonly LockedPackageAllocationAuthorityEvidence[]>;
@@ -178,9 +189,9 @@ export interface PackageAllocationAuthorityPreviewRepository {
 export interface PackageAllocationLedgerTransaction {
   lockGroup(groupKey: string, createIfMissing: boolean): Promise<LockedPackageAllocationGroup | null>;
   lockSourceFacts(sourceWmsShipmentItemIds: readonly number[]): Promise<readonly PackageAllocationSourceFacts[]>;
-  discoverAuthorityReadinessPackageLabelIds(
+  discoverAuthorityReadinessPackageSelection(
     sourceWmsShipmentItemIds: readonly number[],
-  ): Promise<readonly number[]>;
+  ): Promise<readonly PackageAllocationAuthorityDiscoveredPackageEvidence[]>;
   lockAuthorityReadinessPackages(
     shippingProviderLabelIds: readonly number[],
   ): Promise<readonly LockedPackageAllocationAuthorityEvidence[]>;
@@ -375,6 +386,41 @@ function compareText(left: string, right: string): number {
   return 0;
 }
 
+function discoveryRelationshipTypes(
+  value: unknown,
+): readonly PackageAllocationAuthorityDiscoveryRelationshipType[] {
+  if (
+    !Array.isArray(value)
+    || value.length === 0
+    || value.length > PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES.length
+  ) {
+    throw new PackageAllocationLedgerRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      "Authority package discovery returned invalid relationship evidence",
+      { field: "relationship_types" },
+    );
+  }
+  const relationshipTypes = value.map((raw) => {
+    const relationshipType = requiredText(raw, "relationship_types");
+    if (!AUTHORITY_DISCOVERY_RELATIONSHIP_TYPE_SET.has(relationshipType)) {
+      throw new PackageAllocationLedgerRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "Authority package discovery returned an unknown relationship type",
+        { field: "relationship_types" },
+      );
+    }
+    return relationshipType as PackageAllocationAuthorityDiscoveryRelationshipType;
+  }).sort(compareText);
+  if (new Set(relationshipTypes).size !== relationshipTypes.length) {
+    throw new PackageAllocationLedgerRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      "Authority package discovery returned duplicate relationship evidence",
+      { field: "relationship_types" },
+    );
+  }
+  return Object.freeze(relationshipTypes);
+}
+
 function chunks<T>(values: readonly T[]): readonly (readonly T[])[] {
   const result: T[][] = [];
   for (let index = 0; index < values.length; index += JSON_BATCH_SIZE) {
@@ -544,9 +590,9 @@ class PgPackageAllocationLedgerTransaction
     }));
   }
 
-  async discoverAuthorityReadinessPackageLabelIds(
+  async discoverAuthorityReadinessPackageSelection(
     sourceWmsShipmentItemIds: readonly number[],
-  ): Promise<readonly number[]> {
+  ): Promise<readonly PackageAllocationAuthorityDiscoveredPackageEvidence[]> {
     const sortedIds = [...new Set(sourceWmsShipmentItemIds)].sort(
       (left, right) => left - right,
     );
@@ -621,39 +667,42 @@ class PgPackageAllocationLedgerTransaction
       );
     }
 
-    const labelIds = result.rows.flatMap((raw) => {
+    const packages = result.rows.flatMap((raw) => {
       const row = raw as Record<string, unknown>;
-      return row.shipping_provider_label_id === null
-        ? []
-        : [positiveSafeInteger(
-            row.shipping_provider_label_id,
-            "shipping_provider_label_id",
-          )];
+      if (row.shipping_provider_label_id === null) return [];
+      return [Object.freeze({
+        shippingProviderLabelId: positiveSafeInteger(
+          row.shipping_provider_label_id,
+          "shipping_provider_label_id",
+        ),
+        relationshipTypes: discoveryRelationshipTypes(row.relationship_types),
+      })];
     });
-    if (labelIds.length === 0) {
+    if (packages.length === 0) {
       throw new PackageAllocationLedgerRepositoryError(
         "PACKAGE_EVIDENCE_NOT_FOUND",
         "No outbound shipping-provider label is related to the locked WMS source set",
         { sourceWmsShipmentItemIds: sortedIds },
       );
     }
-    if (labelIds.length > MAX_AUTHORITY_PACKAGES) {
+    if (packages.length > MAX_AUTHORITY_PACKAGES) {
       throw new PackageAllocationLedgerRepositoryError(
         "INVALID_DATABASE_EVIDENCE",
         "Authority package discovery exceeded its package-count safety bound",
         {
-          observedPackageCount: labelIds.length,
+          observedPackageCount: packages.length,
           maxPackageCount: MAX_AUTHORITY_PACKAGES,
         },
       );
     }
+    const labelIds = packages.map((pkg) => pkg.shippingProviderLabelId);
     if (new Set(labelIds).size !== labelIds.length) {
       throw new PackageAllocationLedgerRepositoryError(
         "INVALID_DATABASE_EVIDENCE",
         "Authority package discovery returned duplicate package identities",
       );
     }
-    return Object.freeze(labelIds);
+    return Object.freeze(packages);
   }
 
   async readAuthorityReadinessPackages(

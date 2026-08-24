@@ -570,6 +570,7 @@ async function captureProductionDiscoveryQuery(): Promise<CapturedDiscoveryQuery
           source_count: 1,
           found_source_ids: [1],
           shipping_provider_label_id: "1",
+          relationship_types: ["shipment_request_link"],
         }]);
       }
       return queryResult([]);
@@ -581,7 +582,7 @@ async function captureProductionDiscoveryQuery(): Promise<CapturedDiscoveryQuery
   } as Pick<Pool, "connect">);
 
   await repository.withSerializableTransaction((transaction) =>
-    transaction.discoverAuthorityReadinessPackageLabelIds([1]),
+    transaction.discoverAuthorityReadinessPackageSelection([1]),
   );
   if (capture.current === null) {
     throw new Error("Production package-discovery SQL was not captured");
@@ -976,6 +977,27 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       selectionAuthority: "database_relationship_closure",
       selectionCompleteness: "unproven_outside_persisted_relationships",
       selectedShippingProviderLabelIds: [primaryLabelId, emptySiblingLabelId],
+      relationshipSelectionEvidence: {
+        contractVersion: 1,
+        evidenceType: "package_allocation_relationship_selection",
+        evidenceHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        sourceWmsShipmentItemIds: [sourceId],
+        packages: [
+          {
+            shippingProviderLabelId: primaryLabelId,
+            relationshipTypes: [
+              "provider_order_id_match",
+              "shipping_engine_order_link",
+            ],
+          },
+          {
+            shippingProviderLabelId: emptySiblingLabelId,
+            relationshipTypes: [
+              "provider_order_id_match",
+            ],
+          },
+        ],
+      },
       groupState: "absent",
       readiness: {
         authority: "none",
