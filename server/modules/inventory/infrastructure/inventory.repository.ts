@@ -797,6 +797,7 @@ export function createInventoryMethods(
         p.id as product_id,
         p.sku as base_sku,
         p.name as product_name,
+        p.inventory_strategy,
         pv.barcode,
         COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
         COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
@@ -809,14 +810,23 @@ export function createInventoryMethods(
                   ELSE 0 END) as has_replen_rule
       FROM catalog.product_variants pv
       LEFT JOIN catalog.products p ON pv.product_id = p.id
-      INNER JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
-      INNER JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id AND wl.warehouse_id = ${warehouseId}
+      LEFT JOIN inventory.inventory_levels il
+        ON il.product_variant_id = pv.id
+       AND EXISTS (
+         SELECT 1
+         FROM warehouse.warehouse_locations warehouse_scope
+         WHERE warehouse_scope.id = il.warehouse_location_id
+           AND warehouse_scope.warehouse_id = ${warehouseId}
+       )
+      LEFT JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
       LEFT JOIN warehouse.product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
       LEFT JOIN inventory.replen_rules rr ON rr.product_id = pv.product_id
       LEFT JOIN inventory.replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
       WHERE pv.is_active = true
-      GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, p.name, pv.barcode
-      HAVING COALESCE(SUM(il.variant_qty), 0) != 0 OR COALESCE(SUM(il.reserved_qty), 0) != 0
+      GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, p.name, p.inventory_strategy, pv.barcode
+      HAVING COALESCE(SUM(il.variant_qty), 0) != 0
+          OR COALESCE(SUM(il.reserved_qty), 0) != 0
+          OR p.inventory_strategy = 'recipe_managed'
       ORDER BY pv.sku
     `) : await db.execute(sql`
       SELECT
@@ -830,6 +840,7 @@ export function createInventoryMethods(
         p.id as product_id,
         p.sku as base_sku,
         p.name as product_name,
+        p.inventory_strategy,
         pv.barcode,
         COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
         COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
@@ -848,7 +859,7 @@ export function createInventoryMethods(
       LEFT JOIN inventory.replen_rules rr ON rr.product_id = pv.product_id
       LEFT JOIN inventory.replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
       WHERE pv.is_active = true
-      GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, p.name, pv.barcode
+      GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, p.name, p.inventory_strategy, pv.barcode
       ORDER BY pv.sku
     `);
     return result.rows as Record<string, unknown>[];

@@ -10,6 +10,7 @@ const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage, .
 import { requirePermission, requireAuth, upload } from "../../routes/middleware";
 import { insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema } from "@shared/schema";
 import Papa from "papaparse";
+import { projectInventoryLevels } from "./application/inventory-levels.query";
 
 export function registerInventoryRoutes(app: Express) {
 
@@ -2126,61 +2127,21 @@ export function registerInventoryRoutes(app: Express) {
 
   app.get("/api/inventory/levels", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      const warehouseIdRaw = req.query.warehouseId;
+      const warehouseId = warehouseIdRaw == null ? undefined : Number(warehouseIdRaw);
+      if (warehouseId != null && (!Number.isInteger(warehouseId) || warehouseId <= 0)) {
+        return res.status(400).json({
+          error: "INVALID_WAREHOUSE_ID",
+          message: "warehouseId must be a positive integer",
+        });
+      }
       
       const inventoryRows = await storage.getInventoryLevelsSummary(warehouseId);
-
-      const levels = inventoryRows.map((row: any) => {
-        const variantQty = parseInt(row.total_variant_qty) || 0;
-        const reservedQty = parseInt(row.total_reserved_qty) || 0;
-        const binCount = parseInt(row.bin_count) || 0;
-        const hasReplenRule = parseInt(row.has_replen_rule) === 1;
-        const hierarchyLevel = row.hierarchy_level || 1;
-        const parentVariantId = row.parent_variant_id || null;
-        const barcode = row.barcode || null;
-        const isBaseUnit = row.is_base_unit === true;
-
-        return {
-          variantId: row.variant_id,
-          sku: row.variant_sku,
-          name: row.variant_name,
-          unitsPerVariant: row.units_per_variant || 1,
-          parentVariantId,
-          hierarchyLevel,
-          isBaseUnit,
-          baseSku: row.base_sku,
-          productId: row.product_id,
-          productName: row.product_name || null,
-          barcode,
-          variantQty,
-          reservedQty,
-          pickedQty: parseInt(row.total_picked_qty) || 0,
-          available: 0,
-          locationCount: parseInt(row.location_count) || 0,
-          pickableQty: parseInt(row.pickable_variant_qty) || 0,
-          binCount,
-          noBin: variantQty > 0 && binCount === 0,
-          noCaseBreak: hierarchyLevel >= 2 && !parentVariantId && !isBaseUnit,
-          noBarcode: !barcode,
-          noReplen: binCount > 0 && !hasReplenRule,
-          overReserved: reservedQty > variantQty,
-          negativeQty: variantQty < 0,
-        };
+      const result = await projectInventoryLevels({
+        rows: inventoryRows,
+        atp: req.app.locals.services.atp,
+        warehouseId,
       });
-
-      const skuCounts = new Map<string, number>();
-      for (const lv of levels) {
-        lv.available = lv.variantQty - lv.reservedQty;
-        if (lv.sku) {
-          const upper = lv.sku.toUpperCase();
-          skuCounts.set(upper, (skuCounts.get(upper) || 0) + 1);
-        }
-      }
-
-      const result = levels.map(lv => ({
-        ...lv,
-        isDuplicate: lv.sku ? (skuCounts.get(lv.sku.toUpperCase()) || 0) > 1 : false,
-      }));
 
       res.json(result);
     } catch (error) {
