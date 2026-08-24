@@ -129,7 +129,8 @@ export interface DropshipStoreConnectionTokenGrant {
   accessTokenExpiresAt: Date | null;
   externalAccountId: string | null;
   providerEnvironment: string;
-  externalAccountIdentityScheme: string;
+  externalAccountIdentityScheme: string | null;
+  providerAccountUsername?: string | null;
   externalDisplayName: string | null;
   tokenMetadata?: Record<string, unknown>;
 }
@@ -222,8 +223,8 @@ export interface DropshipStoreConnectionRepository {
     platform: DropshipSupportedStorePlatform;
     externalAccountId: string | null;
     providerEnvironment: string;
-    externalAccountIdentityScheme: string;
-    externalAccountVerifiedAt: Date;
+    externalAccountIdentityScheme: string | null;
+    externalAccountVerifiedAt: Date | null;
     externalDisplayName: string | null;
     shopDomain: string | null;
     accessTokenRef: string;
@@ -467,16 +468,56 @@ export class DropshipStoreConnectionService {
         })
       : null;
 
-    const grant = await this.deps.oauthProviders[platform].exchangeCode({
-      code: input.code,
-      shopDomain: state.shopDomain,
-      query: input,
+    let grant: DropshipStoreConnectionTokenGrant;
+    try {
+      grant = await this.deps.oauthProviders[platform].exchangeCode({
+        code: input.code,
+        shopDomain: state.shopDomain,
+        query: input,
+      });
+    } catch (error) {
+      this.deps.logger.error({
+        code: error instanceof DropshipError
+          ? error.code
+          : "DROPSHIP_STORE_OAUTH_PROVIDER_FAILURE",
+        message: "Dropship store OAuth provider exchange failed.",
+        context: {
+          platform,
+          intent,
+          vendorId: vendor.vendorId,
+          storeConnectionId: targetConnection?.storeConnectionId ?? null,
+          ...oauthProviderFailureDiagnostics(error),
+        },
+      });
+      throw error;
+    }
+    this.deps.logger.info({
+      code: "DROPSHIP_STORE_OAUTH_IDENTITY_OBSERVED",
+      message: "Dropship store OAuth provider identity was read.",
+      context: {
+        platform,
+        intent,
+        vendorId: vendor.vendorId,
+        storeConnectionId: targetConnection?.storeConnectionId ?? null,
+        providerEnvironment: grant.providerEnvironment,
+        identityScheme: grant.externalAccountIdentityScheme,
+        hasStableAccountId: grant.externalAccountId !== null,
+        hasProviderUsername: grant.providerAccountUsername !== null,
+        hasDisplayName: grant.externalDisplayName !== null,
+      },
     });
     assertOAuthGrantMatchesIntent({
       intent,
       platform,
       targetConnection,
       grant,
+    });
+    const persistedIdentity = resolveOAuthGrantIdentityForPersistence({
+      intent,
+      platform,
+      targetConnection,
+      grant,
+      verifiedAt: now,
     });
     if (
       intent === "change_store"
@@ -508,11 +549,11 @@ export class DropshipStoreConnectionService {
     let connection = await this.deps.repository.connectStore({
       vendorId: vendor.vendorId,
       platform,
-      externalAccountId: grant.externalAccountId,
+      externalAccountId: persistedIdentity.externalAccountId,
       providerEnvironment: grant.providerEnvironment,
-      externalAccountIdentityScheme: grant.externalAccountIdentityScheme,
-      externalAccountVerifiedAt: now,
-      externalDisplayName: grant.externalDisplayName,
+      externalAccountIdentityScheme: persistedIdentity.externalAccountIdentityScheme,
+      externalAccountVerifiedAt: persistedIdentity.externalAccountVerifiedAt,
+      externalDisplayName: persistedIdentity.externalDisplayName,
       shopDomain: state.shopDomain,
       accessTokenRef: tokenRecords[0].tokenRef,
       refreshTokenRef: tokenRecords.find((record) => record.tokenKind === "refresh")?.tokenRef ?? null,
@@ -521,6 +562,7 @@ export class DropshipStoreConnectionService {
       config: {
         tokenMetadata: grant.tokenMetadata ?? {},
         connectedByMemberId: vendor.memberId,
+        identityCompatibilityMode: persistedIdentity.compatibilityMode,
         oauthIntent: intent,
       },
       oauthIntent: intent,
@@ -534,6 +576,7 @@ export class DropshipStoreConnectionService {
         vendorId: vendor.vendorId,
         storeConnectionId: connection.storeConnectionId,
         platform,
+        identityCompatibilityMode: persistedIdentity.compatibilityMode,
       },
     });
 
@@ -1032,6 +1075,111 @@ function assertOAuthGrantMatchesIntent(input: {
       },
     );
   }
+}
+
+interface PersistedOAuthIdentity {
+  externalAccountId: string | null;
+  externalAccountIdentityScheme: "provider_user_id" | null;
+  externalAccountVerifiedAt: Date | null;
+  externalDisplayName: string | null;
+  compatibilityMode: "stable_provider_identity" | "legacy_username_refresh";
+}
+
+function resolveOAuthGrantIdentityForPersistence(input: {
+  intent: DropshipStoreOAuthIntent;
+  platform: DropshipSupportedStorePlatform;
+  targetConnection: DropshipStoreConnectionProfile | null;
+  grant: DropshipStoreConnectionTokenGrant;
+  verifiedAt: Date;
+}): PersistedOAuthIdentity {
+  if (
+    input.grant.externalAccountIdentityScheme === "provider_user_id"
+    && typeof input.grant.externalAccountId === "string"
+    && input.grant.externalAccountId.trim() !== ""
+  ) {
+    return {
+      externalAccountId: input.grant.externalAccountId,
+      externalAccountIdentityScheme: "provider_user_id",
+      externalAccountVerifiedAt: input.verifiedAt,
+      externalDisplayName: input.grant.externalDisplayName,
+      compatibilityMode: "stable_provider_identity",
+    };
+  }
+
+  const isUsernameOnlyEbayGrant = input.platform === "ebay"
+    && input.grant.externalAccountId === null
+    && input.grant.externalAccountIdentityScheme === null
+    && typeof input.grant.providerAccountUsername === "string"
+    && input.grant.providerAccountUsername.trim() !== "";
+  if (!isUsernameOnlyEbayGrant) {
+    throw stableMarketplaceAccountIdRequired(input.platform);
+  }
+
+  const target = input.targetConnection;
+  const isLegacyRefreshTarget = input.intent === "refresh_connection"
+    && target !== null
+    && target.platform === "ebay"
+    && target.externalAccountId === null
+    && (target.externalAccountIdentityScheme === null || target.externalAccountIdentityScheme === "legacy_username");
+  if (!isLegacyRefreshTarget) {
+    throw stableMarketplaceAccountIdRequired(input.platform);
+  }
+
+  const expectedUsername = target.externalDisplayName?.trim() ?? "";
+  const observedAccountNames = [
+    input.grant.providerAccountUsername,
+    input.grant.externalDisplayName,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim() !== "")
+    .map((value) => value.trim());
+  if (expectedUsername === "" || !observedAccountNames.includes(expectedUsername)) {
+    throw new DropshipError(
+      "DROPSHIP_STORE_OAUTH_LEGACY_ACCOUNT_MISMATCH",
+      "The authorized eBay account did not match the legacy store connection being refreshed.",
+      {
+        storeConnectionId: target.storeConnectionId,
+        hasExpectedUsername: expectedUsername !== "",
+        accountNamesMatch: false,
+        retryable: false,
+      },
+    );
+  }
+
+  return {
+    // A username is not promoted to stable marketplace identity evidence. The
+    // existing legacy connection can receive fresh credentials, while listing
+    // registration continues to require a later provider_user_id observation.
+    externalAccountId: null,
+    externalAccountIdentityScheme: null,
+    externalAccountVerifiedAt: null,
+    externalDisplayName: target.externalDisplayName,
+    compatibilityMode: "legacy_username_refresh",
+  };
+}
+
+function stableMarketplaceAccountIdRequired(platform: DropshipSupportedStorePlatform): DropshipError {
+  return new DropshipError(
+    platform === "ebay"
+      ? "DROPSHIP_EBAY_STABLE_ACCOUNT_ID_REQUIRED"
+      : "DROPSHIP_STORE_STABLE_ACCOUNT_ID_REQUIRED",
+    `${platform === "ebay" ? "eBay" : "The marketplace"} did not return the stable provider account ID required to identify this seller account.`,
+    { platform, retryable: false },
+  );
+}
+
+function oauthProviderFailureDiagnostics(error: unknown): Record<string, unknown> {
+  if (!(error instanceof DropshipError)) {
+    return {
+      errorType: error instanceof Error ? error.name : typeof error,
+    };
+  }
+
+  const context = error.context ?? {};
+  return {
+    providerHttpStatus: typeof context.status === "number" ? context.status : null,
+    retryable: typeof context.retryable === "boolean" ? context.retryable : null,
+    hasProviderUsername: typeof context.hasUsername === "boolean" ? context.hasUsername : null,
+  };
 }
 
 function hasProviderIdentityDrift(input: {

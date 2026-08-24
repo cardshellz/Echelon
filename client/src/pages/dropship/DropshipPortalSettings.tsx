@@ -36,6 +36,7 @@ import {
   type DropshipSensitiveAction,
 } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
+import { storeOAuthEmailVerificationMessage } from "./store-oauth-verification-copy";
 
 type PendingStoreAction =
   | "disconnect-send-code"
@@ -183,7 +184,7 @@ export default function DropshipPortalSettings() {
       passkeyAction: "reauth-passkey-proof",
       sendCodeAction: "reauth-send-code",
       verifyCodeAction: "reauth-verify-code",
-      sentMessage: `Verification code sent. Enter it below, then ${action}.`,
+      sentMessage: storeOAuthEmailVerificationMessage(action),
       codeRequiredMessage: `Enter the 6-digit verification code before you ${action}.`,
     });
   }
