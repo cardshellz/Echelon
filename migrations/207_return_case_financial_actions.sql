@@ -581,8 +581,8 @@ BEGIN
   FROM returns.return_case_vendor_settlement_ledger_entries
   WHERE vendor_settlement_id = target_settlement_id;
 
-  IF credit_count <> CASE WHEN settlement.gross_credit_cents > 0 THEN 1 ELSE 0 END
-     OR fee_count <> CASE WHEN settlement.total_fee_cents > 0 THEN 1 ELSE 0 END THEN
+  IF credit_count <> (CASE WHEN settlement.gross_credit_cents > 0 THEN 1 ELSE 0 END)
+     OR fee_count <> (CASE WHEN settlement.total_fee_cents > 0 THEN 1 ELSE 0 END) THEN
     RAISE EXCEPTION 'Vendor settlement % wallet evidence is incomplete', target_settlement_id
       USING ERRCODE = '23514';
   END IF;
