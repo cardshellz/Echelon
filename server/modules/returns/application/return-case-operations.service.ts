@@ -153,6 +153,10 @@ export interface ApplyReturnInventoryTreatmentResult {
   replayed: boolean;
 }
 
+export type ReturnCaseOperationCommandType = Exclude<
+  ReturnCaseActionKind,
+  "issue_customer_refund" | "settle_vendor_account"
+>;
 export type ReturnCaseOperationResult =
   | RecordReturnReceiptResult
   | StartReturnInspectionResult
@@ -232,7 +236,7 @@ export interface PersistReturnInventoryTreatmentInput {
 }
 
 export interface ExistingReturnCaseCommand {
-  commandType: ReturnCaseActionKind;
+  commandType: ReturnCaseOperationCommandType;
   requestHash: string;
   result: ReturnCaseOperationResult;
 }
@@ -580,7 +584,7 @@ export class ReturnCaseOperationService {
 async function resolveReplay(
   tx: ReturnCaseOperationTransaction,
   idempotencyKey: string,
-  commandType: ReturnCaseActionKind,
+  commandType: ReturnCaseOperationCommandType,
   requestHash: string,
 ): Promise<ReturnCaseOperationResult | null> {
   const existing = await tx.findCommand(idempotencyKey);
@@ -612,7 +616,10 @@ async function loadAggregate(
   return aggregate;
 }
 
-function requireActionAvailable(context: ReturnCaseActionContext, kind: ReturnCaseActionKind): void {
+function requireActionAvailable(
+  context: ReturnCaseActionContext,
+  kind: ReturnCaseOperationCommandType,
+): void {
   const action = deriveReturnCaseActionPlan(context).actions.find((candidate) => candidate.kind === kind);
   if (!action || action.state !== "available") {
     throw new ReturnCaseOperationError(
@@ -741,7 +748,7 @@ function normalizeCommon<T extends {
 }
 
 function hashCommand(
-  commandType: ReturnCaseActionKind,
+  commandType: ReturnCaseOperationCommandType,
   input:
     | RecordReturnReceiptInput
     | StartReturnInspectionInput

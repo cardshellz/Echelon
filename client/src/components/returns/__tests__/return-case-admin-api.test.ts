@@ -4,11 +4,15 @@ import {
   ReturnCaseAdminApiError,
   applyReturnInventoryTreatment,
   completeReturnInspection,
+  getCustomerRefundPreview,
   getReturnCaseDetail,
   getReturnVariantBinAssignments,
   getReturnWarehouseLocations,
+  getVendorSettlementPreview,
+  issueReturnCustomerRefund,
   recordReturnDisposition,
   recordReturnReceipt,
+  settleReturnVendorAccount,
   startReturnInspection,
   type ReturnCaseAdminTransport,
 } from "../return-case-admin-api";
@@ -810,6 +814,169 @@ describe("return case admin API client", () => {
     });
   });
 
+  it("loads and strictly correlates an exact Shopify customer-refund preview", async () => {
+    const preview = {
+      commandType: "issue_customer_refund" as const,
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      externalOrderId: "1001",
+      quoteHash: "a".repeat(64),
+      quote: {
+        provider: "shopify" as const,
+        currency: "USD",
+        amountCents: 525,
+        maximumRefundableCents: 525,
+        lines: [{ returnCaseItemId: 9, externalLineItemId: "2001", quantity: 1, subtotalCents: 495, taxCents: 30, totalCents: 525 }],
+        transactions: [{ position: 0, parentTransactionId: "gid://shopify/OrderTransaction/3001", gateway: "shopify_payments", amountCents: 525 }],
+      },
+    };
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(preview));
+
+    await expect(getCustomerRefundPreview(42, transport)).resolves.toEqual(preview);
+    expect(transport).toHaveBeenCalledWith(
+      "/api/returns/admin/cases/42/customer-refund-preview",
+      { method: "GET", credentials: "include", headers: { Accept: "application/json" } },
+    );
+
+    const wrongCase = { ...preview, caseId: 43 };
+    await expect(getCustomerRefundPreview(
+      42,
+      vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(wrongCase)),
+    )).rejects.toMatchObject({ code: "RETURN_CASE_RESPONSE_INVALID" });
+  });
+
+  it("normalizes and strictly correlates a Shopify customer-refund command", async () => {
+    const response = {
+      commandType: "issue_customer_refund" as const,
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      customerRefundId: 71,
+      provider: "shopify" as const,
+      providerRefundId: "gid://shopify/Refund/4001",
+      currency: "USD",
+      amountCents: 525,
+      completedAt: "2026-08-23T13:00:00.000Z",
+      replayed: false,
+    };
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(response));
+
+    await expect(issueReturnCustomerRefund(42, {
+      idempotencyKey: " refund-command-1 ",
+      quoteHash: "a".repeat(64),
+      notifyCustomer: true,
+      notes: " approved return ",
+    }, transport)).resolves.toEqual(response);
+    expect(transport).toHaveBeenCalledWith(
+      "/api/returns/admin/cases/42/customer-refunds",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          idempotencyKey: "refund-command-1",
+          quoteHash: "a".repeat(64),
+          notifyCustomer: true,
+          notes: "approved return",
+        }),
+      }),
+    );
+
+    await expect(issueReturnCustomerRefund(42, {
+      idempotencyKey: "refund-command-2",
+      quoteHash: "a".repeat(64),
+      notifyCustomer: false,
+      notes: null,
+    }, vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse({ ...response, caseId: 43 })))).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+    });
+  });
+
+  it("posts and correlates a fault-specific vendor settlement preview", async () => {
+    const preview = {
+      commandType: "settle_vendor_account" as const,
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      vendorId: 8,
+      quoteHash: "b".repeat(64),
+      quote: {
+        currency: "USD",
+        faultCategory: "vendor" as const,
+        returnShippingActualCents: 300,
+        settlement: {
+          productCreditCents: 2_000,
+          originalShippingCreditCents: 500,
+          restockingFeeCents: 0,
+          processingFeeCents: 0,
+          returnShippingFeeCents: 300,
+          grossCreditCents: 2_500,
+          totalFeeCents: 300,
+          netSettlementCents: 2_200,
+          creditLedgerType: "return_credit" as const,
+          breakdown: {},
+        },
+        policyFeeIds: { restockingFeeId: null, processingFeeId: null, returnShippingFeeId: 5 },
+      },
+    };
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(preview));
+
+    await expect(getVendorSettlementPreview(42, "vendor", transport)).resolves.toEqual(preview);
+    expect(transport).toHaveBeenCalledWith(
+      "/api/returns/admin/cases/42/vendor-settlement-preview",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ faultCategory: "vendor" }) }),
+    );
+
+    const wrongFault = { ...preview, quote: { ...preview.quote, faultCategory: "carrier" as const } };
+    await expect(getVendorSettlementPreview(
+      42,
+      "vendor",
+      vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(wrongFault)),
+    )).rejects.toMatchObject({ code: "RETURN_CASE_RESPONSE_INVALID" });
+  });
+
+  it("normalizes and strictly correlates an internal vendor-wallet settlement command", async () => {
+    const response = {
+      commandType: "settle_vendor_account" as const,
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      vendorSettlementId: 19,
+      vendorId: 8,
+      currency: "USD",
+      grossCreditCents: 2_500,
+      totalFeeCents: 300,
+      netSettlementCents: 2_200,
+      walletLedgerIds: [91, 92],
+      settledAt: "2026-08-23T14:00:00.000Z",
+      replayed: false,
+    };
+    const transport = vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse(response));
+
+    await expect(settleReturnVendorAccount(42, {
+      idempotencyKey: " settlement-command-1 ",
+      quoteHash: "b".repeat(64),
+      faultCategory: "vendor",
+      notes: " vendor fault confirmed ",
+    }, transport)).resolves.toEqual(response);
+    expect(transport).toHaveBeenCalledWith(
+      "/api/returns/admin/cases/42/vendor-settlements",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          idempotencyKey: "settlement-command-1",
+          quoteHash: "b".repeat(64),
+          faultCategory: "vendor",
+          notes: "vendor fault confirmed",
+        }),
+      }),
+    );
+
+    await expect(settleReturnVendorAccount(42, {
+      idempotencyKey: "settlement-command-2",
+      quoteHash: "b".repeat(64),
+      faultCategory: "vendor",
+      notes: null,
+    }, vi.fn<ReturnCaseAdminTransport>(async () => jsonResponse({ ...response, caseId: 43 })))).rejects.toMatchObject({
+      code: "RETURN_CASE_RESPONSE_INVALID",
+    });
+  });
+
 
   it("classifies invalid JSON and transport failures with one attempted request", async () => {
     const invalidJsonTransport = vi.fn<ReturnCaseAdminTransport>(async () =>
@@ -994,6 +1161,20 @@ function detailFixture() {
           description: "Apply recorded treatment decisions.",
           state: "blocked" as const,
           reasonCode: "RETURN_NOT_FULLY_RECEIVED",
+        },
+        {
+          kind: "issue_customer_refund" as const,
+          label: "Issue customer refund",
+          description: "Refund the Card Shellz customer through the source Shopify order.",
+          state: "blocked" as const,
+          reasonCode: "RETURN_INSPECTION_NOT_APPROVED",
+        },
+        {
+          kind: "settle_vendor_account" as const,
+          label: "Settle vendor account",
+          description: "Post the approved return credit to the dropship vendor's Echelon wallet.",
+          state: "not_applicable" as const,
+          reasonCode: "RETURN_VENDOR_SETTLEMENT_NOT_APPLICABLE",
         },
       ],
     },

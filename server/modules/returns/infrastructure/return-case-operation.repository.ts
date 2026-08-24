@@ -51,6 +51,9 @@ interface CaseRow {
   oms_order_id: unknown;
   wms_order_id: unknown;
   wms_return_id: unknown;
+  business_context: unknown;
+  channel_provider: unknown;
+  vendor_id: unknown;
   case_status: unknown;
   approval_status: unknown;
   logistics_status: unknown;
@@ -179,13 +182,16 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
 
     const caseResult = await this.tx.execute(sql`
       SELECT
-        id, case_number, oms_order_id, wms_order_id, wms_return_id, case_status,
-        approval_status, logistics_status, inspection_status,
-        customer_refund_status, vendor_settlement_status,
-        policy_id, policy_version, policy_snapshot
-      FROM returns.return_cases
-      WHERE id = ${caseId}
-      FOR UPDATE
+        return_case.id, return_case.case_number, return_case.oms_order_id,
+        return_case.wms_order_id, return_case.wms_return_id, return_case.business_context,
+        channel.provider AS channel_provider, return_case.vendor_id, return_case.case_status,
+        return_case.approval_status, return_case.logistics_status, return_case.inspection_status,
+        return_case.customer_refund_status, return_case.vendor_settlement_status,
+        return_case.policy_id, return_case.policy_version, return_case.policy_snapshot
+      FROM returns.return_cases return_case
+      LEFT JOIN channels.channels channel ON channel.id = return_case.channel_id
+      WHERE return_case.id = ${caseId}
+      FOR UPDATE OF return_case
     `);
     const row = rowsOf<CaseRow>(caseResult)[0];
     if (!row) return null;
@@ -340,6 +346,9 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
       wmsReturnId,
       items: operationItems,
       actionContext: {
+        businessContext: readBusinessContext(row.business_context),
+        channelProvider: readNullableText(row.channel_provider),
+        vendorId: readNullablePositiveInteger(row.vendor_id, "return case vendor id"),
         lifecycle: {
           caseStatus: readText(row.case_status, "case status") as ReturnCaseOperationAggregate["actionContext"]["lifecycle"]["caseStatus"],
           approvalStatus: readText(row.approval_status, "approval status") as ReturnCaseOperationAggregate["actionContext"]["lifecycle"]["approvalStatus"],
@@ -1296,6 +1305,13 @@ function readText(value: unknown, field: string): string {
     throw new ReturnCaseOperationError("RETURN_CASE_DATA_INVALID", `${field} is invalid.`, 500, { field, value });
   }
   return value;
+}
+
+function readBusinessContext(
+  value: unknown,
+): ReturnCaseOperationAggregate["actionContext"]["businessContext"] {
+  if (value === "retail" || value === "dropship") return value;
+  throw new ReturnCaseOperationError("RETURN_CASE_DATA_INVALID", "Return case business context is invalid.", 500);
 }
 
 function readNullableText(value: unknown): string | null {

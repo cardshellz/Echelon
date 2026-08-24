@@ -66,7 +66,7 @@ describe("PostgresReturnCaseOperationStore", () => {
     const statements = execute.mock.calls.map(([query]) => qtext(query));
     const identityRead = statements.findIndex((text) => text.startsWith("SELECT oms_order_id FROM returns.return_cases"));
     const advisoryLock = statements.findIndex((text) => text.startsWith("SELECT pg_advisory_xact_lock"));
-    const caseLock = statements.findIndex((text) => text.includes("FROM returns.return_cases") && text.endsWith("FOR UPDATE"));
+    const caseLock = statements.findIndex((text) => text.includes("FROM returns.return_cases return_case") && text.endsWith("FOR UPDATE OF return_case"));
     const wmsHeaderLock = statements.findIndex((text) => text.startsWith("SELECT id, status, received_at, restocked FROM wms.returns"));
     const wmsItemLock = statements.findIndex((text) => text.includes("FROM wms.return_items ri"));
     const dispositionHeaderLock = statements.findIndex((text) => text.includes("FROM returns.return_case_dispositions") && text.endsWith("FOR UPDATE"));
@@ -498,7 +498,7 @@ function operationReader(
       return { rows: [{ oms_order_id: 50 }] };
     }
     if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [{}] };
-    if (text.includes("SELECT id, case_number, oms_order_id, wms_order_id, wms_return_id")) {
+    if (text.includes("FROM returns.return_cases return_case") && text.includes("FOR UPDATE OF return_case")) {
       return { rows: [{ ...caseRow(), ...caseOverride }] };
     }
     if (text.startsWith("SELECT id, status, received_at, restocked FROM wms.returns")) {
@@ -719,6 +719,9 @@ function caseRow() {
     oms_order_id: 50,
     wms_order_id: 60,
     wms_return_id: 230,
+    business_context: "retail",
+    channel_provider: "shopify",
+    vendor_id: null,
     case_status: "open",
     approval_status: "approved",
     logistics_status: "partially_received",

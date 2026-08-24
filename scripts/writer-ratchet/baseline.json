@@ -680,6 +680,15 @@
   "returns.return_case_commands": [
     "modules/returns"
   ],
+  "returns.return_case_customer_refund_items": [
+    "modules/returns"
+  ],
+  "returns.return_case_customer_refund_transactions": [
+    "modules/returns"
+  ],
+  "returns.return_case_customer_refunds": [
+    "modules/returns"
+  ],
   "returns.return_case_disposition_items": [
     "modules/returns"
   ],
@@ -699,6 +708,12 @@
     "modules/returns"
   ],
   "returns.return_case_items": [
+    "modules/returns"
+  ],
+  "returns.return_case_vendor_settlement_ledger_entries": [
+    "modules/returns"
+  ],
+  "returns.return_case_vendor_settlements": [
     "modules/returns"
   ],
   "returns.return_cases": [

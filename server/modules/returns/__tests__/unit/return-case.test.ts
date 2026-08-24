@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ReturnPolicy } from "@shared/schema";
 import {
+  deriveManualReturnLifecycle,
   deriveShopifyRefundReturnLifecycle,
   ReturnCaseDomainError,
   snapshotReturnPolicy,
@@ -60,6 +61,43 @@ describe("Shopify refund Return Case lifecycle", () => {
       .toThrowError(expect.objectContaining({ code: "RETURN_CASE_POLICY_INVALID" }));
     expect(() => deriveShopifyRefundReturnLifecycle(policy({ version: 0 })))
       .toThrowError(ReturnCaseDomainError);
+  });
+});
+
+describe("manual Return Case lifecycle", () => {
+  it("keeps customer refund pending only when Card Shellz owns the retail customer", () => {
+    expect(deriveManualReturnLifecycle(policy(), "retail")).toMatchObject({
+      customerRefundStatus: "pending",
+      vendorSettlementStatus: "not_applicable",
+    });
+  });
+
+  it("uses vendor settlement rather than customer refund for dropship returns", () => {
+    expect(deriveManualReturnLifecycle(policy({
+      businessContext: "dropship",
+      channelId: null,
+      vendorId: 22,
+      storeConnectionId: 9,
+      customerRefundAuthority: "marketplace",
+      vendorSettlementTrigger: "inspection_approved",
+    }), "dropship")).toMatchObject({
+      customerRefundStatus: "not_required",
+      vendorSettlementStatus: "pending",
+    });
+  });
+
+  it("does not create a vendor settlement obligation when the policy trigger is none", () => {
+    expect(deriveManualReturnLifecycle(policy({
+      businessContext: "dropship",
+      channelId: null,
+      vendorId: 22,
+      storeConnectionId: 9,
+      customerRefundAuthority: "marketplace",
+      vendorSettlementTrigger: "none",
+    }), "dropship")).toMatchObject({
+      customerRefundStatus: "not_required",
+      vendorSettlementStatus: "not_applicable",
+    });
   });
 });
 

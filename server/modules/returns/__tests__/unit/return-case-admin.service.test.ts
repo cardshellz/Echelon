@@ -175,6 +175,8 @@ describe("ReturnCaseAdminService", () => {
         { kind: "complete_inspection", state: "blocked" },
         { kind: "record_disposition", state: "blocked" },
         { kind: "apply_inventory_treatment", state: "blocked" },
+        { kind: "issue_customer_refund", state: "not_applicable" },
+        { kind: "settle_vendor_account", state: "not_applicable" },
       ],
     });
     expect(result.events[0]).toMatchObject({
@@ -237,6 +239,8 @@ describe("ReturnCaseAdminService", () => {
       expect.objectContaining({ kind: "complete_inspection", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
       expect.objectContaining({ kind: "record_disposition", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
       expect.objectContaining({ kind: "apply_inventory_treatment", state: "blocked", reasonCode: "RETURN_POLICY_SNAPSHOT_INVALID" }),
+      expect.objectContaining({ kind: "issue_customer_refund", state: "not_applicable", reasonCode: "RETURN_CUSTOMER_REFUND_NOT_OWNED" }),
+      expect.objectContaining({ kind: "settle_vendor_account", state: "not_applicable", reasonCode: "RETURN_VENDOR_SETTLEMENT_NOT_APPLICABLE" }),
     ]);
   });
 

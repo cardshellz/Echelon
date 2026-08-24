@@ -51,6 +51,64 @@ describe("ReturnCaseOperationsCard", () => {
     expect(markup.match(/<button/g)).toHaveLength(1);
   });
 
+  it("shows only the financial action owned by the return business context", () => {
+    const retailMarkup = renderToStaticMarkup(createElement(ReturnCaseOperationsCard, {
+      returnCaseId: 42,
+      actionPlan: actionPlan({
+        nextAction: "issue_customer_refund",
+        actions: [
+          {
+            kind: "issue_customer_refund",
+            label: "Issue customer refund",
+            description: "Refund the Card Shellz customer through Shopify.",
+            state: "available",
+            reasonCode: null,
+          },
+          {
+            kind: "settle_vendor_account",
+            label: "Settle vendor account",
+            description: "Not applicable to retail returns.",
+            state: "not_applicable",
+            reasonCode: "RETURN_VENDOR_SETTLEMENT_NOT_APPLICABLE",
+          },
+        ],
+      }),
+      items: [],
+      onRefreshRequested: async () => undefined,
+    }));
+    const dropshipMarkup = renderToStaticMarkup(createElement(ReturnCaseOperationsCard, {
+      returnCaseId: 43,
+      actionPlan: actionPlan({
+        nextAction: "settle_vendor_account",
+        actions: [
+          {
+            kind: "issue_customer_refund",
+            label: "Issue customer refund",
+            description: "Echelon does not own the marketplace buyer.",
+            state: "not_applicable",
+            reasonCode: "RETURN_CUSTOMER_REFUND_NOT_OWNED",
+          },
+          {
+            kind: "settle_vendor_account",
+            label: "Settle vendor account",
+            description: "Post the vendor-facing wallet credit and fees.",
+            state: "available",
+            reasonCode: null,
+          },
+        ],
+      }),
+      items: [],
+      onRefreshRequested: async () => undefined,
+    }));
+
+    expect(retailMarkup).toContain("Issue customer refund");
+    expect(retailMarkup).not.toContain("Settle vendor account");
+    expect(dropshipMarkup).toContain("Settle vendor account");
+    expect(dropshipMarkup).not.toContain("Issue customer refund");
+    expect(retailMarkup.match(/<button/g)).toHaveLength(1);
+    expect(dropshipMarkup.match(/<button/g)).toHaveLength(1);
+  });
+
   it("labels the completed begin step as Started and exposes completion for the exact active inspection", () => {
     const markup = renderToStaticMarkup(createElement(ReturnCaseOperationsCard, {
       returnCaseId: 42,

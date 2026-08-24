@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { CheckCircle2, ClipboardCheck, Loader2, PackageCheck } from "lucide-react";
+import { CheckCircle2, ClipboardCheck, DollarSign, Loader2, PackageCheck, WalletCards } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +42,11 @@ import {
   type StartReturnInspectionResult,
 } from "./return-case-admin-api";
 import { ApplyReturnInventoryTreatmentDialog } from "./ApplyReturnInventoryTreatmentDialog";
+import {
+  IssueCustomerRefundDialog,
+  SettleVendorAccountDialog,
+  formatMoney,
+} from "./ReturnCaseFinancialDialogs";
 
 export interface ReturnCaseOperationsCardProps {
   returnCaseId: number;
@@ -127,6 +132,8 @@ export function ReturnCaseOperationsCard({
   const [completionDialogOpen, setCompletionDialogOpen] = useState(false);
   const [dispositionDialogOpen, setDispositionDialogOpen] = useState(false);
   const [inventoryTreatmentDialogOpen, setInventoryTreatmentDialogOpen] = useState(false);
+  const [customerRefundDialogOpen, setCustomerRefundDialogOpen] = useState(false);
+  const [vendorSettlementDialogOpen, setVendorSettlementDialogOpen] = useState(false);
   const [lastResult, setLastResult] = useState<ReturnCaseOperationResult | null>(null);
   const completionContext = resolveInspectionCompletionContext(actionPlan);
   const dispositionAction = actionPlan.actions.find(
@@ -135,6 +142,18 @@ export function ReturnCaseOperationsCard({
   const inventoryTreatmentAction = actionPlan.actions.find(
     (action) => action.kind === "apply_inventory_treatment" && action.state === "available",
   ) ?? null;
+  const customerRefundAction = actionPlan.actions.find(
+    (action) => action.kind === "issue_customer_refund" && action.state === "available",
+  ) ?? null;
+  const vendorSettlementAction = actionPlan.actions.find(
+    (action) => action.kind === "settle_vendor_account" && action.state === "available",
+  ) ?? null;
+  const displayedActions = actionPlan.actions.filter(
+    (action) => !(
+      (action.kind === "issue_customer_refund" || action.kind === "settle_vendor_account")
+      && action.state === "not_applicable"
+    ),
+  );
 
   useEffect(() => {
     if (completionDialogOpen && completionContext === null) setCompletionDialogOpen(false);
@@ -147,6 +166,16 @@ export function ReturnCaseOperationsCard({
       setInventoryTreatmentDialogOpen(false);
     }
   }, [inventoryTreatmentAction, inventoryTreatmentDialogOpen]);
+  useEffect(() => {
+    if (customerRefundDialogOpen && customerRefundAction === null) {
+      setCustomerRefundDialogOpen(false);
+    }
+  }, [customerRefundAction, customerRefundDialogOpen]);
+  useEffect(() => {
+    if (vendorSettlementDialogOpen && vendorSettlementAction === null) {
+      setVendorSettlementDialogOpen(false);
+    }
+  }, [vendorSettlementAction, vendorSettlementDialogOpen]);
 
   const complete = (result: ReturnCaseOperationResult) => {
     setLastResult(result);
@@ -170,13 +199,13 @@ export function ReturnCaseOperationsCard({
 
         {lastResult && <OperationSuccess result={lastResult} />}
 
-        {actionPlan.actions.length === 0 ? (
+        {displayedActions.length === 0 ? (
           <div className="border p-3 text-sm text-muted-foreground">
             The server did not provide any operations for this return case.
           </div>
         ) : (
           <div className="divide-y border">
-            {actionPlan.actions.map((action) => (
+            {displayedActions.map((action) => (
               <div
                 key={action.kind}
                 className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between"
@@ -221,6 +250,18 @@ export function ReturnCaseOperationsCard({
                 {inventoryTreatmentAction === action && (
                   <Button type="button" size="sm" onClick={() => setInventoryTreatmentDialogOpen(true)}>
                     <PackageCheck />
+                    {action.label}
+                  </Button>
+                )}
+                {customerRefundAction === action && (
+                  <Button type="button" size="sm" onClick={() => setCustomerRefundDialogOpen(true)}>
+                    <DollarSign />
+                    {action.label}
+                  </Button>
+                )}
+                {vendorSettlementAction === action && (
+                  <Button type="button" size="sm" onClick={() => setVendorSettlementDialogOpen(true)}>
+                    <WalletCards />
                     {action.label}
                   </Button>
                 )}
@@ -293,6 +334,28 @@ export function ReturnCaseOperationsCard({
           }}
         />
       )}
+      <IssueCustomerRefundDialog
+        open={customerRefundDialogOpen && customerRefundAction !== null}
+        onOpenChange={setCustomerRefundDialogOpen}
+        returnCaseId={returnCaseId}
+        action={customerRefundAction}
+        onRefreshRequested={onRefreshRequested}
+        onCompleted={(result) => {
+          setCustomerRefundDialogOpen(false);
+          complete(result);
+        }}
+      />
+      <SettleVendorAccountDialog
+        open={vendorSettlementDialogOpen && vendorSettlementAction !== null}
+        onOpenChange={setVendorSettlementDialogOpen}
+        returnCaseId={returnCaseId}
+        action={vendorSettlementAction}
+        onRefreshRequested={onRefreshRequested}
+        onCompleted={(result) => {
+          setVendorSettlementDialogOpen(false);
+          complete(result);
+        }}
+      />
     </Card>
   );
 }
@@ -1535,6 +1598,18 @@ function operationSuccessContent(result: ReturnCaseOperationResult): { title: st
     return {
       title: result.replayed ? "Inventory treatment already applied" : "Inventory treatment applied",
       message: `${result.inventoryTreatmentSummary.appliedUnits} of ${result.inventoryTreatmentSummary.dispositionUnits} decided units have been applied; ${result.inventoryTreatmentSummary.remainingUnits} remain.`,
+    };
+  }
+  if (result.commandType === "issue_customer_refund") {
+    return {
+      title: result.replayed ? "Customer refund already issued" : "Customer refund issued",
+      message: `${formatMoney(result.amountCents, result.currency)} was refunded through Shopify.`,
+    };
+  }
+  if (result.commandType === "settle_vendor_account") {
+    return {
+      title: result.replayed ? "Vendor settlement already posted" : "Vendor settlement posted",
+      message: `${formatMoney(result.netSettlementCents, result.currency)} net was posted to the vendor's Echelon wallet.`,
     };
   }
   const outcome = result.inspectionStatus === "approved" ? "approved" : "rejected";
