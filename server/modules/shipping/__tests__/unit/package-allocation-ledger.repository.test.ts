@@ -308,6 +308,10 @@ describe("PgPackageAllocationLedgerRepository", () => {
       /anchor_engine_orders AS MATERIALIZED \([\s\S]*?\),\s*UNION\s+SELECT physical\.shipping_engine_order_id/,
     );
     expect(discoveryQuery?.text).toContain("wms.shipping_provider_label_links");
+    expect(discoveryQuery?.text).not.toMatch(/WHERE\s+link\.shipment_request_id[\s\S]*?\sOR\s+link\./);
+    expect(discoveryQuery?.text).not.toMatch(
+      /engine_order\.provider_order_id[\s\S]*?\sOR\s+[\s\S]*?engine_order\.provider_order_key/,
+    );
     expect(discoveryQuery?.text).not.toContain("JOIN wms.orders");
     expect(discoveryQuery?.text).not.toContain("wms_order_id");
   });

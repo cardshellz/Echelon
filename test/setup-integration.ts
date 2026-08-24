@@ -89,6 +89,7 @@ export async function runMigrations(): Promise<void> {
     "test/fixtures/named-schema-integration.sql",
     "migrations/198_package_allocation_ledger_foundation.sql",
     "migrations/199_package_allocation_persistence_foundation.sql",
+    "migrations/0619_package_allocation_discovery_indexes.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;
