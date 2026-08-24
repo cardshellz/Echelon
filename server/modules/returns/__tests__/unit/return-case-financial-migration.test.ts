@@ -42,8 +42,8 @@ describe("return case financial actions migration", () => {
 
   it("requires the exact number of credit and fee ledger entries", () => {
     expect(migration).toContain("validate_vendor_settlement_ledger_evidence");
-    expect(migration).toContain("credit_count <> CASE WHEN settlement.gross_credit_cents > 0 THEN 1 ELSE 0 END");
-    expect(migration).toContain("fee_count <> CASE WHEN settlement.total_fee_cents > 0 THEN 1 ELSE 0 END");
+    expect(migration).toContain("credit_count <> (CASE WHEN settlement.gross_credit_cents > 0 THEN 1 ELSE 0 END)");
+    expect(migration).toContain("fee_count <> (CASE WHEN settlement.total_fee_cents > 0 THEN 1 ELSE 0 END)");
     expect(migration).toContain("return_case_vendor_settlement_header_ledger_guard");
     expect(migration).toContain("return_case_vendor_settlement_child_ledger_guard");
   });
