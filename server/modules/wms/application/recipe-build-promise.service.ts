@@ -33,6 +33,8 @@ type InventoryReservationPort = {
     orderId: number;
     orderItemId: number;
     userId?: string;
+    referenceType?: string;
+    referenceId?: string;
   }, txOverride?: TransactionExecutor) => Promise<boolean>;
 };
 
@@ -84,6 +86,10 @@ function holdReason(orderItemId: number): string {
   return `recipe_build_required:order_item:${orderItemId}`;
 }
 
+function directReservationReference(orderItemId: number, locationId: number): string {
+  return `${orderItemId}:${locationId}`;
+}
+
 export class RecipeBuildPromiseService {
   constructor(
     private readonly db: RecipePromiseDb,
@@ -115,6 +121,30 @@ export class RecipeBuildPromiseService {
     return rowsOf(result)[0] ?? null;
   }
 
+  private async getLedgerReservedQty(orderItemId: number, tx: TransactionExecutor): Promise<number> {
+    const result = await tx.execute(sql`
+      SELECT COALESCE(SUM(reserved_qty_delta), 0)::int AS reserved_qty
+      FROM inventory.inventory_transactions
+      WHERE order_item_id = ${orderItemId}
+        AND voided_at IS NULL
+    `);
+    return Math.max(0, Number(rowsOf(result)[0]?.reserved_qty ?? 0));
+  }
+
+  private directQty(plan: RecipeDemandPlan): number {
+    const directQty = plan.directAllocations.reduce((total, allocation) => {
+      positiveInteger(allocation.sourceLocationId, "directAllocation.sourceLocationId");
+      return total + positiveInteger(allocation.qty, "directAllocation.qty");
+    }, 0);
+    if (!Number.isSafeInteger(directQty) || directQty > plan.requestedQty) {
+      throw new RecipeCapacityError("RECIPE_PROMISE_PLAN_INVALID", "Direct allocations exceed requested demand", {
+        requestedQty: plan.requestedQty,
+        directQty,
+      });
+    }
+    return directQty;
+  }
+
   private validateExistingDemand(existing: any, input: RecipeBuildClaimInput): RecipeBuildClaimResult {
     const sameCommand = Number(existing.order_id) === input.orderId
       && Number(existing.order_item_id) === input.orderItemId
@@ -127,11 +157,25 @@ export class RecipeBuildPromiseService {
         { orderItemId: input.orderItemId, demandId: Number(existing.id) },
       );
     }
+    const promisedQty = positiveInteger(existing.promised_qty, "existingDemand.promisedQty");
+    if (promisedQty > input.orderQty) {
+      throw new RecipeCapacityError(
+        "RECIPE_PROMISE_DATA_INVALID",
+        "The persisted promised quantity exceeds the order-item quantity",
+        {
+          demandId: Number(existing.id),
+          orderItemId: input.orderItemId,
+          promisedQty,
+          orderQty: input.orderQty,
+        },
+      );
+    }
+    const directQty = input.orderQty - promisedQty;
     if (existing.status === "awaiting_build") {
-      return { reserved: 0, promised: Number(existing.promised_qty), shortfall: 0 };
+      return { reserved: directQty, promised: promisedQty, shortfall: 0 };
     }
     if (existing.status === "fulfilled") {
-      return { reserved: Number(existing.promised_qty), promised: 0, shortfall: 0 };
+      return { reserved: input.orderQty, promised: 0, shortfall: 0 };
     }
     throw new RecipeCapacityError(
       "RECIPE_PROMISE_NOT_RETRYABLE",
@@ -202,6 +246,21 @@ export class RecipeBuildPromiseService {
     // after that lock so a concurrent first attempt is observed idempotently.
     const existing = await this.getExistingDemand(input.orderItemId, tx);
     if (existing) return this.validateExistingDemand(existing, input);
+    const existingReservedQty = await this.getLedgerReservedQty(input.orderItemId, tx);
+    if (existingReservedQty === input.orderQty) {
+      return { reserved: input.orderQty, promised: 0, shortfall: 0 };
+    }
+    if (existingReservedQty !== 0) {
+      throw new RecipeCapacityError(
+        "RECIPE_PROMISE_PARTIAL_RESERVATION",
+        "A recipe-managed order item has a partial physical reservation without a build demand",
+        {
+          orderItemId: input.orderItemId,
+          requestedQty: input.orderQty,
+          reservedQty: existingReservedQty,
+        },
+      );
+    }
 
     const warehouseId = positiveInteger(order.warehouse_id, "order.warehouseId");
 
@@ -216,20 +275,60 @@ export class RecipeBuildPromiseService {
       throw error;
     }
 
-    if (plan.nodes.length === 0) {
+    if (
+      plan.targetVariantId !== input.variantId
+      || plan.requestedQty !== input.orderQty
+      || plan.warehouseId !== warehouseId
+    ) {
+      throw new RecipeCapacityError(
+        "RECIPE_PROMISE_PLAN_INVALID",
+        "The recipe planner returned a plan for different demand",
+        {
+          orderItemId: input.orderItemId,
+          expected: { variantId: input.variantId, requestedQty: input.orderQty, warehouseId },
+          actual: {
+            variantId: plan.targetVariantId,
+            requestedQty: plan.requestedQty,
+            warehouseId: plan.warehouseId,
+          },
+        },
+      );
+    }
+
+    const directQty = this.directQty(plan);
+    for (const allocation of plan.directAllocations) {
       const reserved = await this.inventoryCore.reserveForOrder({
         productVariantId: input.variantId,
-        warehouseLocationId: plan.sourceLocationId,
-        qty: input.orderQty,
+        warehouseLocationId: allocation.sourceLocationId,
+        qty: allocation.qty,
         orderId: input.orderId,
         orderItemId: input.orderItemId,
         userId: input.actorId,
+        referenceType: "recipe_direct",
+        referenceId: directReservationReference(input.orderItemId, allocation.sourceLocationId),
       }, tx);
-      return reserved
-        ? { reserved: input.orderQty, promised: 0, shortfall: 0 }
-        : { reserved: 0, promised: 0, shortfall: input.orderQty };
+      if (!reserved) {
+        throw new RecipeCapacityError(
+          "RECIPE_DIRECT_RESERVATION_FAILED",
+          "Finished recipe output could not be reserved for its owning order item",
+          { orderItemId: input.orderItemId, sourceLocationId: allocation.sourceLocationId, qty: allocation.qty },
+        );
+      }
     }
 
+    if (plan.nodes.length === 0) {
+      if (directQty !== input.orderQty) {
+        throw new RecipeCapacityError("RECIPE_PROMISE_PLAN_INVALID", "A direct-only plan does not cover the requested demand", {
+          orderItemId: input.orderItemId,
+          requestedQty: input.orderQty,
+          directQty,
+        });
+      }
+      return { reserved: directQty, promised: 0, shortfall: 0 };
+    }
+
+    const promisedQty = input.orderQty - directQty;
+    positiveInteger(promisedQty, "promisedQty");
     const reason = holdReason(input.orderItemId);
     const demandResult = await tx.execute(sql`
       INSERT INTO wms.order_build_demands
@@ -237,7 +336,7 @@ export class RecipeBuildPromiseService {
          requested_qty, promised_qty, status, hold_applied, hold_reason, created_by)
       VALUES
         (${input.orderId}, ${input.orderItemId}, ${input.variantId}, ${warehouseId},
-         ${input.orderQty}, ${input.orderQty}, 'planning', false, ${reason},
+         ${input.orderQty}, ${promisedQty}, 'planning', false, ${reason},
          ${input.actorId ?? AUTOMATION_ACTOR})
       RETURNING *
     `);
@@ -320,11 +419,12 @@ export class RecipeBuildPromiseService {
       orderId: input.orderId,
       orderItemId: input.orderItemId,
       targetVariantId: input.variantId,
-      promisedQty: input.orderQty,
+      directReservedQty: directQty,
+      promisedQty,
       rootBuildOrderId,
       buildOrderCount: plan.nodes.length,
     }));
-    return { reserved: 0, promised: input.orderQty, shortfall: 0 };
+    return { reserved: directQty, promised: promisedQty, shortfall: 0 };
   }
 
   async reconcileBuildCompletion(
@@ -380,6 +480,8 @@ export class RecipeBuildPromiseService {
       orderId: Number(demand.order_id),
       orderItemId: Number(demand.order_item_id),
       userId: AUTOMATION_ACTOR,
+      referenceType: "recipe_build",
+      referenceId: String(demand.id),
     }, tx);
     if (!reserved) {
       throw new RecipeCapacityError(

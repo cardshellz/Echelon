@@ -1020,19 +1020,32 @@ export class InventoryUseCases {
     orderId: number;
     orderItemId: number;
     userId?: string;
+    referenceType?: string;
+    referenceId?: string;
   }, txOverride?: any): Promise<boolean> {
-    if (params.qty <= 0) throw new Error("qty must be a positive integer");
+    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) {
+      throw new Error("qty must be a positive safe integer");
+    }
+    const referenceType = String(params.referenceType ?? "order").trim();
+    const referenceId = String(params.referenceId ?? params.orderId).trim();
+    if (!referenceType || referenceType.length > 30) {
+      throw new Error("referenceType must contain 1 to 30 characters");
+    }
+    if (!referenceId || referenceId.length > 100) {
+      throw new Error("referenceId must contain 1 to 100 characters");
+    }
 
     const doWork = async (tx: any) => {
-      // Idempotency: check if this order item already has a reserve row.
-      // The DB has a unique partial index (uq_inventory_transactions_reserve_dedup)
-      // as a safety net, but checking first avoids double-incrementing reservedQty.
+      // One order item may have multiple supply segments (finished stock and
+      // recipe-built shortfall). Each segment remains independently idempotent.
       const existingReserve = await tx.execute(sql`
         SELECT id
         FROM inventory.inventory_transactions
         WHERE transaction_type = 'reserve'
           AND order_id = ${params.orderId}
           AND order_item_id = ${params.orderItemId}
+          AND COALESCE(reference_type, 'order') = ${referenceType}
+          AND COALESCE(reference_id, order_id::text) = ${referenceId}
           AND voided_at IS NULL
         LIMIT 1
       `);
@@ -1069,8 +1082,8 @@ export class InventoryUseCases {
           targetState: "committed",
           orderId: params.orderId,
           orderItemId: params.orderItemId,
-          referenceType: "order",
-          referenceId: String(params.orderId),
+          referenceType,
+          referenceId,
           userId: params.userId ?? null,
         }, tx);
       } catch (err: any) {

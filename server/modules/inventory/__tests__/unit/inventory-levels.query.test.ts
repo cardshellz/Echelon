@@ -40,8 +40,8 @@ describe("projectInventoryLevels", () => {
     const atp = {
       getAtpPerVariant: vi.fn(async () => [
         { productVariantId: 100, atpUnits: 2_200 },
-        { productVariantId: 200, atpUnits: 440 },
-        { productVariantId: 300, atpUnits: 88 },
+        { productVariantId: 200, atpUnits: 442 },
+        { productVariantId: 300, atpUnits: 172 },
       ]),
       getAtpPerVariantByWarehouse: vi.fn(),
     };
@@ -57,8 +57,8 @@ describe("projectInventoryLevels", () => {
 
     expect(result.map(({ sku, variantQty, reservedQty, available }) => ({ sku, variantQty, reservedQty, available }))).toEqual([
       { sku: "QUAD-BOX-TOP-EA", variantQty: 0, reservedQty: 0, available: 2_200 },
-      { sku: "QUAD-BOX-TOP-P5", variantQty: 5, reservedQty: 3, available: 440 },
-      { sku: "QUAD-BOX-TOP-C25", variantQty: 87, reservedQty: 3, available: 88 },
+      { sku: "QUAD-BOX-TOP-P5", variantQty: 5, reservedQty: 3, available: 442 },
+      { sku: "QUAD-BOX-TOP-C25", variantQty: 87, reservedQty: 3, available: 172 },
     ]);
     expect(atp.getAtpPerVariant).toHaveBeenCalledOnce();
     expect(atp.getAtpPerVariant).toHaveBeenCalledWith(10);

@@ -29,6 +29,12 @@ export type BuildRecipeView = {
   outputName: string;
   outputQty: number;
   notes: string | null;
+  createdBy: string | null;
+  supersedesRecipeId: number | null;
+  changeReason: string | null;
+  retiredBy: string | null;
+  retiredAt: string | null;
+  updatedAt: string;
   components: BuildRecipeComponentView[];
   createdAt: string;
 };
@@ -154,6 +160,12 @@ function recipeFromRow(row: any): BuildRecipeView {
     outputName: String(row.output_name),
     outputQty: Number(row.output_qty),
     notes: row.notes ?? null,
+    createdBy: row.created_by ?? null,
+    supersedesRecipeId: row.supersedes_recipe_id == null ? null : Number(row.supersedes_recipe_id),
+    changeReason: row.change_reason ?? null,
+    retiredBy: row.retired_by ?? null,
+    retiredAt: row.retired_at == null ? null : String(row.retired_at),
+    updatedAt: String(row.updated_at),
     components: [],
     createdAt: String(row.created_at),
   };

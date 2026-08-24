@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import {
   assertBuildVariantSnapshotsCurrent,
   BuildDomainError,
@@ -50,6 +51,24 @@ export type CreateBuildRecipeInput = {
   status: "draft" | "active";
   notes?: string;
   actorId?: string;
+};
+
+export type UpdateBuildRecipeInput = Omit<CreateBuildRecipeInput, "code" | "actorId"> & {
+  recipeId: number;
+  expectedVersion: number;
+  changeReason: string;
+  idempotencyKey: string;
+  changeRequestHash: string;
+  actorId: string;
+  changedAt: Date;
+};
+export type BuildRecipeVersionResult = Record<string, unknown> & {
+  id: number;
+  code: string;
+  version: number;
+  output_variant_id: number;
+  alreadyApplied: boolean;
+  previousOutputVariantId?: number;
 };
 
 export type CreateBuildOrderInput = {
@@ -318,6 +337,31 @@ export class BuildRepository {
         components: componentDefinitions,
       });
 
+      if (input.status === "active") {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(hashtext('inventory.build_recipe_output'), ${input.outputVariantId})
+        `);
+        const outputConflict = await tx.execute(sql`
+          SELECT id, code, version
+          FROM inventory.build_recipes
+          WHERE output_variant_id = ${input.outputVariantId}
+            AND status = 'active'
+          LIMIT 1
+        `);
+        if (outputConflict.rows[0]) {
+          throw new BuildDomainError(
+            "BUILD_OUTPUT_RECIPE_CONFLICT",
+            "The output variant already has an active build recipe",
+            {
+              outputVariantId: input.outputVariantId,
+              recipeId: Number(outputConflict.rows[0].id),
+              recipeCode: String(outputConflict.rows[0].code),
+              recipeVersion: Number(outputConflict.rows[0].version),
+            },
+          );
+        }
+      }
+
       const recipeResult = await tx.execute(sql`
         INSERT INTO inventory.build_recipes
           (code, name, version, status, recipe_type, output_variant_id,
@@ -340,6 +384,256 @@ export class BuildRepository {
         `);
       }
       return recipe;
+    });
+  }
+
+  async updateRecipe(input: UpdateBuildRecipeInput): Promise<BuildRecipeVersionResult> {
+    calculateBuildQuantities({
+      plannedBuilds: 1,
+      outputQtyPerBuild: input.outputQty,
+      components: input.components,
+    });
+
+    return this.db.transaction(async (tx) => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          hashtext('inventory.build_recipe_edit'),
+          hashtext(${input.idempotencyKey})
+        )
+      `);
+      const idempotentResult = await tx.execute(sql`
+        SELECT *
+        FROM inventory.build_recipes
+        WHERE change_idempotency_key = ${input.idempotencyKey}
+        FOR UPDATE
+      `);
+      const idempotentRecipe = idempotentResult.rows[0];
+      if (idempotentRecipe) {
+        if (String(idempotentRecipe.change_request_hash) !== input.changeRequestHash) {
+          throw new BuildDomainError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "The idempotency key already belongs to a different recipe edit",
+            { idempotencyKey: input.idempotencyKey },
+          );
+        }
+        return {
+          ...idempotentRecipe,
+          id: Number(idempotentRecipe.id),
+          code: String(idempotentRecipe.code),
+          version: Number(idempotentRecipe.version),
+          output_variant_id: Number(idempotentRecipe.output_variant_id),
+          alreadyApplied: true,
+        };
+      }
+
+      const currentResult = await tx.execute(sql`
+        SELECT *
+        FROM inventory.build_recipes
+        WHERE id = ${input.recipeId}
+        FOR UPDATE
+      `);
+      const current = currentResult.rows[0];
+      if (!current) {
+        throw new BuildDomainError(
+          "BUILD_RECIPE_NOT_FOUND",
+          `Build recipe ${input.recipeId} was not found`,
+        );
+      }
+
+      const versionsResult = await tx.execute(sql`
+        SELECT id, version, status
+        FROM inventory.build_recipes
+        WHERE code = ${current.code}
+        ORDER BY version DESC
+        FOR UPDATE
+      `);
+      const latest = versionsResult.rows[0];
+      if (
+        current.status === "retired"
+        || Number(current.version) !== input.expectedVersion
+        || Number(latest?.id) !== Number(current.id)
+      ) {
+        throw new BuildDomainError(
+          "BUILD_RECIPE_VERSION_CONFLICT",
+          "This recipe changed after the edit screen was loaded",
+          {
+            recipeId: input.recipeId,
+            expectedVersion: input.expectedVersion,
+            actualVersion: Number(current.version),
+            latestRecipeId: latest == null ? null : Number(latest.id),
+            latestVersion: latest == null ? null : Number(latest.version),
+            status: String(current.status),
+          },
+        );
+      }
+
+      const currentComponentsResult = await tx.execute(sql`
+        SELECT component_variant_id, component_product_id, component_units_per_variant, qty
+        FROM inventory.build_recipe_components
+        WHERE recipe_id = ${current.id}
+        ORDER BY component_variant_id
+      `);
+      const before = {
+        recipeId: Number(current.id),
+        code: String(current.code),
+        name: String(current.name),
+        version: Number(current.version),
+        status: String(current.status),
+        recipeType: String(current.recipe_type),
+        outputVariantId: Number(current.output_variant_id),
+        outputProductId: Number(current.output_product_id),
+        outputUnitsPerVariant: Number(current.output_units_per_variant),
+        outputQty: Number(current.output_qty),
+        notes: current.notes ?? null,
+        components: currentComponentsResult.rows.map((component) => ({
+          componentVariantId: Number(component.component_variant_id),
+          componentProductId: Number(component.component_product_id),
+          componentUnitsPerVariant: Number(component.component_units_per_variant),
+          qtyPerBuild: Number(component.qty),
+        })),
+      };
+
+      const variantFacts = await loadActiveBuildVariantFacts(
+        tx,
+        [input.outputVariantId, ...input.components.map((item) => item.componentVariantId)],
+        { recipeId: input.recipeId },
+      );
+      const outputFacts = getVariantFacts(variantFacts, input.outputVariantId, {
+        recipeId: input.recipeId,
+      });
+      await assertRecipeManagedOutputProduct(tx, outputFacts.productId, {
+        recipeId: input.recipeId,
+        outputVariantId: input.outputVariantId,
+      });
+      const componentDefinitions = input.components.map((component) => ({
+        ...getVariantFacts(variantFacts, component.componentVariantId, {
+          recipeId: input.recipeId,
+        }),
+        qtyPerBuild: component.qtyPerBuild,
+      }));
+      validateBuildRecipeDefinition({
+        recipeType: input.recipeType,
+        output: { ...outputFacts, qtyPerBuild: input.outputQty },
+        components: componentDefinitions,
+      });
+
+      if (input.status === "active") {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(hashtext('inventory.build_recipe_output'), ${input.outputVariantId})
+        `);
+        const outputConflict = await tx.execute(sql`
+          SELECT id, code, version
+          FROM inventory.build_recipes
+          WHERE output_variant_id = ${input.outputVariantId}
+            AND status = 'active'
+            AND code <> ${current.code}
+          LIMIT 1
+        `);
+        if (outputConflict.rows[0]) {
+          throw new BuildDomainError(
+            "BUILD_OUTPUT_RECIPE_CONFLICT",
+            "The output variant already has an active build recipe",
+            {
+              outputVariantId: input.outputVariantId,
+              recipeId: Number(outputConflict.rows[0].id),
+              recipeCode: String(outputConflict.rows[0].code),
+              recipeVersion: Number(outputConflict.rows[0].version),
+            },
+          );
+        }
+      }
+
+      if (input.status === "active") {
+        await tx.execute(sql`
+          UPDATE inventory.build_recipes
+          SET status = 'retired',
+              retired_by = ${input.actorId},
+              retired_at = ${input.changedAt},
+              updated_at = ${input.changedAt}
+          WHERE code = ${current.code}
+            AND status IN ('active', 'draft')
+        `);
+      } else if (current.status === "draft") {
+        await tx.execute(sql`
+          UPDATE inventory.build_recipes
+          SET status = 'retired',
+              retired_by = ${input.actorId},
+              retired_at = ${input.changedAt},
+              updated_at = ${input.changedAt}
+          WHERE id = ${current.id}
+        `);
+      }
+
+      const nextVersion = Number(latest.version) + 1;
+      const recipeResult = await tx.execute(sql`
+        INSERT INTO inventory.build_recipes
+          (code, name, version, status, recipe_type, output_variant_id,
+           output_product_id, output_units_per_variant, output_qty, notes, created_by,
+           supersedes_recipe_id, change_reason, change_idempotency_key, change_request_hash,
+           created_at, updated_at)
+        VALUES
+          (${current.code}, ${input.name}, ${nextVersion}, ${input.status}, ${input.recipeType},
+           ${input.outputVariantId}, ${outputFacts.productId}, ${outputFacts.unitsPerVariant},
+           ${input.outputQty}, ${input.notes ?? null}, ${input.actorId}, ${current.id},
+           ${input.changeReason}, ${input.idempotencyKey}, ${input.changeRequestHash},
+           ${input.changedAt}, ${input.changedAt})
+        RETURNING *
+      `);
+      const recipe = recipeResult.rows[0];
+      for (const component of componentDefinitions) {
+        await tx.execute(sql`
+          INSERT INTO inventory.build_recipe_components
+            (recipe_id, component_variant_id, component_product_id,
+             component_units_per_variant, qty)
+          VALUES
+            (${recipe.id}, ${component.variantId}, ${component.productId},
+             ${component.unitsPerVariant}, ${component.qtyPerBuild})
+        `);
+      }
+
+      const after = {
+        recipeId: Number(recipe.id),
+        code: String(recipe.code),
+        name: String(recipe.name),
+        version: Number(recipe.version),
+        status: String(recipe.status),
+        recipeType: String(recipe.recipe_type),
+        outputVariantId: Number(recipe.output_variant_id),
+        outputProductId: Number(recipe.output_product_id),
+        outputUnitsPerVariant: Number(recipe.output_units_per_variant),
+        outputQty: Number(recipe.output_qty),
+        notes: recipe.notes ?? null,
+        components: componentDefinitions.map((component) => ({
+          componentVariantId: component.variantId,
+          componentProductId: component.productId,
+          componentUnitsPerVariant: component.unitsPerVariant,
+          qtyPerBuild: component.qtyPerBuild,
+        })),
+      };
+      await persistAuditEvent(tx as unknown as Parameters<typeof persistAuditEvent>[0], {
+        actor: input.actorId,
+        action: "inventory.build_recipe.version_created",
+        target: `inventory.build_recipe:${current.code}`,
+        changes: { before, after },
+        context: {
+          changeReason: input.changeReason,
+          sourceRecipeId: Number(current.id),
+          sourceVersion: Number(current.version),
+          newRecipeId: Number(recipe.id),
+          newVersion: Number(recipe.version),
+          requestedStatus: input.status,
+        },
+      }, { timestamp: input.changedAt, emitStructuredLog: false });
+
+      return {
+        ...recipe,
+        id: Number(recipe.id),
+        code: String(recipe.code),
+        version: Number(recipe.version),
+        output_variant_id: Number(recipe.output_variant_id),
+        alreadyApplied: false,
+        previousOutputVariantId: Number(current.output_variant_id),
+      };
     });
   }
 

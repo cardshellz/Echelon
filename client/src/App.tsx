@@ -301,6 +301,9 @@ function Router() {
         <Route path="/inventory/builds/recipes/new">
           <ProtectedRoute component={BuildRecipeCreate} allowedRoles={["admin", "lead"]} />
         </Route>
+        <Route path="/inventory/builds/recipes/:recipeId/edit">
+          <ProtectedRoute component={BuildRecipeCreate} allowedRoles={["admin", "lead"]} />
+        </Route>
         <Route path="/inventory/builds">
           <ProtectedRoute component={Builds} allowedRoles={["admin", "lead"]} />
         </Route>

@@ -50,6 +50,45 @@ describe("ReservationService build-aware order status", () => {
     }]);
   });
 
+  it("treats direct reservation plus promised shortfall as fully covered", async () => {
+    const db = {
+      select: vi.fn(() => selectRows([{
+        id: 46,
+        orderId: 14,
+        sku: "QUAD-BOX-TOP-P5",
+        quantity: 2,
+      }])),
+      execute: vi.fn()
+        .mockResolvedValueOnce({
+          rows: [{
+            delta_sum: 1,
+            legacy_reserves: 0,
+            picked_units: 0,
+            unreserved_units: 0,
+          }],
+        })
+        .mockResolvedValueOnce({
+          rows: [{ promised_qty: 1, status: "awaiting_build" }],
+        }),
+    };
+    const service = createReservationService(
+      db as any,
+      {},
+      { queueSyncAfterInventoryChange: vi.fn() },
+      {},
+    );
+
+    await expect(service.getOrderReservationStatus(14)).resolves.toEqual([{
+      sku: "QUAD-BOX-TOP-P5",
+      orderItemId: 46,
+      reservedQty: 1,
+      promisedQty: 1,
+      demandStatus: "awaiting_build",
+      isReserved: false,
+      isPromised: true,
+    }]);
+  });
+
   it("derives physical reservation from this order item's ledger, not global SKU counters", async () => {
     const db = {
       select: vi.fn(() => selectRows([{

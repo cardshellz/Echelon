@@ -13,6 +13,7 @@ import {
   numeric,
   index,
   uniqueIndex,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -164,10 +165,20 @@ export const buildRecipes = inventorySchema.table("build_recipes", {
   outputQty: integer("output_qty").notNull().default(1),
   notes: text("notes"),
   createdBy: varchar("created_by", { length: 100 }),
+  supersedesRecipeId: integer("supersedes_recipe_id")
+    .references((): AnyPgColumn => buildRecipes.id, { onDelete: "restrict" }),
+  changeReason: varchar("change_reason", { length: 1000 }),
+  changeIdempotencyKey: varchar("change_idempotency_key", { length: 100 }),
+  changeRequestHash: varchar("change_request_hash", { length: 64 }),
+  retiredBy: varchar("retired_by", { length: 100 }),
+  retiredAt: timestamp("retired_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   codeVersionUnique: uniqueIndex("build_recipes_code_version_uidx").on(table.code, table.version),
+  changeIdempotencyUnique: uniqueIndex("build_recipes_change_idempotency_uidx")
+    .on(table.changeIdempotencyKey)
+    .where(sql`${table.changeIdempotencyKey} IS NOT NULL`),
   versionPositive: check("build_recipes_version_chk", sql`${table.version} > 0`),
   outputQtyPositive: check("build_recipes_output_qty_chk", sql`${table.outputQty} > 0`),
   statusValid: check("build_recipes_status_chk", sql`${table.status} IN ('draft', 'active', 'retired')`),
@@ -178,6 +189,23 @@ export const buildRecipes = inventorySchema.table("build_recipes", {
   snapshotValid: check(
     "build_recipes_snapshot_chk",
     sql`${table.outputProductId} > 0 AND ${table.outputUnitsPerVariant} > 0`,
+  ),
+  versionChangeEvidenceValid: check(
+    "build_recipes_version_change_evidence_chk",
+    sql`(${table.version} = 1 AND ${table.supersedesRecipeId} IS NULL)
+      OR (
+        ${table.version} > 1
+        AND ${table.supersedesRecipeId} IS NOT NULL
+        AND btrim(${table.changeReason}) <> ''
+        AND ${table.changeIdempotencyKey} IS NOT NULL
+        AND btrim(${table.changeIdempotencyKey}) <> ''
+        AND ${table.changeRequestHash} ~ '^[0-9a-f]{64}$'
+      )`,
+  ),
+  retirementEvidenceValid: check(
+    "build_recipes_retirement_evidence_chk",
+    sql`(${table.status} = 'retired' AND ${table.retiredBy} IS NOT NULL AND ${table.retiredAt} IS NOT NULL)
+      OR (${table.status} <> 'retired' AND ${table.retiredBy} IS NULL AND ${table.retiredAt} IS NULL)`,
   ),
 }));
 

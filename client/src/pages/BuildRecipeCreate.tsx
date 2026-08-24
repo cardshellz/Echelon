@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ArrowLeft, ArrowLeftRight, Check, Hammer, Loader2, Plus, X } from "lucide-react";
-import { useLocation } from "wouter";
+import { useLocation, useRoute } from "wouter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,6 +17,64 @@ import {
   type RecipeComponentDraft,
   type RecipeType,
 } from "@/features/inventory-builds/build-recipe-model";
+
+type RecipeComponentView = {
+  id: number;
+  componentVariantId: number;
+  componentProductId: number;
+  componentUnitsPerVariant: number;
+  sku: string | null;
+  name: string;
+  qtyPerBuild: number;
+};
+
+type BuildRecipeView = {
+  id: number;
+  code: string;
+  name: string;
+  version: number;
+  status: "draft" | "active" | "retired";
+  recipeType: RecipeType;
+  outputVariantId: number;
+  outputProductId: number;
+  outputUnitsPerVariant: number;
+  outputSku: string | null;
+  outputName: string;
+  outputQty: number;
+  notes: string | null;
+  createdBy: string | null;
+  supersedesRecipeId: number | null;
+  changeReason: string | null;
+  retiredBy: string | null;
+  retiredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  components: RecipeComponentView[];
+};
+
+type RecipeSaveResult = {
+  version: number;
+};
+
+function recipeVariant(input: {
+  variantId: number;
+  productId: number;
+  unitsPerVariant: number;
+  sku: string | null;
+  name: string;
+}): BuildVariantResult {
+  return {
+    productVariantId: input.variantId,
+    productId: input.productId,
+    unitsPerVariant: input.unitsPerVariant,
+    sku: input.sku ?? input.name,
+    name: input.name,
+  };
+}
+
+function createIdempotencyKey(recipeId: number): string {
+  return `build-recipe-${recipeId}-${crypto.randomUUID()}`;
+}
 
 async function responseJson<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => null);
@@ -38,19 +96,72 @@ function SectionHeading({ number, title, detail }: { number: number; title: stri
 
 export default function BuildRecipeCreate() {
   const [, navigate] = useLocation();
+  const [, editParams] = useRoute("/inventory/builds/recipes/:recipeId/edit");
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const recipeId = editParams?.recipeId == null ? null : Number(editParams.recipeId);
+  const isEditing = Number.isSafeInteger(recipeId) && Number(recipeId) > 0;
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
   const [notes, setNotes] = useState("");
-  const [status, setStatus] = useState("active");
+  const [status, setStatus] = useState<"draft" | "active">("active");
   const [recipeType, setRecipeType] = useState<RecipeType>("assembly");
   const [outputVariant, setOutputVariant] = useState<BuildVariantResult | null>(null);
   const [outputQty, setOutputQty] = useState("1");
+  const [changeReason, setChangeReason] = useState("");
   const [nextComponentKey, setNextComponentKey] = useState(2);
   const [components, setComponents] = useState<RecipeComponentDraft[]>([
     { key: 1, variant: null, qtyPerBuild: "1" },
   ]);
+  const hydratedRecipeId = useRef<number | null>(null);
+  const editIdempotencyKey = useRef<string | null>(null);
+
+  const { data: recipes = [], isLoading: recipesLoading } = useQuery<BuildRecipeView[]>({
+    queryKey: ["/api/inventory/build-recipes"],
+    queryFn: async () => responseJson(await fetch("/api/inventory/build-recipes", { credentials: "include" })),
+    enabled: isEditing,
+  });
+  const recipe = isEditing ? recipes.find((item) => item.id === recipeId) ?? null : null;
+  const versionHistory = useMemo(
+    () => recipe == null
+      ? []
+      : recipes
+        .filter((item) => item.code === recipe.code)
+        .sort((left, right) => right.version - left.version),
+    [recipe, recipes],
+  );
+  const isLatestVersion = !isEditing || (recipe != null && versionHistory[0]?.id === recipe.id);
+
+  useEffect(() => {
+    if (!recipe || hydratedRecipeId.current === recipe.id) return;
+    setCode(recipe.code);
+    setName(recipe.name);
+    setNotes(recipe.notes ?? "");
+    setStatus(recipe.status === "draft" ? "draft" : "active");
+    setRecipeType(recipe.recipeType);
+    setOutputVariant(recipeVariant({
+      variantId: recipe.outputVariantId,
+      productId: recipe.outputProductId,
+      unitsPerVariant: recipe.outputUnitsPerVariant,
+      sku: recipe.outputSku,
+      name: recipe.outputName,
+    }));
+    setOutputQty(String(recipe.outputQty));
+    setComponents(recipe.components.map((component, index) => ({
+      key: index + 1,
+      variant: recipeVariant({
+        variantId: component.componentVariantId,
+        productId: component.componentProductId,
+        unitsPerVariant: component.componentUnitsPerVariant,
+        sku: component.sku,
+        name: component.name,
+      }),
+      qtyPerBuild: String(component.qtyPerBuild),
+    })));
+    setNextComponentKey(recipe.components.length + 1);
+    setChangeReason("");
+    hydratedRecipeId.current = recipe.id;
+  }, [recipe]);
 
   const evidence = useMemo(() => calculateRecipeEvidence({
     recipeType,
@@ -58,15 +169,34 @@ export default function BuildRecipeCreate() {
     outputQty,
     components,
   }), [components, outputQty, outputVariant, recipeType]);
-  const valid = Boolean(code.trim() && name.trim() && evidence?.valid);
+  const valid = Boolean(
+    code.trim()
+    && name.trim()
+    && evidence?.valid
+    && (!isEditing || (recipe && isLatestVersion && changeReason.trim())),
+  );
+  const editCommandSignature = useMemo(() => JSON.stringify({
+    recipeId,
+    name: name.trim(),
+    notes: notes.trim(),
+    status,
+    recipeType,
+    outputVariantId: outputVariant?.productVariantId ?? null,
+    outputQty,
+    changeReason: changeReason.trim(),
+    components: components.map((component) => ({
+      componentVariantId: component.variant?.productVariantId ?? null,
+      qtyPerBuild: component.qtyPerBuild,
+    })),
+  }), [changeReason, components, name, notes, outputQty, outputVariant, recipeId, recipeType, status]);
 
-  const createRecipe = useMutation({
-    mutationFn: async () => responseJson(await fetch("/api/inventory/build-recipes", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        code: code.trim(),
+  useEffect(() => {
+    editIdempotencyKey.current = null;
+  }, [editCommandSignature]);
+
+  const saveRecipe = useMutation({
+    mutationFn: async () => {
+      const body = {
         name: name.trim(),
         status,
         recipeType,
@@ -77,19 +207,62 @@ export default function BuildRecipeCreate() {
           componentVariantId: component.variant?.productVariantId,
           qtyPerBuild: Number(component.qtyPerBuild),
         })),
-      }),
-    })),
-    onSuccess: async () => {
+      };
+      if (!isEditing || recipe == null) {
+        return responseJson<RecipeSaveResult>(await fetch("/api/inventory/build-recipes", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...body, code: code.trim() }),
+        }));
+      }
+
+      const idempotencyKey = editIdempotencyKey.current ?? createIdempotencyKey(recipe.id);
+      editIdempotencyKey.current = idempotencyKey;
+      return responseJson<RecipeSaveResult>(await fetch(`/api/inventory/build-recipes/${recipe.id}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify({
+          ...body,
+          expectedVersion: recipe.version,
+          changeReason: changeReason.trim(),
+        }),
+      }));
+    },
+    onSuccess: async (savedRecipe) => {
+      editIdempotencyKey.current = null;
       await queryClient.invalidateQueries({ queryKey: ["/api/inventory/build-recipes"] });
-      toast({ title: "Build recipe created" });
+      toast({
+        title: isEditing
+          ? `Recipe version ${savedRecipe.version} saved`
+          : "Build recipe created",
+      });
       navigate("/inventory/builds?tab=recipes");
     },
     onError: (error: Error) => toast({
-      title: "Recipe creation failed",
+      title: isEditing ? "Recipe update failed" : "Recipe creation failed",
       description: error.message,
       variant: "destructive",
     }),
   });
+
+  if (isEditing && recipesLoading) {
+    return <div className="p-6 text-sm text-muted-foreground">Loading recipe...</div>;
+  }
+  if (isEditing && !recipe) {
+    return (
+      <div className="space-y-3 p-6">
+        <h1 className="text-xl font-semibold">Recipe not found</h1>
+        <Button variant="outline" onClick={() => navigate("/inventory/builds?tab=recipes")}>
+          <ArrowLeft className="mr-2 h-4 w-4" />Back to Builds
+        </Button>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-3 md:p-6">
@@ -98,21 +271,31 @@ export default function BuildRecipeCreate() {
           <Button variant="ghost" className="mb-2 px-0" onClick={() => navigate("/inventory/builds?tab=recipes")}>
             <ArrowLeft className="mr-2 h-4 w-4" />Back to Builds
           </Button>
-          <h1 className="text-2xl font-bold">Create build recipe</h1>
-          <p className="text-sm text-muted-foreground">Define a versioned, repeatable transformation from component inventory into an output SKU.</p>
+          <h1 className="text-2xl font-bold">{isEditing ? `Edit ${code}` : "Create build recipe"}</h1>
+          <p className="text-sm text-muted-foreground">{isEditing ? "Save changes as a new immutable recipe version. Existing build orders retain their original version." : "Define a versioned, repeatable transformation from component inventory into an output SKU."}</p>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" onClick={() => navigate("/inventory/builds?tab=recipes")}>Cancel</Button>
-          <Button disabled={!valid || createRecipe.isPending} onClick={() => createRecipe.mutate()}>
-            {createRecipe.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Create recipe
+          <Button disabled={!valid || saveRecipe.isPending} onClick={() => saveRecipe.mutate()}>
+            {saveRecipe.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{isEditing ? "Save new version" : "Create recipe"}
           </Button>
         </div>
       </header>
+      {isEditing && !isLatestVersion && (
+        <div className="flex gap-3 border border-red-300 bg-red-50 p-4 text-red-950">
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+          <div>
+            <div className="font-medium">This is historical version {recipe?.version} and cannot be edited.</div>
+            <div className="text-sm">Open version {versionHistory[0]?.version} from the recipe list before making another change.</div>
+          </div>
+        </div>
+      )}
+
 
       <section className="space-y-5 border-b pb-6">
         <SectionHeading number={1} title="Recipe identity" detail="Name the operational rule and choose how it should be classified." />
         <div className="grid gap-4 pl-0 md:grid-cols-2 md:pl-10">
-          <div><Label>Recipe code *</Label><Input value={code} onChange={(event) => setCode(event.target.value)} placeholder="QUAD-BOX-TOP-EA" /></div>
+          <div><Label>Recipe code *</Label><Input value={code} onChange={(event) => setCode(event.target.value)} placeholder="QUAD-BOX-TOP-EA" disabled={isEditing} /><p className="mt-1 text-xs text-muted-foreground">{isEditing ? "Recipe code is the permanent identity shared by all versions." : "Use a stable operational code; it cannot be changed after creation."}</p></div>
           <div><Label>Name *</Label><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Assemble Quad Box Toploader" /></div>
           <div className="md:col-span-2">
             <Label>Recipe type *</Label>
@@ -200,7 +383,7 @@ export default function BuildRecipeCreate() {
           <div className="grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
             <div>
               <Label>Status</Label>
-              <Select value={status} onValueChange={setStatus}>
+              <Select value={status} onValueChange={(value) => { if (value === "active" || value === "draft") setStatus(value); }}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="draft">Draft</SelectItem></SelectContent>
               </Select>
@@ -211,10 +394,58 @@ export default function BuildRecipeCreate() {
         </div>
       </section>
 
+      {isEditing && (
+        <>
+          <section className="space-y-5 border-b pb-6">
+            <SectionHeading number={5} title="Change record" detail="Explain why this recipe is changing. The reason and before/after definition are written to the immutable audit log." />
+            <div className="space-y-2 md:pl-10">
+              <Label htmlFor="change-reason">Reason for change *</Label>
+              <Textarea
+                id="change-reason"
+                className="min-h-24"
+                maxLength={1000}
+                value={changeReason}
+                onChange={(event) => setChangeReason(event.target.value)}
+                placeholder="Describe the operational reason, source evidence, and expected effect."
+              />
+              <div className="text-xs text-muted-foreground">{changeReason.trim().length}/1000 characters</div>
+            </div>
+          </section>
+
+          <section className="space-y-5 border-b pb-6">
+            <SectionHeading number={6} title="Version history" detail="Every saved definition remains available for operational and audit traceability." />
+            <div className="overflow-x-auto border md:ml-10">
+              <table className="w-full text-sm">
+                <thead className="border-b bg-muted/40 text-left">
+                  <tr>
+                    <th className="px-3 py-2">Version</th>
+                    <th className="px-3 py-2">Status</th>
+                    <th className="px-3 py-2">Changed by</th>
+                    <th className="px-3 py-2">Changed at</th>
+                    <th className="px-3 py-2">Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {versionHistory.map((version) => (
+                    <tr key={version.id} className="border-b last:border-b-0">
+                      <td className="px-3 py-2 font-medium">v{version.version}</td>
+                      <td className="px-3 py-2"><Badge variant={version.status === "active" ? "default" : "secondary"}>{version.status}</Badge></td>
+                      <td className="px-3 py-2">{version.createdBy ?? "-"}</td>
+                      <td className="whitespace-nowrap px-3 py-2">{new Date(version.createdAt).toLocaleString()}</td>
+                      <td className="max-w-md px-3 py-2">{version.changeReason ?? (version.version === 1 ? "Initial recipe definition" : "-")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </>
+      )}
+
       <footer className="flex justify-end gap-2 pb-8">
         <Button variant="outline" onClick={() => navigate("/inventory/builds?tab=recipes")}>Cancel</Button>
-        <Button disabled={!valid || createRecipe.isPending} onClick={() => createRecipe.mutate()}>
-          {createRecipe.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Create recipe
+        <Button disabled={!valid || saveRecipe.isPending} onClick={() => saveRecipe.mutate()}>
+          {saveRecipe.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{isEditing ? "Save new version" : "Create recipe"}
         </Button>
       </footer>
     </div>
