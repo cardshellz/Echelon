@@ -31,14 +31,17 @@ export type PackageAllocationDiscoveryPlanAuditPoolFactory = (
   config: PoolConfig,
 ) => PackageAllocationDiscoveryPlanAuditPool;
 
-export interface PackageAllocationDiscoveryPlanAuditJobResult
-  extends PackageAllocationDiscoveryPlanAuditReport {
+export interface PackageAllocationDiscoveryAuditJobTimingEvidence {
   readonly setupDurationMs: number;
   readonly connectDurationMs: number;
   readonly auditDurationMs: number;
   readonly cleanupDurationMs: number;
   readonly totalDurationMs: number;
 }
+
+export interface PackageAllocationDiscoveryPlanAuditJobResult
+  extends PackageAllocationDiscoveryPlanAuditReport,
+    PackageAllocationDiscoveryAuditJobTimingEvidence {}
 
 export interface PackageAllocationDiscoveryPlanAuditRuntimeDependencies {
   readonly nowMs: () => number;
@@ -145,13 +148,14 @@ export function packageAllocationDiscoveryPlanAuditPoolConfig(
     NormalizedPackageAllocationDiscoveryPlanAuditOptions,
     "statementTimeoutMs" | "lockTimeoutMs" | "idleInTransactionTimeoutMs"
   >,
+  applicationName = "package-allocation-discovery-plan-audit",
 ): PoolConfig {
   const serverStatementTimeoutMs = repositoryOptions.statementTimeoutMs
     + SERVER_STATEMENT_TIMEOUT_GRACE_MS;
   const config: BoundedPlanAuditPoolConfig = {
     ...verifiedPostgresPoolConfig({
       connectionString,
-      applicationName: "package-allocation-discovery-plan-audit",
+      applicationName,
       max: 1,
     }),
     connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
@@ -180,27 +184,40 @@ function durationMs(start: number, end: number, field: string): number {
   return safeEnd - safeStart;
 }
 
-export async function runPackageAllocationDiscoveryPlanAuditJob(options: {
+export type PackageAllocationDiscoveryAuditCleanupFailureKind =
+  | "cleanup"
+  | "execution_and_cleanup";
+
+export async function runPackageAllocationDiscoveryAuditJob<TReport extends object>(options: {
   readonly sourceWmsShipmentItemId: number;
   readonly environment?: NodeJS.ProcessEnv;
   readonly poolFactory?: PackageAllocationDiscoveryPlanAuditPoolFactory;
   readonly runtime?: PackageAllocationDiscoveryPlanAuditRuntimeDependencies;
-  readonly auditPlan?: typeof auditPackageAllocationAuthorityDiscoveryPlan;
-}): Promise<PackageAllocationDiscoveryPlanAuditJobResult> {
+  readonly assertEnabled: (environment: NodeJS.ProcessEnv) => void;
+  readonly applicationName: string;
+  readonly audit: (
+    client: PlanAuditPoolClient,
+    options: NormalizedPackageAllocationDiscoveryPlanAuditOptions,
+  ) => Promise<TReport>;
+  readonly auditLabel: string;
+  readonly createCleanupError: (
+    kind: PackageAllocationDiscoveryAuditCleanupFailureKind,
+    failures: readonly unknown[],
+  ) => Error;
+}): Promise<Readonly<TReport & PackageAllocationDiscoveryAuditJobTimingEvidence>> {
   const environment = options.environment ?? process.env;
-  assertPackageAllocationDiscoveryPlanAuditEnabled(environment);
+  options.assertEnabled(environment);
   const connectionString = packageAllocationDiscoveryPlanAuditConnectionString(environment);
   const repositoryOptions = normalizePackageAllocationDiscoveryPlanAuditOptions({
     sourceWmsShipmentItemId: options.sourceWmsShipmentItemId,
   });
   const runtime = options.runtime ?? DEFAULT_RUNTIME_DEPENDENCIES;
   const poolFactory = options.poolFactory ?? defaultPoolFactory;
-  const auditPlan = options.auditPlan ?? auditPackageAllocationAuthorityDiscoveryPlan;
   const totalStartedAtMs = safeRuntimeValue(runtime.nowMs(), "audit start time");
 
   let pool: PackageAllocationDiscoveryPlanAuditPool | undefined;
   let client: PlanAuditPoolClient | null = null;
-  let report: PackageAllocationDiscoveryPlanAuditReport | undefined;
+  let report: TReport | undefined;
   let setupStartedAtMs: number | undefined;
   let setupFinishedAtMs: number | undefined;
   let connectStartedAtMs: number | undefined;
@@ -217,6 +234,7 @@ export async function runPackageAllocationDiscoveryPlanAuditJob(options: {
     pool = poolFactory(packageAllocationDiscoveryPlanAuditPoolConfig(
       connectionString,
       repositoryOptions,
+      options.applicationName,
     ));
     setupFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "setup finish time");
 
@@ -224,9 +242,12 @@ export async function runPackageAllocationDiscoveryPlanAuditJob(options: {
     client = await pool.connect();
     connectFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "connect finish time");
 
-    auditStartedAtMs = safeRuntimeValue(runtime.nowMs(), "plan audit start time");
-    report = await auditPlan(client, repositoryOptions);
-    auditFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "plan audit finish time");
+    auditStartedAtMs = safeRuntimeValue(
+      runtime.nowMs(),
+      `${options.auditLabel} start time`,
+    );
+    report = await options.audit(client, repositoryOptions);
+    auditFinishedAtMs = safeRuntimeValue(runtime.nowMs(), `${options.auditLabel} finish time`);
   } catch (error) {
     primaryFailure = error;
     primaryFailed = true;
@@ -241,7 +262,9 @@ export async function runPackageAllocationDiscoveryPlanAuditJob(options: {
     }
     if (client !== null) {
       try {
-        client.release(primaryFailed ? new Error("discard failed plan-audit client") : undefined);
+        client.release(
+          primaryFailed ? new Error(`discard failed ${options.auditLabel} client`) : undefined,
+        );
       } catch (error) {
         cleanupFailures.push(error);
       }
@@ -260,20 +283,15 @@ export async function runPackageAllocationDiscoveryPlanAuditJob(options: {
 
   if (primaryFailed) {
     if (cleanupFailures.length > 0) {
-      throw new PackageAllocationDiscoveryPlanAuditJobError(
-        "PACKAGE_ALLOCATION_DISCOVERY_PLAN_AUDIT_EXECUTION_AND_CLEANUP_FAILED",
-        "Package-allocation discovery plan audit execution and cleanup both failed",
+      throw options.createCleanupError(
+        "execution_and_cleanup",
         [primaryFailure, ...cleanupFailures],
       );
     }
     throw primaryFailure;
   }
   if (cleanupFailures.length > 0) {
-    throw new PackageAllocationDiscoveryPlanAuditJobError(
-      "PACKAGE_ALLOCATION_DISCOVERY_PLAN_AUDIT_CLEANUP_FAILED",
-      "Package-allocation discovery plan audit cleanup failed",
-      cleanupFailures,
-    );
+    throw options.createCleanupError("cleanup", cleanupFailures);
   }
   const totalFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "audit finish time");
   if (
@@ -287,7 +305,7 @@ export async function runPackageAllocationDiscoveryPlanAuditJob(options: {
     || cleanupStartedAtMs === undefined
     || cleanupFinishedAtMs === undefined
   ) {
-    throw new Error("Package-allocation discovery plan audit completed without required evidence");
+    throw new Error(`${options.auditLabel} completed without required evidence`);
   }
   return Object.freeze({
     ...report,
@@ -300,6 +318,34 @@ export async function runPackageAllocationDiscoveryPlanAuditJob(options: {
       "cleanup duration",
     ),
     totalDurationMs: durationMs(totalStartedAtMs, totalFinishedAtMs, "total duration"),
+  });
+}
+
+export async function runPackageAllocationDiscoveryPlanAuditJob(options: {
+  readonly sourceWmsShipmentItemId: number;
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly poolFactory?: PackageAllocationDiscoveryPlanAuditPoolFactory;
+  readonly runtime?: PackageAllocationDiscoveryPlanAuditRuntimeDependencies;
+  readonly auditPlan?: typeof auditPackageAllocationAuthorityDiscoveryPlan;
+}): Promise<PackageAllocationDiscoveryPlanAuditJobResult> {
+  return runPackageAllocationDiscoveryAuditJob({
+    sourceWmsShipmentItemId: options.sourceWmsShipmentItemId,
+    environment: options.environment,
+    poolFactory: options.poolFactory,
+    runtime: options.runtime,
+    assertEnabled: assertPackageAllocationDiscoveryPlanAuditEnabled,
+    applicationName: "package-allocation-discovery-plan-audit",
+    audit: options.auditPlan ?? auditPackageAllocationAuthorityDiscoveryPlan,
+    auditLabel: "package-allocation discovery plan audit",
+    createCleanupError: (kind, failures) => new PackageAllocationDiscoveryPlanAuditJobError(
+      kind === "cleanup"
+        ? "PACKAGE_ALLOCATION_DISCOVERY_PLAN_AUDIT_CLEANUP_FAILED"
+        : "PACKAGE_ALLOCATION_DISCOVERY_PLAN_AUDIT_EXECUTION_AND_CLEANUP_FAILED",
+      kind === "cleanup"
+        ? "Package-allocation discovery plan audit cleanup failed"
+        : "Package-allocation discovery plan audit execution and cleanup both failed",
+      failures,
+    ),
   });
 }
 

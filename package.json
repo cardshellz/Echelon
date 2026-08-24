@@ -29,6 +29,7 @@
     "wms:monitor-integrity": "tsx scripts/run-wms-inventory-integrity-monitor.ts --execute",
     "wms:audit-shipment-lifecycle-shadow": "tsx server/jobs/shipment-lifecycle-shadow-audit.job.ts",
     "wms:audit-package-allocation-discovery-plan": "tsx server/jobs/package-allocation-authority-discovery-plan-audit.job.ts",
+    "wms:audit-package-allocation-discovery-execution": "tsx server/jobs/package-allocation-authority-discovery-execution-audit.job.ts",
     "operations:project-control-tower": "tsx scripts/run-operations-control-tower-projection.ts --execute --source=all",
     "wms:release-auto-holds": "tsx scripts/release-auto-held-orders.ts",
     "oms:recover-unauthorized": "tsx scripts/recover-unauthorized-paid-lines.ts",
