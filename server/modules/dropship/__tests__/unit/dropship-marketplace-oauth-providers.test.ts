@@ -112,6 +112,16 @@ describe("EbayDropshipOAuthProvider", () => {
         storeUrlPath: "marzcards",
       },
     });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://apiz.sandbox.ebay.com/commerce/identity/v1/user/",
+      {
+        headers: {
+          Authorization: "Bearer ebay-access-token",
+          Accept: "application/json",
+        },
+      },
+    );
     expect(fetchMock).toHaveBeenCalledWith(
       "https://api.sandbox.ebay.com/sell/stores/v1/store",
       expect.objectContaining({
@@ -119,6 +129,48 @@ describe("EbayDropshipOAuthProvider", () => {
           Authorization: "Bearer ebay-access-token",
         }),
       }),
+    );
+  });
+
+  it("uses the eBay apiz origin for production seller identity reads", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "ebay-access-token",
+        refresh_token: "ebay-refresh-token",
+        expires_in: 3600,
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        userId: "seller-account-123",
+        username: "seller-login",
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        name: "marzcards",
+      }), { status: 200 }));
+    const provider = new EbayDropshipOAuthProvider({
+      clientId: "ebay-key",
+      clientSecret: "ebay-secret",
+      ruName: "Cardshellz_Cardshellz-dropship-oauth",
+      environment: "production",
+    });
+
+    await provider.exchangeCode({
+      code: "auth-code",
+      shopDomain: null,
+      query: {
+        code: "auth-code",
+        state: "signed-state",
+      },
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://apiz.ebay.com/commerce/identity/v1/user/",
+      {
+        headers: {
+          Authorization: "Bearer ebay-access-token",
+          Accept: "application/json",
+        },
+      },
     );
   });
 
