@@ -69,6 +69,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { calculateLegacyFungibleAvailability } from "@/lib/inventory-availability";
 
 interface VariantAvailability {
   variantId: number;
@@ -149,6 +150,7 @@ interface VariantLevel {
   baseSku: string | null;
   productId: number | null;
   productName: string | null;
+  inventoryStrategy: string | null;
   variantQty: number;
   reservedQty: number;
   pickedQty: number;
@@ -839,25 +841,10 @@ export default function Inventory() {
 
   // Fungible available: own available + sum of descendant available (converted to this variant's units)
   // This is the number shown in the Available column — math adds up to bin-level rows
-  const fungibleAvailable = useMemo(() => {
-    const result = new Map<number, number>();
-    for (const v of variantLevels) {
-      let total = v.available; // own: physical - reserved
-      // BFS descendants — no clipping, raw math so bins add up to header
-      const queue = [...(childrenMap.get(v.variantId) || [])];
-      const visited = new Set<number>();
-      while (queue.length > 0) {
-        const child = queue.shift()!;
-        if (visited.has(child.variantId)) continue;
-        visited.add(child.variantId);
-        total += Math.floor(child.available * child.unitsPerVariant / v.unitsPerVariant);
-        const grandchildren = childrenMap.get(child.variantId) || [];
-        queue.push(...grandchildren);
-      }
-      if (total !== v.available) result.set(v.variantId, total);
-    }
-    return result;
-  }, [variantLevels, childrenMap]);
+  const fungibleAvailable = useMemo(
+    () => calculateLegacyFungibleAvailability(variantLevels),
+    [variantLevels],
+  );
 
   // Summary bar stats — product-level counts from purchasing reorder analysis
   const orderNowCount = reorderData?.summary?.belowReorderPoint ?? 0;
