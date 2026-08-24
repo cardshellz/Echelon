@@ -38,7 +38,7 @@ describe("EbayDropshipOAuthProvider", () => {
     expect(url.searchParams.toString()).not.toContain("dropship-ebay-secret");
   });
 
-  it("forces eBay login when changing stores but keeps refresh on the current session", () => {
+  it("forces eBay login for refresh and change-store authorizations", () => {
     process.env = {
       ...ORIGINAL_ENV,
       DROPSHIP_EBAY_CLIENT_ID: "dropship-ebay-client",
@@ -60,7 +60,7 @@ describe("EbayDropshipOAuthProvider", () => {
     }).authorizationUrl);
 
     expect(changeStoreUrl.searchParams.get("prompt")).toBe("login");
-    expect(refreshUrl.searchParams.has("prompt")).toBe(false);
+    expect(refreshUrl.searchParams.get("prompt")).toBe("login");
   });
 
   it("uses the eBay Store name as the connected store display name when available", async () => {

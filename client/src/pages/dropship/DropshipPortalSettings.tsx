@@ -178,7 +178,7 @@ export default function DropshipPortalSettings() {
   }
 
   async function ensureConnectProof(intent: DropshipStoreOAuthIntent, connection: DropshipStoreConnectionProfileResponse): Promise<boolean> {
-    const action = storeOAuthActionText(intent, connection.platform);
+    const action = storeOAuthActionText(intent, connection.platform, connection.status);
     return ensureSensitiveActionProof({
       action: "connect_store",
       passkeyAction: "reauth-passkey-proof",
@@ -535,7 +535,7 @@ function StoreConnectionCard({
             onClick={() => onReauthorize(connection, "refresh_connection")}
           >
             {reauthorizeButtonIcon({ emailChallengeAction, intent: "refresh_connection", isReauthorizeTarget, pendingStoreAction, reauthorizeIntent })}
-            {reauthorizeButtonLabel({ emailChallengeAction, intent: "refresh_connection", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent })}
+            {reauthorizeButtonLabel({ emailChallengeAction, intent: "refresh_connection", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent, status: connection.status })}
           </Button>
         )}
         {canChange && (
@@ -547,7 +547,7 @@ function StoreConnectionCard({
             onClick={() => onReauthorize(connection, "change_store")}
           >
             {reauthorizeButtonIcon({ emailChallengeAction, intent: "change_store", isReauthorizeTarget, pendingStoreAction, reauthorizeIntent })}
-            {reauthorizeButtonLabel({ emailChallengeAction, intent: "change_store", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent })}
+            {reauthorizeButtonLabel({ emailChallengeAction, intent: "change_store", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent, status: connection.status })}
           </Button>
         )}
         <Button
@@ -626,15 +626,16 @@ function canDisconnectStoreConnection(connection: DropshipStoreConnectionProfile
   return connection.status !== "disconnected" && connection.status !== "grace_period";
 }
 
-function canRefreshStoreConnection(connection: DropshipStoreConnectionProfileResponse): boolean {
+export function canRefreshStoreConnection(connection: DropshipStoreConnectionProfileResponse): boolean {
   return connection.status === "needs_reauth"
     || connection.status === "refresh_failed"
+    || connection.status === "grace_period"
     || connection.status === "disconnected"
     || (connection.status === "connected" && !connection.launchReady);
 }
 
-function canChangeStoreConnection(connection: DropshipStoreConnectionProfileResponse): boolean {
-  return ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status);
+export function canChangeStoreConnection(connection: DropshipStoreConnectionProfileResponse): boolean {
+  return ["connected", "needs_reauth", "refresh_failed", "grace_period", "disconnected"].includes(connection.status);
 }
 
 function connectionDisplayName(connection: DropshipStoreConnectionProfileResponse): string {
@@ -707,14 +708,15 @@ function reauthorizeButtonLabel(input: {
   pendingStoreAction: PendingStoreAction;
   platform: DropshipStoreConnectionProfileResponse["platform"];
   reauthorizeIntent: DropshipStoreOAuthIntent;
+  status: DropshipStoreConnectionProfileResponse["status"];
 }): string {
   const isActiveIntent = input.isReauthorizeTarget && input.reauthorizeIntent === input.intent;
   if (isActiveIntent && input.pendingStoreAction === "reauth-send-code") return "Sending code";
   if (isActiveIntent && input.pendingStoreAction === "reauth-verify-code") return "Verifying code";
   if (isActiveIntent && input.pendingStoreAction === "reauth-passkey-proof") return "Waiting for passkey";
   if (isActiveIntent && input.pendingStoreAction === "reauth-start") return "Opening authorization";
-  if (isActiveIntent && input.emailChallengeAction === "connect_store") return `Verify and ${storeOAuthActionText(input.intent, input.platform)}`;
-  return storeOAuthActionTitle(input.intent, input.platform);
+  if (isActiveIntent && input.emailChallengeAction === "connect_store") return `Verify and ${storeOAuthActionText(input.intent, input.platform, input.status)}`;
+  return storeOAuthActionTitle(input.intent, input.platform, input.status);
 }
 
 function reauthorizeButtonIcon(input: {
@@ -731,13 +733,25 @@ function reauthorizeButtonIcon(input: {
   return input.intent === "refresh_connection" ? <RefreshCw className="h-4 w-4" /> : <Store className="h-4 w-4" />;
 }
 
-function storeOAuthActionTitle(intent: DropshipStoreOAuthIntent, platform: DropshipStoreConnectionProfileResponse["platform"]): string {
+export function storeOAuthActionTitle(
+  intent: DropshipStoreOAuthIntent,
+  platform: DropshipStoreConnectionProfileResponse["platform"],
+  status?: DropshipStoreConnectionProfileResponse["status"],
+): string {
+  if (intent === "refresh_connection" && status === "grace_period") return `Reconnect ${formatStatus(platform)} store`;
+  if (intent === "change_store" && status === "grace_period") return `Connect a different ${formatStatus(platform)} store`;
   if (intent === "refresh_connection") return `Refresh ${formatStatus(platform)} connection`;
   if (intent === "change_store") return `Change ${formatStatus(platform)} store`;
   return `Connect ${formatStatus(platform)}`;
 }
 
-function storeOAuthActionText(intent: DropshipStoreOAuthIntent, platform: DropshipStoreConnectionProfileResponse["platform"]): string {
+function storeOAuthActionText(
+  intent: DropshipStoreOAuthIntent,
+  platform: DropshipStoreConnectionProfileResponse["platform"],
+  status?: DropshipStoreConnectionProfileResponse["status"],
+): string {
+  if (intent === "refresh_connection" && status === "grace_period") return `reconnect the ${formatStatus(platform)} store`;
+  if (intent === "change_store" && status === "grace_period") return `connect a different ${formatStatus(platform)} store`;
   if (intent === "refresh_connection") return `refresh the ${formatStatus(platform)} connection`;
   if (intent === "change_store") return `change the ${formatStatus(platform)} store`;
   return `connect ${formatStatus(platform)}`;
