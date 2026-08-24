@@ -46,6 +46,7 @@ import {
   type DropshipStorePlatform,
 } from "@/lib/dropship-ops-surface";
 import { DropshipPortalShell } from "./DropshipPortalShell";
+import { storeOAuthEmailVerificationMessage } from "./store-oauth-verification-copy";
 
 type PendingAction = "send-email-code" | "verify-email-code" | "passkey-proof" | "oauth-start" | null;
 type PendingActivationAction = "send-email-code" | "verify-email-code" | "passkey-proof" | "activate-account" | null;
@@ -276,7 +277,9 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
           await startEmailStepUp("connect_store");
           setEmailCodeSent(true);
           setVerificationCode("");
-          setMessage(`Verification code sent. Enter it below, then ${storeOAuthActionText(requestedIntent, platform)}.`);
+          setMessage(storeOAuthEmailVerificationMessage(
+            storeOAuthActionText(requestedIntent, platform),
+          ));
         });
         return;
       } else {

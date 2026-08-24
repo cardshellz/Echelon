@@ -439,7 +439,17 @@ describe("DropshipStoreConnectionService", () => {
       hasRefreshToken: true,
     });
     expect(repository.lastConnectInput?.tokenRecords.map((record) => record.tokenKind)).toEqual(["access", "refresh"]);
-    expect(logs[0]).toMatchObject({ code: "DROPSHIP_STORE_CONNECTED" });
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DROPSHIP_STORE_OAUTH_IDENTITY_OBSERVED",
+        context: expect.objectContaining({
+          hasStableAccountId: true,
+          hasProviderUsername: false,
+          identityScheme: "provider_user_id",
+        }),
+      }),
+      expect.objectContaining({ code: "DROPSHIP_STORE_CONNECTED" }),
+    ]));
   });
 
   it("completes OAuth by reconnecting the existing unhealthy store slot", async () => {
@@ -479,6 +489,202 @@ describe("DropshipStoreConnectionService", () => {
       externalAccountIdentityScheme: "provider_user_id",
     });
   });
+
+  it("refreshes an unclaimed legacy eBay connection when the returned username matches", async () => {
+    repository.connections = [makeConnection({
+      storeConnectionId: 21,
+      status: "needs_reauth",
+      externalAccountId: null,
+      providerEnvironment: null,
+      externalAccountIdentityScheme: null,
+      externalAccountVerifiedAt: null,
+      externalDisplayName: "marz_cards",
+      hasAccessToken: false,
+      hasRefreshToken: false,
+    })];
+    ebayOAuthProvider.usernameOnlyIdentity = true;
+    ebayOAuthProvider.providerEnvironment = "production";
+    ebayOAuthProvider.providerAccountUsername = "legacy-login-name";
+    ebayOAuthProvider.externalDisplayName = "marz_cards";
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+      intent: "refresh_connection",
+    };
+
+    const result = await service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    });
+
+    expect(result.connection).toMatchObject({
+      storeConnectionId: 21,
+      externalAccountId: null,
+      providerEnvironment: "production",
+      externalAccountIdentityScheme: null,
+      externalAccountVerifiedAt: null,
+      externalDisplayName: "marz_cards",
+      status: "connected",
+      hasAccessToken: true,
+      hasRefreshToken: true,
+    });
+    expect(repository.lastConnectInput).toMatchObject({
+      oauthIntent: "refresh_connection",
+      externalAccountId: null,
+      externalAccountIdentityScheme: null,
+      externalAccountVerifiedAt: null,
+      externalDisplayName: "marz_cards",
+      config: {
+        identityCompatibilityMode: "legacy_username_refresh",
+      },
+    });
+    expect(logs).toContainEqual(expect.objectContaining({
+      code: "DROPSHIP_STORE_OAUTH_IDENTITY_OBSERVED",
+      context: expect.objectContaining({
+        platform: "ebay",
+        intent: "refresh_connection",
+        storeConnectionId: 21,
+        providerEnvironment: "production",
+        identityScheme: null,
+        hasStableAccountId: false,
+        hasProviderUsername: true,
+        hasDisplayName: true,
+      }),
+    }));
+  });
+
+  it("rejects username-only refresh evidence when it does not match the legacy connection", async () => {
+    repository.connections = [makeConnection({
+      storeConnectionId: 21,
+      status: "needs_reauth",
+      externalAccountId: null,
+      providerEnvironment: null,
+      externalAccountIdentityScheme: null,
+      externalAccountVerifiedAt: null,
+      externalDisplayName: "marz_cards",
+    })];
+    ebayOAuthProvider.usernameOnlyIdentity = true;
+    ebayOAuthProvider.providerEnvironment = "production";
+    ebayOAuthProvider.providerAccountUsername = "different_seller";
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+      intent: "refresh_connection",
+    };
+
+    await expect(service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_OAUTH_LEGACY_ACCOUNT_MISMATCH",
+    });
+    expect(repository.lastConnectInput).toBeNull();
+  });
+
+  it("logs credential-safe provider diagnostics when eBay identity lookup fails", async () => {
+    repository.connections = [makeConnection({
+      storeConnectionId: 21,
+      status: "needs_reauth",
+      externalAccountId: null,
+      externalAccountIdentityScheme: null,
+      externalAccountVerifiedAt: null,
+      externalDisplayName: "marz_cards",
+    })];
+    ebayOAuthProvider.exchangeError = new DropshipError(
+      "DROPSHIP_EBAY_STABLE_ACCOUNT_ID_REQUIRED",
+      "eBay did not return the stable provider user ID required to identify this seller account.",
+      { status: 403, retryable: false },
+    );
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+      intent: "refresh_connection",
+    };
+
+    await expect(service.completeOAuthCallback({
+      state: "signed",
+      code: "secret-authorization-code",
+      platform: "ebay",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_STABLE_ACCOUNT_ID_REQUIRED",
+    });
+    expect(logs).toContainEqual({
+      code: "DROPSHIP_EBAY_STABLE_ACCOUNT_ID_REQUIRED",
+      message: "Dropship store OAuth provider exchange failed.",
+      context: {
+        platform: "ebay",
+        intent: "refresh_connection",
+        vendorId: 10,
+        storeConnectionId: 21,
+        providerHttpStatus: 403,
+        retryable: false,
+        hasProviderUsername: null,
+      },
+    });
+    expect(JSON.stringify(logs)).not.toContain("secret-authorization-code");
+    expect(repository.lastConnectInput).toBeNull();
+  });
+
+  it.each(["connect", "change_store"] as const)(
+    "requires stable eBay identity for %s OAuth instead of accepting username-only evidence",
+    async (intent) => {
+      if (intent === "change_store") {
+        repository.connections = [makeConnection({
+          storeConnectionId: 21,
+          externalAccountId: null,
+          externalAccountIdentityScheme: null,
+          externalAccountVerifiedAt: null,
+          externalDisplayName: "marz_cards",
+        })];
+      }
+      ebayOAuthProvider.usernameOnlyIdentity = true;
+      ebayOAuthProvider.providerAccountUsername = "marz_cards";
+      stateSigner.payload = {
+        version: 1,
+        vendorId: 10,
+        memberId: "member-1",
+        platform: "ebay",
+        shopDomain: null,
+        nonce: "nonce",
+        issuedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 60000).toISOString(),
+        returnTo: "/dropship/settings",
+        intent,
+      };
+
+      await expect(service.completeOAuthCallback({
+        state: "signed",
+        code: "auth-code",
+        platform: "ebay",
+      })).rejects.toMatchObject({
+        code: "DROPSHIP_EBAY_STABLE_ACCOUNT_ID_REQUIRED",
+      });
+      expect(repository.lastConnectInput).toBeNull();
+    },
+  );
 
   it("completes OAuth by replacing the existing same-platform store authorization", async () => {
     repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "connected" })];
@@ -935,7 +1141,11 @@ class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
   authorizationCalls: Array<Parameters<DropshipMarketplaceOAuthProvider["createAuthorizationUrl"]>[0]> = [];
   externalAccountId: string | null = null;
   providerEnvironment = "test";
-  externalAccountIdentityScheme = "provider_user_id";
+  externalAccountIdentityScheme: string | null = "provider_user_id";
+  providerAccountUsername: string | null = null;
+  usernameOnlyIdentity = false;
+  externalDisplayName: string | null = null;
+  exchangeError: Error | null = null;
   exchangeCalls: Array<{
     code: string;
     shopDomain: string | null;
@@ -964,14 +1174,20 @@ class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
     query: CompleteOAuthQuery;
   }): Promise<DropshipStoreConnectionTokenGrant> {
     this.exchangeCalls.push(input);
+    if (this.exchangeError) {
+      throw this.exchangeError;
+    }
+    const usernameOnly = this.platform === "ebay" && this.usernameOnlyIdentity;
     return {
       accessToken: "access-token",
       refreshToken: this.platform === "ebay" ? "refresh-token" : null,
       accessTokenExpiresAt: new Date(now.getTime() + 3600000),
-      externalAccountId: this.externalAccountId ?? `external-${this.platform}`,
+      externalAccountId: usernameOnly ? null : (this.externalAccountId ?? `external-${this.platform}`),
       providerEnvironment: this.providerEnvironment,
-      externalAccountIdentityScheme: this.externalAccountIdentityScheme,
-      externalDisplayName: `External ${this.platform}`,
+      externalAccountIdentityScheme: usernameOnly ? null : this.externalAccountIdentityScheme,
+      providerAccountUsername: usernameOnly ? this.providerAccountUsername : null,
+      externalDisplayName: this.externalDisplayName
+        ?? (usernameOnly ? this.providerAccountUsername : `External ${this.platform}`),
     };
   }
 }

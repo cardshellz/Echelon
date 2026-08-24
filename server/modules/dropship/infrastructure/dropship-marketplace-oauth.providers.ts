@@ -129,7 +129,8 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
       accessTokenExpiresAt,
       externalAccountId: identity.accountId,
       providerEnvironment: this.config.environment,
-      externalAccountIdentityScheme: "provider_user_id",
+      externalAccountIdentityScheme: identity.accountId ? "provider_user_id" : null,
+      providerAccountUsername: identity.username,
       externalDisplayName: store.storeName ?? identity.displayName,
       tokenMetadata: {
         environment: this.config.environment,
@@ -143,7 +144,11 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
     };
   }
 
-  private async fetchIdentity(accessToken: string): Promise<{ accountId: string | null; displayName: string | null }> {
+  private async fetchIdentity(accessToken: string): Promise<{
+    accountId: string | null;
+    username: string | null;
+    displayName: string | null;
+  }> {
     const response = await fetch(EBAY_IDENTITY_URLS[this.config.environment], {
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -161,7 +166,7 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
     const identity = await response.json() as Record<string, unknown>;
     const username = optionalString(identity.username);
     const userId = optionalString(identity.userId);
-    if (!userId) {
+    if (!userId && !username) {
       throw new DropshipError(
         "DROPSHIP_EBAY_STABLE_ACCOUNT_ID_REQUIRED",
         "eBay did not return the stable provider user ID required to identify this seller account.",
@@ -170,6 +175,7 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
     }
     return {
       accountId: userId,
+      username,
       displayName: username ?? userId,
     };
   }

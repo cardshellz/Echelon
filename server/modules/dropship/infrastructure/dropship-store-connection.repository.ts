@@ -196,8 +196,8 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     platform: DropshipSupportedStorePlatform;
     externalAccountId: string | null;
     providerEnvironment: string;
-    externalAccountIdentityScheme: string;
-    externalAccountVerifiedAt: Date;
+    externalAccountIdentityScheme: string | null;
+    externalAccountVerifiedAt: Date | null;
     externalDisplayName: string | null;
     shopDomain: string | null;
     accessTokenRef: string;
@@ -1331,7 +1331,7 @@ function providerIdentityConflictContext(
     platform: DropshipSupportedStorePlatform;
     providerEnvironment: string;
     externalAccountId: string | null;
-    externalAccountIdentityScheme: string;
+    externalAccountIdentityScheme: string | null;
   },
   marketplaceIdentityBound: boolean,
 ): Record<string, unknown> {

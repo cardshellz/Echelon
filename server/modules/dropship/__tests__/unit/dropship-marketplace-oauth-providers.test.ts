@@ -163,7 +163,7 @@ describe("EbayDropshipOAuthProvider", () => {
     });
   });
 
-  it("rejects eBay OAuth identity responses that contain a username but no stable userId", async () => {
+  it("returns explicit username-only evidence when eBay omits the stable userId", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(new Response(JSON.stringify({
         access_token: "ebay-access-token",
@@ -173,6 +173,45 @@ describe("EbayDropshipOAuthProvider", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({
         username: "seller-login",
       }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        name: "marzcards",
+      }), { status: 200 }));
+    const provider = new EbayDropshipOAuthProvider({
+      clientId: "ebay-key",
+      clientSecret: "ebay-secret",
+      ruName: "Cardshellz_Cardshellz-dropship-oauth",
+      environment: "sandbox",
+    });
+
+    const result = await provider.exchangeCode({
+      code: "auth-code",
+      shopDomain: null,
+      query: {
+        code: "auth-code",
+        state: "signed-state",
+      },
+    });
+
+    expect(result).toMatchObject({
+      externalAccountId: null,
+      externalAccountIdentityScheme: null,
+      providerAccountUsername: "seller-login",
+      externalDisplayName: "marzcards",
+      tokenMetadata: {
+        identityAccountId: null,
+        identityDisplayName: "seller-login",
+      },
+    });
+  });
+
+  it("rejects eBay OAuth identity responses with neither userId nor username", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "ebay-access-token",
+        refresh_token: "ebay-refresh-token",
+        expires_in: 3600,
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         name: "marzcards",
       }), { status: 200 }));
@@ -193,7 +232,7 @@ describe("EbayDropshipOAuthProvider", () => {
     })).rejects.toMatchObject({
       code: "DROPSHIP_EBAY_STABLE_ACCOUNT_ID_REQUIRED",
       context: {
-        hasUsername: true,
+        hasUsername: false,
         retryable: false,
       },
     });
