@@ -19,8 +19,10 @@ const EBAY_CONSENT_URLS = {
 } as const;
 
 const EBAY_IDENTITY_URLS = {
-  sandbox: "https://api.sandbox.ebay.com/commerce/identity/v1/user/",
-  production: "https://api.ebay.com/commerce/identity/v1/user/",
+  // Commerce Identity is hosted on eBay's apiz origin. The token, stores,
+  // inventory, and fulfillment APIs intentionally remain on the api origin.
+  sandbox: "https://apiz.sandbox.ebay.com/commerce/identity/v1/user/",
+  production: "https://apiz.ebay.com/commerce/identity/v1/user/",
 } as const;
 
 const EBAY_STORES_URLS = {
