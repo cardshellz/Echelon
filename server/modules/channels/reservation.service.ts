@@ -1109,7 +1109,7 @@ class ReservationService {
         promisedQty,
         demandStatus,
         isReserved: reservedQty >= Number(item.quantity),
-        isPromised: promisedQty >= Number(item.quantity),
+        isPromised: promisedQty > 0 && reservedQty + promisedQty >= Number(item.quantity),
       });
     }
 

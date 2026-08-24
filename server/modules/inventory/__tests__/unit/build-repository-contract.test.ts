@@ -85,4 +85,27 @@ describe("build repository transaction contract", () => {
     expect(executionSource).toContain("resulting_completed_builds");
     expect(executionSource).toContain("SET status = 'reversed'");
   });
+
+  it("creates recipe edits as locked immutable versions with transactional audit evidence", () => {
+    expect(repositorySource).toContain("async updateRecipe(input: UpdateBuildRecipeInput)");
+    expect(repositorySource).toMatch(/WHERE id = \$\{input\.recipeId\}[\s\S]*FOR UPDATE/);
+    expect(repositorySource).toMatch(/WHERE code = \$\{current\.code\}[\s\S]*ORDER BY version DESC[\s\S]*FOR UPDATE/);
+    expect(repositorySource).toContain("nextVersion = Number(latest.version) + 1");
+    expect(repositorySource).toContain("supersedes_recipe_id");
+    expect(repositorySource).toContain("change_idempotency_key");
+    expect(repositorySource).toContain("change_request_hash");
+    expect(repositorySource).toContain("persistAuditEvent(tx");
+    expect(repositorySource).toContain("inventory.build_recipe.version_created");
+    expect(repositorySource).toContain("changes: { before, after }");
+  });
+
+  it("guards active output ownership and idempotent recipe retries", () => {
+    expect(repositorySource).toContain("pg_advisory_xact_lock(hashtext('inventory.build_recipe_output')");
+    expect(repositorySource).toContain("BUILD_OUTPUT_RECIPE_CONFLICT");
+    expect(repositorySource).toContain("hashtext('inventory.build_recipe_edit')");
+    expect(repositorySource).toContain("IDEMPOTENCY_KEY_REUSED");
+    expect(repositorySource).toContain("alreadyApplied: true");
+    expect(repositorySource).toContain("BUILD_RECIPE_VERSION_CONFLICT");
+  });
+
 });

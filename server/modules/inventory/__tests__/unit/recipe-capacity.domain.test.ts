@@ -68,6 +68,7 @@ describe("recipe capacity domain", () => {
     expect(plan).toMatchObject({
       sourceLocationId: 21,
       requestedQty: 7,
+      directAllocations: [{ sourceLocationId: 21, qty: 7 }],
       rootNodeKey: null,
       nodes: [],
     });
@@ -76,7 +77,7 @@ describe("recipe capacity domain", () => {
     }), 200)).toBe(7);
   });
 
-  it("builds the full line when finished stock cannot satisfy it exactly", () => {
+  it("uses finished stock first and builds only the remaining demand", () => {
     const plan = planRecipeDemand(snapshot({
       recipes: [eaAssembly, p5Conversion],
       stock: [
@@ -86,17 +87,18 @@ describe("recipe capacity domain", () => {
       outputLocations: [[100, 20], [200, 21]],
     }), 200, 2);
 
+    expect(plan.directAllocations).toEqual([{ sourceLocationId: 21, qty: 1 }]);
     expect(plan.nodes).toHaveLength(2);
     expect(plan.nodes[0]).toMatchObject({
       recipeId: 10,
-      plannedBuilds: 10,
-      outputQty: 10,
+      plannedBuilds: 5,
+      outputQty: 5,
     });
     expect(plan.nodes[1]).toMatchObject({
       recipeId: 20,
-      plannedBuilds: 2,
-      outputQty: 2,
-      components: [{ variantId: 100, requiredQty: 10 }],
+      plannedBuilds: 1,
+      outputQty: 1,
+      components: [{ variantId: 100, requiredQty: 5 }],
     });
   });
 
@@ -129,15 +131,56 @@ describe("recipe capacity domain", () => {
     expect(plan.rootNodeKey).toBe("root");
   });
 
-  it("derives independent P5 and C25 capacity from 2,200 complete raw sets", () => {
+  it("adds direct finished stock to independently buildable P5 and C25 capacity", () => {
     const common = {
       recipes: [eaAssembly, p5Conversion, c25Conversion],
-      stock: rawStock(2_200),
+      stock: [
+        ...rawStock(2_200),
+        { variantId: 200, locationId: 21, availableQty: 2 },
+        { variantId: 300, locationId: 22, availableQty: 84 },
+      ],
       outputLocations: [[100, 20], [200, 21], [300, 22]] as Array<[number, number]>,
     };
 
-    expect(calculateRecipeCapacity(snapshot(common), 200)).toBe(440);
-    expect(calculateRecipeCapacity(snapshot(common), 300)).toBe(88);
+    expect(calculateRecipeCapacity(snapshot(common), 200)).toBe(442);
+    expect(calculateRecipeCapacity(snapshot(common), 300)).toBe(172);
+  });
+
+  it("uses one deterministic finished-goods location and builds any remainder", () => {
+    const plan = planRecipeDemand(snapshot({
+      recipes: [p5Conversion],
+      stock: [
+        { variantId: 200, locationId: 23, availableQty: 2 },
+        { variantId: 200, locationId: 21, availableQty: 3 },
+        { variantId: 200, locationId: 22, availableQty: 3 },
+        { variantId: 100, locationId: 20, availableQty: 20 },
+      ],
+      outputLocations: [[200, 21]],
+    }), 200, 7);
+
+    expect(plan.directAllocations).toEqual([{ sourceLocationId: 21, qty: 3 }]);
+    expect(plan.nodes).toEqual([expect.objectContaining({
+      outputVariantId: 200,
+      plannedBuilds: 4,
+      outputQty: 4,
+    })]);
+  });
+
+  it("does not mix non-output-location stock into a build promise", () => {
+    const plan = planRecipeDemand(snapshot({
+      recipes: [p5Conversion],
+      stock: [
+        { variantId: 200, locationId: 23, availableQty: 2 },
+        { variantId: 100, locationId: 20, availableQty: 10 },
+      ],
+      outputLocations: [[200, 21]],
+    }), 200, 2);
+
+    expect(plan.directAllocations).toEqual([]);
+    expect(plan.nodes).toEqual([expect.objectContaining({
+      outputLocationId: 21,
+      plannedBuilds: 2,
+    })]);
   });
 
   it("fails closed when active recipes are ambiguous", () => {

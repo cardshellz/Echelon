@@ -75,6 +75,8 @@ describe("InventoryUseCases.reserveForOrder idempotency (M1/M2)", () => {
       transactionType: "reserve",
       orderId: 100,
       orderItemId: 200,
+      referenceType: "order",
+      referenceId: "100",
     });
   });
 
@@ -93,6 +95,45 @@ describe("InventoryUseCases.reserveForOrder idempotency (M1/M2)", () => {
     expect(result).toBe(true);
     expect(mockStorage.adjustInventoryLevel).not.toHaveBeenCalled();
     expect(txns).toHaveLength(0);
+  });
+
+  it("allows independently idempotent direct and built supply segments", async () => {
+    const { uc, mockStorage, txns, executeFn } = makeHarness();
+    executeFn.mockResolvedValue({ rows: [] });
+
+    await uc.reserveForOrder({
+      productVariantId: 1,
+      warehouseLocationId: 2,
+      qty: 1,
+      orderId: 100,
+      orderItemId: 200,
+      referenceType: "recipe_direct",
+      referenceId: "200:2",
+    });
+    await uc.reserveForOrder({
+      productVariantId: 1,
+      warehouseLocationId: 3,
+      qty: 2,
+      orderId: 100,
+      orderItemId: 200,
+      referenceType: "recipe_build",
+      referenceId: "77",
+    });
+
+    expect(mockStorage.adjustInventoryLevel).toHaveBeenCalledTimes(2);
+    expect(txns).toHaveLength(2);
+    expect(txns).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        reservedQtyDelta: 1,
+        referenceType: "recipe_direct",
+        referenceId: "200:2",
+      }),
+      expect.objectContaining({
+        reservedQtyDelta: 2,
+        referenceType: "recipe_build",
+        referenceId: "77",
+      }),
+    ]));
   });
 
   it("catches 23505 reserve_dedup constraint as belt-and-suspenders", async () => {

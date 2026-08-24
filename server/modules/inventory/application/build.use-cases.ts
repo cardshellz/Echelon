@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   BuildDomainError,
   requireBuildRecipeType,
@@ -9,10 +10,12 @@ import {
   type BuildOrderCompletedContext,
   type BuildExecutionResult,
   type BuildRepository,
+  type BuildRecipeVersionResult,
   type BuildReversalResult,
   type CancelBuildOrderInput,
   type CreateBuildOrderInput,
   type CreateBuildRecipeInput,
+  type UpdateBuildRecipeInput,
   type ExecuteBuildRunInput,
   type ReverseBuildRunInput,
 } from "../infrastructure/build.repository";
@@ -30,6 +33,7 @@ export type BuildInventoryChangeTrigger =
   | "build_released"
   | "build_completed"
   | "build_cancelled"
+  | "recipe_version_created"
   | "build_reversed";
 
 type InventoryChangedCallback = (variantId: number, trigger: BuildInventoryChangeTrigger) => void;
@@ -43,6 +47,11 @@ function requiredText(value: unknown, field: string, maxLength: number): string 
     );
   }
   return value.trim();
+}
+
+function optionalText(value: unknown, field: string, maxLength: number): string | undefined {
+  if (value == null || value === "") return undefined;
+  return requiredText(value, field, maxLength);
 }
 
 function requiredIdempotencyKey(value: unknown): string {
@@ -75,6 +84,7 @@ export class BuildUseCases {
     private readonly repository: BuildRepository,
     private readonly changes: BuildChangeRepository,
     private readonly queries: BuildQueryRepository,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   onInventoryChange(callback: InventoryChangedCallback): void {
@@ -103,7 +113,7 @@ export class BuildUseCases {
       recipeType: requireBuildRecipeType(input.recipeType),
       outputVariantId: requirePositiveInteger(input.outputVariantId, "outputVariantId"),
       outputQty: requirePositiveInteger(input.outputQty, "outputQty"),
-      notes: input.notes?.trim() || undefined,
+      notes: optionalText(input.notes, "notes", 5000),
       components: components.map((component, index) => ({
         componentVariantId: requirePositiveInteger(
           component.componentVariantId,
@@ -112,6 +122,82 @@ export class BuildUseCases {
         qtyPerBuild: requirePositiveInteger(component.qtyPerBuild, `components[${index}].qtyPerBuild`),
       })),
     });
+  }
+
+  async updateRecipe(
+    input: Omit<UpdateBuildRecipeInput, "changeRequestHash" | "changedAt">,
+  ): Promise<BuildRecipeVersionResult> {
+    const components = requiredArray<UpdateBuildRecipeInput["components"][number]>(
+      input.components,
+      "components",
+    ).map((component, index) => ({
+      componentVariantId: requirePositiveInteger(
+        component.componentVariantId,
+        `components[${index}].componentVariantId`,
+      ),
+      qtyPerBuild: requirePositiveInteger(
+        component.qtyPerBuild,
+        `components[${index}].qtyPerBuild`,
+      ),
+    })).sort((left, right) => left.componentVariantId - right.componentVariantId);
+    if (input.status !== "draft" && input.status !== "active") {
+      throw new BuildDomainError(
+        "INVALID_BUILD_INPUT",
+        "status must be draft or active",
+        { field: "status" },
+      );
+    }
+
+    const normalized = {
+      recipeId: requirePositiveInteger(input.recipeId, "recipeId"),
+      expectedVersion: requirePositiveInteger(input.expectedVersion, "expectedVersion"),
+      name: requiredText(input.name, "name", 150),
+      status: input.status,
+      recipeType: requireBuildRecipeType(input.recipeType),
+      outputVariantId: requirePositiveInteger(input.outputVariantId, "outputVariantId"),
+      outputQty: requirePositiveInteger(input.outputQty, "outputQty"),
+      notes: optionalText(input.notes, "notes", 5000),
+      components,
+      changeReason: requiredText(input.changeReason, "changeReason", 1000),
+      idempotencyKey: requiredIdempotencyKey(input.idempotencyKey),
+      actorId: requiredText(input.actorId, "actorId", 100),
+    };
+    const changeRequestHash = createHash("sha256")
+      .update(JSON.stringify({ ...normalized, notes: normalized.notes ?? null }))
+      .digest("hex");
+    const result = await this.repository.updateRecipe({
+      ...normalized,
+      changeRequestHash,
+      changedAt: this.clock(),
+    });
+
+    if (!result.alreadyApplied && this.inventoryChangedCallback) {
+      const affectedVariantIds = new Set<number>([
+        Number(result.previousOutputVariantId),
+        Number(result.output_variant_id),
+      ]);
+      for (const variantId of affectedVariantIds) {
+        if (!Number.isSafeInteger(variantId) || variantId <= 0) continue;
+        try {
+          this.inventoryChangedCallback(variantId, "recipe_version_created");
+        } catch (error: any) {
+          console.warn(JSON.stringify({
+            event: "build_recipe_inventory_notification_failed",
+            recipeId: Number(result.id),
+            productVariantId: variantId,
+            error: error?.message ?? String(error),
+          }));
+        }
+      }
+    }
+    console.info(JSON.stringify({
+      event: result.alreadyApplied ? "build_recipe_version_reused" : "build_recipe_version_created",
+      recipeId: Number(result.id),
+      recipeCode: String(result.code),
+      recipeVersion: Number(result.version),
+      actorId: normalized.actorId,
+    }));
+    return result;
   }
 
   async createOrder(input: CreateBuildOrderInput, txOverride?: BuildDb): Promise<any> {
