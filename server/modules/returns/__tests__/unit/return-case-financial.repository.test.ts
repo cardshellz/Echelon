@@ -1,18 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DropshipReturnWalletSettlementPort } from "../../../dropship/application/return-wallet-settlement.port";
 import type {
+  ReturnCaseAdminStore,
+  ReturnCaseDetailRow,
+} from "../../application/return-case-admin.service";
+import type {
   ReturnFinancialCaseSource,
   VendorSettlementQuote,
 } from "../../application/return-case-financial.service";
 
 const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
+  query: vi.fn(),
   persistAuditEvent: vi.fn(),
 }));
 
 vi.mock("../../../../db", () => ({
   db: {},
-  pool: { connect: mocks.connect },
+  pool: { connect: mocks.connect, query: mocks.query },
 }));
 
 vi.mock("../../../../infrastructure/auditLogger", () => ({
@@ -25,11 +30,79 @@ vi.mock("../../infrastructure/return-case.repository", () => ({
   },
 }));
 
-import { PostgresReturnCaseVendorSettlementStore } from "../../infrastructure/return-case-financial.repository";
+import {
+  PostgresReturnCaseFinancialSourceStore,
+  PostgresReturnCaseVendorSettlementStore,
+} from "../../infrastructure/return-case-financial.repository";
 
 const NOW = new Date("2026-08-23T20:00:00.000Z");
 const REQUEST_HASH = "a".repeat(64);
 const QUOTE_HASH = "b".repeat(64);
+
+describe("PostgresReturnCaseFinancialSourceStore", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("resolves a legacy immutable RMA item through its exact OMS order line", async () => {
+    const adminStore = adminStoreWith(financialDetail());
+    mocks.query.mockImplementation(async (text: string, params: unknown[]) => {
+      const sql = normalizeSql(text);
+      if (sql.includes("FROM oms.oms_orders")) {
+        expect(params).toEqual([653408]);
+        return result([{ external_order_id: "653408", currency: "USD" }]);
+      }
+      expect(sql).toContain("FROM oms.oms_order_lines");
+      expect(sql).toContain("WHERE order_id = $1");
+      expect(params).toEqual([653408, [114910]]);
+      return result([{ id: "114910", external_line_item_id: "36002367799455" }]);
+    });
+
+    const store = new PostgresReturnCaseFinancialSourceStore(adminStore);
+    const loaded = await store.loadCase(1);
+
+    expect(loaded?.items[0].externalLineItemId).toBe("36002367799455");
+    expect(mocks.query).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed when the immutable snapshot conflicts with the OMS line", async () => {
+    const adminStore = adminStoreWith(financialDetail({ externalLineItemId: "other-line" }));
+    mockOmsIdentity([{ id: "114910", external_line_item_id: "36002367799455" }]);
+
+    const store = new PostgresReturnCaseFinancialSourceStore(adminStore);
+    await expect(store.loadCase(1)).rejects.toMatchObject({
+      code: "RETURN_FINANCIAL_LINE_IDENTITY_CONFLICT",
+      status: 409,
+      context: expect.objectContaining({ reason: "EXTERNAL_LINE_ID_MISMATCH" }),
+    });
+  });
+
+  it("fails closed when the linked OMS line does not belong to the source order", async () => {
+    const adminStore = adminStoreWith(financialDetail());
+    mockOmsIdentity([]);
+
+    const store = new PostgresReturnCaseFinancialSourceStore(adminStore);
+    await expect(store.loadCase(1)).rejects.toMatchObject({
+      code: "RETURN_FINANCIAL_LINE_IDENTITY_CONFLICT",
+      status: 409,
+      context: expect.objectContaining({ reason: "OMS_LINE_NOT_IN_SOURCE_ORDER" }),
+    });
+  });
+
+  it("preserves a stored identity when an older item has no OMS line link", async () => {
+    const adminStore = adminStoreWith(financialDetail({
+      omsOrderLineId: null,
+      externalLineItemId: "legacy-line",
+    }));
+    mockOmsIdentity([]);
+
+    const store = new PostgresReturnCaseFinancialSourceStore(adminStore);
+    const loaded = await store.loadCase(1);
+
+    expect(loaded?.items[0].externalLineItemId).toBe("legacy-line");
+    expect(mocks.query).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("PostgresReturnCaseVendorSettlementStore", () => {
   beforeEach(() => {
@@ -162,6 +235,83 @@ function source(): ReturnFinancialCaseSource {
     actionContext: {} as ReturnFinancialCaseSource["actionContext"],
     items: [],
   };
+}
+
+function adminStoreWith(detail: ReturnCaseDetailRow): Pick<ReturnCaseAdminStore, "getById"> {
+  return { getById: vi.fn().mockResolvedValue(detail) };
+}
+
+function financialDetail(
+  itemOverrides: Partial<ReturnCaseDetailRow["items"][number]> = {},
+): ReturnCaseDetailRow {
+  return {
+    recordOrigin: "canonical",
+    recordKey: "canonical:1",
+    legacyRmaId: null,
+    id: 1,
+    caseNumber: "RET-0000000001",
+    sourceProvider: "admin",
+    sourceEventType: "manual_return_case_opened",
+    sourceEventId: "returns-admin:1",
+    businessContext: "retail",
+    channelId: 36,
+    channelName: "Shopify",
+    vendorId: null,
+    vendorName: null,
+    storeConnectionId: null,
+    storeName: null,
+    omsOrderId: 653408,
+    omsOrderNumber: "#61694",
+    wmsOrderId: 206955,
+    wmsOrderNumber: "#61694",
+    wmsReturnId: 230,
+    caseStatus: "open",
+    approvalStatus: "approved",
+    logisticsStatus: "received",
+    inspectionStatus: "approved",
+    customerRefundStatus: "pending",
+    vendorSettlementStatus: "not_applicable",
+    openedAt: NOW,
+    closedAt: null,
+    itemCount: 1,
+    unitCount: 1,
+    policyId: 6,
+    policyVersion: 2,
+    policySnapshot: {},
+    createdAt: NOW,
+    updatedAt: NOW,
+    items: [{
+      id: 1,
+      wmsReturnItemId: 41,
+      omsOrderLineId: 114910,
+      wmsOrderItemId: 317291,
+      productVariantId: 700,
+      externalLineItemId: null,
+      sku: "SHLZ-TOP-180PT-BLU-P10",
+      title: "180PT 3x4 Premium Toploader - UV Shield - Blue Hint - Pack of 10",
+      quantity: 1,
+      expectedQuantity: 1,
+      receivedQuantity: 1,
+      remainingQuantity: 0,
+      receiptStatus: "received",
+      unitPaidPriceCents: 495,
+      sourceLineTotalCents: 495,
+      createdAt: NOW,
+      ...itemOverrides,
+    }],
+    events: [],
+    actionContext: { channelProvider: "shopify" } as ReturnCaseDetailRow["actionContext"],
+  };
+}
+
+function mockOmsIdentity(rows: Array<{ id: string; external_line_item_id: string | null }>): void {
+  mocks.query.mockImplementation(async (text: string) => {
+    const sql = normalizeSql(text);
+    if (sql.includes("FROM oms.oms_orders")) {
+      return result([{ external_order_id: "653408", currency: "USD" }]);
+    }
+    return result(rows);
+  });
 }
 
 function quote(): VendorSettlementQuote {

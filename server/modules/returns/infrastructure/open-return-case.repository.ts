@@ -24,6 +24,7 @@ import {
   type ReturnSourceOrderSearchQuery,
   type ReturnSourceOrderSearchRow,
 } from "../application/open-return-case.service";
+import { resolveReturnCaseExternalLineItemId } from "../domain/return-case-line-identity";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -54,7 +55,9 @@ interface SourceItemRow {
   warehouse_status: unknown;
   wms_order_item_id: unknown;
   oms_order_line_id: unknown;
-  external_line_item_id: unknown;
+  wms_external_line_item_id: unknown;
+  matched_oms_order_line_id: unknown;
+  oms_external_line_item_id: unknown;
   sku: unknown;
   title: unknown;
   fulfilled_quantity: unknown;
@@ -483,7 +486,9 @@ async function loadSourceItems(
       wo.warehouse_status AS warehouse_status,
       oi.id AS wms_order_item_id,
       oi.oms_order_line_id,
-      oi.source_item_id AS external_line_item_id,
+      oi.source_item_id AS wms_external_line_item_id,
+      ol.id AS matched_oms_order_line_id,
+      ol.external_line_item_id AS oms_external_line_item_id,
       oi.sku,
       oi.name AS title,
       oi.fulfilled_quantity,
@@ -493,6 +498,9 @@ async function loadSourceItems(
     FROM wms.orders wo
     JOIN wms.order_items oi ON oi.order_id = wo.id
     LEFT JOIN expected e ON e.order_item_id = oi.id
+    LEFT JOIN oms.oms_order_lines ol
+      ON ol.id = oi.oms_order_line_id
+     AND ol.order_id = ${omsOrderId}
     WHERE wo.oms_fulfillment_order_id = ${String(omsOrderId)}
       AND (${wmsOrderId}::int IS NULL OR wo.id = ${wmsOrderId})
       AND (${itemIds.length === 0} OR oi.id = ANY(ARRAY[${sql.join(itemIds.length === 0 ? [0] : itemIds, sql`, `)}]::int[]))
@@ -540,10 +548,29 @@ function mapSourceHeader(row: SourceHeaderRow): ReturnSourceOrderSearchRow {
 }
 
 function mapSourceItem(row: SourceItemRow): ReturnSourceOrderItem {
+  const wmsOrderItemId = readPositiveInteger(row.wms_order_item_id, "WMS order item id");
+  const omsOrderLineId = readNullablePositiveInteger(row.oms_order_line_id, "OMS order line id");
+  const resolution = resolveReturnCaseExternalLineItemId({
+    omsOrderLineId,
+    storedExternalLineItemId: readNullableText(row.wms_external_line_item_id),
+    omsExternalLineItemId: readNullableText(row.oms_external_line_item_id),
+    omsLineMatchedSourceOrder: readNullablePositiveInteger(
+      row.matched_oms_order_line_id,
+      "matched OMS order line id",
+    ) !== null,
+  });
+  if (resolution.status === "conflict") {
+    throw new OpenReturnCaseError(
+      "RETURN_SOURCE_LINE_IDENTITY_CONFLICT",
+      "A return source item has conflicting OMS line identity evidence.",
+      409,
+      { wmsOrderItemId, omsOrderLineId, reason: resolution.reason },
+    );
+  }
   return {
-    wmsOrderItemId: readPositiveInteger(row.wms_order_item_id, "WMS order item id"),
-    omsOrderLineId: readNullablePositiveInteger(row.oms_order_line_id, "OMS order line id"),
-    externalLineItemId: readNullableText(row.external_line_item_id),
+    wmsOrderItemId,
+    omsOrderLineId,
+    externalLineItemId: resolution.status === "resolved" ? resolution.externalLineItemId : null,
     sku: readText(row.sku, "SKU"),
     title: readText(row.title, "item title"),
     fulfilledQuantity: readNonNegativeInteger(row.fulfilled_quantity, "fulfilled quantity"),

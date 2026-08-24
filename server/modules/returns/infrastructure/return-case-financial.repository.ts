@@ -18,11 +18,20 @@ import {
   type StoredCustomerRefund,
   type VendorSettlementQuote,
 } from "../application/return-case-financial.service";
+import type {
+  ReturnCaseAdminStore,
+  ReturnCaseItemRow,
+} from "../application/return-case-admin.service";
+import { resolveReturnCaseExternalLineItemId } from "../domain/return-case-line-identity";
 import { PostgresReturnCaseAdminStore } from "./return-case.repository";
 
 interface OmsSourceRow {
   external_order_id: unknown;
   currency: unknown;
+}
+interface OmsLineIdentityRow {
+  id: unknown;
+  external_line_item_id: unknown;
 }
 interface CustomerRefundRow {
   id: unknown;
@@ -71,7 +80,9 @@ interface VendorSettlementReplayRow {
 }
 
 export class PostgresReturnCaseFinancialSourceStore implements ReturnCaseFinancialSourceStore {
-  constructor(private readonly adminStore = new PostgresReturnCaseAdminStore()) {}
+  constructor(
+    private readonly adminStore: Pick<ReturnCaseAdminStore, "getById"> = new PostgresReturnCaseAdminStore(),
+  ) {}
 
   async loadCase(caseId: number): Promise<ReturnFinancialCaseSource | null> {
     const detail = await this.adminStore.getById(caseId);
@@ -93,11 +104,16 @@ export class PostgresReturnCaseFinancialSourceStore implements ReturnCaseFinanci
       throw financialError("RETURN_FINANCIAL_SOURCE_INCOMPLETE", "The source OMS order was not found.", 409, { caseId, omsOrderId: detail.omsOrderId });
     }
     const source = oms.rows[0];
+    const businessContext = readBusinessContext(detail.businessContext);
+    const channelProvider = detail.actionContext.channelProvider;
+    const items = businessContext === "retail" && channelProvider === "shopify"
+      ? await resolveRetailShopifyItems(caseId, detail.omsOrderId, detail.items)
+      : detail.items.map((item) => mapFinancialItem(item, item.externalLineItemId));
     return {
       caseId: detail.id,
       caseNumber: detail.caseNumber,
-      businessContext: readBusinessContext(detail.businessContext),
-      channelProvider: detail.actionContext.channelProvider,
+      businessContext,
+      channelProvider,
       channelId: detail.channelId,
       vendorId: detail.vendorId,
       storeConnectionId: detail.storeConnectionId,
@@ -107,15 +123,7 @@ export class PostgresReturnCaseFinancialSourceStore implements ReturnCaseFinanci
       policyVersion: detail.policyVersion,
       updatedAt: detail.updatedAt,
       actionContext: detail.actionContext,
-      items: detail.items.map((item) => ({
-        returnCaseItemId: item.id,
-        omsOrderLineId: item.omsOrderLineId,
-        externalLineItemId: item.externalLineItemId,
-        productVariantId: item.productVariantId,
-        quantity: item.quantity,
-        sku: item.sku,
-        title: item.title,
-      })),
+      items,
     };
   }
 }
@@ -760,6 +768,81 @@ function parseVendorSettlementResult(value: unknown): SettleVendorAccountResult 
     settledAt: dateValue(value.settledAt, "stored vendor settlement timestamp").toISOString(),
     replayed: booleanValue(value.replayed, "stored vendor settlement replay flag"),
   };
+}
+
+async function resolveRetailShopifyItems(
+  caseId: number,
+  omsOrderId: number,
+  items: ReturnCaseItemRow[],
+): Promise<ReturnFinancialCaseSource["items"]> {
+  const linkedLineIds = [...new Set(
+    items
+      .map((item) => item.omsOrderLineId)
+      .filter((id): id is number => id !== null),
+  )];
+  const matchedById = new Map<number, string | null>();
+  if (linkedLineIds.length > 0) {
+    const result = await pool.query<OmsLineIdentityRow>(
+      `SELECT id, external_line_item_id
+       FROM oms.oms_order_lines
+       WHERE order_id = $1
+         AND id = ANY($2::bigint[])
+       ORDER BY id`,
+      [omsOrderId, linkedLineIds],
+    );
+    for (const row of result.rows) {
+      const id = positiveInteger(row.id, "OMS order line id");
+      if (!linkedLineIds.includes(id) || matchedById.has(id)) {
+        throw lineIdentityConflict(caseId, null, id, "INVALID_EVIDENCE");
+      }
+      matchedById.set(id, nullableText(row.external_line_item_id));
+    }
+  }
+
+  return items.map((item) => {
+    const resolution = resolveReturnCaseExternalLineItemId({
+      omsOrderLineId: item.omsOrderLineId,
+      storedExternalLineItemId: item.externalLineItemId,
+      omsExternalLineItemId: item.omsOrderLineId === null ? null : matchedById.get(item.omsOrderLineId) ?? null,
+      omsLineMatchedSourceOrder: item.omsOrderLineId !== null && matchedById.has(item.omsOrderLineId),
+    });
+    if (resolution.status === "conflict") {
+      throw lineIdentityConflict(caseId, item.id, item.omsOrderLineId, resolution.reason);
+    }
+    return mapFinancialItem(
+      item,
+      resolution.status === "resolved" ? resolution.externalLineItemId : null,
+    );
+  });
+}
+
+function mapFinancialItem(
+  item: ReturnCaseItemRow,
+  externalLineItemId: string | null,
+): ReturnFinancialCaseSource["items"][number] {
+  return {
+    returnCaseItemId: item.id,
+    omsOrderLineId: item.omsOrderLineId,
+    externalLineItemId,
+    productVariantId: item.productVariantId,
+    quantity: item.quantity,
+    sku: item.sku,
+    title: item.title,
+  };
+}
+
+function lineIdentityConflict(
+  caseId: number,
+  returnCaseItemId: number | null,
+  omsOrderLineId: number | null,
+  reason: string,
+): ReturnCaseFinancialError {
+  return financialError(
+    "RETURN_FINANCIAL_LINE_IDENTITY_CONFLICT",
+    "A returned item has conflicting OMS line identity evidence.",
+    409,
+    { caseId, returnCaseItemId, omsOrderLineId, reason },
+  );
 }
 
 function rowId(row: IdRow | undefined, field: string): number {
