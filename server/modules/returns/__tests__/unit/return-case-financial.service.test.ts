@@ -35,6 +35,7 @@ describe("ReturnCaseFinancialService", () => {
       commandType: "issue_customer_refund",
       caseId: 42,
       externalOrderId: "gid://shopify/Order/500",
+      externalOrderNumber: "#61694",
       quote: { amountCents: 525, currency: "USD" },
     });
     expect(harness.customerProvider.quote).toHaveBeenCalledWith({
@@ -330,6 +331,7 @@ function source(
     storeConnectionId: null,
     omsOrderId: 500,
     externalOrderId: "gid://shopify/Order/500",
+    externalOrderNumber: "#61694",
     currency: "USD",
     policyVersion: 2,
     updatedAt: NOW,

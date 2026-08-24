@@ -34,6 +34,7 @@ export interface ReturnFinancialCaseSource {
   storeConnectionId: number | null;
   omsOrderId: number;
   externalOrderId: string;
+  externalOrderNumber: string | null;
   currency: string;
   policyVersion: number;
   updatedAt: Date;
@@ -75,6 +76,7 @@ export interface CustomerRefundPreview {
   caseId: number;
   caseNumber: string;
   externalOrderId: string;
+  externalOrderNumber: string | null;
   quoteHash: string;
   quote: CustomerRefundQuote;
 }
@@ -323,6 +325,7 @@ export class ReturnCaseFinancialService {
       caseId,
       caseNumber: source.caseNumber,
       externalOrderId: source.externalOrderId,
+      externalOrderNumber: source.externalOrderNumber,
       quoteHash: hashQuote(quote),
       quote,
     } };
@@ -589,6 +592,9 @@ function validateSource(source: ReturnFinancialCaseSource): ReturnFinancialCaseS
   }
   requiredText(source.caseNumber, "source.caseNumber", 32);
   requiredText(source.externalOrderId, "source.externalOrderId", 100);
+  if (source.externalOrderNumber !== null) {
+    requiredText(source.externalOrderNumber, "source.externalOrderNumber", 50);
+  }
   currencyCode(source.currency, "source.currency");
   if (!(source.updatedAt instanceof Date) || Number.isNaN(source.updatedAt.getTime())) {
     throw storedEvidenceInvalid("Return case updated timestamp is invalid.");

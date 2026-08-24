@@ -50,7 +50,7 @@ describe("PostgresReturnCaseFinancialSourceStore", () => {
       const sql = normalizeSql(text);
       if (sql.includes("FROM oms.oms_orders")) {
         expect(params).toEqual([653408]);
-        return result([{ external_order_id: "653408", currency: "USD" }]);
+        return result([{ external_order_id: "653408", external_order_number: "#61694", currency: "USD" }]);
       }
       expect(sql).toContain("FROM oms.oms_order_lines");
       expect(sql).toContain("WHERE order_id = $1");
@@ -62,6 +62,7 @@ describe("PostgresReturnCaseFinancialSourceStore", () => {
     const loaded = await store.loadCase(1);
 
     expect(loaded?.items[0].externalLineItemId).toBe("36002367799455");
+    expect(loaded?.externalOrderNumber).toBe("#61694");
     expect(mocks.query).toHaveBeenCalledTimes(2);
   });
 
@@ -229,6 +230,7 @@ function source(): ReturnFinancialCaseSource {
     storeConnectionId: 9,
     omsOrderId: 500,
     externalOrderId: "marketplace-order-500",
+    externalOrderNumber: "MARKETPLACE-500",
     currency: "USD",
     policyVersion: 2,
     updatedAt: NOW,
@@ -308,7 +310,7 @@ function mockOmsIdentity(rows: Array<{ id: string; external_line_item_id: string
   mocks.query.mockImplementation(async (text: string) => {
     const sql = normalizeSql(text);
     if (sql.includes("FROM oms.oms_orders")) {
-      return result([{ external_order_id: "653408", currency: "USD" }]);
+      return result([{ external_order_id: "653408", external_order_number: "#61694", currency: "USD" }]);
     }
     return result(rows);
   });

@@ -204,6 +204,7 @@ function source(): ReturnFinancialCaseSource {
     vendorId: null,
     omsOrderId: 653408,
     externalOrderId: "1001",
+    externalOrderNumber: "#61694",
     currency: "USD",
     customerRefundStatus: "pending",
     vendorSettlementStatus: "not_applicable",

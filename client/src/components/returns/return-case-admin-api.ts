@@ -766,6 +766,7 @@ export const customerRefundPreviewSchema = z.object({
   caseId: positiveSafeIntegerSchema,
   caseNumber: requiredTextSchema,
   externalOrderId: requiredTextSchema,
+  externalOrderNumber: nullableRequiredTextSchema,
   quoteHash: sha256Schema,
   quote: customerRefundQuoteSchema,
 }).strict();

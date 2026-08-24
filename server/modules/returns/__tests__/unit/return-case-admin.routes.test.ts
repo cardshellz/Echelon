@@ -715,6 +715,7 @@ describe("return case admin routes", () => {
       caseId: 42,
       caseNumber: "RET-0000000042",
       externalOrderId: "1001",
+      externalOrderNumber: "#61694",
       quoteHash: "a".repeat(64),
       quote: {
         provider: "shopify",
