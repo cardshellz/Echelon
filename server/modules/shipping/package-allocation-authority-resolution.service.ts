@@ -11,7 +11,7 @@ import {
 import { adaptPersistedDeclaredPackageLifecycleEvidence } from "./declared-package-lifecycle-shadow.domain";
 import type {
   LockedPackageAllocationAuthorityEvidence,
-  PackageAllocationLedgerRepository,
+  PackageAllocationAuthorityPreviewRepository,
 } from "./package-allocation-ledger.repository";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
@@ -280,7 +280,7 @@ function sortPackages(
  * persisted relationship, so both modes remain explicitly incomplete.
  */
 export class PackageAllocationAuthorityResolutionPreviewService {
-  constructor(private readonly repository: PackageAllocationLedgerRepository) {}
+  constructor(private readonly repository: PackageAllocationAuthorityPreviewRepository) {}
 
   async preview(
     rawCommand: PackageAllocationAuthorityResolutionPreviewCommand,
@@ -306,8 +306,8 @@ export class PackageAllocationAuthorityResolutionPreviewService {
     PackageAllocationAuthorityResolutionPreviewResultV1
     | PackageAllocationAuthorityResolutionDiscoveryPreviewResultV1
   > {
-    return this.repository.withSerializableTransaction(async (transaction) => {
-      const group = await transaction.lockGroup(command.groupKey, false);
+    return this.repository.withRepeatableReadOnlyTransaction(async (transaction) => {
+      const group = await transaction.readGroup(command.groupKey);
       if (group !== null && group.currentVersion !== 0) {
         throw new PackageAllocationAuthorityResolutionPreviewServiceError(
           "EXISTING_GROUP_REQUIRES_REPLAY",
@@ -319,7 +319,7 @@ export class PackageAllocationAuthorityResolutionPreviewService {
         );
       }
 
-      const sourceFacts = await transaction.lockSourceFacts(
+      const sourceFacts = await transaction.readSourceFacts(
         command.sourceWmsShipmentItemIds,
       );
       const sortedSourceFacts = Object.freeze(
@@ -334,7 +334,7 @@ export class PackageAllocationAuthorityResolutionPreviewService {
           : await transaction.discoverAuthorityReadinessPackageLabelIds(
               command.sourceWmsShipmentItemIds,
             );
-      const packages = sortPackages(await transaction.lockAuthorityReadinessPackages(
+      const packages = sortPackages(await transaction.readAuthorityReadinessPackages(
         selectedShippingProviderLabelIds,
       ));
       const readiness = assessPackageAllocationAuthorityReadiness({

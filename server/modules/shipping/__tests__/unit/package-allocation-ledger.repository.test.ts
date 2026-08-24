@@ -125,6 +125,112 @@ describe("PgPackageAllocationLedgerRepository", () => {
     expect(client.released).toBe(true);
   });
 
+  it("uses one bounded repeatable read-only snapshot without writer locks", async () => {
+    const client = new FakeClient();
+    client.handler = ({ text }) => {
+      if (text.includes("FROM wms.package_allocation_groups")) {
+        return [{ id: "1", group_key: groupKey, current_version: 0 }];
+      }
+      if (text.includes("FROM wms.outbound_shipment_items")) {
+        return [{
+          source_wms_shipment_item_id: 7001,
+          shipment_request_item_id: "90001",
+          source_quantity: 2,
+          shipment_item_purpose: "customer_fulfillment",
+          order_item_id: 8101,
+          replacement_for_order_item_id: null,
+          correction_for_shipment_item_id: null,
+          product_variant_id: 9101,
+          order_item_sku: "SKU-ONE",
+          replacement_order_item_sku: null,
+          product_variant_sku: "SKU-ONE",
+        }];
+      }
+      if (text.includes("WITH locked_labels AS MATERIALIZED")) {
+        return [{
+          shipping_provider_label_id: "42",
+          provider: "shipstation",
+          provider_label_id: "44_001",
+          tracking_number: "1Z-PREVIEW-42",
+          label_status: "active",
+          label_direction: "outbound",
+          first_observed_at: new Date("2026-08-23T12:00:00.000Z"),
+          last_observed_at: new Date("2026-08-23T12:00:01.000Z"),
+          label_event_count: "0",
+          label_event_payload_bytes: "0",
+          max_event_payload_bytes: "0",
+        }];
+      }
+      return [];
+    };
+    const repository = repositoryWith(client);
+
+    const evidence = await repository.withRepeatableReadOnlyTransaction(
+      async (transaction) => ({
+        group: await transaction.readGroup(groupKey),
+        sourceFacts: await transaction.readSourceFacts([7001]),
+        packages: await transaction.readAuthorityReadinessPackages([42]),
+      }),
+    );
+
+    expect(evidence.group).toEqual({ id: "1", groupKey, currentVersion: 0 });
+    expect(evidence.sourceFacts.map((fact) => fact.sourceWmsShipmentItemId)).toEqual([7001]);
+    expect(evidence.packages.map((pkg) => pkg.evidenceKey)).toEqual(["shipping-provider-label:42"]);
+    expect(client.queries[0].text).toBe(
+      "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+    );
+    expect(client.queries[1].values).toEqual(["30000ms", "5000ms", "60000ms"]);
+    expect(client.queries.at(-1)?.text).toBe("ROLLBACK");
+    const queryText = client.queries.map((query) => query.text).join("\n");
+    expect(queryText).not.toMatch(/pg_advisory_xact_lock|FOR\s+(?:UPDATE|KEY SHARE)/i);
+    expect(client.queries.map((query) => query.text)).not.toContain("COMMIT");
+    expect(client.released).toBe(true);
+  });
+
+  it("preserves a read-only preview application failure and rolls back", async () => {
+    const client = new FakeClient();
+    const repository = repositoryWith(client);
+    const primary = new PackageAllocationPersistenceError(
+      "STALE_GROUP_VERSION",
+      "stale preview test result",
+    );
+
+    await expect(repository.withRepeatableReadOnlyTransaction(async () => {
+      throw primary;
+    })).rejects.toBe(primary);
+
+    expect(client.queries.at(-1)?.text).toBe("ROLLBACK");
+    expect(client.queries.map((query) => query.text)).not.toContain("COMMIT");
+    expect(client.released).toBe(true);
+  });
+
+  it("evicts a read-only preview client whose rollback failed", async () => {
+    const client = new FakeClient();
+    const rollbackError = Object.assign(
+      new Error("read-only rollback failed"),
+      { code: "ROLLBACK_TEST" },
+    );
+    client.handler = ({ text }) => {
+      if (text === "ROLLBACK") throw rollbackError;
+      return [];
+    };
+    const repository = repositoryWith(client);
+
+    await expect(
+      repository.withRepeatableReadOnlyTransaction(async () => "ok"),
+    ).rejects.toMatchObject({
+      name: "PackageAllocationLedgerRepositoryError",
+      code: "ROLLBACK_FAILED",
+      context: {
+        primaryCode: null,
+        rollbackPostgresCode: "ROLLBACK_TEST",
+      },
+    });
+
+    expect(client.releaseArgument).toBe(rollbackError);
+    expect(client.released).toBe(true);
+  });
+
   it("preserves a classified application error and rolls back", async () => {
     const client = new FakeClient();
     const repository = repositoryWith(client);

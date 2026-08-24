@@ -15,6 +15,8 @@ import {
   PackageAllocationLedgerRepositoryError,
   PgPackageAllocationLedgerRepository,
   type LockedPackageAllocationAuthorityEvidence,
+  type PackageAllocationAuthorityPreviewRepository,
+  type PackageAllocationAuthorityPreviewTransaction,
   type PackageAllocationLedgerRepository,
   type PackageAllocationLedgerTransaction,
 } from "../../package-allocation-ledger.repository";
@@ -115,14 +117,14 @@ function command(): PackageAllocationAuthorityReadinessCommand {
 }
 
 describe("PackageAllocationAuthorityReadinessService", () => {
-  it("loads locked evidence canonically and remains review-only", async () => {
+  it("loads one read-only evidence snapshot canonically and remains review-only", async () => {
     const calls: string[] = [];
     const transaction = {
-      lockSourceFacts: async (ids: readonly number[]) => {
+      readSourceFacts: async (ids: readonly number[]) => {
         calls.push(`sources:${ids.join(",")}`);
         return ids.map(sourceFacts);
       },
-      lockAuthorityReadinessPackages: async (ids: readonly number[]) => {
+      readAuthorityReadinessPackages: async (ids: readonly number[]) => {
         calls.push(`labels:${ids.join(",")}`);
         return Object.freeze([
           Object.freeze({
@@ -131,9 +133,9 @@ describe("PackageAllocationAuthorityReadinessService", () => {
           }),
         ]);
       },
-    } as unknown as PackageAllocationLedgerTransaction;
-    const repository: PackageAllocationLedgerRepository = {
-      withSerializableTransaction: async (work) => {
+    } as unknown as PackageAllocationAuthorityPreviewTransaction;
+    const repository: PackageAllocationAuthorityPreviewRepository = {
+      withRepeatableReadOnlyTransaction: async (work) => {
         calls.push("transaction");
         return work(transaction);
       },
@@ -167,8 +169,8 @@ describe("PackageAllocationAuthorityReadinessService", () => {
 
   it("rejects duplicate identities before opening a transaction", async () => {
     let transactionCalls = 0;
-    const repository: PackageAllocationLedgerRepository = {
-      withSerializableTransaction: async () => {
+    const repository: PackageAllocationAuthorityPreviewRepository = {
+      withRepeatableReadOnlyTransaction: async () => {
         transactionCalls += 1;
         throw new Error("must not run");
       },
@@ -199,7 +201,7 @@ describe("PackageAllocationAuthorityReadinessService", () => {
   it("sanitizes invalid command details and never echoes rejected literals", async () => {
     const sentinel = "ROOT_AUTHORITY_SENTINEL";
     const service = new PackageAllocationAuthorityReadinessService({
-      withSerializableTransaction: async () => {
+      withRepeatableReadOnlyTransaction: async () => {
         throw new Error("must not run");
       },
     });

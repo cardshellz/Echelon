@@ -16,8 +16,8 @@ import {
 import type {
   LockedPackageAllocationAuthorityEvidence,
   LockedPackageAllocationGroup,
-  PackageAllocationLedgerRepository,
-  PackageAllocationLedgerTransaction,
+  PackageAllocationAuthorityPreviewRepository,
+  PackageAllocationAuthorityPreviewTransaction,
 } from "../../package-allocation-ledger.repository";
 import type { PackageAllocationSourceFacts } from "../../package-allocation-source-identity.domain";
 
@@ -150,7 +150,7 @@ function discoveryCommand() {
 }
 
 interface RepositoryFixture {
-  readonly repository: PackageAllocationLedgerRepository;
+  readonly repository: PackageAllocationAuthorityPreviewRepository;
   readonly calls: string[];
 }
 
@@ -163,11 +163,11 @@ function repositoryFixture(
     throw new Error("preview must not call ledger persistence");
   };
   const transaction = {
-    lockGroup: async (requestedGroupKey: string, createIfMissing: boolean) => {
-      calls.push(`group:${requestedGroupKey}:${String(createIfMissing)}`);
+    readGroup: async (requestedGroupKey: string) => {
+      calls.push(`group:${requestedGroupKey}`);
       return group;
     },
-    lockSourceFacts: async (ids: readonly number[]) => {
+    readSourceFacts: async (ids: readonly number[]) => {
       calls.push(`sources:${ids.join(",")}`);
       return ids.map(sourceFacts);
     },
@@ -175,7 +175,7 @@ function repositoryFixture(
       calls.push(`discover:${ids.join(",")}`);
       return [42, 43];
     },
-    lockAuthorityReadinessPackages: async (ids: readonly number[]) => {
+    readAuthorityReadinessPackages: async (ids: readonly number[]) => {
       calls.push(`labels:${ids.join(",")}`);
       return packages;
     },
@@ -186,11 +186,11 @@ function repositoryFixture(
     loadPlanEntries: unexpectedWrite,
     loadPlanIntents: unexpectedWrite,
     appendPlan: unexpectedWrite,
-  } as unknown as PackageAllocationLedgerTransaction;
+  } as unknown as PackageAllocationAuthorityPreviewTransaction;
   return {
     calls,
     repository: {
-      withSerializableTransaction: async (work) => {
+      withRepeatableReadOnlyTransaction: async (work) => {
         calls.push("transaction");
         return work(transaction);
       },
@@ -230,7 +230,7 @@ describe("PackageAllocationAuthorityResolutionPreviewService", () => {
     expect(input).toEqual(before);
     expect(fixture.calls).toEqual([
       "transaction",
-      `group:${groupKey}:false`,
+      `group:${groupKey}`,
       `sources:${sourceId}`,
       `discover:${sourceId}`,
       "labels:42,43",
@@ -272,7 +272,7 @@ describe("PackageAllocationAuthorityResolutionPreviewService", () => {
     expect(input).toEqual(before);
     expect(fixture.calls).toEqual([
       "transaction",
-      `group:${groupKey}:false`,
+      `group:${groupKey}`,
       `sources:${sourceId}`,
       "labels:42,43",
     ]);
@@ -395,7 +395,7 @@ describe("PackageAllocationAuthorityResolutionPreviewService", () => {
     });
     expect(fixture.calls).toEqual([
       "transaction",
-      `group:${groupKey}:false`,
+      `group:${groupKey}`,
     ]);
   });
 
@@ -411,13 +411,13 @@ describe("PackageAllocationAuthorityResolutionPreviewService", () => {
     ).preview(command());
 
     expect(result.groupState).toBe("empty");
-    expect(fixture.calls[1]).toBe(`group:${groupKey}:false`);
+    expect(fixture.calls[1]).toBe(`group:${groupKey}`);
   });
 
   it("validates duplicate identities and sanitizes invalid literals before a transaction", async () => {
     let transactionCalls = 0;
     const service = new PackageAllocationAuthorityResolutionPreviewService({
-      withSerializableTransaction: async () => {
+      withRepeatableReadOnlyTransaction: async () => {
         transactionCalls += 1;
         throw new Error("must not run");
       },
