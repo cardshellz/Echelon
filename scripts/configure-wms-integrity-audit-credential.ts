@@ -8,6 +8,9 @@ import {
 import {
   SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS,
 } from "../server/modules/shipping/shipment-lifecycle-shadow-audit.repository";
+import {
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
+} from "../server/modules/shipping/package-allocation-authority-discovery.query";
 import { verifiedPostgresPoolConfig } from "../server/infrastructure/verified-postgres-pool-config";
 
 interface CredentialFlags {
@@ -82,6 +85,7 @@ export function requiredWmsIntegrityAuditCredentialRelations(): string[] {
   return [...new Set([
     ...requiredWmsIntegrityAuditRelations(),
     ...SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS,
+    ...PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
   ])].sort();
 }
 
