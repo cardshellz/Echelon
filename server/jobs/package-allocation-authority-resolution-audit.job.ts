@@ -5,6 +5,10 @@ import type { Pool, PoolClient, PoolConfig } from "pg";
 import { z } from "zod";
 
 import {
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES,
+  type PackageAllocationAuthorityDiscoveryRelationshipType,
+} from "../modules/shipping/package-allocation-authority-discovery.query";
+import {
   auditPackageAllocationAuthorityDiscoveryPlan,
   type NormalizedPackageAllocationDiscoveryPlanAuditOptions,
   type PackageAllocationDiscoveryPlanAuditReport,
@@ -43,6 +47,10 @@ export interface PackageAllocationAuthorityResolutionAuditReport {
   readonly selectionCompleteness: "unproven_outside_persisted_relationships";
   readonly groupState: "absent" | "empty";
   readonly selectedPackageCount: number;
+  readonly relationshipPathPackageCounts: Readonly<Record<
+    PackageAllocationAuthorityDiscoveryRelationshipType,
+    number
+  >>;
   readonly projectedPackageCount: number;
   readonly rejectedPackageCount: number;
   readonly readinessReviewCodes: readonly string[];
@@ -129,6 +137,22 @@ function sortedUnique(values: readonly string[]): readonly string[] {
   return Object.freeze([...new Set(values)].sort());
 }
 
+function relationshipPathPackageCounts(
+  preview: PackageAllocationAuthorityResolutionDiscoveryPreviewResultV1,
+): Readonly<Record<PackageAllocationAuthorityDiscoveryRelationshipType, number>> {
+  const counts = Object.fromEntries(
+    PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES.map(
+      (relationshipType) => [relationshipType, 0],
+    ),
+  ) as Record<PackageAllocationAuthorityDiscoveryRelationshipType, number>;
+  for (const pkg of preview.relationshipSelectionEvidence.packages) {
+    for (const relationshipType of pkg.relationshipTypes) {
+      counts[relationshipType] += 1;
+    }
+  }
+  return Object.freeze(counts);
+}
+
 export function summarizePackageAllocationAuthorityResolutionAudit(
   plan: PackageAllocationDiscoveryPlanAuditReport,
   preview: PackageAllocationAuthorityResolutionDiscoveryPreviewResultV1,
@@ -154,6 +178,7 @@ export function summarizePackageAllocationAuthorityResolutionAudit(
     selectionCompleteness: preview.selectionCompleteness,
     groupState: preview.groupState,
     selectedPackageCount: preview.selectedShippingProviderLabelIds.length,
+    relationshipPathPackageCounts: relationshipPathPackageCounts(preview),
     projectedPackageCount,
     rejectedPackageCount: preview.readiness.packageAssessments.length - projectedPackageCount,
     readinessReviewCodes: sortedUnique(

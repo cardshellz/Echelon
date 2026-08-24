@@ -1,4 +1,8 @@
+import { createHash } from "node:crypto";
+
 import { z } from "zod";
+
+import { canonicalJson } from "@shared/utils/canonical-json";
 
 import {
   assessPackageAllocationAuthorityReadiness,
@@ -11,6 +15,7 @@ import {
 import { adaptPersistedDeclaredPackageLifecycleEvidence } from "./declared-package-lifecycle-shadow.domain";
 import type {
   LockedPackageAllocationAuthorityEvidence,
+  PackageAllocationAuthorityDiscoveredPackageEvidence,
   PackageAllocationAuthorityPreviewRepository,
 } from "./package-allocation-ledger.repository";
 
@@ -95,6 +100,15 @@ export interface PackageAllocationAuthorityResolutionPreviewResultV1 {
   readonly resolution: PackageAllocationAuthorityResolutionResultV1 | null;
 }
 
+export interface PackageAllocationAuthorityRelationshipSelectionEvidenceV1 {
+  readonly contractVersion: 1;
+  readonly evidenceType: "package_allocation_relationship_selection";
+  /** Diagnostic commitment only; it does not grant membership, role, or contents authority. */
+  readonly evidenceHash: string;
+  readonly sourceWmsShipmentItemIds: readonly number[];
+  readonly packages: readonly PackageAllocationAuthorityDiscoveredPackageEvidence[];
+}
+
 export interface PackageAllocationAuthorityResolutionDiscoveryPreviewResultV1 {
   readonly contractVersion: 1;
   readonly authority: "none";
@@ -105,6 +119,7 @@ export interface PackageAllocationAuthorityResolutionDiscoveryPreviewResultV1 {
   /** A provider package without any persisted relationship remains unknowable here. */
   readonly selectionCompleteness: "unproven_outside_persisted_relationships";
   readonly selectedShippingProviderLabelIds: readonly number[];
+  readonly relationshipSelectionEvidence: PackageAllocationAuthorityRelationshipSelectionEvidenceV1;
   readonly groupState: "absent" | "empty";
   readonly readiness: PackageAllocationAuthorityReadinessResultV1;
   readonly resolution: PackageAllocationAuthorityResolutionResultV1 | null;
@@ -145,6 +160,31 @@ function deepFreeze<T>(value: T): T {
     Object.freeze(value);
   }
   return value;
+}
+
+function relationshipSelectionEvidence(
+  sourceWmsShipmentItemIds: readonly number[],
+  packages: readonly PackageAllocationAuthorityDiscoveredPackageEvidence[],
+): PackageAllocationAuthorityRelationshipSelectionEvidenceV1 {
+  const normalizedPackages = packages.map((pkg) => Object.freeze({
+    shippingProviderLabelId: pkg.shippingProviderLabelId,
+    relationshipTypes: Object.freeze([...pkg.relationshipTypes].sort(compareText)),
+  })).sort(
+    (left, right) =>
+      left.shippingProviderLabelId - right.shippingProviderLabelId,
+  );
+  const projection = {
+    contractVersion: 1 as const,
+    evidenceType: "package_allocation_relationship_selection" as const,
+    sourceWmsShipmentItemIds: Object.freeze([...sourceWmsShipmentItemIds]),
+    packages: Object.freeze(normalizedPackages),
+  };
+  return deepFreeze({
+    ...projection,
+    evidenceHash: createHash("sha256")
+      .update(canonicalJson(projection), "utf8")
+      .digest("hex"),
+  });
 }
 
 function duplicateValue(values: readonly number[]): number | null {
@@ -328,12 +368,23 @@ export class PackageAllocationAuthorityResolutionPreviewService {
             left.sourceWmsShipmentItemId - right.sourceWmsShipmentItemId,
         ),
       );
+      const discoveredPackageSelection:
+        readonly PackageAllocationAuthorityDiscoveredPackageEvidence[] =
+        command.previewMode === "bootstrap_selected_scope"
+          ? Object.freeze([])
+          : await transaction.discoverAuthorityReadinessPackageSelection(
+              command.sourceWmsShipmentItemIds,
+            );
+      const relationshipEvidence = relationshipSelectionEvidence(
+        command.sourceWmsShipmentItemIds,
+        discoveredPackageSelection,
+      );
       const selectedShippingProviderLabelIds =
         command.previewMode === "bootstrap_selected_scope"
           ? command.shippingProviderLabelIds
-          : await transaction.discoverAuthorityReadinessPackageLabelIds(
-              command.sourceWmsShipmentItemIds,
-            );
+          : Object.freeze(relationshipEvidence.packages.map(
+              (pkg) => pkg.shippingProviderLabelId,
+            ));
       const packages = sortPackages(await transaction.readAuthorityReadinessPackages(
         selectedShippingProviderLabelIds,
       ));
@@ -398,6 +449,7 @@ export class PackageAllocationAuthorityResolutionPreviewService {
             previewMode: "bootstrap_relationship_discovery" as const,
             selectionAuthority: "database_relationship_closure" as const,
             selectionCompleteness: "unproven_outside_persisted_relationships" as const,
+            relationshipSelectionEvidence: relationshipEvidence,
           });
     });
   }

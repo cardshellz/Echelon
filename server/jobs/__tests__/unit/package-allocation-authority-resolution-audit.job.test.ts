@@ -52,6 +52,27 @@ function previewResult(
     selectionAuthority: "database_relationship_closure",
     selectionCompleteness: "unproven_outside_persisted_relationships",
     selectedShippingProviderLabelIds: [42, 43],
+    relationshipSelectionEvidence: {
+      contractVersion: 1,
+      evidenceType: "package_allocation_relationship_selection",
+      evidenceHash: "a".repeat(64),
+      sourceWmsShipmentItemIds: [7001],
+      packages: [
+        {
+          shippingProviderLabelId: 42,
+          relationshipTypes: [
+            "provider_order_id_match",
+            "shipping_engine_order_link",
+          ],
+        },
+        {
+          shippingProviderLabelId: 43,
+          relationshipTypes: [
+            "provider_order_id_match",
+          ],
+        },
+      ],
+    },
     groupState: "absent",
     readiness: {
       packageAssessments: [
@@ -156,6 +177,16 @@ describe("package-allocation authority resolution audit job", () => {
       selectionCompleteness: "unproven_outside_persisted_relationships",
       groupState: "absent",
       selectedPackageCount: 2,
+      relationshipPathPackageCounts: {
+        legacy_wms_shipment_link: 0,
+        physical_shipment_link: 0,
+        provider_order_id_match: 2,
+        provider_order_key_match: 0,
+        provider_physical_shipment_match: 0,
+        provider_order_reference_match: 0,
+        shipment_request_link: 0,
+        shipping_engine_order_link: 1,
+      },
       projectedPackageCount: 1,
       rejectedPackageCount: 1,
       readinessReviewCodes: ["package_membership_policy_unresolved"],
@@ -166,6 +197,7 @@ describe("package-allocation authority resolution audit job", () => {
       executableEffectIntentCount: 0,
     });
     expect(Object.isFrozen(report)).toBe(true);
+    expect(Object.isFrozen(report.relationshipPathPackageCounts)).toBe(true);
     expect(() => summarizePackageAllocationAuthorityResolutionAudit(
       planReport(),
       previewResult(true),

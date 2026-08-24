@@ -4,6 +4,9 @@ import type { Pool, PoolClient, QueryResult } from "pg";
 import { describe, expect, it } from "vitest";
 
 import {
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES,
+} from "../../package-allocation-authority-discovery.query";
+import {
   type AppendPackageAllocationPlanInput,
   PackageAllocationLedgerRepositoryError,
   PgPackageAllocationLedgerRepository,
@@ -380,22 +383,41 @@ describe("PgPackageAllocationLedgerRepository", () => {
             source_count: 2,
             found_source_ids: [7001, 7002],
             shipping_provider_label_id: "42",
+            relationship_types: [
+              "shipping_engine_order_link",
+              "provider_order_id_match",
+            ],
           },
           {
             source_count: 2,
             found_source_ids: [7001, 7002],
             shipping_provider_label_id: "43",
+            relationship_types: ["provider_order_id_match"],
           },
         ]
       : [];
     const repository = repositoryWith(client);
 
-    const labelIds = await repository.withSerializableTransaction((transaction) => (
-      transaction.discoverAuthorityReadinessPackageLabelIds([7002, 7001, 7002])
+    const selection = await repository.withSerializableTransaction((transaction) => (
+      transaction.discoverAuthorityReadinessPackageSelection([7002, 7001, 7002])
     ));
 
-    expect(labelIds).toEqual([42, 43]);
-    expect(Object.isFrozen(labelIds)).toBe(true);
+    expect(selection).toEqual([
+      {
+        shippingProviderLabelId: 42,
+        relationshipTypes: [
+          "provider_order_id_match",
+          "shipping_engine_order_link",
+        ],
+      },
+      {
+        shippingProviderLabelId: 43,
+        relationshipTypes: ["provider_order_id_match"],
+      },
+    ]);
+    expect(Object.isFrozen(selection)).toBe(true);
+    expect(Object.isFrozen(selection[0])).toBe(true);
+    expect(Object.isFrozen(selection[0].relationshipTypes)).toBe(true);
     const discoveryQuery = client.queries.find((query) =>
       query.text.includes("WITH selected_sources AS MATERIALIZED"),
     );
@@ -414,6 +436,13 @@ describe("PgPackageAllocationLedgerRepository", () => {
       /anchor_engine_orders AS MATERIALIZED \([\s\S]*?\),\s*UNION\s+SELECT physical\.shipping_engine_order_id/,
     );
     expect(discoveryQuery?.text).toContain("wms.shipping_provider_label_links");
+    expect(discoveryQuery?.text).toContain(
+      "candidate_label_relationships AS MATERIALIZED",
+    );
+    for (const relationshipType of PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES) {
+      expect(discoveryQuery?.text).toContain(`'${relationshipType}'::text`);
+    }
+    expect(discoveryQuery?.text).toMatch(/ARRAY_AGG\(\s*DISTINCT relationship\.relationship_type/);
     expect(discoveryQuery?.text).not.toMatch(/WHERE\s+link\.shipment_request_id[\s\S]*?\sOR\s+link\./);
     expect(discoveryQuery?.text).not.toMatch(
       /engine_order\.provider_order_id[\s\S]*?\sOR\s+[\s\S]*?engine_order\.provider_order_key/,
@@ -434,10 +463,35 @@ describe("PgPackageAllocationLedgerRepository", () => {
     const repository = repositoryWith(client);
 
     await expect(repository.withSerializableTransaction((transaction) => (
-      transaction.discoverAuthorityReadinessPackageLabelIds([7001])
+      transaction.discoverAuthorityReadinessPackageSelection([7001])
     ))).rejects.toMatchObject({
       code: "PACKAGE_EVIDENCE_NOT_FOUND",
       context: { sourceWmsShipmentItemIds: [7001] },
+    });
+    expect(client.queries.at(-1)?.text).toBe("ROLLBACK");
+  });
+
+  it.each([
+    ["empty", []],
+    ["unknown", ["forged_relationship"]],
+    ["duplicate", ["shipment_request_link", "shipment_request_link"]],
+  ] as const)("fails closed on %s relationship evidence", async (_case, relationshipTypes) => {
+    const client = new FakeClient();
+    client.handler = ({ text }) => text.includes("WITH selected_sources AS MATERIALIZED")
+      ? [{
+          source_count: 1,
+          found_source_ids: [7001],
+          shipping_provider_label_id: "42",
+          relationship_types: [...relationshipTypes],
+        }]
+      : [];
+    const repository = repositoryWith(client);
+
+    await expect(repository.withSerializableTransaction((transaction) => (
+      transaction.discoverAuthorityReadinessPackageSelection([7001])
+    ))).rejects.toMatchObject({
+      code: "INVALID_DATABASE_EVIDENCE",
+      context: { field: "relationship_types" },
     });
     expect(client.queries.at(-1)?.text).toBe("ROLLBACK");
   });
@@ -455,7 +509,7 @@ describe("PgPackageAllocationLedgerRepository", () => {
     const missingSourceRepository = repositoryWith(missingSourceClient);
 
     await expect(missingSourceRepository.withSerializableTransaction((transaction) => (
-      transaction.discoverAuthorityReadinessPackageLabelIds([7001, 7002])
+      transaction.discoverAuthorityReadinessPackageSelection([7001, 7002])
     ))).rejects.toMatchObject({
       code: "SOURCE_EVIDENCE_NOT_FOUND",
       context: { missingWmsShipmentItemIds: [7002] },
@@ -468,12 +522,13 @@ describe("PgPackageAllocationLedgerRepository", () => {
             source_count: 1,
             found_source_ids: [7001],
             shipping_provider_label_id: String(index + 1),
+            relationship_types: ["shipment_request_link"],
           }))
         : [];
     const oversizedRepository = repositoryWith(oversizedClient);
 
     await expect(oversizedRepository.withSerializableTransaction((transaction) => (
-      transaction.discoverAuthorityReadinessPackageLabelIds([7001])
+      transaction.discoverAuthorityReadinessPackageSelection([7001])
     ))).rejects.toMatchObject({
       code: "INVALID_DATABASE_EVIDENCE",
       context: {

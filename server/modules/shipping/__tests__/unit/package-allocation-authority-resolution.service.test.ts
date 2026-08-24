@@ -171,9 +171,21 @@ function repositoryFixture(
       calls.push(`sources:${ids.join(",")}`);
       return ids.map(sourceFacts);
     },
-    discoverAuthorityReadinessPackageLabelIds: async (ids: readonly number[]) => {
+    discoverAuthorityReadinessPackageSelection: async (ids: readonly number[]) => {
       calls.push(`discover:${ids.join(",")}`);
-      return [42, 43];
+      return [
+        {
+          shippingProviderLabelId: 43,
+          relationshipTypes: ["provider_order_id_match"],
+        },
+        {
+          shippingProviderLabelId: 42,
+          relationshipTypes: [
+            "shipping_engine_order_link",
+            "provider_order_id_match",
+          ],
+        },
+      ];
     },
     readAuthorityReadinessPackages: async (ids: readonly number[]) => {
       calls.push(`labels:${ids.join(",")}`);
@@ -235,6 +247,24 @@ describe("PackageAllocationAuthorityResolutionPreviewService", () => {
       `discover:${sourceId}`,
       "labels:42,43",
     ]);
+    const relationshipProjection = {
+      contractVersion: 1 as const,
+      evidenceType: "package_allocation_relationship_selection" as const,
+      sourceWmsShipmentItemIds: [sourceId],
+      packages: [
+        {
+          shippingProviderLabelId: 42,
+          relationshipTypes: [
+            "provider_order_id_match",
+            "shipping_engine_order_link",
+          ],
+        },
+        {
+          shippingProviderLabelId: 43,
+          relationshipTypes: ["provider_order_id_match"],
+        },
+      ],
+    };
     expect(result).toMatchObject({
       contractVersion: 1,
       authority: "none",
@@ -243,6 +273,10 @@ describe("PackageAllocationAuthorityResolutionPreviewService", () => {
       selectionAuthority: "database_relationship_closure",
       selectionCompleteness: "unproven_outside_persisted_relationships",
       selectedShippingProviderLabelIds: [42, 43],
+      relationshipSelectionEvidence: {
+        ...relationshipProjection,
+        evidenceHash: sha256(canonicalJson(relationshipProjection)),
+      },
       groupState: "absent",
       readiness: {
         authority: "none",
@@ -258,6 +292,11 @@ describe("PackageAllocationAuthorityResolutionPreviewService", () => {
     )).toBe(true);
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.selectedShippingProviderLabelIds)).toBe(true);
+    expect(Object.isFrozen(result.relationshipSelectionEvidence)).toBe(true);
+    expect(Object.isFrozen(result.relationshipSelectionEvidence.packages)).toBe(true);
+    expect(Object.isFrozen(
+      result.relationshipSelectionEvidence.packages[0].relationshipTypes,
+    )).toBe(true);
   });
 
   it("previews exact active A+B as two physical consumptions without double fulfillment", async () => {
