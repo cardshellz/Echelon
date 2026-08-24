@@ -21,6 +21,15 @@ import type {
   PackageAllocationEffectIntentV1,
   PackageAllocationEntryV1,
 } from "../../package-allocation-group.domain";
+import {
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_INDEX_CONTRACTS,
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES,
+} from "../../package-allocation-authority-discovery.query";
+import {
+  PACKAGE_ALLOCATION_DISCOVERY_EXPLAIN_SQL,
+  PACKAGE_ALLOCATION_DISCOVERY_INDEX_CATALOG_SQL,
+  PACKAGE_ALLOCATION_DISCOVERY_RELATION_ASSERTION_SQL,
+} from "../../package-allocation-authority-discovery-plan-audit.repository";
 import { packageAllocationPackageKey } from "../../package-allocation-authority-resolution.domain";
 import { PackageAllocationAuthorityReadinessService } from "../../package-allocation-authority-readiness.service";
 import { PackageAllocationAuthorityResolutionPreviewService } from "../../package-allocation-authority-resolution.service";
@@ -616,6 +625,68 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       expect(usedIndexNames, `${indexName} was absent from the forced-index plan`)
         .toContain(indexName);
     }
+  });
+
+  it("executes the read-only plan-audit SQL contract on PostgreSQL", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-PLAN-AUDIT", 1);
+    const client = await pool.connect();
+    let primaryFailure: unknown;
+    let relationEvidence: Record<string, unknown> | undefined;
+    let catalogEvidence: readonly Record<string, unknown>[] | undefined;
+    let explained: unknown;
+    try {
+      await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const relations = await client.query(PACKAGE_ALLOCATION_DISCOVERY_RELATION_ASSERTION_SQL);
+      relationEvidence = relations.rows[0] as Record<string, unknown> | undefined;
+      const catalog = await client.query(PACKAGE_ALLOCATION_DISCOVERY_INDEX_CATALOG_SQL);
+      catalogEvidence = catalog.rows as Record<string, unknown>[];
+      const explain = await client.query<{ "QUERY PLAN": unknown }>(
+        PACKAGE_ALLOCATION_DISCOVERY_EXPLAIN_SQL,
+        [[sourceId], PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES + 1],
+      );
+      explained = explain.rows[0]?.["QUERY PLAN"];
+    } catch (error) {
+      primaryFailure = error;
+    }
+
+    let rollbackFailure: unknown;
+    try {
+      await client.query("ROLLBACK");
+    } catch (error) {
+      rollbackFailure = error;
+    } finally {
+      client.release(rollbackFailure instanceof Error ? rollbackFailure : undefined);
+    }
+    if (primaryFailure !== undefined && rollbackFailure !== undefined) {
+      throw new AggregateError(
+        [primaryFailure, rollbackFailure],
+        "Plan-audit SQL and rollback both failed",
+      );
+    }
+    if (primaryFailure !== undefined) throw primaryFailure;
+    if (rollbackFailure !== undefined) throw rollbackFailure;
+
+    expect(relationEvidence).toMatchObject({
+      missing_required_select_count: "0",
+      required_rls_count: "0",
+      missing_required_schema_usage_count: "0",
+    });
+    expect(catalogEvidence).toHaveLength(
+      PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_INDEX_CONTRACTS.length,
+    );
+    expect(catalogEvidence?.every((row) => (
+      row.relation_schema === "wms"
+      && row.indisvalid === true
+      && row.indisready === true
+      && row.indislive === true
+    ))).toBe(true);
+    expect(explainPlanRoot(explained)).toMatchObject({
+      "Node Type": expect.any(String),
+      "Startup Cost": expect.any(Number),
+      "Total Cost": expect.any(Number),
+      "Plan Rows": expect.any(Number),
+    });
+    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
   });
 
   it("loads locked persisted evidence and remains shadow-only without ledger writes", async () => {

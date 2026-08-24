@@ -10,6 +10,9 @@ import {
 import {
   SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS,
 } from "../../server/modules/shipping/shipment-lifecycle-shadow-audit.repository";
+import {
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
+} from "../../server/modules/shipping/package-allocation-authority-discovery.query";
 
 const REMOTE_URL = "postgresql://audit:test-password@db.example.com:5432/echelon";
 
@@ -62,6 +65,7 @@ describe("shipment lifecycle shadow audit credential configuration", () => {
     const expectedRelations = [...new Set([
       ...requiredWmsIntegrityAuditRelations(),
       ...SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS,
+      ...PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
     ])].sort();
 
     expect(requiredWmsIntegrityAuditCredentialRelations()).toEqual(expectedRelations);
@@ -74,6 +78,10 @@ describe("shipment lifecycle shadow audit credential configuration", () => {
 
     const statements = plan.statements.join(";\n");
     for (const relation of SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS) {
+      const [schema, table] = relation.split(".");
+      expect(statements).toContain(`"${schema}"."${table}"`);
+    }
+    for (const relation of PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS) {
       const [schema, table] = relation.split(".");
       expect(statements).toContain(`"${schema}"."${table}"`);
     }

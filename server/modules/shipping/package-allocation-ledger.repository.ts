@@ -11,6 +11,10 @@ import type {
   PackageAllocationSourceFacts,
   PackageAllocationSourceRegistrationV1,
 } from "./package-allocation-source-identity.domain";
+import {
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES,
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_SQL,
+} from "./package-allocation-authority-discovery.query";
 
 const SOURCE_LOCK_NAMESPACE = 918_421;
 const LABEL_LOCK_NAMESPACE = 918_422;
@@ -19,7 +23,7 @@ const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS = 60_000;
 const JSON_BATCH_SIZE = 1_000;
 const MAX_AUTHORITY_SOURCE_LINES = 500;
-const MAX_AUTHORITY_PACKAGES = 200;
+const MAX_AUTHORITY_PACKAGES = PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES;
 const MAX_AUTHORITY_EVENTS_PER_PACKAGE = 5_000;
 const MAX_AUTHORITY_TOTAL_EVENTS = 10_000;
 const MAX_AUTHORITY_CURRENT_CARRIER_EVENTS = 5_000;
@@ -509,184 +513,7 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
     }
 
     const result = await this.client.query(
-      `WITH selected_sources AS MATERIALIZED (
-         SELECT shipment_item.id, shipment_item.shipment_id
-         FROM wms.outbound_shipment_items AS shipment_item
-         WHERE shipment_item.id = ANY($1::integer[])
-       ),
-       source_stats AS MATERIALIZED (
-         SELECT
-           COUNT(*)::integer AS source_count,
-           COALESCE(
-             ARRAY_AGG(source.id ORDER BY source.id),
-             ARRAY[]::integer[]
-           ) AS found_source_ids
-         FROM selected_sources AS source
-       ),
-       source_physical_shipments AS MATERIALIZED (
-         SELECT DISTINCT physical_item.physical_shipment_id AS id
-         FROM wms.physical_shipment_items AS physical_item
-         JOIN selected_sources AS source
-           ON source.id = physical_item.legacy_wms_shipment_item_id
-         UNION
-         SELECT DISTINCT physical_item.physical_shipment_id
-         FROM wms.physical_shipment_items AS physical_item
-         JOIN wms.shipment_request_items AS request_item
-           ON request_item.id = physical_item.shipment_request_item_id
-         JOIN selected_sources AS source
-           ON source.id = request_item.legacy_wms_shipment_item_id
-       ),
-       anchor_requests AS MATERIALIZED (
-         SELECT request_item.shipment_request_id AS id
-         FROM wms.shipment_request_items AS request_item
-         JOIN selected_sources AS source
-           ON source.id = request_item.legacy_wms_shipment_item_id
-         UNION
-         SELECT request.id
-         FROM wms.shipment_requests AS request
-         JOIN selected_sources AS source
-           ON source.shipment_id = request.legacy_wms_shipment_id
-       ),
-       anchor_engine_orders AS MATERIALIZED (
-         SELECT order_request.shipping_engine_order_id AS id
-         FROM wms.shipping_engine_order_requests AS order_request
-         JOIN anchor_requests AS request
-           ON request.id = order_request.shipment_request_id
-         UNION
-         SELECT engine_order.id
-         FROM wms.shipping_engine_orders AS engine_order
-         JOIN anchor_requests AS request
-           ON request.id = engine_order.shipment_request_id
-         UNION
-         SELECT physical.shipping_engine_order_id
-         FROM wms.physical_shipments AS physical
-         JOIN source_physical_shipments AS source_physical
-           ON source_physical.id = physical.id
-         WHERE physical.shipping_engine_order_id IS NOT NULL
-         UNION
-         SELECT physical.shipping_engine_order_id
-         FROM wms.physical_shipments AS physical
-         JOIN anchor_requests AS request
-           ON request.id = physical.shipment_request_id
-         WHERE physical.shipping_engine_order_id IS NOT NULL
-       ),
-       scope_requests AS MATERIALIZED (
-         SELECT request.id
-         FROM anchor_requests AS request
-         UNION
-         SELECT order_request.shipment_request_id
-         FROM wms.shipping_engine_order_requests AS order_request
-         JOIN anchor_engine_orders AS engine_order
-           ON engine_order.id = order_request.shipping_engine_order_id
-         UNION
-         SELECT engine_order.shipment_request_id
-         FROM wms.shipping_engine_orders AS engine_order
-         JOIN anchor_engine_orders AS anchor
-           ON anchor.id = engine_order.id
-         WHERE engine_order.shipment_request_id IS NOT NULL
-         UNION
-         SELECT physical.shipment_request_id
-         FROM wms.physical_shipments AS physical
-         JOIN source_physical_shipments AS source_physical
-           ON source_physical.id = physical.id
-         WHERE physical.shipment_request_id IS NOT NULL
-       ),
-       scope_legacy_shipments AS MATERIALIZED (
-         SELECT source.shipment_id AS id
-         FROM selected_sources AS source
-         WHERE source.shipment_id IS NOT NULL
-         UNION
-         SELECT request.legacy_wms_shipment_id
-         FROM wms.shipment_requests AS request
-         JOIN scope_requests AS scoped_request
-           ON scoped_request.id = request.id
-         WHERE request.legacy_wms_shipment_id IS NOT NULL
-       ),
-       scope_physical_shipments AS MATERIALIZED (
-         SELECT source_physical.id
-         FROM source_physical_shipments AS source_physical
-         UNION
-         SELECT physical.id
-         FROM wms.physical_shipments AS physical
-         JOIN scope_requests AS request
-           ON request.id = physical.shipment_request_id
-         UNION
-         SELECT physical.id
-         FROM wms.physical_shipments AS physical
-         JOIN anchor_engine_orders AS engine_order
-           ON engine_order.id = physical.shipping_engine_order_id
-       ),
-       candidate_labels AS MATERIALIZED (
-         SELECT link.shipping_provider_label_id AS id
-         FROM wms.shipping_provider_label_links AS link
-         WHERE link.shipment_request_id IN (SELECT id FROM scope_requests)
-         UNION
-         SELECT link.shipping_provider_label_id
-         FROM wms.shipping_provider_label_links AS link
-         WHERE link.shipping_engine_order_id IN (
-           SELECT id FROM anchor_engine_orders
-         )
-         UNION
-         SELECT link.shipping_provider_label_id
-         FROM wms.shipping_provider_label_links AS link
-         WHERE link.physical_shipment_id IN (
-           SELECT id FROM scope_physical_shipments
-         )
-         UNION
-         SELECT link.shipping_provider_label_id
-         FROM wms.shipping_provider_label_links AS link
-         WHERE link.legacy_wms_shipment_id IN (
-           SELECT id FROM scope_legacy_shipments
-         )
-         UNION
-         SELECT label.id
-         FROM wms.shipping_provider_labels AS label
-         JOIN wms.shipping_engine_orders AS engine_order
-           ON engine_order.id IN (SELECT id FROM anchor_engine_orders)
-          AND engine_order.provider = label.provider
-          AND engine_order.provider_order_id = label.provider_order_id
-         WHERE engine_order.provider_order_id IS NOT NULL
-         UNION
-         SELECT label.id
-         FROM wms.shipping_provider_labels AS label
-         JOIN wms.shipping_engine_orders AS engine_order
-           ON engine_order.id IN (SELECT id FROM anchor_engine_orders)
-          AND engine_order.provider = label.provider
-          AND engine_order.provider_order_key = label.provider_order_key
-         WHERE engine_order.provider_order_key IS NOT NULL
-         UNION
-         SELECT label.id
-         FROM wms.shipping_provider_labels AS label
-         JOIN wms.shipping_engine_order_provider_refs AS provider_ref
-           ON provider_ref.shipping_engine_order_id IN (
-             SELECT id FROM anchor_engine_orders
-           )
-          AND provider_ref.provider = label.provider
-          AND provider_ref.provider_order_id = label.provider_order_id
-         UNION
-         SELECT label.id
-         FROM wms.shipping_provider_labels AS label
-         JOIN wms.physical_shipments AS physical
-           ON physical.id IN (SELECT id FROM scope_physical_shipments)
-          AND physical.provider = label.provider
-          AND physical.provider_physical_shipment_id = label.provider_label_id
-       )
-       SELECT
-         stats.source_count,
-         stats.found_source_ids,
-         candidate.shipping_provider_label_id
-       FROM source_stats AS stats
-       LEFT JOIN LATERAL (
-         SELECT label.id::text AS shipping_provider_label_id,
-                label.id AS sortable_label_id
-         FROM candidate_labels AS candidate_label
-         JOIN wms.shipping_provider_labels AS label
-           ON label.id = candidate_label.id
-         WHERE label.label_direction = 'outbound'
-         ORDER BY label.id
-         LIMIT $2
-       ) AS candidate ON TRUE
-       ORDER BY candidate.sortable_label_id NULLS LAST`,
+      PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_SQL,
       [sortedIds, MAX_AUTHORITY_PACKAGES + 1],
     );
     if (result.rows.length === 0) {
