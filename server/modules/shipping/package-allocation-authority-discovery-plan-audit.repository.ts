@@ -517,7 +517,13 @@ function summarizeExplainPlan(raw: unknown): ExplainPlanSummary {
   });
 }
 
-async function loadAuditInsideTransaction(
+/**
+ * Runs the non-executing plan audit inside a caller-owned read-only
+ * transaction. The execution audit reuses this exact preflight so catalog,
+ * grant, role, and cost-plan evidence are evaluated in the same snapshot as
+ * EXPLAIN ANALYZE.
+ */
+export async function loadPackageAllocationAuthorityDiscoveryPlanAuditInsideTransaction(
   client: QueryClient,
   input: NormalizedPackageAllocationDiscoveryPlanAuditOptions,
 ): Promise<PackageAllocationDiscoveryPlanAuditReport> {
@@ -578,7 +584,10 @@ export async function auditPackageAllocationAuthorityDiscoveryPlan(
   let report: PackageAllocationDiscoveryPlanAuditReport | undefined;
   let primaryFailure: unknown;
   try {
-    report = await loadAuditInsideTransaction(client, input);
+    report = await loadPackageAllocationAuthorityDiscoveryPlanAuditInsideTransaction(
+      client,
+      input,
+    );
   } catch (error) {
     primaryFailure = error;
   }

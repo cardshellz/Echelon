@@ -24,12 +24,18 @@ import type {
 import {
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_INDEX_CONTRACTS,
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES,
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
 } from "../../package-allocation-authority-discovery.query";
 import {
   PACKAGE_ALLOCATION_DISCOVERY_EXPLAIN_SQL,
   PACKAGE_ALLOCATION_DISCOVERY_INDEX_CATALOG_SQL,
   PACKAGE_ALLOCATION_DISCOVERY_RELATION_ASSERTION_SQL,
 } from "../../package-allocation-authority-discovery-plan-audit.repository";
+import {
+  auditPackageAllocationAuthorityDiscoveryExecution,
+  type PackageAllocationDiscoveryExecutionAuditReport,
+} from "../../package-allocation-authority-discovery-execution-audit.repository";
+import { SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS } from "../../shipment-lifecycle-shadow-audit.repository";
 import { packageAllocationPackageKey } from "../../package-allocation-authority-resolution.domain";
 import { PackageAllocationAuthorityReadinessService } from "../../package-allocation-authority-readiness.service";
 import { PackageAllocationAuthorityResolutionPreviewService } from "../../package-allocation-authority-resolution.service";
@@ -49,6 +55,7 @@ const PRIMARY_GROUP_KEY = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const COMPETING_GROUP_KEY = "96e1be0d-c7d8-4c91-919f-04f5eb547f80";
 const CONCURRENCY_TEST_TIMEOUT_MS = 20_000;
 const BARRIER_TIMEOUT_MS = 5_000;
+const EXECUTION_AUDIT_ROLE = "package_allocation_discovery_execution_auditor";
 
 interface LedgerCounts {
   readonly groups: number;
@@ -225,6 +232,39 @@ async function installAuthorityReadinessTestRelations(pool: Pool): Promise<void>
       last_match_attempt_hash varchar(64) NOT NULL,
       last_match_status varchar(30) NOT NULL
     );
+  `);
+}
+
+async function installExecutionAuditRole(pool: Pool): Promise<void> {
+  const requiredRelations = [...new Set([
+    ...PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
+    ...SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS,
+  ])].sort();
+  await pool.query(`
+    DO $role$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '${EXECUTION_AUDIT_ROLE}'
+      ) THEN
+        CREATE ROLE ${EXECUTION_AUDIT_ROLE}
+          NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+          NOREPLICATION NOBYPASSRLS;
+      END IF;
+    END
+    $role$;
+    ALTER ROLE ${EXECUTION_AUDIT_ROLE}
+      NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+      NOREPLICATION NOBYPASSRLS;
+    GRANT USAGE ON SCHEMA wms TO ${EXECUTION_AUDIT_ROLE};
+    GRANT SELECT ON TABLE ${requiredRelations.join(", ")}
+      TO ${EXECUTION_AUDIT_ROLE};
+  `);
+}
+
+async function removeExecutionAuditRole(pool: Pool): Promise<void> {
+  await pool.query(`
+    DROP OWNED BY ${EXECUTION_AUDIT_ROLE};
+    DROP ROLE IF EXISTS ${EXECUTION_AUDIT_ROLE};
   `);
 }
 
@@ -554,6 +594,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     await runMigrations();
     pool = getTestPool();
     await installAuthorityReadinessTestRelations(pool);
+    await installExecutionAuditRole(pool);
   }, 30_000);
 
   beforeEach(async () => {
@@ -561,7 +602,21 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
   });
 
   afterAll(async () => {
-    await closeTestDb();
+    let roleCleanupFailure: unknown;
+    try {
+      await removeExecutionAuditRole(pool);
+    } catch (error) {
+      roleCleanupFailure = error;
+    }
+    try {
+      await closeTestDb();
+    } catch (error) {
+      if (roleCleanupFailure !== undefined) {
+        throw new AggregateError([roleCleanupFailure, error], "Integration cleanup failed");
+      }
+      throw error;
+    }
+    if (roleCleanupFailure !== undefined) throw roleCleanupFailure;
   });
 
   it("installs valid discovery indexes that PostgreSQL can use for the production query", async () => {
@@ -689,6 +744,71 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
   });
 
+
+  it("executes one representative discovery query under the limited read-only role", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-EXECUTION-AUDIT", 1);
+    const providerOrderId = "provider-order-execution-audit-1";
+    const labelId = await seedAuthorityReadinessLabel(pool, sourceId, { providerOrderId });
+    await seedAuthorityDiscoveryRelations(pool, sourceId, labelId, providerOrderId);
+    const countsBefore = await loadLedgerCounts(pool);
+    const client = await pool.connect();
+    let report: PackageAllocationDiscoveryExecutionAuditReport | undefined;
+    let primaryFailure: unknown;
+    let resetFailure: unknown;
+    try {
+      await client.query(`SET ROLE ${EXECUTION_AUDIT_ROLE}`);
+      report = await auditPackageAllocationAuthorityDiscoveryExecution(client, {
+        sourceWmsShipmentItemId: sourceId,
+      });
+    } catch (error) {
+      primaryFailure = error;
+    } finally {
+      try {
+        await client.query("RESET ROLE");
+      } catch (error) {
+        resetFailure = error;
+      }
+      client.release(resetFailure instanceof Error ? resetFailure : undefined);
+    }
+    if (primaryFailure !== undefined && resetFailure !== undefined) {
+      throw new AggregateError(
+        [primaryFailure, resetFailure],
+        "Execution audit and role reset both failed",
+      );
+    }
+    if (primaryFailure !== undefined) throw primaryFailure;
+    if (resetFailure !== undefined) throw resetFailure;
+
+    expect(report).toMatchObject({
+      mode: "read_only_explain_analyze",
+      queryExecuted: true,
+      sourceCount: 1,
+      representativeSourceVerified: true,
+      readOnlyRoleVerified: true,
+      expectedIndexCount: PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_INDEX_CONTRACTS.length,
+      executionPlanNodeCount: expect.any(Number),
+      executionRootNodeType: expect.any(String),
+      actualRows: expect.any(Number),
+      actualLoops: expect.any(Number),
+      planningTimeMs: expect.any(Number),
+      executionTimeMs: expect.any(Number),
+      executionBuffers: {
+        sharedHitBlocks: expect.any(Number),
+        sharedReadBlocks: expect.any(Number),
+        sharedDirtiedBlocks: expect.any(Number),
+        sharedWrittenBlocks: expect.any(Number),
+        localHitBlocks: expect.any(Number),
+        localReadBlocks: expect.any(Number),
+        localDirtiedBlocks: expect.any(Number),
+        localWrittenBlocks: expect.any(Number),
+        tempReadBlocks: expect.any(Number),
+        tempWrittenBlocks: expect.any(Number),
+      },
+    });
+    expect(report?.executionPlanNodeCount).toBeGreaterThan(0);
+    expect(report?.actualLoops).toBeGreaterThan(0);
+    expect(await loadLedgerCounts(pool)).toEqual(countsBefore);
+  });
   it("loads locked persisted evidence and remains shadow-only without ledger writes", async () => {
     const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-READINESS", 2);
     const labelId = await seedAuthorityReadinessLabel(pool, sourceId);
