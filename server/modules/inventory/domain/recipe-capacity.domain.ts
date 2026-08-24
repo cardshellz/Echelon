@@ -20,6 +20,16 @@ export type RecipeStockPosition = {
   availableQty: number;
 };
 
+export type RecipeFinishedVariantDefinition = {
+  variantId: number;
+  productId: number;
+  unitsPerVariant: number;
+};
+
+export type RecipeFinishedStockPosition = RecipeFinishedVariantDefinition & {
+  availableQty: number;
+};
+
 export type RecipePlanComponent = {
   variantId: number;
   requiredQty: number;
@@ -46,6 +56,8 @@ export type WarehouseRecipeSnapshot = {
   warehouseId: number;
   recipes: RecipeDefinition[];
   stock: RecipeStockPosition[];
+  finishedVariants: RecipeFinishedVariantDefinition[];
+  finishedStock: RecipeFinishedStockPosition[];
   outputLocations: ReadonlyMap<number, number>;
 };
 
@@ -136,6 +148,72 @@ function makeStockMap(stock: RecipeStockPosition[]): Map<number, Map<number, num
   return result;
 }
 
+function makeFinishedVariantMap(
+  variants: RecipeFinishedVariantDefinition[],
+): Map<number, RecipeFinishedVariantDefinition> {
+  const result = new Map<number, RecipeFinishedVariantDefinition>();
+  for (const variant of variants) {
+    positiveSafeInteger(variant.variantId, "finishedVariant.variantId");
+    positiveSafeInteger(variant.productId, "finishedVariant.productId");
+    positiveSafeInteger(variant.unitsPerVariant, "finishedVariant.unitsPerVariant");
+    if (result.has(variant.variantId)) {
+      throw new RecipeCapacityError("DUPLICATE_FINISHED_VARIANT", `Finished variant ${variant.variantId} is duplicated`, {
+        variantId: variant.variantId,
+      });
+    }
+    result.set(variant.variantId, variant);
+  }
+  return result;
+}
+
+function makeFinishedPoolMap(stock: RecipeFinishedStockPosition[]): Map<number, number> {
+  const result = new Map<number, number>();
+  for (const position of stock) {
+    positiveSafeInteger(position.variantId, "finishedStock.variantId");
+    positiveSafeInteger(position.productId, "finishedStock.productId");
+    positiveSafeInteger(position.unitsPerVariant, "finishedStock.unitsPerVariant");
+    if (!Number.isSafeInteger(position.availableQty)) {
+      throw new RecipeCapacityError("INVALID_FINISHED_STOCK", "Finished inventory must be a signed safe integer", {
+        position,
+      });
+    }
+    const availableBase = position.availableQty * position.unitsPerVariant;
+    if (!Number.isSafeInteger(availableBase)) {
+      throw new RecipeCapacityError("RECIPE_CAPACITY_OVERFLOW", "Finished inventory exceeds the supported range", {
+        position,
+      });
+    }
+    const nextTotal = (result.get(position.productId) ?? 0) + availableBase;
+    if (!Number.isSafeInteger(nextTotal)) {
+      throw new RecipeCapacityError("RECIPE_CAPACITY_OVERFLOW", "Finished inventory pool exceeds the supported range", {
+        productId: position.productId,
+      });
+    }
+    result.set(position.productId, nextTotal);
+  }
+  for (const [productId, availableBase] of result) {
+    result.set(productId, Math.max(0, availableBase));
+  }
+  return result;
+}
+
+function consumeFinishedPool(
+  pools: Map<number, number>,
+  variant: RecipeFinishedVariantDefinition | undefined,
+  requestedQty: number,
+  outputLocationId: number | undefined,
+  allowPartial: boolean,
+): RecipeDirectAllocation | null {
+  if (!variant || outputLocationId == null) return null;
+  const availableBase = pools.get(variant.productId) ?? 0;
+  const availableQty = Math.floor(availableBase / variant.unitsPerVariant);
+  if (availableQty <= 0 || (!allowPartial && availableQty < requestedQty)) return null;
+
+  const qty = allowPartial ? Math.min(requestedQty, availableQty) : requestedQty;
+  pools.set(variant.productId, availableBase - (qty * variant.unitsPerVariant));
+  return { sourceLocationId: outputLocationId, qty };
+}
+
 function locationWithEnough(
   stock: Map<number, Map<number, number>>,
   variantId: number,
@@ -220,17 +298,26 @@ export function planRecipeDemand(
 
   const recipes = makeRecipeMap(snapshot.recipes);
   const stock = makeStockMap(snapshot.stock);
+  const finishedVariants = makeFinishedVariantMap(snapshot.finishedVariants);
+  const finishedPools = makeFinishedPoolMap(snapshot.finishedStock);
+  // Finished variants belonging to a recipe output product share one base-unit
+  // pool. Remove their exact-SKU rows from component stock so the same physical
+  // units cannot be consumed once as finished supply and again as recipe input.
+  for (const variantId of finishedVariants.keys()) stock.delete(variantId);
   const nodes: RecipePlanNode[] = [];
-  // A WMS order/shipment item has one physical source location. Reserve direct
-  // finished stock from one deterministic bin, then build only the remainder.
-  // When the recipe has an output assignment, direct stock must come from that
-  // same location so built shortfall and finished stock remain one pick source.
-  const directAllocations = consumeDirectTargetStock(
-    stock,
-    targetVariantId,
+  // Normalize the shared finished-package pool into target units at the
+  // target's assigned output location, then build only the remaining demand.
+  const targetOutputLocationId = snapshot.outputLocations.get(targetVariantId);
+  const pooledTarget = consumeFinishedPool(
+    finishedPools,
+    finishedVariants.get(targetVariantId),
     requestedQty,
-    snapshot.outputLocations.get(targetVariantId),
+    targetOutputLocationId,
+    true,
   );
+  const directAllocations = pooledTarget
+    ? [pooledTarget]
+    : consumeDirectTargetStock(stock, targetVariantId, requestedQty, targetOutputLocationId);
   const directQty = directAllocations.reduce((total, allocation) => total + allocation.qty, 0);
   const buildQty = requestedQty - directQty;
 
@@ -240,6 +327,17 @@ export function planRecipeDemand(
     path: string,
     stack: ReadonlySet<number>,
   ): SatisfiedRequirement => {
+    const pooled = consumeFinishedPool(
+      finishedPools,
+      finishedVariants.get(variantId),
+      qty,
+      snapshot.outputLocations.get(variantId),
+      false,
+    );
+    if (pooled) {
+      return { sourceLocationId: pooled.sourceLocationId, prerequisiteNodeKey: null };
+    }
+
     const directLocation = locationWithEnough(stock, variantId, qty);
     if (directLocation != null) {
       consume(stock, variantId, directLocation, qty);

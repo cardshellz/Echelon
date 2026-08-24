@@ -17,6 +17,7 @@ type RecipeGraph = {
   recipes: RecipeDefinition[];
   variantIds: number[];
   productIds: number[];
+  outputProductIds: number[];
 };
 
 function positiveInteger(value: unknown, field: string): number {
@@ -100,7 +101,9 @@ export class RecipeCapacityService {
     const selectedRecipes: RecipeDefinition[] = [];
     const selectedRecipeIds = new Set<number>();
     const variantIds = new Set<number>([targetVariantId]);
-    const productIds = new Set<number>([positiveInteger(targetFacts.product_id, "target_product_id")]);
+    const targetProductId = positiveInteger(targetFacts.product_id, "target_product_id");
+    const productIds = new Set<number>([targetProductId]);
+    const outputProductIds = new Set<number>([targetProductId]);
     const visit = (variantId: number, stack: ReadonlySet<number>): void => {
       if (stack.has(variantId)) {
         throw new RecipeCapacityError("RECIPE_CYCLE", `Recipe graph contains a cycle at variant ${variantId}`, {
@@ -121,6 +124,7 @@ export class RecipeCapacityService {
       selectedRecipeIds.add(recipe.id);
       selectedRecipes.push(recipe);
       productIds.add(recipe.outputProductId);
+      outputProductIds.add(recipe.outputProductId);
       const nextStack = new Set(stack);
       nextStack.add(variantId);
       for (const component of recipe.components) {
@@ -134,6 +138,7 @@ export class RecipeCapacityService {
       recipes: selectedRecipes,
       variantIds: [...variantIds].sort((left, right) => left - right),
       productIds: [...productIds].sort((left, right) => left - right),
+      outputProductIds: [...outputProductIds].sort((left, right) => left - right),
     };
   }
 
@@ -147,12 +152,33 @@ export class RecipeCapacityService {
     executor: QueryExecutor,
   ): Promise<WarehouseRecipeSnapshot[]> {
     const graph = await this.loadGraph(targetVariantId, executor);
-    const variantSql = sql.join(graph.variantIds.map((id) => sql`${id}`), sql`, `);
+    const outputProductSql = sql.join(graph.outputProductIds.map((id) => sql`${id}`), sql`, `);
+    const finishedVariantRows = rowsOf(await executor.execute(sql`
+      SELECT variant.id,
+             variant.product_id,
+             variant.units_per_variant
+      FROM catalog.product_variants variant
+      WHERE variant.product_id IN (${outputProductSql})
+        AND variant.is_active = true
+      ORDER BY variant.product_id, variant.id
+    `));
+    const finishedVariants = finishedVariantRows.map((row) => ({
+      variantId: positiveInteger(row.id, "finished_variant.id"),
+      productId: positiveInteger(row.product_id, "finished_variant.product_id"),
+      unitsPerVariant: positiveInteger(row.units_per_variant, "finished_variant.units_per_variant"),
+    }));
+    const finishedVariantsById = new Map(
+      finishedVariants.map((variant) => [variant.variantId, variant]),
+    );
+    const finishedVariantIds = new Set(finishedVariantsById.keys());
+    const snapshotVariantIds = [...new Set([...graph.variantIds, ...finishedVariantIds])]
+      .sort((left, right) => left - right);
+    const variantSql = sql.join(snapshotVariantIds.map((id) => sql`${id}`), sql`, `);
     const stockRows = rowsOf(await executor.execute(sql`
       SELECT level.product_variant_id,
              location.warehouse_id,
              level.warehouse_location_id,
-             GREATEST(level.variant_qty - level.reserved_qty, 0)::int AS available_qty
+             (level.variant_qty - level.reserved_qty - level.picked_qty - level.packed_qty)::bigint AS available_qty
       FROM inventory.inventory_levels level
       JOIN warehouse.warehouse_locations location
         ON location.id = level.warehouse_location_id
@@ -160,7 +186,6 @@ export class RecipeCapacityService {
        AND location.cycle_count_freeze_id IS NULL
       WHERE level.product_variant_id IN (${variantSql})
         AND (${warehouseId ?? null}::int IS NULL OR location.warehouse_id = ${warehouseId ?? null})
-        AND level.variant_qty > level.reserved_qty
       ORDER BY location.warehouse_id, level.product_variant_id, level.warehouse_location_id
     `));
     const assignmentRows = rowsOf(await executor.execute(sql`
@@ -191,11 +216,39 @@ export class RecipeCapacityService {
         recipes: graph.recipes,
         stock: stockRows
           .filter((row) => Number(row.warehouse_id) === currentWarehouseId)
+          .filter((row) => !finishedVariantIds.has(Number(row.product_variant_id)))
+          .filter((row) => Number(row.available_qty) > 0)
           .map((row) => ({
             variantId: positiveInteger(row.product_variant_id, "stock.product_variant_id"),
             locationId: positiveInteger(row.warehouse_location_id, "stock.warehouse_location_id"),
             availableQty: Number(row.available_qty),
           })),
+        finishedVariants,
+        finishedStock: stockRows
+          .filter((row) => Number(row.warehouse_id) === currentWarehouseId)
+          .filter((row) => finishedVariantIds.has(Number(row.product_variant_id)))
+          .map((row) => {
+            const variantId = positiveInteger(row.product_variant_id, "finished_stock.product_variant_id");
+            const variant = finishedVariantsById.get(variantId);
+            if (!variant) {
+              throw new RecipeCapacityError("FINISHED_VARIANT_NOT_FOUND", `Finished variant ${variantId} was not loaded`, {
+                variantId,
+              });
+            }
+            const availableQty = Number(row.available_qty);
+            if (!Number.isSafeInteger(availableQty)) {
+              throw new RecipeCapacityError("INVALID_FINISHED_STOCK", "Finished inventory must be a signed safe integer", {
+                variantId,
+                availableQty: row.available_qty,
+              });
+            }
+            return {
+              variantId,
+              productId: variant.productId,
+              unitsPerVariant: variant.unitsPerVariant,
+              availableQty,
+            };
+          }),
         outputLocations: new Map(
           assignmentRows
             .filter((row) => Number(row.warehouse_id) === currentWarehouseId)

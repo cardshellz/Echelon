@@ -13,12 +13,16 @@ const WAREHOUSE_ID = 1;
 function snapshot(input: {
   recipes?: RecipeDefinition[];
   stock?: WarehouseRecipeSnapshot["stock"];
+  finishedVariants?: WarehouseRecipeSnapshot["finishedVariants"];
+  finishedStock?: WarehouseRecipeSnapshot["finishedStock"];
   outputLocations?: Array<[number, number]>;
 } = {}): WarehouseRecipeSnapshot {
   return {
     warehouseId: WAREHOUSE_ID,
     recipes: input.recipes ?? [],
     stock: input.stock ?? [],
+    finishedVariants: input.finishedVariants ?? [],
+    finishedStock: input.finishedStock ?? [],
     outputLocations: new Map(input.outputLocations ?? []),
   };
 }
@@ -131,19 +135,66 @@ describe("recipe capacity domain", () => {
     expect(plan.rootNodeKey).toBe("root");
   });
 
-  it("adds direct finished stock to independently buildable P5 and C25 capacity", () => {
+  it("adds the shared finished-package pool to independently buildable P5 and C25 capacity", () => {
     const common = {
       recipes: [eaAssembly, p5Conversion, c25Conversion],
-      stock: [
-        ...rawStock(2_200),
-        { variantId: 200, locationId: 21, availableQty: 2 },
-        { variantId: 300, locationId: 22, availableQty: 84 },
+      stock: rawStock(2_200),
+      finishedVariants: [
+        { variantId: 100, productId: 1000, unitsPerVariant: 1 },
+        { variantId: 200, productId: 1000, unitsPerVariant: 5 },
+        { variantId: 300, productId: 1000, unitsPerVariant: 25 },
+      ],
+      finishedStock: [
+        { variantId: 200, productId: 1000, unitsPerVariant: 5, availableQty: 2 },
+        { variantId: 300, productId: 1000, unitsPerVariant: 25, availableQty: 84 },
       ],
       outputLocations: [[100, 20], [200, 21], [300, 22]] as Array<[number, number]>,
     };
 
-    expect(calculateRecipeCapacity(snapshot(common), 200)).toBe(442);
+    expect(calculateRecipeCapacity(snapshot(common), 100)).toBe(4_310);
+    expect(calculateRecipeCapacity(snapshot(common), 200)).toBe(862);
     expect(calculateRecipeCapacity(snapshot(common), 300)).toBe(172);
+  });
+
+  it("subtracts target over-reservations from sibling finished-package supply", () => {
+    const common = {
+      recipes: [eaAssembly, p5Conversion],
+      stock: rawStock(100),
+      finishedVariants: [
+        { variantId: 100, productId: 1000, unitsPerVariant: 1 },
+        { variantId: 200, productId: 1000, unitsPerVariant: 5 },
+        { variantId: 300, productId: 1000, unitsPerVariant: 25 },
+      ],
+      finishedStock: [
+        { variantId: 200, productId: 1000, unitsPerVariant: 5, availableQty: -10 },
+        { variantId: 300, productId: 1000, unitsPerVariant: 25, availableQty: 2 },
+      ],
+      outputLocations: [[100, 20], [200, 21]] as Array<[number, number]>,
+    };
+
+    expect(calculateRecipeCapacity(snapshot(common), 200)).toBe(20);
+  });
+
+  it("reserves finished-package capacity before creating build demand", () => {
+    const plan = planRecipeDemand(snapshot({
+      recipes: [eaAssembly, p5Conversion],
+      stock: rawStock(10),
+      finishedVariants: [
+        { variantId: 100, productId: 1000, unitsPerVariant: 1 },
+        { variantId: 200, productId: 1000, unitsPerVariant: 5 },
+        { variantId: 300, productId: 1000, unitsPerVariant: 25 },
+      ],
+      finishedStock: [
+        { variantId: 300, productId: 1000, unitsPerVariant: 25, availableQty: 1 },
+      ],
+      outputLocations: [[100, 20], [200, 21]],
+    }), 200, 7);
+
+    expect(plan.directAllocations).toEqual([{ sourceLocationId: 21, qty: 5 }]);
+    expect(plan.nodes).toEqual([
+      expect.objectContaining({ outputVariantId: 100, plannedBuilds: 10 }),
+      expect.objectContaining({ outputVariantId: 200, plannedBuilds: 2 }),
+    ]);
   });
 
   it("uses one deterministic finished-goods location and builds any remainder", () => {
