@@ -6,6 +6,7 @@ import {
   Check,
   Loader2,
   PackageCheck,
+  Pencil,
   Plus,
   RotateCcw,
 } from "lucide-react";
@@ -45,6 +46,13 @@ type BuildRecipe = {
   outputName: string;
   outputQty: number;
   notes: string | null;
+  createdBy: string | null;
+  supersedesRecipeId: number | null;
+  changeReason: string | null;
+  retiredBy: string | null;
+  retiredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
   components: RecipeComponent[];
 };
 
@@ -222,6 +230,14 @@ export default function Builds() {
   const { data: recipes = [], isLoading: recipesLoading } = useQuery<BuildRecipe[]>({
     queryKey: ["/api/inventory/build-recipes"],
   });
+  const latestRecipeIdByCode = useMemo(() => {
+    const latest = new Map<string, BuildRecipe>();
+    for (const recipe of recipes) {
+      const current = latest.get(recipe.code);
+      if (!current || recipe.version > current.version) latest.set(recipe.code, recipe);
+    }
+    return new Map(Array.from(latest, ([code, recipe]) => [code, recipe.id]));
+  }, [recipes]);
   const { data: orders = [], isLoading: ordersLoading } = useQuery<BuildOrder[]>({
     queryKey: ["/api/inventory/build-orders"],
   });
@@ -527,16 +543,37 @@ export default function Builds() {
         <TabsContent value="recipes" className="mt-4">
           <div className="overflow-x-auto border">
             <Table>
-              <TableHeader><TableRow><TableHead>Recipe</TableHead><TableHead>Output</TableHead><TableHead>Components per build</TableHead><TableHead>Status</TableHead></TableRow></TableHeader>
+              <TableHeader><TableRow><TableHead>Recipe</TableHead><TableHead>Output</TableHead><TableHead>Components per build</TableHead><TableHead>Status</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
               <TableBody>
-                {recipesLoading && <TableRow><TableCell colSpan={4}>Loading recipes...</TableCell></TableRow>}
-                {!recipesLoading && recipes.length === 0 && <TableRow><TableCell colSpan={4} className="py-10 text-center text-muted-foreground">Create a recipe to define how component units become an output SKU.</TableCell></TableRow>}
-                {recipes.map((recipe) => <TableRow key={recipe.id}>
-                  <TableCell><div className="font-medium">{recipe.code}</div><div className="flex items-center gap-2 text-xs text-muted-foreground">{recipe.name} / v{recipe.version}<Badge variant="outline">{recipe.recipeType}</Badge></div></TableCell>
-                  <TableCell>{recipe.outputQty} x {recipe.outputSku ?? recipe.outputName}</TableCell>
-                  <TableCell>{recipe.components.map((component) => <div key={component.id} className="text-xs">{component.qtyPerBuild} x {component.sku ?? component.name}</div>)}</TableCell>
-                  <TableCell><Badge variant={recipe.status === "active" ? "default" : "secondary"}>{recipe.status}</Badge></TableCell>
-                </TableRow>)}
+                {recipesLoading && <TableRow><TableCell colSpan={5}>Loading recipes...</TableCell></TableRow>}
+                {!recipesLoading && recipes.length === 0 && <TableRow><TableCell colSpan={5} className="py-10 text-center text-muted-foreground">Create a recipe to define how component units become an output SKU.</TableCell></TableRow>}
+                {recipes.map((recipe) => {
+                  const canEdit = latestRecipeIdByCode.get(recipe.code) === recipe.id && recipe.status !== "retired";
+                  return (
+                    <TableRow key={recipe.id}>
+                      <TableCell>
+                        <div className="font-medium">{recipe.code}</div>
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">{recipe.name} / v{recipe.version}<Badge variant="outline">{recipe.recipeType}</Badge></div>
+                        {recipe.changeReason && <div className="mt-1 max-w-md text-xs text-muted-foreground">{recipe.changeReason}</div>}
+                      </TableCell>
+                      <TableCell>{recipe.outputQty} x {recipe.outputSku ?? recipe.outputName}</TableCell>
+                      <TableCell>{recipe.components.map((component) => <div key={component.id} className="text-xs">{component.qtyPerBuild} x {component.sku ?? component.name}</div>)}</TableCell>
+                      <TableCell><Badge variant={recipe.status === "active" ? "default" : "secondary"}>{recipe.status}</Badge></TableCell>
+                      <TableCell className="text-right">
+                        {canEdit && (
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => navigate(`/inventory/builds/recipes/${recipe.id}/edit`)}
+                            title={`Edit ${recipe.code} v${recipe.version}`}
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>

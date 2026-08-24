@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { BuildUseCases } from "../../application/build.use-cases";
 
-function createSubject() {
+function createSubject(clock: () => Date = () => new Date("2026-08-24T14:30:00.000Z")) {
   const repository = {
     createRecipe: vi.fn(async (input) => input),
+    updateRecipe: vi.fn(async (input) => ({ ...input, id: 12, code: "BOX-5", version: 2, output_variant_id: input.outputVariantId, previousOutputVariantId: 19, alreadyApplied: false })),
     createOrder: vi.fn(async (input) => input),
     releaseOrder: vi.fn(),
     executeOrder: vi.fn(),
@@ -13,7 +14,7 @@ function createSubject() {
   const changes = { listAffectedVariantIds: vi.fn(async () => []) };
   const queries = { listProductRelationships: vi.fn(), listRecipes: vi.fn(), listOrders: vi.fn(), getOrder: vi.fn() };
   return {
-    subject: new BuildUseCases(repository as any, changes as any, queries as any),
+    subject: new BuildUseCases(repository as any, changes as any, queries as any, clock),
     repository,
     changes,
     queries,
@@ -208,6 +209,97 @@ describe("BuildUseCases input boundary", () => {
       reason: "Incorrect physical count",
     }));
     expect(notification).toHaveBeenCalledWith(10, "build_reversed");
+  });
+
+
+  it("normalizes and hashes an audited recipe version command deterministically", async () => {
+    const { subject, repository } = createSubject();
+    const notification = vi.fn();
+    subject.onInventoryChange(notification);
+
+    await subject.updateRecipe({
+      recipeId: 7,
+      expectedVersion: 3,
+      name: "  Pack five revised  ",
+      status: "active",
+      recipeType: "assembly",
+      outputVariantId: 20,
+      outputQty: 1,
+      notes: "  Updated handling  ",
+      components: [
+        { componentVariantId: 12, qtyPerBuild: 2 },
+        { componentVariantId: 10, qtyPerBuild: 1 },
+      ],
+      changeReason: "  Supplier changed the component configuration.  ",
+      idempotencyKey: "recipe-edit-command-7",
+      actorId: "admin-42",
+    });
+
+    expect(repository.updateRecipe).toHaveBeenCalledWith(expect.objectContaining({
+      recipeId: 7,
+      expectedVersion: 3,
+      name: "Pack five revised",
+      notes: "Updated handling",
+      changeReason: "Supplier changed the component configuration.",
+      idempotencyKey: "recipe-edit-command-7",
+      actorId: "admin-42",
+      changedAt: new Date("2026-08-24T14:30:00.000Z"),
+      components: [
+        { componentVariantId: 10, qtyPerBuild: 1 },
+        { componentVariantId: 12, qtyPerBuild: 2 },
+      ],
+      changeRequestHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }));
+    expect(notification).toHaveBeenCalledWith(19, "recipe_version_created");
+    expect(notification).toHaveBeenCalledWith(20, "recipe_version_created");
+  });
+
+  it("requires a recipe change reason before repository access", async () => {
+    const { subject, repository } = createSubject();
+
+    await expect(subject.updateRecipe({
+      recipeId: 7,
+      expectedVersion: 3,
+      name: "Pack five",
+      status: "active",
+      recipeType: "conversion",
+      outputVariantId: 20,
+      outputQty: 1,
+      components: [{ componentVariantId: 10, qtyPerBuild: 5 }],
+      changeReason: " ",
+      idempotencyKey: "recipe-edit-command-7",
+      actorId: "admin-42",
+    })).rejects.toMatchObject({ code: "INVALID_BUILD_INPUT" });
+    expect(repository.updateRecipe).not.toHaveBeenCalled();
+  });
+
+  it("does not repeat inventory notifications for an idempotent recipe edit retry", async () => {
+    const { subject, repository } = createSubject();
+    const notification = vi.fn();
+    subject.onInventoryChange(notification);
+    repository.updateRecipe.mockResolvedValue({
+      id: 12,
+      code: "BOX-5",
+      version: 2,
+      output_variant_id: 20,
+      alreadyApplied: true,
+    });
+
+    await subject.updateRecipe({
+      recipeId: 7,
+      expectedVersion: 1,
+      name: "Pack five",
+      status: "active",
+      recipeType: "conversion",
+      outputVariantId: 20,
+      outputQty: 1,
+      components: [{ componentVariantId: 10, qtyPerBuild: 5 }],
+      changeReason: "Correct the pack rule.",
+      idempotencyKey: "recipe-edit-command-7",
+      actorId: "admin-42",
+    });
+
+    expect(notification).not.toHaveBeenCalled();
   });
 
 });

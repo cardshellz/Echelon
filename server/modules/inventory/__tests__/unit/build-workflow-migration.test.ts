@@ -18,6 +18,10 @@ const migration618 = fs.readFileSync(
   path.resolve(process.cwd(), "migrations/0618_inventory_build_execution_runs.sql"),
   "utf8",
 );
+const migration208 = fs.readFileSync(
+  path.resolve(process.cwd(), "migrations/208_build_recipe_version_audit.sql"),
+  "utf8",
+);
 const namedSchemaIntegrationFixture = fs.readFileSync(
   path.resolve(process.cwd(), "test/fixtures/named-schema-integration.sql"),
   "utf8",
@@ -97,6 +101,17 @@ describe("inventory build workflow migrations", () => {
     expect(migration618).toContain("resulting_order_status varchar(20) NOT NULL");
     expect(migration618).toContain("cancelled_reservation_qty integer");
     expect(migration618).toMatch(/DO \$\$[\s\S]*END\s+\$\$;/);
+  });
+
+
+  it("adds durable evidence and lifecycle constraints for recipe edits", () => {
+    expect(migration208).toContain("supersedes_recipe_id integer");
+    expect(migration208).toContain("build_recipes_supersedes_recipe_fk");
+    expect(migration208).toContain("build_recipes_change_idempotency_uidx");
+    expect(migration208).toContain("build_recipes_version_change_evidence_chk");
+    expect(migration208).toContain("build_recipes_retirement_evidence_chk");
+    expect(migration208).toContain("system:migration:208");
+    expect(migration208).toContain("change_request_hash ~ '^[0-9a-f]{64}$'");
   });
 
 });

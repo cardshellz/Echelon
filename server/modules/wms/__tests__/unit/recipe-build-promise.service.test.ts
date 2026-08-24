@@ -61,6 +61,7 @@ describe("RecipeBuildPromiseService", () => {
       targetVariantId: 50,
       requestedQty: 2,
       sourceLocationId: 700,
+      directAllocations: [{ sourceLocationId: 700, qty: 2 }],
       nodes: [],
       rootNodeKey: null,
     });
@@ -87,6 +88,8 @@ describe("RecipeBuildPromiseService", () => {
       orderId: 500,
       orderItemId: 600,
       userId: undefined,
+      referenceType: "recipe_direct",
+      referenceId: "600:700",
     }, tx);
     expect(deps.builds.createOrder).not.toHaveBeenCalled();
   });
@@ -95,6 +98,7 @@ describe("RecipeBuildPromiseService", () => {
     const tx = makeExecutor([
       [orderRow()],
       [],
+      [{ reserved_qty: 0 }],
       [],
       [],
       [],
@@ -108,6 +112,7 @@ describe("RecipeBuildPromiseService", () => {
       targetVariantId: 50,
       requestedQty: 2,
       sourceLocationId: 700,
+      directAllocations: [],
       rootNodeKey: "root",
       nodes: [
         {
@@ -168,6 +173,68 @@ describe("RecipeBuildPromiseService", () => {
     });
   });
 
+  it("reserves finished stock and promises only the build shortfall", async () => {
+    const tx = makeExecutor([
+      [orderRow()],
+      [],
+      [{ reserved_qty: 0 }],
+      [],
+      [{ id: 77 }],
+      [],
+    ]);
+    const deps = makeDependencies();
+    deps.recipeCapacity.planDemand.mockResolvedValue({
+      warehouseId: 1,
+      targetVariantId: 50,
+      requestedQty: 2,
+      sourceLocationId: 700,
+      directAllocations: [{ sourceLocationId: 703, qty: 1 }],
+      rootNodeKey: "root",
+      nodes: [{
+        nodeKey: "root",
+        recipeId: 11,
+        outputVariantId: 50,
+        outputLocationId: 700,
+        plannedBuilds: 1,
+        outputQty: 1,
+        components: [
+          { variantId: 40, requiredQty: 5, sourceLocationId: 701, prerequisiteNodeKey: null },
+        ],
+      }],
+    });
+    deps.builds.createOrder.mockResolvedValue({ id: 1002 });
+    const service = createRecipeBuildPromiseService(
+      { ...tx, transaction: async (work: any) => work(tx) } as any,
+      deps.recipeCapacity as any,
+      deps.builds as any,
+      deps.inventoryCore,
+    );
+
+    const result = await service.claimOrderItem({
+      productId: 5,
+      variantId: 50,
+      orderQty: 2,
+      orderId: 500,
+      orderItemId: 600,
+      actorId: "test-user",
+    }, tx as any);
+
+    expect(result).toEqual({ reserved: 1, promised: 1, shortfall: 0 });
+    expect(deps.inventoryCore.reserveForOrder).toHaveBeenCalledWith({
+      productVariantId: 50,
+      warehouseLocationId: 703,
+      qty: 1,
+      orderId: 500,
+      orderItemId: 600,
+      userId: "test-user",
+      referenceType: "recipe_direct",
+      referenceId: "600:703",
+    }, tx);
+    expect(deps.builds.createOrder).toHaveBeenCalledWith(expect.objectContaining({
+      plannedBuilds: 1,
+    }), tx);
+  });
+
   it("reuses an awaiting demand after acquiring the order-item lock", async () => {
     const tx = makeExecutor([
       [orderRow()],
@@ -199,6 +266,75 @@ describe("RecipeBuildPromiseService", () => {
 
     expect(result).toEqual({ reserved: 0, promised: 2, shortfall: 0 });
     expect(deps.recipeCapacity.getGraphProductIds).not.toHaveBeenCalled();
+    expect(deps.builds.createOrder).not.toHaveBeenCalled();
+  });
+
+  it("rejects an existing demand whose promised quantity exceeds the order line", async () => {
+    const tx = makeExecutor([
+      [orderRow()],
+      [{
+        id: 77,
+        order_id: 500,
+        order_item_id: 600,
+        target_variant_id: 50,
+        requested_qty: 2,
+        promised_qty: 3,
+        status: "awaiting_build",
+      }],
+    ]);
+    const deps = makeDependencies();
+    const service = createRecipeBuildPromiseService(
+      { ...tx, transaction: async (work: any) => work(tx) } as any,
+      deps.recipeCapacity as any,
+      deps.builds as any,
+      deps.inventoryCore,
+    );
+
+    await expect(service.claimOrderItem({
+      productId: 5,
+      variantId: 50,
+      orderQty: 2,
+      orderId: 500,
+      orderItemId: 600,
+    }, tx as any)).rejects.toMatchObject({ code: "RECIPE_PROMISE_DATA_INVALID" });
+
+    expect(deps.recipeCapacity.getGraphProductIds).not.toHaveBeenCalled();
+    expect(deps.inventoryCore.reserveForOrder).not.toHaveBeenCalled();
+  });
+
+  it("rejects a planner response for different demand before reserving inventory", async () => {
+    const tx = makeExecutor([
+      [orderRow()],
+      [],
+      [{ reserved_qty: 0 }],
+      [],
+    ]);
+    const deps = makeDependencies();
+    deps.recipeCapacity.planDemand.mockResolvedValue({
+      warehouseId: 2,
+      targetVariantId: 50,
+      requestedQty: 2,
+      sourceLocationId: 700,
+      directAllocations: [{ sourceLocationId: 700, qty: 2 }],
+      nodes: [],
+      rootNodeKey: null,
+    });
+    const service = createRecipeBuildPromiseService(
+      { ...tx, transaction: async (work: any) => work(tx) } as any,
+      deps.recipeCapacity as any,
+      deps.builds as any,
+      deps.inventoryCore,
+    );
+
+    await expect(service.claimOrderItem({
+      productId: 5,
+      variantId: 50,
+      orderQty: 2,
+      orderId: 500,
+      orderItemId: 600,
+    }, tx as any)).rejects.toMatchObject({ code: "RECIPE_PROMISE_PLAN_INVALID" });
+
+    expect(deps.inventoryCore.reserveForOrder).not.toHaveBeenCalled();
     expect(deps.builds.createOrder).not.toHaveBeenCalled();
   });
 
@@ -265,6 +401,8 @@ describe("RecipeBuildPromiseService", () => {
       orderId: 500,
       orderItemId: 600,
       userId: "recipe-atp",
+      referenceType: "recipe_build",
+      referenceId: "77",
     }, tx);
     expect(tx.set).toHaveBeenCalledWith({ onHold: false, holdReason: null });
   });

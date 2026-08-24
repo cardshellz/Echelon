@@ -21,6 +21,8 @@ const BUILD_CONFLICT_CODES = new Set([
   "BUILD_REVERSAL_SOURCE_DRIFT",
   "BUILD_RUN_ALREADY_REVERSED",
   "BUILD_RUN_INCOMPLETE",
+  "BUILD_OUTPUT_RECIPE_CONFLICT",
+  "BUILD_RECIPE_VERSION_CONFLICT",
   "IDEMPOTENCY_KEY_REUSED",
   "INSUFFICIENT_BUILD_COMPONENT",
   "INVALID_BUILD_STATUS",
@@ -114,6 +116,21 @@ export function registerBuildRoutes(app: Express): void {
         actorId: actorId(req),
       });
       res.status(201).json(recipe);
+    } catch (error) {
+      respondWithBuildError(res, error);
+    }
+  });
+
+  app.patch("/api/inventory/build-recipes/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const idempotencyKey = req.get("Idempotency-Key") ?? req.body?.idempotencyKey;
+      const recipe = await req.app.locals.services.builds.updateRecipe({
+        ...req.body,
+        recipeId: Number(req.params.id),
+        idempotencyKey,
+        actorId: actorId(req),
+      });
+      res.json(recipe);
     } catch (error) {
       respondWithBuildError(res, error);
     }

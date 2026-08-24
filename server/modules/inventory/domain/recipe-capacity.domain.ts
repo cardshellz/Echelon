@@ -37,6 +37,11 @@ export type RecipePlanNode = {
   components: RecipePlanComponent[];
 };
 
+export type RecipeDirectAllocation = {
+  sourceLocationId: number;
+  qty: number;
+};
+
 export type WarehouseRecipeSnapshot = {
   warehouseId: number;
   recipes: RecipeDefinition[];
@@ -49,6 +54,7 @@ export type RecipeDemandPlan = {
   targetVariantId: number;
   requestedQty: number;
   sourceLocationId: number;
+  directAllocations: RecipeDirectAllocation[];
   nodes: RecipePlanNode[];
   rootNodeKey: string | null;
 };
@@ -160,6 +166,33 @@ function consume(
   locations!.set(locationId, available - qty);
 }
 
+function consumeDirectTargetStock(
+  stock: Map<number, Map<number, number>>,
+  variantId: number,
+  requestedQty: number,
+  outputLocationId: number | undefined,
+): RecipeDirectAllocation[] {
+  const locations = stock.get(variantId);
+  if (outputLocationId != null && locations) {
+    for (const locationId of locations.keys()) {
+      if (locationId !== outputLocationId) locations.set(locationId, 0);
+    }
+  }
+
+  const candidates = [...(stock.get(variantId)?.entries() ?? [])]
+    .filter(([, availableQty]) => availableQty > 0)
+    .sort((left, right) => right[1] - left[1] || left[0] - right[0]);
+  const selected = outputLocationId == null
+    ? candidates[0]
+    : candidates.find(([locationId]) => locationId === outputLocationId);
+  if (!selected) return [];
+
+  const [sourceLocationId, availableQty] = selected;
+  const qty = Math.min(availableQty, requestedQty);
+  consume(stock, variantId, sourceLocationId, qty);
+  return [{ sourceLocationId, qty }];
+}
+
 function addStock(
   stock: Map<number, Map<number, number>>,
   variantId: number,
@@ -188,6 +221,18 @@ export function planRecipeDemand(
   const recipes = makeRecipeMap(snapshot.recipes);
   const stock = makeStockMap(snapshot.stock);
   const nodes: RecipePlanNode[] = [];
+  // A WMS order/shipment item has one physical source location. Reserve direct
+  // finished stock from one deterministic bin, then build only the remainder.
+  // When the recipe has an output assignment, direct stock must come from that
+  // same location so built shortfall and finished stock remain one pick source.
+  const directAllocations = consumeDirectTargetStock(
+    stock,
+    targetVariantId,
+    requestedQty,
+    snapshot.outputLocations.get(targetVariantId),
+  );
+  const directQty = directAllocations.reduce((total, allocation) => total + allocation.qty, 0);
+  const buildQty = requestedQty - directQty;
 
   const satisfy = (
     variantId: number,
@@ -224,9 +269,6 @@ export function planRecipeDemand(
         variantId,
       });
     }
-    // A recipe promise is all-or-nothing for the requested line. If finished
-    // stock cannot satisfy it in full, build the full quantity so the promise
-    // never depends on finished units that were not reserved for this order.
     const plannedBuilds = Math.ceil(qty / recipe.outputQty);
     const producedQty = safeMultiply(plannedBuilds, recipe.outputQty, {
       recipeId: recipe.id,
@@ -265,12 +307,18 @@ export function planRecipeDemand(
     return { sourceLocationId: outputLocationId, prerequisiteNodeKey: nodeKey };
   };
 
-  const target = satisfy(targetVariantId, requestedQty, "root", new Set<number>());
+  const target = buildQty > 0
+    ? satisfy(targetVariantId, buildQty, "root", new Set<number>())
+    : {
+        sourceLocationId: directAllocations[0]!.sourceLocationId,
+        prerequisiteNodeKey: null,
+      };
   return {
     warehouseId: snapshot.warehouseId,
     targetVariantId,
     requestedQty,
     sourceLocationId: target.sourceLocationId,
+    directAllocations,
     nodes,
     rootNodeKey: target.prerequisiteNodeKey,
   };

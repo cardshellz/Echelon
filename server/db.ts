@@ -443,10 +443,12 @@ export async function runStartupMigrations(): Promise<void> {
         END IF;
       END $$;
     `);
-    // Phase 3: reserve dedup — one reserve ledger row per (order_id, order_item_id)
+    // Reserve dedup is scoped to a supply segment so a recipe-managed order
+    // item can reserve finished stock now and built shortfall later.
     await client.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_transactions_reserve_dedup
-        ON inventory.inventory_transactions (order_id, order_item_id)
+        ON inventory.inventory_transactions
+          (order_id, order_item_id, (COALESCE(reference_type, 'order')), (COALESCE(reference_id, order_id::text)))
         WHERE transaction_type = 'reserve'
           AND order_id IS NOT NULL
           AND order_item_id IS NOT NULL
