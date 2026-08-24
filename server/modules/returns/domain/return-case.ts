@@ -69,7 +69,7 @@ export function deriveManualReturnLifecycle(
     approvalStatus: "approved",
     logisticsStatus: "awaiting_return",
     inspectionStatus: policy.inspectionRequirement === "none" ? "not_required" : "pending",
-    customerRefundStatus: "pending",
+    customerRefundStatus: businessContext === "retail" ? "pending" : "not_required",
     vendorSettlementStatus:
       businessContext === "dropship" && policy.vendorSettlementTrigger !== "none"
         ? "pending"

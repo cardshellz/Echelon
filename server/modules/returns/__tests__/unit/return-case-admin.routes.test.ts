@@ -14,6 +14,10 @@ import {
   ReturnCaseOperationError,
   type ReturnCaseOperationService,
 } from "../../application/return-case-operations.service";
+import {
+  ReturnCaseFinancialError,
+  type ReturnCaseFinancialService,
+} from "../../application/return-case-financial.service";
 import { registerReturnCaseAdminRoutes } from "../../interfaces/http/return-case-admin.routes";
 
 const { requirePermissionMock } = vi.hoisted(() => ({
@@ -33,13 +37,15 @@ describe("return case admin routes", () => {
   let service: ReturnType<typeof fakeService>;
   let openService: ReturnType<typeof fakeOpenService>;
   let operationService: ReturnType<typeof fakeOperationService>;
+  let financialService: ReturnType<typeof fakeFinancialService>;
 
   beforeEach(async () => {
     requirePermissionMock.mockClear();
     service = fakeService();
     openService = fakeOpenService();
     operationService = fakeOperationService();
-    server = await startServer(buildApp(service, openService, operationService));
+    financialService = fakeFinancialService();
+    server = await startServer(buildApp(service, openService, operationService, financialService));
   });
 
   afterEach(async () => server.close());
@@ -660,7 +666,7 @@ describe("return case admin routes", () => {
 
   it("requires an authenticated actor for return operations", async () => {
     await server.close();
-    server = await startServer(buildApp(service, openService, operationService, null));
+    server = await startServer(buildApp(service, openService, operationService, financialService, null));
 
     const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/receipt`, {
       method: "POST",
@@ -703,6 +709,164 @@ describe("return case admin routes", () => {
     });
   });
 
+  it("previews the exact Shopify customer refund with orders edit permission", async () => {
+    financialService.previewCustomerRefund.mockResolvedValue({
+      commandType: "issue_customer_refund",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      externalOrderId: "1001",
+      quoteHash: "a".repeat(64),
+      quote: {
+        provider: "shopify",
+        currency: "USD",
+        amountCents: 525,
+        maximumRefundableCents: 525,
+        lines: [{ returnCaseItemId: 9, externalLineItemId: "2001", quantity: 1, subtotalCents: 495, taxCents: 30, totalCents: 525 }],
+        transactions: [{ position: 0, parentTransactionId: "gid://shopify/OrderTransaction/3001", gateway: "shopify_payments", amountCents: 525 }],
+      },
+    });
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/customer-refund-preview`);
+
+    expect(response).toMatchObject({ status: 200, body: { caseId: 42, quoteHash: "a".repeat(64) } });
+    expect(financialService.previewCustomerRefund).toHaveBeenCalledWith(42);
+    expect(requirePermissionMock).toHaveBeenCalledWith("orders", "edit");
+  });
+
+  it("issues a customer refund with strict input and the authenticated actor", async () => {
+    financialService.issueCustomerRefund.mockResolvedValue({
+      commandType: "issue_customer_refund",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      customerRefundId: 71,
+      provider: "shopify",
+      providerRefundId: "gid://shopify/Refund/4001",
+      currency: "USD",
+      amountCents: 525,
+      completedAt: "2026-08-23T13:00:00.000Z",
+      replayed: false,
+    });
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/customer-refunds`, {
+      method: "POST",
+      body: {
+        idempotencyKey: " customer-refund-command-1 ",
+        quoteHash: "a".repeat(64),
+        notifyCustomer: true,
+        notes: " approved return ",
+      },
+    });
+
+    expect(response.status).toBe(201);
+    expect(financialService.issueCustomerRefund).toHaveBeenCalledWith({
+      caseId: 42,
+      idempotencyKey: "customer-refund-command-1",
+      quoteHash: "a".repeat(64),
+      notifyCustomer: true,
+      notes: "approved return",
+      actor: "user:7",
+    });
+  });
+
+  it("previews and posts a dropship vendor settlement without marketplace-buyer data", async () => {
+    financialService.previewVendorSettlement.mockResolvedValue({
+      commandType: "settle_vendor_account",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      vendorId: 8,
+      quoteHash: "b".repeat(64),
+      quote: {
+        currency: "USD",
+        faultCategory: "vendor",
+        returnShippingActualCents: 300,
+        settlement: {
+          productCreditCents: 2_000,
+          originalShippingCreditCents: 500,
+          restockingFeeCents: 0,
+          processingFeeCents: 0,
+          returnShippingFeeCents: 300,
+          grossCreditCents: 2_500,
+          totalFeeCents: 300,
+          netSettlementCents: 2_200,
+        },
+        policyFeeIds: { restockingFeeId: null, processingFeeId: null, returnShippingFeeId: 5 },
+      },
+    });
+    financialService.settleVendorAccount.mockResolvedValue({
+      commandType: "settle_vendor_account",
+      caseId: 42,
+      caseNumber: "RET-0000000042",
+      vendorSettlementId: 19,
+      vendorId: 8,
+      currency: "USD",
+      grossCreditCents: 2_500,
+      totalFeeCents: 300,
+      netSettlementCents: 2_200,
+      walletLedgerIds: [91, 92],
+      settledAt: "2026-08-23T14:00:00.000Z",
+      replayed: false,
+    });
+
+    const preview = await jsonRequest(`${server.url}/api/returns/admin/cases/42/vendor-settlement-preview`, {
+      method: "POST",
+      body: { faultCategory: "vendor" },
+    });
+    const result = await jsonRequest(`${server.url}/api/returns/admin/cases/42/vendor-settlements`, {
+      method: "POST",
+      body: {
+        idempotencyKey: " vendor-settlement-command-1 ",
+        quoteHash: "b".repeat(64),
+        faultCategory: "vendor",
+        notes: null,
+      },
+    });
+
+    expect(preview.status).toBe(200);
+    expect(financialService.previewVendorSettlement).toHaveBeenCalledWith({ caseId: 42, faultCategory: "vendor" });
+    expect(result.status).toBe(201);
+    expect(financialService.settleVendorAccount).toHaveBeenCalledWith({
+      caseId: 42,
+      idempotencyKey: "vendor-settlement-command-1",
+      quoteHash: "b".repeat(64),
+      faultCategory: "vendor",
+      notes: null,
+      actor: "user:7",
+    });
+    expect(requirePermissionMock).toHaveBeenCalledWith("dropship", "manage_operations");
+  });
+
+  it("rejects malformed financial requests before provider or wallet calls", async () => {
+    const customer = await jsonRequest(`${server.url}/api/returns/admin/cases/42/customer-refunds`, {
+      method: "POST",
+      body: { idempotencyKey: "refund-1", quoteHash: "not-a-hash", notifyCustomer: true, notes: null },
+    });
+    const vendor = await jsonRequest(`${server.url}/api/returns/admin/cases/42/vendor-settlements`, {
+      method: "POST",
+      body: { idempotencyKey: "settle-1", quoteHash: "b".repeat(64), faultCategory: "made_up", notes: null },
+    });
+
+    expect(customer).toMatchObject({ status: 400, body: { error: { code: "RETURN_CASE_QUERY_INVALID" } } });
+    expect(vendor).toMatchObject({ status: 400, body: { error: { code: "RETURN_CASE_QUERY_INVALID" } } });
+    expect(financialService.issueCustomerRefund).not.toHaveBeenCalled();
+    expect(financialService.settleVendorAccount).not.toHaveBeenCalled();
+  });
+
+  it("preserves classified financial conflicts", async () => {
+    financialService.previewCustomerRefund.mockRejectedValue(new ReturnCaseFinancialError(
+      "RETURN_CUSTOMER_REFUND_NOT_OWNED",
+      "Echelon does not own this buyer refund.",
+      409,
+      { caseId: 42 },
+    ));
+
+    const response = await jsonRequest(`${server.url}/api/returns/admin/cases/42/customer-refund-preview`);
+
+    expect(response).toEqual({
+      status: 409,
+      body: { error: { code: "RETURN_CUSTOMER_REFUND_NOT_OWNED", message: "Echelon does not own this buyer refund.", context: { caseId: 42 } } },
+    });
+  });
+
   it("requires inventory adjust permission for all operation routes", () => {
     const adjustCalls = requirePermissionMock.mock.calls.filter(
       ([resource, action]) => resource === "inventory" && action === "adjust",
@@ -735,10 +899,20 @@ function fakeOperationService() {
   };
 }
 
+function fakeFinancialService() {
+  return {
+    previewCustomerRefund: vi.fn(),
+    issueCustomerRefund: vi.fn(),
+    previewVendorSettlement: vi.fn(),
+    settleVendorAccount: vi.fn(),
+  };
+}
+
 function buildApp(
   service: ReturnType<typeof fakeService>,
   openService: ReturnType<typeof fakeOpenService>,
   operationService: ReturnType<typeof fakeOperationService>,
+  financialService: ReturnType<typeof fakeFinancialService>,
   userId: number | null = 7,
 ): express.Express {
   const app = express();
@@ -754,6 +928,7 @@ function buildApp(
     service as unknown as ReturnCaseAdminService,
     openService as unknown as OpenReturnCaseService,
     operationService as unknown as ReturnCaseOperationService,
+    financialService as unknown as ReturnCaseFinancialService,
   );
   return app;
 }

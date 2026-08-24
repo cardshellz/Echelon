@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
-import { returnCaseStatuses, returnDispositionTreatments } from "@shared/schema";
+import { dropshipFaultCategoryEnum, returnCaseStatuses, returnDispositionTreatments } from "@shared/schema";
 import { requirePermission } from "../../../../routes/middleware";
 import {
   ReturnCaseAdminError,
@@ -13,9 +13,14 @@ import {
   ReturnCaseOperationError,
   ReturnCaseOperationService,
 } from "../../application/return-case-operations.service";
+import {
+  ReturnCaseFinancialError,
+  ReturnCaseFinancialService,
+} from "../../application/return-case-financial.service";
 import { PostgresReturnCaseAdminStore } from "../../infrastructure/return-case.repository";
 import { PostgresOpenReturnCaseStore } from "../../infrastructure/open-return-case.repository";
 import { PostgresReturnCaseOperationStore } from "../../infrastructure/return-case-operation.repository";
+import { createReturnCaseFinancialServiceFromEnv } from "../../infrastructure/return-case-financial.factory";
 
 const listQuerySchema = z.object({
   search: z.string().trim().max(160).optional().transform((value) => value || null),
@@ -85,6 +90,22 @@ const inventoryTreatmentSchema = z.object({
   }).strict()).min(1).max(200),
 }).strict();
 
+const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+const issueCustomerRefundSchema = z.object({
+  idempotencyKey: z.string().trim().min(1).max(160),
+  quoteHash: sha256Schema,
+  notifyCustomer: z.boolean(),
+  notes: z.string().trim().max(2_000).nullable().default(null),
+}).strict();
+const vendorSettlementPreviewSchema = z.object({
+  faultCategory: z.enum(dropshipFaultCategoryEnum),
+}).strict();
+const settleVendorAccountSchema = z.object({
+  idempotencyKey: z.string().trim().min(1).max(160),
+  quoteHash: sha256Schema,
+  faultCategory: z.enum(dropshipFaultCategoryEnum),
+  notes: z.string().trim().max(2_000).nullable().default(null),
+}).strict();
 
 export function registerReturnCaseAdminRoutes(
   app: Express,
@@ -96,6 +117,7 @@ export function registerReturnCaseAdminRoutes(
     { notify: (productVariantId) => app.locals.services.inventoryCore
       .triggerNotifyChange(productVariantId, "return_inventory_treatment") },
   ),
+  financialService: ReturnCaseFinancialService = createReturnCaseFinancialServiceFromEnv(),
 ): void {
   app.get("/api/returns/admin/cases", requirePermission("inventory", "view"), async (req, res) => {
     const parsed = listQuerySchema.safeParse(req.query);
@@ -295,6 +317,100 @@ export function registerReturnCaseAdminRoutes(
       }
     },
   );
+
+  app.get(
+    "/api/returns/admin/cases/:id/customer-refund-preview",
+    requirePermission("orders", "edit"),
+    async (req, res) => {
+      const parsedCaseId = caseIdSchema.safeParse(req.params.id);
+      if (!parsedCaseId.success) return sendValidationError(res, parsedCaseId.error);
+      try {
+        return res.json(await financialService.previewCustomerRefund(parsedCaseId.data));
+      } catch (error) {
+        return sendError(
+          res,
+          error,
+          "RETURN_CUSTOMER_REFUND_PREVIEW_FAILED",
+          "Customer refund preview could not be loaded.",
+        );
+      }
+    },
+  );
+
+  app.post(
+    "/api/returns/admin/cases/:id/customer-refunds",
+    requirePermission("orders", "edit"),
+    async (req, res) => {
+      const parsedCaseId = caseIdSchema.safeParse(req.params.id);
+      if (!parsedCaseId.success) return sendValidationError(res, parsedCaseId.error);
+      const parsedBody = issueCustomerRefundSchema.safeParse(req.body);
+      if (!parsedBody.success) return sendValidationError(res, parsedBody.error);
+      const actor = readAuthenticatedActor(req);
+      if (!actor) return sendActorRequired(res);
+      try {
+        const result = await financialService.issueCustomerRefund({
+          caseId: parsedCaseId.data,
+          ...parsedBody.data,
+          actor,
+        });
+        return res.status(result.replayed ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(res, error, "RETURN_CUSTOMER_REFUND_FAILED", "Customer refund could not be issued.");
+      }
+    },
+  );
+
+  app.post(
+    "/api/returns/admin/cases/:id/vendor-settlement-preview",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      const parsedCaseId = caseIdSchema.safeParse(req.params.id);
+      if (!parsedCaseId.success) return sendValidationError(res, parsedCaseId.error);
+      const parsedBody = vendorSettlementPreviewSchema.safeParse(req.body);
+      if (!parsedBody.success) return sendValidationError(res, parsedBody.error);
+      try {
+        return res.json(await financialService.previewVendorSettlement({
+          caseId: parsedCaseId.data,
+          faultCategory: parsedBody.data.faultCategory,
+        }));
+      } catch (error) {
+        return sendError(
+          res,
+          error,
+          "RETURN_VENDOR_SETTLEMENT_PREVIEW_FAILED",
+          "Vendor settlement preview could not be loaded.",
+        );
+      }
+    },
+  );
+
+  app.post(
+    "/api/returns/admin/cases/:id/vendor-settlements",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      const parsedCaseId = caseIdSchema.safeParse(req.params.id);
+      if (!parsedCaseId.success) return sendValidationError(res, parsedCaseId.error);
+      const parsedBody = settleVendorAccountSchema.safeParse(req.body);
+      if (!parsedBody.success) return sendValidationError(res, parsedBody.error);
+      const actor = readAuthenticatedActor(req);
+      if (!actor) return sendActorRequired(res);
+      try {
+        const result = await financialService.settleVendorAccount({
+          caseId: parsedCaseId.data,
+          ...parsedBody.data,
+          actor,
+        });
+        return res.status(result.replayed ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(
+          res,
+          error,
+          "RETURN_VENDOR_SETTLEMENT_FAILED",
+          "Vendor account settlement could not be posted.",
+        );
+      }
+    },
+  );
 }
 
 function readAuthenticatedActor(req: Request): string | null {
@@ -324,6 +440,7 @@ function sendError(res: Response, error: unknown, fallbackCode: string, fallback
     error instanceof ReturnCaseAdminError
     || error instanceof OpenReturnCaseError
     || error instanceof ReturnCaseOperationError
+    || error instanceof ReturnCaseFinancialError
   ) {
     return res.status(error.status).json({
       error: { code: error.code, message: error.message, context: error.context },

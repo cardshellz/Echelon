@@ -30,6 +30,8 @@ export const returnCaseActionKindSchema = z.enum([
   "complete_inspection",
   "record_disposition",
   "apply_inventory_treatment",
+  "issue_customer_refund",
+  "settle_vendor_account",
 ]);
 export const returnCaseActionStateSchema = z.enum([
   "available",
@@ -711,6 +713,154 @@ export const applyReturnInventoryTreatmentResultSchema = z.object({
   replayed: z.boolean(),
 }).strict();
 
+const currencyCodeSchema = z.string().regex(/^[A-Z]{3}$/);
+const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+const safeIntegerSchema = z.number().int().safe();
+const customerRefundQuoteLineSchema = z.object({
+  returnCaseItemId: positiveSafeIntegerSchema,
+  externalLineItemId: requiredTextSchema,
+  quantity: positiveSafeIntegerSchema,
+  subtotalCents: nonNegativeSafeIntegerSchema,
+  taxCents: nonNegativeSafeIntegerSchema,
+  totalCents: nonNegativeSafeIntegerSchema,
+}).strict().superRefine((line, context) => {
+  if (!Number.isSafeInteger(line.subtotalCents + line.taxCents)
+    || line.totalCents !== line.subtotalCents + line.taxCents) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Refund line totals are inconsistent.", path: ["totalCents"] });
+  }
+});
+const customerRefundQuoteTransactionSchema = z.object({
+  position: nonNegativeSafeIntegerSchema,
+  parentTransactionId: requiredTextSchema,
+  gateway: requiredTextSchema,
+  amountCents: positiveSafeIntegerSchema,
+}).strict();
+export const customerRefundQuoteSchema = z.object({
+  provider: z.literal("shopify"),
+  currency: currencyCodeSchema,
+  amountCents: positiveSafeIntegerSchema,
+  maximumRefundableCents: positiveSafeIntegerSchema,
+  lines: z.array(customerRefundQuoteLineSchema).min(1).max(200),
+  transactions: z.array(customerRefundQuoteTransactionSchema).min(1).max(50),
+}).strict().superRefine((quote, context) => {
+  const lineTotal = quote.lines.reduce((sum, line) => sum + line.totalCents, 0);
+  const transactionTotal = quote.transactions.reduce((sum, transaction) => sum + transaction.amountCents, 0);
+  const lineIds = new Set(quote.lines.map((line) => line.returnCaseItemId));
+  const externalLineIds = new Set(quote.lines.map((line) => line.externalLineItemId));
+  const positions = new Set(quote.transactions.map((transaction) => transaction.position));
+  const parentIds = new Set(quote.transactions.map((transaction) => transaction.parentTransactionId));
+  if (!Number.isSafeInteger(lineTotal) || !Number.isSafeInteger(transactionTotal)
+    || lineTotal !== quote.amountCents || transactionTotal !== quote.amountCents
+    || quote.amountCents > quote.maximumRefundableCents) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Refund quote totals are inconsistent.", path: ["amountCents"] });
+  }
+  if (lineIds.size !== quote.lines.length || externalLineIds.size !== quote.lines.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Refund quote lines are duplicated.", path: ["lines"] });
+  }
+  if (positions.size !== quote.transactions.length || parentIds.size !== quote.transactions.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Refund quote transactions are duplicated.", path: ["transactions"] });
+  }
+});
+export const customerRefundPreviewSchema = z.object({
+  commandType: z.literal("issue_customer_refund"),
+  caseId: positiveSafeIntegerSchema,
+  caseNumber: requiredTextSchema,
+  externalOrderId: requiredTextSchema,
+  quoteHash: sha256Schema,
+  quote: customerRefundQuoteSchema,
+}).strict();
+export const issueCustomerRefundInputSchema = z.object({
+  idempotencyKey: idempotencyKeySchema,
+  quoteHash: sha256Schema,
+  notifyCustomer: z.boolean(),
+  notes: notesSchema,
+}).strict();
+export const issueCustomerRefundResultSchema = z.object({
+  commandType: z.literal("issue_customer_refund"),
+  caseId: positiveSafeIntegerSchema,
+  caseNumber: requiredTextSchema,
+  customerRefundId: positiveSafeIntegerSchema,
+  provider: z.literal("shopify"),
+  providerRefundId: requiredTextSchema,
+  currency: currencyCodeSchema,
+  amountCents: positiveSafeIntegerSchema,
+  completedAt: dateTimeSchema,
+  replayed: z.boolean(),
+}).strict();
+
+export const dropshipReturnFaultCategorySchema = z.enum([
+  "card_shellz", "vendor", "customer", "marketplace", "carrier",
+]);
+const vendorSettlementMoneySchema = z.object({
+  productCreditCents: nonNegativeSafeIntegerSchema,
+  originalShippingCreditCents: nonNegativeSafeIntegerSchema,
+  restockingFeeCents: nonNegativeSafeIntegerSchema,
+  processingFeeCents: nonNegativeSafeIntegerSchema,
+  returnShippingFeeCents: nonNegativeSafeIntegerSchema,
+  grossCreditCents: nonNegativeSafeIntegerSchema,
+  totalFeeCents: nonNegativeSafeIntegerSchema,
+  netSettlementCents: safeIntegerSchema,
+  creditLedgerType: z.enum(["return_credit", "insurance_pool_credit"]),
+  breakdown: z.record(jsonValueSchema),
+}).strict().superRefine((settlement, context) => {
+  const gross = settlement.productCreditCents + settlement.originalShippingCreditCents;
+  const fees = settlement.restockingFeeCents
+    + settlement.processingFeeCents
+    + settlement.returnShippingFeeCents;
+  if (!Number.isSafeInteger(gross) || !Number.isSafeInteger(fees)
+    || settlement.grossCreditCents !== gross
+    || settlement.totalFeeCents !== fees
+    || settlement.netSettlementCents !== gross - fees) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Vendor settlement totals are inconsistent.", path: ["netSettlementCents"] });
+  }
+});
+const vendorSettlementQuoteSchema = z.object({
+  currency: currencyCodeSchema,
+  faultCategory: dropshipReturnFaultCategorySchema,
+  returnShippingActualCents: nonNegativeSafeIntegerSchema.nullable(),
+  settlement: vendorSettlementMoneySchema,
+  policyFeeIds: z.object({
+    restockingFeeId: positiveSafeIntegerSchema.nullable(),
+    processingFeeId: positiveSafeIntegerSchema.nullable(),
+    returnShippingFeeId: positiveSafeIntegerSchema.nullable(),
+  }).strict(),
+}).strict();
+export const vendorSettlementPreviewSchema = z.object({
+  commandType: z.literal("settle_vendor_account"),
+  caseId: positiveSafeIntegerSchema,
+  caseNumber: requiredTextSchema,
+  vendorId: positiveSafeIntegerSchema,
+  quoteHash: sha256Schema,
+  quote: vendorSettlementQuoteSchema,
+}).strict();
+export const settleVendorAccountInputSchema = z.object({
+  idempotencyKey: idempotencyKeySchema,
+  quoteHash: sha256Schema,
+  faultCategory: dropshipReturnFaultCategorySchema,
+  notes: notesSchema,
+}).strict();
+export const settleVendorAccountResultSchema = z.object({
+  commandType: z.literal("settle_vendor_account"),
+  caseId: positiveSafeIntegerSchema,
+  caseNumber: requiredTextSchema,
+  vendorSettlementId: positiveSafeIntegerSchema,
+  vendorId: positiveSafeIntegerSchema,
+  currency: currencyCodeSchema,
+  grossCreditCents: nonNegativeSafeIntegerSchema,
+  totalFeeCents: nonNegativeSafeIntegerSchema,
+  netSettlementCents: safeIntegerSchema,
+  walletLedgerIds: z.array(positiveSafeIntegerSchema).max(2),
+  settledAt: dateTimeSchema,
+  replayed: z.boolean(),
+}).strict().superRefine((result, context) => {
+  if (result.netSettlementCents !== result.grossCreditCents - result.totalFeeCents) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Vendor settlement result totals are inconsistent.", path: ["netSettlementCents"] });
+  }
+  if (new Set(result.walletLedgerIds).size !== result.walletLedgerIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Vendor settlement ledger evidence is duplicated.", path: ["walletLedgerIds"] });
+  }
+});
+
 export type ReturnCaseActionKind = z.infer<typeof returnCaseActionKindSchema>;
 export type ReturnCaseAction = z.infer<typeof returnCaseActionSchema>;
 export type ReturnCaseActionPlan = z.infer<typeof returnCaseActionPlanSchema>;
@@ -729,12 +879,21 @@ export type RecordReturnDispositionInput = z.input<typeof recordReturnDispositio
 export type RecordReturnDispositionResult = z.infer<typeof recordReturnDispositionResultSchema>;
 export type ApplyReturnInventoryTreatmentInput = z.input<typeof applyReturnInventoryTreatmentInputSchema>;
 export type ApplyReturnInventoryTreatmentResult = z.infer<typeof applyReturnInventoryTreatmentResultSchema>;
+export type CustomerRefundPreview = z.infer<typeof customerRefundPreviewSchema>;
+export type IssueCustomerRefundInput = z.input<typeof issueCustomerRefundInputSchema>;
+export type IssueCustomerRefundResult = z.infer<typeof issueCustomerRefundResultSchema>;
+export type DropshipReturnFaultCategory = z.infer<typeof dropshipReturnFaultCategorySchema>;
+export type VendorSettlementPreview = z.infer<typeof vendorSettlementPreviewSchema>;
+export type SettleVendorAccountInput = z.input<typeof settleVendorAccountInputSchema>;
+export type SettleVendorAccountResult = z.infer<typeof settleVendorAccountResultSchema>;
 export type ReturnCaseOperationResult =
   | RecordReturnReceiptResult
   | StartReturnInspectionResult
   | CompleteReturnInspectionResult
   | RecordReturnDispositionResult
-  | ApplyReturnInventoryTreatmentResult;
+  | ApplyReturnInventoryTreatmentResult
+  | IssueCustomerRefundResult
+  | SettleVendorAccountResult;
 export const returnWarehouseLocationSchema = z.object({
   id: positiveSafeIntegerSchema,
   code: requiredTextSchema,
@@ -1030,6 +1189,87 @@ export async function applyReturnInventoryTreatment(
     `/api/returns/admin/cases/${parsedCaseId}/inventory-treatments`,
     jsonPost(body),
     correlatedResultSchema,
+    transport,
+  );
+}
+
+export async function getCustomerRefundPreview(
+  caseId: number,
+  transport: ReturnCaseAdminTransport = fetch,
+): Promise<CustomerRefundPreview> {
+  const parsedCaseId = parseCaseId(caseId);
+  const correlatedSchema = customerRefundPreviewSchema.superRefine((preview, context) => {
+    if (preview.caseId !== parsedCaseId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Refund preview caseId does not match the request.", path: ["caseId"] });
+    }
+  });
+  return requestJson(
+    `/api/returns/admin/cases/${parsedCaseId}/customer-refund-preview`,
+    { method: "GET", credentials: "include", headers: { Accept: "application/json" } },
+    correlatedSchema,
+    transport,
+  );
+}
+
+export async function issueReturnCustomerRefund(
+  caseId: number,
+  input: IssueCustomerRefundInput,
+  transport: ReturnCaseAdminTransport = fetch,
+): Promise<IssueCustomerRefundResult> {
+  const parsedCaseId = parseCaseId(caseId);
+  const parsedInput = parseOutboundInput(issueCustomerRefundInputSchema, input);
+  const correlatedSchema = issueCustomerRefundResultSchema.superRefine((result, context) => {
+    if (result.caseId !== parsedCaseId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Refund response caseId does not match the request.", path: ["caseId"] });
+    }
+  });
+  return requestJson(
+    `/api/returns/admin/cases/${parsedCaseId}/customer-refunds`,
+    jsonPost(parsedInput),
+    correlatedSchema,
+    transport,
+  );
+}
+
+export async function getVendorSettlementPreview(
+  caseId: number,
+  faultCategory: DropshipReturnFaultCategory,
+  transport: ReturnCaseAdminTransport = fetch,
+): Promise<VendorSettlementPreview> {
+  const parsedCaseId = parseCaseId(caseId);
+  const parsedFaultCategory = parseOutboundInput(dropshipReturnFaultCategorySchema, faultCategory);
+  const correlatedSchema = vendorSettlementPreviewSchema.superRefine((preview, context) => {
+    if (preview.caseId !== parsedCaseId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Settlement preview caseId does not match the request.", path: ["caseId"] });
+    }
+    if (preview.quote.faultCategory !== parsedFaultCategory) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Settlement preview fault category does not match the request.", path: ["quote", "faultCategory"] });
+    }
+  });
+  return requestJson(
+    `/api/returns/admin/cases/${parsedCaseId}/vendor-settlement-preview`,
+    jsonPost({ faultCategory: parsedFaultCategory }),
+    correlatedSchema,
+    transport,
+  );
+}
+
+export async function settleReturnVendorAccount(
+  caseId: number,
+  input: SettleVendorAccountInput,
+  transport: ReturnCaseAdminTransport = fetch,
+): Promise<SettleVendorAccountResult> {
+  const parsedCaseId = parseCaseId(caseId);
+  const parsedInput = parseOutboundInput(settleVendorAccountInputSchema, input);
+  const correlatedSchema = settleVendorAccountResultSchema.superRefine((result, context) => {
+    if (result.caseId !== parsedCaseId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Settlement response caseId does not match the request.", path: ["caseId"] });
+    }
+  });
+  return requestJson(
+    `/api/returns/admin/cases/${parsedCaseId}/vendor-settlements`,
+    jsonPost(parsedInput),
+    correlatedSchema,
     transport,
   );
 }

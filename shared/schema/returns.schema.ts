@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { bigint, boolean, check, index, integer, jsonb, pgSchema, text, timestamp, uniqueIndex, varchar } from "drizzle-orm/pg-core";
 import { channels } from "./channels.schema";
-import { dropshipStoreConnections, dropshipVendors } from "./dropship.schema";
+import { dropshipStoreConnections, dropshipVendors, dropshipWalletLedger } from "./dropship.schema";
 import { inventoryLots, inventoryTransactions } from "./inventory.schema";
 import { omsOrderLines, omsOrders } from "./oms.schema";
 import { orderItems, orders, returnItems, returns } from "./orders.schema";
@@ -276,6 +276,165 @@ export const returnCaseInventoryTreatmentItems = returnsSchema.table("return_cas
   `),
 ]);
 
+export const returnCaseCustomerRefunds = returnsSchema.table("return_case_customer_refunds", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  returnCaseId: bigint("return_case_id", { mode: "number" }).notNull().references(() => returnCases.id),
+  channelId: integer("channel_id").notNull().references(() => channels.id),
+  provider: varchar("provider", { length: 30 }).$type<"shopify">().notNull(),
+  externalOrderId: varchar("external_order_id", { length: 100 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull(),
+  amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
+  maximumRefundableCents: bigint("maximum_refundable_cents", { mode: "number" }).notNull(),
+  status: varchar("status", { length: 24 }).$type<"pending" | "completed" | "failed">().notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 160 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  quoteHash: varchar("quote_hash", { length: 64 }).notNull(),
+  quote: jsonb("quote").notNull(),
+  notifyCustomer: boolean("notify_customer").notNull(),
+  requestedBy: varchar("requested_by", { length: 255 }).notNull(),
+  notes: text("notes"),
+  providerRefundId: varchar("provider_refund_id", { length: 160 }),
+  providerResult: jsonb("provider_result"),
+  failureCode: varchar("failure_code", { length: 160 }),
+  failureMessage: text("failure_message"),
+  requestedAt: timestamp("requested_at", { withTimezone: true }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("return_case_customer_refunds_idempotency_uq").on(table.idempotencyKey),
+  uniqueIndex("return_case_customer_refunds_pending_uq").on(table.returnCaseId)
+    .where(sql`${table.status} = 'pending'`),
+  uniqueIndex("return_case_customer_refunds_completed_uq").on(table.returnCaseId)
+    .where(sql`${table.status} = 'completed'`),
+  uniqueIndex("return_case_customer_refunds_provider_id_uq").on(table.channelId, table.providerRefundId)
+    .where(sql`${table.providerRefundId} IS NOT NULL`),
+  index("return_case_customer_refunds_case_idx").on(table.returnCaseId, table.requestedAt, table.id),
+  check("return_case_customer_refunds_provider_chk", sql`${table.provider} = 'shopify'`),
+  check("return_case_customer_refunds_currency_chk", sql`${table.currency} ~ '^[A-Z]{3}$'`),
+  check("return_case_customer_refunds_amount_chk", sql`
+    ${table.amountCents} > 0 AND ${table.maximumRefundableCents} >= ${table.amountCents}
+  `),
+  check("return_case_customer_refunds_status_chk", sql`${table.status} IN ('pending','completed','failed')`),
+  check("return_case_customer_refunds_hash_chk", sql`
+    ${table.requestHash} ~ '^[0-9a-f]{64}$' AND ${table.quoteHash} ~ '^[0-9a-f]{64}$'
+  `),
+  check("return_case_customer_refunds_quote_chk", sql`jsonb_typeof(${table.quote}) = 'object'`),
+  check("return_case_customer_refunds_actor_chk", sql`btrim(${table.requestedBy}) <> ''`),
+  check("return_case_customer_refunds_completion_chk", sql`
+    (${table.status} = 'pending' AND ${table.providerRefundId} IS NULL AND ${table.providerResult} IS NULL
+      AND ${table.failureCode} IS NULL AND ${table.failureMessage} IS NULL AND ${table.completedAt} IS NULL)
+    OR (${table.status} = 'completed' AND ${table.providerRefundId} IS NOT NULL AND ${table.providerResult} IS NOT NULL
+      AND ${table.failureCode} IS NULL AND ${table.failureMessage} IS NULL AND ${table.completedAt} IS NOT NULL)
+    OR (${table.status} = 'failed' AND ${table.providerRefundId} IS NULL AND ${table.providerResult} IS NULL
+      AND ${table.failureCode} IS NOT NULL AND ${table.failureMessage} IS NOT NULL AND ${table.completedAt} IS NOT NULL)
+  `),
+  check("return_case_customer_refunds_time_chk", sql`${table.completedAt} IS NULL OR ${table.completedAt} >= ${table.requestedAt}`),
+]);
+
+export const returnCaseCustomerRefundItems = returnsSchema.table("return_case_customer_refund_items", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  customerRefundId: bigint("customer_refund_id", { mode: "number" }).notNull()
+    .references(() => returnCaseCustomerRefunds.id),
+  returnCaseItemId: bigint("return_case_item_id", { mode: "number" }).notNull()
+    .references(() => returnCaseItems.id),
+  externalLineItemId: varchar("external_line_item_id", { length: 100 }).notNull(),
+  quantity: integer("quantity").notNull(),
+  subtotalCents: bigint("subtotal_cents", { mode: "number" }).notNull(),
+  taxCents: bigint("tax_cents", { mode: "number" }).notNull(),
+  totalCents: bigint("total_cents", { mode: "number" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("return_case_customer_refund_items_item_uq").on(table.customerRefundId, table.returnCaseItemId),
+  uniqueIndex("return_case_customer_refund_items_external_uq").on(table.customerRefundId, table.externalLineItemId),
+  index("return_case_customer_refund_items_case_item_idx").on(table.returnCaseItemId, table.id),
+  check("return_case_customer_refund_items_quantity_chk", sql`${table.quantity} > 0`),
+  check("return_case_customer_refund_items_money_chk", sql`
+    ${table.subtotalCents} >= 0 AND ${table.taxCents} >= 0
+    AND ${table.totalCents} = ${table.subtotalCents} + ${table.taxCents}
+  `),
+]);
+
+export const returnCaseCustomerRefundTransactions = returnsSchema.table("return_case_customer_refund_transactions", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  customerRefundId: bigint("customer_refund_id", { mode: "number" }).notNull()
+    .references(() => returnCaseCustomerRefunds.id),
+  position: integer("position").notNull(),
+  parentTransactionId: varchar("parent_transaction_id", { length: 160 }).notNull(),
+  gateway: varchar("gateway", { length: 160 }).notNull(),
+  amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("return_case_customer_refund_transactions_position_uq").on(table.customerRefundId, table.position),
+  uniqueIndex("return_case_customer_refund_transactions_parent_uq").on(table.customerRefundId, table.parentTransactionId),
+  check("return_case_customer_refund_transactions_position_chk", sql`${table.position} >= 0`),
+  check("return_case_customer_refund_transactions_amount_chk", sql`${table.amountCents} > 0`),
+  check("return_case_customer_refund_transactions_text_chk", sql`
+    btrim(${table.parentTransactionId}) <> '' AND btrim(${table.gateway}) <> ''
+  `),
+]);
+
+export const returnCaseVendorSettlements = returnsSchema.table("return_case_vendor_settlements", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  returnCaseId: bigint("return_case_id", { mode: "number" }).notNull().references(() => returnCases.id),
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
+  faultCategory: varchar("fault_category", { length: 24 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull(),
+  productCreditCents: bigint("product_credit_cents", { mode: "number" }).notNull(),
+  originalShippingCreditCents: bigint("original_shipping_credit_cents", { mode: "number" }).notNull(),
+  restockingFeeCents: bigint("restocking_fee_cents", { mode: "number" }).notNull(),
+  processingFeeCents: bigint("processing_fee_cents", { mode: "number" }).notNull(),
+  returnShippingFeeCents: bigint("return_shipping_fee_cents", { mode: "number" }).notNull(),
+  grossCreditCents: bigint("gross_credit_cents", { mode: "number" }).notNull(),
+  totalFeeCents: bigint("total_fee_cents", { mode: "number" }).notNull(),
+  netSettlementCents: bigint("net_settlement_cents", { mode: "number" }).notNull(),
+  returnShippingActualCents: bigint("return_shipping_actual_cents", { mode: "number" }),
+  restockingFeePolicyId: integer("restocking_fee_policy_id"),
+  processingFeePolicyId: integer("processing_fee_policy_id"),
+  returnShippingFeePolicyId: integer("return_shipping_fee_policy_id"),
+  settlementBreakdown: jsonb("settlement_breakdown").notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 160 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  quoteHash: varchar("quote_hash", { length: 64 }).notNull(),
+  recordedBy: varchar("recorded_by", { length: 255 }).notNull(),
+  notes: text("notes"),
+  settledAt: timestamp("settled_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("return_case_vendor_settlements_case_uq").on(table.returnCaseId),
+  uniqueIndex("return_case_vendor_settlements_idempotency_uq").on(table.idempotencyKey),
+  index("return_case_vendor_settlements_vendor_idx").on(table.vendorId, table.settledAt, table.id),
+  check("return_case_vendor_settlements_fault_chk", sql`${table.faultCategory} IN ('card_shellz','vendor','customer','marketplace','carrier')`),
+  check("return_case_vendor_settlements_currency_chk", sql`${table.currency} ~ '^[A-Z]{3}$'`),
+  check("return_case_vendor_settlements_money_chk", sql`
+    ${table.productCreditCents} >= 0 AND ${table.originalShippingCreditCents} >= 0
+    AND ${table.restockingFeeCents} >= 0 AND ${table.processingFeeCents} >= 0
+    AND ${table.returnShippingFeeCents} >= 0
+    AND ${table.grossCreditCents} = ${table.productCreditCents} + ${table.originalShippingCreditCents}
+    AND ${table.totalFeeCents} = ${table.restockingFeeCents} + ${table.processingFeeCents} + ${table.returnShippingFeeCents}
+    AND ${table.netSettlementCents} = ${table.grossCreditCents} - ${table.totalFeeCents}
+    AND (${table.returnShippingActualCents} IS NULL OR ${table.returnShippingActualCents} >= 0)
+  `),
+  check("return_case_vendor_settlements_hash_chk", sql`
+    ${table.requestHash} ~ '^[0-9a-f]{64}$' AND ${table.quoteHash} ~ '^[0-9a-f]{64}$'
+  `),
+  check("return_case_vendor_settlements_breakdown_chk", sql`jsonb_typeof(${table.settlementBreakdown}) = 'object'`),
+  check("return_case_vendor_settlements_actor_chk", sql`btrim(${table.recordedBy}) <> ''`),
+]);
+
+export const returnCaseVendorSettlementLedgerEntries = returnsSchema.table("return_case_vendor_settlement_ledger_entries", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  vendorSettlementId: bigint("vendor_settlement_id", { mode: "number" }).notNull()
+    .references(() => returnCaseVendorSettlements.id),
+  walletLedgerId: integer("wallet_ledger_id").notNull().references(() => dropshipWalletLedger.id),
+  entryRole: varchar("entry_role", { length: 16 }).$type<"credit" | "fee">().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("return_case_vendor_settlement_ledger_entry_uq").on(table.vendorSettlementId, table.entryRole),
+  uniqueIndex("return_case_vendor_settlement_wallet_ledger_uq").on(table.walletLedgerId),
+  check("return_case_vendor_settlement_ledger_role_chk", sql`${table.entryRole} IN ('credit','fee')`),
+]);
+
 export const returnCaseCommands = returnsSchema.table("return_case_commands", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   returnCaseId: bigint("return_case_id", { mode: "number" }).notNull().references(() => returnCases.id, { onDelete: "cascade" }),
@@ -288,7 +447,7 @@ export const returnCaseCommands = returnsSchema.table("return_case_commands", {
 }, (table) => [
   uniqueIndex("return_case_commands_idempotency_uq").on(table.idempotencyKey),
   index("return_case_commands_case_idx").on(table.returnCaseId, table.createdAt, table.id),
-  check("return_case_commands_type_chk", sql`${table.commandType} IN ('record_receipt','start_inspection','complete_inspection','record_disposition','apply_inventory_treatment')`),
+  check("return_case_commands_type_chk", sql`${table.commandType} IN ('record_receipt','start_inspection','complete_inspection','record_disposition','apply_inventory_treatment','issue_customer_refund','settle_vendor_account')`),
   check("return_case_commands_hash_chk", sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`),
   check("return_case_commands_response_chk", sql`jsonb_typeof(${table.response}) = 'object'`),
 ]);
@@ -320,3 +479,13 @@ export type ReturnCaseInventoryTreatment = typeof returnCaseInventoryTreatments.
 export type InsertReturnCaseInventoryTreatment = typeof returnCaseInventoryTreatments.$inferInsert;
 export type ReturnCaseInventoryTreatmentItem = typeof returnCaseInventoryTreatmentItems.$inferSelect;
 export type InsertReturnCaseInventoryTreatmentItem = typeof returnCaseInventoryTreatmentItems.$inferInsert;
+export type ReturnCaseCustomerRefund = typeof returnCaseCustomerRefunds.$inferSelect;
+export type InsertReturnCaseCustomerRefund = typeof returnCaseCustomerRefunds.$inferInsert;
+export type ReturnCaseCustomerRefundItem = typeof returnCaseCustomerRefundItems.$inferSelect;
+export type InsertReturnCaseCustomerRefundItem = typeof returnCaseCustomerRefundItems.$inferInsert;
+export type ReturnCaseCustomerRefundTransaction = typeof returnCaseCustomerRefundTransactions.$inferSelect;
+export type InsertReturnCaseCustomerRefundTransaction = typeof returnCaseCustomerRefundTransactions.$inferInsert;
+export type ReturnCaseVendorSettlement = typeof returnCaseVendorSettlements.$inferSelect;
+export type InsertReturnCaseVendorSettlement = typeof returnCaseVendorSettlements.$inferInsert;
+export type ReturnCaseVendorSettlementLedgerEntry = typeof returnCaseVendorSettlementLedgerEntries.$inferSelect;
+export type InsertReturnCaseVendorSettlementLedgerEntry = typeof returnCaseVendorSettlementLedgerEntries.$inferInsert;

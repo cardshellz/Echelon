@@ -24,6 +24,8 @@ describe("return case action plan", () => {
       expect.objectContaining({ kind: "complete_inspection", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
       expect.objectContaining({ kind: "record_disposition", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
       expect.objectContaining({ kind: "apply_inventory_treatment", state: "blocked", reasonCode: "RETURN_NOT_FULLY_RECEIVED" }),
+      expect.objectContaining({ kind: "issue_customer_refund", state: "blocked", reasonCode: "RETURN_INSPECTION_EVIDENCE_INVALID" }),
+      expect.objectContaining({ kind: "settle_vendor_account", state: "not_applicable", reasonCode: "RETURN_VENDOR_SETTLEMENT_NOT_APPLICABLE" }),
     ]);
   });
 
@@ -625,10 +627,204 @@ describe("return case action plan", () => {
       });
     }
   });
+
+  it("offers the Shopify customer refund only for an eligible retail return", () => {
+    const plan = deriveReturnCaseActionPlan(context({
+      lifecycle: {
+        ...lifecycle(),
+        logisticsStatus: "received",
+        inspectionStatus: "approved",
+      },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+      inspection: completedInspection("approved"),
+      disposition: completeDisposition(),
+    }));
+
+    expect(plan.actions.find((item) => item.kind === "issue_customer_refund")).toMatchObject({
+      state: "available",
+      reasonCode: null,
+    });
+    expect(plan.actions.find((item) => item.kind === "settle_vendor_account")).toMatchObject({
+      state: "not_applicable",
+      reasonCode: "RETURN_VENDOR_SETTLEMENT_NOT_APPLICABLE",
+    });
+  });
+
+  it("offers a retail refund without inspection only when policy and lifecycle both say not required", () => {
+    const plan = deriveReturnCaseActionPlan(context({
+      lifecycle: {
+        ...lifecycle(),
+        logisticsStatus: "received",
+        inspectionStatus: "not_required",
+      },
+      policy: { ...policy(), inspectionRequirement: "none" },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+      inspection: null,
+      disposition: completeDisposition(),
+    }));
+
+    expect(plan.actions.find((item) => item.kind === "issue_customer_refund")).toMatchObject({
+      state: "available",
+      reasonCode: null,
+    });
+  });
+
+  it("blocks financial actions when an approved lifecycle lacks terminal inspection evidence", () => {
+    const retail = deriveReturnCaseActionPlan(context({
+      lifecycle: { ...lifecycle(), logisticsStatus: "received", inspectionStatus: "approved" },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+      inspection: null,
+      disposition: completeDisposition(),
+    }));
+    expect(retail.actions.find((item) => item.kind === "issue_customer_refund")).toMatchObject({
+      state: "blocked",
+      reasonCode: "RETURN_INSPECTION_EVIDENCE_INVALID",
+    });
+
+    const dropship = deriveReturnCaseActionPlan(context({
+      ...context(),
+      businessContext: "dropship",
+      channelProvider: null,
+      vendorId: 22,
+      lifecycle: { ...lifecycle(), inspectionStatus: "approved", customerRefundStatus: "not_required", vendorSettlementStatus: "pending" },
+      policy: { ...policy(), customerRefundAuthority: "marketplace", vendorSettlementTrigger: "inspection_approved" },
+      inspection: null,
+      disposition: completeDisposition(),
+    }));
+    expect(dropship.actions.find((item) => item.kind === "settle_vendor_account")).toMatchObject({
+      state: "blocked",
+      reasonCode: "RETURN_INSPECTION_EVIDENCE_INVALID",
+    });
+  });
+
+  it("marks the retail refund completed from canonical lifecycle evidence", () => {
+    const plan = deriveReturnCaseActionPlan(context({
+      lifecycle: { ...lifecycle(), customerRefundStatus: "completed" },
+    }));
+
+    expect(plan.actions.find((item) => item.kind === "issue_customer_refund")).toMatchObject({
+      state: "completed",
+      reasonCode: null,
+    });
+  });
+
+  it("fails the retail refund closed for unsupported ownership or provider context", () => {
+    const externalAuthority = deriveReturnCaseActionPlan(context({
+      policy: { ...policy(), customerRefundAuthority: "marketplace" },
+    }));
+    expect(externalAuthority.actions.find((item) => item.kind === "issue_customer_refund")).toMatchObject({
+      state: "not_applicable",
+      reasonCode: "RETURN_CUSTOMER_REFUND_OWNED_EXTERNALLY",
+    });
+
+    const unsupportedProvider = deriveReturnCaseActionPlan(context({ channelProvider: "ebay" }));
+    expect(unsupportedProvider.actions.find((item) => item.kind === "issue_customer_refund")).toMatchObject({
+      state: "blocked",
+      reasonCode: "RETURN_CUSTOMER_REFUND_PROVIDER_UNSUPPORTED",
+    });
+  });
+
+  it("offers vendor wallet settlement only for an eligible dropship return", () => {
+    const plan = deriveReturnCaseActionPlan(context({
+      businessContext: "dropship",
+      channelProvider: "ebay",
+      vendorId: 22,
+      lifecycle: {
+        ...lifecycle(),
+        logisticsStatus: "received",
+        inspectionStatus: "approved",
+        customerRefundStatus: "not_required",
+        vendorSettlementStatus: "pending",
+      },
+      policy: {
+        ...policy(),
+        customerRefundAuthority: "marketplace",
+        vendorSettlementTrigger: "inspection_approved",
+      },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+      inspection: completedInspection("approved"),
+      disposition: completeDisposition(),
+    }));
+
+    expect(plan.actions.find((item) => item.kind === "issue_customer_refund")).toMatchObject({
+      state: "not_applicable",
+      reasonCode: "RETURN_CUSTOMER_REFUND_NOT_OWNED",
+    });
+    expect(plan.actions.find((item) => item.kind === "settle_vendor_account")).toMatchObject({
+      state: "available",
+      reasonCode: null,
+    });
+  });
+
+  it("marks vendor settlement completed from canonical lifecycle evidence", () => {
+    const plan = deriveReturnCaseActionPlan(context({
+      businessContext: "dropship",
+      vendorId: 22,
+      lifecycle: {
+        ...lifecycle(),
+        customerRefundStatus: "not_required",
+        vendorSettlementStatus: "completed",
+      },
+      policy: { ...policy(), vendorSettlementTrigger: "inspection_approved" },
+    }));
+
+    expect(plan.actions.find((item) => item.kind === "settle_vendor_account")).toMatchObject({
+      state: "completed",
+      reasonCode: null,
+    });
+  });
+
+  it("fails vendor settlement closed when its trigger cannot be proven locally", () => {
+    for (const trigger of ["customer_refunded", "carrier_claim_paid"] as const) {
+      const plan = deriveReturnCaseActionPlan(context({
+        businessContext: "dropship",
+        vendorId: 22,
+        lifecycle: {
+          ...lifecycle(),
+          customerRefundStatus: "not_required",
+          vendorSettlementStatus: "pending",
+        },
+        policy: { ...policy(), vendorSettlementTrigger: trigger },
+      }));
+      expect(plan.actions.find((item) => item.kind === "settle_vendor_account")).toMatchObject({
+        state: "blocked",
+        reasonCode: trigger === "customer_refunded"
+          ? "RETURN_VENDOR_TRIGGER_CUSTOMER_REFUND_UNPROVEN"
+          : "RETURN_VENDOR_TRIGGER_CARRIER_CLAIM_UNPROVEN",
+      });
+    }
+  });
+
+  it("blocks both financial actions when persisted inventory-treatment evidence conflicts", () => {
+    const plan = deriveReturnCaseActionPlan(context({
+      lifecycle: { ...lifecycle(), logisticsStatus: "received", inspectionStatus: "approved" },
+      receipt: receipt({ receivedQuantity: 2, status: "received" }),
+      inspection: completedInspection("approved"),
+      disposition: completeDisposition(),
+      inventoryTreatment: {
+        recordCount: 1,
+        lines: [{
+          dispositionItemId: 999,
+          returnCaseItemId: 1,
+          treatment: "restock_sellable",
+          quantity: 1,
+          warehouseLocationId: 17,
+          inventoryTransactionId: 501,
+          inventoryLotId: 601,
+        }],
+      },
+    }));
+
+    expect(plan.actions[5]).toMatchObject({ state: "blocked", reasonCode: "RETURN_INVENTORY_TREATMENT_STATE_CONFLICT" });
+    expect(plan.actions[6]).toMatchObject({ state: "not_applicable" });
+  });
 });
 
 function context(overrides: Partial<ReturnCaseActionContext> = {}): ReturnCaseActionContext {
   return {
+    businessContext: "retail",
+    channelProvider: "shopify",
+    vendorId: null,
     lifecycle: lifecycle(),
     policy: policy(),
     receipt: receipt(),

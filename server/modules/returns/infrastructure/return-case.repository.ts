@@ -119,11 +119,7 @@ unified_returns AS (
       WHEN rma.inspected_at IS NOT NULL AND rma.status IN ('approved', 'credited', 'closed') THEN 'approved'
       ELSE 'pending'
     END AS inspection_status,
-    CASE
-      WHEN rma.credited_at IS NOT NULL THEN 'completed'
-      WHEN rma.status = 'rejected' THEN 'not_required'
-      ELSE 'pending'
-    END AS customer_refund_status,
+    'not_required'::text AS customer_refund_status,
     CASE
       WHEN rma.credited_at IS NOT NULL THEN 'completed'
       WHEN rma.status = 'rejected' THEN 'not_applicable'
@@ -375,6 +371,7 @@ function selectCaseRows() {
       businessContext: returnCases.businessContext,
       channelId: returnCases.channelId,
       channelName: channels.name,
+      channelProvider: channels.provider,
       vendorId: returnCases.vendorId,
       vendorBusinessName: dropshipVendors.businessName,
       vendorEmail: dropshipVendors.email,
@@ -604,6 +601,9 @@ function buildActionContext(input: ActionContextInput): ReturnCaseActionContext 
     inventoryLotId: readNullablePositiveSafeInteger(row.inventoryLotId, "inventory treatment lot id"),
   }));
   return {
+    businessContext: readBusinessContext(input.caseRow.businessContext),
+    channelProvider: readNullableText(input.caseRow.channelProvider),
+    vendorId: readNullablePositiveSafeInteger(input.caseRow.vendorId, "return case vendor id"),
     lifecycle: {
       caseStatus: input.caseRow.caseStatus as ReturnCaseActionContext["lifecycle"]["caseStatus"],
       approvalStatus: input.caseRow.approvalStatus as ReturnCaseActionContext["lifecycle"]["approvalStatus"],
@@ -679,6 +679,10 @@ function readReceiptStatus(value: unknown): ReturnCaseItemRow["receiptStatus"] {
 function readInspectionStatus(value: unknown): ReturnInspectionFacts["status"] {
   if (value === "in_progress" || value === "approved" || value === "rejected" || value === "cancelled") return value;
   throw new Error("Invalid return inspection status returned by the database.");
+}
+function readBusinessContext(value: unknown): ReturnCaseActionContext["businessContext"] {
+  if (value === "retail" || value === "dropship") return value;
+  throw new Error("Invalid return case business context returned by the database.");
 }
 function readRequiredText(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim() === "") throw new Error("Invalid " + field + " returned by the database.");

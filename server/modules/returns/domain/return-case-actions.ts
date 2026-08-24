@@ -9,6 +9,7 @@ import {
   returnRefundAuthorities,
   returnShippingPayers,
   returnVendorSettlementTriggers,
+  type ReturnBusinessContext,
   type ReturnInspectionOwner,
   type ReturnInspectionRequirement,
   type ReturnDestination,
@@ -29,6 +30,8 @@ export const returnCaseActionKinds = [
   "complete_inspection",
   "record_disposition",
   "apply_inventory_treatment",
+  "issue_customer_refund",
+  "settle_vendor_account",
 ] as const;
 export type ReturnCaseActionKind = typeof returnCaseActionKinds[number];
 export type ReturnCaseActionState = "available" | "blocked" | "completed" | "not_applicable";
@@ -141,6 +144,9 @@ export interface ReturnCaseInventoryTreatmentSummary {
   items: ReturnCaseInventoryTreatmentItemSummary[];
 }
 export interface ReturnCaseActionContext {
+  businessContext: ReturnBusinessContext;
+  channelProvider: string | null;
+  vendorId: number | null;
 
   lifecycle: ReturnCaseLifecycle;
   policy: ReturnPolicySnapshotFacts | null;
@@ -236,6 +242,8 @@ export function deriveReturnCaseActionPlan(context: ReturnCaseActionContext): Re
     deriveCompleteInspectionAction(context, receipt),
     deriveDispositionAction(context, receipt, disposition),
     deriveInventoryTreatmentAction(context, receipt, disposition, inventoryTreatment),
+    deriveCustomerRefundAction(context, disposition, inventoryTreatment),
+    deriveVendorSettlementAction(context, disposition, inventoryTreatment),
   ];
   return {
     nextAction: actions.find((action) => action.state === "available")?.kind ?? null,
@@ -389,6 +397,106 @@ function deriveInventoryTreatmentAction(
     return blocked(base, "RETURN_DISPOSITION_NOT_COMPLETE");
   }
   return available(base);
+}
+
+function deriveCustomerRefundAction(
+  context: ReturnCaseActionContext,
+  disposition: DispositionAnalysis,
+  inventoryTreatment: InventoryTreatmentAnalysis,
+): ReturnCaseAction {
+  const base = {
+    kind: "issue_customer_refund" as const,
+    label: "Issue customer refund",
+    description: "Refund the Card Shellz customer through the source Shopify order. This does not settle a dropship vendor account.",
+  };
+  if (context.businessContext !== "retail") {
+    return notApplicable(base, "RETURN_CUSTOMER_REFUND_NOT_OWNED");
+  }
+  if (!context.policy) return blocked(base, "RETURN_POLICY_SNAPSHOT_INVALID");
+  if (context.policy.customerRefundAuthority !== "card_shellz") {
+    return notApplicable(base, "RETURN_CUSTOMER_REFUND_OWNED_EXTERNALLY");
+  }
+  if (context.lifecycle.customerRefundStatus === "completed") return completed(base);
+  if (context.channelProvider !== "shopify") {
+    return blocked(base, "RETURN_CUSTOMER_REFUND_PROVIDER_UNSUPPORTED");
+  }
+  if (context.lifecycle.caseStatus !== "open") return blocked(base, "RETURN_CASE_NOT_OPEN");
+  if (context.lifecycle.approvalStatus !== "approved") return blocked(base, "RETURN_CASE_NOT_APPROVED");
+  if (context.lifecycle.customerRefundStatus !== "pending"
+    && context.lifecycle.customerRefundStatus !== "failed") {
+    return blocked(base, "RETURN_CUSTOMER_REFUND_STATE_CONFLICT");
+  }
+  const inspectionBlocker = deriveCustomerRefundInspectionBlocker(context);
+  if (inspectionBlocker) return blocked(base, inspectionBlocker);
+  if (disposition.blocker) return blocked(base, disposition.blocker);
+  if (inventoryTreatment.blocker) return blocked(base, inventoryTreatment.blocker);
+  if (!disposition.summary.fullyRecorded) {
+    return blocked(base, "RETURN_DISPOSITION_NOT_COMPLETE");
+  }
+  return available(base);
+}
+
+function deriveVendorSettlementAction(
+  context: ReturnCaseActionContext,
+  disposition: DispositionAnalysis,
+  inventoryTreatment: InventoryTreatmentAnalysis,
+): ReturnCaseAction {
+  const base = {
+    kind: "settle_vendor_account" as const,
+    label: "Settle vendor account",
+    description: "Post the approved return credit and applicable fees to the dropship vendor's Echelon wallet. This does not refund a marketplace buyer.",
+  };
+  if (context.businessContext !== "dropship") {
+    return notApplicable(base, "RETURN_VENDOR_SETTLEMENT_NOT_APPLICABLE");
+  }
+  if (!context.policy) return blocked(base, "RETURN_POLICY_SNAPSHOT_INVALID");
+  if (context.policy.vendorSettlementTrigger === "none") {
+    return notApplicable(base, "RETURN_VENDOR_SETTLEMENT_NOT_APPLICABLE");
+  }
+  if (context.lifecycle.vendorSettlementStatus === "completed") return completed(base);
+  if (context.vendorId === null) return blocked(base, "RETURN_VENDOR_ID_MISSING");
+  if (context.lifecycle.caseStatus !== "open") return blocked(base, "RETURN_CASE_NOT_OPEN");
+  if (context.lifecycle.approvalStatus !== "approved") return blocked(base, "RETURN_CASE_NOT_APPROVED");
+  if (context.lifecycle.vendorSettlementStatus === "held") {
+    return blocked(base, "RETURN_VENDOR_SETTLEMENT_HELD");
+  }
+  if (context.lifecycle.vendorSettlementStatus !== "pending"
+    && context.lifecycle.vendorSettlementStatus !== "eligible"
+    && context.lifecycle.vendorSettlementStatus !== "failed") {
+    return blocked(base, "RETURN_VENDOR_SETTLEMENT_STATE_CONFLICT");
+  }
+  if (context.policy.vendorSettlementTrigger !== "inspection_approved") {
+    return blocked(
+      base,
+      context.policy.vendorSettlementTrigger === "customer_refunded"
+        ? "RETURN_VENDOR_TRIGGER_CUSTOMER_REFUND_UNPROVEN"
+        : "RETURN_VENDOR_TRIGGER_CARRIER_CLAIM_UNPROVEN",
+    );
+  }
+  if (!context.inspection || context.inspection.status !== "approved"
+    || !isCoherentTerminalInspection(context, context.inspection)) {
+    return blocked(base, "RETURN_INSPECTION_EVIDENCE_INVALID");
+  }
+  if (disposition.blocker) return blocked(base, disposition.blocker);
+  if (inventoryTreatment.blocker) return blocked(base, inventoryTreatment.blocker);
+  if (!disposition.summary.fullyRecorded) {
+    return blocked(base, "RETURN_DISPOSITION_NOT_COMPLETE");
+  }
+  return available(base);
+}
+
+function deriveCustomerRefundInspectionBlocker(context: ReturnCaseActionContext): string | null {
+  if (!context.policy) return "RETURN_POLICY_SNAPSHOT_INVALID";
+  if (context.policy.inspectionRequirement === "none") {
+    return context.lifecycle.inspectionStatus === "not_required" && context.inspection === null
+      ? null
+      : "RETURN_INSPECTION_STATE_CONFLICT";
+  }
+  if (!context.inspection) return "RETURN_INSPECTION_EVIDENCE_INVALID";
+  if (context.inspection.status !== "approved") return "RETURN_INSPECTION_NOT_APPROVED";
+  return isCoherentTerminalInspection(context, context.inspection)
+    ? null
+    : "RETURN_INSPECTION_EVIDENCE_INVALID";
 }
 function deriveDispositionInspectionBlocker(context: ReturnCaseActionContext): string | null {
   if (!context.policy) return "RETURN_POLICY_SNAPSHOT_INVALID";
