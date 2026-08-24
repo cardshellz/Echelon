@@ -4,7 +4,7 @@ import {
   assessPackageAllocationAuthorityReadiness,
   type PackageAllocationAuthorityReadinessResultV1,
 } from "./package-allocation-authority-readiness.domain";
-import type { PackageAllocationLedgerRepository } from "./package-allocation-ledger.repository";
+import type { PackageAllocationAuthorityPreviewRepository } from "./package-allocation-ledger.repository";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const MAX_SOURCE_LINES = 500;
@@ -132,22 +132,22 @@ function normalizeCommand(
 }
 
 /**
- * Loads authenticated database evidence under the ledger's serializable locks
+ * Loads authenticated database evidence from one repeatable read-only snapshot
  * and runs the pure readiness classifier. This service never creates a group,
  * persists a plan, grants authority, or emits executable effects.
  */
 export class PackageAllocationAuthorityReadinessService {
-  constructor(private readonly repository: PackageAllocationLedgerRepository) {}
+  constructor(private readonly repository: PackageAllocationAuthorityPreviewRepository) {}
 
   async assess(
     rawCommand: PackageAllocationAuthorityReadinessCommand,
   ): Promise<PackageAllocationAuthorityReadinessResultV1> {
     const command = normalizeCommand(rawCommand);
-    return this.repository.withSerializableTransaction(async (transaction) => {
-      const sourceFacts = await transaction.lockSourceFacts(
+    return this.repository.withRepeatableReadOnlyTransaction(async (transaction) => {
+      const sourceFacts = await transaction.readSourceFacts(
         command.sourceWmsShipmentItemIds,
       );
-      const packages = await transaction.lockAuthorityReadinessPackages(
+      const packages = await transaction.readAuthorityReadinessPackages(
         command.shippingProviderLabelIds,
       );
       return assessPackageAllocationAuthorityReadiness({

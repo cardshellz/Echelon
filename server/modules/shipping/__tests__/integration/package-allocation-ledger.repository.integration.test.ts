@@ -35,11 +35,11 @@ import {
   auditPackageAllocationAuthorityDiscoveryExecution,
   type PackageAllocationDiscoveryExecutionAuditReport,
 } from "../../package-allocation-authority-discovery-execution-audit.repository";
-import { SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS } from "../../shipment-lifecycle-shadow-audit.repository";
 import { packageAllocationPackageKey } from "../../package-allocation-authority-resolution.domain";
 import { PackageAllocationAuthorityReadinessService } from "../../package-allocation-authority-readiness.service";
 import { PackageAllocationAuthorityResolutionPreviewService } from "../../package-allocation-authority-resolution.service";
 import {
+  PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS,
   PgPackageAllocationLedgerRepository,
   type PersistedPackageAllocationEntry,
   type PersistedPackageAllocationIntent,
@@ -236,10 +236,7 @@ async function installAuthorityReadinessTestRelations(pool: Pool): Promise<void>
 }
 
 async function installExecutionAuditRole(pool: Pool): Promise<void> {
-  const requiredRelations = [...new Set([
-    ...PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
-    ...SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS,
-  ])].sort();
+  const requiredRelations = PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS;
   await pool.query(`
     DO $role$
     BEGIN
@@ -255,7 +252,7 @@ async function installExecutionAuditRole(pool: Pool): Promise<void> {
     ALTER ROLE ${EXECUTION_AUDIT_ROLE}
       NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
       NOREPLICATION NOBYPASSRLS;
-    GRANT USAGE ON SCHEMA wms TO ${EXECUTION_AUDIT_ROLE};
+    GRANT USAGE ON SCHEMA catalog, wms TO ${EXECUTION_AUDIT_ROLE};
     GRANT SELECT ON TABLE ${requiredRelations.join(", ")}
       TO ${EXECUTION_AUDIT_ROLE};
   `);
@@ -266,6 +263,44 @@ async function removeExecutionAuditRole(pool: Pool): Promise<void> {
     DROP OWNED BY ${EXECUTION_AUDIT_ROLE};
     DROP ROLE IF EXISTS ${EXECUTION_AUDIT_ROLE};
   `);
+}
+
+async function withExecutionAuditRole<T>(
+  pool: Pool,
+  work: (scopedPool: Pick<Pool, "connect">) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  let result: T | undefined;
+  let primaryFailure: unknown;
+  let resetFailure: unknown;
+  try {
+    await client.query(`SET ROLE ${EXECUTION_AUDIT_ROLE}`);
+    const scopedPool = {
+      connect: async () => ({
+        query: client.query.bind(client),
+        release: () => undefined,
+      } as unknown as PoolClient),
+    } as Pick<Pool, "connect">;
+    result = await work(scopedPool);
+  } catch (error) {
+    primaryFailure = error;
+  } finally {
+    try {
+      await client.query("RESET ROLE");
+    } catch (error) {
+      resetFailure = error;
+    }
+    client.release(resetFailure instanceof Error ? resetFailure : undefined);
+  }
+  if (primaryFailure !== undefined && resetFailure !== undefined) {
+    throw new AggregateError(
+      [primaryFailure, resetFailure],
+      "Execution-audit role work and role reset both failed",
+    );
+  }
+  if (primaryFailure !== undefined) throw primaryFailure;
+  if (resetFailure !== undefined) throw resetFailure;
+  return result as T;
 }
 
 async function seedAuthorityReadinessLabel(
@@ -897,7 +932,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
   });
 
-  it("discovers a related empty sibling package without granting it item authority", async () => {
+  it("discovers an empty sibling under the SELECT-only role without granting item authority", async () => {
     const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-DISCOVERY", 2);
     const providerOrderId = "provider-order-discovery-1";
     const primaryLabelId = await seedAuthorityReadinessLabel(pool, sourceId, {
@@ -919,16 +954,18 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       primaryLabelId,
       providerOrderId,
     );
-    const service = new PackageAllocationAuthorityResolutionPreviewService(
-      new PgPackageAllocationLedgerRepository(pool),
-    );
-
-    const result = await service.previewDiscovered({
-      contractVersion: 1,
-      authorityMode: "shadow_only",
-      previewMode: "bootstrap_relationship_discovery",
-      groupKey: PRIMARY_GROUP_KEY,
-      sourceWmsShipmentItemIds: [sourceId],
+    const countsBefore = await loadLedgerCounts(pool);
+    const result = await withExecutionAuditRole(pool, async (scopedPool) => {
+      const service = new PackageAllocationAuthorityResolutionPreviewService(
+        new PgPackageAllocationLedgerRepository(scopedPool),
+      );
+      return service.previewDiscovered({
+        contractVersion: 1,
+        authorityMode: "shadow_only",
+        previewMode: "bootstrap_relationship_discovery",
+        groupKey: PRIMARY_GROUP_KEY,
+        sourceWmsShipmentItemIds: [sourceId],
+      });
     });
 
     expect(result).toMatchObject({
@@ -970,7 +1007,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect(result.resolution?.plannerResult.state.desiredEffectIntents.every(
       (intent) => intent.executable === false,
     )).toBe(true);
-    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
+    expect(await loadLedgerCounts(pool)).toEqual(countsBefore);
   });
 
   it("persists one complete inert plan and exact-replays it without duplicate rows", async () => {

@@ -13,6 +13,7 @@ import type {
 } from "./package-allocation-source-identity.domain";
 import {
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES,
+  PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_SQL,
 } from "./package-allocation-authority-discovery.query";
 
@@ -29,6 +30,18 @@ const MAX_AUTHORITY_TOTAL_EVENTS = 10_000;
 const MAX_AUTHORITY_CURRENT_CARRIER_EVENTS = 5_000;
 const MAX_AUTHORITY_EVENT_PAYLOAD_BYTES = 4 * 1_024 * 1_024;
 const MAX_AUTHORITY_TOTAL_PAYLOAD_BYTES = 8 * 1_024 * 1_024;
+
+export const PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS:
+readonly string[] = Object.freeze([...new Set([
+  ...PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
+  "catalog.product_variants",
+  "wms.carrier_tracking_event_matches",
+  "wms.carrier_tracking_events",
+  "wms.carrier_tracking_reconciliation_state",
+  "wms.order_items",
+  "wms.package_allocation_groups",
+  "wms.shipping_provider_label_events",
+])].sort());
 
 type QueryClient = Pick<PoolClient, "query">;
 
@@ -143,6 +156,23 @@ export interface AppendPackageAllocationPlanInput {
   readonly intents: readonly PackageAllocationEffectIntentV1[];
   readonly sourcesByWmsItemId: ReadonlyMap<number, RegisteredPackageAllocationSource>;
   readonly bindingsByPackageKey: ReadonlyMap<string, RegisteredPackageAllocationBinding>;
+}
+
+export interface PackageAllocationAuthorityPreviewTransaction {
+  readGroup(groupKey: string): Promise<LockedPackageAllocationGroup | null>;
+  readSourceFacts(sourceWmsShipmentItemIds: readonly number[]): Promise<readonly PackageAllocationSourceFacts[]>;
+  discoverAuthorityReadinessPackageLabelIds(
+    sourceWmsShipmentItemIds: readonly number[],
+  ): Promise<readonly number[]>;
+  readAuthorityReadinessPackages(
+    shippingProviderLabelIds: readonly number[],
+  ): Promise<readonly LockedPackageAllocationAuthorityEvidence[]>;
+}
+
+export interface PackageAllocationAuthorityPreviewRepository {
+  withRepeatableReadOnlyTransaction<T>(
+    work: (transaction: PackageAllocationAuthorityPreviewTransaction) => Promise<T>,
+  ): Promise<T>;
 }
 
 export interface PackageAllocationLedgerTransaction {
@@ -374,8 +404,15 @@ function sourceRegistrationMatches(
     && actual.sourceFingerprint === expected.sourceFingerprint;
 }
 
-class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTransaction {
+class PgPackageAllocationLedgerTransaction
+  implements PackageAllocationLedgerTransaction, PackageAllocationAuthorityPreviewTransaction {
   constructor(private readonly client: QueryClient) {}
+
+  async readGroup(
+    groupKey: string,
+  ): Promise<LockedPackageAllocationGroup | null> {
+    return this.loadGroup(groupKey, false);
+  }
 
   async lockGroup(
     groupKey: string,
@@ -393,11 +430,18 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
         [groupKey],
       );
     }
+    return this.loadGroup(groupKey, true);
+  }
+
+  private async loadGroup(
+    groupKey: string,
+    lockRows: boolean,
+  ): Promise<LockedPackageAllocationGroup | null> {
+    const rowLockClause = lockRows ? "\n       FOR UPDATE" : "";
     const result = await this.client.query(
       `SELECT id::text AS id, group_key::text AS group_key, current_version
        FROM wms.package_allocation_groups
-       WHERE group_key = $1::uuid
-       FOR UPDATE`,
+       WHERE group_key = $1::uuid${rowLockClause}`,
       [groupKey],
     );
     if (result.rows.length === 0) return null;
@@ -411,21 +455,43 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
     const row = result.rows[0] as Record<string, unknown>;
     return Object.freeze({
       id: bigintText(row.id, "package_allocation_groups.id"),
-      groupKey: requiredText(row.group_key, "package_allocation_groups.group_key").toLowerCase(),
-      currentVersion: nonnegativeInteger(row.current_version, "package_allocation_groups.current_version"),
+      groupKey: requiredText(
+        row.group_key,
+        "package_allocation_groups.group_key",
+      ).toLowerCase(),
+      currentVersion: nonnegativeInteger(
+        row.current_version,
+        "package_allocation_groups.current_version",
+      ),
     });
+  }
+
+  async readSourceFacts(
+    sourceWmsShipmentItemIds: readonly number[],
+  ): Promise<readonly PackageAllocationSourceFacts[]> {
+    return this.loadSourceFacts(sourceWmsShipmentItemIds, false);
   }
 
   async lockSourceFacts(
     sourceWmsShipmentItemIds: readonly number[],
   ): Promise<readonly PackageAllocationSourceFacts[]> {
+    return this.loadSourceFacts(sourceWmsShipmentItemIds, true);
+  }
+
+  private async loadSourceFacts(
+    sourceWmsShipmentItemIds: readonly number[],
+    lockRows: boolean,
+  ): Promise<readonly PackageAllocationSourceFacts[]> {
     const sortedIds = [...new Set(sourceWmsShipmentItemIds)].sort((left, right) => left - right);
-    for (const sourceId of sortedIds) {
-      await this.client.query(
-        "SELECT pg_advisory_xact_lock($1, $2)",
-        [SOURCE_LOCK_NAMESPACE, sourceId],
-      );
+    if (lockRows) {
+      for (const sourceId of sortedIds) {
+        await this.client.query(
+          "SELECT pg_advisory_xact_lock($1, $2)",
+          [SOURCE_LOCK_NAMESPACE, sourceId],
+        );
+      }
     }
+    const rowLockClause = lockRows ? "\n       FOR UPDATE OF shipment_item" : "";
     const result = await this.client.query(
       `SELECT
          shipment_item.id AS source_wms_shipment_item_id,
@@ -449,8 +515,7 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
        LEFT JOIN catalog.product_variants AS variant
          ON variant.id = shipment_item.product_variant_id
        WHERE shipment_item.id = ANY($1::integer[])
-       ORDER BY shipment_item.id
-       FOR UPDATE OF shipment_item`,
+       ORDER BY shipment_item.id${rowLockClause}`,
       [sortedIds],
     );
     if (result.rows.length !== sortedIds.length) {
@@ -591,8 +656,21 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
     return Object.freeze(labelIds);
   }
 
+  async readAuthorityReadinessPackages(
+    shippingProviderLabelIds: readonly number[],
+  ): Promise<readonly LockedPackageAllocationAuthorityEvidence[]> {
+    return this.loadAuthorityReadinessPackages(shippingProviderLabelIds, false);
+  }
+
   async lockAuthorityReadinessPackages(
     shippingProviderLabelIds: readonly number[],
+  ): Promise<readonly LockedPackageAllocationAuthorityEvidence[]> {
+    return this.loadAuthorityReadinessPackages(shippingProviderLabelIds, true);
+  }
+
+  private async loadAuthorityReadinessPackages(
+    shippingProviderLabelIds: readonly number[],
+    lockRows: boolean,
   ): Promise<readonly LockedPackageAllocationAuthorityEvidence[]> {
     const sortedIds = [...new Set(shippingProviderLabelIds)].sort(
       (left, right) => left - right,
@@ -615,12 +693,18 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
           { shippingProviderLabelId: labelId },
         );
       }
-      await this.client.query("SELECT pg_advisory_xact_lock($1, $2)", [
-        LABEL_LOCK_NAMESPACE,
-        labelId,
-      ]);
+      if (lockRows) {
+        await this.client.query("SELECT pg_advisory_xact_lock($1, $2)", [
+          LABEL_LOCK_NAMESPACE,
+          labelId,
+        ]);
+      }
     }
 
+    const labelRowLockClause = lockRows ? "\n         FOR UPDATE" : "";
+    const carrierRowLockClause = lockRows
+      ? "\n       FOR KEY SHARE OF reconciliation_state, match, carrier_event"
+      : "";
     const labelResult = await this.client.query(
       `WITH locked_labels AS MATERIALIZED (
          SELECT
@@ -634,8 +718,7 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
            label.last_observed_at
          FROM wms.shipping_provider_labels AS label
          WHERE label.id = ANY($1::bigint[])
-         ORDER BY label.id
-         FOR UPDATE
+         ORDER BY label.id${labelRowLockClause}
        ),
        event_stats AS (
          SELECT
@@ -786,8 +869,7 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
          AND carrier_event.dispatch_evidence = 'confirmed'
          AND match.match_status IN ('matched', 'voided_label')
        ORDER BY match.shipping_provider_label_id, carrier_event.received_at, carrier_event.id
-       LIMIT $2
-       FOR KEY SHARE OF reconciliation_state, match, carrier_event`,
+       LIMIT $2${carrierRowLockClause}`,
       [sortedIds, MAX_AUTHORITY_CURRENT_CARRIER_EVENTS + 1],
     );
     if (carrierResult.rows.length > MAX_AUTHORITY_CURRENT_CARRIER_EVENTS) {
@@ -1575,7 +1657,8 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
   }
 }
 
-export class PgPackageAllocationLedgerRepository implements PackageAllocationLedgerRepository {
+export class PgPackageAllocationLedgerRepository
+  implements PackageAllocationLedgerRepository, PackageAllocationAuthorityPreviewRepository {
   private readonly statementTimeoutMs: number;
   private readonly lockTimeoutMs: number;
   private readonly idleTransactionTimeoutMs: number;
@@ -1601,6 +1684,93 @@ export class PgPackageAllocationLedgerRepository implements PackageAllocationLed
         );
       }
     }
+  }
+
+  async withRepeatableReadOnlyTransaction<T>(
+    work: (transaction: PackageAllocationAuthorityPreviewTransaction) => Promise<T>,
+  ): Promise<T> {
+    let client: PoolClient;
+    try {
+      client = await this.pool.connect();
+    } catch (error) {
+      throw classifyDatabaseError(error);
+    }
+
+    let primaryError: unknown = null;
+    let clientDiscardError: Error | undefined;
+    let result: T | undefined;
+    let workStarted = false;
+    let workCompleted = false;
+    try {
+      await client.query(
+        "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+      );
+      await client.query(
+        `SELECT
+           set_config('statement_timeout', $1, true),
+           set_config('lock_timeout', $2, true),
+           set_config('idle_in_transaction_session_timeout', $3, true)`,
+        [
+          `${this.statementTimeoutMs}ms`,
+          `${this.lockTimeoutMs}ms`,
+          `${this.idleTransactionTimeoutMs}ms`,
+        ],
+      );
+      workStarted = true;
+      result = await work(new PgPackageAllocationLedgerTransaction(client));
+      workCompleted = true;
+    } catch (error) {
+      primaryError = workStarted && !workCompleted
+        ? classifyTransactionWorkError(error)
+        : classifyDatabaseError(error);
+    }
+
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      clientDiscardError = rollbackError instanceof Error
+        ? rollbackError
+        : new Error("The package allocation read-only rollback failed with a non-Error value");
+      const rollbackFailure = new PackageAllocationLedgerRepositoryError(
+        "ROLLBACK_FAILED",
+        primaryError === null
+          ? "The package allocation read-only preview rollback failed"
+          : "The package allocation read-only preview and its rollback both failed",
+        {
+          primaryCode: errorCodeForContext(primaryError),
+          rollbackPostgresCode: pgErrorCode(rollbackError),
+        },
+        primaryError === null
+          ? rollbackError
+          : new AggregateError([primaryError, rollbackError]),
+      );
+      primaryError = rollbackFailure;
+    }
+
+    let releaseError: unknown = null;
+    try {
+      client.release(clientDiscardError);
+    } catch (error) {
+      releaseError = error;
+    }
+    if (releaseError !== null) {
+      const errors = primaryError === null
+        ? [releaseError]
+        : [primaryError, releaseError];
+      throw new PackageAllocationLedgerRepositoryError(
+        "RELEASE_FAILED",
+        primaryError === null
+          ? "The package allocation read-only preview completed but client release failed"
+          : "The package allocation read-only preview and client release both failed",
+        {
+          primaryCode: errorCodeForContext(primaryError),
+          releaseCode: errorCodeForContext(releaseError),
+        },
+        new AggregateError(errors),
+      );
+    }
+    if (primaryError !== null) throw primaryError;
+    return result as T;
   }
 
   async withSerializableTransaction<T>(

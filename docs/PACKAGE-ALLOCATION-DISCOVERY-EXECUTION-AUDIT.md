@@ -74,7 +74,8 @@ legitimately change which plan nodes execute.
 
 One source does not prove every relationship shape, production cardinality, cache
 state, concurrency level, or worst-case runtime. This command does not execute the
-full authority-resolution service, which currently uses row locks and a serializable
-write-capable repository transaction. It does not authorize runtime wiring,
+full authority-resolution service. That service now has a separate repeatable-read,
+read-only preview transaction and a separately gated resolution audit. This
+discovery-only command does not authorize running that later audit, runtime wiring,
 scheduling, ledger mutation, or executable effects. Those remain separate reviewed
 Phase 2 gates.
