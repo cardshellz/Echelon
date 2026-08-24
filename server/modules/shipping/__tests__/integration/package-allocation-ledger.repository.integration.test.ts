@@ -178,17 +178,6 @@ async function seedCustomerFulfillmentSource(
 
 async function installAuthorityReadinessTestRelations(pool: Pool): Promise<void> {
   await pool.query(`
-    ALTER TABLE wms.shipping_provider_labels
-      ADD COLUMN provider varchar(40) NOT NULL,
-      ADD COLUMN provider_label_id varchar(200) NOT NULL,
-      ADD COLUMN provider_order_id varchar(200),
-      ADD COLUMN provider_order_key varchar(200),
-      ADD COLUMN tracking_number varchar(200) NOT NULL,
-      ADD COLUMN label_status varchar(30) NOT NULL,
-      ADD COLUMN label_direction varchar(20) NOT NULL,
-      ADD COLUMN first_observed_at timestamptz NOT NULL,
-      ADD COLUMN last_observed_at timestamptz NOT NULL;
-
     CREATE TABLE wms.shipping_provider_label_events (
       id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
       shipping_provider_label_id bigint NOT NULL
@@ -461,6 +450,94 @@ function fulfilledValues(
   ));
 }
 
+const DISCOVERY_INDEX_NAMES = [
+  "idx_physical_shipment_items_request_item_lookup",
+  "idx_physical_shipments_engine_order_lookup",
+  "idx_shipping_provider_label_links_request_lookup",
+  "idx_shipping_provider_label_links_engine_order_lookup",
+  "idx_shipping_provider_label_links_physical_lookup",
+  "idx_shipping_provider_label_links_legacy_lookup",
+  "idx_shipping_provider_labels_provider_order_id_lookup",
+  "idx_shipping_provider_labels_provider_order_key_lookup",
+] as const;
+
+interface CapturedDiscoveryQuery {
+  readonly text: string;
+  readonly values: readonly unknown[];
+}
+
+function queryResult(rows: readonly Record<string, unknown>[]) {
+  return {
+    command: "SELECT",
+    rowCount: rows.length,
+    oid: 0,
+    fields: [],
+    rows: [...rows],
+  };
+}
+
+async function captureProductionDiscoveryQuery(): Promise<CapturedDiscoveryQuery> {
+  const capture: { current: CapturedDiscoveryQuery | null } = { current: null };
+  const client = {
+    query: async (text: string, values: readonly unknown[] = []) => {
+      if (text.includes("WITH selected_sources AS MATERIALIZED")) {
+        capture.current = { text, values: [...values] };
+        return queryResult([{
+          source_count: 1,
+          found_source_ids: [1],
+          shipping_provider_label_id: "1",
+        }]);
+      }
+      return queryResult([]);
+    },
+    release: () => undefined,
+  } as unknown as PoolClient;
+  const repository = new PgPackageAllocationLedgerRepository({
+    connect: async () => client,
+  } as Pick<Pool, "connect">);
+
+  await repository.withSerializableTransaction((transaction) =>
+    transaction.discoverAuthorityReadinessPackageLabelIds([1]),
+  );
+  if (capture.current === null) {
+    throw new Error("Production package-discovery SQL was not captured");
+  }
+  return capture.current;
+}
+
+function recordValue(value: unknown, field: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${field} is not a PostgreSQL plan object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function explainPlanRoot(value: unknown): Record<string, unknown> {
+  const parsed = typeof value === "string" ? JSON.parse(value) : value;
+  if (!Array.isArray(parsed) || parsed.length !== 1) {
+    throw new Error("PostgreSQL EXPLAIN JSON did not contain one root document");
+  }
+  return recordValue(recordValue(parsed[0], "EXPLAIN document").Plan, "EXPLAIN root");
+}
+
+function planIndexNames(root: Record<string, unknown>): readonly string[] {
+  const names = new Set<string>();
+  const pending: Record<string, unknown>[] = [root];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    if (typeof node["Index Name"] === "string") {
+      names.add(node["Index Name"]);
+    }
+    const children = node.Plans;
+    if (Array.isArray(children)) {
+      for (const child of children) {
+        pending.push(recordValue(child, "EXPLAIN child plan"));
+      }
+    }
+  }
+  return [...names].sort();
+}
+
 describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () => {
   let pool: Pool;
 
@@ -476,6 +553,69 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
   afterAll(async () => {
     await closeTestDb();
+  });
+
+  it("installs valid discovery indexes that PostgreSQL can use for the production query", async () => {
+    const catalog = await pool.query<{
+      index_name: string;
+      indisvalid: boolean;
+      indisready: boolean;
+    }>(
+      `SELECT index_relation.relname AS index_name,
+              index_state.indisvalid,
+              index_state.indisready
+       FROM pg_catalog.pg_index AS index_state
+       JOIN pg_catalog.pg_class AS index_relation
+         ON index_relation.oid = index_state.indexrelid
+       JOIN pg_catalog.pg_namespace AS namespace
+         ON namespace.oid = index_relation.relnamespace
+       WHERE namespace.nspname = 'wms'
+         AND index_relation.relname = ANY($1::text[])
+       ORDER BY index_relation.relname`,
+      [[...DISCOVERY_INDEX_NAMES]],
+    );
+    expect(catalog.rows.map((row) => row.index_name)).toEqual(
+      [...DISCOVERY_INDEX_NAMES].sort(),
+    );
+    expect(catalog.rows.every((row) => row.indisvalid && row.indisready)).toBe(true);
+
+    const discoveryQuery = await captureProductionDiscoveryQuery();
+    const client = await pool.connect();
+    let releaseError: Error | undefined;
+    let explained: unknown;
+    try {
+      await client.query("BEGIN TRANSACTION READ ONLY");
+      await client.query("SET LOCAL statement_timeout = '15s'");
+      await client.query("SET LOCAL lock_timeout = '2s'");
+      await client.query("SET LOCAL enable_seqscan = off");
+      const result = await client.query<{ "QUERY PLAN": unknown }>(
+        `EXPLAIN (FORMAT JSON, COSTS OFF) ${discoveryQuery.text}`,
+        [...discoveryQuery.values],
+      );
+      explained = result.rows[0]?.["QUERY PLAN"];
+      await client.query("ROLLBACK");
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        releaseError = rollbackError instanceof Error
+          ? rollbackError
+          : new Error("Discovery EXPLAIN rollback failed with a non-Error value");
+        throw new AggregateError(
+          [error, rollbackError],
+          "Discovery EXPLAIN and rollback both failed",
+        );
+      }
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+
+    const usedIndexNames = planIndexNames(explainPlanRoot(explained));
+    for (const indexName of DISCOVERY_INDEX_NAMES) {
+      expect(usedIndexNames, `${indexName} was absent from the forced-index plan`)
+        .toContain(indexName);
+    }
   });
 
   it("loads locked persisted evidence and remains shadow-only without ledger writes", async () => {

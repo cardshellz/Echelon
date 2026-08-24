@@ -314,6 +314,9 @@ export const physicalShipments = wmsSchema.table("physical_shipments", {
 }, (table) => [
   uniqueIndex("physical_shipments_provider_unique").on(table.provider, table.providerPhysicalShipmentId),
   index("idx_physical_shipments_request").on(table.shipmentRequestId),
+  index("idx_physical_shipments_engine_order_lookup")
+    .on(table.shippingEngineOrderId, table.id)
+    .where(sql`${table.shippingEngineOrderId} IS NOT NULL`),
   index("idx_physical_shipments_tracking")
     .on(table.trackingNumber)
     .where(sql`${table.trackingNumber} IS NOT NULL`),
@@ -341,6 +344,9 @@ export const physicalShipmentItems = wmsSchema.table("physical_shipment_items", 
   uniqueIndex("uq_physical_shipment_items_legacy_item")
     .on(table.legacyWmsShipmentItemId)
     .where(sql`${table.legacyWmsShipmentItemId} IS NOT NULL`),
+  index("idx_physical_shipment_items_request_item_lookup")
+    .on(table.shipmentRequestItemId, table.physicalShipmentId)
+    .where(sql`${table.shipmentRequestItemId} IS NOT NULL`),
   index("idx_physical_shipment_items_plan_line").on(table.fulfillmentPlanLineId),
   index("idx_physical_shipment_items_replacement_line")
     .on(table.replacementForOrderItemId)
@@ -376,6 +382,12 @@ export const shippingProviderLabels = wmsSchema.table("shipping_provider_labels"
 }, (table) => [
   uniqueIndex("uq_shipping_provider_labels_provider_label")
     .on(table.provider, table.providerLabelId),
+  index("idx_shipping_provider_labels_provider_order_id_lookup")
+    .on(table.provider, table.providerOrderId, table.id)
+    .where(sql`${table.providerOrderId} IS NOT NULL`),
+  index("idx_shipping_provider_labels_provider_order_key_lookup")
+    .on(table.provider, table.providerOrderKey, table.id)
+    .where(sql`${table.providerOrderKey} IS NOT NULL`),
   index("idx_shipping_provider_labels_shadow_scan")
     .on(table.provider, table.id.desc()),
   index("idx_shipping_provider_labels_tracking").on(table.provider, table.normalizedTrackingNumber),
@@ -409,6 +421,18 @@ export const shippingProviderLabelLinks = wmsSchema.table("shipping_provider_lab
     .where(sql`${table.physicalShipmentId} IS NOT NULL`),
   uniqueIndex("uq_shipping_provider_label_links_legacy")
     .on(table.shippingProviderLabelId, table.legacyWmsShipmentId)
+    .where(sql`${table.legacyWmsShipmentId} IS NOT NULL`),
+  index("idx_shipping_provider_label_links_request_lookup")
+    .on(table.shipmentRequestId, table.shippingProviderLabelId)
+    .where(sql`${table.shipmentRequestId} IS NOT NULL`),
+  index("idx_shipping_provider_label_links_engine_order_lookup")
+    .on(table.shippingEngineOrderId, table.shippingProviderLabelId)
+    .where(sql`${table.shippingEngineOrderId} IS NOT NULL`),
+  index("idx_shipping_provider_label_links_physical_lookup")
+    .on(table.physicalShipmentId, table.shippingProviderLabelId)
+    .where(sql`${table.physicalShipmentId} IS NOT NULL`),
+  index("idx_shipping_provider_label_links_legacy_lookup")
+    .on(table.legacyWmsShipmentId, table.shippingProviderLabelId)
     .where(sql`${table.legacyWmsShipmentId} IS NOT NULL`),
   index("idx_shipping_provider_label_links_label").on(table.shippingProviderLabelId),
 ]);

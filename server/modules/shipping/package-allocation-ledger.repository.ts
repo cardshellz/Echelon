@@ -619,24 +619,41 @@ class PgPackageAllocationLedgerTransaction implements PackageAllocationLedgerTra
        candidate_labels AS MATERIALIZED (
          SELECT link.shipping_provider_label_id AS id
          FROM wms.shipping_provider_label_links AS link
-         WHERE
-           link.shipment_request_id IN (SELECT id FROM scope_requests)
-           OR link.shipping_engine_order_id IN (SELECT id FROM anchor_engine_orders)
-           OR link.physical_shipment_id IN (SELECT id FROM scope_physical_shipments)
-           OR link.legacy_wms_shipment_id IN (SELECT id FROM scope_legacy_shipments)
+         WHERE link.shipment_request_id IN (SELECT id FROM scope_requests)
+         UNION
+         SELECT link.shipping_provider_label_id
+         FROM wms.shipping_provider_label_links AS link
+         WHERE link.shipping_engine_order_id IN (
+           SELECT id FROM anchor_engine_orders
+         )
+         UNION
+         SELECT link.shipping_provider_label_id
+         FROM wms.shipping_provider_label_links AS link
+         WHERE link.physical_shipment_id IN (
+           SELECT id FROM scope_physical_shipments
+         )
+         UNION
+         SELECT link.shipping_provider_label_id
+         FROM wms.shipping_provider_label_links AS link
+         WHERE link.legacy_wms_shipment_id IN (
+           SELECT id FROM scope_legacy_shipments
+         )
          UNION
          SELECT label.id
          FROM wms.shipping_provider_labels AS label
          JOIN wms.shipping_engine_orders AS engine_order
            ON engine_order.id IN (SELECT id FROM anchor_engine_orders)
           AND engine_order.provider = label.provider
-          AND (
-            (engine_order.provider_order_id IS NOT NULL
-             AND engine_order.provider_order_id = label.provider_order_id)
-            OR
-            (engine_order.provider_order_key IS NOT NULL
-             AND engine_order.provider_order_key = label.provider_order_key)
-          )
+          AND engine_order.provider_order_id = label.provider_order_id
+         WHERE engine_order.provider_order_id IS NOT NULL
+         UNION
+         SELECT label.id
+         FROM wms.shipping_provider_labels AS label
+         JOIN wms.shipping_engine_orders AS engine_order
+           ON engine_order.id IN (SELECT id FROM anchor_engine_orders)
+          AND engine_order.provider = label.provider
+          AND engine_order.provider_order_key = label.provider_order_key
+         WHERE engine_order.provider_order_key IS NOT NULL
          UNION
          SELECT label.id
          FROM wms.shipping_provider_labels AS label

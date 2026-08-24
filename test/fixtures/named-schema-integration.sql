@@ -298,7 +298,16 @@ CREATE TABLE wms.physical_shipment_items (
 );
 
 CREATE TABLE wms.shipping_provider_labels (
-  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  provider varchar(40) NOT NULL,
+  provider_label_id varchar(200) NOT NULL,
+  provider_order_id varchar(200),
+  provider_order_key varchar(200),
+  tracking_number varchar(200) NOT NULL,
+  label_status varchar(30) NOT NULL,
+  label_direction varchar(20) NOT NULL,
+  first_observed_at timestamptz NOT NULL,
+  last_observed_at timestamptz NOT NULL
 );
 
 CREATE TABLE wms.shipping_provider_label_links (
