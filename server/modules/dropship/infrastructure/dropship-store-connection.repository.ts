@@ -806,7 +806,7 @@ async function hasReconnectableConnectionWithClient(
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1
        AND platform = $2
-       AND status IN ('connected','needs_reauth','refresh_failed','disconnected')`,
+       AND status IN ('connected','needs_reauth','refresh_failed','grace_period','disconnected')`,
     [vendorId, platform],
   );
   return Number(result.rows[0]?.count ?? 0) > 0;
@@ -879,16 +879,17 @@ async function findReusableConnection(
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1
        AND platform = $2
-       AND status IN ('connected','needs_reauth','refresh_failed','disconnected')
+       AND status IN ('connected','needs_reauth','refresh_failed','grace_period','disconnected')
        AND (
-         status IN ('connected','needs_reauth','refresh_failed')
+         status IN ('connected','needs_reauth','refresh_failed','grace_period')
          OR COALESCE(shop_domain, '') = COALESCE($3, '')
        )
      ORDER BY CASE status
                 WHEN 'needs_reauth' THEN 0
                 WHEN 'refresh_failed' THEN 1
                 WHEN 'connected' THEN 2
-                ELSE 3
+                WHEN 'grace_period' THEN 3
+                ELSE 4
               END,
               updated_at DESC,
               id DESC
@@ -900,7 +901,10 @@ async function findReusableConnection(
 }
 
 function isReconnectableActiveConnection(connection: StoreConnectionRow | null): boolean {
-  return connection?.status === "connected" || connection?.status === "needs_reauth" || connection?.status === "refresh_failed";
+  return connection?.status === "connected"
+    || connection?.status === "needs_reauth"
+    || connection?.status === "refresh_failed"
+    || connection?.status === "grace_period";
 }
 
 async function findConnectionByIdForUpdate(

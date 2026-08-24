@@ -82,9 +82,10 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
       scope: EBAY_SCOPES.join(" "),
       state: input.state,
     });
-    if (input.intent !== "refresh_connection") {
-      params.set("prompt", "login");
-    }
+    // Every interactive eBay authorization must require credentials. In
+    // particular, a refresh cannot inherit an unrelated browser session and
+    // silently replace the connection's credentials with the wrong seller.
+    params.set("prompt", "login");
 
     return {
       authorizationUrl: `${EBAY_CONSENT_URLS[this.config.environment]}?${params.toString()}`,

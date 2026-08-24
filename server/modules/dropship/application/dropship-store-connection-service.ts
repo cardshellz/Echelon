@@ -997,14 +997,15 @@ function selectOAuthTargetConnection(
   return connections
     .filter((connection) => (
       connection.platform === platform
-      && ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status)
+      && ["connected", "needs_reauth", "refresh_failed", "grace_period", "disconnected"].includes(connection.status)
     ))
     .sort((left, right) => {
       const statusOrder = (status: DropshipStoreConnectionProfile["status"]) => {
         if (status === "needs_reauth") return 0;
         if (status === "refresh_failed") return 1;
         if (status === "connected") return 2;
-        return 3;
+        if (status === "grace_period") return 3;
+        return 4;
       };
       return statusOrder(left.status) - statusOrder(right.status)
         || right.updatedAt.getTime() - left.updatedAt.getTime()

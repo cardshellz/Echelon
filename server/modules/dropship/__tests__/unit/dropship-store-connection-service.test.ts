@@ -106,7 +106,24 @@ describe("PgDropshipStoreConnectionRepository", () => {
     ]);
   });
 
-  it("preserves admin order-processing config when reconnecting an unhealthy store", async () => {
+  it("treats a grace-period connection as reconnectable", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const release = () => undefined;
+    const query = async (sql: string, params: unknown[]) => {
+      queries.push({ sql, params });
+      return { rows: [{ count: "1" }] };
+    };
+    const connect = async () => ({ query, release });
+    const repository = new PgDropshipStoreConnectionRepository({ connect } as unknown as Pool);
+
+    const reconnectable = await repository.hasReconnectableConnection({ vendorId: 10, platform: "ebay" });
+
+    expect(reconnectable).toBe(true);
+    expect(queries[0]?.sql).toContain("'grace_period'");
+    expect(queries[0]?.params).toEqual([10, "ebay"]);
+  });
+
+  it("reuses a grace-period row and preserves admin order-processing config when reconnecting", async () => {
     const queries: Array<{ sql: string; params: unknown[] }> = [];
     const release = () => undefined;
     const existingConfig = {
@@ -126,7 +143,7 @@ describe("PgDropshipStoreConnectionRepository", () => {
         return {
           rows: [makeStoreConnectionRow({
             id: 21,
-            status: "needs_reauth",
+            status: "grace_period",
             setup_status: "attention_required",
             config: existingConfig,
           })],
@@ -386,6 +403,23 @@ describe("DropshipStoreConnectionService", () => {
     });
   });
 
+  it.each(["refresh_connection", "change_store"] as const)(
+    "allows %s OAuth while the existing store is in its disconnect grace period",
+    async (intent) => {
+      repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "grace_period" })];
+
+      const start = await service.startOAuth("member-1", { platform: "ebay", intent });
+
+      expect(start.platform).toBe("ebay");
+      expect(stateSigner.lastPayload).toMatchObject({
+        vendorId: 10,
+        memberId: "member-1",
+        platform: "ebay",
+        intent,
+      });
+    },
+  );
+
   it("blocks a different platform when an unhealthy connection owns the launch store slot", async () => {
     repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "needs_reauth" })];
 
@@ -452,8 +486,8 @@ describe("DropshipStoreConnectionService", () => {
     ]));
   });
 
-  it("completes OAuth by reconnecting the existing unhealthy store slot", async () => {
-    repository.connections = [makeConnection({ storeConnectionId: 21, status: "needs_reauth" })];
+  it("completes OAuth by restoring the existing grace-period store slot", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, status: "grace_period" })];
     stateSigner.payload = {
       version: 1,
       vendorId: 10,
@@ -1289,7 +1323,7 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     return this.connections.some((connection) => (
       connection.vendorId === input.vendorId
       && connection.platform === input.platform
-      && ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status)
+      && ["connected", "needs_reauth", "refresh_failed", "grace_period", "disconnected"].includes(connection.status)
     ));
   }
 
@@ -1328,7 +1362,7 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     const existing = this.connections.find((connection) => (
       connection.vendorId === input.vendorId
       && connection.platform === input.platform
-      && ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status)
+      && ["connected", "needs_reauth", "refresh_failed", "grace_period", "disconnected"].includes(connection.status)
     ));
     const connection = makeConnection({
       storeConnectionId: existing?.storeConnectionId ?? 20,
