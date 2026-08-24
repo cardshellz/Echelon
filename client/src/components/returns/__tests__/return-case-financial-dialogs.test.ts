@@ -19,7 +19,8 @@ describe("return case financial reviews", () => {
     }));
 
     expect(markup).toContain("Shopify order");
-    expect(markup).toContain("1001");
+    expect(markup).toContain("#61694");
+    expect(markup).toContain("Shopify ID 1001");
     expect(markup).toContain("gid://shopify/LineItem/2001");
     expect(markup).toContain("USD 4.95");
     expect(markup).toContain("USD 0.30");
@@ -55,6 +56,7 @@ function customerRefundPreview(): CustomerRefundPreview {
     caseId: 42,
     caseNumber: "RET-0000000042",
     externalOrderId: "1001",
+    externalOrderNumber: "#61694",
     quoteHash: "a".repeat(64),
     quote: {
       provider: "shopify",

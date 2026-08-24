@@ -87,6 +87,7 @@ function source(): ReturnFinancialCaseSource {
     storeConnectionId: null,
     omsOrderId: 500,
     externalOrderId: "gid://shopify/Order/500",
+    externalOrderNumber: "#61694",
     currency: "USD",
     policyVersion: 2,
     updatedAt: NOW,

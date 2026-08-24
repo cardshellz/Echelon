@@ -217,7 +217,10 @@ export function CustomerRefundReview({ preview }: { preview: CustomerRefundPrevi
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <div className="text-xs text-muted-foreground">Shopify order</div>
-          <div className="font-medium">{preview.externalOrderId}</div>
+          <div className="font-medium">{preview.externalOrderNumber ?? preview.externalOrderId}</div>
+          {preview.externalOrderNumber ? (
+            <div className="text-xs text-muted-foreground">Shopify ID {preview.externalOrderId}</div>
+          ) : null}
         </div>
         <div className="text-right">
           <div className="text-xs text-muted-foreground">Refund total</div>

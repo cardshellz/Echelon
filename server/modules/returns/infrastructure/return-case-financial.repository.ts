@@ -27,6 +27,7 @@ import { PostgresReturnCaseAdminStore } from "./return-case.repository";
 
 interface OmsSourceRow {
   external_order_id: unknown;
+  external_order_number: unknown;
   currency: unknown;
 }
 interface OmsLineIdentityRow {
@@ -94,7 +95,7 @@ export class PostgresReturnCaseFinancialSourceStore implements ReturnCaseFinanci
       throw financialError("RETURN_FINANCIAL_SOURCE_INCOMPLETE", "The Return Case is missing its OMS order identity.", 409, { caseId });
     }
     const oms = await pool.query<OmsSourceRow>(
-      `SELECT external_order_id, currency
+      `SELECT external_order_id, external_order_number, currency
        FROM oms.oms_orders
        WHERE id = $1
        LIMIT 1`,
@@ -119,6 +120,7 @@ export class PostgresReturnCaseFinancialSourceStore implements ReturnCaseFinanci
       storeConnectionId: detail.storeConnectionId,
       omsOrderId: detail.omsOrderId,
       externalOrderId: requiredText(source.external_order_id, "external order id"),
+      externalOrderNumber: nullableText(source.external_order_number),
       currency: currencyCode(source.currency, "OMS order currency"),
       policyVersion: detail.policyVersion,
       updatedAt: detail.updatedAt,
