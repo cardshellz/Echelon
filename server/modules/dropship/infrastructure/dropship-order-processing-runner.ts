@@ -1,3 +1,5 @@
+import { buildSchedulerFailureContext } from "../../../infrastructure/scheduler-failure-context";
+import { startDropshipWorkerSchedule } from "./dropship-worker-schedule";
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
@@ -290,19 +292,20 @@ export function startDropshipOrderProcessingWorker(): void {
       console.error(JSON.stringify({
         code: "DROPSHIP_ORDER_PROCESSING_SWEEP_FAILED",
         message: "Dropship order processing sweep failed.",
-        context: {
-          error: error instanceof Error ? error.message : String(error),
-        },
+        context: buildSchedulerFailureContext(error),
       }));
     }
   };
 
-  setTimeout(runLockedSweep, Math.min(intervalMs, 5_000));
-  setInterval(runLockedSweep, intervalMs);
+  const { initialDelayMs } = startDropshipWorkerSchedule({
+    name: "orderProcessing",
+    intervalMs,
+    run: runLockedSweep,
+  });
   console.info(JSON.stringify({
     code: "DROPSHIP_ORDER_PROCESSING_WORKER_STARTED",
     message: "Dropship order processing worker started.",
-    context: { intervalMs },
+    context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" },
   }));
 }
 

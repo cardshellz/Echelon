@@ -9,7 +9,7 @@ describe("dropship eBay order-intake runner", () => {
       "server/modules/dropship/infrastructure/dropship-ebay-order-intake-runner.ts",
     ), "utf8");
     const cycleStart = source.indexOf("const runLockedSweep = async () => {");
-    const cycleEnd = source.indexOf("setTimeout(runLockedSweep", cycleStart);
+    const cycleEnd = source.indexOf("startDropshipWorkerSchedule({", cycleStart);
 
     expect(cycleStart).toBeGreaterThanOrEqual(0);
     expect(cycleEnd).toBeGreaterThan(cycleStart);

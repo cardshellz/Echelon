@@ -1,3 +1,5 @@
+import { buildSchedulerFailureContext } from "../../../infrastructure/scheduler-failure-context";
+import { startDropshipWorkerSchedule } from "./dropship-worker-schedule";
 import type { Pool } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
@@ -135,19 +137,20 @@ export function startDropshipListingPushWorker(): void {
       console.error(JSON.stringify({
         code: "DROPSHIP_LISTING_PUSH_SWEEP_FAILED",
         message: "Dropship listing push sweep failed.",
-        context: {
-          error: error instanceof Error ? error.message : String(error),
-        },
+        context: buildSchedulerFailureContext(error),
       }));
     }
   };
 
-  setTimeout(runLockedSweep, Math.min(intervalMs, 5_000));
-  setInterval(runLockedSweep, intervalMs);
+  const { initialDelayMs } = startDropshipWorkerSchedule({
+    name: "listingPush",
+    intervalMs,
+    run: runLockedSweep,
+  });
   console.info(JSON.stringify({
     code: "DROPSHIP_LISTING_PUSH_WORKER_STARTED",
     message: "Dropship listing push worker started.",
-    context: { intervalMs },
+    context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" },
   }));
 }
 

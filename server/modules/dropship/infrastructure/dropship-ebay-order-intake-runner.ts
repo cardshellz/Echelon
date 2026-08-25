@@ -1,3 +1,5 @@
+import { buildSchedulerFailureContext } from "../../../infrastructure/scheduler-failure-context";
+import { startDropshipWorkerSchedule } from "./dropship-worker-schedule";
 import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
 import { createDropshipEbayOrderIntakePollServiceFromEnv } from "./dropship-ebay-order-intake.factory";
 import { createDropshipOrderIntakeHealthServiceFromEnv } from "./dropship-order-intake-health.factory";
@@ -65,9 +67,7 @@ export function startDropshipEbayOrderIntakeWorker(): void {
       console.error(JSON.stringify({
         code: "DROPSHIP_ORDER_INTAKE_HEALTH_MONITOR_FAILED",
         message: "Dropship order-intake health monitor failed.",
-        context: {
-          error: error instanceof Error ? error.message : String(error),
-        },
+        context: buildSchedulerFailureContext(error),
       }));
     }
 
@@ -93,19 +93,20 @@ export function startDropshipEbayOrderIntakeWorker(): void {
       console.error(JSON.stringify({
         code: "DROPSHIP_EBAY_ORDER_INTAKE_SWEEP_FAILED",
         message: "Dropship eBay order intake sweep failed.",
-        context: {
-          error: error instanceof Error ? error.message : String(error),
-        },
+        context: buildSchedulerFailureContext(error),
       }));
     }
   };
 
-  setTimeout(runLockedSweep, Math.min(intervalMs, 5_000));
-  setInterval(runLockedSweep, intervalMs);
+  const { initialDelayMs } = startDropshipWorkerSchedule({
+    name: "ebayOrderIntake",
+    intervalMs,
+    run: runLockedSweep,
+  });
   console.info(JSON.stringify({
     code: "DROPSHIP_EBAY_ORDER_INTAKE_WORKER_STARTED",
     message: "Dropship eBay order intake worker started.",
-    context: { intervalMs },
+    context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" },
   }));
 }
 
