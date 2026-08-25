@@ -25,11 +25,12 @@ describe("buildSchedulerFailureContext", () => {
       maximumConnections: 20,
     });
     mocks.getSchedulerLockPoolSnapshot.mockReturnValue({
-      totalConnections: 2,
-      idleConnections: 0,
+      totalConnections: 8,
+      idleConnections: 6,
       checkedOutConnections: 2,
-      waitingRequests: 4,
-      maximumConnections: 2,
+      waitingRequests: 1,
+      maximumConnections: 8,
+      activeLockIds: [736206, 736207],
     });
   });
 
@@ -50,11 +51,12 @@ describe("buildSchedulerFailureContext", () => {
         maximumConnections: 20,
       },
       schedulerLockPool: {
-        totalConnections: 2,
-        idleConnections: 0,
+        totalConnections: 8,
+        idleConnections: 6,
         checkedOutConnections: 2,
-        waitingRequests: 4,
-        maximumConnections: 2,
+        waitingRequests: 1,
+        maximumConnections: 8,
+        activeLockIds: [736206, 736207],
       },
     });
   });
