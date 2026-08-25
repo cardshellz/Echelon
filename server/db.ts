@@ -3,6 +3,10 @@ import pkg from "pg";
 const { Pool } = pkg;
 import * as schema from "@shared/schema";
 import { createDatabasePoolConfig } from "./database-pool-config";
+import {
+  getPostgresPoolSnapshot,
+  type PostgresPoolSnapshot,
+} from "./infrastructure/postgres-pool-observability";
 
 const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
 
@@ -32,6 +36,15 @@ const poolConfig = createDatabasePoolConfig({
 });
 
 export const pool = new Pool(poolConfig);
+
+export function getDatabasePoolSnapshot(): PostgresPoolSnapshot {
+  return getPostgresPoolSnapshot({
+    totalCount: pool.totalCount,
+    idleCount: pool.idleCount,
+    waitingCount: pool.waitingCount,
+    options: { max: poolConfig.max },
+  });
+}
 
 pool.on("error", (error) => {
   console.error("[DatabasePool] Unexpected idle client error:", error);

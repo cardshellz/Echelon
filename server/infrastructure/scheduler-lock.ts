@@ -1,10 +1,20 @@
 import type { PoolClient } from "pg";
 import pg from "pg";
+import {
+  getPostgresPoolSnapshot,
+  type PostgresPoolSnapshot,
+} from "./postgres-pool-observability";
 
 const { Pool } = pg;
 
 interface AdvisoryLockPool {
   connect(): Promise<Pick<PoolClient, "query" | "release">>;
+  totalCount?: number;
+  idleCount?: number;
+  waitingCount?: number;
+  options?: {
+    max?: number;
+  };
 }
 
 interface AdvisoryLockLogger {
@@ -27,6 +37,24 @@ let defaultRunner: ReturnType<typeof createAdvisoryLockRunner> | null = null;
 export async function withAdvisoryLock<T>(lockId: number, fn: () => Promise<T>): Promise<T | null> {
   defaultRunner ??= createAdvisoryLockRunner(getLockPool(), console);
   return defaultRunner(lockId, fn);
+}
+
+export function getSchedulerLockPoolSnapshot(): PostgresPoolSnapshot | null {
+  if (
+    lockPool === null
+    || typeof lockPool.totalCount !== "number"
+    || typeof lockPool.idleCount !== "number"
+    || typeof lockPool.waitingCount !== "number"
+  ) {
+    return null;
+  }
+
+  return getPostgresPoolSnapshot({
+    totalCount: lockPool.totalCount,
+    idleCount: lockPool.idleCount,
+    waitingCount: lockPool.waitingCount,
+    options: lockPool.options,
+  });
 }
 
 export function createAdvisoryLockRunner(

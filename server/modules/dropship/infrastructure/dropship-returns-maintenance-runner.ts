@@ -1,3 +1,5 @@
+import { buildSchedulerFailureContext } from "../../../infrastructure/scheduler-failure-context";
+import { startDropshipWorkerSchedule } from "./dropship-worker-schedule";
 import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
 import { createDropshipCollectionSweepServiceFromEnv } from "./dropship-collection-sweep.factory";
 import { createDropshipNoInspectionWatcherServiceFromEnv } from "./dropship-no-inspection-watcher.factory";
@@ -107,19 +109,20 @@ export function startDropshipReturnsMaintenanceWorker(): void {
       console.error(JSON.stringify({
         code: "DROPSHIP_RETURNS_MAINTENANCE_SWEEP_FAILED",
         message: "Dropship returns maintenance sweep failed.",
-        context: {
-          error: error instanceof Error ? error.message : String(error),
-        },
+        context: buildSchedulerFailureContext(error),
       }));
     }
   };
 
-  setTimeout(runLockedSweep, Math.min(intervalMs, 10_000));
-  setInterval(runLockedSweep, intervalMs);
+  const { initialDelayMs } = startDropshipWorkerSchedule({
+    name: "returnsMaintenance",
+    intervalMs,
+    run: runLockedSweep,
+  });
   console.info(JSON.stringify({
     code: "DROPSHIP_RETURNS_MAINTENANCE_WORKER_STARTED",
     message: "Dropship returns maintenance worker started.",
-    context: { intervalMs },
+    context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" },
   }));
 }
 
