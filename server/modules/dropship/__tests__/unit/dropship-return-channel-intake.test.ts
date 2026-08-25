@@ -28,6 +28,7 @@ import {
   shouldRecordEbayReturnCase,
   type EbayReturnCase,
 } from "../../infrastructure/dropship-ebay-return-intake.mapper";
+import { EbayDropshipReturnIntakeProvider } from "../../infrastructure/dropship-ebay-return-intake.provider";
 import {
   buildShopifyReturnIntakeDraft,
   mapShopifyReturnReasonToFaultHint,
@@ -459,6 +460,36 @@ describe("DropshipReturnIntakePollService", () => {
 });
 
 // ---------------------------------------------------------------------------
+// eBay Post-Order return intake provider
+// ---------------------------------------------------------------------------
+
+describe("EbayDropshipReturnIntakeProvider", () => {
+  it("uses IAF authorization when searching eBay returns", async () => {
+    const fetchImpl = vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      expect(String(input)).toContain("/post-order/v2/return/search?");
+      expect(new Headers(init?.headers).get("Authorization")).toBe("IAF token");
+      return new Response(JSON.stringify({ returns: [], total: 0, limit: 50, offset: 0 }), {
+        status: 200,
+      });
+    });
+    const provider = new EbayDropshipReturnIntakeProvider(
+      makeNullCredentials(),
+      fetchImpl as typeof fetch,
+    );
+
+    await expect(provider.fetchReturns({
+      connection: makeConnection(),
+      since: new Date("2026-08-24T00:00:00.000Z"),
+      until: new Date("2026-08-25T00:00:00.000Z"),
+    })).resolves.toEqual({ drafts: [], ignored: 0 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Tracking provider wiring (PR 3 port)
 // ---------------------------------------------------------------------------
 
@@ -499,8 +530,9 @@ describe("DropshipChannelReturnTrackingProvider", () => {
   });
 
   it("maps an eBay return detail shipment into a tracking snapshot", async () => {
-    const fetchImpl = async (input: unknown) => {
+    const fetchImpl = async (input: unknown, init?: RequestInit) => {
       expect(String(input)).toContain("/post-order/v2/return/ret-9001");
+      expect(new Headers(init?.headers).get("Authorization")).toBe("IAF token");
       return new Response(JSON.stringify({
         returnId: "ret-9001",
         returnShipment: {

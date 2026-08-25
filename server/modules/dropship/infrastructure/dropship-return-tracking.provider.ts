@@ -8,6 +8,7 @@ import type {
   DropshipMarketplaceStoreCredentials,
 } from "./dropship-marketplace-credentials";
 import { isEbayResourceAuthFailureStatus } from "./dropship-ebay-auth-failure";
+import { buildEbayPostOrderAuthorization } from "./dropship-ebay-post-order-auth";
 
 /**
  * Return-leg tracking provider (stack 4/4, item E): implements the PR 3
@@ -145,7 +146,7 @@ export class DropshipChannelReturnTrackingProvider implements DropshipReturnTrac
           {
             method: "GET",
             headers: {
-              Authorization: `Bearer ${input.credential.accessToken}`,
+              Authorization: buildEbayPostOrderAuthorization(input.credential.accessToken),
               Accept: "application/json",
               "X-EBAY-C-MARKETPLACE-ID": input.marketplaceId,
             },

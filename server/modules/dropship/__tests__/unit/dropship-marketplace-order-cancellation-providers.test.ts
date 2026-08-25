@@ -74,6 +74,9 @@ describe("dropship marketplace order cancellation providers", () => {
       externalCancellationId: "cancel-1",
     });
     expect(fetcher.calls[0]?.url).toBe("https://api.sandbox.ebay.com/post-order/v2/cancellation");
+    expect(new Headers(fetcher.calls[0]?.init.headers).get("Authorization")).toBe(
+      "IAF ebay-token",
+    );
     const body = JSON.parse(String(fetcher.calls[0]?.init.body));
     expect(body).toEqual({
       legacyOrderId: "LEGACY-ORDER-1",
