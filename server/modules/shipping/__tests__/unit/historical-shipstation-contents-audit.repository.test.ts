@@ -54,7 +54,11 @@ describe("historical ShipStation contents audit repository", () => {
     expect(HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL).toMatch(
       /declaredContentsEvidence'.*'status'[\s\S]*= 'authoritative'/,
     );
+    expect(HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL).toMatch(
+      /\(\$1::bigint IS NULL OR label\.id < \$1::bigint\)/,
+    );
     expect(HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL).toMatch(/ORDER BY label\.id DESC/);
+    expect(HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL).toMatch(/LIMIT \$2/);
     expect(HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL).not.toMatch(
       /ORDER BY label\.last_observed_at/,
     );
@@ -152,11 +156,14 @@ describe("historical ShipStation contents audit repository", () => {
 
     await expect(loadHistoricalShipStationContentsCandidates(client, {
       candidateLimit: 2,
+      beforeLabelId: "104",
       statementTimeoutMs: 3_000,
       lockTimeoutMs: 500,
       idleInTransactionTimeoutMs: 5_000,
     })).resolves.toEqual({
       candidateLimit: 2,
+      beforeLabelId: "104",
+      nextBeforeLabelId: "102",
       batchLimitReached: true,
       databaseTemporaryPrivilege: false,
       candidates: [
@@ -191,7 +198,7 @@ describe("historical ShipStation contents audit repository", () => {
       values: ["3000ms"],
     });
     expect(queries.find((query) => query.text === HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL))
-      .toMatchObject({ values: [3] });
+      .toMatchObject({ values: ["104", 3] });
     expect(queries.find((query) => query.text === HISTORICAL_SHIPSTATION_CONTENTS_LINKS_SQL))
       .toMatchObject({ values: [["103", "102"]] });
     expect(queries.find((query) => query.text === HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL))
@@ -287,5 +294,15 @@ describe("historical ShipStation contents audit repository", () => {
     expect(() => normalizeHistoricalShipStationContentsAuditRepositoryOptions({
       candidateLimit: 101,
     })).toThrow(/candidateLimit/);
+    expect(normalizeHistoricalShipStationContentsAuditRepositoryOptions({})).toMatchObject({
+      beforeLabelId: null,
+    });
+    expect(normalizeHistoricalShipStationContentsAuditRepositoryOptions({
+      beforeLabelId: "9223372036854775807",
+    })).toMatchObject({ beforeLabelId: "9223372036854775807" });
+    for (const beforeLabelId of ["", "0", " 1", "9223372036854775808"]) {
+      expect(() => normalizeHistoricalShipStationContentsAuditRepositoryOptions({ beforeLabelId }))
+        .toThrow(/beforeLabelId/);
+    }
   });
 });
