@@ -1,4 +1,5 @@
 import * as React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { DropshipStoreConnectionProfileResponse } from "@/lib/dropship-ops-surface";
 
@@ -44,5 +45,73 @@ describe("DropshipPortalSettings store lifecycle actions", () => {
     expect(canChangeStoreConnection(connection)).toBe(true);
     expect(storeOAuthActionTitle("refresh_connection", "ebay", connection.status)).toBe("Reconnect Ebay store");
     expect(storeOAuthActionTitle("change_store", "ebay", connection.status)).toBe("Connect a different Ebay store");
+  });
+
+  it("binds the email verification code to one explicit store action", async () => {
+    vi.stubGlobal("React", React);
+    const {
+      SensitiveActionVerificationPanel,
+      storeVerificationActionContent,
+    } = await import("../DropshipPortalSettings");
+    const connection = makeConnection("grace_period");
+
+    expect(storeVerificationActionContent({
+      connection,
+      emailChallengeAction: "connect_store",
+      intent: "change_store",
+    })).toEqual({
+      actionLabel: "Connect a different Ebay store: marz_cards",
+      confirmLabel: "Verify and connect a different Ebay store",
+    });
+
+    const markup = renderToStaticMarkup(React.createElement(SensitiveActionVerificationPanel, {
+      connection,
+      emailChallengeAction: "connect_store",
+      intent: "change_store",
+      onCancel: () => undefined,
+      onConfirm: () => undefined,
+      onVerificationCodeChange: () => undefined,
+      pendingStoreAction: null,
+      verificationCode: "813606",
+    }));
+
+    expect(markup).toContain("verification code sent to your email");
+    expect(markup).toContain("Selected action:");
+    expect(markup).toContain("Connect a different Ebay store: marz_cards");
+    expect(markup).toContain("Verify and connect a different Ebay store");
+    expect(markup).not.toContain("Verify and reconnect");
+  });
+
+  it("locks every ordinary store action while one verification challenge is active", async () => {
+    vi.stubGlobal("React", React);
+    const { storeActionButtonsLocked } = await import("../DropshipPortalSettings");
+
+    expect(storeActionButtonsLocked("connect_store", null)).toBe(true);
+    expect(storeActionButtonsLocked("disconnect_store", null)).toBe(true);
+    expect(storeActionButtonsLocked(null, "reauth-send-code")).toBe(true);
+    expect(storeActionButtonsLocked(null, null)).toBe(false);
+  });
+
+  it("uses action-specific confirmation copy for reconnect and disconnect", async () => {
+    vi.stubGlobal("React", React);
+    const { storeVerificationActionContent } = await import("../DropshipPortalSettings");
+    const connection = makeConnection("grace_period");
+
+    expect(storeVerificationActionContent({
+      connection,
+      emailChallengeAction: "connect_store",
+      intent: "refresh_connection",
+    })).toEqual({
+      actionLabel: "Reconnect Ebay store: marz_cards",
+      confirmLabel: "Verify and reconnect the Ebay store",
+    });
+    expect(storeVerificationActionContent({
+      connection,
+      emailChallengeAction: "disconnect_store",
+      intent: "refresh_connection",
+    })).toEqual({
+      actionLabel: "Disconnect marz_cards",
+      confirmLabel: "Verify and disconnect marz_cards",
+    });
   });
 });

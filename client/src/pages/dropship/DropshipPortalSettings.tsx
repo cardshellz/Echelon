@@ -86,6 +86,15 @@ export default function DropshipPortalSettings() {
     queryFn: () => fetchJson<DropshipStoreConnectionListResponse>("/api/dropship/store-connections"),
   });
   const settings = settingsQuery.data?.settings;
+  const storeConnections = storeConnectionsQuery.data?.connections ?? [];
+  const verificationTargetId = emailChallengeAction === "connect_store"
+    ? reauthorizeTargetId
+    : emailChallengeAction === "disconnect_store"
+      ? disconnectTargetId
+      : null;
+  const verificationConnection = verificationTargetId === null
+    ? null
+    : storeConnections.find((connection) => connection.storeConnectionId === verificationTargetId) ?? null;
 
   const hasActiveProof = (action: DropshipSensitiveAction) => {
     return isDropshipSensitiveProofActive({
@@ -152,9 +161,8 @@ export default function DropshipPortalSettings() {
 
   async function disconnectStore(connection: DropshipStoreConnectionProfileResponse): Promise<void> {
     setDisconnectTargetId(connection.storeConnectionId);
+    if (!await ensureDisconnectProof()) return;
     try {
-      if (!await ensureDisconnectProof()) return;
-
       await runStoreAction("disconnect", async () => {
         const response = await postJson<DropshipStoreConnectionDisconnectResponse>(
           `/api/dropship/store-connections/${connection.storeConnectionId}/disconnect`,
@@ -192,15 +200,21 @@ export default function DropshipPortalSettings() {
   async function reauthorizeStore(connection: DropshipStoreConnectionProfileResponse, intent: DropshipStoreOAuthIntent): Promise<void> {
     setReauthorizeTargetId(connection.storeConnectionId);
     setReauthorizeIntent(intent);
+    if (intent === "refresh_connection" && !canRefreshStoreConnection(connection)) {
+      setReauthorizeTargetId(null);
+      return;
+    }
+    if (intent === "change_store" && !canChangeStoreConnection(connection)) {
+      setReauthorizeTargetId(null);
+      return;
+    }
+    if (connection.platform === "shopify" && !connection.shopDomain) {
+      setError("Shopify authorization requires the stored shop domain. Disconnect and connect the store again if the domain is missing.");
+      setReauthorizeTargetId(null);
+      return;
+    }
+    if (!await ensureConnectProof(intent, connection)) return;
     try {
-      if (intent === "refresh_connection" && !canRefreshStoreConnection(connection)) return;
-      if (intent === "change_store" && !canChangeStoreConnection(connection)) return;
-      if (connection.platform === "shopify" && !connection.shopDomain) {
-        setError("Shopify authorization requires the stored shop domain. Disconnect and connect the store again if the domain is missing.");
-        return;
-      }
-      if (!await ensureConnectProof(intent, connection)) return;
-
       await runStoreAction("reauth-start", async () => {
         const result = await postJson<DropshipStoreConnectionOAuthStartResponse>(
           "/api/dropship/store-connections/oauth/start",
@@ -216,6 +230,27 @@ export default function DropshipPortalSettings() {
     } finally {
       setReauthorizeTargetId(null);
     }
+  }
+
+  function cancelSensitiveActionVerification(): void {
+    setEmailChallengeAction(null);
+    setVerificationCode("");
+    setDisconnectTargetId(null);
+    setReauthorizeTargetId(null);
+    setError("");
+  }
+
+  async function confirmSensitiveActionVerification(): Promise<void> {
+    if (!emailChallengeAction || !verificationConnection) {
+      cancelSensitiveActionVerification();
+      setError("The selected store action is no longer available. Choose the action again.");
+      return;
+    }
+    if (emailChallengeAction === "disconnect_store") {
+      await disconnectStore(verificationConnection);
+      return;
+    }
+    await reauthorizeStore(verificationConnection, reauthorizeIntent);
   }
 
   async function runStoreAction(action: PendingStoreAction, task: () => Promise<void>): Promise<boolean> {
@@ -292,9 +327,13 @@ export default function DropshipPortalSettings() {
               </Alert>
             )}
 
-            {emailChallengeAction && (
+            {emailChallengeAction && verificationConnection && (
               <SensitiveActionVerificationPanel
                 emailChallengeAction={emailChallengeAction}
+                connection={verificationConnection}
+                intent={reauthorizeIntent}
+                onCancel={cancelSensitiveActionVerification}
+                onConfirm={confirmSensitiveActionVerification}
                 pendingStoreAction={pendingStoreAction}
                 verificationCode={verificationCode}
                 onVerificationCodeChange={setVerificationCode}
@@ -308,7 +347,6 @@ export default function DropshipPortalSettings() {
               pendingStoreAction={pendingStoreAction}
               disconnectTargetId={disconnectTargetId}
               reauthorizeTargetId={reauthorizeTargetId}
-              verificationCode={verificationCode}
               onDisconnect={disconnectStore}
               onReauthorize={reauthorizeStore}
               reauthorizeIntent={reauthorizeIntent}
@@ -370,7 +408,6 @@ function StoreConnectionsPanel({
   reauthorizeIntent,
   reauthorizeTargetId,
   result,
-  verificationCode,
 }: {
   disconnectTargetId: number | null;
   emailChallengeAction: DropshipSensitiveAction | null;
@@ -381,7 +418,6 @@ function StoreConnectionsPanel({
   reauthorizeIntent: DropshipStoreOAuthIntent;
   reauthorizeTargetId: number | null;
   result: DropshipStoreConnectionListResponse | undefined;
-  verificationCode: string;
 }) {
   if (isLoading) {
     return (
@@ -424,7 +460,6 @@ function StoreConnectionsPanel({
               pendingStoreAction={pendingStoreAction}
               reauthorizeIntent={reauthorizeIntent}
               reauthorizeTargetId={reauthorizeTargetId}
-              verificationCode={verificationCode}
               onDisconnect={onDisconnect}
               onReauthorize={onReauthorize}
             />
@@ -453,7 +488,6 @@ function StoreConnectionCard({
   reauthorizeIntent,
   reauthorizeTargetId,
   setupChecks,
-  verificationCode,
 }: {
   connection: DropshipStoreConnectionProfileResponse;
   disconnectTargetId: number | null;
@@ -464,16 +498,15 @@ function StoreConnectionCard({
   reauthorizeIntent: DropshipStoreOAuthIntent;
   reauthorizeTargetId: number | null;
   setupChecks: DropshipStoreConnectionSetupCheck[];
-  verificationCode: string;
 }) {
   const isDisconnectTarget = disconnectTargetId === connection.storeConnectionId;
   const isReauthorizeTarget = reauthorizeTargetId === connection.storeConnectionId;
-  const pending = pendingStoreAction !== null;
   const canDisconnect = canDisconnectStoreConnection(connection);
   const canRefresh = canRefreshStoreConnection(connection);
   const canChange = canChangeStoreConnection(connection);
-  const disconnectDisabled = !canDisconnect || pending || (emailChallengeAction === "disconnect_store" && verificationCode.length !== 6);
-  const reauthorizeDisabled = pending || (emailChallengeAction === "connect_store" && verificationCode.length !== 6);
+  const actionSelectionLocked = storeActionButtonsLocked(emailChallengeAction, pendingStoreAction);
+  const disconnectDisabled = !canDisconnect || actionSelectionLocked;
+  const reauthorizeDisabled = actionSelectionLocked;
   const openSetupChecks = setupChecks.filter((check) => !check.resolvedAt);
 
   return (
@@ -526,40 +559,44 @@ function StoreConnectionCard({
         </div>
       )}
 
-      <div className="mt-4 grid gap-2 sm:grid-cols-3">
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
         {canRefresh && (
           <Button
             type="button"
-            className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+            className="h-auto min-h-10 min-w-0 gap-2 whitespace-normal bg-[#C060E0] text-center hover:bg-[#a94bc9]"
             disabled={reauthorizeDisabled}
             onClick={() => onReauthorize(connection, "refresh_connection")}
           >
-            {reauthorizeButtonIcon({ emailChallengeAction, intent: "refresh_connection", isReauthorizeTarget, pendingStoreAction, reauthorizeIntent })}
-            {reauthorizeButtonLabel({ emailChallengeAction, intent: "refresh_connection", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent, status: connection.status })}
+            {reauthorizeButtonIcon({ intent: "refresh_connection", isReauthorizeTarget, pendingStoreAction, reauthorizeIntent })}
+            {reauthorizeButtonLabel({ intent: "refresh_connection", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent, status: connection.status })}
           </Button>
         )}
         {canChange && (
           <Button
             type="button"
             variant={canRefresh ? "outline" : "default"}
-            className={canRefresh ? "h-10 gap-2" : "h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"}
+            className={canRefresh
+              ? "h-auto min-h-10 min-w-0 gap-2 whitespace-normal text-center"
+              : "h-auto min-h-10 min-w-0 gap-2 whitespace-normal bg-[#C060E0] text-center hover:bg-[#a94bc9]"}
             disabled={reauthorizeDisabled}
             onClick={() => onReauthorize(connection, "change_store")}
           >
-            {reauthorizeButtonIcon({ emailChallengeAction, intent: "change_store", isReauthorizeTarget, pendingStoreAction, reauthorizeIntent })}
-            {reauthorizeButtonLabel({ emailChallengeAction, intent: "change_store", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent, status: connection.status })}
+            {reauthorizeButtonIcon({ intent: "change_store", isReauthorizeTarget, pendingStoreAction, reauthorizeIntent })}
+            {reauthorizeButtonLabel({ intent: "change_store", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent, status: connection.status })}
           </Button>
         )}
-        <Button
-          type="button"
-          variant="destructive"
-          className={canRefresh || canChange ? "h-10 gap-2" : "h-10 w-full gap-2 sm:col-span-3"}
-          disabled={disconnectDisabled}
-          onClick={() => onDisconnect(connection)}
-        >
-          {disconnectButtonIcon({ emailChallengeAction, isDisconnectTarget, pendingStoreAction })}
-          {disconnectButtonLabel({ emailChallengeAction, isDisconnectTarget, pendingStoreAction })}
-        </Button>
+        {canDisconnect && (
+          <Button
+            type="button"
+            variant="destructive"
+            className="h-auto min-h-10 w-full gap-2 whitespace-normal text-center sm:col-span-2"
+            disabled={disconnectDisabled}
+            onClick={() => onDisconnect(connection)}
+          >
+            {disconnectButtonIcon({ isDisconnectTarget, pendingStoreAction })}
+            {disconnectButtonLabel({ isDisconnectTarget, pendingStoreAction })}
+          </Button>
+        )}
       </div>
       {!canDisconnect && (
         <p className="mt-2 text-xs text-zinc-500">
@@ -570,34 +607,96 @@ function StoreConnectionCard({
   );
 }
 
-function SensitiveActionVerificationPanel({
+export function storeActionButtonsLocked(
+  emailChallengeAction: DropshipSensitiveAction | null,
+  pendingStoreAction: PendingStoreAction,
+): boolean {
+  return emailChallengeAction !== null || pendingStoreAction !== null;
+}
+
+export function storeVerificationActionContent(input: {
+  connection: DropshipStoreConnectionProfileResponse;
+  emailChallengeAction: DropshipSensitiveAction;
+  intent: DropshipStoreOAuthIntent;
+}): {
+  actionLabel: string;
+  confirmLabel: string;
+} {
+  const storeName = connectionDisplayName(input.connection);
+  if (input.emailChallengeAction === "disconnect_store") {
+    return {
+      actionLabel: `Disconnect ${storeName}`,
+      confirmLabel: `Verify and disconnect ${storeName}`,
+    };
+  }
+  return {
+    actionLabel: `${storeOAuthActionTitle(input.intent, input.connection.platform, input.connection.status)}: ${storeName}`,
+    confirmLabel: `Verify and ${storeOAuthActionText(input.intent, input.connection.platform, input.connection.status)}`,
+  };
+}
+
+export function SensitiveActionVerificationPanel({
+  connection,
   emailChallengeAction,
+  intent,
+  onCancel,
+  onConfirm,
   onVerificationCodeChange,
   pendingStoreAction,
   verificationCode,
 }: {
+  connection: DropshipStoreConnectionProfileResponse;
   emailChallengeAction: DropshipSensitiveAction;
+  intent: DropshipStoreOAuthIntent;
+  onCancel: () => void;
+  onConfirm: () => void;
   onVerificationCodeChange: (value: string) => void;
   pendingStoreAction: PendingStoreAction;
   verificationCode: string;
 }) {
+  const content = storeVerificationActionContent({ connection, emailChallengeAction, intent });
+  const pending = pendingStoreAction !== null;
   return (
-    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
-      <div className="max-w-sm space-y-2">
-        <Label>{sensitiveActionVerificationLabel(emailChallengeAction)}</Label>
-        <InputOTP
-          maxLength={6}
-          value={verificationCode}
-          onChange={onVerificationCodeChange}
-          containerClassName="justify-between"
-          disabled={pendingStoreAction !== null}
-        >
-          <InputOTPGroup>
-            {Array.from({ length: 6 }).map((_, index) => (
-              <InputOTPSlot key={index} index={index} className="h-10 w-10 text-sm" />
-            ))}
-          </InputOTPGroup>
-        </InputOTP>
+    <section className="mt-5 rounded-md border border-[#C060E0]/40 bg-white p-4" aria-labelledby="store-action-verification-title">
+      <div>
+        <h2 id="store-action-verification-title" className="font-semibold">Confirm selected store action</h2>
+        <p className="mt-1 text-sm text-zinc-600">
+          Enter the 6-digit verification code sent to your email. This code authorizes only the selected action below.
+        </p>
+      </div>
+      <div className="mt-4 rounded-md border border-violet-200 bg-violet-50 p-3 text-sm text-violet-950">
+        <span className="font-medium">Selected action:</span> {content.actionLabel}
+      </div>
+      <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div className="space-y-2">
+          <Label>{sensitiveActionVerificationLabel(emailChallengeAction)}</Label>
+          <InputOTP
+            maxLength={6}
+            value={verificationCode}
+            onChange={onVerificationCodeChange}
+            disabled={pending}
+          >
+            <InputOTPGroup>
+              {Array.from({ length: 6 }).map((_, index) => (
+                <InputOTPSlot key={index} index={index} className="h-10 w-10 text-sm" />
+              ))}
+            </InputOTPGroup>
+          </InputOTP>
+        </div>
+        <div className="flex flex-col-reverse gap-2 sm:flex-row lg:justify-end">
+          <Button type="button" variant="outline" disabled={pending} onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant={emailChallengeAction === "disconnect_store" ? "destructive" : "default"}
+            className={emailChallengeAction === "connect_store" ? "bg-[#C060E0] hover:bg-[#a94bc9]" : undefined}
+            disabled={pending || verificationCode.length !== 6}
+            onClick={onConfirm}
+          >
+            {pending ? "Verifying code" : content.confirmLabel}
+          </Button>
+        </div>
       </div>
     </section>
   );
@@ -678,7 +777,6 @@ function setupCheckTone(severity: string): string {
 }
 
 function disconnectButtonLabel(input: {
-  emailChallengeAction: DropshipSensitiveAction | null;
   isDisconnectTarget: boolean;
   pendingStoreAction: PendingStoreAction;
 }): string {
@@ -686,23 +784,19 @@ function disconnectButtonLabel(input: {
   if (input.isDisconnectTarget && input.pendingStoreAction === "disconnect-verify-code") return "Verifying code";
   if (input.isDisconnectTarget && input.pendingStoreAction === "disconnect-passkey-proof") return "Waiting for passkey";
   if (input.isDisconnectTarget && input.pendingStoreAction === "disconnect") return "Disconnecting";
-  if (input.emailChallengeAction === "disconnect_store") return "Verify and disconnect";
   return "Disconnect";
 }
 
 function disconnectButtonIcon(input: {
-  emailChallengeAction: DropshipSensitiveAction | null;
   isDisconnectTarget: boolean;
   pendingStoreAction: PendingStoreAction;
 }) {
   if (input.isDisconnectTarget && input.pendingStoreAction === "disconnect-passkey-proof") return <Fingerprint className="h-4 w-4" />;
   if (input.isDisconnectTarget && (input.pendingStoreAction === "disconnect-send-code" || input.pendingStoreAction === "disconnect-verify-code")) return <Mail className="h-4 w-4" />;
-  if (input.emailChallengeAction === "disconnect_store") return <Mail className="h-4 w-4" />;
   return <Plug className="h-4 w-4" />;
 }
 
 function reauthorizeButtonLabel(input: {
-  emailChallengeAction: DropshipSensitiveAction | null;
   intent: DropshipStoreOAuthIntent;
   isReauthorizeTarget: boolean;
   pendingStoreAction: PendingStoreAction;
@@ -715,12 +809,10 @@ function reauthorizeButtonLabel(input: {
   if (isActiveIntent && input.pendingStoreAction === "reauth-verify-code") return "Verifying code";
   if (isActiveIntent && input.pendingStoreAction === "reauth-passkey-proof") return "Waiting for passkey";
   if (isActiveIntent && input.pendingStoreAction === "reauth-start") return "Opening authorization";
-  if (isActiveIntent && input.emailChallengeAction === "connect_store") return `Verify and ${storeOAuthActionText(input.intent, input.platform, input.status)}`;
   return storeOAuthActionTitle(input.intent, input.platform, input.status);
 }
 
 function reauthorizeButtonIcon(input: {
-  emailChallengeAction: DropshipSensitiveAction | null;
   intent: DropshipStoreOAuthIntent;
   isReauthorizeTarget: boolean;
   pendingStoreAction: PendingStoreAction;
@@ -729,7 +821,6 @@ function reauthorizeButtonIcon(input: {
   const isActiveIntent = input.isReauthorizeTarget && input.reauthorizeIntent === input.intent;
   if (isActiveIntent && input.pendingStoreAction === "reauth-passkey-proof") return <Fingerprint className="h-4 w-4" />;
   if (isActiveIntent && (input.pendingStoreAction === "reauth-send-code" || input.pendingStoreAction === "reauth-verify-code")) return <Mail className="h-4 w-4" />;
-  if (isActiveIntent && input.emailChallengeAction === "connect_store") return <Mail className="h-4 w-4" />;
   return input.intent === "refresh_connection" ? <RefreshCw className="h-4 w-4" /> : <Store className="h-4 w-4" />;
 }
 
