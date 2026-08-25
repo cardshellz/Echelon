@@ -18,6 +18,7 @@ import {
   isEbayResourceAuthFailureStatus,
   isEbayTokenRefreshAuthFailureStatus,
 } from "./dropship-ebay-auth-failure";
+import { buildEbayPostOrderAuthorization } from "./dropship-ebay-post-order-auth";
 
 /**
  * eBay return-intake provider (design spec D2a): polls the Post-Order API
@@ -246,7 +247,7 @@ export class EbayDropshipReturnIntakeProvider implements DropshipReturnIntakePro
         response = await this.fetchImpl(`${EBAY_BASE_URLS[input.environment]}${input.path}`, {
           method: "GET",
           headers: {
-            Authorization: `Bearer ${input.credential.accessToken}`,
+            Authorization: buildEbayPostOrderAuthorization(input.credential.accessToken),
             Accept: "application/json",
             "X-EBAY-C-MARKETPLACE-ID": input.marketplaceId,
           },

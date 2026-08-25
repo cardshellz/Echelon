@@ -12,6 +12,7 @@ import {
   isEbayResourceAuthFailureStatus,
   isEbayTokenRefreshAuthFailureStatus,
 } from "./dropship-ebay-auth-failure";
+import { buildEbayPostOrderAuthorization } from "./dropship-ebay-post-order-auth";
 
 type FetchLike = typeof fetch;
 type EbayEnvironment = "sandbox" | "production";
@@ -186,7 +187,7 @@ export class EbayDropshipOrderCancellationProvider implements DropshipMarketplac
     const response = await this.fetchImpl(`${EBAY_BASE_URLS[input.config.environment]}${input.path}`, {
       method: input.method,
       headers: {
-        Authorization: `Bearer ${input.credential.accessToken}`,
+        Authorization: buildEbayPostOrderAuthorization(input.credential.accessToken),
         "Content-Type": "application/json",
         Accept: "application/json",
         "Content-Language": "en-US",
