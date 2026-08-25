@@ -1,6 +1,9 @@
 import { getDatabasePoolSnapshot } from "../db";
 import type { PostgresPoolSnapshot } from "./postgres-pool-observability";
-import { getSchedulerLockPoolSnapshot } from "./scheduler-lock";
+import {
+  getSchedulerLockPoolSnapshot,
+  type SchedulerLockPoolSnapshot,
+} from "./scheduler-lock";
 
 interface ErrorWithCode extends Error {
   code?: unknown;
@@ -11,7 +14,7 @@ export interface SchedulerFailureContext {
   errorName: string | null;
   errorCode: string | null;
   databasePool: PostgresPoolSnapshot;
-  schedulerLockPool: PostgresPoolSnapshot | null;
+  schedulerLockPool: SchedulerLockPoolSnapshot | null;
 }
 
 export function buildSchedulerFailureContext(error: unknown): SchedulerFailureContext {
