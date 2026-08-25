@@ -1827,6 +1827,69 @@ export const insertVendorInvoiceLineSchema = createInsertSchema(vendorInvoiceLin
 export type InsertVendorInvoiceLine = z.infer<typeof insertVendorInvoiceLineSchema>;
 export type VendorInvoiceLine = typeof vendorInvoiceLines.$inferSelect;
 
+// Immutable evidence for the conservative historical repair that restores
+// missing invoice mills from a linked PO without erasing real price variance.
+export const vendorInvoiceUnitCostRepairs = procurementSchema.table(
+  "vendor_invoice_unit_cost_repairs",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    vendorInvoiceLineId: integer("vendor_invoice_line_id").notNull()
+      .references(() => vendorInvoiceLines.id, { onDelete: "restrict" }),
+    purchaseOrderLineId: integer("purchase_order_line_id").notNull()
+      .references(() => purchaseOrderLines.id, { onDelete: "restrict" }),
+    repairKey: varchar("repair_key", { length: 120 }).notNull(),
+    evidenceType: varchar("evidence_type", { length: 50 }).notNull(),
+    previousUnitCostCents: bigint("previous_unit_cost_cents", { mode: "number" }).notNull(),
+    previousUnitCostMills: bigint("previous_unit_cost_mills", { mode: "number" }),
+    repairedUnitCostCents: bigint("repaired_unit_cost_cents", { mode: "number" }).notNull(),
+    repairedUnitCostMills: bigint("repaired_unit_cost_mills", { mode: "number" }).notNull(),
+    invoiceQty: integer("invoice_qty").notNull(),
+    invoiceLineTotalCents: bigint("invoice_line_total_cents", { mode: "number" }).notNull(),
+    poOrderQty: integer("po_order_qty").notNull(),
+    poUnitCostCents: bigint("po_unit_cost_cents", { mode: "number" }).notNull(),
+    poUnitCostMills: bigint("po_unit_cost_mills", { mode: "number" }).notNull(),
+    poTotalProductCostCents: bigint("po_total_product_cost_cents", { mode: "number" }).notNull(),
+    poLineTotalCents: bigint("po_line_total_cents", { mode: "number" }),
+    previousMatchStatus: varchar("previous_match_status", { length: 20 }).notNull(),
+    repairedAt: timestamp("repaired_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("vendor_invoice_unit_cost_repairs_identity_uq")
+      .on(table.vendorInvoiceLineId, table.repairKey),
+    index("vendor_invoice_unit_cost_repairs_po_line_idx")
+      .on(table.purchaseOrderLineId, table.repairedAt, table.id),
+    check("vendor_invoice_unit_cost_repairs_evidence_chk", sql`
+      ${table.evidenceType} IN (
+        'proportional_po_product_total',
+        'proportional_po_line_total',
+        'derived_invoice_mills_match'
+      )
+    `),
+    check("vendor_invoice_unit_cost_repairs_previous_mills_chk", sql`
+      ${table.previousUnitCostMills} IS NULL
+    `),
+    check("vendor_invoice_unit_cost_repairs_money_chk", sql`
+      ${table.previousUnitCostCents} >= 0
+      AND ${table.repairedUnitCostCents} >= 0
+      AND ${table.repairedUnitCostMills} >= 0
+      AND ${table.invoiceLineTotalCents} >= 0
+      AND ${table.poUnitCostCents} >= 0
+      AND ${table.poUnitCostMills} >= 0
+      AND ${table.poTotalProductCostCents} >= 0
+      AND (${table.poLineTotalCents} IS NULL OR ${table.poLineTotalCents} >= 0)
+    `),
+    check("vendor_invoice_unit_cost_repairs_quantity_chk", sql`
+      ${table.invoiceQty} > 0 AND ${table.poOrderQty} > 0
+    `),
+    check("vendor_invoice_unit_cost_repairs_cents_mirror_chk", sql`
+      ${table.repairedUnitCostCents}::numeric =
+        floor((${table.repairedUnitCostMills}::numeric + 50) / 100)
+    `),
+  ],
+);
+
+export type VendorInvoiceUnitCostRepair = typeof vendorInvoiceUnitCostRepairs.$inferSelect;
+
 // ============================================================================
 // 19. VENDOR INVOICE ATTACHMENTS (refs vendorInvoices)
 // ============================================================================
