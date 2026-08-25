@@ -422,6 +422,51 @@ export const dropshipStoreConnections = dropshipSchema.table(
     ),
   ],
 );
+export const dropshipStoreOrderIntakeHealth = dropshipSchema.table(
+  "dropship_store_order_intake_health",
+  {
+    storeConnectionId: integer("store_connection_id")
+      .primaryKey()
+      .references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
+    mode: varchar("mode", { length: 20 }).notNull(),
+    status: varchar("status", { length: 20 }).notNull(),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+    lastFailureAt: timestamp("last_failure_at", { withTimezone: true }),
+    lastFailureCode: varchar("last_failure_code", { length: 100 }),
+    lastFailureMessage: text("last_failure_message"),
+    statusChangedAt: timestamp("status_changed_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("dropship_order_intake_health_status_idx").on(table.status),
+    index("dropship_order_intake_health_attempt_idx").on(table.lastAttemptAt),
+    check(
+      "dropship_order_intake_health_mode_chk",
+      sql`${table.mode} IN ('poll','webhook')`,
+    ),
+    check(
+      "dropship_order_intake_health_status_chk",
+      sql`${table.status} IN ('healthy','warning','degraded','stopped')`,
+    ),
+    check(
+      "dropship_order_intake_health_failure_count_chk",
+      sql`${table.consecutiveFailures} >= 0`,
+    ),
+    check(
+      "dropship_order_intake_health_failure_evidence_chk",
+      sql`(${table.lastFailureCode} IS NULL) = (${table.lastFailureMessage} IS NULL)`,
+    ),
+    check(
+      "dropship_order_intake_health_healthy_chk",
+      sql`${table.status} <> 'healthy' OR (${table.lastSuccessAt} IS NOT NULL AND ${table.consecutiveFailures} = 0)`,
+    ),
+  ],
+);
+
+
 
 export const dropshipStoreConnectionTokens = dropshipSchema.table(
   "dropship_store_connection_tokens",

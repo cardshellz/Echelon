@@ -240,6 +240,9 @@
   "dropship.dropship_store_listing_configs": [
     "modules/dropship"
   ],
+  "dropship.dropship_store_order_intake_health": [
+    "modules/dropship"
+  ],
   "dropship.dropship_store_setup_checks": [
     "modules/dropship"
   ],
