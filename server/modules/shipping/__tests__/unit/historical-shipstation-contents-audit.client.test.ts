@@ -4,6 +4,16 @@ import {
   createHistoricalShipStationContentsClient,
   HistoricalShipStationContentsClientError,
 } from "../../historical-shipstation-contents-audit.client";
+import type { HistoricalShipStationExpectedContentsEvidence } from "../../historical-shipstation-contents-recovery.domain";
+
+const expectedContents: HistoricalShipStationExpectedContentsEvidence = {
+  kind: "available",
+  source: "physical_shipment",
+  lines: [
+    { wmsShipmentItemId: 7_001, sku: "SKU-A", quantity: 2 },
+    { wmsShipmentItemId: 7_002, sku: "SKU-B", quantity: 1 },
+  ],
+};
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -34,12 +44,16 @@ describe("historical ShipStation contents audit client", () => {
         ],
       }],
     }));
-    const result = await client(fetchImpl as typeof fetch).loadShipmentContents(44_001);
+    const result = await client(fetchImpl as typeof fetch).loadShipmentContents(
+      44_001,
+      expectedContents,
+    );
 
     expect(result).toEqual({
       kind: "found",
       evidence: {
         status: "authoritative",
+        recoveryStatus: "provider_line_keys_authoritative",
         providerItemCount: 2,
         recognizedProviderItemCount: 2,
         canonicalLineCount: 2,
@@ -64,6 +78,56 @@ describe("historical ShipStation contents audit client", () => {
     expect(JSON.stringify(result)).not.toContain("SECRET");
   });
 
+  it("classifies exact SKU and quantity recovery without retaining provider or WMS SKUs", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      shipments: [{
+        shipmentId: 44_001,
+        shipmentItems: [
+          { lineItemKey: null, sku: "SKU-B", quantity: 1, name: "SECRET-NAME-B" },
+          { lineItemKey: null, sku: "SKU-A", quantity: 2, name: "SECRET-NAME-A" },
+        ],
+      }],
+    }));
+
+    const result = await client(fetchImpl as typeof fetch).loadShipmentContents(
+      44_001,
+      expectedContents,
+    );
+
+    expect(result).toMatchObject({
+      kind: "found",
+      evidence: {
+        status: "unrecognized",
+        recoveryStatus: "exact_unique_wms_match",
+        providerItemCount: 2,
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/SECRET|SKU-A|SKU-B/);
+  });
+
+  it("keeps provider/WMS contradictions in review without returning line details", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      shipments: [{
+        shipmentId: 44_001,
+        shipmentItems: [{ lineItemKey: null, sku: "CONFLICTING-SKU", quantity: 5 }],
+      }],
+    }));
+
+    const result = await client(fetchImpl as typeof fetch).loadShipmentContents(
+      44_001,
+      expectedContents,
+    );
+
+    expect(result).toMatchObject({
+      kind: "found",
+      evidence: {
+        status: "unrecognized",
+        recoveryStatus: "provider_wms_conflict",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("CONFLICTING-SKU");
+  });
+
   it.each([
     [undefined, "omitted"],
     [[], "empty"],
@@ -79,7 +143,7 @@ describe("historical ShipStation contents audit client", () => {
     }));
 
     await expect(
-      client(fetchImpl as typeof fetch).loadShipmentContents(44_001),
+      client(fetchImpl as typeof fetch).loadShipmentContents(44_001, expectedContents),
     ).resolves.toMatchObject({ kind: "found", evidence: { status } });
   });
 
@@ -88,7 +152,7 @@ describe("historical ShipStation contents audit client", () => {
       shipments: [{ shipmentId: 44_002, shipmentItems: [] }],
     }));
     await expect(
-      client(fetchImpl as typeof fetch).loadShipmentContents(44_001),
+      client(fetchImpl as typeof fetch).loadShipmentContents(44_001, expectedContents),
     ).resolves.toEqual({ kind: "not_found" });
   });
 
@@ -99,7 +163,10 @@ describe("historical ShipStation contents audit client", () => {
         { shipmentId: 44_001, shipmentItems: [] },
       ],
     }));
-    const promise = client(fetchImpl as typeof fetch).loadShipmentContents(44_001);
+    const promise = client(fetchImpl as typeof fetch).loadShipmentContents(
+      44_001,
+      expectedContents,
+    );
 
     await expect(promise).rejects.toMatchObject({ code: "INVALID_RESPONSE", context: {} });
     await promise.catch((error: unknown) => {
@@ -109,7 +176,10 @@ describe("historical ShipStation contents audit client", () => {
 
   it("classifies unsuccessful responses without retaining their body", async () => {
     const fetchImpl = vi.fn(async () => new Response("SECRET-PROVIDER-BODY", { status: 401 }));
-    const promise = client(fetchImpl as typeof fetch).loadShipmentContents(44_001);
+    const promise = client(fetchImpl as typeof fetch).loadShipmentContents(
+      44_001,
+      expectedContents,
+    );
 
     await expect(promise).rejects.toMatchObject({
       code: "HTTP",

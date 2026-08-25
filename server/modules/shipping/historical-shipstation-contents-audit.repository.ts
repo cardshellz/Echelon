@@ -1,10 +1,13 @@
 import type { PoolClient } from "pg";
 
+import type { HistoricalShipStationExpectedContentsEvidence } from "./historical-shipstation-contents-recovery.domain";
 import { assertShipmentLifecycleShadowRoleIsReadOnly } from "./shipment-lifecycle-shadow-audit.repository";
 
 type QueryClient = Pick<PoolClient, "query">;
 
 const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
+const MAX_LINKED_PACKAGE_LINES = 500;
 
 export const HISTORICAL_SHIPSTATION_CONTENTS_AUDIT_LIMITS = Object.freeze({
   defaultCandidateLimit: 25,
@@ -16,6 +19,57 @@ export const HISTORICAL_SHIPSTATION_CONTENTS_AUDIT_LIMITS = Object.freeze({
   defaultIdleInTransactionTimeoutMs: 45_000,
   maxIdleInTransactionTimeoutMs: 300_000,
 });
+
+export const HISTORICAL_SHIPSTATION_CONTENTS_LINEAGE_REQUIRED_RELATIONS = Object.freeze([
+  "catalog.product_variants",
+  "wms.order_items",
+  "wms.outbound_shipment_items",
+  "wms.physical_shipment_items",
+  "wms.shipping_provider_label_links",
+] as const);
+
+const LINEAGE_REQUIRED_RELATIONS_SQL = HISTORICAL_SHIPSTATION_CONTENTS_LINEAGE_REQUIRED_RELATIONS
+  .map((relation) => `('${relation}', '${relation.split(".")[0]}')`)
+  .join(",\n      ");
+
+export const HISTORICAL_SHIPSTATION_CONTENTS_LINEAGE_ROLE_ASSERTION_SQL = `
+  WITH required_relations(qualified_name, schema_name) AS (
+    VALUES
+      ${LINEAGE_REQUIRED_RELATIONS_SQL}
+  ),
+  required_relation_state AS MATERIALIZED (
+    SELECT
+      qualified_name,
+      schema_name,
+      to_regclass(qualified_name) AS relation_oid
+    FROM required_relations
+  )
+  SELECT
+    COALESCE((
+      SELECT COUNT(*)
+      FROM required_relation_state
+      WHERE relation_oid IS NULL
+        OR NOT COALESCE(
+          has_table_privilege(current_user, relation_oid, 'SELECT'),
+          false
+        )
+    ), 0)::text AS missing_required_select_count,
+    COALESCE((
+      SELECT COUNT(*)
+      FROM required_relation_state AS required
+      JOIN pg_catalog.pg_class AS relation
+        ON relation.oid = required.relation_oid
+      WHERE relation.relrowsecurity
+    ), 0)::text AS required_rls_count,
+    COALESCE((
+      SELECT COUNT(*)
+      FROM (
+        SELECT DISTINCT schema_name
+        FROM required_relations
+      ) AS required_schema
+      WHERE NOT has_schema_privilege(current_user, schema_name, 'USAGE')
+    ), 0)::text AS missing_required_schema_usage_count
+`;
 
 export const HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL = `
   SELECT
@@ -46,6 +100,87 @@ export const HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL = `
   LIMIT $1
 `;
 
+export const HISTORICAL_SHIPSTATION_CONTENTS_LINKS_SQL = `
+  SELECT
+    link.shipping_provider_label_id::text AS shipping_provider_label_id,
+    COUNT(DISTINCT link.physical_shipment_id) FILTER (
+      WHERE link.physical_shipment_id IS NOT NULL
+    )::text AS physical_shipment_count,
+    COUNT(DISTINCT link.legacy_wms_shipment_id) FILTER (
+      WHERE link.legacy_wms_shipment_id IS NOT NULL
+    )::text AS legacy_wms_shipment_count
+  FROM wms.shipping_provider_label_links AS link
+  WHERE link.shipping_provider_label_id = ANY($1::bigint[])
+  GROUP BY link.shipping_provider_label_id
+  ORDER BY link.shipping_provider_label_id
+`;
+
+export const HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL = `
+  WITH selected_labels(shipping_provider_label_id) AS (
+    SELECT UNNEST($1::bigint[])
+  ),
+  linked_lines AS (
+    SELECT
+      link.shipping_provider_label_id::text AS shipping_provider_label_id,
+      'physical_shipment'::text AS source_kind,
+      item.legacy_wms_shipment_item_id::text AS wms_shipment_item_id,
+      item.sku,
+      item.quantity_shipped::text AS quantity
+    FROM selected_labels AS selected
+    JOIN wms.shipping_provider_label_links AS link
+      ON link.shipping_provider_label_id = selected.shipping_provider_label_id
+    JOIN wms.physical_shipment_items AS item
+      ON item.physical_shipment_id = link.physical_shipment_id
+    WHERE link.physical_shipment_id IS NOT NULL
+
+    UNION ALL
+
+    SELECT
+      link.shipping_provider_label_id::text AS shipping_provider_label_id,
+      'legacy_wms_shipment'::text AS source_kind,
+      item.id::text AS wms_shipment_item_id,
+      CASE item.shipment_item_purpose
+        WHEN 'customer_fulfillment' THEN order_item.sku
+        WHEN 'replacement' THEN replacement_order_item.sku
+        WHEN 'concession' THEN variant.sku
+        WHEN 'omission_correction' THEN variant.sku
+        WHEN 'unclassified' THEN variant.sku
+        ELSE NULL
+      END AS sku,
+      item.qty::text AS quantity
+    FROM selected_labels AS selected
+    JOIN wms.shipping_provider_label_links AS link
+      ON link.shipping_provider_label_id = selected.shipping_provider_label_id
+    JOIN wms.outbound_shipment_items AS item
+      ON item.shipment_id = link.legacy_wms_shipment_id
+    LEFT JOIN wms.order_items AS order_item
+      ON order_item.id = item.order_item_id
+    LEFT JOIN wms.order_items AS replacement_order_item
+      ON replacement_order_item.id = item.replacement_for_order_item_id
+    LEFT JOIN catalog.product_variants AS variant
+      ON variant.id = item.product_variant_id
+    WHERE link.legacy_wms_shipment_id IS NOT NULL
+  ),
+  ranked_lines AS (
+    SELECT
+      linked_lines.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY shipping_provider_label_id, source_kind
+        ORDER BY wms_shipment_item_id::bigint
+      ) AS source_row_number
+    FROM linked_lines
+  )
+  SELECT
+    shipping_provider_label_id,
+    source_kind,
+    wms_shipment_item_id,
+    sku,
+    quantity
+  FROM ranked_lines
+  WHERE source_row_number <= $2::integer
+  ORDER BY shipping_provider_label_id, source_kind, wms_shipment_item_id::bigint
+`;
+
 export interface HistoricalShipStationContentsAuditRepositoryOptions {
   readonly candidateLimit?: number;
   readonly statementTimeoutMs?: number;
@@ -63,6 +198,7 @@ export interface NormalizedHistoricalShipStationContentsAuditRepositoryOptions {
 export interface HistoricalShipStationContentsCandidate {
   readonly shippingProviderLabelId: string;
   readonly providerShipmentId: number;
+  readonly expectedContents: HistoricalShipStationExpectedContentsEvidence;
 }
 
 export interface HistoricalShipStationContentsCandidateBatch {
@@ -160,7 +296,47 @@ function positiveProviderShipmentId(value: unknown): number {
   return parsed;
 }
 
-function mapCandidate(row: Record<string, unknown>): HistoricalShipStationContentsCandidate {
+function safeCount(value: unknown, field: string): number {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    throw new HistoricalShipStationContentsAuditRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      `${field} must be a nonnegative count`,
+    );
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new HistoricalShipStationContentsAuditRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      `${field} exceeds the JavaScript safe-integer range`,
+    );
+  }
+  return parsed;
+}
+
+function positivePostgresInteger(value: unknown): number | null {
+  if (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed <= POSTGRES_INTEGER_MAX
+    ? parsed
+    : null;
+}
+
+function exactSku(value: unknown): string | null {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 100
+    || value.trim() !== value
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function mapCandidateIdentity(row: Record<string, unknown>): Omit<
+  HistoricalShipStationContentsCandidate,
+  "expectedContents"
+> {
   return Object.freeze({
     shippingProviderLabelId: positiveBigintString(
       row.shipping_provider_label_id,
@@ -168,6 +344,178 @@ function mapCandidate(row: Record<string, unknown>): HistoricalShipStationConten
     ),
     providerShipmentId: positiveProviderShipmentId(row.provider_label_id),
   });
+}
+
+interface LinkedPackageSummary {
+  readonly physicalShipmentCount: number;
+  readonly legacyWmsShipmentCount: number;
+}
+
+type LinkedLineSource = "physical_shipment" | "legacy_wms_shipment";
+
+function unavailableExpectedContents(
+  reason: Extract<HistoricalShipStationExpectedContentsEvidence, { kind: "unavailable" }>["reason"],
+): HistoricalShipStationExpectedContentsEvidence {
+  return Object.freeze({ kind: "unavailable" as const, reason });
+}
+
+function mapLinkedPackageSummaries(
+  rows: readonly Record<string, unknown>[],
+  selectedLabelIds: ReadonlySet<string>,
+): ReadonlyMap<string, LinkedPackageSummary> {
+  const summaries = new Map<string, LinkedPackageSummary>();
+  for (const row of rows) {
+    const labelId = positiveBigintString(
+      row.shipping_provider_label_id,
+      "shipping_provider_label_id",
+    );
+    if (!selectedLabelIds.has(labelId) || summaries.has(labelId)) {
+      throw new HistoricalShipStationContentsAuditRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "Historical ShipStation lineage query returned an unexpected or duplicate label",
+      );
+    }
+    summaries.set(labelId, Object.freeze({
+      physicalShipmentCount: safeCount(
+        row.physical_shipment_count,
+        "physical_shipment_count",
+      ),
+      legacyWmsShipmentCount: safeCount(
+        row.legacy_wms_shipment_count,
+        "legacy_wms_shipment_count",
+      ),
+    }));
+  }
+  return summaries;
+}
+
+function mapLinkedLineRows(
+  rows: readonly Record<string, unknown>[],
+  selectedLabelIds: ReadonlySet<string>,
+): ReadonlyMap<string, ReadonlyMap<LinkedLineSource, readonly Record<string, unknown>[]>> {
+  const mutable = new Map<string, Map<LinkedLineSource, Record<string, unknown>[]>>();
+  for (const row of rows) {
+    const labelId = positiveBigintString(
+      row.shipping_provider_label_id,
+      "shipping_provider_label_id",
+    );
+    if (!selectedLabelIds.has(labelId)) {
+      throw new HistoricalShipStationContentsAuditRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "Historical ShipStation line query returned an unexpected label",
+      );
+    }
+    const source = row.source_kind;
+    if (source !== "physical_shipment" && source !== "legacy_wms_shipment") {
+      throw new HistoricalShipStationContentsAuditRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "Historical ShipStation line query returned an unknown source",
+      );
+    }
+    const bySource = mutable.get(labelId) ?? new Map<LinkedLineSource, Record<string, unknown>[]>();
+    const sourceRows = bySource.get(source) ?? [];
+    sourceRows.push(row);
+    bySource.set(source, sourceRows);
+    mutable.set(labelId, bySource);
+  }
+  const frozen = new Map<string, ReadonlyMap<LinkedLineSource, readonly Record<string, unknown>[]>>();
+  for (const [labelId, bySource] of mutable) {
+    frozen.set(labelId, new Map(
+      [...bySource].map(([source, sourceRows]) => [source, Object.freeze([...sourceRows])]),
+    ));
+  }
+  return frozen;
+}
+
+function availableExpectedContents(
+  source: LinkedLineSource,
+  rows: readonly Record<string, unknown>[],
+): HistoricalShipStationExpectedContentsEvidence {
+  if (rows.length === 0 || rows.length > MAX_LINKED_PACKAGE_LINES) {
+    return unavailableExpectedContents("linked_package_contents_unavailable");
+  }
+  const seenIds = new Set<number>();
+  const lines: Array<{ wmsShipmentItemId: number; sku: string; quantity: number }> = [];
+  for (const row of rows) {
+    const wmsShipmentItemId = positivePostgresInteger(row.wms_shipment_item_id);
+    const quantity = positivePostgresInteger(row.quantity);
+    const sku = exactSku(row.sku);
+    if (
+      wmsShipmentItemId === null
+      || quantity === null
+      || sku === null
+      || seenIds.has(wmsShipmentItemId)
+    ) {
+      return unavailableExpectedContents("linked_package_contents_unavailable");
+    }
+    seenIds.add(wmsShipmentItemId);
+    lines.push(Object.freeze({ wmsShipmentItemId, sku, quantity }));
+  }
+  lines.sort((left, right) => left.wmsShipmentItemId - right.wmsShipmentItemId);
+  return Object.freeze({ kind: "available" as const, source, lines: Object.freeze(lines) });
+}
+
+function expectedContentsForCandidate(
+  labelId: string,
+  summaries: ReadonlyMap<string, LinkedPackageSummary>,
+  lineRows: ReadonlyMap<string, ReadonlyMap<LinkedLineSource, readonly Record<string, unknown>[]>>,
+): HistoricalShipStationExpectedContentsEvidence {
+  const summary = summaries.get(labelId);
+  if (!summary) return unavailableExpectedContents("no_linked_package");
+  if (summary.physicalShipmentCount > 1) {
+    return unavailableExpectedContents("ambiguous_linked_package");
+  }
+  if (summary.physicalShipmentCount === 1) {
+    return availableExpectedContents(
+      "physical_shipment",
+      lineRows.get(labelId)?.get("physical_shipment") ?? [],
+    );
+  }
+  if (summary.legacyWmsShipmentCount > 1) {
+    return unavailableExpectedContents("ambiguous_linked_package");
+  }
+  if (summary.legacyWmsShipmentCount === 1) {
+    return availableExpectedContents(
+      "legacy_wms_shipment",
+      lineRows.get(labelId)?.get("legacy_wms_shipment") ?? [],
+    );
+  }
+  return unavailableExpectedContents("no_linked_package");
+}
+
+async function assertLineageRoleEvidence(client: QueryClient): Promise<void> {
+  const result = await client.query(HISTORICAL_SHIPSTATION_CONTENTS_LINEAGE_ROLE_ASSERTION_SQL);
+  const row = (result.rows as Record<string, unknown>[])[0];
+  if (!row) {
+    throw new HistoricalShipStationContentsAuditRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      "Could not verify the historical ShipStation lineage read privileges",
+    );
+  }
+  const missingRequiredSelectCount = safeCount(
+    row.missing_required_select_count,
+    "missing_required_select_count",
+  );
+  const requiredRlsCount = safeCount(row.required_rls_count, "required_rls_count");
+  const missingRequiredSchemaUsageCount = safeCount(
+    row.missing_required_schema_usage_count,
+    "missing_required_schema_usage_count",
+  );
+  if (
+    missingRequiredSelectCount !== 0
+    || requiredRlsCount !== 0
+    || missingRequiredSchemaUsageCount !== 0
+  ) {
+    throw new HistoricalShipStationContentsAuditRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      "The historical ShipStation audit role cannot read all required lineage relations",
+      Object.freeze({
+        missingRequiredSelectCount,
+        requiredRlsCount,
+        missingRequiredSchemaUsageCount,
+      }),
+    );
+  }
 }
 
 async function loadInsideTransaction(
@@ -184,11 +532,12 @@ async function loadInsideTransaction(
     `${input.idleInTransactionTimeoutMs}ms`,
   ]);
   const roleEvidence = await assertShipmentLifecycleShadowRoleIsReadOnly(client);
+  await assertLineageRoleEvidence(client);
   const result = await client.query(
     HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL,
     [input.candidateLimit + 1],
   );
-  const mapped = (result.rows as Record<string, unknown>[]).map(mapCandidate);
+  const mapped = (result.rows as Record<string, unknown>[]).map(mapCandidateIdentity);
   const seenLabelIds = new Set<string>();
   const seenProviderIds = new Set<number>();
   for (const candidate of mapped) {
@@ -204,11 +553,40 @@ async function loadInsideTransaction(
     seenLabelIds.add(candidate.shippingProviderLabelId);
     seenProviderIds.add(candidate.providerShipmentId);
   }
+
+  const selected = mapped.slice(0, input.candidateLimit);
+  const selectedLabelIds = Object.freeze(selected.map((candidate) => candidate.shippingProviderLabelId));
+  const selectedLabelIdSet = new Set(selectedLabelIds);
+  const linksResult = selectedLabelIds.length === 0
+    ? { rows: [] }
+    : await client.query(HISTORICAL_SHIPSTATION_CONTENTS_LINKS_SQL, [selectedLabelIds]);
+  const linesResult = selectedLabelIds.length === 0
+    ? { rows: [] }
+    : await client.query(HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL, [
+        selectedLabelIds,
+        MAX_LINKED_PACKAGE_LINES + 1,
+      ]);
+  const summaries = mapLinkedPackageSummaries(
+    linksResult.rows as Record<string, unknown>[],
+    selectedLabelIdSet,
+  );
+  const lineRows = mapLinkedLineRows(
+    linesResult.rows as Record<string, unknown>[],
+    selectedLabelIdSet,
+  );
+  const candidates = Object.freeze(selected.map((candidate) => Object.freeze({
+    ...candidate,
+    expectedContents: expectedContentsForCandidate(
+      candidate.shippingProviderLabelId,
+      summaries,
+      lineRows,
+    ),
+  })));
   return Object.freeze({
     candidateLimit: input.candidateLimit,
     batchLimitReached: mapped.length > input.candidateLimit,
     databaseTemporaryPrivilege: roleEvidence.databaseTemporaryPrivilege,
-    candidates: Object.freeze(mapped.slice(0, input.candidateLimit)),
+    candidates,
   });
 }
 
