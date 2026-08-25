@@ -5,6 +5,11 @@ import {
   type ShipStationShipmentContentsEvidenceStatus,
 } from "./carrier-tracking.domain";
 import {
+  classifyHistoricalShipStationContentsRecovery,
+  type HistoricalShipStationContentsRecoveryStatus,
+  type HistoricalShipStationExpectedContentsEvidence,
+} from "./historical-shipstation-contents-recovery.domain";
+import {
   readBoundedResponseText,
   ShipStationTrackingResponseReadError,
 } from "./shipstation-tracking-http";
@@ -27,6 +32,7 @@ const responseSchema = z.object({
 
 export interface HistoricalShipStationContentsEvidenceSummary {
   readonly status: ShipStationShipmentContentsEvidenceStatus;
+  readonly recoveryStatus: HistoricalShipStationContentsRecoveryStatus;
   readonly providerItemCount: number;
   readonly recognizedProviderItemCount: number;
   readonly canonicalLineCount: number;
@@ -43,7 +49,10 @@ export type HistoricalShipStationContentsLookupResult =
     }>;
 
 export interface HistoricalShipStationContentsClient {
-  loadShipmentContents(providerShipmentId: number): Promise<HistoricalShipStationContentsLookupResult>;
+  loadShipmentContents(
+    providerShipmentId: number,
+    expectedContents: HistoricalShipStationExpectedContentsEvidence,
+  ): Promise<HistoricalShipStationContentsLookupResult>;
 }
 
 export type HistoricalShipStationContentsClientErrorCode =
@@ -185,7 +194,10 @@ export function createHistoricalShipStationContentsClient(
   };
 
   return Object.freeze({
-    async loadShipmentContents(providerShipmentId: number) {
+    async loadShipmentContents(
+      providerShipmentId: number,
+      expectedContents: HistoricalShipStationExpectedContentsEvidence,
+    ) {
       if (!Number.isSafeInteger(providerShipmentId) || providerShipmentId <= 0) {
         throw new HistoricalShipStationContentsClientError(
           "INVALID_INPUT",
@@ -284,13 +296,18 @@ export function createHistoricalShipStationContentsClient(
             "ShipStation historical contents response contained duplicate shipment identity",
           );
         }
-        const evidence = normalizeShipStationShipmentContentsEvidence(
-          matches[0].shipmentItems,
-        );
+        const rawProviderItems = matches[0].shipmentItems;
+        const evidence = normalizeShipStationShipmentContentsEvidence(rawProviderItems);
+        const recoveryStatus = classifyHistoricalShipStationContentsRecovery({
+          providerStatus: evidence.status,
+          rawProviderItems,
+          expectedContents,
+        });
         return Object.freeze({
           kind: "found" as const,
           evidence: Object.freeze({
             status: evidence.status,
+            recoveryStatus,
             providerItemCount: evidence.providerItemCount,
             recognizedProviderItemCount: evidence.recognizedProviderItemCount,
             canonicalLineCount: evidence.shipmentItems.length,

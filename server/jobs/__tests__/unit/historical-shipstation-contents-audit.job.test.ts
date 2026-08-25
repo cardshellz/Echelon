@@ -33,7 +33,18 @@ function report() {
       malformed: 0,
       mixed: 0,
     },
+    recoveryStatusCounts: {
+      provider_line_keys_authoritative: 1,
+      exact_unique_wms_match: 0,
+      provider_empty: 0,
+      provider_evidence_unavailable: 0,
+      wms_lineage_unavailable: 0,
+      ambiguous_wms_match: 0,
+      provider_wms_conflict: 0,
+    },
     providerAuthoritativeCount: 1,
+    recoverableProviderEvidenceCount: 1,
+    reviewRequiredByCurrentEvidenceCount: 0,
     requiresLeadAttestationCount: 1,
     safeToAutoResolveCount: 0 as const,
     databaseTemporaryPrivilege: false,
@@ -110,7 +121,11 @@ describe("historical ShipStation contents audit job", () => {
         candidateLimit: 1,
         batchLimitReached: false,
         databaseTemporaryPrivilege: false,
-        candidates: [{ shippingProviderLabelId: "101", providerShipmentId: 44_001 }],
+        candidates: [{
+          shippingProviderLabelId: "101",
+          providerShipmentId: 44_001,
+          expectedContents: { kind: "unavailable" as const, reason: "no_linked_package" as const },
+        }],
       };
     });
     const audit = vi.fn(async () => {

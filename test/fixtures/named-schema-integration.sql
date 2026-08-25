@@ -294,7 +294,9 @@ CREATE TABLE wms.physical_shipment_items (
   shipment_request_item_id bigint
     REFERENCES wms.shipment_request_items(id) ON DELETE RESTRICT,
   legacy_wms_shipment_item_id integer
-    REFERENCES wms.outbound_shipment_items(id) ON DELETE RESTRICT
+    REFERENCES wms.outbound_shipment_items(id) ON DELETE RESTRICT,
+  sku varchar(100) NOT NULL,
+  quantity_shipped integer NOT NULL
 );
 
 CREATE TABLE wms.shipping_provider_labels (

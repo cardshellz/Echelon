@@ -50,6 +50,7 @@ import {
   type PersistPackageAllocationPlanCommand,
   type PersistPackageAllocationPlanResult,
 } from "../../package-allocation-planning.service";
+import { loadHistoricalShipStationContentsCandidates } from "../../historical-shipstation-contents-audit.repository";
 
 const PRIMARY_GROUP_KEY = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const COMPETING_GROUP_KEY = "96e1be0d-c7d8-4c91-919f-04f5eb547f80";
@@ -655,6 +656,147 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     if (roleCleanupFailure !== undefined) throw roleCleanupFailure;
   });
 
+  it("executes historical ShipStation WMS-content recovery queries under the restricted role", async () => {
+    const legacyOrder = await pool.query<{ id: number }>(
+      "INSERT INTO wms.orders DEFAULT VALUES RETURNING id",
+    );
+    const legacyOrderItem = await pool.query<{ id: number }>(
+      `INSERT INTO wms.order_items (order_id, sku, quantity)
+       VALUES ($1::integer, 'LEGACY-SKU', 3)
+       RETURNING id`,
+      [legacyOrder.rows[0].id],
+    );
+    const legacyShipment = await pool.query<{ id: number }>(
+      "INSERT INTO wms.outbound_shipments DEFAULT VALUES RETURNING id",
+    );
+    const legacyItem = await pool.query<{ id: number }>(
+      `INSERT INTO wms.outbound_shipment_items (
+         shipment_id, order_item_id, shipment_item_purpose, qty
+       ) VALUES ($1::integer, $2::integer, 'customer_fulfillment', 3)
+       RETURNING id`,
+      [legacyShipment.rows[0].id, legacyOrderItem.rows[0].id],
+    );
+    const legacyLabel = await pool.query<{ id: string }>(
+      `INSERT INTO wms.shipping_provider_labels (
+         provider, provider_label_id, tracking_number, label_status,
+         label_direction, first_observed_at, last_observed_at
+       ) VALUES (
+         'shipstation', '44001', '1ZRECOVERYLEGACY', 'active',
+         'outbound', '2026-08-25T12:00:00.000Z', '2026-08-25T12:00:00.000Z'
+       ) RETURNING id::text AS id`,
+    );
+    await pool.query(
+      `INSERT INTO wms.shipping_provider_label_events (
+         shipping_provider_label_id, event_hash, event_type, label_status,
+         tracking_number, provider_occurred_at, received_at, sanitized_payload
+       ) VALUES (
+         $1::bigint, $2, 'label_observed', 'active', '1ZRECOVERYLEGACY',
+         NULL, '2026-08-25T12:00:00.000Z', '{"payloadSchemaVersion":1}'::jsonb
+       )`,
+      [legacyLabel.rows[0].id, "a".repeat(64)],
+    );
+    await pool.query(
+      `INSERT INTO wms.shipping_provider_label_links (
+         shipping_provider_label_id, legacy_wms_shipment_id
+       ) VALUES ($1::bigint, $2::integer)`,
+      [legacyLabel.rows[0].id, legacyShipment.rows[0].id],
+    );
+
+    const physicalOrder = await pool.query<{ id: number }>(
+      "INSERT INTO wms.orders DEFAULT VALUES RETURNING id",
+    );
+    const physicalOrderItem = await pool.query<{ id: number }>(
+      `INSERT INTO wms.order_items (order_id, sku, quantity)
+       VALUES ($1::integer, 'LEGACY-DIFFERENT-SKU', 2)
+       RETURNING id`,
+      [physicalOrder.rows[0].id],
+    );
+    const physicalLegacyShipment = await pool.query<{ id: number }>(
+      "INSERT INTO wms.outbound_shipments DEFAULT VALUES RETURNING id",
+    );
+    const physicalLegacyItem = await pool.query<{ id: number }>(
+      `INSERT INTO wms.outbound_shipment_items (
+         shipment_id, order_item_id, shipment_item_purpose, qty
+       ) VALUES ($1::integer, $2::integer, 'customer_fulfillment', 2)
+       RETURNING id`,
+      [physicalLegacyShipment.rows[0].id, physicalOrderItem.rows[0].id],
+    );
+    const physicalShipment = await pool.query<{ id: string }>(
+      `INSERT INTO wms.physical_shipments (provider, provider_physical_shipment_id)
+       VALUES ('shipstation', '44002')
+       RETURNING id::text AS id`,
+    );
+    await pool.query(
+      `INSERT INTO wms.physical_shipment_items (
+         physical_shipment_id, legacy_wms_shipment_item_id, sku, quantity_shipped
+       ) VALUES ($1::bigint, $2::integer, 'PHYSICAL-SKU', 2)`,
+      [physicalShipment.rows[0].id, physicalLegacyItem.rows[0].id],
+    );
+    const physicalLabel = await pool.query<{ id: string }>(
+      `INSERT INTO wms.shipping_provider_labels (
+         provider, provider_label_id, tracking_number, label_status,
+         label_direction, first_observed_at, last_observed_at
+       ) VALUES (
+         'shipstation', '44002', '1ZRECOVERYPHYSICAL', 'active',
+         'outbound', '2026-08-25T12:01:00.000Z', '2026-08-25T12:01:00.000Z'
+       ) RETURNING id::text AS id`,
+    );
+    await pool.query(
+      `INSERT INTO wms.shipping_provider_label_events (
+         shipping_provider_label_id, event_hash, event_type, label_status,
+         tracking_number, provider_occurred_at, received_at, sanitized_payload
+       ) VALUES (
+         $1::bigint, $2, 'label_observed', 'active', '1ZRECOVERYPHYSICAL',
+         NULL, '2026-08-25T12:01:00.000Z', '{"payloadSchemaVersion":1}'::jsonb
+       )`,
+      [physicalLabel.rows[0].id, "b".repeat(64)],
+    );
+    await pool.query(
+      `INSERT INTO wms.shipping_provider_label_links (
+         shipping_provider_label_id, physical_shipment_id, legacy_wms_shipment_id
+       ) VALUES ($1::bigint, $2::bigint, $3::integer)`,
+      [
+        physicalLabel.rows[0].id,
+        physicalShipment.rows[0].id,
+        physicalLegacyShipment.rows[0].id,
+      ],
+    );
+
+    const batch = await withExecutionAuditRole(pool, async (scopedPool) => {
+      const client = await scopedPool.connect();
+      return loadHistoricalShipStationContentsCandidates(client, { candidateLimit: 10 });
+    });
+
+    const byProviderShipmentId = new Map(
+      batch.candidates.map((candidate) => [candidate.providerShipmentId, candidate]),
+    );
+    expect(byProviderShipmentId.get(44_001)).toEqual({
+      shippingProviderLabelId: legacyLabel.rows[0].id,
+      providerShipmentId: 44_001,
+      expectedContents: {
+        kind: "available",
+        source: "legacy_wms_shipment",
+        lines: [{
+          wmsShipmentItemId: legacyItem.rows[0].id,
+          sku: "LEGACY-SKU",
+          quantity: 3,
+        }],
+      },
+    });
+    expect(byProviderShipmentId.get(44_002)).toEqual({
+      shippingProviderLabelId: physicalLabel.rows[0].id,
+      providerShipmentId: 44_002,
+      expectedContents: {
+        kind: "available",
+        source: "physical_shipment",
+        lines: [{
+          wmsShipmentItemId: physicalLegacyItem.rows[0].id,
+          sku: "PHYSICAL-SKU",
+          quantity: 2,
+        }],
+      },
+    });
+  });
   it("installs valid discovery indexes that PostgreSQL can use for the production query", async () => {
     const catalog = await pool.query<{
       index_name: string;
