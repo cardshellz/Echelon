@@ -79,6 +79,7 @@ export const HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL = `
   WHERE label.provider = 'shipstation'
     AND label.label_direction = 'outbound'
     AND label.provider_label_id ~ '^[1-9][0-9]*$'
+    AND ($1::bigint IS NULL OR label.id < $1::bigint)
     AND EXISTS (
       SELECT 1
       FROM wms.shipping_provider_label_events AS historical_event
@@ -97,7 +98,7 @@ export const HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL = `
           = 'authoritative'
     )
   ORDER BY label.id DESC
-  LIMIT $1
+  LIMIT $2
 `;
 
 export const HISTORICAL_SHIPSTATION_CONTENTS_LINKS_SQL = `
@@ -183,6 +184,7 @@ export const HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL = `
 
 export interface HistoricalShipStationContentsAuditRepositoryOptions {
   readonly candidateLimit?: number;
+  readonly beforeLabelId?: string;
   readonly statementTimeoutMs?: number;
   readonly lockTimeoutMs?: number;
   readonly idleInTransactionTimeoutMs?: number;
@@ -190,6 +192,7 @@ export interface HistoricalShipStationContentsAuditRepositoryOptions {
 
 export interface NormalizedHistoricalShipStationContentsAuditRepositoryOptions {
   readonly candidateLimit: number;
+  readonly beforeLabelId: string | null;
   readonly statementTimeoutMs: number;
   readonly lockTimeoutMs: number;
   readonly idleInTransactionTimeoutMs: number;
@@ -203,6 +206,8 @@ export interface HistoricalShipStationContentsCandidate {
 
 export interface HistoricalShipStationContentsCandidateBatch {
   readonly candidateLimit: number;
+  readonly beforeLabelId: string | null;
+  readonly nextBeforeLabelId: string | null;
   readonly batchLimitReached: boolean;
   readonly databaseTemporaryPrivilege: boolean;
   readonly candidates: readonly HistoricalShipStationContentsCandidate[];
@@ -235,6 +240,14 @@ function boundedPositiveInteger(
   return value;
 }
 
+function optionalPositiveBigintCursor(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  if (!/^[1-9][0-9]*$/.test(value) || BigInt(value) > POSTGRES_BIGINT_MAX) {
+    throw new RangeError("beforeLabelId must be a positive PostgreSQL bigint");
+  }
+  return value;
+}
+
 export function normalizeHistoricalShipStationContentsAuditRepositoryOptions(
   options: HistoricalShipStationContentsAuditRepositoryOptions = {},
 ): NormalizedHistoricalShipStationContentsAuditRepositoryOptions {
@@ -245,6 +258,7 @@ export function normalizeHistoricalShipStationContentsAuditRepositoryOptions(
       "candidateLimit",
       limits.maxCandidateLimit,
     ),
+    beforeLabelId: optionalPositiveBigintCursor(options.beforeLabelId),
     statementTimeoutMs: boundedPositiveInteger(
       options.statementTimeoutMs ?? limits.defaultStatementTimeoutMs,
       "statementTimeoutMs",
@@ -535,7 +549,7 @@ async function loadInsideTransaction(
   await assertLineageRoleEvidence(client);
   const result = await client.query(
     HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL,
-    [input.candidateLimit + 1],
+    [input.beforeLabelId, input.candidateLimit + 1],
   );
   const mapped = (result.rows as Record<string, unknown>[]).map(mapCandidateIdentity);
   const seenLabelIds = new Set<string>();
@@ -555,6 +569,10 @@ async function loadInsideTransaction(
   }
 
   const selected = mapped.slice(0, input.candidateLimit);
+  const batchLimitReached = mapped.length > input.candidateLimit;
+  const nextBeforeLabelId = batchLimitReached
+    ? selected.at(-1)?.shippingProviderLabelId ?? null
+    : null;
   const selectedLabelIds = Object.freeze(selected.map((candidate) => candidate.shippingProviderLabelId));
   const selectedLabelIdSet = new Set(selectedLabelIds);
   const linksResult = selectedLabelIds.length === 0
@@ -584,7 +602,9 @@ async function loadInsideTransaction(
   })));
   return Object.freeze({
     candidateLimit: input.candidateLimit,
-    batchLimitReached: mapped.length > input.candidateLimit,
+    beforeLabelId: input.beforeLabelId,
+    nextBeforeLabelId,
+    batchLimitReached,
     databaseTemporaryPrivilege: roleEvidence.databaseTemporaryPrivilege,
     candidates,
   });

@@ -19,6 +19,8 @@ function report() {
   return {
     mode: "read_only_historical_shipstation_contents_audit" as const,
     candidateLimit: 1,
+    beforeLabelId: null,
+    nextBeforeLabelId: null,
     batchLimitReached: false,
     selectedCandidateCount: 1,
     providerRequestCount: 1,
@@ -45,6 +47,7 @@ function report() {
     providerAuthoritativeCount: 1,
     recoverableProviderEvidenceCount: 1,
     reviewRequiredByCurrentEvidenceCount: 0,
+    reviewCases: [],
     requiresLeadAttestationCount: 1,
     safeToAutoResolveCount: 0 as const,
     databaseTemporaryPrivilege: false,
@@ -64,13 +67,30 @@ describe("historical ShipStation contents audit job", () => {
     expect(parseHistoricalShipStationContentsAuditCliOptions([])).toEqual({
       help: false,
       candidateLimit: 25,
+      beforeLabelId: null,
     });
     expect(parseHistoricalShipStationContentsAuditCliOptions(["--limit=100"])).toEqual({
       help: false,
       candidateLimit: 100,
+      beforeLabelId: null,
+    });
+    expect(parseHistoricalShipStationContentsAuditCliOptions([
+      "--before-label-id=9223372036854775807",
+      "--limit=8",
+    ])).toEqual({
+      help: false,
+      candidateLimit: 8,
+      beforeLabelId: "9223372036854775807",
     });
     expect(() => parseHistoricalShipStationContentsAuditCliOptions(["--limit=101"]))
       .toThrow(/must not exceed/);
+    for (const cursor of ["0", " 1", "9223372036854775808"]) {
+      expect(() => parseHistoricalShipStationContentsAuditCliOptions([`--before-label-id=${cursor}`]))
+        .toThrow(/positive PostgreSQL bigint/);
+    }
+    expect(() => parseHistoricalShipStationContentsAuditCliOptions([
+      "--before-label-id=9", "--before-label-id=8",
+    ])).toThrow(/Duplicate flag/);
     expect(() => parseHistoricalShipStationContentsAuditCliOptions(["--execute"]))
       .toThrow(/Unknown flag/);
   });
@@ -119,6 +139,8 @@ describe("historical ShipStation contents audit job", () => {
       order.push("database");
       return {
         candidateLimit: 1,
+        beforeLabelId: "500",
+        nextBeforeLabelId: null,
         batchLimitReached: false,
         databaseTemporaryPrivilege: false,
         candidates: [{
@@ -136,6 +158,7 @@ describe("historical ShipStation contents audit job", () => {
 
     const result = await runHistoricalShipStationContentsAuditJob({
       candidateLimit: 1,
+      beforeLabelId: "500",
       environment,
       poolFactory,
       providerClient: { loadShipmentContents: vi.fn() },
@@ -154,6 +177,10 @@ describe("historical ShipStation contents audit job", () => {
     });
     expect(release).toHaveBeenCalledWith(undefined);
     expect(end).toHaveBeenCalledOnce();
+    expect(loadCandidates).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ candidateLimit: 1, beforeLabelId: "500" }),
+    );
   });
 
   it("preserves database and cleanup failures and never calls the provider", async () => {

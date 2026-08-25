@@ -762,10 +762,58 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       ],
     );
 
-    const batch = await withExecutionAuditRole(pool, async (scopedPool) => {
+    const { batch, firstPage, secondPage } = await withExecutionAuditRole(pool, async (scopedPool) => {
       const client = await scopedPool.connect();
-      return loadHistoricalShipStationContentsCandidates(client, { candidateLimit: 10 });
+      const batch = await loadHistoricalShipStationContentsCandidates(client, { candidateLimit: 10 });
+      const firstPage = await loadHistoricalShipStationContentsCandidates(
+        client,
+        { candidateLimit: 1 },
+      );
+      if (firstPage.nextBeforeLabelId === null) {
+        throw new Error("Expected the first historical-content page to expose a continuation cursor");
+      }
+      const secondPage = await loadHistoricalShipStationContentsCandidates(client, {
+        candidateLimit: 1,
+        beforeLabelId: firstPage.nextBeforeLabelId,
+      });
+      return {
+        batch,
+        firstPage,
+        secondPage,
+      };
     });
+
+    expect(batch).toMatchObject({
+      candidateLimit: 10,
+      beforeLabelId: null,
+      nextBeforeLabelId: null,
+      batchLimitReached: false,
+      databaseTemporaryPrivilege: true,
+    });
+    expect(batch.candidates.map((candidate) => candidate.shippingProviderLabelId)).toEqual([
+      physicalLabel.rows[0].id,
+      legacyLabel.rows[0].id,
+    ]);
+    expect(firstPage).toMatchObject({
+      candidateLimit: 1,
+      beforeLabelId: null,
+      nextBeforeLabelId: physicalLabel.rows[0].id,
+      batchLimitReached: true,
+      databaseTemporaryPrivilege: true,
+    });
+    expect(firstPage.candidates.map((candidate) => candidate.shippingProviderLabelId)).toEqual([
+      physicalLabel.rows[0].id,
+    ]);
+    expect(secondPage).toMatchObject({
+      candidateLimit: 1,
+      beforeLabelId: physicalLabel.rows[0].id,
+      nextBeforeLabelId: null,
+      batchLimitReached: false,
+      databaseTemporaryPrivilege: true,
+    });
+    expect(secondPage.candidates.map((candidate) => candidate.shippingProviderLabelId)).toEqual([
+      legacyLabel.rows[0].id,
+    ]);
 
     const byProviderShipmentId = new Map(
       batch.candidates.map((candidate) => [candidate.providerShipmentId, candidate]),

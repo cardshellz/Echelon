@@ -15,6 +15,7 @@ const CONTENT_STATUSES: readonly ShipStationShipmentContentsEvidenceStatus[] = O
   "malformed",
   "mixed",
 ]);
+const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const EXPECTED_CONTENTS_UNAVAILABLE_REASONS = new Set([
   "no_linked_package",
@@ -22,9 +23,43 @@ const EXPECTED_CONTENTS_UNAVAILABLE_REASONS = new Set([
   "linked_package_contents_unavailable",
 ]);
 
+type RecoverableStatus =
+  | "provider_line_keys_authoritative"
+  | "exact_unique_wms_match";
+
+export type HistoricalShipStationContentsReviewReason =
+  | Exclude<HistoricalShipStationContentsRecoveryStatus, RecoverableStatus>
+  | "provider_shipment_not_found"
+  | "provider_request_failed";
+
+export type HistoricalShipStationExpectedContentsSummary =
+  | Readonly<{
+      readonly kind: "available";
+      readonly source: "physical_shipment" | "legacy_wms_shipment";
+      readonly lineCount: number;
+    }>
+  | Readonly<{
+      readonly kind: "unavailable";
+      readonly reason:
+        | "no_linked_package"
+        | "ambiguous_linked_package"
+        | "linked_package_contents_unavailable";
+    }>;
+
+export interface HistoricalShipStationContentsReviewCase {
+  readonly shippingProviderLabelId: string;
+  readonly reason: HistoricalShipStationContentsReviewReason;
+  readonly providerContentsStatus: ShipStationShipmentContentsEvidenceStatus | null;
+  readonly providerItemCount: number | null;
+  readonly canonicalLineCount: number | null;
+  readonly expectedContents: HistoricalShipStationExpectedContentsSummary;
+}
+
 export interface HistoricalShipStationContentsAuditReport {
   readonly mode: "read_only_historical_shipstation_contents_audit";
   readonly candidateLimit: number;
+  readonly beforeLabelId: string | null;
+  readonly nextBeforeLabelId: string | null;
   readonly batchLimitReached: boolean;
   readonly selectedCandidateCount: number;
   readonly providerRequestCount: number;
@@ -36,6 +71,7 @@ export interface HistoricalShipStationContentsAuditReport {
   readonly providerAuthoritativeCount: number;
   readonly recoverableProviderEvidenceCount: number;
   readonly reviewRequiredByCurrentEvidenceCount: number;
+  readonly reviewCases: readonly HistoricalShipStationContentsReviewCase[];
   readonly requiresLeadAttestationCount: number;
   readonly safeToAutoResolveCount: 0;
   readonly databaseTemporaryPrivilege: boolean;
@@ -87,6 +123,32 @@ function validExpectedContents(
   });
 }
 
+function validPositiveBigintString(value: unknown): value is string {
+  return typeof value === "string"
+    && /^[1-9][0-9]*$/.test(value)
+    && BigInt(value) <= POSTGRES_BIGINT_MAX;
+}
+
+function isRecoverableStatus(
+  status: HistoricalShipStationContentsRecoveryStatus,
+): status is RecoverableStatus {
+  return status === "provider_line_keys_authoritative"
+    || status === "exact_unique_wms_match";
+}
+
+function expectedContentsSummary(
+  evidence: HistoricalShipStationExpectedContentsEvidence,
+): HistoricalShipStationExpectedContentsSummary {
+  if (evidence.kind === "unavailable") {
+    return Object.freeze({ kind: evidence.kind, reason: evidence.reason });
+  }
+  return Object.freeze({
+    kind: evidence.kind,
+    source: evidence.source,
+    lineCount: evidence.lines.length,
+  });
+}
+
 export async function auditHistoricalShipStationContents(
   batch: HistoricalShipStationContentsCandidateBatch,
   client: HistoricalShipStationContentsClient,
@@ -95,16 +157,20 @@ export async function auditHistoricalShipStationContents(
     !Number.isSafeInteger(batch.candidateLimit)
     || batch.candidateLimit < 1
     || batch.candidates.length > batch.candidateLimit
+    || typeof batch.batchLimitReached !== "boolean"
+    || typeof batch.databaseTemporaryPrivilege !== "boolean"
+    || (batch.beforeLabelId !== null && !validPositiveBigintString(batch.beforeLabelId))
+    || (batch.nextBeforeLabelId !== null && !validPositiveBigintString(batch.nextBeforeLabelId))
   ) {
     throw new TypeError("Historical ShipStation contents candidate batch is invalid");
   }
 
   const labelIds = new Set<string>();
   const providerIds = new Set<number>();
+  let previousLabelId = batch.beforeLabelId;
   for (const candidate of batch.candidates) {
     if (
-      typeof candidate.shippingProviderLabelId !== "string"
-      || !/^[1-9][0-9]*$/.test(candidate.shippingProviderLabelId)
+      !validPositiveBigintString(candidate.shippingProviderLabelId)
       || !Number.isSafeInteger(candidate.providerShipmentId)
       || candidate.providerShipmentId <= 0
       || !validExpectedContents(candidate.expectedContents)
@@ -113,8 +179,25 @@ export async function auditHistoricalShipStationContents(
     ) {
       throw new TypeError("Historical ShipStation contents candidate evidence is invalid or duplicated");
     }
+    if (
+      previousLabelId !== null
+      && BigInt(candidate.shippingProviderLabelId) >= BigInt(previousLabelId)
+    ) {
+      throw new TypeError("Historical ShipStation contents candidates are not in strict descending label-id order");
+    }
     labelIds.add(candidate.shippingProviderLabelId);
     providerIds.add(candidate.providerShipmentId);
+    previousLabelId = candidate.shippingProviderLabelId;
+  }
+
+  const expectedNextBeforeLabelId = batch.batchLimitReached
+    ? batch.candidates.at(-1)?.shippingProviderLabelId ?? null
+    : null;
+  if (
+    (expectedNextBeforeLabelId === null && batch.batchLimitReached)
+    || batch.nextBeforeLabelId !== expectedNextBeforeLabelId
+  ) {
+    throw new TypeError("Historical ShipStation contents pagination evidence is invalid");
   }
 
   const contentsStatusCounts: Record<ShipStationShipmentContentsEvidenceStatus, number> = {
@@ -131,6 +214,25 @@ export async function auditHistoricalShipStationContents(
   let providerShipmentFoundCount = 0;
   let providerShipmentNotFoundCount = 0;
   let providerRequestFailureCount = 0;
+  const reviewCases: HistoricalShipStationContentsReviewCase[] = [];
+  const addReviewCase = (
+    candidate: HistoricalShipStationContentsCandidateBatch["candidates"][number],
+    reason: HistoricalShipStationContentsReviewReason,
+    evidence: Readonly<{
+      readonly status: ShipStationShipmentContentsEvidenceStatus;
+      readonly providerItemCount: number;
+      readonly canonicalLineCount: number;
+    }> | null = null,
+  ): void => {
+    reviewCases.push(Object.freeze({
+      shippingProviderLabelId: candidate.shippingProviderLabelId,
+      reason,
+      providerContentsStatus: evidence?.status ?? null,
+      providerItemCount: evidence?.providerItemCount ?? null,
+      canonicalLineCount: evidence?.canonicalLineCount ?? null,
+      expectedContents: expectedContentsSummary(candidate.expectedContents),
+    }));
+  };
 
   for (const candidate of batch.candidates) {
     try {
@@ -140,13 +242,18 @@ export async function auditHistoricalShipStationContents(
       );
       if (result.kind === "not_found") {
         providerShipmentNotFoundCount += 1;
+        addReviewCase(candidate, "provider_shipment_not_found");
         continue;
       }
       providerShipmentFoundCount += 1;
       contentsStatusCounts[result.evidence.status] += 1;
       recoveryStatusCounts[result.evidence.recoveryStatus] += 1;
+      if (!isRecoverableStatus(result.evidence.recoveryStatus)) {
+        addReviewCase(candidate, result.evidence.recoveryStatus, result.evidence);
+      }
     } catch {
       providerRequestFailureCount += 1;
+      addReviewCase(candidate, "provider_request_failed");
     }
   }
 
@@ -163,9 +270,12 @@ export async function auditHistoricalShipStationContents(
   const recoverableProviderEvidenceCount =
     frozenRecoveryStatusCounts.provider_line_keys_authoritative
     + frozenRecoveryStatusCounts.exact_unique_wms_match;
+  const frozenReviewCases = Object.freeze(reviewCases);
   return Object.freeze({
     mode: "read_only_historical_shipstation_contents_audit",
     candidateLimit: batch.candidateLimit,
+    beforeLabelId: batch.beforeLabelId,
+    nextBeforeLabelId: batch.nextBeforeLabelId,
     batchLimitReached: batch.batchLimitReached,
     selectedCandidateCount: batch.candidates.length,
     providerRequestCount: batch.candidates.length,
@@ -176,8 +286,8 @@ export async function auditHistoricalShipStationContents(
     recoveryStatusCounts: frozenRecoveryStatusCounts,
     providerAuthoritativeCount: frozenStatusCounts.authoritative,
     recoverableProviderEvidenceCount,
-    reviewRequiredByCurrentEvidenceCount:
-      batch.candidates.length - recoverableProviderEvidenceCount,
+    reviewRequiredByCurrentEvidenceCount: frozenReviewCases.length,
+    reviewCases: frozenReviewCases,
     // Recovery evidence is preview-only. A later audited write path must decide
     // whether and how to attest historical V1 omissions.
     requiresLeadAttestationCount: batch.candidates.length,

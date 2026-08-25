@@ -60,6 +60,7 @@ const SERVER_STATEMENT_TIMEOUT_GRACE_MS = 5_000;
 const CLIENT_QUERY_TIMEOUT_GRACE_MS = 5_000;
 const IDLE_TRANSACTION_TIMEOUT_GRACE_MS = 15_000;
 const POOL_IDLE_TIMEOUT_MS = 10_000;
+const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
 
 export type HistoricalShipStationContentsAuditJobErrorCode =
   | "HISTORICAL_SHIPSTATION_CONTENTS_AUDIT_CLEANUP_FAILED"
@@ -79,6 +80,7 @@ export class HistoricalShipStationContentsAuditJobError extends Error {
 export interface HistoricalShipStationContentsAuditCliOptions {
   readonly help: boolean;
   readonly candidateLimit: number;
+  readonly beforeLabelId: string | null;
 }
 
 function positiveLimit(value: string): number {
@@ -97,15 +99,33 @@ function positiveLimit(value: string): number {
   return parsed;
 }
 
+function positiveBigintCursor(value: string): string {
+  if (
+    !/^[1-9][0-9]*$/.test(value)
+    || BigInt(value) > POSTGRES_BIGINT_MAX
+  ) {
+    throw new Error("--before-label-id must be a positive PostgreSQL bigint");
+  }
+  return value;
+}
+
 export function parseHistoricalShipStationContentsAuditCliOptions(
   argv: readonly string[],
 ): HistoricalShipStationContentsAuditCliOptions {
   let help = false;
   let candidateLimit: number = HISTORICAL_SHIPSTATION_CONTENTS_AUDIT_LIMITS.defaultCandidateLimit;
+  let beforeLabelId: string | null = null;
   let limitSeen = false;
+  let beforeLabelIdSeen = false;
   for (const argument of argv) {
     if (argument === "--help" || argument === "-h") {
       help = true;
+      continue;
+    }
+    if (argument.startsWith("--before-label-id=")) {
+      if (beforeLabelIdSeen) throw new Error("Duplicate flag: --before-label-id");
+      beforeLabelIdSeen = true;
+      beforeLabelId = positiveBigintCursor(argument.slice("--before-label-id=".length));
       continue;
     }
     if (!argument.startsWith("--limit=")) {
@@ -115,7 +135,7 @@ export function parseHistoricalShipStationContentsAuditCliOptions(
     limitSeen = true;
     candidateLimit = positiveLimit(argument.slice("--limit=".length));
   }
-  return Object.freeze({ help, candidateLimit });
+  return Object.freeze({ help, candidateLimit, beforeLabelId });
 }
 
 export function assertHistoricalShipStationContentsAuditEnabled(
@@ -204,7 +224,10 @@ async function loadCandidateBatch(options: {
       options.repositoryOptions,
     ));
     client = await pool.connect();
-    batch = await options.loadCandidates(client, options.repositoryOptions);
+    batch = await options.loadCandidates(client, {
+      ...options.repositoryOptions,
+      beforeLabelId: options.repositoryOptions.beforeLabelId ?? undefined,
+    });
   } catch (error) {
     primaryFailure = error;
   }
@@ -254,8 +277,12 @@ async function loadCandidateBatch(options: {
 
 export async function runHistoricalShipStationContentsAuditJob(options: {
   readonly candidateLimit?: number;
+  readonly beforeLabelId?: string;
   readonly environment?: NodeJS.ProcessEnv;
-  readonly repositoryOptions?: Omit<HistoricalShipStationContentsAuditRepositoryOptions, "candidateLimit">;
+  readonly repositoryOptions?: Omit<
+    HistoricalShipStationContentsAuditRepositoryOptions,
+    "candidateLimit" | "beforeLabelId"
+  >;
   readonly poolFactory?: HistoricalShipStationContentsAuditPoolFactory;
   readonly providerClient?: HistoricalShipStationContentsClient;
   readonly loadCandidates?: typeof loadHistoricalShipStationContentsCandidates;
@@ -270,6 +297,7 @@ export async function runHistoricalShipStationContentsAuditJob(options: {
   const repositoryOptions = normalizeHistoricalShipStationContentsAuditRepositoryOptions({
     ...options.repositoryOptions,
     candidateLimit: options.candidateLimit,
+    beforeLabelId: options.beforeLabelId,
   });
   const providerClient = options.providerClient ?? createHistoricalShipStationContentsClient({
     apiKey: environment.SHIPSTATION_API_KEY,
@@ -312,10 +340,11 @@ export async function runHistoricalShipStationContentsAuditJob(options: {
 function usage(): string {
   return [
     "Usage:",
-    "  npm run wms:audit-historical-shipstation-contents -- [--limit=N]",
+    "  npm run wms:audit-historical-shipstation-contents -- [--limit=N] [--before-label-id=ID]",
     "",
     "Reads a bounded historical V1 candidate page with the dedicated audit role,",
-    "performs bounded ShipStation detail GETs, and prints aggregate classifications only.",
+    "performs bounded ShipStation detail GETs, and prints aggregate counts plus review IDs.",
+    "It never prints tracking numbers, SKUs, quantities, or raw provider payloads.",
     "It never writes evidence and never resolves historical omissions automatically.",
   ].join("\n");
 }
@@ -328,6 +357,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   }
   const result = await runHistoricalShipStationContentsAuditJob({
     candidateLimit: cli.candidateLimit,
+    beforeLabelId: cli.beforeLabelId ?? undefined,
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
