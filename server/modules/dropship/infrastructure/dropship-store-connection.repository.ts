@@ -141,7 +141,7 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
        LEFT JOIN dropship.dropship_store_listing_configs slc ON slc.store_connection_id = sc.id
        LEFT JOIN LATERAL (
          SELECT COUNT(*) AS open_setup_check_count,
-                COUNT(*) FILTER (WHERE severity = 'error') AS error_setup_check_count,
+                COUNT(*) FILTER (WHERE severity IN ('error','blocker')) AS error_setup_check_count,
                 COUNT(*) FILTER (WHERE severity = 'warning') AS warning_setup_check_count
          FROM dropship.dropship_store_setup_checks ssc
          WHERE ssc.store_connection_id = sc.id

@@ -200,6 +200,7 @@ describe("EbayDropshipOrderIntakeProvider", () => {
 describe("DropshipEbayOrderIntakePollService", () => {
   it("records fetched orders and advances the store sync cursor only after success", async () => {
     const repository = new FakePollRepository();
+    const healthService = new FakeOrderIntakeHealthService();
     const provider: DropshipEbayOrderIntakeProvider = {
       fetchOrders: vi.fn(async () => ({
         ignored: 1,
@@ -216,6 +217,7 @@ describe("DropshipEbayOrderIntakePollService", () => {
     };
     const service = new DropshipEbayOrderIntakePollService({
       repository,
+      healthService,
       provider,
       orderIntakeService: {
         recordMarketplaceOrder: vi.fn(async () => ({
@@ -260,17 +262,20 @@ describe("DropshipEbayOrderIntakePollService", () => {
       ordersCreated: 1,
       ordersIgnored: 1,
     });
-    expect(repository.lastSuccess).toEqual({
+    expect(healthService.successes).toEqual([{
+      vendorId: 10,
       storeConnectionId: 22,
+      platform: "ebay",
       syncedThrough: new Date("2026-05-03T15:00:00.000Z"),
-      now: new Date("2026-05-03T15:00:00.000Z"),
-    });
+    }]);
   });
 
   it("does not advance the store sync cursor when order recording fails", async () => {
     const repository = new FakePollRepository();
+    const healthService = new FakeOrderIntakeHealthService();
     const service = new DropshipEbayOrderIntakePollService({
       repository,
+      healthService,
       provider: {
         fetchOrders: vi.fn(async () => ({
           ignored: 0,
@@ -306,11 +311,13 @@ describe("DropshipEbayOrderIntakePollService", () => {
       storesFailed: 1,
       ordersCreated: 0,
     });
-    expect(repository.lastSuccess).toBeNull();
+    expect(healthService.successes).toHaveLength(0);
+    expect(healthService.failures).toHaveLength(1);
   });
 
   it("isolates an immutable order conflict, records the other orders, and advances the cursor", async () => {
     const repository = new FakePollRepository();
+    const healthService = new FakeOrderIntakeHealthService();
     const orders = ["ORDER-1", "ORDER-2", "ORDER-3"].map(makePollOrder);
     const recordMarketplaceOrder = vi.fn(async (input) => {
       if (input.externalOrderId === "ORDER-2") {
@@ -329,6 +336,7 @@ describe("DropshipEbayOrderIntakePollService", () => {
     const logger = nullLogger();
     const service = new DropshipEbayOrderIntakePollService({
       repository,
+      healthService,
       provider: {
         fetchOrders: vi.fn(async () => ({ ignored: 0, orders })),
       },
@@ -359,14 +367,16 @@ describe("DropshipEbayOrderIntakePollService", () => {
         failureCode: "DROPSHIP_ORDER_INTAKE_IMMUTABLE_PAYLOAD_CHANGE",
       }),
     ]);
-    expect(repository.lastSuccess).not.toBeNull();
+    expect(healthService.successes).toHaveLength(1);
     expect(logger.warn).toHaveBeenCalledTimes(1);
   });
 
   it("does not isolate malformed immutable-conflict errors", async () => {
     const repository = new FakePollRepository();
+    const healthService = new FakeOrderIntakeHealthService();
     const service = new DropshipEbayOrderIntakePollService({
       repository,
+      healthService,
       provider: {
         fetchOrders: vi.fn(async () => ({ ignored: 0, orders: [makePollOrder("ORDER-1")] })),
       },
@@ -391,7 +401,8 @@ describe("DropshipEbayOrderIntakePollService", () => {
 
     expect(result).toMatchObject({ storesSucceeded: 0, storesFailed: 1, ordersConflicted: 0 });
     expect(repository.immutableConflicts).toHaveLength(0);
-    expect(repository.lastSuccess).toBeNull();
+    expect(healthService.successes).toHaveLength(0);
+    expect(healthService.failures).toHaveLength(1);
   });
 });
 
@@ -493,17 +504,10 @@ class FakeCredentialRepository implements DropshipMarketplaceCredentialRepositor
 }
 
 class FakePollRepository implements DropshipEbayOrderIntakeRepository {
-  lastSuccess: Parameters<DropshipEbayOrderIntakeRepository["markStorePollSucceeded"]>[0] | null = null;
   immutableConflicts: Array<Parameters<DropshipEbayOrderIntakeRepository["recordImmutableOrderConflict"]>[0]> = [];
 
   async listPollableStoreConnections(): Promise<DropshipEbayOrderIntakeStoreConnection[]> {
-    return [{ vendorId: 10, storeConnectionId: 22, lastOrderSyncAt: null }];
-  }
-
-  async markStorePollSucceeded(
-    input: Parameters<DropshipEbayOrderIntakeRepository["markStorePollSucceeded"]>[0],
-  ): Promise<void> {
-    this.lastSuccess = input;
+    return [{ vendorId: 10, storeConnectionId: 22, platform: "ebay", lastOrderSyncAt: null }];
   }
 
   async recordImmutableOrderConflict(
@@ -511,6 +515,30 @@ class FakePollRepository implements DropshipEbayOrderIntakeRepository {
   ): Promise<{ created: boolean }> {
     this.immutableConflicts.push(input);
     return { created: true };
+  }
+}
+
+class FakeOrderIntakeHealthService {
+  successes: Array<{
+    vendorId: number;
+    storeConnectionId: number;
+    platform: "ebay";
+    syncedThrough: Date;
+  }> = [];
+  failures: Array<{
+    vendorId: number;
+    storeConnectionId: number;
+    platform: "ebay";
+    failureCode: string;
+    failureMessage: string;
+  }> = [];
+
+  async recordPollSucceeded(input: (typeof this.successes)[number]): Promise<void> {
+    this.successes.push(input);
+  }
+
+  async recordPollFailed(input: (typeof this.failures)[number]): Promise<void> {
+    this.failures.push(input);
   }
 }
 

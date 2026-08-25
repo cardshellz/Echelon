@@ -4,6 +4,7 @@ import type {
   DropshipOrderIntakeService,
 } from "./dropship-order-intake-service";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipOrderIntakeHealthService } from "./dropship-order-intake-health-service";
 import { DropshipError } from "../domain/errors";
 
 export const IMMUTABLE_ORDER_INTAKE_CONFLICT_CODE = "DROPSHIP_ORDER_INTAKE_IMMUTABLE_PAYLOAD_CHANGE";
@@ -11,6 +12,7 @@ export const IMMUTABLE_ORDER_INTAKE_CONFLICT_CODE = "DROPSHIP_ORDER_INTAKE_IMMUT
 export interface DropshipEbayOrderIntakeStoreConnection {
   vendorId: number;
   storeConnectionId: number;
+  platform: "ebay";
   lastOrderSyncAt: Date | null;
 }
 
@@ -47,11 +49,6 @@ export interface DropshipEbayOrderIntakeRepository {
     limit: number;
   }): Promise<DropshipEbayOrderIntakeStoreConnection[]>;
 
-  markStorePollSucceeded(input: {
-    storeConnectionId: number;
-    syncedThrough: Date;
-    now: Date;
-  }): Promise<void>;
 
   recordImmutableOrderConflict(
     input: DropshipEbayOrderIntakeImmutableConflictInput,
@@ -72,6 +69,10 @@ export interface DropshipEbayOrderIntakeSweepResult {
 
 export interface DropshipEbayOrderIntakePollServiceDependencies {
   repository: DropshipEbayOrderIntakeRepository;
+  healthService: Pick<
+    DropshipOrderIntakeHealthService,
+    "recordPollSucceeded" | "recordPollFailed"
+  >;
   provider: DropshipEbayOrderIntakeProvider;
   orderIntakeService: Pick<DropshipOrderIntakeService, "recordMarketplaceOrder">;
   clock: DropshipClock;
@@ -138,14 +139,16 @@ export class DropshipEbayOrderIntakePollService {
             }
           }
         }
-        await this.deps.repository.markStorePollSucceeded({
+        await this.deps.healthService.recordPollSucceeded({
+          vendorId: connection.vendorId,
           storeConnectionId: connection.storeConnectionId,
+          platform: connection.platform,
           syncedThrough: now,
-          now: this.deps.clock.now(),
         });
         result.storesSucceeded += 1;
       } catch (error) {
         result.storesFailed += 1;
+        await this.recordPollFailureSafely(connection, error);
         this.deps.logger.warn({
           code: "DROPSHIP_EBAY_ORDER_INTAKE_STORE_FAILED",
           message: "Dropship eBay order intake failed for a store connection.",
@@ -159,6 +162,30 @@ export class DropshipEbayOrderIntakePollService {
     }
 
     return result;
+  }
+
+  private async recordPollFailureSafely(
+    connection: DropshipEbayOrderIntakeStoreConnection,
+    error: unknown,
+  ): Promise<void> {
+    try {
+      await this.deps.healthService.recordPollFailed({
+        vendorId: connection.vendorId,
+        storeConnectionId: connection.storeConnectionId,
+        platform: connection.platform,
+        failureCode: error instanceof DropshipError
+          ? error.code
+          : "DROPSHIP_EBAY_ORDER_INTAKE_STORE_FAILED",
+        failureMessage: (error instanceof Error ? error.message : String(error)).slice(0, 2000),
+      });
+    } catch (healthError) {
+      this.deps.logger.error({
+        code: "DROPSHIP_ORDER_INTAKE_HEALTH_RECORDING_FAILED",
+        message: "Dropship order-intake failure could not be persisted to the health ledger.",
+        context: { vendorId: connection.vendorId, storeConnectionId: connection.storeConnectionId,
+          error: healthError instanceof Error ? healthError.message : String(healthError) },
+      });
+    }
   }
 }
 
