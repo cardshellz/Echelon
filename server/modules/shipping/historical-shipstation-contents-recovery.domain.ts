@@ -83,6 +83,33 @@ function compareText(left: string, right: string): number {
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
+export function historicalShipStationRecoverableCaseEvidenceHash(input: Readonly<{
+  readonly shippingProviderLabelId: string;
+  readonly recoveryStatus: HistoricalShipStationContentsRecoveryEvidence["recoveryStatus"];
+  readonly providerEvidenceHash: string;
+}>): string {
+  if (
+    !/^[1-9][0-9]*$/.test(input.shippingProviderLabelId)
+    || BigInt(input.shippingProviderLabelId) > BigInt("9223372036854775807")
+    || !["provider_line_keys_authoritative", "exact_unique_wms_match"].includes(
+      input.recoveryStatus,
+    )
+    || !/^[0-9a-f]{64}$/.test(input.providerEvidenceHash)
+  ) {
+    throw new HistoricalShipStationContentsRecoveryError(
+      "INVALID_PROVIDER_CONTENTS_EVIDENCE",
+      "Recoverable-case evidence identity failed validation",
+    );
+  }
+  return sha256(canonicalJson(Object.freeze({
+    contract: "historical_shipstation_contents_recoverable_case_v1",
+    contractVersion: HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
+    shippingProviderLabelId: input.shippingProviderLabelId,
+    recoveryStatus: input.recoveryStatus,
+    providerEvidenceHash: input.providerEvidenceHash,
+  })));
+}
+
 
 function isPositivePostgresInteger(value: unknown): value is number {
   return Number.isInteger(value)

@@ -987,6 +987,12 @@
   "wms.shipping_engine_orders": [
     "modules/oms"
   ],
+  "wms.shipping_provider_label_content_attestation_resolutions": [
+    "modules/shipping"
+  ],
+  "wms.shipping_provider_label_content_attestations": [
+    "modules/shipping"
+  ],
   "wms.shipping_provider_label_events": [
     "modules/shipping"
   ],

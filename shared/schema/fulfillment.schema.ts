@@ -28,6 +28,7 @@ import {
   wmsSchema,
 } from "./orders.schema";
 import { warehouses } from "./warehouse.schema";
+import { users } from "./identity.schema";
 
 export const fulfillmentPlanStatusValues = ["active", "superseded", "cancelled"] as const;
 export const fulfillmentPlanLineStatusValues = [
@@ -450,9 +451,124 @@ export const shippingProviderLabelEvents = wmsSchema.table("shipping_provider_la
 }, (table) => [
   uniqueIndex("uq_shipping_provider_label_events_hash")
     .on(table.shippingProviderLabelId, table.eventHash),
+  uniqueIndex("uq_shipping_provider_label_events_id_label")
+    .on(table.id, table.shippingProviderLabelId),
   index("idx_shipping_provider_label_events_label")
     .on(table.shippingProviderLabelId, table.receivedAt),
 ]);
+
+export interface ShippingProviderLabelAttestedContentLine {
+  readonly wmsShipmentItemId: number;
+  readonly quantity: number;
+}
+
+export const shippingProviderLabelContentAttestations = wmsSchema.table(
+  "shipping_provider_label_content_attestations",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    shippingProviderLabelId: bigint("shipping_provider_label_id", { mode: "number" })
+      .notNull()
+      .references(() => shippingProviderLabels.id, { onDelete: "restrict" }),
+    recoveryContractVersion: integer("recovery_contract_version").notNull(),
+    recoveryStatus: varchar("recovery_status", { length: 50 }).notNull(),
+    previewEvidenceHash: varchar("preview_evidence_hash", { length: 64 }).notNull(),
+    providerEvidenceHash: varchar("provider_evidence_hash", { length: 64 }).notNull(),
+    attestedContents: jsonb("attested_contents")
+      .$type<readonly ShippingProviderLabelAttestedContentLine[]>()
+      .notNull(),
+    actorUserId: varchar("actor_user_id").notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    actorRole: varchar("actor_role", { length: 20 }).notNull(),
+    reason: varchar("reason", { length: 500 }).notNull(),
+    attestationHash: varchar("attestation_hash", { length: 64 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("uq_shipping_provider_label_content_attestations_label_preview")
+      .on(table.shippingProviderLabelId, table.previewEvidenceHash),
+    uniqueIndex("uq_shipping_provider_label_content_attestations_label_hash")
+      .on(table.shippingProviderLabelId, table.attestationHash),
+    uniqueIndex("uq_shipping_provider_label_content_attestations_id_label")
+      .on(table.id, table.shippingProviderLabelId),
+    index("idx_shipping_provider_label_content_attestations_label")
+      .on(table.shippingProviderLabelId, table.createdAt, table.id),
+    check(
+      "shipping_provider_label_content_attestations_contract_chk",
+      sql`${table.recoveryContractVersion} = 1`,
+    ),
+    check(
+      "shipping_provider_label_content_attestations_status_chk",
+      sql`${table.recoveryStatus} IN ('provider_line_keys_authoritative', 'exact_unique_wms_match')`,
+    ),
+    check(
+      "shipping_provider_label_content_attestations_preview_hash_chk",
+      sql`${table.previewEvidenceHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "shipping_provider_label_content_attestations_provider_hash_chk",
+      sql`${table.providerEvidenceHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "shipping_provider_label_content_attestations_hash_chk",
+      sql`${table.attestationHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "shipping_provider_label_content_attestations_contents_chk",
+      sql`jsonb_typeof(${table.attestedContents}) = 'array'
+        AND jsonb_array_length(${table.attestedContents}) BETWEEN 1 AND 500`,
+    ),
+    check(
+      "shipping_provider_label_content_attestations_actor_role_chk",
+      sql`${table.actorRole} IN ('admin', 'lead')`,
+    ),
+    check(
+      "shipping_provider_label_content_attestations_reason_chk",
+      sql`BTRIM(${table.reason}) <> '' AND ${table.reason} = BTRIM(${table.reason})`,
+    ),
+  ],
+);
+
+export const shippingProviderLabelContentAttestationResolutions = wmsSchema.table(
+  "shipping_provider_label_content_attestation_resolutions",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    shippingProviderLabelContentAttestationId: bigint(
+      "shipping_provider_label_content_attestation_id",
+      { mode: "number" },
+    ).notNull(),
+    shippingProviderLabelId: bigint("shipping_provider_label_id", { mode: "number" }).notNull(),
+    shippingProviderLabelEventId: bigint("shipping_provider_label_event_id", { mode: "number" })
+      .notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [
+        table.shippingProviderLabelContentAttestationId,
+        table.shippingProviderLabelId,
+      ],
+      foreignColumns: [
+        shippingProviderLabelContentAttestations.id,
+        shippingProviderLabelContentAttestations.shippingProviderLabelId,
+      ],
+      name: "fk_shipping_provider_label_content_attestation_resolutions_attestation",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.shippingProviderLabelEventId, table.shippingProviderLabelId],
+      foreignColumns: [
+        shippingProviderLabelEvents.id,
+        shippingProviderLabelEvents.shippingProviderLabelId,
+      ],
+      name: "fk_shipping_provider_label_content_attestation_resolutions_event",
+    }).onDelete("restrict"),
+    uniqueIndex("uq_shipping_provider_label_content_attestation_resolutions_pair")
+      .on(table.shippingProviderLabelContentAttestationId, table.shippingProviderLabelEventId),
+    uniqueIndex("uq_shipping_provider_label_content_attestation_resolutions_event")
+      .on(table.shippingProviderLabelEventId),
+    index("idx_shipping_provider_label_content_attestation_resolutions_attestation")
+      .on(table.shippingProviderLabelContentAttestationId, table.shippingProviderLabelEventId),
+  ],
+);
 
 export const packageAllocationGroups = wmsSchema.table("package_allocation_groups", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
@@ -1319,6 +1435,8 @@ export const insertPhysicalShipmentItemSchema = createInsertSchema(physicalShipm
 export const insertShippingProviderLabelSchema = createInsertSchema(shippingProviderLabels).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertShippingProviderLabelLinkSchema = createInsertSchema(shippingProviderLabelLinks).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertShippingProviderLabelEventSchema = createInsertSchema(shippingProviderLabelEvents).omit({ id: true });
+export const insertShippingProviderLabelContentAttestationSchema = createInsertSchema(shippingProviderLabelContentAttestations).omit({ id: true, createdAt: true });
+export const insertShippingProviderLabelContentAttestationResolutionSchema = createInsertSchema(shippingProviderLabelContentAttestationResolutions).omit({ id: true, createdAt: true });
 export const insertPackageAllocationGroupSchema = createInsertSchema(packageAllocationGroups).omit({ id: true, createdAt: true, versionUpdatedAt: true });
 export const insertPackageAllocationPackageBindingSchema = createInsertSchema(packageAllocationPackageBindings).omit({ id: true, createdAt: true });
 export const insertPackageAllocationSourceLineSchema = createInsertSchema(packageAllocationSourceLines).omit({ id: true, createdAt: true });
@@ -1370,6 +1488,10 @@ export type InsertShippingProviderLabelLink = z.infer<typeof insertShippingProvi
 export type ShippingProviderLabelLink = typeof shippingProviderLabelLinks.$inferSelect;
 export type InsertShippingProviderLabelEvent = z.infer<typeof insertShippingProviderLabelEventSchema>;
 export type ShippingProviderLabelEvent = typeof shippingProviderLabelEvents.$inferSelect;
+export type InsertShippingProviderLabelContentAttestation = z.infer<typeof insertShippingProviderLabelContentAttestationSchema>;
+export type ShippingProviderLabelContentAttestation = typeof shippingProviderLabelContentAttestations.$inferSelect;
+export type InsertShippingProviderLabelContentAttestationResolution = z.infer<typeof insertShippingProviderLabelContentAttestationResolutionSchema>;
+export type ShippingProviderLabelContentAttestationResolution = typeof shippingProviderLabelContentAttestationResolutions.$inferSelect;
 export type InsertPackageAllocationGroup = z.infer<typeof insertPackageAllocationGroupSchema>;
 export type PackageAllocationGroup = typeof packageAllocationGroups.$inferSelect;
 export type InsertPackageAllocationPackageBinding = z.infer<typeof insertPackageAllocationPackageBindingSchema>;

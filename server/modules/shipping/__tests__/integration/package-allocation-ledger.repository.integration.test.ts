@@ -51,6 +51,13 @@ import {
   type PersistPackageAllocationPlanResult,
 } from "../../package-allocation-planning.service";
 import { loadHistoricalShipStationContentsCandidates } from "../../historical-shipstation-contents-audit.repository";
+import type { HistoricalShipStationContentsClient } from "../../historical-shipstation-contents-audit.client";
+import { PgHistoricalShipStationContentsAttestationRepository } from "../../historical-shipstation-contents-attestation.repository";
+import { HistoricalShipStationContentsAttestationService } from "../../historical-shipstation-contents-attestation.service";
+import {
+  buildHistoricalShipStationContentsRecoveryEvidence,
+  historicalShipStationRecoverableCaseEvidenceHash,
+} from "../../historical-shipstation-contents-recovery.domain";
 
 const PRIMARY_GROUP_KEY = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const COMPETING_GROUP_KEY = "96e1be0d-c7d8-4c91-919f-04f5eb547f80";
@@ -195,19 +202,6 @@ async function seedCustomerFulfillmentSource(
 
 async function installAuthorityReadinessTestRelations(pool: Pool): Promise<void> {
   await pool.query(`
-    CREATE TABLE wms.shipping_provider_label_events (
-      id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      shipping_provider_label_id bigint NOT NULL
-        REFERENCES wms.shipping_provider_labels(id) ON DELETE RESTRICT,
-      event_hash varchar(64) NOT NULL,
-      event_type varchar(40) NOT NULL,
-      label_status varchar(30) NOT NULL,
-      tracking_number varchar(200) NOT NULL,
-      provider_occurred_at timestamptz,
-      received_at timestamptz NOT NULL,
-      sanitized_payload jsonb NOT NULL
-    );
-
     CREATE TABLE wms.carrier_tracking_events (
       id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
       dispatch_evidence varchar(30) NOT NULL,
@@ -845,6 +839,197 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       },
     });
   });
+
+  it("persists one exact lead attestation, replays it, and rolls back a competing resolution", async () => {
+    const leadUserId = "11111111-1111-4111-8111-111111111111";
+    await pool.query(
+      `INSERT INTO identity.users (id, username, password, role, active)
+       VALUES ($1, 'historical-attestation-lead', 'test-only-password-hash', 'lead', 1)`,
+      [leadUserId],
+    );
+    const order = await pool.query<{ id: number }>(
+      "INSERT INTO wms.orders DEFAULT VALUES RETURNING id",
+    );
+    const orderItem = await pool.query<{ id: number }>(
+      `INSERT INTO wms.order_items (order_id, sku, quantity)
+       VALUES ($1::integer, 'ATTEST-SKU', 2)
+       RETURNING id`,
+      [order.rows[0].id],
+    );
+    const shipment = await pool.query<{ id: number }>(
+      "INSERT INTO wms.outbound_shipments DEFAULT VALUES RETURNING id",
+    );
+    const shipmentItem = await pool.query<{ id: number }>(
+      `INSERT INTO wms.outbound_shipment_items (
+         shipment_id, order_item_id, shipment_item_purpose, qty
+       ) VALUES ($1::integer, $2::integer, 'customer_fulfillment', 2)
+       RETURNING id`,
+      [shipment.rows[0].id, orderItem.rows[0].id],
+    );
+    const label = await pool.query<{ id: string }>(
+      `INSERT INTO wms.shipping_provider_labels (
+         provider, provider_label_id, tracking_number, label_status,
+         label_direction, first_observed_at, last_observed_at
+       ) VALUES (
+         'shipstation', '55001', '1ZATTESTATION', 'active', 'outbound',
+         '2026-08-26T12:00:00.000Z', '2026-08-26T12:00:00.000Z'
+       ) RETURNING id::text AS id`,
+    );
+    const labelEvent = await pool.query<{ id: string }>(
+      `INSERT INTO wms.shipping_provider_label_events (
+         shipping_provider_label_id, event_hash, event_type, label_status,
+         tracking_number, provider_occurred_at, received_at, sanitized_payload
+       ) VALUES (
+         $1::bigint, $2, 'label_observed', 'active', '1ZATTESTATION', NULL,
+         '2026-08-26T12:00:00.000Z', '{"payloadSchemaVersion":1}'::jsonb
+       ) RETURNING id::text AS id`,
+      [label.rows[0].id, "d".repeat(64)],
+    );
+    await pool.query(
+      `INSERT INTO wms.shipping_provider_label_links (
+         shipping_provider_label_id, legacy_wms_shipment_id
+       ) VALUES ($1::bigint, $2::integer)`,
+      [label.rows[0].id, shipment.rows[0].id],
+    );
+
+    const expectedContents = Object.freeze({
+      kind: "available" as const,
+      source: "legacy_wms_shipment" as const,
+      lines: Object.freeze([
+        Object.freeze({
+          wmsShipmentItemId: shipmentItem.rows[0].id,
+          sku: "ATTEST-SKU",
+          quantity: 2,
+        }),
+      ]),
+    });
+    const recoveryEvidence = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 55_001,
+      providerStatus: "authoritative",
+      rawProviderItems: [{
+        lineItemKey: `wms-item-${shipmentItem.rows[0].id}`,
+        quantity: 2,
+      }],
+      expectedContents,
+    });
+    if (recoveryEvidence === null) throw new Error("Expected recoverable integration evidence");
+    const previewEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
+      shippingProviderLabelId: label.rows[0].id,
+      recoveryStatus: recoveryEvidence.recoveryStatus,
+      providerEvidenceHash: recoveryEvidence.evidenceHash,
+    });
+    const client: HistoricalShipStationContentsClient = {
+      async loadShipmentContents(providerShipmentId, observedExpectedContents) {
+        expect(providerShipmentId).toBe(55_001);
+        expect(observedExpectedContents).toEqual(expectedContents);
+        return Object.freeze({
+          kind: "found" as const,
+          evidence: Object.freeze({
+            status: "authoritative" as const,
+            recoveryStatus: recoveryEvidence.recoveryStatus,
+            providerItemCount: 1,
+            recognizedProviderItemCount: 1,
+            canonicalLineCount: 1,
+            malformedItemCount: 0,
+            unrecognizedItemCount: 0,
+            duplicateLineItemCount: 0,
+            recoveryEvidence: Object.freeze({
+              contractVersion: recoveryEvidence.contractVersion,
+              evidenceHash: recoveryEvidence.evidenceHash,
+              attestedLineCount: recoveryEvidence.attestedContents.length,
+            }),
+          }),
+          recoveryEvidenceDetails: recoveryEvidence,
+        });
+      },
+    };
+    const repository = new PgHistoricalShipStationContentsAttestationRepository(pool);
+    const service = new HistoricalShipStationContentsAttestationService(repository, client);
+    const command = Object.freeze({
+      shippingProviderLabelId: label.rows[0].id,
+      expectedPreviewEvidenceHash: previewEvidenceHash,
+      authenticatedActorUserId: leadUserId,
+      reason: "Reviewed exact historical ShipStation contents against linked WMS lineage",
+    });
+
+    const created = await service.attest(command);
+    expect(created).toMatchObject({
+      kind: "created",
+      shippingProviderLabelId: label.rows[0].id,
+      previewEvidenceHash,
+      resolvedEventCount: 1,
+    });
+    const persisted = await pool.query<{
+      actor_user_id: string;
+      actor_role: string;
+      reason: string;
+      attested_contents: unknown;
+      resolved_event_id: string;
+    }>(
+      `SELECT
+         attestation.actor_user_id,
+         attestation.actor_role,
+         attestation.reason,
+         attestation.attested_contents,
+         resolution.shipping_provider_label_event_id::text AS resolved_event_id
+       FROM wms.shipping_provider_label_content_attestations AS attestation
+       JOIN wms.shipping_provider_label_content_attestation_resolutions AS resolution
+         ON resolution.shipping_provider_label_content_attestation_id = attestation.id
+       WHERE attestation.id = $1::bigint`,
+      [created.attestationId],
+    );
+    expect(persisted.rows).toEqual([{
+      actor_user_id: leadUserId,
+      actor_role: "lead",
+      reason: command.reason,
+      attested_contents: recoveryEvidence.attestedContents,
+      resolved_event_id: labelEvent.rows[0].id,
+    }]);
+
+    await expect(service.attest(structuredClone(command))).resolves.toMatchObject({
+      kind: "already_persisted",
+      attestationId: created.attestationId,
+      resolvedEventCount: 1,
+    });
+    await expect(service.attest({
+      ...command,
+      reason: "A different reason cannot reuse the same reviewed fingerprint",
+    })).rejects.toMatchObject({ code: "ATTESTATION_CONFLICT" });
+
+    await expect(repository.withSerializableTransaction(async (transaction) => {
+      const actor = await transaction.lockAuthorizedActor(leadUserId);
+      if (actor === null) throw new Error("Expected the integration lead to remain authorized");
+      const resolvedLabelEventIds = await transaction.loadResolvableLabelEventIds(label.rows[0].id);
+      return transaction.appendExactAttestation({
+        shippingProviderLabelId: label.rows[0].id,
+        recoveryEvidence: Object.freeze({
+          ...recoveryEvidence,
+          evidenceHash: "e".repeat(64),
+        }),
+        previewEvidenceHash: "f".repeat(64),
+        actor,
+        reason: "Competing evidence must roll back its parent row",
+        attestationHash: "a".repeat(64),
+        resolvedLabelEventIds,
+      });
+    })).rejects.toMatchObject({ code: "ATTESTATION_CONFLICT" });
+
+    const counts = await pool.query<{ attestations: number; resolutions: number }>(
+      `SELECT
+         (SELECT COUNT(*)::integer FROM wms.shipping_provider_label_content_attestations)
+           AS attestations,
+         (SELECT COUNT(*)::integer FROM wms.shipping_provider_label_content_attestation_resolutions)
+           AS resolutions`,
+    );
+    expect(counts.rows).toEqual([{ attestations: 1, resolutions: 1 }]);
+    await expect(pool.query(
+      `UPDATE wms.shipping_provider_label_content_attestations
+       SET reason = 'mutation is forbidden'
+       WHERE id = $1::bigint`,
+      [created.attestationId],
+    )).rejects.toMatchObject({ code: "55000" });
+  });
+
   it("installs valid discovery indexes that PostgreSQL can use for the production query", async () => {
     const catalog = await pool.query<{
       index_name: string;

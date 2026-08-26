@@ -90,6 +90,7 @@ export async function runMigrations(): Promise<void> {
     "migrations/198_package_allocation_ledger_foundation.sql",
     "migrations/199_package_allocation_persistence_foundation.sql",
     "migrations/0619_package_allocation_discovery_indexes.sql",
+    "migrations/0621_shipping_provider_label_content_attestations.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;
@@ -119,6 +120,8 @@ export async function runMigrations(): Promise<void> {
 }
 
 const TRUNCATE_TABLES = [
+  "wms.shipping_provider_label_content_attestation_resolutions",
+  "wms.shipping_provider_label_content_attestations",
   "wms.package_allocation_effect_intents",
   "wms.package_allocation_entries",
   "wms.package_allocation_plans",
@@ -158,6 +161,7 @@ const TRUNCATE_TABLES = [
   "catalog.product_lines",
   "catalog.product_variants",
   "catalog.products",
+  "identity.users",
 ];
 
 export async function truncateTestData(): Promise<void> {

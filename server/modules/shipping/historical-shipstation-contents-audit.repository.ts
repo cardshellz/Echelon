@@ -534,6 +534,35 @@ function expectedContentsForCandidate(
   return unavailableExpectedContents("no_linked_package");
 }
 
+
+export async function loadHistoricalShipStationExpectedContents(
+  client: QueryClient,
+  rawShippingProviderLabelId: string,
+): Promise<HistoricalShipStationExpectedContentsEvidence> {
+  const shippingProviderLabelId = positiveBigintString(
+    rawShippingProviderLabelId,
+    "shipping_provider_label_id",
+  );
+  const labelIds = Object.freeze([shippingProviderLabelId]);
+  const selectedLabelIds = new Set(labelIds);
+  const linksResult = await client.query(HISTORICAL_SHIPSTATION_CONTENTS_LINKS_SQL, [labelIds]);
+  const linesResult = await client.query(HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL, [
+    labelIds,
+    MAX_LINKED_PACKAGE_LINES + 1,
+  ]);
+  return expectedContentsForCandidate(
+    shippingProviderLabelId,
+    mapLinkedPackageSummaries(
+      linksResult.rows as Record<string, unknown>[],
+      selectedLabelIds,
+    ),
+    mapLinkedLineRows(
+      linesResult.rows as Record<string, unknown>[],
+      selectedLabelIds,
+    ),
+  );
+}
+
 async function assertLineageRoleEvidence(client: QueryClient): Promise<void> {
   const result = await client.query(HISTORICAL_SHIPSTATION_CONTENTS_LINEAGE_ROLE_ASSERTION_SQL);
   const row = (result.rows as Record<string, unknown>[])[0];
