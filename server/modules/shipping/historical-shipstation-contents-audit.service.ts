@@ -1,8 +1,19 @@
+import { createHash } from "node:crypto";
+
+import { canonicalJson } from "@shared/utils/canonical-json";
+
 import type { ShipStationShipmentContentsEvidenceStatus } from "./carrier-tracking.domain";
-import type { HistoricalShipStationContentsClient } from "./historical-shipstation-contents-audit.client";
-import type { HistoricalShipStationContentsCandidateBatch } from "./historical-shipstation-contents-audit.repository";
+import type {
+  HistoricalShipStationContentsClient,
+  HistoricalShipStationContentsRecoveryEvidenceSummary,
+} from "./historical-shipstation-contents-audit.client";
+import {
+  HISTORICAL_SHIPSTATION_CONTENTS_AUDIT_LIMITS,
+  type HistoricalShipStationContentsCandidateBatch,
+} from "./historical-shipstation-contents-audit.repository";
 import {
   HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_STATUSES,
+  HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
   type HistoricalShipStationContentsRecoveryStatus,
   type HistoricalShipStationExpectedContentsEvidence,
 } from "./historical-shipstation-contents-recovery.domain";
@@ -55,6 +66,18 @@ export interface HistoricalShipStationContentsReviewCase {
   readonly expectedContents: HistoricalShipStationExpectedContentsSummary;
 }
 
+export interface HistoricalShipStationContentsRecoverableCase {
+  readonly shippingProviderLabelId: string;
+  readonly recoveryStatus: RecoverableStatus;
+  readonly providerContentsStatus: ShipStationShipmentContentsEvidenceStatus;
+  readonly providerItemCount: number;
+  readonly canonicalLineCount: number;
+  readonly attestedLineCount: number;
+  readonly expectedContents: HistoricalShipStationExpectedContentsSummary;
+  readonly contractVersion: typeof HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION;
+  readonly evidenceHash: string;
+}
+
 export interface HistoricalShipStationContentsAuditReport {
   readonly mode: "read_only_historical_shipstation_contents_audit";
   readonly candidateLimit: number;
@@ -70,6 +93,7 @@ export interface HistoricalShipStationContentsAuditReport {
   readonly recoveryStatusCounts: Readonly<Record<HistoricalShipStationContentsRecoveryStatus, number>>;
   readonly providerAuthoritativeCount: number;
   readonly recoverableProviderEvidenceCount: number;
+  readonly recoverableCases: readonly HistoricalShipStationContentsRecoverableCase[];
   readonly reviewRequiredByCurrentEvidenceCount: number;
   readonly reviewCases: readonly HistoricalShipStationContentsReviewCase[];
   readonly requiresLeadAttestationCount: number;
@@ -136,6 +160,31 @@ function isRecoverableStatus(
     || status === "exact_unique_wms_match";
 }
 
+function validRecoveryEvidenceSummary(
+  evidence: HistoricalShipStationContentsRecoveryEvidenceSummary | null,
+): evidence is HistoricalShipStationContentsRecoveryEvidenceSummary {
+  return evidence !== null
+    && evidence.contractVersion === HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION
+    && /^[0-9a-f]{64}$/.test(evidence.evidenceHash)
+    && Number.isSafeInteger(evidence.attestedLineCount)
+    && evidence.attestedLineCount >= 1
+    && evidence.attestedLineCount <= 500;
+}
+
+function labelBoundEvidenceHash(
+  shippingProviderLabelId: string,
+  recoveryStatus: RecoverableStatus,
+  providerEvidenceHash: string,
+): string {
+  return createHash("sha256").update(canonicalJson(Object.freeze({
+    contract: "historical_shipstation_contents_recoverable_case_v1",
+    contractVersion: HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
+    shippingProviderLabelId,
+    recoveryStatus,
+    providerEvidenceHash,
+  })), "utf8").digest("hex");
+}
+
 function expectedContentsSummary(
   evidence: HistoricalShipStationExpectedContentsEvidence,
 ): HistoricalShipStationExpectedContentsSummary {
@@ -156,6 +205,7 @@ export async function auditHistoricalShipStationContents(
   if (
     !Number.isSafeInteger(batch.candidateLimit)
     || batch.candidateLimit < 1
+    || batch.candidateLimit > HISTORICAL_SHIPSTATION_CONTENTS_AUDIT_LIMITS.maxCandidateLimit
     || batch.candidates.length > batch.candidateLimit
     || typeof batch.batchLimitReached !== "boolean"
     || typeof batch.databaseTemporaryPrivilege !== "boolean"
@@ -214,6 +264,7 @@ export async function auditHistoricalShipStationContents(
   let providerShipmentFoundCount = 0;
   let providerShipmentNotFoundCount = 0;
   let providerRequestFailureCount = 0;
+  const recoverableCases: HistoricalShipStationContentsRecoverableCase[] = [];
   const reviewCases: HistoricalShipStationContentsReviewCase[] = [];
   const addReviewCase = (
     candidate: HistoricalShipStationContentsCandidateBatch["candidates"][number],
@@ -245,10 +296,37 @@ export async function auditHistoricalShipStationContents(
         addReviewCase(candidate, "provider_shipment_not_found");
         continue;
       }
-      providerShipmentFoundCount += 1;
-      contentsStatusCounts[result.evidence.status] += 1;
-      recoveryStatusCounts[result.evidence.recoveryStatus] += 1;
-      if (!isRecoverableStatus(result.evidence.recoveryStatus)) {
+      const recoverable = isRecoverableStatus(result.evidence.recoveryStatus);
+      const recoveryEvidence = result.evidence.recoveryEvidence;
+      if (recoverable) {
+        if (!validRecoveryEvidenceSummary(recoveryEvidence)) {
+          throw new TypeError("Historical ShipStation recovery evidence summary is inconsistent");
+        }
+        providerShipmentFoundCount += 1;
+        contentsStatusCounts[result.evidence.status] += 1;
+        recoveryStatusCounts[result.evidence.recoveryStatus] += 1;
+        recoverableCases.push(Object.freeze({
+          shippingProviderLabelId: candidate.shippingProviderLabelId,
+          recoveryStatus: result.evidence.recoveryStatus,
+          providerContentsStatus: result.evidence.status,
+          providerItemCount: result.evidence.providerItemCount,
+          canonicalLineCount: result.evidence.canonicalLineCount,
+          attestedLineCount: recoveryEvidence.attestedLineCount,
+          expectedContents: expectedContentsSummary(candidate.expectedContents),
+          contractVersion: recoveryEvidence.contractVersion,
+          evidenceHash: labelBoundEvidenceHash(
+            candidate.shippingProviderLabelId,
+            result.evidence.recoveryStatus,
+            recoveryEvidence.evidenceHash,
+          ),
+        }));
+      } else {
+        if (recoveryEvidence !== null) {
+          throw new TypeError("Historical ShipStation recovery evidence summary is inconsistent");
+        }
+        providerShipmentFoundCount += 1;
+        contentsStatusCounts[result.evidence.status] += 1;
+        recoveryStatusCounts[result.evidence.recoveryStatus] += 1;
         addReviewCase(candidate, result.evidence.recoveryStatus, result.evidence);
       }
     } catch {
@@ -267,9 +345,8 @@ export async function auditHistoricalShipStationContents(
       ),
     ),
   ) as Readonly<Record<HistoricalShipStationContentsRecoveryStatus, number>>;
-  const recoverableProviderEvidenceCount =
-    frozenRecoveryStatusCounts.provider_line_keys_authoritative
-    + frozenRecoveryStatusCounts.exact_unique_wms_match;
+  const frozenRecoverableCases = Object.freeze(recoverableCases);
+  const recoverableProviderEvidenceCount = frozenRecoverableCases.length;
   const frozenReviewCases = Object.freeze(reviewCases);
   return Object.freeze({
     mode: "read_only_historical_shipstation_contents_audit",
@@ -286,6 +363,7 @@ export async function auditHistoricalShipStationContents(
     recoveryStatusCounts: frozenRecoveryStatusCounts,
     providerAuthoritativeCount: frozenStatusCounts.authoritative,
     recoverableProviderEvidenceCount,
+    recoverableCases: frozenRecoverableCases,
     reviewRequiredByCurrentEvidenceCount: frozenReviewCases.length,
     reviewCases: frozenReviewCases,
     // Recovery evidence is preview-only. A later audited write path must decide

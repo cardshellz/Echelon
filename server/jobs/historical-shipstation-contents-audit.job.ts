@@ -343,8 +343,9 @@ function usage(): string {
     "  npm run wms:audit-historical-shipstation-contents -- [--limit=N] [--before-label-id=ID]",
     "",
     "Reads a bounded historical V1 candidate page with the dedicated audit role,",
-    "performs bounded ShipStation detail GETs, and prints aggregate counts plus review IDs.",
-    "It never prints tracking numbers, SKUs, quantities, or raw provider payloads.",
+    "performs bounded ShipStation detail GETs, and prints aggregate counts plus bounded",
+    "internal recoverable/review label IDs and cryptographic evidence hashes.",
+    "It never prints provider shipment IDs, tracking numbers, SKUs, quantities, or raw payloads.",
     "It never writes evidence and never resolves historical omissions automatically.",
   ].join("\n");
 }

@@ -29,17 +29,28 @@ function found(
   status: "authoritative" | "omitted" | "empty" | "unrecognized" | "malformed" | "mixed",
   recoveryStatus: HistoricalShipStationContentsRecoveryStatus,
 ) {
+  const recoverable = recoveryStatus === "provider_line_keys_authoritative"
+    || recoveryStatus === "exact_unique_wms_match";
   return {
     kind: "found" as const,
     evidence: {
       status,
       recoveryStatus,
-      providerItemCount: 0,
-      recognizedProviderItemCount: 0,
-      canonicalLineCount: 0,
+      providerItemCount: recoverable ? 1 : 0,
+      recognizedProviderItemCount: status === "authoritative" ? 1 : 0,
+      canonicalLineCount: status === "authoritative" ? 1 : 0,
       malformedItemCount: 0,
-      unrecognizedItemCount: 0,
+      unrecognizedItemCount: status === "unrecognized" ? 1 : 0,
       duplicateLineItemCount: 0,
+      recoveryEvidence: recoverable
+        ? {
+          contractVersion: 1 as const,
+          evidenceHash: recoveryStatus === "provider_line_keys_authoritative"
+            ? "a".repeat(64)
+            : "b".repeat(64),
+          attestedLineCount: 1,
+        }
+        : null,
     },
   };
 }
@@ -123,6 +134,30 @@ describe("historical ShipStation contents audit service", () => {
       },
       providerAuthoritativeCount: 1,
       recoverableProviderEvidenceCount: 2,
+      recoverableCases: [
+        {
+          shippingProviderLabelId: "108",
+          recoveryStatus: "provider_line_keys_authoritative",
+          providerContentsStatus: "authoritative",
+          providerItemCount: 1,
+          canonicalLineCount: 1,
+          attestedLineCount: 1,
+          expectedContents: expectedContentsSummary,
+          contractVersion: 1,
+          evidenceHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+        {
+          shippingProviderLabelId: "105",
+          recoveryStatus: "exact_unique_wms_match",
+          providerContentsStatus: "unrecognized",
+          providerItemCount: 1,
+          canonicalLineCount: 0,
+          attestedLineCount: 1,
+          expectedContents: expectedContentsSummary,
+          contractVersion: 1,
+          evidenceHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      ],
       reviewRequiredByCurrentEvidenceCount: 6,
       reviewCases: [
         reviewCase("107", "provider_evidence_unavailable", "omitted"),
@@ -146,6 +181,11 @@ describe("historical ShipStation contents audit service", () => {
     expect(Object.isFrozen(report)).toBe(true);
     expect(Object.isFrozen(report.contentsStatusCounts)).toBe(true);
     expect(Object.isFrozen(report.recoveryStatusCounts)).toBe(true);
+    expect(Object.isFrozen(report.recoverableCases)).toBe(true);
+    expect(report.recoverableCases.every(Object.isFrozen)).toBe(true);
+    expect(report.recoverableCases.every((entry) => Object.isFrozen(entry.expectedContents))).toBe(true);
+    expect(report.recoverableCases[0]?.evidenceHash)
+      .not.toBe(report.recoverableCases[1]?.evidenceHash);
     expect(Object.isFrozen(report.reviewCases)).toBe(true);
     expect(report.reviewCases.every((entry) => Object.isFrozen(entry.expectedContents))).toBe(true);
   });
@@ -187,6 +227,51 @@ describe("historical ShipStation contents audit service", () => {
       expectedContents: unavailableExpectedContents,
     }]);
     expect(JSON.stringify(report)).not.toContain(String(candidate.providerShipmentId));
+  });
+
+  it("fails closed when a recoverable result omits its evidence fingerprint", async () => {
+    const inconsistent = found("authoritative", "provider_line_keys_authoritative");
+    const loadShipmentContents = vi.fn().mockResolvedValue({
+      ...inconsistent,
+      evidence: {
+        ...inconsistent.evidence,
+        recoveryEvidence: null,
+      },
+    });
+
+    const report = await auditHistoricalShipStationContents({
+      candidateLimit: 1,
+      beforeLabelId: null,
+      nextBeforeLabelId: null,
+      batchLimitReached: false,
+      databaseTemporaryPrivilege: false,
+      candidates: [candidates[0]],
+    }, { loadShipmentContents });
+
+    expect(report).toMatchObject({
+      providerShipmentFoundCount: 0,
+      providerRequestFailureCount: 1,
+      recoverableProviderEvidenceCount: 0,
+      recoverableCases: [],
+      reviewCases: [{
+        shippingProviderLabelId: "108",
+        reason: "provider_request_failed",
+      }],
+      safeToAutoResolveCount: 0,
+    });
+  });
+
+  it("rejects an oversized proposal batch before any provider call", async () => {
+    const loadShipmentContents = vi.fn();
+    await expect(auditHistoricalShipStationContents({
+      candidateLimit: 101,
+      beforeLabelId: null,
+      nextBeforeLabelId: null,
+      batchLimitReached: false,
+      databaseTemporaryPrivilege: false,
+      candidates: [candidates[0]],
+    }, { loadShipmentContents })).rejects.toThrow(/candidate batch is invalid/);
+    expect(loadShipmentContents).not.toHaveBeenCalled();
   });
 
   it("rejects duplicated identities before any provider call", async () => {

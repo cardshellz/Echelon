@@ -49,7 +49,7 @@ describe("historical ShipStation contents audit client", () => {
       expectedContents,
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       kind: "found",
       evidence: {
         status: "authoritative",
@@ -60,6 +60,11 @@ describe("historical ShipStation contents audit client", () => {
         malformedItemCount: 0,
         unrecognizedItemCount: 0,
         duplicateLineItemCount: 0,
+        recoveryEvidence: {
+          contractVersion: 1,
+          evidenceHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+          attestedLineCount: 2,
+        },
       },
     });
     const [request, init] = fetchImpl.mock.calls[0]!;
@@ -100,6 +105,11 @@ describe("historical ShipStation contents audit client", () => {
         status: "unrecognized",
         recoveryStatus: "exact_unique_wms_match",
         providerItemCount: 2,
+        recoveryEvidence: {
+          contractVersion: 1,
+          evidenceHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+          attestedLineCount: 2,
+        },
       },
     });
     expect(JSON.stringify(result)).not.toMatch(/SECRET|SKU-A|SKU-B/);
@@ -123,6 +133,7 @@ describe("historical ShipStation contents audit client", () => {
       evidence: {
         status: "unrecognized",
         recoveryStatus: "provider_wms_conflict",
+        recoveryEvidence: null,
       },
     });
     expect(JSON.stringify(result)).not.toContain("CONFLICTING-SKU");
@@ -144,7 +155,10 @@ describe("historical ShipStation contents audit client", () => {
 
     await expect(
       client(fetchImpl as typeof fetch).loadShipmentContents(44_001, expectedContents),
-    ).resolves.toMatchObject({ kind: "found", evidence: { status } });
+    ).resolves.toMatchObject({
+      kind: "found",
+      evidence: { status, recoveryEvidence: null },
+    });
   });
 
   it("returns not_found only when the requested shipment identity is absent", async () => {
