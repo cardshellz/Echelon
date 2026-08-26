@@ -124,6 +124,7 @@ export const HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL = `
     SELECT
       link.shipping_provider_label_id::text AS shipping_provider_label_id,
       'physical_shipment'::text AS source_kind,
+      link.physical_shipment_id::text AS linked_package_id,
       item.legacy_wms_shipment_item_id::text AS wms_shipment_item_id,
       item.sku,
       item.quantity_shipped::text AS quantity
@@ -139,6 +140,7 @@ export const HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL = `
     SELECT
       link.shipping_provider_label_id::text AS shipping_provider_label_id,
       'legacy_wms_shipment'::text AS source_kind,
+      link.legacy_wms_shipment_id::text AS linked_package_id,
       item.id::text AS wms_shipment_item_id,
       CASE item.shipment_item_purpose
         WHEN 'customer_fulfillment' THEN order_item.sku
@@ -167,19 +169,24 @@ export const HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL = `
       linked_lines.*,
       ROW_NUMBER() OVER (
         PARTITION BY shipping_provider_label_id, source_kind
-        ORDER BY wms_shipment_item_id::bigint
+        ORDER BY linked_package_id::bigint, wms_shipment_item_id::bigint
       ) AS source_row_number
     FROM linked_lines
   )
   SELECT
     shipping_provider_label_id,
     source_kind,
+    linked_package_id,
     wms_shipment_item_id,
     sku,
     quantity
   FROM ranked_lines
   WHERE source_row_number <= $2::integer
-  ORDER BY shipping_provider_label_id, source_kind, wms_shipment_item_id::bigint
+  ORDER BY
+    shipping_provider_label_id,
+    source_kind,
+    linked_package_id::bigint,
+    wms_shipment_item_id::bigint
 `;
 
 export interface HistoricalShipStationContentsAuditRepositoryOptions {
@@ -406,8 +413,14 @@ function mapLinkedPackageSummaries(
 function mapLinkedLineRows(
   rows: readonly Record<string, unknown>[],
   selectedLabelIds: ReadonlySet<string>,
-): ReadonlyMap<string, ReadonlyMap<LinkedLineSource, readonly Record<string, unknown>[]>> {
-  const mutable = new Map<string, Map<LinkedLineSource, Record<string, unknown>[]>>();
+): ReadonlyMap<
+  string,
+  ReadonlyMap<LinkedLineSource, ReadonlyMap<string, readonly Record<string, unknown>[]>>
+> {
+  const mutable = new Map<
+    string,
+    Map<LinkedLineSource, Map<string, Record<string, unknown>[]>>
+  >();
   for (const row of rows) {
     const labelId = positiveBigintString(
       row.shipping_provider_label_id,
@@ -426,16 +439,28 @@ function mapLinkedLineRows(
         "Historical ShipStation line query returned an unknown source",
       );
     }
-    const bySource = mutable.get(labelId) ?? new Map<LinkedLineSource, Record<string, unknown>[]>();
-    const sourceRows = bySource.get(source) ?? [];
-    sourceRows.push(row);
-    bySource.set(source, sourceRows);
+    const linkedPackageId = positiveBigintString(row.linked_package_id, "linked_package_id");
+    const bySource = mutable.get(labelId)
+      ?? new Map<LinkedLineSource, Map<string, Record<string, unknown>[]>>();
+    const byPackage = bySource.get(source) ?? new Map<string, Record<string, unknown>[]>();
+    const packageRows = byPackage.get(linkedPackageId) ?? [];
+    packageRows.push(row);
+    byPackage.set(linkedPackageId, packageRows);
+    bySource.set(source, byPackage);
     mutable.set(labelId, bySource);
   }
-  const frozen = new Map<string, ReadonlyMap<LinkedLineSource, readonly Record<string, unknown>[]>>();
+  const frozen = new Map<
+    string,
+    ReadonlyMap<LinkedLineSource, ReadonlyMap<string, readonly Record<string, unknown>[]>>
+  >();
   for (const [labelId, bySource] of mutable) {
     frozen.set(labelId, new Map(
-      [...bySource].map(([source, sourceRows]) => [source, Object.freeze([...sourceRows])]),
+      [...bySource].map(([source, byPackage]) => [source, new Map(
+        [...byPackage].map(([packageId, packageRows]) => [
+          packageId,
+          Object.freeze([...packageRows]),
+        ]),
+      )]),
     ));
   }
   return frozen;
@@ -472,27 +497,39 @@ function availableExpectedContents(
 function expectedContentsForCandidate(
   labelId: string,
   summaries: ReadonlyMap<string, LinkedPackageSummary>,
-  lineRows: ReadonlyMap<string, ReadonlyMap<LinkedLineSource, readonly Record<string, unknown>[]>>,
+  lineRows: ReadonlyMap<
+    string,
+    ReadonlyMap<LinkedLineSource, ReadonlyMap<string, readonly Record<string, unknown>[]>>
+  >,
 ): HistoricalShipStationExpectedContentsEvidence {
+  function contentsForLinkedSource(
+    source: LinkedLineSource,
+    linkedPackageCount: number,
+  ): HistoricalShipStationExpectedContentsEvidence {
+    const populatedPackages = lineRows.get(labelId)?.get(source) ?? new Map();
+    if (populatedPackages.size > linkedPackageCount) {
+      throw new HistoricalShipStationContentsAuditRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "Historical ShipStation line query returned more populated packages than linked packages",
+      );
+    }
+    if (linkedPackageCount === 1) {
+      const rows = populatedPackages.values().next().value ?? [];
+      return availableExpectedContents(source, rows);
+    }
+    if (populatedPackages.size !== 1) {
+      return unavailableExpectedContents("ambiguous_linked_package");
+    }
+    return availableExpectedContents(source, populatedPackages.values().next().value ?? []);
+  }
+
   const summary = summaries.get(labelId);
   if (!summary) return unavailableExpectedContents("no_linked_package");
-  if (summary.physicalShipmentCount > 1) {
-    return unavailableExpectedContents("ambiguous_linked_package");
+  if (summary.physicalShipmentCount > 0) {
+    return contentsForLinkedSource("physical_shipment", summary.physicalShipmentCount);
   }
-  if (summary.physicalShipmentCount === 1) {
-    return availableExpectedContents(
-      "physical_shipment",
-      lineRows.get(labelId)?.get("physical_shipment") ?? [],
-    );
-  }
-  if (summary.legacyWmsShipmentCount > 1) {
-    return unavailableExpectedContents("ambiguous_linked_package");
-  }
-  if (summary.legacyWmsShipmentCount === 1) {
-    return availableExpectedContents(
-      "legacy_wms_shipment",
-      lineRows.get(labelId)?.get("legacy_wms_shipment") ?? [],
-    );
+  if (summary.legacyWmsShipmentCount > 0) {
+    return contentsForLinkedSource("legacy_wms_shipment", summary.legacyWmsShipmentCount);
   }
   return unavailableExpectedContents("no_linked_package");
 }

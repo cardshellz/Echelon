@@ -79,6 +79,12 @@ describe("historical ShipStation contents audit repository", () => {
     ]);
     expect(HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL).toMatch(/UNION ALL/);
     expect(HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL).toMatch(
+      /link\.physical_shipment_id::text AS linked_package_id/,
+    );
+    expect(HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL).toMatch(
+      /link\.legacy_wms_shipment_id::text AS linked_package_id/,
+    );
+    expect(HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL).toMatch(
       /WHEN 'replacement' THEN replacement_order_item\.sku/,
     );
     expect(HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL).toMatch(
@@ -123,6 +129,7 @@ describe("historical ShipStation contents audit repository", () => {
             {
               shipping_provider_label_id: "103",
               source_kind: "physical_shipment",
+              linked_package_id: "9001",
               wms_shipment_item_id: "7002",
               sku: "SKU-B",
               quantity: "1",
@@ -130,6 +137,7 @@ describe("historical ShipStation contents audit repository", () => {
             {
               shipping_provider_label_id: "103",
               source_kind: "physical_shipment",
+              linked_package_id: "9001",
               wms_shipment_item_id: "7001",
               sku: "SKU-A",
               quantity: "2",
@@ -137,6 +145,7 @@ describe("historical ShipStation contents audit repository", () => {
             {
               shipping_provider_label_id: "103",
               source_kind: "legacy_wms_shipment",
+              linked_package_id: "8001",
               wms_shipment_item_id: "7999",
               sku: null,
               quantity: "1",
@@ -144,6 +153,7 @@ describe("historical ShipStation contents audit repository", () => {
             {
               shipping_provider_label_id: "102",
               source_kind: "legacy_wms_shipment",
+              linked_package_id: "8101",
               wms_shipment_item_id: "7101",
               sku: "SKU-C",
               quantity: "3",
@@ -204,6 +214,90 @@ describe("historical ShipStation contents audit repository", () => {
     expect(queries.find((query) => query.text === HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL))
       .toMatchObject({ values: [["103", "102"], 501] });
     expect(queries.at(-1)?.text).toBe("ROLLBACK");
+  });
+
+  it("uses the sole populated linked package and keeps multiple populated packages ambiguous", async () => {
+    const client = {
+      async query(text: string) {
+        if (text.includes("current_setting('transaction_read_only')")) {
+          return { rows: [readOnlyRoleRow()] };
+        }
+        if (text === HISTORICAL_SHIPSTATION_CONTENTS_LINEAGE_ROLE_ASSERTION_SQL) {
+          return { rows: [lineageRoleRow()] };
+        }
+        if (text === HISTORICAL_SHIPSTATION_CONTENTS_CANDIDATES_SQL) {
+          return { rows: [
+            { shipping_provider_label_id: "103", provider_label_id: "44003" },
+            { shipping_provider_label_id: "102", provider_label_id: "44002" },
+          ] };
+        }
+        if (text === HISTORICAL_SHIPSTATION_CONTENTS_LINKS_SQL) {
+          return { rows: [
+            {
+              shipping_provider_label_id: "103",
+              physical_shipment_count: "0",
+              legacy_wms_shipment_count: "2",
+            },
+            {
+              shipping_provider_label_id: "102",
+              physical_shipment_count: "0",
+              legacy_wms_shipment_count: "2",
+            },
+          ] };
+        }
+        if (text === HISTORICAL_SHIPSTATION_CONTENTS_LINKED_LINES_SQL) {
+          return { rows: [
+            {
+              shipping_provider_label_id: "103",
+              source_kind: "legacy_wms_shipment",
+              linked_package_id: "7001",
+              wms_shipment_item_id: "7101",
+              sku: "SKU-A",
+              quantity: "2",
+            },
+            {
+              shipping_provider_label_id: "102",
+              source_kind: "legacy_wms_shipment",
+              linked_package_id: "8001",
+              wms_shipment_item_id: "8101",
+              sku: "SKU-B",
+              quantity: "1",
+            },
+            {
+              shipping_provider_label_id: "102",
+              source_kind: "legacy_wms_shipment",
+              linked_package_id: "8002",
+              wms_shipment_item_id: "8201",
+              sku: "SKU-B",
+              quantity: "1",
+            },
+          ] };
+        }
+        return { rows: [] };
+      },
+    };
+
+    await expect(loadHistoricalShipStationContentsCandidates(client, {
+      candidateLimit: 2,
+    })).resolves.toMatchObject({
+      candidates: [
+        {
+          shippingProviderLabelId: "103",
+          expectedContents: {
+            kind: "available",
+            source: "legacy_wms_shipment",
+            lines: [{ wmsShipmentItemId: 7_101, sku: "SKU-A", quantity: 2 }],
+          },
+        },
+        {
+          shippingProviderLabelId: "102",
+          expectedContents: {
+            kind: "unavailable",
+            reason: "ambiguous_linked_package",
+          },
+        },
+      ],
+    });
   });
 
   it("keeps ambiguous or empty linked package evidence unavailable", async () => {
