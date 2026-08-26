@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildHistoricalShipStationContentsRecoveryEvidence,
   classifyHistoricalShipStationContentsRecovery,
   HistoricalShipStationContentsRecoveryError,
   type HistoricalShipStationExpectedContentsEvidence,
@@ -39,6 +40,134 @@ describe("historical ShipStation contents recovery", () => {
     expect(classify("authoritative", [
       { lineItemKey: "wms-item-7001", sku: "SKU-A", quantity: 2 },
     ])).toBe("provider_line_keys_authoritative");
+  });
+
+  it("builds deterministic redacted provider-line-key recovery evidence", () => {
+    const first = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_001,
+      providerStatus: "authoritative",
+      rawProviderItems: [
+        { lineItemKey: "wms-item-7002", sku: "SECRET-SKU-B", quantity: 1 },
+        { lineItemKey: "wms-item-7001", name: "SECRET-NAME-A", quantity: 2 },
+      ],
+      expectedContents: expected,
+    });
+    const reordered = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_001,
+      providerStatus: "authoritative",
+      rawProviderItems: [
+        { lineItemKey: "wms-item-7001", ignored: "OTHER-SECRET", quantity: 2 },
+        { lineItemKey: "wms-item-7002", quantity: 1 },
+      ],
+      expectedContents: expected,
+    });
+    if (first === null || reordered === null) throw new Error("expected recoverable evidence");
+
+    expect(first).toEqual(reordered);
+    expect(first).toMatchObject({
+      contractVersion: 1,
+      recoveryStatus: "provider_line_keys_authoritative",
+      evidenceHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      attestedContents: [
+        { wmsShipmentItemId: 7_001, quantity: 2 },
+        { wmsShipmentItemId: 7_002, quantity: 1 },
+      ],
+    });
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.attestedContents)).toBe(true);
+    expect(first.attestedContents.every(Object.isFrozen)).toBe(true);
+    expect(JSON.stringify(first)).not.toMatch(/SECRET|SKU-|44001/);
+
+    const changedProviderIdentity = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_002,
+      providerStatus: "authoritative",
+      rawProviderItems: [
+        { lineItemKey: "wms-item-7001", quantity: 2 },
+        { lineItemKey: "wms-item-7002", quantity: 1 },
+      ],
+      expectedContents: expected,
+    });
+    const changedQuantity = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_001,
+      providerStatus: "authoritative",
+      rawProviderItems: [
+        { lineItemKey: "wms-item-7001", quantity: 3 },
+        { lineItemKey: "wms-item-7002", quantity: 1 },
+      ],
+      expectedContents: expected,
+    });
+    expect(changedProviderIdentity?.evidenceHash).not.toBe(first.evidenceHash);
+    expect(changedQuantity?.evidenceHash).not.toBe(first.evidenceHash);
+  });
+
+  it("builds stable exact-WMS recovery evidence and binds the WMS source identities", () => {
+    const first = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_001,
+      providerStatus: "unrecognized",
+      rawProviderItems: [
+        { lineItemKey: null, sku: "SKU-B", quantity: 1 },
+        { lineItemKey: null, sku: "SKU-A", quantity: 2 },
+      ],
+      expectedContents: expected,
+    });
+    const reordered = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_001,
+      providerStatus: "unrecognized",
+      rawProviderItems: [
+        { lineItemKey: null, sku: "SKU-A", quantity: 2 },
+        { lineItemKey: null, sku: "SKU-B", quantity: 1 },
+      ],
+      expectedContents: {
+        kind: "available",
+        source: "physical_shipment",
+        lines: [...expected.lines].reverse(),
+      },
+    });
+    const reboundSources = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_001,
+      providerStatus: "unrecognized",
+      rawProviderItems: [
+        { lineItemKey: null, sku: "SKU-A", quantity: 2 },
+        { lineItemKey: null, sku: "SKU-B", quantity: 1 },
+      ],
+      expectedContents: {
+        kind: "available",
+        source: "physical_shipment",
+        lines: [
+          { wmsShipmentItemId: 8_001, sku: "SKU-A", quantity: 2 },
+          { wmsShipmentItemId: 8_002, sku: "SKU-B", quantity: 1 },
+        ],
+      },
+    });
+    if (first === null || reordered === null || reboundSources === null) {
+      throw new Error("expected exact WMS recovery evidence");
+    }
+
+    expect(first).toEqual(reordered);
+    expect(first.attestedContents).toEqual([
+      { wmsShipmentItemId: 7_001, quantity: 2 },
+      { wmsShipmentItemId: 7_002, quantity: 1 },
+    ]);
+    expect(reboundSources.evidenceHash).not.toBe(first.evidenceHash);
+    expect(JSON.stringify(first)).not.toMatch(/SKU-A|SKU-B|44001/);
+  });
+
+  it("returns no recovery evidence for review-only classifications", () => {
+    expect(buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_001,
+      providerStatus: "empty",
+      rawProviderItems: [],
+      expectedContents: expected,
+    })).toBeNull();
+  });
+
+  it("fails closed when authoritative status contradicts the provider line evidence", () => {
+    expect(() => buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_001,
+      providerStatus: "authoritative",
+      rawProviderItems: [{ lineItemKey: "external-1", quantity: 1 }],
+      expectedContents: expected,
+    })).toThrow(HistoricalShipStationContentsRecoveryError);
   });
 
   it("keeps a genuinely empty provider shipment in review", () => {

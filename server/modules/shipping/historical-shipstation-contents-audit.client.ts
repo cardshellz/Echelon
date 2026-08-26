@@ -5,7 +5,9 @@ import {
   type ShipStationShipmentContentsEvidenceStatus,
 } from "./carrier-tracking.domain";
 import {
+  buildHistoricalShipStationContentsRecoveryEvidence,
   classifyHistoricalShipStationContentsRecovery,
+  type HistoricalShipStationContentsRecoveryEvidence,
   type HistoricalShipStationContentsRecoveryStatus,
   type HistoricalShipStationExpectedContentsEvidence,
 } from "./historical-shipstation-contents-recovery.domain";
@@ -39,6 +41,13 @@ export interface HistoricalShipStationContentsEvidenceSummary {
   readonly malformedItemCount: number;
   readonly unrecognizedItemCount: number;
   readonly duplicateLineItemCount: number;
+  readonly recoveryEvidence: HistoricalShipStationContentsRecoveryEvidenceSummary | null;
+}
+
+export interface HistoricalShipStationContentsRecoveryEvidenceSummary {
+  readonly contractVersion: HistoricalShipStationContentsRecoveryEvidence["contractVersion"];
+  readonly evidenceHash: string;
+  readonly attestedLineCount: number;
 }
 
 export type HistoricalShipStationContentsLookupResult =
@@ -298,11 +307,18 @@ export function createHistoricalShipStationContentsClient(
         }
         const rawProviderItems = matches[0].shipmentItems;
         const evidence = normalizeShipStationShipmentContentsEvidence(rawProviderItems);
-        const recoveryStatus = classifyHistoricalShipStationContentsRecovery({
+        const recoveryEvidence = buildHistoricalShipStationContentsRecoveryEvidence({
+          providerShipmentId,
           providerStatus: evidence.status,
           rawProviderItems,
           expectedContents,
         });
+        const recoveryStatus = recoveryEvidence?.recoveryStatus
+          ?? classifyHistoricalShipStationContentsRecovery({
+            providerStatus: evidence.status,
+            rawProviderItems,
+            expectedContents,
+          });
         return Object.freeze({
           kind: "found" as const,
           evidence: Object.freeze({
@@ -314,6 +330,13 @@ export function createHistoricalShipStationContentsClient(
             malformedItemCount: evidence.malformedItemCount,
             unrecognizedItemCount: evidence.unrecognizedItemCount,
             duplicateLineItemCount: evidence.duplicateLineItemCount,
+            recoveryEvidence: recoveryEvidence === null
+              ? null
+              : Object.freeze({
+                contractVersion: recoveryEvidence.contractVersion,
+                evidenceHash: recoveryEvidence.evidenceHash,
+                attestedLineCount: recoveryEvidence.attestedContents.length,
+              }),
           }),
         });
       }
