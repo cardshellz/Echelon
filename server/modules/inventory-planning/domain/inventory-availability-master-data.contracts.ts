@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
 
-const positiveInteger = z.number().int().positive();
-const nonnegativeInteger = z.number().int().nonnegative();
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
+const positiveInteger = z.number().int().positive().max(POSTGRES_INTEGER_MAX);
+const nonnegativeInteger = z.number().int().nonnegative().max(POSTGRES_INTEGER_MAX);
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 const nonblank = (max: number) => z.string().trim().min(1).max(max);
 
@@ -155,7 +156,7 @@ function comparePaths(
 }
 
 function pathIdentity(path: z.infer<typeof transformationPathDraftSchema>): string {
-  return `${path.sourceVariantId}:${path.destinationVariantId}:${path.operationType}`;
+  return `${path.sourceVariantId}:${path.destinationVariantId}`;
 }
 
 export const transformationModelDefinitionSchema = z.object({
@@ -232,7 +233,7 @@ export const transformationModelDefinitionSchema = z.object({
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["paths", pathIndex],
-        message: "Transformation path identities must be unique within a model draft.",
+        message: "A directed source/destination pair may have only one authority path.",
       });
     }
     pathIdentities.add(identity);
@@ -261,6 +262,27 @@ export const transformationModelDefinitionSchema = z.object({
     const binding = path.transformationRecipeBindingKey === null
       ? undefined
       : bindingsByKey.get(path.transformationRecipeBindingKey);
+
+    if (
+      path.operationType === "break_pack"
+      && path.sourceUnitsPerVariant <= path.destinationUnitsPerVariant
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["paths", pathIndex, "operationType"],
+        message: "Break-pack paths must move from a larger package to a smaller package.",
+      });
+    }
+    if (
+      path.operationType === "assemble_pack"
+      && path.sourceUnitsPerVariant >= path.destinationUnitsPerVariant
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["paths", pathIndex, "operationType"],
+        message: "Assemble-pack paths must move from a smaller package to a larger package.",
+      });
+    }
 
     if (path.transformationRecipeBindingKey !== null && !binding) {
       context.addIssue({
@@ -351,6 +373,13 @@ export function calculateTransformationModelDefinitionHash(
   return createHash("sha256").update(canonicalJson(projection), "utf8").digest("hex");
 }
 
+export function calculateLocationPromisePolicyDefinitionHash(
+  input: z.infer<typeof locationPromisePolicyDraftSchema>,
+): string {
+  const definition = locationPromisePolicyDraftSchema.parse(input);
+  return createHash("sha256").update(canonicalJson(definition), "utf8").digest("hex");
+}
+
 export const safetyPolicyScopeSchema = z.discriminatedUnion("scopeType", [
   z.object({ scopeType: z.literal("business") }).strict(),
   z.object({ scopeType: z.literal("network_variant"), productVariantId: positiveInteger }).strict(),
@@ -396,6 +425,42 @@ export const promiseSafetyPolicyDraftSchema = z.object({
     });
   }
 });
+
+export function calculatePromiseSafetyPolicyDefinitionHash(
+  input: z.infer<typeof promiseSafetyPolicyDraftSchema>,
+): string {
+  const definition = promiseSafetyPolicyDraftSchema.parse(input);
+  return createHash("sha256").update(canonicalJson(definition), "utf8").digest("hex");
+}
+
+export function calculateMasterDataDraftRequestHash(
+  commandType:
+    | "transformation_model"
+    | "transformation_model_draft_update"
+    | "location_promise_policy"
+    | "promise_safety_policy",
+  input: {
+    actorId: string;
+    changeReason: string;
+    definition: unknown;
+  },
+): string {
+  return createHash("sha256")
+    .update(canonicalJson({ commandType, ...input }), "utf8")
+    .digest("hex");
+}
+
+export class InventoryAvailabilityMasterDataError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly details: readonly string[] = [],
+  ) {
+    super(message);
+    this.name = "InventoryAvailabilityMasterDataError";
+  }
+}
 
 export const demandEvidenceSnapshotSchema = z.object({
   productVariantId: positiveInteger,
@@ -449,14 +514,30 @@ export const demandEvidenceSnapshotSchema = z.object({
 
 export interface InventoryAvailabilityMasterDataRepository {
   createTransformationModelDraft(
-    command: z.infer<typeof auditedDraftCommandSchema> & { definition: TransformationModelDefinition },
+    command: z.infer<typeof auditedDraftCommandSchema> & {
+      definition: TransformationModelDefinition;
+      occurredAt: Date;
+    },
+  ): Promise<{ modelId: number; version: number; definitionHash: string; alreadyApplied: boolean }>;
+  updateTransformationModelDraft(
+    command: z.infer<typeof auditedDraftCommandSchema> & {
+      productId: number;
+      draftModelId: number;
+      expectedVersion: number;
+      expectedDefinitionHash: string;
+      expectedHeadRevision: string;
+      definition: TransformationModelDefinition;
+      occurredAt: Date;
+    },
   ): Promise<{ modelId: number; version: number; definitionHash: string; alreadyApplied: boolean }>;
   createLocationPromisePolicyDraft(
     command: z.infer<typeof auditedDraftCommandSchema>
-      & z.infer<typeof locationPromisePolicyDraftSchema>,
+      & z.infer<typeof locationPromisePolicyDraftSchema>
+      & { occurredAt: Date },
   ): Promise<{ policyId: number; version: number; alreadyApplied: boolean }>;
   createPromiseSafetyPolicyDraft(
     command: z.infer<typeof auditedDraftCommandSchema>
-      & z.infer<typeof promiseSafetyPolicyDraftSchema>,
+      & z.infer<typeof promiseSafetyPolicyDraftSchema>
+      & { occurredAt: Date },
   ): Promise<{ policyId: number; version: number; scopeKey: string; alreadyApplied: boolean }>;
 }

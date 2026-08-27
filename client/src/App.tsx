@@ -30,6 +30,7 @@ import DropshipPortalWallet from "@/pages/dropship/DropshipPortalWallet";
 import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
 import Builds from "@/pages/Builds";
+import SupplyTransformations from "@/pages/SupplyTransformations";
 import BuildRecipeCreate from "@/pages/BuildRecipeCreate";
 import Orders from "@/pages/Orders";
 import Dropship from "@/pages/Dropship";
@@ -121,13 +122,15 @@ function ReorderAnalysisRoute() {
 }
 
 function ProtectedRoute({
-  component: Component, 
-  allowedRoles 
+  component: Component,
+  allowedRoles,
+  requiredPermission,
 }: { 
-  component: React.ComponentType; 
+  component: React.ComponentType;
   allowedRoles?: string[];
+  requiredPermission?: { resource: string; action: string };
 }) {
-  const { user, isLoading } = useAuth();
+  const { user, isLoading, hasPermission } = useAuth();
   
   if (isLoading) {
     return (
@@ -142,6 +145,12 @@ function ProtectedRoute({
   }
   
   if (allowedRoles && !allowedRoles.includes(user.role)) {
+    return <Redirect to="/picking" />;
+  }
+  if (
+    requiredPermission
+    && !hasPermission(requiredPermission.resource, requiredPermission.action)
+  ) {
     return <Redirect to="/picking" />;
   }
   
@@ -306,6 +315,12 @@ function Router() {
         </Route>
         <Route path="/inventory/builds">
           <ProtectedRoute component={Builds} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/inventory/supply-transformations">
+          <ProtectedRoute
+            component={SupplyTransformations}
+            requiredPermission={{ resource: "inventory_planning", action: "view" }}
+          />
         </Route>
         <Route path="/cycle-counts">
           <ProtectedRoute component={CycleCounts} allowedRoles={["admin", "lead"]} />

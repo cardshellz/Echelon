@@ -2,8 +2,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { config } from "dotenv";
+import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import * as databaseSchema from "@shared/schema";
+
+import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
+import { transformationModelDefinitionSchema } from "../../domain/inventory-availability-master-data.contracts";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 
@@ -39,6 +44,8 @@ async function expectDatabaseError(
 
 describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL guarantees", () => {
   let pool: pg.Pool;
+  let createdAuditTable = false;
+  let createdIdempotencyTable = false;
 
   beforeAll(async () => {
     const protectedUrls = [
@@ -63,12 +70,21 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       CREATE SCHEMA inventory;
 
       CREATE TABLE catalog.products (
-        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        sku varchar(100),
+        name text NOT NULL DEFAULT 'Integration product',
+        inventory_strategy varchar(30) NOT NULL DEFAULT 'physical_fungible',
+        is_active boolean NOT NULL DEFAULT true
       );
       CREATE TABLE catalog.product_variants (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         product_id integer NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
+        sku varchar(100),
+        name text NOT NULL DEFAULT 'Integration variant',
         units_per_variant integer NOT NULL,
+        uom_type varchar(20) NOT NULL DEFAULT 'pack',
+        hierarchy_level integer NOT NULL DEFAULT 1,
+        is_active boolean NOT NULL DEFAULT true,
         CONSTRAINT product_variants_id_product_uq UNIQUE (id, product_id)
       );
       CREATE TABLE warehouse.warehouses (
@@ -84,6 +100,8 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         version integer NOT NULL,
         status varchar(20) NOT NULL,
         output_product_id integer NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
+        name varchar(150) NOT NULL DEFAULT 'Integration recipe',
+        recipe_type varchar(20) NOT NULL DEFAULT 'conversion',
         output_variant_id integer NOT NULL REFERENCES catalog.product_variants(id) ON DELETE RESTRICT,
         output_units_per_variant integer NOT NULL,
         output_qty integer NOT NULL
@@ -97,10 +115,45 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         qty integer NOT NULL
       );
     `);
+    const auditTable = await pool.query<{ audit_table: string | null }>(
+      "SELECT to_regclass('public.audit_events')::text AS audit_table",
+    );
+    if (auditTable.rows[0]?.audit_table === null) {
+      createdAuditTable = true;
+      await pool.query(`
+        CREATE TABLE public.audit_events (
+          id bigserial PRIMARY KEY,
+          timestamp timestamptz NOT NULL DEFAULT transaction_timestamp(),
+          level text NOT NULL DEFAULT 'AUDIT',
+          actor text NOT NULL,
+          action text NOT NULL,
+          target text,
+          changes jsonb,
+          context jsonb
+        )
+      `);
+    }
+
+    const idempotencyTable = await pool.query<{ idempotency_table: string | null }>(
+      "SELECT to_regclass('public.idempotency_keys')::text AS idempotency_table",
+    );
+    if (idempotencyTable.rows[0]?.idempotency_table === null) {
+      createdIdempotencyTable = true;
+      await pool.query(`
+        CREATE TABLE public.idempotency_keys (
+          key text PRIMARY KEY,
+          request_hash text NOT NULL,
+          response_body jsonb,
+          created_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+          expires_at timestamptz
+        )
+      `);
+    }
 
     const migrationClient = await pool.connect();
     try {
       await migrationClient.query("BEGIN");
+
       await migrationClient.query(migrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
@@ -116,7 +169,9 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       TRUNCATE TABLE
         warehouse.fulfillment_provider_accounts,
         catalog.products,
-        warehouse.warehouses
+        warehouse.warehouses,
+        public.idempotency_keys,
+        public.audit_events
       RESTART IDENTITY CASCADE
     `);
   });
@@ -124,6 +179,12 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
   afterAll(async () => {
     if (pool) {
       await pool.query("DROP SCHEMA inventory, warehouse, catalog CASCADE");
+      if (createdAuditTable) {
+        await pool.query("DROP TABLE public.audit_events");
+      }
+      if (createdIdempotencyTable) {
+        await pool.query("DROP TABLE public.idempotency_keys");
+      }
       await pool.end();
     }
   });
@@ -876,6 +937,126 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     await sealModel(modelId);
   });
 
+  it("creates a validated draft graph, head, and audit atomically with idempotent replay", async () => {
+    const scope = await seedProductAndWarehouse([1, 5]);
+    const testDatabase = drizzle(pool, { schema: databaseSchema });
+    const store = new PostgresInventoryAvailabilityMasterDataStore(testDatabase);
+    const definition = transformationModelDefinitionSchema.parse({
+      productId: scope.productId,
+      buildToPromiseEnabled: false,
+      paths: [{
+        sourceProductId: scope.productId,
+        sourceVariantId: scope.variantIds[0],
+        destinationProductId: scope.productId,
+        destinationVariantId: scope.variantIds[1],
+        inputQty: 5,
+        outputQty: 1,
+        sourceUnitsPerVariant: 1,
+        destinationUnitsPerVariant: 5,
+        operationType: "assemble_pack",
+        authorityState: "allowed",
+        transformationRecipeBindingKey: null,
+      }],
+      recipeBindings: [],
+    });
+    const command = {
+      actorId: "integration-test",
+      changeReason: "Validated EA to P5 authority",
+      idempotencyKey: "repository-integration:model-1",
+      requestHash: "b".repeat(64),
+      definition,
+      occurredAt: new Date(FIXED_TIME),
+    };
+
+    const created = await store.createTransformationModelDraft(command);
+    const replayed = await store.createTransformationModelDraft(command);
+
+    expect(created).toMatchObject({
+      version: 1,
+      alreadyApplied: false,
+    });
+    expect(replayed).toEqual({ ...created, alreadyApplied: true });
+    const persisted = await pool.query<{
+      lifecycle_status: string;
+      validation_state: string;
+      validation_errors: unknown[];
+      draft_model_id: number;
+      revision: string;
+      path_count: string;
+      audit_count: string;
+    }>(
+      `SELECT model.lifecycle_status, model.validation_state, model.validation_errors,
+              head.draft_model_id, head.revision,
+              (SELECT count(*) FROM inventory.transformation_model_paths
+               WHERE model_id = model.id) AS path_count,
+              (SELECT count(*) FROM public.audit_events
+               WHERE action = 'inventory_availability.transformation_model.draft_created'
+                 AND target = 'inventory.transformation_model:' || model.id::text) AS audit_count
+       FROM inventory.transformation_model_versions AS model
+       JOIN inventory.transformation_model_heads AS head
+         ON head.product_id = model.product_id
+       WHERE model.id = $1`,
+      [created.modelId],
+    );
+    expect(persisted.rows[0]).toEqual({
+      lifecycle_status: "draft",
+      validation_state: "valid",
+      validation_errors: [],
+      draft_model_id: created.modelId,
+      revision: "0",
+      path_count: "1",
+      audit_count: "1",
+    });
+  });
+
+  it("serializes concurrent draft creation by product owner", async () => {
+    const scope = await seedProductAndWarehouse([1]);
+    const testDatabase = drizzle(pool, { schema: databaseSchema });
+    const store = new PostgresInventoryAvailabilityMasterDataStore(testDatabase);
+    const definition = transformationModelDefinitionSchema.parse({
+      productId: scope.productId,
+      buildToPromiseEnabled: false,
+      paths: [],
+      recipeBindings: [],
+    });
+    const first = store.createTransformationModelDraft({
+      actorId: "integration-test",
+      changeReason: "First concurrent draft",
+      idempotencyKey: "repository-integration:concurrent-1",
+      requestHash: "c".repeat(64),
+      definition,
+      occurredAt: new Date(FIXED_TIME),
+    });
+    const second = store.createTransformationModelDraft({
+      actorId: "integration-test",
+      changeReason: "Second concurrent draft",
+      idempotencyKey: "repository-integration:concurrent-2",
+      requestHash: "d".repeat(64),
+      definition,
+      occurredAt: new Date(FIXED_TIME),
+    });
+
+    const outcomes = await Promise.allSettled([first, second]);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(rejected).toMatchObject({
+      status: "rejected",
+      reason: {
+        code: "INVENTORY_AVAILABILITY_DRAFT_EXISTS",
+        status: 409,
+      },
+    });
+    const counts = await pool.query<{ models: string; heads: string }>(
+      `SELECT
+         (SELECT count(*) FROM inventory.transformation_model_versions
+          WHERE product_id = $1) AS models,
+         (SELECT count(*) FROM inventory.transformation_model_heads
+          WHERE product_id = $1) AS heads`,
+      [scope.productId],
+    );
+    expect(counts.rows[0]).toEqual({ models: "1", heads: "1" });
+  });
+
   it("deletes a complete draft graph but keeps sealed graph members immutable", async () => {
     const scope = await seedProductAndWarehouse([1, 5]);
     const modelId = await insertDraftModel(scope.productId, "discard-draft");
@@ -961,5 +1142,507 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       ),
       "demand_evidence_snapshots_input_uq",
     );
+  });
+
+  it("persists policy drafts, replays idempotently, and audits predecessor versions", async () => {
+    const scope = await seedProductAndWarehouse();
+    await pool.query(
+      "UPDATE catalog.products SET sku = 'QUAD', name = 'Quad Box' WHERE id = $1",
+      [scope.productId],
+    );
+    const testDatabase = drizzle(pool, { schema: databaseSchema });
+    const store = new PostgresInventoryAvailabilityMasterDataStore(testDatabase);
+    await expect(store.listProductOptions({ q: "quad", limit: 50 })).resolves.toEqual([
+      { id: scope.productId, sku: "QUAD", name: "Quad Box" },
+    ]);
+
+    const firstLocationCommand = {
+      actorId: "integration-test",
+      warehouseLocationId: scope.locationId,
+      eligibilityMode: "eligible" as const,
+      changeReason: "Reserve location may promise",
+      idempotencyKey: "repository-integration:location-1",
+      requestHash: "1".repeat(64),
+      occurredAt: new Date(FIXED_TIME),
+    };
+    const firstLocation = await store.createLocationPromisePolicyDraft(firstLocationCommand);
+    await expect(store.createLocationPromisePolicyDraft(firstLocationCommand)).resolves.toEqual({
+      ...firstLocation,
+      alreadyApplied: true,
+    });
+    const locationPublication = await pool.connect();
+    try {
+      await locationPublication.query("BEGIN");
+      await locationPublication.query(
+        `UPDATE inventory.location_promise_policy_versions
+         SET lifecycle_status = 'sealed', sealed_by = 'integration-test', sealed_at = $2
+         WHERE id = $1`,
+        [firstLocation.policyId, FIXED_TIME],
+      );
+      await locationPublication.query(
+        `UPDATE inventory.location_promise_policy_heads
+         SET active_policy_id = $2, draft_policy_id = NULL, revision = revision + 1,
+             updated_by = 'integration-test', update_reason = 'publish first location policy'
+         WHERE warehouse_location_id = $1`,
+        [scope.locationId, firstLocation.policyId],
+      );
+      await locationPublication.query("COMMIT");
+    } catch (error) {
+      await locationPublication.query("ROLLBACK");
+      throw error;
+    } finally {
+      locationPublication.release();
+    }
+    const secondLocation = await store.createLocationPromisePolicyDraft({
+      ...firstLocationCommand,
+      eligibilityMode: "ineligible",
+      changeReason: "Exclude damaged reserve location",
+      idempotencyKey: "repository-integration:location-2",
+      requestHash: "2".repeat(64),
+    });
+    const locationAudit = await pool.query<{ changes: { before: unknown } }>(
+      `SELECT changes FROM public.audit_events
+       WHERE action = 'inventory_availability.location_promise_policy.draft_created'
+         AND target = $1
+       ORDER BY id DESC LIMIT 1`,
+      [`inventory.location_promise_policy:${secondLocation.policyId}`],
+    );
+    expect(locationAudit.rows[0].changes.before).toEqual({
+      id: firstLocation.policyId,
+      version: 1,
+    });
+
+    const safetyScope = {
+      scopeType: "network_variant" as const,
+      productVariantId: scope.variantIds[0],
+    };
+    const firstSafetyCommand = {
+      actorId: "integration-test",
+      scope: safetyScope,
+      value: { policyMode: "off" as const },
+      changeReason: "No floor for this SKU",
+      idempotencyKey: "repository-integration:safety-1",
+      requestHash: "3".repeat(64),
+      occurredAt: new Date(FIXED_TIME),
+    };
+    const firstSafety = await store.createPromiseSafetyPolicyDraft(firstSafetyCommand);
+    await expect(store.createPromiseSafetyPolicyDraft(firstSafetyCommand)).resolves.toEqual({
+      ...firstSafety,
+      alreadyApplied: true,
+    });
+    const safetyPublication = await pool.connect();
+    try {
+      await safetyPublication.query("BEGIN");
+      await safetyPublication.query(
+        `UPDATE inventory.promise_safety_policy_versions
+         SET lifecycle_status = 'sealed', sealed_by = 'integration-test', sealed_at = $2
+         WHERE id = $1`,
+        [firstSafety.policyId, FIXED_TIME],
+      );
+      await safetyPublication.query(
+        `UPDATE inventory.promise_safety_policy_heads
+         SET active_policy_id = $2, draft_policy_id = NULL, revision = revision + 1,
+             updated_by = 'integration-test', update_reason = 'publish first safety policy'
+         WHERE scope_key = $1`,
+        [firstSafety.scopeKey, firstSafety.policyId],
+      );
+      await safetyPublication.query("COMMIT");
+    } catch (error) {
+      await safetyPublication.query("ROLLBACK");
+      throw error;
+    } finally {
+      safetyPublication.release();
+    }
+    const secondSafety = await store.createPromiseSafetyPolicyDraft({
+      ...firstSafetyCommand,
+      value: { policyMode: "fixed_units" as const, fixedUnits: 4 },
+      changeReason: "Keep four units unpromised",
+      idempotencyKey: "repository-integration:safety-2",
+      requestHash: "4".repeat(64),
+    });
+    const safetyAudit = await pool.query<{ changes: { before: unknown } }>(
+      `SELECT changes FROM public.audit_events
+       WHERE action = 'inventory_availability.promise_safety_policy.draft_created'
+         AND target = $1
+       ORDER BY id DESC LIMIT 1`,
+      [`inventory.promise_safety_policy:${secondSafety.policyId}`],
+    );
+    expect(safetyAudit.rows[0].changes.before).toEqual({
+      id: firstSafety.policyId,
+      version: 1,
+    });
+
+    await expect(store.createPromiseSafetyPolicyDraft({
+      ...firstSafetyCommand,
+      idempotencyKey: firstLocationCommand.idempotencyKey,
+      requestHash: "5".repeat(64),
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "INVENTORY_AVAILABILITY_IDEMPOTENCY_KEY_REUSED",
+    });
+  });
+
+  it("updates a draft atomically with a durable receipt, full audit, and stale rollback", async () => {
+    const scope = await seedProductAndWarehouse([1, 5]);
+    const testDatabase = drizzle(pool, { schema: databaseSchema });
+    const store = new PostgresInventoryAvailabilityMasterDataStore(testDatabase);
+    const initialDefinition = transformationModelDefinitionSchema.parse({
+      productId: scope.productId,
+      buildToPromiseEnabled: false,
+      paths: [],
+      recipeBindings: [],
+    });
+    const created = await store.createTransformationModelDraft({
+      actorId: "integration-test",
+      changeReason: "Create editable draft",
+      idempotencyKey: "repository-integration:update-source",
+      requestHash: "6".repeat(64),
+      definition: initialDefinition,
+      occurredAt: new Date(FIXED_TIME),
+    });
+    const identityBefore = await pool.query<{
+      idempotency_key: string;
+      request_hash: string;
+      created_by: string;
+      created_at: Date;
+    }>(
+      `SELECT idempotency_key, request_hash, created_by, created_at
+       FROM inventory.transformation_model_versions WHERE id = $1`,
+      [created.modelId],
+    );
+    const updatedDefinition = transformationModelDefinitionSchema.parse({
+      productId: scope.productId,
+      buildToPromiseEnabled: false,
+      paths: [{
+        sourceProductId: scope.productId,
+        sourceVariantId: scope.variantIds[0],
+        destinationProductId: scope.productId,
+        destinationVariantId: scope.variantIds[1],
+        inputQty: 5,
+        outputQty: 1,
+        sourceUnitsPerVariant: 1,
+        destinationUnitsPerVariant: 5,
+        operationType: "assemble_pack",
+        authorityState: "allowed",
+        transformationRecipeBindingKey: null,
+      }],
+      recipeBindings: [],
+    });
+    const updateCommand = {
+      actorId: "integration-test",
+      productId: scope.productId,
+      draftModelId: created.modelId,
+      expectedVersion: created.version,
+      expectedDefinitionHash: created.definitionHash,
+      expectedHeadRevision: "0",
+      changeReason: "Add reviewed EA to P5 authority",
+      idempotencyKey: "repository-integration:update-1",
+      requestHash: "7".repeat(64),
+      definition: updatedDefinition,
+      occurredAt: new Date(FIXED_TIME),
+    };
+    const updated = await store.updateTransformationModelDraft(updateCommand);
+    await expect(store.updateTransformationModelDraft(updateCommand)).resolves.toEqual({
+      ...updated,
+      alreadyApplied: true,
+    });
+    await expect(store.updateTransformationModelDraft({
+      ...updateCommand,
+      requestHash: "8".repeat(64),
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "INVENTORY_AVAILABILITY_IDEMPOTENCY_KEY_REUSED",
+    });
+
+    const persisted = await pool.query<{
+      idempotency_key: string;
+      request_hash: string;
+      created_by: string;
+      created_at: Date;
+      revision: string;
+      path_count: string;
+      command_type: string;
+      audit_before_id: number;
+      audit_after_id: number;
+    }>(
+      `SELECT model.idempotency_key, model.request_hash, model.created_by, model.created_at,
+              head.revision,
+              (SELECT count(*) FROM inventory.transformation_model_paths
+               WHERE model_id = model.id) AS path_count,
+              receipt.response_body->>'commandType' AS command_type,
+              (audit.changes->'before'->>'id')::integer AS audit_before_id,
+              (audit.changes->'after'->>'id')::integer AS audit_after_id
+       FROM inventory.transformation_model_versions AS model
+       JOIN inventory.transformation_model_heads AS head ON head.product_id = model.product_id
+       JOIN public.idempotency_keys AS receipt
+         ON receipt.key = 'inventory-availability:' || $2
+       JOIN public.audit_events AS audit
+         ON audit.action = 'inventory_availability.transformation_model.draft_updated'
+        AND audit.target = 'inventory.transformation_model:' || model.id::text
+       WHERE model.id = $1`,
+      [created.modelId, updateCommand.idempotencyKey],
+    );
+    expect(persisted.rows[0]).toMatchObject({
+      ...identityBefore.rows[0],
+      revision: "1",
+      path_count: "1",
+      command_type: "transformation_model_draft_update",
+      audit_before_id: created.modelId,
+      audit_after_id: created.modelId,
+    });
+
+    const staleKey = "repository-integration:update-stale";
+    await expect(store.updateTransformationModelDraft({
+      ...updateCommand,
+      expectedDefinitionHash: updated.definitionHash,
+      idempotencyKey: staleKey,
+      requestHash: "9".repeat(64),
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "INVENTORY_AVAILABILITY_DRAFT_STALE",
+    });
+    const staleReceipt = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM public.idempotency_keys WHERE key = $1",
+      [`inventory-availability:${staleKey}`],
+    );
+    expect(staleReceipt.rows[0].count).toBe("0");
+
+    await expect(store.createLocationPromisePolicyDraft({
+      actorId: "integration-test",
+      warehouseLocationId: scope.locationId,
+      eligibilityMode: "eligible",
+      changeReason: "Cross-command key check",
+      idempotencyKey: updateCommand.idempotencyKey,
+      requestHash: "a".repeat(64),
+      occurredAt: new Date(FIXED_TIME),
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "INVENTORY_AVAILABILITY_IDEMPOTENCY_KEY_REUSED",
+    });
+  });
+
+  it("uses reference locks that block catalog lifecycle writers", async () => {
+    const scope = await seedProductAndWarehouse();
+    const reader = await pool.connect();
+    const writer = await pool.connect();
+    try {
+      await reader.query("BEGIN");
+      await reader.query(
+        "SELECT id FROM catalog.product_variants WHERE id = $1 FOR SHARE",
+        [scope.variantIds[0]],
+      );
+      await writer.query("BEGIN");
+      await writer.query("SET LOCAL statement_timeout = '250ms'");
+      await expectDatabaseError(
+        () => writer.query(
+          "UPDATE catalog.product_variants SET is_active = false WHERE id = $1",
+          [scope.variantIds[0]],
+        ),
+        "statement timeout",
+      );
+      await writer.query("ROLLBACK");
+      await reader.query("COMMIT");
+    } finally {
+      reader.release();
+      writer.release();
+    }
+  });
+
+  it("keeps active authority and legacy runtime state unchanged while recording a draft", async () => {
+    const scope = await seedProductAndWarehouse([1, 5]);
+    await pool.query(`
+      CREATE TABLE inventory.inventory_levels (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        warehouse_location_id integer NOT NULL,
+        product_variant_id integer NOT NULL,
+        variant_qty integer NOT NULL DEFAULT 0,
+        reserved_qty integer NOT NULL DEFAULT 0,
+        picked_qty integer NOT NULL DEFAULT 0,
+        packed_qty integer NOT NULL DEFAULT 0,
+        backorder_qty integer NOT NULL DEFAULT 0,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      DROP SCHEMA IF EXISTS wms CASCADE;
+      CREATE SCHEMA wms;
+      CREATE TABLE wms.order_build_demands (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        requested_qty integer NOT NULL,
+        promised_qty integer NOT NULL,
+        status varchar(30) NOT NULL,
+        hold_applied boolean NOT NULL,
+        hold_reason varchar(200) NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      DROP SCHEMA IF EXISTS channels CASCADE;
+      CREATE SCHEMA channels;
+      CREATE TABLE channels.channel_reservations (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        reserve_base_qty integer NOT NULL,
+        override_qty integer,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE TABLE channels.channel_allocation_rules (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        mode varchar(10) NOT NULL,
+        share_pct integer,
+        eligible boolean NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE TABLE channels.allocation_audit_log (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        total_atp_base integer NOT NULL,
+        allocated_qty integer NOT NULL,
+        allocation_method varchar(30) NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE TABLE channels.channel_sync_log (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        atp_base integer NOT NULL,
+        pushed_qty integer NOT NULL,
+        status varchar(20) NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE TABLE channels.sync_log (
+        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        action varchar(30) NOT NULL,
+        new_value text,
+        status varchar(20) NOT NULL,
+        source varchar(20) NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+    `);
+    try {
+      await pool.query(
+        "UPDATE catalog.products SET inventory_strategy = 'recipe_managed' WHERE id = $1",
+        [scope.productId],
+      );
+      await pool.query(
+        `INSERT INTO inventory.inventory_levels (
+           warehouse_location_id, product_variant_id, variant_qty, reserved_qty,
+           picked_qty, packed_qty, backorder_qty
+         ) VALUES ($1, $2, 100, 7, 2, 1, 3)`,
+        [scope.locationId, scope.variantIds[0]],
+      );
+      await pool.query(
+        `INSERT INTO wms.order_build_demands (
+           requested_qty, promised_qty, status, hold_applied, hold_reason
+         ) VALUES (9, 8, 'awaiting_build', true, 'recipe_build_required')`,
+      );
+      await pool.query(
+        `INSERT INTO channels.channel_reservations (reserve_base_qty, override_qty)
+         VALUES (11, 13);
+         INSERT INTO channels.channel_allocation_rules (mode, share_pct, eligible)
+         VALUES ('share', 40, true);
+         INSERT INTO channels.allocation_audit_log (
+           total_atp_base, allocated_qty, allocation_method
+         ) VALUES (100, 40, 'percentage');
+         INSERT INTO channels.channel_sync_log (atp_base, pushed_qty, status)
+         VALUES (100, 40, 'success');
+         INSERT INTO channels.sync_log (action, new_value, status, source)
+         VALUES ('inventory_push', '40', 'pushed', 'manual');`,
+      );
+
+      const activeModelId = await insertDraftModel(scope.productId, "gate1-active");
+      await pool.query(
+        `INSERT INTO inventory.transformation_model_heads (
+           product_id, draft_model_id, updated_by, update_reason
+         ) VALUES ($1, $2, 'integration-test', 'create active sentinel')`,
+        [scope.productId, activeModelId],
+      );
+      await markModelValid(activeModelId);
+      const activation = await pool.connect();
+      try {
+        await activation.query("BEGIN");
+        await activation.query(
+          `UPDATE inventory.transformation_model_versions
+           SET lifecycle_status = 'sealed', sealed_by = 'integration-test', sealed_at = $2
+           WHERE id = $1`,
+          [activeModelId, FIXED_TIME],
+        );
+        await activation.query(
+          `UPDATE inventory.transformation_model_heads
+           SET active_model_id = $2, draft_model_id = NULL, revision = revision + 1,
+               updated_by = 'integration-test', update_reason = 'activate sentinel'
+           WHERE product_id = $1`,
+          [scope.productId, activeModelId],
+        );
+        await activation.query("COMMIT");
+      } catch (error) {
+        await activation.query("ROLLBACK");
+        throw error;
+      } finally {
+        activation.release();
+      }
+
+      const snapshotSql = `SELECT
+        (SELECT inventory_strategy FROM catalog.products WHERE id = $1) AS inventory_strategy,
+        (SELECT COALESCE(jsonb_agg(to_jsonb(levels) ORDER BY id), '[]'::jsonb)::text
+           FROM inventory.inventory_levels AS levels) AS inventory_levels,
+        (SELECT COALESCE(jsonb_agg(to_jsonb(demand) ORDER BY id), '[]'::jsonb)::text
+           FROM wms.order_build_demands AS demand) AS build_demands,
+        (SELECT COALESCE(jsonb_agg(to_jsonb(reserve_row) ORDER BY id), '[]'::jsonb)::text
+           FROM channels.channel_reservations AS reserve_row) AS channel_reservations,
+        (SELECT COALESCE(jsonb_agg(to_jsonb(rule_row) ORDER BY id), '[]'::jsonb)::text
+           FROM channels.channel_allocation_rules AS rule_row) AS allocation_rules,
+        (SELECT COALESCE(jsonb_agg(to_jsonb(audit_row) ORDER BY id), '[]'::jsonb)::text
+           FROM channels.allocation_audit_log AS audit_row) AS allocation_audits,
+        (SELECT COALESCE(jsonb_agg(to_jsonb(sync_row) ORDER BY id), '[]'::jsonb)::text
+           FROM channels.channel_sync_log AS sync_row) AS channel_sync_log,
+        (SELECT COALESCE(jsonb_agg(to_jsonb(log_row) ORDER BY id), '[]'::jsonb)::text
+           FROM channels.sync_log AS log_row) AS sync_log`;
+      const before = await pool.query(snapshotSql, [scope.productId]);
+      const testDatabase = drizzle(pool, { schema: databaseSchema });
+      const store = new PostgresInventoryAvailabilityMasterDataStore(testDatabase);
+      const definition = transformationModelDefinitionSchema.parse({
+        productId: scope.productId,
+        buildToPromiseEnabled: false,
+        paths: [],
+        recipeBindings: [],
+      });
+      const created = await store.createTransformationModelDraft({
+        actorId: "integration-test",
+        changeReason: "Gate 1 runtime isolation",
+        idempotencyKey: "repository-integration:gate1-isolation",
+        requestHash: "f".repeat(64),
+        definition,
+        occurredAt: new Date(FIXED_TIME),
+      });
+      const after = await pool.query(snapshotSql, [scope.productId]);
+      expect(after.rows[0]).toEqual(before.rows[0]);
+
+      const head = await pool.query<{
+        active_model_id: number;
+        draft_model_id: number;
+        revision: string;
+      }>(
+        `SELECT active_model_id, draft_model_id, revision
+         FROM inventory.transformation_model_heads WHERE product_id = $1`,
+        [scope.productId],
+      );
+      expect(head.rows[0]).toMatchObject({
+        active_model_id: activeModelId,
+        draft_model_id: created.modelId,
+      });
+
+      await store.updateTransformationModelDraft({
+        actorId: "integration-test",
+        changeReason: "Gate 1 runtime isolation edit",
+        idempotencyKey: "repository-integration:gate1-isolation-edit",
+        requestHash: "e".repeat(64),
+        productId: scope.productId,
+        draftModelId: created.modelId,
+        expectedVersion: created.version,
+        expectedDefinitionHash: created.definitionHash,
+        expectedHeadRevision: String(head.rows[0]!.revision),
+        definition,
+        occurredAt: new Date(FIXED_TIME),
+      });
+      const afterEdit = await pool.query(snapshotSql, [scope.productId]);
+      expect(afterEdit.rows[0]).toEqual(before.rows[0]);
+    } finally {
+      await pool.query("DROP SCHEMA IF EXISTS channels CASCADE");
+      await pool.query("DROP SCHEMA IF EXISTS wms CASCADE");
+      await pool.query("DROP TABLE IF EXISTS inventory.inventory_levels");
+    }
   });
 });
