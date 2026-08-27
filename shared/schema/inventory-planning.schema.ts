@@ -913,6 +913,115 @@ export const demandEvidenceSnapshots = inventoryPlanningSchema.table(
   }),
 );
 
+export const plannerShadowRuns = inventoryPlanningSchema.table(
+  "planner_shadow_runs",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+    modelId: integer("model_id"),
+    modelVersion: integer("model_version"),
+    modelDefinitionHash: varchar("model_definition_hash", { length: 64 }),
+    legacyInventoryStrategy: varchar("legacy_inventory_strategy", { length: 30 }).notNull(),
+    snapshotFingerprint: varchar("snapshot_fingerprint", { length: 64 }).notNull(),
+    snapshotPayload: jsonb("snapshot_payload").notNull(),
+    status: varchar("status", { length: 20 }).notNull(),
+    blockerCodes: jsonb("blocker_codes").notNull().default(sql`'[]'::jsonb`),
+    idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
+    requestedBy: varchar("requested_by", { length: 100 }).notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    modelProductForeignKey: foreignKey({
+      columns: [table.modelId, table.productId],
+      foreignColumns: [transformationModelVersions.id, transformationModelVersions.productId],
+      name: "planner_shadow_runs_model_product_fk",
+    }).onDelete("restrict"),
+    idempotencyUnique: uniqueIndex("planner_shadow_runs_idempotency_uq").on(table.idempotencyKey),
+    productLookup: index("planner_shadow_runs_product_lookup_idx")
+      .on(table.productId, table.completedAt.desc(), table.id.desc()),
+    statusValid: check("planner_shadow_runs_status_chk", sql`${table.status} IN ('completed', 'blocked')`),
+    legacyStrategyValid: check(
+      "planner_shadow_runs_legacy_strategy_chk",
+      sql`${table.legacyInventoryStrategy} IN ('physical_fungible', 'recipe_managed', 'physical_only')`,
+    ),
+    hashValid: check(
+      "planner_shadow_runs_hash_chk",
+      sql`${table.snapshotFingerprint} ~ '^[0-9a-f]{64}$'
+        AND (${table.modelDefinitionHash} IS NULL OR ${table.modelDefinitionHash} ~ '^[0-9a-f]{64}$')`,
+    ),
+    modelEvidenceValid: check(
+      "planner_shadow_runs_model_evidence_chk",
+      sql`(${table.modelId} IS NULL AND ${table.modelVersion} IS NULL AND ${table.modelDefinitionHash} IS NULL)
+        OR (${table.modelId} IS NOT NULL AND ${table.modelVersion} > 0
+          AND ${table.modelDefinitionHash} IS NOT NULL)`,
+    ),
+    jsonValid: check(
+      "planner_shadow_runs_json_chk",
+      sql`jsonb_typeof(${table.snapshotPayload}) = 'object'
+        AND jsonb_typeof(${table.blockerCodes}) = 'array'
+        AND ${table.snapshotPayload} ->> 'schemaVersion' = 'inventory_availability_snapshot_v1'
+        AND ${table.snapshotPayload} ->> 'snapshotFingerprint' = ${table.snapshotFingerprint}
+        AND (${table.snapshotPayload} ->> 'productId')::integer = ${table.productId}
+        AND ${table.snapshotPayload} ->> 'legacyInventoryStrategy' = ${table.legacyInventoryStrategy}
+        AND (${table.snapshotPayload} ->> 'capturedAt')::timestamptz = ${table.capturedAt}`,
+    ),
+    actorValid: check(
+      "planner_shadow_runs_actor_chk",
+      sql`btrim(${table.requestedBy}) <> '' AND btrim(${table.idempotencyKey}) <> ''`,
+    ),
+    timeValid: check("planner_shadow_runs_time_chk", sql`${table.completedAt} >= ${table.capturedAt}`),
+  }),
+);
+
+export const plannerShadowResults = inventoryPlanningSchema.table(
+  "planner_shadow_results",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    runId: bigint("run_id", { mode: "bigint" }).notNull()
+      .references(() => plannerShadowRuns.id, { onDelete: "restrict" }),
+    warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "restrict" }),
+    productVariantId: integer("product_variant_id").notNull()
+      .references(() => productVariants.id, { onDelete: "restrict" }),
+    legacyAtpUnits: bigint("legacy_atp_units", { mode: "bigint" }).notNull(),
+    proposedAtpUnits: bigint("proposed_atp_units", { mode: "bigint" }).notNull(),
+    differenceUnits: bigint("difference_units", { mode: "bigint" }).notNull(),
+    readinessState: varchar("readiness_state", { length: 20 }).notNull(),
+    classifications: jsonb("classifications").notNull(),
+    proposedProjection: jsonb("proposed_projection").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    resultUnique: uniqueIndex("planner_shadow_results_scope_variant_uq")
+      .on(table.runId, sql`COALESCE(${table.warehouseId}, 0)`, table.productVariantId),
+    runLookup: index("planner_shadow_results_run_idx").on(table.runId, table.warehouseId, table.productVariantId),
+    quantityValid: check(
+      "planner_shadow_results_quantity_chk",
+      sql`${table.legacyAtpUnits} >= 0 AND ${table.proposedAtpUnits} >= 0
+        AND ${table.differenceUnits} = ${table.proposedAtpUnits} - ${table.legacyAtpUnits}`,
+    ),
+    readinessValid: check(
+      "planner_shadow_results_readiness_chk",
+      sql`${table.readinessState} IN ('ready', 'blocked')`,
+    ),
+    evidenceValid: check(
+      "planner_shadow_results_evidence_chk",
+      sql`jsonb_typeof(${table.classifications}) = 'array'
+        AND jsonb_array_length(${table.classifications}) > 0
+        AND jsonb_typeof(${table.proposedProjection}) = 'object'
+        AND ${table.proposedProjection} ->> 'targetVariantId' = ${table.productVariantId}::text
+        AND ${table.proposedProjection} ->> 'atpUnits' = ${table.proposedAtpUnits}::text
+        AND ${table.proposedProjection} ->> 'status' = ${table.readinessState}
+        AND ((${table.warehouseId} IS NULL
+            AND ${table.proposedProjection} #>> '{scope,kind}' = 'network')
+          OR (${table.warehouseId} IS NOT NULL
+            AND ${table.proposedProjection} #>> '{scope,kind}' = 'warehouse'
+            AND ${table.proposedProjection} #>> '{scope,warehouseId}' = ${table.warehouseId}::text))`,
+    ),
+  }),
+);
+
 const generatedFields = { id: true, createdAt: true, updatedAt: true } as const;
 
 export const insertFulfillmentNodeSchema = createInsertSchema(fulfillmentNodes).omit(generatedFields);
@@ -940,6 +1049,10 @@ export const insertPromiseSafetyPolicyVersionSchema = createInsertSchema(promise
   .omit(generatedFields);
 export const insertDemandEvidenceSnapshotSchema = createInsertSchema(demandEvidenceSnapshots)
   .omit({ id: true, createdAt: true });
+export const insertPlannerShadowRunSchema = createInsertSchema(plannerShadowRuns)
+  .omit({ id: true, createdAt: true });
+export const insertPlannerShadowResultSchema = createInsertSchema(plannerShadowResults)
+  .omit({ id: true, createdAt: true });
 
 export type FulfillmentNode = typeof fulfillmentNodes.$inferSelect;
 export type FulfillmentProviderAccount = typeof fulfillmentProviderAccounts.$inferSelect;
@@ -953,6 +1066,8 @@ export type TransformationRecipeComponentSnapshot =
   typeof transformationRecipeComponentSnapshots.$inferSelect;
 export type PromiseSafetyPolicyVersion = typeof promiseSafetyPolicyVersions.$inferSelect;
 export type DemandEvidenceSnapshot = typeof demandEvidenceSnapshots.$inferSelect;
+export type PlannerShadowRun = typeof plannerShadowRuns.$inferSelect;
+export type PlannerShadowResult = typeof plannerShadowResults.$inferSelect;
 
 export type InsertFulfillmentNode = z.infer<typeof insertFulfillmentNodeSchema>;
 export type InsertFulfillmentProviderAccount = z.infer<typeof insertFulfillmentProviderAccountSchema>;
@@ -973,3 +1088,5 @@ export type InsertTransformationRecipeComponentSnapshot = z.infer<
 >;
 export type InsertPromiseSafetyPolicyVersion = z.infer<typeof insertPromiseSafetyPolicyVersionSchema>;
 export type InsertDemandEvidenceSnapshot = z.infer<typeof insertDemandEvidenceSnapshotSchema>;
+export type InsertPlannerShadowRun = z.infer<typeof insertPlannerShadowRunSchema>;
+export type InsertPlannerShadowResult = z.infer<typeof insertPlannerShadowResultSchema>;
