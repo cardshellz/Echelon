@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
 
-import type { HistoricalShipStationContentsClient } from "./historical-shipstation-contents-audit.client";
+import type {
+  HistoricalShipStationContentsClient,
+  HistoricalShipStationContentsEvidenceSummary,
+} from "./historical-shipstation-contents-audit.client";
 import type { HistoricalShipStationContentsCandidate } from "./historical-shipstation-contents-audit.repository";
 import {
   historicalShipStationRecoverableCaseEvidenceHash,
@@ -35,6 +38,23 @@ export const historicalShipStationContentsAttestationCommandSchema = z.object({
 export type HistoricalShipStationContentsAttestationCommand = z.infer<
   typeof historicalShipStationContentsAttestationCommandSchema
 >;
+
+export interface HistoricalShipStationContentsAttestationPreview {
+  readonly shippingProviderLabelId: string;
+  readonly providerShipmentId: number;
+  readonly providerContentsStatus: HistoricalShipStationContentsEvidenceSummary["status"];
+  readonly recoveryStatus: HistoricalShipStationContentsRecoveryEvidence["recoveryStatus"];
+  readonly previewEvidenceHash: string;
+  readonly providerEvidenceHash: string;
+  readonly expectedContents: HistoricalShipStationContentsCandidate["expectedContents"];
+  readonly attestedContents: HistoricalShipStationContentsRecoveryEvidence["attestedContents"];
+}
+
+interface LoadedHistoricalShipStationContentsAttestationPreview {
+  readonly candidate: HistoricalShipStationContentsCandidate;
+  readonly recoveryEvidence: HistoricalShipStationContentsRecoveryEvidence;
+  readonly preview: HistoricalShipStationContentsAttestationPreview;
+}
 
 export type HistoricalShipStationContentsAttestationServiceErrorCode =
   | "CANDIDATE_CHANGED"
@@ -140,6 +160,27 @@ export class HistoricalShipStationContentsAttestationService {
     private readonly providerClient: HistoricalShipStationContentsClient,
   ) {}
 
+  async preview(
+    rawShippingProviderLabelId: string,
+  ): Promise<HistoricalShipStationContentsAttestationPreview> {
+    const parsedLabelId = positivePostgresBigintTextSchema.safeParse(rawShippingProviderLabelId);
+    if (!parsedLabelId.success) {
+      throw new HistoricalShipStationContentsAttestationServiceError(
+        "INVALID_COMMAND",
+        "Historical contents attestation preview identifier failed validation",
+        Object.freeze({
+          issues: parsedLabelId.error.issues.map((issue) => Object.freeze({
+            code: issue.code,
+            path: ["shippingProviderLabelId"],
+            message: issue.message,
+          })),
+        }),
+      );
+    }
+    const loaded = await this.loadPreview(parsedLabelId.data);
+    return loaded.preview;
+  }
+
   async attest(
     rawCommand: HistoricalShipStationContentsAttestationCommand,
   ): Promise<PersistedHistoricalShipStationContentsAttestation> {
@@ -158,47 +199,9 @@ export class HistoricalShipStationContentsAttestationService {
       );
     }
     const command = parsed.data;
-    const candidate = await this.repository.loadCandidateSnapshot(
-      command.shippingProviderLabelId,
-    );
-    if (candidate === null) {
-      throw new HistoricalShipStationContentsAttestationServiceError(
-        "CANDIDATE_NOT_FOUND",
-        "Historical contents attestation candidate is no longer eligible",
-        Object.freeze({ shippingProviderLabelId: command.shippingProviderLabelId }),
-      );
-    }
-
-    const providerResult = await this.providerClient.loadShipmentContents(
-      candidate.providerShipmentId,
-      candidate.expectedContents,
-    );
-    if (providerResult.kind === "not_found") {
-      throw new HistoricalShipStationContentsAttestationServiceError(
-        "PROVIDER_SHIPMENT_NOT_FOUND",
-        "Historical contents attestation provider shipment was not found",
-        Object.freeze({ shippingProviderLabelId: command.shippingProviderLabelId }),
-      );
-    }
-    const recoveryEvidence = providerResult.recoveryEvidenceDetails ?? null;
-    if (
-      recoveryEvidence === null
-      || !validRecoveryEvidence(recoveryEvidence, providerResult.evidence)
-    ) {
-      throw new HistoricalShipStationContentsAttestationServiceError(
-        "PROVIDER_EVIDENCE_NOT_RECOVERABLE",
-        "Historical contents attestation provider evidence is not recoverable",
-        Object.freeze({
-          shippingProviderLabelId: command.shippingProviderLabelId,
-          recoveryStatus: providerResult.evidence.recoveryStatus,
-        }),
-      );
-    }
-    const previewEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
-      shippingProviderLabelId: candidate.shippingProviderLabelId,
-      recoveryStatus: recoveryEvidence.recoveryStatus,
-      providerEvidenceHash: recoveryEvidence.evidenceHash,
-    });
+    const loaded = await this.loadPreview(command.shippingProviderLabelId);
+    const { candidate, recoveryEvidence, preview } = loaded;
+    const previewEvidenceHash = preview.previewEvidenceHash;
     if (previewEvidenceHash !== command.expectedPreviewEvidenceHash) {
       throw new HistoricalShipStationContentsAttestationServiceError(
         "PREVIEW_EVIDENCE_MISMATCH",
@@ -255,5 +258,60 @@ export class HistoricalShipStationContentsAttestationService {
       });
       return transaction.appendExactAttestation(record);
     });
+  }
+
+  private async loadPreview(
+    shippingProviderLabelId: string,
+  ): Promise<LoadedHistoricalShipStationContentsAttestationPreview> {
+    const candidate = await this.repository.loadCandidateSnapshot(shippingProviderLabelId);
+    if (candidate === null) {
+      throw new HistoricalShipStationContentsAttestationServiceError(
+        "CANDIDATE_NOT_FOUND",
+        "Historical contents attestation candidate is no longer eligible",
+        Object.freeze({ shippingProviderLabelId }),
+      );
+    }
+
+    const providerResult = await this.providerClient.loadShipmentContents(
+      candidate.providerShipmentId,
+      candidate.expectedContents,
+    );
+    if (providerResult.kind === "not_found") {
+      throw new HistoricalShipStationContentsAttestationServiceError(
+        "PROVIDER_SHIPMENT_NOT_FOUND",
+        "Historical contents attestation provider shipment was not found",
+        Object.freeze({ shippingProviderLabelId }),
+      );
+    }
+    const recoveryEvidence = providerResult.recoveryEvidenceDetails ?? null;
+    if (
+      recoveryEvidence === null
+      || !validRecoveryEvidence(recoveryEvidence, providerResult.evidence)
+    ) {
+      throw new HistoricalShipStationContentsAttestationServiceError(
+        "PROVIDER_EVIDENCE_NOT_RECOVERABLE",
+        "Historical contents attestation provider evidence is not recoverable",
+        Object.freeze({
+          shippingProviderLabelId,
+          recoveryStatus: providerResult.evidence.recoveryStatus,
+        }),
+      );
+    }
+    const previewEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
+      shippingProviderLabelId: candidate.shippingProviderLabelId,
+      recoveryStatus: recoveryEvidence.recoveryStatus,
+      providerEvidenceHash: recoveryEvidence.evidenceHash,
+    });
+    const preview: HistoricalShipStationContentsAttestationPreview = Object.freeze({
+      shippingProviderLabelId: candidate.shippingProviderLabelId,
+      providerShipmentId: candidate.providerShipmentId,
+      providerContentsStatus: providerResult.evidence.status,
+      recoveryStatus: recoveryEvidence.recoveryStatus,
+      previewEvidenceHash,
+      providerEvidenceHash: recoveryEvidence.evidenceHash,
+      expectedContents: candidate.expectedContents,
+      attestedContents: recoveryEvidence.attestedContents,
+    });
+    return Object.freeze({ candidate, recoveryEvidence, preview });
   }
 }

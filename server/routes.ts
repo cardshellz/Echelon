@@ -66,6 +66,7 @@ import { registerReturnPolicyAdminRoutes } from "./modules/returns/interfaces/ht
 import { registerReturnCaseAdminRoutes } from "./modules/returns/interfaces/http/return-case-admin.routes";
 import { registerDropshipOpsSurfaceRoutes } from "./modules/dropship/interfaces/http/dropship-ops-surface.routes";
 import { registerDropshipMarketplaceOrderIntakeRoutes } from "./modules/dropship/interfaces/http/dropship-marketplace-order-intake.routes";
+import { registerHistoricalShipStationContentsAttestationAdminRoutes } from "./modules/shipping/historical-shipstation-contents-attestation.routes";
 import { registerShippingAdminRoutes } from "./modules/shipping-engine/shipping-admin.routes";
 import { registerOutboundShipmentRoutes } from "./modules/shipping-engine/outbound-shipments.routes";
 import { registerCarrierCallbackRoutes } from "./modules/shipping-engine/interfaces/http/carrier-callback.routes";
@@ -108,6 +109,7 @@ export async function registerRoutes(
   registerDropshipAdminCarrierProtectionRoutes(app);
   registerDropshipAdminCarrierClaimRoutes(app);
   registerDropshipAdminReturnPolicyRoutes(app);
+  registerHistoricalShipStationContentsAttestationAdminRoutes(app);
   registerShippingAdminRoutes(app);
   registerShadowAdminRoutes(app);
   registerPackingRoutes(app);

@@ -109,6 +109,44 @@ const command = Object.freeze({
 });
 
 describe("historical ShipStation contents lead attestation", () => {
+  it("returns the exact immutable recoverable preview without opening a write transaction", async () => {
+    const persistence = repository();
+    const client = providerClient();
+    const service = new HistoricalShipStationContentsAttestationService(persistence.value, client);
+
+    const preview = await service.preview(candidate.shippingProviderLabelId);
+
+    expect(preview).toEqual({
+      shippingProviderLabelId: "51",
+      providerShipmentId: 44_001,
+      providerContentsStatus: "authoritative",
+      recoveryStatus: "provider_line_keys_authoritative",
+      previewEvidenceHash: expectedPreviewEvidenceHash,
+      providerEvidenceHash: "a".repeat(64),
+      expectedContents: candidate.expectedContents,
+      attestedContents: recoveryEvidence.attestedContents,
+    });
+    expect(Object.isFrozen(preview)).toBe(true);
+    expect(client.loadShipmentContents).toHaveBeenCalledWith(
+      candidate.providerShipmentId,
+      candidate.expectedContents,
+    );
+    expect(persistence.value.withSerializableTransaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid preview identifiers without querying the repository", async () => {
+    const persistence = repository();
+    const service = new HistoricalShipStationContentsAttestationService(
+      persistence.value,
+      providerClient(),
+    );
+
+    const promise = service.preview("0");
+
+    await expect(promise).rejects.toMatchObject({ code: "INVALID_COMMAND" });
+    expect(persistence.value.loadCandidateSnapshot).not.toHaveBeenCalled();
+  });
+
   it("revalidates the preview and appends exact lead, reason, contents, and resolution evidence", async () => {
     const persistence = repository();
     const client = providerClient();
