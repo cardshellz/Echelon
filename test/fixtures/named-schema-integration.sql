@@ -3,12 +3,25 @@ DROP SCHEMA IF EXISTS inventory CASCADE;
 DROP SCHEMA IF EXISTS warehouse CASCADE;
 DROP SCHEMA IF EXISTS catalog CASCADE;
 DROP SCHEMA IF EXISTS wms CASCADE;
+DROP SCHEMA IF EXISTS identity CASCADE;
 
 CREATE SCHEMA catalog;
 CREATE SCHEMA warehouse;
 CREATE SCHEMA inventory;
 CREATE SCHEMA channels;
 CREATE SCHEMA wms;
+CREATE SCHEMA identity;
+
+CREATE TABLE identity.users (
+  id varchar PRIMARY KEY,
+  username text NOT NULL UNIQUE,
+  password text NOT NULL,
+  role varchar(20) NOT NULL DEFAULT 'picker',
+  display_name text,
+  active integer NOT NULL DEFAULT 1,
+  created_at timestamp NOT NULL DEFAULT now(),
+  last_login_at timestamp
+);
 
 CREATE OR REPLACE FUNCTION wms.reject_shipping_evidence_ledger_mutation()
 RETURNS trigger
@@ -310,6 +323,20 @@ CREATE TABLE wms.shipping_provider_labels (
   label_direction varchar(20) NOT NULL,
   first_observed_at timestamptz NOT NULL,
   last_observed_at timestamptz NOT NULL
+);
+
+CREATE TABLE wms.shipping_provider_label_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  shipping_provider_label_id bigint NOT NULL
+    REFERENCES wms.shipping_provider_labels(id) ON DELETE RESTRICT,
+  event_hash varchar(64) NOT NULL,
+  event_type varchar(40) NOT NULL,
+  label_status varchar(30) NOT NULL,
+  tracking_number varchar(200) NOT NULL,
+  provider_occurred_at timestamptz,
+  received_at timestamptz NOT NULL,
+  sanitized_payload jsonb NOT NULL,
+  UNIQUE (shipping_provider_label_id, event_hash)
 );
 
 CREATE TABLE wms.shipping_provider_label_links (

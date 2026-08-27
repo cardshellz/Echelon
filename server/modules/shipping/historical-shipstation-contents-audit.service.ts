@@ -1,7 +1,3 @@
-import { createHash } from "node:crypto";
-
-import { canonicalJson } from "@shared/utils/canonical-json";
-
 import type { ShipStationShipmentContentsEvidenceStatus } from "./carrier-tracking.domain";
 import type {
   HistoricalShipStationContentsClient,
@@ -14,6 +10,7 @@ import {
 import {
   HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_STATUSES,
   HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
+  historicalShipStationRecoverableCaseEvidenceHash,
   type HistoricalShipStationContentsRecoveryStatus,
   type HistoricalShipStationExpectedContentsEvidence,
 } from "./historical-shipstation-contents-recovery.domain";
@@ -171,20 +168,6 @@ function validRecoveryEvidenceSummary(
     && evidence.attestedLineCount <= 500;
 }
 
-function labelBoundEvidenceHash(
-  shippingProviderLabelId: string,
-  recoveryStatus: RecoverableStatus,
-  providerEvidenceHash: string,
-): string {
-  return createHash("sha256").update(canonicalJson(Object.freeze({
-    contract: "historical_shipstation_contents_recoverable_case_v1",
-    contractVersion: HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
-    shippingProviderLabelId,
-    recoveryStatus,
-    providerEvidenceHash,
-  })), "utf8").digest("hex");
-}
-
 function expectedContentsSummary(
   evidence: HistoricalShipStationExpectedContentsEvidence,
 ): HistoricalShipStationExpectedContentsSummary {
@@ -314,11 +297,11 @@ export async function auditHistoricalShipStationContents(
           attestedLineCount: recoveryEvidence.attestedLineCount,
           expectedContents: expectedContentsSummary(candidate.expectedContents),
           contractVersion: recoveryEvidence.contractVersion,
-          evidenceHash: labelBoundEvidenceHash(
-            candidate.shippingProviderLabelId,
-            result.evidence.recoveryStatus,
-            recoveryEvidence.evidenceHash,
-          ),
+          evidenceHash: historicalShipStationRecoverableCaseEvidenceHash({
+            shippingProviderLabelId: candidate.shippingProviderLabelId,
+            recoveryStatus: result.evidence.recoveryStatus,
+            providerEvidenceHash: recoveryEvidence.evidenceHash,
+          }),
         }));
       } else {
         if (recoveryEvidence !== null) {

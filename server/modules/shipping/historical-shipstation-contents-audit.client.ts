@@ -55,6 +55,7 @@ export type HistoricalShipStationContentsLookupResult =
   | Readonly<{
       readonly kind: "found";
       readonly evidence: HistoricalShipStationContentsEvidenceSummary;
+      readonly recoveryEvidenceDetails?: HistoricalShipStationContentsRecoveryEvidence | null;
     }>;
 
 export interface HistoricalShipStationContentsClient {
@@ -338,6 +339,7 @@ export function createHistoricalShipStationContentsClient(
                 attestedLineCount: recoveryEvidence.attestedContents.length,
               }),
           }),
+          recoveryEvidenceDetails: recoveryEvidence,
         });
       }
 
