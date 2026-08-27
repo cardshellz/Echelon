@@ -1164,7 +1164,7 @@ async function assertIdempotencyKeyUnusedByOtherType(
       FROM inventory.promise_safety_policy_versions
       UNION ALL
       SELECT 'transformation_model_draft_update'::text AS command_type,
-             substring(key FROM ${DRAFT_UPDATE_RECEIPT_PREFIX.length + 1}) AS idempotency_key
+             ${idempotencyKey}::text AS idempotency_key
       FROM public.idempotency_keys
       WHERE key = ${draftUpdateReceiptKey(idempotencyKey)}
     ) AS used_key
