@@ -9,7 +9,7 @@ import {
 import { InventoryServiceDropshipAtpProvider } from "../../infrastructure/dropship-atp.provider";
 import { PgDropshipSelectionAtpRepository } from "../../infrastructure/dropship-selection-atp.repository";
 import { DropshipError } from "../../domain/errors";
-import { requireDropshipAuth, requireDropshipSensitiveActionProof } from "./dropship-auth.routes";
+import { requireDropshipAuth } from "./dropship-auth.routes";
 
 export function registerDropshipVendorCatalogRoutes(
   app: Express,
@@ -31,7 +31,6 @@ export function registerDropshipVendorCatalogRoutes(
   app.put(
     "/api/dropship/catalog/selection-rules",
     requireDropshipAuth,
-    requireDropshipSensitiveActionProof("manage_catalog_selection"),
     async (req, res) => {
       try {
         const vendor = await service.requireVendorForMember(req.session.dropship!.memberId);

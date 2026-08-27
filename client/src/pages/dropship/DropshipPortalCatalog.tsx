@@ -32,7 +32,6 @@ import {
 import {
   buildListingPreviewRequest,
   buildListingPushRequest,
-  buildScopedSelectionReplacement,
   buildVariantSelectionReplacement,
   buildQueryUrl,
   createDropshipIdempotencyKey,
@@ -53,7 +52,6 @@ import {
   type DropshipSelectionRulesResponse,
   type DropshipSettingsResponse,
   type DropshipVendorSelectionAction,
-  type DropshipVendorSelectionScopeTarget,
 } from "@/lib/dropship-ops-surface";
 import { isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
@@ -69,6 +67,8 @@ type CatalogFilters = {
 };
 
 const ALL_FILTER_VALUE = "all";
+const SELECTED_CATALOG_PAGE_LIMIT = 200;
+type SelectedCatalogPageLoader = (page: number, limit: number) => Promise<DropshipCatalogResponse>;
 const defaultCatalogFilters: CatalogFilters = {
   search: "",
   selectedOnly: "false",
@@ -76,6 +76,32 @@ const defaultCatalogFilters: CatalogFilters = {
   productLineIds: ALL_FILTER_VALUE,
   productId: ALL_FILTER_VALUE,
 };
+
+export async function fetchAllSelectedCatalogRows(
+  loadPage: SelectedCatalogPageLoader = (page, limit) => fetchJson<DropshipCatalogResponse>(
+    buildQueryUrl("/api/dropship/catalog", {
+      selectedOnly: true,
+      page,
+      limit,
+    }),
+  ),
+): Promise<DropshipCatalogRow[]> {
+  const firstPage = await loadPage(1, SELECTED_CATALOG_PAGE_LIMIT);
+  const pageCount = Math.max(1, Math.ceil(firstPage.total / firstPage.limit));
+  const rowsByVariantId = new Map<number, DropshipCatalogRow>();
+
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    // Bound request fan-out for large catalogs while retaining deterministic page order.
+    const page = pageNumber === 1
+      ? firstPage
+      : await loadPage(pageNumber, SELECTED_CATALOG_PAGE_LIMIT);
+    for (const row of page.rows) {
+      rowsByVariantId.set(row.productVariantId, row);
+    }
+  }
+
+  return Array.from(rowsByVariantId.values());
+}
 
 export default function DropshipPortalCatalog() {
   const queryClient = useQueryClient();
@@ -94,8 +120,6 @@ export default function DropshipPortalCatalog() {
   const [applied, setApplied] = useState<CatalogFilters>(defaultCatalogFilters);
   const [pendingSelectionAction, setPendingSelectionAction] = useState<PendingSelectionAction>(null);
   const [pendingListingAction, setPendingListingAction] = useState<PendingListingAction>(null);
-  const [selectionEmailCodeSent, setSelectionEmailCodeSent] = useState(false);
-  const [selectionVerificationCode, setSelectionVerificationCode] = useState("");
   const [selectedStoreConnectionId, setSelectedStoreConnectionId] = useState("");
   const [listingPreview, setListingPreview] = useState<DropshipListingPreviewResult | null>(null);
   const [listingPushResult, setListingPushResult] = useState<DropshipListingPushResponse | null>(null);
@@ -121,6 +145,10 @@ export default function DropshipPortalCatalog() {
     queryKey: ["/api/dropship/catalog/selection-rules"],
     queryFn: () => fetchJson<DropshipSelectionRulesResponse>("/api/dropship/catalog/selection-rules"),
   });
+  const selectedCatalogQuery = useQuery<DropshipCatalogRow[]>({
+    queryKey: ["/api/dropship/catalog", "selected"],
+    queryFn: () => fetchAllSelectedCatalogRows(),
+  });
   const settingsQuery = useQuery<DropshipSettingsResponse>({
     queryKey: ["/api/dropship/settings"],
     queryFn: () => fetchJson<DropshipSettingsResponse>("/api/dropship/settings"),
@@ -128,12 +156,12 @@ export default function DropshipPortalCatalog() {
   const visibleRows = catalogQuery.data?.rows ?? [];
   const visibleSelectableRows = visibleRows.filter(canSelectRow);
   const visibleSelectedRows = visibleRows.filter((row) => row.selectionDecision.selected);
+  const selectedCatalogRows = selectedCatalogQuery.data ?? [];
   const catalogFacets = catalogQuery.data?.facets ?? {
     categories: [],
     productLines: [],
     products: [],
   };
-  const activeSelectionRuleCount = selectionRulesQuery.data?.rules.filter((rule) => rule.isActive !== false).length ?? 0;
   const hasActiveFilters = applied.search !== ""
     || applied.selectedOnly !== "false"
     || applied.category !== ALL_FILTER_VALUE
@@ -156,13 +184,6 @@ export default function DropshipPortalCatalog() {
       proof: sensitiveProofs.bulk_listing_push,
     });
   }, [principal, sensitiveProofs.bulk_listing_push]);
-  const activeCatalogSelectionProof = useMemo(() => {
-    return isDropshipSensitiveProofActive({
-      principal,
-      action: "manage_catalog_selection",
-      proof: sensitiveProofs.manage_catalog_selection,
-    });
-  }, [principal, sensitiveProofs.manage_catalog_selection]);
   const pushablePreviewCount = listingPreviewPushableCount(listingPreview);
 
   useEffect(() => {
@@ -180,10 +201,6 @@ export default function DropshipPortalCatalog() {
     if (rows.length === 0) {
       return;
     }
-    if (!(await ensureCatalogSelectionProof())) {
-      return;
-    }
-
     setPendingSelectionAction(actionKey);
     setError("");
     setMessage("");
@@ -198,6 +215,7 @@ export default function DropshipPortalCatalog() {
       });
       await Promise.all([
         catalogQuery.refetch(),
+        selectedCatalogQuery.refetch(),
         selectionRulesQuery.refetch(),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
       ]);
@@ -206,134 +224,6 @@ export default function DropshipPortalCatalog() {
       setListingPushResult(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Catalog selection update failed.");
-    } finally {
-      setPendingSelectionAction(null);
-    }
-  }
-
-  async function replaceScopedSelection(
-    action: DropshipVendorSelectionAction,
-    target: DropshipVendorSelectionScopeTarget,
-    actionKey: string,
-  ) {
-    if (!selectionRulesQuery.data) {
-      setError("Selection rules are still loading.");
-      return;
-    }
-    if (!(await ensureCatalogSelectionProof())) {
-      return;
-    }
-
-    setPendingSelectionAction(actionKey);
-    setError("");
-    setMessage("");
-    try {
-      await putJson<DropshipSelectionRulesReplaceResponse>("/api/dropship/catalog/selection-rules", {
-        idempotencyKey: createDropshipIdempotencyKey(`catalog-scope-${action}`),
-        rules: buildScopedSelectionReplacement({
-          existingRules: selectionRulesQuery.data.rules,
-          target,
-          action,
-        }),
-      });
-      await Promise.all([
-        catalogQuery.refetch(),
-        selectionRulesQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
-      ]);
-      setMessage(`${selectionTargetLabel(target)} ${action === "include" ? "selected" : "removed"}.`);
-      setListingPreview(null);
-      setListingPushResult(null);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Catalog scope selection update failed.");
-    } finally {
-      setPendingSelectionAction(null);
-    }
-  }
-
-  async function clearSelectionRules() {
-    if (!selectionRulesQuery.data) {
-      setError("Selection rules are still loading.");
-      return;
-    }
-    if (!(await ensureCatalogSelectionProof())) {
-      return;
-    }
-
-    setPendingSelectionAction("scope:clear");
-    setError("");
-    setMessage("");
-    try {
-      await putJson<DropshipSelectionRulesReplaceResponse>("/api/dropship/catalog/selection-rules", {
-        idempotencyKey: createDropshipIdempotencyKey("catalog-clear"),
-        rules: [],
-      });
-      await Promise.all([
-        catalogQuery.refetch(),
-        selectionRulesQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
-      ]);
-      setMessage("Catalog selection cleared.");
-      setListingPreview(null);
-      setListingPushResult(null);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Catalog selection clear failed.");
-    } finally {
-      setPendingSelectionAction(null);
-    }
-  }
-
-  async function ensureCatalogSelectionProof(): Promise<boolean> {
-    if (activeCatalogSelectionProof) {
-      return true;
-    }
-
-    if (principal?.hasPasskey) {
-      return runSelectionProofAction("proof:passkey", async () => {
-        await verifyPasskeyStepUp("manage_catalog_selection");
-      });
-    }
-
-    if (!selectionEmailCodeSent) {
-      await runSelectionProofAction("proof:send-code", async () => {
-        await startEmailStepUp("manage_catalog_selection");
-        setSelectionEmailCodeSent(true);
-        setSelectionVerificationCode("");
-        setMessage("Verification code sent.");
-      });
-      return false;
-    }
-
-    if (selectionVerificationCode.length !== 6) {
-      setError("Enter the 6-digit verification code before updating catalog selection.");
-      return false;
-    }
-
-    const verified = await runSelectionProofAction("proof:verify-code", async () => {
-      await verifyEmailStepUp({
-        action: "manage_catalog_selection",
-        verificationCode: selectionVerificationCode,
-      });
-    });
-    if (!verified) {
-      return false;
-    }
-
-    setSelectionEmailCodeSent(false);
-    setSelectionVerificationCode("");
-    return true;
-  }
-
-  async function runSelectionProofAction(action: PendingSelectionAction, task: () => Promise<void>): Promise<boolean> {
-    setPendingSelectionAction(action);
-    setError("");
-    setMessage("");
-    try {
-      await task();
-      return true;
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Catalog selection verification failed.");
-      return false;
     } finally {
       setPendingSelectionAction(null);
     }
@@ -348,11 +238,11 @@ export default function DropshipPortalCatalog() {
     try {
       const request = buildListingPreviewRequest({
         storeConnectionId: selectedStoreConnectionIdNumber,
-        rows: visibleSelectedRows,
+        rows: selectedCatalogRows,
         retailPriceByVariantId,
       });
       if (request.productVariantIds.length === 0) {
-        setError("Select at least one visible catalog row before previewing listings.");
+        setError("Select at least one catalog item before previewing listings.");
         return;
       }
       const response = await postJson<DropshipListingPreviewResponse>("/api/dropship/listings/preview", request);
@@ -483,7 +373,7 @@ export default function DropshipPortalCatalog() {
               Catalog
             </h1>
             <p className="mt-1 text-sm text-zinc-500">
-              Filter the exposed catalog, then choose products and variants from the table.
+              Browse available items, choose what to sell, then preview and push those listings to your store.
             </p>
           </div>
         </div>
@@ -505,6 +395,14 @@ export default function DropshipPortalCatalog() {
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
               {queryErrorMessage(selectionRulesQuery.error, "Unable to load catalog selection rules.")}
+            </AlertDescription>
+          </Alert>
+        )}
+        {selectedCatalogQuery.error && (
+          <Alert variant="destructive" className="mt-5">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {queryErrorMessage(selectedCatalogQuery.error, "Unable to load your selected catalog items.")}
             </AlertDescription>
           </Alert>
         )}
@@ -545,26 +443,18 @@ export default function DropshipPortalCatalog() {
           onSelectedOnlyChange={setSelectedOnly}
         />
 
-        <CatalogSelectionProofPanel
-          emailCodeSent={selectionEmailCodeSent}
-          pendingSelectionAction={pendingSelectionAction}
-          verificationCode={selectionVerificationCode}
-          onVerificationCodeChange={setSelectionVerificationCode}
-        />
-
-        <CatalogSelectionSummaryPanel
-          activeSelectionRuleCount={activeSelectionRuleCount}
-          pendingSelectionAction={pendingSelectionAction}
-          selectableRowCount={visibleSelectableRows.length}
-          selectedRowCount={visibleSelectedRows.length}
-          selectionDisabled={selectionRulesQuery.isLoading || pendingSelectionAction !== null}
-          total={catalogQuery.data?.total ?? 0}
-          visibleRowCount={visibleRows.length}
-          onClearSelection={clearSelectionRules}
-          onSelectCatalog={() => replaceScopedSelection("include", { scopeType: "catalog" }, "scope:catalog:include")}
-        />
-
-        <div className="mt-5 rounded-md border border-zinc-200 bg-white">
+        <section className="mt-5 overflow-hidden rounded-md border border-zinc-200 bg-white">
+          <div className="flex flex-col gap-3 border-b border-zinc-200 p-4 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">Available catalog</h2>
+              <p className="mt-1 text-sm text-zinc-500">
+                Choose the variants you want to sell. Catalog selection does not require verification.
+              </p>
+            </div>
+            <Badge variant="outline" className="w-fit border-violet-200 bg-violet-50 text-violet-800">
+              {selectedCatalogQuery.isLoading ? "Loading selection" : `${selectedCatalogRows.length} selected`}
+            </Badge>
+          </div>
           {catalogQuery.isLoading ? (
             <div className="space-y-2 p-4">
               <Skeleton className="h-12 w-full" />
@@ -603,7 +493,7 @@ export default function DropshipPortalCatalog() {
               </EmptyHeader>
             </Empty>
           )}
-        </div>
+        </section>
 
         <ListingPreviewPanel
           launchReadyStoreConnections={launchReadyStoreConnections}
@@ -612,7 +502,7 @@ export default function DropshipPortalCatalog() {
           listingPushResult={listingPushResult}
           pendingListingAction={pendingListingAction}
           pushablePreviewCount={pushablePreviewCount}
-          selectedRowCount={visibleSelectedRows.length}
+          selectedRows={selectedCatalogRows}
           selectedStoreConnectionId={selectedStoreConnectionId}
           verificationCode={verificationCode}
           onPreview={previewListings}
@@ -797,118 +687,6 @@ function FilterSelect({
   );
 }
 
-function CatalogSelectionSummaryPanel({
-  activeSelectionRuleCount,
-  onClearSelection,
-  onSelectCatalog,
-  pendingSelectionAction,
-  selectableRowCount,
-  selectedRowCount,
-  selectionDisabled,
-  total,
-  visibleRowCount,
-}: {
-  activeSelectionRuleCount: number;
-  onClearSelection: () => void;
-  onSelectCatalog: () => void;
-  pendingSelectionAction: PendingSelectionAction;
-  selectableRowCount: number;
-  selectedRowCount: number;
-  selectionDisabled: boolean;
-  total: number;
-  visibleRowCount: number;
-}) {
-  return (
-    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">Product selection</h2>
-          <p className="mt-1 text-sm text-zinc-500">
-            Select or remove individual variants in the table. Visible actions apply to the current filtered table.
-          </p>
-        </div>
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <Button
-            type="button"
-            className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-            disabled={selectionDisabled || total === 0}
-            onClick={onSelectCatalog}
-          >
-            <PlusCircle className="h-4 w-4" />
-            {pendingSelectionAction === "scope:catalog:include" ? "Selecting all" : "Select all exposed catalog"}
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            className="h-10 gap-2"
-            disabled={selectionDisabled || activeSelectionRuleCount === 0}
-            onClick={onClearSelection}
-          >
-            <MinusCircle className="h-4 w-4" />
-            {pendingSelectionAction === "scope:clear" ? "Clearing" : "Clear all selections"}
-          </Button>
-        </div>
-      </div>
-      <div className="mt-4 grid gap-3 md:grid-cols-4">
-        <PreviewMetric label="Visible rows" value={`${visibleRowCount} / ${total}`} />
-        <PreviewMetric label="Selectable visible" value={String(selectableRowCount)} />
-        <PreviewMetric label="Selected visible" value={String(selectedRowCount)} />
-        <PreviewMetric label="Active rules" value={String(activeSelectionRuleCount)} />
-      </div>
-    </section>
-  );
-}
-
-function CatalogSelectionProofPanel({
-  emailCodeSent,
-  onVerificationCodeChange,
-  pendingSelectionAction,
-  verificationCode,
-}: {
-  emailCodeSent: boolean;
-  onVerificationCodeChange: (value: string) => void;
-  pendingSelectionAction: PendingSelectionAction;
-  verificationCode: string;
-}) {
-  const showingPasskey = pendingSelectionAction === "proof:passkey";
-  if (!emailCodeSent && !showingPasskey) {
-    return null;
-  }
-
-  return (
-    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h2 className="text-base font-semibold">Catalog selection verification</h2>
-          <p className="mt-1 text-sm text-zinc-500">
-            {showingPasskey ? "Waiting for passkey confirmation." : "Enter the 6-digit code to apply catalog selection changes."}
-          </p>
-        </div>
-        <Badge variant="outline" className="w-fit border-zinc-200 bg-zinc-50 text-zinc-700">
-          {showingPasskey ? "Passkey" : "Email MFA"}
-        </Badge>
-      </div>
-      {emailCodeSent && (
-        <div className="mt-4 max-w-sm space-y-2">
-          <Label>Verification code</Label>
-          <InputOTP
-            maxLength={6}
-            value={verificationCode}
-            onChange={onVerificationCodeChange}
-            containerClassName="justify-between"
-          >
-            <InputOTPGroup>
-              {Array.from({ length: 6 }).map((_, index) => (
-                <InputOTPSlot key={index} index={index} className="h-10 w-10 text-sm" />
-              ))}
-            </InputOTPGroup>
-          </InputOTP>
-        </div>
-      )}
-    </section>
-  );
-}
-
 function ListingPreviewPanel({
   emailCodeSent,
   launchReadyStoreConnections,
@@ -920,7 +698,7 @@ function ListingPreviewPanel({
   onVerificationCodeChange,
   pendingListingAction,
   pushablePreviewCount,
-  selectedRowCount,
+  selectedRows,
   selectedStoreConnectionId,
   verificationCode,
 }: {
@@ -934,10 +712,11 @@ function ListingPreviewPanel({
   onVerificationCodeChange: (value: string) => void;
   pendingListingAction: PendingListingAction;
   pushablePreviewCount: number;
-  selectedRowCount: number;
+  selectedRows: DropshipCatalogRow[];
   selectedStoreConnectionId: string;
   verificationCode: string;
 }) {
+  const selectedRowCount = selectedRows.length;
   const previewDisabled = launchReadyStoreConnections.length === 0
     || !selectedStoreConnectionId
     || selectedRowCount === 0
@@ -953,7 +732,10 @@ function ListingPreviewPanel({
         <div>
           <h2 className="text-lg font-semibold">Listing preview and push</h2>
           <p className="mt-1 text-sm text-zinc-500">
-            Preview selected visible catalog rows before queueing a marketplace listing push.
+            Review everything you selected, then preview marketplace requirements before pushing to your store.
+          </p>
+          <p className="mt-1 text-xs font-medium text-violet-700">
+            Preview does not require verification. MFA is requested only when you queue ready listings.
           </p>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row">
@@ -996,7 +778,7 @@ function ListingPreviewPanel({
       </div>
 
       <div className="mt-4 grid gap-3 md:grid-cols-4">
-        <PreviewMetric label="Selected visible" value={String(selectedRowCount)} />
+        <PreviewMetric label="Selected for listing" value={String(selectedRowCount)} />
         <PreviewMetric label="Ready" value={String(listingPreview?.summary.ready ?? 0)} />
         <PreviewMetric label="Warnings" value={String(listingPreview?.summary.warning ?? 0)} />
         <PreviewMetric label="Blocked" value={String(listingPreview?.summary.blocked ?? 0)} />
@@ -1008,9 +790,47 @@ function ListingPreviewPanel({
         </div>
       )}
 
+      {!listingPreview && selectedRows.length > 0 && (
+        <div className="mt-4 overflow-hidden rounded-md border border-zinc-200">
+          <div className="border-b border-zinc-200 bg-zinc-50 px-4 py-3">
+            <h3 className="text-sm font-semibold">Selected items</h3>
+            <p className="mt-1 text-xs text-zinc-500">These items will be evaluated when you preview the listing push.</p>
+          </div>
+          <div className="max-h-72 overflow-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Product</TableHead>
+                  <TableHead>Variant</TableHead>
+                  <TableHead>SKU</TableHead>
+                  <TableHead>Quantity</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {selectedRows.map((row) => (
+                  <TableRow key={row.productVariantId}>
+                    <TableCell className="font-medium">{row.productName}</TableCell>
+                    <TableCell>{row.variantName}</TableCell>
+                    <TableCell className="font-mono text-xs">{row.variantSku || `Variant ${row.productVariantId}`}</TableCell>
+                    <TableCell className="font-mono">{row.selectionDecision.marketplaceQuantity}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </div>
+      )}
+
+      {!listingPreview && selectedRows.length === 0 && (
+        <div className="mt-4 rounded-md border border-dashed border-zinc-300 bg-zinc-50 p-4 text-sm text-zinc-600">
+          Select items from the available catalog above. They will appear here before you preview or push them.
+        </div>
+      )}
+
       {emailCodeSent && (
-        <div className="mt-4 max-w-sm space-y-2">
-          <Label>Verification code</Label>
+        <div className="mt-4 max-w-sm space-y-2 rounded-md border border-violet-200 bg-violet-50 p-4">
+          <Label>Verification code to push listings</Label>
+          <p className="text-xs text-zinc-600">Enter the 6-digit code sent to your email, then verify and queue the push.</p>
           <InputOTP
             maxLength={6}
             value={verificationCode}
@@ -1270,14 +1090,6 @@ function pushButtonIcon(pendingListingAction: PendingListingAction, emailCodeSen
   if (pendingListingAction === "send-code" || (emailCodeSent && pendingListingAction !== "push")) return <Mail className="h-4 w-4" />;
   if (pendingListingAction === "push") return <Send className="h-4 w-4" />;
   return <ArrowRight className="h-4 w-4" />;
-}
-
-function selectionTargetLabel(target: DropshipVendorSelectionScopeTarget): string {
-  if (target.scopeType === "catalog") return "All exposed catalog";
-  if (target.scopeType === "category") return `Category ${formatStatus(target.category)}`;
-  if (target.scopeType === "product_line") return `Product line ${target.productLineId}`;
-  if (target.scopeType === "product") return `Product ${target.productId}`;
-  return `Variant ${target.productVariantId}`;
 }
 
 function canSelectRow(row: DropshipCatalogRow): boolean {
