@@ -1040,62 +1040,26 @@ export async function runStartupMigrations(): Promise<void> {
     // changes belong to shellz-club's migrations. NEVER reintroduce
     // membership.* DDL in this startup routine.
 
-    // subscription_billing_log
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS subscription_billing_log (
-        id SERIAL PRIMARY KEY,
-        member_subscription_id INTEGER NOT NULL REFERENCES membership.member_subscriptions(id),
-        shopify_billing_attempt_id VARCHAR(100),
-        shopify_order_id BIGINT,
-        amount_cents INTEGER NOT NULL,
-        currency VARCHAR(3) DEFAULT 'USD',
-        status VARCHAR(30) NOT NULL,
-        error_code VARCHAR(100),
-        error_message TEXT,
-        idempotency_key VARCHAR(200),
-        billing_period_start TIMESTAMP,
-        billing_period_end TIMESTAMP,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW()
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_sbl_subscription ON subscription_billing_log(member_subscription_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_sbl_status ON subscription_billing_log(status)`);
-    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sbl_idempotency ON subscription_billing_log(idempotency_key) WHERE idempotency_key IS NOT NULL`);
-
-    // subscription_events
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS subscription_events (
-        id SERIAL PRIMARY KEY,
-        member_subscription_id INTEGER REFERENCES membership.member_subscriptions(id),
-        shopify_subscription_contract_id BIGINT,
-        event_type VARCHAR(50) NOT NULL,
-        event_source VARCHAR(30) NOT NULL,
-        payload JSONB,
-        notes TEXT,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW()
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_se_subscription ON subscription_events(member_subscription_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_se_contract ON subscription_events(shopify_subscription_contract_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_se_type ON subscription_events(event_type)`);
-
-    // selling_plan_map
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS selling_plan_map (
-        id SERIAL PRIMARY KEY,
-        shopify_selling_plan_gid VARCHAR(100) NOT NULL UNIQUE,
-        shopify_selling_plan_group_gid VARCHAR(100) NOT NULL,
-        plan_id INTEGER NOT NULL REFERENCES plans(id),
-        plan_name VARCHAR(100) NOT NULL,
-        billing_interval VARCHAR(20) NOT NULL,
-        price_cents INTEGER NOT NULL,
-        is_active BOOLEAN DEFAULT true,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-      )
-    `);
-
-    console.log("Checked subscription engine tables (subscription_billing_log, subscription_events, selling_plan_map)");
+    // The subscription engine tables (subscription_billing_log,
+    // subscription_events, selling_plan_map) used to be created here. They are
+    // membership-domain tables owned by shellz-club's migrations - exactly what
+    // the warning above forbids - and creating them here was actively harmful:
+    //
+    //   - They were created UNQUALIFIED, so they targeted `public`, while
+    //     Drizzle reads them from `membership`
+    //     (shared/schema/membership.schema.ts declares all three on
+    //     membershipSchema). Anything this created was a duplicate nothing read.
+    //
+    //   - subscription_billing_log declared
+    //     `member_subscription_id INTEGER REFERENCES membership.member_subscriptions(id)`
+    //     while that id is varchar, so Postgres refused the foreign key with
+    //     "cannot be implemented". Being the FIRST of the three, it aborted the
+    //     whole routine and every remaining schema fallback was SKIPPED on every
+    //     boot - silent schema drift, plus a stack trace in the logs each start.
+    //
+    // membership.subscription_events and membership.selling_plan_map already
+    // exist, created by shellz-club. subscription_billing_log is not queried by
+    // Echelon at all; if it is ever needed it belongs in a shellz-club migration.
 
     // ─── Migration 053: OMS Shopify webhook columns ──────────
     await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS financial_status VARCHAR(30) DEFAULT 'paid'`);
