@@ -76,6 +76,41 @@ describe("inventory availability master-data contracts", () => {
     expect(transformationModelDefinitionSchema.safeParse(explicitPackagingDefinition()).success).toBe(true);
   });
 
+  it("enforces operation direction from the immutable package sizes", () => {
+    const reversedAssemble = explicitPackagingDefinition();
+    reversedAssemble.paths = [{
+      ...reversedAssemble.paths[1]!,
+      operationType: "assemble_pack",
+    }];
+    const assembleResult = transformationModelDefinitionSchema.safeParse(reversedAssemble);
+    expect(assembleResult.success).toBe(false);
+    expect(assembleResult.error?.issues.some((issue) =>
+      issue.message.includes("smaller package to a larger package"))).toBe(true);
+
+    const reversedBreak = explicitPackagingDefinition();
+    reversedBreak.paths = [{
+      ...reversedBreak.paths[0]!,
+      operationType: "break_pack",
+    }];
+    const breakResult = transformationModelDefinitionSchema.safeParse(reversedBreak);
+    expect(breakResult.success).toBe(false);
+    expect(breakResult.error?.issues.some((issue) =>
+      issue.message.includes("larger package to a smaller package"))).toBe(true);
+  });
+
+  it("rejects competing authority modes for the same directed pair", () => {
+    const definition = explicitPackagingDefinition();
+    definition.paths.push({
+      ...definition.paths[0]!,
+      operationType: "directed_conversion",
+      authorityState: "blocked",
+    });
+    const result = transformationModelDefinitionSchema.safeParse(definition);
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.some((issue) =>
+      issue.message.includes("only one authority path"))).toBe(true);
+  });
+
   it("makes model hashes independent of UI row order", () => {
     const first = explicitPackagingDefinition();
     const second = { ...first, paths: [...first.paths].reverse() };
@@ -196,6 +231,17 @@ describe("inventory availability master-data contracts", () => {
       scope: { scopeType: "network_variant", productVariantId: 19 },
       value: { policyMode: "off" },
     }).success).toBe(true);
+  });
+
+  it("rejects policy identifiers and quantities outside PostgreSQL integer range", () => {
+    expect(promiseSafetyPolicyDraftSchema.safeParse({
+      scope: { scopeType: "network_variant", productVariantId: 2_147_483_648 },
+      value: { policyMode: "off" },
+    }).success).toBe(false);
+    expect(promiseSafetyPolicyDraftSchema.safeParse({
+      scope: { scopeType: "network_variant", productVariantId: 19 },
+      value: { policyMode: "fixed_units", fixedUnits: 2_147_483_648 },
+    }).success).toBe(false);
   });
 
   it("keeps demand quantities as bigint and requires bounded override evidence", () => {

@@ -376,8 +376,20 @@
     "server/routes/diagnostics.ts",
     "server/scripts/fix_orphaned_picks.ts"
   ],
+  "inventory.location_promise_policy_heads": [
+    "modules/inventory-planning"
+  ],
+  "inventory.location_promise_policy_versions": [
+    "modules/inventory-planning"
+  ],
   "inventory.location_replen_config": [
     "modules/inventory"
+  ],
+  "inventory.promise_safety_policy_heads": [
+    "modules/inventory-planning"
+  ],
+  "inventory.promise_safety_policy_versions": [
+    "modules/inventory-planning"
   ],
   "inventory.replen_rules": [
     "modules/catalog",
@@ -390,6 +402,21 @@
   ],
   "inventory.replen_tier_defaults": [
     "modules/inventory"
+  ],
+  "inventory.transformation_model_heads": [
+    "modules/inventory-planning"
+  ],
+  "inventory.transformation_model_paths": [
+    "modules/inventory-planning"
+  ],
+  "inventory.transformation_model_versions": [
+    "modules/inventory-planning"
+  ],
+  "inventory.transformation_recipe_bindings": [
+    "modules/inventory-planning"
+  ],
+  "inventory.transformation_recipe_component_snapshots": [
+    "modules/inventory-planning"
   ],
   "inventory.warehouse_settings": [
     "modules/inventory",
@@ -669,6 +696,7 @@
     "server/platform/commands/financial-command-operations.service.ts"
   ],
   "public.idempotency_keys": [
+    "modules/inventory-planning",
     "server/middleware/idempotency.ts"
   ],
   "public.notification_preferences": [

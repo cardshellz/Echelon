@@ -44,6 +44,7 @@ import {
   PackageCheck,
   TrendingUp,
   Route as RouteIcon,
+  GitBranch,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -67,8 +68,21 @@ import { NotificationBell } from "@/components/NotificationBell";
 
 // --- Navigation types ---
 
-type NavLink = { label: string; icon: LucideIcon; href: string; roles?: string[] };
-type NavGroup = { label: string; icon: LucideIcon; children: NavLink[]; roles?: string[] };
+type NavPermission = { resource: string; action: string };
+type NavLink = {
+  label: string;
+  icon: LucideIcon;
+  href: string;
+  roles?: string[];
+  requiredPermission?: NavPermission;
+};
+type NavGroup = {
+  label: string;
+  icon: LucideIcon;
+  children: NavLink[];
+  roles?: string[];
+  requiredPermission?: NavPermission;
+};
 type NavEntry = NavLink | NavGroup;
 
 function isNavGroup(entry: NavEntry): entry is NavGroup {
@@ -145,6 +159,12 @@ const navStructure: NavEntry[] = [
     children: [
       { label: "Stock Levels", icon: Box, href: "/inventory" },
       { label: "Builds", icon: PackageCheck, href: "/inventory/builds" },
+      {
+        label: "Supply & Transformations",
+        icon: GitBranch,
+        href: "/inventory/supply-transformations",
+        requiredPermission: { resource: "inventory_planning", action: "view" },
+      },
       { label: "Warehouses", icon: Building2, href: "/warehouse" },
       { label: "Pick Zones", icon: MapIcon, href: "/pick-zones" },
       { label: "Slotting Setup", icon: MapPin, href: "/slotting-setup" },
@@ -255,7 +275,7 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
   const search = useSearch();
   const locationPath = navPath(location);
   const currentHref = search ? `${locationPath}?${search}` : locationPath;
-  const { user, logout } = useAuth();
+  const { user, logout, hasPermission } = useAuth();
 
   // Reorder Engine flag (see REORDER_ENGINE_NAV_LABEL above). Same query key
   // as ReorderAnalysisRoute in App.tsx so React Query dedupes the request.
@@ -310,9 +330,10 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
   }, [locationPath]);
 
   // Role-based filtering
-  const isVisible = (roles?: string[]) => {
+  const isVisible = (roles?: string[], permission?: NavPermission) => {
+    if (permission) return hasPermission(permission.resource, permission.action);
     if (!roles) return true;
-    return user && roles.includes(user.role);
+    return Boolean(user && roles.includes(user.role));
   };
 
   const handleGroupClick = (label: string) => {
@@ -349,10 +370,9 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
         <nav className="space-y-0.5 px-2">
           {navEntries.map((entry) => {
             // Top-level role check
-            if (!isVisible(entry.roles)) return null;
-
             // Standalone link (Dashboard)
             if (!isNavGroup(entry)) {
+              if (!isVisible(entry.roles, entry.requiredPermission)) return null;
               const isActive = isNavHrefActive(locationPath, currentHref, entry.href);
               const Icon = entry.icon;
               return (
@@ -375,7 +395,13 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
             }
 
             // Group: filter children by role
-            const visibleChildren = entry.children.filter(child => isVisible(child.roles));
+            const parentVisible = isVisible(entry.roles, entry.requiredPermission);
+            const visibleChildren = entry.children.filter((child) =>
+              child.requiredPermission
+                ? isVisible(child.roles, child.requiredPermission)
+                : child.roles
+                  ? isVisible(child.roles)
+                  : parentVisible);
             if (visibleChildren.length === 0) return null;
 
             const GroupIcon = entry.icon;
