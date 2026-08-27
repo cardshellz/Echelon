@@ -27,33 +27,14 @@ describe("dropship vendor catalog routes", () => {
     await server?.close();
   });
 
-  it("requires sensitive-action proof before replacing catalog selection rules", async () => {
-    server = await startServer(buildApp(service as unknown as DropshipSelectionAtpService, false));
-
-    const response = await jsonRequest(`${server.url}/api/dropship/catalog/selection-rules`, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": "catalog-selection-001",
-      },
-      body: JSON.stringify({ rules: [] }),
-    });
-
-    expect(response.status).toBe(403);
-    expect(response.body.error).toMatchObject({
-      code: "DROPSHIP_STEP_UP_REQUIRED",
-    });
-    expect(service.lastReplaceInput).toBeNull();
-  });
-
-  it("replaces catalog selection rules after a valid sensitive-action proof", async () => {
+  it("replaces catalog selection rules for an authenticated vendor without step-up proof", async () => {
     server = await startServer(buildApp(service as unknown as DropshipSelectionAtpService, true));
 
     const response = await jsonRequest(`${server.url}/api/dropship/catalog/selection-rules`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        "Idempotency-Key": "catalog-selection-002",
+        "Idempotency-Key": "catalog-selection-001",
       },
       body: JSON.stringify({ rules: [] }),
     });
@@ -66,13 +47,32 @@ describe("dropship vendor catalog routes", () => {
     });
     expect(service.lastReplaceInput).toMatchObject({
       vendorId: 10,
-      idempotencyKey: "catalog-selection-002",
+      idempotencyKey: "catalog-selection-001",
       actor: {
         actorType: "vendor",
         actorId: "member-1",
       },
       rules: [],
     });
+  });
+
+  it("rejects catalog selection updates without an authenticated vendor session", async () => {
+    server = await startServer(buildApp(service as unknown as DropshipSelectionAtpService, false));
+
+    const response = await jsonRequest(`${server.url}/api/dropship/catalog/selection-rules`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": "catalog-selection-002",
+      },
+      body: JSON.stringify({ rules: [] }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toMatchObject({
+      code: "DROPSHIP_AUTH_REQUIRED",
+    });
+    expect(service.lastReplaceInput).toBeNull();
   });
 });
 
@@ -100,31 +100,25 @@ class FakeDropshipSelectionAtpService {
 
 function buildApp(
   service: DropshipSelectionAtpService,
-  includeSensitiveProof: boolean,
+  authenticated: boolean,
 ): express.Express {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
-    (req as Request & { session: Record<string, unknown> }).session = {
-      dropship: {
-        authIdentityId: 1,
-        memberId: "member-1",
-        cardShellzEmail: "vendor@cardshellz.test",
-        hasPasskey: false,
-        authMethod: "password",
-        entitlementStatus: "active",
-        authenticatedAt: "2026-05-08T12:00:00.000Z",
-      },
-      dropshipSensitiveProofs: includeSensitiveProof
-        ? {
-            manage_catalog_selection: {
-              method: "email_mfa",
-              verifiedAt: "2026-05-08T12:00:00.000Z",
-              expiresAt: "2099-05-08T12:10:00.000Z",
-            },
-          }
-        : {},
-    };
+    (req as Request & { session: Record<string, unknown> }).session = authenticated
+      ? {
+          dropship: {
+            authIdentityId: 1,
+            memberId: "member-1",
+            cardShellzEmail: "vendor@cardshellz.test",
+            hasPasskey: false,
+            authMethod: "password",
+            entitlementStatus: "active",
+            authenticatedAt: "2026-05-08T12:00:00.000Z",
+          },
+          dropshipSensitiveProofs: {},
+        }
+      : {};
     next();
   });
   registerDropshipVendorCatalogRoutes(app, service);
