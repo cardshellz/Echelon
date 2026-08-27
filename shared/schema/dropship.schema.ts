@@ -188,6 +188,7 @@ export const dropshipSensitiveActionEnum = [
   "add_funding_method",
   "remove_funding_method",
   "wallet_funding_high_value",
+  "manage_catalog_selection",
   "bulk_listing_push",
   "high_risk_order_acceptance",
   "manage_notification_preferences",
@@ -349,7 +350,7 @@ export const dropshipSensitiveActionChallenges = dropshipSchema.table(
     ),
     check(
       "dropship_sensitive_challenge_action_chk",
-      sql`${table.action} IN ('account_bootstrap','connect_store','disconnect_store','change_password','change_contact_email','password_reset','register_passkey','activate_account','add_funding_method','remove_funding_method','wallet_funding_high_value','bulk_listing_push','high_risk_order_acceptance','manage_notification_preferences')`,
+      sql`${table.action} IN ('account_bootstrap','connect_store','disconnect_store','change_password','change_contact_email','password_reset','register_passkey','activate_account','add_funding_method','remove_funding_method','wallet_funding_high_value','manage_catalog_selection','bulk_listing_push','high_risk_order_acceptance','manage_notification_preferences')`,
     ),
     check(
       "dropship_sensitive_challenge_method_chk",

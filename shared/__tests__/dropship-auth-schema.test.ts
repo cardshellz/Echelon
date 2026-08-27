@@ -53,6 +53,7 @@ describe("Dropship V2 auth schema contract", () => {
     expect(dropshipSensitiveActionEnum).toContain("activate_account");
     expect(dropshipSensitiveActionEnum).toContain("connect_store");
     expect(dropshipSensitiveActionEnum).toContain("add_funding_method");
+    expect(dropshipSensitiveActionEnum).toContain("manage_catalog_selection");
     expect(dropshipSensitiveActionEnum).toContain("manage_notification_preferences");
     expect((dropshipSensitiveActionChallenges as any).challengeHash.name).toBe("challenge_hash");
     expect(migrationSql).toContain("dropship_sensitive_challenge_method_chk");
