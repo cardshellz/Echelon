@@ -219,7 +219,7 @@ async function getProcurementPipeline(): Promise<ProcurementPipelineSummary> {
   const result = await db.execute(sql`
     SELECT
       COUNT(*) FILTER (WHERE status IN ('approved', 'sent', 'acknowledged', 'partially_received'))::int AS open_po_count,
-      COALESCE(SUM(total_amount_cents) FILTER (WHERE status IN ('approved', 'sent', 'acknowledged', 'partially_received')), 0)::bigint AS open_po_value,
+      COALESCE(SUM(total_cents) FILTER (WHERE status IN ('approved', 'sent', 'acknowledged', 'partially_received')), 0)::bigint AS open_po_value,
       COUNT(*) FILTER (WHERE status = 'draft')::int AS draft_po_count,
       COUNT(*) FILTER (
         WHERE status IN ('approved', 'sent', 'acknowledged')
@@ -262,12 +262,15 @@ async function getFinancialKpis(from: Date, to: Date): Promise<FinancialKpis> {
       WHERE il.status = 'active' AND il.qty_on_hand > 0
     `),
     db.execute(sql`
-      SELECT COALESCE(SUM(total_amount_cents), 0)::bigint AS value
+      SELECT COALESCE(SUM(total_cents), 0)::bigint AS value
       FROM procurement.purchase_orders
       WHERE status IN ('approved', 'sent', 'acknowledged', 'partially_received')
     `),
     db.execute(sql`
-      SELECT COALESCE(SUM(total_amount_cents), 0)::bigint AS value
+      -- balance_cents is the outstanding amount (invoiced minus paid), which is
+      -- what "pending AP" means. invoiced_amount_cents would double-count the
+      -- part already paid on partially_paid invoices.
+      SELECT COALESCE(SUM(balance_cents), 0)::bigint AS value
       FROM procurement.vendor_invoices
       WHERE status IN ('received', 'approved', 'partially_paid')
     `),
