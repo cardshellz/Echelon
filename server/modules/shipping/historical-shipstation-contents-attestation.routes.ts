@@ -1,4 +1,11 @@
 import type { Express, Request, Response } from "express";
+import {
+  HISTORICAL_SHIPSTATION_CONTENTS_ATTESTATION_API_PATH,
+  historicalShipStationContentsAttestationPreviewResponseSchema,
+  historicalShipStationContentsAttestationRequestSchema,
+  historicalShipStationContentsAttestationResponseSchema,
+  historicalShipStationContentsLabelIdSchema,
+} from "@shared/types/historical-shipstation-contents-attestation";
 import { z } from "zod";
 
 import { pool } from "../../db";
@@ -20,19 +27,7 @@ import {
 } from "./historical-shipstation-contents-attestation.service";
 
 export const HISTORICAL_SHIPSTATION_CONTENTS_ATTESTATION_ADMIN_PATH =
-  "/api/shipping/admin/historical-contents-attestations";
-
-const POSTGRES_BIGINT_MAX_TEXT = "9223372036854775807";
-const labelIdSchema = z.string().regex(/^[1-9][0-9]*$/).refine(
-  (value) => value.length < POSTGRES_BIGINT_MAX_TEXT.length
-    || (value.length === POSTGRES_BIGINT_MAX_TEXT.length && value <= POSTGRES_BIGINT_MAX_TEXT),
-  "must fit a positive PostgreSQL bigint",
-);
-const attestationBodySchema = z.object({
-  expectedPreviewEvidenceHash: z.string().regex(/^[0-9a-f]{64}$/),
-  reason: z.string().min(1).max(500)
-    .refine((value) => value.trim() === value, "must not contain surrounding whitespace"),
-}).strict();
+  HISTORICAL_SHIPSTATION_CONTENTS_ATTESTATION_API_PATH;
 
 export interface HistoricalShipStationContentsAttestationApi {
   preview(shippingProviderLabelId: string): Promise<HistoricalShipStationContentsAttestationPreview>;
@@ -163,10 +158,15 @@ export function registerHistoricalShipStationContentsAttestationAdminRoutes(
     `${HISTORICAL_SHIPSTATION_CONTENTS_ATTESTATION_ADMIN_PATH}/:shippingProviderLabelId/preview`,
     requirePermission("inventory", "view"),
     async (request, response) => {
-      const parsedLabelId = labelIdSchema.safeParse(request.params.shippingProviderLabelId);
+      const parsedLabelId = historicalShipStationContentsLabelIdSchema.safeParse(
+        request.params.shippingProviderLabelId,
+      );
       if (!parsedLabelId.success) return sendValidationError(response, parsedLabelId.error);
       try {
-        return response.json({ preview: await resolveService().preview(parsedLabelId.data) });
+        const previewResponse = historicalShipStationContentsAttestationPreviewResponseSchema.parse({
+          preview: await resolveService().preview(parsedLabelId.data),
+        });
+        return response.json(previewResponse);
       } catch (error) {
         return sendAttestationError(response, error);
       }
@@ -177,9 +177,13 @@ export function registerHistoricalShipStationContentsAttestationAdminRoutes(
     `${HISTORICAL_SHIPSTATION_CONTENTS_ATTESTATION_ADMIN_PATH}/:shippingProviderLabelId`,
     requirePermission("inventory", "adjust"),
     async (request, response) => {
-      const parsedLabelId = labelIdSchema.safeParse(request.params.shippingProviderLabelId);
+      const parsedLabelId = historicalShipStationContentsLabelIdSchema.safeParse(
+        request.params.shippingProviderLabelId,
+      );
       if (!parsedLabelId.success) return sendValidationError(response, parsedLabelId.error);
-      const parsedBody = attestationBodySchema.safeParse(request.body);
+      const parsedBody = historicalShipStationContentsAttestationRequestSchema.safeParse(
+        request.body,
+      );
       if (!parsedBody.success) return sendValidationError(response, parsedBody.error);
       const authenticatedActorUserId = readAuthenticatedActorUserId(request);
       if (authenticatedActorUserId === null) {
@@ -197,7 +201,12 @@ export function registerHistoricalShipStationContentsAttestationAdminRoutes(
           authenticatedActorUserId,
           reason: parsedBody.data.reason,
         });
-        return response.status(attestation.kind === "created" ? 201 : 200).json({ attestation });
+        const attestationResponse = historicalShipStationContentsAttestationResponseSchema.parse({
+          attestation,
+        });
+        return response
+          .status(attestation.kind === "created" ? 201 : 200)
+          .json(attestationResponse);
       } catch (error) {
         return sendAttestationError(response, error);
       }
