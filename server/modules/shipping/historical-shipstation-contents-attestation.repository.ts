@@ -11,7 +11,9 @@ import type {
 } from "./historical-shipstation-contents-recovery.domain";
 
 const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const MAX_RESOLVED_EVENTS = 500;
+const MAX_REVIEW_CONTEXT_REFERENCES = 100;
 
 type QueryResult = Readonly<{ readonly rows: readonly Record<string, unknown>[] }>;
 type QueryClient = Readonly<{
@@ -60,6 +62,28 @@ export interface PersistedHistoricalShipStationContentsAttestation {
   readonly resolvedEventCount: number;
 }
 
+export interface HistoricalShipStationContentsAttestationReviewContext {
+  readonly trackingNumber: string;
+  readonly shipStationOrderId: string | null;
+  readonly wmsOrders: readonly Readonly<{
+    wmsOrderId: number;
+    orderNumber: string;
+  }>[];
+  readonly linkedShipments: readonly Readonly<{
+    source: "physical_shipment" | "legacy_wms_shipment";
+    shipmentId: string;
+  }>[];
+  readonly linePresentations: readonly Readonly<{
+    wmsShipmentItemId: number;
+    itemName: string | null;
+  }>[];
+}
+
+export interface HistoricalShipStationContentsAttestationReviewSnapshot {
+  readonly candidate: HistoricalShipStationContentsCandidate;
+  readonly reviewContext: HistoricalShipStationContentsAttestationReviewContext;
+}
+
 export interface HistoricalShipStationContentsAttestationTransaction {
   lockAuthorizedActor(userId: string): Promise<AuthorizedHistoricalContentsAttestationActor | null>;
   loadCandidateForUpdate(
@@ -72,9 +96,9 @@ export interface HistoricalShipStationContentsAttestationTransaction {
 }
 
 export interface HistoricalShipStationContentsAttestationRepository {
-  loadCandidateSnapshot(
+  loadReviewSnapshot(
     shippingProviderLabelId: string,
-  ): Promise<HistoricalShipStationContentsCandidate | null>;
+  ): Promise<HistoricalShipStationContentsAttestationReviewSnapshot | null>;
   withSerializableTransaction<T>(
     work: (transaction: HistoricalShipStationContentsAttestationTransaction) => Promise<T>,
   ): Promise<T>;
@@ -145,12 +169,40 @@ function exactText(value: unknown, field: string): string {
   return value;
 }
 
+function exactBoundedText(value: unknown, field: string, maximum: number): string {
+  const parsed = exactText(value, field);
+  if (parsed.length > maximum) {
+    throw new HistoricalShipStationContentsAttestationRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      `Historical contents attestation received oversized ${field}`,
+    );
+  }
+  return parsed;
+}
+
+function optionalExactBoundedText(value: unknown, field: string, maximum: number): string | null {
+  return value === null || value === undefined
+    ? null
+    : exactBoundedText(value, field, maximum);
+}
+
 function positiveSafeInteger(value: unknown, field: string): number {
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new HistoricalShipStationContentsAttestationRepositoryError(
       "INVALID_DATABASE_EVIDENCE",
       `Historical contents attestation received invalid ${field}`,
+    );
+  }
+  return parsed;
+}
+
+function positivePostgresInteger(value: unknown, field: string): number {
+  const parsed = positiveSafeInteger(value, field);
+  if (parsed > POSTGRES_INTEGER_MAX) {
+    throw new HistoricalShipStationContentsAttestationRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      `Historical contents attestation received out-of-range ${field}`,
     );
   }
   return parsed;
@@ -445,13 +497,238 @@ async function loadCandidate(
   });
 }
 
+async function loadReviewContext(
+  client: QueryClient,
+  candidate: HistoricalShipStationContentsCandidate,
+): Promise<HistoricalShipStationContentsAttestationReviewContext> {
+  const identityResult = await client.query(
+    `SELECT
+       label.tracking_number,
+       NULLIF(BTRIM(label.provider_order_id), '') AS provider_order_id
+     FROM wms.shipping_provider_labels AS label
+     WHERE label.id = $1::bigint
+       AND label.provider = 'shipstation'
+       AND label.label_direction = 'outbound'`,
+    [candidate.shippingProviderLabelId],
+  );
+  if (identityResult.rows.length !== 1) {
+    throw new HistoricalShipStationContentsAttestationRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      "Historical contents review identity is missing or duplicated",
+    );
+  }
+  const identity = identityResult.rows[0];
+  const trackingNumber = exactBoundedText(identity.tracking_number, "tracking_number", 200);
+  const shipStationOrderId = optionalExactBoundedText(
+    identity.provider_order_id,
+    "provider_order_id",
+    200,
+  );
+
+  const linksResult = await client.query(
+    `SELECT
+       link.physical_shipment_id::text AS physical_shipment_id,
+       link.legacy_wms_shipment_id::text AS legacy_wms_shipment_id
+     FROM wms.shipping_provider_label_links AS link
+     WHERE link.shipping_provider_label_id = $1::bigint
+     ORDER BY link.id
+     LIMIT $2::integer`,
+    [candidate.shippingProviderLabelId, MAX_REVIEW_CONTEXT_REFERENCES + 1],
+  );
+  if (linksResult.rows.length > MAX_REVIEW_CONTEXT_REFERENCES) {
+    throw new HistoricalShipStationContentsAttestationRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      "Historical contents review shipment references exceed the safety bound",
+    );
+  }
+  const linkedShipmentKeys = new Set<string>();
+  const linkedShipments: HistoricalShipStationContentsAttestationReviewContext[
+    "linkedShipments"
+  ][number][] = [];
+  for (const row of linksResult.rows) {
+    for (const [source, rawId] of [
+      ["physical_shipment", row.physical_shipment_id],
+      ["legacy_wms_shipment", row.legacy_wms_shipment_id],
+    ] as const) {
+      if (rawId === null || rawId === undefined) continue;
+      const shipmentId = positiveBigintText(rawId, `${source}_id`);
+      const key = `${source}:${shipmentId}`;
+      if (linkedShipmentKeys.has(key)) {
+        throw new HistoricalShipStationContentsAttestationRepositoryError(
+          "INVALID_DATABASE_EVIDENCE",
+          "Historical contents review received a duplicate linked shipment",
+        );
+      }
+      linkedShipmentKeys.add(key);
+      linkedShipments.push(Object.freeze({ source, shipmentId }));
+    }
+  }
+  if (linkedShipments.length > MAX_REVIEW_CONTEXT_REFERENCES) {
+    throw new HistoricalShipStationContentsAttestationRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      "Historical contents review shipment references exceed the safety bound",
+    );
+  }
+  linkedShipments.sort((left, right) => {
+    const sourceComparison = left.source < right.source
+      ? -1
+      : left.source > right.source
+        ? 1
+        : 0;
+    if (sourceComparison !== 0) return sourceComparison;
+    const leftId = BigInt(left.shipmentId);
+    const rightId = BigInt(right.shipmentId);
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+  });
+
+  const expectedLineIds = candidate.expectedContents.kind === "available"
+    ? candidate.expectedContents.lines.map((line) => line.wmsShipmentItemId)
+    : [];
+  const ordersResult = await client.query(
+    `WITH links AS MATERIALIZED (
+       SELECT link.*
+       FROM wms.shipping_provider_label_links AS link
+       WHERE link.shipping_provider_label_id = $1::bigint
+     ), order_ids(order_id) AS (
+       SELECT legacy.order_id
+       FROM links
+       JOIN wms.outbound_shipments AS legacy
+         ON legacy.id = links.legacy_wms_shipment_id
+       WHERE legacy.order_id IS NOT NULL
+
+       UNION
+
+       SELECT request.wms_order_id
+       FROM links
+       JOIN wms.shipment_requests AS request
+         ON request.id = links.shipment_request_id
+
+       UNION
+
+       SELECT request.wms_order_id
+       FROM links
+       JOIN wms.shipping_engine_order_requests AS engine_request
+         ON engine_request.shipping_engine_order_id = links.shipping_engine_order_id
+       JOIN wms.shipment_requests AS request
+         ON request.id = engine_request.shipment_request_id
+
+       UNION
+
+       SELECT request.wms_order_id
+       FROM links
+       JOIN wms.physical_shipments AS physical
+         ON physical.id = links.physical_shipment_id
+       JOIN wms.shipment_requests AS request
+         ON request.id = physical.shipment_request_id
+
+       UNION
+
+       SELECT request.wms_order_id
+       FROM links
+       JOIN wms.physical_shipments AS physical
+         ON physical.id = links.physical_shipment_id
+       JOIN wms.shipping_engine_order_requests AS engine_request
+         ON engine_request.shipping_engine_order_id = physical.shipping_engine_order_id
+       JOIN wms.shipment_requests AS request
+         ON request.id = engine_request.shipment_request_id
+
+       UNION
+
+       SELECT order_item.order_id
+       FROM wms.outbound_shipment_items AS shipment_item
+       JOIN wms.order_items AS order_item
+         ON order_item.id = shipment_item.order_item_id
+       WHERE shipment_item.id = ANY($2::integer[])
+
+       UNION
+
+       SELECT replacement_item.order_id
+       FROM wms.outbound_shipment_items AS shipment_item
+       JOIN wms.order_items AS replacement_item
+         ON replacement_item.id = shipment_item.replacement_for_order_item_id
+       WHERE shipment_item.id = ANY($2::integer[])
+     )
+     SELECT orders.id::text AS wms_order_id, orders.order_number
+     FROM order_ids
+     JOIN wms.orders AS orders ON orders.id = order_ids.order_id
+     ORDER BY orders.id
+     LIMIT $3::integer`,
+    [candidate.shippingProviderLabelId, expectedLineIds, MAX_REVIEW_CONTEXT_REFERENCES + 1],
+  );
+  if (ordersResult.rows.length > MAX_REVIEW_CONTEXT_REFERENCES) {
+    throw new HistoricalShipStationContentsAttestationRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      "Historical contents review order references exceed the safety bound",
+    );
+  }
+  const wmsOrders = Object.freeze(ordersResult.rows.map((row) => Object.freeze({
+    wmsOrderId: positivePostgresInteger(row.wms_order_id, "wms_order_id"),
+    orderNumber: exactBoundedText(row.order_number, "order_number", 50),
+  })));
+
+  const lineNamesById = new Map<number, string | null>();
+  if (expectedLineIds.length > 0) {
+    const lineResult = await client.query(
+      `SELECT
+         shipment_item.id::text AS wms_shipment_item_id,
+         LEFT(NULLIF(BTRIM(CASE shipment_item.shipment_item_purpose
+           WHEN 'customer_fulfillment' THEN order_item.name
+           WHEN 'replacement' THEN replacement_item.name
+           WHEN 'concession' THEN variant.name
+           WHEN 'omission_correction' THEN variant.name
+           WHEN 'unclassified' THEN variant.name
+           ELSE NULL
+         END), ''), 500) AS item_name
+       FROM wms.outbound_shipment_items AS shipment_item
+       LEFT JOIN wms.order_items AS order_item
+         ON order_item.id = shipment_item.order_item_id
+       LEFT JOIN wms.order_items AS replacement_item
+         ON replacement_item.id = shipment_item.replacement_for_order_item_id
+       LEFT JOIN catalog.product_variants AS variant
+         ON variant.id = shipment_item.product_variant_id
+       WHERE shipment_item.id = ANY($1::integer[])
+       ORDER BY shipment_item.id`,
+      [expectedLineIds],
+    );
+    const expectedLineIdSet = new Set(expectedLineIds);
+    for (const row of lineResult.rows) {
+      const wmsShipmentItemId = positivePostgresInteger(
+        row.wms_shipment_item_id,
+        "wms_shipment_item_id",
+      );
+      if (!expectedLineIdSet.has(wmsShipmentItemId) || lineNamesById.has(wmsShipmentItemId)) {
+        throw new HistoricalShipStationContentsAttestationRepositoryError(
+          "INVALID_DATABASE_EVIDENCE",
+          "Historical contents review received unexpected or duplicate line presentation",
+        );
+      }
+      lineNamesById.set(
+        wmsShipmentItemId,
+        optionalExactBoundedText(row.item_name, "item_name", 500),
+      );
+    }
+  }
+  const linePresentations = Object.freeze(expectedLineIds.map((wmsShipmentItemId) => Object.freeze({
+    wmsShipmentItemId,
+    itemName: lineNamesById.get(wmsShipmentItemId) ?? null,
+  })));
+
+  return Object.freeze({
+    trackingNumber,
+    shipStationOrderId,
+    wmsOrders,
+    linkedShipments: Object.freeze(linkedShipments),
+    linePresentations,
+  });
+}
+
 export class PgHistoricalShipStationContentsAttestationRepository
 implements HistoricalShipStationContentsAttestationRepository {
   constructor(private readonly pool: Pool) {}
 
-  async loadCandidateSnapshot(
+  async loadReviewSnapshot(
     shippingProviderLabelId: string,
-  ): Promise<HistoricalShipStationContentsCandidate | null> {
+  ): Promise<HistoricalShipStationContentsAttestationReviewSnapshot | null> {
     let client: PoolClient;
     try {
       client = await this.pool.connect();
@@ -460,10 +737,17 @@ implements HistoricalShipStationContentsAttestationRepository {
     }
     let primaryFailure: unknown;
     let rollbackFailure: unknown;
-    let candidate: HistoricalShipStationContentsCandidate | null = null;
+    let snapshot: HistoricalShipStationContentsAttestationReviewSnapshot | null = null;
     try {
       await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      candidate = await loadCandidate(client as unknown as QueryClient, shippingProviderLabelId, false);
+      const queryClient = client as unknown as QueryClient;
+      const candidate = await loadCandidate(queryClient, shippingProviderLabelId, false);
+      snapshot = candidate === null
+        ? null
+        : Object.freeze({
+            candidate,
+            reviewContext: await loadReviewContext(queryClient, candidate),
+          });
       await client.query("COMMIT");
     } catch (error) {
       primaryFailure = error;
@@ -502,7 +786,7 @@ implements HistoricalShipStationContentsAttestationRepository {
       }
       throw classifyDatabaseError(primaryFailure);
     }
-    return candidate;
+    return snapshot;
   }
 
   async withSerializableTransaction<T>(

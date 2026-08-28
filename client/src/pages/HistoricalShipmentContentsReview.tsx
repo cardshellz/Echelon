@@ -101,7 +101,7 @@ export default function HistoricalShipmentContentsReview() {
         title: result.kind === "created" ? "Attestation recorded" : "Attestation already recorded",
         description: `${result.resolvedEventCount} historical label event${
           result.resolvedEventCount === 1 ? " was" : "s were"
-        } resolved by immutable evidence.`,
+        } linked to immutable evidence.`,
       });
     },
     onError: async (error: Error) => {
@@ -188,7 +188,7 @@ export default function HistoricalShipmentContentsReview() {
         <p className="mt-2 max-w-4xl text-muted-foreground">
           Compare the current WMS package lineage with ShipStation shipment contents before
           recording immutable evidence for a historical label. This does not change package items
-          or inventory.
+          or inventory, and it does not grant package-allocation authority.
         </p>
       </div>
 
@@ -255,8 +255,9 @@ export default function HistoricalShipmentContentsReview() {
                     : "Exact attestation already existed"}
                 </CardTitle>
                 <CardDescription>
-                  Attestation #{receipt.attestationId} resolved {receipt.resolvedEventCount} historical
-                  label event{receipt.resolvedEventCount === 1 ? "" : "s"}.
+                  Attestation #{receipt.attestationId} linked immutable evidence to{" "}
+                  {receipt.resolvedEventCount} historical label event
+                  {receipt.resolvedEventCount === 1 ? "" : "s"}.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -350,29 +351,58 @@ function PreviewSummary({
   const source = preview.expectedContents.kind === "available"
     ? preview.expectedContents.source.replaceAll("_", " ")
     : preview.expectedContents.reason.replaceAll("_", " ");
+  const orders = preview.reviewContext.wmsOrders.length === 0
+    ? "No linked WMS order"
+    : preview.reviewContext.wmsOrders
+        .map((order) => `${order.orderNumber} (WMS ${order.wmsOrderId})`)
+        .join(", ");
+  const shipments = preview.reviewContext.linkedShipments.length === 0
+    ? "No linked WMS shipment"
+    : preview.reviewContext.linkedShipments
+        .map((shipment) => shipment.source === "physical_shipment"
+          ? `Physical ${shipment.shipmentId}`
+          : `WMS ${shipment.shipmentId}`)
+        .join(", ");
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <RefreshCw className="h-5 w-5" aria-hidden="true" />
-          Current evidence preview
+          Shipment identity
         </CardTitle>
         <CardDescription>
-          This fingerprint is valid only while the candidate and provider evidence remain unchanged.
+          Confirm these operational references identify the shipment you intend to review.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
-        <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <EvidenceField label="Provider label" value={preview.shippingProviderLabelId} />
+        <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <EvidenceField label="Order" value={orders} />
+          <EvidenceField label="Tracking" value={preview.reviewContext.trackingNumber} />
+          <EvidenceField label="Linked shipments" value={shipments} />
           <EvidenceField label="ShipStation shipment" value={String(preview.providerShipmentId)} />
-          <EvidenceField label="Provider evidence" value={preview.providerContentsStatus} />
-          <EvidenceField label="WMS lineage" value={source} />
+          <EvidenceField
+            label="ShipStation order"
+            value={preview.reviewContext.shipStationOrderId ?? "Not recorded"}
+          />
+          <EvidenceField label="Internal label reference" value={preview.shippingProviderLabelId} />
         </dl>
-        <div className="grid gap-4 lg:grid-cols-2">
-          <HashField label="Preview fingerprint" value={preview.previewEvidenceHash} />
-          <HashField label="Provider evidence hash" value={preview.providerEvidenceHash} />
+        <div className="rounded-md border bg-muted/20 p-4">
+          <p className="mb-3 text-sm text-muted-foreground">
+            The fingerprint below is valid only while the candidate and provider evidence remain
+            unchanged.
+          </p>
+          <dl className="grid gap-4 sm:grid-cols-2">
+            <EvidenceField label="Provider evidence" value={preview.providerContentsStatus} />
+            <EvidenceField label="WMS lineage" value={source} />
+          </dl>
+          <div className="mt-4 grid gap-4 lg:grid-cols-2">
+            <HashField label="Preview fingerprint" value={preview.previewEvidenceHash} />
+            <HashField label="Provider evidence hash" value={preview.providerEvidenceHash} />
+          </div>
+          <Badge className="mt-4" variant="outline">
+            Recovery: {preview.recoveryStatus.replaceAll("_", " ")}
+          </Badge>
         </div>
-        <Badge variant="outline">Recovery: {preview.recoveryStatus.replaceAll("_", " ")}</Badge>
       </CardContent>
     </Card>
   );
@@ -388,7 +418,8 @@ function EvidenceComparisonTable({
       <CardHeader>
         <CardTitle>WMS versus ShipStation</CardTitle>
         <CardDescription>
-          Rows are joined by immutable WMS shipment-item identity, not by display SKU alone.
+          Product names and SKUs are for recognition. Comparison still uses the immutable WMS line
+          identity shown beneath each item.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -396,8 +427,7 @@ function EvidenceComparisonTable({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>WMS item ID</TableHead>
-                <TableHead>SKU</TableHead>
+                <TableHead>Item</TableHead>
                 <TableHead className="text-right">WMS quantity</TableHead>
                 <TableHead className="text-right">ShipStation quantity</TableHead>
                 <TableHead>Comparison</TableHead>
@@ -406,8 +436,15 @@ function EvidenceComparisonTable({
             <TableBody>
               {rows.map((row) => (
                 <TableRow key={row.wmsShipmentItemId}>
-                  <TableCell className="font-mono">{row.wmsShipmentItemId}</TableCell>
-                  <TableCell>{row.sku ?? "Not present in WMS evidence"}</TableCell>
+                  <TableCell>
+                    <div className="font-medium">
+                      {row.itemName ?? row.sku ?? "Not present in WMS evidence"}
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {row.sku === null ? "SKU unavailable" : `SKU ${row.sku}`}
+                      {` · WMS line ${row.wmsShipmentItemId}`}
+                    </div>
+                  </TableCell>
                   <TableCell className="text-right">{row.expectedQuantity ?? "—"}</TableCell>
                   <TableCell className="text-right">{row.attestedQuantity ?? "—"}</TableCell>
                   <TableCell><ComparisonBadge status={row.status} /></TableCell>

@@ -56,7 +56,6 @@ import { PgHistoricalShipStationContentsAttestationRepository } from "../../hist
 import { HistoricalShipStationContentsAttestationService } from "../../historical-shipstation-contents-attestation.service";
 import {
   buildHistoricalShipStationContentsRecoveryEvidence,
-  historicalShipStationRecoverableCaseEvidenceHash,
 } from "../../historical-shipstation-contents-recovery.domain";
 
 const PRIMARY_GROUP_KEY = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
@@ -848,16 +847,19 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       [leadUserId],
     );
     const order = await pool.query<{ id: number }>(
-      "INSERT INTO wms.orders DEFAULT VALUES RETURNING id",
+      `INSERT INTO wms.orders (order_number, customer_name)
+       VALUES ('#ATTEST-1001', 'Historical attestation test')
+       RETURNING id`,
     );
     const orderItem = await pool.query<{ id: number }>(
-      `INSERT INTO wms.order_items (order_id, sku, quantity)
-       VALUES ($1::integer, 'ATTEST-SKU', 2)
+      `INSERT INTO wms.order_items (order_id, sku, name, quantity)
+       VALUES ($1::integer, 'ATTEST-SKU', 'Attestation test item', 2)
        RETURNING id`,
       [order.rows[0].id],
     );
     const shipment = await pool.query<{ id: number }>(
-      "INSERT INTO wms.outbound_shipments DEFAULT VALUES RETURNING id",
+      "INSERT INTO wms.outbound_shipments (order_id) VALUES ($1::integer) RETURNING id",
+      [order.rows[0].id],
     );
     const shipmentItem = await pool.query<{ id: number }>(
       `INSERT INTO wms.outbound_shipment_items (
@@ -868,12 +870,12 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     );
     const label = await pool.query<{ id: string }>(
       `INSERT INTO wms.shipping_provider_labels (
-         provider, provider_label_id, tracking_number, label_status,
+         provider, provider_label_id, provider_order_id, tracking_number, label_status,
          label_direction, first_observed_at, last_observed_at
        ) VALUES (
-         'shipstation', '55001', '1ZATTESTATION', 'active', 'outbound',
-         '2026-08-26T12:00:00.000Z', '2026-08-26T12:00:00.000Z'
-       ) RETURNING id::text AS id`,
+          'shipstation', '55001', '77001', '1ZATTESTATION', 'active', 'outbound',
+          '2026-08-26T12:00:00.000Z', '2026-08-26T12:00:00.000Z'
+        ) RETURNING id::text AS id`,
     );
     const labelEvent = await pool.query<{ id: string }>(
       `INSERT INTO wms.shipping_provider_label_events (
@@ -913,11 +915,6 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       expectedContents,
     });
     if (recoveryEvidence === null) throw new Error("Expected recoverable integration evidence");
-    const previewEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
-      shippingProviderLabelId: label.rows[0].id,
-      recoveryStatus: recoveryEvidence.recoveryStatus,
-      providerEvidenceHash: recoveryEvidence.evidenceHash,
-    });
     const client: HistoricalShipStationContentsClient = {
       async loadShipmentContents(providerShipmentId, observedExpectedContents) {
         expect(providerShipmentId).toBe(55_001);
@@ -945,6 +942,21 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     };
     const repository = new PgHistoricalShipStationContentsAttestationRepository(pool);
     const service = new HistoricalShipStationContentsAttestationService(repository, client);
+    const preview = await service.preview(label.rows[0].id);
+    const previewEvidenceHash = preview.previewEvidenceHash;
+    expect(preview.reviewContext).toEqual({
+      trackingNumber: "1ZATTESTATION",
+      shipStationOrderId: "77001",
+      wmsOrders: [{ wmsOrderId: order.rows[0].id, orderNumber: "#ATTEST-1001" }],
+      linkedShipments: [{
+        source: "legacy_wms_shipment",
+        shipmentId: String(shipment.rows[0].id),
+      }],
+      linePresentations: [{
+        wmsShipmentItemId: shipmentItem.rows[0].id,
+        itemName: "Attestation test item",
+      }],
+    });
     const command = Object.freeze({
       shippingProviderLabelId: label.rows[0].id,
       expectedPreviewEvidenceHash: previewEvidenceHash,

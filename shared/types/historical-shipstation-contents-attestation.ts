@@ -31,6 +31,40 @@ function rejectDuplicateWmsShipmentItemIds(
   });
 }
 
+function rejectDuplicateWmsOrderIds(
+  orders: ReadonlyArray<{ wmsOrderId: number }>,
+  context: z.RefinementCtx,
+): void {
+  const seen = new Set<number>();
+  orders.forEach((order, index) => {
+    if (seen.has(order.wmsOrderId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [index, "wmsOrderId"],
+        message: "duplicates a WMS order identity",
+      });
+    }
+    seen.add(order.wmsOrderId);
+  });
+}
+
+function rejectDuplicateShipmentReferences(
+  shipments: ReadonlyArray<{ source: string; shipmentId: string }>,
+  context: z.RefinementCtx,
+): void {
+  const seen = new Set<string>();
+  shipments.forEach((shipment, index) => {
+    const key = `${shipment.source}:${shipment.shipmentId}`;
+    if (seen.has(key)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [index],
+        message: "duplicates a linked shipment identity",
+      });
+    }
+    seen.add(key);
+  });
+}
 
 export const HISTORICAL_SHIPSTATION_CONTENTS_ATTESTATION_API_PATH =
   "/api/shipping/admin/historical-contents-attestations";
@@ -71,6 +105,23 @@ export const historicalShipStationAttestedContentsLineSchema = z.object({
   quantity: positivePostgresIntegerSchema,
 }).strict();
 
+export const historicalShipStationContentsReviewContextSchema = z.object({
+  trackingNumber: exactNonblankText(200),
+  shipStationOrderId: exactNonblankText(200).nullable(),
+  wmsOrders: z.array(z.object({
+    wmsOrderId: positivePostgresIntegerSchema,
+    orderNumber: exactNonblankText(50),
+  }).strict()).max(100).superRefine(rejectDuplicateWmsOrderIds),
+  linkedShipments: z.array(z.object({
+    source: z.enum(["physical_shipment", "legacy_wms_shipment"]),
+    shipmentId: historicalShipStationContentsLabelIdSchema,
+  }).strict()).max(100).superRefine(rejectDuplicateShipmentReferences),
+  linePresentations: z.array(z.object({
+    wmsShipmentItemId: positivePostgresIntegerSchema,
+    itemName: exactNonblankText(500).nullable(),
+  }).strict()).max(MAX_PACKAGE_LINES).superRefine(rejectDuplicateWmsShipmentItemIds),
+}).strict();
+
 export const historicalShipStationContentsAttestationPreviewSchema = z.object({
   shippingProviderLabelId: historicalShipStationContentsLabelIdSchema,
   providerShipmentId: positiveSafeIntegerSchema,
@@ -88,6 +139,7 @@ export const historicalShipStationContentsAttestationPreviewSchema = z.object({
   ]),
   previewEvidenceHash: sha256Schema,
   providerEvidenceHash: sha256Schema,
+  reviewContext: historicalShipStationContentsReviewContextSchema,
   expectedContents: historicalShipStationExpectedContentsSchema,
   attestedContents: z.array(historicalShipStationAttestedContentsLineSchema)
     .min(1)
@@ -122,6 +174,10 @@ export type HistoricalShipStationContentsAttestationPreview = z.infer<
 
 export type HistoricalShipStationContentsAttestationPreviewResponse = z.infer<
   typeof historicalShipStationContentsAttestationPreviewResponseSchema
+>;
+
+export type HistoricalShipStationContentsReviewContext = z.infer<
+  typeof historicalShipStationContentsReviewContextSchema
 >;
 
 export type HistoricalShipStationContentsAttestationRequest = z.infer<
