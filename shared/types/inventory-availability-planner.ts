@@ -176,11 +176,7 @@ export const plannerOutputLocationSchema = z.object({
   warehouseLocationId: positiveInteger,
 }).strict();
 
-export const supplySnapshotContentSchema = z.object({
-  schemaVersion: z.literal("inventory_availability_snapshot_v1"),
-  capturedAt: z.string().datetime(),
-  productId: positiveInteger,
-  legacyInventoryStrategy: z.enum(PRODUCT_INVENTORY_STRATEGIES),
+const supplySnapshotEvidenceShape = {
   variants: z.array(plannerVariantSchema),
   warehouses: z.array(plannerWarehouseSchema),
   locations: z.array(plannerLocationSchema),
@@ -191,9 +187,33 @@ export const supplySnapshotContentSchema = z.object({
   legacyRecipes: z.array(plannerLegacyRecipeSchema),
   outputLocations: z.array(plannerOutputLocationSchema),
   claimProjectionSource: z.literal("inventory_levels.reserved_qty"),
+} as const;
+
+export const supplySnapshotContentSchema = z.object({
+  schemaVersion: z.literal("inventory_availability_snapshot_v1"),
+  capturedAt: z.string().datetime(),
+  productId: positiveInteger,
+  legacyInventoryStrategy: z.enum(PRODUCT_INVENTORY_STRATEGIES),
+  ...supplySnapshotEvidenceShape,
 }).strict();
 
 export const supplySnapshotSchema = supplySnapshotContentSchema.extend({
+  snapshotFingerprint: sha256Hex,
+}).strict();
+
+export const claimSupplySnapshotRootSchema = z.object({
+  productId: positiveInteger,
+  legacyInventoryStrategy: z.enum(PRODUCT_INVENTORY_STRATEGIES),
+}).strict();
+
+export const claimSupplySnapshotContentSchema = z.object({
+  schemaVersion: z.literal("inventory_availability_claim_snapshot_v1"),
+  capturedAt: z.string().datetime(),
+  rootProducts: z.array(claimSupplySnapshotRootSchema).min(1).max(500),
+  ...supplySnapshotEvidenceShape,
+}).strict();
+
+export const claimSupplySnapshotSchema = claimSupplySnapshotContentSchema.extend({
   snapshotFingerprint: sha256Hex,
 }).strict();
 
@@ -213,6 +233,14 @@ export const plannerBlockerSchema = z.object({
   context: z.record(z.unknown()),
 }).strict();
 
+export const plannerModelEvidenceSchema = z.object({
+  productId: positiveInteger,
+  modelId: positiveInteger,
+  version: positiveInteger,
+  definitionHash: sha256Hex,
+  lifecycleSelection: plannerLifecycleSelectionSchema,
+}).strict();
+
 export const atpProjectionSchema = z.object({
   targetVariantId: positiveInteger,
   scope: fulfillmentScopeSchema,
@@ -226,13 +254,7 @@ export const atpProjectionSchema = z.object({
   convertibleUnits: plannerNonnegativeQuantitySchema,
   buildableUnits: plannerNonnegativeQuantitySchema,
   snapshotFingerprint: sha256Hex,
-  modelEvidence: z.array(z.object({
-    productId: positiveInteger,
-    modelId: positiveInteger,
-    version: positiveInteger,
-    definitionHash: sha256Hex,
-    lifecycleSelection: plannerLifecycleSelectionSchema,
-  }).strict()),
+  modelEvidence: z.array(plannerModelEvidenceSchema),
   safetyEvidence: z.array(z.object({
     warehouseId: positiveInteger,
     productVariantId: positiveInteger,
@@ -252,7 +274,19 @@ export const claimPlanRequestSchema = z.object({
     targetVariantId: positiveInteger,
     requestedQty: plannerPositiveQuantitySchema,
   }).strict()).min(1).max(500),
-}).strict();
+}).strict().superRefine((request, context) => {
+  const seen = new Set<string>();
+  request.lines.forEach((line, index) => {
+    if (seen.has(line.lineKey)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["lines", index, "lineKey"],
+        message: "Claim line keys must be unique within a request",
+      });
+    }
+    seen.add(line.lineKey);
+  });
+});
 
 export const resourceClaimSegmentSchema = z.object({
   lineKey: nonblank(200),
@@ -289,6 +323,16 @@ export const claimPlanSchema = z.object({
   }).strict()),
   resourceClaims: z.array(resourceClaimSegmentSchema),
   operations: z.array(plannerOperationSchema),
+  fulfillmentGroups: z.array(z.object({
+    groupKey: nonblank(300),
+    warehouseId: positiveInteger,
+    lineAllocations: z.array(z.object({
+      lineKey: nonblank(200),
+      targetVariantId: positiveInteger,
+      plannedQty: plannerPositiveQuantitySchema,
+    }).strict()).min(1),
+  }).strict()),
+  modelEvidence: z.array(plannerModelEvidenceSchema),
   blockers: z.array(plannerBlockerSchema),
   snapshotFingerprint: sha256Hex,
 }).strict();
@@ -436,6 +480,8 @@ export const runPlannerShadowRequestSchema = z.object({
 
 export type SupplySnapshotContentDto = z.infer<typeof supplySnapshotContentSchema>;
 export type SupplySnapshotDto = z.infer<typeof supplySnapshotSchema>;
+export type ClaimSupplySnapshotContentDto = z.infer<typeof claimSupplySnapshotContentSchema>;
+export type ClaimSupplySnapshotDto = z.infer<typeof claimSupplySnapshotSchema>;
 export type AtpProjectionRequestDto = z.infer<typeof atpProjectionRequestSchema>;
 export type AtpProjectionDto = z.infer<typeof atpProjectionSchema>;
 export type ClaimPlanRequestDto = z.infer<typeof claimPlanRequestSchema>;

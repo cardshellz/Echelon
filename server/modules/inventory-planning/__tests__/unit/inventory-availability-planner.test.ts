@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import type { SupplySnapshotContentDto } from "@shared/types/inventory-availability-planner";
+import type {
+  ClaimSupplySnapshotContentDto,
+  SupplySnapshotContentDto,
+} from "@shared/types/inventory-availability-planner";
 import {
   calculateLegacyAtpFromSnapshot,
   calculateSupplySnapshotFingerprint,
   classifyShadowDifference,
   planCanonicalClaim,
   projectCanonicalAtp,
+  sealClaimSupplySnapshot,
   sealSupplySnapshot,
 } from "../../domain/inventory-availability-planner";
 
@@ -454,6 +458,94 @@ describe("inventory availability canonical planner", () => {
     });
     expect(plan.resourceClaims).toEqual([expect.objectContaining({ sourceVariantId: 201, claimedQty: "8" })]);
     expect(plan.operations).toEqual([expect.objectContaining({ operationType: "component_build", outputQty: "4" })]);
+  });
+
+  it("plans different root products against one shared component pool", () => {
+    const base = content();
+    const componentVariant = {
+      id: 301, productId: 30, sku: "SHARED", name: "Shared component", unitsPerVariant: 1, isActive: true,
+    };
+    const secondTarget = {
+      id: 201, productId: 20, sku: "SECOND", name: "Second product", unitsPerVariant: 1, isActive: true,
+    };
+    const recipe = (input: { bindingId: number; recipeId: number; productId: number; variantId: number }) => ({
+      bindingId: input.bindingId,
+      recipeId: input.recipeId,
+      relationshipRole: "component_build" as const,
+      warehouseId: null,
+      recipeCodeSnapshot: `BUILD-${input.productId}`,
+      recipeVersionSnapshot: 1,
+      recipeDefinitionHash: HASH,
+      outputProductId: input.productId,
+      outputVariantId: input.variantId,
+      outputUnitsPerVariant: 1,
+      outputQty: "1",
+      validationState: "valid" as const,
+      validationErrors: [],
+      components: [{
+        componentVariantId: 301,
+        componentProductId: 30,
+        componentUnitsPerVariant: 1,
+        componentQty: "2",
+      }],
+    });
+    const claimContent: ClaimSupplySnapshotContentDto = {
+      schemaVersion: "inventory_availability_claim_snapshot_v1",
+      capturedAt: base.capturedAt,
+      rootProducts: [
+        { productId: 10, legacyInventoryStrategy: "physical_only" },
+        { productId: 20, legacyInventoryStrategy: "physical_only" },
+      ],
+      variants: [base.variants[0]!, secondTarget, componentVariant],
+      warehouses: base.warehouses,
+      locations: base.locations,
+      inventoryPositions: [position({ id: 1, variantId: 301, physical: 10 })],
+      safetyPolicies: base.safetyPolicies,
+      demandEvidence: [],
+      transformationModels: [
+        {
+          ...base.transformationModels[0]!,
+          buildToPromiseEnabled: true,
+          recipeBindings: [recipe({ bindingId: 701, recipeId: 71, productId: 10, variantId: 101 })],
+        },
+        {
+          ...base.transformationModels[0]!,
+          modelId: 502,
+          productId: 20,
+          buildToPromiseEnabled: true,
+          recipeBindings: [recipe({ bindingId: 702, recipeId: 72, productId: 20, variantId: 201 })],
+        },
+      ],
+      legacyRecipes: [],
+      outputLocations: [
+        { productVariantId: 101, warehouseId: 1, warehouseLocationId: 11 },
+        { productVariantId: 201, warehouseId: 1, warehouseLocationId: 11 },
+      ],
+      claimProjectionSource: "inventory_levels.reserved_qty",
+    };
+    const plan = planCanonicalClaim(sealClaimSupplySnapshot(claimContent), {
+      requestKey: "order:shared-component",
+      scope: { kind: "network" },
+      lines: [
+        { lineKey: "first", targetVariantId: 101, requestedQty: "4" },
+        { lineKey: "second", targetVariantId: 201, requestedQty: "4" },
+      ],
+    });
+
+    expect(plan.lines).toEqual([
+      { lineKey: "first", targetVariantId: 101, requestedQty: "4", plannedQty: "4", shortfallQty: "0" },
+      { lineKey: "second", targetVariantId: 201, requestedQty: "4", plannedQty: "1", shortfallQty: "3" },
+    ]);
+    expect(plan.resourceClaims.reduce((sum, claim) => sum + BigInt(claim.claimedQty), BigInt(0)))
+      .toBe(BigInt(10));
+    expect(plan.modelEvidence.map((model) => model.productId)).toEqual([10, 20]);
+    expect(plan.fulfillmentGroups).toEqual([expect.objectContaining({
+      warehouseId: 1,
+      lineAllocations: [
+        { lineKey: "first", targetVariantId: 101, plannedQty: "4" },
+        { lineKey: "second", targetVariantId: 201, plannedQty: "1" },
+      ],
+    })]);
   });
 
   it("replays deterministically and fingerprints state independently of capture time", () => {
