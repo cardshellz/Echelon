@@ -128,6 +128,28 @@ function createMockAtpService(config: {
 // ---------------------------------------------------------------------------
 
 describe("Allocation Engine (Parallel Model)", () => {
+  it("previews allocations without writing allocation audit rows", async () => {
+    const variants = [
+      { productVariantId: 1, sku: "EA", name: "Each", unitsPerVariant: 1, atpUnits: 10, atpBase: 10 },
+    ];
+    const db = createMockDb({
+      activeChannels: [{ id: 36, name: "Shopify", provider: "shopify", status: "active", priority: 0 }],
+      warehouseAssignments: [{ channelId: 36, warehouseId: 1, enabled: true }],
+    });
+    const engine = createAllocationEngine(db, createMockAtpService({ variants, warehouseAtp: { 1: 10 } }));
+
+    const result = await engine.previewProduct(1);
+
+    expect(result.allocations).toEqual([
+      expect.objectContaining({
+        channelId: 36,
+        allocatedUnits: 10,
+        warehouseScopeSource: "explicit",
+      }),
+    ]);
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
   // -----------------------------------------------------------------------
   // Layer 1: Warehouse scoping
   // -----------------------------------------------------------------------

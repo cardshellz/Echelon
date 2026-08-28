@@ -1139,6 +1139,37 @@ export function calculateLegacyAtpFromSnapshot(
   );
 }
 
+/**
+ * Reconstruct the base-unit capacity returned by the deployed legacy ATP
+ * service from the same sealed shadow snapshot. Fungible products retain the
+ * unrounded shared pool; exact and recipe-managed products expose the capacity
+ * represented by their sellable variant quantity.
+ */
+export function calculateLegacyAtpBaseFromSnapshot(
+  rawSnapshot: SupplySnapshotDto,
+  rawRequest: AtpProjectionRequestDto,
+): bigint {
+  const snapshot = parseSupplySnapshot(rawSnapshot);
+  const request = atpProjectionRequestSchema.parse(rawRequest);
+  const target = snapshot.variants.find((variant) => variant.id === request.targetVariantId);
+  if (!target || target.productId !== snapshot.productId || !target.isActive) return BigInt(0);
+  if (snapshot.legacyInventoryStrategy !== "physical_fungible") {
+    return calculateLegacyAtpFromSnapshot(snapshot, request) * BigInt(target.unitsPerVariant);
+  }
+  const productVariants = new Set(snapshot.variants
+    .filter((variant) => variant.productId === snapshot.productId && variant.isActive)
+    .map((variant) => variant.id));
+  const positions = snapshot.inventoryPositions.filter((position) =>
+    productVariants.has(position.productVariantId)
+    && legacyPositionInScope(snapshot, position, request.scope));
+  const base = positions.reduce((sum, position) => {
+    const variant = snapshot.variants.find((candidate) => candidate.id === position.productVariantId)!;
+    return sum + (qty(position.variantQty, "legacy.variantQty")
+      - qty(position.reservedQty, "legacy.reservedQty")) * BigInt(variant.unitsPerVariant);
+  }, BigInt(0));
+  return clamp(base);
+}
+
 function hasExcludedPhysical(snapshot: SupplySnapshotDto, variantId: number, scope: Scope): boolean {
   const locations = new Map(snapshot.locations.map((location) => [location.id, location] as const));
   const warehouses = new Map(snapshot.warehouses.map((warehouse) => [warehouse.id, warehouse] as const));

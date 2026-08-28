@@ -16,6 +16,7 @@ import {
   promiseSafetyPolicyVersions,
   transformationModelHeads,
   transformationModelPaths,
+  transformationModelReviews,
   transformationModelVersions,
   transformationRecipeBindings,
   transformationRecipeComponentSnapshots,
@@ -25,6 +26,11 @@ const MIGRATION_PREFIX = "211";
 const MIGRATION_FILENAME = "211_inventory_availability_foundation.sql";
 const migrationPath = resolve(process.cwd(), "migrations", MIGRATION_FILENAME);
 const migrationSql = readFileSync(migrationPath, "utf8");
+const phase3MigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations", "0622_inventory_availability_backfill_review.sql"),
+  "utf8",
+);
+const parityMigrationSql = `${migrationSql}\n${phase3MigrationSql}`;
 const compactMigrationSql = migrationSql.replace(/\s+/g, " ").trim();
 const schemaPath = resolve(process.cwd(), "shared/schema/inventory-planning.schema.ts");
 const schemaSource = readFileSync(schemaPath, "utf8");
@@ -42,6 +48,7 @@ const parityTables: readonly PgTable[] = [
   transformationRecipeBindings,
   transformationRecipeComponentSnapshots,
   transformationModelHeads,
+  transformationModelReviews,
   promiseSafetyPolicyVersions,
   promiseSafetyPolicyHeads,
   demandEvidenceSnapshots,
@@ -49,14 +56,14 @@ const parityTables: readonly PgTable[] = [
 
 function extractCreateTableBody(schemaName: string, tableName: string): string {
   const header = `CREATE TABLE ${schemaName}.${tableName} (`;
-  const headerIndex = migrationSql.indexOf(header);
+  const headerIndex = parityMigrationSql.indexOf(header);
   if (headerIndex < 0) throw new Error(`Missing ${schemaName}.${tableName}`);
   const bodyStart = headerIndex + header.length;
   let depth = 1;
   let insideString = false;
-  for (let index = bodyStart; index < migrationSql.length; index += 1) {
-    const character = migrationSql[index];
-    const nextCharacter = migrationSql[index + 1];
+  for (let index = bodyStart; index < parityMigrationSql.length; index += 1) {
+    const character = parityMigrationSql[index];
+    const nextCharacter = parityMigrationSql[index + 1];
     if (character === "'") {
       if (insideString && nextCharacter === "'") {
         index += 1;
@@ -69,7 +76,7 @@ function extractCreateTableBody(schemaName: string, tableName: string): string {
     if (character === "(") depth += 1;
     if (character === ")") {
       depth -= 1;
-      if (depth === 0) return migrationSql.slice(bodyStart, index);
+      if (depth === 0) return parityMigrationSql.slice(bodyStart, index);
     }
   }
   throw new Error(`Unterminated ${schemaName}.${tableName}`);
@@ -104,11 +111,19 @@ function splitTopLevel(source: string): string[] {
 }
 
 function migrationColumns(schemaName: string, tableName: string): string[] {
-  return splitTopLevel(extractCreateTableBody(schemaName, tableName))
+  const createColumns = splitTopLevel(extractCreateTableBody(schemaName, tableName))
     .filter((part) => !/^CONSTRAINT\b/i.test(part))
     .map((part) => part.match(/^([a-z_][a-z0-9_]*)\s/i)?.[1])
-    .filter((column): column is string => Boolean(column))
-    .sort();
+    .filter((column): column is string => Boolean(column));
+  const qualifiedName = `${schemaName}.${tableName}`.replace(".", "\\.");
+  const alterPattern = new RegExp(
+    `ALTER\\s+TABLE\\s+${qualifiedName}([\\s\\S]*?);`,
+    "gi",
+  );
+  const addedColumns = [...parityMigrationSql.matchAll(alterPattern)]
+    .flatMap((match) => [...match[1].matchAll(/\bADD\s+COLUMN\s+([a-z_][a-z0-9_]*)/gi)])
+    .map((match) => match[1]);
+  return [...new Set([...createColumns, ...addedColumns])].sort();
 }
 
 function configuredObjectNames(table: PgTable): Set<string> {
@@ -138,8 +153,8 @@ function migrationNamedObjects(schemaName: string, tableName: string): string[] 
   );
   return [
     ...bodyNames,
-    ...[...migrationSql.matchAll(indexPattern)].map((match) => match[1]),
-    ...[...migrationSql.matchAll(alterPattern)].map((match) => match[1]),
+    ...[...parityMigrationSql.matchAll(indexPattern)].map((match) => match[1]),
+    ...[...parityMigrationSql.matchAll(alterPattern)].map((match) => match[1]),
   ].sort();
 }
 
@@ -173,12 +188,12 @@ describe("inventory availability Slice 1 migration contract", () => {
     expect(migrationSql).toContain("it creates no claim, activation, runtime-binding, or publication authority");
   });
 
-  it("declares exactly the same 14 tables and columns in SQL and Drizzle", () => {
+  it("declares exactly the same 15 tables and columns across additive SQL and Drizzle", () => {
     const expectedNames = parityTables.map((table) => {
       const config = getTableConfig(table);
       return `${config.schema}.${config.name}`;
     }).sort();
-    const migrationNames = [...migrationSql.matchAll(/\bCREATE\s+TABLE\s+([a-z_]+\.[a-z_]+)/gi)]
+    const migrationNames = [...parityMigrationSql.matchAll(/\bCREATE\s+TABLE\s+([a-z_]+\.[a-z_]+)/gi)]
       .map((match) => match[1])
       .sort();
     expect(migrationNames).toEqual(expectedNames);

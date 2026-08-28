@@ -125,6 +125,7 @@ export const transformationAdminRecipeComponentSchema = z.object({
   componentQty: positiveInteger,
   sku: z.string().max(100).nullable(),
   name: z.string(),
+  isActive: z.boolean(),
 }).strict();
 
 export const transformationAdminRecipeSchema = z.object({
@@ -186,6 +187,9 @@ export const transformationAdminModelSchema = z.object({
   lifecycleStatus: z.enum(["draft", "sealed", "retired"]),
   buildToPromiseEnabled: z.boolean(),
   definitionHash: z.string().regex(/^[0-9a-f]{64}$/),
+  origin: z.enum(["operator", "phase3_backfill"]),
+  originInputHash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  originResultHash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
   validationState: z.enum(["valid", "invalid"]),
   validationErrors: z.array(z.unknown()),
   changeReason: z.string(),
@@ -194,7 +198,16 @@ export const transformationAdminModelSchema = z.object({
   updatedAt: z.string().datetime(),
   bindings: z.array(transformationAdminBindingSchema),
   paths: z.array(transformationAdminPathSchema),
-}).strict();
+}).strict().superRefine((model, context) => {
+  const hasBackfillHashes = model.originInputHash !== null && model.originResultHash !== null;
+  if ((model.origin === "phase3_backfill") !== hasBackfillHashes) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["originInputHash"],
+      message: "Phase 3 backfill models require both origin hashes; operator models require neither",
+    });
+  }
+});
 
 export const supplyTransformationsAdminViewSchema = z.object({
   product: z.object({

@@ -11,6 +11,14 @@ configuration changes, recipe activation, channel inventory publication, or data
 repair. Every production mutation remains subject to preview, explicit approval,
 transactional execution, and read-only post-verification.
 
+Reviewed decisions made after the original cold-start draft supersede four older
+patterns that still appear in historical sections of this document: directed
+transformation paths are the only conversion authority (not equivalence groups),
+reverse authority requires its own path, rollout has no required canary cohorts,
+and the first authority cutover cannot roll back to legacy ATP. Phase 3 follows
+the implementation record in
+`docs/INVENTORY-AVAILABILITY-PHASE-3-BACKFILL-AND-REVIEW.md`.
+
 The program must preserve existing physical inventory, reservations, lot costs,
 channel mappings, and operational history. The migration changes how availability
 is derived and reserved; it does not rewrite inventory to make the new model fit.
@@ -533,8 +541,9 @@ Gate 2:
 Backfill rules:
 
 - `physical_only` -> no package relationships.
-- `physical_fungible` -> draft reversible package relationships that reproduce the
-  existing base-unit pool.
+- `physical_fungible` -> draft paired, explicit directed paths between adjacent
+  package sizes. Each direction is independently reviewable; multi-step traversal
+  reproduces the existing base-unit pool without granting implicit reversibility.
 - Existing build recipes -> bind their exact current active versions.
 - `recipe_managed` package relationships -> require explicit review; do not infer
   reversibility merely because sibling variants exist.
@@ -570,38 +579,44 @@ Gate 4:
 - Proposed channel quantities never exceed planner ATP.
 - No adapter is called during dry run.
 
-### Phase 5 - Two-phase product canary
+### Phase 5 - Controlled full-catalog activation
 
-Activate only `QUAD-BOX-TOP` first.
+There are no required product canaries or activation cohorts. Activation occurs
+only after the complete active catalog and every external publication target pass
+review.
 
 #### Step A: Revalidate
 
-- Lock the graph.
+- Lock the catalog activation state and selected model/policy heads.
 - Recompute legacy and proposed ATP from current inventory.
-- Verify reservations are representable.
-- Verify mappings and channel locations.
+- Verify all open demand is representable by durable claims.
+- Verify every fulfillment node, mapping, channel, and provider location.
 - Abort on any stale preview or definition-hash mismatch.
 
 #### Step B: Conservative publication
 
-For every variant/channel/location publish:
+For every provider variant/channel/location key with valid authoritative readback,
+publish:
 
 ```text
-safe ATP = min(legacy ATP, proposed ATP)
+safe provider quantity = min(current provider observed quantity, new desired quantity)
 ```
 
-Verify provider acknowledgement before backend activation. This may temporarily
-understate availability, but it prevents the storefront from promising more than
-either backend model can honor.
+Missing or stale required readback blocks activation; it is never guessed. Verify
+provider acknowledgement before the authority switch. This may temporarily
+understate availability, but it cannot raise an external promise before the new
+planner is authoritative.
 
 #### Step C: Atomic activation
 
-In one database transaction:
+In one database transaction for the complete catalog:
 
-- revalidate the graph and current snapshot;
-- activate the selected immutable model version;
+- revalidate the full catalog preview and current snapshot;
+- activate every reviewed immutable model and policy version;
+- switch ATP readers, order acceptance, claims, admin views, and publishers to the
+  new planner together;
 - record actor, reason, hashes, and ATP evidence;
-- write the channel-resynchronization outbox event.
+- write target-scoped channel-resynchronization outbox events.
 
 After commit, new ATP reads and reservation claims use the same active model.
 
@@ -614,24 +629,21 @@ After commit, new ATP reads and reservation claims use the same active model.
 Gate 5:
 
 - Physical quantities, lots, costs, and existing reservations are unchanged.
-- Admin ATP, allocation ATP, Shopify targets, and reservation plans share one model
-  version.
+- Admin ATP, allocation ATP, all storefront targets, and claim plans share the
+  catalog activation version.
 - Test reservation, cancellation, and concurrency behavior pass.
 - No unexplained channel drift or order shortfall occurs during the observation
   window.
 
-### Phase 6 - Controlled cohorts
+### Phase 6 - Post-cutover verification and stabilization
 
-Suggested progression:
-
-1. A small exact-only cohort.
-2. A small existing package-hierarchy cohort.
-3. Simple recipe-managed products with one output recipe.
-4. Products with multiple component dependencies.
-5. Remaining products in bounded batches.
-
-Each cohort repeats conservative publication, activation, verification, and a defined
-observation window. Stop expansion on any blocker.
+- Keep the new planner authoritative across the complete catalog.
+- Retry idempotent target-scoped publication until provider acknowledgement and
+  required readback are verified.
+- Monitor order acceptance, claim shortfalls, transformation execution, provider
+  drift, and multi-warehouse fulfillment evidence.
+- A post-cutover failure does not reactivate legacy ATP. Later model rollback may
+  select only a previously provider-verified version of the new model.
 
 Gate 6:
 
@@ -737,7 +749,8 @@ Alert on:
 
 - Proposed ATP flows through allocation rules per warehouse.
 - Dry run never calls an adapter.
-- Conservative publication uses `min(legacy, proposed)`.
+- Conservative first-cutover publication uses
+  `min(current provider observed, new desired)` for each verified provider key.
 - Activation outbox retries without duplicate harmful writes.
 - Shopify/provider failures remain visible and resumable.
 - Provider read-back mismatch blocks completion.
@@ -751,7 +764,7 @@ Alert on:
 - Draft validation exposes actionable correction paths.
 - Activation and rollback require actor/reason confirmation and show progress.
 
-### Production canary checks
+### Production cutover checks
 
 - Read-only before/after inventory and reservation snapshots.
 - Channel target and provider read-back by mapped location.
@@ -799,11 +812,12 @@ PRs. Each slice remains independently deployable and backward compatible.
 - Add conservative publication and rollback commands.
 - Do not activate products yet.
 
-### Slice 4 - Quad Box canary and cohort operations
+### Slice 4 - Full-catalog activation operations
 
-- Review and activate the Quad Box model using the runbook.
-- Verify backend, reservation, allocation, and Shopify behavior.
-- Add cohort queue, monitoring, and support controls.
+- Complete full-catalog model and channel review, including Quad Box.
+- Execute the role-gated catalog activation using the runbook.
+- Verify backend, claims, allocation, all configured providers, and readback behavior.
+- Add activation monitoring and support controls.
 
 ### Slice 5 - Legacy retirement
 
@@ -818,18 +832,20 @@ PRs. Each slice remains independently deployable and backward compatible.
 - Physical inventory remains exact and is never synthesized from ATP.
 - Physical finished stock and component-buildable capacity may coexist.
 - Package directions are explicit; reversibility is never inferred.
-- Reversible packages use one equivalence relationship, not opposing recipes.
+- Reverse conversion authority requires a separate explicit directed path.
 - Admin ATP, channel ATP, and reservation share one planner/model version.
-- Migration is shadow-first and product-scoped.
+- Migration is shadow-first across the full active catalog, followed by one
+  controlled catalog-wide activation.
 - Channel cutover uses conservative publication before activation.
-- Production rollback changes policy versions, not physical inventory history.
+- The first cutover never returns to legacy ATP; later rollback selects only a
+  previously verified version of the new model and never rewrites physical history.
 
 ## Open Questions To Resolve In Phase 0
 
 1. Which channels and storefront paths consume allocation-engine ATP, and does any
    active path bypass it?
 2. What provider read-back evidence is available per channel/location?
-3. What stability duration and order volume are required before cohort expansion?
+3. What stability duration and order volume are required before legacy retirement?
 4. Which package changes require labor, packaging materials, quality control, or yield,
    and therefore cannot be reversible equivalence?
 5. Should alternate BOMs be supported now, or remain deferred behind one active recipe

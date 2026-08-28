@@ -388,6 +388,7 @@ function editorView(): SupplyTransformationsAdminView {
           componentQty: 1,
           sku: "BASE-EA",
           name: "Base",
+          isActive: true,
         }],
       },
       {
@@ -408,6 +409,7 @@ function editorView(): SupplyTransformationsAdminView {
           componentQty: 5,
           sku: "QUAD-EA",
           name: "Quad Each",
+          isActive: true,
         }],
       },
     ],
