@@ -28,6 +28,10 @@ const shadowMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/214_inventory_planner_shadow_evidence.sql"),
   "utf8",
 );
+const backfillMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0622_inventory_availability_backfill_review.sql"),
+  "utf8",
+);
 const HASH = "a".repeat(64);
 const FIXED_TIME = "2026-08-26T12:00:00.000Z";
 
@@ -164,6 +168,8 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query("BEGIN");
 
       await migrationClient.query(migrationSql);
+      await migrationClient.query(shadowMigrationSql);
+      await migrationClient.query(backfillMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -309,7 +315,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         )
       ORDER BY table_schema, table_name
     `);
-    expect(tables.rows).toHaveLength(14);
+    expect(tables.rows).toHaveLength(15);
     expect(tables.rows.some((row) => row.table_name.startsWith("atp_"))).toBe(false);
   });
 
@@ -1666,18 +1672,6 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       [scope.productId, modelId],
     );
 
-    const migrationClient = await pool.connect();
-    try {
-      await migrationClient.query("BEGIN");
-      await migrationClient.query(shadowMigrationSql);
-      await migrationClient.query("COMMIT");
-    } catch (error) {
-      await migrationClient.query("ROLLBACK");
-      throw error;
-    } finally {
-      migrationClient.release();
-    }
-
     const content: SupplySnapshotContentDto = {
       schemaVersion: "inventory_availability_snapshot_v1",
       capturedAt: "2026-08-27T12:00:00.000Z",
@@ -1823,5 +1817,121 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       ),
       "planner_shadow_results_evidence_chk",
     );
+  });
+
+  it("installs immutable Phase 3 origin and hash-bound review evidence", async () => {
+    const scope = await seedProductAndWarehouse([1]);
+    const inputHash = "b".repeat(64);
+    const resultHash = "c".repeat(64);
+    const model = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.transformation_model_versions (
+         product_id, version, build_to_promise_enabled, definition_hash,
+         validation_state, validation_errors, change_reason, idempotency_key,
+         request_hash, origin, origin_input_hash, origin_result_hash, created_by
+       ) VALUES ($1, 1, false, $2, 'valid', '[]'::jsonb,
+         'Phase 3 deterministic draft', 'phase3:model:1', $2,
+         'phase3_backfill', $3, $4, 'integration-test')
+       RETURNING id`,
+      [scope.productId, HASH, inputHash, resultHash],
+    );
+    await pool.query(
+      `INSERT INTO inventory.transformation_model_heads (
+         product_id, draft_model_id, updated_by, update_reason
+       ) VALUES ($1, $2, 'integration-test', 'Phase 3 review')`,
+      [scope.productId, model.rows[0]!.id],
+    );
+
+    const invalidScope = await seedProductAndWarehouse([1]);
+    await expectDatabaseError(
+      () => pool.query(
+        `UPDATE inventory.transformation_model_versions
+         SET origin_result_hash = $2
+         WHERE id = $1`,
+        [model.rows[0]!.id, "d".repeat(64)],
+      ),
+      "transformation model origin evidence is immutable",
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        `INSERT INTO inventory.transformation_model_versions (
+           product_id, version, build_to_promise_enabled, definition_hash,
+           validation_state, validation_errors, change_reason, idempotency_key,
+           request_hash, origin, created_by
+         ) VALUES ($1, 1, false, $2, 'valid', '[]'::jsonb,
+           'Invalid Phase 3 draft', 'phase3:model:invalid', $2,
+           'phase3_backfill', 'integration-test')`,
+        [invalidScope.productId, HASH],
+      ),
+      "transformation_model_versions_origin_chk",
+    );
+
+    const unheadedModel = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.transformation_model_versions (
+         product_id, version, build_to_promise_enabled, definition_hash,
+         validation_state, validation_errors, change_reason, idempotency_key,
+         request_hash, created_by
+       ) VALUES ($1, 1, false, $2, 'valid', '[]'::jsonb,
+         'Unheaded draft', 'phase3:model:unheaded', $2, 'integration-test')
+       RETURNING id`,
+      [invalidScope.productId, HASH],
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        `INSERT INTO inventory.transformation_model_reviews (
+           model_id, product_id, model_version, model_definition_hash,
+           decision, reason, reviewed_by, reviewed_at, idempotency_key, request_hash
+         ) VALUES ($1, $2, 1, $3, 'approved', 'Not the current draft',
+           'integration-test', $4, 'phase3:review:unheaded', $3)`,
+        [unheadedModel.rows[0]!.id, invalidScope.productId, HASH, FIXED_TIME],
+      ),
+      "transformation model review must reference the current draft",
+    );
+
+    const wrongDefinitionHash = "e".repeat(64);
+    await expectDatabaseError(
+      () => pool.query(
+        `INSERT INTO inventory.transformation_model_reviews (
+           model_id, product_id, model_version, model_definition_hash,
+           decision, reason, reviewed_by, reviewed_at, idempotency_key, request_hash
+         ) VALUES ($1, $2, 1, $3, 'approved', 'Wrong definition hash',
+           'integration-test', $4, 'phase3:review:wrong-hash', $3)`,
+        [model.rows[0]!.id, scope.productId, wrongDefinitionHash, FIXED_TIME],
+      ),
+      "transformation_model_reviews_model_fk",
+    );
+
+    const review = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.transformation_model_reviews (
+         model_id, product_id, model_version, model_definition_hash,
+         decision, reason, reviewed_by, reviewed_at, idempotency_key, request_hash
+       ) VALUES ($1, $2, 1, $3, 'approved', 'Exact definition verified',
+         'integration-test', $4, 'phase3:review:1', $3)
+       RETURNING id`,
+      [model.rows[0]!.id, scope.productId, HASH, FIXED_TIME],
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE inventory.transformation_model_reviews SET reason = 'changed' WHERE id = $1",
+        [review.rows[0]!.id],
+      ),
+      "transformation model review evidence is append-only",
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        "DELETE FROM inventory.transformation_model_reviews WHERE id = $1",
+        [review.rows[0]!.id],
+      ),
+      "transformation model review evidence is append-only",
+    );
+    const secondReview = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.transformation_model_reviews (
+         model_id, product_id, model_version, model_definition_hash,
+         decision, reason, reviewed_by, reviewed_at, idempotency_key, request_hash
+       ) VALUES ($1, $2, 1, $3, 'changes_required', 'Later contrary evidence',
+         'integration-test', $4, 'phase3:review:2', $3)
+       RETURNING id`,
+      [model.rows[0]!.id, scope.productId, HASH, "2026-08-26T12:01:00.000Z"],
+    );
+    expect(BigInt(secondReview.rows[0]!.id)).toBeGreaterThan(BigInt(review.rows[0]!.id));
   });
 });

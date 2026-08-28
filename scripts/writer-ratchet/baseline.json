@@ -415,6 +415,9 @@
   "inventory.transformation_model_paths": [
     "modules/inventory-planning"
   ],
+  "inventory.transformation_model_reviews": [
+    "modules/inventory-planning"
+  ],
   "inventory.transformation_model_versions": [
     "modules/inventory-planning"
   ],

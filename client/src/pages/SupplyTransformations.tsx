@@ -10,6 +10,17 @@ import {
   type UpdateTransformationModelDraftRequest,
 } from "@shared/types/inventory-availability-admin";
 import {
+  applyInventoryAvailabilityBackfillDraftRequestSchema,
+  applyInventoryAvailabilityBackfillDraftResultSchema,
+  inventoryAvailabilityBackfillQueueResponseSchema,
+  inventoryAvailabilityChannelPreviewSchema,
+  reviewInventoryAvailabilityBackfillDraftRequestSchema,
+  reviewInventoryAvailabilityBackfillDraftResultSchema,
+  type InventoryAvailabilityBackfillQueueResponse,
+  type InventoryAvailabilityBackfillQueueRow,
+  type InventoryAvailabilityChannelPreview,
+} from "@shared/types/inventory-availability-backfill";
+import {
   plannerShadowRunSchema,
   runPlannerShadowRequestSchema,
   type PlannerShadowRunDto,
@@ -74,6 +85,8 @@ export default function SupplyTransformations() {
   const nextRowId = useRef(1);
   const idempotencyKey = useRef<string | null>(null);
   const shadowIdempotencyKey = useRef<string | null>(null);
+  const backfillIdempotencyKey = useRef<string | null>(null);
+  const reviewIdempotencyKey = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
   const [productId, setProductId] = useState<number | null>(null);
@@ -83,6 +96,18 @@ export default function SupplyTransformations() {
   const [buildAuthorityResolutionConfirmed, setBuildAuthorityResolutionConfirmed] = useState(false);
   const [paths, setPaths] = useState<PathDraft[]>([]);
   const [changeReason, setChangeReason] = useState("");
+  const [queueSearch, setQueueSearch] = useState("");
+  const [queueStateFilter, setQueueStateFilter] = useState("all");
+  const [backfillReason, setBackfillReason] = useState("");
+  const [reviewReason, setReviewReason] = useState("");
+
+  const migrationQueueQuery = useQuery<InventoryAvailabilityBackfillQueueResponse>({
+    queryKey: ["/api/inventory-planning/admin/migration-queue"],
+    queryFn: () => fetchJson(
+      "/api/inventory-planning/admin/migration-queue",
+      inventoryAvailabilityBackfillQueueResponseSchema,
+    ),
+  });
 
   const productsQuery = useQuery<ProductOption[]>({
     queryKey: ["/api/inventory-planning/admin/products", deferredSearch],
@@ -118,6 +143,22 @@ export default function SupplyTransformations() {
     enabled: productId !== null,
     retry: false,
   });
+  const channelPreviewQuery = useQuery<InventoryAvailabilityChannelPreview | null>({
+    queryKey: ["/api/inventory-planning/admin/migration-queue/channel-preview", productId],
+    queryFn: async () => {
+      try {
+        return await fetchJson(
+          `/api/inventory-planning/admin/migration-queue/${productId}/channel-preview`,
+          inventoryAvailabilityChannelPreviewSchema,
+        );
+      } catch (error) {
+        if (error instanceof HttpResponseError && error.status === 404) return null;
+        throw error;
+      }
+    },
+    enabled: productId !== null,
+    retry: false,
+  });
 
   useEffect(() => {
     setEditingCurrentDraft(false);
@@ -128,6 +169,10 @@ export default function SupplyTransformations() {
     setChangeReason("");
     idempotencyKey.current = null;
     shadowIdempotencyKey.current = null;
+    backfillIdempotencyKey.current = null;
+    reviewIdempotencyKey.current = null;
+    setBackfillReason("");
+    setReviewReason("");
   }, [productId]);
 
   useEffect(() => {
@@ -162,6 +207,9 @@ export default function SupplyTransformations() {
       setEditingCurrentDraft(false);
       await queryClient.invalidateQueries({
         queryKey: ["/api/inventory-planning/admin/supply-transformations", productId],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ["/api/inventory-planning/admin/migration-queue"],
       });
       toast({
         title: input.kind === "create" ? "Draft created" : "Draft updated",
@@ -201,6 +249,108 @@ export default function SupplyTransformations() {
     },
   });
 
+  const applyBackfillDraft = useMutation({
+    mutationFn: (row: InventoryAvailabilityBackfillQueueRow) => {
+      const request = applyInventoryAvailabilityBackfillDraftRequestSchema.parse({
+        expectedInputHash: row.inputHash,
+        expectedResultHash: row.resultHash,
+        changeReason: backfillReason,
+        idempotencyKey: backfillIdempotencyKey.current
+          ?? `phase3-backfill:${row.productId}:${crypto.randomUUID()}`,
+      });
+      backfillIdempotencyKey.current = request.idempotencyKey;
+      return fetchJson(
+        `/api/inventory-planning/admin/migration-queue/${row.productId}/drafts`,
+        applyInventoryAvailabilityBackfillDraftResultSchema,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+    },
+    onSuccess: async (result, row) => {
+      backfillIdempotencyKey.current = null;
+      setBackfillReason("");
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["/api/inventory-planning/admin/migration-queue"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/inventory-planning/admin/supply-transformations", row.productId],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/inventory-planning/admin/migration-queue/channel-preview", row.productId],
+        }),
+      ]);
+      toast({
+        title: result.alreadyApplied ? "Draft already recorded" : "Backfill draft recorded",
+        description: "The deterministic candidate is a draft only. Runtime ATP and channels are unchanged.",
+      });
+    },
+    onError: (error: Error) => {
+      if (error instanceof HttpResponseError && error.status === 409) {
+        backfillIdempotencyKey.current = null;
+        void queryClient.invalidateQueries({
+          queryKey: ["/api/inventory-planning/admin/migration-queue"],
+        });
+      }
+      toast({ title: "Backfill draft not recorded", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const reviewBackfillDraft = useMutation({
+    mutationFn: ({
+      row,
+      decision,
+    }: {
+      row: InventoryAvailabilityBackfillQueueRow;
+      decision: "approved" | "changes_required";
+    }) => {
+      if (!row.draft) throw new Error("Reload the queue; the selected product has no draft.");
+      const request = reviewInventoryAvailabilityBackfillDraftRequestSchema.parse({
+        expectedModelId: row.draft.modelId,
+        expectedModelVersion: row.draft.version,
+        expectedDefinitionHash: row.draft.definitionHash,
+        expectedHeadRevision: row.draft.headRevision,
+        decision,
+        reason: reviewReason,
+        idempotencyKey: reviewIdempotencyKey.current
+          ?? `phase3-review:${row.productId}:${crypto.randomUUID()}`,
+      });
+      reviewIdempotencyKey.current = request.idempotencyKey;
+      return fetchJson(
+        `/api/inventory-planning/admin/migration-queue/${row.productId}/reviews`,
+        reviewInventoryAvailabilityBackfillDraftResultSchema,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+    },
+    onSuccess: async (result) => {
+      reviewIdempotencyKey.current = null;
+      setReviewReason("");
+      await queryClient.invalidateQueries({
+        queryKey: ["/api/inventory-planning/admin/migration-queue"],
+      });
+      toast({
+        title: result.review.decision === "approved" ? "Draft approved" : "Changes required",
+        description: "Review evidence was recorded. This does not activate the model or publish inventory.",
+      });
+    },
+    onError: (error: Error) => {
+      if (error instanceof HttpResponseError && error.status === 409) {
+        reviewIdempotencyKey.current = null;
+        void queryClient.invalidateQueries({
+          queryKey: ["/api/inventory-planning/admin/migration-queue"],
+        });
+      }
+      toast({ title: "Review not recorded", description: error.message, variant: "destructive" });
+    },
+  });
+
   const runShadow = useMutation({
     mutationFn: (selectedProductId: number) => {
       const request = runPlannerShadowRequestSchema.parse({
@@ -223,6 +373,12 @@ export default function SupplyTransformations() {
       await queryClient.invalidateQueries({
         queryKey: [
           "/api/inventory-planning/admin/supply-transformations/shadow-runs/latest",
+          selectedProductId,
+        ],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: [
+          "/api/inventory-planning/admin/migration-queue/channel-preview",
           selectedProductId,
         ],
       });
@@ -267,6 +423,19 @@ export default function SupplyTransformations() {
     ? prefillPathsFromModel(previewModel, 1).paths
     : [];
   const displayedPaths = isEditing ? paths : previewPaths;
+  const filteredMigrationRows = useMemo(() => {
+    const normalizedSearch = queueSearch.trim().toLowerCase();
+    return (migrationQueueQuery.data?.products ?? []).filter((row) => {
+      const stateMatches = queueStateFilter === "all" || row.queueState === queueStateFilter;
+      const searchMatches = normalizedSearch.length === 0
+        || row.productName.toLowerCase().includes(normalizedSearch)
+        || (row.productSku ?? "").toLowerCase().includes(normalizedSearch)
+        || String(row.productId) === normalizedSearch;
+      return stateMatches && searchMatches;
+    });
+  }, [migrationQueueQuery.data?.products, queueSearch, queueStateFilter]);
+  const selectedMigrationRow = migrationQueueQuery.data?.products.find((row) =>
+    row.productId === productId) ?? null;
 
   const addPath = (destinationVariantId: number) => {
     if (!view) return;
@@ -457,6 +626,28 @@ export default function SupplyTransformations() {
         </CardContent>
       </Card>
 
+      <MigrationQueuePanel
+        queue={migrationQueueQuery.data ?? null}
+        rows={filteredMigrationRows}
+        selectedRow={selectedMigrationRow}
+        isLoading={migrationQueueQuery.isLoading}
+        error={migrationQueueQuery.error as Error | null}
+        canEdit={canEdit}
+        search={queueSearch}
+        stateFilter={queueStateFilter}
+        backfillReason={backfillReason}
+        reviewReason={reviewReason}
+        isApplying={applyBackfillDraft.isPending}
+        isReviewing={reviewBackfillDraft.isPending}
+        onSearchChange={setQueueSearch}
+        onStateFilterChange={setQueueStateFilter}
+        onSelectProduct={setProductId}
+        onBackfillReasonChange={setBackfillReason}
+        onReviewReasonChange={setReviewReason}
+        onApply={(row) => applyBackfillDraft.mutate(row)}
+        onReview={(row, decision) => reviewBackfillDraft.mutate({ row, decision })}
+      />
+
       <Card>
         <CardHeader><CardTitle>Select a product</CardTitle></CardHeader>
         <CardContent className="grid gap-3 md:grid-cols-2">
@@ -563,6 +754,12 @@ export default function SupplyTransformations() {
             onRun={() => runShadow.mutate(view.product.id)}
           />
 
+          <ChannelPublicationPreviewPanel
+            preview={channelPreviewQuery.data ?? null}
+            isLoading={channelPreviewQuery.isLoading}
+            error={channelPreviewQuery.error as Error | null}
+          />
+
           <DestinationColumns
             view={view}
             paths={displayedPaths}
@@ -646,6 +843,354 @@ export default function SupplyTransformations() {
       )}
     </div>
   );
+}
+
+function MigrationQueuePanel({
+  queue,
+  rows,
+  selectedRow,
+  isLoading,
+  error,
+  canEdit,
+  search,
+  stateFilter,
+  backfillReason,
+  reviewReason,
+  isApplying,
+  isReviewing,
+  onSearchChange,
+  onStateFilterChange,
+  onSelectProduct,
+  onBackfillReasonChange,
+  onReviewReasonChange,
+  onApply,
+  onReview,
+}: {
+  queue: InventoryAvailabilityBackfillQueueResponse | null;
+  rows: InventoryAvailabilityBackfillQueueRow[];
+  selectedRow: InventoryAvailabilityBackfillQueueRow | null;
+  isLoading: boolean;
+  error: Error | null;
+  canEdit: boolean;
+  search: string;
+  stateFilter: string;
+  backfillReason: string;
+  reviewReason: string;
+  isApplying: boolean;
+  isReviewing: boolean;
+  onSearchChange: (value: string) => void;
+  onStateFilterChange: (value: string) => void;
+  onSelectProduct: (productId: number) => void;
+  onBackfillReasonChange: (value: string) => void;
+  onReviewReasonChange: (value: string) => void;
+  onApply: (row: InventoryAvailabilityBackfillQueueRow) => void;
+  onReview: (
+    row: InventoryAvailabilityBackfillQueueRow,
+    decision: "approved" | "changes_required",
+  ) => void;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Phase 3 migration queue</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          Every active product is classified by one deterministic algorithm. Applying a candidate
+          creates only a draft; approval is review evidence, not activation.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {isLoading && <div className="text-sm text-muted-foreground">Classifying active products…</div>}
+        {error && <div className="text-sm text-destructive">{error.message}</div>}
+        {queue && (
+          <>
+            <div className="flex flex-wrap gap-2 text-xs">
+              <Badge variant="outline">{queue.summary.totalActiveProducts} active</Badge>
+              <Badge variant="destructive">{queue.summary.blocked} blocked</Badge>
+              <Badge variant="outline">{queue.summary.notBackfilled} not backfilled</Badge>
+              <Badge variant="outline">{queue.summary.conflictingDraft} conflicting draft</Badge>
+              <Badge variant="outline">{queue.summary.awaitingReview} awaiting review</Badge>
+              <Badge variant="outline">{queue.summary.changesRequired} changes required</Badge>
+              <Badge>{queue.summary.approved} approved</Badge>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="migration-queue-search">Search full queue</Label>
+                <Input
+                  id="migration-queue-search"
+                  value={search}
+                  onChange={(event) => onSearchChange(event.target.value)}
+                  placeholder="Product ID, SKU, or name"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="migration-queue-state">Queue state</Label>
+                <select
+                  id="migration-queue-state"
+                  className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+                  value={stateFilter}
+                  onChange={(event) => onStateFilterChange(event.target.value)}
+                >
+                  <option value="all">All states</option>
+                  <option value="blocked">Blocked</option>
+                  <option value="not_backfilled">Not backfilled</option>
+                  <option value="conflicting_draft">Conflicting draft</option>
+                  <option value="awaiting_review">Awaiting review</option>
+                  <option value="changes_required">Changes required</option>
+                  <option value="approved">Approved</option>
+                </select>
+              </div>
+            </div>
+            <div className="max-h-[32rem] overflow-auto rounded-md border">
+              <table className="w-full min-w-[920px] text-left text-sm">
+                <thead className="sticky top-0 border-b bg-muted text-xs uppercase text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2">Product</th>
+                    <th className="px-3 py-2">State</th>
+                    <th className="px-3 py-2">Legacy strategy</th>
+                    <th className="px-3 py-2">Candidate</th>
+                    <th className="px-3 py-2 text-right">Variants</th>
+                    <th className="px-3 py-2 text-right">Recipes</th>
+                    <th className="px-3 py-2 text-right">Issues</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr
+                      key={row.productId}
+                      className={`cursor-pointer border-b last:border-b-0 hover:bg-muted/40 ${
+                        selectedRow?.productId === row.productId ? "bg-blue-50" : ""
+                      }`}
+                      onClick={() => onSelectProduct(row.productId)}
+                    >
+                      <td className="px-3 py-2">
+                        <div className="font-medium">{row.productSku ?? `Product ${row.productId}`}</div>
+                        <div className="text-xs text-muted-foreground">{row.productName}</div>
+                      </td>
+                      <td className="px-3 py-2">
+                        <Badge variant={row.queueState === "blocked" ? "destructive" : "outline"}>
+                          {formatQueueState(row.queueState)}
+                        </Badge>
+                      </td>
+                      <td className="px-3 py-2">{row.legacyInventoryStrategy}</td>
+                      <td className="px-3 py-2">{formatQueueState(row.classification)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{row.activeVariantCount}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{row.activeRecipeCount}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{row.issues.length}</td>
+                    </tr>
+                  ))}
+                  {rows.length === 0 && (
+                    <tr><td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">No products match.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Input {queue.catalogInputHash.slice(0, 12)} · result {queue.catalogResultHash.slice(0, 12)} ·
+              captured {new Date(queue.capturedAt).toLocaleString()}
+            </div>
+          </>
+        )}
+
+        {selectedRow && (
+          <div className="space-y-4 rounded-md border p-4">
+            <div>
+              <div className="font-semibold">
+                {selectedRow.productSku ?? `Product ${selectedRow.productId}`} — {selectedRow.productName}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                Candidate definition {selectedRow.candidateDefinitionHash?.slice(0, 12) ?? "blocked"} ·
+                input {selectedRow.inputHash.slice(0, 12)} · result {selectedRow.resultHash.slice(0, 12)}
+              </div>
+            </div>
+            {selectedRow.candidateDefinition && (
+              <div className="grid gap-3 text-sm md:grid-cols-3">
+                <div>Directed paths: {selectedRow.candidateDefinition.paths.length}</div>
+                <div>Recipe bindings: {selectedRow.candidateDefinition.recipeBindings.length}</div>
+                <div>Build-to-promise: {selectedRow.candidateDefinition.buildToPromiseEnabled ? "enabled" : "off"}</div>
+              </div>
+            )}
+            {selectedRow.issues.length > 0 && (
+              <div className="space-y-2">
+                {selectedRow.issues.map((entry) => (
+                  <div
+                    key={`${entry.code}:${entry.message}`}
+                    className={`rounded-md border p-3 text-sm ${
+                      entry.severity === "blocking"
+                        ? "border-red-300 bg-red-50 text-red-900"
+                        : "border-amber-300 bg-amber-50 text-amber-900"
+                    }`}
+                  >
+                    <span className="font-medium">{entry.code}</span>: {entry.message}
+                  </div>
+                ))}
+              </div>
+            )}
+            {selectedRow.draft && (
+              <div className="text-sm">
+                Draft v{selectedRow.draft.version} · {selectedRow.draft.origin.replaceAll("_", " ")} ·
+                definition {selectedRow.draft.definitionHash.slice(0, 12)} ·
+                {selectedRow.draft.candidateMatch ? " candidate matches" : " candidate differs"}
+              </div>
+            )}
+            {canEdit && selectedRow.queueState === "not_backfilled" && (
+              <div className="space-y-3">
+                <Label htmlFor="backfill-change-reason">Draft reason</Label>
+                <Textarea
+                  id="backfill-change-reason"
+                  value={backfillReason}
+                  onChange={(event) => onBackfillReasonChange(event.target.value)}
+                  placeholder="Why this deterministic legacy-to-draft mapping is being recorded"
+                />
+                <Button
+                  type="button"
+                  disabled={!backfillReason.trim() || isApplying || !selectedRow.candidateDefinition}
+                  onClick={() => onApply(selectedRow)}
+                >
+                  <ShieldCheck className="mr-2 h-4 w-4" />
+                  {isApplying ? "Recording draft…" : "Record deterministic draft"}
+                </Button>
+              </div>
+            )}
+            {canEdit && ["awaiting_review", "changes_required"].includes(selectedRow.queueState)
+              && selectedRow.draft && (
+              <div className="space-y-3">
+                <Label htmlFor="backfill-review-reason">Review reason</Label>
+                <Textarea
+                  id="backfill-review-reason"
+                  value={reviewReason}
+                  onChange={(event) => onReviewReasonChange(event.target.value)}
+                  placeholder="Evidence supporting approval or required changes"
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    disabled={!reviewReason.trim() || isReviewing}
+                    onClick={() => onReview(selectedRow, "approved")}
+                  >
+                    Approve exact definition
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={!reviewReason.trim() || isReviewing}
+                    onClick={() => onReview(selectedRow, "changes_required")}
+                  >
+                    Require changes
+                  </Button>
+                </div>
+              </div>
+            )}
+            {selectedRow.review && (
+              <div className="rounded-md border bg-muted/30 p-3 text-sm">
+                Review: {formatQueueState(selectedRow.review.decision)} by {selectedRow.review.reviewedBy}
+                {" "}on {new Date(selectedRow.review.reviewedAt).toLocaleString()} — {selectedRow.review.reason}
+              </div>
+            )}
+            {selectedRow.queueState === "changes_required" && (
+              <div className="text-sm text-amber-800">
+                Edit the draft below if its definition is wrong, or record a later approval with
+                new evidence. The review ledger preserves both decisions.
+              </div>
+            )}
+            {selectedRow.queueState === "approved" && (
+              <div className="font-medium text-emerald-700">
+                This exact draft definition is approved. It is still inactive and unpublished.
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ChannelPublicationPreviewPanel({
+  preview,
+  isLoading,
+  error,
+}: {
+  preview: InventoryAvailabilityChannelPreview | null;
+  isLoading: boolean;
+  error: Error | null;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Channel-publication preview</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          Replays current legacy channel allocation policy against the legacy and proposed ATP
+          values from one shadow snapshot. No adapter is called and no allocation audit is written.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {isLoading && <div className="text-sm text-muted-foreground">Calculating read-only preview…</div>}
+        {error && <div className="text-sm text-destructive">{error.message}</div>}
+        {!isLoading && !error && !preview && (
+          <div className="text-sm text-muted-foreground">
+            Record a current shadow ATP comparison to preview channel quantities.
+          </div>
+        )}
+        {preview && (
+          <>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <Badge variant="outline">legacy allocation policy</Badge>
+              <span>Shadow {preview.shadowRunId}</span>
+              <span>·</span>
+              <span>{preview.modelVersion === null ? "no model evidence" : `model v${preview.modelVersion}`}</span>
+              <span>·</span>
+              <span>provider write: no</span>
+              <span>·</span>
+              <span>allocation audit: no</span>
+            </div>
+            {preview.blockers.map((blocker) => (
+              <div key={blocker.code} className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+                <span className="font-medium">{blocker.code}</span>: {blocker.message}
+              </div>
+            ))}
+            {preview.rows.length > 0 && (
+              <div className="overflow-x-auto rounded-md border">
+                <table className="w-full min-w-[980px] text-left text-sm">
+                  <thead className="border-b bg-muted/50 text-xs uppercase text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2">Channel</th>
+                      <th className="px-3 py-2">SKU</th>
+                      <th className="px-3 py-2">Warehouse scope</th>
+                      <th className="px-3 py-2 text-right">Legacy ATP</th>
+                      <th className="px-3 py-2 text-right">Proposed ATP</th>
+                      <th className="px-3 py-2 text-right">Legacy publish</th>
+                      <th className="px-3 py-2 text-right">Proposed publish</th>
+                      <th className="px-3 py-2 text-right">Difference</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.rows.map((row) => (
+                      <tr key={`${row.channelId}:${row.productVariantId}`} className="border-b last:border-b-0">
+                        <td className="px-3 py-2">
+                          <div className="font-medium">{row.channelName}</div>
+                          <div className="text-xs text-muted-foreground">{row.channelProvider}</div>
+                        </td>
+                        <td className="px-3 py-2">{row.sku ?? `Variant ${row.productVariantId}`}</td>
+                        <td className="px-3 py-2">{formatQueueState(row.warehouseScopeSource)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{formatPlannerQuantity(row.legacyAtpUnits)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{formatPlannerQuantity(row.proposedAtpUnits)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{formatPlannerQuantity(row.legacyPublishedUnits)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{formatPlannerQuantity(row.proposedPublishedUnits)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{formatPlannerDifference(row.differenceUnits)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function formatQueueState(value: string): string {
+  return value.replaceAll("_", " ");
 }
 
 function ShadowComparisonPanel({

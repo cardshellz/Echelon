@@ -29,6 +29,11 @@ export const auditedDraftCommandSchema = z.object({
   requestHash: sha256Hex,
 }).strict();
 
+export const transformationBackfillEvidenceSchema = z.object({
+  inputHash: sha256Hex,
+  resultHash: sha256Hex,
+}).strict();
+
 export const locationPromisePolicyDraftSchema = z.object({
   warehouseLocationId: positiveInteger,
   eligibilityMode: z.enum(["inherit", "eligible", "ineligible"]),
@@ -516,6 +521,7 @@ export interface InventoryAvailabilityMasterDataRepository {
   createTransformationModelDraft(
     command: z.infer<typeof auditedDraftCommandSchema> & {
       definition: TransformationModelDefinition;
+      backfillEvidence?: z.infer<typeof transformationBackfillEvidenceSchema>;
       occurredAt: Date;
     },
   ): Promise<{ modelId: number; version: number; definitionHash: string; alreadyApplied: boolean }>;

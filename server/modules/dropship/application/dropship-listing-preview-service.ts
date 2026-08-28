@@ -207,8 +207,19 @@ export class DropshipListingPreviewService {
 
   async generatePreview(input: unknown): Promise<DropshipListingPreviewResult> {
     const parsed = generateVendorListingPreviewInputSchema.parse(input);
+    const context = await this.loadStoreContextForAction(
+      parsed.vendorId,
+      parsed.storeConnectionId,
+      "preview",
+    );
+    return this.generatePreviewForContext(parsed, context);
+  }
+
+  private async generatePreviewForContext(
+    parsed: GenerateVendorListingPreviewInput,
+    context: DropshipListingStoreContext,
+  ): Promise<DropshipListingPreviewResult> {
     const generatedAt = this.deps.clock.now();
-    const context = await this.loadUsableStoreContext(parsed.vendorId, parsed.storeConnectionId);
     const config = await this.deps.repository.getStoreListingConfig(parsed.storeConnectionId);
     const uniqueVariantIds = uniquePositiveIntegers(parsed.productVariantIds);
     const requestedRetailPriceByVariantId = normalizeRequestedRetailPricesByVariantId({
@@ -325,14 +336,20 @@ export class DropshipListingPreviewService {
     const serializedRequestedRetailPricesByVariantId = serializeRequestedRetailPricesByVariantId(
       requestedRetailPricesByVariantId,
     );
-    const preview = await this.generatePreview({
+    const context = await this.loadStoreContextForAction(
+      parsed.vendorId,
+      parsed.storeConnectionId,
+      "push",
+    );
+    const previewInput: GenerateVendorListingPreviewInput = {
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       productVariantIds: uniqueVariantIds,
       requestedRetailPriceCents: parsed.requestedRetailPriceCents,
       requestedRetailPricesByVariantId: serializedRequestedRetailPricesByVariantId,
       actor: parsed.requestedBy,
-    });
+    };
+    const preview = await this.generatePreviewForContext(previewInput, context);
     const requestHash = hashListingPushJobRequest({
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
@@ -374,43 +391,46 @@ export class DropshipListingPreviewService {
     };
   }
 
-  private async loadUsableStoreContext(
+  private async loadStoreContextForAction(
     vendorId: number,
     storeConnectionId: number,
+    action: "preview" | "push",
   ): Promise<DropshipListingStoreContext> {
     const context = await this.deps.repository.loadStoreContext({ vendorId, storeConnectionId });
     if (!context) {
       throw new DropshipError(
         "DROPSHIP_STORE_CONNECTION_REQUIRED",
-        "Dropship store connection is required before listing preview.",
-        { vendorId, storeConnectionId },
+        `Dropship store connection is required before listing ${action}.`,
+        { vendorId, storeConnectionId, action },
       );
     }
-    if (context.vendorStatus !== "active") {
+    const vendorStatusAllowed = context.vendorStatus === "active"
+      || (action === "preview" && context.vendorStatus === "onboarding");
+    if (!vendorStatusAllowed) {
       throw new DropshipError(
         "DROPSHIP_LISTING_VENDOR_BLOCKED",
-        "Dropship vendor status does not allow listing preview or push.",
-        { vendorId, vendorStatus: context.vendorStatus },
+        `Dropship vendor status does not allow listing ${action}.`,
+        { vendorId, vendorStatus: context.vendorStatus, action },
       );
     }
     if (context.entitlementStatus !== "active") {
       throw new DropshipError(
         "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED",
-        "Dropship vendor entitlement does not allow listing preview or push.",
-        { vendorId, entitlementStatus: context.entitlementStatus },
+        `Dropship vendor entitlement does not allow listing ${action}.`,
+        { vendorId, entitlementStatus: context.entitlementStatus, action },
       );
     }
     if (context.storeStatus !== "connected") {
       throw new DropshipError(
         "DROPSHIP_LISTING_STORE_BLOCKED",
-        "Dropship store connection is not healthy enough for listing preview or push.",
-        { vendorId, storeConnectionId, storeStatus: context.storeStatus },
+        `Dropship store connection is not healthy enough for listing ${action}.`,
+        { vendorId, storeConnectionId, storeStatus: context.storeStatus, action },
       );
     }
     if (!context.storeLaunchReady) {
       throw new DropshipError(
         "DROPSHIP_LISTING_STORE_BLOCKED",
-        "Dropship store connection is not launch-ready for listing preview or push.",
+        `Dropship store connection is not launch-ready for listing ${action}.`,
         {
           vendorId,
           storeConnectionId,
@@ -418,6 +438,7 @@ export class DropshipListingPreviewService {
           setupStatus: context.setupStatus,
           platform: context.platform,
           storeLaunchReady: false,
+          action,
         },
       );
     }

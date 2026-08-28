@@ -132,6 +132,8 @@ export interface VariantChannelAllocation {
   method: string;
   /** Why this amount was allocated */
   reason: string;
+  /** Whether warehouse scope is configured or inherited from the legacy fallback. */
+  warehouseScopeSource: "explicit" | "legacy_all_active_fallback";
   /** Disaggregated sub-quantities per target warehouse */
   warehouseBreakdown: Array<{ warehouseId: number; qty: number }>;
 }
@@ -199,6 +201,21 @@ class AllocationEngine {
     productId: number,
     triggeredBy?: string,
   ): Promise<ProductAllocationResult> {
+    const result = await this.calculateProduct(productId);
+    await this.logAllocation(result, triggeredBy);
+    return result;
+  }
+
+  /**
+   * Calculate the exact legacy channel allocation without persisting allocation
+   * audit rows or invoking a provider adapter. Phase 3 uses this only inside a
+   * read-only transaction to compare two immutable ATP inputs.
+   */
+  async previewProduct(productId: number): Promise<ProductAllocationResult> {
+    return this.calculateProduct(productId);
+  }
+
+  private async calculateProduct(productId: number): Promise<ProductAllocationResult> {
     const result: ProductAllocationResult = {
       productId,
       totalAtpBase: 0,
@@ -351,6 +368,9 @@ class AllocationEngine {
 
     // 7. For each channel, compute ATP independently (parallel model)
     for (const channel of activeChannels) {
+      const warehouseScopeSource = warehousesByChannel.has(channel.id)
+        ? "explicit" as const
+        : "legacy_all_active_fallback" as const;
       // Product line gate
       if (eligibleChannelIds !== null && !eligibleChannelIds.has(channel.id)) {
         result.blocked.push({
@@ -379,6 +399,7 @@ class AllocationEngine {
             allocatedBase: 0,
             method: "zero",
             reason: "Product is explicitly unlisted for this channel (via overrides)",
+            warehouseScopeSource,
             warehouseBreakdown: [],
           });
         }
@@ -464,6 +485,7 @@ class AllocationEngine {
             allocatedBase: 0,
             method: "zero",
             reason: "Product ineligible for this channel",
+            warehouseScopeSource,
             warehouseBreakdown: [],
           });
         }
@@ -487,6 +509,7 @@ class AllocationEngine {
             allocatedBase: 0,
             method: "zero",
             reason: "Variant is explicitly unlisted for this channel (via overrides)",
+            warehouseScopeSource,
             warehouseBreakdown: [],
           });
           continue;
@@ -510,14 +533,12 @@ class AllocationEngine {
           channel,
           assignedWarehouseIds,
           avgDailyUsage,
+          warehouseScopeSource,
         );
 
         result.allocations.push(allocation);
       }
     }
-
-    // Audit log
-    await this.logAllocation(result, triggeredBy);
 
     return result;
   }
@@ -567,6 +588,7 @@ class AllocationEngine {
     channel: Channel,
     assignedWarehouseIds: number[],
     avgDailyUsage: number = 0,
+    warehouseScopeSource: VariantChannelAllocation["warehouseScopeSource"],
   ): VariantChannelAllocation {
     const base = {
       channelId: channel.id,
@@ -576,6 +598,7 @@ class AllocationEngine {
       productVariantId: variant.productVariantId,
       sku: variant.sku,
       unitsPerVariant: variant.unitsPerVariant,
+      warehouseScopeSource,
     };
 
     // Step 1: Eligibility check
