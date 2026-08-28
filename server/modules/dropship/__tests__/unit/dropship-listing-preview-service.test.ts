@@ -85,6 +85,51 @@ describe("DropshipListingPreviewService", () => {
     });
   });
 
+  it("allows an onboarding vendor to preview a launch-ready selected listing", async () => {
+    repository.context = {
+      ...repository.context,
+      vendorStatus: "onboarding",
+    };
+
+    const result = await service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPriceCents: 1299,
+    });
+
+    expect(result.summary).toEqual({ total: 1, ready: 1, blocked: 0, warning: 0 });
+    expect(result.rows[0]).toMatchObject({
+      productVariantId: 101,
+      previewStatus: "ready",
+      priceCents: 1299,
+    });
+    expect(repository.lastCreatedInput).toBeNull();
+  });
+
+  it.each(["paused", "lapsed", "suspended", "closed"] as const)(
+    "blocks a %s vendor from listing preview",
+    async (vendorStatus) => {
+      repository.context = {
+        ...repository.context,
+        vendorStatus,
+      };
+
+      await expect(service.previewForMember("member-1", {
+        storeConnectionId: 22,
+        productVariantIds: [101],
+        requestedRetailPriceCents: 1299,
+      })).rejects.toMatchObject({
+        code: "DROPSHIP_LISTING_VENDOR_BLOCKED",
+        context: {
+          vendorId: 10,
+          vendorStatus,
+          action: "preview",
+        },
+      });
+      expect(repository.lastCreatedInput).toBeNull();
+    },
+  );
+
   it("applies per-variant retail price overrides to listing previews", async () => {
     const result = await service.previewForMember("member-1", {
       storeConnectionId: 22,
@@ -185,6 +230,31 @@ describe("DropshipListingPreviewService", () => {
         "999": 1299,
       },
     })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID" });
+  });
+
+  it("blocks an onboarding vendor from creating a listing push job", async () => {
+    repository.context = {
+      ...repository.context,
+      vendorStatus: "onboarding",
+    };
+
+    await expect(service.createListingPushJobForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPricesByVariantId: {
+        "101": 1399,
+      },
+      idempotencyKey: "onboarding-listing-job",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_LISTING_VENDOR_BLOCKED",
+      context: {
+        vendorId: 10,
+        vendorStatus: "onboarding",
+        action: "push",
+      },
+    });
+    expect(repository.lastCreatedInput).toBeNull();
+    expect(repository.jobs).toEqual([]);
   });
 
   it("creates listing push jobs idempotently and rejects request drift", async () => {
