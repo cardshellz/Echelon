@@ -289,7 +289,7 @@ class OrderCombiningService {
                o.customer_name, o.customer_email,
                o.shipping_address, o.shipping_city, o.shipping_state,
                o.shipping_postal_code, o.shipping_country,
-               o.total_amount, o.source, o.created_at,
+               ROUND(o.total_cents::numeric / 100, 2)::text AS total_amount, o.source, o.created_at,
                CASE WHEN cog.id IS NOT NULL THEN o.combined_group_id ELSE NULL END AS combined_group_id,
                CASE WHEN cog.id IS NOT NULL THEN o.combined_role ELSE NULL END AS combined_role,
                COALESCE((SELECT COUNT(*) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_items,
@@ -304,13 +304,16 @@ class OrderCombiningService {
       `);
     } catch (columnError: any) {
       if (columnError?.code === "42703") {
-        console.log("Note: combined_group_id column not yet in database, querying without it");
+        console.warn(
+          "[combining] retrying without combined_group_id after a missing-column error:",
+          columnError?.message ?? columnError,
+        );
         result = await this.db.execute(sql`
           SELECT o.id, o.order_number, o.warehouse_id,
                  o.customer_name, o.customer_email,
                  o.shipping_address, o.shipping_city, o.shipping_state,
                  o.shipping_postal_code, o.shipping_country,
-                 o.total_amount, o.source, o.created_at,
+                 ROUND(o.total_cents::numeric / 100, 2)::text AS total_amount, o.source, o.created_at,
                  COALESCE((SELECT COUNT(*) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_items,
                  COALESCE((SELECT SUM(oi.quantity) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_units
           FROM wms.orders o
@@ -641,7 +644,7 @@ class OrderCombiningService {
                o.customer_name, o.customer_email,
                o.shipping_address, o.shipping_city, o.shipping_state,
                o.shipping_postal_code, o.shipping_country, o.item_count,
-               o.unit_count, o.total_amount, o.source, o.created_at,
+               o.unit_count, ROUND(o.total_cents::numeric / 100, 2)::text AS total_amount, o.source, o.created_at,
                o.order_placed_at, o.shopify_created_at,
                CASE WHEN cog.id IS NOT NULL THEN o.combined_group_id ELSE NULL END AS combined_group_id
         FROM wms.orders o
