@@ -7,7 +7,7 @@
     "dev:client": "vite dev --port 5000",
     "dev": "NODE_ENV=development tsx server/index.ts",
     "build": "tsx script/build.ts",
-    "start": "NODE_ENV=production node dist/index.cjs",
+    "start": "NODE_ENV=production node --max-old-space-size=384 dist/index.cjs",
     "check": "tsc",
     "monitor:pick-replen-health": "tsx scripts/monitor-pick-replen-health.ts --notify --recoverInlineReplen --queueMissingReplen --json",
     "procurement:health-escalation": "tsx server/jobs/run-procurement-health-escalation.ts",
