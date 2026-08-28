@@ -125,14 +125,16 @@ export async function loadInventoryAvailabilityBackfillSources(
     entries.push(variant);
     variantsByProduct.set(variant.productId, entries);
   }
-  const componentsByRecipe = new Map<number, typeof componentRows>();
+  type PublicRecipeComponent = Omit<typeof componentRows[number], "recipeId">;
+  const componentsByRecipe = new Map<number, PublicRecipeComponent[]>();
   for (const component of componentRows) {
-    const entries = componentsByRecipe.get(component.recipeId) ?? [];
-    entries.push(component);
-    componentsByRecipe.set(component.recipeId, entries);
+    const { recipeId, ...publicComponent } = component;
+    const entries = componentsByRecipe.get(recipeId) ?? [];
+    entries.push(publicComponent);
+    componentsByRecipe.set(recipeId, entries);
   }
   const recipesByProduct = new Map<number, Array<typeof recipeRows[number] & {
-    components: typeof componentRows;
+    components: PublicRecipeComponent[];
   }>>();
   for (const recipe of recipeRows) {
     const entries = recipesByProduct.get(recipe.outputProductId) ?? [];
