@@ -281,6 +281,29 @@ describe("historical ShipStation contents attestation admin routes", () => {
     expect(conflictResponse.status).toBe(409);
   });
 
+  it("fails closed when the service returns an invalid preview contract", async () => {
+    const service = fakeService();
+    service.preview.mockResolvedValue({ ...preview, providerShipmentId: 0 });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      const baseUrl = await listen(buildApp(service.value));
+      const response = await jsonRequest(
+        `${baseUrl}${HISTORICAL_SHIPSTATION_CONTENTS_ATTESTATION_ADMIN_PATH}/51/preview`,
+      );
+
+      expect(response).toMatchObject({
+        status: 500,
+        body: {
+          error: { code: "HISTORICAL_CONTENTS_ATTESTATION_INTERNAL_ERROR" },
+        },
+      });
+      expect(consoleError).toHaveBeenCalledOnce();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("rejects invalid label identities and reuses one lazily-created service", async () => {
     const service = fakeService();
     const factory = vi.fn(() => service.value);

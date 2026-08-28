@@ -65,6 +65,7 @@ import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/s
 import { useAuth } from "@/lib/auth";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { NotificationBell } from "@/components/NotificationBell";
+import { HISTORICAL_SHIPMENT_CONTENTS_REVIEW_PATH } from "@/lib/historical-shipstation-contents-attestation";
 
 // --- Navigation types ---
 
@@ -210,6 +211,12 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Shipments", icon: Truck, href: "/outbound-shipments" },
+      {
+        label: "Historical Contents Review",
+        icon: Shield,
+        href: HISTORICAL_SHIPMENT_CONTENTS_REVIEW_PATH,
+        requiredPermission: { resource: "inventory", action: "view" },
+      },
       { label: "Shipping Groups", icon: Layers, href: "/shipping-groups" },
       { label: "Service Levels", icon: RouteIcon, href: "/shipping-service-levels", roles: ["admin"] },
       { label: "Settings", icon: Package, href: "/shipping-settings", roles: ["admin"] },
