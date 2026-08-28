@@ -604,6 +604,10 @@ export class EbayApiClient {
       trackingNumber: string;
       lines: readonly NormalizedEbayFulfillmentLine[] | null;
     }> = [];
+    // eBay's raw lineItems for each identity match, kept only for the diagnostic
+    // below. `normalizeFulfillmentLines` collapses every rejection to `null`, so
+    // the normalized value cannot say WHY a package failed to parse.
+    const rawCandidateLines: unknown[] = [];
     for (const item of fulfillments) {
       const itemFulfillmentId =
         typeof item?.fulfillmentId === "string" ? item.fulfillmentId.trim() : "";
@@ -615,6 +619,7 @@ export class EbayApiClient {
         (expectedFulfillmentId && itemFulfillmentId === expectedFulfillmentId) ||
         itemTracking === expectedTracking;
       if (!matchesIdentity) continue;
+      rawCandidateLines.push(item?.lineItems ?? null);
       identityMatches.push({
         fulfillmentId: itemFulfillmentId,
         trackingNumber: itemTracking,
@@ -636,6 +641,42 @@ export class EbayApiClient {
         trackingNumber: exactMatches[0].trackingNumber,
       };
     }
+
+    // Diagnostic only - no behaviour change. These conflicts accumulate (113 eBay
+    // pushes parked in `review` as of 2026-08-27, roughly 2-3 more per day) and
+    // the message alone cannot explain them: reaching here proves eBay ALREADY
+    // holds a fulfillment matching our tracking or fulfillment id, so the push is
+    // being rejected over one of four conditions and the context that would say
+    // which was thrown away with the error. Name the failing condition per
+    // candidate, and include eBay's raw lineItems, so the next occurrence is
+    // diagnosable from the log instead of by inference.
+    console.warn(
+      "[eBay] fulfillment idempotency conflict",
+      JSON.stringify({
+        orderId,
+        expectedFulfillmentId: expectedFulfillmentId ?? null,
+        expectedTracking,
+        expectedLineSignature,
+        expectedLines,
+        identityMatchCount: identityMatches.length,
+        exactMatchCount: exactMatches.length,
+        candidates: identityMatches.map((candidate, index) => ({
+          fulfillmentId: candidate.fulfillmentId || null,
+          trackingNumber: candidate.trackingNumber,
+          normalizedLines: candidate.lines,
+          rawLineItems: rawCandidateLines[index] ?? null,
+          failedChecks: [
+            !candidate.fulfillmentId ? "missing_fulfillment_id" : null,
+            candidate.trackingNumber !== expectedTracking ? "tracking_mismatch" : null,
+            candidate.lines === null ? "lines_unparseable" : null,
+            candidate.lines !== null
+              && fulfillmentLineSignature(candidate.lines) !== expectedLineSignature
+              ? "line_signature_mismatch"
+              : null,
+          ].filter(Boolean),
+        })),
+      }),
+    );
 
     throw new EbayFulfillmentIdempotencyConflictError(
       `eBay fulfillment identity for order ${orderId} conflicts with the expected physical package`,
