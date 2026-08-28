@@ -10,6 +10,7 @@ import {
   type SupplySnapshotDto,
 } from "@shared/types/inventory-availability-planner";
 import {
+  calculateLegacyAtpBaseFromSnapshot,
   parseSupplySnapshot,
   sealSupplySnapshot,
 } from "../domain/inventory-availability-planner";
@@ -695,10 +696,24 @@ function validatePersistenceInput(input: PersistPlannerShadowRunInput): {
       : warehouseCodes.get(result.warehouseId) ?? null;
     if (result.warehouseCodeSnapshot !== expectedWarehouseCode
       || result.productVariantSkuSnapshot !== variant.sku
-      || result.productVariantNameSnapshot !== variant.name) {
+      || result.productVariantNameSnapshot !== variant.name
+      || result.productVariantUnitsPerVariantSnapshot !== variant.unitsPerVariant) {
       throw new InventoryAvailabilityShadowRepositoryError(
         "SHADOW_EVIDENCE_LABEL_MISMATCH",
         "Shadow result labels must match the sealed supply snapshot.",
+        { warehouseId: result.warehouseId, productVariantId: result.productVariantId },
+      );
+    }
+    const expectedLegacyAtpBase = calculateLegacyAtpBaseFromSnapshot(snapshot, {
+      targetVariantId: result.productVariantId,
+      scope: result.warehouseId === null
+        ? { kind: "network" }
+        : { kind: "warehouse", warehouseId: result.warehouseId },
+    });
+    if (BigInt(result.legacyAtpBaseUnits) !== expectedLegacyAtpBase) {
+      throw new InventoryAvailabilityShadowRepositoryError(
+        "INVALID_SHADOW_LEGACY_BASE",
+        "Legacy ATP base units must match the sealed supply snapshot.",
         { warehouseId: result.warehouseId, productVariantId: result.productVariantId },
       );
     }
@@ -811,7 +826,14 @@ async function loadShadowRun(
         productVariantId,
         productVariantSkuSnapshot: variant.sku,
         productVariantNameSnapshot: variant.name,
+        productVariantUnitsPerVariantSnapshot: variant.unitsPerVariant,
         legacyAtpUnits: String(result.legacy_atp_units),
+        legacyAtpBaseUnits: calculateLegacyAtpBaseFromSnapshot(snapshot, {
+          targetVariantId: productVariantId,
+          scope: warehouseId === null
+            ? { kind: "network" }
+            : { kind: "warehouse", warehouseId },
+        }).toString(),
         proposedAtpUnits: String(result.proposed_atp_units),
         differenceUnits: String(result.difference_units),
         readinessState: result.readiness_state,

@@ -43,7 +43,8 @@
     "test:db:setup": "docker compose -f docker-compose.test.yml up -d",
     "test:unit": "vitest run unit",
     "test:integration": "vitest run integration",
-    "writer-ratchet:baseline": "tsx scripts/writer-ratchet/generate-baseline.ts"
+    "writer-ratchet:baseline": "tsx scripts/writer-ratchet/generate-baseline.ts",
+    "inventory:backfill-availability-models": "tsx scripts/backfill-inventory-availability-models.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

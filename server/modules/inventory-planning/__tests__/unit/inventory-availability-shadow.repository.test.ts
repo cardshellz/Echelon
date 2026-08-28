@@ -6,6 +6,7 @@ import type {
   SupplySnapshotContentDto,
 } from "@shared/types/inventory-availability-planner";
 import {
+  calculateLegacyAtpBaseFromSnapshot,
   calculateLegacyAtpFromSnapshot,
   classifyShadowDifference,
   projectCanonicalAtp,
@@ -140,7 +141,9 @@ function persistenceFixture() {
       productVariantId: request.targetVariantId,
       productVariantSkuSnapshot: "EA",
       productVariantNameSnapshot: "Each",
+      productVariantUnitsPerVariantSnapshot: 1,
       legacyAtpUnits: legacyAtp.toString(),
+      legacyAtpBaseUnits: calculateLegacyAtpBaseFromSnapshot(snapshot, request).toString(),
       proposedAtpUnits: proposedProjection.atpUnits,
       differenceUnits: (BigInt(proposedProjection.atpUnits) - legacyAtp).toString(),
       readinessState: proposedProjection.status,

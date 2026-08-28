@@ -426,6 +426,9 @@ export const transformationModelVersions = inventoryPlanningSchema.table(
     changeReason: varchar("change_reason", { length: 1000 }).notNull(),
     idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
     requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    origin: varchar("origin", { length: 30 }).notNull().default("operator"),
+    originInputHash: varchar("origin_input_hash", { length: 64 }),
+    originResultHash: varchar("origin_result_hash", { length: 64 }),
     createdBy: varchar("created_by", { length: 100 }).notNull(),
     sealedBy: varchar("sealed_by", { length: 100 }),
     sealedAt: timestamp("sealed_at", { withTimezone: true }),
@@ -441,6 +444,8 @@ export const transformationModelVersions = inventoryPlanningSchema.table(
       .on(table.id, table.productId),
     idProductVersionUnique: uniqueIndex("transformation_model_versions_id_product_version_uq")
       .on(table.id, table.productId, table.version),
+    reviewEvidenceUnique: uniqueIndex("transformation_model_versions_review_evidence_uq")
+      .on(table.id, table.productId, table.version, table.definitionHash),
     idempotencyUnique: uniqueIndex("transformation_model_versions_idempotency_uq")
       .on(table.idempotencyKey),
     oneDraft: uniqueIndex("transformation_model_versions_one_draft_uq")
@@ -468,6 +473,15 @@ export const transformationModelVersions = inventoryPlanningSchema.table(
     reasonValid: check(
       "transformation_model_versions_reason_chk",
       sql`char_length(btrim(${table.changeReason})) BETWEEN 1 AND 1000`,
+    ),
+    originValid: check(
+      "transformation_model_versions_origin_chk",
+      sql`(${table.origin} = 'operator'
+          AND ${table.originInputHash} IS NULL
+          AND ${table.originResultHash} IS NULL)
+        OR (${table.origin} = 'phase3_backfill'
+          AND ${table.originInputHash} ~ '^[0-9a-f]{64}$'
+          AND ${table.originResultHash} ~ '^[0-9a-f]{64}$')`,
     ),
     predecessorValid: check(
       "transformation_model_versions_predecessor_chk",
@@ -687,6 +701,59 @@ export const transformationModelHeads = inventoryPlanningSchema.table(
     reasonValid: check(
       "transformation_model_heads_reason_chk",
       sql`char_length(btrim(${table.updateReason})) BETWEEN 1 AND 1000`,
+    ),
+  }),
+);
+
+export const transformationModelReviews = inventoryPlanningSchema.table(
+  "transformation_model_reviews",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    modelId: integer("model_id").notNull(),
+    productId: integer("product_id").notNull()
+      .references(() => products.id, { onDelete: "restrict" }),
+    modelVersion: integer("model_version").notNull(),
+    modelDefinitionHash: varchar("model_definition_hash", { length: 64 }).notNull(),
+    decision: varchar("decision", { length: 30 }).notNull(),
+    reason: varchar("reason", { length: 1000 }).notNull(),
+    reviewedBy: varchar("reviewed_by", { length: 100 }).notNull(),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    modelForeignKey: foreignKey({
+      columns: [table.modelId, table.productId, table.modelVersion, table.modelDefinitionHash],
+      foreignColumns: [
+        transformationModelVersions.id,
+        transformationModelVersions.productId,
+        transformationModelVersions.version,
+        transformationModelVersions.definitionHash,
+      ],
+      name: "transformation_model_reviews_model_fk",
+    }).onDelete("restrict"),
+    modelDefinitionLookup: index("transformation_model_reviews_definition_lookup_idx")
+      .on(table.modelId, table.modelDefinitionHash, table.reviewedAt, table.id),
+    idempotencyUnique: uniqueIndex("transformation_model_reviews_idempotency_uq")
+      .on(table.idempotencyKey),
+    productLookup: index("transformation_model_reviews_product_lookup_idx")
+      .on(table.productId, table.reviewedAt, table.id),
+    decisionValid: check(
+      "transformation_model_reviews_decision_chk",
+      sql`${table.decision} IN ('approved', 'changes_required')`,
+    ),
+    hashValid: check(
+      "transformation_model_reviews_hash_chk",
+      sql`${table.modelDefinitionHash} ~ '^[0-9a-f]{64}$'
+        AND ${table.requestHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    evidenceValid: check(
+      "transformation_model_reviews_evidence_chk",
+      sql`${table.modelVersion} > 0
+        AND char_length(btrim(${table.reason})) BETWEEN 1 AND 1000
+        AND char_length(btrim(${table.reviewedBy})) BETWEEN 1 AND 100
+        AND char_length(btrim(${table.idempotencyKey})) BETWEEN 1 AND 120`,
     ),
   }),
 );
@@ -1037,6 +1104,8 @@ export const insertLocationPromisePolicyVersionSchema = createInsertSchema(
 ).omit(generatedFields);
 export const insertTransformationModelVersionSchema = createInsertSchema(transformationModelVersions)
   .omit(generatedFields);
+export const insertTransformationModelReviewSchema = createInsertSchema(transformationModelReviews)
+  .omit({ id: true, createdAt: true });
 export const insertTransformationModelPathSchema = createInsertSchema(transformationModelPaths)
   .omit({ id: true, createdAt: true });
 export const insertTransformationRecipeBindingSchema = createInsertSchema(
@@ -1060,6 +1129,7 @@ export type FulfillmentProviderLocation = typeof fulfillmentProviderLocations.$i
 export type FulfillmentNodeProviderBinding = typeof fulfillmentNodeProviderBindings.$inferSelect;
 export type LocationPromisePolicyVersion = typeof locationPromisePolicyVersions.$inferSelect;
 export type TransformationModelVersion = typeof transformationModelVersions.$inferSelect;
+export type TransformationModelReview = typeof transformationModelReviews.$inferSelect;
 export type TransformationModelPath = typeof transformationModelPaths.$inferSelect;
 export type TransformationRecipeBinding = typeof transformationRecipeBindings.$inferSelect;
 export type TransformationRecipeComponentSnapshot =
@@ -1079,6 +1149,7 @@ export type InsertLocationPromisePolicyVersion = z.infer<
   typeof insertLocationPromisePolicyVersionSchema
 >;
 export type InsertTransformationModelVersion = z.infer<typeof insertTransformationModelVersionSchema>;
+export type InsertTransformationModelReview = z.infer<typeof insertTransformationModelReviewSchema>;
 export type InsertTransformationModelPath = z.infer<typeof insertTransformationModelPathSchema>;
 export type InsertTransformationRecipeBinding = z.infer<
   typeof insertTransformationRecipeBindingSchema

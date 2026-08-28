@@ -9,6 +9,7 @@ import {
 } from "@shared/types/inventory-availability-planner";
 import {
   calculateLegacyAtpFromSnapshot,
+  calculateLegacyAtpBaseFromSnapshot,
   classifyShadowDifference,
   projectCanonicalAtp,
 } from "../domain/inventory-availability-planner";
@@ -81,6 +82,7 @@ export class InventoryAvailabilityShadowService {
         });
         const proposedProjection = projectCanonicalAtp(snapshot, projectionRequest);
         const legacyAtp = calculateLegacyAtpFromSnapshot(snapshot, projectionRequest);
+        const legacyAtpBase = calculateLegacyAtpBaseFromSnapshot(snapshot, projectionRequest);
         const proposedAtp = BigInt(proposedProjection.atpUnits);
         results.push({
           warehouseId: scope.kind === "warehouse" ? scope.warehouseId : null,
@@ -90,7 +92,9 @@ export class InventoryAvailabilityShadowService {
           productVariantId: variant.id,
           productVariantSkuSnapshot: variant.sku,
           productVariantNameSnapshot: variant.name,
+          productVariantUnitsPerVariantSnapshot: variant.unitsPerVariant,
           legacyAtpUnits: legacyAtp.toString(),
+          legacyAtpBaseUnits: legacyAtpBase.toString(),
           proposedAtpUnits: proposedAtp.toString(),
           differenceUnits: (proposedAtp - legacyAtp).toString(),
           readinessState: proposedProjection.status,

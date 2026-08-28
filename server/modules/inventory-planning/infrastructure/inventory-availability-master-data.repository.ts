@@ -11,6 +11,7 @@ import {
   promiseSafetyPolicyVersions,
   transformationModelHeads,
   transformationModelPaths,
+  transformationModelReviews,
   transformationModelVersions,
   transformationRecipeBindings,
   transformationRecipeComponentSnapshots,
@@ -29,6 +30,9 @@ import {
   createTransformationModelDraftResultSchema,
   transformationAdminRecipeSchema,
 } from "@shared/types/inventory-availability-admin";
+import {
+  inventoryAvailabilityBackfillReviewSchema,
+} from "@shared/types/inventory-availability-backfill";
 
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
@@ -44,6 +48,12 @@ import {
   safetyPolicyScopeKey,
   type TransformationModelDefinition,
 } from "../domain/inventory-availability-master-data.contracts";
+import {
+  planInventoryAvailabilityBackfill,
+} from "../domain/inventory-availability-backfill";
+import {
+  loadInventoryAvailabilityBackfillSources,
+} from "./inventory-availability-backfill.repository";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type Executor = typeof db | Transaction;
@@ -162,6 +172,9 @@ implements InventoryAvailabilityMasterDataAdminStore {
     >[0],
   ) {
     return this.database.transaction(async (tx) => {
+      if (command.backfillEvidence) {
+        await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
+      }
       const productId = command.definition.productId;
       await lockIdempotencyKey(tx, command.idempotencyKey);
       await tx.execute(sql`
@@ -195,6 +208,30 @@ implements InventoryAvailabilityMasterDataAdminStore {
       if (head?.draftModelId) {
         throw draftExists("transformation model", String(productId));
       }
+      if (command.backfillEvidence) {
+        const [source] = await loadInventoryAvailabilityBackfillSources(tx, [productId]);
+        if (!source) {
+          throw new InventoryAvailabilityMasterDataError(
+            409,
+            "INVENTORY_AVAILABILITY_BACKFILL_SOURCE_CHANGED",
+            "The active product is no longer eligible for deterministic backfill.",
+          );
+        }
+        const currentCandidate = planInventoryAvailabilityBackfill(source);
+        if (
+          currentCandidate.inputHash !== command.backfillEvidence.inputHash
+          || currentCandidate.resultHash !== command.backfillEvidence.resultHash
+          || !currentCandidate.definition
+          || currentCandidate.definitionHash
+            !== calculateTransformationModelDefinitionHash(command.definition)
+        ) {
+          throw new InventoryAvailabilityMasterDataError(
+            409,
+            "INVENTORY_AVAILABILITY_BACKFILL_PREVIEW_STALE",
+            "The product, variants, recipes, or generated draft changed after preview.",
+          );
+        }
+      }
       await assertTransformationReferences(tx, command.definition);
       const previous = await latestTransformationModel(tx, productId);
       const version = (previous?.version ?? 0) + 1;
@@ -213,6 +250,9 @@ implements InventoryAvailabilityMasterDataAdminStore {
           changeReason: command.changeReason,
           idempotencyKey: command.idempotencyKey,
           requestHash: command.requestHash,
+          origin: command.backfillEvidence ? "phase3_backfill" : "operator",
+          originInputHash: command.backfillEvidence?.inputHash ?? null,
+          originResultHash: command.backfillEvidence?.resultHash ?? null,
           createdBy: command.actorId,
           createdAt: command.occurredAt,
           updatedAt: command.occurredAt,
@@ -256,6 +296,9 @@ implements InventoryAvailabilityMasterDataAdminStore {
           changeReason: command.changeReason,
           idempotencyKey: command.idempotencyKey,
           requestHash: command.requestHash,
+          origin: command.backfillEvidence ? "phase3_backfill" : "operator",
+          originInputHash: command.backfillEvidence?.inputHash ?? null,
+          originResultHash: command.backfillEvidence?.resultHash ?? null,
           runtimeAuthorityChanged: false,
         },
       }, {
@@ -738,6 +781,7 @@ async function loadAdminRecipes(
       componentQty: buildRecipeComponents.qty,
       sku: productVariants.sku,
       name: productVariants.name,
+      isActive: productVariants.isActive,
     })
     .from(buildRecipeComponents)
     .innerJoin(productVariants, eq(productVariants.id, buildRecipeComponents.componentVariantId))
@@ -757,6 +801,7 @@ async function loadAdminRecipes(
       componentQty: component.componentQty,
       sku: component.sku,
       name: component.name,
+      isActive: component.isActive,
     });
     componentsByRecipe.set(component.recipeId, components);
   }
@@ -853,6 +898,9 @@ async function loadTransformationModel(
     lifecycleStatus: model.lifecycleStatus as TransformationAdminModel["lifecycleStatus"],
     buildToPromiseEnabled: model.buildToPromiseEnabled,
     definitionHash: model.definitionHash,
+    origin: model.origin as TransformationAdminModel["origin"],
+    originInputHash: model.originInputHash,
+    originResultHash: model.originResultHash,
     validationState: model.validationState as TransformationAdminModel["validationState"],
     validationErrors: Array.isArray(model.validationErrors) ? model.validationErrors : [],
     changeReason: model.changeReason,
