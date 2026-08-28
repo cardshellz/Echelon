@@ -2,7 +2,27 @@ import type { Request, Response, NextFunction } from "express";
 import { hasPermission } from "../modules/identity";
 import multer from "multer";
 
-export const upload = multer({ storage: multer.memoryStorage() });
+/**
+ * Shared upload handler for CSV imports and invoice attachments.
+ *
+ * `memoryStorage()` buffers the whole file in RAM, so without `limits` a single
+ * request can allocate as much as the client chooses to send. That matters more
+ * than it looks: this instance is used by at least six routes, including
+ * /api/vendor-invoices/:id/attachments, and Buffers live off-heap where
+ * --max-old-space-size does not constrain them. On a 512MB dyno an unbounded
+ * upload is a crash, not a slow request.
+ *
+ * 10MB matches the ceiling catalog asset uploads already enforce.
+ */
+export const UPLOAD_MAX_BYTES =
+  Number(process.env.UPLOAD_MAX_BYTES) > 0
+    ? Number(process.env.UPLOAD_MAX_BYTES)
+    : 10 * 1024 * 1024;
+
+export const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: UPLOAD_MAX_BYTES, files: 1 },
+});
 
 export function requirePermission(resource: string, action: string) {
   return async (req: Request, res: Response, next: NextFunction) => {
