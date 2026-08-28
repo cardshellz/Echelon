@@ -82,7 +82,9 @@ import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import ProcurementSettings from "@/pages/ProcurementSettings";
 import ShippingSettings from "@/pages/ShippingSettings";
+import HistoricalShipmentContentsReview from "@/pages/HistoricalShipmentContentsReview";
 import ShippingServiceLevels from "@/pages/ShippingServiceLevels";
+import { HISTORICAL_SHIPMENT_CONTENTS_REVIEW_PATH } from "@/lib/historical-shipstation-contents-attestation";
 import ShippingServiceLevelDetail from "@/pages/ShippingServiceLevelDetail";
 import NotificationPreferences from "@/pages/NotificationPreferences";
 import EbayChannelPage from "@/pages/EbayChannelPage";
@@ -419,6 +421,13 @@ function Router() {
         </Route>
         <Route path="/products/:id">
           <ProtectedRoute component={ProductDetail} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path={HISTORICAL_SHIPMENT_CONTENTS_REVIEW_PATH}>
+          <ProtectedRoute
+            component={HistoricalShipmentContentsReview}
+            allowedRoles={["admin", "lead"]}
+            requiredPermission={{ resource: "inventory", action: "view" }}
+          />
         </Route>
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
