@@ -63,6 +63,26 @@ describe("Postgres inventory availability shadow repository", () => {
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 
+  it("captures claim roots and their shared graph in one repeatable-read transaction", async () => {
+    const client = fakeSnapshotClient();
+    const repository = new PostgresInventoryAvailabilityShadowRepository(
+      { connect: vi.fn(async () => client) } as never,
+    );
+
+    const snapshot = await repository.captureClaimSupplySnapshot([101]);
+
+    expect(snapshot).toMatchObject({
+      schemaVersion: "inventory_availability_claim_snapshot_v1",
+      rootProducts: [{ productId: 10, legacyInventoryStrategy: "physical_only" }],
+      inventoryPositions: [expect.objectContaining({ productVariantId: 101, variantQty: "7" })],
+    });
+    expect(client.query.mock.calls[0]?.[0]).toBe(
+      "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+    );
+    expect(client.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
   it("persists a complete run and its evidence atomically", async () => {
     const fixture = persistenceFixture();
     const client = fakePersistenceClient(fixture, { insertRunId: "99" });

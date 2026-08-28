@@ -83,6 +83,7 @@ import { registerDestinationScopeReaderRoutes } from "./modules/shipping-engine/
 import { registerInventoryAvailabilityMasterDataRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-master-data.routes";
 import { registerInventoryAvailabilityShadowRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-shadow.routes";
 import { registerInventoryAvailabilityBackfillRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-backfill.routes";
+import { registerInventoryAvailabilityPhase4Routes } from "./modules/inventory-planning/interfaces/http/inventory-availability-phase4.routes";
 import { registerShippingDestinationNormalizationRoutes } from "./modules/shipping-engine/interfaces/http/shipping-destination-normalization.routes";
 
 export async function registerRoutes(
@@ -127,6 +128,7 @@ export async function registerRoutes(
   registerInventoryAvailabilityMasterDataRoutes(app);
   registerInventoryAvailabilityShadowRoutes(app);
   registerInventoryAvailabilityBackfillRoutes(app);
+  registerInventoryAvailabilityPhase4Routes(app);
   registerShippingDestinationNormalizationRoutes(app);
   registerOutboundShipmentRoutes(app);
   registerDropshipAdminOmsChannelConfigRoutes(app);
