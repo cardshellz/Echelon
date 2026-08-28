@@ -25,6 +25,10 @@ import {
   runPlannerShadowRequestSchema,
   type PlannerShadowRunDto,
 } from "@shared/types/inventory-availability-planner";
+import {
+  inventoryActivationDryRunSchema,
+  runInventoryActivationDryRunRequestSchema,
+} from "@shared/types/inventory-availability-phase4";
 import { z } from "zod";
 import {
   AlertTriangle,
@@ -80,6 +84,7 @@ type DraftMutationInput =
 export default function SupplyTransformations() {
   const { hasPermission } = useAuth();
   const canEdit = hasPermission("inventory_planning", "edit");
+  const canActivate = hasPermission("inventory_planning", "activate");
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const nextRowId = useRef(1);
@@ -87,6 +92,7 @@ export default function SupplyTransformations() {
   const shadowIdempotencyKey = useRef<string | null>(null);
   const backfillIdempotencyKey = useRef<string | null>(null);
   const reviewIdempotencyKey = useRef<string | null>(null);
+  const activationDryRunIdempotencyKey = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
   const [productId, setProductId] = useState<number | null>(null);
@@ -100,6 +106,7 @@ export default function SupplyTransformations() {
   const [queueStateFilter, setQueueStateFilter] = useState("all");
   const [backfillReason, setBackfillReason] = useState("");
   const [reviewReason, setReviewReason] = useState("");
+  const [activationDryRunReason, setActivationDryRunReason] = useState("");
 
   const migrationQueueQuery = useQuery<InventoryAvailabilityBackfillQueueResponse>({
     queryKey: ["/api/inventory-planning/admin/migration-queue"],
@@ -396,6 +403,47 @@ export default function SupplyTransformations() {
     },
   });
 
+  const runActivationDryRun = useMutation({
+    mutationFn: () => {
+      const queue = migrationQueueQuery.data;
+      if (!queue) throw new Error("Load the current full migration queue first.");
+      const request = runInventoryActivationDryRunRequestSchema.parse({
+        expectedCatalogInputHash: queue.catalogInputHash,
+        expectedCatalogResultHash: queue.catalogResultHash,
+        idempotencyKey: activationDryRunIdempotencyKey.current
+          ?? `inventory-availability-activation-dry-run:${crypto.randomUUID()}`,
+        reason: activationDryRunReason,
+      });
+      activationDryRunIdempotencyKey.current = request.idempotencyKey;
+      return fetchJson(
+        "/api/inventory-planning/admin/activation-runs/dry-run",
+        inventoryActivationDryRunSchema,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+    },
+    onSuccess: (result) => {
+      activationDryRunIdempotencyKey.current = null;
+      toast({
+        title: result.state === "blocked" ? "Activation dry run found blockers" : "Activation dry run is ready",
+        description: "Evidence was recorded without changing runtime ATP or contacting providers.",
+        variant: result.state === "blocked" ? "destructive" : "default",
+      });
+    },
+    onError: (error: Error) => {
+      if (error instanceof HttpResponseError && error.status === 409) {
+        activationDryRunIdempotencyKey.current = null;
+        void queryClient.invalidateQueries({
+          queryKey: ["/api/inventory-planning/admin/migration-queue"],
+        });
+      }
+      toast({ title: "Activation dry run failed", description: error.message, variant: "destructive" });
+    },
+  });
+
   const isEditing = Boolean(view && (view.draftModel === null || editingCurrentDraft));
   const activeVariants = view?.variants.filter((variant) => variant.isActive) ?? [];
   const activeAssemblyRecipes = view?.recipes.filter((recipe) =>
@@ -619,8 +667,8 @@ export default function SupplyTransformations() {
           <div>
             <div className="font-semibold text-amber-900">Legacy runtime authority remains active</div>
             <div className="text-amber-800">
-              This page records validated drafts only. It has no activation endpoint and cannot
-              publish inventory.
+              Draft, shadow, claim-simulation, and activation dry-run evidence cannot activate a
+              model or publish inventory. There is no live activation endpoint.
             </div>
           </div>
         </CardContent>
@@ -647,6 +695,66 @@ export default function SupplyTransformations() {
         onApply={(row) => applyBackfillDraft.mutate(row)}
         onReview={(row, decision) => reviewBackfillDraft.mutate({ row, decision })}
       />
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Phase 4 full-catalog activation dry run</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Revalidates every product and compares proposed channel quantities with legacy
+            acknowledgement and provider-readback evidence. It cannot call an adapter or enqueue
+            publication work.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="activation-dry-run-reason">Review reason</Label>
+            <Textarea
+              id="activation-dry-run-reason"
+              value={activationDryRunReason}
+              onChange={(event) => {
+                setActivationDryRunReason(event.target.value);
+                activationDryRunIdempotencyKey.current = null;
+              }}
+              placeholder="Why the complete catalog is being revalidated"
+              disabled={!canActivate}
+            />
+          </div>
+          <Button
+            type="button"
+            disabled={
+              !canActivate
+              || !migrationQueueQuery.data
+              || !activationDryRunReason.trim()
+              || runActivationDryRun.isPending
+            }
+            onClick={() => runActivationDryRun.mutate()}
+          >
+            <ShieldCheck className="mr-2 h-4 w-4" />
+            {runActivationDryRun.isPending ? "Running full-catalog dry run…" : "Run activation dry run"}
+          </Button>
+          {!canActivate && (
+            <div className="text-sm text-muted-foreground">
+              The inventory planning activate ability is required to create activation-review evidence.
+            </div>
+          )}
+          {runActivationDryRun.data && (
+            <div className="space-y-2 rounded-md border p-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={runActivationDryRun.data.state === "blocked" ? "destructive" : "default"}>
+                  {runActivationDryRun.data.state.replaceAll("_", " ")}
+                </Badge>
+                <span>{runActivationDryRun.data.summary.readyProducts} ready</span>
+                <span>{runActivationDryRun.data.summary.blockedProducts} blocked</span>
+                <span>{runActivationDryRun.data.summary.publicationRows} channel/SKU rows</span>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                Run {runActivationDryRun.data.activationRunId} · result {runActivationDryRun.data.resultHash.slice(0, 12)} ·
+                runtime unchanged · no provider write · no outbox enqueue
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader><CardTitle>Select a product</CardTitle></CardHeader>

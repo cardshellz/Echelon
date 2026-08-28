@@ -73,7 +73,9 @@ export const channelConnections = channelsSchema.table("channel_connections", {
   metadata: jsonb("metadata"), // Provider-specific settings
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("channel_connections_id_channel_uq").on(table.id, table.channelId),
+]);
 
 export const insertChannelConnectionSchema = createInsertSchema(channelConnections).omit({
   id: true,

@@ -2,6 +2,8 @@ import type { Pool, PoolClient } from "pg";
 
 import { pool } from "../../../db";
 import {
+  type ClaimSupplySnapshotContentDto,
+  type ClaimSupplySnapshotDto,
   plannerShadowResultSchema,
   plannerShadowRunSchema,
   type PlannerShadowResultDto,
@@ -12,6 +14,7 @@ import {
 import {
   calculateLegacyAtpBaseFromSnapshot,
   parseSupplySnapshot,
+  sealClaimSupplySnapshot,
   sealSupplySnapshot,
 } from "../domain/inventory-availability-planner";
 
@@ -37,6 +40,10 @@ export interface InventoryAvailabilityShadowStore {
   captureSupplySnapshot(productId: number): Promise<SupplySnapshotDto>;
   persistShadowRun(input: PersistPlannerShadowRunInput): Promise<PlannerShadowRunDto>;
   getLatestShadowRun(productId: number): Promise<PlannerShadowRunDto | null>;
+}
+
+export interface InventoryAvailabilityClaimSnapshotStore {
+  captureClaimSupplySnapshot(targetVariantIds: readonly number[]): Promise<ClaimSupplySnapshotDto>;
 }
 
 export class InventoryAvailabilityShadowRepositoryError extends Error {
@@ -253,8 +260,11 @@ async function loadSelectedModel(client: QueryClient, productId: number): Promis
   };
 }
 
-async function loadModelGraph(client: QueryClient, productId: number): Promise<LoadedModel[]> {
-  const queue = [productId];
+async function loadModelGraphForProducts(
+  client: QueryClient,
+  rootProductIds: readonly number[],
+): Promise<LoadedModel[]> {
+  const queue = uniqueSorted(rootProductIds);
   const visited = new Set<number>();
   const models: LoadedModel[] = [];
   while (queue.length > 0) {
@@ -265,7 +275,7 @@ async function loadModelGraph(client: QueryClient, productId: number): Promise<L
       throw new InventoryAvailabilityShadowRepositoryError(
         "TRANSFORMATION_GRAPH_TOO_LARGE",
         "Transformation model graph exceeded the bounded product limit.",
-        { productId, limit: MAX_TRANSFORMATION_GRAPH_PRODUCTS },
+        { rootProductIds: uniqueSorted(rootProductIds), limit: MAX_TRANSFORMATION_GRAPH_PRODUCTS },
       );
     }
     const model = await loadSelectedModel(client, current);
@@ -346,26 +356,24 @@ async function loadLegacyRecipes(
   return [...byId.values()];
 }
 
-async function captureInsideTransaction(client: QueryClient, productId: number): Promise<SupplySnapshotDto> {
-  const snapshotRow = rows(await client.query(
-    `SELECT transaction_timestamp() AS captured_at`,
-  ))[0];
-  const product = rows(await client.query(
-    `SELECT id, inventory_strategy
-     FROM catalog.products
-     WHERE id = $1`,
-    [productId],
-  ))[0];
-  if (!product) {
-    throw new InventoryAvailabilityShadowRepositoryError(
-      "PRODUCT_NOT_FOUND",
-      "Inventory-planning product was not found.",
-      { productId },
-    );
-  }
+type SnapshotProduct = {
+  productId: number;
+  legacyInventoryStrategy: SupplySnapshotDto["legacyInventoryStrategy"];
+};
 
-  const models = await loadModelGraph(client, productId);
-  const modelProductIds = new Set<number>([productId]);
+type CapturedGraphContent = Omit<
+  ClaimSupplySnapshotContentDto,
+  "schemaVersion" | "rootProducts"
+>;
+
+async function captureGraphInsideTransaction(
+  client: QueryClient,
+  rootProducts: readonly SnapshotProduct[],
+  capturedAt: string,
+): Promise<CapturedGraphContent> {
+  const rootProductIds = rootProducts.map((product) => product.productId);
+  const models = await loadModelGraphForProducts(client, rootProductIds);
+  const modelProductIds = new Set<number>(rootProductIds);
   for (const model of models) {
     modelProductIds.add(model.productId);
     for (const binding of model.recipeBindings) {
@@ -381,13 +389,20 @@ async function captureInsideTransaction(client: QueryClient, productId: number):
     [uniqueSorted(modelProductIds)],
   ));
   const targetVariantIds = initialVariants
-    .filter((row) => Number(row.product_id) === productId && bool(row.is_active))
+    .filter((row) => rootProductIds.includes(Number(row.product_id)) && bool(row.is_active))
     .map((row) => integer(row.id, "targetVariant.id"));
   const legacyRecipes = await loadLegacyRecipes(client, targetVariantIds);
   const relevantProductIds = new Set(modelProductIds);
   for (const recipe of legacyRecipes) {
     relevantProductIds.add(recipe.outputProductId);
     for (const component of recipe.components) relevantProductIds.add(component.componentProductId);
+  }
+  if (relevantProductIds.size > MAX_TRANSFORMATION_GRAPH_PRODUCTS) {
+    throw new InventoryAvailabilityShadowRepositoryError(
+      "TRANSFORMATION_GRAPH_TOO_LARGE",
+      "Combined claim transformation and legacy-recipe graph exceeded the bounded product limit.",
+      { rootProductIds, limit: MAX_TRANSFORMATION_GRAPH_PRODUCTS },
+    );
   }
   const variantRows = rows(await client.query(
     `SELECT id, product_id, sku, name, units_per_variant, is_active
@@ -584,11 +599,8 @@ async function captureInsideTransaction(client: QueryClient, productId: number):
     calculatedAt: iso(row.calculated_at, "demandEvidence.calculatedAt"),
   }));
 
-  const content: SupplySnapshotContentDto = {
-    schemaVersion: "inventory_availability_snapshot_v1",
-    capturedAt: iso(snapshotRow?.captured_at, "snapshot.capturedAt"),
-    productId,
-    legacyInventoryStrategy: product.inventory_strategy,
+  return {
+    capturedAt,
     variants,
     warehouses,
     locations,
@@ -600,7 +612,95 @@ async function captureInsideTransaction(client: QueryClient, productId: number):
     outputLocations,
     claimProjectionSource: "inventory_levels.reserved_qty",
   };
+}
+
+async function loadSnapshotProducts(
+  client: QueryClient,
+  productIds: readonly number[],
+): Promise<SnapshotProduct[]> {
+  const uniqueProductIds = uniqueSorted(productIds);
+  const productRows = rows(await client.query(
+    `SELECT id, inventory_strategy
+     FROM catalog.products
+     WHERE id = ANY($1::integer[])
+     ORDER BY id`,
+    [uniqueProductIds],
+  ));
+  if (productRows.length !== uniqueProductIds.length) {
+    const foundIds = new Set(productRows.map((row) => integer(row.id, "product.id")));
+    throw new InventoryAvailabilityShadowRepositoryError(
+      "PRODUCT_NOT_FOUND",
+      "One or more inventory-planning products were not found.",
+      { productIds: uniqueProductIds.filter((productId) => !foundIds.has(productId)) },
+    );
+  }
+  return productRows.map((row) => ({
+    productId: integer(row.id, "product.id"),
+    legacyInventoryStrategy: row.inventory_strategy,
+  }));
+}
+
+async function captureInsideTransaction(client: QueryClient, productId: number): Promise<SupplySnapshotDto> {
+  const snapshotRow = rows(await client.query(
+    `SELECT transaction_timestamp() AS captured_at`,
+  ))[0];
+  const [product] = await loadSnapshotProducts(client, [productId]);
+  const capturedAt = iso(snapshotRow?.captured_at, "snapshot.capturedAt");
+  const graph = await captureGraphInsideTransaction(client, [product!], capturedAt);
+  const content: SupplySnapshotContentDto = {
+    schemaVersion: "inventory_availability_snapshot_v1",
+    productId: product!.productId,
+    legacyInventoryStrategy: product!.legacyInventoryStrategy,
+    ...graph,
+  };
   return sealSupplySnapshot(content);
+}
+
+async function captureClaimInsideTransaction(
+  client: QueryClient,
+  targetVariantIds: readonly number[],
+): Promise<ClaimSupplySnapshotDto> {
+  const uniqueVariantIds = uniqueSorted(targetVariantIds);
+  if (uniqueVariantIds.length === 0 || uniqueVariantIds.length > 500) {
+    throw new InventoryAvailabilityShadowRepositoryError(
+      "INVALID_CLAIM_TARGETS",
+      "Claim simulation requires between 1 and 500 unique target variants.",
+      { count: uniqueVariantIds.length },
+    );
+  }
+  const snapshotRow = rows(await client.query(
+    `SELECT transaction_timestamp() AS captured_at`,
+  ))[0];
+  const targetRows = rows(await client.query(
+    `SELECT id, product_id
+     FROM catalog.product_variants
+     WHERE id = ANY($1::integer[])
+       AND is_active = true
+     ORDER BY id`,
+    [uniqueVariantIds],
+  ));
+  const foundVariantIds = new Set(targetRows.map((row) => integer(row.id, "targetVariant.id")));
+  if (foundVariantIds.size !== uniqueVariantIds.length) {
+    throw new InventoryAvailabilityShadowRepositoryError(
+      "TARGET_VARIANT_NOT_FOUND",
+      "One or more claim target variants are missing or inactive.",
+      { targetVariantIds: uniqueVariantIds.filter((variantId) => !foundVariantIds.has(variantId)) },
+    );
+  }
+  const products = await loadSnapshotProducts(
+    client,
+    targetRows.map((row) => integer(row.product_id, "targetVariant.productId")),
+  );
+  const capturedAt = iso(snapshotRow?.captured_at, "snapshot.capturedAt");
+  const graph = await captureGraphInsideTransaction(client, products, capturedAt);
+  return sealClaimSupplySnapshot({
+    schemaVersion: "inventory_availability_claim_snapshot_v1",
+    rootProducts: products.map((product) => ({
+      productId: product.productId,
+      legacyInventoryStrategy: product.legacyInventoryStrategy,
+    })),
+    ...graph,
+  });
 }
 
 function validatePersistenceInput(input: PersistPlannerShadowRunInput): {
@@ -884,7 +984,8 @@ function chunks<T>(values: readonly T[], size: number): T[][] {
   return result;
 }
 
-export class PostgresInventoryAvailabilityShadowRepository implements InventoryAvailabilityShadowStore {
+export class PostgresInventoryAvailabilityShadowRepository
+implements InventoryAvailabilityShadowStore, InventoryAvailabilityClaimSnapshotStore {
   constructor(private readonly connectionPool: ClientPool = pool) {}
 
   async captureSupplySnapshot(productId: number): Promise<SupplySnapshotDto> {
@@ -893,6 +994,16 @@ export class PostgresInventoryAvailabilityShadowRepository implements InventoryA
       this.connectionPool,
       "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
       (client) => captureInsideTransaction(client, validatedProductId),
+    );
+  }
+
+  async captureClaimSupplySnapshot(
+    targetVariantIds: readonly number[],
+  ): Promise<ClaimSupplySnapshotDto> {
+    return inTransaction(
+      this.connectionPool,
+      "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+      (client) => captureClaimInsideTransaction(client, targetVariantIds),
     );
   }
 

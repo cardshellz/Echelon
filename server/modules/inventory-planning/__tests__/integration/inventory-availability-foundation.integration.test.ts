@@ -32,6 +32,10 @@ const backfillMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0622_inventory_availability_backfill_review.sql"),
   "utf8",
 );
+const phase4MigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0623_inventory_claim_simulation_activation_outbox.sql"),
+  "utf8",
+);
 const HASH = "a".repeat(64);
 const FIXED_TIME = "2026-08-26T12:00:00.000Z";
 
@@ -78,9 +82,21 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       DROP SCHEMA IF EXISTS inventory CASCADE;
       DROP SCHEMA IF EXISTS warehouse CASCADE;
       DROP SCHEMA IF EXISTS catalog CASCADE;
+      DROP SCHEMA IF EXISTS channels CASCADE;
       CREATE SCHEMA catalog;
       CREATE SCHEMA warehouse;
       CREATE SCHEMA inventory;
+      CREATE SCHEMA channels;
+
+      CREATE TABLE channels.channels (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        name varchar(100) NOT NULL,
+        provider varchar(30) NOT NULL
+      );
+      CREATE TABLE channels.channel_connections (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        channel_id integer NOT NULL REFERENCES channels.channels(id) ON DELETE CASCADE
+      );
 
       CREATE TABLE catalog.products (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -170,6 +186,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(migrationSql);
       await migrationClient.query(shadowMigrationSql);
       await migrationClient.query(backfillMigrationSql);
+      await migrationClient.query(phase4MigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -183,6 +200,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     await pool.query(`
       TRUNCATE TABLE
         warehouse.fulfillment_provider_accounts,
+        channels.channels,
         catalog.products,
         warehouse.warehouses,
         public.idempotency_keys,
@@ -193,7 +211,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
 
   afterAll(async () => {
     if (pool) {
-      await pool.query("DROP SCHEMA inventory, warehouse, catalog CASCADE");
+      await pool.query("DROP SCHEMA inventory, warehouse, catalog, channels CASCADE");
       if (createdAuditTable) {
         await pool.query("DROP TABLE public.audit_events");
       }
@@ -1488,8 +1506,6 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         hold_reason varchar(200) NOT NULL,
         updated_at timestamptz NOT NULL DEFAULT now()
       );
-      DROP SCHEMA IF EXISTS channels CASCADE;
-      CREATE SCHEMA channels;
       CREATE TABLE channels.channel_reservations (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         reserve_base_qty integer NOT NULL,
@@ -1655,7 +1671,14 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       const afterEdit = await pool.query(snapshotSql, [scope.productId]);
       expect(afterEdit.rows[0]).toEqual(before.rows[0]);
     } finally {
-      await pool.query("DROP SCHEMA IF EXISTS channels CASCADE");
+      await pool.query(`
+        DROP TABLE IF EXISTS
+          channels.channel_reservations,
+          channels.channel_allocation_rules,
+          channels.allocation_audit_log,
+          channels.channel_sync_log,
+          channels.sync_log
+      `);
       await pool.query("DROP SCHEMA IF EXISTS wms CASCADE");
       await pool.query("DROP TABLE IF EXISTS inventory.inventory_levels");
     }
@@ -1933,5 +1956,176 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       [model.rows[0]!.id, scope.productId, HASH, "2026-08-26T12:01:00.000Z"],
     );
     expect(BigInt(secondReview.rows[0]!.id)).toBeGreaterThan(BigInt(review.rows[0]!.id));
+  });
+
+  it("keeps Phase 4 claim and activation dry-run evidence non-operational and immutable", async () => {
+    const requestKey = "integration:claim:1";
+    const snapshot = {
+      schemaVersion: "inventory_availability_claim_snapshot_v1",
+      snapshotFingerprint: HASH,
+    };
+    const plan = {
+      requestKey,
+      status: "satisfied",
+      snapshotFingerprint: HASH,
+    };
+    const claimRun = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.planner_claim_simulation_runs (
+         request_key, request_hash, request_payload, root_product_ids,
+         snapshot_fingerprint, snapshot_payload, plan_status, plan_payload,
+         blocker_codes, idempotency_key, reason, requested_by,
+         operational_write_attempted, captured_at, completed_at
+       ) VALUES (
+         $1, $2, $3::jsonb, '[10]'::jsonb, $2, $4::jsonb, 'satisfied', $5::jsonb,
+         '[]'::jsonb, 'integration:claim:1', 'Synthetic evidence', 'integration-test',
+         false, $6, $6
+       ) RETURNING id`,
+      [
+        requestKey,
+        HASH,
+        JSON.stringify({ requestKey }),
+        JSON.stringify(snapshot),
+        JSON.stringify(plan),
+        FIXED_TIME,
+      ],
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE inventory.planner_claim_simulation_runs SET reason = 'changed' WHERE id = $1",
+        [claimRun.rows[0]!.id],
+      ),
+      "planner_claim_simulation_runs is append-only",
+    );
+
+    const activationRun = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.availability_activation_runs (
+         mode, scope, state, request_hash, result_hash,
+         expected_catalog_input_hash, expected_catalog_result_hash,
+         captured_catalog_input_hash, captured_catalog_result_hash,
+         evidence_payload, blocker_codes, idempotency_key, reason, requested_by,
+         runtime_authority_changed, provider_write_attempted, outbox_enqueued,
+         started_at, completed_at
+       ) VALUES (
+         'dry_run', 'full_catalog', 'ready_for_publication', $1, $1,
+         $1, $1, $1, $1, '{}'::jsonb, '[]'::jsonb,
+         'integration:activation:1', 'Full catalog dry run', 'integration-test',
+         false, false, false, $2, $2
+       ) RETURNING id`,
+      [HASH, FIXED_TIME],
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE inventory.availability_activation_runs SET state = 'blocked' WHERE id = $1",
+        [activationRun.rows[0]!.id],
+      ),
+      "dry-run activation evidence is append-only",
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        `INSERT INTO inventory.availability_activation_runs (
+           mode, scope, state, request_hash, result_hash,
+           expected_catalog_input_hash, expected_catalog_result_hash,
+           captured_catalog_input_hash, captured_catalog_result_hash,
+           evidence_payload, blocker_codes, idempotency_key, reason, requested_by,
+           runtime_authority_changed, provider_write_attempted, outbox_enqueued,
+           started_at, completed_at
+         ) VALUES (
+           'dry_run', 'full_catalog', 'ready_for_publication', $1, $1,
+           $1, $1, $1, $1, '{}'::jsonb, '[]'::jsonb,
+           'integration:activation:invalid', 'Must remain inactive', 'integration-test',
+           false, true, false, $2, $2
+         )`,
+        [HASH, FIXED_TIME],
+      ),
+      "availability_activation_runs_dry_run_chk",
+    );
+  });
+
+  it("enforces monotonic absolute publication revisions and independent provider readback", async () => {
+    const scope = await seedProductAndWarehouse([1, 5]);
+    const channel = await pool.query<{ id: number }>(
+      "INSERT INTO channels.channels (name, provider) VALUES ('Shopify', 'shopify') RETURNING id",
+    );
+    const connection = await pool.query<{ id: number }>(
+      "INSERT INTO channels.channel_connections (channel_id) VALUES ($1) RETURNING id",
+      [channel.rows[0]!.id],
+    );
+    const node = await pool.query<{ id: number }>(
+      `INSERT INTO warehouse.fulfillment_nodes (
+         code, name, node_type, warehouse_id, inventory_authority,
+         fulfillment_authority, created_by
+       ) VALUES (
+         'PRIMARY', 'Primary warehouse', 'internal_warehouse', $1,
+         'echelon', 'echelon', 'integration-test'
+       ) RETURNING id`,
+      [scope.warehouseId],
+    );
+    const target = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.inventory_publication_targets (
+         channel_id, channel_connection_id, fulfillment_node_id,
+         provider_scope_type, external_scope_id, publication_authority,
+         state, change_reason, created_by, activated_by, activated_at
+       ) VALUES (
+         $1, $2, $3, 'location', 'shopify-location-1', 'echelon',
+         'preview', 'Integration preview', 'integration-test', 'integration-test', $4
+       ) RETURNING id`,
+      [channel.rows[0]!.id, connection.rows[0]!.id, node.rows[0]!.id, FIXED_TIME],
+    );
+
+    const outbox = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.inventory_publication_outbox (
+         publication_target_id, product_variant_id, desired_revision, desired_quantity,
+         channel_connection_id_snapshot, external_scope_id_snapshot,
+         external_inventory_item_id_snapshot, idempotency_key, payload_hash, available_at
+       ) VALUES ($1, $2, 1, 0, $3, 'shopify-location-1', 'inventory-item-1',
+         'publication:1', $4, $5) RETURNING id`,
+      [target.rows[0]!.id, scope.variantIds[0], connection.rows[0]!.id, HASH, FIXED_TIME],
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        `INSERT INTO inventory.inventory_publication_outbox (
+           publication_target_id, product_variant_id, desired_revision, desired_quantity,
+           channel_connection_id_snapshot, external_scope_id_snapshot,
+           external_inventory_item_id_snapshot, idempotency_key, payload_hash, available_at
+         ) VALUES ($1, $2, 1, 2, $3, 'shopify-location-1', 'inventory-item-1',
+           'publication:stale', $4, $5)`,
+        [target.rows[0]!.id, scope.variantIds[0], connection.rows[0]!.id, HASH, FIXED_TIME],
+      ),
+      "publication revision must be greater than existing revision 1",
+    );
+
+    const standaloneReadback = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.inventory_publication_readbacks (
+         publication_target_id, product_variant_id, observed_quantity,
+         matches_desired, evidence_hash, observed_at
+       ) VALUES ($1, $2, 7, NULL, $3, $4) RETURNING id`,
+      [target.rows[0]!.id, scope.variantIds[1], HASH, FIXED_TIME],
+    );
+    expect(standaloneReadback.rows[0]!.id).toBeTruthy();
+
+    const linkedReadback = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.inventory_publication_readbacks (
+         publication_target_id, product_variant_id, outbox_id, observed_quantity,
+         matches_desired, evidence_hash, observed_at
+       ) VALUES ($1, $2, $3, 0, true, $4, $5) RETURNING id`,
+      [target.rows[0]!.id, scope.variantIds[0], outbox.rows[0]!.id, HASH, FIXED_TIME],
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE inventory.inventory_publication_readbacks SET observed_quantity = 1 WHERE id = $1",
+        [linkedReadback.rows[0]!.id],
+      ),
+      "inventory_publication_readbacks is append-only",
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        `INSERT INTO inventory.inventory_publication_readbacks (
+           publication_target_id, product_variant_id, outbox_id, observed_quantity,
+           matches_desired, evidence_hash, observed_at
+         ) VALUES ($1, $2, $3, 1, true, $4, $5::timestamptz + interval '1 second')`,
+        [target.rows[0]!.id, scope.variantIds[0], outbox.rows[0]!.id, HASH, FIXED_TIME],
+      ),
+      "readback match flag does not match observed and desired quantities",
+    );
   });
 });

@@ -4,12 +4,16 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   atpProjectionRequestSchema,
   atpProjectionSchema,
+  claimSupplySnapshotContentSchema,
+  claimSupplySnapshotSchema,
   claimPlanRequestSchema,
   claimPlanSchema,
   supplySnapshotContentSchema,
   supplySnapshotSchema,
   type AtpProjectionDto,
   type AtpProjectionRequestDto,
+  type ClaimSupplySnapshotContentDto,
+  type ClaimSupplySnapshotDto,
   type ClaimPlanDto,
   type ClaimPlanRequestDto,
   type PlannerBlockerDto,
@@ -36,6 +40,7 @@ type Model = SupplySnapshotDto["transformationModels"][number];
 type Path = Model["paths"][number];
 type Recipe = Model["recipeBindings"][number];
 type SafetyEvidence = AtpProjectionDto["safetyEvidence"][number];
+type PlannerSupplySnapshot = SupplySnapshotDto | ClaimSupplySnapshotDto;
 
 type Resource = {
   inventoryLevelId: number;
@@ -69,7 +74,7 @@ type PlannedOperation = {
 type Breakdown = { total: bigint; direct: bigint; convertible: bigint; buildable: bigint };
 
 type Context = {
-  snapshot: SupplySnapshotDto;
+  snapshot: PlannerSupplySnapshot;
   warehouseId: number;
   variantsById: ReadonlyMap<number, Variant>;
   resourcesByVariant: Map<number, Resource[]>;
@@ -174,6 +179,24 @@ export function sealSupplySnapshot(raw: SupplySnapshotContentDto): SupplySnapsho
   });
 }
 
+export function calculateClaimSupplySnapshotFingerprint(
+  raw: ClaimSupplySnapshotContentDto,
+): string {
+  const content = claimSupplySnapshotContentSchema.parse(raw);
+  const { capturedAt: _capturedAt, ...state } = content;
+  return createHash("sha256").update(canonicalJson(state), "utf8").digest("hex");
+}
+
+export function sealClaimSupplySnapshot(
+  raw: ClaimSupplySnapshotContentDto,
+): ClaimSupplySnapshotDto {
+  const content = claimSupplySnapshotContentSchema.parse(raw);
+  return claimSupplySnapshotSchema.parse({
+    ...content,
+    snapshotFingerprint: calculateClaimSupplySnapshotFingerprint(content),
+  });
+}
+
 function assertUnique(values: readonly (number | string)[], field: string): void {
   const seen = new Set<number | string>();
   for (const value of values) {
@@ -188,7 +211,13 @@ function assertUnique(values: readonly (number | string)[], field: string): void
   }
 }
 
-function assertSnapshotReferences(snapshot: SupplySnapshotDto): void {
+function rootProductIds(snapshot: PlannerSupplySnapshot): number[] {
+  return snapshot.schemaVersion === "inventory_availability_snapshot_v1"
+    ? [snapshot.productId]
+    : snapshot.rootProducts.map((root) => root.productId);
+}
+
+function assertSnapshotReferences(snapshot: PlannerSupplySnapshot): void {
   assertUnique(snapshot.variants.map((entry) => entry.id), "variants.id");
   assertUnique(snapshot.warehouses.map((entry) => entry.id), "warehouses.id");
   assertUnique(snapshot.locations.map((entry) => entry.id), "locations.id");
@@ -200,6 +229,8 @@ function assertSnapshotReferences(snapshot: SupplySnapshotDto): void {
   assertUnique(snapshot.legacyRecipes.map((entry) => entry.recipeId), "legacyRecipes.id");
   assertUnique(snapshot.outputLocations.map((entry) =>
     `${entry.warehouseId}:${entry.productVariantId}`), "outputLocations.scopeVariant");
+  const roots = rootProductIds(snapshot);
+  assertUnique(roots, "rootProducts.productId");
 
   const variants = new Map(snapshot.variants.map((entry) => [entry.id, entry] as const));
   const warehouses = new Set(snapshot.warehouses.map((entry) => entry.id));
@@ -211,6 +242,16 @@ function assertSnapshotReferences(snapshot: SupplySnapshotDto): void {
       { field, value },
     );
   };
+
+  for (const productId of roots) {
+    if (!snapshot.variants.some((variant) => variant.productId === productId && variant.isActive)) {
+      invalid(
+        "rootProducts.productId",
+        productId,
+        "A claim snapshot root product must contain at least one active target variant.",
+      );
+    }
+  }
 
   for (const location of snapshot.locations) {
     if (location.warehouseId !== null && !warehouses.has(location.warehouseId)) {
@@ -336,6 +377,33 @@ export function parseSupplySnapshot(raw: unknown): SupplySnapshotDto {
   return snapshot;
 }
 
+export function parseClaimSupplySnapshot(raw: unknown): ClaimSupplySnapshotDto {
+  const snapshot = claimSupplySnapshotSchema.parse(raw);
+  const { snapshotFingerprint, ...content } = snapshot;
+  const expectedFingerprint = calculateClaimSupplySnapshotFingerprint(content);
+  if (snapshotFingerprint !== expectedFingerprint) {
+    throw new InventoryAvailabilityPlannerError(
+      "SUPPLY_SNAPSHOT_FINGERPRINT_MISMATCH",
+      "The claim supply snapshot content does not match its fingerprint.",
+      { snapshotFingerprint, expectedFingerprint },
+    );
+  }
+  assertSnapshotReferences(snapshot);
+  return snapshot;
+}
+
+function parseClaimPlannerSnapshot(raw: unknown): PlannerSupplySnapshot {
+  if (
+    raw
+    && typeof raw === "object"
+    && "schemaVersion" in raw
+    && raw.schemaVersion === "inventory_availability_claim_snapshot_v1"
+  ) {
+    return parseClaimSupplySnapshot(raw);
+  }
+  return parseSupplySnapshot(raw);
+}
+
 export function isPromiseEligibleLocation(location: Location, warehouseIsActive: boolean): boolean {
   if (!warehouseIsActive || !location.isActive || location.isFrozen || location.warehouseId === null) {
     return false;
@@ -346,7 +414,7 @@ export function isPromiseEligibleLocation(location: Location, warehouseIsActive:
   return PROMISE_ELIGIBLE_LOCATION_TYPES.has(location.locationType);
 }
 
-function resolveSafety(snapshot: SupplySnapshotDto, warehouseId: number, variantId: number): {
+function resolveSafety(snapshot: PlannerSupplySnapshot, warehouseId: number, variantId: number): {
   protectedQty: bigint;
   evidence: SafetyEvidence;
   blockers: PlannerBlockerDto[];
@@ -452,7 +520,7 @@ function consumeAcross(resources: Resource[], requestedQty: bigint): bigint {
   return requestedQty - remaining;
 }
 
-function buildContext(snapshot: SupplySnapshotDto, warehouseId: number, simulation = false): Context {
+function buildContext(snapshot: PlannerSupplySnapshot, warehouseId: number, simulation = false): Context {
   const variantsById = new Map(snapshot.variants.map((variant) => [variant.id, variant] as const));
   const warehousesById = new Map(snapshot.warehouses.map((warehouse) => [warehouse.id, warehouse] as const));
   const locationsById = new Map(snapshot.locations.map((location) => [location.id, location] as const));
@@ -550,12 +618,14 @@ function buildContext(snapshot: SupplySnapshotDto, warehouseId: number, simulati
       recipesByOutput.set(recipe.outputVariantId, candidates);
     }
   }
-  if (!snapshot.transformationModels.some((model) => model.productId === snapshot.productId)) {
-    blockers.push(problem(
-      "MISSING_TRANSFORMATION_MODEL",
-      "No draft or active transformation model was captured for the target product.",
-      { productId: snapshot.productId },
-    ));
+  for (const productId of rootProductIds(snapshot)) {
+    if (!snapshot.transformationModels.some((model) => model.productId === productId)) {
+      blockers.push(problem(
+        "MISSING_TRANSFORMATION_MODEL",
+        "No draft or active transformation model was captured for a target product.",
+        { productId },
+      ));
+    }
   }
   for (const paths of pathsByDestination.values()) {
     paths.sort((left, right) => left.sourceVariantId - right.sourceVariantId || left.pathId - right.pathId);
@@ -823,7 +893,7 @@ function fulfillUpTo(
   return result;
 }
 
-function warehouseIds(snapshot: SupplySnapshotDto, scope: Scope): number[] {
+function warehouseIds(snapshot: PlannerSupplySnapshot, scope: Scope): number[] {
   return scope.kind === "warehouse"
     ? [scope.warehouseId]
     : snapshot.warehouses
@@ -832,7 +902,7 @@ function warehouseIds(snapshot: SupplySnapshotDto, scope: Scope): number[] {
         .sort((left, right) => left - right);
 }
 
-function modelEvidence(snapshot: SupplySnapshotDto): AtpProjectionDto["modelEvidence"] {
+function modelEvidence(snapshot: PlannerSupplySnapshot): AtpProjectionDto["modelEvidence"] {
   return snapshot.transformationModels
     .map((model) => ({
       productId: model.productId,
@@ -934,15 +1004,31 @@ function mergeClaims(claims: readonly ResourceClaim[]): ResourceClaim[] {
 }
 
 export function planCanonicalClaim(
-  rawSnapshot: SupplySnapshotDto,
+  rawSnapshot: SupplySnapshotDto | ClaimSupplySnapshotDto,
   rawRequest: ClaimPlanRequestDto,
 ): ClaimPlanDto {
-  const snapshot = parseSupplySnapshot(rawSnapshot);
+  const snapshot = parseClaimPlannerSnapshot(rawSnapshot);
   const request = claimPlanRequestSchema.parse(rawRequest);
+  const roots = new Set(rootProductIds(snapshot));
+  const variantsById = new Map(snapshot.variants.map((variant) => [variant.id, variant] as const));
+  for (const line of request.lines) {
+    const target = variantsById.get(line.targetVariantId);
+    if (!target?.isActive || !roots.has(target.productId)) {
+      throw new InventoryAvailabilityPlannerError(
+        "TARGET_VARIANT_NOT_FOUND",
+        "A requested active target variant does not belong to a claim snapshot root product.",
+        { lineKey: line.lineKey, targetVariantId: line.targetVariantId, rootProductIds: [...roots].sort() },
+      );
+    }
+  }
   const contexts = warehouseIds(snapshot, request.scope)
     .map((warehouseId) => buildContext(snapshot, warehouseId));
   const blockers = contexts.flatMap((context) => context.blockers);
   const lines: ClaimPlanDto["lines"] = [];
+  const lineAllocationsByWarehouse = new Map<
+    number,
+    ClaimPlanDto["fulfillmentGroups"][number]["lineAllocations"]
+  >();
   for (const line of request.lines) {
     let remaining = qty(line.requestedQty, "claimLine.requestedQty");
     let plannedQty = BigInt(0);
@@ -959,6 +1045,15 @@ export function planCanonicalClaim(
       );
       plannedQty = add(plannedQty, planned.total, "claimLine.plannedQty");
       remaining -= planned.total;
+      if (planned.total > BigInt(0)) {
+        const allocations = lineAllocationsByWarehouse.get(context.warehouseId) ?? [];
+        allocations.push({
+          lineKey: line.lineKey,
+          targetVariantId: line.targetVariantId,
+          plannedQty: planned.total.toString(),
+        });
+        lineAllocationsByWarehouse.set(context.warehouseId, allocations);
+      }
     }
     lines.push({
       lineKey: line.lineKey,
@@ -983,6 +1078,14 @@ export function planCanonicalClaim(
       plannedExecutions: operation.plannedExecutions.toString(),
       outputQty: operation.outputQty.toString(),
     })),
+    fulfillmentGroups: [...lineAllocationsByWarehouse]
+      .sort(([left], [right]) => left - right)
+      .map(([warehouseId, lineAllocations]) => ({
+        groupKey: `${request.requestKey}:warehouse:${warehouseId}`,
+        warehouseId,
+        lineAllocations,
+      })),
+    modelEvidence: modelEvidence(snapshot),
     blockers: resolvedBlockers,
     snapshotFingerprint: snapshot.snapshotFingerprint,
   });
