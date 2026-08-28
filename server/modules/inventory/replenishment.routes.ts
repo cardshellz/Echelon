@@ -3,6 +3,7 @@ import { catalogStorage } from "../catalog";
 import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
 import { requirePermission } from "../../routes/middleware";
+import { UPLOAD_MAX_BYTES } from "../../routes/middleware";
 
 export function registerReplenishmentRoutes(app: Express) {
   // Compose `storage` at CALL time, not at module-init. This module is re-exported
@@ -246,7 +247,12 @@ export function registerReplenishmentRoutes(app: Express) {
     try {
       const multer = await import("multer");
       const Papa = await import("papaparse");
-      const upload = multer.default({ storage: multer.default.memoryStorage() });
+      // Bounded: memoryStorage buffers the whole file in RAM, and Buffers sit
+      // off-heap where --max-old-space-size cannot contain them.
+      const upload = multer.default({
+        storage: multer.default.memoryStorage(),
+        limits: { fileSize: UPLOAD_MAX_BYTES, files: 1 },
+      });
       
       // Handle the file upload
       upload.single("file")(req, res, async (err: any) => {
