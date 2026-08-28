@@ -9,8 +9,21 @@ import {
   type CreateTransformationModelDraftRequest,
   type UpdateTransformationModelDraftRequest,
 } from "@shared/types/inventory-availability-admin";
+import {
+  plannerShadowRunSchema,
+  runPlannerShadowRequestSchema,
+  type PlannerShadowRunDto,
+} from "@shared/types/inventory-availability-planner";
 import { z } from "zod";
-import { AlertTriangle, ArrowRight, Pencil, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  Pencil,
+  PlayCircle,
+  Plus,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -60,6 +73,7 @@ export default function SupplyTransformations() {
   const { toast } = useToast();
   const nextRowId = useRef(1);
   const idempotencyKey = useRef<string | null>(null);
+  const shadowIdempotencyKey = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
   const [productId, setProductId] = useState<number | null>(null);
@@ -88,6 +102,22 @@ export default function SupplyTransformations() {
     enabled: productId !== null,
   });
   const view = viewQuery.data;
+  const shadowQuery = useQuery<PlannerShadowRunDto | null>({
+    queryKey: ["/api/inventory-planning/admin/supply-transformations/shadow-runs/latest", productId],
+    queryFn: async () => {
+      try {
+        return await fetchJson(
+          `/api/inventory-planning/admin/supply-transformations/${productId}/shadow-runs/latest`,
+          plannerShadowRunSchema,
+        );
+      } catch (error) {
+        if (error instanceof HttpResponseError && error.status === 404) return null;
+        throw error;
+      }
+    },
+    enabled: productId !== null,
+    retry: false,
+  });
 
   useEffect(() => {
     setEditingCurrentDraft(false);
@@ -97,6 +127,7 @@ export default function SupplyTransformations() {
     setPaths([]);
     setChangeReason("");
     idempotencyKey.current = null;
+    shadowIdempotencyKey.current = null;
   }, [productId]);
 
   useEffect(() => {
@@ -164,6 +195,45 @@ export default function SupplyTransformations() {
       }
       toast({
         title: "Draft not saved",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const runShadow = useMutation({
+    mutationFn: (selectedProductId: number) => {
+      const request = runPlannerShadowRequestSchema.parse({
+        idempotencyKey: shadowIdempotencyKey.current
+          ?? `inventory-availability-shadow:${selectedProductId}:${crypto.randomUUID()}`,
+      });
+      shadowIdempotencyKey.current = request.idempotencyKey;
+      return fetchJson(
+        `/api/inventory-planning/admin/supply-transformations/${selectedProductId}/shadow-runs`,
+        plannerShadowRunSchema,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+    },
+    onSuccess: async (_result, selectedProductId) => {
+      shadowIdempotencyKey.current = null;
+      await queryClient.invalidateQueries({
+        queryKey: [
+          "/api/inventory-planning/admin/supply-transformations/shadow-runs/latest",
+          selectedProductId,
+        ],
+      });
+      toast({
+        title: "Shadow comparison recorded",
+        description: "Legacy and proposed ATP were compared from one snapshot. Runtime ATP is unchanged.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Shadow comparison failed",
         description: error.message,
         variant: "destructive",
       });
@@ -484,6 +554,15 @@ export default function SupplyTransformations() {
             </CardContent>
           </Card>
 
+          <ShadowComparisonPanel
+            run={shadowQuery.data ?? null}
+            isLoading={shadowQuery.isLoading}
+            error={shadowQuery.error as Error | null}
+            canRun={canEdit}
+            isRunning={runShadow.isPending}
+            onRun={() => runShadow.mutate(view.product.id)}
+          />
+
           <DestinationColumns
             view={view}
             paths={displayedPaths}
@@ -567,6 +646,148 @@ export default function SupplyTransformations() {
       )}
     </div>
   );
+}
+
+function ShadowComparisonPanel({
+  run,
+  isLoading,
+  error,
+  canRun,
+  isRunning,
+  onRun,
+}: {
+  run: PlannerShadowRunDto | null;
+  isLoading: boolean;
+  error: Error | null;
+  canRun: boolean;
+  isRunning: boolean;
+  onRun: () => void;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <CardTitle>Shadow ATP comparison</CardTitle>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Compare legacy and proposed ATP from the same sealed snapshot. This records evidence
+              only; it does not switch readers, reserve stock, or publish channel quantities.
+            </p>
+          </div>
+          {canRun && (
+            <Button type="button" variant="outline" disabled={isRunning} onClick={onRun}>
+              <PlayCircle className="mr-2 h-4 w-4" />
+              {isRunning ? "Comparing…" : "Run comparison"}
+            </Button>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {isLoading && <div className="text-sm text-muted-foreground">Loading evidence…</div>}
+        {error && <div className="text-sm text-destructive">{error.message}</div>}
+        {!isLoading && !error && !run && (
+          <div className="text-sm text-muted-foreground">
+            No shadow comparison has been recorded for this product.
+          </div>
+        )}
+        {run && (
+          <>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <Badge variant={run.status === "completed" ? "outline" : "destructive"}>
+                {run.status === "completed" ? "planner evidence ready" : "configuration blocked"}
+              </Badge>
+              <span>Legacy {run.legacyInventoryStrategy}</span>
+              <span>·</span>
+              <span>Snapshot {run.snapshotFingerprint.slice(0, 12)}</span>
+              <span>·</span>
+              <span>captured {new Date(run.capturedAt).toLocaleString()}</span>
+              <span>·</span>
+              <span>completed {new Date(run.completedAt).toLocaleString()}</span>
+              <span>·</span>
+              <span>{run.modelVersion === null ? "no selected model" : `model v${run.modelVersion}`}</span>
+            </div>
+            {run.blockerCodes.length > 0 && (
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+                Activation blockers: {run.blockerCodes.join(", ")}. The numeric preview remains
+                evidence only and is not safe for operational cutover.
+              </div>
+            )}
+            <div className="overflow-x-auto rounded-md border">
+              <table className="w-full min-w-[760px] text-left text-sm">
+                <thead className="border-b bg-muted/50 text-xs uppercase text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2">Scope</th>
+                    <th className="px-3 py-2">SKU</th>
+                    <th className="px-3 py-2 text-right">Legacy ATP</th>
+                    <th className="px-3 py-2 text-right">Proposed ATP</th>
+                    <th className="px-3 py-2 text-right">Difference</th>
+                    <th className="px-3 py-2">Evidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {run.results.map((result) => {
+                    return (
+                      <tr
+                        key={`${result.warehouseId ?? "network"}:${result.productVariantId}`}
+                        className="border-b last:border-b-0"
+                      >
+                        <td className="px-3 py-2">
+                          {result.warehouseId === null
+                            ? "Network"
+                            : `${result.warehouseCodeSnapshot} (${result.warehouseId})`}
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="font-medium">
+                            {result.productVariantSkuSnapshot ?? `Variant ${result.productVariantId}`}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {result.productVariantNameSnapshot}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {formatPlannerQuantity(result.legacyAtpUnits)}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {formatPlannerQuantity(result.proposedAtpUnits)}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {formatPlannerDifference(result.differenceUnits)}
+                        </td>
+                        <td className="px-3 py-2 text-xs">
+                          {result.classifications.map(formatShadowClassification).join(", ")}
+                          {result.readinessState === "blocked" && (
+                            <div className="mt-1 font-medium text-amber-800">Blocked from cutover</div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+        {!canRun && (
+          <div className="text-xs text-muted-foreground">
+            The inventory planning edit ability is required to record a new comparison.
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function formatPlannerQuantity(value: string): string {
+  return BigInt(value).toLocaleString();
+}
+
+function formatPlannerDifference(value: string): string {
+  const parsed = BigInt(value);
+  return `${parsed > BigInt(0) ? "+" : ""}${parsed.toLocaleString()}`;
+}
+
+function formatShadowClassification(value: string): string {
+  return value.replaceAll("_", " ");
 }
 
 function DestinationColumns({

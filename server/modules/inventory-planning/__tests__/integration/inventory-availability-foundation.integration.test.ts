@@ -9,6 +9,11 @@ import * as databaseSchema from "@shared/schema";
 
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
 import { transformationModelDefinitionSchema } from "../../domain/inventory-availability-master-data.contracts";
+import {
+  projectCanonicalAtp,
+  sealSupplySnapshot,
+} from "../../domain/inventory-availability-planner";
+import type { SupplySnapshotContentDto } from "@shared/types/inventory-availability-planner";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 
@@ -17,6 +22,10 @@ const DISPOSABLE_DB = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeWithDisposableDb = TEST_DB_URL && DISPOSABLE_DB ? describe : describe.skip;
 const migrationSql = readFileSync(
   resolve(process.cwd(), "migrations/211_inventory_availability_foundation.sql"),
+  "utf8",
+);
+const shadowMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/214_inventory_planner_shadow_evidence.sql"),
   "utf8",
 );
 const HASH = "a".repeat(64);
@@ -1644,5 +1653,175 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await pool.query("DROP SCHEMA IF EXISTS wms CASCADE");
       await pool.query("DROP TABLE IF EXISTS inventory.inventory_levels");
     }
+  });
+
+  it("installs append-only Phase 2 shadow evidence with column-to-payload guarantees", async () => {
+    const scope = await seedProductAndWarehouse([1]);
+    const modelId = await insertDraftModel(scope.productId, "phase2-shadow");
+    await markModelValid(modelId);
+    await pool.query(
+      `INSERT INTO inventory.transformation_model_heads (
+         product_id, draft_model_id, updated_by, update_reason
+       ) VALUES ($1, $2, 'integration-test', 'Phase 2 shadow model')`,
+      [scope.productId, modelId],
+    );
+
+    const migrationClient = await pool.connect();
+    try {
+      await migrationClient.query("BEGIN");
+      await migrationClient.query(shadowMigrationSql);
+      await migrationClient.query("COMMIT");
+    } catch (error) {
+      await migrationClient.query("ROLLBACK");
+      throw error;
+    } finally {
+      migrationClient.release();
+    }
+
+    const content: SupplySnapshotContentDto = {
+      schemaVersion: "inventory_availability_snapshot_v1",
+      capturedAt: "2026-08-27T12:00:00.000Z",
+      productId: scope.productId,
+      legacyInventoryStrategy: "physical_fungible",
+      variants: [{
+        id: scope.variantIds[0]!,
+        productId: scope.productId,
+        sku: "INTEGRATION-EA",
+        name: "Integration Each",
+        unitsPerVariant: 1,
+        isActive: true,
+      }],
+      warehouses: [{
+        id: scope.warehouseId,
+        code: "INT",
+        isActive: true,
+        hubWarehouseId: null,
+      }],
+      locations: [{
+        id: scope.locationId,
+        warehouseId: scope.warehouseId,
+        code: "INT-PICK",
+        locationType: "pick",
+        isPickable: true,
+        isActive: true,
+        isFrozen: false,
+        promisePolicy: null,
+      }],
+      inventoryPositions: [],
+      safetyPolicies: [{
+        policyId: 1,
+        version: 1,
+        lifecycleSelection: "draft_head",
+        scopeKey: "business",
+        scopeType: "business",
+        productVariantId: null,
+        warehouseId: null,
+        policyMode: "off",
+        fixedUnits: null,
+        daysOfCoverMilliDays: null,
+        untrustedDemandFallbackUnits: null,
+        demandMethodVersion: null,
+        definitionHash: HASH,
+      }],
+      demandEvidence: [],
+      transformationModels: [{
+        modelId,
+        productId: scope.productId,
+        version: 1,
+        lifecycleSelection: "draft_head",
+        lifecycleStatus: "draft",
+        buildToPromiseEnabled: false,
+        definitionHash: HASH,
+        validationState: "valid",
+        validationErrors: [],
+        paths: [],
+        recipeBindings: [],
+      }],
+      legacyRecipes: [],
+      outputLocations: [{
+        productVariantId: scope.variantIds[0]!,
+        warehouseId: scope.warehouseId,
+        warehouseLocationId: scope.locationId,
+      }],
+      claimProjectionSource: "inventory_levels.reserved_qty",
+    };
+    const snapshot = sealSupplySnapshot(content);
+    const projection = projectCanonicalAtp(snapshot, {
+      targetVariantId: scope.variantIds[0]!,
+      scope: { kind: "network" },
+    });
+    expect(projection).toMatchObject({ status: "ready", atpUnits: "0" });
+
+    const run = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.planner_shadow_runs (
+         product_id, model_id, model_version, model_definition_hash,
+         legacy_inventory_strategy, snapshot_fingerprint, snapshot_payload,
+         status, blocker_codes, idempotency_key, requested_by, captured_at, completed_at
+       ) VALUES ($1, $2, 1, $3, 'physical_fungible', $4, $5::jsonb,
+         'completed', '[]'::jsonb, 'integration:shadow:1', 'integration-test', $6, $7)
+       RETURNING id`,
+      [
+        scope.productId,
+        modelId,
+        HASH,
+        snapshot.snapshotFingerprint,
+        JSON.stringify(snapshot),
+        snapshot.capturedAt,
+        "2026-08-27T12:00:01.000Z",
+      ],
+    );
+    await pool.query(
+      `INSERT INTO inventory.planner_shadow_results (
+         run_id, warehouse_id, product_variant_id, legacy_atp_units,
+         proposed_atp_units, difference_units, readiness_state,
+         classifications, proposed_projection
+       ) VALUES ($1, NULL, $2, 0, 0, 0, 'ready', '["match"]'::jsonb, $3::jsonb)`,
+      [run.rows[0]!.id, scope.variantIds[0], JSON.stringify(projection)],
+    );
+
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE inventory.planner_shadow_runs SET status = 'blocked' WHERE id = $1",
+        [run.rows[0]!.id],
+      ),
+      "planner shadow evidence is append-only",
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        "DELETE FROM inventory.planner_shadow_results WHERE run_id = $1",
+        [run.rows[0]!.id],
+      ),
+      "planner shadow evidence is append-only",
+    );
+
+    const invalidRun = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.planner_shadow_runs (
+         product_id, model_id, model_version, model_definition_hash,
+         legacy_inventory_strategy, snapshot_fingerprint, snapshot_payload,
+         status, blocker_codes, idempotency_key, requested_by, captured_at, completed_at
+       ) VALUES ($1, $2, 1, $3, 'physical_fungible', $4, $5::jsonb,
+         'completed', '[]'::jsonb, 'integration:shadow:invalid', 'integration-test', $6, $7)
+       RETURNING id`,
+      [
+        scope.productId,
+        modelId,
+        HASH,
+        snapshot.snapshotFingerprint,
+        JSON.stringify(snapshot),
+        snapshot.capturedAt,
+        "2026-08-27T12:00:01.000Z",
+      ],
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        `INSERT INTO inventory.planner_shadow_results (
+           run_id, warehouse_id, product_variant_id, legacy_atp_units,
+           proposed_atp_units, difference_units, readiness_state,
+           classifications, proposed_projection
+         ) VALUES ($1, NULL, $2, 0, 1, 1, 'ready', '["match"]'::jsonb, $3::jsonb)`,
+        [invalidRun.rows[0]!.id, scope.variantIds[0], JSON.stringify(projection)],
+      ),
+      "planner_shadow_results_evidence_chk",
+    );
   });
 });

@@ -385,6 +385,12 @@
   "inventory.location_replen_config": [
     "modules/inventory"
   ],
+  "inventory.planner_shadow_results": [
+    "modules/inventory-planning"
+  ],
+  "inventory.planner_shadow_runs": [
+    "modules/inventory-planning"
+  ],
   "inventory.promise_safety_policy_heads": [
     "modules/inventory-planning"
   ],
