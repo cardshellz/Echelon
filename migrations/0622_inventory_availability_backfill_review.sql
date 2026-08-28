@@ -14,6 +14,8 @@ ALTER TABLE inventory.transformation_model_versions
       AND origin_input_hash IS NULL
       AND origin_result_hash IS NULL)
     OR (origin = 'phase3_backfill'
+      AND origin_input_hash IS NOT NULL
+      AND origin_result_hash IS NOT NULL
       AND origin_input_hash ~ '^[0-9a-f]{64}$'
       AND origin_result_hash ~ '^[0-9a-f]{64}$')
   );

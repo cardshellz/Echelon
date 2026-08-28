@@ -315,7 +315,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         )
       ORDER BY table_schema, table_name
     `);
-    expect(tables.rows).toHaveLength(14);
+    expect(tables.rows).toHaveLength(15);
     expect(tables.rows.some((row) => row.table_name.startsWith("atp_"))).toBe(false);
   });
 

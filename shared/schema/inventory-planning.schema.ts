@@ -480,6 +480,8 @@ export const transformationModelVersions = inventoryPlanningSchema.table(
           AND ${table.originInputHash} IS NULL
           AND ${table.originResultHash} IS NULL)
         OR (${table.origin} = 'phase3_backfill'
+          AND ${table.originInputHash} IS NOT NULL
+          AND ${table.originResultHash} IS NOT NULL
           AND ${table.originInputHash} ~ '^[0-9a-f]{64}$'
           AND ${table.originResultHash} ~ '^[0-9a-f]{64}$')`,
     ),
