@@ -168,6 +168,8 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query("BEGIN");
 
       await migrationClient.query(migrationSql);
+      await migrationClient.query(shadowMigrationSql);
+      await migrationClient.query(backfillMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -1670,18 +1672,6 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       [scope.productId, modelId],
     );
 
-    const migrationClient = await pool.connect();
-    try {
-      await migrationClient.query("BEGIN");
-      await migrationClient.query(shadowMigrationSql);
-      await migrationClient.query("COMMIT");
-    } catch (error) {
-      await migrationClient.query("ROLLBACK");
-      throw error;
-    } finally {
-      migrationClient.release();
-    }
-
     const content: SupplySnapshotContentDto = {
       schemaVersion: "inventory_availability_snapshot_v1",
       capturedAt: "2026-08-27T12:00:00.000Z",
@@ -1830,18 +1820,6 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
   });
 
   it("installs immutable Phase 3 origin and hash-bound review evidence", async () => {
-    const migrationClient = await pool.connect();
-    try {
-      await migrationClient.query("BEGIN");
-      await migrationClient.query(backfillMigrationSql);
-      await migrationClient.query("COMMIT");
-    } catch (error) {
-      await migrationClient.query("ROLLBACK");
-      throw error;
-    } finally {
-      migrationClient.release();
-    }
-
     const scope = await seedProductAndWarehouse([1]);
     const inputHash = "b".repeat(64);
     const resultHash = "c".repeat(64);
