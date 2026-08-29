@@ -33,6 +33,19 @@ const preview = Object.freeze({
   recoveryStatus: "provider_line_keys_authoritative" as const,
   previewEvidenceHash: "a".repeat(64),
   providerEvidenceHash: "b".repeat(64),
+  reviewContext: Object.freeze({
+    trackingNumber: "9400111899223856928499",
+    shipStationOrderId: "700100200",
+    wmsOrders: Object.freeze([
+      Object.freeze({ wmsOrderId: 301, orderNumber: "#1001" }),
+    ]),
+    linkedShipments: Object.freeze([
+      Object.freeze({ source: "legacy_wms_shipment" as const, shipmentId: "88" }),
+    ]),
+    linePresentations: Object.freeze([
+      Object.freeze({ wmsShipmentItemId: 7_001, itemName: "Card Shell" }),
+    ]),
+  }),
   expectedContents: Object.freeze({
     kind: "available" as const,
     source: "legacy_wms_shipment" as const,

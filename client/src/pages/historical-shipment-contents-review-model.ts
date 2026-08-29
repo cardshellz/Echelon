@@ -13,6 +13,7 @@ export type HistoricalContentsComparisonStatus =
 
 export interface HistoricalContentsComparisonRow {
   readonly wmsShipmentItemId: number;
+  readonly itemName: string | null;
   readonly sku: string | null;
   readonly expectedQuantity: number | null;
   readonly attestedQuantity: number | null;
@@ -51,6 +52,9 @@ export function historicalContentsComparisonRows(
   const attestedById = new Map(
     preview.attestedContents.map((line) => [line.wmsShipmentItemId, line] as const),
   );
+  const presentationById = new Map(
+    preview.reviewContext.linePresentations.map((line) => [line.wmsShipmentItemId, line] as const),
+  );
   const identities = new Set([...expectedById.keys(), ...attestedById.keys()]);
   return Object.freeze([...identities]
     .sort((left, right) => left - right)
@@ -66,6 +70,7 @@ export function historicalContentsComparisonRows(
             : "quantity_mismatch";
       return Object.freeze({
         wmsShipmentItemId,
+        itemName: presentationById.get(wmsShipmentItemId)?.itemName ?? null,
         sku: expected?.sku ?? null,
         expectedQuantity: expected?.quantity ?? null,
         attestedQuantity: attested?.quantity ?? null,

@@ -14,6 +14,19 @@ const preview: HistoricalShipStationContentsAttestationPreview = {
   recoveryStatus: "provider_line_keys_authoritative",
   previewEvidenceHash: "a".repeat(64),
   providerEvidenceHash: "b".repeat(64),
+  reviewContext: {
+    trackingNumber: "9400111899223856928499",
+    shipStationOrderId: "700100200",
+    wmsOrders: [{ wmsOrderId: 301, orderNumber: "#1001" }],
+    linkedShipments: [
+      { source: "physical_shipment", shipmentId: "77" },
+      { source: "legacy_wms_shipment", shipmentId: "88" },
+    ],
+    linePresentations: [
+      { wmsShipmentItemId: 10, itemName: "Item A" },
+      { wmsShipmentItemId: 20, itemName: "Item B" },
+    ],
+  },
   expectedContents: {
     kind: "available",
     source: "physical_shipment",
@@ -34,6 +47,7 @@ describe("historical shipment contents review model", () => {
     expect(historicalContentsComparisonRows(preview)).toEqual([
       {
         wmsShipmentItemId: 10,
+        itemName: "Item A",
         sku: "SKU-A",
         expectedQuantity: 2,
         attestedQuantity: 2,
@@ -41,6 +55,7 @@ describe("historical shipment contents review model", () => {
       },
       {
         wmsShipmentItemId: 20,
+        itemName: "Item B",
         sku: "SKU-B",
         expectedQuantity: 3,
         attestedQuantity: 4,
@@ -48,6 +63,7 @@ describe("historical shipment contents review model", () => {
       },
       {
         wmsShipmentItemId: 30,
+        itemName: null,
         sku: null,
         expectedQuantity: null,
         attestedQuantity: 1,

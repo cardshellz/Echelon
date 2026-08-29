@@ -223,6 +223,7 @@ CREATE TABLE inventory.inventory_levels (
 
 CREATE TABLE wms.orders (
   id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  order_number varchar(50) NOT NULL DEFAULT 'TEST-ORDER',
   warehouse_status varchar(30) NOT NULL DEFAULT 'pending',
   cancelled_at timestamp,
   order_placed_at timestamp NOT NULL DEFAULT now()
@@ -232,12 +233,14 @@ CREATE TABLE wms.order_items (
   id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   order_id integer NOT NULL REFERENCES wms.orders(id) ON DELETE CASCADE,
   sku varchar(100),
+  name text NOT NULL DEFAULT 'Test item',
   quantity integer NOT NULL DEFAULT 0,
   status varchar(30) NOT NULL DEFAULT 'pending'
 );
 
 CREATE TABLE wms.outbound_shipments (
-  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  order_id integer REFERENCES wms.orders(id)
 );
 
 CREATE TABLE wms.outbound_shipment_items (
@@ -253,6 +256,7 @@ CREATE TABLE wms.outbound_shipment_items (
 
 CREATE TABLE wms.shipment_requests (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  wms_order_id integer REFERENCES wms.orders(id) ON DELETE CASCADE,
   legacy_wms_shipment_id integer UNIQUE
     REFERENCES wms.outbound_shipments(id) ON DELETE SET NULL
 );

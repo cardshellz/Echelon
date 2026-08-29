@@ -15,6 +15,7 @@ import {
 import type {
   HistoricalShipStationContentsAttestationRepository,
   HistoricalShipStationContentsAttestationRecord,
+  HistoricalShipStationContentsAttestationReviewSnapshot,
   PersistedHistoricalShipStationContentsAttestation,
 } from "./historical-shipstation-contents-attestation.repository";
 
@@ -46,6 +47,7 @@ export interface HistoricalShipStationContentsAttestationPreview {
   readonly recoveryStatus: HistoricalShipStationContentsRecoveryEvidence["recoveryStatus"];
   readonly previewEvidenceHash: string;
   readonly providerEvidenceHash: string;
+  readonly reviewContext: HistoricalShipStationContentsAttestationReviewSnapshot["reviewContext"];
   readonly expectedContents: HistoricalShipStationContentsCandidate["expectedContents"];
   readonly attestedContents: HistoricalShipStationContentsRecoveryEvidence["attestedContents"];
 }
@@ -79,6 +81,24 @@ export class HistoricalShipStationContentsAttestationServiceError extends Error 
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+export function historicalShipStationContentsAttestationPreviewEvidenceHash(input: Readonly<{
+  readonly shippingProviderLabelId: string;
+  readonly recoveryStatus: HistoricalShipStationContentsRecoveryEvidence["recoveryStatus"];
+  readonly providerEvidenceHash: string;
+  readonly reviewContext: HistoricalShipStationContentsAttestationReviewSnapshot["reviewContext"];
+}>): string {
+  const recoverableCaseEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
+    shippingProviderLabelId: input.shippingProviderLabelId,
+    recoveryStatus: input.recoveryStatus,
+    providerEvidenceHash: input.providerEvidenceHash,
+  });
+  return sha256(canonicalJson(Object.freeze({
+    contract: "historical_shipstation_contents_attestation_preview_v2",
+    recoverableCaseEvidenceHash,
+    reviewContext: input.reviewContext,
+  })));
 }
 
 function sameCandidate(
@@ -263,14 +283,15 @@ export class HistoricalShipStationContentsAttestationService {
   private async loadPreview(
     shippingProviderLabelId: string,
   ): Promise<LoadedHistoricalShipStationContentsAttestationPreview> {
-    const candidate = await this.repository.loadCandidateSnapshot(shippingProviderLabelId);
-    if (candidate === null) {
+    const snapshot = await this.repository.loadReviewSnapshot(shippingProviderLabelId);
+    if (snapshot === null) {
       throw new HistoricalShipStationContentsAttestationServiceError(
         "CANDIDATE_NOT_FOUND",
         "Historical contents attestation candidate is no longer eligible",
         Object.freeze({ shippingProviderLabelId }),
       );
     }
+    const { candidate, reviewContext } = snapshot;
 
     const providerResult = await this.providerClient.loadShipmentContents(
       candidate.providerShipmentId,
@@ -297,10 +318,11 @@ export class HistoricalShipStationContentsAttestationService {
         }),
       );
     }
-    const previewEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
+    const previewEvidenceHash = historicalShipStationContentsAttestationPreviewEvidenceHash({
       shippingProviderLabelId: candidate.shippingProviderLabelId,
       recoveryStatus: recoveryEvidence.recoveryStatus,
       providerEvidenceHash: recoveryEvidence.evidenceHash,
+      reviewContext,
     });
     const preview: HistoricalShipStationContentsAttestationPreview = Object.freeze({
       shippingProviderLabelId: candidate.shippingProviderLabelId,
@@ -309,6 +331,7 @@ export class HistoricalShipStationContentsAttestationService {
       recoveryStatus: recoveryEvidence.recoveryStatus,
       previewEvidenceHash,
       providerEvidenceHash: recoveryEvidence.evidenceHash,
+      reviewContext,
       expectedContents: candidate.expectedContents,
       attestedContents: recoveryEvidence.attestedContents,
     });
