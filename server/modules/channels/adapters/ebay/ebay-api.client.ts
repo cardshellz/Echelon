@@ -77,6 +77,27 @@ interface NormalizedEbayFulfillmentLine {
   readonly quantity: number;
 }
 
+/**
+ * A fulfillment line as eBay REPORTS it back on the read path.
+ *
+ * `quantity` is nullable here and non-null on `NormalizedEbayFulfillmentLine`
+ * because the two directions of eBay's API are not symmetric. The POST body we
+ * send takes `{ lineItemId, quantity }`, but the GET
+ * `/sell/fulfillment/v1/order/{orderId}/shipping_fulfillment` response returns
+ * each line as `{ lineItemId }` alone - no `quantity` key at all. Verified
+ * 2026-08-29 against production eBay: across the 115 parked pushes, 160 of 160
+ * returned line items had no `quantity` field.
+ */
+interface ProviderEbayFulfillmentLine {
+  readonly lineItemId: string;
+  readonly quantity: number | null;
+}
+
+/**
+ * Normalize the lines WE intend to ship. Strict on purpose: our own payload is
+ * the authority for how much of each line is in the package, so a missing or
+ * nonsensical quantity is a real defect and must not reach eBay.
+ */
 function normalizeFulfillmentLines(
   value: unknown,
 ): readonly NormalizedEbayFulfillmentLine[] | null {
@@ -97,10 +118,83 @@ function normalizeFulfillmentLines(
   );
 }
 
+/**
+ * Normalize the lines eBay reports on an existing fulfillment.
+ *
+ * Absent `quantity` is tolerated because eBay never sends one; a PRESENT but
+ * malformed quantity is still rejected, so this stays strict about everything
+ * eBay actually tells us. A line id is still mandatory - without it there is
+ * nothing to compare and we must not claim a match.
+ */
+function normalizeProviderFulfillmentLines(
+  value: unknown,
+): readonly ProviderEbayFulfillmentLine[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+
+  const quantities = new Map<string, number | null>();
+  for (const candidate of value) {
+    const lineItemId = String((candidate as any)?.lineItemId ?? "").trim();
+    if (!lineItemId) return null;
+
+    const rawQuantity = (candidate as any)?.quantity;
+    const quantityOmitted = rawQuantity === undefined || rawQuantity === null;
+    let quantity: number | null = null;
+    if (!quantityOmitted) {
+      quantity = Number(rawQuantity);
+      if (!Number.isInteger(quantity) || quantity <= 0) return null;
+    }
+
+    if (!quantities.has(lineItemId)) {
+      quantities.set(lineItemId, quantity);
+      continue;
+    }
+    // Duplicate id: sum only when BOTH sides carry a real quantity. If either
+    // is unknown the total is unknown, and guessing it would be the exact
+    // over-reach this guard exists to prevent.
+    const existing = quantities.get(lineItemId) ?? null;
+    quantities.set(
+      lineItemId,
+      existing === null || quantity === null ? null : existing + quantity,
+    );
+  }
+
+  return Object.freeze(
+    [...quantities.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([lineItemId, quantity]) => Object.freeze({ lineItemId, quantity })),
+  );
+}
+
 function fulfillmentLineSignature(
   lines: readonly NormalizedEbayFulfillmentLine[],
 ): string {
   return JSON.stringify(lines.map((line) => [line.lineItemId, line.quantity]));
+}
+
+/**
+ * Does the fulfillment eBay already holds describe the same package we were
+ * about to push?
+ *
+ * Requires the same set of line item ids, and requires every quantity eBay DOES
+ * report to equal ours. A quantity eBay omits is treated as unstated rather
+ * than as a mismatch - that is the single assumption relaxed here, and it is
+ * relaxed because eBay omits it on every read.
+ */
+function providerLinesMatchExpected(
+  providerLines: readonly ProviderEbayFulfillmentLine[],
+  expectedLines: readonly NormalizedEbayFulfillmentLine[],
+): boolean {
+  if (providerLines.length !== expectedLines.length) return false;
+
+  const expectedById = new Map(
+    expectedLines.map((line) => [line.lineItemId, line.quantity]),
+  );
+  for (const line of providerLines) {
+    const expectedQuantity = expectedById.get(line.lineItemId);
+    if (expectedQuantity === undefined) return false;
+    if (line.quantity !== null && line.quantity !== expectedQuantity) return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -602,7 +696,7 @@ export class EbayApiClient {
     const identityMatches: Array<{
       fulfillmentId: string;
       trackingNumber: string;
-      lines: readonly NormalizedEbayFulfillmentLine[] | null;
+      lines: readonly ProviderEbayFulfillmentLine[] | null;
     }> = [];
     // eBay's raw lineItems for each identity match, kept only for the diagnostic
     // below. `normalizeFulfillmentLines` collapses every rejection to `null`, so
@@ -623,7 +717,7 @@ export class EbayApiClient {
       identityMatches.push({
         fulfillmentId: itemFulfillmentId,
         trackingNumber: itemTracking,
-        lines: normalizeFulfillmentLines(item?.lineItems),
+        lines: normalizeProviderFulfillmentLines(item?.lineItems),
       });
     }
 
@@ -633,7 +727,7 @@ export class EbayApiClient {
       Boolean(candidate.fulfillmentId)
       && candidate.trackingNumber === expectedTracking
       && candidate.lines !== null
-      && fulfillmentLineSignature(candidate.lines) === expectedLineSignature,
+      && providerLinesMatchExpected(candidate.lines, expectedLines),
     );
     if (identityMatches.length === 1 && exactMatches.length === 1) {
       return {
@@ -670,7 +764,7 @@ export class EbayApiClient {
             candidate.trackingNumber !== expectedTracking ? "tracking_mismatch" : null,
             candidate.lines === null ? "lines_unparseable" : null,
             candidate.lines !== null
-              && fulfillmentLineSignature(candidate.lines) !== expectedLineSignature
+              && !providerLinesMatchExpected(candidate.lines, expectedLines)
               ? "line_signature_mismatch"
               : null,
           ].filter(Boolean),
