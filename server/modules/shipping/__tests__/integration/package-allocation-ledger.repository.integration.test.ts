@@ -847,8 +847,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       [leadUserId],
     );
     const order = await pool.query<{ id: number }>(
-      `INSERT INTO wms.orders (order_number, customer_name)
-       VALUES ('#ATTEST-1001', 'Historical attestation test')
+      `INSERT INTO wms.orders (order_number)
+       VALUES ('#ATTEST-1001')
        RETURNING id`,
     );
     const orderItem = await pool.query<{ id: number }>(

@@ -72,4 +72,25 @@ describe("named-schema integration fixture", () => {
       }
     });
   }
+
+  it("supports the historical shipment contents operator-identity query", () => {
+    const requiredColumns = [
+      ["wms.orders", ["order_number"]],
+      ["wms.order_items", ["name"]],
+      ["wms.outbound_shipments", ["order_id"]],
+    ] as const;
+
+    for (const [tableName, columns] of requiredColumns) {
+      const tablePattern = new RegExp(
+        `CREATE TABLE ${escapeRegex(tableName)} \\(([\\s\\S]*?)\\n\\);`,
+      );
+      const tableBody = fixtureSql.match(tablePattern)?.[1];
+      expect(tableBody, `missing fixture table ${tableName}`).toBeDefined();
+      for (const column of columns) {
+        expect(tableBody, `missing ${tableName}.${column}`).toMatch(
+          new RegExp(`^  ${escapeRegex(column)}\\s`, "m"),
+        );
+      }
+    }
+  });
 });
