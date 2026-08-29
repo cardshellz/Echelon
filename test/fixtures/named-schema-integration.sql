@@ -256,6 +256,7 @@ CREATE TABLE wms.outbound_shipment_items (
 
 CREATE TABLE wms.shipment_requests (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  wms_order_id integer REFERENCES wms.orders(id) ON DELETE CASCADE,
   legacy_wms_shipment_id integer UNIQUE
     REFERENCES wms.outbound_shipments(id) ON DELETE SET NULL
 );

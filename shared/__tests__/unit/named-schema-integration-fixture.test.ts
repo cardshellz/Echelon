@@ -75,9 +75,44 @@ describe("named-schema integration fixture", () => {
 
   it("supports the historical shipment contents operator-identity query", () => {
     const requiredColumns = [
-      ["wms.orders", ["order_number"]],
-      ["wms.order_items", ["name"]],
-      ["wms.outbound_shipments", ["order_id"]],
+      ["wms.orders", ["id", "order_number"]],
+      ["wms.order_items", ["id", "order_id", "name"]],
+      ["wms.outbound_shipments", ["id", "order_id"]],
+      ["wms.shipment_requests", ["id", "wms_order_id"]],
+      [
+        "wms.shipping_engine_order_requests",
+        ["shipping_engine_order_id", "shipment_request_id"],
+      ],
+      [
+        "wms.physical_shipments",
+        ["id", "shipment_request_id", "shipping_engine_order_id"],
+      ],
+      [
+        "wms.shipping_provider_labels",
+        ["id", "provider", "provider_order_id", "tracking_number", "label_direction"],
+      ],
+      [
+        "wms.shipping_provider_label_links",
+        [
+          "id",
+          "shipping_provider_label_id",
+          "shipment_request_id",
+          "shipping_engine_order_id",
+          "physical_shipment_id",
+          "legacy_wms_shipment_id",
+        ],
+      ],
+      [
+        "wms.outbound_shipment_items",
+        [
+          "id",
+          "order_item_id",
+          "replacement_for_order_item_id",
+          "shipment_item_purpose",
+          "product_variant_id",
+        ],
+      ],
+      ["catalog.product_variants", ["id", "name"]],
     ] as const;
 
     for (const [tableName, columns] of requiredColumns) {
