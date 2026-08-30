@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const migration = readFileSync(
-  "migrations/0626_historical_shipstation_contents_system_recovery.sql",
+  "migrations/0627_historical_shipstation_contents_system_recovery.sql",
   "utf8",
 );
 const schema = readFileSync("shared/schema/fulfillment.schema.ts", "utf8");
@@ -27,6 +27,6 @@ describe("historical ShipStation contents system recovery migration", () => {
     expect(schema).toContain("uq_shipping_provider_label_events_one_contents_recovery");
     expect(schema).toContain("shipping_provider_label_events_recovery_payload_chk");
     expect(schema).toContain("historical_shipstation_contents_system_recovery");
-    expect(setup).toContain("migrations/0626_historical_shipstation_contents_system_recovery.sql");
+    expect(setup).toContain("migrations/0627_historical_shipstation_contents_system_recovery.sql");
   });
 });
