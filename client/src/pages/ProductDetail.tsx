@@ -337,6 +337,8 @@ interface ProductVariantRow {
   heightMm: number | null;
   shipsInOwnContainer: boolean;
   maxUnitsPerPackage: number | null;
+  requiresShipping: boolean;
+  trackInventory: boolean | null;
   hierarchyLevel: number;
   uomType?: VariantUomType | null;
   parentVariantId: number | null;
@@ -2111,6 +2113,8 @@ export default function ProductDetail() {
     package: emptyVariantPackageInput(),
     shipsInOwnContainer: false,
     maxUnitsPerPackage: "",
+    requiresShipping: true,
+    trackInventory: true,
   });
   const [skuManuallyEdited, setSkuManuallyEdited] = useState(false);
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
@@ -2186,6 +2190,8 @@ export default function ProductDetail() {
       package: emptyVariantPackageInput(),
       shipsInOwnContainer: false,
       maxUnitsPerPackage: "",
+      requiresShipping: true,
+      trackInventory: true,
     });
     setVariantDialogOpen(true);
   }, [computeAutoSku, computeAutoName]);
@@ -2221,6 +2227,8 @@ export default function ProductDetail() {
       package: emptyVariantPackageInput(),
       shipsInOwnContainer: false,
       maxUnitsPerPackage: "",
+      requiresShipping: true,
+      trackInventory: true,
     });
     setVariantDialogOpen(true);
     toast({
@@ -2245,6 +2253,8 @@ export default function ProductDetail() {
       package: variantPackageInputFromVariant(variant),
       shipsInOwnContainer: variant.shipsInOwnContainer ?? false,
       maxUnitsPerPackage: variant.maxUnitsPerPackage != null ? String(variant.maxUnitsPerPackage) : "",
+      requiresShipping: variant.requiresShipping !== false,
+      trackInventory: variant.trackInventory !== false,
     });
     setVariantDialogOpen(true);
   }, []);
@@ -2290,6 +2300,8 @@ export default function ProductDetail() {
         barcode: data.barcode || null,
         parentVariantId: data.parentVariantId,
         isBaseUnit: data.isBaseUnit,
+        requiresShipping: data.requiresShipping,
+        trackInventory: data.trackInventory,
         ...packageAttributes,
         ...packingFlags,
       });
@@ -2344,6 +2356,8 @@ export default function ProductDetail() {
           barcode: data.barcode || null,
           parentVariantId: data.parentVariantId,
           isBaseUnit: data.isBaseUnit,
+          requiresShipping: data.requiresShipping,
+          trackInventory: data.trackInventory,
           ...packageAttributes,
           ...packingFlags,
         }),
@@ -4073,6 +4087,51 @@ export default function ProductDetail() {
                 placeholder="Optional"
                 className="h-11"
               />
+            </div>
+
+            <div className="rounded-md border p-3 space-y-3">
+              <div>
+                <Label className="text-sm font-medium">Fulfillment &amp; Inventory</Label>
+                <p className="text-xs text-muted-foreground">
+                  Digital variants bypass warehouse ATP, reservations, picking, and channel quantity publication.
+                </p>
+              </div>
+              <div className="space-y-3">
+                <div className="flex items-start gap-2">
+                  <Checkbox
+                    id="variant-requires-shipping"
+                    checked={variantForm.requiresShipping}
+                    onCheckedChange={(checked) => setVariantForm((prev) => ({
+                      ...prev,
+                      requiresShipping: checked === true,
+                      trackInventory: checked === true ? prev.trackInventory : false,
+                    }))}
+                  />
+                  <div>
+                    <label htmlFor="variant-requires-shipping" className="text-sm cursor-pointer">
+                      Requires shipping (physical item)
+                    </label>
+                    <p className="text-xs text-muted-foreground">Turn this off for gift cards, donations, and other digital items.</p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-2">
+                  <Checkbox
+                    id="variant-track-inventory"
+                    checked={variantForm.trackInventory}
+                    disabled={!variantForm.requiresShipping}
+                    onCheckedChange={(checked) => setVariantForm((prev) => ({
+                      ...prev,
+                      trackInventory: checked === true,
+                    }))}
+                  />
+                  <div>
+                    <label htmlFor="variant-track-inventory" className="text-sm cursor-pointer">
+                      Track inventory and include in ATP
+                    </label>
+                    <p className="text-xs text-muted-foreground">Turn this off for physical items that ship but are not warehouse-managed.</p>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div className="rounded-md border p-3 space-y-3">

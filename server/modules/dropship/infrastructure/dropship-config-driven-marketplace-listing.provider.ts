@@ -11,6 +11,7 @@ export class ConfigDrivenDropshipMarketplaceListingProvider implements DropshipM
     content: DropshipCanonicalListingContent;
     priceCents: number | null;
     quantity: number;
+    storeCategoryNames?: readonly string[];
   }): DropshipMarketplaceListingValidationResult {
     const blockers: string[] = [];
     const warnings: string[] = [];
@@ -35,6 +36,9 @@ export class ConfigDrivenDropshipMarketplaceListingProvider implements DropshipM
     }
 
     for (const field of input.config.requiredProductFields) {
+      // eBay browse category has a provider invariant below so it produces one
+      // stable, domain-specific blocker even when the config also declares it.
+      if (field === "ebayBrowseCategoryId") continue;
       if (!hasProductField(input.content, field)) {
         blockers.push(`missing_product_field:${field}`);
       }
@@ -49,6 +53,16 @@ export class ConfigDrivenDropshipMarketplaceListingProvider implements DropshipM
     }
     if (!input.content.description?.trim()) {
       warnings.push("listing_description_missing");
+    }
+    const marketplaceCategoryId = normalizedOptionalString(
+      input.content.ebayBrowseCategoryId,
+    );
+    const marketplaceCategoryName = normalizedOptionalString(
+      input.content.ebayBrowseCategoryName,
+    );
+    const storeCategoryNames = normalizeStoreCategoryNames(input.storeCategoryNames);
+    if (input.config.platform === "ebay" && !marketplaceCategoryId) {
+      blockers.push("ebay_browse_category_required");
     }
 
     if (blockers.length > 0 || input.priceCents === null) {
@@ -66,6 +80,9 @@ export class ConfigDrivenDropshipMarketplaceListingProvider implements DropshipM
         title,
         description: input.content.description,
         category: input.content.category,
+        marketplaceCategoryId,
+        marketplaceCategoryName,
+        storeCategoryNames,
         brand: input.content.brand,
         gtin: input.content.gtin,
         mpn: input.content.mpn,
@@ -81,6 +98,18 @@ export class ConfigDrivenDropshipMarketplaceListingProvider implements DropshipM
       warnings,
     };
   }
+}
+
+function normalizedOptionalString(value: string | null): string | null {
+  const normalized = value?.trim();
+  return normalized ? normalized : null;
+}
+
+function normalizeStoreCategoryNames(values: readonly string[] | undefined): string[] {
+  const normalized = (values ?? [])
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return [...new Set(normalized)].slice(0, 2);
 }
 
 function hasConfigValue(config: Record<string, unknown>, dottedKey: string): boolean {

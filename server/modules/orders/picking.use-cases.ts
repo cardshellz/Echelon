@@ -1857,8 +1857,8 @@ export class PickingUseCases {
     // means "we sell and ship this, but do not inventory-manage it" — one-off
     // goods, inserts, occasional stock. The pick is confirmation-only: the
     // picking log keeps the audit trail; no level/lot/reservation writes.
-    if (productVariant.trackInventory === false) {
-      console.log(`[Inventory] ${productVariant.sku} is non-stock (track_inventory=false) — confirmation-only pick, no deduction`);
+    if (productVariant.requiresShipping === false || productVariant.trackInventory === false) {
+      console.log(`[Inventory] ${productVariant.sku} is not warehouse-managed — confirmation-only pick, no deduction`);
       return { success: true, noVariant: true, productVariantId: productVariant.id, locationId: 0, locationCode: null, systemQtyAfter: 0 };
     }
 

@@ -28,6 +28,87 @@ function repositoryWith(input: Readonly<{
 }
 
 describe("historical ShipStation contents attestation repository transaction", () => {
+  it("loads recognizable order, shipment, tracking, and item context in one read snapshot", async () => {
+    const harness = repositoryWith({
+      query: async (text) => {
+        if (text === "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY") {
+          return { rows: [] };
+        }
+        if (text === "COMMIT") return { rows: [] };
+        if (text.includes("label.provider_label_id") && text.includes("FOR UPDATE") === false) {
+          return {
+            rows: [{
+              shipping_provider_label_id: "51",
+              provider_label_id: "44001",
+              tracking_number: "9400111899223856928499",
+            }],
+          };
+        }
+        if (text.includes("COUNT(DISTINCT link.physical_shipment_id)")) {
+          return {
+            rows: [{
+              shipping_provider_label_id: "51",
+              physical_shipment_count: "0",
+              legacy_wms_shipment_count: "1",
+            }],
+          };
+        }
+        if (text.includes("'legacy_wms_shipment'::text AS source_kind")) {
+          return {
+            rows: [{
+              shipping_provider_label_id: "51",
+              source_kind: "legacy_wms_shipment",
+              linked_package_id: "88",
+              wms_shipment_item_id: "7001",
+              sku: "SKU-A",
+              quantity: "2",
+            }],
+          };
+        }
+        if (text.includes("NULLIF(BTRIM(label.provider_order_id)")) {
+          return {
+            rows: [{
+              tracking_number: "9400111899223856928499",
+              provider_order_id: "700100200",
+            }],
+          };
+        }
+        if (text.includes("link.physical_shipment_id::text AS physical_shipment_id")) {
+          return {
+            rows: [{ physical_shipment_id: null, legacy_wms_shipment_id: "88" }],
+          };
+        }
+        if (text.includes("WITH links AS MATERIALIZED")) {
+          return { rows: [{ wms_order_id: "301", order_number: "#1001" }] };
+        }
+        if (text.includes("AS item_name")) {
+          return { rows: [{ wms_shipment_item_id: "7001", item_name: "Card Shell" }] };
+        }
+        throw new Error(`Unexpected test query: ${text}`);
+      },
+    });
+
+    await expect(harness.repository.loadReviewSnapshot("51")).resolves.toEqual({
+      candidate: {
+        shippingProviderLabelId: "51",
+        providerShipmentId: 44_001,
+        expectedContents: {
+          kind: "available",
+          source: "legacy_wms_shipment",
+          lines: [{ wmsShipmentItemId: 7_001, sku: "SKU-A", quantity: 2 }],
+        },
+      },
+      reviewContext: {
+        trackingNumber: "9400111899223856928499",
+        shipStationOrderId: "700100200",
+        wmsOrders: [{ wmsOrderId: 301, orderNumber: "#1001" }],
+        linkedShipments: [{ source: "legacy_wms_shipment", shipmentId: "88" }],
+        linePresentations: [{ wmsShipmentItemId: 7_001, itemName: "Card Shell" }],
+      },
+    });
+    expect(harness.release).toHaveBeenCalledWith(undefined);
+  });
+
   it("rolls back and preserves the application failure", async () => {
     const harness = repositoryWith();
     const primary = new Error("classified application failure");

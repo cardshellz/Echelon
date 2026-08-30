@@ -48,6 +48,82 @@ describe("deterministic inventory availability backfill", () => {
     ]));
   });
 
+  it("excludes a digital-only product instead of inventing conversion paths", () => {
+    const digitalSource = source("physical_fungible");
+    digitalSource.variants = digitalSource.variants.map((variant) => ({
+      ...variant,
+      requiresShipping: false,
+      trackInventory: false,
+    }));
+
+    const candidate = planInventoryAvailabilityBackfill(digitalSource);
+
+    expect(candidate.classification).toBe("excluded_unmanaged");
+    expect(candidate.definition).toBeNull();
+    expect(candidate.issues).toContainEqual(expect.objectContaining({
+      code: "NO_INVENTORY_MANAGED_VARIANTS",
+      severity: "review",
+    }));
+  });
+
+  it("keeps a digital-only product excluded when stale recipe records exist", () => {
+    const digitalSource = source("recipe_managed");
+    digitalSource.variants = digitalSource.variants.map((variant) => ({
+      ...variant,
+      requiresShipping: false,
+      trackInventory: false,
+    }));
+    digitalSource.recipes = [{
+      id: 30,
+      code: "STALE-DIGITAL-RECIPE",
+      name: "Stale digital recipe",
+      version: 1,
+      status: "active",
+      recipeType: "conversion",
+      outputProductId: 10,
+      outputVariantId: 12,
+      outputUnitsPerVariant: 5,
+      outputQty: 1,
+      components: [],
+    }];
+
+    const candidate = planInventoryAvailabilityBackfill(digitalSource);
+
+    expect(candidate.classification).toBe("excluded_unmanaged");
+    expect(candidate.definition).toBeNull();
+    expect(candidate.issues).toContainEqual(expect.objectContaining({
+      code: "RECIPE_OUTPUT_NOT_ACTIVE",
+      severity: "blocking",
+    }));
+  });
+
+  it("plans only managed physical variants for a mixed product", () => {
+    const mixedSource = source("physical_fungible");
+    mixedSource.variants = [
+      ...mixedSource.variants,
+      {
+        id: 14,
+        productId: 10,
+        sku: "DIGITAL",
+        name: "Digital gift",
+        unitsPerVariant: 1,
+        uomType: "each",
+        isActive: true,
+        requiresShipping: false,
+        trackInventory: false,
+      },
+    ];
+
+    const candidate = planInventoryAvailabilityBackfill(mixedSource);
+    const pathVariantIds = candidate.definition!.paths.flatMap((path) => [
+      path.sourceVariantId,
+      path.destinationVariantId,
+    ]);
+
+    expect(candidate.classification).toBe("legacy_fungible_directed_pool");
+    expect(pathVariantIds).not.toContain(14);
+  });
+
   it("binds exact active recipe versions but never invents a reverse recipe path", () => {
     const recipeSource = source("recipe_managed");
     recipeSource.recipes = [

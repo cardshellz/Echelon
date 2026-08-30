@@ -72,4 +72,23 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(source).toContain('verifyPasskeyStepUp("bulk_listing_push")');
     expect(source).toContain('startEmailStepUp("bulk_listing_push")');
   });
+
+  it("separates required marketplace categorization from optional seller Store organization", () => {
+    const source = readFileSync(
+      join(process.cwd(), "client", "src", "pages", "dropship", "DropshipPortalCatalog.tsx"),
+      "utf8",
+    );
+    const comboboxSource = readFileSync(
+      join(process.cwd(), "client", "src", "components", "dropship", "EbayStoreCategoryCombobox.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("Your eBay Store organization (optional)");
+    expect(source).toContain("Card Shellz supplies the required eBay marketplace category.");
+    expect(source).toContain("Leaving both fields blank does not block preview or push.");
+    expect(source).toContain("Marketplace category");
+    expect(source).toContain("Your Store:");
+    expect(comboboxSource).toContain("Search your eBay Store categories...");
+    expect(comboboxSource).toContain('className="max-h-64 overflow-y-auto overscroll-contain"');
+  });
 });

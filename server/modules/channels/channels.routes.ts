@@ -30,6 +30,7 @@ import { enqueueShipStationHoldSyncRetry } from "../oms/webhook-retry.worker";
 import { reserveAndPushAfterHoldRelease } from "../orders/release-hold-push";
 import { WmsOrderInvariantError } from "../wms/insert-order";
 import { randomBytes } from "crypto";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import {
   buildWmsOrderBucketCounts,
   compareWmsOrdersNewestFirst,
@@ -67,6 +68,14 @@ export function registerChannelRoutes(app: Express) {
         return res.status(400).json({ error: "channelId and productVariantId are required" });
       }
 
+      const variant = await storage.getProductVariantById(productVariantId);
+      if (!variant) return res.status(404).json({ error: "Variant not found" });
+      if (!isInventoryManagedVariant(variant)) {
+        return res.status(409).json({
+          error: "Digital or inventory-untracked variants cannot have an inventory feed",
+        });
+      }
+
       // Check if feed already exists
       const existing = await storage.getChannelFeedByChannelAndVariant(channelId, productVariantId);
       if (existing) {
@@ -80,9 +89,6 @@ export function registerChannelRoutes(app: Express) {
       // Look up channel and variant
       const channel = await storage.getChannelById(channelId);
       if (!channel) return res.status(404).json({ error: "Channel not found" });
-
-      const variant = await storage.getProductVariantById(productVariantId);
-      if (!variant) return res.status(404).json({ error: "Variant not found" });
 
       // Use shopifyVariantId for Shopify channels, SKU for others
       const channelVariantId = channel.provider === "shopify" && variant.shopifyVariantId
@@ -259,6 +265,22 @@ export function registerChannelRoutes(app: Express) {
       }
 
       const data = parseResult.data;
+      const requestedSkus = [...new Set(data.items.map((item) => item.sku.trim().toUpperCase()))];
+      const catalogVariants = await db
+        .select({
+          sku: productVariants.sku,
+          requiresShipping: productVariants.requiresShipping,
+        })
+        .from(productVariants)
+        .where(sql`UPPER(BTRIM(${productVariants.sku})) IN (${sql.join(
+          requestedSkus.map((sku) => sql`${sku}`),
+          sql`, `,
+        )})`);
+      const requiresShippingBySku = new Map(
+        catalogVariants
+          .filter((variant) => variant.sku)
+          .map((variant) => [variant.sku!.trim().toUpperCase(), variant.requiresShipping] as const),
+      );
 
       // ----------------------------------------------------------------
       // Step 1: create the OMS parent order (source-of-truth for a manual
@@ -307,7 +329,7 @@ export function registerChannelRoutes(app: Express) {
             paidPriceCents: 0,
             totalCents: 0,
             taxable: true,
-            requiresShipping: true,
+            requiresShipping: requiresShippingBySku.get(item.sku.trim().toUpperCase()) ?? true,
           })),
         },
       );
@@ -352,6 +374,7 @@ export function registerChannelRoutes(app: Express) {
         location: item.location || "UNASSIGNED",
         zone: item.zone || "U",
         status: "pending" as const,
+        requiresShipping: requiresShippingBySku.get(item.sku.trim().toUpperCase()) === false ? 0 : 1,
       }));
 
       const order = await storage.createOrderWithItems(orderData as any, itemsData as any);
@@ -780,7 +803,7 @@ export function registerChannelRoutes(app: Express) {
             channelVariantId: pv.shopifyVariantId!,
             channelProductId: productMap.get(pv.productId) || null,
             channelSku: pv.sku || null,
-            isActive: 1,
+            isActive: isInventoryManagedVariant(pv) ? 1 : 0,
           });
           if (existing) feedsUpdated++;
           else feedsCreated++;
@@ -1539,7 +1562,8 @@ export function registerChannelRoutes(app: Express) {
       if (isNaN(productId)) return res.status(400).json({ error: "Invalid product ID" });
 
       const activeChannels = await storage.getActiveChannels();
-      const variants = await storage.getProductVariantsByProductId(productId);
+      const variants = (await storage.getProductVariantsByProductId(productId))
+        .filter(isInventoryManagedVariant);
       const variantIds = variants.map((v: any) => v.id);
 
       // Product-level allocation rules per channel

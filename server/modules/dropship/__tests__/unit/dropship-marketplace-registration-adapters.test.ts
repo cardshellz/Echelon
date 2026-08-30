@@ -169,6 +169,8 @@ describe("PgDropshipMarketplaceRegistrationOwnerRepository", () => {
             sku: "ARM-ENV-SGL-P50",
             is_active: true,
             units_per_variant: 50,
+            requires_shipping: false,
+            track_inventory: false,
           },
         ] };
       }
@@ -207,7 +209,7 @@ describe("PgDropshipMarketplaceRegistrationOwnerRepository", () => {
     expect(variants).toEqual([
       { id: 701, productId: 70, sku: "ARM-ENV-SGL-C750", isActive: true, availableQuantity: 0 },
       { id: 702, productId: 70, sku: "ARM-ENV-SGL-C700", isActive: false, availableQuantity: 0 },
-      { id: 703, productId: 70, sku: "ARM-ENV-SGL-P50", isActive: true, availableQuantity: 10 },
+      { id: 703, productId: 70, sku: "ARM-ENV-SGL-P50", isActive: true, availableQuantity: 0 },
     ]);
     expect(atp.getBaseAtpByProductIds).toHaveBeenCalledWith([70]);
     const accessQuery = queries.find((entry) => entry.sql.includes("AS can_list"));
@@ -298,7 +300,12 @@ describe("RefreshingDropshipEbayRegistrationCredentialProvider", () => {
     expect(result.accessToken).toBe("fresh-access-token");
     expect(fetchFn).toHaveBeenCalledWith(
       "https://api.sandbox.ebay.com/identity/v1/oauth2/token",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining(
+          encodeURIComponent("https://api.ebay.com/oauth/api_scope/sell.stores"),
+        ),
+      }),
     );
     expect(replaceTokens).toHaveBeenCalledWith({
       vendorId: 10,

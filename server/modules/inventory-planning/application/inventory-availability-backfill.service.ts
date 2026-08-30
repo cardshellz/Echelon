@@ -126,6 +126,8 @@ export class InventoryAvailabilityBackfillService {
         : null;
       const queueState = candidate.classification === "blocked"
         ? "blocked" as const
+        : candidate.classification === "excluded_unmanaged"
+          ? "excluded" as const
         : !draft
           ? "not_backfilled" as const
           : !candidateMatch
@@ -170,6 +172,7 @@ export class InventoryAvailabilityBackfillService {
       summary: {
         totalActiveProducts: rows.length,
         blocked: count("blocked"),
+        excluded: count("excluded"),
         notBackfilled: count("not_backfilled"),
         conflictingDraft: count("conflicting_draft"),
         awaitingReview: count("awaiting_review"),

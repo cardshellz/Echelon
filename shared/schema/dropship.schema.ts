@@ -559,6 +559,103 @@ export const dropshipStoreListingConfigs = dropshipSchema.table(
   ],
 );
 
+export const dropshipEbayStoreCategoryAssignmentRevisions = dropshipSchema.table(
+  "dropship_ebay_store_category_assignment_revisions",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    vendorId: integer("vendor_id")
+      .notNull()
+      .references(() => dropshipVendors.id, { onDelete: "cascade" }),
+    storeConnectionId: integer("store_connection_id")
+      .notNull()
+      .references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
+    productVariantId: integer("product_variant_id")
+      .notNull()
+      .references(() => productVariants.id, { onDelete: "cascade" }),
+    idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    storeCategoryIds: jsonb("store_category_ids").notNull().default([]),
+    storeCategoryNames: jsonb("store_category_names").notNull().default([]),
+    actorType: varchar("actor_type", { length: 40 }).notNull(),
+    actorId: varchar("actor_id", { length: 255 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("dropship_ebay_store_category_revision_idem_idx").on(
+      table.vendorId,
+      table.idempotencyKey,
+    ),
+    index("dropship_ebay_store_category_revision_target_idx").on(
+      table.storeConnectionId,
+      table.productVariantId,
+      table.createdAt,
+    ),
+    check(
+      "dropship_ebay_store_category_revision_actor_chk",
+      sql`${table.actorType} IN ('vendor','admin','system')`,
+    ),
+    check(
+      "dropship_ebay_store_category_revision_ids_chk",
+      sql`jsonb_typeof(${table.storeCategoryIds}) = 'array'
+          AND jsonb_array_length(${table.storeCategoryIds}) BETWEEN 0 AND 2`,
+    ),
+    check(
+      "dropship_ebay_store_category_revision_names_chk",
+      sql`jsonb_typeof(${table.storeCategoryNames}) = 'array'
+          AND jsonb_array_length(${table.storeCategoryNames}) = jsonb_array_length(${table.storeCategoryIds})`,
+    ),
+  ],
+);
+
+export const dropshipEbayStoreCategoryAssignments = dropshipSchema.table(
+  "dropship_ebay_store_category_assignments",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    vendorId: integer("vendor_id")
+      .notNull()
+      .references(() => dropshipVendors.id, { onDelete: "cascade" }),
+    storeConnectionId: integer("store_connection_id")
+      .notNull()
+      .references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
+    productVariantId: integer("product_variant_id")
+      .notNull()
+      .references(() => productVariants.id, { onDelete: "cascade" }),
+    revisionId: integer("revision_id")
+      .notNull()
+      .references(() => dropshipEbayStoreCategoryAssignmentRevisions.id),
+    storeCategoryIds: jsonb("store_category_ids").notNull().default([]),
+    storeCategoryNames: jsonb("store_category_names").notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("dropship_ebay_store_category_assignment_target_idx").on(
+      table.storeConnectionId,
+      table.productVariantId,
+    ),
+    index("dropship_ebay_store_category_assignment_vendor_idx").on(
+      table.vendorId,
+      table.storeConnectionId,
+    ),
+    check(
+      "dropship_ebay_store_category_assignment_ids_chk",
+      sql`jsonb_typeof(${table.storeCategoryIds}) = 'array'
+          AND jsonb_array_length(${table.storeCategoryIds}) BETWEEN 1 AND 2`,
+    ),
+    check(
+      "dropship_ebay_store_category_assignment_names_chk",
+      sql`jsonb_typeof(${table.storeCategoryNames}) = 'array'
+          AND jsonb_array_length(${table.storeCategoryNames}) = jsonb_array_length(${table.storeCategoryIds})`,
+    ),
+  ],
+);
+
 export const dropshipStoreSetupChecks = dropshipSchema.table(
   "dropship_store_setup_checks",
   {

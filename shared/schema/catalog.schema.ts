@@ -179,6 +179,10 @@ export const productVariants = catalogSchema.table("product_variants", {
   standardCostCents: bigint("standard_cost_cents", { mode: "number" }), // Standard cost for valuation
   lastCostCents: bigint("last_cost_cents", { mode: "number" }), // Most recent purchase cost
   avgCostCents: bigint("avg_cost_cents", { mode: "number" }), // Weighted average cost (updated on each receipt)
+  // Fulfillment identity is independent from inventory management. Digital
+  // variants do not ship and must never enter ATP, reservation, picking, or
+  // channel inventory quantity workflows.
+  requiresShipping: boolean("requires_shipping").notNull().default(true),
   trackInventory: boolean("track_inventory").default(true),
   inventoryPolicy: varchar("inventory_policy", { length: 20 }).default("deny"),
   shopifyVariantId: varchar("shopify_variant_id", { length: 100 }),
@@ -204,6 +208,7 @@ export const productVariants = catalogSchema.table("product_variants", {
 }, (table) => [
   uniqueIndex("product_variants_id_product_uidx").on(table.id, table.productId),
   check("product_variants_max_units_per_package_chk", sql`${table.maxUnitsPerPackage} IS NULL OR ${table.maxUnitsPerPackage} > 0`),
+  check("product_variants_digital_untracked_chk", sql`${table.requiresShipping} = true OR ${table.trackInventory} IS FALSE`),
   check("product_variants_single_unit_uom_invariants_chk", sql`${table.uomType} NOT IN ('piece', 'each') OR (
     ${table.unitsPerVariant} = 1
     AND ${table.hierarchyLevel} = 1

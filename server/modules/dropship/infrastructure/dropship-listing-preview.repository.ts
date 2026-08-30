@@ -79,6 +79,8 @@ interface CandidateRow {
   title: string | null;
   description: string | null;
   category: string | null;
+  ebay_browse_category_id: string | null;
+  ebay_browse_category_name: string | null;
   brand: string | null;
   gtin: string | null;
   mpn: string | null;
@@ -266,6 +268,8 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            COALESCE(p.title, p.name) AS title,
            p.description,
            p.category,
+           p.ebay_browse_category_id,
+           p.ebay_browse_category_name,
            p.brand,
            pv.gtin,
            pv.mpn,
@@ -303,6 +307,8 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
              AND NULLIF(BTRIM(pa.url), '') IS NOT NULL
          ) assets ON true
          WHERE pv.id = ANY($1::int[])
+           AND pv.requires_shipping = true
+           AND COALESCE(pv.track_inventory, true) = true
          GROUP BY p.id, pv.id, retail_cache.price, assets.image_urls`,
         [productVariantIds],
       );
@@ -352,6 +358,35 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
         [input.storeConnectionId, input.productVariantIds],
       );
       return result.rows.map(mapExistingListingRow);
+    } finally {
+      client.release();
+    }
+  }
+
+  async listEbayStoreCategoryAssignments(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    productVariantIds: readonly number[];
+  }): Promise<Array<{ productVariantId: number; storeCategoryNames: string[] }>> {
+    if (input.productVariantIds.length === 0) return [];
+    const client = await this.dbPool.connect();
+    try {
+      const result = await client.query<{
+        product_variant_id: number;
+        store_category_names: unknown;
+      }>(
+        `SELECT product_variant_id, store_category_names
+         FROM dropship.dropship_ebay_store_category_assignments
+         WHERE vendor_id = $1
+           AND store_connection_id = $2
+           AND product_variant_id = ANY($3::int[])
+         ORDER BY product_variant_id ASC`,
+        [input.vendorId, input.storeConnectionId, input.productVariantIds],
+      );
+      return result.rows.map((row) => ({
+        productVariantId: row.product_variant_id,
+        storeCategoryNames: requiredStringArray(row.store_category_names, "store_category_names", 2),
+      }));
     } finally {
       client.release();
     }
@@ -699,6 +734,8 @@ function mapCandidateRow(row: CandidateRow): DropshipListingCatalogCandidate {
     productVariantId: row.product_variant_id,
     productLineIds: row.product_line_ids ?? [],
     category: row.category,
+    ebayBrowseCategoryId: row.ebay_browse_category_id,
+    ebayBrowseCategoryName: row.ebay_browse_category_name,
     productIsActive: row.product_is_active,
     variantIsActive: row.variant_is_active,
     unitsPerVariant: Math.max(1, row.units_per_variant),
@@ -773,6 +810,22 @@ function stringArrayFromJson(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : [];
+}
+
+function requiredStringArray(value: unknown, field: string, maxLength: number): string[] {
+  if (!Array.isArray(value) || value.length > maxLength) {
+    throw new Error(`Persisted ${field} must be an array of at most ${maxLength} values.`);
+  }
+  const values = value.map((item) => {
+    if (typeof item !== "string" || !item.trim()) {
+      throw new Error(`Persisted ${field} must contain non-empty strings.`);
+    }
+    return item.trim();
+  });
+  if (new Set(values).size !== values.length) {
+    throw new Error(`Persisted ${field} must contain unique values.`);
+  }
+  return values;
 }
 
 function requiredRow<T>(row: T | undefined, message: string): T {

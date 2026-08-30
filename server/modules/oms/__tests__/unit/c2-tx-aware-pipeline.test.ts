@@ -372,13 +372,17 @@ describe("ReservationService :: dbOverride threading", () => {
       return result;
     }
 
+    let selectCall = 0;
     const overrideDb = {
       select: vi.fn(() => {
         overrideDbCalls.push("override:select");
+        const data = selectCall++ === 0
+          ? [{ productId: 1, requiresShipping: true, trackInventory: true }]
+          : [{ warehouseLocationId: 1 }];
         const chainable: any = {
           from: vi.fn(() => chainable),
           innerJoin: vi.fn(() => chainable),
-          where: vi.fn(() => makeThenableResult([{ warehouseLocationId: 1 }])),
+          where: vi.fn(() => makeThenableResult(data)),
         };
         return chainable;
       }),

@@ -51,6 +51,7 @@ import type {
 import { ChannelAdapterRegistry } from "./channel-adapter.interface";
 import type { AllocationEngine, ProductAllocationResult } from "./allocation-engine.service";
 import type { SourceLockService } from "./source-lock.service";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -653,6 +654,8 @@ class EchelonSyncOrchestrator {
         sku: productVariants.sku,
         shopifyVariantId: productVariants.shopifyVariantId,
         shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
+        requiresShipping: productVariants.requiresShipping,
+        trackInventory: productVariants.trackInventory,
       }).from(productVariants).where(eq(productVariants.id, variantId)).limit(1);
 
       if (!variant) {
@@ -660,6 +663,19 @@ class EchelonSyncOrchestrator {
           productId, variantId, sku: a.sku, allocatedQty: totalPushQty, previousQty: null, status: "error", error: "Variant not found"
         });
         result.variantsErrored++;
+        continue;
+      }
+      if (!isInventoryManagedVariant(variant)) {
+        result.variantsSkipped++;
+        result.details.push({
+          productId,
+          variantId,
+          sku: a.sku,
+          previousQty: null,
+          allocatedQty: totalPushQty,
+          status: "skipped",
+          error: "Digital or inventory-untracked variants do not publish channel quantities",
+        });
         continue;
       }
 
@@ -1392,7 +1408,11 @@ class EchelonSyncOrchestrator {
   ): Promise<InventorySyncResult[]> {
     // Look up the product
     const [variant] = await this.db
-      .select({ productId: productVariants.productId })
+      .select({
+        productId: productVariants.productId,
+        requiresShipping: productVariants.requiresShipping,
+        trackInventory: productVariants.trackInventory,
+      })
       .from(productVariants)
       .where(eq(productVariants.id, productVariantId))
       .limit(1);
@@ -1401,6 +1421,7 @@ class EchelonSyncOrchestrator {
       console.warn(`[SyncOrchestrator] onInventoryChange: variant ${productVariantId} not found`);
       return [];
     }
+    if (!isInventoryManagedVariant(variant)) return [];
 
     return this.syncInventoryForProduct(
       variant.productId,
@@ -1418,7 +1439,11 @@ class EchelonSyncOrchestrator {
       .select({ productId: productVariants.productId })
       .from(channelFeeds)
       .innerJoin(productVariants, eq(channelFeeds.productVariantId, productVariants.id))
-      .where(eq(channelFeeds.isActive, 1))
+      .where(and(
+        eq(channelFeeds.isActive, 1),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+      ))
       .groupBy(productVariants.productId);
 
     const listingRows = await this.db
@@ -1430,6 +1455,8 @@ class EchelonSyncOrchestrator {
         and(
           eq(channels.status, "active"),
           eq(channels.syncEnabled, true),
+          eq(productVariants.requiresShipping, true),
+          sql`COALESCE(${productVariants.trackInventory}, true) = true`,
         ),
       )
       .groupBy(productVariants.productId);

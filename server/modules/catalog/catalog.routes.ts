@@ -40,6 +40,7 @@ import {
   assertProductInventoryStrategyTransition,
   parseProductInventoryStrategy,
 } from "./inventory-strategy-policy";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 
 // Physical packing facts beyond weight/dims. Canonical on the variant since
 // migration 185; validated here because the variant PUT spreads req.body.
@@ -66,6 +67,45 @@ function coercePackingFlagsOnVariantPayload(input: unknown): {
   if (!parsed.success) {
     throw Object.assign(
       new Error("shipsInOwnContainer must be a boolean and maxUnitsPerPackage must be a positive integer or null"),
+      { statusCode: 400 },
+    );
+  }
+  return parsed.data;
+}
+
+const variantFulfillmentSchema = z.object({
+  requiresShipping: z.boolean().optional(),
+  trackInventory: z.boolean().optional(),
+}).strict();
+
+export function coerceVariantFulfillmentOnPayload(
+  input: unknown,
+  existing?: { requiresShipping: boolean; trackInventory: boolean | null },
+): { requiresShipping?: boolean; trackInventory?: boolean } {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const source = input as Record<string, unknown>;
+  const candidate: Record<string, unknown> = {};
+  for (const key of ["requiresShipping", "trackInventory"] as const) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) candidate[key] = source[key];
+  }
+  if (Object.keys(candidate).length === 0) return {};
+
+  const parsed = variantFulfillmentSchema.safeParse(candidate);
+  if (!parsed.success) {
+    throw Object.assign(
+      new Error("requiresShipping and trackInventory must be booleans"),
+      { statusCode: 400 },
+    );
+  }
+  const requiresShipping = parsed.data.requiresShipping
+    ?? existing?.requiresShipping
+    ?? true;
+  const trackInventory = parsed.data.trackInventory
+    ?? existing?.trackInventory
+    ?? true;
+  if (!requiresShipping && trackInventory !== false) {
+    throw Object.assign(
+      new Error("Digital variants must set trackInventory to false"),
       { statusCode: 400 },
     );
   }
@@ -1574,11 +1614,13 @@ export async function registerProductRoutes(app: Express) {
       }
       const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
       const packingFlags = coercePackingFlagsOnVariantPayload(req.body);
+      const fulfillment = coerceVariantFulfillmentOnPayload(req.body);
       const uomAttributes = validateVariantUomWrite(req.body);
       const variant = await storage.createProductVariant({
         ...req.body,
         ...packageAttributes,
         ...packingFlags,
+        ...fulfillment,
         ...uomAttributes,
         productId,
       });
@@ -1647,11 +1689,42 @@ export async function registerProductRoutes(app: Express) {
           ...req.body,
           ...packageAttributes,
           ...packingFlags,
+          ...coerceVariantFulfillmentOnPayload(req.body, existing),
           ...validateVariantUomWrite(req.body, existing),
           ...(normalizedNewSku ? { sku: normalizedNewSku } : {}),
         };
         const updatedVariant = await storage.updateProductVariant(id, payload, tx);
         if (!updatedVariant) return { variant: null, renamed: false };
+        if (!isInventoryManagedVariant(updatedVariant)) {
+          await tx
+            .update(channelFeeds)
+            .set({ isActive: 0, updatedAt: new Date() })
+            .where(eq(channelFeeds.productVariantId, id));
+        }
+        if (
+          existing.requiresShipping !== updatedVariant.requiresShipping
+          || existing.trackInventory !== updatedVariant.trackInventory
+        ) {
+          await persistAuditEvent(tx, {
+            actor,
+            action: "catalog.variant_fulfillment_updated",
+            target: `product_variant:${id}`,
+            changes: {
+              before: {
+                requiresShipping: existing.requiresShipping,
+                trackInventory: existing.trackInventory,
+              },
+              after: {
+                requiresShipping: updatedVariant.requiresShipping,
+                trackInventory: updatedVariant.trackInventory,
+              },
+            },
+            context: {
+              inventoryManaged: isInventoryManagedVariant(updatedVariant),
+              inventoryFeedsDeactivated: !isInventoryManagedVariant(updatedVariant),
+            },
+          });
+        }
 
         const oldSku = existing.sku;
         let renamed = false;

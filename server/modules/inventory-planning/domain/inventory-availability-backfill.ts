@@ -11,6 +11,7 @@ import {
   inventoryAvailabilityBackfillDefinitionSchema,
 } from "@shared/types/inventory-availability-backfill";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { z } from "zod";
 
 import {
@@ -32,6 +33,8 @@ export const inventoryAvailabilityBackfillSourceVariantSchema = z.object({
   unitsPerVariant: positiveInteger,
   uomType: z.enum(VARIANT_UOM_TYPES),
   isActive: z.literal(true),
+  requiresShipping: z.boolean().optional(),
+  trackInventory: z.boolean().nullable().optional(),
 }).strict();
 
 export const inventoryAvailabilityBackfillSourceRecipeSchema = z.object({
@@ -55,6 +58,8 @@ export const inventoryAvailabilityBackfillSourceRecipeSchema = z.object({
     sku: z.string().max(100).nullable(),
     name: z.string(),
     isActive: z.boolean(),
+    requiresShipping: z.boolean().optional(),
+    trackInventory: z.boolean().nullable().optional(),
   }).strict()),
 }).strict();
 
@@ -81,6 +86,7 @@ export interface InventoryAvailabilityBackfillCandidate {
     | "exact_only"
     | "legacy_fungible_directed_pool"
     | "recipe_managed_explicit_review"
+    | "excluded_unmanaged"
     | "blocked";
   inputHash: string;
   resultHash: string;
@@ -202,7 +208,8 @@ export function planInventoryAvailabilityBackfill(
   const source = normalizedSource(raw);
   const inputHash = calculateInventoryAvailabilityBackfillInputHash(source);
   const issues: InventoryAvailabilityBackfillIssue[] = [];
-  const variantsById = new Map(source.variants.map((variant) => [variant.id, variant] as const));
+  const managedVariants = source.variants.filter(isInventoryManagedVariant);
+  const variantsById = new Map(managedVariants.map((variant) => [variant.id, variant] as const));
 
   if (source.variants.length === 0) {
     issues.push(issue(
@@ -210,6 +217,13 @@ export function planInventoryAvailabilityBackfill(
       "blocking",
       "The active product has no active variants to classify.",
       { productId: source.product.id },
+    ));
+  } else if (managedVariants.length === 0) {
+    issues.push(issue(
+      "NO_INVENTORY_MANAGED_VARIANTS",
+      "review",
+      "The active product has no shippable, inventory-managed variants and is excluded from ATP migration.",
+      { productId: source.product.id, activeVariantIds: source.variants.map((variant) => variant.id) },
     ));
   }
 
@@ -235,9 +249,9 @@ export function planInventoryAvailabilityBackfill(
   };
 
   if (source.product.legacyInventoryStrategy === "physical_fungible") {
-    for (let index = 0; index < source.variants.length - 1; index += 1) {
-      const left = source.variants[index]!;
-      const right = source.variants[index + 1]!;
+    for (let index = 0; index < managedVariants.length - 1; index += 1) {
+      const left = managedVariants[index]!;
+      const right = managedVariants[index + 1]!;
       addPath(packagingPath(source.product.id, left, right), "legacy_physical_fungible");
       addPath(packagingPath(source.product.id, right, left), "legacy_physical_fungible");
     }
@@ -289,6 +303,17 @@ export function planInventoryAvailabilityBackfill(
         "blocking",
         "An active recipe references an inactive component variant.",
         { productId: source.product.id, recipeId: recipe.id, componentVariantIds: inactiveComponents },
+      ));
+    }
+    const unmanagedComponents = recipe.components
+      .filter((component) => !isInventoryManagedVariant(component))
+      .map((component) => component.componentVariantId);
+    if (unmanagedComponents.length > 0) {
+      issues.push(issue(
+        "RECIPE_COMPONENT_NOT_INVENTORY_MANAGED",
+        "blocking",
+        "An active recipe references a digital or inventory-untracked component variant.",
+        { productId: source.product.id, recipeId: recipe.id, componentVariantIds: unmanagedComponents },
       ));
     }
     const staleComponents = recipe.components
@@ -431,17 +456,26 @@ export function planInventoryAvailabilityBackfill(
   }
 
   const hasBlockingIssue = issues.some((entry) => entry.severity === "blocking");
-  const provisionalClassification = source.product.legacyInventoryStrategy === "physical_only"
+  const provisionalClassification = managedVariants.length === 0
+    ? "excluded_unmanaged" as const
+    : source.product.legacyInventoryStrategy === "physical_only"
     ? "exact_only" as const
     : source.product.legacyInventoryStrategy === "physical_fungible"
       ? "legacy_fungible_directed_pool" as const
       : "recipe_managed_explicit_review" as const;
-  const classification = hasBlockingIssue ? "blocked" as const : provisionalClassification;
+  // A product with no warehouse-managed variants is outside ATP authority. Keep
+  // stale recipe problems visible as evidence, but do not let irrelevant
+  // physical-planning records turn a digital-only product into an ATP blocker.
+  const classification = managedVariants.length === 0
+    ? "excluded_unmanaged" as const
+    : hasBlockingIssue
+      ? "blocked" as const
+      : provisionalClassification;
 
   let definition: TransformationModelDefinition | null = null;
   let publicDefinition: InventoryAvailabilityBackfillDefinition | null = null;
   let definitionHash: string | null = null;
-  if (!hasBlockingIssue) {
+  if (!hasBlockingIssue && managedVariants.length > 0) {
     definition = transformationModelDefinitionSchema.parse({
       productId: source.product.id,
       buildToPromiseEnabled: source.product.legacyInventoryStrategy === "recipe_managed"

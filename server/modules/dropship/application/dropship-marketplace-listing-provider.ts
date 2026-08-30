@@ -26,6 +26,8 @@ export interface DropshipCanonicalListingContent {
   title: string | null;
   description: string | null;
   category: string | null;
+  ebayBrowseCategoryId: string | null;
+  ebayBrowseCategoryName: string | null;
   brand: string | null;
   gtin: string | null;
   mpn: string | null;
@@ -45,6 +47,9 @@ export interface DropshipMarketplaceListingIntent {
   title: string;
   description: string | null;
   category: string | null;
+  marketplaceCategoryId: string | null;
+  marketplaceCategoryName: string | null;
+  storeCategoryNames: string[];
   brand: string | null;
   gtin: string | null;
   mpn: string | null;
@@ -69,5 +74,6 @@ export interface DropshipMarketplaceListingProvider {
     content: DropshipCanonicalListingContent;
     priceCents: number | null;
     quantity: number;
+    storeCategoryNames?: readonly string[];
   }): DropshipMarketplaceListingValidationResult;
 }

@@ -8,6 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as databaseSchema from "@shared/schema";
 
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
+import { loadInventoryAvailabilityBackfillSources } from "../../infrastructure/inventory-availability-backfill.repository";
 import { transformationModelDefinitionSchema } from "../../domain/inventory-availability-master-data.contracts";
 import {
   projectCanonicalAtp,
@@ -114,6 +115,8 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         uom_type varchar(20) NOT NULL DEFAULT 'pack',
         hierarchy_level integer NOT NULL DEFAULT 1,
         is_active boolean NOT NULL DEFAULT true,
+        requires_shipping boolean NOT NULL DEFAULT true,
+        track_inventory boolean DEFAULT true,
         CONSTRAINT product_variants_id_product_uq UNIQUE (id, product_id)
       );
       CREATE TABLE warehouse.warehouses (
@@ -268,6 +271,45 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     );
     return result.rows[0].id;
   }
+
+  it("removes the repository-only recipe grouping key before strict backfill DTO validation", async () => {
+    const output = await seedProductAndWarehouse([1]);
+    const componentProduct = await pool.query<{ id: number }>(
+      "INSERT INTO catalog.products DEFAULT VALUES RETURNING id",
+    );
+    const componentVariant = await pool.query<{ id: number }>(
+      `INSERT INTO catalog.product_variants (product_id, units_per_variant)
+       VALUES ($1, 1) RETURNING id`,
+      [componentProduct.rows[0]!.id],
+    );
+    const recipe = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.build_recipes (
+         code, version, status, output_product_id, output_variant_id,
+         output_units_per_variant, output_qty
+       ) VALUES ('BACKFILL-DTO', 1, 'active', $1, $2, 1, 1) RETURNING id`,
+      [output.productId, output.variantIds[0]],
+    );
+    await pool.query(
+      `INSERT INTO inventory.build_recipe_components (
+         recipe_id, component_product_id, component_variant_id,
+         component_units_per_variant, qty
+       ) VALUES ($1, $2, $3, 1, 2)`,
+      [recipe.rows[0]!.id, componentProduct.rows[0]!.id, componentVariant.rows[0]!.id],
+    );
+
+    const testDatabase = drizzle(pool, { schema: databaseSchema });
+    const [source] = await loadInventoryAvailabilityBackfillSources(
+      testDatabase,
+      [output.productId],
+    );
+
+    expect(source?.recipes[0]?.components[0]).toMatchObject({
+      componentVariantId: componentVariant.rows[0]!.id,
+      componentProductId: componentProduct.rows[0]!.id,
+      componentQty: 2,
+    });
+    expect(source?.recipes[0]?.components[0]).not.toHaveProperty("recipeId");
+  });
 
   async function markModelValid(modelId: number): Promise<void> {
     await pool.query(

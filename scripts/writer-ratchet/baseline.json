@@ -150,6 +150,12 @@
   "dropship.dropship_collection_attempts": [
     "modules/dropship"
   ],
+  "dropship.dropship_ebay_store_category_assignment_revisions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_ebay_store_category_assignments": [
+    "modules/dropship"
+  ],
   "dropship.dropship_funding_methods": [
     "modules/dropship"
   ],

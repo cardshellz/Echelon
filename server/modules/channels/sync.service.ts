@@ -24,6 +24,7 @@ import type {
   Product,
   Warehouse,
 } from "@shared/schema";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -228,7 +229,11 @@ class ChannelSyncService {
     const variantRows: ProductVariant[] = await this.db
       .select()
       .from(productVariants)
-      .where(inArray(productVariants.id, variantIds));
+      .where(and(
+        inArray(productVariants.id, variantIds),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+      ));
 
     let productIds = Array.from(new Set(variantRows.map((v) => v.productId)));
 
@@ -522,6 +527,7 @@ class ChannelSyncService {
         .where(eq(productVariants.id, feed.productVariantId))
         .limit(1);
       if (!variant) continue;
+      if (!isInventoryManagedVariant(variant)) continue;
 
       // Cache ATP per product
       if (!productCache.has(variant.productId)) {
@@ -569,6 +575,8 @@ class ChannelSyncService {
       .from(productVariants)
       .where(and(
         eq(productVariants.isActive, true),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
         sql`${productVariants.shopifyVariantId} IS NOT NULL`,
       ));
 
@@ -723,6 +731,8 @@ class ChannelSyncService {
       .select({
         productId: productVariants.productId,
         shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
+        requiresShipping: productVariants.requiresShipping,
+        trackInventory: productVariants.trackInventory,
       })
       .from(productVariants)
       .where(eq(productVariants.id, feed.productVariantId))
@@ -731,6 +741,11 @@ class ChannelSyncService {
     if (!variantRow?.shopifyInventoryItemId) {
       throw new Error(
         `Variant ${feed.productVariantId} has no shopifyInventoryItemId — run Shopify product sync first`,
+      );
+    }
+    if (!isInventoryManagedVariant(variantRow)) {
+      throw new Error(
+        `Variant ${feed.productVariantId} is digital or inventory-untracked; quantity publication is prohibited`,
       );
     }
 
