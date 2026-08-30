@@ -92,3 +92,32 @@ export async function isBehindSchedule(
     return true;
   }
 }
+
+/**
+ * Run a boot catch-up pass, but only if a scheduled run was genuinely missed.
+ *
+ * Wraps the check-run-record sequence because the recording half is easy to
+ * forget, and forgetting it is silent: the timestamp goes stale, every later
+ * boot decides it is behind, and the gate quietly stops gating.
+ *
+ * Call the scheduled runs' `recordRunCompleted` separately - this helper only
+ * covers the boot path.
+ *
+ * Returns whether the pass actually ran, which is what the tests assert on.
+ */
+export async function runBootCatchUpIfBehind(input: {
+  db: Db;
+  jobKey: string;
+  intervalMs: number;
+  logPrefix: string;
+  run: () => Promise<unknown>;
+}): Promise<boolean> {
+  const { db, jobKey, intervalMs, logPrefix, run } = input;
+  if (!(await isBehindSchedule(db, jobKey, intervalMs))) {
+    console.log(`${logPrefix} Boot catch-up skipped - ${jobKey} is on schedule.`);
+    return false;
+  }
+  await run();
+  await recordRunCompleted(db, jobKey);
+  return true;
+}

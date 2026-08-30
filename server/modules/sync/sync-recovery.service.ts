@@ -17,6 +17,10 @@ import { runReconciliationNow as shopifyReconcile } from "../orders/shopify-orde
 import { backfillShopifyOrders } from "./shopify-bridge-wrapper";
 import { sql } from "drizzle-orm";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
+import {
+  recordRunCompleted,
+  runBootCatchUpIfBehind,
+} from "../../infrastructure/scheduler-run-registry";
 
 export interface StageResult {
   name: string;
@@ -33,6 +37,8 @@ export interface SyncRecoveryResult {
   /** Convenience: true if every stage succeeded (even with 0 changes). */
   allOk: boolean;
 }
+
+const SYNC_RECOVERY_JOB_KEY = "sync_recovery";
 
 export class SyncRecoveryService {
   private isRunning = false;
@@ -294,14 +300,25 @@ export class SyncRecoveryService {
     );
 
     const firstTimer = setTimeout(() => {
-      this.runAll().catch((err) => {
+      // runAll() walks the whole Shopify -> OMS -> WMS pipeline, so replaying it
+      // on every deploy is the most expensive of the boot passes. Only run it
+      // when a scheduled run was genuinely missed.
+      runBootCatchUpIfBehind({
+        db: this.db,
+        jobKey: SYNC_RECOVERY_JOB_KEY,
+        intervalMs,
+        logPrefix: "[SyncRecovery]",
+        run: () => this.runAll(),
+      }).catch((err) => {
         console.error("[SyncRecovery] Initial run failed:", err);
       });
 
       const loopTimer = setInterval(() => {
-        this.runAll().catch((err) => {
-          console.error("[SyncRecovery] Scheduled run failed:", err);
-        });
+        this.runAll()
+          .then(() => recordRunCompleted(this.db, SYNC_RECOVERY_JOB_KEY))
+          .catch((err) => {
+            console.error("[SyncRecovery] Scheduled run failed:", err);
+          });
       }, intervalMs);
 
       // Attach loopTimer to be clearable from the outside

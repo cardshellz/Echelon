@@ -1,12 +1,17 @@
 import type { Pool } from "pg";
 
-import { pool } from "../../db";
+import { db, pool } from "../../db";
+import {
+  recordRunCompleted,
+  runBootCatchUpIfBehind,
+} from "../../infrastructure/scheduler-run-registry";
 import { purgeExpiredFinancialCommandResults } from "./financial-command-operations.service";
 
 const DEFAULT_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_BATCH_SIZE = 500;
 const DEFAULT_MAX_BATCHES = 10;
 const LOG_PREFIX = "[Financial Command Retention]";
+const JOB_KEY = "financial_command_retention";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let inFlight = false;
@@ -17,8 +22,32 @@ export function startFinancialCommandRetentionWorker(): void {
     return;
   }
   const intervalMs = positiveIntegerEnv("FINANCIAL_COMMAND_RETENTION_INTERVAL_MS", DEFAULT_INTERVAL_MS);
-  const run = () => void runFinancialCommandRetentionTick();
-  setTimeout(run, Math.min(intervalMs, 10_000));
+  // The scheduled pass records its completion so the boot gate below can tell a
+  // genuinely missed run from an ordinary redeploy.
+  const run = () => void runFinancialCommandRetentionTick().then(async ({ status }) => {
+    if (status === "success") await recordRunCompleted(db, JOB_KEY);
+  }).catch((error) => console.error(`${LOG_PREFIX} Could not record run`, error));
+
+  // Boot pass only when a scheduled run was actually missed. This purges up to
+  // maxBatches x batchSize rows, and replaying that on every deploy of a 6h job
+  // is waste the 512MB dyno cannot spare.
+  setTimeout(() => {
+    void runBootCatchUpIfBehind({
+      db,
+      jobKey: JOB_KEY,
+      intervalMs,
+      logPrefix: LOG_PREFIX,
+      run: async () => {
+        const { status } = await runFinancialCommandRetentionTick();
+        if (status !== "success") {
+          // The tick logs its own failure. Throw so the helper does not stamp a
+          // completion this job never reached.
+          throw new Error(`retention tick did not complete (${status})`);
+        }
+      },
+    }).catch((error) => console.error(`${LOG_PREFIX} Boot catch-up failed`, error));
+  }, Math.min(intervalMs, 10_000));
+
   timer = setInterval(run, intervalMs);
   console.info(`${LOG_PREFIX} Started cleanup worker (interval ${intervalMs}ms)`);
 }
