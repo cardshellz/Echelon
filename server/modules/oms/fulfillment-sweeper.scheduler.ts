@@ -2,6 +2,10 @@ import { db } from "../../db";
 import { sql, eq, and, gt, lt, inArray } from "drizzle-orm";
 import { omsOrders, channels } from "@shared/schema";
 import { withAdvisoryLock } from "../../infrastructure/scheduler-lock";
+import {
+  isBehindSchedule,
+  recordRunCompleted,
+} from "../../infrastructure/scheduler-run-registry";
 import { EbayFulfillmentReconciler } from "./reconcilers/ebay.reconciler";
 import { ShopifyFulfillmentReconciler } from "./reconcilers/shopify.reconciler";
 import type { FulfillmentReconciler } from "./reconcilers/reconciler.interface";
@@ -33,6 +37,11 @@ const INBOUND_RECEIPT_RECOVERY_LIMIT = 100;
 const INBOUND_RECEIPT_RECOVERY_MIN_AGE_MINUTES = 5;
 const INBOUND_RECEIPT_RECOVERY_MAX_FAILURES = 5;
 const INBOUND_RECEIPT_RECOVERY_INTERVAL_MS = 60_000;
+const OUTBOUND_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+const INBOUND_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+// Durable job keys for the boot catch-up decision (see scheduler-run-registry).
+const OUTBOUND_SWEEP_JOB_KEY = "fulfillment_outbound";
+const INBOUND_SWEEP_JOB_KEY = "fulfillment_inbound";
 const SHOPIFY_WRITEBACK_DEBT_RECOVERY_LIMIT = 25;
 const SHOPIFY_WRITEBACK_DEBT_RETRY_DELAY_MS = 6 * 60 * 60 * 1000;
 const SHIPSTATION_LABEL_RECOVERY_LIMIT = 10;
@@ -702,10 +711,18 @@ export function startFulfillmentSweeper(
   const RECEIPT_RECOVERY_LOCK_ID = 8486;
   const SHIPSTATION_LABEL_RECOVERY_LOCK_ID = 8487;
 
-  // Run immediately on boot
+  // Catch-up pass on boot, but only when a scheduled run was genuinely missed.
+  // This app deploys many times a day; without the check, every deploy replayed
+  // a full sweep against an app that was up seconds earlier, and several heavy
+  // sweeps allocating at once is what pushed a 512MB dyno past its quota.
   setTimeout(() => {
     withAdvisoryLock(SWEEPER_LOCK_ID, async () => {
+      if (!(await isBehindSchedule(dbArg, OUTBOUND_SWEEP_JOB_KEY, OUTBOUND_SWEEP_INTERVAL_MS))) {
+        console.log(`${LOG_PREFIX} Boot catch-up skipped - outbound sweep is on schedule.`);
+        return;
+      }
       await runFulfillmentSweep(dbArg, fulfillmentAuthority, physicalRecovery);
+      await recordRunCompleted(dbArg, OUTBOUND_SWEEP_JOB_KEY);
     }).catch((err) => console.error(`${LOG_PREFIX} Boot run error: ${err.message}`));
   }, 5000);
 
@@ -736,23 +753,32 @@ export function startFulfillmentSweeper(
     }, SHIPSTATION_LABEL_RECOVERY_INTERVAL_MS);
   }
 
-  // Inbound provider poll on boot (staggered from receipt recovery).
+  // Inbound provider poll on boot (staggered from receipt recovery), and again
+  // only when a scheduled run was genuinely missed.
   setTimeout(() => {
     withAdvisoryLock(INBOUND_LOCK_ID, async () => {
+      if (!(await isBehindSchedule(dbArg, INBOUND_SWEEP_JOB_KEY, INBOUND_SWEEP_INTERVAL_MS))) {
+        console.log(`${LOG_PREFIX} Boot catch-up skipped - inbound sweep is on schedule.`);
+        return;
+      }
       await runInboundFulfillmentSweep(
         dbArg,
         fulfillmentAuthority,
         channelFulfillmentIngress,
       );
+      await recordRunCompleted(dbArg, INBOUND_SWEEP_JOB_KEY);
     }).catch((err) => console.error(`${LOG_PREFIX} Inbound boot run error: ${err.message}`));
   }, 30000);
 
-  // Run every 1 hour thereafter
+  // Run every 1 hour thereafter. Recording here as well as on the boot pass is
+  // what keeps the timestamp fresh - otherwise it goes stale and every boot
+  // decides it is behind, which is the behaviour this is meant to remove.
   setInterval(() => {
     withAdvisoryLock(SWEEPER_LOCK_ID, async () => {
       await runFulfillmentSweep(dbArg, fulfillmentAuthority, physicalRecovery);
+      await recordRunCompleted(dbArg, OUTBOUND_SWEEP_JOB_KEY);
     }).catch((err) => console.error(`${LOG_PREFIX} Scheduled run error: ${err.message}`));
-  }, 60 * 60 * 1000);
+  }, OUTBOUND_SWEEP_INTERVAL_MS);
 
   // Inbound sweep every hour (offset by 30 min from outbound)
   setTimeout(() => {
@@ -763,7 +789,8 @@ export function startFulfillmentSweeper(
           fulfillmentAuthority,
           channelFulfillmentIngress,
         );
+        await recordRunCompleted(dbArg, INBOUND_SWEEP_JOB_KEY);
       }).catch((err) => console.error(`${LOG_PREFIX} Inbound sweep error: ${err.message}`));
-    }, 60 * 60 * 1000);
+    }, INBOUND_SWEEP_INTERVAL_MS);
   }, 30 * 60 * 1000);
 }

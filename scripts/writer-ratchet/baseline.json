@@ -735,6 +735,9 @@
   "public.reorder_exclusion_rules": [
     "modules/procurement"
   ],
+  "public.scheduler_runs": [
+    "server/infrastructure/scheduler-run-registry.ts"
+  ],
   "returns.return_case_commands": [
     "modules/returns"
   ],
