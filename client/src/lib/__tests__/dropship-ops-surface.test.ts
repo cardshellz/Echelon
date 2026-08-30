@@ -75,8 +75,10 @@ import {
   sectionStatusTone,
   trackingPushRetryEligibility,
   DROPSHIP_RMA_TRANSITIONS,
+  DropshipApiError,
   legalRmaTransitions,
   isRmaStatusTerminal,
+  queryErrorCode,
 } from "../dropship-ops-surface";
 import type {
   DropshipCatalogRow,
@@ -112,6 +114,41 @@ describe("dropship ops surface client helpers", () => {
     await expect(fetchJson("/api/dropship/orders")).rejects.toThrow(
       "Unauthorized dropship session.",
     );
+  });
+
+  it("preserves structured API error metadata for targeted recovery actions", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          ({
+            ok: false,
+            status: 403,
+            statusText: "Forbidden",
+            json: async () => ({
+              error: {
+                code: "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
+                message: "Reconnect the eBay store to grant Store-category access.",
+                context: { storeConnectionId: 17 },
+              },
+            }),
+          }) as Response,
+      ),
+    );
+
+    const caught = await fetchJson("/api/dropship/ebay/store-categories/17").catch(
+      (error: unknown) => error,
+    );
+
+    expect(caught).toBeInstanceOf(DropshipApiError);
+    expect(caught).toMatchObject({
+      status: 403,
+      code: "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
+      message: "Reconnect the eBay store to grant Store-category access.",
+      context: { storeConnectionId: 17 },
+    });
+    expect(queryErrorCode(caught)).toBe("DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED");
+    expect(queryErrorCode(new Error("Unstructured error"))).toBeNull();
   });
 
   it("falls back to explicit query error messages", () => {

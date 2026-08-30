@@ -730,7 +730,7 @@ export function canRefreshStoreConnection(connection: DropshipStoreConnectionPro
     || connection.status === "refresh_failed"
     || connection.status === "grace_period"
     || connection.status === "disconnected"
-    || (connection.status === "connected" && !connection.launchReady);
+    || (connection.status === "connected" && (connection.platform === "ebay" || !connection.launchReady));
 }
 
 export function canChangeStoreConnection(connection: DropshipStoreConnectionProfileResponse): boolean {
