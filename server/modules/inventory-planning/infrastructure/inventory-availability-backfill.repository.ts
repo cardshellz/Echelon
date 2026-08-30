@@ -67,6 +67,8 @@ export async function loadInventoryAvailabilityBackfillSources(
       unitsPerVariant: productVariants.unitsPerVariant,
       uomType: productVariants.uomType,
       isActive: productVariants.isActive,
+      requiresShipping: productVariants.requiresShipping,
+      trackInventory: productVariants.trackInventory,
     })
     .from(productVariants)
     .where(and(
@@ -113,6 +115,8 @@ export async function loadInventoryAvailabilityBackfillSources(
           sku: productVariants.sku,
           name: productVariants.name,
           isActive: productVariants.isActive,
+          requiresShipping: productVariants.requiresShipping,
+          trackInventory: productVariants.trackInventory,
         })
         .from(buildRecipeComponents)
         .innerJoin(productVariants, eq(productVariants.id, buildRecipeComponents.componentVariantId))

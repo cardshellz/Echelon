@@ -59,6 +59,7 @@ export interface IChannelStorage {
   // Channel feed queries (channelId-based, complementing inventory module's channelType-based methods)
   getChannelFeedByChannelAndVariant(channelId: number, productVariantId: number): Promise<ChannelFeed | undefined>;
   reactivateChannelFeed(feedId: number): Promise<void>;
+  setChannelFeedActive(feedId: number, isActive: boolean): Promise<void>;
   createChannelFeedDirect(data: InsertChannelFeed): Promise<ChannelFeed>;
   getActiveChannelFeeds(): Promise<{ feedId: number; channelId: number | null; productVariantId: number; lastSyncedQty: number | null; lastSyncedAt: Date | null }[]>;
   getChannelFeedsByVariantIds(variantIds: number[]): Promise<{ id: number; channelId: number | null; productVariantId: number; lastSyncedQty: number | null; lastSyncedAt: Date | null; isActive: number | null }[]>;
@@ -297,6 +298,12 @@ export const channelMethods: IChannelStorage = {
 
   async reactivateChannelFeed(feedId: number): Promise<void> {
     await db.update(channelFeeds).set({ isActive: 1, updatedAt: new Date() }).where(eq(channelFeeds.id, feedId));
+  },
+
+  async setChannelFeedActive(feedId: number, isActive: boolean): Promise<void> {
+    await db.update(channelFeeds)
+      .set({ isActive: isActive ? 1 : 0, updatedAt: new Date() })
+      .where(eq(channelFeeds.id, feedId));
   },
 
   async createChannelFeedDirect(data: InsertChannelFeed): Promise<ChannelFeed> {
@@ -651,7 +658,11 @@ export const channelMethods: IChannelStorage = {
       })
       .from(inventoryLevels)
       .innerJoin(productVariants, eq(productVariants.id, inventoryLevels.productVariantId))
-      .where(inArray(productVariants.productId, productIds));
+      .where(and(
+        inArray(productVariants.productId, productIds),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+      ));
 
     const invByProduct = new Map<number, { qty: number; valueCents: number }>();
     for (const r of invRows as any[]) {
@@ -733,7 +744,11 @@ export const channelMethods: IChannelStorage = {
     const variantRows = await db
       .select({ id: productVariants.id, avgCostCents: productVariants.avgCostCents })
       .from(productVariants)
-      .where(inArray(productVariants.productId, productIds));
+      .where(and(
+        inArray(productVariants.productId, productIds),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+      ));
     const variantIds = (variantRows as any[]).map((v) => v.id as number);
     const costById = new Map<number, number>();
     for (const v of variantRows as any[]) costById.set(v.id, Number(v.avgCostCents ?? 0));
@@ -776,14 +791,23 @@ export const channelMethods: IChannelStorage = {
       .selectDistinct({ id: productVariants.id })
       .from(productVariants)
       .innerJoin(inventoryLevels, eq(inventoryLevels.productVariantId, productVariants.id))
-      .where(and(eq(productVariants.isActive, true), gt(inventoryLevels.variantQty, 0)));
+      .where(and(
+        eq(productVariants.isActive, true),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+        gt(inventoryLevels.variantQty, 0),
+      ));
     return rows.map((v: any) => v.id);
   },
 
   async getVariantIdsByProductIds(productIds: number[]): Promise<number[]> {
     if (productIds.length === 0) return [];
     const rows = await db.select({ id: productVariants.id }).from(productVariants)
-      .where(inArray(productVariants.productId, productIds));
+      .where(and(
+        inArray(productVariants.productId, productIds),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+      ));
     return rows.map((v: any) => v.id);
   },
 
@@ -894,6 +918,8 @@ export const channelMethods: IChannelStorage = {
       .innerJoin(products, eq(products.id, productVariants.productId))
       .where(and(
         eq(productVariants.isActive, true),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
         or(
           ilike(productVariants.sku, pattern),
           ilike(productVariants.name, pattern),

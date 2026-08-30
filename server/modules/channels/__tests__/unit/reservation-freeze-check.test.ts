@@ -43,7 +43,9 @@ describe("ReservationService.reserveForOrder freeze-check (H1)", () => {
       innerJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
-      limit: vi.fn().mockResolvedValue([{ warehouseLocationId: 42 }]),
+      limit: vi.fn()
+        .mockResolvedValueOnce([{ productId: 100, requiresShipping: true, trackInventory: true }])
+        .mockResolvedValueOnce([{ warehouseLocationId: 42 }]),
     };
 
     const mockDb: any = {
@@ -72,7 +74,10 @@ describe("ReservationService.reserveForOrder freeze-check (H1)", () => {
       innerJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
-      limit: vi.fn().mockResolvedValue([]),
+      limit: vi.fn()
+        .mockResolvedValueOnce([{ productId: 100, requiresShipping: true, trackInventory: true }])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]),
     };
 
     const mockDb: any = {

@@ -105,7 +105,10 @@ describe("PgDropshipListingPreviewRepository", () => {
     const result = await repository.listCatalogCandidates([101]);
 
     expect(result[0]).toMatchObject({ productVariantId: 101, weightGrams: 321 });
-    expect(String(client.query.mock.calls[0]?.[0])).toContain("pv.weight_grams");
+    const query = String(client.query.mock.calls[0]?.[0]);
+    expect(query).toContain("pv.weight_grams");
+    expect(query).toContain("pv.requires_shipping = true");
+    expect(query).toContain("COALESCE(pv.track_inventory, true) = true");
   });
 });
 

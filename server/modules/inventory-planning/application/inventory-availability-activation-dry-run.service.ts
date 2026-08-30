@@ -105,51 +105,55 @@ export class InventoryAvailabilityActivationDryRunService {
     const queue = await this.backfillReader.getMigrationQueue();
     assertExpectedCatalog(queue, parsed.data.expectedCatalogInputHash, parsed.data.expectedCatalogResultHash);
 
-    const work = await mapWithConcurrency(queue.products, 5, async (product): Promise<ProductWork> => {
-      const blockers = queueBlockers(product);
-      let preview: InventoryAvailabilityChannelPreview | null = null;
-      try {
-        preview = await this.backfillReader.getChannelPreview(product.productId);
-      } catch (error) {
-        if (!(error instanceof InventoryAvailabilityMasterDataError)
-          || error.code !== "INVENTORY_AVAILABILITY_SHADOW_RUN_NOT_FOUND") {
-          throw error;
+    const work = await mapWithConcurrency(
+      queue.products.filter((product) => product.queueState !== "excluded"),
+      5,
+      async (product): Promise<ProductWork> => {
+        const blockers = queueBlockers(product);
+        let preview: InventoryAvailabilityChannelPreview | null = null;
+        try {
+          preview = await this.backfillReader.getChannelPreview(product.productId);
+        } catch (error) {
+          if (!(error instanceof InventoryAvailabilityMasterDataError)
+            || error.code !== "INVENTORY_AVAILABILITY_SHADOW_RUN_NOT_FOUND") {
+            throw error;
+          }
+          blockers.push(blocker(
+            "CHANNEL_PREVIEW_NOT_AVAILABLE",
+            "blocking",
+            "No current channel publication preview exists for this product.",
+            product.productId,
+            {},
+          ));
         }
-        blockers.push(blocker(
-          "CHANNEL_PREVIEW_NOT_AVAILABLE",
-          "blocking",
-          "No current channel publication preview exists for this product.",
-          product.productId,
-          {},
-        ));
-      }
-      if (preview) {
-        blockers.push(...preview.blockers.map((entry) => blocker(
-          entry.code,
-          entry.severity,
-          entry.message,
-          product.productId,
-          entry.context,
-        )));
-        for (const row of preview.rows) {
-          if (BigInt(row.proposedPublishedUnits) > BigInt(row.proposedAtpUnits)) {
-            blockers.push(blocker(
-              "CHANNEL_QUANTITY_EXCEEDS_CANONICAL_ATP",
-              "blocking",
-              "A proposed channel quantity exceeds canonical ATP for the same sellable SKU.",
-              product.productId,
-              {
-                channelId: row.channelId,
-                productVariantId: row.productVariantId,
-                proposedPublishedUnits: row.proposedPublishedUnits,
-                proposedAtpUnits: row.proposedAtpUnits,
-              },
-            ));
+        if (preview) {
+          blockers.push(...preview.blockers.map((entry) => blocker(
+            entry.code,
+            entry.severity,
+            entry.message,
+            product.productId,
+            entry.context,
+          )));
+          for (const row of preview.rows) {
+            if (BigInt(row.proposedPublishedUnits) > BigInt(row.proposedAtpUnits)) {
+              blockers.push(blocker(
+                "CHANNEL_QUANTITY_EXCEEDS_CANONICAL_ATP",
+                "blocking",
+                "A proposed channel quantity exceeds canonical ATP for the same sellable SKU.",
+                product.productId,
+                {
+                  channelId: row.channelId,
+                  productVariantId: row.productVariantId,
+                  proposedPublishedUnits: row.proposedPublishedUnits,
+                  proposedAtpUnits: row.proposedAtpUnits,
+                },
+              ));
+            }
           }
         }
-      }
-      return { queue: product, preview, blockers };
-    });
+        return { queue: product, preview, blockers };
+      },
+    );
 
     const evidenceKeys = work.flatMap(({ preview }) => preview?.rows.map((row) => ({
       channelId: row.channelId,

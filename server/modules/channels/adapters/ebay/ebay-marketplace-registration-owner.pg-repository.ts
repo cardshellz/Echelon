@@ -4,6 +4,7 @@ import { channelConnections, channels, products, productVariants } from "@shared
 import { db as defaultDb } from "../../../../db";
 import { createInventoryAtpService } from "../../../inventory";
 import { MarketplaceListingRegistrationError } from "../../../marketplace-listings/domain/registration-errors";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import type {
   EbayMarketplaceRegistrationOwnerRepository,
   EbayRegistrationChannelRecord,
@@ -19,8 +20,9 @@ export interface EbayRegistrationAtpReader {
 
 /**
  * PostgreSQL-backed Channels owner repository. Catalog membership deliberately
- * has no active or quantity predicate: archived and zero-ATP variants are part
- * of the registration snapshot and must remain available for remote discovery.
+ * has no active or quantity predicate: archived, zero-ATP, and unmanaged
+ * variants remain in the registration snapshot for remote discovery. Unmanaged
+ * variants receive a zero quantity and never borrow from the physical pool.
  */
 export class PgEbayMarketplaceRegistrationOwnerRepository
   implements EbayMarketplaceRegistrationOwnerRepository
@@ -90,6 +92,8 @@ export class PgEbayMarketplaceRegistrationOwnerRepository
           sku: productVariants.sku,
           isActive: productVariants.isActive,
           unitsPerVariant: productVariants.unitsPerVariant,
+          requiresShipping: productVariants.requiresShipping,
+          trackInventory: productVariants.trackInventory,
         })
         .from(productVariants)
         .where(eq(productVariants.productId, productId))
@@ -120,7 +124,9 @@ export class PgEbayMarketplaceRegistrationOwnerRepository
         productId: row.productId,
         sku: row.sku,
         isActive: row.isActive,
-        availableQuantity: Math.floor(atpBase / row.unitsPerVariant),
+        availableQuantity: isInventoryManagedVariant(row)
+          ? Math.floor(atpBase / row.unitsPerVariant)
+          : 0,
       };
     });
   }

@@ -708,6 +708,8 @@ export function createInventoryMethods(
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.warehouse_location_id = ${locationId}
         AND il.variant_qty > 0
+        AND pv.requires_shipping = true
+        AND COALESCE(pv.track_inventory, true) = true
       ORDER BY pv.sku
       LIMIT ${limit}
     `);
@@ -725,6 +727,8 @@ export function createInventoryMethods(
         pv.units_per_variant as "unitsPerVariant"
       FROM catalog.product_variants pv
       WHERE pv.is_active = true
+        AND pv.requires_shipping = true
+        AND COALESCE(pv.track_inventory, true) = true
         AND pv.sku IS NOT NULL
         AND (
           LOWER(pv.sku) LIKE ${searchPattern} OR
@@ -753,6 +757,8 @@ export function createInventoryMethods(
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       LEFT JOIN warehouse.warehouses w ON w.id = wl.warehouse_id
       WHERE il.variant_qty > 0
+        AND pv.requires_shipping = true
+        AND COALESCE(pv.track_inventory, true) = true
         AND (
           LOWER(pv.sku) LIKE ${searchPattern} OR
           LOWER(pv.name) LIKE ${searchPattern}
@@ -823,6 +829,8 @@ export function createInventoryMethods(
       LEFT JOIN inventory.replen_rules rr ON rr.product_id = pv.product_id
       LEFT JOIN inventory.replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
       WHERE pv.is_active = true
+        AND pv.requires_shipping = true
+        AND COALESCE(pv.track_inventory, true) = true
       GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, p.name, p.inventory_strategy, pv.barcode
       HAVING COALESCE(SUM(il.variant_qty), 0) != 0
           OR COALESCE(SUM(il.reserved_qty), 0) != 0
@@ -859,6 +867,8 @@ export function createInventoryMethods(
       LEFT JOIN inventory.replen_rules rr ON rr.product_id = pv.product_id
       LEFT JOIN inventory.replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
       WHERE pv.is_active = true
+        AND pv.requires_shipping = true
+        AND COALESCE(pv.track_inventory, true) = true
       GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, p.name, p.inventory_strategy, pv.barcode
       ORDER BY pv.sku
     `);
@@ -894,6 +904,8 @@ export function createInventoryMethods(
       LEFT JOIN warehouse.product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
       LEFT JOIN warehouse.warehouses w ON wl.warehouse_id = w.id
       WHERE (il.variant_qty != 0 OR il.reserved_qty != 0)
+        AND pv.requires_shipping = true
+        AND COALESCE(pv.track_inventory, true) = true
         ${warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``}
         ${search ? sql`AND (wl.code LIKE ${'%' + search + '%'} OR pv.sku LIKE ${'%' + search + '%'} OR pv.name LIKE ${'%' + search + '%'})` : sql``}
       ORDER BY wl.code, pv.sku
@@ -941,6 +953,8 @@ export function createInventoryMethods(
       LEFT JOIN catalog.products p ON pv.product_id = p.id
       LEFT JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
       WHERE il.variant_qty > 0
+        AND pv.requires_shipping = true
+        AND COALESCE(pv.track_inventory, true) = true
       ORDER BY wl.code, pv.sku
     `);
     return result.rows as Record<string, unknown>[];

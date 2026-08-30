@@ -40,6 +40,8 @@ export interface VariantAvailabilityContext {
   productVariantId: number;
   catalogSku: string | null;
   catalogVariantActive: boolean;
+  catalogRequiresShipping: boolean;
+  catalogTrackInventory: boolean | null;
   variantExcluded: boolean | null;
   catalogProductActive: boolean;
   catalogProductStatus: string | null;
@@ -75,6 +77,8 @@ interface ContextRow {
   product_variant_id: number;
   catalog_sku: string | null;
   catalog_variant_active: boolean;
+  catalog_requires_shipping: boolean;
+  catalog_track_inventory: boolean | null;
   variant_excluded: boolean | null;
   catalog_product_active: boolean;
   catalog_product_status: string | null;
@@ -219,6 +223,8 @@ export async function loadVariantAvailabilityContext(
       variant_row.id AS product_variant_id,
       variant_row.sku AS catalog_sku,
       variant_row.is_active AS catalog_variant_active,
+      variant_row.requires_shipping AS catalog_requires_shipping,
+      variant_row.track_inventory AS catalog_track_inventory,
       variant_row.ebay_listing_excluded AS variant_excluded,
       product_row.is_active AS catalog_product_active,
       product_row.status AS catalog_product_status,
@@ -272,6 +278,8 @@ export async function loadVariantAvailabilityContext(
     productVariantId: row.product_variant_id,
     catalogSku: row.catalog_sku,
     catalogVariantActive: row.catalog_variant_active,
+    catalogRequiresShipping: row.catalog_requires_shipping,
+    catalogTrackInventory: row.catalog_track_inventory,
     variantExcluded: row.variant_excluded,
     catalogProductActive: row.catalog_product_active,
     catalogProductStatus: row.catalog_product_status,
@@ -420,6 +428,49 @@ export async function markVariantAvailabilitySynced(
         AND lease_token = $4::uuid
     `, [claim.channelId, claim.productVariantId, claim.revision, claim.leaseToken, input.quantity]);
     requireAffectedRow(completed, "Completing availability sync");
+    await client.query("COMMIT");
+    return true;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/** Complete a claimed repair without publishing an external quantity. */
+export async function markVariantAvailabilityNotApplicable(
+  dbPool: SqlPool,
+  claim: ClaimedVariantAvailabilitySync,
+): Promise<boolean> {
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+    const completed = await client.query(`
+      UPDATE channels.channel_variant_availability_sync
+      SET status = 'synced',
+          lease_token = NULL,
+          lease_expires_at = NULL,
+          next_attempt_at = transaction_timestamp(),
+          completed_at = transaction_timestamp(),
+          last_error = NULL,
+          updated_at = transaction_timestamp()
+      WHERE channel_id = $1
+        AND product_variant_id = $2
+        AND revision = $3
+        AND status = 'processing'
+        AND lease_token = $4::uuid
+    `, [claim.channelId, claim.productVariantId, claim.revision, claim.leaseToken]);
+    if (completed.rowCount !== 1) {
+      await client.query("ROLLBACK");
+      return false;
+    }
+    await client.query(`
+      UPDATE channels.channel_feeds
+      SET is_active = 0,
+          updated_at = transaction_timestamp()
+      WHERE channel_id = $1 AND product_variant_id = $2
+    `, [claim.channelId, claim.productVariantId]);
     await client.query("COMMIT");
     return true;
   } catch (error) {

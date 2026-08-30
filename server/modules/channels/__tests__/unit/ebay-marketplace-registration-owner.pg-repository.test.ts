@@ -65,6 +65,8 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
             sku: "ARM-ENV-SGL-P50",
             isActive: true,
             unitsPerVariant: 50,
+            requiresShipping: false,
+            trackInventory: false,
           },
         ])),
     };
@@ -100,7 +102,7 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
         productId: 501,
         sku: "ARM-ENV-SGL-P50",
         isActive: true,
-        availableQuantity: 30,
+        availableQuantity: 0,
       },
     ]);
     expect(atp.getAtpBase).toHaveBeenCalledWith(501);

@@ -96,6 +96,7 @@ CREATE TABLE catalog.product_variants (
   standard_cost_cents bigint,
   last_cost_cents bigint,
   avg_cost_cents bigint,
+  requires_shipping boolean NOT NULL DEFAULT true,
   track_inventory boolean DEFAULT true,
   inventory_policy varchar(20) DEFAULT 'deny',
   shopify_variant_id varchar(100),
@@ -120,6 +121,8 @@ CREATE TABLE catalog.product_variants (
   updated_at timestamp NOT NULL DEFAULT now(),
   CONSTRAINT product_variants_uom_type_chk
     CHECK (uom_type IN ('piece', 'each', 'pack', 'inner_pack', 'case', 'skid')),
+  CONSTRAINT product_variants_digital_untracked_chk
+    CHECK (requires_shipping = true OR track_inventory IS FALSE),
   CONSTRAINT product_variants_single_unit_uom_invariants_chk
     CHECK (
       uom_type NOT IN ('piece', 'each')

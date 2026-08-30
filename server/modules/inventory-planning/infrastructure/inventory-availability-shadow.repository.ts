@@ -385,6 +385,8 @@ async function captureGraphInsideTransaction(
     `SELECT id, product_id, sku, name, units_per_variant, is_active
      FROM catalog.product_variants
      WHERE product_id = ANY($1::integer[])
+       AND requires_shipping = true
+       AND COALESCE(track_inventory, true) = true
      ORDER BY product_id, id`,
     [uniqueSorted(modelProductIds)],
   ));
@@ -408,6 +410,8 @@ async function captureGraphInsideTransaction(
     `SELECT id, product_id, sku, name, units_per_variant, is_active
      FROM catalog.product_variants
      WHERE product_id = ANY($1::integer[])
+       AND requires_shipping = true
+       AND COALESCE(track_inventory, true) = true
      ORDER BY product_id, id`,
     [uniqueSorted(relevantProductIds)],
   ));
@@ -674,8 +678,10 @@ async function captureClaimInsideTransaction(
   const targetRows = rows(await client.query(
     `SELECT id, product_id
      FROM catalog.product_variants
-     WHERE id = ANY($1::integer[])
-       AND is_active = true
+      WHERE id = ANY($1::integer[])
+        AND is_active = true
+        AND requires_shipping = true
+        AND COALESCE(track_inventory, true) = true
      ORDER BY id`,
     [uniqueVariantIds],
   ));
