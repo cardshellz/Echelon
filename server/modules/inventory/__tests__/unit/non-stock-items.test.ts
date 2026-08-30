@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
  * one-off goods. The flag existed in the schema but nothing honored it, so a
  * zero-stock one-off hard-blocked its order in the pick queue forever.
  *
- * ECHELON OWNS THE FLAG (operator-set; catalog imports never write it):
+ * ECHELON OWNS THE FLAG for physical items. Catalog import may only force the
+ * flag off when Shopify explicitly identifies a variant as digital:
  *  1. Pick: confirmation-only — completes with NO level/lot writes.
  *  2. Reservation: skipped — an untracked item can never fail a reservation
  *     or trigger a shortfall hold.
@@ -33,8 +34,11 @@ describe("non-stock items (track_inventory=false)", () => {
     expect(src).toContain("variant.trackInventory === false");
   });
 
-  it("catalog import does NOT write the flag — Echelon owns it", () => {
+  it("catalog import only forces tracking off for explicit digital variants", () => {
     const src = read("../../../channels/catalog-backfill.service.ts");
-    expect(src).not.toContain("trackInventory");
+    expect(src).toContain("requires_shipping");
+    expect(src).toContain("requiresShipping ? {} : { trackInventory: false }");
+    expect(src).toContain("trackInventory: requiresShipping");
+    expect(src).toContain("if (!isInventoryManagedVariant(variant)) {");
   });
 });

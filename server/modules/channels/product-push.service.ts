@@ -58,6 +58,8 @@ export interface ResolvedVariant {
   compareAtPrice: number | null;
   shopifyVariantId: string | null;
   isListed: boolean;
+  requiresShipping: boolean;
+  trackInventory: boolean | null;
 }
 
 export interface ResolvedChannelProduct {
@@ -142,6 +144,8 @@ export function createChannelProductPushService(db: any) {
         compareAtPrice: pr?.compareAtPrice ?? v.compareAtPriceCents ?? null,
         shopifyVariantId: v.shopifyVariantId,
         isListed: vo ? vo.isListed === 1 : true,
+        requiresShipping: v.requiresShipping !== false,
+        trackInventory: v.trackInventory,
       };
     });
 
@@ -324,9 +328,12 @@ export function createChannelProductPushService(db: any) {
         // Ensure channel feeds exist for all listed variants (in case they were added after initial push)
         for (const variant of resolved.variants) {
           if (!variant.isListed) continue;
+          const inventoryManaged = variant.requiresShipping && variant.trackInventory !== false;
           const existingFeed = await storage.getChannelFeedByChannelAndVariant(channelId, variant.id);
           if (existingFeed) {
-            if (existingFeed.isActive !== 1) await storage.reactivateChannelFeed(existingFeed.id);
+            if ((existingFeed.isActive === 1) !== inventoryManaged) {
+              await storage.setChannelFeedActive(existingFeed.id, inventoryManaged);
+            }
           } else {
             const shopifyVariantId = variant.shopifyVariantId || null;
             await storage.createChannelFeedDirect({
@@ -336,7 +343,7 @@ export function createChannelProductPushService(db: any) {
               channelVariantId: shopifyVariantId || variant.sku || String(variant.id),
               channelProductId: externalProductId,
               channelSku: variant.sku || null,
-              isActive: 1,
+              isActive: inventoryManaged ? 1 : 0,
             });
           }
         }
@@ -383,9 +390,10 @@ export function createChannelProductPushService(db: any) {
 
             // Ensure channel feed exists so inventory sync picks this variant up
             const existingFeed = await storage.getChannelFeedByChannelAndVariant(channelId, variant.id);
+            const inventoryManaged = variant.requiresShipping && variant.trackInventory !== false;
             if (existingFeed) {
-              if (existingFeed.isActive !== 1) {
-                await storage.reactivateChannelFeed(existingFeed.id);
+              if ((existingFeed.isActive === 1) !== inventoryManaged) {
+                await storage.setChannelFeedActive(existingFeed.id, inventoryManaged);
               }
             } else {
               await storage.createChannelFeedDirect({
@@ -395,7 +403,7 @@ export function createChannelProductPushService(db: any) {
                 channelVariantId: shopifyVariantId,
                 channelProductId: newExternalProductId,
                 channelSku: variant.sku || null,
-                isActive: 1,
+                isActive: inventoryManaged ? 1 : 0,
               });
             }
           }
@@ -514,6 +522,7 @@ export function createChannelProductPushService(db: any) {
         option1: isSingleDefaultVariant ? "Default Title" : (v.name || v.sku || "Default"),
         barcode: v.barcode || v.gtin || undefined,
         price: (v.price! / 100).toFixed(2),
+        requires_shipping: v.requiresShipping,
       };
       if (v.compareAtPrice != null) {
         variant.compare_at_price = (v.compareAtPrice / 100).toFixed(2);

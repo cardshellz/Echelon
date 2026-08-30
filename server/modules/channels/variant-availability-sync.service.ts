@@ -8,12 +8,14 @@ import {
   claimVariantAvailabilitySyncs,
   enqueueVariantAvailabilitySync,
   loadVariantAvailabilityContext,
+  markVariantAvailabilityNotApplicable,
   markVariantAvailabilityFailed,
   markVariantAvailabilitySynced,
   supersedeAvailabilityClaim,
   type ClaimedVariantAvailabilitySync,
   type SqlPool,
 } from "./variant-availability-sync.repository";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 
 const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_LEASE_SECONDS = 120;
@@ -94,6 +96,22 @@ async function processClaim(
 
     if (context.channelProvider.toLowerCase() !== "ebay") {
       throw new Error(`Unsupported availability-sync provider ${context.channelProvider}`);
+    }
+
+    if (!isInventoryManagedVariant({
+      requiresShipping: context.catalogRequiresShipping,
+      trackInventory: context.catalogTrackInventory,
+    })) {
+      const completed = await markVariantAvailabilityNotApplicable(dependencies.dbPool, claim);
+      console.info(`${LOG_PREFIX} Skipped quantity publication for unmanaged variant`, {
+        channelId: context.channelId,
+        productVariantId: context.productVariantId,
+        requiresShipping: context.catalogRequiresShipping,
+        trackInventory: context.catalogTrackInventory,
+        revision: claim.revision,
+        completed,
+      });
+      return completed ? "synced" : "superseded";
     }
 
     let allocatedQuantity = 0;

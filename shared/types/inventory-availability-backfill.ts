@@ -17,12 +17,13 @@ const nonblank = (max: number) => z.string().trim().min(1).max(max);
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 
 export const INVENTORY_AVAILABILITY_BACKFILL_ALGORITHM_VERSION =
-  "inventory_availability_backfill_v1" as const;
+  "inventory_availability_backfill_v2" as const;
 
 export const inventoryAvailabilityBackfillClassificationSchema = z.enum([
   "exact_only",
   "legacy_fungible_directed_pool",
   "recipe_managed_explicit_review",
+  "excluded_unmanaged",
   "blocked",
 ]);
 
@@ -72,6 +73,7 @@ export const inventoryAvailabilityBackfillReviewSchema = z.object({
 
 export const inventoryAvailabilityBackfillQueueStateSchema = z.enum([
   "blocked",
+  "excluded",
   "not_backfilled",
   "conflicting_draft",
   "awaiting_review",
@@ -112,6 +114,7 @@ export const inventoryAvailabilityBackfillQueueResponseSchema = z.object({
   summary: z.object({
     totalActiveProducts: nonnegativeInteger,
     blocked: nonnegativeInteger,
+    excluded: nonnegativeInteger,
     notBackfilled: nonnegativeInteger,
     conflictingDraft: nonnegativeInteger,
     awaitingReview: nonnegativeInteger,

@@ -15,6 +15,8 @@ export type CreateProductVariantInput = {
   heightMm?: number | null;
   shipsInOwnContainer?: boolean;
   maxUnitsPerPackage?: number | null;
+  requiresShipping?: boolean;
+  trackInventory?: boolean;
 };
 
 export type CreatedProductVariant = {

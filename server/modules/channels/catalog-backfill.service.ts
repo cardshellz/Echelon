@@ -42,6 +42,7 @@ import {
   type Warehouse,
 } from "@shared/schema";
 import { decideImportedShopifyProductMapping } from "../catalog/shopify-product-mapping.domain";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -153,6 +154,7 @@ interface ShopifyProductRaw {
     weight: number | null;
     weight_unit: string | null;
     inventory_item_id: number;
+    requires_shipping: boolean;
     position: number;
     option1: string | null;
     option2: string | null;
@@ -511,6 +513,7 @@ class CatalogBackfillService {
     const compareAtPriceCents = shopifyVariant.compare_at_price
       ? Math.round(parseFloat(shopifyVariant.compare_at_price) * 100)
       : null;
+    const requiresShipping = shopifyVariant.requires_shipping !== false;
 
     // Variant name from title
     const variantName = shopifyVariant.title !== "Default Title"
@@ -571,6 +574,8 @@ class CatalogBackfillService {
             barcode: shopifyVariant.barcode,
             priceCents,
             compareAtPriceCents,
+            requiresShipping,
+            ...(requiresShipping ? {} : { trackInventory: false }),
             shopifyVariantId: shopifyVariantId,
             shopifyInventoryItemId: shopifyInventoryItemId,
             unitsPerVariant,
@@ -599,6 +604,8 @@ class CatalogBackfillService {
             barcode: shopifyVariant.barcode,
             priceCents,
             compareAtPriceCents,
+            requiresShipping,
+            trackInventory: requiresShipping,
             shopifyVariantId: shopifyVariantId,
             shopifyInventoryItemId: shopifyInventoryItemId,
             unitsPerVariant,
@@ -618,6 +625,7 @@ class CatalogBackfillService {
     }
 
     if (!echelonVariant) return null;
+    const inventoryManaged = isInventoryManagedVariant(echelonVariant);
 
     // --- Upsert channel_feeds ---
     if (!isDryRun) {
@@ -639,7 +647,7 @@ class CatalogBackfillService {
             channelVariantId: shopifyVariantId,
             channelProductId: shopifyProductId,
             channelSku: sku,
-            isActive: 1,
+            isActive: inventoryManaged ? 1 : 0,
             updatedAt: new Date(),
           })
           .where(eq(channelFeeds.id, existingFeed.id));
@@ -652,7 +660,7 @@ class CatalogBackfillService {
           channelVariantId: shopifyVariantId,
           channelProductId: shopifyProductId,
           channelSku: sku,
-          isActive: 1,
+          isActive: inventoryManaged ? 1 : 0,
         });
         result.feeds.created++;
       }
@@ -827,12 +835,21 @@ class CatalogBackfillService {
             id: productVariants.id,
             sku: productVariants.sku,
             shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
+            requiresShipping: productVariants.requiresShipping,
+            trackInventory: productVariants.trackInventory,
           })
           .from(productVariants)
           .where(eq(productVariants.id, v.echelonVariantId))
           .limit(1);
 
         if (variant) {
+          if (!isInventoryManagedVariant(variant)) {
+            result.inventory.skipped++;
+            console.log(
+              `[CatalogBackfill] Variant ${variant.sku ?? variant.id}: digital or inventory-untracked, skipping warehouse inventory import`,
+            );
+            continue;
+          }
           variantInfos.push({
             echelonVariantId: variant.id,
             sku: variant.sku,
@@ -970,7 +987,7 @@ class CatalogBackfillService {
 
     console.log(
       `[CatalogBackfill] Inventory backfill complete: ${result.inventory.imported} imported, ` +
-      `${result.inventory.skipped} skipped (trusted Echelon), ${result.inventory.noShopifyData} no Shopify data, ` +
+      `${result.inventory.skipped} skipped (not imported), ${result.inventory.noShopifyData} no Shopify data, ` +
       `${result.reconciliation.length} reconciliation entries`,
     );
   }

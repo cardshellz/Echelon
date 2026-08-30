@@ -164,13 +164,14 @@ function fakeService() {
 
 function queue() {
   return {
-    algorithmVersion: "inventory_availability_backfill_v1" as const,
+    algorithmVersion: "inventory_availability_backfill_v2" as const,
     capturedAt: "2026-08-28T12:00:00.000Z",
     catalogInputHash: HASH,
     catalogResultHash: HASH,
     summary: {
       totalActiveProducts: 1,
       blocked: 0,
+      excluded: 0,
       notBackfilled: 1,
       conflictingDraft: 0,
       awaitingReview: 0,

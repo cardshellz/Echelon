@@ -9,6 +9,7 @@ import type {
   DropshipRegistrationVariantRecord,
 } from "../application/dropship-marketplace-registration-owner-reader";
 import { MarketplaceListingRegistrationError } from "../../marketplace-listings/domain/registration-errors";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 
 interface StoreConnectionRow {
   id: number;
@@ -30,6 +31,8 @@ interface ProductVariantRow {
   sku: string | null;
   is_active: boolean;
   units_per_variant: number;
+  requires_shipping: boolean;
+  track_inventory: boolean | null;
 }
 
 /**
@@ -138,7 +141,9 @@ export class PgDropshipMarketplaceRegistrationOwnerRepository
                 pv.product_id,
                 pv.sku,
                 pv.is_active,
-                pv.units_per_variant
+                pv.units_per_variant,
+                pv.requires_shipping,
+                pv.track_inventory
          FROM catalog.product_variants pv
          WHERE pv.product_id = $1
          ORDER BY pv.position ASC, pv.id ASC`,
@@ -162,7 +167,10 @@ export class PgDropshipMarketplaceRegistrationOwnerRepository
       productId: row.product_id,
       sku: row.sku,
       isActive: row.is_active,
-      availableQuantity: variantAtp(baseAtp, row),
+      availableQuantity: isInventoryManagedVariant({
+        requiresShipping: row.requires_shipping,
+        trackInventory: row.track_inventory,
+      }) ? variantAtp(baseAtp, row) : 0,
     }));
   }
 }

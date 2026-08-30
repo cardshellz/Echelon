@@ -11,6 +11,7 @@ import { requirePermission, requireAuth, upload } from "../../routes/middleware"
 import { insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema } from "@shared/schema";
 import Papa from "papaparse";
 import { projectInventoryLevels } from "./application/inventory-levels.query";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 
 export function registerInventoryRoutes(app: Express) {
 
@@ -655,6 +656,8 @@ export function registerInventoryRoutes(app: Express) {
       let status;
       if (!variant) {
         status = { isBackordered: false, backorderQty: 0, atp: 0 };
+      } else if (!isInventoryManagedVariant(variant)) {
+        status = { isBackordered: false, backorderQty: 0, atp: 0 };
       } else {
         const atpBase = await atpSvc.getAtpBase(variant.productId);
         status = {
@@ -739,7 +742,7 @@ export function registerInventoryRoutes(app: Express) {
 
         for (const [variantId, levels] of levelsByVariant) {
           const variant = allVariants.find(v => v.id === variantId);
-          if (!variant) continue;
+          if (!variant || !isInventoryManagedVariant(variant)) continue;
           const productId = variant.productId;
           const product = allProducts.find(p => p.id === productId);
           if (!product) continue;

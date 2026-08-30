@@ -148,6 +148,22 @@ class ReservationService {
     }
 
     const reserveWithinTransaction = async (tx: any): Promise<ReserveForOrderResult> => {
+      const [variant] = await tx
+        .select({
+          productId: productVariants.productId,
+          requiresShipping: productVariants.requiresShipping,
+          trackInventory: productVariants.trackInventory,
+        })
+        .from(productVariants)
+        .where(eq(productVariants.id, variantId))
+        .limit(1);
+      if (!variant || variant.productId !== productId) {
+        throw new Error(`Variant ${variantId} does not belong to product ${productId}`);
+      }
+      if (variant.requiresShipping === false || variant.trackInventory === false) {
+        return { reserved: 0, promised: 0, shortfall: 0 };
+      }
+
       const inventoryStrategy = await this.atpService.getProductInventoryStrategy(productId, tx);
       if (inventoryStrategy === "recipe_managed") {
         if (!this.recipeBuildPromise) {
@@ -365,7 +381,7 @@ class ReservationService {
 
         // Non-stock item: nothing to reserve, never a shortfall (mirrors the
         // confirmation-only pick path in picking.use-cases._deductInventory).
-        if (variant.trackInventory === false) {
+        if (variant.requiresShipping === false || variant.trackInventory === false) {
           continue;
         }
 
