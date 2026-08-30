@@ -54,9 +54,13 @@ describe("digital inventory exclusion contract", () => {
     const sync = read("../../../channels/sync.service.ts");
     const orchestrator = read("../../../channels/echelon-sync-orchestrator.service.ts");
     const availability = read("../../../channels/variant-availability-sync.service.ts");
+    const productPush = read("../../../channels/product-push.service.ts");
     expect(sync).toContain("isInventoryManagedVariant(variantRow)");
     expect(orchestrator).toContain("isInventoryManagedVariant(variant)");
     expect(availability).toContain("markVariantAvailabilityNotApplicable");
+    expect(productPush).toContain(
+      "inventory_management: v.trackInventory === false ? null : undefined",
+    );
   });
 
   it("keeps digital variants out of allocation and new-listing inventory surfaces", () => {

@@ -523,6 +523,10 @@ export function createChannelProductPushService(db: any) {
         barcode: v.barcode || v.gtin || undefined,
         price: (v.price! / 100).toFixed(2),
         requires_shipping: v.requiresShipping,
+        // Explicitly clear Shopify tracking for digital and physical non-stock
+        // variants. Undefined preserves existing Shopify tracking for managed
+        // variants; quantity ownership remains with the inventory publisher.
+        inventory_management: v.trackInventory === false ? null : undefined,
       };
       if (v.compareAtPrice != null) {
         variant.compare_at_price = (v.compareAtPrice / 100).toFixed(2);
