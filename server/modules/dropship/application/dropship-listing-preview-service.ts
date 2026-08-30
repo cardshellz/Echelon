@@ -95,6 +95,9 @@ export interface DropshipListingPreviewRow {
   warnings: string[];
   marketplaceQuantity: number;
   priceCents: number | null;
+  marketplaceCategoryId: string | null;
+  marketplaceCategoryName: string | null;
+  storeCategoryNames: string[];
   previewHash: string;
   adminExposureDecision: DropshipCatalogExposureDecision;
   selectionDecision: DropshipVendorCatalogSelectionDecision;
@@ -174,6 +177,11 @@ export interface DropshipListingPreviewRepository {
     productVariantIds: readonly number[];
   }): Promise<DropshipExistingVendorListing[]>;
   listPricingPolicies(): Promise<DropshipPricingPolicyRecord[]>;
+  listEbayStoreCategoryAssignments(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    productVariantIds: readonly number[];
+  }): Promise<Array<{ productVariantId: number; storeCategoryNames: string[] }>>;
   getPackageReadiness(productVariantIds: readonly number[]): Promise<Map<number, DropshipListingPackageReadiness>>;
   createListingPushJob(
     input: CreateDropshipListingPushJobRepositoryInput,
@@ -235,6 +243,7 @@ export class DropshipListingPreviewService {
       existingListings,
       pricingPolicies,
       packageReadiness,
+      ebayStoreCategoryAssignments,
     ] = await Promise.all([
       this.deps.repository.listCatalogExposureRules(),
       this.deps.repository.listSelectionRules(parsed.vendorId),
@@ -249,6 +258,13 @@ export class DropshipListingPreviewService {
       }),
       this.deps.repository.listPricingPolicies(),
       this.deps.repository.getPackageReadiness(uniqueVariantIds),
+      context.platform === "ebay"
+        ? this.deps.repository.listEbayStoreCategoryAssignments({
+            vendorId: parsed.vendorId,
+            storeConnectionId: parsed.storeConnectionId,
+            productVariantIds: uniqueVariantIds,
+          })
+        : Promise.resolve([]),
     ]);
 
     const productIds = uniquePositiveIntegers(candidates.map((candidate) => candidate.productId));
@@ -256,6 +272,12 @@ export class DropshipListingPreviewService {
     const candidatesByVariantId = new Map(candidates.map((candidate) => [candidate.productVariantId, candidate]));
     const overridesByVariantId = new Map(overrides.map((override) => [override.productVariantId, override]));
     const listingsByVariantId = new Map(existingListings.map((listing) => [listing.productVariantId, listing]));
+    const storeCategoryNamesByVariantId = new Map(
+      ebayStoreCategoryAssignments.map((assignment) => [
+        assignment.productVariantId,
+        assignment.storeCategoryNames,
+      ]),
+    );
     const rows = uniqueVariantIds.map((productVariantId) => {
       const candidate = candidatesByVariantId.get(productVariantId);
       if (!candidate) {
@@ -290,6 +312,7 @@ export class DropshipListingPreviewService {
           ?? null,
         marketplaceListing: this.deps.marketplaceListing,
         generatedAt,
+        storeCategoryNames: storeCategoryNamesByVariantId.get(productVariantId) ?? [],
       });
     });
 
@@ -542,6 +565,7 @@ function buildListingPreviewRow(input: {
   requestedRetailPriceCents: number | null;
   marketplaceListing: DropshipMarketplaceListingProvider;
   generatedAt: Date;
+  storeCategoryNames: readonly string[];
 }): DropshipListingPreviewRow {
   const blockers: string[] = [];
   const warnings: string[] = [];
@@ -578,6 +602,7 @@ function buildListingPreviewRow(input: {
         content: input.candidate,
         priceCents,
         quantity: input.selectionDecision.marketplaceQuantity,
+        storeCategoryNames: input.storeCategoryNames,
       })
     : { intent: null, blockers: [], warnings: [] };
   blockers.push(...marketplaceValidation.blockers);
@@ -595,6 +620,11 @@ function buildListingPreviewRow(input: {
     platform: input.context.platform,
     listingMode: input.config?.listingMode ?? null,
     priceCents,
+    marketplaceCategoryId: marketplaceValidation.intent?.marketplaceCategoryId
+      ?? input.candidate.ebayBrowseCategoryId,
+    marketplaceCategoryName: marketplaceValidation.intent?.marketplaceCategoryName
+      ?? input.candidate.ebayBrowseCategoryName,
+    storeCategoryNames: marketplaceValidation.intent?.storeCategoryNames ?? [],
     marketplaceQuantity: input.selectionDecision.marketplaceQuantity,
     blockers,
     warnings,
@@ -614,6 +644,11 @@ function buildListingPreviewRow(input: {
     warnings,
     marketplaceQuantity: input.selectionDecision.marketplaceQuantity,
     priceCents,
+    marketplaceCategoryId: marketplaceValidation.intent?.marketplaceCategoryId
+      ?? input.candidate.ebayBrowseCategoryId,
+    marketplaceCategoryName: marketplaceValidation.intent?.marketplaceCategoryName
+      ?? input.candidate.ebayBrowseCategoryName,
+    storeCategoryNames: marketplaceValidation.intent?.storeCategoryNames ?? [],
     previewHash,
     adminExposureDecision: input.adminExposureDecision,
     selectionDecision: input.selectionDecision,
@@ -643,6 +678,9 @@ function missingCatalogPreviewRow(input: {
     warnings: [],
     marketplaceQuantity: 0,
     priceCents: null,
+    marketplaceCategoryId: null,
+    marketplaceCategoryName: null,
+    storeCategoryNames: [],
     previewHash,
     adminExposureDecision: {
       exposed: false,

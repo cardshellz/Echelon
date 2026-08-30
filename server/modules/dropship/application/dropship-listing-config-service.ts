@@ -254,13 +254,18 @@ export function buildDefaultDropshipStoreListingConfig(
       marketplaceConfig: {},
       requiredConfigKeys: [
         "marketplaceId",
-        "categoryId",
         "merchantLocationKey",
         "businessPolicies.paymentPolicyId",
         "businessPolicies.returnPolicyId",
         "businessPolicies.fulfillmentPolicyId",
       ],
-      requiredProductFields: ["sku", "title", "description", "imageUrls"],
+      requiredProductFields: [
+        "sku",
+        "title",
+        "description",
+        "imageUrls",
+        "ebayBrowseCategoryId",
+      ],
       isActive: true,
     };
   }

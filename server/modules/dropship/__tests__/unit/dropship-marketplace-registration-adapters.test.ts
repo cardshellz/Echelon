@@ -300,7 +300,12 @@ describe("RefreshingDropshipEbayRegistrationCredentialProvider", () => {
     expect(result.accessToken).toBe("fresh-access-token");
     expect(fetchFn).toHaveBeenCalledWith(
       "https://api.sandbox.ebay.com/identity/v1/oauth2/token",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining(
+          encodeURIComponent("https://api.ebay.com/oauth/api_scope/sell.stores"),
+        ),
+      }),
     );
     expect(replaceTokens).toHaveBeenCalledWith({
       vendorId: 10,

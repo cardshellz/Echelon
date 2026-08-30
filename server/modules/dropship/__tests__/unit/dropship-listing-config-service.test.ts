@@ -66,9 +66,12 @@ describe("DropshipListingConfigService", () => {
   });
 
   it("defaults new eBay configs to live while Shopify remains draft-first", () => {
-    expect(buildDefaultDropshipStoreListingConfig("ebay").listingMode).toBe(
+    const ebayConfig = buildDefaultDropshipStoreListingConfig("ebay");
+    expect(ebayConfig.listingMode).toBe(
       DROPSHIP_DEFAULT_EBAY_LISTING_MODE,
     );
+    expect(ebayConfig.requiredConfigKeys).not.toContain("categoryId");
+    expect(ebayConfig.requiredProductFields).toContain("ebayBrowseCategoryId");
     expect(buildDefaultDropshipStoreListingConfig("shopify").listingMode).toBe(
       DROPSHIP_DEFAULT_LISTING_MODE,
     );

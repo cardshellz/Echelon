@@ -21,6 +21,7 @@ import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { EbayStoreCategoryCombobox } from "@/components/dropship/EbayStoreCategoryCombobox";
 import {
   Table,
   TableBody,
@@ -45,6 +46,8 @@ import {
   queryErrorMessage,
   type DropshipCatalogResponse,
   type DropshipCatalogRow,
+  type DropshipEbayStoreCategoryAssignmentResponse,
+  type DropshipEbayStoreCategoryResponse,
   type DropshipListingPreviewResponse,
   type DropshipListingPreviewResult,
   type DropshipListingPushResponse,
@@ -128,6 +131,9 @@ export default function DropshipPortalCatalog() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [retailPriceByVariantId, setRetailPriceByVariantId] = useState<Record<string, string>>({});
+  const [pendingStoreCategoryVariantIds, setPendingStoreCategoryVariantIds] = useState<Set<number>>(
+    () => new Set(),
+  );
   const catalogUrl = useMemo(() => buildQueryUrl("/api/dropship/catalog", {
     search: applied.search,
     category: applied.category === ALL_FILTER_VALUE ? undefined : applied.category,
@@ -177,6 +183,21 @@ export default function DropshipPortalCatalog() {
     [settingsQuery.data?.settings.storeConnections],
   );
   const selectedStoreConnectionIdNumber = Number(selectedStoreConnectionId);
+  const selectedStoreConnection = launchReadyStoreConnections.find(
+    (connection) => connection.storeConnectionId === selectedStoreConnectionIdNumber,
+  ) ?? null;
+  const ebayStoreCategoryQueryKey = [
+    "/api/dropship/ebay/store-categories",
+    selectedStoreConnectionIdNumber,
+  ] as const;
+  const ebayStoreCategoryQuery = useQuery<DropshipEbayStoreCategoryResponse>({
+    queryKey: ebayStoreCategoryQueryKey,
+    queryFn: () => fetchJson<DropshipEbayStoreCategoryResponse>(
+      `/api/dropship/ebay/store-categories/${selectedStoreConnectionIdNumber}`,
+    ),
+    enabled: selectedStoreConnection?.platform === "ebay",
+    staleTime: 60_000,
+  });
   const activeBulkPushProof = useMemo(() => {
     return isDropshipSensitiveProofActive({
       principal,
@@ -340,6 +361,50 @@ export default function DropshipPortalCatalog() {
     setMessage("");
   }
 
+  async function updateEbayStoreCategoryAssignment(
+    productVariantId: number,
+    storeCategoryIds: string[],
+  ) {
+    setPendingStoreCategoryVariantIds((current) => new Set(current).add(productVariantId));
+    setError("");
+    setMessage("");
+    try {
+      const result = await putJson<DropshipEbayStoreCategoryAssignmentResponse>(
+        `/api/dropship/ebay/store-category-assignments/${productVariantId}`,
+        {
+          storeConnectionId: selectedStoreConnectionIdNumber,
+          storeCategoryIds,
+          idempotencyKey: createDropshipIdempotencyKey("ebay-store-category"),
+        },
+      );
+      queryClient.setQueryData<DropshipEbayStoreCategoryResponse>(
+        ebayStoreCategoryQueryKey,
+        (current) => current ? {
+          ...current,
+          assignments: [
+            ...current.assignments.filter(
+              (assignment) => assignment.productVariantId !== productVariantId,
+            ),
+            ...(result.assignment ? [result.assignment] : []),
+          ].sort((left, right) => left.productVariantId - right.productVariantId),
+        } : current,
+      );
+      setListingPreview(null);
+      setListingPushResult(null);
+      setMessage(storeCategoryIds.length > 0
+        ? "eBay Store category assignment saved."
+        : "Optional eBay Store category assignment cleared.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "eBay Store category update failed.");
+    } finally {
+      setPendingStoreCategoryVariantIds((current) => {
+        const next = new Set(current);
+        next.delete(productVariantId);
+        return next;
+      });
+    }
+  }
+
   function applyCatalogFilters() {
     setApplied({
       search: search.trim(),
@@ -494,6 +559,17 @@ export default function DropshipPortalCatalog() {
             </Empty>
           )}
         </section>
+
+        {selectedStoreConnection?.platform === "ebay" && (
+          <EbayStoreCategoryAssignmentPanel
+            data={ebayStoreCategoryQuery.data ?? null}
+            error={ebayStoreCategoryQuery.error}
+            isLoading={ebayStoreCategoryQuery.isLoading}
+            pendingProductVariantIds={pendingStoreCategoryVariantIds}
+            rows={selectedCatalogRows}
+            onAssignmentChange={updateEbayStoreCategoryAssignment}
+          />
+        )}
 
         <ListingPreviewPanel
           launchReadyStoreConnections={launchReadyStoreConnections}
@@ -687,6 +763,183 @@ function FilterSelect({
   );
 }
 
+function EbayStoreCategoryAssignmentPanel({
+  data,
+  error,
+  isLoading,
+  onAssignmentChange,
+  pendingProductVariantIds,
+  rows,
+}: {
+  data: DropshipEbayStoreCategoryResponse | null;
+  error: unknown;
+  isLoading: boolean;
+  onAssignmentChange: (productVariantId: number, storeCategoryIds: string[]) => void;
+  pendingProductVariantIds: ReadonlySet<number>;
+  rows: DropshipCatalogRow[];
+}) {
+  const pageSize = 25;
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount));
+  }, [pageCount]);
+  const pageRows = rows.slice((page - 1) * pageSize, page * pageSize);
+  const assignmentByVariantId = new Map(
+    (data?.assignments ?? []).map((assignment) => [assignment.productVariantId, assignment]),
+  );
+
+  return (
+    <section className="mt-5 overflow-hidden rounded-md border border-zinc-200 bg-white">
+      <div className="border-b border-zinc-200 p-4">
+        <h2 className="text-lg font-semibold">Your eBay Store organization (optional)</h2>
+        <p className="mt-1 text-sm text-zinc-500">
+          Card Shellz supplies the required eBay marketplace category. Use these searchable fields only if you want a listing organized inside one or two custom categories in your own eBay Store.
+        </p>
+        <p className="mt-1 text-xs text-zinc-500">
+          Leaving both fields blank does not block preview or push. Category changes save immediately and are shown again in listing preview.
+        </p>
+      </div>
+
+      {isLoading ? (
+        <div className="space-y-2 p-4">
+          <Skeleton className="h-12 w-full" />
+          <Skeleton className="h-12 w-full" />
+        </div>
+      ) : error ? (
+        <div className="m-4 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+          <div className="font-medium">Custom Store categories are unavailable.</div>
+          <div className="mt-1">
+            {queryErrorMessage(error, "The connected eBay account did not return its Store categories.")}
+          </div>
+          <div className="mt-1 text-xs">You can still preview and push listings without this optional organization.</div>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="p-4 text-sm text-zinc-500">
+          Select catalog items above before assigning your eBay Store categories.
+        </div>
+      ) : (data?.categories.length ?? 0) === 0 ? (
+        <div className="p-4 text-sm text-zinc-500">
+          No custom leaf categories were returned by this eBay Store. Listings will use eBay&apos;s default Store organization.
+        </div>
+      ) : (
+        <div>
+          <div className="max-h-96 overflow-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Selected item</TableHead>
+                  <TableHead>Primary Store category</TableHead>
+                  <TableHead>Secondary Store category</TableHead>
+                  <TableHead>Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {pageRows.map((row) => {
+                const assignment = assignmentByVariantId.get(row.productVariantId);
+                const selectedIds = assignment?.storeCategoryIds ?? [];
+                const primaryId = selectedIds[0] ?? null;
+                const secondaryId = selectedIds[1] ?? null;
+                const pending = pendingProductVariantIds.has(row.productVariantId);
+                const categoryPathById = new Map(
+                  data?.categories.map((category) => [category.categoryId, category.path]) ?? [],
+                );
+                const staleAssignment = selectedIds.some((categoryId, index) => (
+                  categoryPathById.get(categoryId) !== assignment?.storeCategoryNames[index]
+                ));
+                return (
+                  <TableRow key={row.productVariantId}>
+                    <TableCell>
+                      <div className="font-medium">{row.productName}</div>
+                      <div className="font-mono text-xs text-zinc-500">
+                        {row.variantSku || `Variant ${row.productVariantId}`}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <EbayStoreCategoryCombobox
+                        ariaLabel={`Primary eBay Store category for ${row.variantSku || row.variantName}`}
+                        categories={data?.categories ?? []}
+                        disabled={pending}
+                        placeholder="Use eBay default"
+                        value={primaryId}
+                        onValueChange={(categoryId) => {
+                          const nextIds = categoryId === null
+                            ? selectedIds.slice(1, 2)
+                            : [categoryId, ...selectedIds.filter((value) => value !== categoryId).slice(0, 1)];
+                          onAssignmentChange(row.productVariantId, nextIds);
+                        }}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <EbayStoreCategoryCombobox
+                        ariaLabel={`Secondary eBay Store category for ${row.variantSku || row.variantName}`}
+                        categories={(data?.categories ?? []).filter((category) => category.categoryId !== primaryId)}
+                        disabled={pending || primaryId === null}
+                        placeholder={primaryId === null ? "Select primary first" : "No secondary category"}
+                        value={secondaryId}
+                        onValueChange={(categoryId) => {
+                          if (primaryId === null) return;
+                          const nextIds = categoryId === null
+                            ? selectedIds.slice(0, 1)
+                            : [primaryId, categoryId];
+                          onAssignmentChange(row.productVariantId, nextIds);
+                        }}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      {pending ? (
+                        <Badge variant="outline">Saving</Badge>
+                      ) : staleAssignment ? (
+                        <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-900">
+                          Category changed on eBay
+                        </Badge>
+                      ) : selectedIds.length > 0 ? (
+                        <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-800">
+                          Assigned
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline">eBay default</Badge>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                );
+                })}
+              </TableBody>
+            </Table>
+          </div>
+          {pageCount > 1 && (
+            <div className="flex items-center justify-between gap-3 border-t border-zinc-200 px-4 py-3 text-sm text-zinc-600">
+              <span>
+                Showing {(page - 1) * pageSize + 1}-{Math.min(page * pageSize, rows.length)} of {rows.length} selected items
+              </span>
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={page === 1}
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                >
+                  Previous
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={page === pageCount}
+                  onClick={() => setPage((current) => Math.min(pageCount, current + 1))}
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ListingPreviewPanel({
   emailCodeSent,
   launchReadyStoreConnections,
@@ -855,6 +1108,9 @@ function ListingPreviewPanel({
                 <TableHead>Mode</TableHead>
                 <TableHead>Qty</TableHead>
                 <TableHead>Price</TableHead>
+                {listingPreview.platform === "ebay" && (
+                  <TableHead>Marketplace category</TableHead>
+                )}
                 <TableHead>Status</TableHead>
                 <TableHead>Blockers / Warnings</TableHead>
               </TableRow>
@@ -869,6 +1125,23 @@ function ListingPreviewPanel({
                   <TableCell>{formatStatus(row.listingMode || row.platform)}</TableCell>
                   <TableCell className="font-mono">{row.marketplaceQuantity}</TableCell>
                   <TableCell>{row.priceCents === null ? "Missing" : formatCents(row.priceCents)}</TableCell>
+                  {listingPreview.platform === "ebay" && (
+                    <TableCell>
+                      {row.marketplaceCategoryId ? (
+                        <div>
+                          <div className="font-medium">{row.marketplaceCategoryName || "eBay category"}</div>
+                          <div className="font-mono text-xs text-zinc-500">{row.marketplaceCategoryId}</div>
+                          <div className="mt-1 text-xs text-zinc-500">
+                            {row.storeCategoryNames.length > 0
+                              ? `Your Store: ${row.storeCategoryNames.join(", ")}`
+                              : "Your Store: eBay default"}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-sm text-red-700">Not mapped</span>
+                      )}
+                    </TableCell>
+                  )}
                   <TableCell>
                     <Badge variant="outline" className={previewStatusTone(row.previewStatus)}>
                       {formatStatus(row.previewStatus)}

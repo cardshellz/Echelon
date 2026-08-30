@@ -39,7 +39,6 @@ interface Clock {
 
 interface EbayListingConfig {
   marketplaceId: string;
-  categoryId: string;
   merchantLocationKey: string;
   businessPolicies: {
     paymentPolicyId: string;
@@ -613,7 +612,6 @@ function parseEbayListingConfig(
   const businessPolicies = recordFromConfig(config, "businessPolicies");
   const parsed = {
     marketplaceId: requiredConfigString(config, "marketplaceId"),
-    categoryId: requiredConfigString(config, "categoryId"),
     merchantLocationKey: requiredConfigString(config, "merchantLocationKey"),
     businessPolicies: {
       paymentPolicyId: requiredConfigString(
@@ -662,7 +660,17 @@ function assertEbayReady(
       { productVariantId: input.productVariantId, retryable: false },
     );
   }
-  if (!config.categoryId || !config.merchantLocationKey) {
+  if (!intent.marketplaceCategoryId?.trim()) {
+    throw new DropshipError(
+      "DROPSHIP_EBAY_BROWSE_CATEGORY_REQUIRED",
+      "eBay listing push requires the catalog product's eBay browse category.",
+      {
+        productVariantId: input.productVariantId,
+        retryable: false,
+      },
+    );
+  }
+  if (!config.merchantLocationKey) {
     throw new DropshipError(
       "DROPSHIP_EBAY_LISTING_CONFIG_REQUIRED",
       "eBay listing configuration is incomplete.",
@@ -679,6 +687,14 @@ function buildDropshipEbayListingDraft(
   listingBuilder: EbayListingBuilder,
 ) {
   const intent = input.listingIntent;
+  const marketplaceCategoryId = intent.marketplaceCategoryId?.trim();
+  if (!marketplaceCategoryId) {
+    throw new DropshipError(
+      "DROPSHIP_EBAY_BROWSE_CATEGORY_REQUIRED",
+      "eBay listing push requires the catalog product's eBay browse category.",
+      { productVariantId: input.productVariantId, retryable: false },
+    );
+  }
   const sku = intent.sku?.trim();
   if (!sku) {
     throw new DropshipError(
@@ -726,9 +742,6 @@ function buildDropshipEbayListingDraft(
     merchantLocationKey: config.merchantLocationKey,
     marketplaceId: config.marketplaceId,
     listingPolicies: config.businessPolicies,
-    channelOverrides: {
-      marketplaceCategoryId: config.categoryId,
-    },
   };
   const quantityByVariantId = new Map([
     [input.productVariantId, intent.quantity],
@@ -736,11 +749,12 @@ function buildDropshipEbayListingDraft(
 
   return listingBuilder.buildListingDraft(listing, sharedConfig, {
     availableQuantityByVariantId: quantityByVariantId,
-    categoryIdOverride: config.categoryId,
+    categoryIdOverride: marketplaceCategoryId,
     conditionOverride: mapEbayCondition(intent.condition),
     descriptionHtmlOverride: intent.description ?? intent.title,
     includeOfferTax: false,
     requirePackageWeight: true,
+    storeCategoryNames: intent.storeCategoryNames,
   });
 }
 

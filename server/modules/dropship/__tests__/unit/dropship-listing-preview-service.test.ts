@@ -85,6 +85,78 @@ describe("DropshipListingPreviewService", () => {
     });
   });
 
+  it("carries the catalog product eBay category into preview and listing intent", async () => {
+    repository.context = {
+      ...repository.context,
+      platform: "ebay",
+    };
+    repository.config = {
+      ...repository.config!,
+      platform: "ebay",
+      marketplaceConfig: { profileId: "profile-1" },
+    };
+    repository.storeCategoryAssignments = [{
+      productVariantId: 101,
+      storeCategoryNames: ["Supplies:Toploaders"],
+    }];
+
+    const result = await service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPriceCents: 1299,
+    });
+
+    expect(result.rows[0]).toMatchObject({
+      previewStatus: "ready",
+      marketplaceCategoryId: "183438",
+      marketplaceCategoryName: "Card Toploaders & Holders",
+      storeCategoryNames: ["Supplies:Toploaders"],
+    });
+    expect(result.rows[0]?.listingIntent).toMatchObject({
+      marketplaceCategoryId: "183438",
+      marketplaceCategoryName: "Card Toploaders & Holders",
+      storeCategoryNames: ["Supplies:Toploaders"],
+    });
+  });
+
+  it("blocks eBay preview when the catalog product has no browse category", async () => {
+    repository.context = {
+      ...repository.context,
+      platform: "ebay",
+    };
+    repository.config = {
+      ...repository.config!,
+      platform: "ebay",
+      marketplaceConfig: { profileId: "profile-1", categoryId: "183454" },
+      requiredProductFields: [
+        ...repository.config!.requiredProductFields,
+        "ebayBrowseCategoryId",
+      ],
+    };
+    repository.candidate = {
+      ...repository.candidate,
+      ebayBrowseCategoryId: null,
+      ebayBrowseCategoryName: null,
+    };
+
+    const result = await service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPriceCents: 1299,
+    });
+
+    expect(result.rows[0]).toMatchObject({
+      previewStatus: "blocked",
+      marketplaceCategoryId: null,
+      blockers: expect.arrayContaining(["ebay_browse_category_required"]),
+      listingIntent: null,
+    });
+    expect(result.rows[0]?.blockers.filter((blocker) => (
+      blocker === "ebay_browse_category_required"
+      || blocker === "missing_product_field:ebayBrowseCategoryId"
+    ))).toEqual(["ebay_browse_category_required"]);
+  });
+
   it("allows an onboarding vendor to preview a launch-ready selected listing", async () => {
     repository.context = {
       ...repository.context,
@@ -317,6 +389,11 @@ class FakeAtpProvider implements DropshipAtpProvider {
 }
 
 class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
+  candidate = makeCandidate();
+  storeCategoryAssignments: Array<{
+    productVariantId: number;
+    storeCategoryNames: string[];
+  }> = [];
   context: DropshipListingStoreContext = {
     vendorId: 10,
     vendorStatus: "active",
@@ -371,7 +448,7 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
   }
 
   async listCatalogCandidates(): Promise<DropshipListingCatalogCandidate[]> {
-    return [makeCandidate()];
+    return [this.candidate];
   }
 
   async listVariantOverrides(): Promise<DropshipVendorVariantOverride[]> {
@@ -384,6 +461,13 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
 
   async listPricingPolicies(): Promise<DropshipPricingPolicyRecord[]> {
     return [];
+  }
+
+  async listEbayStoreCategoryAssignments(): Promise<Array<{
+    productVariantId: number;
+    storeCategoryNames: string[];
+  }>> {
+    return this.storeCategoryAssignments;
   }
 
   async getPackageReadiness(): Promise<Map<number, DropshipListingPackageReadiness>> {
@@ -434,6 +518,8 @@ function makeCandidate(): DropshipListingCatalogCandidate {
     productVariantId: 101,
     productLineIds: [9],
     category: "Protectors",
+    ebayBrowseCategoryId: "183438",
+    ebayBrowseCategoryName: "Card Toploaders & Holders",
     productIsActive: true,
     variantIsActive: true,
     unitsPerVariant: 3,
