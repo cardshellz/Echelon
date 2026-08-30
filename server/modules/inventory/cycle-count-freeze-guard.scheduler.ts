@@ -1,10 +1,16 @@
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
 import { withAdvisoryLock } from "../../infrastructure/scheduler-lock";
+import {
+  recordRunCompleted,
+  runBootCatchUpIfBehind,
+} from "../../infrastructure/scheduler-run-registry";
 
 const LOG_PREFIX = "[Cycle-Count Freeze Guard]";
 const FREEZE_GUARD_LOCK_ID = 90210;
 const DEFAULT_MAX_AGE_DAYS = 3;
+const FREEZE_GUARD_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const FREEZE_GUARD_JOB_KEY = "cycle_count_freeze_guard";
 
 /**
  * Max number of days a cycle-count freeze may hold a location before it is
@@ -83,17 +89,26 @@ export function startCycleCountFreezeGuard(dbArg: any = db): void {
     `${LOG_PREFIX} Scheduler started (every 6h, max freeze age ${getFreezeMaxAgeDays()}d, dyno-safe lock)`,
   );
 
-  // Boot run (staggered after other schedulers)
+  // Boot run (staggered after other schedulers), but only when a scheduled run
+  // was genuinely missed. A 6h job replayed on every deploy is pure waste.
   setTimeout(() => {
     withAdvisoryLock(FREEZE_GUARD_LOCK_ID, async () => {
-      await runCycleCountFreezeGuard(dbArg);
+      await runBootCatchUpIfBehind({
+        db: dbArg,
+        jobKey: FREEZE_GUARD_JOB_KEY,
+        intervalMs: FREEZE_GUARD_INTERVAL_MS,
+        logPrefix: LOG_PREFIX,
+        run: () => runCycleCountFreezeGuard(dbArg),
+      });
     }).catch((err) => console.error(`${LOG_PREFIX} Boot run error: ${err.message}`));
   }, 20000);
 
-  // Every 6 hours thereafter
+  // Every 6 hours thereafter. Recording here too is what keeps the timestamp
+  // fresh; without it every boot would decide it is behind.
   setInterval(() => {
     withAdvisoryLock(FREEZE_GUARD_LOCK_ID, async () => {
       await runCycleCountFreezeGuard(dbArg);
+      await recordRunCompleted(dbArg, FREEZE_GUARD_JOB_KEY);
     }).catch((err) => console.error(`${LOG_PREFIX} Scheduled run error: ${err.message}`));
-  }, 6 * 60 * 60 * 1000);
+  }, FREEZE_GUARD_INTERVAL_MS);
 }

@@ -79,15 +79,21 @@ describe("recordRunCompleted", () => {
 
 describe("fulfillment sweeper boot wiring", () => {
   it("gates both hourly boot sweeps on being behind", () => {
-    expect(SWEEPER_SRC).toMatch(/isBehindSchedule\(dbArg, OUTBOUND_SWEEP_JOB_KEY, OUTBOUND_SWEEP_INTERVAL_MS\)/);
-    expect(SWEEPER_SRC).toMatch(/isBehindSchedule\(dbArg, INBOUND_SWEEP_JOB_KEY, INBOUND_SWEEP_INTERVAL_MS\)/);
+    // Both boot passes go through the shared helper, which is what pairs the
+    // "am I behind?" check with recording the completion.
+    expect(SWEEPER_SRC).toMatch(/jobKey: OUTBOUND_SWEEP_JOB_KEY,/);
+    expect(SWEEPER_SRC).toMatch(/intervalMs: OUTBOUND_SWEEP_INTERVAL_MS,/);
+    expect(SWEEPER_SRC).toMatch(/jobKey: INBOUND_SWEEP_JOB_KEY,/);
+    expect(SWEEPER_SRC).toMatch(/intervalMs: INBOUND_SWEEP_INTERVAL_MS,/);
+    expect(SWEEPER_SRC.match(/runBootCatchUpIfBehind\(/g) ?? []).toHaveLength(2);
   });
 
   it("records completion on the scheduled runs too, not just the boot pass", () => {
     // Recording only on boot would let the timestamp go stale, so every boot
-    // would decide it is behind - defeating the whole change.
+    // would decide it is behind - defeating the whole change. The boot passes
+    // record inside runBootCatchUpIfBehind; these are the two interval runs.
     const recordCalls = SWEEPER_SRC.match(/recordRunCompleted\(dbArg, \w+_SWEEP_JOB_KEY\)/g) ?? [];
-    expect(recordCalls.length).toBe(4); // boot + interval, for inbound and outbound
+    expect(recordCalls.length).toBe(2);
   });
 
   it("keeps the short-interval receipt recovery ungated", () => {

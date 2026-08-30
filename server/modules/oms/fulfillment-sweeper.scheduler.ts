@@ -3,8 +3,8 @@ import { sql, eq, and, gt, lt, inArray } from "drizzle-orm";
 import { omsOrders, channels } from "@shared/schema";
 import { withAdvisoryLock } from "../../infrastructure/scheduler-lock";
 import {
-  isBehindSchedule,
   recordRunCompleted,
+  runBootCatchUpIfBehind,
 } from "../../infrastructure/scheduler-run-registry";
 import { EbayFulfillmentReconciler } from "./reconcilers/ebay.reconciler";
 import { ShopifyFulfillmentReconciler } from "./reconcilers/shopify.reconciler";
@@ -717,12 +717,13 @@ export function startFulfillmentSweeper(
   // sweeps allocating at once is what pushed a 512MB dyno past its quota.
   setTimeout(() => {
     withAdvisoryLock(SWEEPER_LOCK_ID, async () => {
-      if (!(await isBehindSchedule(dbArg, OUTBOUND_SWEEP_JOB_KEY, OUTBOUND_SWEEP_INTERVAL_MS))) {
-        console.log(`${LOG_PREFIX} Boot catch-up skipped - outbound sweep is on schedule.`);
-        return;
-      }
-      await runFulfillmentSweep(dbArg, fulfillmentAuthority, physicalRecovery);
-      await recordRunCompleted(dbArg, OUTBOUND_SWEEP_JOB_KEY);
+      await runBootCatchUpIfBehind({
+        db: dbArg,
+        jobKey: OUTBOUND_SWEEP_JOB_KEY,
+        intervalMs: OUTBOUND_SWEEP_INTERVAL_MS,
+        logPrefix: LOG_PREFIX,
+        run: () => runFulfillmentSweep(dbArg, fulfillmentAuthority, physicalRecovery),
+      });
     }).catch((err) => console.error(`${LOG_PREFIX} Boot run error: ${err.message}`));
   }, 5000);
 
@@ -757,16 +758,17 @@ export function startFulfillmentSweeper(
   // only when a scheduled run was genuinely missed.
   setTimeout(() => {
     withAdvisoryLock(INBOUND_LOCK_ID, async () => {
-      if (!(await isBehindSchedule(dbArg, INBOUND_SWEEP_JOB_KEY, INBOUND_SWEEP_INTERVAL_MS))) {
-        console.log(`${LOG_PREFIX} Boot catch-up skipped - inbound sweep is on schedule.`);
-        return;
-      }
-      await runInboundFulfillmentSweep(
-        dbArg,
-        fulfillmentAuthority,
-        channelFulfillmentIngress,
-      );
-      await recordRunCompleted(dbArg, INBOUND_SWEEP_JOB_KEY);
+      await runBootCatchUpIfBehind({
+        db: dbArg,
+        jobKey: INBOUND_SWEEP_JOB_KEY,
+        intervalMs: INBOUND_SWEEP_INTERVAL_MS,
+        logPrefix: LOG_PREFIX,
+        run: () => runInboundFulfillmentSweep(
+          dbArg,
+          fulfillmentAuthority,
+          channelFulfillmentIngress,
+        ),
+      });
     }).catch((err) => console.error(`${LOG_PREFIX} Inbound boot run error: ${err.message}`));
   }, 30000);
 

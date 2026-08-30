@@ -14,9 +14,15 @@ import {
   handoffOmsOrderShipmentsToChannelFulfillment,
 } from "./channel-fulfillment-authority.handoff";
 import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
+import {
+  recordRunCompleted,
+  runBootCatchUpIfBehind,
+} from "../../infrastructure/scheduler-run-registry";
 
 const LOG_PREFIX = "[OMS Flow Reconciliation]";
 const LOCK_ID = 918405;
+const RECONCILIATION_INTERVAL_MS = 15 * 60 * 1000;
+const RECONCILIATION_JOB_KEY = "oms_flow_reconciliation";
 const REMEDIABLE_CODES = new Set([
   "OMS_PAID_WITHOUT_WMS",
   "WMS_READY_WITHOUT_SHIPMENT",
@@ -1891,6 +1897,7 @@ export function startOmsFlowReconciliationScheduler(
       // pre-2026-07-07 order) would hide them from ops-health.
       reconciliationSchedulerLastError = null;
       await runOmsFlowReconciliation(dbArg, dependencies);
+      await recordRunCompleted(dbArg, RECONCILIATION_JOB_KEY);
       reconciliationSchedulerLastSuccessAt = new Date();
     }).catch((err) => {
       reconciliationSchedulerLastError = err instanceof Error ? err.message : String(err);
@@ -1898,7 +1905,28 @@ export function startOmsFlowReconciliationScheduler(
     });
   };
 
+  // The boot pass only runs when a scheduled run was genuinely missed. After an
+  // ordinary deploy the last run is minutes old, so it is skipped and the
+  // interval picks the work up on time.
+  const bootLocked = () => {
+    reconciliationSchedulerLastRunAt = new Date();
+    return withAdvisoryLock(LOCK_ID, async () => {
+      reconciliationSchedulerLastError = null;
+      const ran = await runBootCatchUpIfBehind({
+        db: dbArg,
+        jobKey: RECONCILIATION_JOB_KEY,
+        intervalMs: RECONCILIATION_INTERVAL_MS,
+        logPrefix: LOG_PREFIX,
+        run: () => runOmsFlowReconciliation(dbArg, dependencies),
+      });
+      if (ran) reconciliationSchedulerLastSuccessAt = new Date();
+    }).catch((err) => {
+      reconciliationSchedulerLastError = err instanceof Error ? err.message : String(err);
+      console.error(`${LOG_PREFIX} boot run error: ${reconciliationSchedulerLastError}`);
+    });
+  };
+
   console.log(`${LOG_PREFIX} Scheduler started (every 15 minutes, dyno-safe lock)`);
-  setTimeout(runLocked, 20_000);
-  setInterval(runLocked, 15 * 60 * 1000);
+  setTimeout(bootLocked, 20_000);
+  setInterval(runLocked, RECONCILIATION_INTERVAL_MS);
 }
