@@ -10,12 +10,17 @@
 -- erases them and every boot looks like a cold start. This table survives the
 -- restart, letting a boot ask the only question that matters: are we behind?
 --
+-- Lives in public, not oms: ARCHITECTURE-AUDIT-2026-07.md 4.1 makes modules/oms
+-- the sole writer of oms.*, and this is cross-cutting scheduler bookkeeping that
+-- any module may need. Same placement as public.audit_events, the other
+-- infrastructure-owned table.
+--
 -- Keyed by job, one row per sweep. Primary key gives ON CONFLICT its target.
-CREATE TABLE IF NOT EXISTS oms.scheduler_runs (
+CREATE TABLE IF NOT EXISTS public.scheduler_runs (
   job_key VARCHAR(100) PRIMARY KEY,
   last_completed_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-COMMENT ON TABLE oms.scheduler_runs IS
+COMMENT ON TABLE public.scheduler_runs IS
   'Last successful completion per scheduled sweep. Read on boot to decide whether a catch-up pass is genuinely needed.';

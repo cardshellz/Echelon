@@ -72,7 +72,7 @@ describe("recordRunCompleted", () => {
     const statement = chunks
       .map((chunk: any) => (Array.isArray(chunk?.value) ? chunk.value.join("") : ""))
       .join(" ");
-    expect(statement).toMatch(/oms\.scheduler_runs/);
+    expect(statement).toMatch(/public\.scheduler_runs/);
     expect(statement).toMatch(/ON CONFLICT \(job_key\) DO UPDATE/);
   });
 });
@@ -112,6 +112,6 @@ describe("migration 0624", () => {
     // Neither app_settings table was usable as a key/value store, so this owns
     // its own table; without the primary key the upsert fails at runtime.
     expect(MIGRATION).toMatch(/job_key VARCHAR\(100\) PRIMARY KEY/);
-    expect(MIGRATION).toMatch(/CREATE TABLE IF NOT EXISTS oms\.scheduler_runs/);
+    expect(MIGRATION).toMatch(/CREATE TABLE IF NOT EXISTS public\.scheduler_runs/);
   });
 });

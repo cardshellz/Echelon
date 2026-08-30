@@ -14,7 +14,10 @@ import { sql } from "drizzle-orm";
  * and every boot looks like a cold start. This persists the timestamp instead,
  * letting a boot ask the only question that matters: are we actually behind?
  *
- * Stored in oms.scheduler_runs (migration 0624). Note that neither app_settings
+ * Stored in public.scheduler_runs (migration 0624) rather than oms.*, because
+ * ARCHITECTURE-AUDIT-2026-07.md 4.1 makes modules/oms the sole writer of oms.*
+ * and this is cross-cutting scheduler bookkeeping. public.audit_events is the
+ * same shape of infrastructure-owned table. Note that neither app_settings
  * table was usable: both are singleton settings rows in production, despite the
  * Drizzle schema declaring warehouse.app_settings as a key/value store - the real
  * table has no `key` column at all.
@@ -31,7 +34,7 @@ export async function getLastRunAt(db: Db, jobKey: string): Promise<Date | null>
   const row = firstRow(
     await db.execute(sql`
       SELECT last_completed_at
-      FROM oms.scheduler_runs
+      FROM public.scheduler_runs
       WHERE job_key = ${jobKey}
       LIMIT 1
     `),
@@ -52,7 +55,7 @@ export async function recordRunCompleted(
   now: Date = new Date(),
 ): Promise<void> {
   await db.execute(sql`
-    INSERT INTO oms.scheduler_runs (job_key, last_completed_at, updated_at)
+    INSERT INTO public.scheduler_runs (job_key, last_completed_at, updated_at)
     VALUES (${jobKey}, ${now.toISOString()}, NOW())
     ON CONFLICT (job_key) DO UPDATE
       SET last_completed_at = EXCLUDED.last_completed_at,
