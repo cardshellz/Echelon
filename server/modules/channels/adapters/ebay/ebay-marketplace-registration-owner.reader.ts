@@ -24,9 +24,10 @@ export interface EbayRegistrationVariantRecord {
 }
 
 /**
- * Channels-owned persistence boundary. `loadAllProductVariants` must not apply
- * an active/status/quantity filter; registration needs the complete catalog
- * family so archived and zero-quantity members remain observable.
+ * Channels-owned persistence boundary. `loadAllProductVariants` returns the
+ * complete customer-sellable family without active/status/quantity filtering,
+ * so archived and zero-quantity members remain observable while internal build
+ * identities never enter marketplace registration.
  */
 export interface EbayMarketplaceRegistrationOwnerRepository {
   loadChannel(channelId: number): Promise<EbayRegistrationChannelRecord | null>;

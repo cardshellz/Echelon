@@ -27,9 +27,10 @@ export interface DropshipRegistrationVariantRecord {
 }
 
 /**
- * Dropship-owned persistence boundary. `loadAllProductVariants` must not apply
- * active, eligibility, or positive-quantity filters. Registration must see the
- * complete catalog family, including archived and zero-quantity variants.
+ * Dropship-owned persistence boundary. `loadAllProductVariants` returns the
+ * complete customer-sellable family without active or positive-quantity
+ * filtering, so archived and zero-quantity members remain observable while
+ * internal build identities never enter marketplace registration.
  */
 export interface DropshipMarketplaceRegistrationOwnerRepository {
   loadStoreConnection(

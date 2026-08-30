@@ -12,6 +12,10 @@ import {
 } from "@shared/types/inventory-availability-backfill";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
+import {
+  isCustomerSellableVariant,
+  VARIANT_SALES_ELIGIBILITIES,
+} from "@shared/catalog/variant-sales-eligibility";
 import { z } from "zod";
 
 import {
@@ -35,6 +39,7 @@ export const inventoryAvailabilityBackfillSourceVariantSchema = z.object({
   isActive: z.literal(true),
   requiresShipping: z.boolean().optional(),
   trackInventory: z.boolean().nullable().optional(),
+  salesEligibility: z.enum(VARIANT_SALES_ELIGIBILITIES).default("sellable"),
 }).strict();
 
 export const inventoryAvailabilityBackfillSourceRecipeSchema = z.object({
@@ -87,6 +92,7 @@ export interface InventoryAvailabilityBackfillCandidate {
     | "legacy_fungible_directed_pool"
     | "recipe_managed_explicit_review"
     | "excluded_unmanaged"
+    | "excluded_internal_supply_only"
     | "blocked";
   inputHash: string;
   resultHash: string;
@@ -209,6 +215,7 @@ export function planInventoryAvailabilityBackfill(
   const inputHash = calculateInventoryAvailabilityBackfillInputHash(source);
   const issues: InventoryAvailabilityBackfillIssue[] = [];
   const managedVariants = source.variants.filter(isInventoryManagedVariant);
+  const sellableManagedVariants = managedVariants.filter(isCustomerSellableVariant);
   const variantsById = new Map(managedVariants.map((variant) => [variant.id, variant] as const));
 
   if (source.variants.length === 0) {
@@ -224,6 +231,13 @@ export function planInventoryAvailabilityBackfill(
       "review",
       "The active product has no shippable, inventory-managed variants and is excluded from ATP migration.",
       { productId: source.product.id, activeVariantIds: source.variants.map((variant) => variant.id) },
+    ));
+  } else if (sellableManagedVariants.length === 0) {
+    issues.push(issue(
+      "NO_CUSTOMER_SELLABLE_VARIANTS",
+      "review",
+      "The active product contains managed internal supply but no customer-sellable ATP target.",
+      { productId: source.product.id, internalVariantIds: managedVariants.map((variant) => variant.id) },
     ));
   }
 
@@ -252,13 +266,17 @@ export function planInventoryAvailabilityBackfill(
     for (let index = 0; index < managedVariants.length - 1; index += 1) {
       const left = managedVariants[index]!;
       const right = managedVariants[index + 1]!;
-      addPath(packagingPath(source.product.id, left, right), "legacy_physical_fungible");
-      addPath(packagingPath(source.product.id, right, left), "legacy_physical_fungible");
+      if (isCustomerSellableVariant(right)) {
+        addPath(packagingPath(source.product.id, left, right), "legacy_physical_fungible");
+      }
+      if (isCustomerSellableVariant(left)) {
+        addPath(packagingPath(source.product.id, right, left), "legacy_physical_fungible");
+      }
     }
     issues.push(issue(
       "LEGACY_FUNGIBLE_DIRECTIONS_REQUIRE_REVIEW",
       "review",
-      "The legacy shared pool was expanded into explicit two-way directed paths; every direction must be reviewed.",
+      "The legacy shared pool was expanded into explicit directed paths between adjacent packages; internal-only destinations are omitted and every remaining direction must be reviewed.",
       { productId: source.product.id, pathCount: pathsByIdentity.size },
     ));
   }
@@ -458,6 +476,8 @@ export function planInventoryAvailabilityBackfill(
   const hasBlockingIssue = issues.some((entry) => entry.severity === "blocking");
   const provisionalClassification = managedVariants.length === 0
     ? "excluded_unmanaged" as const
+    : sellableManagedVariants.length === 0
+      ? "excluded_internal_supply_only" as const
     : source.product.legacyInventoryStrategy === "physical_only"
     ? "exact_only" as const
     : source.product.legacyInventoryStrategy === "physical_fungible"
@@ -468,6 +488,8 @@ export function planInventoryAvailabilityBackfill(
   // physical-planning records turn a digital-only product into an ATP blocker.
   const classification = managedVariants.length === 0
     ? "excluded_unmanaged" as const
+    : sellableManagedVariants.length === 0
+      ? "excluded_internal_supply_only" as const
     : hasBlockingIssue
       ? "blocked" as const
       : provisionalClassification;
@@ -475,7 +497,7 @@ export function planInventoryAvailabilityBackfill(
   let definition: TransformationModelDefinition | null = null;
   let publicDefinition: InventoryAvailabilityBackfillDefinition | null = null;
   let definitionHash: string | null = null;
-  if (!hasBlockingIssue && managedVariants.length > 0) {
+  if (!hasBlockingIssue && sellableManagedVariants.length > 0) {
     definition = transformationModelDefinitionSchema.parse({
       productId: source.product.id,
       buildToPromiseEnabled: source.product.legacyInventoryStrategy === "recipe_managed"

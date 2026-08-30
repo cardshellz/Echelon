@@ -118,6 +118,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
         unitsPerVariant: productVariants.unitsPerVariant,
         uomType: productVariants.uomType,
         isActive: productVariants.isActive,
+        salesEligibility: productVariants.salesEligibility,
       })
       .from(productVariants)
       .where(and(

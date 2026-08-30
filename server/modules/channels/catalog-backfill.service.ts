@@ -43,6 +43,7 @@ import {
 } from "@shared/schema";
 import { decideImportedShopifyProductMapping } from "../catalog/shopify-product-mapping.domain";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
+import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -562,6 +563,20 @@ class CatalogBackfillService {
           sku,
           existingEchelonProductId: existingVariant.productId,
           requestedEchelonProductId: productId,
+        }));
+        return null;
+      }
+      if (!isCustomerSellableVariant(existingVariant)) {
+        result.variants.skipped++;
+        result.errors.push(
+          `Shopify variant ${shopifyVariantId} (${sku}) matches internal-only Echelon variant ${existingVariant.id}; it was not linked`,
+        );
+        console.warn(JSON.stringify({
+          event: "shopify_variant_internal_only_conflict",
+          code: "VARIANT_INTERNAL_ONLY",
+          shopifyVariantId,
+          sku,
+          productVariantId: existingVariant.id,
         }));
         return null;
       }

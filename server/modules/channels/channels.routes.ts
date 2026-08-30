@@ -31,6 +31,7 @@ import { reserveAndPushAfterHoldRelease } from "../orders/release-hold-push";
 import { WmsOrderInvariantError } from "../wms/insert-order";
 import { randomBytes } from "crypto";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
+import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import {
   buildWmsOrderBucketCounts,
   compareWmsOrdersNewestFirst,
@@ -70,6 +71,12 @@ export function registerChannelRoutes(app: Express) {
 
       const variant = await storage.getProductVariantById(productVariantId);
       if (!variant) return res.status(404).json({ error: "Variant not found" });
+      if (!isCustomerSellableVariant(variant)) {
+        return res.status(409).json({
+          code: "VARIANT_INTERNAL_ONLY",
+          error: "Internal-only variants cannot have a channel inventory feed",
+        });
+      }
       if (!isInventoryManagedVariant(variant)) {
         return res.status(409).json({
           error: "Digital or inventory-untracked variants cannot have an inventory feed",
@@ -782,7 +789,9 @@ export function registerChannelRoutes(app: Express) {
       let feedsUpdated = 0;
       try {
         const allVariants = await storage.getAllProductVariants();
-        const shopifyVariants = allVariants.filter((v: any) => v.shopifyVariantId);
+        const shopifyVariants = allVariants.filter(
+          (v: any) => v.shopifyVariantId && isCustomerSellableVariant(v),
+        );
 
         // Build product ID → Shopify product ID map
         const productIds = [...new Set(shopifyVariants.map((v: any) => v.productId))];
@@ -1335,6 +1344,14 @@ export function registerChannelRoutes(app: Express) {
     try {
       const channelId = parseInt(req.params.channelId);
       const variantId = parseInt(req.params.variantId);
+      const variant = await storage.getProductVariantById(variantId);
+      if (!variant) return res.status(404).json({ error: "Variant not found" });
+      if (req.body?.isListed !== 0 && !isCustomerSellableVariant(variant)) {
+        return res.status(409).json({
+          code: "VARIANT_INTERNAL_ONLY",
+          error: "Internal-only variants cannot be listed on a channel",
+        });
+      }
       const override = await storage.upsertChannelVariantOverride({
         channelId,
         productVariantId: variantId,
@@ -1473,6 +1490,17 @@ export function registerChannelRoutes(app: Express) {
       const parseResult = insertChannelReservationSchema.safeParse(req.body);
       if (!parseResult.success) {
         return res.status(400).json({ error: "Invalid reservation data", details: parseResult.error.errors });
+      }
+
+      if (parseResult.data.productVariantId) {
+        const variant = await storage.getProductVariantById(parseResult.data.productVariantId);
+        if (!variant) return res.status(404).json({ error: "Variant not found" });
+        if (!isCustomerSellableVariant(variant)) {
+          return res.status(409).json({
+            code: "VARIANT_INTERNAL_ONLY",
+            error: "Internal-only variants cannot have channel allocation settings",
+          });
+        }
       }
 
       const reservation = await storage.upsertChannelReservation(parseResult.data);
@@ -2460,6 +2488,21 @@ export function registerChannelRoutes(app: Express) {
         eligible: parsed.data.eligible,
         notes: parsed.data.notes ?? null,
       };
+
+      if (data.productVariantId) {
+        const [variant] = await db
+          .select({ salesEligibility: productVariants.salesEligibility })
+          .from(productVariants)
+          .where(eq(productVariants.id, data.productVariantId))
+          .limit(1);
+        if (!variant) return res.status(404).json({ error: "Variant not found" });
+        if (!isCustomerSellableVariant(variant)) {
+          return res.status(409).json({
+            code: "VARIANT_INTERNAL_ONLY",
+            error: "Internal-only variants cannot have channel allocation rules",
+          });
+        }
+      }
 
       const [created] = await db.insert(channelAllocationRules).values(data).returning();
 

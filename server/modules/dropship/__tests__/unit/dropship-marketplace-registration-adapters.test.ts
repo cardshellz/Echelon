@@ -36,7 +36,7 @@ const owner: Extract<ListingOwnerRef, { kind: "dropship" }> = {
 };
 
 describe("DropshipMarketplaceRegistrationOwnerReader", () => {
-  it("returns every product variant, including inactive and zero-quantity members", async () => {
+  it("returns every customer-sellable candidate, including inactive and zero-quantity members", async () => {
     const repository: DropshipMarketplaceRegistrationOwnerRepository = {
       loadStoreConnection: vi.fn(async () => ({
         id: 21,
@@ -128,7 +128,7 @@ describe("DropshipMarketplaceRegistrationOwnerReader", () => {
 });
 
 describe("PgDropshipMarketplaceRegistrationOwnerRepository", () => {
-  it("authorizes an existing owner association and derives ATP for every active or archived variant", async () => {
+  it("authorizes an existing owner association and derives ATP for every sellable active or archived variant", async () => {
     const queries: Array<{ sql: string; params: readonly unknown[] }> = [];
     const release = vi.fn();
     const query = vi.fn(async (sql: string, params: readonly unknown[] = []) => {
@@ -217,6 +217,7 @@ describe("PgDropshipMarketplaceRegistrationOwnerRepository", () => {
     expect(accessQuery?.sql).not.toContain("dvl.status");
     const variantsQuery = queries.find((entry) => entry.sql.includes("FROM catalog.product_variants pv"));
     expect(variantsQuery?.sql).not.toContain("pv.is_active = true");
+    expect(variantsQuery?.sql).toContain("pv.sales_eligibility = 'sellable'");
     expect(release).toHaveBeenCalledTimes(3);
   });
 });

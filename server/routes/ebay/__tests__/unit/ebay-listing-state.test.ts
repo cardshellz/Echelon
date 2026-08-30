@@ -80,6 +80,21 @@ describe("eBay listing state", () => {
     ).toBe(false);
   });
 
+  it("does not sell an internal-only catalog variant even when every eBay control allows it", () => {
+    expect(
+      isVariantSellable({
+        productActive: true,
+        variantActive: true,
+        salesEligibility: "internal_only",
+        productExcluded: false,
+        productOverrideIsListed: 1,
+        variantExcluded: false,
+        variantOverrideIsListed: 1,
+        typeListingEnabled: true,
+      }),
+    ).toBe(false);
+  });
+
   it("sells an active catalog variant when every eBay listing control allows it", () => {
     expect(
       isVariantSellable({

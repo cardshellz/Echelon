@@ -1491,12 +1491,22 @@ function DestinationColumns({
           return (
             <div key={destination.id} className="space-y-3 rounded-md border p-3">
               <div>
-                <div className="font-semibold">{variantDisplayName(destination)}</div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="font-semibold">{variantDisplayName(destination)}</div>
+                  {destination.salesEligibility === "internal_only" && (
+                    <Badge variant="secondary">Internal supply only</Badge>
+                  )}
+                </div>
                 <div className="text-xs text-muted-foreground">
                   Output · {destination.unitsPerVariant} base unit{
                     destination.unitsPerVariant === 1 ? "" : "s"
                   }
                 </div>
+                {destination.salesEligibility === "internal_only" && (
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    This column can hold operational conversion paths, but it is never a customer ATP target.
+                  </div>
+                )}
               </div>
               {destinationPaths.map((path) => editable ? (
                 <DestinationPathEditor

@@ -705,6 +705,7 @@ async function lockAndValidateCatalogVariants(
     `SELECT id, sku, is_active
      FROM catalog.product_variants
      WHERE product_id = $1
+       AND sales_eligibility = 'sellable'
      ORDER BY id
      FOR SHARE`,
     [plan.owner.productId],

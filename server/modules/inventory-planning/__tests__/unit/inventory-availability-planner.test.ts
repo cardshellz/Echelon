@@ -333,6 +333,53 @@ describe("inventory availability canonical planner", () => {
     });
   });
 
+  it("uses internal-only EA as directed supply but never as a customer target", () => {
+    const base = content({
+      variants: content().variants.map((variant) => ({
+        ...variant,
+        salesEligibility: variant.id === 101 ? "internal_only" as const : "sellable" as const,
+      })),
+      inventoryPositions: [position({ id: 1, variantId: 101, physical: 100 })],
+    });
+    const snapshot = sealSupplySnapshot({
+      ...base,
+      transformationModels: [{
+        ...base.transformationModels[0]!,
+        paths: [path({
+          id: 1,
+          source: 101,
+          destination: 105,
+          inputQty: 5,
+          outputQty: 1,
+          sourceUnits: 1,
+          destinationUnits: 5,
+        })],
+      }],
+    });
+
+    expect(projectCanonicalAtp(snapshot, {
+      targetVariantId: 105,
+      scope: { kind: "warehouse", warehouseId: 1 },
+    })).toMatchObject({
+      atpUnits: "20",
+      directUnits: "0",
+      convertibleUnits: "20",
+    });
+    expect(() => projectCanonicalAtp(snapshot, {
+      targetVariantId: 101,
+      scope: { kind: "warehouse", warehouseId: 1 },
+    })).toThrow(expect.objectContaining({ code: "TARGET_VARIANT_NOT_CUSTOMER_SELLABLE" }));
+    expect(calculateLegacyAtpFromSnapshot(snapshot, {
+      targetVariantId: 101,
+      scope: { kind: "warehouse", warehouseId: 1 },
+    })).toBe(BigInt(0));
+    expect(() => planCanonicalClaim(snapshot, {
+      requestKey: "order:internal-ea",
+      scope: { kind: "warehouse", warehouseId: 1 },
+      lines: [{ lineKey: "ea", targetVariantId: 101, requestedQty: "1" }],
+    })).toThrow(expect.objectContaining({ code: "TARGET_VARIANT_NOT_CUSTOMER_SELLABLE" }));
+  });
+
   it("plans a whole order once so alternative package lines cannot reuse the same EA", () => {
     const base = content({ inventoryPositions: [position({ id: 1, variantId: 101, physical: 100 })] });
     const snapshot = sealSupplySnapshot({

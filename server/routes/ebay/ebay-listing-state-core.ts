@@ -9,6 +9,7 @@ export interface EffectiveListingInput {
 export interface VariantSellabilityInput extends EffectiveListingInput {
   productActive: boolean | null | undefined;
   variantActive: boolean | null | undefined;
+  salesEligibility?: VariantSalesEligibility | null;
 }
 
 function isListedOverride(value: number | boolean | null | undefined): boolean {
@@ -35,7 +36,12 @@ export function isVariantSellable(input: VariantSellabilityInput): boolean {
   return (
     input.productActive === true &&
     input.variantActive === true &&
+    isCustomerSellableVariant(input) &&
     isVariantEffectivelyListed(input)
   );
 }
 
+import {
+  isCustomerSellableVariant,
+  type VariantSalesEligibility,
+} from "@shared/catalog/variant-sales-eligibility";

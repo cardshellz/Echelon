@@ -307,8 +307,9 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
              AND NULLIF(BTRIM(pa.url), '') IS NOT NULL
          ) assets ON true
          WHERE pv.id = ANY($1::int[])
-           AND pv.requires_shipping = true
-           AND COALESCE(pv.track_inventory, true) = true
+            AND pv.requires_shipping = true
+            AND COALESCE(pv.track_inventory, true) = true
+            AND pv.sales_eligibility = 'sellable'
          GROUP BY p.id, pv.id, retail_cache.price, assets.image_urls`,
         [productVariantIds],
       );

@@ -662,6 +662,7 @@ function dogfoodReadinessSql(): string {
         FROM catalog.product_variants pv
         INNER JOIN catalog.products p ON p.id = pv.product_id
         WHERE pv.is_active = true
+          AND pv.sales_eligibility = 'sellable'
           AND p.is_active = true
           AND EXISTS (
             SELECT 1

@@ -54,6 +54,7 @@ import {
   isSingleUnitVariantUomType,
   type VariantUomType,
 } from "@shared/catalog/variant-uom";
+import type { VariantSalesEligibility } from "@shared/catalog/variant-sales-eligibility";
 
 interface Product {
   id: number;
@@ -82,6 +83,7 @@ interface ProductVariant {
   shopifyInventoryItemId?: string | null;
   isActive: boolean;
   dropshipEligible?: boolean;
+  salesEligibility?: VariantSalesEligibility;
   weightGrams: number | null;
   lengthMm: number | null;
   widthMm: number | null;
@@ -1248,6 +1250,9 @@ export default function Variants() {
                     <Badge variant={variant.isActive ? "default" : "secondary"} className="text-xs flex-shrink-0">
                       {variant.isActive ? "Active" : "Inactive"}
                     </Badge>
+                    {variant.salesEligibility === "internal_only" && (
+                      <Badge variant="outline" className="text-xs flex-shrink-0">Internal only</Badge>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 mb-2">
                     <Badge variant="outline" className="text-xs">{getUomLabel(variant)}</Badge>
@@ -1292,6 +1297,7 @@ export default function Variants() {
                         openShopifyLinkDialog(variant);
                       }}
                       data-testid={`btn-shopify-link-mobile-${variant.id}`}
+                      disabled={variant.salesEligibility === "internal_only"}
                     >
                       <Store className="h-4 w-4 mr-1" />
                       Shopify
@@ -1390,9 +1396,14 @@ export default function Variants() {
                       <p className="mt-1 text-xs text-muted-foreground">{packageDisplay.detail}</p>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={variant.isActive ? "default" : "secondary"}>
-                        {variant.isActive ? "Active" : "Inactive"}
-                      </Badge>
+                      <div className="flex flex-col items-start gap-1">
+                        <Badge variant={variant.isActive ? "default" : "secondary"}>
+                          {variant.isActive ? "Active" : "Inactive"}
+                        </Badge>
+                        {variant.salesEligibility === "internal_only" && (
+                          <Badge variant="outline">Internal only</Badge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <Switch
@@ -1401,6 +1412,7 @@ export default function Variants() {
                         onCheckedChange={(checked) => {
                           dropshipMutation.mutate({ variantId: variant.id, eligible: checked });
                         }}
+                        disabled={variant.salesEligibility === "internal_only"}
                       />
                     </TableCell>
                     <TableCell>
@@ -1430,6 +1442,7 @@ export default function Variants() {
                           }}
                           title={variant.shopifyVariantId ? "Change Shopify variant link" : "Link Shopify variant"}
                           data-testid={`btn-shopify-link-${variant.id}`}
+                          disabled={variant.salesEligibility === "internal_only"}
                         >
                           <Store className="h-4 w-4" />
                         </Button>

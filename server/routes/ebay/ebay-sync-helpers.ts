@@ -91,7 +91,8 @@ export async function upsertPushError(dbArg: EchelonDb, channelId: number, produ
       and(
         eq(productVariants.productId, productId),
         sql`${productVariants.sku} IS NOT NULL`,
-        eq(productVariants.isActive, true)
+        eq(productVariants.isActive, true),
+        eq(productVariants.salesEligibility, "sellable"),
       )
     )
     .limit(1);
@@ -292,6 +293,7 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
     price_cents: productVariants.priceCents,
     variant_weight_grams: productVariants.weightGrams,
     variant_is_active: productVariants.isActive,
+    variant_sales_eligibility: productVariants.salesEligibility,
     variant_excluded: productVariants.ebayListingExcluded,
     variant_override_is_listed: channelVariantOverrides.isListed,
     variant_weight_override: channelVariantOverrides.weightOverride,
@@ -481,6 +483,7 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
         isListed: isVariantSellable({
           productActive: product.product_is_active,
           variantActive: variant.variant_is_active,
+          salesEligibility: variant.variant_sales_eligibility,
           productExcluded: product.product_excluded === true,
           productOverrideIsListed: product.product_override_is_listed,
           typeListingEnabled: product.type_listing_enabled,

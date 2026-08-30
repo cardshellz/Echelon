@@ -795,6 +795,7 @@ export const channelMethods: IChannelStorage = {
         eq(productVariants.isActive, true),
         eq(productVariants.requiresShipping, true),
         sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+        eq(productVariants.salesEligibility, "sellable"),
         gt(inventoryLevels.variantQty, 0),
       ));
     return rows.map((v: any) => v.id);
@@ -807,6 +808,7 @@ export const channelMethods: IChannelStorage = {
         inArray(productVariants.productId, productIds),
         eq(productVariants.requiresShipping, true),
         sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+        eq(productVariants.salesEligibility, "sellable"),
       ));
     return rows.map((v: any) => v.id);
   },

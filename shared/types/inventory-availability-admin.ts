@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PRODUCT_INVENTORY_STRATEGIES } from "../catalog/inventory-strategy";
+import { VARIANT_SALES_ELIGIBILITIES } from "../catalog/variant-sales-eligibility";
 import { VARIANT_UOM_TYPES } from "../catalog/variant-uom";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
@@ -116,6 +117,7 @@ export const transformationAdminVariantSchema = z.object({
   unitsPerVariant: positiveInteger,
   uomType: z.enum(VARIANT_UOM_TYPES),
   isActive: z.boolean(),
+  salesEligibility: z.enum(VARIANT_SALES_ELIGIBILITIES).optional(),
 }).strict();
 
 export const transformationAdminRecipeComponentSchema = z.object({

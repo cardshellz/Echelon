@@ -52,6 +52,7 @@ import { ChannelAdapterRegistry } from "./channel-adapter.interface";
 import type { AllocationEngine, ProductAllocationResult } from "./allocation-engine.service";
 import type { SourceLockService } from "./source-lock.service";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
+import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -656,6 +657,7 @@ class EchelonSyncOrchestrator {
         shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
         requiresShipping: productVariants.requiresShipping,
         trackInventory: productVariants.trackInventory,
+        salesEligibility: productVariants.salesEligibility,
       }).from(productVariants).where(eq(productVariants.id, variantId)).limit(1);
 
       if (!variant) {
@@ -675,6 +677,19 @@ class EchelonSyncOrchestrator {
           allocatedQty: totalPushQty,
           status: "skipped",
           error: "Digital or inventory-untracked variants do not publish channel quantities",
+        });
+        continue;
+      }
+      if (!isCustomerSellableVariant(variant)) {
+        result.variantsSkipped++;
+        result.details.push({
+          productId,
+          variantId,
+          sku: a.sku,
+          previousQty: null,
+          allocatedQty: totalPushQty,
+          status: "skipped",
+          error: "Internal-only variants do not publish channel quantities",
         });
         continue;
       }
@@ -1443,6 +1458,7 @@ class EchelonSyncOrchestrator {
         eq(channelFeeds.isActive, 1),
         eq(productVariants.requiresShipping, true),
         sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+        eq(productVariants.salesEligibility, "sellable"),
       ))
       .groupBy(productVariants.productId);
 
@@ -1457,6 +1473,7 @@ class EchelonSyncOrchestrator {
           eq(channels.syncEnabled, true),
           eq(productVariants.requiresShipping, true),
           sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+          eq(productVariants.salesEligibility, "sellable"),
         ),
       )
       .groupBy(productVariants.productId);

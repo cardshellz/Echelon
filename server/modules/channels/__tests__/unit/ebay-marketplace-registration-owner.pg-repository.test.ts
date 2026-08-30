@@ -35,7 +35,7 @@ function orderedLimitedRows(rows: readonly unknown[]) {
 }
 
 describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
-  it("loads the authoritative owner and every variant using shared-pool ATP", async () => {
+  it("loads the authoritative owner and every customer-sellable variant using shared-pool ATP", async () => {
     const db = {
       select: vi.fn()
         .mockReturnValueOnce(limitedRows([{ id: 67, provider: "ebay" }]))

@@ -61,6 +61,38 @@ describe("inventory availability shadow service", () => {
     expect(result.results).toEqual(persisted.results);
   });
 
+  it("keeps internal-only inventory in the snapshot but omits it as a shadow target", async () => {
+    const base = content();
+    const snapshot = sealSupplySnapshot({
+      ...base,
+      variants: [
+        { ...base.variants[0]!, salesEligibility: "internal_only" },
+        {
+          id: 105,
+          productId: 10,
+          sku: "P5",
+          name: "Pack 5",
+          unitsPerVariant: 5,
+          isActive: true,
+          salesEligibility: "sellable",
+        },
+      ],
+      outputLocations: [
+        ...base.outputLocations,
+        { productVariantId: 105, warehouseId: 1, warehouseLocationId: 11 },
+      ],
+    });
+    const store = fakeStore(snapshot);
+    const service = new InventoryAvailabilityShadowService(store, { now: () => COMPLETED_AT });
+
+    await service.runProductShadow(10, { idempotencyKey: "shadow-sellable-only" }, "operator-1");
+
+    const persisted = store.persistShadowRun.mock.calls[0]![0];
+    expect(persisted.snapshot.variants.map((variant) => variant.id)).toEqual([101, 105]);
+    expect(persisted.results).toHaveLength(2);
+    expect(new Set(persisted.results.map((result) => result.productVariantId))).toEqual(new Set([105]));
+  });
+
   it("rejects malformed boundaries before taking a database snapshot", async () => {
     const store = fakeStore(sealSupplySnapshot(content()));
     const service = new InventoryAvailabilityShadowService(store, { now: () => COMPLETED_AT });

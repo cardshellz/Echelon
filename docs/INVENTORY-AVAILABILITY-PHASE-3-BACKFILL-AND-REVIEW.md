@@ -177,9 +177,14 @@ authorized, read-only-verified operational review showing:
 2. Repeated full-catalog dry runs produce identical catalog and product hashes from
    unchanged source evidence.
 3. Every nonblocked candidate has an exact draft and an append-only review decision.
-4. Quad Box explicitly binds `BASE + LID + DIV -> EA` and every approved package
-   direction; no direction is inferred.
-5. Every selected product has a current shadow and a nonblocked channel publication
+4. Quad Box explicitly binds its reviewed upstream build to internal EA and the
+   one-way `25 EA -> 1 Quad Box` package direction; no reverse direction is inferred.
+5. Regenerate deterministic evidence with
+   `inventory_availability_backfill_v3`. Sales eligibility participates in the input
+   hash; internal-only variants remain valid supply, are omitted as inferred path
+   destinations, and a product with no sellable target is excluded as
+   `excluded_internal_supply_only`.
+6. Every selected product has a current shadow and a nonblocked channel publication
    preview with explicit warehouse scope.
 
 ## Intentional Corrections To The Original Migration Draft

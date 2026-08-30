@@ -217,6 +217,8 @@ describe("PgMarketplaceListingRegistrationRepository", () => {
     expect(queryIndex(queries, "FROM catalog.product_variants")).toBeLessThan(
       queryIndex(queries, "INSERT INTO marketplace.listing_verification_snapshots"),
     );
+    expect(queries.find((entry) => entry.includes("FROM catalog.product_variants")))
+      .toContain("sales_eligibility = 'sellable'");
     expect(queryIndex(queries, "INSERT INTO marketplace.listing_verification_snapshots")).toBeLessThan(
       queryIndex(queries, "INSERT INTO marketplace.listing_verification_members"),
     );

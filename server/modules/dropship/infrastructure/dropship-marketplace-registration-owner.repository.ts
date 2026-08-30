@@ -146,6 +146,7 @@ export class PgDropshipMarketplaceRegistrationOwnerRepository
                 pv.track_inventory
          FROM catalog.product_variants pv
          WHERE pv.product_id = $1
+           AND pv.sales_eligibility = 'sellable'
          ORDER BY pv.position ASC, pv.id ASC`,
         [input.productId],
       );

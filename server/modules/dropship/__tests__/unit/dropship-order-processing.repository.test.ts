@@ -6,6 +6,7 @@ vi.hoisted(() => {
 });
 
 import { PgDropshipOrderProcessingRepository } from "../../infrastructure/dropship-order-processing.repository";
+import type { DropshipOrderProcessingIntakeRecord } from "../../application/dropship-order-processing-service";
 
 const now = new Date("2026-05-09T18:00:00.000Z");
 const expiredAt = new Date("2026-05-09T17:59:59.000Z");
@@ -61,6 +62,44 @@ describe("PgDropshipOrderProcessingRepository", () => {
     expect(client.query).toHaveBeenCalledWith("BEGIN");
     expect(client.query).toHaveBeenCalledWith("COMMIT");
     expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an internal-only listing before generating a shipping quote", async () => {
+    const query = vi.fn(async (statement: string) => ({
+      rows: String(statement).includes("FROM dropship.dropship_vendor_listings")
+        ? [{
+          listing_id: 44,
+          product_variant_id: 101,
+          listing_status: "active",
+          external_listing_id: "listing-44",
+          external_offer_id: "offer-44",
+          product_sku: "PRODUCT-101",
+          variant_sku: "INTERNAL-EA",
+          product_is_active: true,
+          variant_is_active: true,
+          sales_eligibility: "internal_only",
+          dropship_eligible: true,
+        }]
+        : [],
+    }));
+    const repository = new PgDropshipOrderProcessingRepository({ query } as unknown as Pool);
+    const source = makeProcessingIntakeRow();
+    const intake: DropshipOrderProcessingIntakeRecord = {
+      intakeId: source.id,
+      vendorId: source.vendor_id,
+      storeConnectionId: source.store_connection_id,
+      platform: source.platform,
+      externalOrderId: source.external_order_id,
+      status: "processing",
+      paymentHoldExpiresAt: source.payment_hold_expires_at,
+      normalizedPayload: source.normalized_payload,
+    };
+
+    await expect(repository.resolveQuoteItems({ intake })).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_PROCESSING_VARIANT_NOT_ELIGIBLE",
+      context: expect.objectContaining({ customerSellable: false }),
+    });
+    expect(String(query.mock.calls[0]?.[0])).toContain("pv.sales_eligibility");
   });
 });
 

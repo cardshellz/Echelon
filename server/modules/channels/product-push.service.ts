@@ -31,6 +31,7 @@ import {
   type ChannelAssetOverride,
   type ChannelListing,
 } from "@shared/schema";
+import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import { catalogStorage } from "../catalog";
 import { channelsStorage } from "../channels";
 const storage = { ...catalogStorage, ...channelsStorage };
@@ -143,7 +144,7 @@ export function createChannelProductPushService(db: any) {
         price: pr?.price ?? v.priceCents ?? null,
         compareAtPrice: pr?.compareAtPrice ?? v.compareAtPriceCents ?? null,
         shopifyVariantId: v.shopifyVariantId,
-        isListed: vo ? vo.isListed === 1 : true,
+        isListed: isCustomerSellableVariant(v) && (vo ? vo.isListed === 1 : true),
         requiresShipping: v.requiresShipping !== false,
         trackInventory: v.trackInventory,
       };
@@ -196,6 +197,14 @@ export function createChannelProductPushService(db: any) {
 
     if (!resolved.isListed) {
       return { productId, channelId, status: "skipped", error: "Product not listed on this channel" };
+    }
+    if (!resolved.variants.some((variant) => variant.isListed)) {
+      return {
+        productId,
+        channelId,
+        status: "skipped",
+        error: "Product has no customer-sellable variants",
+      };
     }
 
     // Get channel info
@@ -372,6 +381,7 @@ export function createChannelProductPushService(db: any) {
 
         // Create channel listings + channel feeds for all variants
         for (const variant of resolved.variants) {
+          if (!variant.isListed) continue;
           const shopifyVariant = shopifyProduct.variants?.find(
             (sv: any) => sv.sku === variant.sku,
           );
@@ -561,7 +571,7 @@ export function createChannelProductPushService(db: any) {
       ...(resolved.status === "archived" ? { status: "archived" } : {}),
       // Only include options on new products — updating options on existing products
       // renames them in Shopify and can corrupt variant structure
-      ...(resolved.variants.every((v) => !v.shopifyVariantId) ? { options: productOptions } : {}),
+      ...(listedVariants.every((v) => !v.shopifyVariantId) ? { options: productOptions } : {}),
       variants,
     };
 

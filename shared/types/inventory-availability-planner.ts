@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { PRODUCT_INVENTORY_STRATEGIES } from "../catalog/inventory-strategy";
+import { VARIANT_SALES_ELIGIBILITIES } from "../catalog/variant-sales-eligibility";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
@@ -38,6 +39,10 @@ export const plannerVariantSchema = z.object({
   name: z.string(),
   unitsPerVariant: positiveInteger,
   isActive: z.boolean(),
+  // Optional only so already-sealed v1 snapshots remain verifiable. Every new
+  // database capture writes the explicit value; absence retains the historical
+  // sellable default.
+  salesEligibility: z.enum(VARIANT_SALES_ELIGIBILITIES).optional(),
 }).strict();
 
 export const plannerWarehouseSchema = z.object({

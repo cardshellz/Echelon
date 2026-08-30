@@ -170,7 +170,10 @@ async function loadMappedProducts(
     .leftJoin(shippingGroups, eq(products.shippingGroupId, shippingGroups.id))
     .leftJoin(
       productVariants,
-      eq(productVariants.productId, products.id),
+      and(
+        eq(productVariants.productId, products.id),
+        eq(productVariants.salesEligibility, "sellable"),
+      ),
     )
     .leftJoin(
       channelFeeds,
@@ -236,7 +239,10 @@ async function loadMappedProducts(
         eq(channelListings.channelId, channelId),
       ),
     )
-    .where(inArray(productVariants.productId, productIds))
+    .where(and(
+      inArray(productVariants.productId, productIds),
+      eq(productVariants.salesEligibility, "sellable"),
+    ))
     .orderBy(asc(productVariants.productId), asc(productVariants.id));
 
   const variantsByProductId = new Map<
@@ -477,7 +483,10 @@ export function createShopifyProductMappingReconciliationRepository():
             shopifyInventoryItemId: null,
             updatedAt: input.now,
           })
-          .where(eq(productVariants.productId, input.productId))
+          .where(and(
+            eq(productVariants.productId, input.productId),
+            eq(productVariants.salesEligibility, "sellable"),
+          ))
           .returning({ id: productVariants.id });
         const internalVariantIds = clearedVariants.map((variant) => variant.id);
 

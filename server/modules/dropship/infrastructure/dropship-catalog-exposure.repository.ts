@@ -166,7 +166,7 @@ export class PgDropshipCatalogExposureRepository implements DropshipCatalogExpos
     const client = await this.dbPool.connect();
     try {
       const params: unknown[] = [];
-      const where: string[] = [];
+      const where: string[] = ["pv.sales_eligibility = 'sellable'"];
       const catalogStatus = input.catalogStatus ?? (input.includeInactiveCatalog ? "all" : "active");
 
       if (catalogStatus === "active") {

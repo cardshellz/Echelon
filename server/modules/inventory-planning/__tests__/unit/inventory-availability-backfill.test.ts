@@ -7,9 +7,9 @@ import {
 } from "../../domain/inventory-availability-backfill";
 
 const variants: InventoryAvailabilityBackfillSource["variants"] = [
-  { id: 11, productId: 10, sku: "EA", name: "Each", unitsPerVariant: 1, uomType: "each", isActive: true },
-  { id: 12, productId: 10, sku: "P5", name: "Pack 5", unitsPerVariant: 5, uomType: "pack", isActive: true },
-  { id: 13, productId: 10, sku: "C25", name: "Case 25", unitsPerVariant: 25, uomType: "case", isActive: true },
+  { id: 11, productId: 10, sku: "EA", name: "Each", unitsPerVariant: 1, uomType: "each", isActive: true, salesEligibility: "sellable" },
+  { id: 12, productId: 10, sku: "P5", name: "Pack 5", unitsPerVariant: 5, uomType: "pack", isActive: true, salesEligibility: "sellable" },
+  { id: 13, productId: 10, sku: "C25", name: "Case 25", unitsPerVariant: 25, uomType: "case", isActive: true, salesEligibility: "sellable" },
 ];
 
 function source(
@@ -46,6 +46,50 @@ describe("deterministic inventory availability backfill", () => {
     expect(candidate.issues).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: "LEGACY_FUNGIBLE_DIRECTIONS_REQUIRE_REVIEW", severity: "review" }),
     ]));
+  });
+
+  it("uses internal-only EA as forward supply without inferring a reverse sellable-to-EA path", () => {
+    const quadSource = source("physical_fungible");
+    quadSource.variants = [
+      {
+        ...quadSource.variants[0]!,
+        salesEligibility: "internal_only",
+      },
+      {
+        ...quadSource.variants[2]!,
+        sku: "QUAD",
+        name: "Quad Box",
+        salesEligibility: "sellable",
+      },
+    ];
+
+    const candidate = planInventoryAvailabilityBackfill(quadSource);
+
+    expect(candidate.definition?.paths).toEqual([
+      expect.objectContaining({
+        sourceVariantId: 11,
+        destinationVariantId: 13,
+        inputQty: 25,
+        outputQty: 1,
+      }),
+    ]);
+  });
+
+  it("excludes managed internal supply when the product has no customer ATP target", () => {
+    const internalSource = source("physical_only");
+    internalSource.variants = internalSource.variants.map((variant) => ({
+      ...variant,
+      salesEligibility: "internal_only",
+    }));
+
+    const candidate = planInventoryAvailabilityBackfill(internalSource);
+
+    expect(candidate.classification).toBe("excluded_internal_supply_only");
+    expect(candidate.definition).toBeNull();
+    expect(candidate.issues).toContainEqual(expect.objectContaining({
+      code: "NO_CUSTOMER_SELLABLE_VARIANTS",
+      severity: "review",
+    }));
   });
 
   it("excludes a digital-only product instead of inventing conversion paths", () => {
@@ -111,6 +155,7 @@ describe("deterministic inventory availability backfill", () => {
         isActive: true,
         requiresShipping: false,
         trackInventory: false,
+        salesEligibility: "sellable",
       },
     ];
 

@@ -21,6 +21,7 @@ import {
   type SupplySnapshotContentDto,
   type SupplySnapshotDto,
 } from "@shared/types/inventory-availability-planner";
+import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import {
   calculateRecipeCapacity,
   type RecipeDefinition,
@@ -928,6 +929,13 @@ export function projectCanonicalAtp(
       { productId: snapshot.productId, targetVariantId: request.targetVariantId },
     );
   }
+  if (!isCustomerSellableVariant(target)) {
+    throw new InventoryAvailabilityPlannerError(
+      "TARGET_VARIANT_NOT_CUSTOMER_SELLABLE",
+      "The requested target variant is an internal inventory/transformation identity.",
+      { productId: snapshot.productId, targetVariantId: request.targetVariantId },
+    );
+  }
 
   let atp = BigInt(0);
   let exact = BigInt(0);
@@ -1018,6 +1026,13 @@ export function planCanonicalClaim(
         "TARGET_VARIANT_NOT_FOUND",
         "A requested active target variant does not belong to a claim snapshot root product.",
         { lineKey: line.lineKey, targetVariantId: line.targetVariantId, rootProductIds: [...roots].sort() },
+      );
+    }
+    if (!isCustomerSellableVariant(target)) {
+      throw new InventoryAvailabilityPlannerError(
+        "TARGET_VARIANT_NOT_CUSTOMER_SELLABLE",
+        "A claim line cannot target an internal inventory/transformation identity.",
+        { lineKey: line.lineKey, targetVariantId: line.targetVariantId },
       );
     }
   }
@@ -1212,7 +1227,12 @@ export function calculateLegacyAtpFromSnapshot(
   const snapshot = parseSupplySnapshot(rawSnapshot);
   const request = atpProjectionRequestSchema.parse(rawRequest);
   const target = snapshot.variants.find((variant) => variant.id === request.targetVariantId);
-  if (!target || target.productId !== snapshot.productId || !target.isActive) return BigInt(0);
+  if (
+    !target
+    || target.productId !== snapshot.productId
+    || !target.isActive
+    || !isCustomerSellableVariant(target)
+  ) return BigInt(0);
   const productVariants = new Set(snapshot.variants
     .filter((variant) => variant.productId === snapshot.productId && variant.isActive)
     .map((variant) => variant.id));
@@ -1255,7 +1275,12 @@ export function calculateLegacyAtpBaseFromSnapshot(
   const snapshot = parseSupplySnapshot(rawSnapshot);
   const request = atpProjectionRequestSchema.parse(rawRequest);
   const target = snapshot.variants.find((variant) => variant.id === request.targetVariantId);
-  if (!target || target.productId !== snapshot.productId || !target.isActive) return BigInt(0);
+  if (
+    !target
+    || target.productId !== snapshot.productId
+    || !target.isActive
+    || !isCustomerSellableVariant(target)
+  ) return BigInt(0);
   if (snapshot.legacyInventoryStrategy !== "physical_fungible") {
     return calculateLegacyAtpFromSnapshot(snapshot, request) * BigInt(target.unitsPerVariant);
   }

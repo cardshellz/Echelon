@@ -41,6 +41,14 @@ import {
   parseProductInventoryStrategy,
 } from "./inventory-strategy-policy";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
+import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
+import {
+  assertVariantSalesEligibilityTransitionAllowed,
+  assertVariantSalesIdentityCompatible,
+  coerceVariantSalesEligibilityOnPayload,
+  VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE,
+  VariantSalesEligibilityError,
+} from "./variant-sales-eligibility-policy";
 
 // Physical packing facts beyond weight/dims. Canonical on the variant since
 // migration 185; validated here because the variant PUT spreads req.body.
@@ -1615,19 +1623,32 @@ export async function registerProductRoutes(app: Express) {
       const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
       const packingFlags = coercePackingFlagsOnVariantPayload(req.body);
       const fulfillment = coerceVariantFulfillmentOnPayload(req.body);
+      const salesIdentity = coerceVariantSalesEligibilityOnPayload(req.body);
+      assertVariantSalesIdentityCompatible({
+        salesEligibility: salesIdentity.salesEligibility ?? "sellable",
+        shopifyVariantId: req.body.shopifyVariantId,
+        shopifyInventoryItemId: req.body.shopifyInventoryItemId,
+        dropshipEligible: req.body.dropshipEligible,
+      });
       const uomAttributes = validateVariantUomWrite(req.body);
       const variant = await storage.createProductVariant({
         ...req.body,
         ...packageAttributes,
         ...packingFlags,
         ...fulfillment,
+        ...salesIdentity,
         ...uomAttributes,
         productId,
       });
       res.json(variant);
     } catch (error: any) {
       if (Number.isInteger(error?.statusCode)) {
-        return res.status(error.statusCode).json({ error: error.message });
+        return res.status(error.statusCode).json({
+          error: error.message,
+          ...(error instanceof VariantSalesEligibilityError
+            ? { code: error.code, blockers: error.blockers }
+            : {}),
+        });
       }
       console.error("Error creating variant:", error);
       res.status(500).json({ error: "Failed to create variant" });
@@ -1665,8 +1686,15 @@ export async function registerProductRoutes(app: Express) {
 
       const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
       const packingFlags = coercePackingFlagsOnVariantPayload(req.body);
+      const salesIdentity = coerceVariantSalesEligibilityOnPayload(req.body);
       const actor = authenticatedActor(req);
       const updateResult = await db.transaction(async (tx) => {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(
+            ${VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE},
+            ${id}
+          )
+        `);
         await tx.execute(sql`
           SELECT id
           FROM catalog.products
@@ -1685,10 +1713,26 @@ export async function registerProductRoutes(app: Express) {
           throw Object.assign(new Error("Variant parent changed during SKU update"), { statusCode: 409 });
         }
 
+        const nextSalesEligibility = salesIdentity.salesEligibility ?? existing.salesEligibility;
+        assertVariantSalesIdentityCompatible({
+          salesEligibility: nextSalesEligibility,
+          shopifyVariantId: Object.prototype.hasOwnProperty.call(req.body, "shopifyVariantId")
+            ? req.body.shopifyVariantId
+            : existing.shopifyVariantId,
+          shopifyInventoryItemId: Object.prototype.hasOwnProperty.call(req.body, "shopifyInventoryItemId")
+            ? req.body.shopifyInventoryItemId
+            : existing.shopifyInventoryItemId,
+          dropshipEligible: Object.prototype.hasOwnProperty.call(req.body, "dropshipEligible")
+            ? req.body.dropshipEligible
+            : existing.dropshipEligible,
+        });
+        await assertVariantSalesEligibilityTransitionAllowed(tx, existing, nextSalesEligibility);
+
         const payload = {
           ...req.body,
           ...packageAttributes,
           ...packingFlags,
+          ...salesIdentity,
           ...coerceVariantFulfillmentOnPayload(req.body, existing),
           ...validateVariantUomWrite(req.body, existing),
           ...(normalizedNewSku ? { sku: normalizedNewSku } : {}),
@@ -1725,6 +1769,21 @@ export async function registerProductRoutes(app: Express) {
             },
           });
         }
+        if (existing.salesEligibility !== updatedVariant.salesEligibility) {
+          await persistAuditEvent(tx, {
+            actor,
+            action: "catalog.variant_sales_eligibility_updated",
+            target: `product_variant:${id}`,
+            changes: {
+              before: { salesEligibility: existing.salesEligibility },
+              after: { salesEligibility: updatedVariant.salesEligibility },
+            },
+            context: {
+              customerSellable: updatedVariant.salesEligibility === "sellable",
+              inventoryManaged: isInventoryManagedVariant(updatedVariant),
+            },
+          });
+        }
 
         const oldSku = existing.sku;
         let renamed = false;
@@ -1754,7 +1813,26 @@ export async function registerProductRoutes(app: Express) {
         return res.status(409).json({ error: "SKU already exists" });
       }
       if (Number.isInteger(error?.statusCode)) {
-        return res.status(error.statusCode).json({ error: error.message });
+        return res.status(error.statusCode).json({
+          error: error.message,
+          ...(error instanceof VariantSalesEligibilityError
+            ? { code: error.code, blockers: error.blockers }
+            : {}),
+        });
+      }
+      const constraint = error?.constraint ?? error?.cause?.constraint;
+      if (
+        (error?.code === "23514" || error?.cause?.code === "23514")
+        && [
+          "customer_sellable_variant_required",
+          "internal_only_variant_has_customer_exposure",
+          "product_variants_internal_only_identity_chk",
+        ].includes(constraint)
+      ) {
+        return res.status(409).json({
+          code: "VARIANT_INTERNAL_ONLY_DEPENDENCIES",
+          error: "Remove customer-facing variant dependencies before marking it internal-only.",
+        });
       }
       console.error("Error updating variant:", error);
       res.status(500).json({ error: "Failed to update variant" });
@@ -1868,6 +1946,12 @@ export async function registerProductRoutes(app: Express) {
         .limit(1);
       if (!variant) {
         return res.status(404).json({ error: "Variant not found" });
+      }
+      if (!isCustomerSellableVariant(variant)) {
+        return res.status(409).json({
+          code: "VARIANT_INTERNAL_ONLY",
+          error: "Internal-only variants cannot be linked to Shopify",
+        });
       }
 
       const [product] = await db
@@ -2130,6 +2214,12 @@ export async function registerProductRoutes(app: Express) {
       if (!variant) {
         return res.status(404).json({ error: "Variant not found" });
       }
+      if (!isCustomerSellableVariant(variant)) {
+        return res.status(409).json({
+          code: "VARIANT_INTERNAL_ONLY",
+          error: "Internal-only variants cannot be linked to Shopify",
+        });
+      }
 
       const [product] = await db
         .select()
@@ -2310,6 +2400,24 @@ export async function registerProductRoutes(app: Express) {
       }
 
       const result = await db.transaction(async (tx) => {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(
+            ${VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE},
+            ${id}
+          )
+        `);
+        const [currentVariant] = await tx
+          .select({ salesEligibility: productVariants.salesEligibility })
+          .from(productVariants)
+          .where(eq(productVariants.id, id))
+          .limit(1);
+        if (!currentVariant || !isCustomerSellableVariant(currentVariant)) {
+          throw Object.assign(
+            new Error("Internal-only variants cannot be linked to Shopify"),
+            { statusCode: 409, code: "VARIANT_INTERNAL_ONLY" },
+          );
+        }
+
         const variantUpdates: Partial<typeof productVariants.$inferInsert> = {
           shopifyVariantId,
           shopifyInventoryItemId,
@@ -2447,7 +2555,9 @@ export async function registerProductRoutes(app: Express) {
         error: error?.message || "Failed to link Shopify variant",
         ...(error instanceof ShopifyProductMappingError
           ? { code: error.code, context: error.context }
-          : {}),
+          : error?.code === "VARIANT_INTERNAL_ONLY"
+            ? { code: error.code }
+            : {}),
       });
     }
   });

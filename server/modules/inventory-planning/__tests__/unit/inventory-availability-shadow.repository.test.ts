@@ -40,6 +40,10 @@ describe("Postgres inventory availability shadow repository", () => {
         pickedQty: "3",
         packedQty: "1",
       })],
+      variants: [expect.objectContaining({
+        id: 101,
+        salesEligibility: "sellable",
+      })],
       transformationModels: [expect.objectContaining({
         modelId: 501,
         lifecycleSelection: "draft_head",
@@ -76,10 +80,27 @@ describe("Postgres inventory availability shadow repository", () => {
       rootProducts: [{ productId: 10, legacyInventoryStrategy: "physical_only" }],
       inventoryPositions: [expect.objectContaining({ productVariantId: 101, variantQty: "7" })],
     });
+    const targetQuery = client.query.mock.calls.find((call) =>
+      String(call[0]).includes("WHERE id = ANY($1::integer[])"));
+    expect(String(targetQuery?.[0])).toContain("SELECT id, product_id, sales_eligibility");
     expect(client.query.mock.calls[0]?.[0]).toBe(
       "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
     );
     expect(client.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an internal-only variant as a claim target before graph planning", async () => {
+    const client = fakeSnapshotClient("internal_only");
+    const repository = new PostgresInventoryAvailabilityShadowRepository(
+      { connect: vi.fn(async () => client) } as never,
+    );
+
+    await expect(repository.captureClaimSupplySnapshot([101])).rejects.toMatchObject({
+      code: "TARGET_VARIANT_NOT_CUSTOMER_SELLABLE",
+      context: { targetVariantIds: [101] },
+    });
+    expect(client.query.mock.calls.some((call) => String(call[0]) === "ROLLBACK")).toBe(true);
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 
@@ -230,7 +251,9 @@ function fakePersistenceClient(
   return { query, release: vi.fn() };
 }
 
-function fakeSnapshotClient() {
+function fakeSnapshotClient(
+  variantSalesEligibility: "sellable" | "internal_only" = "sellable",
+) {
   const query = vi.fn(async (statement: unknown) => {
     const sql = String(statement).trim();
     if (sql === "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
@@ -266,6 +289,7 @@ function fakeSnapshotClient() {
         name: "Each",
         units_per_variant: 1,
         is_active: true,
+        sales_eligibility: variantSalesEligibility,
       }] };
     }
     if (sql.includes("FROM warehouse.warehouses")) {

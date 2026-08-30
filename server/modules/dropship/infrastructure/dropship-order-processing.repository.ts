@@ -35,6 +35,7 @@ interface ListingCandidateRow {
   variant_sku: string | null;
   product_is_active: boolean;
   variant_is_active: boolean;
+  sales_eligibility: "sellable" | "internal_only";
   dropship_eligible: boolean | null;
 }
 
@@ -140,6 +141,7 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
          pv.sku AS variant_sku,
          p.is_active AS product_is_active,
          pv.is_active AS variant_is_active,
+         pv.sales_eligibility,
          pv.dropship_eligible
        FROM dropship.dropship_vendor_listings dl
        INNER JOIN catalog.product_variants pv ON pv.id = dl.product_variant_id
@@ -470,7 +472,12 @@ function assertCandidateCanQuote(
       },
     );
   }
-  if (!candidate.product_is_active || !candidate.variant_is_active || candidate.dropship_eligible !== true) {
+  if (
+    !candidate.product_is_active
+    || !candidate.variant_is_active
+    || candidate.sales_eligibility !== "sellable"
+    || candidate.dropship_eligible !== true
+  ) {
     throw new DropshipError(
       "DROPSHIP_ORDER_PROCESSING_VARIANT_NOT_ELIGIBLE",
       "Dropship order line variant is not eligible for shipping quote generation.",
@@ -480,6 +487,7 @@ function assertCandidateCanQuote(
         productVariantId: candidate.product_variant_id,
         productIsActive: candidate.product_is_active,
         variantIsActive: candidate.variant_is_active,
+        customerSellable: candidate.sales_eligibility === "sellable",
         dropshipEligible: candidate.dropship_eligible === true,
       },
     );

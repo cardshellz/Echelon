@@ -117,6 +117,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         is_active boolean NOT NULL DEFAULT true,
         requires_shipping boolean NOT NULL DEFAULT true,
         track_inventory boolean DEFAULT true,
+        sales_eligibility varchar(20) NOT NULL DEFAULT 'sellable',
         CONSTRAINT product_variants_id_product_uq UNIQUE (id, product_id)
       );
       CREATE TABLE warehouse.warehouses (

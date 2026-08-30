@@ -16,6 +16,7 @@ import {
   type SqlPool,
 } from "./variant-availability-sync.repository";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
+import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 
 const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_LEASE_SECONDS = 120;
@@ -108,6 +109,17 @@ async function processClaim(
         productVariantId: context.productVariantId,
         requiresShipping: context.catalogRequiresShipping,
         trackInventory: context.catalogTrackInventory,
+        revision: claim.revision,
+        completed,
+      });
+      return completed ? "synced" : "superseded";
+    }
+    if (!isCustomerSellableVariant({ salesEligibility: context.catalogSalesEligibility })) {
+      const completed = await markVariantAvailabilityNotApplicable(dependencies.dbPool, claim);
+      console.info(`${LOG_PREFIX} Skipped quantity publication for internal-only variant`, {
+        channelId: context.channelId,
+        productVariantId: context.productVariantId,
+        salesEligibility: context.catalogSalesEligibility,
         revision: claim.revision,
         completed,
       });
