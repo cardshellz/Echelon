@@ -419,6 +419,26 @@ describe("projectDeclaredPackageLifecycle", () => {
     });
   });
 
+  it("accepts deterministic system recovery through the same named-resolution rules", () => {
+    const state = projectDeclaredPackageLifecycle(lifecycle([
+      observedLabel({ contentsEvidence: { status: "omitted" } }),
+      contentsAttestation({
+        eventKey: "shipping-provider-label-event:102:contents-recovered",
+        authorization: "system_recovered",
+        actor: "historical-shipstation-contents-system-recovery",
+        reason: "Deterministic provider_line_keys_authoritative recovery",
+      }),
+    ]));
+
+    expect(state).toMatchObject({
+      contentsStatus: "authoritative",
+      authoritativeContents: [{ wmsShipmentItemId: 7001, quantity: 2 }],
+      currentAutomationAuthority: true,
+      reconciliationStatus: "clear",
+      reviewReasons: [],
+    });
+  });
+
   it.each([
     [
       "a duplicate reference",

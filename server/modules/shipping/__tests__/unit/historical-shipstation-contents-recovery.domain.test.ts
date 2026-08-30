@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildHistoricalShipStationContentsRecoveryEvidence,
+  buildHistoricalShipStationContentsSystemRecoveryEvent,
   classifyHistoricalShipStationContentsRecovery,
   HistoricalShipStationContentsRecoveryError,
   type HistoricalShipStationExpectedContentsEvidence,
@@ -29,6 +30,83 @@ function classify(
 }
 
 describe("historical ShipStation contents recovery", () => {
+  it("builds one deterministic redacted system-recovery event", () => {
+    const recoveryEvidence = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_001,
+      providerStatus: "authoritative",
+      rawProviderItems: [
+        { lineItemKey: "wms-item-7002", sku: "SECRET-B", quantity: 1 },
+        { lineItemKey: "wms-item-7001", name: "SECRET-A", quantity: 2 },
+      ],
+      expectedContents: expected,
+    });
+    if (recoveryEvidence === null) throw new Error("expected recoverable evidence");
+
+    const first = buildHistoricalShipStationContentsSystemRecoveryEvent({
+      shippingProviderLabelId: "41",
+      providerShipmentId: 44_001,
+      trackingNumber: "1Z999AA10123456784",
+      labelStatus: "active",
+      recoveryEvidence,
+      resolvedLabelEventIds: [102, 101],
+    });
+    const replay = buildHistoricalShipStationContentsSystemRecoveryEvent({
+      shippingProviderLabelId: "41",
+      providerShipmentId: 44_001,
+      trackingNumber: "1Z999AA10123456784",
+      labelStatus: "active",
+      recoveryEvidence,
+      resolvedLabelEventIds: [101, 102],
+    });
+
+    expect(first).toEqual(replay);
+    expect(first).toMatchObject({
+      eventType: "contents_recovered",
+      labelStatus: "active",
+      providerOccurredAt: null,
+      sanitizedPayload: {
+        payloadSchemaVersion: 2,
+        providerLabelId: "44001",
+        observationSource: "historical_shipstation_contents_system_recovery",
+        recoveryContractVersion: 1,
+        recoveryStatus: "provider_line_keys_authoritative",
+        resolvedLabelEventIds: [101, 102],
+        declaredContentsEvidence: {
+          evidenceSchemaVersion: 1,
+          status: "authoritative",
+          lines: [
+            { lineItemKey: "wms-item-7001", quantity: 2 },
+            { lineItemKey: "wms-item-7002", quantity: 1 },
+          ],
+        },
+      },
+    });
+    expect(first.eventHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(first.sanitizedPayload.recoveryEvidenceHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(first)).not.toMatch(/SECRET|SKU-/);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.sanitizedPayload)).toBe(true);
+  });
+
+  it("rejects duplicate system-recovery resolution references", () => {
+    const recoveryEvidence = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_001,
+      providerStatus: "authoritative",
+      rawProviderItems: [{ lineItemKey: "wms-item-7001", quantity: 2 }],
+      expectedContents: expected,
+    });
+    if (recoveryEvidence === null) throw new Error("expected recoverable evidence");
+
+    expect(() => buildHistoricalShipStationContentsSystemRecoveryEvent({
+      shippingProviderLabelId: "41",
+      providerShipmentId: 44_001,
+      trackingNumber: "1Z999AA10123456784",
+      labelStatus: "active",
+      recoveryEvidence,
+      resolvedLabelEventIds: [101, 101],
+    })).toThrow(HistoricalShipStationContentsRecoveryError);
+  });
+
   it("accepts a deterministic one-to-one SKU and quantity match without relying on input order", () => {
     expect(classify("unrecognized", [
       { orderItemId: 9_002, lineItemKey: null, sku: "SKU-B", quantity: 1 },

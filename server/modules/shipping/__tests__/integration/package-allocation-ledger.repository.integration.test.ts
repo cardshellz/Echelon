@@ -56,7 +56,10 @@ import { PgHistoricalShipStationContentsAttestationRepository } from "../../hist
 import { HistoricalShipStationContentsAttestationService } from "../../historical-shipstation-contents-attestation.service";
 import {
   buildHistoricalShipStationContentsRecoveryEvidence,
+  buildHistoricalShipStationContentsSystemRecoveryEvent,
 } from "../../historical-shipstation-contents-recovery.domain";
+import { PgHistoricalShipStationContentsSystemRecoveryRepository } from "../../historical-shipstation-contents-system-recovery.repository";
+import { HistoricalShipStationContentsSystemRecoveryService } from "../../historical-shipstation-contents-system-recovery.service";
 
 const PRIMARY_GROUP_KEY = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const COMPETING_GROUP_KEY = "96e1be0d-c7d8-4c91-919f-04f5eb547f80";
@@ -836,6 +839,221 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
           quantity: 2,
         }],
       },
+    });
+  });
+
+  it("persists one idempotent system recovery that the allocation readiness consumer reads", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "RECOVERY-SKU", 2);
+    const shipment = await pool.query<{ id: number }>(
+      "INSERT INTO wms.outbound_shipments DEFAULT VALUES RETURNING id",
+    );
+    await pool.query(
+      `UPDATE wms.outbound_shipment_items
+       SET shipment_id = $1::integer
+       WHERE id = $2::integer`,
+      [shipment.rows[0].id, sourceId],
+    );
+    const label = await pool.query<{ id: string }>(
+      `INSERT INTO wms.shipping_provider_labels (
+         provider, provider_label_id, tracking_number, label_status,
+         label_direction, first_observed_at, last_observed_at
+       ) VALUES (
+         'shipstation', '56001', '1ZSYSTEMRECOVERY', 'active', 'outbound',
+         '2026-08-27T12:00:00.000Z', '2026-08-27T12:00:00.000Z'
+       ) RETURNING id::text AS id`,
+    );
+    const historicalPayload = Object.freeze({
+      payloadSchemaVersion: 1,
+      providerLabelId: "56001",
+      trackingNumber: "1ZSYSTEMRECOVERY",
+    });
+    const historicalEventHash = createHash("sha256").update(canonicalJson({
+      provider: "shipstation",
+      ...historicalPayload,
+      labelStatus: "active",
+    })).digest("hex");
+    const historicalEvent = await pool.query<{ id: string }>(
+      `INSERT INTO wms.shipping_provider_label_events (
+         shipping_provider_label_id, event_hash, event_type, label_status,
+         tracking_number, provider_occurred_at, received_at, sanitized_payload
+       ) VALUES (
+         $1::bigint, $2, 'label_observed', 'active', '1ZSYSTEMRECOVERY', NULL,
+         '2026-08-27T12:00:00.000Z', $3::jsonb
+       ) RETURNING id::text AS id`,
+      [label.rows[0].id, historicalEventHash, JSON.stringify(historicalPayload)],
+    );
+    await pool.query(
+      `INSERT INTO wms.shipping_provider_label_links (
+         shipping_provider_label_id, legacy_wms_shipment_id
+       ) VALUES ($1::bigint, $2::integer)`,
+      [label.rows[0].id, shipment.rows[0].id],
+    );
+
+    const expectedContents = Object.freeze({
+      kind: "available" as const,
+      source: "legacy_wms_shipment" as const,
+      lines: Object.freeze([
+        Object.freeze({
+          wmsShipmentItemId: sourceId,
+          sku: "RECOVERY-SKU",
+          quantity: 2,
+        }),
+      ]),
+    });
+    const recoveryEvidence = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 56_001,
+      providerStatus: "authoritative",
+      rawProviderItems: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 2 }],
+      expectedContents,
+    });
+    if (recoveryEvidence === null) throw new Error("Expected recoverable integration evidence");
+    const client: HistoricalShipStationContentsClient = {
+      async loadShipmentContents(providerShipmentId, observedExpectedContents) {
+        expect(providerShipmentId).toBe(56_001);
+        expect(observedExpectedContents).toEqual(expectedContents);
+        return Object.freeze({
+          kind: "found" as const,
+          evidence: Object.freeze({
+            status: "authoritative" as const,
+            recoveryStatus: recoveryEvidence.recoveryStatus,
+            providerItemCount: 1,
+            recognizedProviderItemCount: 1,
+            canonicalLineCount: 1,
+            malformedItemCount: 0,
+            unrecognizedItemCount: 0,
+            duplicateLineItemCount: 0,
+            recoveryEvidence: Object.freeze({
+              contractVersion: recoveryEvidence.contractVersion,
+              evidenceHash: recoveryEvidence.evidenceHash,
+              attestedLineCount: recoveryEvidence.attestedContents.length,
+            }),
+          }),
+          recoveryEvidenceDetails: recoveryEvidence,
+        });
+      },
+    };
+    const recoveryService = new HistoricalShipStationContentsSystemRecoveryService(
+      new PgHistoricalShipStationContentsSystemRecoveryRepository(pool),
+      client,
+    );
+
+    const created = await recoveryService.recover(label.rows[0].id);
+    const replay = await recoveryService.recover(label.rows[0].id);
+    expect(created).toMatchObject({
+      kind: "created",
+      shippingProviderLabelId: label.rows[0].id,
+      eventHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(replay).toEqual({ ...created, kind: "already_persisted" });
+
+    const persisted = await pool.query<{
+      id: string;
+      provider_occurred_at: Date | null;
+      sanitized_payload: Record<string, unknown>;
+    }>(
+      `SELECT id::text AS id, provider_occurred_at, sanitized_payload
+       FROM wms.shipping_provider_label_events
+       WHERE shipping_provider_label_id = $1::bigint
+         AND event_type = 'contents_recovered'`,
+      [label.rows[0].id],
+    );
+    expect(persisted.rows).toHaveLength(1);
+    expect(persisted.rows[0]).toMatchObject({
+      id: created.labelEventId,
+      provider_occurred_at: null,
+      sanitized_payload: {
+        observationSource: "historical_shipstation_contents_system_recovery",
+        resolvedLabelEventIds: [Number(historicalEvent.rows[0].id)],
+        declaredContentsEvidence: {
+          status: "authoritative",
+          lines: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 2 }],
+        },
+      },
+    });
+    expect(JSON.stringify(persisted.rows[0].sanitized_payload)).not.toContain("RECOVERY-SKU");
+
+    const labelId = positiveSafeIntegerFromPostgres(
+      label.rows[0].id,
+      "shipping_provider_labels.id",
+    );
+    const readiness = await new PackageAllocationAuthorityReadinessService(
+      new PgPackageAllocationLedgerRepository(pool),
+    ).assess({
+      contractVersion: 1,
+      authorityMode: "shadow_only",
+      sourceWmsShipmentItemIds: [sourceId],
+      shippingProviderLabelIds: [labelId],
+    });
+    expect(readiness).toMatchObject({
+      authority: "none",
+      outcome: "review",
+      plannerInput: null,
+      packageAssessments: [{
+        evidenceCoverage: "historical_v1_recovered",
+        authoritativeContents: [{ wmsShipmentItemId: sourceId, quantity: 2 }],
+        candidateSourceStatus: "within_candidate_sources",
+      }],
+    });
+    expect(readiness.reviews.map((review) => review.code)).toEqual([
+      "allocation_role_policy_unresolved",
+      "package_membership_policy_unresolved",
+      "physical_consumption_authority_policy_unresolved",
+    ]);
+    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
+
+    const freshAudit = await withExecutionAuditRole(pool, async (scopedPool) => {
+      const scopedClient = await scopedPool.connect();
+      return loadHistoricalShipStationContentsCandidates(scopedClient, { candidateLimit: 10 });
+    });
+    expect(freshAudit.candidates).toEqual([]);
+
+    const competingEvent = buildHistoricalShipStationContentsSystemRecoveryEvent({
+      shippingProviderLabelId: label.rows[0].id,
+      providerShipmentId: 56_001,
+      trackingNumber: "1ZSYSTEMRECOVERY",
+      labelStatus: "active",
+      recoveryEvidence: {
+        ...recoveryEvidence,
+        evidenceHash: "f".repeat(64),
+      },
+      resolvedLabelEventIds: [Number(historicalEvent.rows[0].id)],
+    });
+    await expect(pool.query(
+      `INSERT INTO wms.shipping_provider_label_events (
+         shipping_provider_label_id, event_hash, event_type, label_status,
+         tracking_number, provider_occurred_at, received_at, sanitized_payload
+       ) VALUES ($1::bigint, $2, $3, $4, $5, NULL, transaction_timestamp(), $6::jsonb)`,
+      [
+        label.rows[0].id,
+        competingEvent.eventHash,
+        competingEvent.eventType,
+        competingEvent.labelStatus,
+        competingEvent.trackingNumber,
+        JSON.stringify(competingEvent.sanitizedPayload),
+      ],
+    )).rejects.toMatchObject({ code: "23505" });
+
+    const invalidLabel = await pool.query<{ id: string }>(
+      `INSERT INTO wms.shipping_provider_labels (
+         provider, provider_label_id, tracking_number, label_status,
+         label_direction, first_observed_at, last_observed_at
+       ) VALUES (
+         'shipstation', '56002', '1ZINVALIDRECOVERY', 'active', 'outbound',
+         transaction_timestamp(), transaction_timestamp()
+       ) RETURNING id::text AS id`,
+    );
+    await expect(pool.query(
+      `INSERT INTO wms.shipping_provider_label_events (
+         shipping_provider_label_id, event_hash, event_type, label_status,
+         tracking_number, provider_occurred_at, received_at, sanitized_payload
+       ) VALUES (
+         $1::bigint, $2, 'contents_recovered', 'active',
+         '1ZINVALIDRECOVERY', NULL, transaction_timestamp(), '{}'::jsonb
+       )`,
+      [invalidLabel.rows[0].id, "0".repeat(64)],
+    )).rejects.toMatchObject({
+      code: "23514",
+      constraint: "shipping_provider_label_events_recovery_payload_chk",
     });
   });
 

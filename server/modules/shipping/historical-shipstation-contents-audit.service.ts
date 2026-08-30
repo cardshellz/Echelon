@@ -94,7 +94,7 @@ export interface HistoricalShipStationContentsAuditReport {
   readonly reviewRequiredByCurrentEvidenceCount: number;
   readonly reviewCases: readonly HistoricalShipStationContentsReviewCase[];
   readonly requiresLeadAttestationCount: number;
-  readonly safeToAutoResolveCount: 0;
+  readonly safeToAutoResolveCount: number;
   readonly databaseTemporaryPrivilege: boolean;
 }
 
@@ -349,10 +349,10 @@ export async function auditHistoricalShipStationContents(
     recoverableCases: frozenRecoverableCases,
     reviewRequiredByCurrentEvidenceCount: frozenReviewCases.length,
     reviewCases: frozenReviewCases,
-    // Recovery evidence is preview-only. A later audited write path must decide
-    // whether and how to attest historical V1 omissions.
-    requiresLeadAttestationCount: batch.candidates.length,
-    safeToAutoResolveCount: 0,
+    // The system-recovery write path accepts only these already-classified,
+    // deterministic cases. Every other result remains review-only.
+    requiresLeadAttestationCount: 0,
+    safeToAutoResolveCount: recoverableProviderEvidenceCount,
     databaseTemporaryPrivilege: batch.databaseTemporaryPrivilege,
   });
 }

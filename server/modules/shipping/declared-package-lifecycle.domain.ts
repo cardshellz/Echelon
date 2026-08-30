@@ -74,7 +74,7 @@ const outboundLabelVoidedEventSchema = providerEvidenceEventBaseSchema.extend({
 
 const packageContentsAttestedEventSchema = lifecycleEventBaseSchema.extend({
   kind: z.literal("package_contents_attested"),
-  authorization: z.literal("lead_approved"),
+  authorization: z.enum(["lead_approved", "system_recovered"]),
   actor: boundedIdentifier("actor", 200),
   reason: boundedIdentifier("reason", 500),
   resolvesEventKeys: z.array(boundedIdentifier("resolvesEventKey", 240)).min(1).max(500),
@@ -311,7 +311,7 @@ function resolveTrackingNumber(
 interface ContentSnapshot {
   readonly eventKey: string;
   readonly observedAt: string;
-  readonly source: "provider" | "operator";
+  readonly source: "provider" | "operator" | "system";
   readonly evidenceStatus: DeclaredPackageContentsEvidenceStatus;
   readonly contents: readonly DeclaredPackageLine[] | null;
   readonly fingerprint: string | null;
@@ -448,7 +448,7 @@ function projectContentsTimeline(
       addActiveSnapshot({
         eventKey: event.eventKey,
         observedAt: event.observedAt,
-        source: "operator",
+        source: event.authorization === "system_recovered" ? "system" : "operator",
         evidenceStatus: "authoritative",
         contents,
         fingerprint: sha256(canonicalJson(contents)),
