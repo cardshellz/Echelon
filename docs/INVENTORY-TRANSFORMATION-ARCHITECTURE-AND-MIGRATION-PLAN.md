@@ -178,14 +178,15 @@ Every implementation phase must preserve these contracts.
 
 ## Target Source-Of-Truth Model
 
-There is not one table that owns every concept. There are four explicit authorities:
+There is not one table that owns every concept. There are five explicit authorities:
 
 | Concern | Authority |
 | --- | --- |
 | SKU identity, UOM, package quantity | Catalog product variants |
 | Physical quantity, reservations, lots, costs | Inventory ledger and lot records |
 | Permitted transformations | Active versioned transformation model |
-| Sellable availability | Deterministic ATP projection from the three authorities |
+| Customer promise target eligibility | Catalog variant `sales_eligibility` |
+| Sellable availability | Deterministic ATP projection from the preceding authorities |
 
 The editable catalog Inventory behavior radio is removed after migration. The catalog
 may display derived status badges, but those badges cannot become a second rule source.
@@ -427,29 +428,24 @@ Component recipes that share a component must compete in the same planning snaps
 
 ### Quad Box worked example
 
-The following quantities came from the prior investigation and are examples only.
-They are not a current production snapshot and must be requeried before activation.
+Quad Box is not a reversible package-equivalence case. The approved direction is:
 
 ```text
-C25 physical 87, reserved 3  -> 84 * 25 = 2,100 finished EA
-P5 physical 4, reserved 2    ->  2 *  5 =    10 finished EA
-EA physical 0, reserved 0    ->               0 finished EA
-Finished package pool                         2,110 EA
-
-BASE, LID, and DIV component capacity         2,200 EA
-Total alternative capacity                    4,310 EA
+25 internal EA -> 1 sellable Quad Box
 ```
 
-If every finished relationship is reversible and all component capacity is valid,
-the same shared capacity can be expressed as:
+No `1 Quad Box -> 25 EA` path exists because EA is not sold. Exact physical Quad Box
+inventory can satisfy Quad Box demand, while internal EA and explicitly buildable EA
+may supply only the reviewed forward conversion:
 
 ```text
-EA ATP   = 4,310
-P5 ATP   =   862
-C25 ATP  =   172
+Quad Box ATP = exact available Quad Boxes
+             + floor((available internal EA + explicitly buildable internal EA) / 25)
 ```
 
-These are competing alternatives, not `4,310 + 862 + 172` physical units.
+The internal EA identity remains visible in physical inventory and planner evidence,
+but is excluded from customer/channel targets. Shared EA/component capacity is claimed
+once; it cannot be counted again through another target view.
 
 ## Reservation And Fulfillment Semantics
 
@@ -559,8 +555,8 @@ Gate 3:
 
 - Every active product is classified.
 - Backfill reruns produce identical drafts.
-- Quad Box has an explicitly reviewed model:
-  `BASE + LID + DIV -> EA` and approved package directions.
+- Quad Box has an explicitly reviewed model with internal EA supply and only the
+  approved `25 EA -> 1 Quad Box` package direction.
 
 ### Phase 4 - Unified claim path and dry-run publication
 
@@ -802,6 +798,10 @@ PRs. Each slice remains independently deployable and backward compatible.
 - Add the unified transformation planner.
 - Add legacy/proposed shadow comparison and health UI.
 - Add deterministic dry-run/backfill commands.
+- Version sellability-aware deterministic evidence as
+  `inventory_availability_backfill_v3`; internal-only variants remain graph supply,
+  are omitted as customer targets and inferred path destinations, and internal-only
+  products are explicitly excluded from customer ATP migration.
 - Bind existing recipe versions and prepare Quad Box draft.
 - Legacy remains authoritative.
 
@@ -833,6 +833,11 @@ PRs. Each slice remains independently deployable and backward compatible.
 - Physical finished stock and component-buildable capacity may coexist.
 - Package directions are explicit; reversibility is never inferred.
 - Reverse conversion authority requires a separate explicit directed path.
+- Catalog variant customer eligibility is explicit: `internal_only` identities remain
+  physical/transformation supply but cannot become customer-facing ATP, reservation,
+  listing, allocation, or publication targets.
+- Quad Box consumes 25 internal EA in the forward direction only; physical Quad Box
+  stock does not create EA supply.
 - Admin ATP, channel ATP, and reservation share one planner/model version.
 - Migration is shadow-first across the full active catalog, followed by one
   controlled catalog-wide activation.

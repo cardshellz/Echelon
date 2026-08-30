@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import type { VariantSalesEligibility } from "@shared/catalog/variant-sales-eligibility";
 
 export interface SqlQueryResult<Row = Record<string, unknown>> {
   rows: Row[];
@@ -42,6 +43,7 @@ export interface VariantAvailabilityContext {
   catalogVariantActive: boolean;
   catalogRequiresShipping: boolean;
   catalogTrackInventory: boolean | null;
+  catalogSalesEligibility: VariantSalesEligibility;
   variantExcluded: boolean | null;
   catalogProductActive: boolean;
   catalogProductStatus: string | null;
@@ -79,6 +81,7 @@ interface ContextRow {
   catalog_variant_active: boolean;
   catalog_requires_shipping: boolean;
   catalog_track_inventory: boolean | null;
+  catalog_sales_eligibility: VariantSalesEligibility;
   variant_excluded: boolean | null;
   catalog_product_active: boolean;
   catalog_product_status: string | null;
@@ -225,6 +228,7 @@ export async function loadVariantAvailabilityContext(
       variant_row.is_active AS catalog_variant_active,
       variant_row.requires_shipping AS catalog_requires_shipping,
       variant_row.track_inventory AS catalog_track_inventory,
+      variant_row.sales_eligibility AS catalog_sales_eligibility,
       variant_row.ebay_listing_excluded AS variant_excluded,
       product_row.is_active AS catalog_product_active,
       product_row.status AS catalog_product_status,
@@ -280,6 +284,7 @@ export async function loadVariantAvailabilityContext(
     catalogVariantActive: row.catalog_variant_active,
     catalogRequiresShipping: row.catalog_requires_shipping,
     catalogTrackInventory: row.catalog_track_inventory,
+    catalogSalesEligibility: row.catalog_sales_eligibility,
     variantExcluded: row.variant_excluded,
     catalogProductActive: row.catalog_product_active,
     catalogProductStatus: row.catalog_product_status,

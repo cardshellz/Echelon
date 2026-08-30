@@ -69,6 +69,7 @@ export async function loadInventoryAvailabilityBackfillSources(
       isActive: productVariants.isActive,
       requiresShipping: productVariants.requiresShipping,
       trackInventory: productVariants.trackInventory,
+      salesEligibility: productVariants.salesEligibility,
     })
     .from(productVariants)
     .where(and(

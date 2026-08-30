@@ -29,6 +29,7 @@ function source(): InventoryAvailabilityBackfillSource {
       unitsPerVariant: 1,
       uomType: "each",
       isActive: true,
+      salesEligibility: "sellable",
     }],
     recipes: [],
   };
@@ -83,7 +84,7 @@ describe("InventoryAvailabilityBackfillService", () => {
     const { service } = setup();
     const queue = await service.getMigrationQueue();
     expect(queue).toMatchObject({
-      algorithmVersion: "inventory_availability_backfill_v2",
+      algorithmVersion: "inventory_availability_backfill_v3",
       capturedAt: NOW.toISOString(),
       summary: { totalActiveProducts: 1, blocked: 0, excluded: 0, notBackfilled: 1 },
       products: [{ productId: 10, classification: "exact_only", queueState: "not_backfilled" }],

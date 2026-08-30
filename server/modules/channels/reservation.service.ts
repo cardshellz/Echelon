@@ -10,6 +10,10 @@ import {
 } from "@shared/schema";
 import type { VariantAtp } from "../inventory/atp.service";
 import type { ProductInventoryStrategy } from "@shared/catalog/inventory-strategy";
+import {
+  isCustomerSellableVariant,
+  VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE,
+} from "@shared/catalog/variant-sales-eligibility";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -148,17 +152,27 @@ class ReservationService {
     }
 
     const reserveWithinTransaction = async (tx: any): Promise<ReserveForOrderResult> => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          ${VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE},
+          ${variantId}
+        )
+      `);
       const [variant] = await tx
         .select({
           productId: productVariants.productId,
           requiresShipping: productVariants.requiresShipping,
           trackInventory: productVariants.trackInventory,
+          salesEligibility: productVariants.salesEligibility,
         })
         .from(productVariants)
         .where(eq(productVariants.id, variantId))
         .limit(1);
       if (!variant || variant.productId !== productId) {
         throw new Error(`Variant ${variantId} does not belong to product ${productId}`);
+      }
+      if (!isCustomerSellableVariant(variant)) {
+        return { reserved: 0, promised: 0, shortfall: orderQty };
       }
       if (variant.requiresShipping === false || variant.trackInventory === false) {
         return { reserved: 0, promised: 0, shortfall: 0 };
@@ -375,6 +389,15 @@ class ReservationService {
             sku: item.sku,
             orderItemId: item.id,
             reason: `Product variant not found for SKU "${item.sku}"`,
+          });
+          continue;
+        }
+
+        if (!isCustomerSellableVariant(variant)) {
+          result.failed.push({
+            sku: item.sku,
+            orderItemId: item.id,
+            reason: `Product variant "${item.sku}" is internal-only and cannot be promised to a customer`,
           });
           continue;
         }

@@ -164,7 +164,10 @@ async function loadMapping(
         eq(channelListings.channelId, channel.id),
       ),
     )
-    .where(eq(productVariants.productId, product.id))
+    .where(and(
+      eq(productVariants.productId, product.id),
+      eq(productVariants.salesEligibility, "sellable"),
+    ))
     .orderBy(asc(productVariants.id));
 
   const source: ShopifyProductMappingSource = {

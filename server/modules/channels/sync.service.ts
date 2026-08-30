@@ -25,6 +25,7 @@ import type {
   Warehouse,
 } from "@shared/schema";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
+import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -233,6 +234,7 @@ class ChannelSyncService {
         inArray(productVariants.id, variantIds),
         eq(productVariants.requiresShipping, true),
         sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+        eq(productVariants.salesEligibility, "sellable"),
       ));
 
     let productIds = Array.from(new Set(variantRows.map((v) => v.productId)));
@@ -317,6 +319,10 @@ class ChannelSyncService {
 
     if (!variant) {
       console.warn(`[ChannelSync] Cannot queue sync: variant ${productVariantId} not found`);
+      return;
+    }
+    if (!isCustomerSellableVariant(variant)) {
+      console.warn(`[ChannelSync] Cannot queue sync: variant ${productVariantId} is internal-only`);
       return;
     }
 
@@ -528,6 +534,7 @@ class ChannelSyncService {
         .limit(1);
       if (!variant) continue;
       if (!isInventoryManagedVariant(variant)) continue;
+      if (!isCustomerSellableVariant(variant)) continue;
 
       // Cache ATP per product
       if (!productCache.has(variant.productId)) {
@@ -577,6 +584,7 @@ class ChannelSyncService {
         eq(productVariants.isActive, true),
         eq(productVariants.requiresShipping, true),
         sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+        eq(productVariants.salesEligibility, "sellable"),
         sql`${productVariants.shopifyVariantId} IS NOT NULL`,
       ));
 
@@ -733,6 +741,7 @@ class ChannelSyncService {
         shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
         requiresShipping: productVariants.requiresShipping,
         trackInventory: productVariants.trackInventory,
+        salesEligibility: productVariants.salesEligibility,
       })
       .from(productVariants)
       .where(eq(productVariants.id, feed.productVariantId))
@@ -746,6 +755,11 @@ class ChannelSyncService {
     if (!isInventoryManagedVariant(variantRow)) {
       throw new Error(
         `Variant ${feed.productVariantId} is digital or inventory-untracked; quantity publication is prohibited`,
+      );
+    }
+    if (!isCustomerSellableVariant(variantRow)) {
+      throw new Error(
+        `Variant ${feed.productVariantId} is internal-only; quantity publication is prohibited`,
       );
     }
 

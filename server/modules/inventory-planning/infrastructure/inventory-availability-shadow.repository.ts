@@ -17,6 +17,10 @@ import {
   sealClaimSupplySnapshot,
   sealSupplySnapshot,
 } from "../domain/inventory-availability-planner";
+import {
+  isCustomerSellableVariant,
+  type VariantSalesEligibility,
+} from "@shared/catalog/variant-sales-eligibility";
 
 type QueryResult = { rows: any[] };
 type QueryClient = Pick<PoolClient, "query">;
@@ -80,6 +84,15 @@ function nullableInteger(value: unknown, field: string): number | null {
 
 function bool(value: unknown): boolean {
   return value === true || value === 1 || value === "1" || value === "t";
+}
+
+function salesEligibility(value: unknown): VariantSalesEligibility {
+  if (value === "sellable" || value === "internal_only") return value;
+  throw new InventoryAvailabilityShadowRepositoryError(
+    "INVALID_DATABASE_EVIDENCE",
+    "variant.salesEligibility must be sellable or internal_only",
+    { field: "variant.salesEligibility", value },
+  );
 }
 
 function iso(value: unknown, field: string): string {
@@ -382,7 +395,8 @@ async function captureGraphInsideTransaction(
     }
   }
   const initialVariants = rows(await client.query(
-    `SELECT id, product_id, sku, name, units_per_variant, is_active
+    `SELECT id, product_id, sku, name, units_per_variant, is_active,
+            sales_eligibility
      FROM catalog.product_variants
      WHERE product_id = ANY($1::integer[])
        AND requires_shipping = true
@@ -391,7 +405,10 @@ async function captureGraphInsideTransaction(
     [uniqueSorted(modelProductIds)],
   ));
   const targetVariantIds = initialVariants
-    .filter((row) => rootProductIds.includes(Number(row.product_id)) && bool(row.is_active))
+    .filter((row) =>
+      rootProductIds.includes(Number(row.product_id))
+      && bool(row.is_active)
+      && row.sales_eligibility === "sellable")
     .map((row) => integer(row.id, "targetVariant.id"));
   const legacyRecipes = await loadLegacyRecipes(client, targetVariantIds);
   const relevantProductIds = new Set(modelProductIds);
@@ -407,7 +424,8 @@ async function captureGraphInsideTransaction(
     );
   }
   const variantRows = rows(await client.query(
-    `SELECT id, product_id, sku, name, units_per_variant, is_active
+    `SELECT id, product_id, sku, name, units_per_variant, is_active,
+            sales_eligibility
      FROM catalog.product_variants
      WHERE product_id = ANY($1::integer[])
        AND requires_shipping = true
@@ -422,6 +440,7 @@ async function captureGraphInsideTransaction(
     name: String(row.name),
     unitsPerVariant: integer(row.units_per_variant, "variant.unitsPerVariant"),
     isActive: bool(row.is_active),
+    salesEligibility: salesEligibility(row.sales_eligibility),
   }));
   const variantIds = variants.map((variant) => variant.id);
 
@@ -676,7 +695,7 @@ async function captureClaimInsideTransaction(
     `SELECT transaction_timestamp() AS captured_at`,
   ))[0];
   const targetRows = rows(await client.query(
-    `SELECT id, product_id
+    `SELECT id, product_id, sales_eligibility
      FROM catalog.product_variants
       WHERE id = ANY($1::integer[])
         AND is_active = true
@@ -691,6 +710,16 @@ async function captureClaimInsideTransaction(
       "TARGET_VARIANT_NOT_FOUND",
       "One or more claim target variants are missing or inactive.",
       { targetVariantIds: uniqueVariantIds.filter((variantId) => !foundVariantIds.has(variantId)) },
+    );
+  }
+  const internalTargetVariantIds = targetRows
+    .filter((row) => row.sales_eligibility !== "sellable")
+    .map((row) => integer(row.id, "targetVariant.id"));
+  if (internalTargetVariantIds.length > 0) {
+    throw new InventoryAvailabilityShadowRepositoryError(
+      "TARGET_VARIANT_NOT_CUSTOMER_SELLABLE",
+      "Claim simulation cannot target an internal inventory/transformation identity.",
+      { targetVariantIds: internalTargetVariantIds },
     );
   }
   const products = await loadSnapshotProducts(
@@ -747,7 +776,10 @@ function validatePersistenceInput(input: PersistPlannerShadowRunInput): {
     );
   }
   const targetVariants = new Set(snapshot.variants
-    .filter((variant) => variant.productId === snapshot.productId && variant.isActive)
+    .filter((variant) =>
+      variant.productId === snapshot.productId
+      && variant.isActive
+      && isCustomerSellableVariant(variant))
     .map((variant) => variant.id));
   const activeWarehouseIds = new Set(snapshot.warehouses
     .filter((warehouse) => warehouse.isActive)
@@ -758,7 +790,7 @@ function validatePersistenceInput(input: PersistPlannerShadowRunInput): {
   if (targetVariants.size === 0) {
     throw new InventoryAvailabilityShadowRepositoryError(
       "NO_ACTIVE_PRODUCT_VARIANTS",
-      "A shadow run requires at least one active target-product variant.",
+      "A shadow run requires at least one active customer-sellable target-product variant.",
       { productId: snapshot.productId },
     );
   }
@@ -767,7 +799,7 @@ function validatePersistenceInput(input: PersistPlannerShadowRunInput): {
     if (!targetVariants.has(result.productVariantId)) {
       throw new InventoryAvailabilityShadowRepositoryError(
         "INVALID_SHADOW_RESULT_VARIANT",
-        "Every shadow result must reference an active variant of the target product.",
+        "Every shadow result must reference an active customer-sellable variant of the target product.",
         { productId: snapshot.productId, productVariantId: result.productVariantId },
       );
     }

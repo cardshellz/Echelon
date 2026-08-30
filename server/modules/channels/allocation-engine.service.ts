@@ -34,6 +34,10 @@ import {
   type Channel,
   type ChannelAllocationRule,
 } from "@shared/schema";
+import {
+  isCustomerSellableVariant,
+  type VariantSalesEligibility,
+} from "@shared/catalog/variant-sales-eligibility";
 
 // ---------------------------------------------------------------------------
 // Velocity Cache — per product avg daily usage, cleared each sync cycle
@@ -101,6 +105,7 @@ type AtpService = {
     sku: string;
     name: string;
     unitsPerVariant: number;
+    salesEligibility?: VariantSalesEligibility | null;
     atpUnits: number;
     atpBase: number;
   }>>;
@@ -109,6 +114,7 @@ type AtpService = {
     sku: string;
     name: string;
     unitsPerVariant: number;
+    salesEligibility?: VariantSalesEligibility | null;
     atpUnits: number;
     atpBase: number;
   }>>;
@@ -224,7 +230,10 @@ class AllocationEngine {
     };
 
     // 1. Get global ATP (for the result summary)
-    const globalVariantAtp = await this.atpService.getAtpPerVariant(productId);
+    const authoritativeVariantAtp = await this.atpService.getAtpPerVariant(productId);
+    // Keep internal-only inventory inside the authoritative ATP calculation as
+    // build/component supply, but never emit it as a channel allocation target.
+    const globalVariantAtp = authoritativeVariantAtp.filter(isCustomerSellableVariant);
     if (globalVariantAtp.length === 0) return result;
 
     result.totalAtpBase = globalVariantAtp[0].atpBase;

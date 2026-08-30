@@ -4,6 +4,7 @@ import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { registerInventoryAvailabilityPhase4Routes } from "../../interfaces/http/inventory-availability-phase4.routes";
+import { InventoryAvailabilityShadowRepositoryError } from "../../infrastructure/inventory-availability-shadow.repository";
 
 const HASH = "a".repeat(64);
 const { requirePermissionMock } = vi.hoisted(() => ({
@@ -67,6 +68,29 @@ describe("inventory availability Phase 4 admin routes", () => {
     expect(response.status).toBe(201);
     expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "activate");
     expect(activationDryRunService.runDryRun).toHaveBeenCalledWith(body, "operator-1");
+  });
+
+  it("returns a conflict when a claim targets an internal-only variant", async () => {
+    claimSimulationService.runSimulation.mockRejectedValueOnce(
+      new InventoryAvailabilityShadowRepositoryError(
+        "TARGET_VARIANT_NOT_CUSTOMER_SELLABLE",
+        "Claim simulation cannot target an internal inventory/transformation identity.",
+        { targetVariantIds: [101] },
+      ),
+    );
+
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/claim-simulations`,
+      jsonPost({}),
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({
+      error: {
+        code: "INVENTORY_AVAILABILITY_TARGET_VARIANT_NOT_CUSTOMER_SELLABLE",
+        message: "Claim simulation cannot target an internal inventory/transformation identity.",
+      },
+    });
   });
 });
 

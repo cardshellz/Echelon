@@ -13,6 +13,7 @@ import {
   usesFungibleBaseUnitPool,
   type ProductInventoryStrategy,
 } from "@shared/catalog/inventory-strategy";
+import type { VariantSalesEligibility } from "@shared/catalog/variant-sales-eligibility";
 
 // ============================================================================
 // Types
@@ -33,6 +34,7 @@ export interface VariantAtp {
   sku: string;
   name: string;
   unitsPerVariant: number;
+  salesEligibility: VariantSalesEligibility;
   /** Sellable units under the product's configured inventory strategy. */
   atpUnits: number;
   /** Base-unit capacity represented by this variant's ATP calculation. */
@@ -121,7 +123,13 @@ class InventoryAtpService {
   ) {}
 
   private async getRecipeVariantAtp(
-    variants: Array<{ id: number; sku: string | null; name: string; unitsPerVariant: number }>,
+    variants: Array<{
+      id: number;
+      sku: string | null;
+      name: string;
+      unitsPerVariant: number;
+      salesEligibility: VariantSalesEligibility;
+    }>,
     warehouseId?: number,
   ): Promise<VariantAtp[]> {
     return Promise.all(variants.map(async (variant) => {
@@ -146,6 +154,7 @@ class InventoryAtpService {
         sku: variant.sku ?? "",
         name: variant.name,
         unitsPerVariant: variant.unitsPerVariant,
+        salesEligibility: variant.salesEligibility,
         atpUnits,
         atpBase,
       };
@@ -369,6 +378,7 @@ class InventoryAtpService {
           sku: productVariants.sku,
           name: productVariants.name,
           unitsPerVariant: productVariants.unitsPerVariant,
+          salesEligibility: productVariants.salesEligibility,
         })
         .from(productVariants)
         .where(
@@ -396,6 +406,7 @@ class InventoryAtpService {
         sku: string | null;
         name: string;
         unitsPerVariant: number;
+        salesEligibility: VariantSalesEligibility;
       }) => {
         const availability = calculateSellableVariantAtp({
           strategy: inventoryStrategy,
@@ -408,6 +419,7 @@ class InventoryAtpService {
           sku: v.sku ?? "",
           name: v.name,
           unitsPerVariant: v.unitsPerVariant,
+          salesEligibility: v.salesEligibility,
           ...availability,
         };
       },
@@ -431,6 +443,7 @@ class InventoryAtpService {
           sku: productVariants.sku,
           name: productVariants.name,
           unitsPerVariant: productVariants.unitsPerVariant,
+          salesEligibility: productVariants.salesEligibility,
         })
         .from(productVariants)
         .where(
@@ -458,6 +471,7 @@ class InventoryAtpService {
         sku: string | null;
         name: string;
         unitsPerVariant: number;
+        salesEligibility: VariantSalesEligibility;
       }) => {
         const availability = calculateSellableVariantAtp({
           strategy: inventoryStrategy,
@@ -470,6 +484,7 @@ class InventoryAtpService {
           sku: v.sku ?? "",
           name: v.name,
           unitsPerVariant: v.unitsPerVariant,
+          salesEligibility: v.salesEligibility,
           ...availability,
         };
       },
@@ -510,6 +525,7 @@ class InventoryAtpService {
           eq(productVariants.isActive, true),
           eq(productVariants.requiresShipping, true),
           sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+          eq(productVariants.salesEligibility, "sellable"),
           eq(channels.id, channelId),
           eq(channelFeeds.isActive, 1),
         ),

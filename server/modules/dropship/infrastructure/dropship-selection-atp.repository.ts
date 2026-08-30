@@ -252,6 +252,7 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
         "pv.is_active = true",
         "pv.requires_shipping = true",
         "COALESCE(pv.track_inventory, true) = true",
+        "pv.sales_eligibility = 'sellable'",
       ];
 
       if (input.search) {

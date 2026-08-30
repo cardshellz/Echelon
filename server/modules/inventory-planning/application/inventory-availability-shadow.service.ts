@@ -16,6 +16,7 @@ import {
 import type {
   InventoryAvailabilityShadowStore,
 } from "../infrastructure/inventory-availability-shadow.repository";
+import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 
 const positiveDatabaseIntegerSchema = z.number().int().positive().max(2_147_483_647);
 const actorSchema = z.string().trim().min(1).max(100);
@@ -57,13 +58,16 @@ export class InventoryAvailabilityShadowService {
     const actor = parseActor(actorInput);
     const snapshot = await this.store.captureSupplySnapshot(productId);
     const variants = snapshot.variants
-      .filter((variant) => variant.productId === productId && variant.isActive)
+      .filter((variant) =>
+        variant.productId === productId
+        && variant.isActive
+        && isCustomerSellableVariant(variant))
       .sort((left, right) => left.id - right.id);
     if (variants.length === 0) {
       throw new InventoryAvailabilityShadowServiceError(
         409,
         "INVENTORY_AVAILABILITY_NO_ACTIVE_VARIANTS",
-        "The product has no active variants to compare.",
+        "The product has no active customer-sellable variants to compare.",
       );
     }
     const warehouseScopes = snapshot.warehouses

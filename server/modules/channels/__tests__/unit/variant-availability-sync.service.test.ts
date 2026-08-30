@@ -42,6 +42,7 @@ const CONTEXT = {
   catalogVariantActive: false,
   catalogRequiresShipping: true,
   catalogTrackInventory: true,
+  catalogSalesEligibility: "sellable" as const,
   variantExcluded: false,
   catalogProductActive: true,
   catalogProductStatus: "active",
@@ -174,6 +175,28 @@ describe("variant availability sync service", () => {
       ...CONTEXT,
       catalogRequiresShipping: false,
       catalogTrackInventory: false,
+    });
+    const { service, pushInventory, allocationEngine } = createHarness();
+
+    await expect(service.processDue()).resolves.toEqual({
+      claimed: 1,
+      synced: 1,
+      retried: 0,
+      superseded: 0,
+    });
+    expect(repository.markVariantAvailabilityNotApplicable).toHaveBeenCalledWith(
+      expect.anything(),
+      CLAIM,
+    );
+    expect(allocationEngine.allocateProduct).not.toHaveBeenCalled();
+    expect(pushInventory).not.toHaveBeenCalled();
+    expect(repository.markVariantAvailabilitySynced).not.toHaveBeenCalled();
+  });
+
+  it("completes internal-only availability work without publishing a quantity", async () => {
+    repository.loadVariantAvailabilityContext.mockResolvedValue({
+      ...CONTEXT,
+      catalogSalesEligibility: "internal_only",
     });
     const { service, pushInventory, allocationEngine } = createHarness();
 

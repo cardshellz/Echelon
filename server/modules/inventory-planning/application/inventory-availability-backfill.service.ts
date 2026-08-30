@@ -127,6 +127,7 @@ export class InventoryAvailabilityBackfillService {
       const queueState = candidate.classification === "blocked"
         ? "blocked" as const
         : candidate.classification === "excluded_unmanaged"
+          || candidate.classification === "excluded_internal_supply_only"
           ? "excluded" as const
         : !draft
           ? "not_backfilled" as const

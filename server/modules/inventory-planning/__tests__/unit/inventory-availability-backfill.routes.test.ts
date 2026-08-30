@@ -164,7 +164,7 @@ function fakeService() {
 
 function queue() {
   return {
-    algorithmVersion: "inventory_availability_backfill_v2" as const,
+    algorithmVersion: "inventory_availability_backfill_v3" as const,
     capturedAt: "2026-08-28T12:00:00.000Z",
     catalogInputHash: HASH,
     catalogResultHash: HASH,

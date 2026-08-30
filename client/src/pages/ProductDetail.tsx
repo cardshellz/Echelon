@@ -81,6 +81,7 @@ import {
   PRODUCT_INVENTORY_STRATEGY_DEFINITIONS,
   type ProductInventoryStrategy,
 } from "@shared/catalog/inventory-strategy";
+import type { VariantSalesEligibility } from "@shared/catalog/variant-sales-eligibility";
 
 function getVariantUomType(variant: Pick<ProductVariantRow, "uomType" | "hierarchyLevel" | "unitsPerVariant" | "isBaseUnit" | "parentVariantId">): VariantUomType {
   return variant.uomType ?? inferLegacyVariantUomType(variant);
@@ -339,6 +340,7 @@ interface ProductVariantRow {
   maxUnitsPerPackage: number | null;
   requiresShipping: boolean;
   trackInventory: boolean | null;
+  salesEligibility: VariantSalesEligibility;
   hierarchyLevel: number;
   uomType?: VariantUomType | null;
   parentVariantId: number | null;
@@ -2115,6 +2117,7 @@ export default function ProductDetail() {
     maxUnitsPerPackage: "",
     requiresShipping: true,
     trackInventory: true,
+    salesEligibility: "sellable" as VariantSalesEligibility,
   });
   const [skuManuallyEdited, setSkuManuallyEdited] = useState(false);
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
@@ -2192,6 +2195,7 @@ export default function ProductDetail() {
       maxUnitsPerPackage: "",
       requiresShipping: true,
       trackInventory: true,
+      salesEligibility: "sellable",
     });
     setVariantDialogOpen(true);
   }, [computeAutoSku, computeAutoName]);
@@ -2229,6 +2233,7 @@ export default function ProductDetail() {
       maxUnitsPerPackage: "",
       requiresShipping: true,
       trackInventory: true,
+      salesEligibility: "sellable",
     });
     setVariantDialogOpen(true);
     toast({
@@ -2255,6 +2260,7 @@ export default function ProductDetail() {
       maxUnitsPerPackage: variant.maxUnitsPerPackage != null ? String(variant.maxUnitsPerPackage) : "",
       requiresShipping: variant.requiresShipping !== false,
       trackInventory: variant.trackInventory !== false,
+      salesEligibility: variant.salesEligibility ?? "sellable",
     });
     setVariantDialogOpen(true);
   }, []);
@@ -2302,6 +2308,7 @@ export default function ProductDetail() {
         isBaseUnit: data.isBaseUnit,
         requiresShipping: data.requiresShipping,
         trackInventory: data.trackInventory,
+        salesEligibility: data.salesEligibility,
         ...packageAttributes,
         ...packingFlags,
       });
@@ -2358,6 +2365,7 @@ export default function ProductDetail() {
           isBaseUnit: data.isBaseUnit,
           requiresShipping: data.requiresShipping,
           trackInventory: data.trackInventory,
+          salesEligibility: data.salesEligibility,
           ...packageAttributes,
           ...packingFlags,
         }),
@@ -3567,6 +3575,11 @@ export default function ProductDetail() {
                                     Needs config
                                   </Badge>
                                 )}
+                                {variant.salesEligibility === "internal_only" && (
+                                  <Badge variant="outline" className="text-[10px] bg-slate-50 text-slate-700 border-slate-300">
+                                    Internal only
+                                  </Badge>
+                                )}
                                 <Badge variant="outline" className="text-xs">
                                   {getVariantUomDefinition(getVariantUomType(variant)).label}
                                 </Badge>
@@ -3588,6 +3601,7 @@ export default function ProductDetail() {
                                 <Label className="text-xs text-muted-foreground">Dropship</Label>
                                 <Switch
                                   checked={!!variant.dropshipEligible}
+                                  disabled={variant.salesEligibility === "internal_only"}
                                   onCheckedChange={(checked) => {
                                     dropshipMutation.mutate({ variantId: variant.id, eligible: checked });
                                   }}
@@ -3628,6 +3642,7 @@ export default function ProductDetail() {
                               <TableHead>Breaks Into</TableHead>
                               <TableHead>Barcode</TableHead>
                               <TableHead>Package</TableHead>
+                              <TableHead>Customer sale</TableHead>
                               <TableHead>Dropship</TableHead>
                               <TableHead className="w-[80px]"></TableHead>
                             </TableRow>
@@ -3673,8 +3688,20 @@ export default function ProductDetail() {
                                   <p className="mt-1 text-xs text-muted-foreground">{packageDisplay.detail}</p>
                                 </TableCell>
                                 <TableCell>
+                                  {variant.salesEligibility === "internal_only" ? (
+                                    <Badge variant="outline" className="bg-slate-50 text-slate-700 border-slate-300">
+                                      Internal only
+                                    </Badge>
+                                  ) : (
+                                    <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-300">
+                                      Sellable
+                                    </Badge>
+                                  )}
+                                </TableCell>
+                                <TableCell>
                                   <Switch
                                     checked={!!variant.dropshipEligible}
+                                    disabled={variant.salesEligibility === "internal_only"}
                                     onCheckedChange={(checked) => {
                                       dropshipMutation.mutate({ variantId: variant.id, eligible: checked });
                                     }}
@@ -4097,6 +4124,27 @@ export default function ProductDetail() {
                 </p>
               </div>
               <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="variant-sales-eligibility">Customer sale eligibility</Label>
+                  <Select
+                    value={variantForm.salesEligibility}
+                    onValueChange={(value) => setVariantForm((prev) => ({
+                      ...prev,
+                      salesEligibility: value as VariantSalesEligibility,
+                    }))}
+                  >
+                    <SelectTrigger id="variant-sales-eligibility" className="h-11">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="sellable">Sellable to customers</SelectItem>
+                      <SelectItem value="internal_only">Internal build / inventory only</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Internal-only variants remain in physical inventory and transformation planning, but cannot be listed, allocated, published, dropshipped, or reserved as an order line.
+                  </p>
+                </div>
                 <div className="flex items-start gap-2">
                   <Checkbox
                     id="variant-requires-shipping"

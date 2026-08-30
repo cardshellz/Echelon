@@ -1847,7 +1847,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/variants", requireAuth, async (req, res) => {
+  app.post("/api/inventory/variants", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const parsed = insertProductVariantSchema.safeParse(req.body);
       if (!parsed.success) {

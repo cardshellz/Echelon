@@ -34,4 +34,21 @@ describe("PgDropshipOrderAcceptanceRepository", () => {
     expect(insertBlock).toContain("fulfillment_provider");
     expect(insertBlock).toContain("'dropship', 'unfulfilled'");
   });
+
+  it("rejects an internal-only catalog identity before accepting the order", () => {
+    const candidateQuery = sourceBlock(
+      ACCEPTANCE_REPOSITORY_SRC,
+      "async function resolveAcceptanceLinesWithClient",
+      "function mapListingCandidateRow",
+    );
+    const candidateValidation = sourceBlock(
+      ACCEPTANCE_REPOSITORY_SRC,
+      "function assertListingCandidateCanAccept",
+      "function summarizeInventoryAvailability",
+    );
+
+    expect(candidateQuery).toContain("pv.sales_eligibility");
+    expect(candidateValidation).toContain("!candidate.customerSellable");
+    expect(candidateValidation).toContain("DROPSHIP_ORDER_CATALOG_VARIANT_NOT_ELIGIBLE");
+  });
 });

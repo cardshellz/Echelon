@@ -117,6 +117,7 @@ CREATE TABLE catalog.product_variants (
   ebay_return_policy_override varchar(100),
   ebay_payment_policy_override varchar(100),
   dropship_eligible boolean DEFAULT false,
+  sales_eligibility varchar(20) NOT NULL DEFAULT 'sellable',
   created_at timestamp NOT NULL DEFAULT now(),
   updated_at timestamp NOT NULL DEFAULT now(),
   CONSTRAINT product_variants_uom_type_chk

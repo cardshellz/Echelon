@@ -1,4 +1,5 @@
 import type { VariantUomType } from "@shared/catalog/variant-uom";
+import type { VariantSalesEligibility } from "@shared/catalog/variant-sales-eligibility";
 
 export type CreateProductVariantInput = {
   sku: string | null;
@@ -17,6 +18,7 @@ export type CreateProductVariantInput = {
   maxUnitsPerPackage?: number | null;
   requiresShipping?: boolean;
   trackInventory?: boolean;
+  salesEligibility?: VariantSalesEligibility;
 };
 
 export type CreatedProductVariant = {

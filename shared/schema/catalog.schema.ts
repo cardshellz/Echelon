@@ -8,6 +8,10 @@ import {
   PRODUCT_INVENTORY_STRATEGIES,
   type ProductInventoryStrategy,
 } from "../catalog/inventory-strategy";
+import {
+  VARIANT_SALES_ELIGIBILITIES,
+  type VariantSalesEligibility,
+} from "../catalog/variant-sales-eligibility";
 
 export const catalogSchema = pgSchema("catalog");
 
@@ -184,6 +188,13 @@ export const productVariants = catalogSchema.table("product_variants", {
   // channel inventory quantity workflows.
   requiresShipping: boolean("requires_shipping").notNull().default(true),
   trackInventory: boolean("track_inventory").default(true),
+  // Customer promise identity is independent from physical inventory. An
+  // internal-only variant can remain tracked and participate in builds/ATP,
+  // but customer-facing channel and reservation boundaries must reject it.
+  salesEligibility: varchar("sales_eligibility", { length: 20 })
+    .$type<VariantSalesEligibility>()
+    .notNull()
+    .default("sellable"),
   inventoryPolicy: varchar("inventory_policy", { length: 20 }).default("deny"),
   shopifyVariantId: varchar("shopify_variant_id", { length: 100 }),
   shopifyInventoryItemId: varchar("shopify_inventory_item_id", { length: 100 }),
@@ -209,6 +220,12 @@ export const productVariants = catalogSchema.table("product_variants", {
   uniqueIndex("product_variants_id_product_uidx").on(table.id, table.productId),
   check("product_variants_max_units_per_package_chk", sql`${table.maxUnitsPerPackage} IS NULL OR ${table.maxUnitsPerPackage} > 0`),
   check("product_variants_digital_untracked_chk", sql`${table.requiresShipping} = true OR ${table.trackInventory} IS FALSE`),
+  check("product_variants_sales_eligibility_chk", sql`${table.salesEligibility} IN ('sellable', 'internal_only')`),
+  check("product_variants_internal_only_identity_chk", sql`${table.salesEligibility} = 'sellable' OR (
+    ${table.shopifyVariantId} IS NULL
+    AND ${table.shopifyInventoryItemId} IS NULL
+    AND COALESCE(${table.dropshipEligible}, false) = false
+  )`),
   check("product_variants_single_unit_uom_invariants_chk", sql`${table.uomType} NOT IN ('piece', 'each') OR (
     ${table.unitsPerVariant} = 1
     AND ${table.hierarchyLevel} = 1
@@ -219,6 +236,7 @@ export const productVariants = catalogSchema.table("product_variants", {
 
 export const insertProductVariantSchema = createInsertSchema(productVariants, {
   uomType: z.enum(VARIANT_UOM_TYPES),
+  salesEligibility: z.enum(VARIANT_SALES_ELIGIBILITIES),
 }).omit({
   id: true,
   createdAt: true,

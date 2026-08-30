@@ -1,8 +1,7 @@
 const fs = require('fs');
 const files = [
   'server/modules/dropship/application/orderOrchestrator.ts',
-  'server/modules/dropship/application/walletOrchestrator.ts',
-  'server/modules/dropship/infrastructure/catalog.repository.ts'
+  'server/modules/dropship/application/walletOrchestrator.ts'
 ];
 files.forEach(f => {
   let txt = fs.readFileSync(f, 'utf8');

@@ -86,6 +86,7 @@ interface ListingCandidateRow {
   category: string | null;
   product_is_active: boolean;
   variant_is_active: boolean;
+  sales_eligibility: "sellable" | "internal_only";
   dropship_eligible: boolean | null;
   catalog_retail_price_cents: string | number | null;
 }
@@ -530,6 +531,7 @@ async function resolveAcceptanceLinesWithClient(
        p.category,
        p.is_active AS product_is_active,
        pv.is_active AS variant_is_active,
+       pv.sales_eligibility,
        pv.dropship_eligible,
        COALESCE((ROUND(retail_cache.price::numeric * 100))::bigint, pv.price_cents) AS catalog_retail_price_cents
      FROM dropship.dropship_vendor_listings dl
@@ -1151,6 +1153,7 @@ function mapListingCandidateRow(
   listingStatus: string;
   productIsActive: boolean;
   variantIsActive: boolean;
+  customerSellable: boolean;
   dropshipEligible: boolean;
 } {
   const catalogRetailPriceCents = row.catalog_retail_price_cents === null
@@ -1185,6 +1188,7 @@ function mapListingCandidateRow(
     listingStatus: row.listing_status,
     productIsActive: row.product_is_active,
     variantIsActive: row.variant_is_active,
+    customerSellable: row.sales_eligibility === "sellable",
     dropshipEligible: row.dropship_eligible === true,
   };
 }
@@ -1224,7 +1228,12 @@ function assertListingCandidateCanAccept(
       },
     );
   }
-  if (!candidate.productIsActive || !candidate.variantIsActive || !candidate.dropshipEligible) {
+  if (
+    !candidate.productIsActive
+    || !candidate.variantIsActive
+    || !candidate.customerSellable
+    || !candidate.dropshipEligible
+  ) {
     throw new DropshipError(
       "DROPSHIP_ORDER_CATALOG_VARIANT_NOT_ELIGIBLE",
       "Dropship order line variant is not eligible for dropship acceptance.",
@@ -1234,6 +1243,7 @@ function assertListingCandidateCanAccept(
         productVariantId: candidate.productVariantId,
         productIsActive: candidate.productIsActive,
         variantIsActive: candidate.variantIsActive,
+        customerSellable: candidate.customerSellable,
         dropshipEligible: candidate.dropshipEligible,
       },
     );

@@ -169,7 +169,7 @@ function publicationEvidence(): CurrentPublicationEvidence {
 
 function catalogQueue(): InventoryAvailabilityBackfillQueueResponse {
   return {
-    algorithmVersion: "inventory_availability_backfill_v2",
+    algorithmVersion: "inventory_availability_backfill_v3",
     capturedAt: "2026-08-28T16:55:00.000Z",
     catalogInputHash: HASH_A,
     catalogResultHash: HASH_B,

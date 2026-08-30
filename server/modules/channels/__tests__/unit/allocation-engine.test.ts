@@ -634,6 +634,47 @@ describe("Allocation Engine (Parallel Model)", () => {
   // -----------------------------------------------------------------------
 
   describe("multi-variant allocation", () => {
+    it("keeps internal-only supply in ATP but excludes it as a channel target", async () => {
+      const variants = [
+        {
+          productVariantId: 1,
+          sku: "BUILD-EA",
+          name: "Internal each",
+          unitsPerVariant: 1,
+          salesEligibility: "internal_only" as const,
+          atpUnits: 100,
+          atpBase: 100,
+        },
+        {
+          productVariantId: 2,
+          sku: "SELL-P5",
+          name: "Pack 5",
+          unitsPerVariant: 5,
+          salesEligibility: "sellable" as const,
+          atpUnits: 20,
+          atpBase: 100,
+        },
+      ];
+      const db = createMockDb({
+        activeChannels: [{ id: 36, name: "Shopify", provider: "shopify", status: "active", priority: 0 }],
+        warehouseAssignments: [{ channelId: 36, warehouseId: 1, enabled: true }],
+      });
+      const atp = createMockAtpService({ variants, warehouseAtp: { 1: 100 } });
+      const engine = createAllocationEngine(db, atp);
+
+      const result = await engine.allocateProduct(1);
+
+      expect(atp.getAtpPerVariant).toHaveBeenCalledWith(1);
+      expect(result.totalAtpBase).toBe(100);
+      expect(result.allocations).toEqual([
+        expect.objectContaining({
+          productVariantId: 2,
+          sku: "SELL-P5",
+          allocatedUnits: 20,
+        }),
+      ]);
+    });
+
     it("should handle unitsPerVariant > 1 correctly", async () => {
       const variants = [
         { productVariantId: 1, sku: "TL-50", name: "50ct", unitsPerVariant: 50, atpUnits: 20, atpBase: 1000 },

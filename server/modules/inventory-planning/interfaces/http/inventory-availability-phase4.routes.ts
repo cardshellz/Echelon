@@ -127,6 +127,15 @@ function sendPhase4Error(res: Response, error: unknown, action: string): Respons
       error: { code: "INVENTORY_AVAILABILITY_TARGET_VARIANT_NOT_FOUND", message: error.message },
     });
   }
+  if (error instanceof InventoryAvailabilityShadowRepositoryError
+    && error.code === "TARGET_VARIANT_NOT_CUSTOMER_SELLABLE") {
+    return res.status(409).json({
+      error: {
+        code: "INVENTORY_AVAILABILITY_TARGET_VARIANT_NOT_CUSTOMER_SELLABLE",
+        message: error.message,
+      },
+    });
+  }
   if (error instanceof InventoryAvailabilityActivationDryRunRepositoryError
     && error.code === "IDEMPOTENCY_KEY_REUSED") {
     return res.status(409).json({

@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 
 import { channelConnections, channels, products, productVariants } from "@shared/schema";
 import { db as defaultDb } from "../../../../db";
@@ -19,10 +19,10 @@ export interface EbayRegistrationAtpReader {
 }
 
 /**
- * PostgreSQL-backed Channels owner repository. Catalog membership deliberately
- * has no active or quantity predicate: archived, zero-ATP, and unmanaged
- * variants remain in the registration snapshot for remote discovery. Unmanaged
- * variants receive a zero quantity and never borrow from the physical pool.
+ * PostgreSQL-backed Channels owner repository. Customer-sellable catalog
+ * membership deliberately has no active or quantity predicate: archived,
+ * zero-ATP, and unmanaged sellable variants remain observable for remote
+ * cleanup. Internal-only build identities never enter registration.
  */
 export class PgEbayMarketplaceRegistrationOwnerRepository
   implements EbayMarketplaceRegistrationOwnerRepository
@@ -96,7 +96,10 @@ export class PgEbayMarketplaceRegistrationOwnerRepository
           trackInventory: productVariants.trackInventory,
         })
         .from(productVariants)
-        .where(eq(productVariants.productId, productId))
+        .where(and(
+          eq(productVariants.productId, productId),
+          eq(productVariants.salesEligibility, "sellable"),
+        ))
         .orderBy(asc(productVariants.id)),
       this.atp.getAtpBase(productId),
     ]);

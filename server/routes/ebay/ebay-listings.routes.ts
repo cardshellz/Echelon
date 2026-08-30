@@ -106,7 +106,7 @@ const ebayListingPushRequestSchema = z.object({
             ecm.ebay_browse_category_name,
             ecm.ebay_store_category_id,
             ecm.ebay_store_category_name,
-            (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.sku IS NOT NULL AND pv.is_active = true) AS variant_count,
+            (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.sku IS NOT NULL AND pv.is_active = true AND pv.sales_eligibility = 'sellable') AS variant_count,
             (SELECT COUNT(*) FROM product_assets pa WHERE pa.product_id = p.id) AS image_count,
             cl.id AS listing_id,
             cl.sync_status AS listing_status,
@@ -165,6 +165,7 @@ const ebayListingPushRequestSchema = z.object({
             FROM product_variants pv
             LEFT JOIN channels.channel_variant_overrides cvo ON cvo.product_variant_id = pv.id AND cvo.channel_id = $2
             WHERE pv.product_id = ANY($1) AND pv.sku IS NOT NULL AND pv.is_active = true
+              AND pv.sales_eligibility = 'sellable'
             ORDER BY pv.product_id, pv.position ASC, pv.id ASC
           `, [productIds, EBAY_CHANNEL_ID]);
 
@@ -480,6 +481,7 @@ const ebayListingPushRequestSchema = z.object({
              LEFT JOIN channels.channel_variant_overrides cvo
                ON cvo.product_variant_id = pv.id AND cvo.channel_id = $2::integer
              WHERE pv.product_id = $1::integer AND pv.sku IS NOT NULL AND pv.is_active = true
+               AND pv.sales_eligibility = 'sellable'
                AND COALESCE(pv.ebay_listing_excluded, false) = false
                AND COALESCE(cvo.is_listed, 1) <> 0
              ORDER BY pv.position ASC, pv.id ASC`,
@@ -895,6 +897,7 @@ const ebayListingPushRequestSchema = z.object({
              LEFT JOIN channels.channel_variant_overrides cvo
                ON cvo.product_variant_id = pv.id AND cvo.channel_id = $2::integer
              WHERE pv.product_id = $1::integer AND pv.sku IS NOT NULL AND pv.is_active = true
+               AND pv.sales_eligibility = 'sellable'
                AND COALESCE(pv.ebay_listing_excluded, false) = false
                AND COALESCE(cvo.is_listed, 1) <> 0
              ORDER BY pv.position ASC, pv.id ASC`,
@@ -1258,6 +1261,7 @@ const ebayListingPushRequestSchema = z.object({
             pv.price_cents,
             pv.weight_grams::float8 AS weight_grams,
             pv.is_active AS variant_is_active,
+            pv.sales_eligibility AS variant_sales_eligibility,
             pv.ebay_listing_excluded AS variant_excluded,
             cvo.is_listed AS variant_override_is_listed,
             cvo.weight_override AS channel_weight_override,
@@ -1438,6 +1442,7 @@ const ebayListingPushRequestSchema = z.object({
               isListed: isVariantSellable({
                 productActive: product.product_is_active,
                 variantActive: variant.variant_is_active,
+                salesEligibility: variant.variant_sales_eligibility,
                 productExcluded: product.product_excluded === true,
                 productOverrideIsListed: product.product_override_is_listed,
                 typeListingEnabled: product.type_listing_enabled,
@@ -1602,6 +1607,7 @@ const ebayListingPushRequestSchema = z.object({
           SELECT cl.id, cl.product_variant_id, cl.external_product_id, cl.external_variant_id,
                  cl.external_sku, cl.sync_status,
                  pv.sku AS variant_sku, pv.is_active AS variant_is_active,
+                 pv.sales_eligibility AS variant_sales_eligibility,
                  p.name AS product_name
           FROM channels.channel_listings cl
           LEFT JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
@@ -1650,7 +1656,10 @@ const ebayListingPushRequestSchema = z.object({
             }
 
             if (inspection.hasActiveOffer) {
-              if (listing.variant_is_active === false && (inspection.availableQuantity ?? 0) > 0) {
+              if (
+                (listing.variant_is_active === false || listing.variant_sales_eligibility === "internal_only")
+                && (inspection.availableQuantity ?? 0) > 0
+              ) {
                 await queueVariantAvailabilityRepair({
                   channelId: EBAY_CHANNEL_ID,
                   productVariantId: listing.product_variant_id,

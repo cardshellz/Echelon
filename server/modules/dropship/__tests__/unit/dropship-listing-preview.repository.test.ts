@@ -116,6 +116,7 @@ describe("PgDropshipListingPreviewRepository", () => {
     expect(query).toContain("pv.weight_grams");
     expect(query).toContain("pv.requires_shipping = true");
     expect(query).toContain("COALESCE(pv.track_inventory, true) = true");
+    expect(query).toContain("pv.sales_eligibility = 'sellable'");
     expect(query).toContain("p.ebay_browse_category_id");
   });
 });

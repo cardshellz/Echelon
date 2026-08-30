@@ -17,13 +17,14 @@ const nonblank = (max: number) => z.string().trim().min(1).max(max);
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 
 export const INVENTORY_AVAILABILITY_BACKFILL_ALGORITHM_VERSION =
-  "inventory_availability_backfill_v2" as const;
+  "inventory_availability_backfill_v3" as const;
 
 export const inventoryAvailabilityBackfillClassificationSchema = z.enum([
   "exact_only",
   "legacy_fungible_directed_pool",
   "recipe_managed_explicit_review",
   "excluded_unmanaged",
+  "excluded_internal_supply_only",
   "blocked",
 ]);
 
