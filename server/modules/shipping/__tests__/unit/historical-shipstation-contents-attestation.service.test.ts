@@ -5,15 +5,15 @@ import type { HistoricalShipStationContentsCandidate } from "../../historical-sh
 import {
   HistoricalShipStationContentsAttestationService,
   HistoricalShipStationContentsAttestationServiceError,
+  historicalShipStationContentsAttestationPreviewEvidenceHash,
 } from "../../historical-shipstation-contents-attestation.service";
 import type {
   HistoricalShipStationContentsAttestationRecord,
   HistoricalShipStationContentsAttestationRepository,
   HistoricalShipStationContentsAttestationTransaction,
 } from "../../historical-shipstation-contents-attestation.repository";
-import {
-  historicalShipStationRecoverableCaseEvidenceHash,
-  type HistoricalShipStationContentsRecoveryEvidence,
+import type {
+  HistoricalShipStationContentsRecoveryEvidence,
 } from "../../historical-shipstation-contents-recovery.domain";
 
 const candidate: HistoricalShipStationContentsCandidate = Object.freeze({
@@ -28,6 +28,20 @@ const candidate: HistoricalShipStationContentsCandidate = Object.freeze({
   }),
 });
 
+const reviewContext = Object.freeze({
+  trackingNumber: "9400111899223856928499",
+  shipStationOrderId: "700100200",
+  wmsOrders: Object.freeze([
+    Object.freeze({ wmsOrderId: 301, orderNumber: "#1001" }),
+  ]),
+  linkedShipments: Object.freeze([
+    Object.freeze({ source: "legacy_wms_shipment" as const, shipmentId: "88" }),
+  ]),
+  linePresentations: Object.freeze([
+    Object.freeze({ wmsShipmentItemId: 7_001, itemName: "Card Shell" }),
+  ]),
+});
+
 const recoveryEvidence: HistoricalShipStationContentsRecoveryEvidence = Object.freeze({
   contractVersion: 1,
   recoveryStatus: "provider_line_keys_authoritative",
@@ -37,10 +51,11 @@ const recoveryEvidence: HistoricalShipStationContentsRecoveryEvidence = Object.f
   ]),
 });
 
-const expectedPreviewEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
+const expectedPreviewEvidenceHash = historicalShipStationContentsAttestationPreviewEvidenceHash({
   shippingProviderLabelId: candidate.shippingProviderLabelId,
   recoveryStatus: recoveryEvidence.recoveryStatus,
   providerEvidenceHash: recoveryEvidence.evidenceHash,
+  reviewContext,
 });
 
 function providerClient(
@@ -95,7 +110,12 @@ function repository(input: Readonly<{
     appendExactAttestation,
   };
   const value: HistoricalShipStationContentsAttestationRepository = {
-    loadCandidateSnapshot: vi.fn(async () => input.snapshot === undefined ? candidate : input.snapshot),
+    loadReviewSnapshot: vi.fn(async () => {
+      const snapshotCandidate = input.snapshot === undefined ? candidate : input.snapshot;
+      return snapshotCandidate === null
+        ? null
+        : Object.freeze({ candidate: snapshotCandidate, reviewContext });
+    }),
     withSerializableTransaction: vi.fn(async (work) => work(transaction)),
   };
   return { value, transaction, appendExactAttestation, appended: () => appended };
@@ -109,6 +129,17 @@ const command = Object.freeze({
 });
 
 describe("historical ShipStation contents lead attestation", () => {
+  it("binds the operator-visible shipment identity into the preview fingerprint", () => {
+    const changedIdentityHash = historicalShipStationContentsAttestationPreviewEvidenceHash({
+      shippingProviderLabelId: candidate.shippingProviderLabelId,
+      recoveryStatus: recoveryEvidence.recoveryStatus,
+      providerEvidenceHash: recoveryEvidence.evidenceHash,
+      reviewContext: { ...reviewContext, trackingNumber: "different-tracking-number" },
+    });
+
+    expect(changedIdentityHash).not.toBe(expectedPreviewEvidenceHash);
+  });
+
   it("returns the exact immutable recoverable preview without opening a write transaction", async () => {
     const persistence = repository();
     const client = providerClient();
@@ -123,6 +154,7 @@ describe("historical ShipStation contents lead attestation", () => {
       recoveryStatus: "provider_line_keys_authoritative",
       previewEvidenceHash: expectedPreviewEvidenceHash,
       providerEvidenceHash: "a".repeat(64),
+      reviewContext,
       expectedContents: candidate.expectedContents,
       attestedContents: recoveryEvidence.attestedContents,
     });
@@ -144,7 +176,7 @@ describe("historical ShipStation contents lead attestation", () => {
     const promise = service.preview("0");
 
     await expect(promise).rejects.toMatchObject({ code: "INVALID_COMMAND" });
-    expect(persistence.value.loadCandidateSnapshot).not.toHaveBeenCalled();
+    expect(persistence.value.loadReviewSnapshot).not.toHaveBeenCalled();
   });
 
   it("revalidates the preview and appends exact lead, reason, contents, and resolution evidence", async () => {

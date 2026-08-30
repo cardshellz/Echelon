@@ -13,6 +13,13 @@ const preview = {
   recoveryStatus: "provider_line_keys_authoritative",
   previewEvidenceHash: "a".repeat(64),
   providerEvidenceHash: "b".repeat(64),
+  reviewContext: {
+    trackingNumber: "9400111899223856928499",
+    shipStationOrderId: "700100200",
+    wmsOrders: [{ wmsOrderId: 301, orderNumber: "#1001" }],
+    linkedShipments: [{ source: "legacy_wms_shipment", shipmentId: "88" }],
+    linePresentations: [{ wmsShipmentItemId: 7_001, itemName: "Card Shell" }],
+  },
   expectedContents: {
     kind: "available",
     source: "physical_shipment",
