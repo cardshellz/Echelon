@@ -1,8 +1,18 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import * as React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { DropshipCatalogResponse, DropshipCatalogRow } from "@/lib/dropship-ops-surface";
-import { fetchAllSelectedCatalogRows } from "../DropshipPortalCatalog";
+import {
+  DropshipApiError,
+  type DropshipCatalogResponse,
+  type DropshipCatalogRow,
+} from "@/lib/dropship-ops-surface";
+import {
+  EbayStoreCategoryAssignmentPanel,
+  fetchAllSelectedCatalogRows,
+  shouldOfferEbayStoreReconnect,
+} from "../DropshipPortalCatalog";
 
 function row(productVariantId: number): DropshipCatalogRow {
   return { productVariantId } as DropshipCatalogRow;
@@ -90,5 +100,36 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(source).toContain("Your Store:");
     expect(comboboxSource).toContain("Search your eBay Store categories...");
     expect(comboboxSource).toContain('className="max-h-64 overflow-y-auto overscroll-contain"');
+  });
+
+  it("offers authorization recovery only for reconnectable eBay Store-category errors", () => {
+    vi.stubGlobal("React", React);
+    const permissionError = new DropshipApiError({
+      status: 403,
+      code: "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
+      message: "Reconnect the eBay store to grant Store-category access.",
+    });
+    const providerError = new DropshipApiError({
+      status: 502,
+      code: "DROPSHIP_EBAY_STORE_CATEGORIES_UNAVAILABLE",
+      message: "The connected eBay account did not return a Store category hierarchy.",
+    });
+
+    expect(shouldOfferEbayStoreReconnect(permissionError)).toBe(true);
+    expect(shouldOfferEbayStoreReconnect(providerError)).toBe(false);
+
+    const markup = renderToStaticMarkup(React.createElement(EbayStoreCategoryAssignmentPanel, {
+      data: null,
+      error: permissionError,
+      isLoading: false,
+      onAssignmentChange: () => undefined,
+      onReconnect: () => undefined,
+      pendingProductVariantIds: new Set<number>(),
+      rows: [],
+    }));
+
+    expect(markup).toContain("eBay Store-category authorization needs attention.");
+    expect(markup).toContain("Refresh eBay authorization");
+    expect(markup).toContain("You can still preview and push listings");
   });
 });

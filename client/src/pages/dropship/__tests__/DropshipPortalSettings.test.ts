@@ -47,6 +47,25 @@ describe("DropshipPortalSettings store lifecycle actions", () => {
     expect(storeOAuthActionTitle("change_store", "ebay", connection.status)).toBe("Connect a different Ebay store");
   });
 
+  it("allows a launch-ready eBay connection to refresh newly requested OAuth permissions", async () => {
+    vi.stubGlobal("React", React);
+    const { canRefreshStoreConnection } = await import("../DropshipPortalSettings");
+    const ebayConnection = {
+      ...makeConnection("connected"),
+      launchReady: true,
+      setupStatus: "ready" as const,
+      hasAccessToken: true,
+      hasRefreshToken: true,
+    };
+    const shopifyConnection = {
+      ...ebayConnection,
+      platform: "shopify" as const,
+    };
+
+    expect(canRefreshStoreConnection(ebayConnection)).toBe(true);
+    expect(canRefreshStoreConnection(shopifyConnection)).toBe(false);
+  });
+
   it("binds the email verification code to one explicit store action", async () => {
     vi.stubGlobal("React", React);
     const {

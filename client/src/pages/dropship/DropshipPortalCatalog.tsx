@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import {
   AlertCircle,
   ArrowRight,
@@ -9,6 +10,7 @@ import {
   Mail,
   MinusCircle,
   PlusCircle,
+  RefreshCw,
   Search,
   Send,
 } from "lucide-react";
@@ -43,6 +45,7 @@ import {
   listLaunchReadyStoreConnections,
   postJson,
   putJson,
+  queryErrorCode,
   queryErrorMessage,
   type DropshipCatalogResponse,
   type DropshipCatalogRow,
@@ -56,7 +59,7 @@ import {
   type DropshipSettingsResponse,
   type DropshipVendorSelectionAction,
 } from "@/lib/dropship-ops-surface";
-import { isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
+import { dropshipPortalPath, isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingSelectionAction = string | null;
@@ -108,6 +111,7 @@ export async function fetchAllSelectedCatalogRows(
 
 export default function DropshipPortalCatalog() {
   const queryClient = useQueryClient();
+  const [, setLocation] = useLocation();
   const {
     principal,
     sensitiveProofs,
@@ -565,6 +569,7 @@ export default function DropshipPortalCatalog() {
             data={ebayStoreCategoryQuery.data ?? null}
             error={ebayStoreCategoryQuery.error}
             isLoading={ebayStoreCategoryQuery.isLoading}
+            onReconnect={() => setLocation(dropshipPortalPath("/settings"))}
             pendingProductVariantIds={pendingStoreCategoryVariantIds}
             rows={selectedCatalogRows}
             onAssignmentChange={updateEbayStoreCategoryAssignment}
@@ -763,11 +768,22 @@ function FilterSelect({
   );
 }
 
-function EbayStoreCategoryAssignmentPanel({
+const EBAY_STORE_CATEGORY_RECONNECT_ERROR_CODES = new Set([
+  "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
+  "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED",
+]);
+
+export function shouldOfferEbayStoreReconnect(error: unknown): boolean {
+  const code = queryErrorCode(error);
+  return code !== null && EBAY_STORE_CATEGORY_RECONNECT_ERROR_CODES.has(code);
+}
+
+export function EbayStoreCategoryAssignmentPanel({
   data,
   error,
   isLoading,
   onAssignmentChange,
+  onReconnect,
   pendingProductVariantIds,
   rows,
 }: {
@@ -775,6 +791,7 @@ function EbayStoreCategoryAssignmentPanel({
   error: unknown;
   isLoading: boolean;
   onAssignmentChange: (productVariantId: number, storeCategoryIds: string[]) => void;
+  onReconnect: () => void;
   pendingProductVariantIds: ReadonlySet<number>;
   rows: DropshipCatalogRow[];
 }) {
@@ -788,6 +805,9 @@ function EbayStoreCategoryAssignmentPanel({
   const assignmentByVariantId = new Map(
     (data?.assignments ?? []).map((assignment) => [assignment.productVariantId, assignment]),
   );
+  const errorCode = queryErrorCode(error);
+  const permissionRequired = errorCode === "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED";
+  const reconnectAvailable = shouldOfferEbayStoreReconnect(error);
 
   return (
     <section className="mt-5 overflow-hidden rounded-md border border-zinc-200 bg-white">
@@ -808,11 +828,29 @@ function EbayStoreCategoryAssignmentPanel({
         </div>
       ) : error ? (
         <div className="m-4 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-          <div className="font-medium">Custom Store categories are unavailable.</div>
+          <div className="font-medium">
+            {permissionRequired
+              ? "eBay Store-category authorization needs attention."
+              : "Custom Store categories are unavailable."}
+          </div>
           <div className="mt-1">
-            {queryErrorMessage(error, "The connected eBay account did not return its Store categories.")}
+            {permissionRequired
+              ? "eBay rejected this connection's authorization for custom Store categories. Refreshing the authorization will request that optional access."
+              : queryErrorMessage(error, "The connected eBay account did not return its Store categories.")}
           </div>
           <div className="mt-1 text-xs">You can still preview and push listings without this optional organization.</div>
+          {reconnectAvailable && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-3 gap-2 border-amber-400 bg-white text-amber-950 hover:bg-amber-100"
+              onClick={onReconnect}
+            >
+              <RefreshCw className="h-4 w-4" />
+              {permissionRequired ? "Refresh eBay authorization" : "Reconnect eBay store"}
+            </Button>
+          )}
         </div>
       ) : rows.length === 0 ? (
         <div className="p-4 text-sm text-zinc-500">

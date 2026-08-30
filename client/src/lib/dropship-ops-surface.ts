@@ -2475,10 +2475,29 @@ export function buildQueryUrl(
   return queryString ? `${path}?${queryString}` : path;
 }
 
+export class DropshipApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  readonly context: Readonly<Record<string, unknown>> | null;
+
+  constructor(input: {
+    message: string;
+    status: number;
+    code?: string | null;
+    context?: Record<string, unknown> | null;
+  }) {
+    super(input.message);
+    this.name = "DropshipApiError";
+    this.status = input.status;
+    this.code = input.code ?? null;
+    this.context = input.context ? Object.freeze({ ...input.context }) : null;
+  }
+}
+
 export async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { credentials: "include" });
   if (!response.ok) {
-    throw new Error(await responseErrorMessage(response));
+    throw await responseError(response);
   }
   return response.json() as Promise<T>;
 }
@@ -2491,7 +2510,7 @@ export async function postJson<T>(url: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(await responseErrorMessage(response));
+    throw await responseError(response);
   }
   return response.json() as Promise<T>;
 }
@@ -2504,9 +2523,13 @@ export async function putJson<T>(url: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(await responseErrorMessage(response));
+    throw await responseError(response);
   }
   return response.json() as Promise<T>;
+}
+
+export function queryErrorCode(error: unknown): string | null {
+  return error instanceof DropshipApiError ? error.code : null;
 }
 
 export function queryErrorMessage(error: unknown, fallback: string): string {
@@ -4702,20 +4725,42 @@ export function countByKey(counts: DropshipOpsCount[], key: string): number {
   return counts.find((count) => count.key === key)?.count ?? 0;
 }
 
-async function responseErrorMessage(response: Response): Promise<string> {
+async function responseError(response: Response): Promise<DropshipApiError> {
+  let message = response.statusText || `Request failed with ${response.status}`;
+  let code: string | null = null;
+  let context: Record<string, unknown> | null = null;
+
   try {
-    const body = await response.json();
-    if (typeof body?.error === "string" && body.error.trim()) {
-      return body.error;
-    }
-    if (typeof body?.error?.message === "string") {
-      return body.error.message;
-    }
-    if (typeof body?.message === "string" && body.message.trim()) {
-      return body.message;
+    const body: unknown = await response.json();
+    if (isUnknownRecord(body)) {
+      if (typeof body.error === "string" && body.error.trim()) {
+        message = body.error;
+      } else if (isUnknownRecord(body.error)) {
+        if (typeof body.error.message === "string" && body.error.message.trim()) {
+          message = body.error.message;
+        }
+        if (typeof body.error.code === "string" && body.error.code.trim()) {
+          code = body.error.code;
+        }
+        if (isUnknownRecord(body.error.context)) {
+          context = body.error.context;
+        }
+      } else if (typeof body.message === "string" && body.message.trim()) {
+        message = body.message;
+      }
     }
   } catch {
-    // Fall through to status text.
+    // Keep the HTTP status fallback when the response is not JSON.
   }
-  return response.statusText || `Request failed with ${response.status}`;
+
+  return new DropshipApiError({
+    message,
+    status: response.status,
+    code,
+    context,
+  });
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
