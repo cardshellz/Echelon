@@ -14,7 +14,7 @@ import { sql } from "drizzle-orm";
  * and every boot looks like a cold start. This persists the timestamp instead,
  * letting a boot ask the only question that matters: are we actually behind?
  *
- * Stored in public.scheduler_runs (migration 0624) rather than oms.*, because
+ * Stored in public.scheduler_runs (migration 0625) rather than oms.*, because
  * ARCHITECTURE-AUDIT-2026-07.md 4.1 makes modules/oms the sole writer of oms.*
  * and this is cross-cutting scheduler bookkeeping. public.audit_events is the
  * same shape of infrastructure-owned table. Note that neither app_settings

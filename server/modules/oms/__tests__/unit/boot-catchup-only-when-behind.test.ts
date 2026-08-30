@@ -102,9 +102,9 @@ describe("fulfillment sweeper boot wiring", () => {
   });
 });
 
-describe("migration 0624", () => {
+describe("migration 0625", () => {
   const MIGRATION = readFileSync(
-    resolve(__dirname, "../../../../../migrations/0624_scheduler_runs.sql"),
+    resolve(__dirname, "../../../../../migrations/0625_scheduler_runs.sql"),
     "utf8",
   );
 
