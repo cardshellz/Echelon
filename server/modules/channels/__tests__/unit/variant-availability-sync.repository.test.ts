@@ -3,6 +3,7 @@ import {
   claimVariantAvailabilitySyncs,
   enqueueVariantAvailabilitySync,
   markVariantAvailabilityFailed,
+  markVariantAvailabilityNotApplicable,
   type ClaimedVariantAvailabilitySync,
   type SqlClient,
   type SqlPool,
@@ -105,6 +106,29 @@ describe("variant availability sync repository", () => {
       1800,
       "temporary eBay failure",
     ]);
+  });
+
+  it("atomically completes unmanaged work and deactivates the local feed without writing a quantity", async () => {
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: null });
+    const release = vi.fn();
+    const client = { query, release } as unknown as SqlClient;
+    const pool = { connect: vi.fn().mockResolvedValue(client) } as unknown as SqlPool;
+
+    await expect(markVariantAvailabilityNotApplicable(pool, CLAIM)).resolves.toBe(true);
+
+    expect(query.mock.calls.map(([statement]) => statement.trim())).toEqual([
+      "BEGIN",
+      expect.stringContaining("UPDATE channels.channel_variant_availability_sync"),
+      expect.stringContaining("UPDATE channels.channel_feeds"),
+      "COMMIT",
+    ]);
+    expect(query.mock.calls[1][0]).not.toContain("last_synced_quantity");
+    expect(query.mock.calls[2][0]).toContain("SET is_active = 0");
+    expect(release).toHaveBeenCalledOnce();
   });
 
   it("does not overwrite a newer revision when recording a failure", async () => {

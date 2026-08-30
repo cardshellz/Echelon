@@ -1014,6 +1014,7 @@ function MigrationQueuePanel({
             <div className="flex flex-wrap gap-2 text-xs">
               <Badge variant="outline">{queue.summary.totalActiveProducts} active</Badge>
               <Badge variant="destructive">{queue.summary.blocked} blocked</Badge>
+              <Badge variant="secondary">{queue.summary.excluded} excluded from ATP</Badge>
               <Badge variant="outline">{queue.summary.notBackfilled} not backfilled</Badge>
               <Badge variant="outline">{queue.summary.conflictingDraft} conflicting draft</Badge>
               <Badge variant="outline">{queue.summary.awaitingReview} awaiting review</Badge>
@@ -1040,6 +1041,7 @@ function MigrationQueuePanel({
                 >
                   <option value="all">All states</option>
                   <option value="blocked">Blocked</option>
+                  <option value="excluded">Excluded from ATP</option>
                   <option value="not_backfilled">Not backfilled</option>
                   <option value="conflicting_draft">Conflicting draft</option>
                   <option value="awaiting_review">Awaiting review</option>

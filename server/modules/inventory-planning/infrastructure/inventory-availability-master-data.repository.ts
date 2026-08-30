@@ -120,7 +120,11 @@ implements InventoryAvailabilityMasterDataAdminStore {
         isActive: productVariants.isActive,
       })
       .from(productVariants)
-      .where(eq(productVariants.productId, productId))
+      .where(and(
+        eq(productVariants.productId, productId),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+      ))
       .orderBy(
         asc(productVariants.unitsPerVariant),
         asc(productVariants.hierarchyLevel),
@@ -964,7 +968,7 @@ async function assertTransformationReferences(
   const variantIds = [...expectedVariants.keys()].sort((left, right) => left - right);
   if (variantIds.length > 0) {
     const rows = await tx.execute(sql`
-      SELECT id, product_id, units_per_variant, is_active
+      SELECT id, product_id, units_per_variant, is_active, requires_shipping, track_inventory
       FROM catalog.product_variants
       WHERE id IN (${sql.join(variantIds.map((id) => sql`${id}`), sql`, `)})
       ORDER BY id
@@ -978,6 +982,8 @@ async function assertTransformationReferences(
         || Number(row.product_id) !== expected.productId
         || Number(row.units_per_variant) !== expected.unitsPerVariant
         || !(row.is_active === true || Number(row.is_active) === 1)
+        || row.requires_shipping !== true
+        || row.track_inventory === false
       ) {
         throw invalidReference(
           `Variant ${variantId} changed or is inactive; reload before saving.`,

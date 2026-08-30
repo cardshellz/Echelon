@@ -191,7 +191,11 @@ class InventoryAtpService {
         productVariants,
         eq(inventoryLevels.productVariantId, productVariants.id),
       )
-      .where(eq(productVariants.productId, productId));
+      .where(and(
+        eq(productVariants.productId, productId),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+      ));
 
     return {
       onHand: Number(row.onHand),
@@ -241,7 +245,10 @@ class InventoryAtpService {
       FROM inventory.inventory_levels il
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
-      WHERE pv.product_id = ${productId} AND (
+      WHERE pv.product_id = ${productId}
+        AND pv.requires_shipping = true
+        AND COALESCE(pv.track_inventory, true) = true
+        AND (
         wl.warehouse_id = ${warehouseId}
         OR wl.warehouse_id IN (
           SELECT id FROM warehouse.warehouses WHERE hub_warehouse_id = ${warehouseId}
@@ -291,8 +298,11 @@ class InventoryAtpService {
         il.product_variant_id,
         SUM(GREATEST(il.variant_qty - il.reserved_qty, 0)) as atp
       FROM inventory.inventory_levels il
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.product_variant_id IN (${idList})
+        AND pv.requires_shipping = true
+        AND COALESCE(pv.track_inventory, true) = true
         AND (
           wl.warehouse_id = ${warehouseId}
           OR wl.warehouse_id IN (
@@ -325,7 +335,12 @@ class InventoryAtpService {
         atp: sql<number>`COALESCE(SUM(GREATEST(${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty}, 0)), 0)`,
       })
       .from(inventoryLevels)
-      .where(inArray(inventoryLevels.productVariantId, variantIds))
+      .innerJoin(productVariants, eq(inventoryLevels.productVariantId, productVariants.id))
+      .where(and(
+        inArray(inventoryLevels.productVariantId, variantIds),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+      ))
       .groupBy(inventoryLevels.productVariantId);
     const result = new Map<number, number>();
     for (const row of rows) {
@@ -360,6 +375,8 @@ class InventoryAtpService {
           and(
             eq(productVariants.productId, productId),
             eq(productVariants.isActive, true),
+            eq(productVariants.requiresShipping, true),
+            sql`COALESCE(${productVariants.trackInventory}, true) = true`,
           ),
         ),
     ]);
@@ -420,6 +437,8 @@ class InventoryAtpService {
           and(
             eq(productVariants.productId, productId),
             eq(productVariants.isActive, true),
+            eq(productVariants.requiresShipping, true),
+            sql`COALESCE(${productVariants.trackInventory}, true) = true`,
           ),
         ),
     ]);
@@ -489,6 +508,8 @@ class InventoryAtpService {
         and(
           eq(productVariants.productId, productId),
           eq(productVariants.isActive, true),
+          eq(productVariants.requiresShipping, true),
+          sql`COALESCE(${productVariants.trackInventory}, true) = true`,
           eq(channels.id, channelId),
           eq(channelFeeds.isActive, 1),
         ),
@@ -549,6 +570,8 @@ class InventoryAtpService {
           and(
             eq(productVariants.productId, productId),
             eq(productVariants.isActive, true),
+            eq(productVariants.requiresShipping, true),
+            sql`COALESCE(${productVariants.trackInventory}, true) = true`,
           ),
         )
         .groupBy(
@@ -653,7 +676,11 @@ class InventoryAtpService {
       })
       .from(productVariants)
       .leftJoin(inventoryLevels, eq(inventoryLevels.productVariantId, productVariants.id))
-      .where(eq(productVariants.productId, productId))
+      .where(and(
+        eq(productVariants.productId, productId),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+      ))
       .groupBy(
         productVariants.id,
         productVariants.sku,
@@ -730,7 +757,11 @@ class InventoryAtpService {
         productVariants,
         eq(inventoryLevels.productVariantId, productVariants.id),
       )
-      .where(inArray(productVariants.productId, productIds))
+      .where(and(
+        inArray(productVariants.productId, productIds),
+        eq(productVariants.requiresShipping, true),
+        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+      ))
       .groupBy(productVariants.productId);
 
     const result = new Map<number, number>();

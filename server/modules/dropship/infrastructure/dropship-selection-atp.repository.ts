@@ -247,7 +247,12 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
     const client = await this.dbPool.connect();
     try {
       const params: unknown[] = [];
-      const where = ["p.is_active = true", "pv.is_active = true"];
+      const where = [
+        "p.is_active = true",
+        "pv.is_active = true",
+        "pv.requires_shipping = true",
+        "COALESCE(pv.track_inventory, true) = true",
+      ];
 
       if (input.search) {
         params.push(`%${input.search}%`);

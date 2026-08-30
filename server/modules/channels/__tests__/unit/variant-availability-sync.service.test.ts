@@ -4,6 +4,7 @@ const repository = vi.hoisted(() => ({
   claimVariantAvailabilitySyncs: vi.fn(),
   enqueueVariantAvailabilitySync: vi.fn(),
   loadVariantAvailabilityContext: vi.fn(),
+  markVariantAvailabilityNotApplicable: vi.fn(),
   markVariantAvailabilityFailed: vi.fn(),
   markVariantAvailabilitySynced: vi.fn(),
   supersedeAvailabilityClaim: vi.fn(),
@@ -39,6 +40,8 @@ const CONTEXT = {
   productVariantId: 67,
   catalogSku: "ARM-ENV-SGL-C700",
   catalogVariantActive: false,
+  catalogRequiresShipping: true,
+  catalogTrackInventory: true,
   variantExcluded: false,
   catalogProductActive: true,
   catalogProductStatus: "active",
@@ -80,6 +83,7 @@ describe("variant availability sync service", () => {
     repository.claimVariantAvailabilitySyncs.mockResolvedValue([CLAIM]);
     repository.loadVariantAvailabilityContext.mockResolvedValue(CONTEXT);
     repository.markVariantAvailabilitySynced.mockResolvedValue(true);
+    repository.markVariantAvailabilityNotApplicable.mockResolvedValue(true);
     repository.markVariantAvailabilityFailed.mockResolvedValue("retryable");
     repository.supersedeAvailabilityClaim.mockResolvedValue(undefined);
   });
@@ -163,6 +167,29 @@ describe("variant availability sync service", () => {
       activeClaim,
       expect.objectContaining({ quantity: 31, feedActive: true }),
     );
+  });
+
+  it("completes digital availability work without publishing a quantity", async () => {
+    repository.loadVariantAvailabilityContext.mockResolvedValue({
+      ...CONTEXT,
+      catalogRequiresShipping: false,
+      catalogTrackInventory: false,
+    });
+    const { service, pushInventory, allocationEngine } = createHarness();
+
+    await expect(service.processDue()).resolves.toEqual({
+      claimed: 1,
+      synced: 1,
+      retried: 0,
+      superseded: 0,
+    });
+    expect(repository.markVariantAvailabilityNotApplicable).toHaveBeenCalledWith(
+      expect.anything(),
+      CLAIM,
+    );
+    expect(allocationEngine.allocateProduct).not.toHaveBeenCalled();
+    expect(pushInventory).not.toHaveBeenCalled();
+    expect(repository.markVariantAvailabilitySynced).not.toHaveBeenCalled();
   });
 
   it("supersedes a stale claim before calling eBay", async () => {
