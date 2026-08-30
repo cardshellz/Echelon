@@ -17,6 +17,7 @@ export const dropshipListingRequiredProductFieldSchema = z.enum([
   "condition",
   "itemSpecifics",
   "imageUrls",
+  "ebayBrowseCategoryId",
 ]);
 
 const requiredConfigKeySchema = z.string()

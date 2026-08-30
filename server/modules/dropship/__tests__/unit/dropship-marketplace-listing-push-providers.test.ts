@@ -91,10 +91,56 @@ describe("dropship marketplace listing push providers", () => {
     const offerBody = JSON.parse(String(fetcher.calls[2]?.init.body));
     expect(offerBody).toMatchObject({
       marketplaceId: "EBAY_US",
-      categoryId: "183454",
+      categoryId: "183438",
       merchantLocationKey: "vendor-location",
       pricingSummary: { price: { value: "12.99", currency: "USD" } },
     });
+  });
+
+  it("uses the product category and optional seller Store categories instead of a store-wide category", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ offers: [] }),
+      emptyResponse(),
+      jsonResponse({ offerId: "offer-101" }),
+      emptyResponse(),
+    ]);
+    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+
+    await provider.pushListing(makeRequest({
+      platform: "ebay",
+      marketplaceCategoryId: "183439",
+      storeCategoryNames: ["Shipping Supplies:Armalopes"],
+      marketplaceConfig: {
+        ...ebayMarketplaceConfig(),
+        categoryId: "999999",
+      },
+    }));
+
+    const offerBody = JSON.parse(String(fetcher.calls[2]?.init.body));
+    expect(offerBody).toMatchObject({
+      categoryId: "183439",
+      storeCategoryNames: ["Shipping Supplies:Armalopes"],
+    });
+  });
+
+  it("fails before calling eBay when a listing intent has no product browse category", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([]);
+    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+
+    await expect(provider.pushListing(makeRequest({
+      platform: "ebay",
+      marketplaceCategoryId: null,
+      marketplaceConfig: {
+        ...ebayMarketplaceConfig(),
+        categoryId: "183454",
+      },
+    }))).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_BROWSE_CATEGORY_REQUIRED",
+      context: { productVariantId: 101, retryable: false },
+    });
+    expect(fetcher.calls).toHaveLength(0);
   });
 
   it("publishes an eBay offer when listing mode is live", async () => {
@@ -328,6 +374,8 @@ function makeRequest(input: {
   listingMode?: "draft_first" | "live";
   marketplaceConfig?: Record<string, unknown>;
   weightGrams?: number | null;
+  marketplaceCategoryId?: string | null;
+  storeCategoryNames?: string[];
 }): DropshipMarketplaceListingPushRequest {
   return {
     vendorId: 10,
@@ -350,6 +398,13 @@ function makeRequest(input: {
       title: "Toploader",
       description: "Rigid card protection.",
       category: "Protectors",
+      marketplaceCategoryId: input.marketplaceCategoryId === undefined
+        ? (input.platform === "ebay" ? "183438" : null)
+        : input.marketplaceCategoryId,
+      marketplaceCategoryName: input.platform === "ebay"
+        ? "Card Toploaders & Holders"
+        : null,
+      storeCategoryNames: input.storeCategoryNames ?? [],
       brand: "Card Shellz",
       gtin: "000000000101",
       mpn: "TL35",
@@ -456,7 +511,6 @@ function ebayCredential(): DropshipMarketplaceStoreCredentials {
 function ebayMarketplaceConfig(): Record<string, unknown> {
   return {
     marketplaceId: "EBAY_US",
-    categoryId: "183454",
     merchantLocationKey: "vendor-location",
     businessPolicies: {
       paymentPolicyId: "payment-policy",

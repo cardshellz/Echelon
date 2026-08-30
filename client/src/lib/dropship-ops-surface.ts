@@ -1571,6 +1571,9 @@ export interface DropshipListingPreviewRow {
   warnings: string[];
   marketplaceQuantity: number;
   priceCents: number | null;
+  marketplaceCategoryId: string | null;
+  marketplaceCategoryName: string | null;
+  storeCategoryNames: string[];
   previewHash: string;
 }
 
@@ -1614,6 +1617,33 @@ export interface DropshipListingPushResponse {
     errorMessage: string | null;
   }>;
   preview: DropshipListingPreviewResult;
+  idempotentReplay: boolean;
+}
+
+export interface DropshipEbayStoreCategoryOption {
+  categoryId: string;
+  categoryName: string;
+  path: string;
+  level: number;
+}
+
+export interface DropshipEbayStoreCategoryAssignment {
+  productVariantId: number;
+  storeCategoryIds: string[];
+  storeCategoryNames: string[];
+  updatedAt: string;
+}
+
+export interface DropshipEbayStoreCategoryResponse {
+  storeConnectionId: number;
+  categories: DropshipEbayStoreCategoryOption[];
+  assignments: DropshipEbayStoreCategoryAssignment[];
+  fetchedAt: string;
+}
+
+export interface DropshipEbayStoreCategoryAssignmentResponse {
+  assignment: DropshipEbayStoreCategoryAssignment | null;
+  revisionId: number;
   idempotentReplay: boolean;
 }
 
