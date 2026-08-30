@@ -8,6 +8,11 @@ import {
   SHIPSTATION_LABEL_OBSERVATION_SOURCE,
 } from "./carrier-tracking.domain";
 import {
+  HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE,
+  HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
+  historicalShipStationRecoverableCaseEvidenceHash,
+} from "./historical-shipstation-contents-recovery.domain";
+import {
   projectDeclaredPackageLifecycle,
   type DeclaredPackageBusinessStatus,
   type DeclaredPackageCarrierStatus,
@@ -124,6 +129,30 @@ const persistedV1LabelPayloadSchema = z.object({
   isReturnLabel: z.boolean().optional(),
 }).passthrough();
 
+const persistedSystemRecoveryPayloadSchema = z.object({
+  payloadSchemaVersion: z.literal(2),
+  providerLabelId: boundedIdentifierSchema(200),
+  trackingNumber: boundedIdentifierSchema(200),
+  observationSource: z.literal(
+    HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE,
+  ),
+  recoveryContractVersion: z.literal(
+    HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
+  ),
+  recoveryStatus: z.enum([
+    "provider_line_keys_authoritative",
+    "exact_unique_wms_match",
+  ]),
+  providerEvidenceHash: z.string().regex(/^[0-9a-f]{64}$/),
+  recoveryEvidenceHash: z.string().regex(/^[0-9a-f]{64}$/),
+  resolvedLabelEventIds: z.array(positiveSafeIntegerSchema).min(1).max(500),
+  declaredContentsEvidence: z.object({
+    evidenceSchemaVersion: z.literal(1),
+    status: z.literal("authoritative"),
+    lines: z.array(persistedDeclaredLineSchema).min(1).max(MAX_DECLARED_CONTENT_LINES),
+  }).strict(),
+}).strict();
+
 
 export type PersistedShippingProviderLabelEventRow = Readonly<
   z.infer<typeof persistedLabelEventRowSchema>
@@ -143,6 +172,7 @@ export type PersistedDeclaredPackageEvidence = Readonly<
 
 export type DeclaredPackageLifecycleShadowEvidenceCoverage =
   | "current_flow"
+  | "historical_v1_recovered"
   | "historical_v1_incomplete";
 
 export type DeclaredPackageLifecycleShadowRejectionReason =
@@ -155,6 +185,7 @@ export type DeclaredPackageLifecycleShadowRejectionReason =
   | "invalid_label_event_hash"
   | "invalid_v1_label_evidence"
   | "invalid_v2_label_evidence"
+  | "invalid_system_recovery_evidence"
   | "invalid_persisted_timestamp"
   | "invalid_carrier_evidence"
   | "current_label_projection_mismatch"
@@ -442,10 +473,132 @@ interface AdaptedLabelEventResult {
   readonly evidenceCoverage: DeclaredPackageLifecycleShadowEvidenceCoverage;
 }
 
+function adaptSystemRecoveryEvent(
+  row: PersistedShippingProviderLabelEventRow,
+  providerPhysicalShipmentId: string,
+): AdaptedLabelEventResult {
+  const payloadRecord = plainRecord(row.sanitizedPayload);
+  if (!payloadRecord) {
+    throw new ShadowEvidenceError("invalid_system_recovery_evidence");
+  }
+  assertStoredLabelEventHash(row, payloadRecord);
+  const parsed = persistedSystemRecoveryPayloadSchema.safeParse(payloadRecord);
+  if (!parsed.success) {
+    throw new ShadowEvidenceError("invalid_system_recovery_evidence");
+  }
+  const payload = parsed.data;
+  const uniqueResolvedIds = new Set(payload.resolvedLabelEventIds);
+  const uniqueLineKeys = new Set(
+    payload.declaredContentsEvidence.lines.map((line) => line.lineItemKey),
+  );
+  const expectedRecoveryHash = historicalShipStationRecoverableCaseEvidenceHash({
+    shippingProviderLabelId: String(row.shippingProviderLabelId),
+    recoveryStatus: payload.recoveryStatus,
+    providerEvidenceHash: payload.providerEvidenceHash,
+  });
+  if (
+    payload.providerLabelId !== providerPhysicalShipmentId
+    || payload.trackingNumber !== row.trackingNumber
+    || row.providerOccurredAt !== null
+    || payload.recoveryEvidenceHash !== expectedRecoveryHash
+    || uniqueResolvedIds.size !== payload.resolvedLabelEventIds.length
+    || uniqueLineKeys.size !== payload.declaredContentsEvidence.lines.length
+    || payload.resolvedLabelEventIds.some((eventId) => eventId >= row.id)
+  ) {
+    throw new ShadowEvidenceError("invalid_system_recovery_evidence");
+  }
+  const contents = payload.declaredContentsEvidence.lines
+    .map(lineFromPersistedEvidence)
+    .sort((left, right) => left.wmsShipmentItemId - right.wmsShipmentItemId);
+  const resolvesEventKeys = payload.resolvedLabelEventIds.map(
+    (eventId) => `shipping-provider-label-event:${eventId}:observed`,
+  );
+  Object.freeze(contents);
+  Object.freeze(resolvesEventKeys);
+  const event: DeclaredPackageLifecycleEvent = Object.freeze({
+    kind: "package_contents_attested",
+    eventKey: `shipping-provider-label-event:${row.id}:contents-recovered`,
+    observedAt: timestamp(row.receivedAt),
+    authorization: "system_recovered",
+    actor: "historical-shipstation-contents-system-recovery",
+    reason: `Deterministic ${payload.recoveryStatus} recovery`,
+    resolvesEventKeys,
+    contents,
+  });
+  return Object.freeze({
+    events: Object.freeze([event]),
+    evidenceCoverage: "historical_v1_recovered",
+  });
+}
+
+function assertSystemRecoveryReferences(
+  labelEvents: readonly PersistedShippingProviderLabelEventRow[],
+  currentLabelStatus: ParsedPersistedDeclaredPackageEvidence["currentLabelStatus"],
+  currentTrackingNumber: string,
+): void {
+  const recoveryRows = labelEvents.filter((event) => event.eventType === "contents_recovered");
+  if (recoveryRows.length === 0) return;
+  if (recoveryRows.length !== 1) {
+    throw new ShadowEvidenceError("invalid_system_recovery_evidence");
+  }
+  const recoveryRow = recoveryRows[0];
+  const payloadRecord = plainRecord(recoveryRow.sanitizedPayload);
+  const parsed = persistedSystemRecoveryPayloadSchema.safeParse(payloadRecord);
+  if (
+    !parsed.success
+    || recoveryRow.labelStatus !== currentLabelStatus
+    || recoveryRow.trackingNumber !== currentTrackingNumber
+  ) {
+    throw new ShadowEvidenceError("invalid_system_recovery_evidence");
+  }
+  const eventById = new Map(labelEvents.map((event) => [event.id, event]));
+  const historicalV1EventIds = new Set(labelEvents.flatMap((event) => {
+    if (!["label_observed", "label_voided"].includes(event.eventType)) return [];
+    const eventPayload = plainRecord(event.sanitizedPayload);
+    if (eventPayload === null) return [];
+    return eventPayload.payloadSchemaVersion === undefined
+      || eventPayload.payloadSchemaVersion === 1
+      ? [event.id]
+      : [];
+  }));
+  let historicalV1ReferenceCount = 0;
+  let previousId = 0;
+  for (const resolvedId of parsed.data.resolvedLabelEventIds) {
+    const resolved = eventById.get(resolvedId);
+    const resolvedPayload = resolved ? plainRecord(resolved.sanitizedPayload) : null;
+    const payloadVersion = resolvedPayload?.payloadSchemaVersion;
+    const historicalV1 = payloadVersion === undefined || payloadVersion === 1;
+    const nonAuthoritativeV2 = payloadVersion === 2
+      && plainRecord(resolvedPayload?.declaredContentsEvidence)?.status !== "authoritative";
+    if (
+      resolvedId <= previousId
+      || resolved === undefined
+      || resolved.id >= recoveryRow.id
+      || !["label_observed", "label_voided"].includes(resolved.eventType)
+      || resolvedPayload === null
+      || (!historicalV1 && !nonAuthoritativeV2)
+    ) {
+      throw new ShadowEvidenceError("invalid_system_recovery_evidence");
+    }
+    if (historicalV1) historicalV1ReferenceCount += 1;
+    previousId = resolvedId;
+  }
+  if (historicalV1ReferenceCount === 0) {
+    throw new ShadowEvidenceError("invalid_system_recovery_evidence");
+  }
+  const resolvedIds = new Set(parsed.data.resolvedLabelEventIds);
+  if ([...historicalV1EventIds].some((eventId) => !resolvedIds.has(eventId))) {
+    throw new ShadowEvidenceError("invalid_system_recovery_evidence");
+  }
+}
+
 function adaptLabelEvent(
   row: PersistedShippingProviderLabelEventRow,
   providerPhysicalShipmentId: string,
 ): AdaptedLabelEventResult {
+  if (row.eventType === "contents_recovered") {
+    return adaptSystemRecoveryEvent(row, providerPhysicalShipmentId);
+  }
   const evidence = contentsEvidenceFromPayload(row, providerPhysicalShipmentId);
   const eventKey = `shipping-provider-label-event:${row.id}`;
   const observedAt = timestamp(row.receivedAt);
@@ -544,14 +697,22 @@ export function adaptPersistedDeclaredPackageLifecycleEvidence(
   }
 
   try {
+    assertSystemRecoveryReferences(
+      input.labelEvents,
+      input.currentLabelStatus,
+      input.currentTrackingNumber,
+    );
     const adaptedLabelEvents = input.labelEvents
       .slice()
       .sort((left, right) => left.id - right.id)
       .map((event) => adaptLabelEvent(event, input.providerPhysicalShipmentId));
-    const evidenceCoverage = adaptedLabelEvents.some(
-      (event) => event.evidenceCoverage === "historical_v1_incomplete",
-    )
-      ? "historical_v1_incomplete"
+    const coverageValues = new Set(
+      adaptedLabelEvents.map((event) => event.evidenceCoverage),
+    );
+    const evidenceCoverage = coverageValues.has("historical_v1_incomplete")
+      ? coverageValues.has("historical_v1_recovered")
+        ? "historical_v1_recovered"
+        : "historical_v1_incomplete"
       : "current_flow";
     const events: DeclaredPackageLifecycleEvent[] = [
       ...adaptedLabelEvents.flatMap((event) => event.events),
@@ -601,6 +762,7 @@ function currentLabelProjectionMatches(
   const currentFirstObservedAt = timestamp(input.firstObservedAt);
   const currentLastObservedAt = timestamp(input.lastObservedAt);
   const latestRetainedLabelEventAt = input.labelEvents
+    .filter((event) => event.eventType !== "contents_recovered")
     .map((event) => timestamp(event.receivedAt))
     .sort()
     .at(-1);
@@ -670,6 +832,7 @@ const EVIDENCE_STATUSES: readonly DeclaredPackageContentsEvidenceStatus[] = [
 ];
 const EVIDENCE_COVERAGES: readonly DeclaredPackageLifecycleShadowEvidenceCoverage[] = [
   "current_flow",
+  "historical_v1_recovered",
   "historical_v1_incomplete",
 ];
 const REVIEW_REASONS: readonly DeclaredPackageReviewReason[] = [
@@ -699,6 +862,7 @@ const REJECTION_REASONS: readonly DeclaredPackageLifecycleShadowRejectionReason[
   "invalid_label_event_hash",
   "invalid_v1_label_evidence",
   "invalid_v2_label_evidence",
+  "invalid_system_recovery_evidence",
   "invalid_persisted_timestamp",
   "invalid_carrier_evidence",
   "current_label_projection_mismatch",

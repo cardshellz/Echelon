@@ -4,6 +4,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { describe, expect, it } from "vitest";
 
 import { normalizeShipStationLabelObservation } from "../../carrier-tracking.domain";
+import { buildHistoricalShipStationContentsSystemRecoveryEvent } from "../../historical-shipstation-contents-recovery.domain";
 import {
   adaptPersistedDeclaredPackageLifecycleEvidence,
   projectPersistedDeclaredPackageLifecycleShadow,
@@ -112,6 +113,38 @@ function carrierEvidence(
     eventOccurredAt: possessionOccurredAt,
     receivedAt: possessionReceivedAt,
     ...overrides,
+  };
+}
+
+function systemRecoveryEvent(
+  resolvedLabelEventIds: readonly number[] = [101],
+): PersistedShippingProviderLabelEventRow {
+  const event = buildHistoricalShipStationContentsSystemRecoveryEvent({
+    shippingProviderLabelId: "41",
+    providerShipmentId: 44_001,
+    trackingNumber,
+    labelStatus: "active",
+    recoveryEvidence: {
+      contractVersion: 1,
+      recoveryStatus: "provider_line_keys_authoritative",
+      evidenceHash: "e".repeat(64),
+      attestedContents: [
+        { wmsShipmentItemId: 7001, quantity: 2 },
+        { wmsShipmentItemId: 7002, quantity: 1 },
+      ],
+    },
+    resolvedLabelEventIds,
+  });
+  return {
+    id: 102,
+    shippingProviderLabelId: 41,
+    eventHash: event.eventHash,
+    eventType: event.eventType,
+    labelStatus: event.labelStatus,
+    trackingNumber: event.trackingNumber,
+    providerOccurredAt: event.providerOccurredAt,
+    sanitizedPayload: event.sanitizedPayload,
+    receivedAt: "2026-08-20T14:01:00.000Z",
   };
 }
 
@@ -270,6 +303,72 @@ describe("persisted declared-package lifecycle adapter", () => {
       currentAutomationAuthority: false,
       reconciliationStatus: "review",
       reviewReasons: ["package_contents_omitted"],
+    });
+  });
+
+  it("projects one exact system recovery as authoritative historical coverage", () => {
+    const historical = labelEvent({
+      sanitizedPayload: {
+        providerLabelId: providerPhysicalShipmentId,
+        trackingNumber,
+        shipmentItems: [{ lineItemKey: "wms-item-7001" }],
+      },
+    });
+    const result = projectPersistedDeclaredPackageLifecycleShadow(persistedPackage({
+      labelEvents: [historical, systemRecoveryEvent()],
+      lastObservedAt: labelReceivedAt,
+      confirmedCarrierEvents: [],
+    }));
+
+    expect(result).toMatchObject({
+      outcome: "projected",
+      evidenceCoverage: "historical_v1_recovered",
+      projection: {
+        contentsStatus: "authoritative",
+        observedContentsEvidenceStatuses: ["omitted"],
+        activeContentsEvidenceStatuses: [],
+        authoritativeContents: [
+          { wmsShipmentItemId: 7001, quantity: 2 },
+          { wmsShipmentItemId: 7002, quantity: 1 },
+        ],
+        currentAutomationAuthority: true,
+        reconciliationStatus: "clear",
+        reviewReasons: [],
+      },
+    });
+  });
+
+  it("rejects system recovery that does not resolve a named historical v1 event", () => {
+    const historical = labelEvent({
+      sanitizedPayload: { providerLabelId: providerPhysicalShipmentId, trackingNumber },
+    });
+    expect(projectPersistedDeclaredPackageLifecycleShadow(persistedPackage({
+      labelEvents: [historical, systemRecoveryEvent([999])],
+      lastObservedAt: labelReceivedAt,
+      confirmedCarrierEvents: [],
+    }))).toEqual({
+      outcome: "rejected",
+      reason: "invalid_system_recovery_evidence",
+    });
+  });
+
+  it("rejects partial recovery when any historical v1 contents event remains unresolved", () => {
+    const firstHistorical = labelEvent({
+      id: 100,
+      receivedAt: "2026-08-20T13:59:00.000Z",
+      sanitizedPayload: { providerLabelId: providerPhysicalShipmentId, trackingNumber },
+    });
+    const secondHistorical = labelEvent({
+      sanitizedPayload: { providerLabelId: providerPhysicalShipmentId, trackingNumber },
+    });
+    expect(projectPersistedDeclaredPackageLifecycleShadow(persistedPackage({
+      labelEvents: [firstHistorical, secondHistorical, systemRecoveryEvent([101])],
+      firstObservedAt: "2026-08-20T13:59:00.000Z",
+      lastObservedAt: labelReceivedAt,
+      confirmedCarrierEvents: [],
+    }))).toEqual({
+      outcome: "rejected",
+      reason: "invalid_system_recovery_evidence",
     });
   });
 
@@ -590,6 +689,7 @@ describe("aggregate-only declared-package lifecycle shadow service", () => {
       rejectionReasonCounts: { non_outbound_label: 1 },
       evidenceCoverageCounts: {
         current_flow: 1,
+        historical_v1_recovered: 0,
         historical_v1_incomplete: 1,
       },
       labelStatusCounts: { active: 2 },

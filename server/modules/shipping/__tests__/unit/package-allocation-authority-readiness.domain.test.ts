@@ -13,6 +13,7 @@ import type {
   PersistedShippingProviderLabelEventRow,
 } from "../../declared-package-lifecycle-shadow.domain";
 import type { PackageAllocationSourceFacts } from "../../package-allocation-source-identity.domain";
+import { buildHistoricalShipStationContentsSystemRecoveryEvent } from "../../historical-shipstation-contents-recovery.domain";
 
 const LABEL_RECEIVED_AT = "2026-08-23T14:00:00.000Z";
 
@@ -322,6 +323,61 @@ describe("package allocation authority readiness", () => {
       "authoritative_contents_unavailable",
       "historical_contents_incomplete",
       "package_lifecycle_review",
+      "package_membership_policy_unresolved",
+    ]);
+  });
+
+  it("consumes validated system recovery without retaining the historical-incomplete block", () => {
+    const input = validInput();
+    const historical = historicalPackage();
+    const recovery = buildHistoricalShipStationContentsSystemRecoveryEvent({
+      shippingProviderLabelId: "41",
+      providerShipmentId: 44_001,
+      trackingNumber: "1Z999AA10123456784",
+      labelStatus: "active",
+      recoveryEvidence: {
+        contractVersion: 1,
+        recoveryStatus: "provider_line_keys_authoritative",
+        evidenceHash: "e".repeat(64),
+        attestedContents: [
+          { wmsShipmentItemId: 7001, quantity: 2 },
+          { wmsShipmentItemId: 7002, quantity: 1 },
+        ],
+      },
+      resolvedLabelEventIds: [101],
+    });
+    input.packages[0] = {
+      evidenceKey: "provider-package:shipstation:44001",
+      persistedEvidence: {
+        ...historical,
+        labelEvents: [
+          historical.labelEvents[0],
+          {
+            id: 102,
+            shippingProviderLabelId: 41,
+            eventHash: recovery.eventHash,
+            eventType: recovery.eventType,
+            labelStatus: recovery.labelStatus,
+            trackingNumber: recovery.trackingNumber,
+            providerOccurredAt: recovery.providerOccurredAt,
+            sanitizedPayload: recovery.sanitizedPayload,
+            receivedAt: "2026-08-23T14:01:00.000Z",
+          },
+        ],
+      },
+    };
+
+    const assessment = assessPackageAllocationAuthorityReadiness(input).packageAssessments[0];
+    expect(assessment).toMatchObject({
+      evidenceCoverage: "historical_v1_recovered",
+      authoritativeContents: [
+        { wmsShipmentItemId: 7001, quantity: 2 },
+        { wmsShipmentItemId: 7002, quantity: 1 },
+      ],
+      candidateSourceStatus: "within_candidate_sources",
+    });
+    expect(assessment?.reviewCodes).toEqual([
+      "allocation_role_policy_unresolved",
       "package_membership_policy_unresolved",
     ]);
   });

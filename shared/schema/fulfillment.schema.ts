@@ -453,8 +453,60 @@ export const shippingProviderLabelEvents = wmsSchema.table("shipping_provider_la
     .on(table.shippingProviderLabelId, table.eventHash),
   uniqueIndex("uq_shipping_provider_label_events_id_label")
     .on(table.id, table.shippingProviderLabelId),
+  uniqueIndex("uq_shipping_provider_label_events_one_contents_recovery")
+    .on(table.shippingProviderLabelId)
+    .where(sql`${table.eventType} = 'contents_recovered'`),
   index("idx_shipping_provider_label_events_label")
     .on(table.shippingProviderLabelId, table.receivedAt),
+  check(
+    "shipping_provider_label_events_type_chk",
+    sql`${table.eventType} IN (
+      'label_observed',
+      'label_voided',
+      'label_superseded',
+      'contents_recovered'
+    )`,
+  ),
+  check(
+    "shipping_provider_label_events_recovery_payload_chk",
+    sql`${table.eventType} <> 'contents_recovered'
+      OR ((
+        ${table.providerOccurredAt} IS NULL
+        AND jsonb_typeof(${table.sanitizedPayload}) = 'object'
+        AND ${table.sanitizedPayload}->>'payloadSchemaVersion' = '2'
+        AND ${table.sanitizedPayload}->>'observationSource'
+          = 'historical_shipstation_contents_system_recovery'
+        AND ${table.sanitizedPayload}->>'recoveryContractVersion' = '1'
+        AND ${table.sanitizedPayload}->>'recoveryStatus' IN (
+          'provider_line_keys_authoritative',
+          'exact_unique_wms_match'
+        )
+        AND BTRIM(${table.sanitizedPayload}->>'providerLabelId') <> ''
+        AND LENGTH(${table.sanitizedPayload}->>'providerLabelId') <= 200
+        AND ${table.sanitizedPayload}->>'trackingNumber' = ${table.trackingNumber}
+        AND ${table.sanitizedPayload}->>'providerEvidenceHash' ~ '^[0-9a-f]{64}$'
+        AND ${table.sanitizedPayload}->>'recoveryEvidenceHash' ~ '^[0-9a-f]{64}$'
+        AND CASE
+          WHEN jsonb_typeof(${table.sanitizedPayload}->'resolvedLabelEventIds') = 'array'
+            THEN jsonb_array_length(
+              ${table.sanitizedPayload}->'resolvedLabelEventIds'
+            ) BETWEEN 1 AND 500
+          ELSE false
+        END
+        AND jsonb_typeof(${table.sanitizedPayload}->'declaredContentsEvidence') = 'object'
+        AND ${table.sanitizedPayload}->'declaredContentsEvidence'->>'evidenceSchemaVersion' = '1'
+        AND ${table.sanitizedPayload}->'declaredContentsEvidence'->>'status' = 'authoritative'
+        AND CASE
+          WHEN jsonb_typeof(
+            ${table.sanitizedPayload}->'declaredContentsEvidence'->'lines'
+          ) = 'array'
+            THEN jsonb_array_length(
+              ${table.sanitizedPayload}->'declaredContentsEvidence'->'lines'
+            ) BETWEEN 1 AND 500
+          ELSE false
+        END
+      ) IS TRUE)`,
+  ),
 ]);
 
 export interface ShippingProviderLabelAttestedContentLine {

@@ -167,8 +167,8 @@ describe("historical ShipStation contents audit service", () => {
         reviewCase("102", "provider_shipment_not_found", null),
         reviewCase("101", "provider_request_failed", null),
       ],
-      requiresLeadAttestationCount: 8,
-      safeToAutoResolveCount: 0,
+      requiresLeadAttestationCount: 0,
+      safeToAutoResolveCount: 2,
       databaseTemporaryPrivilege: false,
     });
     expect(maxActive).toBe(1);

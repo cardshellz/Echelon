@@ -5,10 +5,14 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import type { ShipStationShipmentContentsEvidenceStatus } from "./carrier-tracking.domain";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
+const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
 const MAX_PACKAGE_LINES = 500;
 const MAX_SKU_LENGTH = 100;
 
 export const HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION = 1 as const;
+export const HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_EVENT_TYPE = "contents_recovered" as const;
+export const HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE =
+  "historical_shipstation_contents_system_recovery" as const;
 
 export const HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_STATUSES = Object.freeze([
   "provider_line_keys_authoritative",
@@ -60,6 +64,43 @@ export interface HistoricalShipStationContentsRecoveryEvidence {
   readonly attestedContents: readonly HistoricalShipStationRecoverableContentsLine[];
 }
 
+export type HistoricalShipStationContentsRecoveryLabelStatus =
+  | "active"
+  | "voided"
+  | "superseded"
+  | "unknown";
+
+export interface HistoricalShipStationContentsSystemRecoveryPayload {
+  readonly payloadSchemaVersion: 2;
+  readonly providerLabelId: string;
+  readonly trackingNumber: string;
+  readonly observationSource:
+    typeof HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE;
+  readonly recoveryContractVersion:
+    typeof HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION;
+  readonly recoveryStatus: HistoricalShipStationContentsRecoveryEvidence["recoveryStatus"];
+  readonly providerEvidenceHash: string;
+  readonly recoveryEvidenceHash: string;
+  readonly resolvedLabelEventIds: readonly number[];
+  readonly declaredContentsEvidence: Readonly<{
+    readonly evidenceSchemaVersion: 1;
+    readonly status: "authoritative";
+    readonly lines: readonly Readonly<{
+      readonly lineItemKey: string;
+      readonly quantity: number;
+    }>[];
+  }>;
+}
+
+export interface HistoricalShipStationContentsSystemRecoveryEvent {
+  readonly eventHash: string;
+  readonly eventType: typeof HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_EVENT_TYPE;
+  readonly labelStatus: HistoricalShipStationContentsRecoveryLabelStatus;
+  readonly trackingNumber: string;
+  readonly providerOccurredAt: null;
+  readonly sanitizedPayload: HistoricalShipStationContentsSystemRecoveryPayload;
+}
+
 export class HistoricalShipStationContentsRecoveryError extends Error {
   constructor(
     readonly code: HistoricalShipStationContentsRecoveryErrorCode,
@@ -90,7 +131,7 @@ export function historicalShipStationRecoverableCaseEvidenceHash(input: Readonly
 }>): string {
   if (
     !/^[1-9][0-9]*$/.test(input.shippingProviderLabelId)
-    || BigInt(input.shippingProviderLabelId) > BigInt("9223372036854775807")
+    || BigInt(input.shippingProviderLabelId) > POSTGRES_BIGINT_MAX
     || !["provider_line_keys_authoritative", "exact_unique_wms_match"].includes(
       input.recoveryStatus,
     )
@@ -108,6 +149,129 @@ export function historicalShipStationRecoverableCaseEvidenceHash(input: Readonly
     recoveryStatus: input.recoveryStatus,
     providerEvidenceHash: input.providerEvidenceHash,
   })));
+}
+
+function validatedRecoveryContents(
+  recoveryEvidence: HistoricalShipStationContentsRecoveryEvidence,
+): readonly HistoricalShipStationRecoverableContentsLine[] {
+  if (
+    recoveryEvidence.contractVersion !== HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION
+    || !["provider_line_keys_authoritative", "exact_unique_wms_match"].includes(
+      recoveryEvidence.recoveryStatus,
+    )
+    || !/^[0-9a-f]{64}$/.test(recoveryEvidence.evidenceHash)
+    || recoveryEvidence.attestedContents.length < 1
+    || recoveryEvidence.attestedContents.length > MAX_PACKAGE_LINES
+  ) {
+    throw new HistoricalShipStationContentsRecoveryError(
+      "INVALID_PROVIDER_CONTENTS_EVIDENCE",
+      "System recovery evidence failed validation",
+    );
+  }
+  const sourceIds = new Set<number>();
+  const lines = recoveryEvidence.attestedContents.map((line) => {
+    if (
+      !isPositivePostgresInteger(line.wmsShipmentItemId)
+      || !isPositivePostgresInteger(line.quantity)
+      || sourceIds.has(line.wmsShipmentItemId)
+    ) {
+      throw new HistoricalShipStationContentsRecoveryError(
+        "INVALID_PROVIDER_CONTENTS_EVIDENCE",
+        "System recovery evidence contains an invalid or duplicate WMS source line",
+      );
+    }
+    sourceIds.add(line.wmsShipmentItemId);
+    return Object.freeze({
+      wmsShipmentItemId: line.wmsShipmentItemId,
+      quantity: line.quantity,
+    });
+  });
+  lines.sort((left, right) => left.wmsShipmentItemId - right.wmsShipmentItemId);
+  return Object.freeze(lines);
+}
+
+/**
+ * Builds the exact immutable event appended by the system-recovery application
+ * service. The event is deterministic across retries and contains no SKU,
+ * product name, address, or raw provider payload.
+ */
+export function buildHistoricalShipStationContentsSystemRecoveryEvent(input: Readonly<{
+  readonly shippingProviderLabelId: string;
+  readonly providerShipmentId: number;
+  readonly trackingNumber: string;
+  readonly labelStatus: HistoricalShipStationContentsRecoveryLabelStatus;
+  readonly recoveryEvidence: HistoricalShipStationContentsRecoveryEvidence;
+  readonly resolvedLabelEventIds: readonly number[];
+}>): HistoricalShipStationContentsSystemRecoveryEvent {
+  if (
+    !/^[1-9][0-9]*$/.test(input.shippingProviderLabelId)
+    || BigInt(input.shippingProviderLabelId) > POSTGRES_BIGINT_MAX
+    || !Number.isSafeInteger(input.providerShipmentId)
+    || input.providerShipmentId <= 0
+    || typeof input.trackingNumber !== "string"
+    || input.trackingNumber.length < 1
+    || input.trackingNumber.length > 200
+    || input.trackingNumber.trim() !== input.trackingNumber
+    || !["active", "voided", "superseded", "unknown"].includes(input.labelStatus)
+    || input.resolvedLabelEventIds.length < 1
+    || input.resolvedLabelEventIds.length > MAX_PACKAGE_LINES
+  ) {
+    throw new HistoricalShipStationContentsRecoveryError(
+      "INVALID_PROVIDER_CONTENTS_EVIDENCE",
+      "System recovery event identity failed validation",
+    );
+  }
+  const resolvedLabelEventIds = [...input.resolvedLabelEventIds];
+  if (
+    resolvedLabelEventIds.some((eventId) => !Number.isSafeInteger(eventId) || eventId <= 0)
+    || new Set(resolvedLabelEventIds).size !== resolvedLabelEventIds.length
+  ) {
+    throw new HistoricalShipStationContentsRecoveryError(
+      "INVALID_PROVIDER_CONTENTS_EVIDENCE",
+      "System recovery event references invalid or duplicate label evidence",
+    );
+  }
+  resolvedLabelEventIds.sort((left, right) => left - right);
+  Object.freeze(resolvedLabelEventIds);
+  const contents = validatedRecoveryContents(input.recoveryEvidence);
+  const recoveryEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
+    shippingProviderLabelId: input.shippingProviderLabelId,
+    recoveryStatus: input.recoveryEvidence.recoveryStatus,
+    providerEvidenceHash: input.recoveryEvidence.evidenceHash,
+  });
+  const lines = Object.freeze(contents.map((line) => Object.freeze({
+    lineItemKey: `wms-item-${line.wmsShipmentItemId}`,
+    quantity: line.quantity,
+  })));
+  const declaredContentsEvidence = Object.freeze({
+    evidenceSchemaVersion: 1 as const,
+    status: "authoritative" as const,
+    lines,
+  });
+  const sanitizedPayload = Object.freeze({
+    payloadSchemaVersion: 2 as const,
+    providerLabelId: String(input.providerShipmentId),
+    trackingNumber: input.trackingNumber,
+    observationSource: HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE,
+    recoveryContractVersion: HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
+    recoveryStatus: input.recoveryEvidence.recoveryStatus,
+    providerEvidenceHash: input.recoveryEvidence.evidenceHash,
+    recoveryEvidenceHash,
+    resolvedLabelEventIds,
+    declaredContentsEvidence,
+  });
+  return Object.freeze({
+    eventHash: sha256(canonicalJson({
+      provider: "shipstation",
+      ...sanitizedPayload,
+      labelStatus: input.labelStatus,
+    })),
+    eventType: HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_EVENT_TYPE,
+    labelStatus: input.labelStatus,
+    trackingNumber: input.trackingNumber,
+    providerOccurredAt: null,
+    sanitizedPayload,
+  });
 }
 
 
@@ -294,8 +458,9 @@ export function classifyHistoricalShipStationContentsRecovery(input: Readonly<{
 /**
  * Produces a deterministic, non-sensitive commitment to a recoverable provider
  * observation. The returned lines are the exact WMS identities and quantities
- * that a separately authorized lead-attestation path could later review. This
- * function does not authenticate an actor, persist evidence, or grant authority.
+ * that the system-recovery application service may persist only after reloading
+ * and locking the same candidate. This pure function does not persist evidence
+ * or grant runtime effect authority.
  */
 export function buildHistoricalShipStationContentsRecoveryEvidence(input: Readonly<{
   readonly providerShipmentId: number;

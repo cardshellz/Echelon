@@ -91,6 +91,7 @@ export async function runMigrations(): Promise<void> {
     "migrations/199_package_allocation_persistence_foundation.sql",
     "migrations/0619_package_allocation_discovery_indexes.sql",
     "migrations/0621_shipping_provider_label_content_attestations.sql",
+    "migrations/0627_historical_shipstation_contents_system_recovery.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;
