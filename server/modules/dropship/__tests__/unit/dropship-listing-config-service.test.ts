@@ -72,6 +72,7 @@ describe("DropshipListingConfigService", () => {
     );
     expect(ebayConfig.requiredConfigKeys).not.toContain("categoryId");
     expect(ebayConfig.requiredProductFields).toContain("ebayBrowseCategoryId");
+    expect(ebayConfig.marketplaceConfig).toEqual({ marketplaceId: "EBAY_US" });
     expect(buildDefaultDropshipStoreListingConfig("shopify").listingMode).toBe(
       DROPSHIP_DEFAULT_LISTING_MODE,
     );

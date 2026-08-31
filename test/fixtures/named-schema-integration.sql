@@ -4,6 +4,7 @@ DROP SCHEMA IF EXISTS warehouse CASCADE;
 DROP SCHEMA IF EXISTS catalog CASCADE;
 DROP SCHEMA IF EXISTS wms CASCADE;
 DROP SCHEMA IF EXISTS identity CASCADE;
+DROP SCHEMA IF EXISTS ebay CASCADE;
 
 CREATE SCHEMA catalog;
 CREATE SCHEMA warehouse;
@@ -11,6 +12,7 @@ CREATE SCHEMA inventory;
 CREATE SCHEMA channels;
 CREATE SCHEMA wms;
 CREATE SCHEMA identity;
+CREATE SCHEMA ebay;
 
 CREATE TABLE identity.users (
   id varchar PRIMARY KEY,
@@ -414,6 +416,23 @@ CREATE TABLE channels.channels (
   shipping_config jsonb,
   created_at timestamp NOT NULL DEFAULT now(),
   updated_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE ebay.ebay_category_mappings (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  channel_id integer NOT NULL REFERENCES channels.channels(id),
+  product_type_slug varchar(50) NOT NULL,
+  ebay_browse_category_id varchar(20),
+  ebay_browse_category_name varchar(200),
+  ebay_store_category_id varchar(20),
+  ebay_store_category_name varchar(200),
+  fulfillment_policy_override varchar(20),
+  return_policy_override varchar(20),
+  payment_policy_override varchar(20),
+  listing_enabled boolean NOT NULL DEFAULT true,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now(),
+  UNIQUE (channel_id, product_type_slug)
 );
 
 CREATE TABLE channels.channel_reservations (

@@ -19,6 +19,8 @@ import {
 import { ShopifyDropshipWebhookSubscriptionProvider } from "./dropship-shopify-webhook-subscription.provider";
 import { AesGcmDropshipStoreTokenCipher } from "./dropship-token-cipher";
 import { createDropshipNotificationServiceFromEnv } from "./dropship-notification.factory";
+import { createDropshipEbayListingSetupPostConnectProviderFromEnv } from "./dropship-ebay-listing-setup.factory";
+import { DropshipStoreConnectionPostConnectPipeline } from "./dropship-store-connection-post-connect.provider";
 
 export function createDropshipStoreConnectionServiceFromEnv(): DropshipStoreConnectionService {
   return new DropshipStoreConnectionService({
@@ -35,7 +37,10 @@ export function createDropshipStoreConnectionServiceFromEnv(): DropshipStoreConn
         ?? "",
     ),
     tokenCipher: new LazyEnvDropshipStoreTokenCipher(),
-    postConnectProvider: ShopifyDropshipWebhookSubscriptionProvider.fromEnv(),
+    postConnectProvider: new DropshipStoreConnectionPostConnectPipeline([
+      createDropshipEbayListingSetupPostConnectProviderFromEnv(),
+      ShopifyDropshipWebhookSubscriptionProvider.fromEnv(),
+    ]),
     notificationSender: createDropshipNotificationServiceFromEnv(),
     clock: systemDropshipStoreConnectionClock,
     logger: makeDropshipStoreConnectionLogger(),

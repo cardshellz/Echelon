@@ -193,6 +193,7 @@ export interface DropshipStoreConnectionPostConnectProvider {
     vendorId: number;
     storeConnectionId: number;
     platform: DropshipSupportedStorePlatform;
+    providerEnvironment: string;
     shopDomain: string | null;
     accessToken: string;
     connectedAt: Date;
@@ -585,6 +586,7 @@ export class DropshipStoreConnectionService {
       vendorId: vendor.vendorId,
       storeConnectionId: connection.storeConnectionId,
       platform,
+      providerEnvironment: grant.providerEnvironment,
       shopDomain: state.shopDomain,
       accessToken: grant.accessToken,
       connectedAt: now,
@@ -784,6 +786,7 @@ export class DropshipStoreConnectionService {
         vendorId: input.vendorId,
         storeConnectionId: input.storeConnectionId,
         platform: input.platform,
+        providerEnvironment: input.providerEnvironment,
         shopDomain: input.shopDomain,
         accessToken: input.accessToken,
         connectedAt: input.connectedAt,

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useLocation } from "wouter";
 import {
   AlertCircle,
   ArrowRight,
@@ -10,7 +10,6 @@ import {
   Mail,
   MinusCircle,
   PlusCircle,
-  RefreshCw,
   Search,
   Send,
 } from "lucide-react";
@@ -59,8 +58,10 @@ import {
   type DropshipSettingsResponse,
   type DropshipVendorSelectionAction,
 } from "@/lib/dropship-ops-surface";
-import { dropshipPortalPath, isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
+import { isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
+import { EbayListingSetupPanel } from "./EbayListingSetupPanel";
+import { EbayStoreCategoryAuthorizationRecovery } from "./EbayStoreCategoryAuthorizationRecovery";
 
 type PendingSelectionAction = string | null;
 type PendingListingAction = "preview" | "send-code" | "verify-code" | "passkey-proof" | "push" | null;
@@ -111,7 +112,6 @@ export async function fetchAllSelectedCatalogRows(
 
 export default function DropshipPortalCatalog() {
   const queryClient = useQueryClient();
-  const [, setLocation] = useLocation();
   const {
     principal,
     sensitiveProofs,
@@ -565,15 +565,28 @@ export default function DropshipPortalCatalog() {
         </section>
 
         {selectedStoreConnection?.platform === "ebay" && (
-          <EbayStoreCategoryAssignmentPanel
-            data={ebayStoreCategoryQuery.data ?? null}
-            error={ebayStoreCategoryQuery.error}
-            isLoading={ebayStoreCategoryQuery.isLoading}
-            onReconnect={() => setLocation(dropshipPortalPath("/settings"))}
-            pendingProductVariantIds={pendingStoreCategoryVariantIds}
-            rows={selectedCatalogRows}
-            onAssignmentChange={updateEbayStoreCategoryAssignment}
-          />
+          <>
+            <EbayListingSetupPanel
+              storeConnectionId={selectedStoreConnectionIdNumber}
+              onConfigurationChange={() => {
+                setListingPreview(null);
+                setListingPushResult(null);
+                setEmailCodeSent(false);
+                setVerificationCode("");
+              }}
+            />
+            <EbayStoreCategoryAssignmentPanel
+              authorizationRecovery={(
+                <EbayStoreCategoryAuthorizationRecovery error={ebayStoreCategoryQuery.error} />
+              )}
+              data={ebayStoreCategoryQuery.data ?? null}
+              error={ebayStoreCategoryQuery.error}
+              isLoading={ebayStoreCategoryQuery.isLoading}
+              pendingProductVariantIds={pendingStoreCategoryVariantIds}
+              rows={selectedCatalogRows}
+              onAssignmentChange={updateEbayStoreCategoryAssignment}
+            />
+          </>
         )}
 
         <ListingPreviewPanel
@@ -779,19 +792,19 @@ export function shouldOfferEbayStoreReconnect(error: unknown): boolean {
 }
 
 export function EbayStoreCategoryAssignmentPanel({
+  authorizationRecovery,
   data,
   error,
   isLoading,
   onAssignmentChange,
-  onReconnect,
   pendingProductVariantIds,
   rows,
 }: {
+  authorizationRecovery?: ReactNode;
   data: DropshipEbayStoreCategoryResponse | null;
   error: unknown;
   isLoading: boolean;
   onAssignmentChange: (productVariantId: number, storeCategoryIds: string[]) => void;
-  onReconnect: () => void;
   pendingProductVariantIds: ReadonlySet<number>;
   rows: DropshipCatalogRow[];
 }) {
@@ -839,18 +852,7 @@ export function EbayStoreCategoryAssignmentPanel({
               : queryErrorMessage(error, "The connected eBay account did not return its Store categories.")}
           </div>
           <div className="mt-1 text-xs">You can still preview and push listings without this optional organization.</div>
-          {reconnectAvailable && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="mt-3 gap-2 border-amber-400 bg-white text-amber-950 hover:bg-amber-100"
-              onClick={onReconnect}
-            >
-              <RefreshCw className="h-4 w-4" />
-              {permissionRequired ? "Refresh eBay authorization" : "Reconnect eBay store"}
-            </Button>
-          )}
+          {reconnectAvailable && authorizationRecovery}
         </div>
       ) : rows.length === 0 ? (
         <div className="p-4 text-sm text-zinc-500">
@@ -1377,7 +1379,17 @@ function PreviewIssues({ blockers, warnings }: { blockers: string[]; warnings: s
   );
 }
 
-function formatIssue(value: string): string {
+export function formatIssue(value: string): string {
+  const actionableLabels: Record<string, string> = {
+    "missing_config:marketplaceId": "eBay setup: Marketplace",
+    "missing_config:merchantLocationKey": "eBay setup: Inventory location",
+    "missing_config:businessPolicies.paymentPolicyId": "eBay setup: Payment policy",
+    "missing_config:businessPolicies.returnPolicyId": "eBay setup: Return policy",
+    "missing_config:businessPolicies.fulfillmentPolicyId": "eBay setup: Fulfillment policy",
+    ebay_browse_category_required: "Card Shellz marketplace category setup required",
+  };
+  const actionable = actionableLabels[value];
+  if (actionable) return actionable;
   return value.split(":").map((part) => formatStatus(part)).join(": ");
 }
 

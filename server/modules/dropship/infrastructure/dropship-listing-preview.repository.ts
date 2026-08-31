@@ -268,8 +268,15 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            COALESCE(p.title, p.name) AS title,
            p.description,
            p.category,
-           p.ebay_browse_category_id,
-           p.ebay_browse_category_name,
+           COALESCE(
+             NULLIF(BTRIM(p.ebay_browse_category_id), ''),
+             supplier_ebay_category.ebay_browse_category_id
+           ) AS ebay_browse_category_id,
+           CASE
+             WHEN NULLIF(BTRIM(p.ebay_browse_category_id), '') IS NOT NULL
+               THEN p.ebay_browse_category_name
+             ELSE supplier_ebay_category.ebay_browse_category_name
+           END AS ebay_browse_category_name,
            p.brand,
            pv.gtin,
            pv.mpn,
@@ -284,6 +291,21 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
          FROM catalog.product_variants pv
          INNER JOIN catalog.products p ON p.id = pv.product_id
          LEFT JOIN catalog.product_line_products plp ON plp.product_id = p.id
+         LEFT JOIN LATERAL (
+           SELECT
+             MIN(ecm.ebay_browse_category_id) AS ebay_browse_category_id,
+             MIN(ecm.ebay_browse_category_name) AS ebay_browse_category_name
+           FROM ebay.ebay_category_mappings ecm
+           INNER JOIN channels.channels supplier_channel
+             ON supplier_channel.id = ecm.channel_id
+           WHERE ecm.product_type_slug = p.product_type
+             AND supplier_channel.provider = 'ebay'
+             AND supplier_channel.type = 'internal'
+             AND supplier_channel.status = 'active'
+             AND ecm.listing_enabled = true
+             AND NULLIF(BTRIM(ecm.ebay_browse_category_id), '') IS NOT NULL
+           HAVING COUNT(DISTINCT ecm.ebay_browse_category_id) = 1
+         ) supplier_ebay_category ON true
          LEFT JOIN LATERAL (
            SELECT sv.price
            FROM public.shopify_variants sv
@@ -310,7 +332,9 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
             AND pv.requires_shipping = true
             AND COALESCE(pv.track_inventory, true) = true
             AND pv.sales_eligibility = 'sellable'
-         GROUP BY p.id, pv.id, retail_cache.price, assets.image_urls`,
+         GROUP BY p.id, pv.id, retail_cache.price, assets.image_urls,
+                  supplier_ebay_category.ebay_browse_category_id,
+                  supplier_ebay_category.ebay_browse_category_name`,
         [productVariantIds],
       );
       return result.rows.map(mapCandidateRow);
