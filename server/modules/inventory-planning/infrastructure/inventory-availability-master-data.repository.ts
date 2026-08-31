@@ -445,6 +445,210 @@ implements InventoryAvailabilityMasterDataAdminStore {
     });
   }
 
+  async supersedeTransformationModelBackfillDraft(
+    command: Parameters<
+      InventoryAvailabilityMasterDataAdminStore["supersedeTransformationModelBackfillDraft"]
+    >[0],
+  ) {
+    return this.database.transaction(async (tx) => {
+      await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
+      await lockIdempotencyKey(tx, command.idempotencyKey);
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          ${TRANSFORMATION_MODEL_LOCK_NAMESPACE},
+          ${command.productId}
+        )
+      `);
+      await assertIdempotencyKeyUnusedByOtherType(
+        tx,
+        command.idempotencyKey,
+        "transformation_model",
+      );
+
+      const replay = await findTransformationReplay(tx, command.idempotencyKey);
+      if (replay) {
+        assertReplayHash(replay.requestHash, command.requestHash);
+        if (replay.supersedesModelId !== command.draftModelId) {
+          throw new InventoryAvailabilityMasterDataError(
+            500,
+            "INVENTORY_AVAILABILITY_IDEMPOTENCY_STATE_INVALID",
+            "The backfill-refresh receipt does not reference the expected superseded draft.",
+          );
+        }
+        return {
+          modelId: replay.id,
+          version: replay.version,
+          definitionHash: replay.definitionHash,
+          supersededModelId: replay.supersedesModelId,
+          alreadyApplied: true,
+        };
+      }
+
+      const [head] = await tx
+        .select()
+        .from(transformationModelHeads)
+        .where(eq(transformationModelHeads.productId, command.productId))
+        .limit(1)
+        .for("update");
+      const modelResult = await tx.execute(sql`
+        SELECT id, product_id, version, lifecycle_status, definition_hash,
+               origin, origin_input_hash, origin_result_hash
+        FROM inventory.transformation_model_versions
+        WHERE id = ${command.draftModelId}
+        FOR UPDATE
+      `);
+      const model = modelResult.rows[0];
+      if (
+        !head
+        || head.draftModelId !== command.draftModelId
+        || head.revision.toString() !== command.expectedDraftHeadRevision
+        || !model
+        || Number(model.product_id) !== command.productId
+        || Number(model.version) !== command.expectedDraftVersion
+        || String(model.lifecycle_status) !== "draft"
+        || String(model.definition_hash) !== command.expectedDraftDefinitionHash
+        || String(model.origin) !== "phase3_backfill"
+        || String(model.origin_input_hash) !== command.expectedDraftOriginInputHash
+        || String(model.origin_result_hash) !== command.expectedDraftOriginResultHash
+      ) {
+        throw staleDraft();
+      }
+
+      const [source] = await loadInventoryAvailabilityBackfillSources(tx, [command.productId]);
+      if (!source) {
+        throw new InventoryAvailabilityMasterDataError(
+          409,
+          "INVENTORY_AVAILABILITY_BACKFILL_SOURCE_CHANGED",
+          "The active product is no longer eligible for deterministic backfill.",
+        );
+      }
+      const currentCandidate = planInventoryAvailabilityBackfill(source);
+      const definitionHash = calculateTransformationModelDefinitionHash(command.definition);
+      if (
+        currentCandidate.inputHash !== command.backfillEvidence.inputHash
+        || currentCandidate.resultHash !== command.backfillEvidence.resultHash
+        || !currentCandidate.definition
+        || currentCandidate.definitionHash !== definitionHash
+      ) {
+        throw new InventoryAvailabilityMasterDataError(
+          409,
+          "INVENTORY_AVAILABILITY_BACKFILL_PREVIEW_STALE",
+          "The product, variants, recipes, or generated draft changed after preview.",
+        );
+      }
+      if (
+        String(model.definition_hash) === definitionHash
+        && String(model.origin_input_hash) === command.backfillEvidence.inputHash
+        && String(model.origin_result_hash) === command.backfillEvidence.resultHash
+      ) {
+        throw new InventoryAvailabilityMasterDataError(
+          409,
+          "INVENTORY_AVAILABILITY_BACKFILL_DRAFT_CURRENT",
+          "The current Phase 3 draft already has the requested deterministic provenance.",
+        );
+      }
+
+      await assertTransformationReferences(tx, command.definition);
+      const before = await loadTransformationModel(tx, command.draftModelId);
+      if (!before) throw staleDraft();
+
+      await tx
+        .update(transformationModelVersions)
+        .set({
+          lifecycleStatus: "superseded",
+          supersededBy: command.actorId,
+          supersededAt: command.occurredAt,
+          supersessionReason: command.changeReason,
+          updatedAt: command.occurredAt,
+        })
+        .where(eq(transformationModelVersions.id, command.draftModelId));
+
+      if (command.expectedDraftVersion >= 2_147_483_647) {
+        throw new InventoryAvailabilityMasterDataError(
+          409,
+          "INVENTORY_AVAILABILITY_MODEL_VERSION_EXHAUSTED",
+          "The transformation model has exhausted the PostgreSQL version range.",
+        );
+      }
+      const version = command.expectedDraftVersion + 1;
+      const [created] = await tx
+        .insert(transformationModelVersions)
+        .values({
+          productId: command.productId,
+          version,
+          lifecycleStatus: "draft",
+          buildToPromiseEnabled: command.definition.buildToPromiseEnabled,
+          definitionHash,
+          validationState: "invalid",
+          validationErrors: [{ code: "members_pending" }],
+          supersedesModelId: command.draftModelId,
+          changeReason: command.changeReason,
+          idempotencyKey: command.idempotencyKey,
+          requestHash: command.requestHash,
+          origin: "phase3_backfill",
+          originInputHash: command.backfillEvidence.inputHash,
+          originResultHash: command.backfillEvidence.resultHash,
+          createdBy: command.actorId,
+          createdAt: command.occurredAt,
+          updatedAt: command.occurredAt,
+        })
+        .returning({ id: transformationModelVersions.id });
+      await replaceTransformationMembers(tx, created.id, command.definition, command.occurredAt);
+      await tx
+        .update(transformationModelVersions)
+        .set({
+          validationState: "valid",
+          validationErrors: [],
+          definitionHash,
+          updatedAt: command.occurredAt,
+        })
+        .where(eq(transformationModelVersions.id, created.id));
+      await pointTransformationDraftHead(tx, {
+        productId: command.productId,
+        modelId: created.id,
+        actorId: command.actorId,
+        changeReason: command.changeReason,
+        occurredAt: command.occurredAt,
+        headExists: true,
+      });
+      const after = await loadTransformationModel(tx, created.id);
+      if (!after) throw staleDraft();
+
+      await persistAuditEvent(tx, {
+        actor: command.actorId,
+        action: "inventory_availability.transformation_model.backfill_refreshed",
+        target: `inventory.transformation_model:${created.id}`,
+        changes: {
+          before,
+          after,
+        },
+        context: {
+          changeReason: command.changeReason,
+          idempotencyKey: command.idempotencyKey,
+          requestHash: command.requestHash,
+          supersededModelId: command.draftModelId,
+          previousHeadRevision: command.expectedDraftHeadRevision,
+          nextHeadRevision: (BigInt(command.expectedDraftHeadRevision) + BigInt(1)).toString(),
+          previousOriginInputHash: command.expectedDraftOriginInputHash,
+          previousOriginResultHash: command.expectedDraftOriginResultHash,
+          originInputHash: command.backfillEvidence.inputHash,
+          originResultHash: command.backfillEvidence.resultHash,
+          runtimeAuthorityChanged: false,
+        },
+      }, {
+        timestamp: command.occurredAt,
+        emitStructuredLog: false,
+      });
+      return {
+        modelId: created.id,
+        version,
+        definitionHash,
+        supersededModelId: command.draftModelId,
+        alreadyApplied: false,
+      };
+    });
+  }
+
   async createLocationPromisePolicyDraft(
     command: Parameters<
       InventoryAvailabilityMasterDataAdminStore["createLocationPromisePolicyDraft"]
@@ -1070,6 +1274,7 @@ async function findTransformationReplay(tx: Transaction, idempotencyKey: string)
       version: transformationModelVersions.version,
       definitionHash: transformationModelVersions.definitionHash,
       requestHash: transformationModelVersions.requestHash,
+      supersedesModelId: transformationModelVersions.supersedesModelId,
     })
     .from(transformationModelVersions)
     .where(eq(transformationModelVersions.idempotencyKey, idempotencyKey))

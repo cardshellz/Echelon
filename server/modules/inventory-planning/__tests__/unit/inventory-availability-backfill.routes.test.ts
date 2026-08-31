@@ -95,6 +95,41 @@ describe("inventory availability backfill routes", () => {
     expect(service.reviewProductDraft).toHaveBeenCalledWith(10, request, "operator-1");
   });
 
+  it("forwards stale-draft supersession evidence and both path identifiers", async () => {
+    service.refreshProductDraft.mockResolvedValue({
+      modelId: 51,
+      version: 2,
+      definitionHash: HASH,
+      supersededModelId: 50,
+      alreadyApplied: false,
+      inputHash: HASH,
+      resultHash: HASH,
+    });
+    const request = {
+      expectedInputHash: HASH,
+      expectedResultHash: HASH,
+      expectedDraftVersion: 1,
+      expectedDraftDefinitionHash: HASH,
+      expectedDraftHeadRevision: "2",
+      expectedDraftOriginInputHash: HASH,
+      expectedDraftOriginResultHash: HASH,
+      changeReason: "Refresh stale deterministic provenance",
+      idempotencyKey: "phase3-refresh-10",
+    };
+
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/migration-queue/10/drafts/50/refresh`,
+      jsonPost(request),
+    );
+
+    expect(response).toMatchObject({
+      status: 201,
+      body: { modelId: 51, version: 2, supersededModelId: 50 },
+    });
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "edit");
+    expect(service.refreshProductDraft).toHaveBeenCalledWith(10, 50, request, "operator-1");
+  });
+
   it("serves blocker-only channel preview under view permission", async () => {
     service.getChannelPreview.mockResolvedValue({
       productId: 10,
@@ -157,6 +192,7 @@ function fakeService() {
   return {
     getMigrationQueue: vi.fn(),
     applyProductDraft: vi.fn(),
+    refreshProductDraft: vi.fn(),
     reviewProductDraft: vi.fn(),
     getChannelPreview: vi.fn(),
   };

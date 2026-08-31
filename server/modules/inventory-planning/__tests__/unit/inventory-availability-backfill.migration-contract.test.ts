@@ -14,6 +14,7 @@ const previewRepository = source(
 const routes = source(
   "server/modules/inventory-planning/interfaces/http/inventory-availability-backfill.routes.ts",
 );
+const command = source("scripts/backfill-inventory-availability-models.ts");
 
 describe("inventory availability Phase 3 isolation contract", () => {
   it("adds only draft provenance and append-only review evidence", () => {
@@ -40,9 +41,19 @@ describe("inventory availability Phase 3 isolation contract", () => {
     expect(previewRepository).not.toMatch(/adapter\.(?:sync|publish|push|set)/i);
   });
 
-  it("gates draft and review writes by the inventory-planning edit ability", () => {
+  it("gates draft, refresh, and review writes by the inventory-planning edit ability", () => {
     expect(routes.match(/requirePermission\("inventory_planning", "view"\)/g)).toHaveLength(2);
-    expect(routes.match(/requirePermission\("inventory_planning", "edit"\)/g)).toHaveLength(2);
+    expect(routes.match(/requirePermission\("inventory_planning", "edit"\)/g)).toHaveLength(3);
     expect(routes).not.toMatch(/activate|publish|reservation|inventory-level/i);
+  });
+
+  it("keeps stale-draft refresh behind an explicit apply-only command flag", () => {
+    expect(command).toContain('"--refresh-stale-drafts"');
+    expect(command).toContain("--refresh-stale-drafts requires --apply");
+    expect(command).toContain('product.draft?.origin === "phase3_backfill"');
+    expect(command).toContain("service.refreshProductDraft(");
+    expect(command).toContain("runtimeAuthorityChanged: false");
+    expect(command).toContain("inventoryWriteAttempted: false");
+    expect(command).toContain("channelWriteAttempted: false");
   });
 });
