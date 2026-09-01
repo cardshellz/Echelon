@@ -14,7 +14,10 @@ import { warehouseStorage } from "../warehouse";
 const storage = { ...catalogStorage, ...warehouseStorage };
 import { fetchShopifyCatalogProducts, type ShopifyCatalogProduct } from "../integrations/shopify";
 import { db, productCategories, eq, and } from "../../storage/base";
-import { decideImportedShopifyProductMapping } from "./shopify-product-mapping.domain";
+import {
+  decideImportedShopifyProductMapping,
+  resolveImportedVariantSku,
+} from "./shopify-product-mapping.domain";
 
 // ---------------------------------------------------------------------------
 // Shopify product_type → Echelon product_type slug mapping
@@ -177,23 +180,19 @@ export function createProductImportService() {
       const mappedByShopifyId = await storage.getProductByShopifyProductId(String(shopifyProductId));
       if (mappedByShopifyId) matchedProducts.set(mappedByShopifyId.id, mappedByShopifyId);
       for (const variant of variants) {
-        if (variant.sku) {
-          const pv = await storage.getProductVariantBySku(variant.sku);
-          if (pv) {
-            if (pv.salesEligibility === "internal_only") {
-              internalOnlyMatches.push({ productId: pv.productId, sku: variant.sku });
-              continue;
-            }
-            const matchedProduct = await storage.getProductById(pv.productId);
-            if (matchedProduct) matchedProducts.set(matchedProduct.id, matchedProduct);
-            variantsUpdated++;
-          } else {
-            skuNotFound++;
-            unmatchedSkus.push(variant.sku);
+        const importSku = resolveImportedVariantSku(variant);
+        const pv = await storage.getProductVariantBySku(importSku);
+        if (pv) {
+          if (pv.salesEligibility === "internal_only") {
+            internalOnlyMatches.push({ productId: pv.productId, sku: importSku });
+            continue;
           }
+          const matchedProduct = await storage.getProductById(pv.productId);
+          if (matchedProduct) matchedProducts.set(matchedProduct.id, matchedProduct);
+          variantsUpdated++;
         } else {
           skuNotFound++;
-          unmatchedSkus.push(`(no SKU) ${variant.title}`);
+          unmatchedSkus.push(importSku);
         }
       }
 
@@ -292,10 +291,10 @@ export function createProductImportService() {
               seenUrls.add(img.url);
 
               let variantId: number | null = null;
-              if (variant.sku) {
-                const pv = await storage.getProductVariantBySku(variant.sku);
-                if (pv) variantId = pv.id;
-              }
+              const assetVariant = await storage.getProductVariantBySku(
+                resolveImportedVariantSku(variant),
+              );
+              if (assetVariant) variantId = assetVariant.id;
 
               await storage.createProductAsset({
                 productId: echelonProduct.id,
@@ -313,9 +312,13 @@ export function createProductImportService() {
           // routing through a warehouse/bin assignment service. Acceptable for now since
           // product_locations is configuration data (bin assignments), not transactional inventory.
           // When a bin assignment service exists, route through it instead.
-          if (variant.sku) {
-            await storage.upsertProductLocationBySku(variant.sku, variant.title, variant.status, undefined, variant.barcode || undefined);
-          }
+          await storage.upsertProductLocationBySku(
+            resolveImportedVariantSku(variant),
+            variant.title,
+            variant.status,
+            undefined,
+            variant.barcode || undefined,
+          );
         }
       } else {
         console.log(`[Sync] No Echelon product for Shopify product ${shopifyProductId} (${firstVariant.productTitle})`);
@@ -391,9 +394,11 @@ export function createProductImportService() {
     const ambiguousBaseSkus = new Set<string>();
 
     for (const variant of shopifyProducts) {
-      if (!variant.sku) continue;
+      // SKU-less variants (sealed wax, graded singles) import under their
+      // SHOPIFY-<variantId> fallback instead of being skipped.
+      const importSku = resolveImportedVariantSku(variant);
 
-      const match = variant.sku.match(VARIANT_PATTERN);
+      const match = importSku.match(VARIANT_PATTERN);
 
       if (match) {
         const baseSku = match[1];
@@ -438,7 +443,7 @@ export function createProductImportService() {
         }
 
         baseSkuMap[baseSku].variants.push({
-          sku: variant.sku,
+          sku: importSku,
           name: variant.variantTitle || `${variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case'} of ${unitsPerVariant}`,
           type: variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case',
           unitsPerVariant,
@@ -449,7 +454,7 @@ export function createProductImportService() {
         });
       } else {
         standaloneVariants.push({
-          sku: variant.sku,
+          sku: importSku,
           name: variant.title,
           shopifyProductId: variant.shopifyProductId,
           shopifyVariantId: variant.variantId,

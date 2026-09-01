@@ -3,6 +3,7 @@ import {
   buildShopifyProductMappingSummary,
   collectMappedShopifyVariantIds,
   decideImportedShopifyProductMapping,
+  resolveImportedVariantSku,
   evaluateShopifyProductMappingRepair,
   normalizeShopifyId,
   type ShopifyProductMappingSource,
@@ -420,5 +421,32 @@ describe("evaluateShopifyProductMappingRepair", () => {
         }],
       });
     }
+  });
+});
+
+describe("resolveImportedVariantSku", () => {
+  it("keeps a real SKU untouched", () => {
+    expect(resolveImportedVariantSku({ sku: "SHLZ-MAG-35PT-SLV-B25", variantId: 45799040876703 }))
+      .toBe("SHLZ-MAG-35PT-SLV-B25");
+  });
+
+  it("trims surrounding whitespace on a real SKU", () => {
+    expect(resolveImportedVariantSku({ sku: "  EG-SLV-STD-P100  ", variantId: 1 }))
+      .toBe("EG-SLV-STD-P100");
+  });
+
+  it("falls back to SHOPIFY-<variantId> when the variant has no SKU", () => {
+    expect(resolveImportedVariantSku({ sku: null, variantId: 62733635420319 }))
+      .toBe("SHOPIFY-62733635420319");
+    expect(resolveImportedVariantSku({ sku: undefined, variantId: 60224117047455 }))
+      .toBe("SHOPIFY-60224117047455");
+    expect(resolveImportedVariantSku({ sku: "   ", variantId: 7 })).toBe("SHOPIFY-7");
+  });
+
+  it("produces a fallback that cannot be mistaken for a multi-UOM SKU", () => {
+    // Multi-UOM parsing keys on a trailing -(P|B|C)<n>; variant ids are digits,
+    // so a fallback always lands on the standalone (single-unit) path.
+    const fallback = resolveImportedVariantSku({ sku: null, variantId: 62733635420319 });
+    expect(/^(.+)-(P|B|C)(\d+)$/i.test(fallback)).toBe(false);
   });
 });
