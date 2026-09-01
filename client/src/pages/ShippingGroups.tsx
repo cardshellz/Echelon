@@ -285,6 +285,17 @@ export default function ShippingGroups() {
       ),
   });
 
+  // Unassigned has no row in shipping_groups, so its badge cannot come from
+  // groupsQuery. Ask the products endpoint for the total only (limit=1), and
+  // keep it out of the search/page-scoped key so the badge always reflects the
+  // whole unassigned set — matching how the group badges below it behave.
+  const unassignedCountQuery = useQuery<ProductsResponse>({
+    queryKey: ["/api/shipping-groups/products", "unassigned-count"],
+    queryFn: () =>
+      jsonFetch<ProductsResponse>("/api/shipping-groups/products?filter=unassigned&page=1&limit=1"),
+  });
+  const unassignedCount = unassignedCountQuery.data?.total;
+
   const groups = groupsQuery.data ?? [];
   const activeGroups = useMemo(() => groups.filter((g) => g.isActive), [groups]);
   const groupNameById = useMemo(() => {
@@ -367,12 +378,17 @@ export default function ShippingGroups() {
           </button>
           <button
             className={cn(
-              "w-full text-left px-3 py-2 rounded-md text-sm hover:bg-muted",
+              "w-full flex items-center gap-2 text-left px-3 py-2 rounded-md text-sm hover:bg-muted",
               filter === "unassigned" && "bg-muted font-medium",
             )}
             onClick={() => setFilter("unassigned")}
           >
-            Unassigned
+            <span className="flex-1 min-w-0 truncate">Unassigned</span>
+            {unassignedCount !== undefined && (
+              <Badge variant="secondary" className="shrink-0">
+                {unassignedCount}
+              </Badge>
+            )}
           </button>
           <div className="h-px bg-border my-1" />
           {groupsQuery.isLoading && (
