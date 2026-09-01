@@ -34,10 +34,15 @@ const provenanceRefreshMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations", "0628_inventory_backfill_provenance_refresh.sql"),
   "utf8",
 );
+const demandObservationDaysMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations", "0630_inventory_demand_evidence_observation_days.sql"),
+  "utf8",
+);
 const parityMigrationSql = [
   migrationSql,
   phase3MigrationSql,
   provenanceRefreshMigrationSql,
+  demandObservationDaysMigrationSql,
 ].join("\n");
 const compactMigrationSql = migrationSql.replace(/\s+/g, " ").trim();
 const schemaPath = resolve(process.cwd(), "shared/schema/inventory-planning.schema.ts");
@@ -299,6 +304,8 @@ describe("inventory availability Slice 1 migration contract", () => {
     expect(migrationSql).toContain("daily_demand_milli_units bigint");
     expect(migrationSql).toContain("demand evidence snapshots are append-only");
     expect(migrationSql).toContain("demand_evidence_snapshots_input_uq");
+    expect(demandObservationDaysMigrationSql).toContain("observed_days >= 0");
+    expect(compactSchemaSource).toContain("${table.observedDays} >= 0");
     expect(compactSchemaSource).toContain("table.calculatedAt.desc(), table.id.desc()");
   });
 

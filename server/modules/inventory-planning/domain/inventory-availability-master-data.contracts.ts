@@ -474,7 +474,7 @@ export const demandEvidenceSnapshotSchema = z.object({
   windowStartedAt: z.coerce.date(),
   windowEndedAt: z.coerce.date(),
   irreversibleConsumptionUnits: z.bigint().nonnegative(),
-  observedDays: positiveInteger,
+  observedDays: nonnegativeInteger,
   dailyDemandMilliUnits: z.bigint().nonnegative(),
   trustStatus: z.enum(["trusted", "untrusted", "overridden"]),
   trustReasons: z.array(nonblank(500)),
