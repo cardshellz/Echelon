@@ -47,6 +47,10 @@ const demandObservationDaysMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0630_inventory_demand_evidence_observation_days.sql"),
   "utf8",
 );
+const channelExposureMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0632_inventory_channel_exposure_policy.sql"),
+  "utf8",
+);
 const HASH = "a".repeat(64);
 const FIXED_TIME = "2026-08-26T12:00:00.000Z";
 
@@ -209,6 +213,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(phase4MigrationSql);
       await migrationClient.query(backfillProvenanceRefreshMigrationSql);
       await migrationClient.query(demandObservationDaysMigrationSql);
+      await migrationClient.query(channelExposureMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -2412,6 +2417,114 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         [target.rows[0]!.id, scope.variantIds[0], outbox.rows[0]!.id, HASH, FIXED_TIME],
       ),
       "readback match flag does not match observed and desired quantities",
+    );
+  });
+
+  it("enforces draft-head ownership and immutable sealed channel exposure/source definitions", async () => {
+    const scope = await seedProductAndWarehouse([1]);
+    const channel = await pool.query<{ id: number }>(
+      "INSERT INTO channels.channels (name, provider) VALUES ('Exposure channel', 'shopify') RETURNING id",
+    );
+    const connection = await pool.query<{ id: number }>(
+      "INSERT INTO channels.channel_connections (channel_id) VALUES ($1) RETURNING id",
+      [channel.rows[0]!.id],
+    );
+    const node = await pool.query<{ id: number }>(
+      `INSERT INTO warehouse.fulfillment_nodes (
+         code, name, node_type, warehouse_id, inventory_authority,
+         fulfillment_authority, created_by
+       ) VALUES ('EXPOSURE', 'Exposure node', 'internal_warehouse', $1,
+         'echelon', 'echelon', 'integration-test') RETURNING id`,
+      [scope.warehouseId],
+    );
+    const target = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.inventory_publication_targets (
+         channel_id, channel_connection_id, fulfillment_node_id,
+         provider_scope_type, external_scope_id, publication_authority,
+         state, change_reason, created_by
+       ) VALUES ($1, $2, $3, 'location', 'exposure-location', 'echelon',
+         'disabled', 'Integration exposure target', 'integration-test') RETURNING id`,
+      [channel.rows[0]!.id, connection.rows[0]!.id, node.rows[0]!.id],
+    );
+    const scopeKey = `channel:${channel.rows[0]!.id}`;
+    const policy = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.channel_exposure_policy_versions (
+         scope_key, channel_id, scope_type, version, allocation_semantics,
+         eligible, share_bps, holdback_sellable_units, max_publish_mode,
+         min_publish_sellable_units, definition_hash, change_reason,
+         idempotency_key, request_hash, created_by
+       ) VALUES ($1, $2, 'channel', 1, 'exposure', true, 10000, 0,
+         'unlimited', 0, $3, 'Integration draft', 'policy:1', $3,
+         'integration-test') RETURNING id`,
+      [scopeKey, channel.rows[0]!.id, HASH],
+    );
+    await pool.query(
+      `INSERT INTO inventory.channel_exposure_policy_heads (
+         scope_key, channel_id, draft_policy_id, revision, updated_by, update_reason
+       ) VALUES ($1, $2, $3, 1, 'integration-test', 'Integration draft')`,
+      [scopeKey, channel.rows[0]!.id, policy.rows[0]!.id],
+    );
+    await pool.query(
+      "UPDATE inventory.channel_exposure_policy_versions SET share_bps = 7500 WHERE id = $1",
+      [policy.rows[0]!.id],
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE inventory.channel_exposure_policy_versions SET scope_key = 'channel:999' WHERE id = $1",
+        [policy.rows[0]!.id],
+      ),
+      "channel exposure policy identity and request evidence are immutable",
+    );
+
+    const binding = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.publication_source_binding_versions (
+         publication_target_id, version, definition_hash, change_reason,
+         idempotency_key, request_hash, created_by
+       ) VALUES ($1, 1, $2, 'Integration source draft', 'source:1', $2,
+         'integration-test') RETURNING id`,
+      [target.rows[0]!.id, HASH],
+    );
+    await pool.query(
+      `INSERT INTO inventory.publication_source_binding_heads (
+         publication_target_id, draft_binding_id, revision, updated_by, update_reason
+       ) VALUES ($1, $2, 1, 'integration-test', 'Integration source draft')`,
+      [target.rows[0]!.id, binding.rows[0]!.id],
+    );
+    await pool.query(
+      `INSERT INTO inventory.publication_source_binding_members (
+         binding_id, publication_target_id, fulfillment_node_id, priority
+       ) VALUES ($1, $2, $3, 1)`,
+      [binding.rows[0]!.id, target.rows[0]!.id, node.rows[0]!.id],
+    );
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `UPDATE inventory.publication_source_binding_versions
+         SET lifecycle_status = 'sealed', sealed_by = 'integration-test', sealed_at = $2
+         WHERE id = $1`,
+        [binding.rows[0]!.id, FIXED_TIME],
+      );
+      await client.query(
+        `UPDATE inventory.publication_source_binding_heads
+         SET active_binding_id = draft_binding_id, draft_binding_id = NULL, revision = revision + 1
+         WHERE publication_target_id = $1`,
+        [target.rows[0]!.id],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE inventory.publication_source_binding_members SET priority = 2 WHERE binding_id = $1",
+        [binding.rows[0]!.id],
+      ),
+      "source binding members may change only on the current draft",
     );
   });
 });

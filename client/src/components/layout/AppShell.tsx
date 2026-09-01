@@ -223,6 +223,12 @@ const navStructure: NavEntry[] = [
       { label: "Catalog", icon: Package, href: "/catalog" },
       { label: "Product Lines", icon: Tag, href: "/product-lines" },
       { label: "Channels", icon: Store, href: "/channels" },
+      {
+        label: "Inventory Exposure",
+        icon: GitBranch,
+        href: "/channels/inventory-exposure",
+        requiredPermission: { resource: "inventory_planning", action: "view" },
+      },
       { label: "Allocation", icon: Layers, href: "/channel-allocation" },
       { label: "Sync Log", icon: History, href: "/sync-log" },
       { label: "Subscriptions", icon: Crown, href: "/subscriptions" },

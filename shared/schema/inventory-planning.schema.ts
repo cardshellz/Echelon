@@ -8,6 +8,7 @@ import {
   integer,
   jsonb,
   pgSchema,
+  primaryKey,
   timestamp,
   uniqueIndex,
   varchar,
@@ -1340,6 +1341,298 @@ export const inventoryPublicationTargets = inventoryPlanningSchema.table(
   }),
 );
 
+export const channelExposurePolicyVersions = inventoryPlanningSchema.table(
+  "channel_exposure_policy_versions",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    scopeKey: varchar("scope_key", { length: 200 }).notNull(),
+    channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "restrict" }),
+    scopeType: varchar("scope_type", { length: 20 }).notNull(),
+    productId: integer("product_id").references(() => products.id, { onDelete: "restrict" }),
+    productVariantId: integer("product_variant_id"),
+    version: integer("version").notNull(),
+    lifecycleStatus: varchar("lifecycle_status", { length: 20 }).notNull().default("draft"),
+    allocationSemantics: varchar("allocation_semantics", { length: 20 }),
+    eligible: boolean("eligible"),
+    shareBps: integer("share_bps"),
+    holdbackSellableUnits: bigint("holdback_sellable_units", { mode: "bigint" }),
+    maxPublishMode: varchar("max_publish_mode", { length: 20 }),
+    maxPublishSellableUnits: bigint("max_publish_sellable_units", { mode: "bigint" }),
+    minPublishSellableUnits: bigint("min_publish_sellable_units", { mode: "bigint" }),
+    definitionHash: varchar("definition_hash", { length: 64 }).notNull(),
+    supersedesPolicyId: integer("supersedes_policy_id")
+      .references((): AnyPgColumn => channelExposurePolicyVersions.id, { onDelete: "restrict" }),
+    changeReason: varchar("change_reason", { length: 1000 }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    createdBy: varchar("created_by", { length: 100 }).notNull(),
+    sealedBy: varchar("sealed_by", { length: 100 }),
+    sealedAt: timestamp("sealed_at", { withTimezone: true }),
+    retiredBy: varchar("retired_by", { length: 100 }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    variantProductForeignKey: foreignKey({
+      columns: [table.productVariantId, table.productId],
+      foreignColumns: [productVariants.id, productVariants.productId],
+      name: "channel_exposure_policy_versions_variant_product_fk",
+    }).onDelete("restrict"),
+    scopeVersionUnique: uniqueIndex("channel_exposure_policy_versions_scope_version_uq")
+      .on(table.scopeKey, table.version),
+    idScopeUnique: uniqueIndex("channel_exposure_policy_versions_id_scope_uq")
+      .on(table.id, table.scopeKey),
+    idempotencyUnique: uniqueIndex("channel_exposure_policy_versions_idempotency_uq")
+      .on(table.idempotencyKey),
+    oneDraft: uniqueIndex("channel_exposure_policy_versions_one_draft_uq")
+      .on(table.scopeKey).where(sql`${table.lifecycleStatus} = 'draft'`),
+    successorUnique: uniqueIndex("channel_exposure_policy_versions_successor_uq")
+      .on(table.supersedesPolicyId).where(sql`${table.supersedesPolicyId} IS NOT NULL`),
+    resolutionIndex: index("channel_exposure_policy_versions_resolution_idx")
+      .on(table.channelId, table.productId, table.productVariantId, table.id),
+    scopeValid: check(
+      "channel_exposure_policy_versions_scope_chk",
+      sql`(${table.scopeType} = 'channel'
+          AND ${table.scopeKey} = 'channel:' || ${table.channelId}::text
+          AND ${table.productId} IS NULL AND ${table.productVariantId} IS NULL)
+        OR (${table.scopeType} = 'product'
+          AND ${table.scopeKey} = 'channel:' || ${table.channelId}::text
+            || ':product:' || ${table.productId}::text
+          AND ${table.productId} IS NOT NULL AND ${table.productVariantId} IS NULL)
+        OR (${table.scopeType} = 'variant'
+          AND ${table.scopeKey} = 'channel:' || ${table.channelId}::text
+            || ':variant:' || ${table.productVariantId}::text
+          AND ${table.productId} IS NOT NULL AND ${table.productVariantId} IS NOT NULL)`,
+    ),
+    valuePresent: check(
+      "channel_exposure_policy_versions_value_chk",
+      sql`${table.allocationSemantics} IS NOT NULL OR ${table.eligible} IS NOT NULL
+        OR ${table.shareBps} IS NOT NULL OR ${table.holdbackSellableUnits} IS NOT NULL
+        OR ${table.maxPublishMode} IS NOT NULL
+        OR ${table.minPublishSellableUnits} IS NOT NULL`,
+    ),
+    semanticsValid: check(
+      "channel_exposure_policy_versions_semantics_chk",
+      sql`${table.allocationSemantics} IS NULL
+        OR ${table.allocationSemantics} IN ('exposure', 'partitioned')`,
+    ),
+    quantitiesValid: check(
+      "channel_exposure_policy_versions_quantity_chk",
+      sql`(${table.shareBps} IS NULL OR ${table.shareBps} BETWEEN 0 AND 10000)
+        AND (${table.holdbackSellableUnits} IS NULL OR ${table.holdbackSellableUnits} >= 0)
+        AND ((${table.maxPublishMode} IS NULL AND ${table.maxPublishSellableUnits} IS NULL)
+          OR (${table.maxPublishMode} = 'unlimited' AND ${table.maxPublishSellableUnits} IS NULL)
+          OR (${table.maxPublishMode} = 'units' AND ${table.maxPublishSellableUnits} IS NOT NULL
+            AND ${table.maxPublishSellableUnits} >= 0))
+        AND (${table.minPublishSellableUnits} IS NULL OR ${table.minPublishSellableUnits} >= 0)`,
+    ),
+    versionPositive: check("channel_exposure_policy_versions_version_chk", sql`${table.version} > 0`),
+    statusValid: check(
+      "channel_exposure_policy_versions_status_chk",
+      sql`${table.lifecycleStatus} IN ('draft', 'sealed', 'retired')`,
+    ),
+    hashValid: check(
+      "channel_exposure_policy_versions_hash_chk",
+      sql`${table.definitionHash} ~ '^[0-9a-f]{64}$' AND ${table.requestHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    actorValid: check(
+      "channel_exposure_policy_versions_actor_chk",
+      sql`char_length(btrim(${table.createdBy})) BETWEEN 1 AND 100
+        AND char_length(btrim(${table.changeReason})) BETWEEN 1 AND 1000`,
+    ),
+    predecessorValid: check(
+      "channel_exposure_policy_versions_predecessor_chk",
+      sql`(${table.version} = 1 AND ${table.supersedesPolicyId} IS NULL)
+        OR (${table.version} > 1 AND ${table.supersedesPolicyId} IS NOT NULL)`,
+    ),
+    lifecycleValid: check(
+      "channel_exposure_policy_versions_lifecycle_chk",
+      sql`(${table.lifecycleStatus} = 'draft'
+          AND ${table.sealedBy} IS NULL AND ${table.sealedAt} IS NULL
+          AND ${table.retiredBy} IS NULL AND ${table.retiredAt} IS NULL)
+        OR (${table.lifecycleStatus} = 'sealed'
+          AND ${table.sealedBy} IS NOT NULL AND btrim(${table.sealedBy}) <> ''
+          AND ${table.sealedAt} IS NOT NULL
+          AND ${table.retiredBy} IS NULL AND ${table.retiredAt} IS NULL)
+        OR (${table.lifecycleStatus} = 'retired'
+          AND ${table.sealedBy} IS NOT NULL AND btrim(${table.sealedBy}) <> ''
+          AND ${table.sealedAt} IS NOT NULL
+          AND ${table.retiredBy} IS NOT NULL AND btrim(${table.retiredBy}) <> ''
+          AND ${table.retiredAt} IS NOT NULL AND ${table.retiredAt} >= ${table.sealedAt})`,
+    ),
+  }),
+);
+
+export const channelExposurePolicyHeads = inventoryPlanningSchema.table(
+  "channel_exposure_policy_heads",
+  {
+    scopeKey: varchar("scope_key", { length: 200 }).primaryKey(),
+    channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "restrict" }),
+    activePolicyId: integer("active_policy_id"),
+    draftPolicyId: integer("draft_policy_id"),
+    revision: bigint("revision", { mode: "bigint" }).notNull().default(BigInt(1)),
+    updatedBy: varchar("updated_by", { length: 100 }).notNull(),
+    updateReason: varchar("update_reason", { length: 1000 }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    activePolicyForeignKey: foreignKey({
+      columns: [table.activePolicyId, table.scopeKey],
+      foreignColumns: [channelExposurePolicyVersions.id, channelExposurePolicyVersions.scopeKey],
+      name: "channel_exposure_policy_heads_active_fk",
+    }).onDelete("restrict"),
+    draftPolicyForeignKey: foreignKey({
+      columns: [table.draftPolicyId, table.scopeKey],
+      foreignColumns: [channelExposurePolicyVersions.id, channelExposurePolicyVersions.scopeKey],
+      name: "channel_exposure_policy_heads_draft_fk",
+    }).onDelete("restrict"),
+    pointersDistinct: check(
+      "channel_exposure_policy_heads_distinct_chk",
+      sql`${table.activePolicyId} IS NULL OR ${table.draftPolicyId} IS NULL
+        OR ${table.activePolicyId} <> ${table.draftPolicyId}`,
+    ),
+    revisionValid: check("channel_exposure_policy_heads_revision_chk", sql`${table.revision} >= 0`),
+    actorValid: check(
+      "channel_exposure_policy_heads_actor_chk",
+      sql`char_length(btrim(${table.updatedBy})) BETWEEN 1 AND 100
+        AND char_length(btrim(${table.updateReason})) BETWEEN 1 AND 1000`,
+    ),
+  }),
+);
+
+export const publicationSourceBindingVersions = inventoryPlanningSchema.table(
+  "publication_source_binding_versions",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    publicationTargetId: integer("publication_target_id").notNull()
+      .references(() => inventoryPublicationTargets.id, { onDelete: "restrict" }),
+    version: integer("version").notNull(),
+    lifecycleStatus: varchar("lifecycle_status", { length: 20 }).notNull().default("draft"),
+    definitionHash: varchar("definition_hash", { length: 64 }).notNull(),
+    supersedesBindingId: integer("supersedes_binding_id")
+      .references((): AnyPgColumn => publicationSourceBindingVersions.id, { onDelete: "restrict" }),
+    changeReason: varchar("change_reason", { length: 1000 }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    createdBy: varchar("created_by", { length: 100 }).notNull(),
+    sealedBy: varchar("sealed_by", { length: 100 }),
+    sealedAt: timestamp("sealed_at", { withTimezone: true }),
+    retiredBy: varchar("retired_by", { length: 100 }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    targetVersionUnique: uniqueIndex("publication_source_binding_versions_target_version_uq")
+      .on(table.publicationTargetId, table.version),
+    idTargetUnique: uniqueIndex("publication_source_binding_versions_id_target_uq")
+      .on(table.id, table.publicationTargetId),
+    idempotencyUnique: uniqueIndex("publication_source_binding_versions_idempotency_uq")
+      .on(table.idempotencyKey),
+    oneDraft: uniqueIndex("publication_source_binding_versions_one_draft_uq")
+      .on(table.publicationTargetId).where(sql`${table.lifecycleStatus} = 'draft'`),
+    successorUnique: uniqueIndex("publication_source_binding_versions_successor_uq")
+      .on(table.supersedesBindingId).where(sql`${table.supersedesBindingId} IS NOT NULL`),
+    versionPositive: check("publication_source_binding_versions_version_chk", sql`${table.version} > 0`),
+    statusValid: check(
+      "publication_source_binding_versions_status_chk",
+      sql`${table.lifecycleStatus} IN ('draft', 'sealed', 'retired')`,
+    ),
+    hashValid: check(
+      "publication_source_binding_versions_hash_chk",
+      sql`${table.definitionHash} ~ '^[0-9a-f]{64}$' AND ${table.requestHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    actorValid: check(
+      "publication_source_binding_versions_actor_chk",
+      sql`char_length(btrim(${table.createdBy})) BETWEEN 1 AND 100
+        AND char_length(btrim(${table.changeReason})) BETWEEN 1 AND 1000`,
+    ),
+    predecessorValid: check(
+      "publication_source_binding_versions_predecessor_chk",
+      sql`(${table.version} = 1 AND ${table.supersedesBindingId} IS NULL)
+        OR (${table.version} > 1 AND ${table.supersedesBindingId} IS NOT NULL)`,
+    ),
+    lifecycleValid: check(
+      "publication_source_binding_versions_lifecycle_chk",
+      sql`(${table.lifecycleStatus} = 'draft'
+          AND ${table.sealedBy} IS NULL AND ${table.sealedAt} IS NULL
+          AND ${table.retiredBy} IS NULL AND ${table.retiredAt} IS NULL)
+        OR (${table.lifecycleStatus} = 'sealed'
+          AND ${table.sealedBy} IS NOT NULL AND btrim(${table.sealedBy}) <> ''
+          AND ${table.sealedAt} IS NOT NULL
+          AND ${table.retiredBy} IS NULL AND ${table.retiredAt} IS NULL)
+        OR (${table.lifecycleStatus} = 'retired'
+          AND ${table.sealedBy} IS NOT NULL AND btrim(${table.sealedBy}) <> ''
+          AND ${table.sealedAt} IS NOT NULL
+          AND ${table.retiredBy} IS NOT NULL AND btrim(${table.retiredBy}) <> ''
+          AND ${table.retiredAt} IS NOT NULL AND ${table.retiredAt} >= ${table.sealedAt})`,
+    ),
+  }),
+);
+
+export const publicationSourceBindingMembers = inventoryPlanningSchema.table(
+  "publication_source_binding_members",
+  {
+    bindingId: integer("binding_id").notNull(),
+    publicationTargetId: integer("publication_target_id").notNull(),
+    fulfillmentNodeId: integer("fulfillment_node_id").notNull()
+      .references(() => fulfillmentNodes.id, { onDelete: "restrict" }),
+    priority: integer("priority").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    primaryKey: primaryKey({ columns: [table.bindingId, table.fulfillmentNodeId] }),
+    bindingForeignKey: foreignKey({
+      columns: [table.bindingId, table.publicationTargetId],
+      foreignColumns: [publicationSourceBindingVersions.id, publicationSourceBindingVersions.publicationTargetId],
+      name: "publication_source_binding_members_binding_fk",
+    }).onDelete("cascade"),
+    priorityUnique: uniqueIndex("publication_source_binding_members_priority_uq")
+      .on(table.bindingId, table.priority),
+    targetIndex: index("publication_source_binding_members_target_idx")
+      .on(table.publicationTargetId, table.bindingId, table.priority),
+    priorityValid: check("publication_source_binding_members_priority_chk", sql`${table.priority} > 0`),
+  }),
+);
+
+export const publicationSourceBindingHeads = inventoryPlanningSchema.table(
+  "publication_source_binding_heads",
+  {
+    publicationTargetId: integer("publication_target_id").primaryKey()
+      .references(() => inventoryPublicationTargets.id, { onDelete: "restrict" }),
+    activeBindingId: integer("active_binding_id"),
+    draftBindingId: integer("draft_binding_id"),
+    revision: bigint("revision", { mode: "bigint" }).notNull().default(BigInt(1)),
+    updatedBy: varchar("updated_by", { length: 100 }).notNull(),
+    updateReason: varchar("update_reason", { length: 1000 }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    activeBindingForeignKey: foreignKey({
+      columns: [table.activeBindingId, table.publicationTargetId],
+      foreignColumns: [publicationSourceBindingVersions.id, publicationSourceBindingVersions.publicationTargetId],
+      name: "publication_source_binding_heads_active_fk",
+    }).onDelete("restrict"),
+    draftBindingForeignKey: foreignKey({
+      columns: [table.draftBindingId, table.publicationTargetId],
+      foreignColumns: [publicationSourceBindingVersions.id, publicationSourceBindingVersions.publicationTargetId],
+      name: "publication_source_binding_heads_draft_fk",
+    }).onDelete("restrict"),
+    pointersDistinct: check(
+      "publication_source_binding_heads_distinct_chk",
+      sql`${table.activeBindingId} IS NULL OR ${table.draftBindingId} IS NULL
+        OR ${table.activeBindingId} <> ${table.draftBindingId}`,
+    ),
+    revisionValid: check("publication_source_binding_heads_revision_chk", sql`${table.revision} >= 0`),
+    actorValid: check(
+      "publication_source_binding_heads_actor_chk",
+      sql`char_length(btrim(${table.updatedBy})) BETWEEN 1 AND 100
+        AND char_length(btrim(${table.updateReason})) BETWEEN 1 AND 1000`,
+    ),
+  }),
+);
+
 export const inventoryPublicationOutbox = inventoryPlanningSchema.table(
   "inventory_publication_outbox",
   {
@@ -1538,6 +1831,14 @@ export const insertInventoryAvailabilityActivationProductEvidenceSchema = create
 ).omit({ id: true, createdAt: true });
 export const insertInventoryPublicationTargetSchema = createInsertSchema(inventoryPublicationTargets)
   .omit(generatedFields);
+export const insertChannelExposurePolicyVersionSchema = createInsertSchema(channelExposurePolicyVersions)
+  .omit(generatedFields);
+export const insertPublicationSourceBindingVersionSchema = createInsertSchema(
+  publicationSourceBindingVersions,
+).omit(generatedFields);
+export const insertPublicationSourceBindingMemberSchema = createInsertSchema(
+  publicationSourceBindingMembers,
+).omit({ createdAt: true });
 export const insertInventoryPublicationOutboxSchema = createInsertSchema(inventoryPublicationOutbox)
   .omit({ id: true, createdAt: true, updatedAt: true });
 export const insertInventoryPublicationAttemptSchema = createInsertSchema(inventoryPublicationAttempts)
@@ -1568,6 +1869,11 @@ export type InventoryAvailabilityActivationRun = typeof inventoryAvailabilityAct
 export type InventoryAvailabilityActivationProductEvidence =
   typeof inventoryAvailabilityActivationProductEvidence.$inferSelect;
 export type InventoryPublicationTarget = typeof inventoryPublicationTargets.$inferSelect;
+export type ChannelExposurePolicyVersion = typeof channelExposurePolicyVersions.$inferSelect;
+export type ChannelExposurePolicyHead = typeof channelExposurePolicyHeads.$inferSelect;
+export type PublicationSourceBindingVersion = typeof publicationSourceBindingVersions.$inferSelect;
+export type PublicationSourceBindingMember = typeof publicationSourceBindingMembers.$inferSelect;
+export type PublicationSourceBindingHead = typeof publicationSourceBindingHeads.$inferSelect;
 export type InventoryPublicationOutboxEntry = typeof inventoryPublicationOutbox.$inferSelect;
 export type InventoryPublicationAttempt = typeof inventoryPublicationAttempts.$inferSelect;
 export type InventoryPublicationReadback = typeof inventoryPublicationReadbacks.$inferSelect;
@@ -1603,6 +1909,15 @@ export type InsertInventoryAvailabilityActivationProductEvidence = z.infer<
   typeof insertInventoryAvailabilityActivationProductEvidenceSchema
 >;
 export type InsertInventoryPublicationTarget = z.infer<typeof insertInventoryPublicationTargetSchema>;
+export type InsertChannelExposurePolicyVersion = z.infer<
+  typeof insertChannelExposurePolicyVersionSchema
+>;
+export type InsertPublicationSourceBindingVersion = z.infer<
+  typeof insertPublicationSourceBindingVersionSchema
+>;
+export type InsertPublicationSourceBindingMember = z.infer<
+  typeof insertPublicationSourceBindingMemberSchema
+>;
 export type InsertInventoryPublicationOutboxEntry = z.infer<
   typeof insertInventoryPublicationOutboxSchema
 >;
