@@ -84,9 +84,21 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.orders[\s\S]*THEN 'ready'/);
   });
 
-  it("transitions to completed/cancelled when no pending items remain", () => {
-    expect(WMS_SYNC_SRC).toMatch(/ELSE 'completed'/);
+  it("cancels an order with no items, and otherwise leaves the status alone", () => {
+    // This used to assert `ELSE 'completed'`. That branch answered "finished"
+    // for an order that merely had nothing pickable - which is how #62269 and
+    // #62226 were marked done while sitting unpicked with zero units, and
+    // 'completed' is terminal, so neither could be repaired afterwards.
+    //
+    // The rollup cannot see picks or shipments and never stamps completed_at,
+    // so it has no evidence to complete anything: in the 30 days before the
+    // change it produced no legitimate completion at all, while all 13 real
+    // ones came from completeOrder()/updateOrderStatus() with a timestamp.
+    // No items at all is still safely cancellable; everything else it leaves
+    // to the writers that can actually evidence a transition.
     expect(WMS_SYNC_SRC).toMatch(/THEN 'cancelled'/);
+    expect(WMS_SYNC_SRC).toMatch(/ELSE w\.warehouse_status/);
+    expect(WMS_SYNC_SRC).not.toMatch(/ELSE 'completed'/);
   });
 
   it("syncs item cancellations and quantity changes from OMS to WMS", () => {
