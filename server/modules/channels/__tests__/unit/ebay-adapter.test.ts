@@ -25,6 +25,7 @@ import type { ChannelListingPayload } from "../../channel-adapter.interface";
 
 function createMockDb(metadata?: any) {
   const defaultConnection = {
+    id: 22,
     channelId: 2,
     accessToken: null,
     refreshToken: null,
@@ -219,6 +220,51 @@ describe("eBay Adapter", () => {
         managesOwnRates: true,
         enforcesDestinationEligibility: true,
       });
+    });
+  });
+
+  describe("canonical inventory readback", () => {
+    it("reads the exact eBay SKU through the selected connection context", async () => {
+      const getInventoryItem = vi.fn(async () => ({
+        availability: { shipToLocationAvailability: { quantity: 9 } },
+      }));
+      const getApiClient = vi.spyOn(adapter as any, "getApiClient")
+        .mockResolvedValue({ getInventoryItem });
+
+      const result = await adapter.readInventory(2, [{
+        variantId: 101,
+        sku: "CS-TL35-P25",
+        externalInventoryItemId: "CS-TL35-P25",
+        providerScopeType: "account",
+        externalScopeId: "EBAY_US",
+      }], {
+        authority: "canonical_outbox",
+        channelConnectionId: 22,
+        providerScopeType: "account",
+        externalScopeId: "EBAY_US",
+      });
+
+      expect(getApiClient).toHaveBeenCalledWith(2, 22);
+      expect(getInventoryItem).toHaveBeenCalledWith("CS-TL35-P25");
+      expect(result).toEqual([{ variantId: 101, observedQty: 9, status: "success" }]);
+    });
+
+    it("fails closed when channel-scoped OAuth cannot identify one exact connection", async () => {
+      const exactConnection = { id: 22, channelId: 2, metadata: { environment: "sandbox" } };
+      const chain = (data: any[]) => ({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        limit: vi.fn(async () => data),
+      });
+      const ambiguousDb = {
+        select: vi.fn()
+          .mockImplementationOnce(() => chain([exactConnection]))
+          .mockImplementationOnce(() => chain([exactConnection, { ...exactConnection, id: 23 }])),
+      };
+      const ambiguousAdapter = new EbayAdapter(ambiguousDb as any);
+
+      await expect((ambiguousAdapter as any).getConnectionMetadata(2, 22))
+        .rejects.toThrow("OAuth tokens are currently channel-scoped");
     });
   });
 

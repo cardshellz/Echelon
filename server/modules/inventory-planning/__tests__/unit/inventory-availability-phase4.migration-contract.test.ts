@@ -62,11 +62,14 @@ describe("inventory availability Phase 4 inactive contracts", () => {
     expect(routes).not.toMatch(/adapter\.(?:push|publish|sync|set)/i);
   });
 
-  it("exposes only a role-gated full-catalog dry-run control in the admin UI", () => {
+  it("exposes role-gated readback and conservative preparation without authority commit", () => {
     expect(adminPage).toContain('hasPermission("inventory_planning", "activate")');
     expect(adminPage).toContain("/api/inventory-planning/admin/activation-runs/dry-run");
-    expect(adminPage).toContain("There is no live activation endpoint");
+    expect(adminPage).toContain("/api/inventory-planning/admin/publication-readbacks/capture");
+    expect(adminPage).toContain("/api/inventory-planning/admin/activation-runs/prepare");
+    expect(adminPage).toContain("/api/inventory-planning/admin/activation-runs/abort");
+    expect(adminPage).toContain("there is no authority-commit endpoint");
     expect(adminPage).toContain("no provider write · no outbox enqueue");
-    expect(adminPage).not.toMatch(/\/api\/inventory-planning\/admin\/activation-runs\/(?:activate|publish)/);
+    expect(adminPage).not.toContain("/api/inventory-planning/admin/activation-runs/commit");
   });
 });

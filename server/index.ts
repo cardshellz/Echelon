@@ -29,6 +29,7 @@ import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
 import { startControlTowerProjectionScheduler } from "./modules/operations/control-tower-v2.scheduler";
 import { startPoEmailOutboxWorker } from "./modules/procurement/po-email-outbox.worker";
 import { startVariantAvailabilitySyncWorker } from "./modules/channels/variant-availability-sync.worker";
+import { startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
 import { startFinancialCommandRetentionWorker } from "./platform/commands/financial-command-retention.worker";
 import {
   startWebhookRetryWorker,
@@ -821,6 +822,16 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
           "scheduler",
           "Variant availability sync worker",
           "VARIANT_AVAILABILITY_SYNC_WORKER_DISABLED",
+        );
+      }
+
+      if (!schedulersDisabled("INVENTORY_PUBLICATION_WORKER_DISABLED")) {
+        startInventoryPublicationOutboxWorker(services.inventoryPublicationOutbox);
+      } else {
+        logSchedulerDisabled(
+          "scheduler",
+          "Inventory publication outbox worker",
+          "INVENTORY_PUBLICATION_WORKER_DISABLED",
         );
       }
 

@@ -84,6 +84,8 @@ export interface InventoryPushResult {
   pushedQty: number;
   status: "success" | "error" | "skipped";
   error?: string;
+  errorCode?: string;
+  retryable?: boolean;
   /**
    * Set when the adapter discovered the stored externalVariantId was stale
    * and recovered by re-resolving it on the channel (e.g. an eBay offerId
@@ -91,6 +93,40 @@ export interface InventoryPushResult {
    * the next sync doesn't hit the same dead id.
    */
   refreshedExternalVariantId?: string;
+}
+
+export interface InventoryPublicationContext {
+  /** Exact connection selected by the immutable publication target. */
+  channelConnectionId: number;
+  /** Exact provider inventory scope selected by the immutable publication target. */
+  providerScopeType: "account" | "location";
+  /** Exact provider account/location identity selected by the immutable publication target. */
+  externalScopeId: string;
+  /** Distinguishes the durable canonical outbox from legacy direct writers. */
+  authority: "canonical_outbox";
+}
+
+export interface InventoryReadItem {
+  variantId: number;
+  sku: string | null;
+  externalInventoryItemId: string;
+  providerScopeType: "account" | "location";
+  externalScopeId: string;
+}
+
+export interface InventoryReadResult {
+  variantId: number;
+  observedQty: number;
+  status: "success" | "error";
+  error?: string;
+  errorCode?: string;
+}
+
+export class InventoryPublicationConfigurationError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = "InventoryPublicationConfigurationError";
+  }
 }
 
 /** Per-variant pricing to push */
@@ -260,7 +296,18 @@ export interface IChannelAdapter {
   pushInventory(
     channelId: number,
     items: InventoryPushItem[],
+    context?: InventoryPublicationContext,
   ): Promise<InventoryPushResult[]>;
+
+  /** Provider inventory scopes this adapter can address without inference. */
+  readonly inventoryPublicationScopeTypes?: readonly ("account" | "location")[];
+
+  /** Authoritative quantity readback for activation and drift verification. */
+  readInventory?(
+    channelId: number,
+    items: InventoryReadItem[],
+    context: InventoryPublicationContext,
+  ): Promise<InventoryReadResult[]>;
 
   // -------------------------------------------------------------------------
   // Pricing

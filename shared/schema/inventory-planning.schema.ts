@@ -1178,6 +1178,8 @@ export const inventoryAvailabilityActivationRuns = inventoryPlanningSchema.table
   "availability_activation_runs",
   {
     id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    sourceDryRunId: bigint("source_dry_run_id", { mode: "bigint" })
+      .references((): AnyPgColumn => inventoryAvailabilityActivationRuns.id, { onDelete: "restrict" }),
     mode: varchar("mode", { length: 20 }).notNull(),
     scope: varchar("scope", { length: 30 }).notNull().default("full_catalog"),
     state: varchar("state", { length: 40 }).notNull(),
@@ -1195,7 +1197,12 @@ export const inventoryAvailabilityActivationRuns = inventoryPlanningSchema.table
     runtimeAuthorityChanged: boolean("runtime_authority_changed").notNull().default(false),
     providerWriteAttempted: boolean("provider_write_attempted").notNull().default(false),
     outboxEnqueued: boolean("outbox_enqueued").notNull().default(false),
+    providerPublicationRequired: boolean("provider_publication_required").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    preparedAt: timestamp("prepared_at", { withTimezone: true }),
+    publicationVerifiedAt: timestamp("publication_verified_at", { withTimezone: true }),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1252,6 +1259,86 @@ export const inventoryAvailabilityActivationRuns = inventoryPlanningSchema.table
     timeValid: check(
       "availability_activation_runs_time_chk",
       sql`${table.completedAt} IS NULL OR ${table.completedAt} >= ${table.startedAt}`,
+    ),
+  }),
+);
+
+export const inventoryAvailabilityRuntimeAuthority = inventoryPlanningSchema.table(
+  "availability_runtime_authority",
+  {
+    singletonKey: boolean("singleton_key").primaryKey().default(true),
+    authority: varchar("authority", { length: 20 }).notNull().default("legacy"),
+    activationRunId: bigint("activation_run_id", { mode: "bigint" })
+      .references(() => inventoryAvailabilityActivationRuns.id, { onDelete: "restrict" }),
+    revision: bigint("revision", { mode: "bigint" }).notNull().default(BigInt(1)),
+    changedBy: varchar("changed_by", { length: 100 }).notNull(),
+    changeReason: varchar("change_reason", { length: 1000 }).notNull(),
+    changedAt: timestamp("changed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    singletonValid: check("availability_runtime_authority_singleton_chk", sql`${table.singletonKey} = true`),
+    authorityValid: check(
+      "availability_runtime_authority_value_chk",
+      sql`${table.authority} IN ('legacy', 'canonical')`,
+    ),
+    revisionValid: check("availability_runtime_authority_revision_chk", sql`${table.revision} > 0`),
+    activationValid: check(
+      "availability_runtime_authority_activation_chk",
+      sql`(${table.authority} = 'legacy' AND ${table.activationRunId} IS NULL)
+        OR (${table.authority} = 'canonical' AND ${table.activationRunId} IS NOT NULL)`,
+    ),
+  }),
+);
+
+export const inventoryAvailabilityActivationCommands = inventoryPlanningSchema.table(
+  "availability_activation_commands",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    activationRunId: bigint("activation_run_id", { mode: "bigint" })
+      .references(() => inventoryAvailabilityActivationRuns.id, { onDelete: "restrict" }),
+    commandType: varchar("command_type", { length: 30 }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    resultHash: varchar("result_hash", { length: 64 }).notNull(),
+    requestPayload: jsonb("request_payload").notNull(),
+    resultPayload: jsonb("result_payload").notNull(),
+    actor: varchar("actor", { length: 100 }).notNull(),
+    reason: varchar("reason", { length: 1000 }).notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    idempotencyUnique: uniqueIndex("availability_activation_commands_idempotency_uq")
+      .on(table.idempotencyKey),
+    typeValid: check(
+      "availability_activation_commands_type_chk",
+      sql`${table.commandType} IN ('prepare', 'abort')`,
+    ),
+    hashValid: check(
+      "availability_activation_commands_hash_chk",
+      sql`${table.requestHash} ~ '^[0-9a-f]{64}$' AND ${table.resultHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+  }),
+);
+
+export const inventoryAvailabilityActivationFreezes = inventoryPlanningSchema.table(
+  "availability_activation_freezes",
+  {
+    activationRunId: bigint("activation_run_id", { mode: "bigint" }).primaryKey()
+      .references(() => inventoryAvailabilityActivationRuns.id, { onDelete: "restrict" }),
+    sourceDryRunId: bigint("source_dry_run_id", { mode: "bigint" }).notNull()
+      .references(() => inventoryAvailabilityActivationRuns.id, { onDelete: "restrict" }),
+    evidenceHash: varchar("evidence_hash", { length: 64 }).notNull(),
+    acquiredBy: varchar("acquired_by", { length: 100 }).notNull(),
+    acquiredAt: timestamp("acquired_at", { withTimezone: true }).notNull(),
+    releasedBy: varchar("released_by", { length: 100 }),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    releaseReason: varchar("release_reason", { length: 1000 }),
+  },
+  (table) => ({
+    evidenceValid: check(
+      "availability_activation_freezes_hash_chk",
+      sql`${table.evidenceHash} ~ '^[0-9a-f]{64}$'`,
     ),
   }),
 );
@@ -1781,6 +1868,12 @@ export const inventoryPublicationOutbox = inventoryPlanningSchema.table(
     channelConnectionIdSnapshot: integer("channel_connection_id_snapshot").notNull(),
     externalScopeIdSnapshot: varchar("external_scope_id_snapshot", { length: 240 }).notNull(),
     externalInventoryItemIdSnapshot: varchar("external_inventory_item_id_snapshot", { length: 240 }).notNull(),
+    publicationPhase: varchar("publication_phase", { length: 20 }).notNull().default("legacy"),
+    channelIdSnapshot: integer("channel_id_snapshot"),
+    providerKeySnapshot: varchar("provider_key_snapshot", { length: 60 }),
+    providerScopeTypeSnapshot: varchar("provider_scope_type_snapshot", { length: 30 }),
+    externalSkuSnapshot: varchar("external_sku_snapshot", { length: 100 }),
+    publicationTargetRevisionSnapshot: bigint("publication_target_revision_snapshot", { mode: "bigint" }),
     state: varchar("state", { length: 30 }).notNull().default("desired"),
     idempotencyKey: varchar("idempotency_key", { length: 160 }).notNull(),
     payloadHash: varchar("payload_hash", { length: 64 }).notNull(),
@@ -1812,6 +1905,10 @@ export const inventoryPublicationOutbox = inventoryPlanningSchema.table(
         'desired', 'queued', 'leased', 'acknowledged', 'verified', 'drifted',
         'retryable', 'dead_letter', 'superseded', 'cancelled'
       )`,
+    ),
+    phaseValid: check(
+      "inventory_publication_outbox_phase_chk",
+      sql`${table.publicationPhase} IN ('legacy', 'conservative', 'full')`,
     ),
     hashValid: check(
       "inventory_publication_outbox_hash_chk",
@@ -1867,6 +1964,66 @@ export const inventoryPublicationAttempts = inventoryPlanningSchema.table(
   }),
 );
 
+export const inventoryPublicationReadbackRuns = inventoryPlanningSchema.table(
+  "inventory_publication_readback_runs",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    state: varchar("state", { length: 20 }).notNull().default("running"),
+    idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    resultHash: varchar("result_hash", { length: 64 }),
+    resultPayload: jsonb("result_payload"),
+    requestedBy: varchar("requested_by", { length: 100 }).notNull(),
+    reason: varchar("reason", { length: 1000 }).notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    idempotencyUnique: uniqueIndex("inventory_publication_readback_runs_idempotency_uq")
+      .on(table.idempotencyKey),
+    stateValid: check(
+      "inventory_publication_readback_runs_state_chk",
+      sql`${table.state} IN ('running', 'completed', 'partial')`,
+    ),
+    hashValid: check(
+      "inventory_publication_readback_runs_hash_chk",
+      sql`${table.requestHash} ~ '^[0-9a-f]{64}$'
+        AND (${table.resultHash} IS NULL OR ${table.resultHash} ~ '^[0-9a-f]{64}$')`,
+    ),
+  }),
+);
+
+export const inventoryPublicationReadbackRunItems = inventoryPlanningSchema.table(
+  "inventory_publication_readback_run_items",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    readbackRunId: bigint("readback_run_id", { mode: "bigint" }).notNull()
+      .references(() => inventoryPublicationReadbackRuns.id, { onDelete: "restrict" }),
+    publicationTargetId: integer("publication_target_id").notNull()
+      .references(() => inventoryPublicationTargets.id, { onDelete: "restrict" }),
+    productVariantId: integer("product_variant_id").notNull()
+      .references(() => productVariants.id, { onDelete: "restrict" }),
+    status: varchar("status", { length: 20 }).notNull(),
+    evidenceHash: varchar("evidence_hash", { length: 64 }).notNull(),
+    evidencePayload: jsonb("evidence_payload").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identityUnique: uniqueIndex("inventory_publication_readback_run_items_identity_uq")
+      .on(table.readbackRunId, table.publicationTargetId, table.productVariantId),
+    statusValid: check(
+      "inventory_publication_readback_run_items_status_chk",
+      sql`${table.status} IN ('observed', 'failed')`,
+    ),
+    evidenceValid: check(
+      "inventory_publication_readback_run_items_evidence_chk",
+      sql`${table.evidenceHash} ~ '^[0-9a-f]{64}$' AND jsonb_typeof(${table.evidencePayload}) = 'object'`,
+    ),
+  }),
+);
+
 export const inventoryPublicationReadbacks = inventoryPlanningSchema.table(
   "inventory_publication_readbacks",
   {
@@ -1877,6 +2034,12 @@ export const inventoryPublicationReadbacks = inventoryPlanningSchema.table(
       .references(() => productVariants.id, { onDelete: "restrict" }),
     outboxId: bigint("outbox_id", { mode: "bigint" })
       .references(() => inventoryPublicationOutbox.id, { onDelete: "restrict" }),
+    readbackRunId: bigint("readback_run_id", { mode: "bigint" })
+      .references(() => inventoryPublicationReadbackRuns.id, { onDelete: "restrict" }),
+    channelConnectionIdSnapshot: integer("channel_connection_id_snapshot"),
+    providerScopeTypeSnapshot: varchar("provider_scope_type_snapshot", { length: 30 }),
+    externalScopeIdSnapshot: varchar("external_scope_id_snapshot", { length: 240 }),
+    publicationTargetRevisionSnapshot: bigint("publication_target_revision_snapshot", { mode: "bigint" }),
     externalInventoryItemIdSnapshot: varchar("external_inventory_item_id_snapshot", { length: 240 }),
     observedQuantity: bigint("observed_quantity", { mode: "bigint" }).notNull(),
     matchesDesired: boolean("matches_desired"),
@@ -1913,6 +2076,7 @@ export const inventoryAvailabilityActivationEvents = inventoryPlanningSchema.tab
     actor: varchar("actor", { length: 100 }).notNull(),
     reason: varchar("reason", { length: 1000 }).notNull(),
     evidenceHash: varchar("evidence_hash", { length: 64 }).notNull(),
+    evidencePayload: jsonb("evidence_payload").notNull().default(sql`'{}'::jsonb`),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1965,6 +2129,15 @@ export const insertPlannerClaimSimulationRunSchema = createInsertSchema(plannerC
 export const insertInventoryAvailabilityActivationRunSchema = createInsertSchema(
   inventoryAvailabilityActivationRuns,
 ).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertInventoryAvailabilityRuntimeAuthoritySchema = createInsertSchema(
+  inventoryAvailabilityRuntimeAuthority,
+).omit({ changedAt: true });
+export const insertInventoryAvailabilityActivationCommandSchema = createInsertSchema(
+  inventoryAvailabilityActivationCommands,
+).omit({ id: true, createdAt: true });
+export const insertInventoryAvailabilityActivationFreezeSchema = createInsertSchema(
+  inventoryAvailabilityActivationFreezes,
+);
 export const insertInventoryAvailabilityActivationProductEvidenceSchema = createInsertSchema(
   inventoryAvailabilityActivationProductEvidence,
 ).omit({ id: true, createdAt: true });
@@ -1985,6 +2158,12 @@ export const insertInventoryPublicationOutboxSchema = createInsertSchema(invento
   .omit({ id: true, createdAt: true, updatedAt: true });
 export const insertInventoryPublicationAttemptSchema = createInsertSchema(inventoryPublicationAttempts)
   .omit({ id: true, createdAt: true });
+export const insertInventoryPublicationReadbackRunSchema = createInsertSchema(
+  inventoryPublicationReadbackRuns,
+).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertInventoryPublicationReadbackRunItemSchema = createInsertSchema(
+  inventoryPublicationReadbackRunItems,
+).omit({ id: true, createdAt: true });
 export const insertInventoryPublicationReadbackSchema = createInsertSchema(inventoryPublicationReadbacks)
   .omit({ id: true, recordedAt: true });
 export const insertInventoryAvailabilityActivationEventSchema = createInsertSchema(
@@ -2008,6 +2187,9 @@ export type PlannerShadowRun = typeof plannerShadowRuns.$inferSelect;
 export type PlannerShadowResult = typeof plannerShadowResults.$inferSelect;
 export type PlannerClaimSimulationRun = typeof plannerClaimSimulationRuns.$inferSelect;
 export type InventoryAvailabilityActivationRun = typeof inventoryAvailabilityActivationRuns.$inferSelect;
+export type InventoryAvailabilityRuntimeAuthority = typeof inventoryAvailabilityRuntimeAuthority.$inferSelect;
+export type InventoryAvailabilityActivationCommand = typeof inventoryAvailabilityActivationCommands.$inferSelect;
+export type InventoryAvailabilityActivationFreeze = typeof inventoryAvailabilityActivationFreezes.$inferSelect;
 export type InventoryAvailabilityActivationProductEvidence =
   typeof inventoryAvailabilityActivationProductEvidence.$inferSelect;
 export type InventoryPublicationTarget = typeof inventoryPublicationTargets.$inferSelect;
@@ -2020,6 +2202,8 @@ export type PublicationVariantMappingVersion = typeof publicationVariantMappingV
 export type PublicationVariantMappingHead = typeof publicationVariantMappingHeads.$inferSelect;
 export type InventoryPublicationOutboxEntry = typeof inventoryPublicationOutbox.$inferSelect;
 export type InventoryPublicationAttempt = typeof inventoryPublicationAttempts.$inferSelect;
+export type InventoryPublicationReadbackRun = typeof inventoryPublicationReadbackRuns.$inferSelect;
+export type InventoryPublicationReadbackRunItem = typeof inventoryPublicationReadbackRunItems.$inferSelect;
 export type InventoryPublicationReadback = typeof inventoryPublicationReadbacks.$inferSelect;
 export type InventoryAvailabilityActivationEvent = typeof inventoryAvailabilityActivationEvents.$inferSelect;
 
@@ -2049,6 +2233,15 @@ export type InsertPlannerClaimSimulationRun = z.infer<typeof insertPlannerClaimS
 export type InsertInventoryAvailabilityActivationRun = z.infer<
   typeof insertInventoryAvailabilityActivationRunSchema
 >;
+export type InsertInventoryAvailabilityRuntimeAuthority = z.infer<
+  typeof insertInventoryAvailabilityRuntimeAuthoritySchema
+>;
+export type InsertInventoryAvailabilityActivationCommand = z.infer<
+  typeof insertInventoryAvailabilityActivationCommandSchema
+>;
+export type InsertInventoryAvailabilityActivationFreeze = z.infer<
+  typeof insertInventoryAvailabilityActivationFreezeSchema
+>;
 export type InsertInventoryAvailabilityActivationProductEvidence = z.infer<
   typeof insertInventoryAvailabilityActivationProductEvidenceSchema
 >;
@@ -2069,6 +2262,12 @@ export type InsertInventoryPublicationOutboxEntry = z.infer<
   typeof insertInventoryPublicationOutboxSchema
 >;
 export type InsertInventoryPublicationAttempt = z.infer<typeof insertInventoryPublicationAttemptSchema>;
+export type InsertInventoryPublicationReadbackRun = z.infer<
+  typeof insertInventoryPublicationReadbackRunSchema
+>;
+export type InsertInventoryPublicationReadbackRunItem = z.infer<
+  typeof insertInventoryPublicationReadbackRunItemSchema
+>;
 export type InsertInventoryPublicationReadback = z.infer<typeof insertInventoryPublicationReadbackSchema>;
 export type InsertInventoryAvailabilityActivationEvent = z.infer<
   typeof insertInventoryAvailabilityActivationEventSchema

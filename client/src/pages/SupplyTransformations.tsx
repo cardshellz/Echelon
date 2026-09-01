@@ -28,7 +28,13 @@ import {
   type PlannerShadowRunDto,
 } from "@shared/types/inventory-availability-planner";
 import {
+  abortInventoryActivationRequestSchema,
+  captureInventoryPublicationReadbacksRequestSchema,
   inventoryActivationDryRunSchema,
+  inventoryActivationCommandResultSchema,
+  inventoryPublicationReadbackRunSchema,
+  openInventoryActivationStatusResponseSchema,
+  prepareInventoryActivationRequestSchema,
   runInventoryActivationDryRunRequestSchema,
 } from "@shared/types/inventory-availability-phase4";
 import { z } from "zod";
@@ -97,6 +103,9 @@ export default function SupplyTransformations() {
   const refreshBackfillIdempotencyKey = useRef<string | null>(null);
   const reviewIdempotencyKey = useRef<string | null>(null);
   const activationDryRunIdempotencyKey = useRef<string | null>(null);
+  const publicationReadbackIdempotencyKey = useRef<string | null>(null);
+  const activationPrepareIdempotencyKey = useRef<string | null>(null);
+  const activationAbortIdempotencyKey = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
   const [productId, setProductId] = useState<number | null>(null);
@@ -112,6 +121,9 @@ export default function SupplyTransformations() {
   const [refreshBackfillReason, setRefreshBackfillReason] = useState("");
   const [reviewReason, setReviewReason] = useState("");
   const [activationDryRunReason, setActivationDryRunReason] = useState("");
+  const [publicationReadbackReason, setPublicationReadbackReason] = useState("");
+  const [activationPrepareReason, setActivationPrepareReason] = useState("");
+  const [activationAbortReason, setActivationAbortReason] = useState("");
 
   const migrationQueueQuery = useQuery<InventoryAvailabilityBackfillQueueResponse>({
     queryKey: ["/api/inventory-planning/admin/migration-queue"],
@@ -519,6 +531,133 @@ export default function SupplyTransformations() {
     },
   });
 
+  const capturePublicationReadbacks = useMutation({
+    mutationFn: () => {
+      const request = captureInventoryPublicationReadbacksRequestSchema.parse({
+        idempotencyKey: publicationReadbackIdempotencyKey.current
+          ?? `inventory-publication-readback:${crypto.randomUUID()}`,
+        reason: publicationReadbackReason,
+      });
+      publicationReadbackIdempotencyKey.current = request.idempotencyKey;
+      return fetchJson(
+        "/api/inventory-planning/admin/publication-readbacks/capture",
+        inventoryPublicationReadbackRunSchema,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+    },
+    onSuccess: (result) => {
+      publicationReadbackIdempotencyKey.current = null;
+      runActivationDryRun.reset();
+      toast({
+        title: result.state === "completed" ? "Provider quantities refreshed" : "Some readbacks failed",
+        description: `${result.observedRows} exact target/SKU rows observed; ${result.failedRows} failed. Run a new activation dry run next.`,
+        variant: result.state === "completed" ? "default" : "destructive",
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Provider readback failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const openActivationQuery = useQuery({
+    queryKey: ["/api/inventory-planning/admin/activation-runs/open"],
+    queryFn: () => fetchJson(
+      "/api/inventory-planning/admin/activation-runs/open",
+      openInventoryActivationStatusResponseSchema,
+    ),
+    enabled: canActivate,
+    refetchInterval: (query) => query.state.data?.activation?.state === "publishing" ? 3_000 : false,
+  });
+
+  const prepareActivation = useMutation({
+    mutationFn: () => {
+      const dryRun = runActivationDryRun.data;
+      if (!dryRun || dryRun.state !== "ready_for_publication") {
+        throw new Error("Run a fresh, ready full-catalog activation dry run first.");
+      }
+      const request = prepareInventoryActivationRequestSchema.parse({
+        sourceDryRunId: dryRun.activationRunId,
+        expectedDryRunResultHash: dryRun.resultHash,
+        idempotencyKey: activationPrepareIdempotencyKey.current
+          ?? `inventory-availability-activation-prepare:${crypto.randomUUID()}`,
+        reason: activationPrepareReason,
+      });
+      activationPrepareIdempotencyKey.current = request.idempotencyKey;
+      return fetchJson(
+        "/api/inventory-planning/admin/activation-runs/prepare",
+        inventoryActivationCommandResultSchema,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+    },
+    onSuccess: (result) => {
+      activationPrepareIdempotencyKey.current = null;
+      void openActivationQuery.refetch();
+      toast({
+        title: result.state === "publication_verified"
+          ? "Conservative preparation verified"
+          : "Conservative publication queued",
+        description: "Legacy ATP and reservations remain authoritative. Canonical authority cannot be committed from this release.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Activation preparation failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const abortActivation = useMutation({
+    mutationFn: () => {
+      const activationRunId = openActivationQuery.data?.activation?.activationRunId
+        ?? prepareActivation.data?.activationRunId;
+      if (!activationRunId) throw new Error("No activation preparation is available to abort.");
+      const request = abortInventoryActivationRequestSchema.parse({
+        activationRunId,
+        idempotencyKey: activationAbortIdempotencyKey.current
+          ?? `inventory-availability-activation-abort:${crypto.randomUUID()}`,
+        reason: activationAbortReason,
+      });
+      activationAbortIdempotencyKey.current = request.idempotencyKey;
+      return fetchJson(
+        "/api/inventory-planning/admin/activation-runs/abort",
+        inventoryActivationCommandResultSchema,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+    },
+    onSuccess: () => {
+      activationAbortIdempotencyKey.current = null;
+      setActivationAbortReason("");
+      void openActivationQuery.refetch();
+      toast({
+        title: "Activation preparation aborted",
+        description: "The configuration freeze was released. Runtime authority remains legacy.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Activation abort failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const openActivationStatus = openActivationQuery.data?.activation ?? null;
+  const displayedActivationId = openActivationStatus?.activationRunId
+    ?? (abortActivation.data === undefined ? prepareActivation.data?.activationRunId : undefined);
+  const displayedActivationState = openActivationStatus?.state
+    ?? (abortActivation.data === undefined ? prepareActivation.data?.state : undefined);
+  const displayedRuntimeAuthority = openActivationStatus?.runtimeAuthority
+    ?? (abortActivation.data === undefined ? prepareActivation.data?.runtimeAuthority : undefined);
+  const activationStatusUnavailable = canActivate
+    && (openActivationQuery.isLoading || openActivationQuery.isError);
+
   const isEditing = Boolean(view && (view.draftModel === null || editingCurrentDraft));
   const activeVariants = view?.variants.filter((variant) => variant.isActive) ?? [];
   const activeAssemblyRecipes = view?.recipes.filter((recipe) =>
@@ -742,8 +881,9 @@ export default function SupplyTransformations() {
           <div>
             <div className="font-semibold text-amber-900">Legacy runtime authority remains active</div>
             <div className="text-amber-800">
-              Draft, shadow, claim-simulation, and activation dry-run evidence cannot activate a
-              model or publish inventory. There is no live activation endpoint.
+              This release can capture provider readback and conservatively lower external
+              quantities for a reviewed preparation. It cannot switch ATP or reservation authority
+              to canonical; there is no authority-commit endpoint.
             </div>
           </div>
         </CardContent>
@@ -782,14 +922,34 @@ export default function SupplyTransformations() {
         <CardHeader>
           <CardTitle>Phase 4 full-catalog activation dry run</CardTitle>
           <p className="text-sm text-muted-foreground">
-            Revalidates every product and compares proposed channel quantities with legacy
-            acknowledgement and provider-readback evidence. It cannot call an adapter or enqueue
-            publication work.
+            First refresh exact provider quantities, then run the full-catalog dry run. A ready run
+            may prepare conservative publication while legacy ATP and reservations stay authoritative.
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="space-y-2 rounded-md border p-3">
+            <Label htmlFor="publication-readback-reason">1. Provider-readback reason</Label>
+            <Textarea
+              id="publication-readback-reason"
+              value={publicationReadbackReason}
+              onChange={(event) => {
+                setPublicationReadbackReason(event.target.value);
+                publicationReadbackIdempotencyKey.current = null;
+              }}
+              placeholder="Why exact provider quantities are being refreshed"
+              disabled={!canActivate}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!canActivate || !publicationReadbackReason.trim() || capturePublicationReadbacks.isPending}
+              onClick={() => capturePublicationReadbacks.mutate()}
+            >
+              {capturePublicationReadbacks.isPending ? "Reading providers…" : "Refresh provider quantities"}
+            </Button>
+          </div>
           <div className="space-y-2">
-            <Label htmlFor="activation-dry-run-reason">Review reason</Label>
+            <Label htmlFor="activation-dry-run-reason">2. Full-catalog review reason</Label>
             <Textarea
               id="activation-dry-run-reason"
               value={activationDryRunReason}
@@ -835,6 +995,86 @@ export default function SupplyTransformations() {
               </div>
             </div>
           )}
+          <div className="space-y-2 rounded-md border border-amber-300 bg-amber-50/40 p-3">
+            <Label htmlFor="activation-prepare-reason">3. Conservative-publication reason</Label>
+            <Textarea
+              id="activation-prepare-reason"
+              value={activationPrepareReason}
+              onChange={(event) => {
+                setActivationPrepareReason(event.target.value);
+                activationPrepareIdempotencyKey.current = null;
+              }}
+              placeholder="Why the reviewed catalog is ready for conservative provider publication"
+              disabled={!canActivate || activationStatusUnavailable || displayedActivationId !== undefined}
+            />
+            <div className="text-xs text-amber-900">
+              This action can lower provider quantities to min(current provider quantity, proposed
+              quantity). It cannot raise quantities or switch runtime ATP/reservation authority.
+            </div>
+            <Button
+              type="button"
+              disabled={
+                !canActivate
+                || runActivationDryRun.data?.state !== "ready_for_publication"
+                || !activationPrepareReason.trim()
+                || prepareActivation.isPending
+                || activationStatusUnavailable
+                || displayedActivationId !== undefined
+              }
+              onClick={() => prepareActivation.mutate()}
+            >
+              {prepareActivation.isPending ? "Preparing conservative publication…" : "Prepare conservative publication"}
+            </Button>
+            {openActivationQuery.isError && (
+              <div className="text-xs text-destructive">
+                Open preparation status could not be verified. Preparation is disabled until status reload succeeds.
+              </div>
+            )}
+            {displayedActivationId !== undefined && displayedActivationState !== undefined && (
+              <div className="space-y-2 rounded-md border bg-background p-3">
+                <div className="text-sm">
+                  Run {displayedActivationId} · {displayedActivationState.replaceAll("_", " ")} ·
+                  runtime authority {displayedRuntimeAuthority}
+                </div>
+                {openActivationStatus && (
+                  <div className="text-xs text-muted-foreground">
+                    {openActivationStatus.outbox.verified}/{openActivationStatus.outbox.total} verified ·{
+                      " "}{openActivationStatus.outbox.queued} queued ·{
+                      " "}{openActivationStatus.outbox.retryableOrDrifted} retrying/drifted ·{
+                      " "}{openActivationStatus.outbox.deadLetter} dead letter
+                  </div>
+                )}
+                {(openActivationStatus?.outbox.leased ?? 0) > 0 && (
+                  <div className="text-xs text-amber-800">
+                    Wait for {openActivationStatus!.outbox.leased} in-flight provider write(s) before aborting.
+                  </div>
+                )}
+                <Label htmlFor="activation-abort-reason">Abort reason</Label>
+                <Input
+                  id="activation-abort-reason"
+                  value={activationAbortReason}
+                  onChange={(event) => {
+                    setActivationAbortReason(event.target.value);
+                    activationAbortIdempotencyKey.current = null;
+                  }}
+                  placeholder="Why this preparation should be stopped"
+                />
+                <Button
+                  type="button"
+                  variant="destructive"
+                  disabled={
+                    !activationAbortReason.trim()
+                    || abortActivation.isPending
+                    || openActivationQuery.isFetching
+                    || (openActivationStatus?.outbox.leased ?? 0) > 0
+                  }
+                  onClick={() => abortActivation.mutate()}
+                >
+                  {abortActivation.isPending ? "Aborting…" : "Abort preparation"}
+                </Button>
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
 
