@@ -319,7 +319,13 @@
     "modules/identity",
     "modules/inventory"
   ],
+  "inventory.availability_activation_commands": [
+    "modules/inventory-planning"
+  ],
   "inventory.availability_activation_events": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_activation_freezes": [
     "modules/inventory-planning"
   ],
   "inventory.availability_activation_product_evidence": [
@@ -399,6 +405,21 @@
   ],
   "inventory.inventory_lots": [
     "modules/inventory"
+  ],
+  "inventory.inventory_publication_attempts": [
+    "modules/inventory-planning"
+  ],
+  "inventory.inventory_publication_outbox": [
+    "modules/inventory-planning"
+  ],
+  "inventory.inventory_publication_readback_run_items": [
+    "modules/inventory-planning"
+  ],
+  "inventory.inventory_publication_readback_runs": [
+    "modules/inventory-planning"
+  ],
+  "inventory.inventory_publication_readbacks": [
+    "modules/inventory-planning"
   ],
   "inventory.inventory_publication_targets": [
     "modules/inventory-planning"

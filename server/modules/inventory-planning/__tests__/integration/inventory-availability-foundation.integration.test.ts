@@ -56,6 +56,10 @@ const publicationReadinessMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0633_inventory_publication_readiness.sql"),
   "utf8",
 );
+const availabilityCutoverMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0638_inventory_availability_cutover.sql"),
+  "utf8",
+);
 const HASH = "a".repeat(64);
 const FIXED_TIME = "2026-08-26T12:00:00.000Z";
 
@@ -220,6 +224,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(demandObservationDaysMigrationSql);
       await migrationClient.query(channelExposureMigrationSql);
       await migrationClient.query(publicationReadinessMigrationSql);
+      await migrationClient.query(availabilityCutoverMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -301,6 +306,89 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     );
     return result.rows[0].id;
   }
+
+  it("keeps runtime authority legacy and rejects an undeclared commit command", async () => {
+    const dryRun = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.availability_activation_runs (
+         mode, scope, state, request_hash, result_hash,
+         expected_catalog_input_hash, expected_catalog_result_hash,
+         captured_catalog_input_hash, captured_catalog_result_hash,
+         evidence_payload, blocker_codes, idempotency_key, reason, requested_by,
+         runtime_authority_changed, provider_write_attempted, outbox_enqueued,
+         started_at, completed_at
+       ) VALUES (
+         'dry_run', 'full_catalog', 'ready_for_publication', $1, $1,
+         $1, $1, $1, $1, '{}'::jsonb, '[]'::jsonb,
+         'integration-cutover-dry-run', 'Integration cutover evidence', 'integration-test',
+         false, false, false, $2, $2
+       ) RETURNING id`,
+      [HASH, FIXED_TIME],
+    );
+    const activation = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.availability_activation_runs (
+         mode, scope, state, source_dry_run_id, request_hash, result_hash,
+         expected_catalog_input_hash, expected_catalog_result_hash,
+         captured_catalog_input_hash, captured_catalog_result_hash,
+         evidence_payload, blocker_codes, idempotency_key, reason, requested_by,
+         runtime_authority_changed, provider_write_attempted, outbox_enqueued,
+         provider_publication_required, started_at, prepared_at
+       ) VALUES (
+         'activation', 'full_catalog', 'publishing', $1, $2, $2,
+         $2, $2, $2, $2, '{}'::jsonb, '[]'::jsonb,
+         'integration-cutover-prepare', 'Integration conservative preparation', 'integration-test',
+         false, false, true, true, $3, $3
+       ) RETURNING id`,
+      [dryRun.rows[0]!.id, "b".repeat(64), FIXED_TIME],
+    );
+    await pool.query(
+      `INSERT INTO inventory.availability_activation_freezes (
+         activation_run_id, source_dry_run_id, evidence_hash, acquired_by, acquired_at
+       ) VALUES ($1, $2, $3, 'integration-test', $4)`,
+      [activation.rows[0]!.id, dryRun.rows[0]!.id, "c".repeat(64), FIXED_TIME],
+    );
+
+    try {
+      const authority = await pool.query<{ authority: string; activation_run_id: string | null }>(
+        `SELECT authority, activation_run_id
+         FROM inventory.availability_runtime_authority WHERE singleton_key = true`,
+      );
+      expect(authority.rows[0]).toEqual({ authority: "legacy", activation_run_id: null });
+      await expectDatabaseError(
+        () => pool.query(
+          `INSERT INTO inventory.availability_activation_commands (
+             activation_run_id, command_type, idempotency_key, request_hash, result_hash,
+             request_payload, result_payload, actor, reason, occurred_at
+           ) VALUES ($1, 'commit', 'integration-cutover-commit', $2, $2,
+             '{}'::jsonb, '{}'::jsonb, 'integration-test', 'Undeclared command', $3)`,
+          [activation.rows[0]!.id, HASH, FIXED_TIME],
+        ),
+        "availability_activation_commands_type_chk",
+      );
+      await expectDatabaseError(
+        () => pool.query(
+          `UPDATE inventory.availability_runtime_authority
+           SET authority = 'canonical', activation_run_id = $1, revision = revision + 1,
+               changed_by = 'integration-test', change_reason = 'Invalid early switch'
+           WHERE singleton_key = true`,
+          [activation.rows[0]!.id],
+        ),
+        "canonical authority requires its activation run to be activating",
+      );
+    } finally {
+      await pool.query(
+        `UPDATE inventory.availability_activation_runs
+         SET state = 'failed', failed_at = $2, completed_at = $2 WHERE id = $1`,
+        [activation.rows[0]!.id, FIXED_TIME],
+      );
+      await pool.query(
+        `UPDATE inventory.availability_activation_freezes
+         SET released_by = 'integration-test', released_at = $2,
+             release_reason = 'Integration cleanup'
+         WHERE activation_run_id = $1`,
+        [activation.rows[0]!.id, FIXED_TIME],
+      );
+    }
+  });
 
   it("removes the repository-only recipe grouping key before strict backfill DTO validation", async () => {
     const output = await seedProductAndWarehouse([1]);

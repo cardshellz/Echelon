@@ -26,6 +26,9 @@ import type {
   ListingPushResult,
   InventoryPushItem,
   InventoryPushResult,
+  InventoryPublicationContext,
+  InventoryReadItem,
+  InventoryReadResult,
   PricingPushItem,
   PricingPushResult,
   ChannelOrder,
@@ -35,6 +38,7 @@ import type {
   CancellationPayload,
   CancellationPushResult,
 } from "../channel-adapter.interface";
+import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
 
 import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service";
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
@@ -100,14 +104,15 @@ function formatEbayOfferError(
 export class EbayAdapter implements IChannelAdapter {
   readonly adapterName = "eBay";
   readonly providerKey = "ebay";
+  readonly inventoryPublicationScopeTypes = ["account"] as const;
   readonly shippingCapabilities = Object.freeze({
     acceptsEngineQuotes: false,
     managesOwnRates: true,
     enforcesDestinationEligibility: true,
   });
 
-  private authService: EbayAuthService | null = null;
-  private apiClients = new Map<number, EbayApiClient>();
+  private authServices = new Map<string, EbayAuthService>();
+  private apiClients = new Map<string, EbayApiClient>();
   private readonly listingBuilder: EbayListingBuilder;
   private readonly listingConnector: EbayMarketplaceListingConnector;
 
@@ -229,8 +234,19 @@ export class EbayAdapter implements IChannelAdapter {
   async pushInventory(
     channelId: number,
     items: InventoryPushItem[],
+    context?: InventoryPublicationContext,
   ): Promise<InventoryPushResult[]> {
-    const client = await this.getApiClient(channelId);
+    if (context && context.providerScopeType !== "account") {
+      return items.map((item) => ({
+        variantId: item.variantId,
+        pushedQty: 0,
+        status: "error" as const,
+        error: "eBay canonical inventory publication requires an exact account scope",
+        errorCode: "EBAY_INVENTORY_SCOPE_UNSUPPORTED",
+        retryable: false,
+      }));
+    }
+    const client = await this.getApiClient(channelId, context?.channelConnectionId);
     const results: InventoryPushResult[] = [];
 
     // eBay supports bulk update — batch up to 25 items per call
@@ -382,6 +398,45 @@ export class EbayAdapter implements IChannelAdapter {
       await this.delay(500);
     }
 
+    return results;
+  }
+
+  async readInventory(
+    channelId: number,
+    items: InventoryReadItem[],
+    context: InventoryPublicationContext,
+  ): Promise<InventoryReadResult[]> {
+    if (context.providerScopeType !== "account") {
+      return items.map((item) => ({
+        variantId: item.variantId,
+        observedQty: 0,
+        status: "error" as const,
+        error: "eBay canonical inventory readback requires an exact account scope",
+        errorCode: "EBAY_INVENTORY_SCOPE_UNSUPPORTED",
+      }));
+    }
+    const client = await this.getApiClient(channelId, context.channelConnectionId);
+    const results: InventoryReadResult[] = [];
+    for (const item of items) {
+      try {
+        if (!item.sku) throw new Error("eBay inventory readback requires the exact external SKU");
+        const inventoryItem = await client.getInventoryItem(item.sku);
+        const observedQty = Number(
+          inventoryItem?.availability?.shipToLocationAvailability?.quantity,
+        );
+        if (!Number.isSafeInteger(observedQty) || observedQty < 0) {
+          throw new Error("eBay did not return a nonnegative integer inventory quantity");
+        }
+        results.push({ variantId: item.variantId, observedQty, status: "success" });
+      } catch (error) {
+        results.push({
+          variantId: item.variantId,
+          observedQty: 0,
+          status: "error",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     return results;
   }
 
@@ -794,60 +849,90 @@ export class EbayAdapter implements IChannelAdapter {
   // Helper Methods
   // -------------------------------------------------------------------------
 
-  private async getApiClient(channelId: number): Promise<EbayApiClient> {
-    if (this.apiClients.has(channelId)) {
-      return this.apiClients.get(channelId)!;
+  private async getApiClient(channelId: number, channelConnectionId?: number): Promise<EbayApiClient> {
+    const cacheKey = `${channelId}:${channelConnectionId ?? "default"}`;
+    if (this.apiClients.has(cacheKey)) {
+      return this.apiClients.get(cacheKey)!;
     }
 
-    const authService = await this.getAuthService(channelId);
-    const metadata = await this.getConnectionMetadata(channelId);
+    const authService = await this.getAuthService(channelId, channelConnectionId);
+    const metadata = await this.getConnectionMetadata(channelId, channelConnectionId);
     const environment = metadata.environment || "production";
 
     const client = createEbayApiClient(authService, channelId, environment);
-    this.apiClients.set(channelId, client);
+    this.apiClients.set(cacheKey, client);
     return client;
   }
 
-  private async getAuthService(channelId: number): Promise<EbayAuthService> {
-    if (this.authService) return this.authService;
+  private async getAuthService(
+    channelId: number,
+    channelConnectionId?: number,
+  ): Promise<EbayAuthService> {
+    const cacheKey = `${channelId}:${channelConnectionId ?? "default"}`;
+    const cached = this.authServices.get(cacheKey);
+    if (cached) return cached;
 
     // Try env vars first, fall back to connection metadata
     try {
       const config = createEbayAuthConfig();
-      this.authService = new EbayAuthService(this.db, config);
-      return this.authService;
+      const service = new EbayAuthService(this.db, config);
+      this.authServices.set(cacheKey, service);
+      return service;
     } catch {
       // Fall back to connection metadata
-      const metadata = await this.getConnectionMetadata(channelId);
+      const metadata = await this.getConnectionMetadata(channelId, channelConnectionId);
       if (!metadata.clientId || !metadata.clientSecret || !metadata.ruName) {
         throw new Error(
           "eBay OAuth config not found. Set EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, EBAY_RUNAME " +
           "env vars or store in channel connection metadata.",
         );
       }
-      this.authService = new EbayAuthService(this.db, {
+      const service = new EbayAuthService(this.db, {
         clientId: metadata.clientId,
         clientSecret: metadata.clientSecret,
         ruName: metadata.ruName,
         environment: metadata.environment || "production",
       });
-      return this.authService;
+      this.authServices.set(cacheKey, service);
+      return service;
     }
   }
 
   private async getConnectionMetadata(
     channelId: number,
+    channelConnectionId?: number,
   ): Promise<EbayConnectionMetadata> {
     const [conn] = await this.db
       .select()
       .from(channelConnections)
-      .where(eq(channelConnections.channelId, channelId))
+      .where(channelConnectionId === undefined
+        ? eq(channelConnections.channelId, channelId)
+        : and(
+          eq(channelConnections.id, channelConnectionId),
+          eq(channelConnections.channelId, channelId),
+        ))
       .limit(1);
 
     if (!conn) {
       throw new Error(
-        `No channel connection found for channel ${channelId}`,
+        `No channel connection found for channel ${channelId}`
+          + (channelConnectionId === undefined ? "" : ` connection ${channelConnectionId}`),
       );
+    }
+
+    if (channelConnectionId !== undefined) {
+      const connections = await this.db
+        .select({ id: channelConnections.id })
+        .from(channelConnections)
+        .where(eq(channelConnections.channelId, channelId))
+        .limit(2);
+      if (connections.length !== 1 || connections[0]?.id !== channelConnectionId) {
+        throw new InventoryPublicationConfigurationError(
+          "EBAY_CONNECTION_SCOPED_AUTH_UNAVAILABLE",
+          `eBay canonical inventory requires exactly one connection for channel ${channelId}; `
+            + "OAuth tokens are currently channel-scoped.",
+        );
+      }
     }
 
     return (conn.metadata as EbayConnectionMetadata) || {};

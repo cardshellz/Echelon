@@ -27,7 +27,8 @@ import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availa
 import { findPartitionedShareOverages } from "../domain/inventory-channel-exposure";
 
 const actorSchema = z.string().trim().min(1).max(100);
-const ACTIVATION_DRY_RUN_CONTRACT_VERSION = "exact_publication_targets_v2";
+const ACTIVATION_DRY_RUN_CONTRACT_VERSION = "exact_publication_targets_v3";
+const MAX_PROVIDER_READBACK_AGE_MS = 15 * 60 * 1000;
 
 export interface PublicationEvidenceKey {
   channelId: number;
@@ -313,7 +314,7 @@ export class InventoryAvailabilityActivationDryRunService {
           ));
           continue;
         }
-        blockers.push(...legacyPublicationCoverageBlockers(product.productId, evidence));
+        blockers.push(...legacyPublicationCoverageBlockers(product.productId, evidence, startedAt));
       }
       const legacyRows = new Map((legacyPreview?.rows ?? []).map((row) => [publicationKey(row), row] as const));
       const proposedPublications = targetPreviews.flatMap((preview) => preview.rows.map((row) => {
@@ -331,7 +332,7 @@ export class InventoryAvailabilityActivationDryRunService {
               channelId: preview.channelId, productVariantId: row.productVariantId },
           ));
         } else {
-          blockers.push(...targetPublicationBlockers(product.productId, current, preview, row));
+          blockers.push(...targetPublicationBlockers(product.productId, current, preview, row, startedAt));
         }
         const legacy = legacyRows.get(publicationKey({
           channelId: preview.channelId,
@@ -375,6 +376,7 @@ export class InventoryAvailabilityActivationDryRunService {
           mappingDefinitionHash: mapping?.definitionHash ?? null,
           externalInventoryItemId: mapping?.externalInventoryItemId ?? null,
           externalSku: mapping?.externalSku ?? null,
+          policySelections: preview.selectedPolicies,
         };
       }));
       const resolvedBlockers = uniqueBlockers(blockers);
@@ -477,6 +479,7 @@ function queueBlockers(product: InventoryAvailabilityBackfillQueueRow): Activati
 function legacyPublicationCoverageBlockers(
   productId: number,
   evidence: CurrentPublicationEvidence,
+  capturedAt: Date,
 ): ActivationDryRunBlocker[] {
   const context = {
     channelId: evidence.channelId,
@@ -565,11 +568,25 @@ function legacyPublicationCoverageBlockers(
       { ...context, publicationTargetIds: targetsMissingReadback },
     ));
   }
+  const targetsWithStaleReadback = enabledTargets
+    .filter((target) => target.latestReadbackAt !== null
+      && readbackIsStale(target.latestReadbackAt, capturedAt))
+    .map((target) => target.publicationTargetId);
+  if (targetsWithStaleReadback.length > 0) {
+    blockers.push(blocker(
+      "PROVIDER_READBACK_STALE",
+      "blocking",
+      "Provider quantity readback is older than the activation freshness window.",
+      productId,
+      { ...context, publicationTargetIds: targetsWithStaleReadback,
+        maxAgeMilliseconds: MAX_PROVIDER_READBACK_AGE_MS },
+    ));
+  }
   const targetsWithStaleReadbackIdentity = enabledTargets
     .filter((target) => target.mapping !== null
       && target.latestReadbackUnits !== null
       && target.latestReadbackAt !== null
-      && target.latestReadbackExternalInventoryItemId !== target.mapping.externalInventoryItemId)
+      && !readbackMatchesTarget(target))
     .map((target) => target.publicationTargetId);
   if (targetsWithStaleReadbackIdentity.length > 0) {
     blockers.push(blocker(
@@ -588,6 +605,7 @@ function targetPublicationBlockers(
   evidence: CurrentPublicationEvidence,
   preview: InventoryChannelExposurePreview,
   row: InventoryChannelExposurePreview["rows"][number],
+  capturedAt: Date,
 ): ActivationDryRunBlocker[] {
   const context = {
     publicationTargetId: preview.publicationTargetId,
@@ -647,9 +665,21 @@ function targetPublicationBlockers(
       context,
     ));
   }
+  if (row.policy?.eligible && target.latestReadbackAt !== null
+    && readbackIsStale(target.latestReadbackAt, capturedAt)) {
+    blockers.push(blocker(
+      "PROVIDER_READBACK_STALE",
+      "blocking",
+      "Provider quantity readback is older than the activation freshness window.",
+      productId,
+      { ...context, latestReadbackAt: target.latestReadbackAt,
+        maxAgeMilliseconds: MAX_PROVIDER_READBACK_AGE_MS },
+    ));
+  }
   if (row.policy?.eligible && row.mapping
     && target.latestReadbackUnits !== null && target.latestReadbackAt !== null
-    && target.latestReadbackExternalInventoryItemId !== row.mapping.externalInventoryItemId) {
+    && (!readbackMatchesTarget(target)
+      || target.latestReadbackExternalInventoryItemId !== row.mapping.externalInventoryItemId)) {
     blockers.push(blocker(
       "PROVIDER_READBACK_IDENTITY_MISMATCH",
       "blocking",
@@ -660,6 +690,23 @@ function targetPublicationBlockers(
     ));
   }
   return blockers;
+}
+
+function readbackMatchesTarget(
+  target: CurrentPublicationEvidence["configuredTargets"][number],
+): boolean {
+  return target.latestReadbackExternalInventoryItemId === target.mapping?.externalInventoryItemId
+    && target.latestReadbackChannelConnectionId === target.channelConnectionId
+    && target.latestReadbackProviderScopeType === target.providerScopeType
+    && target.latestReadbackExternalScopeId === target.externalScopeId
+    && target.latestReadbackPublicationTargetRevision === target.revision;
+}
+
+function readbackIsStale(observedAt: string, reference: Date): boolean {
+  const observed = Date.parse(observedAt);
+  return !Number.isFinite(observed)
+    || observed > reference.getTime()
+    || reference.getTime() - observed > MAX_PROVIDER_READBACK_AGE_MS;
 }
 
 function blocker(

@@ -111,6 +111,10 @@ import {
 } from "../modules/channels/channel-shipping-capability.registry";
 import { createEchelonSyncOrchestrator } from "../modules/channels/echelon-sync-orchestrator.service";
 import { createVariantAvailabilitySyncService } from "../modules/channels/variant-availability-sync.service";
+import { InventoryPublicationOutboxService } from "../modules/inventory-planning/application/inventory-publication-outbox.service";
+import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
+import { InventoryPublicationReadbackService } from "../modules/inventory-planning/application/inventory-publication-readback.service";
+import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
 export function createServices(db: any) {
@@ -273,6 +277,14 @@ export function createServices(db: any) {
     allocationEngine,
     adapterRegistry,
   });
+  const inventoryPublicationOutbox = new InventoryPublicationOutboxService(
+    new PostgresInventoryPublicationOutboxRepository(),
+    adapterRegistry,
+  );
+  const inventoryPublicationReadback = new InventoryPublicationReadbackService(
+    new PostgresInventoryPublicationReadbackRepository(),
+    adapterRegistry,
+  );
 
   // Wire orchestrator into legacy channelSync so event-driven syncs
   // respect channel_allocation_rules (fixed/share/mirror modes).
@@ -480,6 +492,8 @@ export function createServices(db: any) {
     channelShippingCapabilities,
     echelonOrchestrator,
     variantAvailabilitySync,
+    inventoryPublicationOutbox,
+    inventoryPublicationReadback,
     oms,
     fulfillmentPush,
     channelFulfillmentAuthority,

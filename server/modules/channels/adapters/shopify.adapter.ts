@@ -8,7 +8,7 @@
  * Uses Shopify REST Admin API (2024-01).
  */
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import {
   channelConnections,
   warehouses,
@@ -21,6 +21,9 @@ import type {
   ListingPushResult,
   InventoryPushItem,
   InventoryPushResult,
+  InventoryPublicationContext,
+  InventoryReadItem,
+  InventoryReadResult,
   PricingPushItem,
   PricingPushResult,
   ChannelOrder,
@@ -31,6 +34,7 @@ import type {
   CancellationPayload,
   CancellationPushResult,
 } from "../channel-adapter.interface";
+import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
 import { ShopifyMarketplaceListingConnector } from "../listing-connectors/shopify-listing.connector";
 
 import crypto from "crypto";
@@ -65,6 +69,7 @@ const RATE_LIMIT_DELAY_MS = 1000;
 export class ShopifyAdapter implements IChannelAdapter {
   readonly adapterName = "Shopify";
   readonly providerKey = "shopify";
+  readonly inventoryPublicationScopeTypes = ["location"] as const;
   readonly shippingCapabilities = Object.freeze({
     acceptsEngineQuotes: true,
     managesOwnRates: true,
@@ -123,8 +128,19 @@ export class ShopifyAdapter implements IChannelAdapter {
   async pushInventory(
     channelId: number,
     items: InventoryPushItem[],
+    context?: InventoryPublicationContext,
   ): Promise<InventoryPushResult[]> {
-    const creds = await this.getCredentials(channelId);
+    if (context && context.providerScopeType !== "location") {
+      return items.map((item) => ({
+        variantId: item.variantId,
+        pushedQty: 0,
+        status: "error" as const,
+        error: "Shopify canonical inventory publication requires an exact location scope",
+        errorCode: "SHOPIFY_INVENTORY_SCOPE_UNSUPPORTED",
+        retryable: false,
+      }));
+    }
+    const creds = await this.getCredentials(channelId, context?.channelConnectionId);
     const results: InventoryPushResult[] = [];
 
     for (const item of items) {
@@ -139,8 +155,16 @@ export class ShopifyAdapter implements IChannelAdapter {
           continue;
         }
 
-        // If warehouse breakdown is provided, push per-location
-        if (item.warehouseBreakdown && item.warehouseBreakdown.length > 0) {
+        if (context?.providerScopeType === "location") {
+          await this.setInventoryLevel(
+            creds,
+            item.externalInventoryItemId,
+            context.externalScopeId,
+            item.allocatedQty,
+          );
+        // Legacy callers may still supply their existing warehouse breakdown
+        // until canonical publication authority is deliberately activated.
+        } else if (item.warehouseBreakdown && item.warehouseBreakdown.length > 0) {
           for (const wh of item.warehouseBreakdown) {
             await this.setInventoryLevel(
               creds,
@@ -150,7 +174,7 @@ export class ShopifyAdapter implements IChannelAdapter {
             );
           }
         } else {
-          // Use connection's location ID, fall back to env var
+          // Legacy path: use the connection location, then the historic env fallback.
           const locationId = creds.shopifyLocationId || process.env.SHOPIFY_LOCATION_ID;
           if (!locationId) {
             results.push({
@@ -174,12 +198,15 @@ export class ShopifyAdapter implements IChannelAdapter {
           pushedQty: item.allocatedQty,
           status: "success",
         });
-      } catch (err: any) {
+      } catch (error) {
         results.push({
           variantId: item.variantId,
           pushedQty: 0,
           status: "error",
-          error: err.message,
+          error: error instanceof Error ? error.message : String(error),
+          ...(error instanceof InventoryPublicationConfigurationError
+            ? { errorCode: error.code, retryable: false }
+            : {}),
         });
       }
 
@@ -190,6 +217,55 @@ export class ShopifyAdapter implements IChannelAdapter {
     return results;
   }
 
+  async readInventory(
+    channelId: number,
+    items: InventoryReadItem[],
+    context: InventoryPublicationContext,
+  ): Promise<InventoryReadResult[]> {
+    if (context.providerScopeType !== "location") {
+      return items.map((item) => ({
+        variantId: item.variantId,
+        observedQty: 0,
+        status: "error" as const,
+        error: "Shopify canonical inventory readback requires an exact location scope",
+        errorCode: "SHOPIFY_INVENTORY_SCOPE_UNSUPPORTED",
+      }));
+    }
+    const creds = await this.getCredentials(channelId, context.channelConnectionId);
+    const results: InventoryReadResult[] = [];
+    for (const item of items) {
+      try {
+        const inventoryItemId = shopifyRestId(item.externalInventoryItemId, "inventory item ID");
+        const locationId = shopifyRestId(item.externalScopeId, "location ID");
+        const payload = await this.shopifyGet(
+          creds,
+          `/inventory_levels.json?inventory_item_ids=${inventoryItemId}`
+            + `&location_ids=${locationId}`,
+        );
+        const levels = Array.isArray(payload?.inventory_levels) ? payload.inventory_levels : [];
+        const level = levels.find((candidate: any) =>
+          String(candidate.inventory_item_id) === String(inventoryItemId)
+          && String(candidate.location_id) === String(locationId));
+        const observedQty = Number(level?.available);
+        if (!Number.isSafeInteger(observedQty) || observedQty < 0) {
+          throw new Error("Shopify did not return one nonnegative integer inventory level");
+        }
+        results.push({ variantId: item.variantId, observedQty, status: "success" });
+      } catch (error) {
+        results.push({
+          variantId: item.variantId,
+          observedQty: 0,
+          status: "error",
+          error: error instanceof Error ? error.message : String(error),
+          ...(error instanceof InventoryPublicationConfigurationError
+            ? { errorCode: error.code }
+            : {}),
+        });
+      }
+    }
+    return results;
+  }
+
   private async setInventoryLevel(
     creds: ShopifyCredentials,
     inventoryItemId: string,
@@ -197,8 +273,8 @@ export class ShopifyAdapter implements IChannelAdapter {
     available: number,
   ): Promise<void> {
     await this.shopifyPost(creds, "/inventory_levels/set.json", {
-      location_id: Number(locationId),
-      inventory_item_id: Number(inventoryItemId),
+      location_id: shopifyRestId(locationId, "location ID"),
+      inventory_item_id: shopifyRestId(inventoryItemId, "inventory item ID"),
       available,
     });
   }
@@ -537,15 +613,26 @@ export class ShopifyAdapter implements IChannelAdapter {
   // Shopify API Helpers
   // -------------------------------------------------------------------------
 
-  private async getCredentials(channelId: number): Promise<ShopifyCredentials> {
+  private async getCredentials(
+    channelId: number,
+    channelConnectionId?: number,
+  ): Promise<ShopifyCredentials> {
     const [conn] = await this.db
       .select()
       .from(channelConnections)
-      .where(eq(channelConnections.channelId, channelId))
+      .where(channelConnectionId === undefined
+        ? eq(channelConnections.channelId, channelId)
+        : and(
+          eq(channelConnections.id, channelConnectionId),
+          eq(channelConnections.channelId, channelId),
+        ))
       .limit(1);
 
     if (!conn?.shopDomain || !conn?.accessToken) {
-      throw new Error(`No Shopify credentials configured for channel ${channelId}`);
+      throw new Error(
+        `No Shopify credentials configured for channel ${channelId}`
+          + (channelConnectionId === undefined ? "" : ` connection ${channelConnectionId}`),
+      );
     }
 
     return {
@@ -624,4 +711,21 @@ export class ShopifyAdapter implements IChannelAdapter {
 
 export function createShopifyAdapter(db: any): ShopifyAdapter {
   return new ShopifyAdapter(db);
+}
+
+function shopifyRestId(value: string, field: string): number {
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new InventoryPublicationConfigurationError(
+      "SHOPIFY_INVENTORY_ID_INVALID",
+      `Shopify ${field} must be a positive decimal integer`,
+    );
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new InventoryPublicationConfigurationError(
+      "SHOPIFY_INVENTORY_ID_OUT_OF_RANGE",
+      `Shopify ${field} exceeds the safe REST identifier range`,
+    );
+  }
+  return parsed;
 }

@@ -295,8 +295,12 @@ function publicationEvidence(): CurrentPublicationEvidence {
         externalSku: "EA",
       },
       latestReadbackUnits: "6",
-      latestReadbackAt: "2026-08-28T16:05:00.000Z",
+      latestReadbackAt: "2026-08-28T16:59:00.000Z",
       latestReadbackExternalInventoryItemId: "gid://shopify/InventoryItem/1",
+      latestReadbackChannelConnectionId: 10,
+      latestReadbackProviderScopeType: "location",
+      latestReadbackExternalScopeId: "shopify-location-1",
+      latestReadbackPublicationTargetRevision: "1",
     }],
   };
 }

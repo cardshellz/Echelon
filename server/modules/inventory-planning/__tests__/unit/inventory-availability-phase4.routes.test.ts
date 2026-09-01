@@ -23,12 +23,31 @@ describe("inventory availability Phase 4 admin routes", () => {
   let server: { url: string; close: () => Promise<void> };
   let claimSimulationService: { runSimulation: ReturnType<typeof vi.fn> };
   let activationDryRunService: { runDryRun: ReturnType<typeof vi.fn> };
+  let activationService: {
+    prepare: ReturnType<typeof vi.fn>;
+    abort: ReturnType<typeof vi.fn>;
+    getStatus: ReturnType<typeof vi.fn>;
+    getOpenStatus: ReturnType<typeof vi.fn>;
+  };
+  let publicationReadbackService: { capture: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
     requirePermissionMock.mockClear();
     claimSimulationService = { runSimulation: vi.fn(async () => claimRun()) };
     activationDryRunService = { runDryRun: vi.fn(async () => activationRun()) };
-    server = await startServer(buildApp(claimSimulationService, activationDryRunService));
+    activationService = {
+      prepare: vi.fn(async () => activationCommand("prepare", "publishing")),
+      abort: vi.fn(async () => activationCommand("abort", "failed")),
+      getStatus: vi.fn(async () => activationStatus()),
+      getOpenStatus: vi.fn(async () => activationStatus()),
+    };
+    publicationReadbackService = { capture: vi.fn(async () => readbackRun()) };
+    server = await startServer(buildApp(
+      claimSimulationService,
+      activationDryRunService,
+      activationService,
+      publicationReadbackService,
+    ));
   });
 
   afterEach(async () => server.close());
@@ -92,11 +111,57 @@ describe("inventory availability Phase 4 admin routes", () => {
       },
     });
   });
+
+  it("role-gates conservative activation preparation without exposing authority commit", async () => {
+    const body = {
+      sourceDryRunId: "7",
+      expectedDryRunResultHash: HASH,
+      idempotencyKey: "prepare-route-1",
+      reason: "Prepare conservative publication",
+    };
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/activation-runs/prepare`,
+      jsonPost(body),
+    );
+    expect(response.status).toBe(201);
+    expect(activationService.prepare).toHaveBeenCalledWith(body, "operator-1");
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "activate");
+  });
+
+  it("captures exact provider readback evidence through the activation permission", async () => {
+    const body = { idempotencyKey: "readback-route-1", reason: "Refresh provider evidence" };
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/publication-readbacks/capture`,
+      jsonPost(body),
+    );
+
+    expect(response.status).toBe(201);
+    expect(publicationReadbackService.capture).toHaveBeenCalledWith(body, "operator-1");
+  });
+
+  it("loads the durable open preparation through the activation permission", async () => {
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/activation-runs/open`,
+      { method: "GET", headers: {}, body: "" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ activation: activationStatus() });
+    expect(activationService.getOpenStatus).toHaveBeenCalledOnce();
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "activate");
+  });
 });
 
 function buildApp(
   claimSimulationService: { runSimulation: ReturnType<typeof vi.fn> },
   activationDryRunService: { runDryRun: ReturnType<typeof vi.fn> },
+  activationService: {
+    prepare: ReturnType<typeof vi.fn>;
+    abort: ReturnType<typeof vi.fn>;
+    getStatus: ReturnType<typeof vi.fn>;
+    getOpenStatus: ReturnType<typeof vi.fn>;
+  },
+  publicationReadbackService: { capture: ReturnType<typeof vi.fn> },
 ) {
   const app = express();
   app.use(express.json());
@@ -110,8 +175,63 @@ function buildApp(
   registerInventoryAvailabilityPhase4Routes(app, {
     claimSimulationService,
     activationDryRunService,
+    activationService,
+    publicationReadbackService,
   });
   return app;
+}
+
+function activationCommand(
+  commandType: "prepare" | "abort",
+  state: "publishing" | "failed",
+) {
+  return {
+    activationRunId: "12",
+    commandType,
+    state,
+    sourceDryRunId: "7",
+    revalidationDryRunId: null,
+    conservativePublicationRows: 1,
+    fullPublicationRows: 0,
+    runtimeAuthority: "legacy" as const,
+    alreadyApplied: false,
+  };
+}
+
+function readbackRun() {
+  return {
+    readbackRunId: "5",
+    state: "completed" as const,
+    requestedBy: "operator-1",
+    reason: "Refresh provider evidence",
+    startedAt: "2026-09-01T18:00:00.000Z",
+    completedAt: "2026-09-01T18:00:01.000Z",
+    targetRows: 1,
+    observedRows: 1,
+    failedRows: 0,
+    failures: [],
+    alreadyApplied: false,
+  };
+}
+
+function activationStatus() {
+  return {
+    activationRunId: "12",
+    state: "publishing" as const,
+    sourceDryRunId: "7",
+    runtimeAuthority: "legacy" as const,
+    providerWriteAttempted: false,
+    configurationFrozen: true,
+    outbox: {
+      total: 1,
+      queued: 1,
+      leased: 0,
+      verified: 0,
+      retryableOrDrifted: 0,
+      deadLetter: 0,
+      cancelled: 0,
+    },
+  };
 }
 
 function claimRun() {
