@@ -378,7 +378,12 @@ export default function InboundShipmentDetail() {
 
   // ── Queries ──
 
-  const { data: shipment, isLoading } = useQuery<any>({
+  const {
+    data: shipment,
+    isLoading,
+    error: shipmentError,
+    refetch: refetchShipment,
+  } = useQuery<any>({
     queryKey: shipmentDetailQueryKey,
     enabled: !!shipmentId,
   });
@@ -1067,6 +1072,33 @@ export default function InboundShipmentDetail() {
     return (
       <div className="flex items-center justify-center min-h-[50vh]">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+      </div>
+    );
+  }
+
+  if (shipmentError && !shipment) {
+    const message = shipmentError instanceof Error
+      ? shipmentError.message
+      : "The shipment request failed.";
+    const notFound = message.startsWith("404:");
+    return (
+      <div className="p-6 min-h-[50vh] flex items-center justify-center">
+        <div className="max-w-lg text-center space-y-3">
+          <AlertTriangle className="h-8 w-8 mx-auto text-destructive" />
+          <p className="font-medium">
+            {notFound ? "Shipment not found." : "Unable to load shipment."}
+          </p>
+          {!notFound && <p className="text-sm text-muted-foreground break-words">{message}</p>}
+          <div className="flex justify-center gap-2">
+            {!notFound && (
+              <Button variant="outline" onClick={() => void refetchShipment()}>
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Retry
+              </Button>
+            )}
+            <Button variant="link" onClick={() => navigate("/shipments")}>Back to list</Button>
+          </div>
+        </div>
       </div>
     );
   }

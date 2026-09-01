@@ -78,6 +78,42 @@ function requireNonnegativeInteger(value: unknown, field: string): number {
   return normalized;
 }
 
+function requireSignedInteger(value: unknown, field: string): number {
+  const normalized = Number(value);
+  if (!Number.isSafeInteger(normalized)) {
+    throw new ApLedgerError(`${field} must be a signed safe integer`, 400, {
+      code: "AP_INPUT_SIGNED_INTEGER_REQUIRED",
+      field,
+    });
+  }
+  return normalized;
+}
+
+function roundSignedRatioHalfAwayFromZero(numerator: bigint, denominator: bigint): bigint {
+  if (denominator <= BigInt(0)) {
+    throw new ApLedgerError("Ratio denominator must be positive", 500, {
+      code: "AP_PAYMENT_ALLOCATION_INTEGRITY_ERROR",
+    });
+  }
+  const negative = numerator < BigInt(0);
+  const absoluteNumerator = negative ? -numerator : numerator;
+  const rounded = (absoluteNumerator + denominator / BigInt(2)) / denominator;
+  return negative ? -rounded : rounded;
+}
+
+function floorSignedRatio(numerator: bigint, denominator: bigint): {
+  quotient: bigint;
+  remainder: bigint;
+} {
+  let quotient = numerator / denominator;
+  let remainder = numerator % denominator;
+  if (remainder < BigInt(0)) {
+    quotient -= BigInt(1);
+    remainder += denominator;
+  }
+  return { quotient, remainder };
+}
+
 function requireUsdFinancialDocumentCurrency(value: unknown, field: string): string {
   const currency = normalizeRequiredText(value ?? "USD", field, 3).toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency)) {
@@ -189,7 +225,7 @@ export function allocateProportionalPaidCents(
     seenIds.add(id);
     return {
       id,
-      amountCents: requireNonnegativeInteger(item.amountCents, `items[${index}].amountCents`),
+      amountCents: requireSignedInteger(item.amountCents, `items[${index}].amountCents`),
     };
   });
 
@@ -208,29 +244,48 @@ export function allocateProportionalPaidCents(
   }
 
   const targetNumerator = totalItemAmount * paid;
-  const targetPaid = (targetNumerator + invoiceTotal / BigInt(2)) / invoiceTotal;
+  const targetPaid = roundSignedRatioHalfAwayFromZero(targetNumerator, invoiceTotal);
   const allocations = normalizedItems.map((item) => {
     const numerator = BigInt(item.amountCents) * paid;
+    const divided = floorSignedRatio(numerator, invoiceTotal);
     return {
       id: item.id,
-      paidCents: numerator / invoiceTotal,
-      remainder: numerator % invoiceTotal,
+      paidCents: divided.quotient,
+      remainder: divided.remainder,
     };
   });
   const allocatedFloor = allocations.reduce((sum, item) => sum + item.paidCents, BigInt(0));
   let centsToDistribute = targetPaid - allocatedFloor;
 
-  allocations.sort((left, right) => {
+  if (centsToDistribute < BigInt(0) || centsToDistribute > BigInt(allocations.length)) {
+    throw new ApLedgerError("Signed payment allocation remainder is out of range", 500, {
+      code: "AP_PAYMENT_ALLOCATION_INTEGRITY_ERROR",
+      centsToDistribute: centsToDistribute.toString(),
+      itemCount: allocations.length,
+    });
+  }
+
+  const remainderOrder = [...allocations].sort((left, right) => {
     if (left.remainder === right.remainder) return left.id - right.id;
     return left.remainder > right.remainder ? -1 : 1;
   });
-  for (const allocation of allocations) {
+  for (const allocation of remainderOrder) {
     if (centsToDistribute <= BigInt(0)) break;
     allocation.paidCents += BigInt(1);
     centsToDistribute -= BigInt(1);
   }
 
-  return new Map(allocations.map((item) => [item.id, Number(item.paidCents)]));
+  const paidById = new Map(allocations.map((item) => [item.id, item.paidCents]));
+  return new Map(normalizedItems.map((item) => {
+    const allocatedPaidCents = paidById.get(item.id);
+    if (allocatedPaidCents === undefined) {
+      throw new ApLedgerError("Payment allocation result is missing an item", 500, {
+        code: "AP_PAYMENT_ALLOCATION_INTEGRITY_ERROR",
+        itemId: item.id,
+      });
+    }
+    return [item.id, Number(allocatedPaidCents)];
+  }));
 }
 
 function normalizeRequiredText(value: unknown, field: string, maxLength: number): string {
@@ -3742,9 +3797,12 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
   let paidCents = 0;
   let outstandingCents = 0;
 
+  // Shipment costs may include signed credits (for example, a seller
+  // promotion). Preserve their sign in the payment projection so its totals
+  // reconcile to the same net amount used by shipment costing.
   const normalizedCosts = costs.map((cost, index) => ({
     ...cost,
-    amountCents: requireNonnegativeInteger(
+    amountCents: requireSignedInteger(
       cost.invoiceLineTotalCents !== null && cost.invoiceLineTotalCents !== undefined
         ? cost.invoiceLineTotalCents
         : cost.actualCents !== null && cost.actualCents !== undefined
