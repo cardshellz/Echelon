@@ -12,6 +12,7 @@ const migration = source(
   "0634_package_allocation_authority_snapshot.sql",
 );
 const schema = source("shared", "schema", "fulfillment.schema.ts");
+const integrationSetup = source("test", "setup-integration.ts");
 const normalizedMigration = migration.replace(/\s+/g, " ").trim();
 
 describe("package allocation authority snapshot migration contract", () => {
@@ -49,6 +50,12 @@ describe("package allocation authority snapshot migration contract", () => {
     );
     expect(schema).toContain(
       "jsonb_typeof(${table.authoritySnapshot}) = 'object'",
+    );
+  });
+
+  it("applies the authority snapshot migration in the disposable integration schema", () => {
+    expect(integrationSetup).toContain(
+      '"migrations/0634_package_allocation_authority_snapshot.sql"',
     );
   });
 });

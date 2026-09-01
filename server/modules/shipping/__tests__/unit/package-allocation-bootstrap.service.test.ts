@@ -4,6 +4,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { describe, expect, it, vi } from "vitest";
 
 import { SHIPSTATION_LABEL_OBSERVATION_SOURCE } from "../../carrier-tracking.domain";
+import { packageAllocationPackageKey } from "../../package-allocation-authority-resolution.domain";
 import {
   derivePackageAllocationBootstrapGroupKey,
   PackageAllocationBootstrapPersistenceError,
@@ -241,6 +242,10 @@ describe("PackageAllocationBootstrapPersistenceService", () => {
     expect(result.outcome).toBe("review");
     expect(result.persistence).toBeNull();
     expect(result.resolution?.outcome).toBe("review");
+    expect(result.resolution?.reviews).toEqual([{
+      code: "package_contents_unavailable",
+      packageKeys: [packageAllocationPackageKey("shipstation", "44001")],
+    }]);
     expect(f.planning.persistInTransaction).not.toHaveBeenCalled();
     expect(f.transaction.lockGroup).toHaveBeenCalledTimes(1);
     expect(f.transaction.lockGroup).toHaveBeenCalledWith(f.groupKey, false);
