@@ -39,6 +39,10 @@ import { packageAllocationPackageKey } from "../../package-allocation-authority-
 import { PackageAllocationAuthorityReadinessService } from "../../package-allocation-authority-readiness.service";
 import { PackageAllocationAuthorityResolutionPreviewService } from "../../package-allocation-authority-resolution.service";
 import {
+  derivePackageAllocationBootstrapGroupKey,
+  PackageAllocationBootstrapPersistenceService,
+} from "../../package-allocation-bootstrap.service";
+import {
   PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS,
   PgPackageAllocationLedgerRepository,
   type PersistedPackageAllocationEntry,
@@ -1894,6 +1898,131 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect(result.resolution?.plannerResult.state.desiredEffectIntents.every(
       (intent) => intent.executable === false,
     )).toBe(true);
+    expect(await loadLedgerCounts(pool)).toEqual(countsBefore);
+  });
+
+  it("persists and exact-replays one relationship-discovered inert bootstrap plan", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-BOOTSTRAP", 2);
+    const providerOrderId = "provider-order-bootstrap-1";
+    const labelId = await seedAuthorityReadinessLabel(pool, sourceId, {
+      providerOrderId,
+    });
+    await seedAuthorityDiscoveryRelations(pool, sourceId, labelId, providerOrderId);
+    const repository = new PgPackageAllocationLedgerRepository(pool);
+    const service = new PackageAllocationBootstrapPersistenceService(repository);
+    const bootstrapCommand = {
+      contractVersion: 1 as const,
+      authorityMode: "shadow_only" as const,
+      bootstrapMode: "relationship_discovery" as const,
+      sourceWmsShipmentItemIds: [sourceId],
+      writeContext: {
+        createdBy: "test:package-allocation-bootstrap",
+        reason: "Prove locked relationship-discovered bootstrap persistence",
+      },
+    };
+
+    const created = await service.persistDiscovered(bootstrapCommand);
+    const replay = await service.persistDiscovered(bootstrapCommand);
+
+    expect(created).toMatchObject({
+      authority: "shadow_only",
+      groupKey: derivePackageAllocationBootstrapGroupKey([sourceId]),
+      outcome: "persisted",
+      selectedShippingProviderLabelIds: [labelId],
+      persistence: {
+        kind: "created",
+        persistedPlanVersion: 1,
+      },
+    });
+    expect(replay).toMatchObject({
+      outcome: "persisted",
+      groupKey: created.groupKey,
+      persistence: {
+        kind: "already_persisted",
+        groupId: created.persistence?.groupId,
+        planId: created.persistence?.planId,
+        persistedPlanVersion: 1,
+      },
+    });
+    expect(created.resolution?.plannerResult.state.desiredEffectIntents.every(
+      (intent) => intent.executable === false,
+    )).toBe(true);
+
+    const persisted = await pool.query<{
+      authority_snapshot: Record<string, unknown>;
+      executable_count: number;
+      intent_count: number;
+    }>(
+      `SELECT
+         plan.authority_snapshot,
+         COUNT(intent.id) FILTER (WHERE intent.executable)::integer AS executable_count,
+         COUNT(intent.id)::integer AS intent_count
+       FROM wms.package_allocation_plans AS plan
+       LEFT JOIN wms.package_allocation_effect_intents AS intent
+         ON intent.package_allocation_plan_id = plan.id
+       WHERE plan.id = $1::bigint
+       GROUP BY plan.id`,
+      [created.persistence?.planId],
+    );
+    expect(persisted.rows[0]).toMatchObject({
+      authority_snapshot: {
+        contractVersion: 1,
+        authorityMode: "shadow_only",
+        selectionAuthority: "database_relationship_closure",
+        selectionCompleteness: "unproven_outside_persisted_relationships",
+        relationshipSelectionEvidence: {
+          evidenceHash: created.relationshipSelectionEvidence.evidenceHash,
+          sourceWmsShipmentItemIds: [sourceId],
+          packages: [{ shippingProviderLabelId: labelId }],
+        },
+      },
+      executable_count: 0,
+      intent_count: created.resolution?.plannerResult.state.desiredEffectIntents.length,
+    });
+    const counts = await loadLedgerCounts(pool);
+    expect(counts).toMatchObject({
+      groups: 1,
+      sourceLines: 1,
+      memberships: 1,
+      packageBindings: 1,
+      plans: 1,
+      entries: created.resolution?.plannerResult.state.allocations.length,
+      intents: created.resolution?.plannerResult.state.desiredEffectIntents.length,
+    });
+  });
+
+  it("rolls back bootstrap state when discovered contents remain unresolved", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-BOOTSTRAP-REVIEW", 2);
+    const providerOrderId = "provider-order-bootstrap-review-1";
+    const labelId = await seedAuthorityReadinessLabel(pool, sourceId, {
+      providerOrderId,
+      contentsStatus: "empty",
+    });
+    await seedAuthorityDiscoveryRelations(pool, sourceId, labelId, providerOrderId);
+    const countsBefore = await loadLedgerCounts(pool);
+
+    const result = await new PackageAllocationBootstrapPersistenceService(
+      new PgPackageAllocationLedgerRepository(pool),
+    ).persistDiscovered({
+      contractVersion: 1,
+      authorityMode: "shadow_only",
+      bootstrapMode: "relationship_discovery",
+      sourceWmsShipmentItemIds: [sourceId],
+      writeContext: {
+        createdBy: "test:package-allocation-bootstrap",
+        reason: "Do not persist unresolved package contents",
+      },
+    });
+
+    expect(result).toMatchObject({
+      outcome: "review",
+      persistence: null,
+      selectedShippingProviderLabelIds: [labelId],
+      resolution: {
+        outcome: "review",
+        reviews: [{ code: "package_contents_unavailable" }],
+      },
+    });
     expect(await loadLedgerCounts(pool)).toEqual(countsBefore);
   });
 

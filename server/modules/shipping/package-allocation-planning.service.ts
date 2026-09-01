@@ -27,6 +27,9 @@ import {
 
 export const PACKAGE_ALLOCATION_PLANNER_VERSION = "package-allocation-group-v2";
 const MAX_SERIALIZABLE_ATTEMPTS = 3;
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
+const MAX_AUTHORITY_SOURCE_LINES = 500;
+const MAX_AUTHORITY_PACKAGES = 200;
 
 const writeContextSchema = z.object({
   createdBy: z.string().trim().min(1).max(200),
@@ -78,6 +81,51 @@ export interface PersistPackageAllocationPlanResult {
   readonly currentGroupVersion: number;
   readonly plannerResult: PackageAllocationGroupPlannerResultV1;
 }
+
+const packageAllocationRelationshipSelectionEvidenceSnapshotSchema = z.object({
+  contractVersion: z.literal(1),
+  evidenceType: z.literal("package_allocation_relationship_selection"),
+  evidenceHash: z.string().regex(/^[0-9a-f]{64}$/),
+  sourceWmsShipmentItemIds: z.array(
+    z.number().int().positive().max(POSTGRES_INTEGER_MAX),
+  ).min(1).max(MAX_AUTHORITY_SOURCE_LINES),
+  packages: z.array(z.object({
+    shippingProviderLabelId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    relationshipTypes: z.array(z.string().trim().min(1)).min(1),
+  }).strict()).max(MAX_AUTHORITY_PACKAGES),
+}).strict();
+
+export const packageAllocationPlanAuthoritySnapshotSchema = z.discriminatedUnion(
+  "selectionAuthority",
+  [
+    z.object({
+      contractVersion: z.literal(1),
+      authorityMode: z.literal("shadow_only"),
+      selectionAuthority: z.literal("caller_supplied_unproven"),
+      selectionCompleteness: z.literal("unproven_caller_selection"),
+    }).strict(),
+    z.object({
+      contractVersion: z.literal(1),
+      authorityMode: z.literal("shadow_only"),
+      selectionAuthority: z.literal("database_relationship_closure"),
+      selectionCompleteness: z.literal("unproven_outside_persisted_relationships"),
+      relationshipSelectionEvidence:
+        packageAllocationRelationshipSelectionEvidenceSnapshotSchema,
+    }).strict(),
+  ],
+);
+
+export type PackageAllocationPlanAuthoritySnapshotV1 = z.output<
+  typeof packageAllocationPlanAuthoritySnapshotSchema
+>;
+
+const CALLER_SUPPLIED_AUTHORITY_SNAPSHOT: PackageAllocationPlanAuthoritySnapshotV1 =
+  Object.freeze({
+    contractVersion: 1,
+    authorityMode: "shadow_only",
+    selectionAuthority: "caller_supplied_unproven",
+    selectionCompleteness: "unproven_caller_selection",
+  });
 
 interface PersistedStateEvidence {
   readonly actionEvidence: PackageAllocationGroupStateV1["actionEvidence"];
@@ -224,12 +272,61 @@ function compareCanonical(left: unknown, right: unknown): boolean {
   return canonicalJson(left) === canonicalJson(right);
 }
 
+function normalizeAuthoritySnapshot(
+  rawSnapshot: unknown,
+  failure: Readonly<{
+    code: "INVALID_WRITE_INPUT" | "PERSISTED_STATE_INVALID";
+    message: string;
+    context?: Readonly<Record<string, unknown>>;
+  }> = {
+    code: "INVALID_WRITE_INPUT",
+    message: "The package allocation authority snapshot is invalid",
+  },
+): PackageAllocationPlanAuthoritySnapshotV1 {
+  const parsed = packageAllocationPlanAuthoritySnapshotSchema.safeParse(rawSnapshot);
+  if (!parsed.success) {
+    throw new PackageAllocationPersistenceError(
+      failure.code,
+      failure.message,
+      { ...failure.context, issues: parsed.error.issues },
+    );
+  }
+  if (parsed.data.selectionAuthority === "database_relationship_closure") {
+    const { evidenceHash, ...evidenceProjection } =
+      parsed.data.relationshipSelectionEvidence;
+    const expectedEvidenceHash = createHash("sha256")
+      .update(canonicalJson(evidenceProjection), "utf8")
+      .digest("hex");
+    if (evidenceHash !== expectedEvidenceHash) {
+      throw new PackageAllocationPersistenceError(
+        failure.code,
+        failure.message,
+        {
+          ...failure.context,
+          evidenceHash,
+          expectedEvidenceHash,
+        },
+      );
+    }
+  }
+  return Object.freeze(parsed.data);
+}
+
 async function assertExactReplay(
   transaction: PackageAllocationLedgerTransaction,
   persisted: PersistedPackageAllocationPlan,
   result: PackageAllocationGroupPlannerResultV1,
   writeContext: { readonly createdBy: string; readonly reason: string },
+  authoritySnapshot: PackageAllocationPlanAuthoritySnapshotV1,
 ): Promise<void> {
+  const persistedAuthoritySnapshot = normalizeAuthoritySnapshot(
+    persisted.authoritySnapshot,
+    {
+      code: "PERSISTED_STATE_INVALID",
+      message: "The persisted package allocation authority snapshot is invalid",
+      context: { planId: persisted.id, planVersion: persisted.planVersion },
+    },
+  );
   const expectedReview = { contractVersion: 1 as const, reviews: result.state.reviews };
   const scalarMatch = persisted.planVersion === result.proposedGroupVersion
     && persisted.expectedGroupVersion === result.baseGroupVersion
@@ -244,6 +341,7 @@ async function assertExactReplay(
     transaction.loadPlanIntents(persisted.id),
   ]);
   if (!scalarMatch
+      || !compareCanonical(persistedAuthoritySnapshot, authoritySnapshot)
       || !compareCanonical(persisted.stateSnapshot, result.state)
       || !compareCanonical(persisted.reviewSnapshot, expectedReview)
       || !compareCanonical(entries, expectedPersistedEntries(result))
@@ -303,7 +401,7 @@ export class PackageAllocationPlanningService {
     let attempt = 1;
     while (true) {
       try {
-        return await this.persistOnce(command);
+        return await this.persistOnce(command, CALLER_SUPPLIED_AUTHORITY_SNAPSHOT);
       } catch (error) {
         if (!(error instanceof PackageAllocationLedgerRepositoryError)
             || error.code !== "CONCURRENT_WRITE"
@@ -315,110 +413,88 @@ export class PackageAllocationPlanningService {
     }
   }
 
+  /**
+   * Persists a normalized plan inside a caller-owned serializable transaction.
+   * This is reserved for application services that must lock and resolve
+   * package evidence in the same transaction as the ledger append.
+   */
+  async persistInTransaction(
+    transaction: PackageAllocationLedgerTransaction,
+    rawCommand: PersistPackageAllocationPlanCommand,
+    authoritySnapshot: PackageAllocationPlanAuthoritySnapshotV1,
+  ): Promise<PersistPackageAllocationPlanResult> {
+    const parsed = persistPackageAllocationPlanCommandSchema.safeParse(rawCommand);
+    if (!parsed.success) {
+      throw new PackageAllocationPersistenceError(
+        "INVALID_WRITE_INPUT",
+        "The package allocation persistence command is invalid",
+        { issues: parsed.error.issues },
+      );
+    }
+    return this.persistNormalizedInTransaction(
+      transaction,
+      parsed.data,
+      authoritySnapshot,
+    );
+  }
+
   private async persistOnce(
     command: z.output<typeof persistPackageAllocationPlanCommandSchema>,
+    authoritySnapshot: PackageAllocationPlanAuthoritySnapshotV1,
   ): Promise<PersistPackageAllocationPlanResult> {
-    return this.repository.withSerializableTransaction(async (transaction) => {
-      const group = await transaction.lockGroup(
-        command.groupKey,
-        command.expectedGroupVersion === 0,
+    return this.repository.withSerializableTransaction((transaction) =>
+      this.persistNormalizedInTransaction(transaction, command, authoritySnapshot));
+  }
+
+  private async persistNormalizedInTransaction(
+    transaction: PackageAllocationLedgerTransaction,
+    command: z.output<typeof persistPackageAllocationPlanCommandSchema>,
+    authoritySnapshot: PackageAllocationPlanAuthoritySnapshotV1,
+  ): Promise<PersistPackageAllocationPlanResult> {
+    const normalizedAuthoritySnapshot = normalizeAuthoritySnapshot(authoritySnapshot);
+    const group = await transaction.lockGroup(
+      command.groupKey,
+      command.expectedGroupVersion === 0,
+    );
+    if (group === null) {
+      throw new PackageAllocationPersistenceError(
+        "STALE_GROUP_VERSION",
+        "The requested package allocation group does not exist at the expected version",
+        { groupKey: command.groupKey, expectedGroupVersion: command.expectedGroupVersion },
       );
-      if (group === null) {
-        throw new PackageAllocationPersistenceError(
-          "STALE_GROUP_VERSION",
-          "The requested package allocation group does not exist at the expected version",
-          { groupKey: command.groupKey, expectedGroupVersion: command.expectedGroupVersion },
-        );
-      }
+    }
 
-      const basePlan = command.expectedGroupVersion === 0
-        ? null
-        : await transaction.loadPlanByVersion(group.id, command.expectedGroupVersion);
-      if (command.expectedGroupVersion > 0 && basePlan === null) {
-        throw new PackageAllocationPersistenceError(
-          "CURRENT_PLAN_MISSING",
-          "The expected package allocation plan version is missing",
-          { groupKey: group.groupKey, expectedGroupVersion: command.expectedGroupVersion },
-        );
-      }
-
-      const previousPlan = previousPlanFromPersisted(command.groupKey, basePlan);
-      const sourceFacts = await transaction.lockSourceFacts(
-        command.sourceLines.map((source) => source.wmsShipmentItemId),
+    const basePlan = command.expectedGroupVersion === 0
+      ? null
+      : await transaction.loadPlanByVersion(group.id, command.expectedGroupVersion);
+    if (command.expectedGroupVersion > 0 && basePlan === null) {
+      throw new PackageAllocationPersistenceError(
+        "CURRENT_PLAN_MISSING",
+        "The expected package allocation plan version is missing",
+        { groupKey: group.groupKey, expectedGroupVersion: command.expectedGroupVersion },
       );
-      const registrations = sourceFacts.map(derivePackageAllocationSourceRegistration);
-      validateSourceQuantities(command, registrations);
+    }
 
-      const plannerResult = planPackageAllocationGroup({
-        contractVersion: command.contractVersion,
-        authorityMode: command.authorityMode,
-        groupKey: command.groupKey,
-        expectedGroupVersion: command.expectedGroupVersion,
-        previousPlan,
-        sourceLines: command.sourceLines,
-        packages: command.packages,
-        actions: command.actions,
-      });
-      for (const intent of plannerResult.effectIntentsToAppend) assertIntentPayloadHash(intent);
+    const previousPlan = previousPlanFromPersisted(command.groupKey, basePlan);
+    const sourceFacts = await transaction.lockSourceFacts(
+      command.sourceLines.map((source) => source.wmsShipmentItemId),
+    );
+    const registrations = sourceFacts.map(derivePackageAllocationSourceRegistration);
+    validateSourceQuantities(command, registrations);
 
-      if (plannerResult.outcome === "unchanged") {
-        if (group.currentVersion !== command.expectedGroupVersion) {
-          throw new PackageAllocationPersistenceError(
-            "STALE_GROUP_VERSION",
-            "The package allocation group is not at the expected version",
-            {
-              groupKey: group.groupKey,
-              expectedGroupVersion: command.expectedGroupVersion,
-              actualGroupVersion: group.currentVersion,
-            },
-          );
-        }
-        await transaction.ensureSourceRegistrations(group, registrations, false);
-        await transaction.ensurePackageBindings(
-          group,
-          plannerResult.state.packageEvidence,
-          false,
-        );
-        const currentPlan = group.currentVersion === 0
-          ? null
-          : await transaction.loadPlanByVersion(group.id, group.currentVersion);
-        if (currentPlan === null || currentPlan.stateHash !== plannerResult.stateHash) {
-          throw new PackageAllocationPersistenceError(
-            "CURRENT_PLAN_MISSING",
-            "An unchanged projection does not match the locked current plan",
-            { groupKey: group.groupKey, currentGroupVersion: group.currentVersion },
-          );
-        }
-        return Object.freeze({
-          kind: "unchanged" as const,
-          groupId: group.id,
-          planId: currentPlan.id,
-          persistedPlanVersion: currentPlan.planVersion,
-          currentGroupVersion: group.currentVersion,
-          plannerResult,
-        });
-      }
+    const plannerResult = planPackageAllocationGroup({
+      contractVersion: command.contractVersion,
+      authorityMode: command.authorityMode,
+      groupKey: command.groupKey,
+      expectedGroupVersion: command.expectedGroupVersion,
+      previousPlan,
+      sourceLines: command.sourceLines,
+      packages: command.packages,
+      actions: command.actions,
+    });
+    for (const intent of plannerResult.effectIntentsToAppend) assertIntentPayloadHash(intent);
 
-      const existingPlan = await transaction.loadPlanByInputHash(group.id, plannerResult.evidenceHash);
-      if (existingPlan !== null) {
-        await transaction.ensureSourceRegistrations(group, registrations, false);
-        await transaction.ensurePackageBindings(group, plannerResult.state.packageEvidence, false);
-        await assertExactReplay(
-          transaction,
-          existingPlan,
-          plannerResult,
-          command.writeContext,
-        );
-        return Object.freeze({
-          kind: "already_persisted" as const,
-          groupId: group.id,
-          planId: existingPlan.id,
-          persistedPlanVersion: existingPlan.planVersion,
-          currentGroupVersion: group.currentVersion,
-          plannerResult,
-        });
-      }
-
+    if (plannerResult.outcome === "unchanged") {
       if (group.currentVersion !== command.expectedGroupVersion) {
         throw new PackageAllocationPersistenceError(
           "STALE_GROUP_VERSION",
@@ -430,46 +506,121 @@ export class PackageAllocationPlanningService {
           },
         );
       }
-
-      const allowSourceCreate = group.currentVersion === 0;
-      const sourcesByWmsItemId = await transaction.ensureSourceRegistrations(
-        group,
-        registrations,
-        allowSourceCreate,
-      );
-      const bindingsByPackageKey = await transaction.ensurePackageBindings(
+      await transaction.ensureSourceRegistrations(group, registrations, false);
+      await transaction.ensurePackageBindings(
         group,
         plannerResult.state.packageEvidence,
-        true,
+        false,
       );
-
-      const planId = await transaction.appendPlan({
-        group,
-        planVersion: plannerResult.proposedGroupVersion,
-        inputHash: plannerResult.evidenceHash,
-        stateHash: plannerResult.stateHash,
-        outcome: plannerResult.outcome,
-        plannerVersion: PACKAGE_ALLOCATION_PLANNER_VERSION,
-        reason: command.writeContext.reason,
-        createdBy: command.writeContext.createdBy,
-        stateSnapshot: plannerResult.state,
-        reviewSnapshot: Object.freeze({
-          contractVersion: 1 as const,
-          reviews: plannerResult.state.reviews,
-        }),
-        entries: plannerResult.ledgerEntriesToAppend,
-        intents: plannerResult.effectIntentsToAppend,
-        sourcesByWmsItemId,
-        bindingsByPackageKey,
-      });
+      const currentPlan = group.currentVersion === 0
+        ? null
+        : await transaction.loadPlanByVersion(group.id, group.currentVersion);
+      const currentAuthoritySnapshot = currentPlan === null
+        ? null
+        : normalizeAuthoritySnapshot(currentPlan.authoritySnapshot, {
+            code: "PERSISTED_STATE_INVALID",
+            message: "The persisted package allocation authority snapshot is invalid",
+            context: {
+              planId: currentPlan.id,
+              planVersion: currentPlan.planVersion,
+            },
+          });
+      if (
+        currentPlan === null
+        || currentPlan.stateHash !== plannerResult.stateHash
+        || !compareCanonical(currentAuthoritySnapshot, normalizedAuthoritySnapshot)
+      ) {
+        throw new PackageAllocationPersistenceError(
+          "CURRENT_PLAN_MISSING",
+          "An unchanged projection or authority snapshot does not match the locked current plan",
+          { groupKey: group.groupKey, currentGroupVersion: group.currentVersion },
+        );
+      }
       return Object.freeze({
-        kind: "created" as const,
+        kind: "unchanged" as const,
         groupId: group.id,
-        planId,
-        persistedPlanVersion: plannerResult.proposedGroupVersion,
-        currentGroupVersion: plannerResult.proposedGroupVersion,
+        planId: currentPlan.id,
+        persistedPlanVersion: currentPlan.planVersion,
+        currentGroupVersion: group.currentVersion,
         plannerResult,
       });
+    }
+
+    const existingPlan = await transaction.loadPlanByInputHash(
+      group.id,
+      plannerResult.evidenceHash,
+    );
+    if (existingPlan !== null) {
+      await transaction.ensureSourceRegistrations(group, registrations, false);
+      await transaction.ensurePackageBindings(group, plannerResult.state.packageEvidence, false);
+      await assertExactReplay(
+        transaction,
+        existingPlan,
+        plannerResult,
+        command.writeContext,
+        normalizedAuthoritySnapshot,
+      );
+      return Object.freeze({
+        kind: "already_persisted" as const,
+        groupId: group.id,
+        planId: existingPlan.id,
+        persistedPlanVersion: existingPlan.planVersion,
+        currentGroupVersion: group.currentVersion,
+        plannerResult,
+      });
+    }
+
+    if (group.currentVersion !== command.expectedGroupVersion) {
+      throw new PackageAllocationPersistenceError(
+        "STALE_GROUP_VERSION",
+        "The package allocation group is not at the expected version",
+        {
+          groupKey: group.groupKey,
+          expectedGroupVersion: command.expectedGroupVersion,
+          actualGroupVersion: group.currentVersion,
+        },
+      );
+    }
+
+    const allowSourceCreate = group.currentVersion === 0;
+    const sourcesByWmsItemId = await transaction.ensureSourceRegistrations(
+      group,
+      registrations,
+      allowSourceCreate,
+    );
+    const bindingsByPackageKey = await transaction.ensurePackageBindings(
+      group,
+      plannerResult.state.packageEvidence,
+      true,
+    );
+
+    const planId = await transaction.appendPlan({
+      group,
+      planVersion: plannerResult.proposedGroupVersion,
+      inputHash: plannerResult.evidenceHash,
+      stateHash: plannerResult.stateHash,
+      outcome: plannerResult.outcome,
+      plannerVersion: PACKAGE_ALLOCATION_PLANNER_VERSION,
+      reason: command.writeContext.reason,
+      createdBy: command.writeContext.createdBy,
+      authoritySnapshot: normalizedAuthoritySnapshot,
+      stateSnapshot: plannerResult.state,
+      reviewSnapshot: Object.freeze({
+        contractVersion: 1 as const,
+        reviews: plannerResult.state.reviews,
+      }),
+      entries: plannerResult.ledgerEntriesToAppend,
+      intents: plannerResult.effectIntentsToAppend,
+      sourcesByWmsItemId,
+      bindingsByPackageKey,
+    });
+    return Object.freeze({
+      kind: "created" as const,
+      groupId: group.id,
+      planId,
+      persistedPlanVersion: plannerResult.proposedGroupVersion,
+      currentGroupVersion: plannerResult.proposedGroupVersion,
+      plannerResult,
     });
   }
 }
