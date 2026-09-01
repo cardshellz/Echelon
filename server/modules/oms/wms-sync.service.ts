@@ -1668,7 +1668,17 @@ export class WmsSyncService {
                  SELECT COUNT(*) FROM wms.order_items all_items
                  WHERE all_items.order_id = w.id
                ) = 0 THEN 'cancelled'
-               ELSE 'completed'
+               -- Anything else means the order has lines but none of them are
+               -- pickable right now. That is not evidence of completion, and
+               -- this rollup has none: it cannot see picks or shipments, and it
+               -- never stamps completed_at. It used to answer 'completed' here,
+               -- which marked orders #62269 and #62226 done while they sat
+               -- unpicked with zero units - and 'completed' is terminal, so the
+               -- repair pass skipped them for three days. Completion is owned by
+               -- completeOrder() and updateOrderStatus(), which check the
+               -- transition is legal and record when it happened. Leave the
+               -- status alone and let the writers with evidence move it.
+               ELSE w.warehouse_status
              END,
              item_count = agg.item_count,
              unit_count = agg.unit_count,
