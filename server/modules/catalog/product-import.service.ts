@@ -135,6 +135,19 @@ export interface ShopifyImportMappingConflict {
   matchedEchelonProductIds?: number[];
 }
 
+/**
+ * Shopify owns whether a variant ships. Digital lines (gift cards, donations,
+ * membership plans) must also be untracked to satisfy
+ * product_variants_digital_untracked_chk, so the two travel together.
+ */
+function shippingFieldsFor(requiresShipping: boolean | undefined) {
+  // Only an explicit false means digital. Unknown stays shippable so a partial
+  // payload can never silently untrack a physical variant.
+  return requiresShipping === false
+    ? { requiresShipping: false, trackInventory: false }
+    : { requiresShipping: true };
+}
+
 // SKU parsing pattern: BASE-SKU-[P|B|C]###
 const VARIANT_PATTERN = /^(.+)-(P|B|C)(\d+)$/i;
 
@@ -373,6 +386,7 @@ export function createProductImportService() {
         shopifyInventoryItemId: number | null;
         barcode: string | null;
         imageUrl: string | null;
+        requiresShipping: boolean;
       }>;
     }> = {};
 
@@ -388,6 +402,7 @@ export function createProductImportService() {
       description: string | null;
       barcode: string | null;
       imageUrl: string | null;
+      requiresShipping: boolean;
       /**
        * Additional SKU-less variants of the SAME Shopify product. They become
        * variants of this product rather than products of their own — a graded
@@ -400,6 +415,7 @@ export function createProductImportService() {
         shopifyVariantId: number;
         shopifyInventoryItemId: number | null;
         barcode: string | null;
+        requiresShipping: boolean;
       }>;
     }> = [];
 
@@ -468,7 +484,8 @@ export function createProductImportService() {
           shopifyVariantId: variant.variantId,
           shopifyInventoryItemId: variant.inventoryItemId,
           barcode: variant.barcode,
-          imageUrl: variant.imageUrl
+          imageUrl: variant.imageUrl,
+          requiresShipping: variant.requiresShipping
         });
       } else {
         const entry: FallbackVariant = {
@@ -481,7 +498,8 @@ export function createProductImportService() {
           productType: variant.productType,
           description: variant.description,
           barcode: variant.barcode,
-          imageUrl: variant.imageUrl
+          imageUrl: variant.imageUrl,
+          requiresShipping: variant.requiresShipping
         };
         if (variant.sku && variant.sku.trim()) {
           // A real SKU still owns its own product, exactly as before.
@@ -508,6 +526,7 @@ export function createProductImportService() {
           shopifyVariantId: sibling.shopifyVariantId,
           shopifyInventoryItemId: sibling.shopifyInventoryItemId,
           barcode: sibling.barcode,
+          requiresShipping: sibling.requiresShipping,
         }));
         groupedFallbackVariants += siblings.length;
       }
@@ -626,6 +645,7 @@ export function createProductImportService() {
             continue;
           }
           await storage.updateProductVariant(variant.id, {
+            ...shippingFieldsFor(v.requiresShipping),
             name: v.name,
             unitsPerVariant: v.unitsPerVariant,
             hierarchyLevel,
@@ -636,6 +656,7 @@ export function createProductImportService() {
           variantsUpdated++;
         } else {
           await storage.createProductVariant({
+            ...shippingFieldsFor(v.requiresShipping),
             productId: product.id,
             sku: v.sku,
             name: v.name,
@@ -731,6 +752,7 @@ export function createProductImportService() {
           continue;
         }
         await storage.updateProductVariant(variant.id, {
+          ...shippingFieldsFor(sv.requiresShipping),
           name: 'Each',
           unitsPerVariant: 1,
           hierarchyLevel: 1,
@@ -741,6 +763,7 @@ export function createProductImportService() {
         variantsUpdated++;
       } else {
         await storage.createProductVariant({
+          ...shippingFieldsFor(sv.requiresShipping),
           productId: product.id,
           sku: sv.sku,
           name: 'Each',
@@ -763,6 +786,7 @@ export function createProductImportService() {
             continue;
           }
           await storage.updateProductVariant(existingSibling.id, {
+            ...shippingFieldsFor(sibling.requiresShipping),
             name: sibling.name,
             unitsPerVariant: 1,
             hierarchyLevel: 1,
@@ -773,6 +797,7 @@ export function createProductImportService() {
           variantsUpdated++;
         } else {
           await storage.createProductVariant({
+            ...shippingFieldsFor(sibling.requiresShipping),
             productId: product.id,
             sku: sibling.sku,
             name: sibling.name,
