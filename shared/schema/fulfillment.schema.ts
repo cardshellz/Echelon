@@ -1019,6 +1019,52 @@ export const packageAllocationEffectIntents = wmsSchema.table("package_allocatio
   check("package_allocation_effect_intents_inert_chk", sql`${table.executable} = FALSE`),
 ]);
 
+export const packageAllocationEffectOutbox = wmsSchema.table("package_allocation_effect_outbox", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  packageAllocationEffectIntentId: bigint("package_allocation_effect_intent_id", {
+    mode: "number",
+  }).notNull().references(() => packageAllocationEffectIntents.id, { onDelete: "restrict" }),
+  idempotencyKey: varchar("idempotency_key", { length: 500 }).notNull(),
+  payloadHash: varchar("payload_hash", { length: 64 }).notNull(),
+  state: varchar("state", { length: 30 }).notNull().default("shadow"),
+  executionEnabled: boolean("execution_enabled").notNull().default(false),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  availableAt: timestamp("available_at", { withTimezone: true }),
+  leaseToken: varchar("lease_token", { length: 120 }),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+  lastErrorCode: varchar("last_error_code", { length: 100 }),
+  lastErrorMessage: varchar("last_error_message", { length: 2000 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_package_allocation_effect_outbox_intent")
+    .on(table.packageAllocationEffectIntentId),
+  uniqueIndex("uq_package_allocation_effect_outbox_idempotency")
+    .on(table.idempotencyKey),
+  index("idx_package_allocation_effect_outbox_dispatch")
+    .on(table.state, table.executionEnabled, table.id),
+  check(
+    "package_allocation_effect_outbox_identity_chk",
+    sql`char_length(btrim(${table.idempotencyKey})) BETWEEN 1 AND 500
+      AND ${table.payloadHash} ~ '^[0-9a-f]{64}$'`,
+  ),
+  check(
+    "package_allocation_effect_outbox_inert_chk",
+    sql`${table.state} = 'shadow'
+      AND ${table.executionEnabled} = FALSE
+      AND ${table.attemptCount} = 0
+      AND ${table.availableAt} IS NULL
+      AND ${table.leaseToken} IS NULL
+      AND ${table.leaseExpiresAt} IS NULL
+      AND ${table.lastErrorCode} IS NULL
+      AND ${table.lastErrorMessage} IS NULL`,
+  ),
+  check(
+    "package_allocation_effect_outbox_time_chk",
+    sql`${table.updatedAt} >= ${table.createdAt}`,
+  ),
+]);
+
 export const carrierTrackingSubscriptions = wmsSchema.table("carrier_tracking_subscriptions", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   trackingProvider: varchar("tracking_provider", { length: 40 }).notNull(),
@@ -1526,6 +1572,7 @@ export const insertPackageAllocationGroupSourceLineSchema = createInsertSchema(p
 export const insertPackageAllocationPlanSchema = createInsertSchema(packageAllocationPlans).omit({ id: true, createdAt: true });
 export const insertPackageAllocationEntrySchema = createInsertSchema(packageAllocationEntries).omit({ id: true, createdAt: true });
 export const insertPackageAllocationEffectIntentSchema = createInsertSchema(packageAllocationEffectIntents).omit({ id: true, createdAt: true });
+export const insertPackageAllocationEffectOutboxSchema = createInsertSchema(packageAllocationEffectOutbox).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertCarrierTrackingSubscriptionSchema = createInsertSchema(carrierTrackingSubscriptions).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertCarrierTrackingSubscriptionLabelSchema = createInsertSchema(carrierTrackingSubscriptionLabels).omit({ id: true, createdAt: true });
 export const insertCarrierTrackingSubscriptionAttemptSchema = createInsertSchema(carrierTrackingSubscriptionAttempts).omit({ id: true, createdAt: true });
@@ -1589,6 +1636,8 @@ export type InsertPackageAllocationEntry = z.infer<typeof insertPackageAllocatio
 export type PackageAllocationEntry = typeof packageAllocationEntries.$inferSelect;
 export type InsertPackageAllocationEffectIntent = z.infer<typeof insertPackageAllocationEffectIntentSchema>;
 export type PackageAllocationEffectIntent = typeof packageAllocationEffectIntents.$inferSelect;
+export type InsertPackageAllocationEffectOutbox = z.infer<typeof insertPackageAllocationEffectOutboxSchema>;
+export type PackageAllocationEffectOutbox = typeof packageAllocationEffectOutbox.$inferSelect;
 export type InsertCarrierTrackingSubscription = z.infer<typeof insertCarrierTrackingSubscriptionSchema>;
 export type CarrierTrackingSubscription = typeof carrierTrackingSubscriptions.$inferSelect;
 export type InsertCarrierTrackingSubscriptionLabel = z.infer<typeof insertCarrierTrackingSubscriptionLabelSchema>;

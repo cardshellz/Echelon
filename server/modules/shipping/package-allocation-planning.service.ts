@@ -17,6 +17,7 @@ import {
   type PackageAllocationLedgerRepository,
   type PackageAllocationLedgerTransaction,
   type PersistedPackageAllocationEntry,
+  type PersistedPackageAllocationEffectOutboxEntry,
   type PersistedPackageAllocationIntent,
   type PersistedPackageAllocationPlan,
 } from "./package-allocation-ledger.repository";
@@ -272,6 +273,19 @@ function compareCanonical(left: unknown, right: unknown): boolean {
   return canonicalJson(left) === canonicalJson(right);
 }
 
+function expectedPersistedEffectOutbox(
+  result: PackageAllocationGroupPlannerResultV1,
+): readonly PersistedPackageAllocationEffectOutboxEntry[] {
+  return Object.freeze(result.effectIntentsToAppend.map((intent) => Object.freeze({
+    intentKey: intent.intentKey,
+    idempotencyKey: intent.intentKey,
+    payloadHash: intent.payloadHash,
+    state: "shadow" as const,
+    executionEnabled: false as const,
+    attemptCount: 0 as const,
+  })));
+}
+
 function normalizeAuthoritySnapshot(
   rawSnapshot: unknown,
   failure: Readonly<{
@@ -336,16 +350,18 @@ async function assertExactReplay(
     && persisted.plannerVersion === PACKAGE_ALLOCATION_PLANNER_VERSION
     && persisted.reason === writeContext.reason
     && persisted.createdBy === writeContext.createdBy;
-  const [entries, intents] = await Promise.all([
+  const [entries, intents, effectOutbox] = await Promise.all([
     transaction.loadPlanEntries(persisted.id),
     transaction.loadPlanIntents(persisted.id),
+    transaction.loadPlanEffectOutbox(persisted.id),
   ]);
   if (!scalarMatch
       || !compareCanonical(persistedAuthoritySnapshot, authoritySnapshot)
       || !compareCanonical(persisted.stateSnapshot, result.state)
       || !compareCanonical(persisted.reviewSnapshot, expectedReview)
       || !compareCanonical(entries, expectedPersistedEntries(result))
-      || !compareCanonical(intents, expectedPersistedIntents(result))) {
+      || !compareCanonical(intents, expectedPersistedIntents(result))
+      || !compareCanonical(effectOutbox, expectedPersistedEffectOutbox(result))) {
     throw new PackageAllocationPersistenceError(
       "REPLAY_CONFLICT",
       "The package allocation input hash already exists with different persisted evidence",

@@ -14,6 +14,7 @@ import type {
   PackageAllocationLedgerRepository,
   PackageAllocationLedgerTransaction,
   PersistedPackageAllocationEntry,
+  PersistedPackageAllocationEffectOutboxEntry,
   PersistedPackageAllocationIntent,
   PersistedPackageAllocationPlan,
   RegisteredPackageAllocationBinding,
@@ -129,11 +130,28 @@ function persistedIntent(intent: PackageAllocationEffectIntentV1): PersistedPack
   });
 }
 
+function persistedEffectOutbox(
+  intent: PackageAllocationEffectIntentV1,
+): PersistedPackageAllocationEffectOutboxEntry {
+  return Object.freeze({
+    intentKey: intent.intentKey,
+    idempotencyKey: intent.intentKey,
+    payloadHash: intent.payloadHash,
+    state: "shadow",
+    executionEnabled: false,
+    attemptCount: 0,
+  });
+}
+
 class InMemoryLedgerTransaction implements PackageAllocationLedgerTransaction {
   group: LockedPackageAllocationGroup | null = null;
   readonly plansByVersion = new Map<number, PersistedPackageAllocationPlan>();
   readonly entriesByPlan = new Map<string, readonly PersistedPackageAllocationEntry[]>();
   readonly intentsByPlan = new Map<string, readonly PersistedPackageAllocationIntent[]>();
+  readonly effectOutboxByPlan = new Map<
+    string,
+    readonly PersistedPackageAllocationEffectOutboxEntry[]
+  >();
   readonly sources = new Map<number, RegisteredPackageAllocationSource>();
   readonly bindings = new Map<string, RegisteredPackageAllocationBinding>();
   appendCalls: AppendPackageAllocationPlanInput[] = [];
@@ -214,6 +232,12 @@ class InMemoryLedgerTransaction implements PackageAllocationLedgerTransaction {
     return this.intentsByPlan.get(planId) ?? [];
   }
 
+  async loadPlanEffectOutbox(
+    planId: string,
+  ): Promise<readonly PersistedPackageAllocationEffectOutboxEntry[]> {
+    return this.effectOutboxByPlan.get(planId) ?? [];
+  }
+
   async appendPlan(input: AppendPackageAllocationPlanInput): Promise<string> {
     this.appendCalls.push(input);
     const planId = String(100 + input.planVersion);
@@ -235,6 +259,10 @@ class InMemoryLedgerTransaction implements PackageAllocationLedgerTransaction {
     this.plansByVersion.set(plan.planVersion, plan);
     this.entriesByPlan.set(planId, Object.freeze(input.entries.map(persistedEntry)));
     this.intentsByPlan.set(planId, Object.freeze(input.intents.map(persistedIntent)));
+    this.effectOutboxByPlan.set(
+      planId,
+      Object.freeze(input.intents.map(persistedEffectOutbox)),
+    );
     this.group = Object.freeze({
       ...input.group,
       currentVersion: input.planVersion,
@@ -303,6 +331,9 @@ describe("PackageAllocationPlanningService", () => {
     expect(persisted.entries).toEqual(result.plannerResult.ledgerEntriesToAppend);
     expect(persisted.intents).toEqual(result.plannerResult.effectIntentsToAppend);
     expect(persisted.intents.every((intent) => intent.executable === false)).toBe(true);
+    expect(repository.transaction.effectOutboxByPlan.get("101")).toEqual(
+      result.plannerResult.effectIntentsToAppend.map(persistedEffectOutbox),
+    );
     expect(persisted.plannerVersion).toBe("package-allocation-group-v2");
     expect(persisted.plannerVersion).toBe(PACKAGE_ALLOCATION_PLANNER_VERSION);
     expect(persisted.stateSnapshot).toEqual(result.plannerResult.state);
@@ -483,6 +514,22 @@ describe("PackageAllocationPlanningService", () => {
     repository.transaction.entriesByPlan.set("101", Object.freeze([
       Object.freeze({ ...entries[0], quantity: entries[0].quantity + 1 }),
       ...entries.slice(1),
+    ]));
+
+    await expect(service.persist(command())).rejects.toSatisfy((error: unknown) => {
+      expectPersistenceError(error, "REPLAY_CONFLICT");
+      return true;
+    });
+  });
+
+  it("rejects an input-hash replay whose shadow outbox identity was changed", async () => {
+    const repository = new InMemoryLedgerRepository();
+    const service = new PackageAllocationPlanningService(repository);
+    await service.persist(command());
+    const outbox = repository.transaction.effectOutboxByPlan.get("101")!;
+    repository.transaction.effectOutboxByPlan.set("101", Object.freeze([
+      Object.freeze({ ...outbox[0], payloadHash: "f".repeat(64) }),
+      ...outbox.slice(1),
     ]));
 
     await expect(service.persist(command())).rejects.toSatisfy((error: unknown) => {

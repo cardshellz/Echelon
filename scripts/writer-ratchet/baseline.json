@@ -1014,6 +1014,9 @@
   "wms.package_allocation_effect_intents": [
     "modules/shipping"
   ],
+  "wms.package_allocation_effect_outbox": [
+    "modules/shipping"
+  ],
   "wms.package_allocation_entries": [
     "modules/shipping"
   ],
