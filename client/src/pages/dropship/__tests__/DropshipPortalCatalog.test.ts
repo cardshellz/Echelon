@@ -11,8 +11,10 @@ import {
 import {
   EbayStoreCategoryAssignmentPanel,
   fetchAllSelectedCatalogRows,
+  formatIssue,
   shouldOfferEbayStoreReconnect,
 } from "../DropshipPortalCatalog";
+import { EbayStoreCategoryAuthorizationRecoveryView } from "../EbayStoreCategoryAuthorizationRecovery";
 
 function row(productVariantId: number): DropshipCatalogRow {
   return { productVariantId } as DropshipCatalogRow;
@@ -119,11 +121,11 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(shouldOfferEbayStoreReconnect(providerError)).toBe(false);
 
     const markup = renderToStaticMarkup(React.createElement(EbayStoreCategoryAssignmentPanel, {
+      authorizationRecovery: React.createElement("button", null, "Refresh eBay authorization"),
       data: null,
       error: permissionError,
       isLoading: false,
       onAssignmentChange: () => undefined,
-      onReconnect: () => undefined,
       pendingProductVariantIds: new Set<number>(),
       rows: [],
     }));
@@ -131,5 +133,56 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(markup).toContain("eBay Store-category authorization needs attention.");
     expect(markup).toContain("Refresh eBay authorization");
     expect(markup).toContain("You can still preview and push listings");
+  });
+
+  it("runs Store-category reauthorization inline and returns directly to Catalog", () => {
+    const catalogSource = readFileSync(
+      join(process.cwd(), "client", "src", "pages", "dropship", "DropshipPortalCatalog.tsx"),
+      "utf8",
+    );
+    const recoverySource = readFileSync(
+      join(process.cwd(), "client", "src", "pages", "dropship", "EbayStoreCategoryAuthorizationRecovery.tsx"),
+      "utf8",
+    );
+
+    expect(catalogSource).toContain("<EbayStoreCategoryAuthorizationRecovery");
+    expect(recoverySource).toContain('verifyPasskeyStepUp("connect_store")');
+    expect(recoverySource).toContain('startEmailStepUp("connect_store")');
+    expect(recoverySource).toContain('action: "connect_store"');
+    expect(recoverySource).toContain('"/api/dropship/store-connections/oauth/start"');
+    expect(recoverySource).toContain('intent: "refresh_connection"');
+    expect(recoverySource).toContain('returnTo: dropshipPortalPath("/catalog")');
+    expect(recoverySource).toContain("window.location.assign(result.authorizationUrl)");
+    expect(catalogSource).not.toContain('setLocation(dropshipPortalPath("/settings"))');
+  });
+
+  it("turns raw eBay preview config keys into actionable setup labels", () => {
+    expect(formatIssue("missing_config:merchantLocationKey")).toBe("eBay setup: Inventory location");
+    expect(formatIssue("missing_config:businessPolicies.returnPolicyId")).toBe("eBay setup: Return policy");
+    expect(formatIssue("ebay_browse_category_required")).toBe(
+      "Card Shellz marketplace category setup required",
+    );
+  });
+
+  it("places an explicit authorization confirmation beside the emailed code", () => {
+    vi.stubGlobal("React", React);
+    const markup = renderToStaticMarkup(React.createElement(EbayStoreCategoryAuthorizationRecoveryView, {
+      connectProofActive: false,
+      emailCodeSent: true,
+      errorMessage: "",
+      hasPasskey: false,
+      message: "Verification code sent to your email address.",
+      onCancel: () => undefined,
+      onStart: () => undefined,
+      onVerificationCodeChange: () => undefined,
+      pendingAction: null,
+      permissionRequired: true,
+      verificationCode: "813606",
+    }));
+
+    expect(markup).toContain("Verification code sent to your email address.");
+    expect(markup).toContain("Store authorization verification code");
+    expect(markup).toContain("Verify and open eBay authorization");
+    expect(markup).not.toContain("Settings");
   });
 });

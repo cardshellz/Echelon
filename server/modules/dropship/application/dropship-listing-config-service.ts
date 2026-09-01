@@ -20,6 +20,8 @@ export const DROPSHIP_DEFAULT_LISTING_MODE: DropshipListingMode = "draft_first";
 export const DROPSHIP_DEFAULT_EBAY_LISTING_MODE: DropshipListingMode = "live";
 export const DROPSHIP_DEFAULT_LISTING_INVENTORY_MODE: DropshipListingInventoryMode = "managed_quantity_sync";
 export const DROPSHIP_DEFAULT_LISTING_PRICE_MODE: DropshipListingPriceMode = "vendor_defined";
+/** Dropship eBay selling is currently registered and operated against the US marketplace. */
+export const DROPSHIP_DEFAULT_EBAY_MARKETPLACE_ID = "EBAY_US";
 
 export interface DropshipListingConfigStoreConnectionContext {
   vendorId: number;
@@ -251,7 +253,9 @@ export function buildDefaultDropshipStoreListingConfig(
       listingMode: DROPSHIP_DEFAULT_EBAY_LISTING_MODE,
       inventoryMode: DROPSHIP_DEFAULT_LISTING_INVENTORY_MODE,
       priceMode: DROPSHIP_DEFAULT_LISTING_PRICE_MODE,
-      marketplaceConfig: {},
+      marketplaceConfig: {
+        marketplaceId: DROPSHIP_DEFAULT_EBAY_MARKETPLACE_ID,
+      },
       requiredConfigKeys: [
         "marketplaceId",
         "merchantLocationKey",

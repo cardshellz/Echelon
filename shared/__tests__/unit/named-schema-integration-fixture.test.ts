@@ -12,6 +12,7 @@ import {
   channels,
   channelVariantOverrides,
   channelWarehouseAssignments,
+  ebayCategoryMappings,
   inventoryLevels,
   inventoryTransactions,
   productLineProducts,
@@ -47,6 +48,7 @@ const fixtureTables: PgTable[] = [
   channelAllocationRules,
   allocationAuditLog,
   sourceLockConfig,
+  ebayCategoryMappings,
 ];
 
 function escapeRegex(value: string): string {

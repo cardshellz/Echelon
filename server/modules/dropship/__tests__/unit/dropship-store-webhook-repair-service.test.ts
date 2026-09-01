@@ -40,6 +40,7 @@ describe("DropshipStoreWebhookRepairService", () => {
       vendorId: 10,
       storeConnectionId: 22,
       platform: "shopify",
+      providerEnvironment: "production",
       shopDomain: "vendor-shop.myshopify.com",
       accessToken: "shopify-token",
       connectedAt: now,

@@ -1647,6 +1647,39 @@ export interface DropshipEbayStoreCategoryAssignmentResponse {
   idempotentReplay: boolean;
 }
 
+export interface DropshipEbayListingSetupOption {
+  id: string;
+  name: string;
+}
+
+export interface DropshipEbayListingSetupSelection {
+  merchantLocationKey: string | null;
+  fulfillmentPolicyId: string | null;
+  returnPolicyId: string | null;
+  paymentPolicyId: string | null;
+}
+
+export interface DropshipEbayListingSetupResponse {
+  storeConnectionId: number;
+  marketplaceId: string;
+  complete: boolean;
+  missingFields: string[];
+  selection: DropshipEbayListingSetupSelection;
+  options: {
+    merchantLocations: DropshipEbayListingSetupOption[];
+    fulfillmentPolicies: DropshipEbayListingSetupOption[];
+    returnPolicies: DropshipEbayListingSetupOption[];
+    paymentPolicies: DropshipEbayListingSetupOption[];
+  };
+}
+
+export interface ReplaceDropshipEbayListingSetupInput {
+  merchantLocationKey: string;
+  fulfillmentPolicyId: string;
+  returnPolicyId: string;
+  paymentPolicyId: string;
+}
+
 export type DropshipVendorSelectionScope =
   "catalog" | "product_line" | "category" | "product" | "variant";
 export type DropshipVendorSelectionAction = "include" | "exclude";

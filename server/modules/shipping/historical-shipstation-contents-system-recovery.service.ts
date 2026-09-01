@@ -8,6 +8,7 @@ import type {
 import {
   buildHistoricalShipStationContentsSystemRecoveryEvent,
   HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
+  historicalShipStationRecoverableCaseEvidenceHash,
   type HistoricalShipStationContentsRecoveryEvidence,
 } from "./historical-shipstation-contents-recovery.domain";
 import type {
@@ -28,7 +29,9 @@ export type HistoricalShipStationContentsSystemRecoveryServiceErrorCode =
   | "CANDIDATE_CHANGED"
   | "CANDIDATE_NOT_FOUND"
   | "INVALID_LABEL_ID"
+  | "INVALID_PREVIEW_EVIDENCE_HASH"
   | "NO_RESOLVABLE_EVENTS"
+  | "PROVIDER_EVIDENCE_CHANGED"
   | "PROVIDER_EVIDENCE_NOT_RECOVERABLE"
   | "PROVIDER_SHIPMENT_NOT_FOUND";
 
@@ -112,6 +115,7 @@ export class HistoricalShipStationContentsSystemRecoveryService {
 
   async recover(
     rawShippingProviderLabelId: string,
+    expectedPreviewEvidenceHash: string,
   ): Promise<PersistedHistoricalShipStationContentsSystemRecovery> {
     const parsedLabelId = positivePostgresBigintTextSchema.safeParse(rawShippingProviderLabelId);
     if (!parsedLabelId.success) {
@@ -128,6 +132,13 @@ export class HistoricalShipStationContentsSystemRecoveryService {
       );
     }
     const shippingProviderLabelId = parsedLabelId.data;
+    if (!/^[0-9a-f]{64}$/.test(expectedPreviewEvidenceHash)) {
+      throw new HistoricalShipStationContentsSystemRecoveryServiceError(
+        "INVALID_PREVIEW_EVIDENCE_HASH",
+        "Historical contents system recovery preview evidence hash failed validation",
+        Object.freeze({ shippingProviderLabelId }),
+      );
+    }
     const snapshot = await this.repository.loadSnapshot(shippingProviderLabelId);
     if (snapshot === null) {
       throw new HistoricalShipStationContentsSystemRecoveryServiceError(
@@ -159,6 +170,18 @@ export class HistoricalShipStationContentsSystemRecoveryService {
           shippingProviderLabelId,
           recoveryStatus: providerResult.evidence.recoveryStatus,
         }),
+      );
+    }
+    const currentPreviewEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
+      shippingProviderLabelId,
+      recoveryStatus: recoveryEvidence.recoveryStatus,
+      providerEvidenceHash: recoveryEvidence.evidenceHash,
+    });
+    if (currentPreviewEvidenceHash !== expectedPreviewEvidenceHash) {
+      throw new HistoricalShipStationContentsSystemRecoveryServiceError(
+        "PROVIDER_EVIDENCE_CHANGED",
+        "Historical contents provider evidence changed after preview",
+        Object.freeze({ shippingProviderLabelId }),
       );
     }
 

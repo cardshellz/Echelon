@@ -118,6 +118,11 @@ describe("PgDropshipListingPreviewRepository", () => {
     expect(query).toContain("COALESCE(pv.track_inventory, true) = true");
     expect(query).toContain("pv.sales_eligibility = 'sellable'");
     expect(query).toContain("p.ebay_browse_category_id");
+    expect(query).toContain("FROM ebay.ebay_category_mappings ecm");
+    expect(query).toContain("supplier_channel.type = 'internal'");
+    expect(query).toContain("supplier_channel.status = 'active'");
+    expect(query).toContain("ecm.listing_enabled = true");
+    expect(query).toContain("HAVING COUNT(DISTINCT ecm.ebay_browse_category_id) = 1");
   });
 });
 
