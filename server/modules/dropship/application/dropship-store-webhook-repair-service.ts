@@ -69,6 +69,8 @@ export class DropshipStoreWebhookRepairService {
       vendorId: credentials.vendorId,
       storeConnectionId: credentials.storeConnectionId,
       platform: credentials.platform,
+      // Shopify's OAuth provider is production-only and persists this same value.
+      providerEnvironment: "production",
       shopDomain: credentials.shopDomain,
       accessToken: credentials.accessToken,
       connectedAt: repairedAt,

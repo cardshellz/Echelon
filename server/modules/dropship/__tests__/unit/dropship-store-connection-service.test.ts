@@ -937,6 +937,7 @@ describe("DropshipStoreConnectionService", () => {
       vendorId: 10,
       storeConnectionId: 20,
       platform: "shopify",
+      providerEnvironment: "test",
       shopDomain: "vendor-test.myshopify.com",
       accessToken: "access-token",
       connectedAt: now,
