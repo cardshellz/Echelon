@@ -126,3 +126,50 @@ describe("Shopify import — SKU-less variant grouping", () => {
     expect(skus).toEqual(["SHLZ-MAG-STND", "SHLZ-TOP-35PT-BLU"]);
   });
 });
+
+describe("Shopify import — requires_shipping", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getProductVariantBySku.mockResolvedValue(null);
+    mocks.getProductBySku.mockResolvedValue(null);
+    mocks.createProduct.mockResolvedValue({ id: 901 });
+    mocks.createProductVariant.mockResolvedValue({ id: 2 });
+  });
+
+  it("stores a digital variant as non-shipping and untracked", async () => {
+    // product_variants_digital_untracked_chk requires the two together.
+    mocks.fetchShopifyCatalogProducts.mockResolvedValue([
+      { ...skuLessVariant(500, 7001, "Default Title"), sku: "CLUB-ANNUAL-US", requiresShipping: false },
+    ]);
+
+    await createProductImportService().syncProductsWithMultiUOM();
+
+    expect(mocks.createProductVariant).toHaveBeenCalledWith(
+      expect.objectContaining({ requiresShipping: false, trackInventory: false }),
+    );
+  });
+
+  it("keeps a physical variant shippable and does not force it untracked", async () => {
+    mocks.fetchShopifyCatalogProducts.mockResolvedValue([
+      { ...skuLessVariant(501, 7002, "Default Title"), sku: "SHLZ-TOP-35PT-BLU", requiresShipping: true },
+    ]);
+
+    await createProductImportService().syncProductsWithMultiUOM();
+
+    const call = mocks.createProductVariant.mock.calls[0][0];
+    expect(call.requiresShipping).toBe(true);
+    expect(call).not.toHaveProperty("trackInventory");
+  });
+
+  it("treats an unknown flag as shippable", async () => {
+    mocks.fetchShopifyCatalogProducts.mockResolvedValue([
+      { ...skuLessVariant(502, 7003, "Default Title"), sku: "SHLZ-MAG-STND" },
+    ]);
+
+    await createProductImportService().syncProductsWithMultiUOM();
+
+    expect(mocks.createProductVariant).toHaveBeenCalledWith(
+      expect.objectContaining({ requiresShipping: true }),
+    );
+  });
+});
