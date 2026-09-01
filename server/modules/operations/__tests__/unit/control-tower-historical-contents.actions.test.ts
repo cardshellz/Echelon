@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   decideHistoricalContentsReview,
+  getHistoricalContentsCorrectionPreview,
   getHistoricalContentsReviewPreview,
 } from "../../control-tower-historical-contents.actions";
 import { wmsReconciliationSource } from "../../control-tower-v2.sources";
@@ -84,6 +85,17 @@ describe("Control Tower historical package-content actions", () => {
       reviewService: { preview, decide: vi.fn() },
     })).rejects.toMatchObject({ code: "INVALID_WORK_ITEM_ACTION", statusCode: 409 });
     expect(preview).not.toHaveBeenCalled();
+  });
+
+  it("loads correction evidence through the same exact Tower source contract", async () => {
+    const preview = vi.fn(async () => ({ exceptionId: "501", correctionPlanHash: "a".repeat(64) }));
+
+    await expect(getHistoricalContentsCorrectionPreview({
+      pool: poolWithWorkItem(),
+      workItemId: 71,
+      correctionPreviewService: { preview },
+    })).resolves.toMatchObject({ exceptionId: "501" });
+    expect(preview).toHaveBeenCalledWith("501");
   });
 
   it("requires the current Tower version and forwards the authenticated actor", async () => {
