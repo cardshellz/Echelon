@@ -480,6 +480,29 @@ export async function registerProductRoutes(app: Express) {
     }
   });
 
+/**
+ * A shipping group answers "can this item ship with that item", so the screen
+ * only lists products that can actually ship. Two kinds are excluded:
+ *
+ *   - digital products (gift cards, donations, membership plans): every active
+ *     variant has requires_shipping = false. They sat in Unassigned for ever and
+ *     could be mis-assigned into a group whose metafield checkout ignores anyway
+ *     (the discount Function skips requiresShipping === false lines).
+ *   - rows with no active variants at all: duplicate shells left behind by
+ *     earlier imports. They ship nothing, and because they still carry the
+ *     Shopify mapping they were a common source of the "Multiple Echelon
+ *     products map to the same Shopify product" failure on bulk assign.
+ *
+ * Unknown (NULL) requires_shipping counts as shippable, so nothing disappears
+ * from the screen on incomplete data.
+ */
+const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
+  SELECT 1 FROM catalog.product_variants v
+  WHERE v.product_id = ${products.id}
+    AND v.is_active
+    AND COALESCE(v.requires_shipping, true)
+)`;
+
   app.get("/api/shipping-groups", requirePermission("inventory", "view"), async (_req, res) => {
     try {
       const groups = await db
@@ -500,7 +523,11 @@ export async function registerProductRoutes(app: Express) {
         // would otherwise inflate the count (e.g. archived Quad Box divider SKUs).
         .leftJoin(
           products,
-          and(eq(products.shippingGroupId, shippingGroups.id), eq(products.isActive, true)),
+          and(
+            eq(products.shippingGroupId, shippingGroups.id),
+            eq(products.isActive, true),
+            HAS_SHIPPABLE_VARIANT,
+          ),
         )
         .groupBy(
           shippingGroups.id,
@@ -531,7 +558,7 @@ export async function registerProductRoutes(app: Express) {
       const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit ?? "50")) || 50));
       const offset = (page - 1) * limit;
 
-      const conds: any[] = [eq(products.isActive, true)];
+      const conds: any[] = [eq(products.isActive, true), HAS_SHIPPABLE_VARIANT];
       if (filterRaw === "unassigned") {
         conds.push(isNull(products.shippingGroupId));
       } else if (filterRaw.startsWith("group:")) {
