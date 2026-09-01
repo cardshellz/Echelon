@@ -1019,7 +1019,8 @@
     "modules/orders"
   ],
   "wms.reconciliation_exceptions": [
-    "modules/oms"
+    "modules/oms",
+    "modules/shipping"
   ],
   "wms.return_items": [
     "modules/wms"

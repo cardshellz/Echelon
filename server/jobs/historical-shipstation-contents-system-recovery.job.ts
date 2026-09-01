@@ -27,9 +27,18 @@ import {
   type HistoricalShipStationContentsAuditJobResult,
 } from "./historical-shipstation-contents-audit.job";
 import { HistoricalShipStationContentsAuditRepositoryError } from "../modules/shipping/historical-shipstation-contents-audit.repository";
+import {
+  HistoricalShipStationContentsReviewRepositoryError,
+  PgHistoricalShipStationContentsReviewRepository,
+} from "../modules/shipping/historical-shipstation-contents-review.repository";
+import {
+  HistoricalShipStationContentsReviewService,
+  HistoricalShipStationContentsReviewServiceError,
+} from "../modules/shipping/historical-shipstation-contents-review.service";
+import type { HistoricalShipStationContentsReviewReason } from "../modules/shipping/historical-shipstation-contents-audit.service";
 
 const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
-const PREVIEW_CONTRACT_VERSION = 1 as const;
+const PREVIEW_CONTRACT_VERSION = 2 as const;
 const CONNECTION_TIMEOUT_MS = 10_000;
 const STATEMENT_TIMEOUT_MS = 30_000;
 const QUERY_TIMEOUT_MS = 35_000;
@@ -90,6 +99,14 @@ export type HistoricalShipStationContentsSystemRecoveryOutcome =
       readonly errorCode: string;
     }>;
 
+export type HistoricalShipStationContentsReviewIntakeOutcome = Readonly<{
+  readonly kind: "would_create_review" | "created" | "updated" | "already_persisted" | "failed";
+  readonly shippingProviderLabelId: string;
+  readonly evidenceHash: string;
+  readonly exceptionId?: string;
+  readonly errorCode?: string;
+}>;
+
 export interface HistoricalShipStationContentsSystemRecoveryJobResult {
   readonly mode:
     | "preview_historical_shipstation_contents_system_recovery"
@@ -102,6 +119,12 @@ export interface HistoricalShipStationContentsSystemRecoveryJobResult {
   readonly alreadyPersistedRecoveryCount: number;
   readonly failedRecoveryCount: number;
   readonly outcomes: readonly HistoricalShipStationContentsSystemRecoveryOutcome[];
+  readonly attemptedReviewIntakeCount: number;
+  readonly createdReviewCount: number;
+  readonly updatedReviewCount: number;
+  readonly alreadyPersistedReviewCount: number;
+  readonly failedReviewIntakeCount: number;
+  readonly reviewIntakeOutcomes: readonly HistoricalShipStationContentsReviewIntakeOutcome[];
   readonly auditDurationMs: number;
   readonly recoveryDurationMs: number;
   readonly totalDurationMs: number;
@@ -123,11 +146,27 @@ interface RecoveryService {
   ): Promise<PersistedHistoricalShipStationContentsSystemRecovery>;
 }
 
+interface ReviewIntakeService {
+  intake(input: Readonly<{
+    readonly shippingProviderLabelId: string;
+    readonly reason: HistoricalShipStationContentsReviewReason;
+    readonly expectedEvidenceHash: string;
+  }>): Promise<Readonly<{
+    readonly kind: "created" | "updated" | "already_persisted";
+    readonly exceptionId: string;
+    readonly shippingProviderLabelId: string;
+  }>>;
+}
+
 type RecoveryPoolFactory = (config: PoolConfig) => Pool;
 type RecoveryServiceFactory = (
   pool: Pool,
   providerClient: HistoricalShipStationContentsClient,
 ) => RecoveryService;
+type ReviewIntakeServiceFactory = (
+  pool: Pool,
+  providerClient: HistoricalShipStationContentsClient,
+) => ReviewIntakeService;
 
 const DEFAULT_RUNTIME: HistoricalShipStationContentsSystemRecoveryJobRuntime = Object.freeze({
   nowMs: () => performance.now(),
@@ -305,7 +344,8 @@ function assertAuditReportMatchesRequest(
       return false;
     }
     reviewIds.add(candidate.shippingProviderLabelId);
-    return validPositiveBigint(candidate.shippingProviderLabelId);
+    return validPositiveBigint(candidate.shippingProviderLabelId)
+      && (candidate.evidenceHash === null || /^[0-9a-f]{64}$/.test(candidate.evidenceHash));
   });
   if (
     audit.mode !== "read_only_historical_shipstation_contents_audit"
@@ -361,6 +401,16 @@ function defaultRecoveryServiceFactory(
   );
 }
 
+function defaultReviewIntakeServiceFactory(
+  pool: Pool,
+  providerClient: HistoricalShipStationContentsClient,
+): ReviewIntakeService {
+  return new HistoricalShipStationContentsReviewService(
+    new PgHistoricalShipStationContentsReviewRepository(pool),
+    providerClient,
+  );
+}
+
 function recoveryErrorCode(error: unknown): string {
   if (
     error instanceof HistoricalShipStationContentsSystemRecoveryServiceError
@@ -369,6 +419,93 @@ function recoveryErrorCode(error: unknown): string {
     return error.code;
   }
   return "UNEXPECTED_RECOVERY_FAILURE";
+}
+
+function reviewIntakeErrorCode(error: unknown): string {
+  if (
+    error instanceof HistoricalShipStationContentsReviewServiceError
+    || error instanceof HistoricalShipStationContentsReviewRepositoryError
+  ) {
+    return error.code;
+  }
+  return "UNEXPECTED_REVIEW_INTAKE_FAILURE";
+}
+
+async function applyReviewCases(options: {
+  readonly audit: HistoricalShipStationContentsAuditJobResult;
+  readonly poolConfig: PoolConfig;
+  readonly providerClient: HistoricalShipStationContentsClient;
+  readonly poolFactory: RecoveryPoolFactory;
+  readonly serviceFactory: ReviewIntakeServiceFactory;
+}): Promise<readonly HistoricalShipStationContentsReviewIntakeOutcome[]> {
+  const reviewCases = options.audit.reviewCases.filter(
+    (candidate): candidate is typeof candidate & { evidenceHash: string } => candidate.evidenceHash !== null,
+  );
+  if (reviewCases.length === 0) return Object.freeze([]);
+
+  let pool: Pool | undefined;
+  let outcomes: readonly HistoricalShipStationContentsReviewIntakeOutcome[] | undefined;
+  let primaryFailure: unknown;
+  try {
+    pool = options.poolFactory(options.poolConfig);
+    const service = options.serviceFactory(pool, options.providerClient);
+    const mutableOutcomes: HistoricalShipStationContentsReviewIntakeOutcome[] = [];
+    for (const candidate of reviewCases) {
+      try {
+        const persisted = await service.intake({
+          shippingProviderLabelId: candidate.shippingProviderLabelId,
+          reason: candidate.reason,
+          expectedEvidenceHash: candidate.evidenceHash,
+        });
+        mutableOutcomes.push(Object.freeze({
+          kind: persisted.kind,
+          shippingProviderLabelId: candidate.shippingProviderLabelId,
+          evidenceHash: candidate.evidenceHash,
+          exceptionId: persisted.exceptionId,
+        }));
+      } catch (error) {
+        mutableOutcomes.push(Object.freeze({
+          kind: "failed",
+          shippingProviderLabelId: candidate.shippingProviderLabelId,
+          evidenceHash: candidate.evidenceHash,
+          errorCode: reviewIntakeErrorCode(error),
+        }));
+      }
+    }
+    outcomes = Object.freeze(mutableOutcomes);
+  } catch (error) {
+    primaryFailure = error;
+  }
+
+  let cleanupFailure: unknown;
+  if (pool !== undefined) {
+    try {
+      await pool.end();
+    } catch (error) {
+      cleanupFailure = error;
+    }
+  }
+  if (primaryFailure !== undefined && cleanupFailure !== undefined) {
+    throw new HistoricalShipStationContentsSystemRecoveryJobError(
+      "HISTORICAL_SHIPSTATION_CONTENTS_SYSTEM_RECOVERY_EXECUTION_AND_CLEANUP_FAILED",
+      "Historical contents review intake execution and cleanup both failed",
+      Object.freeze({}),
+      { cause: new AggregateError([primaryFailure, cleanupFailure]) },
+    );
+  }
+  if (primaryFailure !== undefined) throw primaryFailure;
+  if (cleanupFailure !== undefined) {
+    throw new HistoricalShipStationContentsSystemRecoveryJobError(
+      "HISTORICAL_SHIPSTATION_CONTENTS_SYSTEM_RECOVERY_CLEANUP_FAILED",
+      "Historical contents review intake cleanup failed",
+      Object.freeze({}),
+      { cause: cleanupFailure },
+    );
+  }
+  if (outcomes === undefined) {
+    throw new Error("Historical contents review intake completed without outcomes");
+  }
+  return outcomes;
 }
 
 async function applyRecoverableCases(options: {
@@ -455,6 +592,7 @@ export async function runHistoricalShipStationContentsSystemRecoveryJob(options:
   readonly auditJob?: typeof runHistoricalShipStationContentsAuditJob;
   readonly poolFactory?: RecoveryPoolFactory;
   readonly serviceFactory?: RecoveryServiceFactory;
+  readonly reviewIntakeServiceFactory?: ReviewIntakeServiceFactory;
   readonly runtime?: HistoricalShipStationContentsSystemRecoveryJobRuntime;
 } = {}): Promise<HistoricalShipStationContentsSystemRecoveryJobResult> {
   const runtime = options.runtime ?? DEFAULT_RUNTIME;
@@ -518,6 +656,21 @@ export async function runHistoricalShipStationContentsSystemRecoveryJob(options:
         poolFactory: options.poolFactory ?? defaultPoolFactory,
         serviceFactory: options.serviceFactory ?? defaultRecoveryServiceFactory,
       });
+  const reviewIntakeOutcomes = mode === "preview"
+    ? Object.freeze(audit.reviewCases.flatMap((candidate) => candidate.evidenceHash === null
+      ? []
+      : [Object.freeze({
+          kind: "would_create_review" as const,
+          shippingProviderLabelId: candidate.shippingProviderLabelId,
+          evidenceHash: candidate.evidenceHash,
+        })]))
+    : await applyReviewCases({
+        audit,
+        poolConfig: poolConfig!,
+        providerClient,
+        poolFactory: options.poolFactory ?? defaultPoolFactory,
+        serviceFactory: options.reviewIntakeServiceFactory ?? defaultReviewIntakeServiceFactory,
+      });
   const recoveryFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "recovery apply finish time");
   const totalFinishedAtMs = safeRuntimeValue(runtime.nowMs(), "recovery job finish time");
   const createdRecoveryCount = outcomes.filter((outcome) => outcome.kind === "created").length;
@@ -525,6 +678,14 @@ export async function runHistoricalShipStationContentsSystemRecoveryJob(options:
     (outcome) => outcome.kind === "already_persisted",
   ).length;
   const failedRecoveryCount = outcomes.filter((outcome) => outcome.kind === "failed").length;
+  const createdReviewCount = reviewIntakeOutcomes.filter((outcome) => outcome.kind === "created").length;
+  const updatedReviewCount = reviewIntakeOutcomes.filter((outcome) => outcome.kind === "updated").length;
+  const alreadyPersistedReviewCount = reviewIntakeOutcomes.filter(
+    (outcome) => outcome.kind === "already_persisted",
+  ).length;
+  const failedReviewIntakeCount = reviewIntakeOutcomes.filter(
+    (outcome) => outcome.kind === "failed",
+  ).length;
 
   return Object.freeze({
     mode: mode === "preview"
@@ -538,6 +699,12 @@ export async function runHistoricalShipStationContentsSystemRecoveryJob(options:
     alreadyPersistedRecoveryCount,
     failedRecoveryCount,
     outcomes,
+    attemptedReviewIntakeCount: mode === "apply" ? reviewIntakeOutcomes.length : 0,
+    createdReviewCount,
+    updatedReviewCount,
+    alreadyPersistedReviewCount,
+    failedReviewIntakeCount,
+    reviewIntakeOutcomes,
     auditDurationMs: durationMs(auditStartedAtMs, auditFinishedAtMs, "audit duration"),
     recoveryDurationMs: durationMs(
       recoveryStartedAtMs,
@@ -577,7 +744,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     previewToken: cli.previewToken ?? undefined,
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
-  if (result.failedRecoveryCount > 0) process.exitCode = 1;
+  if (result.failedRecoveryCount > 0 || result.failedReviewIntakeCount > 0) process.exitCode = 1;
 }
 
 function isDirectExecution(metaUrl: string, argvEntry: string | undefined): boolean {

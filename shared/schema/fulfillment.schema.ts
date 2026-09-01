@@ -474,12 +474,39 @@ export const shippingProviderLabelEvents = wmsSchema.table("shipping_provider_la
         ${table.providerOccurredAt} IS NULL
         AND jsonb_typeof(${table.sanitizedPayload}) = 'object'
         AND ${table.sanitizedPayload}->>'payloadSchemaVersion' = '2'
-        AND ${table.sanitizedPayload}->>'observationSource'
-          = 'historical_shipstation_contents_system_recovery'
+        AND ${table.sanitizedPayload}->>'observationSource' IN (
+          'historical_shipstation_contents_system_recovery',
+          'historical_shipstation_contents_operator_resolution'
+        )
         AND ${table.sanitizedPayload}->>'recoveryContractVersion' = '1'
         AND ${table.sanitizedPayload}->>'recoveryStatus' IN (
           'provider_line_keys_authoritative',
-          'exact_unique_wms_match'
+          'exact_unique_wms_match',
+          'wms_confirmed_after_provider_conflict'
+        )
+        AND (
+          (
+            ${table.sanitizedPayload}->>'observationSource'
+              = 'historical_shipstation_contents_system_recovery'
+            AND ${table.sanitizedPayload}->>'recoveryStatus' IN (
+              'provider_line_keys_authoritative',
+              'exact_unique_wms_match'
+            )
+            AND NOT (${table.sanitizedPayload} ? 'actorUserId')
+            AND NOT (${table.sanitizedPayload} ? 'actorRole')
+            AND NOT (${table.sanitizedPayload} ? 'reason')
+          )
+          OR (
+            ${table.sanitizedPayload}->>'observationSource'
+              = 'historical_shipstation_contents_operator_resolution'
+            AND ${table.sanitizedPayload}->>'recoveryStatus'
+              = 'wms_confirmed_after_provider_conflict'
+            AND BTRIM(${table.sanitizedPayload}->>'actorUserId') <> ''
+            AND LENGTH(${table.sanitizedPayload}->>'actorUserId') <= 190
+            AND ${table.sanitizedPayload}->>'actorRole' IN ('admin', 'lead')
+            AND BTRIM(${table.sanitizedPayload}->>'reason') <> ''
+            AND LENGTH(${table.sanitizedPayload}->>'reason') <= 500
+          )
         )
         AND BTRIM(${table.sanitizedPayload}->>'providerLabelId') <> ''
         AND LENGTH(${table.sanitizedPayload}->>'providerLabelId') <= 200

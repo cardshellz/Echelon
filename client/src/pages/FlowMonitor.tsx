@@ -292,6 +292,23 @@ interface WorkItemDetail {
   sourceRun: Record<string, unknown> | null;
 }
 
+interface HistoricalContentsReviewPreview {
+  exceptionId: string;
+  shippingProviderLabelId: string;
+  previewEvidenceHash: string;
+  orderNumber: string | null;
+  trackingNumber: string;
+  providerRecoveryStatus: string;
+  providerContents: Array<{ sku: string; quantity: number }> | null;
+  wmsContents: Array<{
+    wmsShipmentItemId: number;
+    sku: string;
+    itemName: string | null;
+    quantity: number;
+  }> | null;
+  allowedDecisions: Array<"wms_confirmed" | "provider_confirmed_pending_inventory_correction" | "cannot_prove">;
+}
+
 interface SourceHealthResponse {
   generatedAt: string;
   staleAfterMinutes: number;
@@ -1814,6 +1831,10 @@ export default function FlowMonitor() {
         onSnooze={() => setSnoozeOpen(true)}
         onSelectRelated={openWorkItem}
         onBack={() => setSelectedId(null)}
+        onHistoricalContentsChanged={async (decision) => {
+          if (decision === "wms_confirmed") setSelectedId(null);
+          await invalidateTower();
+        }}
         busy={acknowledgeMutation.isPending || assignMutation.isPending || snoozeMutation.isPending}
       />
     );
@@ -2666,6 +2687,175 @@ function IssueGroupDetailPanel(props: {
   );
 }
 
+type HistoricalContentsDecision = HistoricalContentsReviewPreview["allowedDecisions"][number];
+
+const HISTORICAL_CONTENTS_DECISION_COPY: Record<HistoricalContentsDecision, {
+  label: string;
+  description: string;
+}> = {
+  wms_confirmed: {
+    label: "Confirm WMS contents",
+    description: "Makes the WMS item list authoritative for this historical package and resolves the content conflict. This does not change inventory.",
+  },
+  provider_confirmed_pending_inventory_correction: {
+    label: "ShipStation is correct",
+    description: "Records ShipStation as the credible item list and keeps the case blocked until a separate audited package and inventory correction is posted.",
+  },
+  cannot_prove: {
+    label: "Cannot prove contents",
+    description: "Records that neither item list can be proven and keeps the case open for additional evidence.",
+  },
+};
+
+function HistoricalContentsReviewPanel(props: {
+  item: QueueItem;
+  canDecide: boolean;
+  onChanged: (decision: HistoricalContentsDecision) => Promise<void>;
+}) {
+  const { toast } = useToast();
+  const [decision, setDecision] = useState<HistoricalContentsDecision | null>(null);
+  const [reason, setReason] = useState("");
+  const previewQuery = useQuery({
+    queryKey: ["historical-contents-review", props.item.id],
+    queryFn: () => fetchJson<HistoricalContentsReviewPreview>(
+      `/api/operations/control-tower/v2/work-items/${props.item.id}/historical-contents-review`,
+    ),
+  });
+  const decisionMutation = useMutation({
+    mutationFn: async () => {
+      if (!decision || !previewQuery.data) throw new Error("Choose a decision after the evidence loads.");
+      const response = await apiRequest(
+        "POST",
+        `/api/operations/control-tower/v2/work-items/${props.item.id}/historical-contents-review/decide`,
+        {
+          version: props.item.rowVersion,
+          expectedPreviewEvidenceHash: previewQuery.data.previewEvidenceHash,
+          decision,
+          reason: reason.trim(),
+        },
+      );
+      return response.json();
+    },
+    onSuccess: async () => {
+      if (decision === null) return;
+      const recordedDecision = decision;
+      toast({
+        title: "Package-content decision recorded",
+        description: recordedDecision === "wms_confirmed"
+          ? "WMS contents are now the immutable authority for this package."
+          : "The review remains blocked until the stated follow-up is complete.",
+      });
+      setDecision(null);
+      setReason("");
+      await props.onChanged(recordedDecision);
+    },
+  });
+
+  if (previewQuery.isLoading) {
+    return <section className="space-y-2 border-y py-4"><Skeleton className="h-5 w-52" /><Skeleton className="h-28 w-full" /></section>;
+  }
+  if (previewQuery.isError || !previewQuery.data) {
+    return (
+      <section className="border-y py-4">
+        <div className="flex items-start gap-2 text-sm text-red-700">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{previewQuery.error instanceof Error ? previewQuery.error.message : "Package-content evidence could not be loaded."}</span>
+        </div>
+        <Button className="mt-3" size="sm" variant="outline" onClick={() => previewQuery.refetch()}>Retry</Button>
+      </section>
+    );
+  }
+
+  const preview = previewQuery.data;
+  return (
+    <section className="space-y-4 border-y py-4">
+      <div>
+        <div className="text-xs font-semibold uppercase text-muted-foreground">Package contents to resolve</div>
+        <p className="mt-1 text-sm">
+          {preview.orderNumber ? `Order ${preview.orderNumber}` : "Historical order"} · Tracking {preview.trackingNumber}
+        </p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="border bg-sky-50 p-3">
+          <div className="text-xs font-semibold uppercase text-sky-900">ShipStation says</div>
+          {preview.providerContents && preview.providerContents.length > 0 ? (
+            <ul className="mt-2 space-y-1 text-sm">
+              {preview.providerContents.map((line, index) => (
+                <li key={`${line.sku}-${index}`} className="flex justify-between gap-3">
+                  <span>{line.sku}</span><span className="font-medium">× {line.quantity}</span>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="mt-2 text-sm text-muted-foreground">No usable product lines were returned.</p>}
+        </div>
+        <div className="border bg-amber-50 p-3">
+          <div className="text-xs font-semibold uppercase text-amber-900">WMS says</div>
+          {preview.wmsContents && preview.wmsContents.length > 0 ? (
+            <ul className="mt-2 space-y-1 text-sm">
+              {preview.wmsContents.map((line) => (
+                <li key={line.wmsShipmentItemId} className="flex justify-between gap-3">
+                  <span>{line.sku}{line.itemName ? ` — ${line.itemName}` : ""}</span>
+                  <span className="font-medium">× {line.quantity}</span>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="mt-2 text-sm text-muted-foreground">No single linked WMS package can be proven.</p>}
+        </div>
+      </div>
+      {props.canDecide ? (
+        <div className="flex flex-wrap gap-2">
+          {preview.allowedDecisions.map((option) => (
+            <Button
+              key={option}
+              size="sm"
+              variant={option === "wms_confirmed" ? "default" : "outline"}
+              onClick={() => setDecision(option)}
+            >
+              {HISTORICAL_CONTENTS_DECISION_COPY[option].label}
+            </Button>
+          ))}
+        </div>
+      ) : <p className="text-xs text-muted-foreground">Operations triage permission is required to record a decision.</p>}
+
+      <Dialog open={decision !== null} onOpenChange={(open) => !open && setDecision(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{decision ? HISTORICAL_CONTENTS_DECISION_COPY[decision].label : "Package-content decision"}</DialogTitle>
+            <DialogDescription>
+              {decision ? HISTORICAL_CONTENTS_DECISION_COPY[decision].description : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor={`historical-contents-reason-${props.item.id}`}>Reason</Label>
+            <Textarea
+              id={`historical-contents-reason-${props.item.id}`}
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              maxLength={500}
+              placeholder="Describe the evidence used for this decision."
+            />
+          </div>
+          {decisionMutation.error && (
+            <p className="text-sm text-red-700">
+              {decisionMutation.error instanceof Error ? decisionMutation.error.message : "The decision could not be recorded."}
+            </p>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDecision(null)} disabled={decisionMutation.isPending}>Cancel</Button>
+            <Button
+              onClick={() => decisionMutation.mutate()}
+              disabled={!reason.trim() || decisionMutation.isPending}
+            >
+              {decisionMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Record decision
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </section>
+  );
+}
+
 function WorkItemDetailPanel(props: {
   detail: WorkItemDetail;
   users: UserOption[];
@@ -2680,6 +2870,7 @@ function WorkItemDetailPanel(props: {
   onSnooze: () => void;
   onSelectRelated: (id: number) => void;
   onBack: () => void;
+  onHistoricalContentsChanged: (decision: HistoricalContentsDecision) => Promise<void>;
   busy: boolean;
 }) {
   const { item } = props.detail;
@@ -2758,6 +2949,14 @@ function WorkItemDetailPanel(props: {
             )}
           </div>
         </section>
+
+        {item.code === "historical_shipstation_contents_review" && (
+          <HistoricalContentsReviewPanel
+            item={item}
+            canDecide={props.canTriage}
+            onChanged={props.onHistoricalContentsChanged}
+          />
+        )}
 
         <section>
           <div className="mb-2 flex items-center justify-between gap-3">

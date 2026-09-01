@@ -148,6 +148,41 @@ function systemRecoveryEvent(
   };
 }
 
+function operatorRecoveryEvent(): PersistedShippingProviderLabelEventRow {
+  const event = buildHistoricalShipStationContentsSystemRecoveryEvent({
+    shippingProviderLabelId: "41",
+    providerShipmentId: 44_001,
+    trackingNumber,
+    labelStatus: "active",
+    recoveryEvidence: {
+      contractVersion: 1,
+      recoveryStatus: "wms_confirmed_after_provider_conflict",
+      evidenceHash: "e".repeat(64),
+      attestedContents: [
+        { wmsShipmentItemId: 7001, quantity: 2 },
+        { wmsShipmentItemId: 7002, quantity: 1 },
+      ],
+    },
+    resolvedLabelEventIds: [101],
+    authorization: {
+      actorUserId: "lead-1",
+      actorRole: "lead",
+      reason: "Physical packing evidence confirms the WMS package.",
+    },
+  });
+  return {
+    id: 102,
+    shippingProviderLabelId: 41,
+    eventHash: event.eventHash,
+    eventType: event.eventType,
+    labelStatus: event.labelStatus,
+    trackingNumber: event.trackingNumber,
+    providerOccurredAt: event.providerOccurredAt,
+    sanitizedPayload: event.sanitizedPayload,
+    receivedAt: "2026-08-20T14:01:00.000Z",
+  };
+}
+
 function persistedPackage(
   overrides: Partial<PersistedDeclaredPackageEvidence> = {},
 ): PersistedDeclaredPackageEvidence {
@@ -335,6 +370,37 @@ describe("persisted declared-package lifecycle adapter", () => {
         reconciliationStatus: "clear",
         reviewReasons: [],
       },
+    });
+  });
+
+  it("projects lead-authorized WMS confirmation with its immutable actor and reason", () => {
+    const historical = labelEvent({
+      sanitizedPayload: {
+        providerLabelId: providerPhysicalShipmentId,
+        trackingNumber,
+        shipmentItems: [{ lineItemKey: "wms-item-7001" }],
+      },
+    });
+    const adapted = adaptPersistedDeclaredPackageLifecycleEvidence(persistedPackage({
+      labelEvents: [historical, operatorRecoveryEvent()],
+      lastObservedAt: labelReceivedAt,
+      confirmedCarrierEvents: [],
+    }));
+
+    expect(adapted.outcome).toBe("adapted");
+    if (adapted.outcome !== "adapted") throw new Error("expected adapted evidence");
+    expect(adapted.input.events).toContainEqual({
+      kind: "package_contents_attested",
+      eventKey: "shipping-provider-label-event:102:contents-recovered",
+      observedAt: "2026-08-20T14:01:00.000Z",
+      authorization: "lead_approved",
+      actor: "lead-1",
+      reason: "Physical packing evidence confirms the WMS package.",
+      resolvesEventKeys: ["shipping-provider-label-event:101:observed"],
+      contents: [
+        { wmsShipmentItemId: 7001, quantity: 2 },
+        { wmsShipmentItemId: 7002, quantity: 1 },
+      ],
     });
   });
 

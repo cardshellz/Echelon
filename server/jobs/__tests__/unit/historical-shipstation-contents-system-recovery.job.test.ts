@@ -87,6 +87,38 @@ function report(
   });
 }
 
+function reviewReport(): HistoricalShipStationContentsAuditJobResult {
+  const base = report([]);
+  return Object.freeze({
+    ...base,
+    selectedCandidateCount: 1,
+    providerRequestCount: 1,
+    providerShipmentFoundCount: 1,
+    contentsStatusCounts: {
+      ...base.contentsStatusCounts,
+      unrecognized: 1,
+    },
+    recoveryStatusCounts: {
+      ...base.recoveryStatusCounts,
+      provider_wms_conflict: 1,
+    },
+    reviewRequiredByCurrentEvidenceCount: 1,
+    reviewCases: Object.freeze([Object.freeze({
+      shippingProviderLabelId: "101",
+      reason: "provider_wms_conflict" as const,
+      evidenceHash: "e".repeat(64),
+      providerContentsStatus: "unrecognized" as const,
+      providerItemCount: 1,
+      canonicalLineCount: 0,
+      expectedContents: Object.freeze({
+        kind: "available" as const,
+        source: "physical_shipment" as const,
+        lineCount: 1,
+      }),
+    })]),
+  });
+}
+
 describe("historical ShipStation contents system recovery job", () => {
   it("defaults to a bounded preview and requires an exact preview token for apply", () => {
     expect(parseHistoricalShipStationContentsSystemRecoveryCliOptions([])).toEqual({
@@ -187,7 +219,7 @@ describe("historical ShipStation contents system recovery job", () => {
 
     expect(result).toMatchObject({
       mode: "preview_historical_shipstation_contents_system_recovery",
-      previewContractVersion: 1,
+      previewContractVersion: 2,
       audit,
       attemptedRecoveryCount: 0,
       createdRecoveryCount: 0,
@@ -209,6 +241,76 @@ describe("historical ShipStation contents system recovery job", () => {
     }));
     expect(poolFactory).not.toHaveBeenCalled();
     expect(serviceFactory).not.toHaveBeenCalled();
+  });
+
+  it("previews durable review intake without opening a write pool", async () => {
+    const audit = reviewReport();
+    const poolFactory = vi.fn();
+    const reviewIntakeServiceFactory = vi.fn();
+    const times = [0, 1, 4, 5, 9, 10];
+
+    const result = await runHistoricalShipStationContentsSystemRecoveryJob({
+      environment: { HISTORICAL_SHIPSTATION_CONTENTS_AUDIT_ENABLED: "true" },
+      providerClient,
+      auditJob: vi.fn(async () => audit),
+      poolFactory,
+      reviewIntakeServiceFactory,
+      runtime: { nowMs: () => times.shift()! },
+    });
+
+    expect(result).toMatchObject({
+      attemptedReviewIntakeCount: 0,
+      createdReviewCount: 0,
+      failedReviewIntakeCount: 0,
+      reviewIntakeOutcomes: [{
+        kind: "would_create_review",
+        shippingProviderLabelId: "101",
+        evidenceHash: "e".repeat(64),
+      }],
+    });
+    expect(poolFactory).not.toHaveBeenCalled();
+    expect(reviewIntakeServiceFactory).not.toHaveBeenCalled();
+  });
+
+  it("applies exact review intake evidence and closes its dedicated pool", async () => {
+    const audit = reviewReport();
+    const end = vi.fn(async () => undefined);
+    const pool = { end } as unknown as Pool;
+    const intake = vi.fn(async () => Object.freeze({
+      kind: "created" as const,
+      exceptionId: "501",
+      shippingProviderLabelId: "101",
+    }));
+    const times = [0, 1, 4, 5, 9, 10];
+
+    const result = await runHistoricalShipStationContentsSystemRecoveryJob({
+      mode: "apply",
+      previewToken: historicalShipStationContentsSystemRecoveryPreviewToken(audit),
+      environment: recoveryEnvironment,
+      providerClient,
+      auditJob: vi.fn(async () => audit),
+      poolFactory: vi.fn(() => pool),
+      reviewIntakeServiceFactory: vi.fn(() => ({ intake })),
+      runtime: { nowMs: () => times.shift()! },
+    });
+
+    expect(intake).toHaveBeenCalledWith({
+      shippingProviderLabelId: "101",
+      reason: "provider_wms_conflict",
+      expectedEvidenceHash: "e".repeat(64),
+    });
+    expect(result).toMatchObject({
+      attemptedReviewIntakeCount: 1,
+      createdReviewCount: 1,
+      failedReviewIntakeCount: 0,
+      reviewIntakeOutcomes: [{
+        kind: "created",
+        shippingProviderLabelId: "101",
+        evidenceHash: "e".repeat(64),
+        exceptionId: "501",
+      }],
+    });
+    expect(end).toHaveBeenCalledOnce();
   });
 
   it("rejects apply before audit when the write authority is incomplete", async () => {
