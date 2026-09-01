@@ -366,6 +366,9 @@ export function resolvePackageAllocationAuthority(
     (pkg) => roles.get(pkg.packageKey) === "primary",
   );
   for (const pkg of packages) {
+    if (pkg.projection.authoritativeContents === null) {
+      reviews.push(resolverReview("package_contents_unavailable", [pkg.packageKey]));
+    }
     if (roles.has(pkg.packageKey)) continue;
     if (transferTargets.has(pkg.packageKey)) {
       roles.set(pkg.packageKey, "replacement_candidate");
@@ -373,7 +376,6 @@ export function resolvePackageAllocationAuthority(
     }
     if (pkg.projection.authoritativeContents === null) {
       roles.set(pkg.packageKey, "additional_dispatch");
-      reviews.push(resolverReview("package_contents_unavailable", [pkg.packageKey]));
       continue;
     }
     const replaceableSources = primaryPackages().filter((primary) => (

@@ -25,6 +25,7 @@ import {
   PackageAllocationPlanningService,
   type PersistPackageAllocationPlanCommand,
 } from "../../package-allocation-planning.service";
+import { buildPackageAllocationAuthorityRelationshipSelectionEvidence } from "../../package-allocation-authority-resolution.service";
 import {
   derivePackageAllocationSourceRegistration,
   type PackageAllocationSourceFacts,
@@ -227,6 +228,7 @@ class InMemoryLedgerTransaction implements PackageAllocationLedgerTransaction {
       plannerVersion: input.plannerVersion,
       reason: input.reason,
       createdBy: input.createdBy,
+      authoritySnapshot: structuredClone(input.authoritySnapshot),
       stateSnapshot: structuredClone(input.stateSnapshot),
       reviewSnapshot: structuredClone(input.reviewSnapshot),
     });
@@ -385,6 +387,12 @@ describe("PackageAllocationPlanningService", () => {
       plannerVersion: PACKAGE_ALLOCATION_PLANNER_VERSION,
       reason: "test",
       createdBy: "test",
+      authoritySnapshot: {
+        contractVersion: 1,
+        authorityMode: "shadow_only",
+        selectionAuthority: "caller_supplied_unproven",
+        selectionCompleteness: "unproven_caller_selection",
+      },
       stateSnapshot: { actionEvidence: [] },
       reviewSnapshot: { contractVersion: 1, reviews: [] },
     }));
@@ -414,6 +422,29 @@ describe("PackageAllocationPlanningService", () => {
       (error: unknown) => {
         expectPersistenceError(error, "PERSISTED_STATE_INVALID");
         expect((error as PackageAllocationPersistenceError).context).toHaveProperty("issues");
+        return true;
+      },
+    );
+    expect(repository.transaction.appendCalls).toHaveLength(1);
+  });
+
+  it("rejects malformed persisted authority provenance as database-state corruption", async () => {
+    const repository = new InMemoryLedgerRepository();
+    const service = new PackageAllocationPlanningService(repository);
+    await service.persist(command());
+    const plan = repository.transaction.plansByVersion.get(1)!;
+    repository.transaction.plansByVersion.set(1, Object.freeze({
+      ...plan,
+      authoritySnapshot: { selectionAuthority: "unknown" },
+    }));
+
+    await expect(service.persist(command({ expectedGroupVersion: 1 }))).rejects.toSatisfy(
+      (error: unknown) => {
+        expectPersistenceError(error, "PERSISTED_STATE_INVALID");
+        expect((error as PackageAllocationPersistenceError).context).toMatchObject({
+          planId: "101",
+          planVersion: 1,
+        });
         return true;
       },
     );
@@ -458,6 +489,82 @@ describe("PackageAllocationPlanningService", () => {
       expectPersistenceError(error, "REPLAY_CONFLICT");
       return true;
     });
+  });
+
+  it("rejects an exact planner replay with different immutable selection provenance", async () => {
+    const repository = new InMemoryLedgerRepository();
+    const service = new PackageAllocationPlanningService(repository);
+    const firstRelationshipEvidence =
+      buildPackageAllocationAuthorityRelationshipSelectionEvidence(
+        [7001],
+        [{
+          shippingProviderLabelId: 42,
+          relationshipTypes: ["shipping_engine_order_link"],
+        }],
+      );
+    const secondRelationshipEvidence =
+      buildPackageAllocationAuthorityRelationshipSelectionEvidence(
+        [7001],
+        [{
+          shippingProviderLabelId: 42,
+          relationshipTypes: ["provider_order_id_match"],
+        }],
+      );
+    const mutableEvidence = (
+      evidence: typeof firstRelationshipEvidence,
+    ) => ({
+      contractVersion: evidence.contractVersion,
+      evidenceType: evidence.evidenceType,
+      evidenceHash: evidence.evidenceHash,
+      sourceWmsShipmentItemIds: [...evidence.sourceWmsShipmentItemIds],
+      packages: evidence.packages.map((pkg) => ({
+        shippingProviderLabelId: pkg.shippingProviderLabelId,
+        relationshipTypes: [...pkg.relationshipTypes],
+      })),
+    });
+    const firstAuthority = Object.freeze({
+      contractVersion: 1 as const,
+      authorityMode: "shadow_only" as const,
+      selectionAuthority: "database_relationship_closure" as const,
+      selectionCompleteness: "unproven_outside_persisted_relationships" as const,
+      relationshipSelectionEvidence: mutableEvidence(firstRelationshipEvidence),
+    });
+    await repository.withSerializableTransaction((transaction) =>
+      service.persistInTransaction(transaction, command(), firstAuthority));
+
+    await expect(repository.withSerializableTransaction((transaction) =>
+      service.persistInTransaction(transaction, command(), {
+        ...firstAuthority,
+        relationshipSelectionEvidence: mutableEvidence(secondRelationshipEvidence),
+      }))).rejects.toSatisfy((error: unknown) => {
+      expectPersistenceError(error, "REPLAY_CONFLICT");
+      return true;
+    });
+    expect(repository.transaction.appendCalls).toHaveLength(1);
+  });
+
+  it("rejects malformed authority provenance before appending a plan", async () => {
+    const repository = new InMemoryLedgerRepository();
+    const service = new PackageAllocationPlanningService(repository);
+
+    await expect(repository.withSerializableTransaction((transaction) =>
+      service.persistInTransaction(transaction, command(), {
+        contractVersion: 1,
+        authorityMode: "shadow_only",
+        selectionAuthority: "database_relationship_closure",
+        selectionCompleteness: "unproven_outside_persisted_relationships",
+        relationshipSelectionEvidence: {
+          contractVersion: 1,
+          evidenceType: "package_allocation_relationship_selection",
+          evidenceHash: "a".repeat(64),
+          sourceWmsShipmentItemIds: [7001],
+          packages: [],
+        },
+      } as any))).rejects.toSatisfy((error: unknown) => {
+      expectPersistenceError(error, "INVALID_WRITE_INPUT");
+      return true;
+    });
+    expect(repository.transaction.appendCalls).toHaveLength(0);
   });
 
   it("retries the whole locked planning transaction after a serialization conflict", async () => {

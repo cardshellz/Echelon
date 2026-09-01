@@ -813,6 +813,7 @@ export const packageAllocationPlans = wmsSchema.table("package_allocation_plans"
   plannerVersion: varchar("planner_version", { length: 100 }).notNull(),
   reason: varchar("reason", { length: 500 }).notNull(),
   createdBy: varchar("created_by", { length: 200 }).notNull(),
+  authoritySnapshot: jsonb("authority_snapshot").notNull(),
   stateSnapshot: jsonb("state_snapshot").notNull(),
   reviewSnapshot: jsonb("review_snapshot").notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -834,7 +835,8 @@ export const packageAllocationPlans = wmsSchema.table("package_allocation_plans"
   check("package_allocation_plans_outcome_chk", sql`${table.outcome} IN ('proposed', 'review')`),
   check(
     "package_allocation_plans_snapshots_chk",
-    sql`jsonb_typeof(${table.stateSnapshot}) = 'object'
+    sql`jsonb_typeof(${table.authoritySnapshot}) = 'object'
+      AND jsonb_typeof(${table.stateSnapshot}) = 'object'
       AND jsonb_typeof(${table.reviewSnapshot}) = 'object'`,
   ),
   check(
