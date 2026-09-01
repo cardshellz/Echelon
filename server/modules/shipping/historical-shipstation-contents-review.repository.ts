@@ -844,7 +844,7 @@ implements HistoricalShipStationContentsReviewRepository {
                     COALESCE(details->'decisionHistory', '[]'::jsonb)
                       || jsonb_build_array(
                            $5::jsonb || jsonb_build_object(
-                             'decisionHash', $6,
+                             'decisionHash', $6::text,
                              'recordedAt', transaction_timestamp()
                            )
                          )
