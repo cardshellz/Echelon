@@ -308,6 +308,44 @@ describe("resolvePackageAllocationAuthority", () => {
     },
   );
 
+  it.each(["empty", "omitted"] as const)(
+    "classifies a sole primary package with %s contents as unavailable",
+    (contentsStatus) => {
+      const pkg = observedPackage("44001", {
+        observedAt: "2026-08-21T14:00:00.000Z",
+        contentsStatus,
+      });
+      const packageKey = packageAllocationPackageKey("shipstation", "44001");
+
+      const result = resolvePackageAllocationAuthority(command([pkg]));
+
+      expect(result).toMatchObject({
+        authority: "shadow_only",
+        outcome: "review",
+        reviews: [{
+          code: "package_contents_unavailable",
+          packageKeys: [packageKey],
+        }],
+      });
+      expect(result.plannerInput.packages).toEqual([
+        expect.objectContaining({
+          packageKey,
+          allocationRole: "primary",
+          membership: { status: "unproven", evidenceKey: null },
+        }),
+      ]);
+      expect(allocationShapes(result.plannerResult)).toEqual([{
+        allocationKind: "primary_transfer",
+        targetKind: "awaiting_relabel",
+        packageKey: null,
+        quantity: 2,
+      }]);
+      expect(result.plannerResult.state.desiredEffectIntents.some(
+        (intent) => intent.wmsShipmentItemId !== null,
+      )).toBe(false);
+    },
+  );
+
   it("fails closed when two packages share the earliest observed label time", () => {
     const packageA = observedPackage("44001", {
       observedAt: "2026-08-21T14:00:00.000Z",

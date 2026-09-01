@@ -18,6 +18,7 @@ import type {
   PackageAllocationAuthorityDiscoveredPackageEvidence,
   PackageAllocationAuthorityPreviewRepository,
 } from "./package-allocation-ledger.repository";
+import type { PackageAllocationSourceFacts } from "./package-allocation-source-identity.domain";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const MAX_SOURCE_LINES = 500;
@@ -162,7 +163,7 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-function relationshipSelectionEvidence(
+export function buildPackageAllocationAuthorityRelationshipSelectionEvidence(
   sourceWmsShipmentItemIds: readonly number[],
   packages: readonly PackageAllocationAuthorityDiscoveredPackageEvidence[],
 ): PackageAllocationAuthorityRelationshipSelectionEvidenceV1 {
@@ -312,6 +313,77 @@ function sortPackages(
   );
 }
 
+export interface PackageAllocationAuthorityEvidenceResolutionV1 {
+  readonly sourceFacts: readonly PackageAllocationSourceFacts[];
+  readonly packages: readonly LockedPackageAllocationAuthorityEvidence[];
+  readonly readiness: PackageAllocationAuthorityReadinessResultV1;
+  readonly resolution: PackageAllocationAuthorityResolutionResultV1 | null;
+}
+
+/**
+ * Resolves one already-snapshotted authority scope. The caller owns the
+ * transaction and decides whether the evidence is read-only or row-locked.
+ * Keeping this function pure prevents the preview and write paths from
+ * drifting into different package-role or contents decisions.
+ */
+export function resolvePackageAllocationAuthorityEvidence(input: {
+  readonly groupKey: string;
+  readonly expectedGroupVersion: number;
+  readonly previousPlan: Parameters<typeof resolvePackageAllocationAuthority>[0]["previousPlan"];
+  readonly sourceFacts: readonly PackageAllocationSourceFacts[];
+  readonly packages: readonly LockedPackageAllocationAuthorityEvidence[];
+  readonly actions: Parameters<typeof resolvePackageAllocationAuthority>[0]["actions"];
+}): PackageAllocationAuthorityEvidenceResolutionV1 {
+  const sourceFacts = Object.freeze(
+    [...input.sourceFacts].sort(
+      (left, right) =>
+        left.sourceWmsShipmentItemId - right.sourceWmsShipmentItemId,
+    ),
+  );
+  const packages = sortPackages(input.packages);
+  const readiness = assessPackageAllocationAuthorityReadiness({
+    contractVersion: 1,
+    authorityMode: "shadow_only",
+    sourceFacts: [...sourceFacts],
+    packages: [...packages],
+  });
+  const adaptedPackages = packages.map((pkg) => ({
+    evidenceKey: pkg.evidenceKey,
+    adapted: adaptPersistedDeclaredPackageLifecycleEvidence(
+      pkg.persistedEvidence,
+    ),
+  }));
+  const resolvedPackages = adaptedPackages.flatMap((pkg) =>
+    pkg.adapted.outcome === "adapted"
+      ? [{
+          evidenceKey: pkg.evidenceKey,
+          lifecycle: {
+            provider: pkg.adapted.input.provider,
+            providerPhysicalShipmentId: pkg.adapted.input.providerPhysicalShipmentId,
+            events: [...pkg.adapted.input.events],
+          },
+        }]
+      : [],
+  );
+  const resolution = resolvedPackages.length === packages.length
+    ? resolvePackageAllocationAuthority({
+        contractVersion: 1,
+        authorityMode: "shadow_only",
+        groupKey: input.groupKey,
+        expectedGroupVersion: input.expectedGroupVersion,
+        previousPlan: input.previousPlan,
+        sourceLines: sourceFacts.map((source) => ({
+          wmsShipmentItemId: source.sourceWmsShipmentItemId,
+          sourceQuantity: source.sourceQuantity,
+        })),
+        packages: resolvedPackages,
+        actions: [...input.actions],
+      })
+    : null;
+
+  return deepFreeze({ sourceFacts, packages, readiness, resolution });
+}
+
 /**
  * Produces an inert bootstrap preview from either an explicitly selected label
  * set or a bounded closure of persisted shipment relationships. It never
@@ -362,12 +434,6 @@ export class PackageAllocationAuthorityResolutionPreviewService {
       const sourceFacts = await transaction.readSourceFacts(
         command.sourceWmsShipmentItemIds,
       );
-      const sortedSourceFacts = Object.freeze(
-        [...sourceFacts].sort(
-          (left, right) =>
-            left.sourceWmsShipmentItemId - right.sourceWmsShipmentItemId,
-        ),
-      );
       const discoveredPackageSelection:
         readonly PackageAllocationAuthorityDiscoveredPackageEvidence[] =
         command.previewMode === "bootstrap_selected_scope"
@@ -375,7 +441,7 @@ export class PackageAllocationAuthorityResolutionPreviewService {
           : await transaction.discoverAuthorityReadinessPackageSelection(
               command.sourceWmsShipmentItemIds,
             );
-      const relationshipEvidence = relationshipSelectionEvidence(
+      const relationshipEvidence = buildPackageAllocationAuthorityRelationshipSelectionEvidence(
         command.sourceWmsShipmentItemIds,
         discoveredPackageSelection,
       );
@@ -385,48 +451,17 @@ export class PackageAllocationAuthorityResolutionPreviewService {
           : Object.freeze(relationshipEvidence.packages.map(
               (pkg) => pkg.shippingProviderLabelId,
             ));
-      const packages = sortPackages(await transaction.readAuthorityReadinessPackages(
+      const packages = await transaction.readAuthorityReadinessPackages(
         selectedShippingProviderLabelIds,
-      ));
-      const readiness = assessPackageAllocationAuthorityReadiness({
-        contractVersion: 1,
-        authorityMode: "shadow_only",
-        sourceFacts: [...sortedSourceFacts],
-        packages: [...packages],
-      });
-      const adaptedPackages = packages.map((pkg) => ({
-        evidenceKey: pkg.evidenceKey,
-        adapted: adaptPersistedDeclaredPackageLifecycleEvidence(
-          pkg.persistedEvidence,
-        ),
-      }));
-      const resolvedPackages = adaptedPackages.flatMap((pkg) =>
-        pkg.adapted.outcome === "adapted"
-          ? [{
-              evidenceKey: pkg.evidenceKey,
-              lifecycle: {
-                provider: pkg.adapted.input.provider,
-                providerPhysicalShipmentId: pkg.adapted.input.providerPhysicalShipmentId,
-                events: [...pkg.adapted.input.events],
-              },
-            }]
-          : [],
       );
-      const resolution = resolvedPackages.length === packages.length
-        ? resolvePackageAllocationAuthority({
-            contractVersion: 1,
-            authorityMode: "shadow_only",
-            groupKey: command.groupKey,
-            expectedGroupVersion: 0,
-            previousPlan: null,
-            sourceLines: sortedSourceFacts.map((source) => ({
-              wmsShipmentItemId: source.sourceWmsShipmentItemId,
-              sourceQuantity: source.sourceQuantity,
-            })),
-            packages: resolvedPackages,
-            actions: [],
-          })
-        : null;
+      const evidenceResolution = resolvePackageAllocationAuthorityEvidence({
+        groupKey: command.groupKey,
+        expectedGroupVersion: 0,
+        previousPlan: null,
+        sourceFacts,
+        packages,
+        actions: [],
+      });
 
       const commonResult = {
         contractVersion: 1 as const,
@@ -434,8 +469,8 @@ export class PackageAllocationAuthorityResolutionPreviewService {
         outcome: "review" as const,
         selectedShippingProviderLabelIds,
         groupState: group === null ? "absent" as const : "empty" as const,
-        readiness,
-        resolution,
+        readiness: evidenceResolution.readiness,
+        resolution: evidenceResolution.resolution,
       };
       return command.previewMode === "bootstrap_selected_scope"
         ? deepFreeze({

@@ -102,6 +102,7 @@ export interface PersistedPackageAllocationPlan {
   readonly plannerVersion: string;
   readonly reason: string;
   readonly createdBy: string;
+  readonly authoritySnapshot: unknown;
   readonly stateSnapshot: unknown;
   readonly reviewSnapshot: unknown;
 }
@@ -161,6 +162,7 @@ export interface AppendPackageAllocationPlanInput {
   readonly plannerVersion: string;
   readonly reason: string;
   readonly createdBy: string;
+  readonly authoritySnapshot: Readonly<Record<string, unknown>>;
   readonly stateSnapshot: PackageAllocationGroupStateV1;
   readonly reviewSnapshot: Readonly<{ contractVersion: 1; reviews: PackageAllocationGroupStateV1["reviews"] }>;
   readonly entries: readonly PackageAllocationEntryV1[];
@@ -1368,6 +1370,7 @@ class PgPackageAllocationLedgerTransaction
          planner_version,
          reason,
          created_by,
+         authority_snapshot,
          state_snapshot,
          review_snapshot
        FROM wms.package_allocation_plans
@@ -1401,6 +1404,7 @@ class PgPackageAllocationLedgerTransaction
       plannerVersion: requiredText(row.planner_version, "planner_version"),
       reason: requiredText(row.reason, "reason"),
       createdBy: requiredText(row.created_by, "created_by"),
+      authoritySnapshot: row.authority_snapshot,
       stateSnapshot: row.state_snapshot,
       reviewSnapshot: row.review_snapshot,
     });
@@ -1544,11 +1548,11 @@ class PgPackageAllocationLedgerTransaction
       `INSERT INTO wms.package_allocation_plans (
          package_allocation_group_id, plan_version, expected_group_version,
          input_hash, state_hash, outcome, planner_version, reason, created_by,
-         state_snapshot, review_snapshot
+         authority_snapshot, state_snapshot, review_snapshot
        ) VALUES (
          $1::bigint, $2::integer, $3::integer,
          $4, $5, $6, $7, $8, $9,
-         $10::jsonb, $11::jsonb
+         $10::jsonb, $11::jsonb, $12::jsonb
        )
        RETURNING id::text AS id`,
       [
@@ -1561,6 +1565,7 @@ class PgPackageAllocationLedgerTransaction
         input.plannerVersion,
         input.reason,
         input.createdBy,
+        JSON.stringify(input.authoritySnapshot),
         JSON.stringify(input.stateSnapshot),
         JSON.stringify(input.reviewSnapshot),
       ],
