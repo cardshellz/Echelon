@@ -67,6 +67,7 @@ export type InventoryAvailabilityMasterDataReplay =
         policyId: number;
         version: number;
         scopeKey: string;
+        definitionHash: string;
         alreadyApplied: boolean;
       };
     };

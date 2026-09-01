@@ -73,6 +73,7 @@ import {
   type TransformationAdminVariant,
   unavailableBuildBindingsForEdit,
 } from "./supply-transformations-model";
+import { PromiseSafetyPolicyPanel } from "./promise-safety-policy-panel";
 
 type DraftMutationInput =
   | { kind: "create"; request: CreateTransformationModelDraftRequest }
@@ -933,6 +934,8 @@ export default function SupplyTransformations() {
               )}
             </CardContent>
           </Card>
+
+          <PromiseSafetyPolicyPanel productId={view.product.id} canEdit={canEdit} />
 
           <ShadowComparisonPanel
             run={shadowQuery.data ?? null}
@@ -2015,11 +2018,11 @@ function recipeBindingKey(recipeId: number): string {
   return `recipe:${recipeId}:network`;
 }
 
-async function fetchJson<T>(
+async function fetchJson<Schema extends z.ZodTypeAny>(
   url: string,
-  schema: z.ZodType<T>,
+  schema: Schema,
   init?: RequestInit,
-): Promise<T> {
+): Promise<z.output<Schema>> {
   const response = await fetch(url, { credentials: "include", ...init });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {

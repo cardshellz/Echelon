@@ -358,6 +358,9 @@
   "inventory.cycle_counts": [
     "modules/inventory"
   ],
+  "inventory.demand_evidence_snapshots": [
+    "modules/inventory-planning"
+  ],
   "inventory.integrity_alert_outbox": [
     "modules/inventory"
   ],

@@ -267,6 +267,17 @@ export const atpProjectionSchema = z.object({
     policyMode: z.enum(["implicit_off", "off", "fixed_units", "days_of_cover"]),
     protectedUnits: plannerNonnegativeQuantitySchema,
     demandEvidenceId: plannerPositiveQuantitySchema.nullable(),
+    demandStatus: z.enum([
+      "not_applicable",
+      "trusted",
+      "trusted_override",
+      "fallback_missing",
+      "fallback_untrusted",
+      "fallback_stale",
+      "fallback_expired_override",
+      "fallback_future_dated",
+      "legacy_unknown",
+    ]).default("legacy_unknown"),
   }).strict()),
   blockers: z.array(plannerBlockerSchema),
 }).strict();

@@ -106,6 +106,7 @@ export const promiseSafetyPolicyDraftResultSchema = z.object({
   policyId: positiveInteger,
   version: positiveInteger,
   scopeKey: nonblank(250),
+  definitionHash: z.string().regex(/^[0-9a-f]{64}$/),
   alreadyApplied: z.boolean(),
 }).strict();
 

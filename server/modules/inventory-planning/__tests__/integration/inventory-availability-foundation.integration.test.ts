@@ -8,6 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as databaseSchema from "@shared/schema";
 
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
+import { PostgresInventoryPromiseSafetyAdminStore } from "../../infrastructure/inventory-promise-safety-admin.repository";
 import { loadInventoryAvailabilityBackfillSources } from "../../infrastructure/inventory-availability-backfill.repository";
 import { planInventoryAvailabilityBackfill } from "../../domain/inventory-availability-backfill";
 import { transformationModelDefinitionSchema } from "../../domain/inventory-availability-master-data.contracts";
@@ -40,6 +41,10 @@ const phase4MigrationSql = readFileSync(
 );
 const backfillProvenanceRefreshMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0628_inventory_backfill_provenance_refresh.sql"),
+  "utf8",
+);
+const demandObservationDaysMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0630_inventory_demand_evidence_observation_days.sql"),
   "utf8",
 );
 const HASH = "a".repeat(64);
@@ -126,7 +131,13 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         CONSTRAINT product_variants_id_product_uq UNIQUE (id, product_id)
       );
       CREATE TABLE warehouse.warehouses (
-        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        code varchar(20) NOT NULL DEFAULT 'TEST',
+        name varchar(200) NOT NULL DEFAULT 'Integration warehouse',
+        warehouse_type varchar(30) NOT NULL DEFAULT 'operations',
+        inventory_source_type varchar(20) NOT NULL DEFAULT 'internal',
+        is_active integer NOT NULL DEFAULT 1,
+        created_at timestamptz NOT NULL DEFAULT now()
       );
       CREATE TABLE warehouse.warehouse_locations (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -197,6 +208,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(backfillMigrationSql);
       await migrationClient.query(phase4MigrationSql);
       await migrationClient.query(backfillProvenanceRefreshMigrationSql);
+      await migrationClient.query(demandObservationDaysMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -1301,25 +1313,30 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     expect(remaining.rows[0].count).toBe("0");
   });
 
-  it("makes demand evidence append-only, bigint-safe, and idempotent by input", async () => {
+  it("makes demand evidence append-only, bigint-safe, zero-day safe, and idempotent by input", async () => {
     const scope = await seedProductAndWarehouse();
     const result = await pool.query<{ id: string }>(
       `INSERT INTO inventory.demand_evidence_snapshots (
          product_variant_id, warehouse_id, window_started_at, window_ended_at,
          irreversible_consumption_units, observed_days, daily_demand_milli_units,
          trust_status, trust_reasons, method_version, input_fingerprint, calculated_at
-       ) VALUES ($1, $2, '2026-08-01T00:00:00Z', '2026-08-08T00:00:00Z',
-         $3::bigint, 7, $4::bigint, 'trusted', '[]'::jsonb,
-         'irreversible-demand-v1', $5, '2026-08-08T01:00:00Z') RETURNING id`,
+       ) VALUES ($1, $2, '2026-07-11T00:00:00Z', '2026-08-08T00:00:00Z',
+         $3::bigint, 0, $4::bigint, 'untrusted', '["INSUFFICIENT_OBSERVATION_DAYS"]'::jsonb,
+         'irreversible_consumption_v1_28d', $5, '2026-08-08T01:00:00Z') RETURNING id`,
       [
         scope.variantIds[0],
         scope.warehouseId,
         "9007199254740993",
-        "1286742750677284714",
+        "0",
         HASH,
       ],
     );
     expect(BigInt(result.rows[0].id)).toBeGreaterThan(0n);
+    const safetyAdminStore = new PostgresInventoryPromiseSafetyAdminStore(
+      drizzle(pool, { schema: databaseSchema }),
+    );
+    const view = await safetyAdminStore.getPromiseSafetyAdminView(scope.productId);
+    expect(view?.demandEvidence[0]?.observedDays).toBe(0);
     await expectDatabaseError(
       () => pool.query(
         "UPDATE inventory.demand_evidence_snapshots SET observed_days = 8 WHERE id = $1",
@@ -1337,9 +1354,9 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
            product_variant_id, warehouse_id, window_started_at, window_ended_at,
            irreversible_consumption_units, observed_days, daily_demand_milli_units,
            trust_status, trust_reasons, method_version, input_fingerprint, calculated_at
-         ) VALUES ($1, $2, '2026-08-01T00:00:00Z', '2026-08-08T00:00:00Z',
-           1, 7, 1, 'trusted', '[]'::jsonb,
-           'irreversible-demand-v1', $3, '2026-08-08T02:00:00Z')`,
+         ) VALUES ($1, $2, '2026-07-11T00:00:00Z', '2026-08-08T00:00:00Z',
+           1, 0, 0, 'untrusted', '["INSUFFICIENT_OBSERVATION_DAYS"]'::jsonb,
+           'irreversible_consumption_v1_28d', $3, '2026-08-08T02:00:00Z')`,
         [scope.variantIds[0], scope.warehouseId, HASH],
       ),
       "demand_evidence_snapshots_input_uq",
@@ -1619,6 +1636,106 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       occurredAt: new Date(FIXED_TIME),
     })).rejects.toMatchObject({
       status: 409,
+      code: "INVENTORY_AVAILABILITY_IDEMPOTENCY_KEY_REUSED",
+    });
+  });
+
+  it("updates a promise-safety draft with optimistic locking, replay, and audit", async () => {
+    const scope = await seedProductAndWarehouse([1]);
+    const testDatabase = drizzle(pool, { schema: databaseSchema });
+    const masterDataStore = new PostgresInventoryAvailabilityMasterDataStore(testDatabase);
+    const safetyAdminStore = new PostgresInventoryPromiseSafetyAdminStore(testDatabase);
+    const created = await masterDataStore.createPromiseSafetyPolicyDraft({
+      actorId: "integration-test",
+      scope: {
+        scopeType: "network_variant",
+        productVariantId: scope.variantIds[0],
+      },
+      value: { policyMode: "fixed_units", fixedUnits: 4 },
+      changeReason: "Create editable safety draft",
+      idempotencyKey: "repository-integration:safety-update-source",
+      requestHash: "b".repeat(64),
+      occurredAt: new Date(FIXED_TIME),
+    });
+    const updateCommand = {
+      policyId: created.policyId,
+      expectedVersion: created.version,
+      expectedDefinitionHash: created.definitionHash,
+      expectedHeadRevision: "0",
+      value: { policyMode: "days_of_cover" as const,
+        daysOfCoverMilliDays: 2_500,
+        untrustedDemandFallbackUnits: 3,
+        demandMethodVersion: "irreversible_consumption_v1_28d" },
+      actorId: "integration-test",
+      changeReason: "Use reviewed demand evidence with a fixed fallback",
+      idempotencyKey: "repository-integration:safety-update-1",
+      requestHash: "c".repeat(64),
+      occurredAt: new Date(FIXED_TIME),
+    };
+
+    const updated = await safetyAdminStore.updatePromiseSafetyPolicyDraft(updateCommand);
+    await expect(safetyAdminStore.updatePromiseSafetyPolicyDraft(updateCommand)).resolves.toEqual({
+      ...updated,
+      alreadyApplied: true,
+    });
+    const persisted = await pool.query<{
+      policy_mode: string;
+      days_of_cover_milli_days: number;
+      untrusted_demand_fallback_units: number;
+      definition_hash: string;
+      revision: string;
+      command_type: string;
+      audit_after_hash: string;
+    }>(
+      `SELECT policy.policy_mode, policy.days_of_cover_milli_days,
+              policy.untrusted_demand_fallback_units, policy.definition_hash,
+              head.revision,
+              receipt.response_body->>'commandType' AS command_type,
+              audit.changes->'after'->>'definitionHash' AS audit_after_hash
+       FROM inventory.promise_safety_policy_versions AS policy
+       JOIN inventory.promise_safety_policy_heads AS head ON head.scope_key = policy.scope_key
+       JOIN public.idempotency_keys AS receipt
+         ON receipt.key = 'inventory-promise-safety-update:' || $2
+       JOIN public.audit_events AS audit
+         ON audit.action = 'inventory_availability.promise_safety_policy.draft_updated'
+        AND audit.target = 'inventory.promise_safety_policy:' || policy.id::text
+       WHERE policy.id = $1`,
+      [created.policyId, updateCommand.idempotencyKey],
+    );
+    expect(persisted.rows[0]).toMatchObject({
+      policy_mode: "days_of_cover",
+      days_of_cover_milli_days: 2_500,
+      untrusted_demand_fallback_units: 3,
+      definition_hash: updated.definitionHash,
+      revision: "1",
+      command_type: "promise_safety_policy_draft_update",
+      audit_after_hash: updated.definitionHash,
+    });
+
+    const staleKey = "repository-integration:safety-update-stale";
+    await expect(safetyAdminStore.updatePromiseSafetyPolicyDraft({
+      ...updateCommand,
+      expectedDefinitionHash: updated.definitionHash,
+      idempotencyKey: staleKey,
+      requestHash: "d".repeat(64),
+    })).rejects.toMatchObject({
+      code: "INVENTORY_PROMISE_SAFETY_STALE_DRAFT",
+    });
+    const staleReceipt = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM public.idempotency_keys WHERE key = $1",
+      [`inventory-promise-safety-update:${staleKey}`],
+    );
+    expect(staleReceipt.rows[0].count).toBe("0");
+
+    await expect(masterDataStore.createLocationPromisePolicyDraft({
+      actorId: "integration-test",
+      warehouseLocationId: scope.locationId,
+      eligibilityMode: "eligible",
+      changeReason: "Reject a reused safety-update key",
+      idempotencyKey: updateCommand.idempotencyKey,
+      requestHash: "e".repeat(64),
+      occurredAt: new Date(FIXED_TIME),
+    })).rejects.toMatchObject({
       code: "INVENTORY_AVAILABILITY_IDEMPOTENCY_KEY_REUSED",
     });
   });
