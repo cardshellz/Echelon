@@ -61,6 +61,8 @@ import {
 } from "../../historical-shipstation-contents-recovery.domain";
 import { PgHistoricalShipStationContentsSystemRecoveryRepository } from "../../historical-shipstation-contents-system-recovery.repository";
 import { HistoricalShipStationContentsSystemRecoveryService } from "../../historical-shipstation-contents-system-recovery.service";
+import { PgHistoricalShipStationContentsReviewRepository } from "../../historical-shipstation-contents-review.repository";
+import { HistoricalShipStationContentsReviewService } from "../../historical-shipstation-contents-review.service";
 
 const PRIMARY_GROUP_KEY = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const COMPETING_GROUP_KEY = "96e1be0d-c7d8-4c91-919f-04f5eb547f80";
@@ -1275,6 +1277,220 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
        WHERE id = $1::bigint`,
       [created.attestationId],
     )).rejects.toMatchObject({ code: "55000" });
+  });
+
+  it("persists and idempotently resolves a ShipStation/WMS contents conflict through lead-confirmed WMS evidence", async () => {
+    const leadUserId = "22222222-2222-4222-8222-222222222222";
+    await pool.query(
+      `INSERT INTO identity.users (id, username, password, role, active)
+       VALUES ($1, 'historical-review-lead', 'test-only-password-hash', 'lead', 1)`,
+      [leadUserId],
+    );
+    const order = await pool.query<{ id: number }>(
+      `INSERT INTO wms.orders (order_number)
+       VALUES ('#REVIEW-1001')
+       RETURNING id`,
+    );
+    const orderItem = await pool.query<{ id: number }>(
+      `INSERT INTO wms.order_items (order_id, sku, name, quantity)
+       VALUES ($1::integer, 'WMS-REVIEW-SKU', 'WMS review item', 2)
+       RETURNING id`,
+      [order.rows[0].id],
+    );
+    const shipment = await pool.query<{ id: number }>(
+      "INSERT INTO wms.outbound_shipments (order_id) VALUES ($1::integer) RETURNING id",
+      [order.rows[0].id],
+    );
+    const shipmentItem = await pool.query<{ id: number }>(
+      `INSERT INTO wms.outbound_shipment_items (
+         shipment_id, order_item_id, shipment_item_purpose, qty
+       ) VALUES ($1::integer, $2::integer, 'customer_fulfillment', 2)
+       RETURNING id`,
+      [shipment.rows[0].id, orderItem.rows[0].id],
+    );
+    const label = await pool.query<{ id: string }>(
+      `INSERT INTO wms.shipping_provider_labels (
+         provider, provider_label_id, provider_order_id, tracking_number, label_status,
+         label_direction, first_observed_at, last_observed_at
+       ) VALUES (
+         'shipstation', '57001', '78001', '1ZHISTORICALREVIEW', 'active', 'outbound',
+         '2026-08-28T12:00:00.000Z', '2026-08-28T12:00:00.000Z'
+       ) RETURNING id::text AS id`,
+    );
+    const historicalPayload = Object.freeze({
+      payloadSchemaVersion: 1,
+      providerLabelId: "57001",
+      trackingNumber: "1ZHISTORICALREVIEW",
+    });
+    const historicalEventHash = createHash("sha256").update(canonicalJson({
+      provider: "shipstation",
+      ...historicalPayload,
+      labelStatus: "active",
+    })).digest("hex");
+    const historicalEvent = await pool.query<{ id: string }>(
+      `INSERT INTO wms.shipping_provider_label_events (
+         shipping_provider_label_id, event_hash, event_type, label_status,
+         tracking_number, provider_occurred_at, received_at, sanitized_payload
+       ) VALUES (
+         $1::bigint, $2, 'label_observed', 'active', '1ZHISTORICALREVIEW', NULL,
+         '2026-08-28T12:00:00.000Z', $3::jsonb
+       ) RETURNING id::text AS id`,
+      [label.rows[0].id, historicalEventHash, JSON.stringify(historicalPayload)],
+    );
+    await pool.query(
+      `INSERT INTO wms.shipping_provider_label_links (
+         shipping_provider_label_id, legacy_wms_shipment_id
+       ) VALUES ($1::bigint, $2::integer)`,
+      [label.rows[0].id, shipment.rows[0].id],
+    );
+
+    const providerObservationHash = "a".repeat(64);
+    const loadShipmentContents = async () => Object.freeze({
+      kind: "found" as const,
+      evidence: Object.freeze({
+        status: "unrecognized" as const,
+        recoveryStatus: "provider_wms_conflict" as const,
+        providerItemCount: 1,
+        recognizedProviderItemCount: 0,
+        canonicalLineCount: 0,
+        malformedItemCount: 0,
+        unrecognizedItemCount: 1,
+        duplicateLineItemCount: 0,
+        recoveryEvidence: null,
+      }),
+      recoveryEvidenceDetails: null,
+      providerObservation: Object.freeze({
+        evidenceHash: providerObservationHash,
+        lines: Object.freeze([
+          Object.freeze({ sku: "SHIPSTATION-REVIEW-SKU", quantity: 5 }),
+        ]),
+      }),
+    });
+    const service = new HistoricalShipStationContentsReviewService(
+      new PgHistoricalShipStationContentsReviewRepository(pool),
+      { loadShipmentContents },
+    );
+    const intake = await service.intake({
+      shippingProviderLabelId: label.rows[0].id,
+      reason: "provider_wms_conflict",
+      expectedEvidenceHash: providerObservationHash,
+    });
+    expect(intake).toMatchObject({ kind: "created", shippingProviderLabelId: label.rows[0].id });
+
+    const preview = await service.preview(intake.exceptionId);
+    expect(preview).toMatchObject({
+      orderNumber: "#REVIEW-1001",
+      trackingNumber: "1ZHISTORICALREVIEW",
+      providerContents: [{ sku: "SHIPSTATION-REVIEW-SKU", quantity: 5 }],
+      wmsContents: [{
+        wmsShipmentItemId: shipmentItem.rows[0].id,
+        sku: "WMS-REVIEW-SKU",
+        itemName: "WMS review item",
+        quantity: 2,
+      }],
+    });
+    const pendingInventoryCorrection = Object.freeze({
+      exceptionId: intake.exceptionId,
+      expectedPreviewEvidenceHash: preview.previewEvidenceHash,
+      authenticatedActorUserId: leadUserId,
+      decision: "provider_confirmed_pending_inventory_correction" as const,
+      reason: "The carrier package record is supported, but inventory correction is not authorized here.",
+    });
+    await expect(service.decide(pendingInventoryCorrection)).resolves.toEqual({
+      exceptionId: intake.exceptionId,
+      status: "acknowledged",
+    });
+    await expect(service.decide(structuredClone(pendingInventoryCorrection))).resolves.toEqual({
+      exceptionId: intake.exceptionId,
+      status: "acknowledged",
+    });
+    await expect(service.intake({
+      shippingProviderLabelId: label.rows[0].id,
+      reason: "provider_wms_conflict",
+      expectedEvidenceHash: providerObservationHash,
+    })).resolves.toMatchObject({ kind: "already_persisted", exceptionId: intake.exceptionId });
+    const pending = await pool.query<{
+      status: string;
+      classification: string;
+      details: Record<string, unknown>;
+      history_count: number;
+    }>(
+      `SELECT status, classification, details,
+              jsonb_array_length(details->'decisionHistory') AS history_count
+       FROM wms.reconciliation_exceptions
+       WHERE id = $1::bigint`,
+      [intake.exceptionId],
+    );
+    expect(pending.rows).toMatchObject([{
+      status: "acknowledged",
+      classification: "hard_block",
+      details: {
+        decision: "provider_confirmed_pending_inventory_correction",
+        decisionActorUserId: leadUserId,
+        decisionActorRole: "lead",
+        inventoryCorrectionRequired: true,
+      },
+      history_count: 1,
+    }]);
+
+    const command = Object.freeze({
+      exceptionId: intake.exceptionId,
+      expectedPreviewEvidenceHash: preview.previewEvidenceHash,
+      authenticatedActorUserId: leadUserId,
+      decision: "wms_confirmed" as const,
+      reason: "The physical packing record confirms the WMS package contents.",
+    });
+    const created = await service.decide(command);
+    const replay = await service.decide(structuredClone(command));
+    expect(created).toMatchObject({
+      kind: "created",
+      exceptionId: intake.exceptionId,
+      shippingProviderLabelId: label.rows[0].id,
+      eventHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(replay).toEqual({ ...created, kind: "already_persisted" });
+
+    const persisted = await pool.query<{
+      status: string;
+      classification: string;
+      resolved_by: string;
+      details: Record<string, unknown>;
+      event_id: string;
+      sanitized_payload: Record<string, unknown>;
+    }>(
+      `SELECT exception.status, exception.classification, exception.resolved_by,
+              exception.details,
+              event.id::text AS event_id, event.sanitized_payload
+       FROM wms.reconciliation_exceptions AS exception
+       JOIN wms.shipping_provider_label_events AS event
+         ON event.id = (exception.details->>'resolutionLabelEventId')::bigint
+       WHERE exception.id = $1::bigint`,
+      [intake.exceptionId],
+    );
+    expect(persisted.rows).toHaveLength(1);
+    expect(persisted.rows[0]).toMatchObject({
+      status: "resolved",
+      classification: "safe_auto_repair",
+      resolved_by: leadUserId,
+      details: {
+        decision: "wms_confirmed",
+        decisionPreviewEvidenceHash: preview.previewEvidenceHash,
+        decisionActorUserId: leadUserId,
+        decisionReason: command.reason,
+      },
+      sanitized_payload: {
+        observationSource: "historical_shipstation_contents_operator_resolution",
+        recoveryStatus: "wms_confirmed_after_provider_conflict",
+        actorUserId: leadUserId,
+        actorRole: "lead",
+        reason: command.reason,
+        resolvedLabelEventIds: [Number(historicalEvent.rows[0].id)],
+        declaredContentsEvidence: {
+          status: "authoritative",
+          lines: [{ lineItemKey: `wms-item-${shipmentItem.rows[0].id}`, quantity: 2 }],
+        },
+      },
+    });
   });
 
   it("installs valid discovery indexes that PostgreSQL can use for the production query", async () => {

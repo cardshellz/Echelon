@@ -87,11 +87,13 @@ export async function runMigrations(): Promise<void> {
   requireDisposableDatabase();
   const sqlArtifacts = [
     "test/fixtures/named-schema-integration.sql",
+    "migrations/109_oms_wms_reconciliation_exceptions.sql",
     "migrations/198_package_allocation_ledger_foundation.sql",
     "migrations/199_package_allocation_persistence_foundation.sql",
     "migrations/0619_package_allocation_discovery_indexes.sql",
     "migrations/0621_shipping_provider_label_content_attestations.sql",
     "migrations/0627_historical_shipstation_contents_system_recovery.sql",
+    "migrations/0631_historical_shipstation_contents_operator_resolution.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;
@@ -121,6 +123,7 @@ export async function runMigrations(): Promise<void> {
 }
 
 const TRUNCATE_TABLES = [
+  "wms.reconciliation_exceptions",
   "wms.shipping_provider_label_content_attestation_resolutions",
   "wms.shipping_provider_label_content_attestations",
   "wms.package_allocation_effect_intents",

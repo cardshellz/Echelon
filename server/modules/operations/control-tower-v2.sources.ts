@@ -520,6 +520,8 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
       ? `${provider} shipment ${providerShipmentRef ?? "unknown"} did not match a WMS shipment${orderNumber ? ` for order ${orderNumber}` : ""}.`
       : rule === "shipstation_unmapped_physical_shipment"
         ? `${provider} reported an unmapped shipment or label record${orderNumber ? ` for order ${orderNumber}` : ""}${trackingNumber ? ` with tracking ${trackingNumber}` : ""}. Echelon did not change fulfillment or inventory because carrier possession and merchant intent are not yet confirmed.`
+        : rule === "historical_shipstation_contents_review"
+          ? `${orderNumber ? `Order ${orderNumber}` : "A historical shipment"}${trackingNumber ? ` with tracking ${trackingNumber}` : ""} has different package contents in ShipStation and WMS. No inventory correction has been posted.`
         : String(row.summary ?? humanizeControlTowerCode(rule)).trim();
     const actualState = rule === "ship_notify_no_match"
       ? [
@@ -549,6 +551,8 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
       rootCauseGroupKey: `wms:${rule}`,
       title: rule === EBAY_TRACKING_CONFLICT_RULE
         ? "eBay tracking changed after fulfillment"
+        : rule === "historical_shipstation_contents_review"
+          ? "ShipStation and WMS package contents disagree"
         : humanizeControlTowerCode(rule),
       summary,
       expectedState: "OMS, WMS, shipment, and provider evidence must agree before fulfillment state changes.",
@@ -558,11 +562,17 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
       impactTags: ["order_flow", "warehouse_execution"],
       actionability: "investigate",
       sourceStatus: sourceStatus(row.status),
-      ownerTeam: "Warehouse",
+      ownerTeam: rule === "historical_shipstation_contents_review" ? "Shipping" : "Warehouse",
       recommendedAction: rule === "ship_notify_no_match"
         ? `Open ${orderNumber ? `order ${orderNumber}` : "the WMS order list"}, verify whether this exact provider shipment is now linked, and replay the provider callback only if fulfillment is still missing.`
         : rule === "shipstation_unmapped_physical_shipment"
           ? "Review the provider label, carrier-tracking evidence, and merchant intent. Classify a replacement only after physical carrier movement is confirmed; otherwise resolve it as an unused, voided, duplicate, or still-pending label."
+          : rule === "historical_shipstation_contents_review"
+            ? details.decision === "provider_confirmed_pending_inventory_correction"
+              ? "ShipStation contents were confirmed. Keep this blocked until an audited inventory and package-line correction is previewed and posted."
+              : details.decision === "cannot_prove"
+                ? "Additional physical evidence is required. Leave the package blocked rather than choosing a content source by assumption."
+                : "Compare the ShipStation and WMS item lists below. A lead may confirm WMS, flag ShipStation for an inventory correction, or record that the contents cannot be proven."
           : rule === EBAY_TRACKING_CONFLICT_RULE
             ? "Compare the original eBay fulfillment with the later physical package. Classify the later package as a replacement or duplicate before resolving this item; do not resend tracking to eBay."
             : "Review the reconciliation evidence and resolve the underlying source workflow. Do not overwrite fulfillment state manually.",

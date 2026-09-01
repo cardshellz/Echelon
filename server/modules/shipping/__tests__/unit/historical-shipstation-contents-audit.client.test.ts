@@ -83,7 +83,7 @@ describe("historical ShipStation contents audit client", () => {
     expect(JSON.stringify(result)).not.toContain("SECRET");
   });
 
-  it("classifies exact SKU and quantity recovery without retaining provider or WMS SKUs", async () => {
+  it("classifies exact SKU and quantity recovery and retains only review-safe provider lines", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({
       shipments: [{
         shipmentId: 44_001,
@@ -111,11 +111,18 @@ describe("historical ShipStation contents audit client", () => {
           attestedLineCount: 2,
         },
       },
+      providerObservation: {
+        evidenceHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        lines: [
+          { sku: "SKU-B", quantity: 1 },
+          { sku: "SKU-A", quantity: 2 },
+        ],
+      },
     });
-    expect(JSON.stringify(result)).not.toMatch(/SECRET|SKU-A|SKU-B/);
+    expect(JSON.stringify(result)).not.toContain("SECRET");
   });
 
-  it("keeps provider/WMS contradictions in review without returning line details", async () => {
+  it("keeps provider/WMS contradictions in review with bounded provider line evidence", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({
       shipments: [{
         shipmentId: 44_001,
@@ -135,8 +142,11 @@ describe("historical ShipStation contents audit client", () => {
         recoveryStatus: "provider_wms_conflict",
         recoveryEvidence: null,
       },
+      providerObservation: {
+        evidenceHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        lines: [{ sku: "CONFLICTING-SKU", quantity: 5 }],
+      },
     });
-    expect(JSON.stringify(result)).not.toContain("CONFLICTING-SKU");
   });
 
   it.each([

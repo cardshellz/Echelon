@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   buildHistoricalShipStationContentsRecoveryEvidence,
   buildHistoricalShipStationContentsSystemRecoveryEvent,
+  buildHistoricalShipStationWmsConfirmationEvidence,
   classifyHistoricalShipStationContentsRecovery,
+  historicalShipStationProviderObservationHash,
   HistoricalShipStationContentsRecoveryError,
   type HistoricalShipStationExpectedContentsEvidence,
 } from "../../historical-shipstation-contents-recovery.domain";
@@ -30,6 +32,117 @@ function classify(
 }
 
 describe("historical ShipStation contents recovery", () => {
+  it("builds deterministic lead-authorized WMS confirmation evidence without SKU data", () => {
+    const recoveryEvidence = buildHistoricalShipStationWmsConfirmationEvidence({
+      providerObservationHash: "f".repeat(64),
+      expectedContents: expected,
+    });
+    const event = buildHistoricalShipStationContentsSystemRecoveryEvent({
+      shippingProviderLabelId: "41",
+      providerShipmentId: 44_001,
+      trackingNumber: "1Z999AA10123456784",
+      labelStatus: "active",
+      recoveryEvidence,
+      resolvedLabelEventIds: [101],
+      authorization: {
+        actorUserId: "lead-1",
+        actorRole: "lead",
+        reason: "Physical packing evidence confirms the WMS package.",
+      },
+    });
+
+    expect(event).toMatchObject({
+      eventType: "contents_recovered",
+      sanitizedPayload: {
+        observationSource: "historical_shipstation_contents_operator_resolution",
+        recoveryStatus: "wms_confirmed_after_provider_conflict",
+        providerEvidenceHash: "f".repeat(64),
+        actorUserId: "lead-1",
+        actorRole: "lead",
+        reason: "Physical packing evidence confirms the WMS package.",
+        declaredContentsEvidence: {
+          status: "authoritative",
+          lines: [
+            { lineItemKey: "wms-item-7001", quantity: 2 },
+            { lineItemKey: "wms-item-7002", quantity: 1 },
+          ],
+        },
+      },
+    });
+    expect(event.eventHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(event)).not.toMatch(/SKU-A|SKU-B/);
+  });
+
+  it("requires operator authorization exactly for manual WMS confirmation", () => {
+    const manualEvidence = buildHistoricalShipStationWmsConfirmationEvidence({
+      providerObservationHash: "f".repeat(64),
+      expectedContents: expected,
+    });
+    expect(() => buildHistoricalShipStationContentsSystemRecoveryEvent({
+      shippingProviderLabelId: "41",
+      providerShipmentId: 44_001,
+      trackingNumber: "1Z999AA10123456784",
+      labelStatus: "active",
+      recoveryEvidence: manualEvidence,
+      resolvedLabelEventIds: [101],
+    })).toThrow(HistoricalShipStationContentsRecoveryError);
+
+    const automaticEvidence = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: 44_001,
+      providerStatus: "authoritative",
+      rawProviderItems: [{ lineItemKey: "wms-item-7001", quantity: 2 }],
+      expectedContents: expected,
+    });
+    if (automaticEvidence === null) throw new Error("expected automatic recovery evidence");
+    expect(() => buildHistoricalShipStationContentsSystemRecoveryEvent({
+      shippingProviderLabelId: "41",
+      providerShipmentId: 44_001,
+      trackingNumber: "1Z999AA10123456784",
+      labelStatus: "active",
+      recoveryEvidence: automaticEvidence,
+      resolvedLabelEventIds: [101],
+      authorization: {
+        actorUserId: "lead-1",
+        actorRole: "lead",
+        reason: "This must not be accepted on an automatic recovery.",
+      },
+    })).toThrow(HistoricalShipStationContentsRecoveryError);
+  });
+
+  it("fingerprints bounded provider evidence independent of line order and detects mixed-line changes", () => {
+    const first = historicalShipStationProviderObservationHash({
+      providerShipmentId: 44_001,
+      providerStatus: "mixed",
+      rawProviderItems: [
+        { lineItemKey: "wms-item-7001", sku: "SKU-A", quantity: 2 },
+        { lineItemKey: "external-1", sku: "SKU-B", quantity: 1 },
+      ],
+      expectedContents: expected,
+    });
+    const reordered = historicalShipStationProviderObservationHash({
+      providerShipmentId: 44_001,
+      providerStatus: "mixed",
+      rawProviderItems: [
+        { lineItemKey: "external-1", sku: "SKU-B", quantity: 1 },
+        { lineItemKey: "wms-item-7001", sku: "SKU-A", quantity: 2 },
+      ],
+      expectedContents: expected,
+    });
+    const changed = historicalShipStationProviderObservationHash({
+      providerShipmentId: 44_001,
+      providerStatus: "mixed",
+      rawProviderItems: [
+        { lineItemKey: "external-2", sku: "SKU-B", quantity: 1 },
+        { lineItemKey: "wms-item-7001", sku: "SKU-A", quantity: 2 },
+      ],
+      expectedContents: expected,
+    });
+
+    expect(first).toBe(reordered);
+    expect(changed).not.toBe(first);
+    expect(first).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it("builds one deterministic redacted system-recovery event", () => {
     const recoveryEvidence = buildHistoricalShipStationContentsRecoveryEvidence({
       providerShipmentId: 44_001,

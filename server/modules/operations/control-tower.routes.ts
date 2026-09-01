@@ -30,6 +30,10 @@ import {
   assignControlTowerV2Item,
   snoozeControlTowerV2Item,
 } from "./control-tower-v2.triage";
+import {
+  decideHistoricalContentsReview,
+  getHistoricalContentsReviewPreview,
+} from "./control-tower-historical-contents.actions";
 
 function operatorName(req: Request): string {
   return req.session.user?.username || req.session.user?.displayName || String(req.session.user?.id || "unknown");
@@ -243,6 +247,42 @@ export function registerOperationsControlTowerRoutes(app: Express) {
         res.json(result);
       } catch (error) {
         sendControlTowerV2Error(res, error, "Failed to snooze Control Tower item");
+      }
+    },
+  );
+
+  app.get(
+    "/api/operations/control-tower/v2/work-items/:id/historical-contents-review",
+    requirePermission("operations", "view"),
+    async (req: Request, res: Response) => {
+      try {
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json(await getHistoricalContentsReviewPreview({
+          pool,
+          workItemId: parsePositiveWorkItemId(req.params.id),
+        }));
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to load historical package-content review");
+      }
+    },
+  );
+
+  app.post(
+    "/api/operations/control-tower/v2/work-items/:id/historical-contents-review/decide",
+    requirePermission("operations", "triage"),
+    async (req: Request, res: Response) => {
+      try {
+        res.json(await decideHistoricalContentsReview({
+          pool,
+          workItemId: parsePositiveWorkItemId(req.params.id),
+          version: parseWorkItemVersion(req.body?.version),
+          actorUserId: req.session.user!.id,
+          expectedPreviewEvidenceHash: req.body?.expectedPreviewEvidenceHash,
+          decision: req.body?.decision,
+          reason: req.body?.reason,
+        }));
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to record historical package-content decision");
       }
     },
   );

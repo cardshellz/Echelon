@@ -8,6 +8,7 @@ import {
   SHIPSTATION_LABEL_OBSERVATION_SOURCE,
 } from "./carrier-tracking.domain";
 import {
+  HISTORICAL_SHIPSTATION_CONTENTS_OPERATOR_RESOLUTION_SOURCE,
   HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE,
   HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
   historicalShipStationRecoverableCaseEvidenceHash,
@@ -133,19 +134,24 @@ const persistedSystemRecoveryPayloadSchema = z.object({
   payloadSchemaVersion: z.literal(2),
   providerLabelId: boundedIdentifierSchema(200),
   trackingNumber: boundedIdentifierSchema(200),
-  observationSource: z.literal(
+  observationSource: z.enum([
     HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE,
-  ),
+    HISTORICAL_SHIPSTATION_CONTENTS_OPERATOR_RESOLUTION_SOURCE,
+  ]),
   recoveryContractVersion: z.literal(
     HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
   ),
   recoveryStatus: z.enum([
     "provider_line_keys_authoritative",
     "exact_unique_wms_match",
+    "wms_confirmed_after_provider_conflict",
   ]),
   providerEvidenceHash: z.string().regex(/^[0-9a-f]{64}$/),
   recoveryEvidenceHash: z.string().regex(/^[0-9a-f]{64}$/),
   resolvedLabelEventIds: z.array(positiveSafeIntegerSchema).min(1).max(500),
+  actorUserId: boundedIdentifierSchema(190).optional(),
+  actorRole: z.enum(["admin", "lead"]).optional(),
+  reason: boundedIdentifierSchema(500).optional(),
   declaredContentsEvidence: z.object({
     evidenceSchemaVersion: z.literal(1),
     status: z.literal("authoritative"),
@@ -487,6 +493,7 @@ function adaptSystemRecoveryEvent(
     throw new ShadowEvidenceError("invalid_system_recovery_evidence");
   }
   const payload = parsed.data;
+  const operatorResolution = payload.recoveryStatus === "wms_confirmed_after_provider_conflict";
   const uniqueResolvedIds = new Set(payload.resolvedLabelEventIds);
   const uniqueLineKeys = new Set(
     payload.declaredContentsEvidence.lines.map((line) => line.lineItemKey),
@@ -501,6 +508,18 @@ function adaptSystemRecoveryEvent(
     || payload.trackingNumber !== row.trackingNumber
     || row.providerOccurredAt !== null
     || payload.recoveryEvidenceHash !== expectedRecoveryHash
+    || operatorResolution !== (
+      payload.observationSource === HISTORICAL_SHIPSTATION_CONTENTS_OPERATOR_RESOLUTION_SOURCE
+      && payload.actorUserId !== undefined
+      && payload.actorRole !== undefined
+      && payload.reason !== undefined
+    )
+    || (!operatorResolution && (
+      payload.observationSource !== HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE
+      || payload.actorUserId !== undefined
+      || payload.actorRole !== undefined
+      || payload.reason !== undefined
+    ))
     || uniqueResolvedIds.size !== payload.resolvedLabelEventIds.length
     || uniqueLineKeys.size !== payload.declaredContentsEvidence.lines.length
     || payload.resolvedLabelEventIds.some((eventId) => eventId >= row.id)
@@ -519,9 +538,13 @@ function adaptSystemRecoveryEvent(
     kind: "package_contents_attested",
     eventKey: `shipping-provider-label-event:${row.id}:contents-recovered`,
     observedAt: timestamp(row.receivedAt),
-    authorization: "system_recovered",
-    actor: "historical-shipstation-contents-system-recovery",
-    reason: `Deterministic ${payload.recoveryStatus} recovery`,
+    authorization: operatorResolution ? "lead_approved" : "system_recovered",
+    actor: operatorResolution
+      ? payload.actorUserId!
+      : "historical-shipstation-contents-system-recovery",
+    reason: operatorResolution
+      ? payload.reason!
+      : `Deterministic ${payload.recoveryStatus} recovery`,
     resolvesEventKeys,
     contents,
   });

@@ -183,7 +183,7 @@ function canonicalEquals(left: unknown, right: unknown): boolean {
   return canonicalJson(left) === canonicalJson(right);
 }
 
-async function loadCandidate(
+export async function loadHistoricalShipStationContentsSystemRecoveryCandidate(
   client: QueryClient,
   shippingProviderLabelId: string,
   lockRow: boolean,
@@ -280,7 +280,7 @@ implements HistoricalShipStationContentsSystemRecoveryTransaction {
   loadCandidateForUpdate(
     shippingProviderLabelId: string,
   ): Promise<HistoricalShipStationContentsSystemRecoveryCandidate | null> {
-    return loadCandidate(this.client, shippingProviderLabelId, true);
+    return loadHistoricalShipStationContentsSystemRecoveryCandidate(this.client, shippingProviderLabelId, true);
   }
 
   async loadResolvableLabelEventIds(
@@ -428,7 +428,7 @@ implements HistoricalShipStationContentsSystemRecoveryRepository {
     try {
       await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const queryClient = client as unknown as QueryClient;
-      const candidate = await loadCandidate(queryClient, shippingProviderLabelId, false);
+      const candidate = await loadHistoricalShipStationContentsSystemRecoveryCandidate(queryClient, shippingProviderLabelId, false);
       snapshot = candidate === null
         ? null
         : Object.freeze({ candidate });

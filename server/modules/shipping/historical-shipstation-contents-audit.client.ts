@@ -7,9 +7,12 @@ import {
 import {
   buildHistoricalShipStationContentsRecoveryEvidence,
   classifyHistoricalShipStationContentsRecovery,
+  historicalShipStationProviderObservationHash,
+  normalizedHistoricalShipStationProviderLines,
   type HistoricalShipStationContentsRecoveryEvidence,
   type HistoricalShipStationContentsRecoveryStatus,
   type HistoricalShipStationExpectedContentsEvidence,
+  type HistoricalShipStationObservedContentsLine,
 } from "./historical-shipstation-contents-recovery.domain";
 import {
   readBoundedResponseText,
@@ -50,12 +53,18 @@ export interface HistoricalShipStationContentsRecoveryEvidenceSummary {
   readonly attestedLineCount: number;
 }
 
+export interface HistoricalShipStationContentsProviderObservation {
+  readonly evidenceHash: string;
+  readonly lines: readonly HistoricalShipStationObservedContentsLine[] | null;
+}
+
 export type HistoricalShipStationContentsLookupResult =
   | Readonly<{ readonly kind: "not_found" }>
   | Readonly<{
       readonly kind: "found";
       readonly evidence: HistoricalShipStationContentsEvidenceSummary;
       readonly recoveryEvidenceDetails?: HistoricalShipStationContentsRecoveryEvidence | null;
+      readonly providerObservation: HistoricalShipStationContentsProviderObservation;
     }>;
 
 export interface HistoricalShipStationContentsClient {
@@ -320,6 +329,15 @@ export function createHistoricalShipStationContentsClient(
             rawProviderItems,
             expectedContents,
           });
+        const providerObservation = Object.freeze({
+          evidenceHash: historicalShipStationProviderObservationHash({
+            providerShipmentId,
+            providerStatus: evidence.status,
+            rawProviderItems,
+            expectedContents,
+          }),
+          lines: normalizedHistoricalShipStationProviderLines(rawProviderItems),
+        });
         return Object.freeze({
           kind: "found" as const,
           evidence: Object.freeze({
@@ -340,6 +358,7 @@ export function createHistoricalShipStationContentsClient(
               }),
           }),
           recoveryEvidenceDetails: recoveryEvidence,
+          providerObservation,
         });
       }
 

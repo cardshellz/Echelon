@@ -13,6 +13,8 @@ export const HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION = 1 as co
 export const HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_EVENT_TYPE = "contents_recovered" as const;
 export const HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE =
   "historical_shipstation_contents_system_recovery" as const;
+export const HISTORICAL_SHIPSTATION_CONTENTS_OPERATOR_RESOLUTION_SOURCE =
+  "historical_shipstation_contents_operator_resolution" as const;
 
 export const HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_STATUSES = Object.freeze([
   "provider_line_keys_authoritative",
@@ -59,10 +61,19 @@ export interface HistoricalShipStationRecoverableContentsLine {
 
 export interface HistoricalShipStationContentsRecoveryEvidence {
   readonly contractVersion: typeof HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION;
-  readonly recoveryStatus: "provider_line_keys_authoritative" | "exact_unique_wms_match";
+  readonly recoveryStatus:
+    | "provider_line_keys_authoritative"
+    | "exact_unique_wms_match"
+    | "wms_confirmed_after_provider_conflict";
   readonly evidenceHash: string;
   readonly attestedContents: readonly HistoricalShipStationRecoverableContentsLine[];
 }
+
+export type HistoricalShipStationContentsAutomaticRecoveryEvidence = Readonly<
+  Omit<HistoricalShipStationContentsRecoveryEvidence, "recoveryStatus"> & {
+    readonly recoveryStatus: "provider_line_keys_authoritative" | "exact_unique_wms_match";
+  }
+>;
 
 export type HistoricalShipStationContentsRecoveryLabelStatus =
   | "active"
@@ -75,13 +86,17 @@ export interface HistoricalShipStationContentsSystemRecoveryPayload {
   readonly providerLabelId: string;
   readonly trackingNumber: string;
   readonly observationSource:
-    typeof HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE;
+    | typeof HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE
+    | typeof HISTORICAL_SHIPSTATION_CONTENTS_OPERATOR_RESOLUTION_SOURCE;
   readonly recoveryContractVersion:
     typeof HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION;
   readonly recoveryStatus: HistoricalShipStationContentsRecoveryEvidence["recoveryStatus"];
   readonly providerEvidenceHash: string;
   readonly recoveryEvidenceHash: string;
   readonly resolvedLabelEventIds: readonly number[];
+  readonly actorUserId?: string;
+  readonly actorRole?: "admin" | "lead";
+  readonly reason?: string;
   readonly declaredContentsEvidence: Readonly<{
     readonly evidenceSchemaVersion: 1;
     readonly status: "authoritative";
@@ -112,7 +127,7 @@ export class HistoricalShipStationContentsRecoveryError extends Error {
   }
 }
 
-interface ProviderContentsLine {
+export interface HistoricalShipStationObservedContentsLine {
   readonly sku: string;
   readonly quantity: number;
 }
@@ -132,7 +147,11 @@ export function historicalShipStationRecoverableCaseEvidenceHash(input: Readonly
   if (
     !/^[1-9][0-9]*$/.test(input.shippingProviderLabelId)
     || BigInt(input.shippingProviderLabelId) > POSTGRES_BIGINT_MAX
-    || !["provider_line_keys_authoritative", "exact_unique_wms_match"].includes(
+    || ![
+      "provider_line_keys_authoritative",
+      "exact_unique_wms_match",
+      "wms_confirmed_after_provider_conflict",
+    ].includes(
       input.recoveryStatus,
     )
     || !/^[0-9a-f]{64}$/.test(input.providerEvidenceHash)
@@ -156,7 +175,11 @@ function validatedRecoveryContents(
 ): readonly HistoricalShipStationRecoverableContentsLine[] {
   if (
     recoveryEvidence.contractVersion !== HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION
-    || !["provider_line_keys_authoritative", "exact_unique_wms_match"].includes(
+    || ![
+      "provider_line_keys_authoritative",
+      "exact_unique_wms_match",
+      "wms_confirmed_after_provider_conflict",
+    ].includes(
       recoveryEvidence.recoveryStatus,
     )
     || !/^[0-9a-f]{64}$/.test(recoveryEvidence.evidenceHash)
@@ -191,8 +214,8 @@ function validatedRecoveryContents(
 }
 
 /**
- * Builds the exact immutable event appended by the system-recovery application
- * service. The event is deterministic across retries and contains no SKU,
+ * Builds the exact immutable event appended by the automatic or operator
+ * recovery application service. The event is deterministic across retries and contains no SKU,
  * product name, address, or raw provider payload.
  */
 export function buildHistoricalShipStationContentsSystemRecoveryEvent(input: Readonly<{
@@ -202,6 +225,11 @@ export function buildHistoricalShipStationContentsSystemRecoveryEvent(input: Rea
   readonly labelStatus: HistoricalShipStationContentsRecoveryLabelStatus;
   readonly recoveryEvidence: HistoricalShipStationContentsRecoveryEvidence;
   readonly resolvedLabelEventIds: readonly number[];
+  readonly authorization?: Readonly<{
+    readonly actorUserId: string;
+    readonly actorRole: "admin" | "lead";
+    readonly reason: string;
+  }>;
 }>): HistoricalShipStationContentsSystemRecoveryEvent {
   if (
     !/^[1-9][0-9]*$/.test(input.shippingProviderLabelId)
@@ -234,6 +262,28 @@ export function buildHistoricalShipStationContentsSystemRecoveryEvent(input: Rea
   resolvedLabelEventIds.sort((left, right) => left - right);
   Object.freeze(resolvedLabelEventIds);
   const contents = validatedRecoveryContents(input.recoveryEvidence);
+  const isOperatorResolution = input.recoveryEvidence.recoveryStatus
+    === "wms_confirmed_after_provider_conflict";
+  const authorization = input.authorization;
+  if (
+    isOperatorResolution !== (authorization !== undefined)
+    || (authorization !== undefined && (
+      typeof authorization.actorUserId !== "string"
+      || authorization.actorUserId.length < 1
+      || authorization.actorUserId.length > 190
+      || authorization.actorUserId.trim() !== authorization.actorUserId
+      || (authorization.actorRole !== "admin" && authorization.actorRole !== "lead")
+      || typeof authorization.reason !== "string"
+      || authorization.reason.length < 1
+      || authorization.reason.length > 500
+      || authorization.reason.trim() !== authorization.reason
+    ))
+  ) {
+    throw new HistoricalShipStationContentsRecoveryError(
+      "INVALID_PROVIDER_CONTENTS_EVIDENCE",
+      "Operator recovery authorization failed validation",
+    );
+  }
   const recoveryEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
     shippingProviderLabelId: input.shippingProviderLabelId,
     recoveryStatus: input.recoveryEvidence.recoveryStatus,
@@ -248,16 +298,23 @@ export function buildHistoricalShipStationContentsSystemRecoveryEvent(input: Rea
     status: "authoritative" as const,
     lines,
   });
-  const sanitizedPayload = Object.freeze({
+  const sanitizedPayload: HistoricalShipStationContentsSystemRecoveryPayload = Object.freeze({
     payloadSchemaVersion: 2 as const,
     providerLabelId: String(input.providerShipmentId),
     trackingNumber: input.trackingNumber,
-    observationSource: HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE,
+    observationSource: isOperatorResolution
+      ? HISTORICAL_SHIPSTATION_CONTENTS_OPERATOR_RESOLUTION_SOURCE
+      : HISTORICAL_SHIPSTATION_CONTENTS_RECOVERY_OBSERVATION_SOURCE,
     recoveryContractVersion: HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
     recoveryStatus: input.recoveryEvidence.recoveryStatus,
     providerEvidenceHash: input.recoveryEvidence.evidenceHash,
     recoveryEvidenceHash,
     resolvedLabelEventIds,
+    ...(authorization === undefined ? {} : {
+      actorUserId: authorization.actorUserId,
+      actorRole: authorization.actorRole,
+      reason: authorization.reason,
+    }),
     declaredContentsEvidence,
   });
   return Object.freeze({
@@ -288,11 +345,13 @@ function exactSku(value: unknown): string | null {
   return value.trim() === value ? value : null;
 }
 
-function providerLines(rawItems: unknown): readonly ProviderContentsLine[] | null {
+export function normalizedHistoricalShipStationProviderLines(
+  rawItems: unknown,
+): readonly HistoricalShipStationObservedContentsLine[] | null {
   if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > MAX_PACKAGE_LINES) {
     return null;
   }
-  const lines: ProviderContentsLine[] = [];
+  const lines: HistoricalShipStationObservedContentsLine[] = [];
   for (const rawItem of rawItems) {
     if (rawItem === null || typeof rawItem !== "object" || Array.isArray(rawItem)) {
       return null;
@@ -303,6 +362,94 @@ function providerLines(rawItems: unknown): readonly ProviderContentsLine[] | nul
     lines.push(Object.freeze({ sku, quantity: item.quantity }));
   }
   return Object.freeze(lines);
+}
+
+function providerObservationFingerprint(rawItems: unknown): Readonly<Record<string, unknown>> {
+  if (rawItems === undefined) return Object.freeze({ kind: "omitted" });
+  if (!Array.isArray(rawItems)) {
+    return Object.freeze({
+      kind: "invalid_container",
+      valueType: rawItems === null ? "null" : typeof rawItems,
+    });
+  }
+  if (rawItems.length > MAX_PACKAGE_LINES) {
+    return Object.freeze({ kind: "oversized", lineCount: rawItems.length });
+  }
+  const lines = rawItems.map((rawItem) => {
+    if (rawItem === null || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+      return Object.freeze({
+        kind: "invalid_line",
+        valueType: rawItem === null ? "null" : Array.isArray(rawItem) ? "array" : typeof rawItem,
+      });
+    }
+    const item = rawItem as Record<string, unknown>;
+    const lineItemKey = typeof item.lineItemKey === "string"
+      && item.lineItemKey.length > 0
+      && item.lineItemKey.length <= 200
+      && item.lineItemKey.trim() === item.lineItemKey
+      ? item.lineItemKey
+      : null;
+    return Object.freeze({
+      kind: "line",
+      lineItemKey,
+      sku: exactSku(item.sku),
+      quantity: typeof item.quantity === "number" && Number.isFinite(item.quantity)
+        ? String(item.quantity)
+        : null,
+    });
+  });
+  lines.sort((left, right) => compareText(canonicalJson(left), canonicalJson(right)));
+  return Object.freeze({ kind: "items", lines: Object.freeze(lines) });
+}
+
+export function historicalShipStationProviderObservationHash(input: Readonly<{
+  readonly providerShipmentId: number;
+  readonly providerStatus: ShipStationShipmentContentsEvidenceStatus;
+  readonly rawProviderItems: unknown;
+  readonly expectedContents: HistoricalShipStationExpectedContentsEvidence;
+}>): string {
+  if (!Number.isSafeInteger(input.providerShipmentId) || input.providerShipmentId <= 0) {
+    throw new HistoricalShipStationContentsRecoveryError(
+      "INVALID_PROVIDER_SHIPMENT_ID",
+      "Provider shipment identity must be a positive safe integer",
+    );
+  }
+  return sha256(canonicalJson(Object.freeze({
+    contract: "historical_shipstation_contents_provider_observation_v1",
+    provider: "shipstation",
+    providerShipmentId: input.providerShipmentId,
+    providerStatus: input.providerStatus,
+    providerObservation: providerObservationFingerprint(input.rawProviderItems),
+    expectedContents: normalizedExpectedContents(input.expectedContents),
+  })));
+}
+
+export function buildHistoricalShipStationWmsConfirmationEvidence(input: Readonly<{
+  readonly providerObservationHash: string;
+  readonly expectedContents: HistoricalShipStationExpectedContentsEvidence;
+}>): HistoricalShipStationContentsRecoveryEvidence {
+  if (!/^[0-9a-f]{64}$/.test(input.providerObservationHash)) {
+    throw new HistoricalShipStationContentsRecoveryError(
+      "INVALID_PROVIDER_CONTENTS_EVIDENCE",
+      "Provider observation hash failed validation",
+    );
+  }
+  const expected = normalizedExpectedContents(input.expectedContents);
+  if (expected.kind !== "available" || expected.lines.length === 0) {
+    throw new HistoricalShipStationContentsRecoveryError(
+      "INVALID_EXPECTED_CONTENTS_EVIDENCE",
+      "WMS confirmation requires one linked package with exact contents",
+    );
+  }
+  return Object.freeze({
+    contractVersion: HISTORICAL_SHIPSTATION_RECOVERY_EVIDENCE_CONTRACT_VERSION,
+    recoveryStatus: "wms_confirmed_after_provider_conflict",
+    evidenceHash: input.providerObservationHash,
+    attestedContents: Object.freeze(expected.lines.map((line) => Object.freeze({
+      wmsShipmentItemId: line.wmsShipmentItemId,
+      quantity: line.quantity,
+    }))),
+  });
 }
 
 function authoritativeProviderLines(
@@ -437,7 +584,7 @@ export function classifyHistoricalShipStationContentsRecovery(input: Readonly<{
   if (input.providerStatus === "empty") return "provider_empty";
   if (input.providerStatus !== "unrecognized") return "provider_evidence_unavailable";
 
-  const provider = providerLines(input.rawProviderItems);
+  const provider = normalizedHistoricalShipStationProviderLines(input.rawProviderItems);
   if (provider === null) return "provider_evidence_unavailable";
   if (input.expectedContents.kind === "unavailable") return "wms_lineage_unavailable";
 
@@ -467,7 +614,7 @@ export function buildHistoricalShipStationContentsRecoveryEvidence(input: Readon
   readonly providerStatus: ShipStationShipmentContentsEvidenceStatus;
   readonly rawProviderItems: unknown;
   readonly expectedContents: HistoricalShipStationExpectedContentsEvidence;
-}>): HistoricalShipStationContentsRecoveryEvidence | null {
+}>): HistoricalShipStationContentsAutomaticRecoveryEvidence | null {
   if (!Number.isSafeInteger(input.providerShipmentId) || input.providerShipmentId <= 0) {
     throw new HistoricalShipStationContentsRecoveryError(
       "INVALID_PROVIDER_SHIPMENT_ID",
@@ -498,7 +645,7 @@ export function buildHistoricalShipStationContentsRecoveryEvidence(input: Readon
         "Exact WMS recovery requires available linked package contents",
       );
     }
-    const provider = providerLines(input.rawProviderItems);
+    const provider = normalizedHistoricalShipStationProviderLines(input.rawProviderItems);
     if (provider === null) {
       throw new HistoricalShipStationContentsRecoveryError(
         "INVALID_PROVIDER_CONTENTS_EVIDENCE",

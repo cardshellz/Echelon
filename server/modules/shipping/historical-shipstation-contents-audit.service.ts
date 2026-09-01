@@ -57,6 +57,7 @@ export type HistoricalShipStationExpectedContentsSummary =
 export interface HistoricalShipStationContentsReviewCase {
   readonly shippingProviderLabelId: string;
   readonly reason: HistoricalShipStationContentsReviewReason;
+  readonly evidenceHash: string | null;
   readonly providerContentsStatus: ShipStationShipmentContentsEvidenceStatus | null;
   readonly providerItemCount: number | null;
   readonly canonicalLineCount: number | null;
@@ -256,11 +257,13 @@ export async function auditHistoricalShipStationContents(
       readonly status: ShipStationShipmentContentsEvidenceStatus;
       readonly providerItemCount: number;
       readonly canonicalLineCount: number;
+      readonly evidenceHash: string;
     }> | null = null,
   ): void => {
     reviewCases.push(Object.freeze({
       shippingProviderLabelId: candidate.shippingProviderLabelId,
       reason,
+      evidenceHash: evidence?.evidenceHash ?? null,
       providerContentsStatus: evidence?.status ?? null,
       providerItemCount: evidence?.providerItemCount ?? null,
       canonicalLineCount: evidence?.canonicalLineCount ?? null,
@@ -310,7 +313,10 @@ export async function auditHistoricalShipStationContents(
         providerShipmentFoundCount += 1;
         contentsStatusCounts[result.evidence.status] += 1;
         recoveryStatusCounts[result.evidence.recoveryStatus] += 1;
-        addReviewCase(candidate, result.evidence.recoveryStatus, result.evidence);
+        addReviewCase(candidate, result.evidence.recoveryStatus, {
+          ...result.evidence,
+          evidenceHash: result.providerObservation.evidenceHash,
+        });
       }
     } catch {
       providerRequestFailureCount += 1;

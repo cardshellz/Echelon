@@ -52,6 +52,15 @@ function found(
         }
         : null,
     },
+    recoveryEvidenceDetails: null,
+    providerObservation: {
+      evidenceHash: recoveryStatus === "provider_line_keys_authoritative"
+        ? "c".repeat(64)
+        : recoveryStatus === "exact_unique_wms_match"
+          ? "d".repeat(64)
+          : "e".repeat(64),
+      lines: null,
+    },
   };
 }
 
@@ -67,6 +76,7 @@ function reviewCase(
     providerContentsStatus,
     providerItemCount: providerFound ? 0 : null,
     canonicalLineCount: providerFound ? 0 : null,
+    evidenceHash: providerFound ? "e".repeat(64) : null,
     expectedContents: expectedContentsSummary,
   };
 }
@@ -224,6 +234,7 @@ describe("historical ShipStation contents audit service", () => {
       providerContentsStatus: contentsStatus,
       providerItemCount: 0,
       canonicalLineCount: 0,
+      evidenceHash: "e".repeat(64),
       expectedContents: unavailableExpectedContents,
     }]);
     expect(JSON.stringify(report)).not.toContain(String(candidate.providerShipmentId));
