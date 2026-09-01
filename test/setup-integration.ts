@@ -96,6 +96,7 @@ export async function runMigrations(): Promise<void> {
     "migrations/0631_historical_shipstation_contents_operator_resolution.sql",
     "migrations/0634_package_allocation_authority_snapshot.sql",
     "migrations/0635_package_allocation_effect_outbox.sql",
+    "migrations/0637_declared_package_business_shipments.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;
@@ -128,6 +129,7 @@ const TRUNCATE_TABLES = [
   "wms.reconciliation_exceptions",
   "wms.shipping_provider_label_content_attestation_resolutions",
   "wms.shipping_provider_label_content_attestations",
+  "wms.declared_package_business_shipments",
   "wms.package_allocation_effect_outbox",
   "wms.package_allocation_effect_intents",
   "wms.package_allocation_entries",

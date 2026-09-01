@@ -1,8 +1,8 @@
 # Shipment Lifecycle and Label Authority Contract
 
-Status: Phase 1 proof contract with a sanitized read-only production snapshot;
-no runtime shipment authority is wired to this document or the accompanying
-domain projection.
+Status: Phase 1 serialized planning and its inert effect outbox are implemented.
+Phase 2 package-level business-shipment recognition is being wired separately
+from item-level fulfillment, inventory, tracking, and notification execution.
 
 ## Purpose
 
@@ -812,6 +812,14 @@ Additional activation blockers proven in this branch:
    provider-membership proof.
 
 ### Phase 2: label-time business shipment
+
+Implementation status: migration `0637_declared_package_business_shipments.sql`
+records one append-only package-level business-shipped fact in the same database
+transaction as a new label event only when retained provider evidence explicitly
+contains `isReturnLabel: false`. Unknown and return direction do not qualify, and
+historical rows are not inferred from old direction defaults. This fact has no
+item-level or remote-effect consumer yet; the remaining Phase 2 steps stay
+inactive.
 
 1. On any newly observed outbound label, record the monotonic package-level
    business-shipment fact immediately; do not wait for exact contents or a

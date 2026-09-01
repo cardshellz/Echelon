@@ -3995,8 +3995,10 @@ export function createShipStationService(
   async function processShipNotify(resourceUrl: string): Promise<number> {
     // SHIP_NOTIFY proves only that ShipStation created, changed, or voided a
     // label. It does not prove carrier possession. Persist every label as
-    // provider evidence; the carrier tracking dispatcher is the sole runtime
-    // path allowed to promote it to shipped inventory and channel fulfillment.
+    // provider evidence; an explicit outbound observation records only the
+    // package-level business-shipped fact. The carrier tracking dispatcher
+    // remains the sole runtime path for item, inventory, and channel effects
+    // until the Phase 2 outbox cutover is separately enabled.
     const data = await apiRequest<{ shipments: ShipStationShipment[] }>(
       "GET",
       withShipmentItemsIncluded(baseUrl, resourceUrl),

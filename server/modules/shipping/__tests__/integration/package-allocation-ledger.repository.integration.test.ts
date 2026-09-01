@@ -677,6 +677,241 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     if (roleCleanupFailure !== undefined) throw roleCleanupFailure;
   });
 
+  it("records one immutable business-shipped fact for an explicit outbound label observation", async () => {
+    const label = await pool.query<{ id: number }>(
+      `INSERT INTO wms.shipping_provider_labels (
+         provider,
+         provider_label_id,
+         tracking_number,
+         label_status,
+         label_direction,
+         first_observed_at,
+         last_observed_at
+       ) VALUES (
+         'shipstation',
+         'phase-2-outbound-label',
+         '1ZPHASE2OUTBOUND',
+         'active',
+         'outbound',
+         '2026-09-01T20:00:00.000Z',
+         '2026-09-01T20:00:00.000Z'
+       )
+       RETURNING id`,
+    );
+    const event = await pool.query<{ id: number }>(
+      `INSERT INTO wms.shipping_provider_label_events (
+         shipping_provider_label_id,
+         event_hash,
+         event_type,
+         label_status,
+         tracking_number,
+         provider_occurred_at,
+         received_at,
+         sanitized_payload
+       ) VALUES (
+         $1::bigint,
+         $2,
+         'label_observed',
+         'active',
+         '1ZPHASE2OUTBOUND',
+         '2026-09-01T19:59:00.000Z',
+         '2026-09-01T20:00:00.000Z',
+         '{"isReturnLabel":false}'::jsonb
+       )
+       RETURNING id`,
+      [label.rows[0].id, "b".repeat(64)],
+    );
+
+    const facts = await pool.query<{
+      shipping_provider_label_id: number;
+      recognition_event_id: number;
+      business_shipment_recognized_at: Date;
+      provider_occurred_at: Date;
+      recognition_source: string;
+    }>(
+      `SELECT
+         shipping_provider_label_id,
+         recognition_event_id,
+         business_shipment_recognized_at,
+         provider_occurred_at,
+         recognition_source
+       FROM wms.declared_package_business_shipments`,
+    );
+    expect(facts.rows).toEqual([{
+      shipping_provider_label_id: label.rows[0].id,
+      recognition_event_id: event.rows[0].id,
+      business_shipment_recognized_at: new Date("2026-09-01T20:00:00.000Z"),
+      provider_occurred_at: new Date("2026-09-01T19:59:00.000Z"),
+      recognition_source: "outbound_label_observed",
+    }]);
+
+    await pool.query(
+      `INSERT INTO wms.shipping_provider_label_events (
+         shipping_provider_label_id,
+         event_hash,
+         event_type,
+         label_status,
+         tracking_number,
+         provider_occurred_at,
+         received_at,
+         sanitized_payload
+       ) VALUES (
+         $1::bigint,
+         $2,
+         'label_observed',
+         'active',
+         '1ZPHASE2OUTBOUND',
+         '2026-09-01T20:01:00.000Z',
+         '2026-09-01T20:02:00.000Z',
+         '{"isReturnLabel":false}'::jsonb
+       )`,
+      [label.rows[0].id, "c".repeat(64)],
+    );
+    const factCount = await pool.query<{ count: number }>(
+      `SELECT COUNT(*)::integer AS count
+       FROM wms.declared_package_business_shipments`,
+    );
+    expect(factCount.rows).toEqual([{ count: 1 }]);
+    await expect(pool.query(
+      `UPDATE wms.declared_package_business_shipments
+       SET recognition_source = 'forged'
+       WHERE shipping_provider_label_id = $1::bigint`,
+      [label.rows[0].id],
+    )).rejects.toMatchObject({ code: "55000" });
+  });
+
+  it("does not create or permit a business-shipped fact for return or void-only evidence", async () => {
+    const label = await pool.query<{ id: number }>(
+      `INSERT INTO wms.shipping_provider_labels (
+         provider,
+         provider_label_id,
+         tracking_number,
+         label_status,
+         label_direction,
+         first_observed_at,
+         last_observed_at
+       ) VALUES (
+         'shipstation',
+         'phase-2-return-label',
+         '1ZPHASE2RETURN',
+         'active',
+         'return',
+         '2026-09-01T21:00:00.000Z',
+         '2026-09-01T21:00:00.000Z'
+       )
+       RETURNING id`,
+    );
+    const event = await pool.query<{ id: number }>(
+      `INSERT INTO wms.shipping_provider_label_events (
+         shipping_provider_label_id,
+         event_hash,
+         event_type,
+         label_status,
+         tracking_number,
+         provider_occurred_at,
+         received_at,
+         sanitized_payload
+       ) VALUES (
+         $1::bigint,
+         $2,
+         'label_observed',
+         'active',
+         '1ZPHASE2RETURN',
+         NULL,
+         '2026-09-01T21:00:00.000Z',
+         '{"isReturnLabel":true}'::jsonb
+       )
+       RETURNING id`,
+      [label.rows[0].id, "d".repeat(64)],
+    );
+    const factCount = await pool.query<{ count: number }>(
+      `SELECT COUNT(*)::integer AS count
+       FROM wms.declared_package_business_shipments`,
+    );
+    expect(factCount.rows).toEqual([{ count: 0 }]);
+
+    await expect(pool.query(
+      `INSERT INTO wms.declared_package_business_shipments (
+         shipping_provider_label_id,
+         recognition_event_id,
+         business_shipment_recognized_at,
+         provider_occurred_at,
+         recognition_source
+       ) VALUES (
+         $1::bigint,
+         $2::bigint,
+         '2026-09-01T21:00:00.000Z',
+         NULL,
+         'outbound_label_observed'
+       )`,
+      [label.rows[0].id, event.rows[0].id],
+    )).rejects.toMatchObject({ code: "23514" });
+
+    const voidedLabel = await pool.query<{ id: number }>(
+      `INSERT INTO wms.shipping_provider_labels (
+         provider,
+         provider_label_id,
+         tracking_number,
+         label_status,
+         label_direction,
+         first_observed_at,
+         last_observed_at
+       ) VALUES (
+         'shipstation',
+         'phase-2-void-only-label',
+         '1ZPHASE2VOIDONLY',
+         'voided',
+         'outbound',
+         '2026-09-01T22:00:00.000Z',
+         '2026-09-01T22:00:00.000Z'
+       )
+       RETURNING id`,
+    );
+    const voidEvent = await pool.query<{ id: number }>(
+      `INSERT INTO wms.shipping_provider_label_events (
+         shipping_provider_label_id,
+         event_hash,
+         event_type,
+         label_status,
+         tracking_number,
+         provider_occurred_at,
+         received_at,
+         sanitized_payload
+       ) VALUES (
+         $1::bigint,
+         $2,
+         'label_voided',
+         'voided',
+         '1ZPHASE2VOIDONLY',
+         '2026-09-01T21:59:00.000Z',
+         '2026-09-01T22:00:00.000Z',
+         '{"isReturnLabel":false}'::jsonb
+       )
+       RETURNING id`,
+      [voidedLabel.rows[0].id, "e".repeat(64)],
+    );
+    expect((await pool.query<{ count: number }>(
+      `SELECT COUNT(*)::integer AS count
+       FROM wms.declared_package_business_shipments`,
+    )).rows).toEqual([{ count: 0 }]);
+    await expect(pool.query(
+      `INSERT INTO wms.declared_package_business_shipments (
+         shipping_provider_label_id,
+         recognition_event_id,
+         business_shipment_recognized_at,
+         provider_occurred_at,
+         recognition_source
+       ) VALUES (
+         $1::bigint,
+         $2::bigint,
+         '2026-09-01T22:00:00.000Z',
+         '2026-09-01T21:59:00.000Z',
+         'outbound_label_observed'
+       )`,
+      [voidedLabel.rows[0].id, voidEvent.rows[0].id],
+    )).rejects.toMatchObject({ code: "23514" });
+  });
+
   it("executes historical ShipStation WMS-content recovery queries under the restricted role", async () => {
     const legacyOrder = await pool.query<{ id: number }>(
       "INSERT INTO wms.orders DEFAULT VALUES RETURNING id",

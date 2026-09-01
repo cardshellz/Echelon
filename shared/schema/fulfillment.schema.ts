@@ -536,6 +536,43 @@ export const shippingProviderLabelEvents = wmsSchema.table("shipping_provider_la
   ),
 ]);
 
+export const declaredPackageBusinessShipments = wmsSchema.table(
+  "declared_package_business_shipments",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    shippingProviderLabelId: bigint("shipping_provider_label_id", { mode: "number" })
+      .notNull()
+      .references(() => shippingProviderLabels.id, { onDelete: "restrict" }),
+    recognitionEventId: bigint("recognition_event_id", { mode: "number" }).notNull(),
+    businessShipmentRecognizedAt: timestamp("business_shipment_recognized_at", {
+      withTimezone: true,
+    }).notNull(),
+    providerOccurredAt: timestamp("provider_occurred_at", { withTimezone: true }),
+    recognitionSource: varchar("recognition_source", { length: 50 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("uq_declared_package_business_shipments_label")
+      .on(table.shippingProviderLabelId),
+    uniqueIndex("uq_declared_package_business_shipments_event")
+      .on(table.recognitionEventId),
+    index("idx_declared_package_business_shipments_recognized")
+      .on(table.businessShipmentRecognizedAt, table.id),
+    foreignKey({
+      columns: [table.recognitionEventId, table.shippingProviderLabelId],
+      foreignColumns: [
+        shippingProviderLabelEvents.id,
+        shippingProviderLabelEvents.shippingProviderLabelId,
+      ],
+      name: "fk_declared_package_business_shipments_event_label",
+    }).onDelete("restrict"),
+    check(
+      "declared_package_business_shipments_source_chk",
+      sql`${table.recognitionSource} = 'outbound_label_observed'`,
+    ),
+  ],
+);
+
 export interface ShippingProviderLabelAttestedContentLine {
   readonly wmsShipmentItemId: number;
   readonly quantity: number;
@@ -1562,6 +1599,7 @@ export const insertPhysicalShipmentItemSchema = createInsertSchema(physicalShipm
 export const insertShippingProviderLabelSchema = createInsertSchema(shippingProviderLabels).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertShippingProviderLabelLinkSchema = createInsertSchema(shippingProviderLabelLinks).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertShippingProviderLabelEventSchema = createInsertSchema(shippingProviderLabelEvents).omit({ id: true });
+export const insertDeclaredPackageBusinessShipmentSchema = createInsertSchema(declaredPackageBusinessShipments).omit({ id: true, createdAt: true });
 export const insertShippingProviderLabelContentAttestationSchema = createInsertSchema(shippingProviderLabelContentAttestations).omit({ id: true, createdAt: true });
 export const insertShippingProviderLabelContentAttestationResolutionSchema = createInsertSchema(shippingProviderLabelContentAttestationResolutions).omit({ id: true, createdAt: true });
 export const insertPackageAllocationGroupSchema = createInsertSchema(packageAllocationGroups).omit({ id: true, createdAt: true, versionUpdatedAt: true });
@@ -1616,6 +1654,8 @@ export type InsertShippingProviderLabelLink = z.infer<typeof insertShippingProvi
 export type ShippingProviderLabelLink = typeof shippingProviderLabelLinks.$inferSelect;
 export type InsertShippingProviderLabelEvent = z.infer<typeof insertShippingProviderLabelEventSchema>;
 export type ShippingProviderLabelEvent = typeof shippingProviderLabelEvents.$inferSelect;
+export type InsertDeclaredPackageBusinessShipment = z.infer<typeof insertDeclaredPackageBusinessShipmentSchema>;
+export type DeclaredPackageBusinessShipment = typeof declaredPackageBusinessShipments.$inferSelect;
 export type InsertShippingProviderLabelContentAttestation = z.infer<typeof insertShippingProviderLabelContentAttestationSchema>;
 export type ShippingProviderLabelContentAttestation = typeof shippingProviderLabelContentAttestations.$inferSelect;
 export type InsertShippingProviderLabelContentAttestationResolution = z.infer<typeof insertShippingProviderLabelContentAttestationResolutionSchema>;
