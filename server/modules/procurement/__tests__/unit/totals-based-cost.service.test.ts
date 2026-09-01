@@ -26,7 +26,7 @@ function buildInsertChain(returnValue: any[] = []) {
 function buildMockDb(
   headerReturn: any,
   captureInserts: any[],
-  references: { product?: any; variant?: any } = {},
+  references: { product?: any; variant?: any; vendorProduct?: any } = {},
 ) {
   const txInsert = vi.fn((table: any) => {
     const chain = {
@@ -65,7 +65,16 @@ function buildMockDb(
         ...references.variant,
       }];
     }
-    if (table === vendorProducts) return [];
+    if (table === vendorProducts) {
+      return references.vendorProduct ? [{
+        id: 27,
+        vendorId: 1,
+        productId: 1,
+        productVariantId: 11,
+        isActive: 1,
+        ...references.vendorProduct,
+      }] : [];
+    }
     return [];
   };
   const tx = {
@@ -288,6 +297,85 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
       expect(row.expectedReceiveVariantId).toBeNull();
       expect(row.expectedReceiveUnitsPerVariant).toBe(1);
       expect(row.sku).toBe("PRODUCT-SKU");
+    });
+
+    it("saves piece economics and clears an inactive receive configuration", async () => {
+      const captureInserts: any[] = [];
+      const inactiveVariant = {
+        id: 11,
+        productId: 1,
+        sku: "VARIANT-SKU-C1000",
+        name: "Case of 1000",
+        unitsPerVariant: 1000,
+        isActive: false,
+      };
+      const vendorProduct = {
+        id: 27,
+        vendorId: 1,
+        productId: 1,
+        productVariantId: 11,
+        isActive: 1,
+      };
+      storage = buildMockStorage({
+        getProductVariantById: vi.fn().mockResolvedValue(inactiveVariant),
+        getProductById: vi.fn().mockResolvedValue({
+          id: 1,
+          sku: "PRODUCT-SKU",
+          name: "Product 1",
+        }),
+        getVendorProductById: vi.fn().mockResolvedValue(vendorProduct),
+      });
+      svc = createPurchasingService(
+        buildMockDb(
+          { id: 42 },
+          captureInserts,
+          {
+            product: { sku: "PRODUCT-SKU" },
+            variant: inactiveVariant,
+            vendorProduct,
+          },
+        ),
+        storage,
+      );
+
+      await svc.createPurchaseOrderWithLines({
+        vendorId: 1,
+        lines: [{
+          productId: 1,
+          productVariantId: 11,
+          expectedReceiveVariantId: 11,
+          expectedReceiveUnitsPerVariant: 1000,
+          vendorProductId: 27,
+          orderQty: 10_000,
+          totalProductCostCents: 60_400,
+          packagingCostCents: 11_800,
+        } as any],
+      });
+
+      const linesInsert = captureInserts.find(
+        (capture) => Array.isArray(capture.rows) && capture.rows[0]?.purchaseOrderId !== undefined,
+      );
+      const row = linesInsert.rows[0];
+      expect(row.productId).toBe(1);
+      expect(row.orderQty).toBe(10_000);
+      expect(row.totalProductCostCents).toBe(60_400);
+      expect(row.packagingCostCents).toBe(11_800);
+      expect(row.vendorProductId).toBe(27);
+      expect(row.productVariantId).toBeNull();
+      expect(row.expectedReceiveVariantId).toBeNull();
+      expect(row.expectedReceiveUnitsPerVariant).toBe(1);
+      expect(row.sku).toBe("PRODUCT-SKU");
+
+      const createdEventInsert = captureInserts.find(
+        (capture) => !Array.isArray(capture.rows) && capture.rows?.eventType === "created",
+      );
+      expect(createdEventInsert.rows.payloadJson.receive_configuration_normalizations).toEqual([{
+        line_number: 1,
+        line_id: null,
+        submitted_variant_id: 11,
+        reason: "inactive",
+        normalized_receive_as: "pieces",
+      }]);
     });
 
     it("handles packaging = 0 correctly", async () => {

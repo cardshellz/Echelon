@@ -5262,6 +5262,10 @@ export function createPurchasingService(
     vendorProduct: any;
     costs: ReturnType<typeof calculateLineCosts>;
     pricing: NormalizedPoLinePricing | null;
+    receiveConfigurationNormalization: {
+      submittedVariantId: number;
+      reason: "inactive";
+    } | null;
   };
 
   async function resolvePurchaseOrderLines(
@@ -5270,9 +5274,11 @@ export function createPurchasingService(
     return Promise.all(
       input.lines.map(async (line) => {
         const lineType: PoLineType = line.lineType ?? "product";
+        let effectiveLine = line;
         let variant: any = null;
         let product: any = null;
         let vendorProduct: any = null;
+        let receiveConfigurationNormalization: ResolvedPurchaseOrderLine["receiveConfigurationNormalization"] = null;
         if (lineType === "product") {
           product = await storage.getProductById(line.productId as number);
           if (!product) {
@@ -5304,13 +5310,21 @@ export function createPurchasingService(
               );
             }
             if (variant.isActive === false) {
-              throw new PurchasingError(
-                `Expected receive variant ${expectedReceiveVariantId} is inactive`,
-                409,
-                { code: "PO_LINE_RECEIVE_VARIANT_INACTIVE" },
-              );
-            }
-            if (
+              // A PO buys product pieces. Receive configuration is optional
+              // operational metadata and must not invalidate the economic line
+              // when a formerly selected package variant has been archived.
+              variant = null;
+              receiveConfigurationNormalization = {
+                submittedVariantId: Number(expectedReceiveVariantId),
+                reason: "inactive",
+              };
+              effectiveLine = {
+                ...line,
+                productVariantId: null,
+                expectedReceiveVariantId: null,
+                expectedReceiveUnitsPerVariant: 1,
+              };
+            } else if (
               line.expectedReceiveUnitsPerVariant != null &&
               Number(variant.unitsPerVariant) !== line.expectedReceiveUnitsPerVariant
             ) {
@@ -5326,39 +5340,35 @@ export function createPurchasingService(
             }
           }
 
-          if (line.vendorProductId !== undefined && line.vendorProductId !== null) {
-            vendorProduct = await storage.getVendorProductById(line.vendorProductId);
+          if (effectiveLine.vendorProductId !== undefined && effectiveLine.vendorProductId !== null) {
+            vendorProduct = await storage.getVendorProductById(effectiveLine.vendorProductId);
             if (
               !vendorProduct ||
               Number(vendorProduct.vendorId) !== input.vendorId ||
               Number(vendorProduct.productId) !== Number(product.id) ||
-              (
-                vendorProduct.productVariantId != null &&
-                Number(vendorProduct.productVariantId) !== (variant?.id ?? null)
-              ) ||
               Number(vendorProduct.isActive ?? 0) !== 1
             ) {
               throw new PurchasingError(
-                `Vendor product ${line.vendorProductId} does not match vendor ${input.vendorId} and product ${product.id}`,
+                `Vendor product ${effectiveLine.vendorProductId} does not match vendor ${input.vendorId} and product ${product.id}`,
                 400,
               );
             }
           }
-          if (line.pricingSource === "vendor_catalog") {
-            if (!vendorProduct || !line.pricing) {
+          if (effectiveLine.pricingSource === "vendor_catalog") {
+            if (!vendorProduct || !effectiveLine.pricing) {
               throw new PurchasingError(
                 "vendor_catalog pricing requires vendorProductId and explicit pricing",
                 400,
                 { code: "PO_LINE_VENDOR_CATALOG_SOURCE_REQUIRES_LINK" },
               );
             }
-            if (!vendorCatalogPricingMatches(vendorProduct, line.pricing)) {
+            if (!vendorCatalogPricingMatches(vendorProduct, effectiveLine.pricing)) {
               throw new PurchasingError(
-                `Vendor product ${line.vendorProductId} pricing no longer matches the submitted quote`,
+                `Vendor product ${effectiveLine.vendorProductId} pricing no longer matches the submitted quote`,
                 409,
                 {
                   code: "PO_LINE_VENDOR_CATALOG_PRICE_MISMATCH",
-                  vendorProductId: line.vendorProductId,
+                  vendorProductId: effectiveLine.vendorProductId,
                   catalogPricingBasis: vendorProduct.pricingBasis ?? "legacy_unknown",
                 },
               );
@@ -5366,8 +5376,8 @@ export function createPurchasingService(
           }
         }
 
-        const pricing = line.pricing ? normalizePoLinePricing(line.pricing) : null;
-        const packagingCostCents = Number(line.packagingCostCents) || 0;
+        const pricing = effectiveLine.pricing ? normalizePoLinePricing(effectiveLine.pricing) : null;
+        const packagingCostCents = Number(effectiveLine.packagingCostCents) || 0;
         const costs = pricing
           ? {
               subtotalCents: pricing.totalProductCostCents + packagingCostCents,
@@ -5380,13 +5390,13 @@ export function createPurchasingService(
               unitCostCents: pricing.unitCostCents,
             }
           : calculateLineCosts({
-              orderQty: line.orderQty,
-              unitCostCents: Number(line.unitCostCents) || 0,
-              unitCostMills: typeof line.unitCostMills === "number" ? line.unitCostMills : null,
+              orderQty: effectiveLine.orderQty,
+              unitCostCents: Number(effectiveLine.unitCostCents) || 0,
+              unitCostMills: typeof effectiveLine.unitCostMills === "number" ? effectiveLine.unitCostMills : null,
               totalProductCostCents:
-                typeof line.totalProductCostCents === "number" ? line.totalProductCostCents : null,
+                typeof effectiveLine.totalProductCostCents === "number" ? effectiveLine.totalProductCostCents : null,
               packagingCostCents:
-                typeof line.packagingCostCents === "number" ? line.packagingCostCents : null,
+                typeof effectiveLine.packagingCostCents === "number" ? effectiveLine.packagingCostCents : null,
             });
         for (const [field, value] of Object.entries(costs)) {
           if (!Number.isSafeInteger(value)) {
@@ -5396,7 +5406,16 @@ export function createPurchasingService(
             });
           }
         }
-        return { line, lineType, variant, product, vendorProduct, costs, pricing };
+        return {
+          line: effectiveLine,
+          lineType,
+          variant,
+          product,
+          vendorProduct,
+          costs,
+          pricing,
+          receiveConfigurationNormalization,
+        };
       }),
     );
   }
@@ -5451,9 +5470,7 @@ export function createPurchasingService(
 
     const variantIds = [...new Set(
       productLines
-        .map((resolved) =>
-          resolved.line.expectedReceiveVariantId ?? resolved.line.productVariantId ?? null,
-        )
+        .map((resolved) => resolved.variant?.id ?? null)
         .filter((id): id is number => id !== null),
     )].sort((a, b) => a - b);
     const liveVariants = variantIds.length === 0
@@ -5468,8 +5485,7 @@ export function createPurchasingService(
       liveVariants.map((row: any) => [Number(row.id), row]),
     );
     for (const resolved of productLines) {
-      const variantId =
-        resolved.line.expectedReceiveVariantId ?? resolved.line.productVariantId ?? null;
+      const variantId = resolved.variant?.id ?? null;
       if (variantId === null) {
         resolved.variant = null;
         continue;
@@ -5485,10 +5501,18 @@ export function createPurchasingService(
         );
       }
       if (live.isActive === false) {
-        throw new PurchasingError(`Expected receive variant ${variantId} is inactive`, 409, {
-          code: "PO_LINE_RECEIVE_VARIANT_INACTIVE",
-          productVariantId: variantId,
-        });
+        resolved.receiveConfigurationNormalization = {
+          submittedVariantId: Number(variantId),
+          reason: "inactive",
+        };
+        resolved.variant = null;
+        resolved.line = {
+          ...resolved.line,
+          productVariantId: null,
+          expectedReceiveVariantId: null,
+          expectedReceiveUnitsPerVariant: 1,
+        };
+        continue;
       }
       if (
         resolved.line.expectedReceiveUnitsPerVariant != null &&
@@ -5530,12 +5554,10 @@ export function createPurchasingService(
         continue;
       }
       const live = liveById.get(vendorProductId);
-      const expectedVariantId = resolved.variant?.id ?? null;
       if (
         !live ||
         Number(live.vendorId) !== vendorId ||
         Number(live.productId) !== Number(resolved.product.id) ||
-        (live.productVariantId != null && Number(live.productVariantId) !== expectedVariantId) ||
         Number(live.isActive ?? 0) !== 1
       ) {
         throw new PurchasingError(
@@ -5660,7 +5682,7 @@ export function createPurchasingService(
         ? (resolved.variant?.name?.split(" ")[0]?.toLowerCase() ?? "each")
         : null,
       unitsPerUom: isProduct ? (resolved.variant?.unitsPerVariant || 1) : 1,
-      expectedReceiveUnitsPerVariant: isProduct
+      expectedReceiveUnitsPerVariant: isProduct && resolved.variant
         ? (resolved.line.expectedReceiveUnitsPerVariant || resolved.variant?.unitsPerVariant || 1)
         : 1,
       orderQty: resolved.pricing?.orderQty ?? resolved.line.orderQty,
@@ -5696,6 +5718,22 @@ export function createPurchasingService(
       parentLineId: null,
       status: "open",
     };
+  }
+
+  function receiveConfigurationNormalizations(
+    resolvedLines: readonly ResolvedPurchaseOrderLine[],
+  ): Array<Record<string, unknown>> {
+    return resolvedLines.flatMap((resolved, index) => {
+      const normalization = resolved.receiveConfigurationNormalization;
+      if (!normalization) return [];
+      return [{
+        line_number: index + 1,
+        line_id: resolved.line.lineId ?? null,
+        submitted_variant_id: normalization.submittedVariantId,
+        reason: normalization.reason,
+        normalized_receive_as: "pieces",
+      }];
+    });
   }
 
   async function applyPurchaseOrderParentLineLinks(
@@ -5908,10 +5946,14 @@ export function createPurchasingService(
       });
 
       // Event stream.
+      const receiveNormalizations = receiveConfigurationNormalizations(resolvedLines);
       await emitPoEventTx(tx, header.id, "created", userId, {
         source: "inline_editor",
         line_count: resolvedLines.length,
         subtotal_cents: subtotalCents,
+        ...(receiveNormalizations.length > 0
+          ? { receive_configuration_normalizations: receiveNormalizations }
+          : {}),
       });
 
       if (internalOptions?.additionalEvent) {
@@ -6260,11 +6302,15 @@ export function createPurchasingService(
         });
       }
 
+      const receiveNormalizations = receiveConfigurationNormalizations(resolvedLines);
       await emitPoEventTx(tx, id, "edited", userId, {
         source: "inline_editor",
         expected_updated_at: input.expectedUpdatedAt.toISOString(),
         added_line_ids: addedLineIds,
         cancelled_line_ids: cancelledLineIds,
+        ...(receiveNormalizations.length > 0
+          ? { receive_configuration_normalizations: receiveNormalizations }
+          : {}),
         before: {
           header: beforeHeader,
           lines: beforeLines,
@@ -8300,6 +8346,16 @@ export function createPurchasingService(
       const lines: PreloadLine[] = [];
       for (const src of srcLines) {
         if (src.status === "cancelled") continue;
+        const sourceReceiveVariantId = src.expectedReceiveVariantId ?? src.productVariantId ?? null;
+        const sourceReceiveVariant = sourceReceiveVariantId == null
+          ? null
+          : await storage.getProductVariantById(sourceReceiveVariantId);
+        const activeSourceReceiveVariant =
+          sourceReceiveVariant &&
+          sourceReceiveVariant.isActive !== false &&
+          Number(sourceReceiveVariant.productId) === Number(src.productId)
+            ? sourceReceiveVariant
+            : null;
         // Source priority (duplicate path):
         //   source line.unit_cost_mills → centsToMills(source line.unit_cost_cents)
         //   overridden by matching vendor_products.unit_cost_mills / cents.
@@ -8322,7 +8378,7 @@ export function createPurchasingService(
         try {
           const vp = await storage.getPreferredVendorProduct(
             src.productId,
-            src.expectedReceiveVariantId ?? src.productVariantId,
+            sourceReceiveVariantId ?? undefined,
           );
           if (vp && vp.vendorId === source.vendorId) {
             if (typeof vp.unitCostMills === "number" && vp.unitCostMills >= 0) {
@@ -8349,9 +8405,11 @@ export function createPurchasingService(
         }
         lines.push({
           productId: src.productId,
-          productVariantId: src.expectedReceiveVariantId ?? src.productVariantId,
-          expectedReceiveVariantId: src.expectedReceiveVariantId ?? src.productVariantId,
-          expectedReceiveUnitsPerVariant: src.expectedReceiveUnitsPerVariant ?? src.unitsPerUom ?? 1,
+          productVariantId: activeSourceReceiveVariant?.id ?? null,
+          expectedReceiveVariantId: activeSourceReceiveVariant?.id ?? null,
+          expectedReceiveUnitsPerVariant: activeSourceReceiveVariant
+            ? src.expectedReceiveUnitsPerVariant ?? src.unitsPerUom ?? activeSourceReceiveVariant.unitsPerVariant ?? 1
+            : 1,
           productName: src.productName ?? "",
           sku: src.sku ?? null,
           variantDescription: null,
@@ -8390,6 +8448,7 @@ export function createPurchasingService(
         if (!variant) continue;
         const product = await storage.getProductById(variant.productId);
         if (!product) continue;
+        const activeReceiveVariant = variant.isActive === false ? null : variant;
         // Source priority (variant path) per spec:
         //   vendor_products.unit_cost_mills
         //   → centsToMills(vendor_products.unit_cost_cents)
@@ -8437,13 +8496,13 @@ export function createPurchasingService(
         }
         lines.push({
           productId: product.id,
-          productVariantId: variant.id,
-          expectedReceiveVariantId: variant.id,
-          expectedReceiveUnitsPerVariant: variant.unitsPerVariant || 1,
+          productVariantId: activeReceiveVariant?.id ?? null,
+          expectedReceiveVariantId: activeReceiveVariant?.id ?? null,
+          expectedReceiveUnitsPerVariant: activeReceiveVariant?.unitsPerVariant || 1,
           productName: product.name ?? "",
           sku: product.sku ?? variant.sku ?? null,
-          variantDescription: variant.name ?? null,
-          uomLabel: variant.name?.split(" ")[0]?.toLowerCase() ?? null,
+          variantDescription: activeReceiveVariant?.name ?? null,
+          uomLabel: activeReceiveVariant?.name?.split(" ")[0]?.toLowerCase() ?? null,
           // No reorder_quantity column today. Default to 1 so the row is
           // usable; users edit qty in the lines editor.
           suggestedQty: 1,

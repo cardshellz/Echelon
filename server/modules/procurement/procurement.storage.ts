@@ -458,6 +458,7 @@ export const procurementMethods: IProcurementStorage = {
       vendor_product_id: number;
       product_id: number;
       product_variant_id: number | null;
+      receive_variant_active: boolean | null;
       receive_units_per_variant: number | string | null;
       sku: string | null;
       product_name: string;
@@ -483,6 +484,7 @@ export const procurementMethods: IProcurementStorage = {
           vp.id              AS vendor_product_id,
           vp.product_id      AS product_id,
           vp.product_variant_id AS product_variant_id,
+          pv.is_active       AS receive_variant_active,
           pv.units_per_variant AS receive_units_per_variant,
           p.sku              AS sku,
           p.name             AS product_name,
@@ -530,42 +532,50 @@ export const procurementMethods: IProcurementStorage = {
       LIMIT ${combined}
     `);
 
-    const inCatalog = inCatalogRows.rows.map((r) => ({
-      vendorProductId: Number(r.vendor_product_id),
-      productId: Number(r.product_id),
-      productVariantId: r.product_variant_id != null ? Number(r.product_variant_id) : null,
-      receiveUnitsPerVariant:
-        r.receive_units_per_variant != null ? Number(r.receive_units_per_variant) : null,
-      sku: r.sku,
-      productName: r.product_name,
-      variantName: r.variant_name,
-      vendorSku: r.vendor_sku,
-      vendorProductName: r.vendor_product_name,
-      unitCostCents: Number(r.unit_cost_cents ?? 0),
-      // unit_cost_mills is the 4-decimal source of truth when present.
-      // If NULL (legacy row), fall back to cents × 100 so the client
-      // still gets a usable mills value.
-      unitCostMills:
-        r.unit_cost_mills != null
-          ? Number(r.unit_cost_mills)
-          : Number(r.unit_cost_cents ?? 0) * 100,
-      pricingBasis:
-        r.pricing_basis === "per_piece" || r.pricing_basis === "per_purchase_uom"
-          ? r.pricing_basis
-          : "legacy_unknown" as const,
-      purchaseUom: r.purchase_uom,
-      quotedUnitCostMills:
-        r.quoted_unit_cost_mills != null ? Number(r.quoted_unit_cost_mills) : null,
-      piecesPerPurchaseUom:
-        r.pieces_per_purchase_uom != null ? Number(r.pieces_per_purchase_uom) : null,
-      quoteReference: r.quote_reference,
-      quotedAt: r.quoted_at,
-      quoteValidUntil: r.quote_valid_until,
-      packSize: r.pack_size != null ? Number(r.pack_size) : null,
-      moq: r.moq != null ? Number(r.moq) : null,
-      leadTimeDays: r.lead_time_days != null ? Number(r.lead_time_days) : null,
-      isPreferred: Number(r.is_preferred ?? 0) === 1,
-    }));
+    const inCatalog = inCatalogRows.rows.map((r) => {
+      const activeReceiveVariant = r.product_variant_id != null && r.receive_variant_active === true;
+      return {
+        vendorProductId: Number(r.vendor_product_id),
+        productId: Number(r.product_id),
+        // vendor_products.product_variant_id is legacy catalog metadata. It
+        // may suggest receiving, but an archived variant cannot be promoted
+        // into the PO's inventory destination.
+        productVariantId: activeReceiveVariant ? Number(r.product_variant_id) : null,
+        receiveUnitsPerVariant:
+          activeReceiveVariant && r.receive_units_per_variant != null
+            ? Number(r.receive_units_per_variant)
+            : null,
+        sku: r.sku,
+        productName: r.product_name,
+        variantName: activeReceiveVariant ? r.variant_name : null,
+        vendorSku: r.vendor_sku,
+        vendorProductName: r.vendor_product_name,
+        unitCostCents: Number(r.unit_cost_cents ?? 0),
+        // unit_cost_mills is the 4-decimal source of truth when present.
+        // If NULL (legacy row), fall back to cents × 100 so the client
+        // still gets a usable mills value.
+        unitCostMills:
+          r.unit_cost_mills != null
+            ? Number(r.unit_cost_mills)
+            : Number(r.unit_cost_cents ?? 0) * 100,
+        pricingBasis:
+          r.pricing_basis === "per_piece" || r.pricing_basis === "per_purchase_uom"
+            ? r.pricing_basis
+            : "legacy_unknown" as const,
+        purchaseUom: r.purchase_uom,
+        quotedUnitCostMills:
+          r.quoted_unit_cost_mills != null ? Number(r.quoted_unit_cost_mills) : null,
+        piecesPerPurchaseUom:
+          r.pieces_per_purchase_uom != null ? Number(r.pieces_per_purchase_uom) : null,
+        quoteReference: r.quote_reference,
+        quotedAt: r.quoted_at,
+        quoteValidUntil: r.quote_valid_until,
+        packSize: r.pack_size != null ? Number(r.pack_size) : null,
+        moq: r.moq != null ? Number(r.moq) : null,
+        leadTimeDays: r.lead_time_days != null ? Number(r.lead_time_days) : null,
+        isPreferred: Number(r.is_preferred ?? 0) === 1,
+      };
+    });
 
     const remaining = combined - inCatalog.length;
     if (remaining <= 0) {
