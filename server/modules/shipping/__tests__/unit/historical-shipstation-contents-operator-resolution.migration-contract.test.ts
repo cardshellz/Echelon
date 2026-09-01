@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-const migrationPath = "migrations/0630_historical_shipstation_contents_operator_resolution.sql";
+const migrationPath = "migrations/0631_historical_shipstation_contents_operator_resolution.sql";
 
 describe("historical ShipStation contents operator resolution migration", () => {
   it("permits only the reviewed manual status with complete operator audit evidence", () => {
