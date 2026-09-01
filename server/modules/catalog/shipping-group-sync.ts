@@ -102,12 +102,16 @@ async function assertSingleLocalOwnerPerShopifyProduct(
   const requestedGids = new Set(
     projections.map((projection) => projection.shopifyProductGid),
   );
+  const projectedProductIds = new Set(
+    projections.map((projection) => projection.productId),
+  );
   const mappedProducts = await client
     .select({
       productId: products.id,
       shopifyProductId: products.shopifyProductId,
       shippingGroupId: products.shippingGroupId,
       shippingGroupCode: shippingGroups.code,
+      isActive: products.isActive,
     })
     .from(products)
     .leftJoin(shippingGroups, eq(products.shippingGroupId, shippingGroups.id))
@@ -123,6 +127,12 @@ async function assertSingleLocalOwnerPerShopifyProduct(
   >();
   for (const mappedProduct of mappedProducts) {
     if (!mappedProduct.shopifyProductId) continue;
+    // A retired product still carries its old Shopify mapping, but it cannot be
+    // the listing's owner — treating it as one made every archived duplicate
+    // permanently block assignment for the live product beside it. A product
+    // being written right now always counts, even if it is archived, so an
+    // explicit assignment to it still fails closed against a live twin.
+    if (mappedProduct.isActive === false && !projectedProductIds.has(mappedProduct.productId)) continue;
 
     let gid: string;
     try {
