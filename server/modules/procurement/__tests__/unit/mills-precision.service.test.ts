@@ -420,4 +420,44 @@ describe("mills — getNewPoPreload", () => {
     expect(result.lines[0].unitCostMills).toBe(0);
     expect(result.lines[0].unitCostCents).toBe(0);
   });
+
+  it("preloads inactive variant recommendations as pieces while preserving vendor pricing", async () => {
+    const storage = buildMockStorage({
+      getVendorById: vi.fn().mockResolvedValue({ id: 1 }),
+      getProductVariantById: vi.fn().mockResolvedValue({
+        id: 11,
+        productId: 1,
+        sku: "SKU-1-C1000",
+        name: "Case of 1000",
+        unitsPerVariant: 1000,
+        isActive: false,
+        standardCostCents: 7,
+      }),
+      getPreferredVendorProduct: vi.fn().mockResolvedValue({
+        id: 27,
+        vendorId: 1,
+        productId: 1,
+        productVariantId: 11,
+        unitCostMills: 604,
+        unitCostCents: 7,
+      }),
+    });
+    const svc = createPurchasingService(buildMockDb({ id: 1 }, []), storage);
+
+    const result = await svc.getNewPoPreload({
+      vendorId: 1,
+      variantIds: [11],
+    });
+
+    expect(result.lines[0]).toMatchObject({
+      productId: 1,
+      productVariantId: null,
+      expectedReceiveVariantId: null,
+      expectedReceiveUnitsPerVariant: 1,
+      unitCostMills: 604,
+      unitCostCents: 6,
+      catalogSource: "vendor_catalog",
+      vendorProductId: 27,
+    });
+  });
 });

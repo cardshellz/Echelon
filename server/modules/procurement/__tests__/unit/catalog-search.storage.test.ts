@@ -69,6 +69,7 @@ describe("Spec A follow-up \u2014 searchVendorCatalog", () => {
           vendor_product_id: 10,
           product_id: 1,
           product_variant_id: 11,
+          receive_variant_active: true,
           receive_units_per_variant: 6,
           sku: "SHLZ-TOP-1",
           product_name: "Shellz Top Box",
@@ -85,6 +86,7 @@ describe("Spec A follow-up \u2014 searchVendorCatalog", () => {
           vendor_product_id: 20,
           product_id: 2,
           product_variant_id: 21,
+          receive_variant_active: true,
           receive_units_per_variant: 12,
           sku: "SHLZ-TOP-2",
           product_name: "Shellz Top Box",
@@ -147,12 +149,64 @@ describe("Spec A follow-up \u2014 searchVendorCatalog", () => {
     ]);
   });
 
+  it("keeps vendor pricing but does not promote an inactive variant into receiving", async () => {
+    dbMock.execute.mockResolvedValueOnce({
+      rows: [{
+        vendor_product_id: 27,
+        product_id: 1,
+        product_variant_id: 2,
+        receive_variant_active: false,
+        receive_units_per_variant: 1000,
+        sku: "SHLZ-TOP-TOB",
+        product_name: "Tobacco Toploader",
+        variant_name: "Case of 1000",
+        vendor_sku: null,
+        vendor_product_name: null,
+        unit_cost_cents: 7,
+        unit_cost_mills: 604,
+        pricing_basis: "per_piece",
+        purchase_uom: "piece",
+        quoted_unit_cost_mills: 604,
+        pieces_per_purchase_uom: 1,
+        quote_reference: "QUOTE-1",
+        quoted_at: new Date("2026-08-01T00:00:00.000Z"),
+        quote_valid_until: null,
+        pack_size: 1,
+        moq: 1,
+        lead_time_days: 30,
+        is_preferred: 1,
+      }],
+    });
+    dbMock.execute.mockResolvedValueOnce({
+      rows: [{ product_id: 1, product_variant_id: 2 }],
+    });
+    dbMock.execute.mockResolvedValueOnce({ rows: [] });
+
+    const result = await procurementMethods.searchVendorCatalog({
+      vendorId: 2,
+      q: "SHLZ-TOP-TOB",
+      limit: 50,
+    });
+
+    expect(result.inCatalog).toEqual([
+      expect.objectContaining({
+        vendorProductId: 27,
+        productId: 1,
+        productVariantId: null,
+        receiveUnitsPerVariant: null,
+        variantName: null,
+        unitCostMills: 604,
+      }),
+    ]);
+  });
+
   it("caps combined results at limit \u2014 inCatalog gets priority", async () => {
     // 50 inCatalog rows saturate the cap; outOfCatalog queries should never run.
     const manyInCatalog = Array.from({ length: 50 }, (_, i) => ({
       vendor_product_id: i + 1,
       product_id: i + 1,
       product_variant_id: i + 100,
+      receive_variant_active: true,
       sku: `SKU-${i}`,
       product_name: `Product ${i}`,
       variant_name: null,

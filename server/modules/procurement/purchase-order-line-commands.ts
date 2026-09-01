@@ -693,12 +693,10 @@ async function resolveLineContext(tx: any, header: any, input: LineContextInput)
       });
     }
     if (receiveVariant.isActive === false) {
-      throw new PurchaseOrderLineCommandError("Receive configuration is inactive", 409, {
-        code: "PO_LINE_RECEIVE_VARIANT_INACTIVE",
-        expectedReceiveVariantId: receiveVariantId,
-      });
-    }
-    if (
+      // Ordering remains product + piece quantity. An archived package
+      // configuration is cleared so it cannot become an inventory destination.
+      receiveVariant = null;
+    } else if (
       input.expectedReceiveUnitsPerVariant != null &&
       Number(receiveVariant.unitsPerVariant) !== input.expectedReceiveUnitsPerVariant
     ) {
@@ -737,10 +735,6 @@ async function resolveLineContext(tx: any, header: any, input: LineContextInput)
       !vendorProduct ||
       Number(vendorProduct.vendorId) !== Number(header.vendorId) ||
       Number(vendorProduct.productId) !== input.productId ||
-      (
-        vendorProduct.productVariantId != null &&
-        Number(vendorProduct.productVariantId) !== receiveVariantId
-      ) ||
       Number(vendorProduct.isActive ?? 0) !== 1
     ) {
       throw new PurchaseOrderLineCommandError(
@@ -802,7 +796,8 @@ function lineValues(
     BigInt(normalized.totalProductCostCents) + BigInt(packagingCostCents),
     "line_total_cents",
   );
-  const expectedReceiveUnits = input.expectedReceiveVariantId == null
+  const expectedReceiveVariantId = context.receiveVariant?.id ?? null;
+  const expectedReceiveUnits = expectedReceiveVariantId == null
     ? null
     : input.expectedReceiveUnitsPerVariant ?? context.receiveVariant?.unitsPerVariant ?? 1;
   const catalogQuote = (input.pricingSource ?? "manual") === "vendor_catalog"
@@ -814,8 +809,8 @@ function lineValues(
     lineNumber,
     lineType: "product" as const,
     productId: input.productId,
-    productVariantId: input.expectedReceiveVariantId ?? null,
-    expectedReceiveVariantId: input.expectedReceiveVariantId ?? null,
+    productVariantId: expectedReceiveVariantId,
+    expectedReceiveVariantId,
     expectedReceiveUnitsPerVariant: expectedReceiveUnits,
     vendorProductId: input.vendorProductId ?? null,
     sku: context.product.sku ?? context.receiveVariant?.sku ?? null,
@@ -1191,6 +1186,7 @@ export function createPurchaseOrderLineCommands(
         pricing: effectivePricing,
       };
       const context = await resolveLineContext(tx, header, contextInput);
+      const effectiveReceiveVariantId = context.receiveVariant?.id ?? null;
       const catalogQuote = resolvedPricingSource === "vendor_catalog"
         ? context.vendorProduct
         : null;
@@ -1208,12 +1204,12 @@ export function createPurchaseOrderLineCommands(
         );
       }
       const patch: Record<string, unknown> = {
-        productVariantId: contextInput.expectedReceiveVariantId ?? null,
-        expectedReceiveVariantId: contextInput.expectedReceiveVariantId ?? null,
-        expectedReceiveUnitsPerVariant: contextInput.expectedReceiveVariantId == null
+        productVariantId: effectiveReceiveVariantId,
+        expectedReceiveVariantId: effectiveReceiveVariantId,
+        expectedReceiveUnitsPerVariant: effectiveReceiveVariantId == null
           ? null
           : contextInput.expectedReceiveUnitsPerVariant ?? context.receiveVariant?.unitsPerVariant ?? 1,
-        unitsPerUom: contextInput.expectedReceiveVariantId == null
+        unitsPerUom: effectiveReceiveVariantId == null
           ? 1
           : contextInput.expectedReceiveUnitsPerVariant ?? context.receiveVariant?.unitsPerVariant ?? 1,
         unitOfMeasure: context.receiveVariant?.name?.split(" ")?.[0]?.toLowerCase() ?? context.product.baseUnit,
