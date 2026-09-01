@@ -30,7 +30,15 @@ const phase3MigrationSql = readFileSync(
   resolve(process.cwd(), "migrations", "0622_inventory_availability_backfill_review.sql"),
   "utf8",
 );
-const parityMigrationSql = `${migrationSql}\n${phase3MigrationSql}`;
+const provenanceRefreshMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations", "0628_inventory_backfill_provenance_refresh.sql"),
+  "utf8",
+);
+const parityMigrationSql = [
+  migrationSql,
+  phase3MigrationSql,
+  provenanceRefreshMigrationSql,
+].join("\n");
 const compactMigrationSql = migrationSql.replace(/\s+/g, " ").trim();
 const schemaPath = resolve(process.cwd(), "shared/schema/inventory-planning.schema.ts");
 const schemaSource = readFileSync(schemaPath, "utf8");

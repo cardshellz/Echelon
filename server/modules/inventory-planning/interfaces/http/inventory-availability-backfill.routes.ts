@@ -5,6 +5,7 @@ import {
   applyInventoryAvailabilityBackfillDraftResultSchema,
   inventoryAvailabilityBackfillQueueResponseSchema,
   inventoryAvailabilityChannelPreviewSchema,
+  refreshInventoryAvailabilityBackfillDraftResultSchema,
   reviewInventoryAvailabilityBackfillDraftResultSchema,
 } from "@shared/types/inventory-availability-backfill";
 
@@ -21,7 +22,11 @@ const positiveIdSchema = z.coerce.number().pipe(
 
 type BackfillService = Pick<
   InventoryAvailabilityBackfillService,
-  "getMigrationQueue" | "applyProductDraft" | "reviewProductDraft" | "getChannelPreview"
+  | "getMigrationQueue"
+  | "applyProductDraft"
+  | "refreshProductDraft"
+  | "reviewProductDraft"
+  | "getChannelPreview"
 >;
 
 export interface InventoryAvailabilityBackfillRouteDependencies {
@@ -48,6 +53,26 @@ export function registerInventoryAvailabilityBackfillRoutes(
         ));
       } catch (error) {
         return sendBackfillError(res, error, "load the inventory availability migration queue");
+      }
+    },
+  );
+
+  app.post(
+    "/api/inventory-planning/admin/migration-queue/:productId/drafts/:draftModelId/refresh",
+    requirePermission("inventory_planning", "edit"),
+    async (req, res) => {
+      try {
+        const result = refreshInventoryAvailabilityBackfillDraftResultSchema.parse(
+          await service.refreshProductDraft(
+            parseProductId(req.params.productId),
+            parseProductId(req.params.draftModelId),
+            req.body,
+            auditActor(req),
+          ),
+        );
+        return res.status(result.alreadyApplied ? 200 : 201).json(result);
+      } catch (error) {
+        return sendBackfillError(res, error, "supersede and refresh a stale Phase 3 draft");
       }
     },
   );

@@ -55,20 +55,44 @@ describe("inventory availability Phase 1 admin surface contract", () => {
     );
     const createStart = repository.indexOf("async createTransformationModelDraft(");
     const updateStart = repository.indexOf("async updateTransformationModelDraft(");
+    const refreshStart = repository.indexOf("async supersedeTransformationModelBackfillDraft(");
     const locationStart = repository.indexOf("async createLocationPromisePolicyDraft(");
     const createTransaction = repository.slice(createStart, updateStart);
-    const updateTransaction = repository.slice(updateStart, locationStart);
+    const updateTransaction = repository.slice(updateStart, refreshStart);
+    const refreshTransaction = repository.slice(refreshStart, locationStart);
 
     expect(createTransaction.indexOf(".from(transformationModelHeads)"))
       .toBeLessThan(createTransaction.indexOf("assertTransformationReferences"));
     expect(updateTransaction.indexOf(".from(transformationModelHeads)"))
       .toBeLessThan(updateTransaction.indexOf("assertTransformationReferences"));
+    expect(refreshTransaction.indexOf(".from(transformationModelHeads)"))
+      .toBeLessThan(refreshTransaction.indexOf("loadInventoryAvailabilityBackfillSources"));
+    expect(refreshTransaction.indexOf("loadInventoryAvailabilityBackfillSources"))
+      .toBeLessThan(refreshTransaction.indexOf("assertTransformationReferences"));
     expect(createTransaction).toContain('.for("update")');
     expect(updateTransaction).toContain('.for("update")');
+    expect(refreshTransaction).toContain('.for("update")');
+    expect(refreshTransaction).toContain("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
     expect(repository).not.toContain("FOR KEY SHARE");
     expect(repository).toContain("FOR SHARE");
     expect(repository).toContain(
       "products -> product variants -> recipes -> recipe components",
     );
+  });
+
+  it("preserves stale Phase 3 drafts through a constrained superseded lifecycle", () => {
+    const migration = source("migrations/0628_inventory_backfill_provenance_refresh.sql");
+    const schema = source("shared/schema/inventory-planning.schema.ts");
+
+    expect(migration).toContain("ADD COLUMN superseded_by VARCHAR(100)");
+    expect(migration).toContain("lifecycle_status IN ('draft', 'sealed', 'retired', 'superseded')");
+    expect(migration).toContain("only Phase 3 backfill drafts may be superseded");
+    expect(migration).toContain("only the current transformation model draft may be superseded");
+    expect(migration).toContain("transformation model definition fields cannot change while superseding");
+    expect(migration).toContain("superseded Phase 3 draft % requires a current Phase 3 successor");
+    expect(migration).toContain("DEFERRABLE INITIALLY DEFERRED");
+    expect(migration).toContain("inventory.guard_versioned_definition_update()");
+    expect(schema).toContain('supersededBy: varchar("superseded_by"');
+    expect(schema).toContain("${table.lifecycleStatus} = 'superseded'");
   });
 });

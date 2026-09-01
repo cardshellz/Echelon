@@ -12,11 +12,11 @@ channel policy, invoke a provider adapter, or publish a quantity. Legacy
 `inventory_strategy` remains the operational authority.
 
 Implementation baseline: deployed `origin/main` merge commit
-`54a09250512053379becbce958f63fea671a9614` (PR #1286).
+`5131b75367423c75d3ec2aa49dc7493a1e933738`.
 
 ## Deterministic Classification Contract
 
-The algorithm identifier is `inventory_availability_backfill_v1`. Its source is one
+The algorithm identifier is `inventory_availability_backfill_v3`. Its source is one
 repeatable-read capture of every active product, active variant, and current active
 recipe/component snapshot. Source arrays are normalized before hashing.
 
@@ -71,6 +71,17 @@ origin_result_hash = exact candidate resultHash
 
 Operator-created drafts retain `origin = operator` and have neither backfill hash.
 
+A draft is the current deterministic candidate only when all three identities match:
+
+```text
+draft.definition_hash = candidate.definitionHash
+draft.origin_input_hash = candidate.inputHash
+draft.origin_result_hash = candidate.resultHash
+```
+
+Definition equality alone is insufficient. It can conceal a changed algorithm or
+changed source/result evidence that happened to produce the same definition.
+
 ## Migration Queue And Review State
 
 `GET /api/inventory-planning/admin/migration-queue` captures the complete active
@@ -80,7 +91,7 @@ catalog and returns these mutually exclusive queue states:
 | --- | --- |
 | `blocked` | Source evidence cannot produce a safe draft |
 | `not_backfilled` | A deterministic candidate exists and no draft exists |
-| `conflicting_draft` | The current draft definition differs from the candidate |
+| `conflicting_draft` | The current draft differs in definition or exact backfill provenance |
 | `awaiting_review` | The exact candidate draft exists without a decision |
 | `changes_required` | Latest append-only decision on the exact draft requires changes |
 | `approved` | Latest append-only decision approves the exact draft |
@@ -92,7 +103,14 @@ and reason-required controls.
 Writes require `inventory_planning:edit` and an authenticated actor:
 
 - `POST /api/inventory-planning/admin/migration-queue/:productId/drafts`
+- `POST /api/inventory-planning/admin/migration-queue/:productId/drafts/:draftModelId/refresh`
 - `POST /api/inventory-planning/admin/migration-queue/:productId/reviews`
+
+The refresh endpoint accepts only the current `phase3_backfill` draft. It verifies
+the exact model/version/head revision and both old origin hashes, replans the current
+candidate under serializable isolation, marks the old draft `superseded` with actor,
+time, and reason, then creates the next inactive model version with current hashes.
+It never deletes or rewrites the old draft and it refuses operator-authored drafts.
 
 Review commands bind product ID, model ID, model version, model definition hash,
 model-head revision, decision, actor, reason, idempotency key, request hash, and time.
@@ -149,7 +167,17 @@ npm run inventory:backfill-availability-models -- --apply `
 An optional `--product-id` limits draft creation to one active product. The command
 skips blocked products and products that already have a matching or conflicting
 draft, uses a deterministic per-product idempotency key, continues after individual
-failures, and exits nonzero if any selected write fails.
+failures, and exits nonzero if any selected write fails. Stale Phase 3 drafts remain
+untouched unless the operator also supplies the explicit refresh flag:
+
+```powershell
+npm run inventory:backfill-availability-models -- --apply --refresh-stale-drafts `
+  --actor "operator-id" `
+  --reason "Supersede stale Phase 3 provenance after v3 review"
+```
+
+`--refresh-stale-drafts` requires `--apply`; it never applies to operator-authored
+drafts.
 
 No production backfill/apply command is part of deployment. Running it against
 production requires a separate explicit operational approval and post-run read-only
@@ -163,6 +191,8 @@ verification.
 - Idempotency keys cannot be reused across transformation, promise-policy, or review
   command families.
 - Backfill origin evidence is immutable.
+- Stale Phase 3 drafts are immutable after `draft -> superseded`; only the current
+  Phase 3 draft can make that transition, and its successor is a new version.
 - Review evidence is append-only and bound to the exact model definition hash.
 - Serialization/deadlock conflicts return a reload-and-retry response; they do not
   silently retry with stale evidence.

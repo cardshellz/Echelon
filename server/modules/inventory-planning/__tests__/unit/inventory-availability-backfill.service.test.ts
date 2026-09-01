@@ -69,6 +69,13 @@ function setup(product: CapturedInventoryAvailabilityBackfillProduct = captured(
       definitionHash: planInventoryAvailabilityBackfill(product.source).definitionHash!,
       alreadyApplied: false,
     })),
+    supersedeTransformationModelBackfillDraft: vi.fn(async () => ({
+      modelId: 51,
+      version: 2,
+      definitionHash: planInventoryAvailabilityBackfill(product.source).definitionHash!,
+      supersededModelId: 50,
+      alreadyApplied: false,
+    })),
   } as unknown as InventoryAvailabilityMasterDataRepository;
   const service = new InventoryAvailabilityBackfillService(
     catalogStore,
@@ -129,6 +136,213 @@ describe("InventoryAvailabilityBackfillService", () => {
         occurredAt: NOW,
       }),
     );
+  });
+
+  it("does not treat a matching definition with stale provenance as the current candidate", async () => {
+    const candidate = planInventoryAvailabilityBackfill(source());
+    const draft = {
+      modelId: 50,
+      version: 1,
+      definitionHash: candidate.definitionHash!,
+      headRevision: "2",
+      origin: "phase3_backfill" as const,
+      originInputHash: HASH,
+      originResultHash: HASH,
+    };
+    const { service } = setup(captured({ draft }));
+
+    const queue = await service.getMigrationQueue();
+
+    expect(queue.products[0]).toMatchObject({
+      queueState: "conflicting_draft",
+      draft: {
+        definitionMatch: true,
+        provenanceMatch: false,
+        candidateMatch: false,
+      },
+    });
+  });
+
+  it("requires definition, input, and result provenance for an exact candidate match", async () => {
+    const candidate = planInventoryAvailabilityBackfill(source());
+    const draft = {
+      modelId: 50,
+      version: 1,
+      definitionHash: candidate.definitionHash!,
+      headRevision: "2",
+      origin: "phase3_backfill" as const,
+      originInputHash: candidate.inputHash,
+      originResultHash: candidate.resultHash,
+    };
+    const { service } = setup(captured({ draft }));
+
+    const queue = await service.getMigrationQueue();
+
+    expect(queue.products[0]).toMatchObject({
+      queueState: "awaiting_review",
+      draft: {
+        definitionMatch: true,
+        provenanceMatch: true,
+        candidateMatch: true,
+      },
+    });
+  });
+
+  it("rejects apply replay when only the definition matches", async () => {
+    const candidate = planInventoryAvailabilityBackfill(source());
+    const draft = {
+      modelId: 50,
+      version: 1,
+      definitionHash: candidate.definitionHash!,
+      headRevision: "2",
+      origin: "phase3_backfill" as const,
+      originInputHash: HASH,
+      originResultHash: HASH,
+    };
+    const { service, masterDataStore } = setup(captured({ draft }));
+
+    await expect(service.applyProductDraft(10, {
+      expectedInputHash: candidate.inputHash,
+      expectedResultHash: candidate.resultHash,
+      changeReason: "Refresh stale evidence",
+      idempotencyKey: "phase3-10",
+    }, "operator-1")).rejects.toMatchObject({
+      status: 409,
+      code: "INVENTORY_AVAILABILITY_BACKFILL_DRAFT_CONFLICT",
+    });
+    expect(masterDataStore.createTransformationModelDraft).not.toHaveBeenCalled();
+  });
+
+  it("replays apply only when definition and both provenance hashes match", async () => {
+    const candidate = planInventoryAvailabilityBackfill(source());
+    const draft = {
+      modelId: 50,
+      version: 1,
+      definitionHash: candidate.definitionHash!,
+      headRevision: "2",
+      origin: "phase3_backfill" as const,
+      originInputHash: candidate.inputHash,
+      originResultHash: candidate.resultHash,
+    };
+    const { service, masterDataStore } = setup(captured({ draft }));
+
+    const result = await service.applyProductDraft(10, {
+      expectedInputHash: candidate.inputHash,
+      expectedResultHash: candidate.resultHash,
+      changeReason: "Replay exact evidence",
+      idempotencyKey: "phase3-10",
+    }, "operator-1");
+
+    expect(result).toMatchObject({ modelId: 50, alreadyApplied: true });
+    expect(masterDataStore.createTransformationModelDraft).not.toHaveBeenCalled();
+  });
+
+  it("passes exact stale-draft and current-candidate evidence to the supersession writer", async () => {
+    const candidate = planInventoryAvailabilityBackfill(source());
+    const draft = {
+      modelId: 50,
+      version: 1,
+      definitionHash: candidate.definitionHash!,
+      headRevision: "2",
+      origin: "phase3_backfill" as const,
+      originInputHash: HASH,
+      originResultHash: HASH,
+    };
+    const { service, masterDataStore } = setup(captured({ draft }));
+
+    const result = await service.refreshProductDraft(10, 50, {
+      expectedInputHash: candidate.inputHash,
+      expectedResultHash: candidate.resultHash,
+      expectedDraftVersion: 1,
+      expectedDraftDefinitionHash: candidate.definitionHash,
+      expectedDraftHeadRevision: "2",
+      expectedDraftOriginInputHash: HASH,
+      expectedDraftOriginResultHash: HASH,
+      changeReason: "Replace stale Phase 3 provenance",
+      idempotencyKey: "phase3-refresh-10",
+    }, "operator-1");
+
+    expect(result).toMatchObject({
+      modelId: 51,
+      version: 2,
+      supersededModelId: 50,
+      inputHash: candidate.inputHash,
+      resultHash: candidate.resultHash,
+    });
+    expect(masterDataStore.supersedeTransformationModelBackfillDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        productId: 10,
+        draftModelId: 50,
+        expectedDraftHeadRevision: "2",
+        expectedDraftOriginInputHash: HASH,
+        expectedDraftOriginResultHash: HASH,
+        backfillEvidence: {
+          inputHash: candidate.inputHash,
+          resultHash: candidate.resultHash,
+        },
+        occurredAt: NOW,
+      }),
+    );
+  });
+
+  it("never automatically supersedes an operator-authored draft", async () => {
+    const candidate = planInventoryAvailabilityBackfill(source());
+    const draft = {
+      modelId: 50,
+      version: 1,
+      definitionHash: candidate.definitionHash!,
+      headRevision: "2",
+      origin: "operator" as const,
+      originInputHash: null,
+      originResultHash: null,
+    };
+    const { service, masterDataStore } = setup(captured({ draft }));
+
+    await expect(service.refreshProductDraft(10, 50, {
+      expectedInputHash: candidate.inputHash,
+      expectedResultHash: candidate.resultHash,
+      expectedDraftVersion: 1,
+      expectedDraftDefinitionHash: candidate.definitionHash,
+      expectedDraftHeadRevision: "2",
+      expectedDraftOriginInputHash: HASH,
+      expectedDraftOriginResultHash: HASH,
+      changeReason: "Must not overwrite operator work",
+      idempotencyKey: "phase3-refresh-10",
+    }, "operator-1")).rejects.toMatchObject({
+      status: 409,
+      code: "INVENTORY_AVAILABILITY_BACKFILL_OPERATOR_DRAFT",
+    });
+    expect(masterDataStore.supersedeTransformationModelBackfillDraft).not.toHaveBeenCalled();
+  });
+
+  it("rejects refresh when the Phase 3 draft already has exact current provenance", async () => {
+    const candidate = planInventoryAvailabilityBackfill(source());
+    const draft = {
+      modelId: 50,
+      version: 1,
+      definitionHash: candidate.definitionHash!,
+      headRevision: "2",
+      origin: "phase3_backfill" as const,
+      originInputHash: candidate.inputHash,
+      originResultHash: candidate.resultHash,
+    };
+    const { service, masterDataStore } = setup(captured({ draft }));
+
+    await expect(service.refreshProductDraft(10, 50, {
+      expectedInputHash: candidate.inputHash,
+      expectedResultHash: candidate.resultHash,
+      expectedDraftVersion: 1,
+      expectedDraftDefinitionHash: candidate.definitionHash,
+      expectedDraftHeadRevision: "2",
+      expectedDraftOriginInputHash: candidate.inputHash,
+      expectedDraftOriginResultHash: candidate.resultHash,
+      changeReason: "No refresh is required",
+      idempotencyKey: "phase3-refresh-10",
+    }, "operator-1")).rejects.toMatchObject({
+      status: 409,
+      code: "INVENTORY_AVAILABILITY_BACKFILL_DRAFT_CURRENT",
+    });
+    expect(masterDataStore.supersedeTransformationModelBackfillDraft).not.toHaveBeenCalled();
   });
 
   it("binds review evidence to the exact model, definition, and head revision", async () => {

@@ -435,6 +435,9 @@ export const transformationModelVersions = inventoryPlanningSchema.table(
     sealedAt: timestamp("sealed_at", { withTimezone: true }),
     retiredBy: varchar("retired_by", { length: 100 }),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
+    supersededBy: varchar("superseded_by", { length: 100 }),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+    supersessionReason: varchar("supersession_reason", { length: 1000 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -458,7 +461,7 @@ export const transformationModelVersions = inventoryPlanningSchema.table(
     versionPositive: check("transformation_model_versions_version_chk", sql`${table.version} > 0`),
     statusValid: check(
       "transformation_model_versions_status_chk",
-      sql`${table.lifecycleStatus} IN ('draft', 'sealed', 'retired')`,
+      sql`${table.lifecycleStatus} IN ('draft', 'sealed', 'retired', 'superseded')`,
     ),
     validationValid: check(
       "transformation_model_versions_validation_chk",
@@ -495,17 +498,29 @@ export const transformationModelVersions = inventoryPlanningSchema.table(
       "transformation_model_versions_lifecycle_chk",
       sql`(${table.lifecycleStatus} = 'draft'
           AND ${table.sealedBy} IS NULL AND ${table.sealedAt} IS NULL
-          AND ${table.retiredBy} IS NULL AND ${table.retiredAt} IS NULL)
+          AND ${table.retiredBy} IS NULL AND ${table.retiredAt} IS NULL
+          AND ${table.supersededBy} IS NULL AND ${table.supersededAt} IS NULL
+          AND ${table.supersessionReason} IS NULL)
         OR (${table.lifecycleStatus} = 'sealed'
           AND ${table.validationState} = 'valid'
           AND ${table.sealedBy} IS NOT NULL AND btrim(${table.sealedBy}) <> ''
           AND ${table.sealedAt} IS NOT NULL
-          AND ${table.retiredBy} IS NULL AND ${table.retiredAt} IS NULL)
+          AND ${table.retiredBy} IS NULL AND ${table.retiredAt} IS NULL
+          AND ${table.supersededBy} IS NULL AND ${table.supersededAt} IS NULL
+          AND ${table.supersessionReason} IS NULL)
         OR (${table.lifecycleStatus} = 'retired'
           AND ${table.sealedBy} IS NOT NULL AND btrim(${table.sealedBy}) <> ''
           AND ${table.sealedAt} IS NOT NULL
           AND ${table.retiredBy} IS NOT NULL AND btrim(${table.retiredBy}) <> ''
-          AND ${table.retiredAt} IS NOT NULL AND ${table.retiredAt} >= ${table.sealedAt})`,
+          AND ${table.retiredAt} IS NOT NULL AND ${table.retiredAt} >= ${table.sealedAt}
+          AND ${table.supersededBy} IS NULL AND ${table.supersededAt} IS NULL
+          AND ${table.supersessionReason} IS NULL)
+        OR (${table.lifecycleStatus} = 'superseded'
+          AND ${table.sealedBy} IS NULL AND ${table.sealedAt} IS NULL
+          AND ${table.retiredBy} IS NULL AND ${table.retiredAt} IS NULL
+          AND ${table.supersededBy} IS NOT NULL AND btrim(${table.supersededBy}) <> ''
+          AND ${table.supersededAt} IS NOT NULL AND ${table.supersededAt} >= ${table.createdAt}
+          AND char_length(btrim(${table.supersessionReason})) BETWEEN 1 AND 1000)`,
     ),
   }),
 );

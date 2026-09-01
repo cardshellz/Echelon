@@ -14,6 +14,8 @@ import {
   applyInventoryAvailabilityBackfillDraftResultSchema,
   inventoryAvailabilityBackfillQueueResponseSchema,
   inventoryAvailabilityChannelPreviewSchema,
+  refreshInventoryAvailabilityBackfillDraftRequestSchema,
+  refreshInventoryAvailabilityBackfillDraftResultSchema,
   reviewInventoryAvailabilityBackfillDraftRequestSchema,
   reviewInventoryAvailabilityBackfillDraftResultSchema,
   type InventoryAvailabilityBackfillQueueResponse,
@@ -91,6 +93,7 @@ export default function SupplyTransformations() {
   const idempotencyKey = useRef<string | null>(null);
   const shadowIdempotencyKey = useRef<string | null>(null);
   const backfillIdempotencyKey = useRef<string | null>(null);
+  const refreshBackfillIdempotencyKey = useRef<string | null>(null);
   const reviewIdempotencyKey = useRef<string | null>(null);
   const activationDryRunIdempotencyKey = useRef<string | null>(null);
   const [search, setSearch] = useState("");
@@ -105,6 +108,7 @@ export default function SupplyTransformations() {
   const [queueSearch, setQueueSearch] = useState("");
   const [queueStateFilter, setQueueStateFilter] = useState("all");
   const [backfillReason, setBackfillReason] = useState("");
+  const [refreshBackfillReason, setRefreshBackfillReason] = useState("");
   const [reviewReason, setReviewReason] = useState("");
   const [activationDryRunReason, setActivationDryRunReason] = useState("");
 
@@ -177,8 +181,10 @@ export default function SupplyTransformations() {
     idempotencyKey.current = null;
     shadowIdempotencyKey.current = null;
     backfillIdempotencyKey.current = null;
+    refreshBackfillIdempotencyKey.current = null;
     reviewIdempotencyKey.current = null;
     setBackfillReason("");
+    setRefreshBackfillReason("");
     setReviewReason("");
   }, [productId]);
 
@@ -355,6 +361,74 @@ export default function SupplyTransformations() {
         });
       }
       toast({ title: "Review not recorded", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const refreshBackfillDraft = useMutation({
+    mutationFn: (row: InventoryAvailabilityBackfillQueueRow) => {
+      const draft = row.draft;
+      if (
+        !draft
+        || draft.origin !== "phase3_backfill"
+        || draft.originInputHash === null
+        || draft.originResultHash === null
+      ) {
+        throw new Error("Reload the queue; only a current Phase 3 backfill draft can be refreshed.");
+      }
+      const request = refreshInventoryAvailabilityBackfillDraftRequestSchema.parse({
+        expectedInputHash: row.inputHash,
+        expectedResultHash: row.resultHash,
+        expectedDraftVersion: draft.version,
+        expectedDraftDefinitionHash: draft.definitionHash,
+        expectedDraftHeadRevision: draft.headRevision,
+        expectedDraftOriginInputHash: draft.originInputHash,
+        expectedDraftOriginResultHash: draft.originResultHash,
+        changeReason: refreshBackfillReason,
+        idempotencyKey: refreshBackfillIdempotencyKey.current
+          ?? `phase3-backfill-refresh:${row.productId}:${crypto.randomUUID()}`,
+      });
+      refreshBackfillIdempotencyKey.current = request.idempotencyKey;
+      return fetchJson(
+        `/api/inventory-planning/admin/migration-queue/${row.productId}/drafts/${draft.modelId}/refresh`,
+        refreshInventoryAvailabilityBackfillDraftResultSchema,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+    },
+    onSuccess: async (result, row) => {
+      refreshBackfillIdempotencyKey.current = null;
+      setRefreshBackfillReason("");
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["/api/inventory-planning/admin/migration-queue"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/inventory-planning/admin/supply-transformations", row.productId],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/inventory-planning/admin/migration-queue/channel-preview", row.productId],
+        }),
+      ]);
+      toast({
+        title: result.alreadyApplied ? "Draft refresh already recorded" : "Stale draft superseded",
+        description: `Draft v${result.version} now carries current deterministic provenance. Runtime ATP and channels are unchanged.`,
+      });
+    },
+    onError: (error: Error) => {
+      if (error instanceof HttpResponseError && error.status === 409) {
+        refreshBackfillIdempotencyKey.current = null;
+        void queryClient.invalidateQueries({
+          queryKey: ["/api/inventory-planning/admin/migration-queue"],
+        });
+      }
+      toast({
+        title: "Stale draft not refreshed",
+        description: error.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -684,15 +758,22 @@ export default function SupplyTransformations() {
         search={queueSearch}
         stateFilter={queueStateFilter}
         backfillReason={backfillReason}
+        refreshBackfillReason={refreshBackfillReason}
         reviewReason={reviewReason}
         isApplying={applyBackfillDraft.isPending}
+        isRefreshing={refreshBackfillDraft.isPending}
         isReviewing={reviewBackfillDraft.isPending}
         onSearchChange={setQueueSearch}
         onStateFilterChange={setQueueStateFilter}
         onSelectProduct={setProductId}
         onBackfillReasonChange={setBackfillReason}
+        onRefreshBackfillReasonChange={(value) => {
+          setRefreshBackfillReason(value);
+          refreshBackfillIdempotencyKey.current = null;
+        }}
         onReviewReasonChange={setReviewReason}
         onApply={(row) => applyBackfillDraft.mutate(row)}
+        onRefresh={(row) => refreshBackfillDraft.mutate(row)}
         onReview={(row, decision) => reviewBackfillDraft.mutate({ row, decision })}
       />
 
@@ -963,15 +1044,19 @@ function MigrationQueuePanel({
   search,
   stateFilter,
   backfillReason,
+  refreshBackfillReason,
   reviewReason,
   isApplying,
+  isRefreshing,
   isReviewing,
   onSearchChange,
   onStateFilterChange,
   onSelectProduct,
   onBackfillReasonChange,
+  onRefreshBackfillReasonChange,
   onReviewReasonChange,
   onApply,
+  onRefresh,
   onReview,
 }: {
   queue: InventoryAvailabilityBackfillQueueResponse | null;
@@ -983,15 +1068,19 @@ function MigrationQueuePanel({
   search: string;
   stateFilter: string;
   backfillReason: string;
+  refreshBackfillReason: string;
   reviewReason: string;
   isApplying: boolean;
+  isRefreshing: boolean;
   isReviewing: boolean;
   onSearchChange: (value: string) => void;
   onStateFilterChange: (value: string) => void;
   onSelectProduct: (productId: number) => void;
   onBackfillReasonChange: (value: string) => void;
+  onRefreshBackfillReasonChange: (value: string) => void;
   onReviewReasonChange: (value: string) => void;
   onApply: (row: InventoryAvailabilityBackfillQueueRow) => void;
+  onRefresh: (row: InventoryAvailabilityBackfillQueueRow) => void;
   onReview: (
     row: InventoryAvailabilityBackfillQueueRow,
     decision: "approved" | "changes_required",
@@ -1139,7 +1228,11 @@ function MigrationQueuePanel({
               <div className="text-sm">
                 Draft v{selectedRow.draft.version} · {selectedRow.draft.origin.replaceAll("_", " ")} ·
                 definition {selectedRow.draft.definitionHash.slice(0, 12)} ·
-                {selectedRow.draft.candidateMatch ? " candidate matches" : " candidate differs"}
+                {selectedRow.draft.candidateMatch
+                  ? " exact definition and provenance match"
+                  : selectedRow.draft.definitionMatch
+                    ? " definition matches, provenance is stale"
+                    : " definition differs"}
               </div>
             )}
             {canEdit && selectedRow.queueState === "not_backfilled" && (
@@ -1161,6 +1254,38 @@ function MigrationQueuePanel({
                 </Button>
               </div>
             )}
+            {canEdit && selectedRow.queueState === "conflicting_draft"
+              && selectedRow.draft?.origin === "phase3_backfill" && (
+              <div className="space-y-3 rounded-md border border-amber-300 bg-amber-50 p-3">
+                <div className="text-sm text-amber-900">
+                  The existing Phase 3 draft does not exactly match the current deterministic
+                  input, result, and definition. Refreshing preserves it as immutable history and
+                  creates the next inactive draft version.
+                </div>
+                <Label htmlFor="backfill-refresh-reason">Supersession reason</Label>
+                <Textarea
+                  id="backfill-refresh-reason"
+                  value={refreshBackfillReason}
+                  onChange={(event) => onRefreshBackfillReasonChange(event.target.value)}
+                  placeholder="Why this stale deterministic draft is being superseded"
+                />
+                <Button
+                  type="button"
+                  disabled={!refreshBackfillReason.trim() || isRefreshing || !selectedRow.candidateDefinition}
+                  onClick={() => onRefresh(selectedRow)}
+                >
+                  <ShieldCheck className="mr-2 h-4 w-4" />
+                  {isRefreshing ? "Refreshing draft…" : "Supersede and refresh draft"}
+                </Button>
+              </div>
+            )}
+            {selectedRow.queueState === "conflicting_draft"
+              && selectedRow.draft?.origin === "operator" && (
+              <div className="text-sm text-amber-800">
+                This draft was authored by an operator. Deterministic backfill will not overwrite
+                or supersede it; review and edit it manually.
+              </div>
+            )}
             {canEdit && ["awaiting_review", "changes_required"].includes(selectedRow.queueState)
               && selectedRow.draft && (
               <div className="space-y-3">
@@ -1177,7 +1302,7 @@ function MigrationQueuePanel({
                     disabled={!reviewReason.trim() || isReviewing}
                     onClick={() => onReview(selectedRow, "approved")}
                   >
-                    Approve exact definition
+                    Approve exact candidate
                   </Button>
                   <Button
                     type="button"

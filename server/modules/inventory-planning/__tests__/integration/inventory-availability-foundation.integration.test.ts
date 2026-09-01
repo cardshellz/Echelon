@@ -9,6 +9,7 @@ import * as databaseSchema from "@shared/schema";
 
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
 import { loadInventoryAvailabilityBackfillSources } from "../../infrastructure/inventory-availability-backfill.repository";
+import { planInventoryAvailabilityBackfill } from "../../domain/inventory-availability-backfill";
 import { transformationModelDefinitionSchema } from "../../domain/inventory-availability-master-data.contracts";
 import {
   projectCanonicalAtp,
@@ -35,6 +36,10 @@ const backfillMigrationSql = readFileSync(
 );
 const phase4MigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0623_inventory_claim_simulation_activation_outbox.sql"),
+  "utf8",
+);
+const backfillProvenanceRefreshMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0628_inventory_backfill_provenance_refresh.sql"),
   "utf8",
 );
 const HASH = "a".repeat(64);
@@ -191,6 +196,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(shadowMigrationSql);
       await migrationClient.query(backfillMigrationSql);
       await migrationClient.query(phase4MigrationSql);
+      await migrationClient.query(backfillProvenanceRefreshMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -1131,6 +1137,126 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       [scope.productId],
     );
     expect(counts.rows[0]).toEqual({ models: "1", heads: "1" });
+  });
+
+  it("atomically supersedes stale Phase 3 provenance without changing active authority", async () => {
+    const scope = await seedProductAndWarehouse([1, 5]);
+    const testDatabase = drizzle(pool, { schema: databaseSchema });
+    const store = new PostgresInventoryAvailabilityMasterDataStore(testDatabase);
+    const [initialSource] = await loadInventoryAvailabilityBackfillSources(
+      testDatabase,
+      [scope.productId],
+    );
+    const initialCandidate = planInventoryAvailabilityBackfill(initialSource!);
+    expect(initialCandidate.definition).not.toBeNull();
+    const created = await store.createTransformationModelDraft({
+      actorId: "integration-test",
+      changeReason: "Initial deterministic Phase 3 draft",
+      idempotencyKey: "repository-integration:backfill-old",
+      requestHash: "7".repeat(64),
+      definition: initialCandidate.definition!,
+      backfillEvidence: {
+        inputHash: initialCandidate.inputHash,
+        resultHash: initialCandidate.resultHash,
+      },
+      occurredAt: new Date(FIXED_TIME),
+    });
+
+    await pool.query(
+      "UPDATE catalog.products SET name = 'Same definition, new source evidence' WHERE id = $1",
+      [scope.productId],
+    );
+    const [currentSource] = await loadInventoryAvailabilityBackfillSources(
+      testDatabase,
+      [scope.productId],
+    );
+    const currentCandidate = planInventoryAvailabilityBackfill(currentSource!);
+    expect(currentCandidate.definitionHash).toBe(initialCandidate.definitionHash);
+    expect(currentCandidate.inputHash).not.toBe(initialCandidate.inputHash);
+    expect(currentCandidate.resultHash).not.toBe(initialCandidate.resultHash);
+
+    const command = {
+      actorId: "integration-test",
+      changeReason: "Supersede stale deterministic provenance",
+      idempotencyKey: "repository-integration:backfill-refresh",
+      requestHash: "8".repeat(64),
+      productId: scope.productId,
+      draftModelId: created.modelId,
+      expectedDraftVersion: 1,
+      expectedDraftDefinitionHash: created.definitionHash,
+      expectedDraftHeadRevision: "0",
+      expectedDraftOriginInputHash: initialCandidate.inputHash,
+      expectedDraftOriginResultHash: initialCandidate.resultHash,
+      definition: currentCandidate.definition!,
+      backfillEvidence: {
+        inputHash: currentCandidate.inputHash,
+        resultHash: currentCandidate.resultHash,
+      },
+      occurredAt: new Date("2026-08-30T20:00:00.000Z"),
+    };
+    const refreshed = await store.supersedeTransformationModelBackfillDraft(command);
+    const replayed = await store.supersedeTransformationModelBackfillDraft(command);
+
+    expect(refreshed).toMatchObject({
+      version: 2,
+      supersededModelId: created.modelId,
+      alreadyApplied: false,
+    });
+    expect(replayed).toEqual({ ...refreshed, alreadyApplied: true });
+    const persisted = await pool.query<{
+      old_status: string;
+      superseded_by: string;
+      supersession_reason: string;
+      new_status: string;
+      new_origin_input_hash: string;
+      new_origin_result_hash: string;
+      supersedes_model_id: number;
+      active_model_id: number | null;
+      draft_model_id: number;
+      revision: string;
+      audit_count: string;
+    }>(
+      `SELECT old.lifecycle_status AS old_status,
+              old.superseded_by,
+              old.supersession_reason,
+              replacement.lifecycle_status AS new_status,
+              replacement.origin_input_hash AS new_origin_input_hash,
+              replacement.origin_result_hash AS new_origin_result_hash,
+              replacement.supersedes_model_id,
+              head.active_model_id,
+              head.draft_model_id,
+              head.revision,
+              (SELECT count(*) FROM public.audit_events
+               WHERE action = 'inventory_availability.transformation_model.backfill_refreshed'
+                 AND target = 'inventory.transformation_model:' || replacement.id::text) AS audit_count
+       FROM inventory.transformation_model_versions AS old
+       JOIN inventory.transformation_model_versions AS replacement
+         ON replacement.supersedes_model_id = old.id
+       JOIN inventory.transformation_model_heads AS head
+         ON head.product_id = old.product_id
+       WHERE old.id = $1`,
+      [created.modelId],
+    );
+    expect(persisted.rows[0]).toEqual({
+      old_status: "superseded",
+      superseded_by: "integration-test",
+      supersession_reason: "Supersede stale deterministic provenance",
+      new_status: "draft",
+      new_origin_input_hash: currentCandidate.inputHash,
+      new_origin_result_hash: currentCandidate.resultHash,
+      supersedes_model_id: created.modelId,
+      active_model_id: null,
+      draft_model_id: refreshed.modelId,
+      revision: "1",
+      audit_count: "1",
+    });
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE inventory.transformation_model_versions SET change_reason = 'tampered' WHERE id = $1",
+        [created.modelId],
+      ),
+      "lifecycle transition superseded -> superseded is not allowed",
+    );
   });
 
   it("deletes a complete draft graph but keeps sealed graph members immutable", async () => {

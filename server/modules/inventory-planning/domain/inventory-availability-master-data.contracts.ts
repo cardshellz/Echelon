@@ -441,6 +441,7 @@ export function calculatePromiseSafetyPolicyDefinitionHash(
 export function calculateMasterDataDraftRequestHash(
   commandType:
     | "transformation_model"
+    | "transformation_model_backfill_refresh"
     | "transformation_model_draft_update"
     | "location_promise_policy"
     | "promise_safety_policy",
@@ -536,6 +537,26 @@ export interface InventoryAvailabilityMasterDataRepository {
       occurredAt: Date;
     },
   ): Promise<{ modelId: number; version: number; definitionHash: string; alreadyApplied: boolean }>;
+  supersedeTransformationModelBackfillDraft(
+    command: z.infer<typeof auditedDraftCommandSchema> & {
+      productId: number;
+      draftModelId: number;
+      expectedDraftVersion: number;
+      expectedDraftDefinitionHash: string;
+      expectedDraftHeadRevision: string;
+      expectedDraftOriginInputHash: string;
+      expectedDraftOriginResultHash: string;
+      definition: TransformationModelDefinition;
+      backfillEvidence: z.infer<typeof transformationBackfillEvidenceSchema>;
+      occurredAt: Date;
+    },
+  ): Promise<{
+    modelId: number;
+    version: number;
+    definitionHash: string;
+    supersededModelId: number;
+    alreadyApplied: boolean;
+  }>;
   createLocationPromisePolicyDraft(
     command: z.infer<typeof auditedDraftCommandSchema>
       & z.infer<typeof locationPromisePolicyDraftSchema>

@@ -5,6 +5,7 @@ import type {
   InventoryAvailabilityBackfillQueueResponse,
   InventoryAvailabilityBackfillReview,
   InventoryAvailabilityChannelPreview,
+  RefreshInventoryAvailabilityBackfillDraftResult,
 } from "@shared/types/inventory-availability-backfill";
 import {
   applyInventoryAvailabilityBackfillDraftRequestSchema,
@@ -12,6 +13,8 @@ import {
   INVENTORY_AVAILABILITY_BACKFILL_ALGORITHM_VERSION,
   inventoryAvailabilityBackfillQueueResponseSchema,
   inventoryAvailabilityChannelPreviewSchema,
+  refreshInventoryAvailabilityBackfillDraftRequestSchema,
+  refreshInventoryAvailabilityBackfillDraftResultSchema,
   reviewInventoryAvailabilityBackfillDraftRequestSchema,
   reviewInventoryAvailabilityBackfillDraftResultSchema,
 } from "@shared/types/inventory-availability-backfill";
@@ -116,13 +119,18 @@ export class InventoryAvailabilityBackfillService {
       candidate: planInventoryAvailabilityBackfill(product.source),
     }));
     const rows = candidates.map(({ captured, candidate }) => {
-      const candidateMatch = Boolean(
-        captured.draft
-        && candidate.definitionHash
-        && captured.draft.definitionHash === candidate.definitionHash,
+      const definitionMatch = Boolean(
+        captured.draft && candidate.definitionHash
+          && captured.draft.definitionHash === candidate.definitionHash,
       );
+      const provenanceMatch = Boolean(
+        captured.draft?.origin === "phase3_backfill"
+          && captured.draft.originInputHash === candidate.inputHash
+          && captured.draft.originResultHash === candidate.resultHash,
+      );
+      const candidateMatch = definitionMatch && provenanceMatch;
       const draft = captured.draft
-        ? { ...captured.draft, candidateMatch }
+        ? { ...captured.draft, definitionMatch, provenanceMatch, candidateMatch }
         : null;
       const queueState = candidate.classification === "blocked"
         ? "blocked" as const
@@ -222,7 +230,7 @@ export class InventoryAvailabilityBackfillService {
       );
     }
     if (captured.draft) {
-      if (captured.draft.definitionHash === candidate.definitionHash) {
+      if (isExactBackfillDraft(captured.draft, candidate)) {
         return applyInventoryAvailabilityBackfillDraftResultSchema.parse({
           modelId: captured.draft.modelId,
           version: captured.draft.version,
@@ -235,7 +243,7 @@ export class InventoryAvailabilityBackfillService {
       throw new InventoryAvailabilityMasterDataError(
         409,
         "INVENTORY_AVAILABILITY_BACKFILL_DRAFT_CONFLICT",
-        "A different operator or backfill draft already exists and must be reviewed, not overwritten.",
+        "A different or stale draft already exists. Phase 3 drafts may be refreshed with explicit supersession evidence; operator drafts must be reviewed manually.",
       );
     }
 
@@ -264,6 +272,131 @@ export class InventoryAvailabilityBackfillService {
     });
     return applyInventoryAvailabilityBackfillDraftResultSchema.parse({
       ...created,
+      inputHash: candidate.inputHash,
+      resultHash: candidate.resultHash,
+    });
+  }
+
+  async refreshProductDraft(
+    productIdInput: number,
+    draftModelIdInput: number,
+    input: unknown,
+    actorInput: string,
+  ): Promise<RefreshInventoryAvailabilityBackfillDraftResult> {
+    const productId = parseProductId(productIdInput);
+    const draftModelId = parseProductId(draftModelIdInput);
+    const actorId = parseActor(actorInput);
+    const request = parseInput(refreshInventoryAvailabilityBackfillDraftRequestSchema, input);
+    const captured = await this.catalogStore.captureBackfillProduct(productId);
+    if (!captured) {
+      throw new InventoryAvailabilityMasterDataError(
+        404,
+        "INVENTORY_AVAILABILITY_PRODUCT_NOT_FOUND",
+        "The active catalog product does not exist.",
+      );
+    }
+    const candidate = planInventoryAvailabilityBackfill(captured.source);
+    if (
+      request.expectedInputHash !== candidate.inputHash
+      || request.expectedResultHash !== candidate.resultHash
+    ) {
+      throw new InventoryAvailabilityMasterDataError(
+        409,
+        "INVENTORY_AVAILABILITY_BACKFILL_PREVIEW_STALE",
+        "The deterministic backfill preview changed; reload the migration queue.",
+      );
+    }
+    if (!candidate.definition || !candidate.definitionHash) {
+      throw new InventoryAvailabilityMasterDataError(
+        409,
+        "INVENTORY_AVAILABILITY_BACKFILL_BLOCKED",
+        "The product has blocking source-data issues and cannot refresh its draft.",
+        candidate.issues
+          .filter((entry) => entry.severity === "blocking")
+          .map((entry) => `${entry.code}: ${entry.message}`),
+      );
+    }
+    const draft = captured.draft;
+    if (
+      !draft
+      || draft.modelId !== draftModelId
+      || draft.version !== request.expectedDraftVersion
+      || draft.definitionHash !== request.expectedDraftDefinitionHash
+      || draft.headRevision !== request.expectedDraftHeadRevision
+    ) {
+      throw new InventoryAvailabilityMasterDataError(
+        409,
+        "INVENTORY_AVAILABILITY_BACKFILL_DRAFT_STALE",
+        "The current draft changed; reload the migration queue before refreshing it.",
+      );
+    }
+    if (draft.origin !== "phase3_backfill") {
+      throw new InventoryAvailabilityMasterDataError(
+        409,
+        "INVENTORY_AVAILABILITY_BACKFILL_OPERATOR_DRAFT",
+        "Operator-authored drafts cannot be superseded by the deterministic backfill command.",
+      );
+    }
+    if (
+      draft.originInputHash !== request.expectedDraftOriginInputHash
+      || draft.originResultHash !== request.expectedDraftOriginResultHash
+    ) {
+      throw new InventoryAvailabilityMasterDataError(
+        409,
+        "INVENTORY_AVAILABILITY_BACKFILL_DRAFT_STALE",
+        "The current draft changed; reload the migration queue before refreshing it.",
+      );
+    }
+    if (isExactBackfillDraft(draft, candidate)) {
+      throw new InventoryAvailabilityMasterDataError(
+        409,
+        "INVENTORY_AVAILABILITY_BACKFILL_DRAFT_CURRENT",
+        "The Phase 3 draft already has the current deterministic provenance and does not need refresh.",
+      );
+    }
+
+    const requestHash = calculateMasterDataDraftRequestHash(
+      "transformation_model_backfill_refresh",
+      {
+        actorId,
+        changeReason: request.changeReason,
+        definition: {
+          productId,
+          draftModelId,
+          expectedDraftVersion: request.expectedDraftVersion,
+          expectedDraftDefinitionHash: request.expectedDraftDefinitionHash,
+          expectedDraftHeadRevision: request.expectedDraftHeadRevision,
+          expectedDraftOriginInputHash: request.expectedDraftOriginInputHash,
+          expectedDraftOriginResultHash: request.expectedDraftOriginResultHash,
+          candidate: candidate.definition,
+          backfillEvidence: {
+            inputHash: candidate.inputHash,
+            resultHash: candidate.resultHash,
+          },
+        },
+      },
+    );
+    const refreshed = await this.masterDataStore.supersedeTransformationModelBackfillDraft({
+      actorId,
+      changeReason: request.changeReason,
+      idempotencyKey: request.idempotencyKey,
+      requestHash,
+      productId,
+      draftModelId,
+      expectedDraftVersion: request.expectedDraftVersion,
+      expectedDraftDefinitionHash: request.expectedDraftDefinitionHash,
+      expectedDraftHeadRevision: request.expectedDraftHeadRevision,
+      expectedDraftOriginInputHash: request.expectedDraftOriginInputHash,
+      expectedDraftOriginResultHash: request.expectedDraftOriginResultHash,
+      definition: candidate.definition,
+      backfillEvidence: {
+        inputHash: candidate.inputHash,
+        resultHash: candidate.resultHash,
+      },
+      occurredAt: validNow(this.clock),
+    });
+    return refreshInventoryAvailabilityBackfillDraftResultSchema.parse({
+      ...refreshed,
       inputHash: candidate.inputHash,
       resultHash: candidate.resultHash,
     });
@@ -312,6 +445,19 @@ export class InventoryAvailabilityBackfillService {
     }
     return inventoryAvailabilityChannelPreviewSchema.parse(preview);
   }
+}
+
+function isExactBackfillDraft(
+  draft: CapturedInventoryAvailabilityBackfillDraft,
+  candidate: ReturnType<typeof planInventoryAvailabilityBackfill>,
+): boolean {
+  return Boolean(
+    candidate.definitionHash
+    && draft.origin === "phase3_backfill"
+    && draft.definitionHash === candidate.definitionHash
+    && draft.originInputHash === candidate.inputHash
+    && draft.originResultHash === candidate.resultHash,
+  );
 }
 
 function parseProductId(value: number): number {

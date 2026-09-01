@@ -49,6 +49,8 @@ export const inventoryAvailabilityBackfillDraftSchema = z.object({
   origin: z.enum(["operator", "phase3_backfill"]),
   originInputHash: sha256Hex.nullable(),
   originResultHash: sha256Hex.nullable(),
+  definitionMatch: z.boolean(),
+  provenanceMatch: z.boolean(),
   candidateMatch: z.boolean(),
 }).strict().superRefine((draft, context) => {
   const hasBackfillHashes = draft.originInputHash !== null && draft.originResultHash !== null;
@@ -134,6 +136,25 @@ export const applyInventoryAvailabilityBackfillDraftRequestSchema = z.object({
 
 export const applyInventoryAvailabilityBackfillDraftResultSchema =
   createTransformationModelDraftResultSchema.extend({
+    inputHash: sha256Hex,
+    resultHash: sha256Hex,
+  }).strict();
+
+export const refreshInventoryAvailabilityBackfillDraftRequestSchema = z.object({
+  expectedInputHash: sha256Hex,
+  expectedResultHash: sha256Hex,
+  expectedDraftVersion: positiveInteger,
+  expectedDraftDefinitionHash: sha256Hex,
+  expectedDraftHeadRevision: postgresBigintStringSchema,
+  expectedDraftOriginInputHash: sha256Hex,
+  expectedDraftOriginResultHash: sha256Hex,
+  changeReason: nonblank(1000),
+  idempotencyKey: nonblank(120),
+}).strict();
+
+export const refreshInventoryAvailabilityBackfillDraftResultSchema =
+  createTransformationModelDraftResultSchema.extend({
+    supersededModelId: positiveInteger,
     inputHash: sha256Hex,
     resultHash: sha256Hex,
   }).strict();
@@ -224,6 +245,12 @@ export type ApplyInventoryAvailabilityBackfillDraftRequest = z.infer<
 >;
 export type ApplyInventoryAvailabilityBackfillDraftResult = z.infer<
   typeof applyInventoryAvailabilityBackfillDraftResultSchema
+>;
+export type RefreshInventoryAvailabilityBackfillDraftRequest = z.infer<
+  typeof refreshInventoryAvailabilityBackfillDraftRequestSchema
+>;
+export type RefreshInventoryAvailabilityBackfillDraftResult = z.infer<
+  typeof refreshInventoryAvailabilityBackfillDraftResultSchema
 >;
 export type ReviewInventoryAvailabilityBackfillDraftRequest = z.infer<
   typeof reviewInventoryAvailabilityBackfillDraftRequestSchema
