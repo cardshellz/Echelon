@@ -48,6 +48,10 @@ describe("Postgres inventory availability activation dry-run repository", () => 
         observed_quantity: "6",
         observed_at: "2026-08-28T17:05:00.000Z",
         external_inventory_item_id_snapshot: "inventory-item-1",
+        channel_connection_id_snapshot: 44,
+        provider_scope_type_snapshot: "location",
+        external_scope_id_snapshot: "location-1",
+        publication_target_revision_snapshot: "2",
       }];
       throw new Error(`Unexpected SQL: ${sql}`);
     });
@@ -79,6 +83,10 @@ describe("Postgres inventory availability activation dry-run repository", () => 
         },
         latestReadbackUnits: "6",
         latestReadbackExternalInventoryItemId: "inventory-item-1",
+        latestReadbackChannelConnectionId: 44,
+        latestReadbackProviderScopeType: "location",
+        latestReadbackExternalScopeId: "location-1",
+        latestReadbackPublicationTargetRevision: "2",
       }],
     });
     expect(client.query.mock.calls[0]?.[0]).toBe(

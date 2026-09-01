@@ -91,6 +91,10 @@ export const currentPublicationEvidenceSchema = z.object({
     latestReadbackUnits: plannerNonnegativeQuantitySchema.nullable(),
     latestReadbackAt: z.string().datetime().nullable(),
     latestReadbackExternalInventoryItemId: nonblank(240).nullable(),
+    latestReadbackChannelConnectionId: positiveInteger.nullable(),
+    latestReadbackProviderScopeType: z.enum(["account", "location"]).nullable(),
+    latestReadbackExternalScopeId: nonblank(240).nullable(),
+    latestReadbackPublicationTargetRevision: z.string().regex(/^[1-9]\d*$/).nullable(),
   }).strict()),
 }).strict();
 
@@ -133,6 +137,13 @@ export const activationDryRunProductSchema = z.object({
     mappingDefinitionHash: sha256Hex.nullable(),
     externalInventoryItemId: nonblank(240).nullable(),
     externalSku: z.string().trim().min(1).max(100).nullable(),
+    policySelections: z.array(z.object({
+      scopeKey: nonblank(200),
+      policyId: positiveInteger,
+      version: positiveInteger,
+      definitionHash: sha256Hex,
+      authority: z.enum(["draft", "active"]),
+    }).strict()),
   }).strict()),
   publicationEvidence: z.array(currentPublicationEvidenceSchema),
   blockers: z.array(activationDryRunBlockerSchema),
@@ -264,6 +275,88 @@ export const inventoryActivationDryRunSchema = z.object({
   }
 });
 
+export const prepareInventoryActivationRequestSchema = z.object({
+  sourceDryRunId: plannerPositiveQuantitySchema,
+  expectedDryRunResultHash: sha256Hex,
+  idempotencyKey: nonblank(120),
+  reason: nonblank(1000),
+}).strict();
+
+export const abortInventoryActivationRequestSchema = z.object({
+  activationRunId: plannerPositiveQuantitySchema,
+  idempotencyKey: nonblank(120),
+  reason: nonblank(1000),
+}).strict();
+
+export const inventoryActivationCommandResultSchema = z.object({
+  activationRunId: plannerPositiveQuantitySchema,
+  commandType: z.enum(["prepare", "abort"]),
+  state: z.enum(["publishing", "publication_verified", "failed"]),
+  sourceDryRunId: plannerPositiveQuantitySchema,
+  revalidationDryRunId: z.null(),
+  conservativePublicationRows: nonnegativeInteger,
+  fullPublicationRows: z.literal(0),
+  runtimeAuthority: z.literal("legacy"),
+  alreadyApplied: z.boolean(),
+}).strict();
+
+export const inventoryActivationStatusSchema = z.object({
+  activationRunId: plannerPositiveQuantitySchema,
+  state: z.enum(["publishing", "publication_verified", "failed"]),
+  sourceDryRunId: plannerPositiveQuantitySchema,
+  runtimeAuthority: z.literal("legacy"),
+  providerWriteAttempted: z.boolean(),
+  configurationFrozen: z.boolean(),
+  outbox: z.object({
+    total: nonnegativeInteger,
+    queued: nonnegativeInteger,
+    leased: nonnegativeInteger,
+    verified: nonnegativeInteger,
+    retryableOrDrifted: nonnegativeInteger,
+    deadLetter: nonnegativeInteger,
+    cancelled: nonnegativeInteger,
+  }).strict(),
+}).strict();
+
+export const openInventoryActivationStatusResponseSchema = z.object({
+  activation: inventoryActivationStatusSchema.nullable(),
+}).strict();
+
+export const captureInventoryPublicationReadbacksRequestSchema = z.object({
+  idempotencyKey: nonblank(120),
+  reason: nonblank(1000),
+}).strict();
+
+export const inventoryPublicationReadbackRunSchema = z.object({
+  readbackRunId: plannerPositiveQuantitySchema,
+  state: z.enum(["completed", "partial"]),
+  requestedBy: nonblank(100),
+  reason: nonblank(1000),
+  startedAt: z.string().datetime(),
+  completedAt: z.string().datetime(),
+  targetRows: nonnegativeInteger,
+  observedRows: nonnegativeInteger,
+  failedRows: nonnegativeInteger,
+  failures: z.array(z.object({
+    publicationTargetId: positiveInteger,
+    productVariantId: positiveInteger,
+    code: nonblank(60),
+    message: nonblank(2000),
+  }).strict()),
+  alreadyApplied: z.boolean(),
+}).strict().superRefine((run, context) => {
+  if (run.observedRows + run.failedRows !== run.targetRows
+    || run.failedRows !== run.failures.length
+    || (run.state === "completed") !== (run.failedRows === 0)
+    || Date.parse(run.completedAt) < Date.parse(run.startedAt)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["state"],
+      message: "Readback run summary is internally inconsistent",
+    });
+  }
+});
+
 export type RunPlannerClaimSimulationRequest = z.infer<
   typeof runPlannerClaimSimulationRequestSchema
 >;
@@ -275,3 +368,19 @@ export type ActivationDryRunBlocker = z.infer<typeof activationDryRunBlockerSche
 export type CurrentPublicationEvidence = z.infer<typeof currentPublicationEvidenceSchema>;
 export type ActivationDryRunProduct = z.infer<typeof activationDryRunProductSchema>;
 export type InventoryActivationDryRun = z.infer<typeof inventoryActivationDryRunSchema>;
+export type PrepareInventoryActivationRequest = z.infer<
+  typeof prepareInventoryActivationRequestSchema
+>;
+export type AbortInventoryActivationRequest = z.infer<
+  typeof abortInventoryActivationRequestSchema
+>;
+export type InventoryActivationCommandResult = z.infer<
+  typeof inventoryActivationCommandResultSchema
+>;
+export type InventoryActivationStatus = z.infer<typeof inventoryActivationStatusSchema>;
+export type OpenInventoryActivationStatusResponse = z.infer<
+  typeof openInventoryActivationStatusResponseSchema
+>;
+export type InventoryPublicationReadbackRun = z.infer<
+  typeof inventoryPublicationReadbackRunSchema
+>;

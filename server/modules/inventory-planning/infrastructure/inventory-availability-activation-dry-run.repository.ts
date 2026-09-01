@@ -201,7 +201,15 @@ implements InventoryAvailabilityActivationDryRunStore {
                    COALESCE(
                      readback.external_inventory_item_id_snapshot,
                      publication.external_inventory_item_id_snapshot
-                   ) AS external_inventory_item_id_snapshot
+                   ) AS external_inventory_item_id_snapshot,
+                   COALESCE(readback.channel_connection_id_snapshot,
+                            publication.channel_connection_id_snapshot) AS channel_connection_id_snapshot,
+                   COALESCE(readback.provider_scope_type_snapshot,
+                            publication.provider_scope_type_snapshot) AS provider_scope_type_snapshot,
+                   COALESCE(readback.external_scope_id_snapshot,
+                            publication.external_scope_id_snapshot) AS external_scope_id_snapshot,
+                   COALESCE(readback.publication_target_revision_snapshot,
+                            publication.publication_target_revision_snapshot) AS publication_target_revision_snapshot
             FROM inventory.inventory_publication_readbacks AS readback
             LEFT JOIN inventory.inventory_publication_outbox AS publication
               ON publication.id = readback.outbox_id
@@ -272,6 +280,22 @@ implements InventoryAvailabilityActivationDryRunStore {
                 readback?.external_inventory_item_id_snapshot == null
                   ? null
                   : String(readback.external_inventory_item_id_snapshot),
+              latestReadbackChannelConnectionId:
+                readback?.channel_connection_id_snapshot == null
+                  ? null
+                  : positiveInteger(readback.channel_connection_id_snapshot, "readback.channelConnectionId"),
+              latestReadbackProviderScopeType:
+                readback?.provider_scope_type_snapshot == null
+                  ? null
+                  : readback.provider_scope_type_snapshot,
+              latestReadbackExternalScopeId:
+                readback?.external_scope_id_snapshot == null
+                  ? null
+                  : String(readback.external_scope_id_snapshot),
+              latestReadbackPublicationTargetRevision:
+                readback?.publication_target_revision_snapshot == null
+                  ? null
+                  : String(readback.publication_target_revision_snapshot),
             };
           });
           const mappingState = !feed

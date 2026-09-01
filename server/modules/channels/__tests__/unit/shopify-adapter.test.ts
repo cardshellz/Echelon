@@ -491,6 +491,81 @@ describe("Shopify Adapter", () => {
       expect(results[0].status).toBe("error");
       expect(results[0].error).toContain("externalInventoryItemId");
     });
+
+    it("uses the exact canonical target connection and provider location", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ inventory_level: {} }),
+      });
+
+      const results = await adapter.pushInventory(1, [{
+        variantId: 1,
+        sku: "TL-UV-100",
+        externalVariantId: null,
+        externalInventoryItemId: "222",
+        allocatedQty: 7,
+      }], {
+        authority: "canonical_outbox",
+        channelConnectionId: 17,
+        providerScopeType: "location",
+        externalScopeId: "98765",
+      });
+
+      expect(results[0]).toMatchObject({ status: "success", pushedQty: 7 });
+      const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+      expect(body).toMatchObject({ inventory_item_id: 222, location_id: 98765, available: 7 });
+    });
+
+    it("reads back the exact canonical target identity", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          inventory_levels: [{ inventory_item_id: 222, location_id: 98765, available: 7 }],
+        }),
+      });
+
+      const results = await adapter.readInventory(1, [{
+        variantId: 1,
+        sku: "TL-UV-100",
+        externalInventoryItemId: "222",
+        providerScopeType: "location",
+        externalScopeId: "98765",
+      }], {
+        authority: "canonical_outbox",
+        channelConnectionId: 17,
+        providerScopeType: "location",
+        externalScopeId: "98765",
+      });
+
+      expect(results).toEqual([{ variantId: 1, observedQty: 7, status: "success" }]);
+      expect((globalThis.fetch as any).mock.calls[0][0]).toContain("location_ids=98765");
+    });
+  });
+
+  describe("canonical inventory scope", () => {
+    it("rejects account scope because Shopify inventory is location-scoped", async () => {
+      const result = await adapter.pushInventory(1, [{
+        variantId: 101,
+        sku: "SKU-101",
+        externalVariantId: null,
+        externalInventoryItemId: "501",
+        allocatedQty: 3,
+      }], {
+        authority: "canonical_outbox",
+        channelConnectionId: 17,
+        providerScopeType: "account",
+        externalScopeId: "shop-account",
+      });
+
+      expect(result).toEqual([expect.objectContaining({
+        variantId: 101,
+        status: "error",
+        error: expect.stringContaining("exact location scope"),
+      })]);
+      expect(db.select).not.toHaveBeenCalled();
+    });
   });
 
   // -----------------------------------------------------------------------
