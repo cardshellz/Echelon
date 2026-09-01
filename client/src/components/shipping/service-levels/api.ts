@@ -1,5 +1,10 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { ServiceLevelOption } from "@/components/shipping/pricing-programs/api";
+import type {
+  ReplaceShippingFulfillmentRoutingInput,
+  ReplaceShippingFulfillmentRoutingResult,
+  ShippingFulfillmentRoutingAdminView,
+} from "@shared/types/shipping-fulfillment-routing";
 import {
   getJson,
   invalidateShippingAdmin,
@@ -34,6 +39,28 @@ export function saveServiceLevelDetails(
 ): Promise<{ serviceLevel: ShippingServiceLevel }> {
   return putJson<{ serviceLevel: ShippingServiceLevel }>(
     `/api/shipping/admin/service-levels/${id}`,
+    input,
+  );
+}
+
+export function fulfillmentRoutingKey(serviceLevelId: number): string {
+  return `/api/shipping/admin/service-levels/${serviceLevelId}/fulfillment-routing`;
+}
+
+export function loadFulfillmentRouting(
+  serviceLevelId: number,
+): Promise<ShippingFulfillmentRoutingAdminView> {
+  return getJson<ShippingFulfillmentRoutingAdminView>(
+    fulfillmentRoutingKey(serviceLevelId),
+  );
+}
+
+export function saveFulfillmentRouting(
+  serviceLevelId: number,
+  input: ReplaceShippingFulfillmentRoutingInput,
+): Promise<ReplaceShippingFulfillmentRoutingResult> {
+  return putJson<ReplaceShippingFulfillmentRoutingResult>(
+    fulfillmentRoutingKey(serviceLevelId),
     input,
   );
 }

@@ -99,7 +99,7 @@ Schema: `shipping.*` in the shared Postgres (Echelon owns it; the club app owns 
 | `zone_sets` + `rate_books` + `rate_book_assignments` | reusable geography, independently priced books, deterministic channel/warehouse selection | migration 137 backfills all current shipping zones/tables to `shopify-retail-default`; dropship is not imported or activated |
 | `box_catalog` | boxes: inner dims, tare, optional lower max weight, cost, fill factor | **14 seeded Jul 9** from 4,259 real ShipStation shipments (top 14 dim combos ≈ 85% of volume, incl. 2 storage-box flats); dimensions/tare/cost still require review in admin. NULL max weight uses the automatic 22,679 g handling ceiling. |
 | `service_levels` | sellable checkout options | Standard is the only initial option and remains the checkout kill-switch; priority, overnight, and pallet freight are inactive future options |
-| `service_level_methods` | reserved future fulfillment mappings | dormant until connected provider accounts supply a canonical method catalog; it is not used by checkout quoting or activation today |
+| `service_level_methods` + `fulfillment_routing_profiles` / `fulfillment_routing_revisions` | ordered, exact provider-account methods allowed to fulfill each service level, with optimistic locking and immutable command evidence | operator-managed control plane backed by the ShipStation v2 method catalog; checkout pricing is separate, and neither label purchase nor dropship consumes the profile until each integration is explicitly wired and validated |
 | `transit_matrix` | historical carrier/method transit windows | 24 rows seeded (mig 120); retained for later fulfillment validation, not checkout-price identity |
 | `quote_snapshots` | every quote (checkout/shadow/manual) — calibration dataset | accumulating; first shadow run persisted Jul 9 |
 | pack plans + actuals | fulfillment plane | schema live (migrations 122 + 135); plans are test/shadow artifacts and are not required for any WMS status transition |
@@ -210,7 +210,7 @@ Each step is independently reversible; only allowlisted test carts can receive E
 
 ## 9 · Backlog after cutover
 
-1. **Priority/Overnight/Pallet Freight service levels** — configure and validate rate tables, then activate per level. Add fulfillment-method mappings only when the fulfillment engine can enforce them.
+1. **Priority/Overnight/Pallet Freight service levels** — configure and validate rate tables plus their fulfillment-routing profiles, then activate per level. Wire the routing reader into label purchase only through a shadow/parity rollout that fails closed on stale provider identities.
 2. **Calibration loop** — with the v2 key: scheduled quoted-vs-actual + live-rate comparison; adjust bands from `quote_snapshots`.
 3. **First-party quote API and benefit policy** — reuse the runtime service with authenticated Shellz Club benefit context.
 4. **Dropship shared-engine migration** — import the existing vendor rates as a separate `shipping.*` book, compare the shared engine against `DropshipShippingRateProvider`, switch only at parity, then retire duplicate tables while retaining dropship insurance, handling, snapshot, and wallet policy.
