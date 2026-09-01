@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { HistoricalShipStationContentsClient } from "../../historical-shipstation-contents-audit.client";
-import type {
-  HistoricalShipStationContentsRecoveryEvidence,
-  HistoricalShipStationContentsSystemRecoveryEvent,
+import {
+  historicalShipStationRecoverableCaseEvidenceHash,
+  type HistoricalShipStationContentsRecoveryEvidence,
+  type HistoricalShipStationContentsSystemRecoveryEvent,
 } from "../../historical-shipstation-contents-recovery.domain";
 import type {
   HistoricalShipStationContentsSystemRecoveryCandidate,
@@ -36,6 +37,11 @@ const recoveryEvidence: HistoricalShipStationContentsRecoveryEvidence = Object.f
   attestedContents: Object.freeze([
     Object.freeze({ wmsShipmentItemId: 7001, quantity: 2 }),
   ]),
+});
+const previewEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
+  shippingProviderLabelId: candidate.shippingProviderLabelId,
+  recoveryStatus: recoveryEvidence.recoveryStatus,
+  providerEvidenceHash: recoveryEvidence.evidenceHash,
 });
 
 function providerClient(): HistoricalShipStationContentsClient {
@@ -102,7 +108,7 @@ describe("HistoricalShipStationContentsSystemRecoveryService", () => {
     const client = providerClient();
     const service = new HistoricalShipStationContentsSystemRecoveryService(repository, client);
 
-    await expect(service.recover("41")).resolves.toMatchObject({
+    await expect(service.recover("41", previewEvidenceHash)).resolves.toMatchObject({
       kind: "created",
       shippingProviderLabelId: "41",
       labelEventId: "102",
@@ -146,10 +152,36 @@ describe("HistoricalShipStationContentsSystemRecoveryService", () => {
       providerClient(),
     );
 
-    await expect(service.recover("41")).rejects.toMatchObject({
+    await expect(service.recover("41", previewEvidenceHash)).rejects.toMatchObject({
       code: "CANDIDATE_CHANGED",
     });
     expect(appendExactRecovery).not.toHaveBeenCalled();
+  });
+
+  it("requires apply evidence to match the exact provider evidence seen in preview", async () => {
+    const exact = dependencies();
+    const service = new HistoricalShipStationContentsSystemRecoveryService(
+      exact.repository,
+      providerClient(),
+    );
+    await expect(service.recover("41", previewEvidenceHash)).resolves.toMatchObject({
+      kind: "created",
+    });
+    expect(exact.appendExactRecovery).toHaveBeenCalledOnce();
+
+    const changed = dependencies();
+    const changedService = new HistoricalShipStationContentsSystemRecoveryService(
+      changed.repository,
+      providerClient(),
+    );
+    await expect(changedService.recover("41", "f".repeat(64))).rejects.toMatchObject({
+      code: "PROVIDER_EVIDENCE_CHANGED",
+    });
+    expect(changed.repository.withSerializableTransaction).not.toHaveBeenCalled();
+
+    await expect(changedService.recover("41", "invalid")).rejects.toMatchObject({
+      code: "INVALID_PREVIEW_EVIDENCE_HASH",
+    });
   });
 
   it("keeps non-recoverable provider evidence out of the write transaction", async () => {
@@ -173,7 +205,7 @@ describe("HistoricalShipStationContentsSystemRecoveryService", () => {
     };
     const service = new HistoricalShipStationContentsSystemRecoveryService(repository, client);
 
-    await expect(service.recover("41")).rejects.toMatchObject({
+    await expect(service.recover("41", previewEvidenceHash)).rejects.toMatchObject({
       code: "PROVIDER_EVIDENCE_NOT_RECOVERABLE",
     });
     expect(repository.withSerializableTransaction).not.toHaveBeenCalled();
@@ -187,10 +219,12 @@ describe("HistoricalShipStationContentsSystemRecoveryService", () => {
       client,
     );
 
-    await expect(service.recover("not-a-label")).rejects.toBeInstanceOf(
+    await expect(service.recover("not-a-label", previewEvidenceHash)).rejects.toBeInstanceOf(
       HistoricalShipStationContentsSystemRecoveryServiceError,
     );
-    await expect(service.recover("41")).rejects.toMatchObject({ code: "CANDIDATE_NOT_FOUND" });
+    await expect(service.recover("41", previewEvidenceHash)).rejects.toMatchObject({
+      code: "CANDIDATE_NOT_FOUND",
+    });
     expect(client.loadShipmentContents).not.toHaveBeenCalled();
   });
 
@@ -201,7 +235,9 @@ describe("HistoricalShipStationContentsSystemRecoveryService", () => {
       providerClient(),
     );
 
-    await expect(service.recover("41")).rejects.toMatchObject({ code: "NO_RESOLVABLE_EVENTS" });
+    await expect(service.recover("41", previewEvidenceHash)).rejects.toMatchObject({
+      code: "NO_RESOLVABLE_EVENTS",
+    });
     expect(appendExactRecovery).not.toHaveBeenCalled();
   });
 });

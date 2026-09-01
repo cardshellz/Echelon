@@ -57,6 +57,7 @@ import { HistoricalShipStationContentsAttestationService } from "../../historica
 import {
   buildHistoricalShipStationContentsRecoveryEvidence,
   buildHistoricalShipStationContentsSystemRecoveryEvent,
+  historicalShipStationRecoverableCaseEvidenceHash,
 } from "../../historical-shipstation-contents-recovery.domain";
 import { PgHistoricalShipStationContentsSystemRecoveryRepository } from "../../historical-shipstation-contents-system-recovery.repository";
 import { HistoricalShipStationContentsSystemRecoveryService } from "../../historical-shipstation-contents-system-recovery.service";
@@ -937,8 +938,24 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       client,
     );
 
-    const created = await recoveryService.recover(label.rows[0].id);
-    const replay = await recoveryService.recover(label.rows[0].id);
+    const previewEvidenceHash = historicalShipStationRecoverableCaseEvidenceHash({
+      shippingProviderLabelId: label.rows[0].id,
+      recoveryStatus: recoveryEvidence.recoveryStatus,
+      providerEvidenceHash: recoveryEvidence.evidenceHash,
+    });
+    await expect(recoveryService.recover(label.rows[0].id, "f".repeat(64)))
+      .rejects.toMatchObject({ code: "PROVIDER_EVIDENCE_CHANGED" });
+    const beforeExactApply = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM wms.shipping_provider_label_events
+       WHERE shipping_provider_label_id = $1::bigint
+         AND event_type = 'contents_recovered'`,
+      [label.rows[0].id],
+    );
+    expect(beforeExactApply.rows[0].count).toBe("0");
+
+    const created = await recoveryService.recover(label.rows[0].id, previewEvidenceHash);
+    const replay = await recoveryService.recover(label.rows[0].id, previewEvidenceHash);
     expect(created).toMatchObject({
       kind: "created",
       shippingProviderLabelId: label.rows[0].id,
