@@ -383,6 +383,18 @@ describe("shipment cost payment allocation", () => {
     expect([...result.values()].reduce((sum, value) => sum + value, 0)).toBe(5);
   });
 
+  it("allocates a partially paid invoice across charges and signed credits", async () => {
+    const { allocateProportionalPaidCents } = await import("../../ap-ledger.service");
+
+    const result = allocateProportionalPaidCents([
+      { id: 1, amountCents: 500 },
+      { id: 2, amountCents: -200 },
+    ], 100, 300);
+
+    expect([...result.entries()]).toEqual([[1, 167], [2, -67]]);
+    expect([...result.values()].reduce((sum, value) => sum + value, 0)).toBe(100);
+  });
+
   it("uses invoice line amounts, preserves actual zero, and returns a payment checksum", async () => {
     const { db } = await import("../../../../db");
     const { getShipmentCostPaymentStatus } = await import("../../ap-ledger.service");
@@ -450,6 +462,99 @@ describe("shipment cost payment allocation", () => {
       linkedCents: 10,
       paidCents: 5,
       outstandingCents: 5,
+    });
+    expect(result.summary.paidCents + result.summary.outstandingCents).toBe(result.summary.totalCents);
+  });
+
+  it("preserves an unlinked signed promotion in the shipment payment summary", async () => {
+    const { db } = await import("../../../../db");
+    const { getShipmentCostPaymentStatus } = await import("../../ap-ledger.service");
+
+    (db.select as any).mockReturnValue({
+      ...mockSelectChain,
+      where: vi.fn().mockResolvedValue([
+        {
+          costId: 103,
+          costType: "freight",
+          description: "Shipment Charges",
+          actualCents: 572_583,
+          estimatedCents: 572_583,
+          vendorInvoiceId: null,
+          invoiceStatus: null,
+          invoiceNumber: null,
+          invoicedAmountCents: null,
+          paidAmountCents: null,
+          invoiceLineTotalCents: null,
+        },
+        {
+          costId: 104,
+          costType: "insurance",
+          description: "Insurance",
+          actualCents: 11_357,
+          estimatedCents: 11_357,
+          vendorInvoiceId: null,
+          invoiceStatus: null,
+          invoiceNumber: null,
+          invoicedAmountCents: null,
+          paidAmountCents: null,
+          invoiceLineTotalCents: null,
+        },
+        {
+          costId: 105,
+          costType: "brokerage",
+          description: "Customs Brokerage",
+          actualCents: 17_500,
+          estimatedCents: 17_500,
+          vendorInvoiceId: null,
+          invoiceStatus: null,
+          invoiceNumber: null,
+          invoicedAmountCents: null,
+          paidAmountCents: null,
+          invoiceLineTotalCents: null,
+        },
+        {
+          costId: 106,
+          costType: "platform_fee",
+          description: "Seller Promotion",
+          actualCents: -5_500,
+          estimatedCents: -5_500,
+          vendorInvoiceId: null,
+          invoiceStatus: null,
+          invoiceNumber: null,
+          invoicedAmountCents: null,
+          paidAmountCents: null,
+          invoiceLineTotalCents: null,
+        },
+        {
+          costId: 107,
+          costType: "platform_fee",
+          description: "Platform Fee",
+          actualCents: 8_939,
+          estimatedCents: 8_939,
+          vendorInvoiceId: null,
+          invoiceStatus: null,
+          invoiceNumber: null,
+          invoicedAmountCents: null,
+          paidAmountCents: null,
+          invoiceLineTotalCents: null,
+        },
+      ]),
+    });
+
+    const result = await getShipmentCostPaymentStatus(78);
+    const promotion = result.costs.find((cost) => cost.costId === 106);
+
+    expect(promotion).toMatchObject({
+      amountCents: -5_500,
+      paidCents: 0,
+      outstandingCents: -5_500,
+      paymentStatus: "unlinked",
+    });
+    expect(result.summary).toEqual({
+      totalCents: 604_879,
+      linkedCents: 0,
+      paidCents: 0,
+      outstandingCents: 604_879,
     });
     expect(result.summary.paidCents + result.summary.outstandingCents).toBe(result.summary.totalCents);
   });
