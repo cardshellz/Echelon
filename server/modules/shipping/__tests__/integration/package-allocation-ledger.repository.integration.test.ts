@@ -63,6 +63,8 @@ import { PgHistoricalShipStationContentsSystemRecoveryRepository } from "../../h
 import { HistoricalShipStationContentsSystemRecoveryService } from "../../historical-shipstation-contents-system-recovery.service";
 import { PgHistoricalShipStationContentsReviewRepository } from "../../historical-shipstation-contents-review.repository";
 import { HistoricalShipStationContentsReviewService } from "../../historical-shipstation-contents-review.service";
+import { PgHistoricalShipStationContentsCorrectionRepository } from "../../historical-shipstation-contents-correction.repository";
+import { HistoricalShipStationContentsCorrectionService } from "../../historical-shipstation-contents-correction.service";
 
 const PRIMARY_GROUP_KEY = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const COMPETING_GROUP_KEY = "96e1be0d-c7d8-4c91-919f-04f5eb547f80";
@@ -1432,6 +1434,31 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       },
       history_count: 1,
     }]);
+
+    const correctionPreview = await new HistoricalShipStationContentsCorrectionService(
+      new PgHistoricalShipStationContentsCorrectionRepository(pool),
+      service,
+    ).preview(intake.exceptionId);
+    expect(correctionPreview).toMatchObject({
+      exceptionId: intake.exceptionId,
+      correctionPlanHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      evidenceComplete: false,
+      packageLineChangeRequired: true,
+    });
+    expect(correctionPreview.lines).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sku: "SHIPSTATION-REVIEW-SKU",
+        providerQuantity: 5,
+        wmsQuantity: 0,
+        packageQuantityDelta: 5,
+      }),
+      expect.objectContaining({
+        sku: "WMS-REVIEW-SKU",
+        providerQuantity: 0,
+        wmsQuantity: 2,
+        packageQuantityDelta: -2,
+      }),
+    ]));
 
     const command = Object.freeze({
       exceptionId: intake.exceptionId,

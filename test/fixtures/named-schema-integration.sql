@@ -257,7 +257,8 @@ CREATE TABLE wms.outbound_shipment_items (
   correction_for_shipment_item_id integer REFERENCES wms.outbound_shipment_items(id) ON DELETE RESTRICT,
   shipment_item_purpose varchar(30) NOT NULL DEFAULT 'customer_fulfillment',
   product_variant_id integer REFERENCES catalog.product_variants(id),
-  qty integer NOT NULL DEFAULT 1
+  qty integer NOT NULL DEFAULT 1,
+  from_location_id integer REFERENCES warehouse.warehouse_locations(id)
 );
 
 CREATE TABLE wms.shipment_requests (

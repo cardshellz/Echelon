@@ -299,6 +299,7 @@ interface HistoricalContentsReviewPreview {
   orderNumber: string | null;
   trackingNumber: string;
   providerRecoveryStatus: string;
+  recordedDecision: "provider_confirmed_pending_inventory_correction" | "cannot_prove" | null;
   providerContents: Array<{ sku: string; quantity: number }> | null;
   wmsContents: Array<{
     wmsShipmentItemId: number;
@@ -307,6 +308,51 @@ interface HistoricalContentsReviewPreview {
     quantity: number;
   }> | null;
   allowedDecisions: Array<"wms_confirmed" | "provider_confirmed_pending_inventory_correction" | "cannot_prove">;
+}
+
+interface HistoricalContentsCorrectionPreview {
+  contractVersion: 1;
+  exceptionId: string;
+  correctionPlanHash: string;
+  orderNumber: string | null;
+  trackingNumber: string;
+  evidenceComplete: boolean;
+  packageLineChangeRequired: boolean;
+  inventoryPostingRequired: boolean;
+  lines: Array<{
+    sku: string;
+    itemName: string | null;
+    productVariantId: number | null;
+    providerQuantity: number | null;
+    wmsQuantity: number;
+    recordedInventoryQuantity: number | null;
+    packageQuantityDelta: number | null;
+    inventoryQuantityDelta: number | null;
+    inventoryAction: "none" | "deduct" | "restore" | "unknown";
+    wmsShipmentItemIds: number[];
+    packageLineAdjustments: Array<{
+      wmsShipmentItemId: number;
+      currentQuantity: number;
+      proposedQuantity: number;
+      quantityDelta: number;
+    }>;
+    restorations: Array<{
+      inventoryTransactionId: number;
+      wmsShipmentItemId: number;
+      warehouseLocationId: number;
+      quantity: number;
+    }>;
+    blockers: Array<{
+      code: string;
+      message: string;
+    }>;
+  }>;
+  blockers: Array<{
+    code: string;
+    sku: string | null;
+    wmsShipmentItemId: number | null;
+    message: string;
+  }>;
 }
 
 interface SourceHealthResponse {
@@ -2713,6 +2759,7 @@ function HistoricalContentsReviewPanel(props: {
   onChanged: (decision: HistoricalContentsDecision) => Promise<void>;
 }) {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [decision, setDecision] = useState<HistoricalContentsDecision | null>(null);
   const [reason, setReason] = useState("");
   const previewQuery = useQuery({
@@ -2720,6 +2767,14 @@ function HistoricalContentsReviewPanel(props: {
     queryFn: () => fetchJson<HistoricalContentsReviewPreview>(
       `/api/operations/control-tower/v2/work-items/${props.item.id}/historical-contents-review`,
     ),
+  });
+  const correctionQuery = useQuery({
+    queryKey: ["historical-contents-correction-preview", props.item.id],
+    queryFn: () => fetchJson<HistoricalContentsCorrectionPreview>(
+      `/api/operations/control-tower/v2/work-items/${props.item.id}/historical-contents-review/correction-preview`,
+    ),
+    enabled: previewQuery.data?.recordedDecision === "provider_confirmed_pending_inventory_correction",
+    retry: false,
   });
   const decisionMutation = useMutation({
     mutationFn: async () => {
@@ -2747,6 +2802,14 @@ function HistoricalContentsReviewPanel(props: {
       });
       setDecision(null);
       setReason("");
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["historical-contents-review", props.item.id],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["historical-contents-correction-preview", props.item.id],
+        }),
+      ]);
       await props.onChanged(recordedDecision);
     },
   });
@@ -2802,6 +2865,92 @@ function HistoricalContentsReviewPanel(props: {
           ) : <p className="mt-2 text-sm text-muted-foreground">No single linked WMS package can be proven.</p>}
         </div>
       </div>
+      {preview.recordedDecision === "provider_confirmed_pending_inventory_correction" && (
+        <div className="space-y-3 border bg-slate-50 p-3">
+          <div>
+            <div className="text-xs font-semibold uppercase text-slate-800">Correction preview</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Preview only — no package line or inventory quantity has been changed.
+            </p>
+          </div>
+          {correctionQuery.isLoading && <Skeleton className="h-24 w-full" />}
+          {correctionQuery.isError && (
+            <div className="flex items-start gap-2 text-sm text-red-700">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p>{correctionQuery.error instanceof Error ? correctionQuery.error.message : "Correction evidence could not be loaded."}</p>
+                <Button className="mt-2" size="sm" variant="outline" onClick={() => correctionQuery.refetch()}>Retry</Button>
+              </div>
+            </div>
+          )}
+          {correctionQuery.data && (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b text-muted-foreground">
+                    <tr>
+                      <th className="py-2 pr-3 font-medium">Item</th>
+                      <th className="px-2 py-2 text-right font-medium">ShipStation</th>
+                      <th className="px-2 py-2 text-right font-medium">WMS</th>
+                      <th className="px-2 py-2 text-right font-medium">Inventory posted</th>
+                      <th className="py-2 pl-3 font-medium">Exact preview</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {correctionQuery.data.lines.map((line) => (
+                      <tr key={line.sku} className="border-b last:border-0">
+                        <td className="py-2 pr-3">
+                          <div className="font-medium">{line.sku}</div>
+                          {line.itemName && <div className="text-muted-foreground">{line.itemName}</div>}
+                        </td>
+                        <td className="px-2 py-2 text-right">{line.providerQuantity ?? "Unknown"}</td>
+                        <td className="px-2 py-2 text-right">{line.wmsQuantity}</td>
+                        <td className="px-2 py-2 text-right">
+                          {line.recordedInventoryQuantity ?? "Unknown"}
+                        </td>
+                        <td className="py-2 pl-3">
+                          <div>
+                            {line.packageQuantityDelta === null
+                              ? "WMS action cannot be proven"
+                              : line.packageQuantityDelta < 0
+                              ? `Reduce WMS by ${Math.abs(line.packageQuantityDelta)}`
+                              : line.packageQuantityDelta > 0
+                                ? `Add ${line.packageQuantityDelta} to WMS`
+                                : "No WMS quantity change"}
+                          </div>
+                          <div>
+                            {line.inventoryAction === "restore"
+                              ? `Restore ${Math.abs(line.inventoryQuantityDelta ?? 0)} to inventory`
+                              : line.inventoryAction === "deduct"
+                                ? `Deduct ${line.inventoryQuantityDelta ?? 0} from inventory`
+                                : line.inventoryAction === "unknown"
+                                  ? "Inventory action cannot be proven"
+                                  : "No inventory change"}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {correctionQuery.data.blockers.length > 0 ? (
+                <div className="border-l-4 border-amber-500 bg-amber-50 p-3">
+                  <div className="text-xs font-semibold uppercase text-amber-900">Posting blockers</div>
+                  <ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-amber-950">
+                    {correctionQuery.data.blockers.map((entry, index) => (
+                      <li key={`${entry.code}-${entry.sku ?? "global"}-${index}`}>{entry.message}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <p className="text-xs text-emerald-800">
+                  The current evidence produces one exact correction plan. Posting is intentionally not enabled in this preview.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
       {props.canDecide ? (
         <div className="flex flex-wrap gap-2">
           {preview.allowedDecisions.map((option) => (

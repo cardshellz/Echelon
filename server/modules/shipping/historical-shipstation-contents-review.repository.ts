@@ -347,12 +347,26 @@ function snapshotFromRow(row: Record<string, unknown>): HistoricalShipStationCon
     );
   }
   const providerValue = providerEvidence as Record<string, unknown>;
+  const recordedDecision = value.decision == null
+    ? null
+    : exactText(value.decision, "decision", 80);
+  if (
+    recordedDecision !== null
+    && recordedDecision !== "provider_confirmed_pending_inventory_correction"
+    && recordedDecision !== "cannot_prove"
+  ) {
+    throw new HistoricalShipStationContentsReviewRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      "Historical contents review received an unsupported recorded decision",
+    );
+  }
   return Object.freeze({
     exceptionId: positiveBigintText(row.id, "exceptionId"),
     candidate,
     reason: reviewReason as HistoricalShipStationContentsReviewSnapshot["reason"],
     providerObservationHash: exactEvidenceHash(providerValue.evidenceHash, "providerEvidenceHash"),
     providerRecoveryStatus: exactText(providerValue.recoveryStatus, "providerRecoveryStatus", 80),
+    recordedDecision,
   });
 }
 
