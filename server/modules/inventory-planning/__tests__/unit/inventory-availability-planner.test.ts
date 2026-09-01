@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type {
-  ClaimSupplySnapshotContentDto,
-  SupplySnapshotContentDto,
+import {
+  atpProjectionSchema,
+  type ClaimSupplySnapshotContentDto,
+  type SupplySnapshotContentDto,
 } from "@shared/types/inventory-availability-planner";
 import {
   calculateLegacyAtpFromSnapshot,
@@ -255,8 +256,67 @@ describe("inventory availability canonical planner", () => {
     }));
     const request = { targetVariantId: 101, scope: { kind: "warehouse" as const, warehouseId: 1 } };
 
-    expect(projectCanonicalAtp(trusted, request).atpUnits).toBe("6");
-    expect(projectCanonicalAtp(untrusted, request).atpUnits).toBe("8");
+    const trustedProjection = projectCanonicalAtp(trusted, request);
+    const untrustedProjection = projectCanonicalAtp(untrusted, request);
+    expect(trustedProjection.atpUnits).toBe("6");
+    expect(trustedProjection.safetyEvidence[0]?.demandStatus).toBe("trusted");
+    expect(untrustedProjection.atpUnits).toBe("8");
+    expect(untrustedProjection.safetyEvidence[0]?.demandStatus).toBe("fallback_untrusted");
+  });
+
+  it("uses fallback units for stale or future-dated demand evidence", () => {
+    const safetyPolicy = {
+      ...content().safetyPolicies[0]!,
+      policyMode: "days_of_cover" as const,
+      daysOfCoverMilliDays: "2500",
+      untrustedDemandFallbackUnits: "2",
+      demandMethodVersion: "shipments-v1",
+    };
+    const demand = {
+      evidenceId: "1",
+      productVariantId: 101,
+      warehouseId: 1,
+      dailyDemandMilliUnits: "1500",
+      trustStatus: "trusted" as const,
+      trustReasons: [],
+      methodVersion: "shipments-v1",
+      inputFingerprint: HASH,
+      overrideExpiresAt: null,
+      calculatedAt: "2026-08-25T12:00:00.000Z",
+    };
+    const request = { targetVariantId: 101, scope: { kind: "warehouse" as const, warehouseId: 1 } };
+    const stale = projectCanonicalAtp(sealSupplySnapshot(content({
+      inventoryPositions: [position({ id: 1, variantId: 101, physical: 10 })],
+      safetyPolicies: [safetyPolicy],
+      demandEvidence: [demand],
+    })), request);
+    const future = projectCanonicalAtp(sealSupplySnapshot(content({
+      inventoryPositions: [position({ id: 1, variantId: 101, physical: 10 })],
+      safetyPolicies: [safetyPolicy],
+      demandEvidence: [{ ...demand, calculatedAt: "2026-08-28T12:00:00.000Z" }],
+    })), request);
+
+    expect(stale.atpUnits).toBe("8");
+    expect(stale.safetyEvidence[0]?.demandStatus).toBe("fallback_stale");
+    expect(future.atpUnits).toBe("8");
+    expect(future.safetyEvidence[0]?.demandStatus).toBe("fallback_future_dated");
+  });
+
+  it("labels persisted pre-status shadow evidence as unknown instead of inventing a reason", () => {
+    const projection = projectCanonicalAtp(sealSupplySnapshot(content({
+      inventoryPositions: [position({ id: 1, variantId: 101, physical: 10 })],
+    })), {
+      targetVariantId: 101,
+      scope: { kind: "warehouse", warehouseId: 1 },
+    });
+    const legacyProjection = {
+      ...projection,
+      safetyEvidence: projection.safetyEvidence.map(({ demandStatus: _omitted, ...evidence }) =>
+        evidence),
+    };
+
+    expect(atpProjectionSchema.parse(legacyProjection).safetyEvidence[0]?.demandStatus)
+      .toBe("legacy_unknown");
   });
 
   it("defines network ATP as the sum of independently fulfillable warehouses", () => {

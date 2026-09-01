@@ -22,6 +22,7 @@ import {
   type SupplySnapshotDto,
 } from "@shared/types/inventory-availability-planner";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
+import { INVENTORY_DEMAND_EVIDENCE_MAX_AGE_HOURS } from "@shared/types/inventory-promise-safety-admin";
 import {
   calculateRecipeCapacity,
   type RecipeDefinition,
@@ -436,6 +437,7 @@ function resolveSafety(snapshot: PlannerSupplySnapshot, warehouseId: number, var
         policyMode: "implicit_off",
         protectedUnits: "0",
         demandEvidenceId: null,
+        demandStatus: "not_applicable",
       },
       blockers: [problem(
         "MISSING_PROMISE_SAFETY_POLICY",
@@ -454,6 +456,7 @@ function resolveSafety(snapshot: PlannerSupplySnapshot, warehouseId: number, var
         policyMode: "off",
         protectedUnits: "0",
         demandEvidenceId: null,
+        demandStatus: "not_applicable",
       },
       blockers: [],
     };
@@ -469,6 +472,7 @@ function resolveSafety(snapshot: PlannerSupplySnapshot, warehouseId: number, var
         policyMode: "fixed_units",
         protectedUnits: protectedQty.toString(),
         demandEvidenceId: null,
+        demandStatus: "not_applicable",
       },
       blockers: [],
     };
@@ -480,7 +484,24 @@ function resolveSafety(snapshot: PlannerSupplySnapshot, warehouseId: number, var
   const overrideValid = demand?.trustStatus === "overridden"
     && demand.overrideExpiresAt !== null
     && Date.parse(demand.overrideExpiresAt) > Date.parse(snapshot.capturedAt);
-  const trusted = demand?.trustStatus === "trusted" || overrideValid;
+  const evidenceAgeMs = demand
+    ? Date.parse(snapshot.capturedAt) - Date.parse(demand.calculatedAt)
+    : null;
+  const evidenceFresh = evidenceAgeMs !== null
+    && evidenceAgeMs >= 0
+    && evidenceAgeMs <= INVENTORY_DEMAND_EVIDENCE_MAX_AGE_HOURS * 60 * 60 * 1_000;
+  const trusted = evidenceFresh && (demand?.trustStatus === "trusted" || overrideValid);
+  const demandStatus: SafetyEvidence["demandStatus"] = trusted
+    ? overrideValid ? "trusted_override" : "trusted"
+    : !demand
+      ? "fallback_missing"
+      : evidenceAgeMs !== null && evidenceAgeMs < 0
+        ? "fallback_future_dated"
+        : !evidenceFresh
+          ? "fallback_stale"
+          : demand.trustStatus === "overridden"
+            ? "fallback_expired_override"
+            : "fallback_untrusted";
   const protectedQty = trusted && demand
     ? ceilDivide(
         multiply(
@@ -500,6 +521,7 @@ function resolveSafety(snapshot: PlannerSupplySnapshot, warehouseId: number, var
       policyMode: "days_of_cover",
       protectedUnits: protectedQty.toString(),
       demandEvidenceId: trusted && demand ? demand.evidenceId : null,
+      demandStatus,
     },
     blockers: [],
   };

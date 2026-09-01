@@ -785,6 +785,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
           id: promiseSafetyPolicyVersions.id,
           version: promiseSafetyPolicyVersions.version,
           scopeKey: promiseSafetyPolicyVersions.scopeKey,
+          definitionHash: promiseSafetyPolicyVersions.definitionHash,
           requestHash: promiseSafetyPolicyVersions.requestHash,
         })
         .from(promiseSafetyPolicyVersions)
@@ -796,6 +797,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
           policyId: replay.id,
           version: replay.version,
           scopeKey: replay.scopeKey,
+          definitionHash: replay.definitionHash,
           alreadyApplied: true,
         };
       }
@@ -878,6 +880,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
         policyId: created.id,
         version,
         scopeKey,
+        definitionHash,
         alreadyApplied: false,
       };
     });
@@ -1344,9 +1347,10 @@ async function findMasterDataReplay(
         requestHash: String(row.request_hash),
         result: {
           policyId: Number(row.id),
-          version: Number(row.version),
-          scopeKey: String(row.scope_key),
-          alreadyApplied: true,
+           version: Number(row.version),
+           scopeKey: String(row.scope_key),
+           definitionHash: String(row.definition_hash),
+           alreadyApplied: true,
         },
       });
     }
@@ -1427,6 +1431,16 @@ async function assertIdempotencyKeyUnusedByOtherType(
              ${idempotencyKey}::text AS idempotency_key
       FROM public.idempotency_keys
       WHERE key = ${draftUpdateReceiptKey(idempotencyKey)}
+      UNION ALL
+      SELECT 'promise_safety_policy_draft_update'::text AS command_type,
+             ${idempotencyKey}::text AS idempotency_key
+      FROM public.idempotency_keys
+      WHERE key = ${`inventory-promise-safety-update:${idempotencyKey}`}
+      UNION ALL
+      SELECT 'inventory_demand_evidence_refresh'::text AS command_type,
+             ${idempotencyKey}::text AS idempotency_key
+      FROM public.idempotency_keys
+      WHERE key = ${`inventory-demand-evidence:${idempotencyKey}`}
     ) AS used_key
     WHERE used_key.idempotency_key = ${idempotencyKey}
       AND used_key.command_type <> ${commandType}

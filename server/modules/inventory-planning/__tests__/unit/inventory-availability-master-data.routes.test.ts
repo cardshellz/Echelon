@@ -25,11 +25,13 @@ vi.mock("../../../../routes/middleware", () => ({
 describe("inventory availability master-data routes", () => {
   let server: { url: string; close: () => Promise<void> };
   let service: ReturnType<typeof fakeService>;
+  let promiseSafetyService: ReturnType<typeof fakePromiseSafetyService>;
 
   beforeEach(async () => {
     requirePermissionMock.mockClear();
     service = fakeService();
-    server = await startServer(buildApp(service));
+    promiseSafetyService = fakePromiseSafetyService();
+    server = await startServer(buildApp(service, true, promiseSafetyService));
   });
 
   afterEach(async () => server.close());
@@ -103,6 +105,26 @@ describe("inventory availability master-data routes", () => {
       },
     );
     expect(response.status).toBe(200);
+  });
+
+  it("returns a retryable conflict for a serializable evidence race", async () => {
+    service.createTransformationModelDraft.mockRejectedValue({ code: "40001" });
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/supply-transformations/10/drafts`,
+      jsonPost({
+        productId: 10,
+        buildToPromiseEnabled: false,
+        paths: [],
+        recipeBindings: [],
+        changeReason: "Concurrent evidence test",
+        idempotencyKey: "route-serialization-1",
+      }),
+    );
+
+    expect(response).toMatchObject({
+      status: 409,
+      body: { error: { code: "INVENTORY_AVAILABILITY_RETRY_REQUIRED" } },
+    });
   });
 
   it("rejects malformed draft input before calling the service", async () => {
@@ -214,6 +236,7 @@ describe("inventory availability master-data routes", () => {
       policyId: 301,
       version: 1,
       scopeKey: "network:variant:11",
+      definitionHash: "b".repeat(64),
       alreadyApplied: false,
     });
     const valid = {
@@ -255,6 +278,67 @@ describe("inventory availability master-data routes", () => {
       body: { error: { code: "INVENTORY_AVAILABILITY_INVALID_INPUT" } },
     });
     expect(service.createPromiseSafetyPolicyDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads, edits, and refreshes promise safety through role-gated admin routes", async () => {
+    promiseSafetyService.getView.mockResolvedValue(promiseSafetyView());
+    promiseSafetyService.updatePolicyDraft.mockResolvedValue({
+      policyId: 301,
+      version: 1,
+      scopeKey: "network:variant:11",
+      definitionHash: "b".repeat(64),
+      alreadyApplied: false,
+    });
+    promiseSafetyService.refreshDemandEvidence.mockResolvedValue({
+      productId: 10,
+      methodVersion: "irreversible_consumption_v1_28d",
+      windowStartedAt: "2026-08-02T00:00:00.000Z",
+      windowEndedAt: "2026-08-30T00:00:00.000Z",
+      calculatedAt: "2026-08-30T12:00:00.000Z",
+      createdSnapshots: 1,
+      reusedSnapshots: 0,
+      trustedSnapshots: 1,
+      untrustedSnapshots: 0,
+      alreadyApplied: false,
+    });
+
+    const viewResponse = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/promise-safety/10`,
+    );
+    expect(viewResponse.status).toBe(200);
+    expect(promiseSafetyService.getView).toHaveBeenCalledWith(10);
+
+    const update = {
+      expectedVersion: 1,
+      expectedDefinitionHash: "a".repeat(64),
+      expectedHeadRevision: "0",
+      value: { policyMode: "fixed_units", fixedUnits: 4 },
+      changeReason: "Protect four units",
+      idempotencyKey: "safety-route-update-1",
+    };
+    const updateResponse = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/promise-safety-policies/drafts/301`,
+      { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) },
+    );
+    expect(updateResponse.status).toBe(200);
+    expect(promiseSafetyService.updatePolicyDraft).toHaveBeenCalledWith(301, update, "operator-1");
+
+    const refresh = {
+      changeReason: "Refresh reviewed demand inputs",
+      idempotencyKey: "safety-route-refresh-1",
+    };
+    const refreshResponse = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/promise-safety/10/demand-evidence/refresh`,
+      jsonPost(refresh),
+    );
+    expect(refreshResponse.status).toBe(201);
+    expect(promiseSafetyService.refreshDemandEvidence).toHaveBeenCalledWith(
+      10,
+      refresh,
+      "operator-1",
+    );
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "view");
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "edit");
   });
 
   it("updates a current draft in place with optimistic evidence and always returns 200", async () => {
@@ -325,9 +409,18 @@ function fakeService() {
   };
 }
 
+function fakePromiseSafetyService() {
+  return {
+    getView: vi.fn(),
+    refreshDemandEvidence: vi.fn(),
+    updatePolicyDraft: vi.fn(),
+  };
+}
+
 function buildApp(
   service: ReturnType<typeof fakeService>,
   authenticated = true,
+  promiseSafetyService = fakePromiseSafetyService(),
 ): express.Express {
   const app = express();
   app.use(express.json());
@@ -340,8 +433,28 @@ function buildApp(
       next();
     });
   }
-  registerInventoryAvailabilityMasterDataRoutes(app, { service });
+  registerInventoryAvailabilityMasterDataRoutes(app, { service, promiseSafetyService });
   return app;
+}
+
+function promiseSafetyView() {
+  return {
+    product: { id: 10, sku: "BASE", name: "Base product" },
+    variants: [],
+    warehouses: [],
+    policyHeads: [],
+    demandMethod: {
+      methodVersion: "irreversible_consumption_v1_28d" as const,
+      observationDays: 28 as const,
+      minimumObservedDays: 14 as const,
+      minimumSourceEvents: 2 as const,
+      minimumActiveDays: 2 as const,
+      minimumConsumptionUnits: 3 as const,
+      recencyDays: 14 as const,
+      maximumEvidenceAgeHours: 36 as const,
+    },
+    demandEvidence: [],
+  };
 }
 
 async function startServer(

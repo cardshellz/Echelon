@@ -972,7 +972,7 @@ export const demandEvidenceSnapshots = inventoryPlanningSchema.table(
     ),
     quantityValid: check(
       "demand_evidence_snapshots_quantity_chk",
-      sql`${table.irreversibleConsumptionUnits} >= 0 AND ${table.observedDays} > 0
+      sql`${table.irreversibleConsumptionUnits} >= 0 AND ${table.observedDays} >= 0
         AND ${table.dailyDemandMilliUnits} >= 0`,
     ),
     trustValid: check(

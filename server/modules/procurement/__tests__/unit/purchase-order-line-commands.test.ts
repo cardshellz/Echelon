@@ -731,4 +731,14 @@ describe("purchase-order line command transaction invariants", () => {
       );
     }
   });
+
+  it("normalizes an inactive receive configuration instead of blocking piece purchasing", () => {
+    const resolverSource = section("async function resolveLineContext(", "function lineValues(");
+    const lineValuesSource = section("function lineValues(", "async function lockHeader(");
+    expect(resolverSource).toContain("receiveVariant = null");
+    expect(resolverSource).not.toContain("PO_LINE_RECEIVE_VARIANT_INACTIVE");
+    expect(lineValuesSource).toContain("context.receiveVariant?.id ?? null");
+    expect(updateLineSource).toContain("const effectiveReceiveVariantId = context.receiveVariant?.id ?? null");
+    expect(updateLineSource).toContain("expectedReceiveVariantId: effectiveReceiveVariantId");
+  });
 });
