@@ -14,7 +14,10 @@ import { warehouseStorage } from "../warehouse";
 const storage = { ...catalogStorage, ...warehouseStorage };
 import { fetchShopifyCatalogProducts, type ShopifyCatalogProduct } from "../integrations/shopify";
 import { db, productCategories, eq, and } from "../../storage/base";
-import { decideImportedShopifyProductMapping } from "./shopify-product-mapping.domain";
+import {
+  decideImportedShopifyProductMapping,
+  resolveImportedVariantSku,
+} from "./shopify-product-mapping.domain";
 
 // ---------------------------------------------------------------------------
 // Shopify product_type → Echelon product_type slug mapping
@@ -177,23 +180,19 @@ export function createProductImportService() {
       const mappedByShopifyId = await storage.getProductByShopifyProductId(String(shopifyProductId));
       if (mappedByShopifyId) matchedProducts.set(mappedByShopifyId.id, mappedByShopifyId);
       for (const variant of variants) {
-        if (variant.sku) {
-          const pv = await storage.getProductVariantBySku(variant.sku);
-          if (pv) {
-            if (pv.salesEligibility === "internal_only") {
-              internalOnlyMatches.push({ productId: pv.productId, sku: variant.sku });
-              continue;
-            }
-            const matchedProduct = await storage.getProductById(pv.productId);
-            if (matchedProduct) matchedProducts.set(matchedProduct.id, matchedProduct);
-            variantsUpdated++;
-          } else {
-            skuNotFound++;
-            unmatchedSkus.push(variant.sku);
+        const importSku = resolveImportedVariantSku(variant);
+        const pv = await storage.getProductVariantBySku(importSku);
+        if (pv) {
+          if (pv.salesEligibility === "internal_only") {
+            internalOnlyMatches.push({ productId: pv.productId, sku: importSku });
+            continue;
           }
+          const matchedProduct = await storage.getProductById(pv.productId);
+          if (matchedProduct) matchedProducts.set(matchedProduct.id, matchedProduct);
+          variantsUpdated++;
         } else {
           skuNotFound++;
-          unmatchedSkus.push(`(no SKU) ${variant.title}`);
+          unmatchedSkus.push(importSku);
         }
       }
 
@@ -292,10 +291,10 @@ export function createProductImportService() {
               seenUrls.add(img.url);
 
               let variantId: number | null = null;
-              if (variant.sku) {
-                const pv = await storage.getProductVariantBySku(variant.sku);
-                if (pv) variantId = pv.id;
-              }
+              const assetVariant = await storage.getProductVariantBySku(
+                resolveImportedVariantSku(variant),
+              );
+              if (assetVariant) variantId = assetVariant.id;
 
               await storage.createProductAsset({
                 productId: echelonProduct.id,
@@ -313,9 +312,13 @@ export function createProductImportService() {
           // routing through a warehouse/bin assignment service. Acceptable for now since
           // product_locations is configuration data (bin assignments), not transactional inventory.
           // When a bin assignment service exists, route through it instead.
-          if (variant.sku) {
-            await storage.upsertProductLocationBySku(variant.sku, variant.title, variant.status, undefined, variant.barcode || undefined);
-          }
+          await storage.upsertProductLocationBySku(
+            resolveImportedVariantSku(variant),
+            variant.title,
+            variant.status,
+            undefined,
+            variant.barcode || undefined,
+          );
         }
       } else {
         console.log(`[Sync] No Echelon product for Shopify product ${shopifyProductId} (${firstVariant.productTitle})`);
@@ -385,15 +388,35 @@ export function createProductImportService() {
       description: string | null;
       barcode: string | null;
       imageUrl: string | null;
+      /**
+       * Additional SKU-less variants of the SAME Shopify product. They become
+       * variants of this product rather than products of their own — a graded
+       * slab listing carries one row per serial, and each is a unit of one
+       * sellable product, not a separate product.
+       */
+      siblingVariants?: Array<{
+        sku: string;
+        name: string;
+        shopifyVariantId: number;
+        shopifyInventoryItemId: number | null;
+        barcode: string | null;
+      }>;
     }> = [];
+
+    // SKU-less variants, grouped by their Shopify product so a listing with
+    // several of them yields one Echelon product with several variants.
+    type FallbackVariant = (typeof standaloneVariants)[number];
+    const fallbackByShopifyProduct = new Map<number, FallbackVariant[]>();
 
     const mappingConflicts: ShopifyImportMappingConflict[] = [];
     const ambiguousBaseSkus = new Set<string>();
 
     for (const variant of shopifyProducts) {
-      if (!variant.sku) continue;
+      // SKU-less variants (sealed wax, graded singles) import under their
+      // SHOPIFY-<variantId> fallback instead of being skipped.
+      const importSku = resolveImportedVariantSku(variant);
 
-      const match = variant.sku.match(VARIANT_PATTERN);
+      const match = importSku.match(VARIANT_PATTERN);
 
       if (match) {
         const baseSku = match[1];
@@ -438,7 +461,7 @@ export function createProductImportService() {
         }
 
         baseSkuMap[baseSku].variants.push({
-          sku: variant.sku,
+          sku: importSku,
           name: variant.variantTitle || `${variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case'} of ${unitsPerVariant}`,
           type: variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case',
           unitsPerVariant,
@@ -448,8 +471,8 @@ export function createProductImportService() {
           imageUrl: variant.imageUrl
         });
       } else {
-        standaloneVariants.push({
-          sku: variant.sku,
+        const entry: FallbackVariant = {
+          sku: importSku,
           name: variant.title,
           shopifyProductId: variant.shopifyProductId,
           shopifyVariantId: variant.variantId,
@@ -459,11 +482,39 @@ export function createProductImportService() {
           description: variant.description,
           barcode: variant.barcode,
           imageUrl: variant.imageUrl
-        });
+        };
+        if (variant.sku && variant.sku.trim()) {
+          // A real SKU still owns its own product, exactly as before.
+          standaloneVariants.push(entry);
+        } else {
+          const bucket = fallbackByShopifyProduct.get(variant.shopifyProductId) ?? [];
+          bucket.push(entry);
+          fallbackByShopifyProduct.set(variant.shopifyProductId, bucket);
+        }
       }
     }
 
-    console.log(`Parsed: ${Object.keys(baseSkuMap).length} base SKUs with variants, ${standaloneVariants.length} standalone`);
+    // One Echelon product per Shopify product for SKU-less listings. The lowest
+    // Shopify variant id is the representative so the product SKU is stable
+    // across runs; the rest attach as sibling variants.
+    let groupedFallbackVariants = 0;
+    for (const bucket of fallbackByShopifyProduct.values()) {
+      const ordered = [...bucket].sort((left, right) => left.shopifyVariantId - right.shopifyVariantId);
+      const [representative, ...siblings] = ordered;
+      if (siblings.length > 0) {
+        representative.siblingVariants = siblings.map((sibling) => ({
+          sku: sibling.sku,
+          name: sibling.name,
+          shopifyVariantId: sibling.shopifyVariantId,
+          shopifyInventoryItemId: sibling.shopifyInventoryItemId,
+          barcode: sibling.barcode,
+        }));
+        groupedFallbackVariants += siblings.length;
+      }
+      standaloneVariants.push(representative);
+    }
+
+    console.log(`Parsed: ${Object.keys(baseSkuMap).length} base SKUs with variants, ${standaloneVariants.length} standalone (${groupedFallbackVariants} SKU-less variants folded into a shared product)`);
 
     let productsCreated = 0;
     let productsUpdated = 0;
@@ -700,6 +751,39 @@ export function createProductImportService() {
           shopifyInventoryItemId: sv.shopifyInventoryItemId ? String(sv.shopifyInventoryItemId) : null,
         });
         variantsCreated++;
+      }
+
+      // Remaining SKU-less variants of the same Shopify product ride along as
+      // variants instead of becoming duplicate products mapped to one Shopify id.
+      for (const sibling of sv.siblingVariants ?? []) {
+        const existingSibling = await storage.getProductVariantBySku(sibling.sku);
+        if (existingSibling) {
+          if (existingSibling.productId !== product.id) {
+            console.warn(`[PRODUCT IMPORT] SKU conflict: ${sibling.sku} exists on product_id=${existingSibling.productId} but import wants product_id=${product.id} — skipping update`);
+            continue;
+          }
+          await storage.updateProductVariant(existingSibling.id, {
+            name: sibling.name,
+            unitsPerVariant: 1,
+            hierarchyLevel: 1,
+            barcode: sibling.barcode,
+            shopifyVariantId: String(sibling.shopifyVariantId),
+            shopifyInventoryItemId: sibling.shopifyInventoryItemId ? String(sibling.shopifyInventoryItemId) : undefined,
+          });
+          variantsUpdated++;
+        } else {
+          await storage.createProductVariant({
+            productId: product.id,
+            sku: sibling.sku,
+            name: sibling.name,
+            unitsPerVariant: 1,
+            hierarchyLevel: 1,
+            barcode: sibling.barcode,
+            shopifyVariantId: String(sibling.shopifyVariantId),
+            shopifyInventoryItemId: sibling.shopifyInventoryItemId ? String(sibling.shopifyInventoryItemId) : null,
+          });
+          variantsCreated++;
+        }
       }
     }
 

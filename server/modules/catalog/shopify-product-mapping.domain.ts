@@ -429,3 +429,25 @@ export function evaluateShopifyProductMappingRepair(input: {
     variantMappings,
   };
 }
+
+/**
+ * Resolve the SKU catalog import should key a Shopify variant on.
+ *
+ * Sealed wax and graded singles are created in Shopify without SKUs — those
+ * lines turn over too fast to earn durable ones. Import used to skip such
+ * variants outright, so they never entered the catalog, never received a
+ * shipping group, and therefore fell into their own "ungrouped" bucket at
+ * checkout, silently defeating per-group free-shipping thresholds.
+ *
+ * Falling back to the Shopify variant id matches the `SHOPIFY-<variantId>`
+ * convention already present in the catalog for these product lines. The
+ * fallback never collides with a real SKU pattern: variant ids are digits, so
+ * `SHOPIFY-<id>` cannot match the multi-UOM suffix pattern `-(P|B|C)<n>`.
+ */
+export function resolveImportedVariantSku(variant: {
+  sku: string | null | undefined;
+  variantId: number;
+}): string {
+  const trimmed = variant.sku?.trim();
+  return trimmed ? trimmed : `SHOPIFY-${variant.variantId}`;
+}
