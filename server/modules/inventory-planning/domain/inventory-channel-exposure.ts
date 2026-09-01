@@ -72,6 +72,15 @@ export function calculatePublicationSourceBindingDefinitionHash(input: {
   }), "utf8").digest("hex");
 }
 
+export function calculatePublicationVariantMappingDefinitionHash(input: {
+  publicationTargetId: number;
+  productVariantId: number;
+  externalInventoryItemId: string;
+  externalSku: string | null;
+}): string {
+  return createHash("sha256").update(canonicalJson(input), "utf8").digest("hex");
+}
+
 export function resolveChannelExposurePolicy(
   input: ChannelExposureResolutionInput,
 ): ChannelExposureResolutionResult {

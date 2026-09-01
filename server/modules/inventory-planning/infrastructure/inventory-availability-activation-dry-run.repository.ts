@@ -165,7 +165,8 @@ implements InventoryAvailabilityActivationDryRunStore {
           `SELECT target.id, target.channel_id, target.channel_connection_id,
                   target.fulfillment_node_id,
                   node.warehouse_id, target.provider_scope_type,
-                  target.external_scope_id, target.publication_authority, target.state
+                  target.external_scope_id, target.publication_authority, target.state,
+                  target.revision
            FROM inventory.inventory_publication_targets AS target
            JOIN warehouse.fulfillment_nodes AS node ON node.id = target.fulfillment_node_id
            WHERE target.channel_id = ANY($1::integer[])
@@ -173,14 +174,38 @@ implements InventoryAvailabilityActivationDryRunStore {
           [channelIds],
         )).rows;
         const targetIds = targetRows.map((row) => positiveInteger(row.id, "publicationTarget.id"));
+        const mappingRows = targetIds.length === 0 ? [] : (await client.query<Record<string, any>>(
+          `SELECT DISTINCT ON (head.publication_target_id, head.product_variant_id)
+                  head.publication_target_id, head.product_variant_id,
+                  pointer.pointer_type, mapping.id AS mapping_id, mapping.version,
+                  mapping.definition_hash, mapping.external_inventory_item_id,
+                  mapping.external_sku
+           FROM inventory.publication_variant_mapping_heads AS head
+           CROSS JOIN LATERAL (
+             VALUES ('draft', head.draft_mapping_id), ('active', head.active_mapping_id)
+           ) AS pointer(pointer_type, mapping_id)
+           JOIN inventory.publication_variant_mapping_versions AS mapping
+             ON mapping.id = pointer.mapping_id
+           WHERE head.publication_target_id = ANY($1::integer[])
+             AND head.product_variant_id = ANY($2::integer[])
+           ORDER BY head.publication_target_id, head.product_variant_id,
+                    CASE pointer.pointer_type WHEN 'draft' THEN 0 ELSE 1 END`,
+          [targetIds, variantIds],
+        )).rows;
         const readbackRows = targetIds.length === 0 ? [] : (await client.query<Record<string, any>>(
-          `SELECT DISTINCT ON (readback.publication_target_id, readback.product_variant_id)
-                  readback.publication_target_id,
-                  readback.product_variant_id,
-                  readback.observed_quantity,
-                  readback.observed_at
-           FROM inventory.inventory_publication_readbacks AS readback
-           WHERE readback.publication_target_id = ANY($1::integer[])
+           `SELECT DISTINCT ON (readback.publication_target_id, readback.product_variant_id)
+                   readback.publication_target_id,
+                   readback.product_variant_id,
+                   readback.observed_quantity,
+                   readback.observed_at,
+                   COALESCE(
+                     readback.external_inventory_item_id_snapshot,
+                     publication.external_inventory_item_id_snapshot
+                   ) AS external_inventory_item_id_snapshot
+            FROM inventory.inventory_publication_readbacks AS readback
+            LEFT JOIN inventory.inventory_publication_outbox AS publication
+              ON publication.id = readback.outbox_id
+            WHERE readback.publication_target_id = ANY($1::integer[])
              AND readback.product_variant_id = ANY($2::integer[])
            ORDER BY readback.publication_target_id, readback.product_variant_id,
                      readback.observed_at DESC, readback.id DESC`,
@@ -202,12 +227,17 @@ implements InventoryAvailabilityActivationDryRunStore {
           `${positiveInteger(row.publication_target_id, "readback.targetId")}:${positiveInteger(row.product_variant_id, "readback.variantId")}`,
           row,
         ] as const));
+        const mappingByKey = new Map(mappingRows.map((row) => [
+          `${positiveInteger(row.publication_target_id, "mapping.targetId")}:${positiveInteger(row.product_variant_id, "mapping.variantId")}`,
+          row,
+        ] as const));
 
         return keys.map((key) => {
           const feed = feedByKey.get(`${key.channelId}:${key.productVariantId}`);
           const configuredTargets = (targetRowsByChannel.get(key.channelId) ?? []).map((target) => {
             const publicationTargetId = positiveInteger(target.id, "publicationTarget.id");
             const readback = readbackByKey.get(`${publicationTargetId}:${key.productVariantId}`);
+            const mapping = mappingByKey.get(`${publicationTargetId}:${key.productVariantId}`);
             return {
               publicationTargetId,
               channelConnectionId: positiveInteger(
@@ -223,12 +253,25 @@ implements InventoryAvailabilityActivationDryRunStore {
               externalScopeId: String(target.external_scope_id),
               publicationAuthority: target.publication_authority,
               state: target.state,
+              revision: String(target.revision),
+              mapping: mapping ? {
+                mappingId: positiveInteger(mapping.mapping_id, "mapping.id"),
+                version: positiveInteger(mapping.version, "mapping.version"),
+                definitionHash: String(mapping.definition_hash),
+                authority: String(mapping.pointer_type),
+                externalInventoryItemId: String(mapping.external_inventory_item_id),
+                externalSku: mapping.external_sku == null ? null : String(mapping.external_sku),
+              } : null,
               latestReadbackUnits: readback
                 ? nonnegativeQuantity(readback.observed_quantity, "readback.observedQuantity")
                 : null,
               latestReadbackAt: readback
                 ? iso(readback.observed_at, "readback.observedAt")
                 : null,
+              latestReadbackExternalInventoryItemId:
+                readback?.external_inventory_item_id_snapshot == null
+                  ? null
+                  : String(readback.external_inventory_item_id_snapshot),
             };
           });
           const mappingState = !feed

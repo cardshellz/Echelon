@@ -2,15 +2,23 @@ import { createHash } from "node:crypto";
 
 import {
   channelExposureDraftSaveResultSchema,
+  createInventoryPublicationTargetRequestSchema,
   inventoryChannelExposureAdminViewSchema,
   inventoryChannelExposurePreviewSchema,
+  inventoryPublicationTargetCommandResultSchema,
   saveChannelExposurePolicyDraftRequestSchema,
   savePublicationSourceBindingDraftRequestSchema,
+  savePublicationVariantMappingDraftRequestSchema,
+  setInventoryPublicationTargetPreviewStateRequestSchema,
   type ChannelExposureDraftSaveResult,
+  type CreateInventoryPublicationTargetRequest,
   type InventoryChannelExposureAdminView,
   type InventoryChannelExposurePreview,
+  type InventoryPublicationTargetCommandResult,
   type SaveChannelExposurePolicyDraftRequest,
   type SavePublicationSourceBindingDraftRequest,
+  type SavePublicationVariantMappingDraftRequest,
+  type SetInventoryPublicationTargetPreviewStateRequest,
 } from "@shared/types/inventory-channel-exposure";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
@@ -34,6 +42,27 @@ extends SavePublicationSourceBindingDraftRequest {
   occurredAt: Date;
 }
 
+export interface CreateInventoryPublicationTargetCommand
+extends CreateInventoryPublicationTargetRequest {
+  actorId: string;
+  requestHash: string;
+  occurredAt: Date;
+}
+
+export interface SetInventoryPublicationTargetPreviewStateCommand
+extends SetInventoryPublicationTargetPreviewStateRequest {
+  actorId: string;
+  requestHash: string;
+  occurredAt: Date;
+}
+
+export interface SavePublicationVariantMappingDraftCommand
+extends SavePublicationVariantMappingDraftRequest {
+  actorId: string;
+  requestHash: string;
+  occurredAt: Date;
+}
+
 export interface InventoryChannelExposureAdminStore {
   getAdminView(productId: number | null): Promise<InventoryChannelExposureAdminView>;
   savePolicyDraft(
@@ -41,6 +70,15 @@ export interface InventoryChannelExposureAdminStore {
   ): Promise<ChannelExposureDraftSaveResult>;
   saveSourceBindingDraft(
     command: SavePublicationSourceBindingDraftCommand,
+  ): Promise<ChannelExposureDraftSaveResult>;
+  createPublicationTarget(
+    command: CreateInventoryPublicationTargetCommand,
+  ): Promise<InventoryPublicationTargetCommandResult>;
+  setPublicationTargetPreviewState(
+    command: SetInventoryPublicationTargetPreviewStateCommand,
+  ): Promise<InventoryPublicationTargetCommandResult>;
+  saveVariantMappingDraft(
+    command: SavePublicationVariantMappingDraftCommand,
   ): Promise<ChannelExposureDraftSaveResult>;
   preview(publicationTargetId: number, productId: number): Promise<InventoryChannelExposurePreview>;
 }
@@ -102,6 +140,62 @@ export class InventoryChannelExposureAdminService {
       ...normalizedRequest,
       actorId,
       requestHash,
+      occurredAt: validNow(this.clock),
+    }));
+  }
+
+  async createPublicationTarget(
+    input: CreateInventoryPublicationTargetRequest,
+    actorInput: string,
+  ): Promise<InventoryPublicationTargetCommandResult> {
+    const request = parseRequest(
+      createInventoryPublicationTargetRequestSchema,
+      input,
+      "INVENTORY_CHANNEL_EXPOSURE_INVALID_PUBLICATION_TARGET",
+    );
+    const actorId = parseActor(actorInput);
+    return inventoryPublicationTargetCommandResultSchema.parse(await this.store.createPublicationTarget({
+      ...request,
+      actorId,
+      requestHash: requestHashFor("inventory_publication_target_create", actorId, request),
+      occurredAt: validNow(this.clock),
+    }));
+  }
+
+  async setPublicationTargetPreviewState(
+    input: SetInventoryPublicationTargetPreviewStateRequest,
+    actorInput: string,
+  ): Promise<InventoryPublicationTargetCommandResult> {
+    const request = parseRequest(
+      setInventoryPublicationTargetPreviewStateRequestSchema,
+      input,
+      "INVENTORY_CHANNEL_EXPOSURE_INVALID_TARGET_PREVIEW_STATE",
+    );
+    const actorId = parseActor(actorInput);
+    return inventoryPublicationTargetCommandResultSchema.parse(
+      await this.store.setPublicationTargetPreviewState({
+        ...request,
+        actorId,
+        requestHash: requestHashFor("inventory_publication_target_preview_state", actorId, request),
+        occurredAt: validNow(this.clock),
+      }),
+    );
+  }
+
+  async saveVariantMappingDraft(
+    input: SavePublicationVariantMappingDraftRequest,
+    actorInput: string,
+  ): Promise<ChannelExposureDraftSaveResult> {
+    const request = parseRequest(
+      savePublicationVariantMappingDraftRequestSchema,
+      input,
+      "INVENTORY_CHANNEL_EXPOSURE_INVALID_VARIANT_MAPPING",
+    );
+    const actorId = parseActor(actorInput);
+    return channelExposureDraftSaveResultSchema.parse(await this.store.saveVariantMappingDraft({
+      ...request,
+      actorId,
+      requestHash: requestHashFor("publication_variant_mapping_draft_save", actorId, request),
       occurredAt: validNow(this.clock),
     }));
   }

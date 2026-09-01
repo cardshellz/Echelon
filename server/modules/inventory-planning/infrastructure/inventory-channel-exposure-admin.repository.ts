@@ -4,14 +4,18 @@ import {
   channelExposurePolicyHeads,
   channelExposurePolicyVersions,
   idempotencyKeys,
+  inventoryPublicationTargets,
   publicationSourceBindingHeads,
   publicationSourceBindingMembers,
   publicationSourceBindingVersions,
+  publicationVariantMappingHeads,
+  publicationVariantMappingVersions,
 } from "@shared/schema";
 import {
   channelExposureDraftSaveResultSchema,
   inventoryChannelExposureAdminViewSchema,
   inventoryChannelExposurePreviewSchema,
+  inventoryPublicationTargetCommandResultSchema,
   type ChannelExposureDraftSaveResult,
   type ChannelExposurePolicyHead,
   type ChannelExposurePolicyScope,
@@ -19,8 +23,11 @@ import {
   type ChannelExposurePolicyVersion,
   type InventoryChannelExposureAdminView,
   type InventoryChannelExposurePreview,
+  type InventoryPublicationTargetCommandResult,
   type PublicationSourceBindingHead,
   type PublicationSourceBindingVersion,
+  type PublicationVariantMappingHead,
+  type PublicationVariantMappingVersion,
 } from "@shared/types/inventory-channel-exposure";
 
 import { db } from "../../../db";
@@ -28,13 +35,17 @@ import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import { sqlIntegerArray } from "../../../infrastructure/postgres-array";
 import type {
   InventoryChannelExposureAdminStore,
+  CreateInventoryPublicationTargetCommand,
   SaveChannelExposurePolicyDraftCommand,
   SavePublicationSourceBindingDraftCommand,
+  SavePublicationVariantMappingDraftCommand,
+  SetInventoryPublicationTargetPreviewStateCommand,
 } from "../application/inventory-channel-exposure-admin.service";
 import {
   calculateChannelExposure,
   calculateChannelExposureDefinitionHash,
   calculatePublicationSourceBindingDefinitionHash,
+  calculatePublicationVariantMappingDefinitionHash,
   channelExposurePolicyScopeKey,
   resolveChannelExposurePolicy,
   type ChannelExposurePolicyCandidate,
@@ -49,8 +60,12 @@ type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 const IDEMPOTENCY_LOCK_NAMESPACE = 918420;
 const POLICY_LOCK_NAMESPACE = 918425;
 const SOURCE_BINDING_LOCK_NAMESPACE = 918426;
+const PUBLICATION_TARGET_LOCK_NAMESPACE = 918427;
+const VARIANT_MAPPING_LOCK_NAMESPACE = 918428;
 const POLICY_RECEIPT_PREFIX = "inventory-channel-exposure-policy:";
 const SOURCE_RECEIPT_PREFIX = "inventory-publication-source-binding:";
+const TARGET_RECEIPT_PREFIX = "inventory-publication-target:";
+const VARIANT_MAPPING_RECEIPT_PREFIX = "inventory-publication-variant-mapping:";
 
 export class PostgresInventoryChannelExposureAdminStore
 implements InventoryChannelExposureAdminStore {
@@ -102,7 +117,7 @@ implements InventoryChannelExposureAdminStore {
     `));
     const targetRows = rows(await this.database.execute(sql`
       SELECT id, channel_id, channel_connection_id, fulfillment_node_id,
-             provider_scope_type, external_scope_id, publication_authority, state
+             provider_scope_type, external_scope_id, publication_authority, state, revision
       FROM inventory.inventory_publication_targets
       ORDER BY channel_id, channel_connection_id, external_scope_id, id
     `));
@@ -145,6 +160,33 @@ implements InventoryChannelExposureAdminStore {
       JOIN inventory.publication_source_binding_versions AS binding ON binding.id = pointer.binding_id
       LEFT JOIN inventory.publication_source_binding_members AS member ON member.binding_id = binding.id
       ORDER BY head.publication_target_id, pointer.pointer_type, member.priority
+    `));
+    const mappingRows = productId === null ? [] : rows(await this.database.execute(sql`
+      SELECT head.publication_target_id, head.product_variant_id, head.revision,
+             pointer.pointer_type, mapping.id AS mapping_id, mapping.version,
+             mapping.lifecycle_status, mapping.external_inventory_item_id,
+             mapping.external_sku, mapping.definition_hash, mapping.change_reason,
+             mapping.created_by, mapping.created_at, mapping.updated_at
+      FROM inventory.publication_variant_mapping_heads AS head
+      CROSS JOIN LATERAL (
+        VALUES ('active', head.active_mapping_id), ('draft', head.draft_mapping_id)
+      ) AS pointer(pointer_type, mapping_id)
+      JOIN inventory.publication_variant_mapping_versions AS mapping ON mapping.id = pointer.mapping_id
+      JOIN catalog.product_variants AS variant ON variant.id = head.product_variant_id
+      WHERE variant.product_id = ${productId}
+      ORDER BY head.publication_target_id, head.product_variant_id, pointer.pointer_type
+    `));
+    const legacyMappingRows = productId === null ? [] : rows(await this.database.execute(sql`
+      SELECT feed.id AS feed_id, feed.channel_id, feed.product_variant_id,
+             feed.is_active, feed.quarantined_at,
+             feed.channel_inventory_item_id, COALESCE(feed.channel_sku, listing.external_sku) AS external_sku
+      FROM channels.channel_feeds AS feed
+      JOIN catalog.product_variants AS variant ON variant.id = feed.product_variant_id
+      LEFT JOIN channels.channel_listings AS listing
+        ON listing.channel_id = feed.channel_id
+       AND listing.product_variant_id = feed.product_variant_id
+      WHERE variant.product_id = ${productId}
+      ORDER BY feed.channel_id, feed.product_variant_id, feed.id
     `));
     const connectionsByChannel = groupBy(connectionRows, (row) => positiveInteger(row.channel_id, "connection.channelId"));
 
@@ -189,6 +231,7 @@ implements InventoryChannelExposureAdminStore {
         externalScopeId: String(row.external_scope_id),
         publicationAuthority: String(row.publication_authority),
         state: String(row.state),
+        revision: String(row.revision),
       })),
       fulfillmentNodes: nodeRows.map((row) => ({
         id: positiveInteger(row.id, "node.id"),
@@ -201,8 +244,332 @@ implements InventoryChannelExposureAdminStore {
       })),
       policyHeads: mapPolicyHeads(policyRows),
       sourceBindingHeads: mapBindingHeads(bindingRows),
+      variantMappingHeads: mapVariantMappingHeads(mappingRows),
+      legacyMappingCandidates: legacyMappingRows.map((row) => ({
+        channelId: positiveInteger(row.channel_id, "legacyMapping.channelId"),
+        productVariantId: positiveInteger(row.product_variant_id, "legacyMapping.variantId"),
+        feedId: positiveInteger(row.feed_id, "legacyMapping.feedId"),
+        mappingState: row.quarantined_at != null ? "quarantined" as const
+          : Number(row.is_active) === 1 ? "active" as const : "inactive" as const,
+        externalInventoryItemId: nullableText(row.channel_inventory_item_id),
+        externalSku: nullableText(row.external_sku),
+      })),
       runtimeAuthority: "legacy_channel_allocation_rules",
       providerWriteEnabled: false,
+    });
+  }
+
+  async createPublicationTarget(
+    command: CreateInventoryPublicationTargetCommand,
+  ): Promise<InventoryPublicationTargetCommandResult> {
+    return this.database.transaction(async (tx) => {
+      const receiptKey = `${TARGET_RECEIPT_PREFIX}${command.idempotencyKey}`;
+      await lockIdempotency(tx, command.idempotencyKey);
+      const replay = await loadTargetReplay(tx, receiptKey, command.requestHash);
+      if (replay) return replay;
+      await insertReceipt(tx, receiptKey, command.requestHash, command.occurredAt);
+      await validatePublicationTarget(tx, command);
+      const identityKey = [
+        command.channelConnectionId,
+        command.providerScopeType,
+        command.externalScopeId,
+      ].join(":");
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(${PUBLICATION_TARGET_LOCK_NAMESPACE}, hashtext(${identityKey}))
+      `);
+      const duplicateRows = rows(await tx.execute(sql`
+        SELECT id
+        FROM inventory.inventory_publication_targets
+        WHERE channel_connection_id = ${command.channelConnectionId}
+          AND provider_scope_type = ${command.providerScopeType}
+          AND external_scope_id = ${command.externalScopeId}
+        FOR SHARE
+      `));
+      if (duplicateRows.length > 0) {
+        throw new InventoryAvailabilityMasterDataError(
+          409,
+          "INVENTORY_PUBLICATION_TARGET_ALREADY_EXISTS",
+          "This provider destination already has an exact publication target.",
+        );
+      }
+      const inserted = await tx.insert(inventoryPublicationTargets).values({
+        channelId: command.channelId,
+        channelConnectionId: command.channelConnectionId,
+        fulfillmentNodeId: command.legacyFulfillmentNodeId,
+        providerScopeType: command.providerScopeType,
+        externalScopeId: command.externalScopeId,
+        publicationAuthority: command.publicationAuthority,
+        state: "disabled",
+        changeReason: command.changeReason,
+        createdBy: command.actorId,
+        activatedBy: null,
+        activatedAt: null,
+        revision: BigInt(1),
+        createdAt: command.occurredAt,
+        updatedAt: command.occurredAt,
+      }).returning({ id: inventoryPublicationTargets.id });
+      const publicationTargetId = inserted[0]!.id;
+      const result = inventoryPublicationTargetCommandResultSchema.parse({
+        publicationTargetId,
+        revision: "1",
+        state: "disabled",
+        alreadyApplied: false,
+        runtimeAuthorityChanged: false,
+        providerWriteAttempted: false,
+        outboxEnqueued: false,
+      });
+      await persistAuditEvent(tx, {
+        actor: command.actorId,
+        action: "inventory_availability.publication_target.created_disabled",
+        target: `inventory.inventory_publication_target:${publicationTargetId}`,
+        changes: { before: null, after: {
+          channelId: command.channelId,
+          channelConnectionId: command.channelConnectionId,
+          legacyFulfillmentNodeId: command.legacyFulfillmentNodeId,
+          providerScopeType: command.providerScopeType,
+          externalScopeId: command.externalScopeId,
+          publicationAuthority: command.publicationAuthority,
+          state: "disabled",
+        } },
+        context: { idempotencyKey: command.idempotencyKey, requestHash: command.requestHash,
+          runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false },
+      }, { timestamp: command.occurredAt, emitStructuredLog: false });
+      await completeTargetReceipt(tx, receiptKey, "inventory_publication_target_create", result);
+      return result;
+    });
+  }
+
+  async setPublicationTargetPreviewState(
+    command: SetInventoryPublicationTargetPreviewStateCommand,
+  ): Promise<InventoryPublicationTargetCommandResult> {
+    return this.database.transaction(async (tx) => {
+      const receiptKey = `${TARGET_RECEIPT_PREFIX}${command.idempotencyKey}`;
+      await lockIdempotency(tx, command.idempotencyKey);
+      const replay = await loadTargetReplay(tx, receiptKey, command.requestHash);
+      if (replay) return replay;
+      await insertReceipt(tx, receiptKey, command.requestHash, command.occurredAt);
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(${PUBLICATION_TARGET_LOCK_NAMESPACE}, ${command.publicationTargetId})
+      `);
+      const targetRows = rows(await tx.execute(sql`
+        SELECT id, state, revision
+        FROM inventory.inventory_publication_targets
+        WHERE id = ${command.publicationTargetId}
+        FOR UPDATE
+      `));
+      const target = targetRows[0];
+      if (!target) {
+        throw new InventoryAvailabilityMasterDataError(
+          404,
+          "INVENTORY_CHANNEL_EXPOSURE_TARGET_NOT_FOUND",
+          "The selected publication target does not exist.",
+        );
+      }
+      if (String(target.revision) !== command.expectedRevision) {
+        throw new InventoryAvailabilityMasterDataError(
+          409,
+          "INVENTORY_PUBLICATION_TARGET_STALE",
+          "The publication target changed. Reload it before changing preview state.",
+        );
+      }
+      const previousState = String(target.state);
+      if (previousState === "live") {
+        throw new InventoryAvailabilityMasterDataError(
+          409,
+          "INVENTORY_PUBLICATION_TARGET_LIVE",
+          "This readiness command cannot change a live publication target.",
+        );
+      }
+      if (previousState === command.state) {
+        throw new InventoryAvailabilityMasterDataError(
+          409,
+          "INVENTORY_PUBLICATION_TARGET_STATE_UNCHANGED",
+          "The publication target is already in the requested state.",
+        );
+      }
+      await tx.update(inventoryPublicationTargets).set({
+        state: command.state,
+        activatedBy: command.state === "preview" ? command.actorId : null,
+        activatedAt: command.state === "preview" ? command.occurredAt : null,
+        revision: sql`${inventoryPublicationTargets.revision} + 1`,
+        updatedAt: command.occurredAt,
+      }).where(eq(inventoryPublicationTargets.id, command.publicationTargetId));
+      const result = inventoryPublicationTargetCommandResultSchema.parse({
+        publicationTargetId: command.publicationTargetId,
+        revision: (BigInt(command.expectedRevision) + BigInt(1)).toString(),
+        state: command.state,
+        alreadyApplied: false,
+        runtimeAuthorityChanged: false,
+        providerWriteAttempted: false,
+        outboxEnqueued: false,
+      });
+      await persistAuditEvent(tx, {
+        actor: command.actorId,
+        action: "inventory_availability.publication_target.preview_state_changed",
+        target: `inventory.inventory_publication_target:${command.publicationTargetId}`,
+        changes: { before: { state: previousState }, after: { state: command.state } },
+        context: { reason: command.changeReason, idempotencyKey: command.idempotencyKey,
+          requestHash: command.requestHash, runtimeAuthorityChanged: false,
+          providerWriteAttempted: false, outboxEnqueued: false },
+      }, { timestamp: command.occurredAt, emitStructuredLog: false });
+      await completeTargetReceipt(tx, receiptKey, "inventory_publication_target_preview_state", result);
+      return result;
+    });
+  }
+
+  async saveVariantMappingDraft(
+    command: SavePublicationVariantMappingDraftCommand,
+  ): Promise<ChannelExposureDraftSaveResult> {
+    return this.database.transaction(async (tx) => {
+      const receiptKey = `${VARIANT_MAPPING_RECEIPT_PREFIX}${command.idempotencyKey}`;
+      await lockIdempotency(tx, command.idempotencyKey);
+      const replay = await loadReplay(tx, receiptKey, command.requestHash);
+      if (replay) return replay;
+      await insertReceipt(tx, receiptKey, command.requestHash, command.occurredAt);
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(${VARIANT_MAPPING_LOCK_NAMESPACE}, ${command.publicationTargetId})
+      `);
+      await validateVariantMapping(tx, command.publicationTargetId, command.productVariantId);
+      const identityConflict = rows(await tx.execute(sql`
+        SELECT head.product_variant_id
+        FROM inventory.publication_variant_mapping_heads AS head
+        JOIN inventory.publication_variant_mapping_versions AS mapping
+          ON mapping.id = COALESCE(head.draft_mapping_id, head.active_mapping_id)
+        WHERE head.publication_target_id = ${command.publicationTargetId}
+          AND head.product_variant_id <> ${command.productVariantId}
+          AND mapping.external_inventory_item_id = ${command.externalInventoryItemId}
+        LIMIT 1
+      `))[0];
+      if (identityConflict) {
+        throw new InventoryAvailabilityMasterDataError(
+          409,
+          "INVENTORY_PUBLICATION_VARIANT_MAPPING_IDENTITY_CONFLICT",
+          "This provider inventory item is already mapped to another SKU in the exact publication target.",
+          [`productVariantId: ${positiveInteger(identityConflict.product_variant_id, "mappingConflict.variantId")}`],
+        );
+      }
+      const headRows = rows(await tx.execute(sql`
+        SELECT publication_target_id, product_variant_id, revision,
+               active_mapping_id, draft_mapping_id
+        FROM inventory.publication_variant_mapping_heads
+        WHERE publication_target_id = ${command.publicationTargetId}
+          AND product_variant_id = ${command.productVariantId}
+        FOR UPDATE
+      `));
+      const head = headRows[0] ?? null;
+      assertExpectedVariantMappingHead(head, command);
+      const definitionHash = calculatePublicationVariantMappingDefinitionHash({
+        publicationTargetId: command.publicationTargetId,
+        productVariantId: command.productVariantId,
+        externalInventoryItemId: command.externalInventoryItemId,
+        externalSku: command.externalSku,
+      });
+      let definitionId: number;
+      let version: number;
+      if (head?.draft_mapping_id != null) {
+        definitionId = positiveInteger(head.draft_mapping_id, "variantMappingHead.draftMappingId");
+        const draftRows = rows(await tx.execute(sql`
+          SELECT id, version, definition_hash
+          FROM inventory.publication_variant_mapping_versions
+          WHERE id = ${definitionId}
+          FOR UPDATE
+        `));
+        const draft = draftRows[0];
+        if (!draft || String(draft.definition_hash) !== command.expectedDraftDefinitionHash) {
+          throw staleVariantMapping();
+        }
+        version = positiveInteger(draft.version, "variantMapping.version");
+        await tx.update(publicationVariantMappingVersions).set({
+          externalInventoryItemId: command.externalInventoryItemId,
+          externalSku: command.externalSku,
+          definitionHash,
+          changeReason: command.changeReason,
+          updatedAt: command.occurredAt,
+        }).where(eq(publicationVariantMappingVersions.id, definitionId));
+      } else {
+        const predecessorId = head?.active_mapping_id == null
+          ? null
+          : positiveInteger(head.active_mapping_id, "variantMappingHead.activeMappingId");
+        const versionRows = rows(await tx.execute(sql`
+          SELECT COALESCE(max(version), 0) + 1 AS next_version
+          FROM inventory.publication_variant_mapping_versions
+          WHERE publication_target_id = ${command.publicationTargetId}
+            AND product_variant_id = ${command.productVariantId}
+        `));
+        version = positiveInteger(versionRows[0]?.next_version, "variantMapping.nextVersion");
+        const inserted = await tx.insert(publicationVariantMappingVersions).values({
+          publicationTargetId: command.publicationTargetId,
+          productVariantId: command.productVariantId,
+          version,
+          lifecycleStatus: "draft",
+          externalInventoryItemId: command.externalInventoryItemId,
+          externalSku: command.externalSku,
+          definitionHash,
+          supersedesMappingId: predecessorId,
+          changeReason: command.changeReason,
+          idempotencyKey: command.idempotencyKey,
+          requestHash: command.requestHash,
+          createdBy: command.actorId,
+          createdAt: command.occurredAt,
+          updatedAt: command.occurredAt,
+        }).returning({ id: publicationVariantMappingVersions.id });
+        definitionId = inserted[0]!.id;
+        if (head) {
+          await tx.update(publicationVariantMappingHeads).set({
+            draftMappingId: definitionId,
+            revision: sql`${publicationVariantMappingHeads.revision} + 1`,
+            updatedBy: command.actorId,
+            updateReason: command.changeReason,
+            updatedAt: command.occurredAt,
+          }).where(sql`${publicationVariantMappingHeads.publicationTargetId} = ${command.publicationTargetId}
+            AND ${publicationVariantMappingHeads.productVariantId} = ${command.productVariantId}`);
+        } else {
+          await tx.insert(publicationVariantMappingHeads).values({
+            publicationTargetId: command.publicationTargetId,
+            productVariantId: command.productVariantId,
+            activeMappingId: null,
+            draftMappingId: definitionId,
+            revision: BigInt(1),
+            updatedBy: command.actorId,
+            updateReason: command.changeReason,
+            updatedAt: command.occurredAt,
+          });
+        }
+      }
+      if (head?.draft_mapping_id != null) {
+        await tx.update(publicationVariantMappingHeads).set({
+          revision: sql`${publicationVariantMappingHeads.revision} + 1`,
+          updatedBy: command.actorId,
+          updateReason: command.changeReason,
+          updatedAt: command.occurredAt,
+        }).where(sql`${publicationVariantMappingHeads.publicationTargetId} = ${command.publicationTargetId}
+          AND ${publicationVariantMappingHeads.productVariantId} = ${command.productVariantId}`);
+      }
+      const result = channelExposureDraftSaveResultSchema.parse({
+        definitionId,
+        version,
+        definitionHash,
+        headRevision: (BigInt(command.expectedHeadRevision) + BigInt(1)).toString(),
+        alreadyApplied: false,
+        runtimeAuthorityChanged: false,
+        providerWriteAttempted: false,
+      });
+      await persistAuditEvent(tx, {
+        actor: command.actorId,
+        action: "inventory_availability.publication_variant_mapping.draft_saved",
+        target: `inventory.publication_variant_mapping:${definitionId}`,
+        changes: { before: null, after: {
+          publicationTargetId: command.publicationTargetId,
+          productVariantId: command.productVariantId,
+          externalInventoryItemId: command.externalInventoryItemId,
+          externalSku: command.externalSku,
+          definitionHash,
+        } },
+        context: { idempotencyKey: command.idempotencyKey, requestHash: command.requestHash,
+          runtimeAuthorityChanged: false, providerWriteAttempted: false },
+      }, { timestamp: command.occurredAt, emitStructuredLog: false });
+      await completeReceipt(tx, receiptKey, "publication_variant_mapping_draft_save", result);
+      return result;
     });
   }
 
@@ -475,7 +842,9 @@ implements InventoryChannelExposureAdminStore {
     return this.database.transaction(async (tx) => {
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`);
       const targetRows = rows(await tx.execute(sql`
-        SELECT id, channel_id FROM inventory.inventory_publication_targets
+        SELECT id, channel_id, channel_connection_id, provider_scope_type,
+               external_scope_id, publication_authority, state, revision
+        FROM inventory.inventory_publication_targets
         WHERE id = ${publicationTargetId}
       `));
       const target = targetRows[0];
@@ -487,6 +856,10 @@ implements InventoryChannelExposureAdminStore {
         );
       }
       const channelId = positiveInteger(target.channel_id, "target.channelId");
+      const channelConnectionId = positiveInteger(
+        target.channel_connection_id,
+        "target.channelConnectionId",
+      );
       const sellableVariantRows = rows(await tx.execute(sql`
         SELECT id
         FROM catalog.product_variants
@@ -548,6 +921,21 @@ implements InventoryChannelExposureAdminStore {
       `));
       const policyCandidates = selectedPolicyCandidates(policyRows);
       const selectedPolicies = selectedPolicyEvidence(policyRows);
+      const variantMappingRows = rows(await tx.execute(sql`
+        SELECT head.product_variant_id, pointer.pointer_type,
+               mapping.id AS mapping_id, mapping.version, mapping.definition_hash,
+               mapping.external_inventory_item_id, mapping.external_sku
+        FROM inventory.publication_variant_mapping_heads AS head
+        CROSS JOIN LATERAL (
+          VALUES ('draft', head.draft_mapping_id), ('active', head.active_mapping_id)
+        ) AS pointer(pointer_type, mapping_id)
+        JOIN inventory.publication_variant_mapping_versions AS mapping ON mapping.id = pointer.mapping_id
+        WHERE head.publication_target_id = ${publicationTargetId}
+          AND head.product_variant_id = ANY(${sqlIntegerArray([...sellableVariantIds])})
+        ORDER BY head.product_variant_id,
+                 CASE pointer.pointer_type WHEN 'draft' THEN 0 ELSE 1 END
+      `));
+      const selectedMappings = selectedVariantMappingEvidence(variantMappingRows);
       const selectedModelRows = rows(await tx.execute(sql`
         SELECT model.id AS model_id, model.version, model.definition_hash
         FROM inventory.transformation_model_heads AS head
@@ -561,6 +949,13 @@ implements InventoryChannelExposureAdminStore {
         message: "The canonical ATP shadow contains a configuration blocker.",
         context: { shadowRunId: run.runId },
       }));
+      if (String(target.state) === "disabled") {
+        blockers.push({
+          code: "PUBLICATION_TARGET_NOT_IN_PREVIEW",
+          message: "This exact publication target is disabled and cannot enter activation readiness review.",
+          context: { publicationTargetId },
+        });
+      }
       if (run.status !== "completed") {
         blockers.push({
           code: "CANONICAL_SHADOW_BLOCKED",
@@ -608,6 +1003,16 @@ implements InventoryChannelExposureAdminStore {
         values.push(result);
         rowsByVariant.set(result.productVariantId, values);
       }
+      for (const productVariantId of sellableVariantIds) {
+        const variantResults = rowsByVariant.get(productVariantId);
+        if (!variantResults || !variantResults.some((row) => row.warehouseId === null)) {
+          blockers.push({
+            code: "CHANNEL_EXPOSURE_SKU_MISSING_FROM_SHADOW",
+            message: "An active sellable SKU has no network row in the sealed canonical ATP shadow.",
+            context: { publicationTargetId, productId, productVariantId },
+          });
+        }
+      }
       const previewRows = [...rowsByVariant.entries()].sort(([left], [right]) => left - right)
         .flatMap(([productVariantId, results]): InventoryChannelExposurePreview["rows"] => {
           const network = results.find((row) => row.warehouseId === null);
@@ -618,9 +1023,18 @@ implements InventoryChannelExposureAdminStore {
             productVariantId,
             policies: policyCandidates,
           });
-          const canonicalAtp = sourceBindingId === null ? BigInt(0) : results
+          const mapping = selectedMappings.get(productVariantId) ?? null;
+          const sourceWarehouseBreakdown = sourceBindingId === null ? [] : results
             .filter((row) => row.warehouseId !== null && warehouseIds.includes(row.warehouseId))
-            .reduce((total, row) => total + BigInt(row.proposedAtpUnits), BigInt(0));
+            .map((row) => ({
+              warehouseId: row.warehouseId!,
+              canonicalAtpUnits: BigInt(row.proposedAtpUnits).toString(),
+            }))
+            .sort((left, right) => left.warehouseId - right.warehouseId);
+          const canonicalAtp = sourceWarehouseBreakdown.reduce(
+            (total, row) => total + BigInt(row.canonicalAtpUnits),
+            BigInt(0),
+          );
           if (!resolution.policy) {
             blockers.push({
               code: "CHANNEL_EXPOSURE_POLICY_INCOMPLETE",
@@ -637,8 +1051,17 @@ implements InventoryChannelExposureAdminStore {
               afterHoldbackUnits: "0",
               cappedUnits: "0",
               publishedUnits: "0",
+              sourceWarehouseBreakdown,
               policy: null,
+              mapping,
             }];
+          }
+          if (resolution.policy.eligible && mapping === null) {
+            blockers.push({
+              code: "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING",
+              message: "An eligible SKU has no exact provider inventory identity for this publication target.",
+              context: { publicationTargetId, channelId, productId, productVariantId },
+            });
           }
           const calculation = calculateChannelExposure(canonicalAtp, resolution.policy);
           return [{
@@ -650,12 +1073,20 @@ implements InventoryChannelExposureAdminStore {
             afterHoldbackUnits: calculation.afterHoldbackUnits.toString(),
             cappedUnits: calculation.cappedUnits.toString(),
             publishedUnits: calculation.publishedUnits.toString(),
+            sourceWarehouseBreakdown,
             policy: resolution.policy,
+            mapping,
           }];
         });
       return inventoryChannelExposurePreviewSchema.parse({
         publicationTargetId,
         channelId,
+        channelConnectionId,
+        providerScopeType: String(target.provider_scope_type),
+        externalScopeId: String(target.external_scope_id),
+        publicationAuthority: String(target.publication_authority),
+        publicationTargetState: String(target.state),
+        publicationTargetRevision: String(target.revision),
         productId,
         shadowRunId: run.runId,
         snapshotFingerprint: run.snapshotFingerprint,
@@ -693,6 +1124,56 @@ function policyColumns(value: ChannelExposurePolicyValue) {
     minPublishSellableUnits: value.minPublishSellableUnits === null
       ? null : BigInt(value.minPublishSellableUnits),
   };
+}
+
+async function validatePublicationTarget(
+  tx: Transaction,
+  command: CreateInventoryPublicationTargetCommand,
+): Promise<void> {
+  const found = rows(await tx.execute(sql`
+    SELECT connection.id AS connection_id, node.id AS node_id
+    FROM channels.channel_connections AS connection
+    JOIN warehouse.fulfillment_nodes AS node
+      ON node.id = ${command.legacyFulfillmentNodeId}
+     AND node.lifecycle_status <> 'retired'
+    WHERE connection.id = ${command.channelConnectionId}
+      AND connection.channel_id = ${command.channelId}
+  `));
+  if (found.length === 0) {
+    throw new InventoryAvailabilityMasterDataError(
+      409,
+      "INVENTORY_PUBLICATION_TARGET_SCOPE_INVALID",
+      "The channel connection and compatibility fulfillment node must exist and match the target scope.",
+    );
+  }
+}
+
+async function validateVariantMapping(
+  tx: Transaction,
+  publicationTargetId: number,
+  productVariantId: number,
+): Promise<void> {
+  const found = rows(await tx.execute(sql`
+    SELECT target.id AS target_id, variant.id AS variant_id
+    FROM inventory.inventory_publication_targets AS target
+    JOIN catalog.product_variants AS variant
+      ON variant.id = ${productVariantId}
+     AND variant.is_active = true
+     AND variant.requires_shipping = true
+     AND COALESCE(variant.track_inventory, true) = true
+     AND variant.sales_eligibility = 'sellable'
+    JOIN catalog.products AS product
+      ON product.id = variant.product_id
+     AND product.is_active = true
+    WHERE target.id = ${publicationTargetId}
+  `));
+  if (found.length === 0) {
+    throw new InventoryAvailabilityMasterDataError(
+      409,
+      "INVENTORY_PUBLICATION_VARIANT_MAPPING_SCOPE_INVALID",
+      "The target must exist and the mapped SKU must be active, physical, tracked, and customer-sellable.",
+    );
+  }
 }
 
 async function validatePolicyScope(tx: Transaction, scope: ChannelExposurePolicyScope): Promise<void> {
@@ -790,6 +1271,17 @@ function assertExpectedSourceHead(
   }
 }
 
+function assertExpectedVariantMappingHead(
+  head: Record<string, any> | null,
+  command: SavePublicationVariantMappingDraftCommand,
+): void {
+  const revision = head ? String(head.revision) : "0";
+  const draftId = head?.draft_mapping_id == null ? null : Number(head.draft_mapping_id);
+  if (revision !== command.expectedHeadRevision || draftId !== command.expectedDraftMappingId) {
+    throw staleVariantMapping();
+  }
+}
+
 function stalePolicy(): InventoryAvailabilityMasterDataError {
   return new InventoryAvailabilityMasterDataError(
     409,
@@ -803,6 +1295,14 @@ function staleSourceBinding(): InventoryAvailabilityMasterDataError {
     409,
     "INVENTORY_CHANNEL_EXPOSURE_STALE_SOURCE_BINDING",
     "The publication source binding changed. Reload it before saving.",
+  );
+}
+
+function staleVariantMapping(): InventoryAvailabilityMasterDataError {
+  return new InventoryAvailabilityMasterDataError(
+    409,
+    "INVENTORY_CHANNEL_EXPOSURE_STALE_VARIANT_MAPPING",
+    "The exact target/SKU mapping draft changed. Reload it before saving.",
   );
 }
 
@@ -841,6 +1341,35 @@ async function loadReplay(
   return { ...parsed.data, alreadyApplied: true };
 }
 
+async function loadTargetReplay(
+  tx: Transaction,
+  receiptKey: string,
+  requestHash: string,
+): Promise<InventoryPublicationTargetCommandResult | null> {
+  const [receipt] = await tx.select({
+    requestHash: idempotencyKeys.requestHash,
+    responseBody: idempotencyKeys.responseBody,
+  }).from(idempotencyKeys).where(eq(idempotencyKeys.key, receiptKey)).limit(1);
+  if (!receipt) return null;
+  if (receipt.requestHash !== requestHash) {
+    throw new InventoryAvailabilityMasterDataError(
+      409,
+      "INVENTORY_CHANNEL_EXPOSURE_IDEMPOTENCY_CONFLICT",
+      "The idempotency key was already used with different inputs.",
+    );
+  }
+  const body = receipt.responseBody as Record<string, unknown> | null;
+  const parsed = inventoryPublicationTargetCommandResultSchema.safeParse(body?.result);
+  if (!parsed.success) {
+    throw new InventoryAvailabilityMasterDataError(
+      500,
+      "INVENTORY_PUBLICATION_TARGET_IDEMPOTENCY_RECEIPT_INVALID",
+      "The prior publication-target command has an incomplete receipt.",
+    );
+  }
+  return { ...parsed.data, alreadyApplied: true };
+}
+
 async function insertReceipt(
   tx: Transaction,
   key: string,
@@ -861,6 +1390,16 @@ async function completeReceipt(
   key: string,
   commandType: string,
   result: ChannelExposureDraftSaveResult,
+): Promise<void> {
+  await tx.update(idempotencyKeys).set({ responseBody: { commandType, result } })
+    .where(eq(idempotencyKeys.key, key));
+}
+
+async function completeTargetReceipt(
+  tx: Transaction,
+  key: string,
+  commandType: string,
+  result: InventoryPublicationTargetCommandResult,
 ): Promise<void> {
   await tx.update(idempotencyKeys).set({ responseBody: { commandType, result } })
     .where(eq(idempotencyKeys.key, key));
@@ -962,6 +1501,65 @@ function mapBindingHeads(bindingRows: Record<string, any>[]): PublicationSourceB
   return [...heads.values()].sort((left, right) => left.publicationTargetId - right.publicationTargetId);
 }
 
+function mapVariantMappingHeads(mappingRows: Record<string, any>[]): PublicationVariantMappingHead[] {
+  const heads = new Map<string, PublicationVariantMappingHead>();
+  for (const row of mappingRows) {
+    const publicationTargetId = positiveInteger(row.publication_target_id, "variantMapping.targetId");
+    const productVariantId = positiveInteger(row.product_variant_id, "variantMapping.variantId");
+    const key = `${publicationTargetId}:${productVariantId}`;
+    const head = heads.get(key) ?? {
+      publicationTargetId,
+      productVariantId,
+      revision: String(row.revision),
+      activeMapping: null,
+      draftMapping: null,
+    };
+    const mapping = mapVariantMapping(row);
+    if (String(row.pointer_type) === "active") head.activeMapping = mapping;
+    if (String(row.pointer_type) === "draft") head.draftMapping = mapping;
+    heads.set(key, head);
+  }
+  return [...heads.values()].sort((left, right) =>
+    left.publicationTargetId - right.publicationTargetId
+    || left.productVariantId - right.productVariantId);
+}
+
+function mapVariantMapping(row: Record<string, any>): PublicationVariantMappingVersion {
+  return {
+    mappingId: positiveInteger(row.mapping_id, "variantMapping.id"),
+    publicationTargetId: positiveInteger(row.publication_target_id, "variantMapping.targetId"),
+    productVariantId: positiveInteger(row.product_variant_id, "variantMapping.variantId"),
+    version: positiveInteger(row.version, "variantMapping.version"),
+    lifecycleStatus: String(row.lifecycle_status) as PublicationVariantMappingVersion["lifecycleStatus"],
+    externalInventoryItemId: String(row.external_inventory_item_id),
+    externalSku: nullableText(row.external_sku),
+    definitionHash: String(row.definition_hash),
+    changeReason: String(row.change_reason),
+    createdBy: String(row.created_by),
+    createdAt: iso(row.created_at, "variantMapping.createdAt"),
+    updatedAt: iso(row.updated_at, "variantMapping.updatedAt"),
+  };
+}
+
+function selectedVariantMappingEvidence(
+  mappingRows: Record<string, any>[],
+): Map<number, NonNullable<InventoryChannelExposurePreview["rows"][number]["mapping"]>> {
+  const selected = new Map<number, NonNullable<InventoryChannelExposurePreview["rows"][number]["mapping"]>>();
+  for (const row of mappingRows) {
+    const productVariantId = positiveInteger(row.product_variant_id, "selectedVariantMapping.variantId");
+    if (selected.has(productVariantId)) continue;
+    selected.set(productVariantId, {
+      mappingId: positiveInteger(row.mapping_id, "selectedVariantMapping.id"),
+      version: positiveInteger(row.version, "selectedVariantMapping.version"),
+      definitionHash: String(row.definition_hash),
+      authority: String(row.pointer_type) as "draft" | "active",
+      externalInventoryItemId: String(row.external_inventory_item_id),
+      externalSku: nullableText(row.external_sku),
+    });
+  }
+  return selected;
+}
+
 function selectedPolicyCandidates(rowsInput: Record<string, any>[]): ChannelExposurePolicyCandidate[] {
   return selectedPolicyRows(rowsInput).map((row) => ({
     scopeKey: String(row.scope_key),
@@ -1046,7 +1644,9 @@ function nullableQuantity(value: unknown): string | null {
 }
 
 function nullableText(value: unknown): string | null {
-  return value == null ? null : String(value);
+  if (value == null) return null;
+  const normalized = String(value).trim();
+  return normalized.length === 0 ? null : normalized;
 }
 
 function iso(value: unknown, field: string): string {

@@ -2,10 +2,14 @@ import type { Express, Request, Response } from "express";
 
 import {
   channelExposureDraftSaveResultSchema,
+  createInventoryPublicationTargetRequestSchema,
   inventoryChannelExposureAdminViewSchema,
   inventoryChannelExposurePreviewSchema,
+  inventoryPublicationTargetCommandResultSchema,
   saveChannelExposurePolicyDraftRequestSchema,
   savePublicationSourceBindingDraftRequestSchema,
+  savePublicationVariantMappingDraftRequestSchema,
+  setInventoryPublicationTargetPreviewStateRequestSchema,
 } from "@shared/types/inventory-channel-exposure";
 import { z } from "zod";
 
@@ -21,6 +25,7 @@ const positiveId = z.coerce.number().int().positive().max(2_147_483_647);
 type ChannelExposureService = Pick<
   InventoryChannelExposureAdminService,
   "getView" | "savePolicyDraft" | "saveSourceBindingDraft" | "preview"
+  | "createPublicationTarget" | "setPublicationTargetPreviewState" | "saveVariantMappingDraft"
 >;
 
 export interface InventoryChannelExposureRouteDependencies {
@@ -78,6 +83,59 @@ export function registerInventoryChannelExposureRoutes(
         return res.status(result.alreadyApplied ? 200 : 201).json(result);
       } catch (error) {
         return sendError(res, error, "save a channel-exposure policy draft");
+      }
+    },
+  );
+
+  app.post(
+    "/api/inventory-planning/admin/channel-exposure/publication-target",
+    requirePermission("inventory_planning", "edit"),
+    async (req, res) => {
+      try {
+        const result = inventoryPublicationTargetCommandResultSchema.parse(
+          await service.createPublicationTarget(
+            parseBody(createInventoryPublicationTargetRequestSchema, req.body),
+            auditActor(req),
+          ),
+        );
+        return res.status(result.alreadyApplied ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(res, error, "create a disabled publication target");
+      }
+    },
+  );
+
+  app.put(
+    "/api/inventory-planning/admin/channel-exposure/publication-target-preview-state",
+    requirePermission("inventory_planning", "activate"),
+    async (req, res) => {
+      try {
+        return res.json(inventoryPublicationTargetCommandResultSchema.parse(
+          await service.setPublicationTargetPreviewState(
+            parseBody(setInventoryPublicationTargetPreviewStateRequestSchema, req.body),
+            auditActor(req),
+          ),
+        ));
+      } catch (error) {
+        return sendError(res, error, "change publication-target preview state");
+      }
+    },
+  );
+
+  app.put(
+    "/api/inventory-planning/admin/channel-exposure/variant-mapping-draft",
+    requirePermission("inventory_planning", "edit"),
+    async (req, res) => {
+      try {
+        const result = channelExposureDraftSaveResultSchema.parse(
+          await service.saveVariantMappingDraft(
+            parseBody(savePublicationVariantMappingDraftRequestSchema, req.body),
+            auditActor(req),
+          ),
+        );
+        return res.status(result.alreadyApplied ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(res, error, "save an exact target/SKU mapping draft");
       }
     },
   );

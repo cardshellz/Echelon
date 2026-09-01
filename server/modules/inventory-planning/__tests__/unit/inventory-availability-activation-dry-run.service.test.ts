@@ -5,6 +5,10 @@ import type {
   InventoryAvailabilityChannelPreview,
 } from "@shared/types/inventory-availability-backfill";
 import type { CurrentPublicationEvidence } from "@shared/types/inventory-availability-phase4";
+import type {
+  InventoryChannelExposureAdminView,
+  InventoryChannelExposurePreview,
+} from "@shared/types/inventory-channel-exposure";
 import {
   InventoryAvailabilityActivationDryRunService,
   InventoryAvailabilityActivationDryRunServiceError,
@@ -26,6 +30,7 @@ describe("inventory availability activation dry-run service", () => {
         getChannelPreview: vi.fn(async () => preview),
       } as never,
       store,
+      exposureReader(),
       sequenceClock(STARTED_AT, COMPLETED_AT),
     );
 
@@ -46,6 +51,7 @@ describe("inventory availability activation dry-run service", () => {
       summary: { totalProducts: 1, readyProducts: 1, blockedProducts: 0, publicationRows: 1 },
     });
     expect(result.products[0]?.proposedPublications[0]).toMatchObject({
+      disposition: "publish",
       canonicalAtpUnits: "10",
       desiredUnits: "8",
       differenceFromLastAcknowledgedUnits: "2",
@@ -67,6 +73,7 @@ describe("inventory availability activation dry-run service", () => {
         getChannelPreview: vi.fn(async () => channelPreview()),
       } as never,
       store,
+      exposureReader(),
       sequenceClock(STARTED_AT, COMPLETED_AT),
     );
 
@@ -91,6 +98,7 @@ describe("inventory availability activation dry-run service", () => {
     const service = new InventoryAvailabilityActivationDryRunService(
       backfillReader as never,
       store,
+      exposureReader(),
       { now: () => STARTED_AT },
     );
 
@@ -108,6 +116,122 @@ describe("inventory availability activation dry-run service", () => {
     expect(backfillReader.getChannelPreview).not.toHaveBeenCalled();
     expect(store.captureCurrentPublicationEvidence).not.toHaveBeenCalled();
     expect(store.persistActivationDryRun).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when provider readback belongs to an older target/SKU identity", async () => {
+    const publication = publicationEvidence();
+    publication.configuredTargets[0]!.latestReadbackExternalInventoryItemId =
+      "gid://shopify/InventoryItem/obsolete";
+    const store = fakeStore([publication]);
+    const service = new InventoryAvailabilityActivationDryRunService(
+      {
+        getMigrationQueue: vi.fn(async () => catalogQueue()),
+        getChannelPreview: vi.fn(async () => channelPreview()),
+      } as never,
+      store,
+      exposureReader(),
+      sequenceClock(STARTED_AT, COMPLETED_AT),
+    );
+
+    const result = await service.runDryRun({
+      expectedCatalogInputHash: HASH_A,
+      expectedCatalogResultHash: HASH_B,
+      idempotencyKey: "activation-dry-run-identity-mismatch",
+      reason: "Reject readback from obsolete provider identity",
+    }, "operator-1");
+
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]?.blockers.map((entry) => entry.code))
+      .toContain("PROVIDER_READBACK_IDENTITY_MISMATCH");
+  });
+
+  it("classifies externally authoritative targets as observation-only", async () => {
+    const view = exposureView();
+    view.publicationTargets[0]!.publicationAuthority = "external_provider";
+    const preview = targetPreview();
+    preview.publicationAuthority = "external_provider";
+    const publication = publicationEvidence();
+    publication.configuredTargets[0]!.publicationAuthority = "external_provider";
+    const service = new InventoryAvailabilityActivationDryRunService(
+      {
+        getMigrationQueue: vi.fn(async () => catalogQueue()),
+        getChannelPreview: vi.fn(async () => channelPreview()),
+      } as never,
+      fakeStore([publication]),
+      {
+        getView: vi.fn(async () => view),
+        preview: vi.fn(async () => preview),
+      },
+      sequenceClock(STARTED_AT, COMPLETED_AT),
+    );
+
+    const result = await service.runDryRun({
+      expectedCatalogInputHash: HASH_A,
+      expectedCatalogResultHash: HASH_B,
+      idempotencyKey: "activation-dry-run-observe-only",
+      reason: "Prove externally authoritative target disposition",
+    }, "operator-1");
+
+    expect(result.state).toBe("ready_for_publication");
+    expect(result.products[0]?.proposedPublications[0]?.disposition).toBe("observe_only");
+  });
+
+  it("blocks overlapping partitioned target shares above one hundred percent", async () => {
+    const secondTarget = {
+      ...exposureView().publicationTargets[0]!,
+      id: 2,
+      providerScopeType: "account" as const,
+      externalScopeId: "shopify-location-2",
+    };
+    const view = exposureView();
+    view.publicationTargets.push(secondTarget);
+    const secondPreview = targetPreview();
+    secondPreview.publicationTargetId = 2;
+    secondPreview.providerScopeType = "account";
+    secondPreview.externalScopeId = "shopify-location-2";
+    secondPreview.rows[0]!.mapping = {
+      ...secondPreview.rows[0]!.mapping!,
+      mappingId: 71,
+      externalInventoryItemId: "gid://shopify/InventoryItem/2",
+    };
+    secondPreview.rows[0]!.policy = {
+      ...secondPreview.rows[0]!.policy!,
+      shareBps: 3_000,
+    };
+    const reader = {
+      getView: vi.fn(async () => view),
+      preview: vi.fn(async (targetId: number) => targetId === 1 ? targetPreview() : secondPreview),
+    };
+    const publication = publicationEvidence();
+    publication.configuredTargets.push({
+      ...publication.configuredTargets[0]!,
+      publicationTargetId: 2,
+      externalScopeId: "shopify-location-2",
+      mapping: secondPreview.rows[0]!.mapping,
+      latestReadbackExternalInventoryItemId: "gid://shopify/InventoryItem/2",
+    });
+    const service = new InventoryAvailabilityActivationDryRunService(
+      {
+        getMigrationQueue: vi.fn(async () => catalogQueue()),
+        getChannelPreview: vi.fn(async () => channelPreview()),
+      } as never,
+      fakeStore([publication]),
+      reader,
+      sequenceClock(STARTED_AT, COMPLETED_AT),
+    );
+
+    const result = await service.runDryRun({
+      expectedCatalogInputHash: HASH_A,
+      expectedCatalogResultHash: HASH_B,
+      idempotencyKey: "activation-dry-run-partition-overage",
+      reason: "Reject overlapping partition overcommit",
+    }, "operator-1");
+
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]?.blockers.map((entry) => entry.code))
+      .toContain("PARTITIONED_CHANNEL_SHARE_EXCEEDS_SOURCE_CAPACITY");
+    expect(result.products[0]?.blockers.map((entry) => entry.code))
+      .toContain("PUBLICATION_TARGET_SCOPE_AMBIGUOUS");
   });
 });
 
@@ -161,9 +285,130 @@ function publicationEvidence(): CurrentPublicationEvidence {
       externalScopeId: "shopify-location-1",
       publicationAuthority: "echelon",
       state: "preview",
+      revision: "1",
+      mapping: {
+        mappingId: 70,
+        version: 1,
+        definitionHash: HASH_A,
+        authority: "draft",
+        externalInventoryItemId: "gid://shopify/InventoryItem/1",
+        externalSku: "EA",
+      },
       latestReadbackUnits: "6",
       latestReadbackAt: "2026-08-28T16:05:00.000Z",
+      latestReadbackExternalInventoryItemId: "gid://shopify/InventoryItem/1",
     }],
+  };
+}
+
+function exposureReader() {
+  return {
+    getView: vi.fn(async () => exposureView()),
+    preview: vi.fn(async () => targetPreview()),
+  };
+}
+
+function exposureView(): InventoryChannelExposureAdminView {
+  return {
+    products: [],
+    selectedProduct: null,
+    channels: [{
+      id: 36,
+      name: "Shopify",
+      provider: "shopify",
+      status: "active",
+      connections: [{ id: 10, externalAccountLabel: "store.myshopify.com" }],
+    }],
+    publicationTargets: [{
+      id: 1,
+      channelId: 36,
+      channelConnectionId: 10,
+      legacyFulfillmentNodeId: 1,
+      providerScopeType: "location",
+      externalScopeId: "shopify-location-1",
+      publicationAuthority: "echelon",
+      state: "preview",
+      revision: "1",
+    }],
+    fulfillmentNodes: [],
+    policyHeads: [],
+    sourceBindingHeads: [],
+    variantMappingHeads: [],
+    legacyMappingCandidates: [],
+    runtimeAuthority: "legacy_channel_allocation_rules",
+    providerWriteEnabled: false,
+  };
+}
+
+function targetPreview(): InventoryChannelExposurePreview {
+  return {
+    publicationTargetId: 1,
+    channelId: 36,
+    channelConnectionId: 10,
+    providerScopeType: "location",
+    externalScopeId: "shopify-location-1",
+    publicationAuthority: "echelon",
+    publicationTargetState: "preview",
+    publicationTargetRevision: "1",
+    productId: 10,
+    shadowRunId: "3",
+    snapshotFingerprint: HASH_B,
+    shadowCapturedAt: "2026-08-28T16:45:00.000Z",
+    modelId: 501,
+    modelVersion: 1,
+    modelDefinitionHash: HASH_A,
+    sourceBindingId: 60,
+    sourceBindingVersion: 1,
+    sourceBindingDefinitionHash: HASH_B,
+    sourceBindingAuthority: "draft",
+    fulfillmentNodeIds: [1],
+    warehouseIds: [1],
+    selectedPolicies: [{
+      scopeKey: "channel:36",
+      policyId: 50,
+      version: 1,
+      definitionHash: HASH_A,
+      authority: "draft",
+    }],
+    rows: [{
+      productVariantId: 101,
+      sku: "EA",
+      unitsPerVariant: 1,
+      canonicalAtpUnits: "10",
+      sharedUnits: "8",
+      afterHoldbackUnits: "8",
+      cappedUnits: "8",
+      publishedUnits: "8",
+      sourceWarehouseBreakdown: [{ warehouseId: 1, canonicalAtpUnits: "10" }],
+      policy: {
+        allocationSemantics: "partitioned",
+        eligible: true,
+        shareBps: 8_000,
+        holdbackSellableUnits: "0",
+        maxPublishSellableUnits: null,
+        minPublishSellableUnits: "0",
+        sources: {
+          allocationSemantics: "channel:36",
+          eligible: "channel:36",
+          shareBps: "channel:36",
+          holdbackSellableUnits: "channel:36",
+          maxPublishSellableUnits: "channel:36",
+          minPublishSellableUnits: "channel:36",
+        },
+      },
+      mapping: {
+        mappingId: 70,
+        version: 1,
+        definitionHash: HASH_A,
+        authority: "draft",
+        externalInventoryItemId: "gid://shopify/InventoryItem/1",
+        externalSku: "EA",
+      },
+    }],
+    blockers: [],
+    runtimeAuthorityChanged: false,
+    providerWriteAttempted: false,
+    outboxEnqueued: false,
   };
 }
 

@@ -64,6 +64,66 @@ describe("InventoryChannelExposureAdminService", () => {
     }));
   });
 
+  it("builds audited target, preview-state, and exact mapping commands", async () => {
+    const store = fakeStore();
+    store.createPublicationTarget.mockResolvedValue(targetResult());
+    store.setPublicationTargetPreviewState.mockResolvedValue(targetResult("preview", "2"));
+    store.saveVariantMappingDraft.mockResolvedValue(saveResult());
+    const service = new InventoryChannelExposureAdminService(store, { now: () => NOW });
+
+    const targetRequest = {
+      channelId: 36,
+      channelConnectionId: 44,
+      legacyFulfillmentNodeId: 1,
+      providerScopeType: "location" as const,
+      externalScopeId: "location-1",
+      publicationAuthority: "echelon" as const,
+      changeReason: "Register exact destination",
+      idempotencyKey: "target-1",
+    };
+    await service.createPublicationTarget(targetRequest, "operator-1");
+    expect(store.createPublicationTarget).toHaveBeenCalledWith({
+      ...targetRequest,
+      actorId: "operator-1",
+      requestHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      occurredAt: NOW,
+    });
+
+    const stateRequest = {
+      publicationTargetId: 5,
+      expectedRevision: "1",
+      state: "preview" as const,
+      changeReason: "Include in readiness evidence",
+      idempotencyKey: "target-state-1",
+    };
+    await service.setPublicationTargetPreviewState(stateRequest, "operator-1");
+    expect(store.setPublicationTargetPreviewState).toHaveBeenCalledWith({
+      ...stateRequest,
+      actorId: "operator-1",
+      requestHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      occurredAt: NOW,
+    });
+
+    const mappingRequest = {
+      publicationTargetId: 5,
+      productVariantId: 101,
+      externalInventoryItemId: "inventory-item-1",
+      externalSku: "EA",
+      expectedHeadRevision: "0",
+      expectedDraftMappingId: null,
+      expectedDraftDefinitionHash: null,
+      changeReason: "Map exact target inventory item",
+      idempotencyKey: "mapping-1",
+    };
+    await service.saveVariantMappingDraft(mappingRequest, "operator-1");
+    expect(store.saveVariantMappingDraft).toHaveBeenCalledWith({
+      ...mappingRequest,
+      actorId: "operator-1",
+      requestHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      occurredAt: NOW,
+    });
+  });
+
   it("rejects empty policies and duplicate source nodes before persistence", async () => {
     const store = fakeStore();
     const service = new InventoryChannelExposureAdminService(store, { now: () => NOW });
@@ -113,11 +173,27 @@ function saveResult() {
   };
 }
 
+function targetResult(state: "disabled" | "preview" = "disabled", revision = "1") {
+  return {
+    publicationTargetId: 5,
+    revision,
+    state,
+    alreadyApplied: false,
+    runtimeAuthorityChanged: false as const,
+    providerWriteAttempted: false as const,
+    outboxEnqueued: false as const,
+  };
+}
+
 function fakeStore() {
   return {
     getAdminView: vi.fn<InventoryChannelExposureAdminStore["getAdminView"]>(),
     savePolicyDraft: vi.fn<InventoryChannelExposureAdminStore["savePolicyDraft"]>(),
     saveSourceBindingDraft: vi.fn<InventoryChannelExposureAdminStore["saveSourceBindingDraft"]>(),
+    createPublicationTarget: vi.fn<InventoryChannelExposureAdminStore["createPublicationTarget"]>(),
+    setPublicationTargetPreviewState:
+      vi.fn<InventoryChannelExposureAdminStore["setPublicationTargetPreviewState"]>(),
+    saveVariantMappingDraft: vi.fn<InventoryChannelExposureAdminStore["saveVariantMappingDraft"]>(),
     preview: vi.fn<InventoryChannelExposureAdminStore["preview"]>(),
   };
 }

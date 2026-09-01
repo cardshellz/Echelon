@@ -10,6 +10,8 @@ This phase is additive and inactive.
 - Activation dry runs do not switch runtime authority, call a channel adapter,
   enqueue publication work, or change channel configuration.
 - Publication targets default to `disabled`.
+- Exact targets may be created only as disabled, and a role-gated command may
+  move them only between `disabled` and `preview` for readiness evidence.
 - No Phase 4 worker consumes the publication outbox.
 
 ## Whole-order claim simulation
@@ -49,15 +51,29 @@ For every active product, the dry run records:
 - migration/backfill approval state;
 - selected draft and review evidence;
 - sealed ATP shadow evidence;
-- legacy and proposed channel allocation calculations;
-- the proposed quantity for every channel/SKU and warehouse breakdown;
+- legacy channel calculations and exact target-aware proposed calculations;
+- the proposed quantity, target revision, source-binding evidence, and exact
+  provider inventory-item mapping for every target/SKU, plus the canonical ATP
+  contribution of each selected source warehouse;
 - the last quantity the legacy feed records as acknowledged; and
-- provider readback evidence, when it exists.
+- provider readback evidence, including its captured provider inventory-item
+  identity, when it exists.
 
 `channel_feeds.last_synced_qty` is labelled as last-acknowledged write evidence.
 It is not treated as provider readback. An active feed with no exact publication
 target, no complete acknowledgement evidence, quarantine, or no provider
 readback produces an explicit blocker.
+
+The dry run also fails closed for missing target/SKU mappings, mapping or target
+revision changes during capture, readbacks whose provider inventory-item
+identity is missing or stale, account-scope overlap, and partitioned shares over
+100 percent across overlapping warehouse source pools.
+
+Every target/SKU evidence row is explicitly classified as `publish`,
+`observe_only`, `skip_ineligible`, or `blocked`. Only an eligible row with
+Echelon publication authority and complete source/mapping evidence can receive
+`publish`; external-provider and manual authority are observation-only and can
+never be mistaken for future outbox work.
 
 The complete result and per-product hashes are stored in:
 
@@ -105,9 +121,15 @@ An exact publication target identifies:
 - publication authority (`echelon`, `external_provider`, or `manual`).
 
 Target state is `disabled`, `preview`, or `live`, and the database default is
-`disabled`. Phase 4 exposes no target writer. A future writer must require the
-authorized transition and persist its audit evidence before selecting `preview`
-or `live`.
+`disabled`. The readiness writer can create only `disabled` targets and can
+perform only audited, optimistic `disabled <-> preview` transitions. No exposed
+request schema or route accepts `live`; that transition remains reserved for
+the global cutover state machine.
+
+Each exact target and sellable SKU has a versioned mapping head and immutable
+version history for the provider inventory-item ID. Drafts are idempotent,
+optimistically revisioned, advisory-locked, and auditable. The full-catalog dry
+run records the selected mapping ID, version, and definition hash.
 
 Each outbox row is an immutable absolute desired quantity for one exact target
 and SKU. Its key includes a monotonically increasing revision. Zero is valid.
@@ -127,9 +149,12 @@ Cancellation and supersession are explicit terminal outcomes. Delivery attempts
 are append-only. Provider acknowledgement and provider quantity readback are
 stored in different tables. A readback identifies the exact target and SKU and
 may exist without an outbox row, which permits inventory observation for a 3PL
-or other externally authoritative provider. When a readback verifies an outbox
-write, the database requires the target/SKU identity and match result to agree
-with that immutable desired row.
+or other externally authoritative provider. Its provider inventory-item
+identity is captured directly or inherited from its immutable outbox row. An
+identity-less readback remains valid historical evidence but cannot satisfy
+activation readiness. When a readback verifies an outbox write, the database
+requires the target/SKU identity and match result to agree with that immutable
+desired row.
 
 ## Lock order for the future live claim/cutover path
 
@@ -155,7 +180,9 @@ The dry run is expected to identify unresolved work, including:
 - stale or blocked ATP shadows;
 - legacy channel warehouse fallback;
 - active legacy feeds not mapped to exact publication targets;
-- missing provider readback; and
+- missing exact target/SKU mapping;
+- missing or mapping-stale provider readback;
+- overlapping account scopes or partitioned shares above source capacity; and
 - proposed quantities that exceed canonical ATP.
 
 The next operational review runs synthetic and recent-order simulations plus the

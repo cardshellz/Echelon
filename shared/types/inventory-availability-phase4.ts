@@ -79,8 +79,18 @@ export const currentPublicationEvidenceSchema = z.object({
     externalScopeId: nonblank(240),
     publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
     state: z.enum(["disabled", "preview", "live"]),
+    revision: z.string().regex(/^[1-9]\d*$/),
+    mapping: z.object({
+      mappingId: positiveInteger,
+      version: positiveInteger,
+      definitionHash: sha256Hex,
+      authority: z.enum(["draft", "active"]),
+      externalInventoryItemId: nonblank(240),
+      externalSku: z.string().trim().min(1).max(100).nullable(),
+    }).strict().nullable(),
     latestReadbackUnits: plannerNonnegativeQuantitySchema.nullable(),
     latestReadbackAt: z.string().datetime().nullable(),
+    latestReadbackExternalInventoryItemId: nonblank(240).nullable(),
   }).strict()),
 }).strict();
 
@@ -96,21 +106,104 @@ export const activationDryRunProductSchema = z.object({
   shadowSnapshotFingerprint: sha256Hex.nullable(),
   channelPreviewHash: sha256Hex.nullable(),
   proposedPublications: z.array(z.object({
+    publicationTargetId: positiveInteger,
     channelId: positiveInteger,
+    channelConnectionId: positiveInteger,
     channelProvider: nonblank(60),
+    providerScopeType: z.enum(["account", "location"]),
+    externalScopeId: nonblank(240),
+    publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
+    publicationTargetRevision: z.string().regex(/^[1-9]\d*$/),
+    disposition: z.enum(["publish", "observe_only", "skip_ineligible", "blocked"]),
     productVariantId: positiveInteger,
     canonicalAtpUnits: plannerNonnegativeQuantitySchema,
     legacyCalculatedUnits: plannerNonnegativeQuantitySchema,
     desiredUnits: plannerNonnegativeQuantitySchema,
     differenceFromLastAcknowledgedUnits: z.string().regex(/^(0|-?[1-9]\d*)$/).nullable(),
-    warehouseBreakdown: z.array(z.object({
+    sourceBindingId: positiveInteger.nullable(),
+    sourceBindingVersion: positiveInteger.nullable(),
+    sourceBindingDefinitionHash: sha256Hex.nullable(),
+    sourceWarehouseIds: z.array(positiveInteger),
+    sourceWarehouseBreakdown: z.array(z.object({
       warehouseId: positiveInteger,
-      desiredUnits: plannerNonnegativeQuantitySchema,
+      canonicalAtpUnits: plannerNonnegativeQuantitySchema,
     }).strict()),
+    mappingId: positiveInteger.nullable(),
+    mappingVersion: positiveInteger.nullable(),
+    mappingDefinitionHash: sha256Hex.nullable(),
+    externalInventoryItemId: nonblank(240).nullable(),
+    externalSku: z.string().trim().min(1).max(100).nullable(),
   }).strict()),
   publicationEvidence: z.array(currentPublicationEvidenceSchema),
   blockers: z.array(activationDryRunBlockerSchema),
-}).strict();
+}).strict().superRefine((product, context) => {
+  product.proposedPublications.forEach((publication, index) => {
+    const sourceEvidence = [
+      publication.sourceBindingId,
+      publication.sourceBindingVersion,
+      publication.sourceBindingDefinitionHash,
+    ];
+    if (![0, 3].includes(sourceEvidence.filter((value) => value !== null).length)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proposedPublications", index, "sourceBindingId"],
+        message: "Publication source-binding evidence must be all present or all absent",
+      });
+    }
+    const mappingEvidence = [
+      publication.mappingId,
+      publication.mappingVersion,
+      publication.mappingDefinitionHash,
+      publication.externalInventoryItemId,
+    ];
+    if (![0, 4].includes(mappingEvidence.filter((value) => value !== null).length)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proposedPublications", index, "mappingId"],
+        message: "Publication target/SKU mapping evidence must be all present or all absent",
+      });
+    }
+    const warehouseIds = publication.sourceWarehouseBreakdown.map((entry) => entry.warehouseId);
+    const warehouseTotal = publication.sourceWarehouseBreakdown.reduce(
+      (total, entry) => total + BigInt(entry.canonicalAtpUnits),
+      BigInt(0),
+    );
+    if (new Set(warehouseIds).size !== warehouseIds.length
+      || warehouseTotal !== BigInt(publication.canonicalAtpUnits)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proposedPublications", index, "sourceWarehouseBreakdown"],
+        message: "Warehouse ATP rows must be unique and sum to target canonical ATP",
+      });
+    }
+    if (publication.disposition === "publish" && (
+      publication.publicationAuthority !== "echelon"
+      || publication.sourceBindingId === null
+      || publication.mappingId === null
+    )) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proposedPublications", index, "disposition"],
+        message: "Publish disposition requires Echelon authority plus complete source and mapping evidence",
+      });
+    }
+    if (publication.disposition === "observe_only"
+      && publication.publicationAuthority === "echelon") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proposedPublications", index, "disposition"],
+        message: "Observe-only disposition is reserved for non-Echelon publication authority",
+      });
+    }
+    if (publication.disposition === "skip_ineligible" && publication.desiredUnits !== "0") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proposedPublications", index, "desiredUnits"],
+        message: "An ineligible target/SKU must have zero desired units",
+      });
+    }
+  });
+});
 
 export const inventoryActivationDryRunSchema = z.object({
   activationRunId: plannerPositiveQuantitySchema,

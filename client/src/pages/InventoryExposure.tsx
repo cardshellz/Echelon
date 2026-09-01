@@ -2,10 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   channelExposureDraftSaveResultSchema,
+  createInventoryPublicationTargetRequestSchema,
   inventoryChannelExposureAdminViewSchema,
   inventoryChannelExposurePreviewSchema,
+  inventoryPublicationTargetCommandResultSchema,
   saveChannelExposurePolicyDraftRequestSchema,
   savePublicationSourceBindingDraftRequestSchema,
+  savePublicationVariantMappingDraftRequestSchema,
+  setInventoryPublicationTargetPreviewStateRequestSchema,
   type ChannelExposurePolicyScope,
   type ChannelExposurePolicyValue,
   type InventoryChannelExposureAdminView,
@@ -55,10 +59,13 @@ const EMPTY_POLICY: PolicyForm = {
 export default function InventoryExposure() {
   const { hasPermission } = useAuth();
   const canEdit = hasPermission("inventory_planning", "edit");
+  const canActivate = hasPermission("inventory_planning", "activate");
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const policyIdempotencyKey = useRef<string | null>(null);
   const sourceIdempotencyKey = useRef<string | null>(null);
+  const targetIdempotencyKey = useRef<string | null>(null);
+  const targetStateIdempotencyKey = useRef<string | null>(null);
   const [productId, setProductId] = useState<number | null>(null);
   const [publicationTargetId, setPublicationTargetId] = useState<number | null>(null);
   const [scopeType, setScopeType] = useState<PolicyScopeType>("channel");
@@ -67,6 +74,14 @@ export default function InventoryExposure() {
   const [policyReason, setPolicyReason] = useState("");
   const [sourceNodeIds, setSourceNodeIds] = useState<number[]>([]);
   const [sourceReason, setSourceReason] = useState("");
+  const [newTargetChannelId, setNewTargetChannelId] = useState<number | null>(null);
+  const [newTargetConnectionId, setNewTargetConnectionId] = useState<number | null>(null);
+  const [newTargetNodeId, setNewTargetNodeId] = useState<number | null>(null);
+  const [newTargetScopeType, setNewTargetScopeType] = useState<"account" | "location">("account");
+  const [newTargetExternalScopeId, setNewTargetExternalScopeId] = useState("");
+  const [newTargetAuthority, setNewTargetAuthority] = useState<"echelon" | "external_provider" | "manual">("echelon");
+  const [newTargetReason, setNewTargetReason] = useState("");
+  const [targetStateReason, setTargetStateReason] = useState("");
 
   const viewQuery = useQuery<InventoryChannelExposureAdminView>({
     queryKey: ["/api/inventory-planning/admin/channel-exposure", productId],
@@ -89,8 +104,27 @@ export default function InventoryExposure() {
         variant.isActive && variant.salesEligibility === "sellable")?.id ?? null);
   }, [productId, view]);
 
+  useEffect(() => {
+    if (!view) return;
+    const selectedChannelId = newTargetChannelId !== null
+      && view.channels.some((item) => item.id === newTargetChannelId)
+      ? newTargetChannelId : view.channels[0]?.id ?? null;
+    if (selectedChannelId !== newTargetChannelId) setNewTargetChannelId(selectedChannelId);
+    const connections = view.channels.find((item) => item.id === selectedChannelId)?.connections ?? [];
+    if (newTargetConnectionId === null
+      || !connections.some((item) => item.id === newTargetConnectionId)) {
+      setNewTargetConnectionId(connections[0]?.id ?? null);
+    }
+    if (newTargetNodeId === null
+      || !view.fulfillmentNodes.some((item) => item.id === newTargetNodeId)) {
+      setNewTargetNodeId(view.fulfillmentNodes[0]?.id ?? null);
+    }
+  }, [newTargetChannelId, newTargetConnectionId, newTargetNodeId, view]);
+
   const target = view?.publicationTargets.find((item) => item.id === publicationTargetId) ?? null;
   const channel = view?.channels.find((item) => item.id === target?.channelId) ?? null;
+  const newTargetConnections = view?.channels.find((item) =>
+    item.id === newTargetChannelId)?.connections ?? [];
   const scope = useMemo<ChannelExposurePolicyScope | null>(() => {
     if (!target) return null;
     if (scopeType === "channel") return { scopeType, channelId: target.channelId };
@@ -120,6 +154,11 @@ export default function InventoryExposure() {
     sourceIdempotencyKey.current = null;
   }, [publicationTargetId, sourceHead?.activeBinding?.definitionHash,
     sourceHead?.draftBinding?.definitionHash]);
+
+  useEffect(() => {
+    setTargetStateReason("");
+    targetStateIdempotencyKey.current = null;
+  }, [publicationTargetId, target?.revision]);
 
   const previewQuery = useQuery({
     queryKey: ["/api/inventory-planning/admin/channel-exposure/preview", publicationTargetId, productId],
@@ -204,6 +243,83 @@ export default function InventoryExposure() {
     }),
   });
 
+  const createTarget = useMutation({
+    mutationFn: async () => {
+      if (newTargetChannelId === null || newTargetConnectionId === null || newTargetNodeId === null) {
+        throw new Error("Select a channel, connection, and compatibility fulfillment node.");
+      }
+      const idempotencyKey = targetIdempotencyKey.current ?? crypto.randomUUID();
+      targetIdempotencyKey.current = idempotencyKey;
+      const request = createInventoryPublicationTargetRequestSchema.parse({
+        channelId: newTargetChannelId,
+        channelConnectionId: newTargetConnectionId,
+        legacyFulfillmentNodeId: newTargetNodeId,
+        providerScopeType: newTargetScopeType,
+        externalScopeId: newTargetExternalScopeId,
+        publicationAuthority: newTargetAuthority,
+        changeReason: newTargetReason,
+        idempotencyKey,
+      });
+      return requestJson(
+        "/api/inventory-planning/admin/channel-exposure/publication-target",
+        inventoryPublicationTargetCommandResultSchema,
+        jsonRequest("POST", request),
+      );
+    },
+    onSuccess: async (result) => {
+      targetIdempotencyKey.current = null;
+      setNewTargetExternalScopeId("");
+      setNewTargetReason("");
+      setPublicationTargetId(result.publicationTargetId);
+      await refreshExposure(queryClient);
+      toast({
+        title: "Disabled publication target created",
+        description: "Configure sources and SKU mappings before enabling readiness preview.",
+      });
+    },
+    onError: (error: Error) => toast({
+      title: "Publication target was not created",
+      description: error.message,
+      variant: "destructive",
+    }),
+  });
+
+  const setTargetPreviewState = useMutation({
+    mutationFn: async () => {
+      if (!target) throw new Error("Select a publication target.");
+      if (target.state === "live") throw new Error("A live target cannot be changed here.");
+      const state = target.state === "preview" ? "disabled" : "preview";
+      const idempotencyKey = targetStateIdempotencyKey.current ?? crypto.randomUUID();
+      targetStateIdempotencyKey.current = idempotencyKey;
+      const request = setInventoryPublicationTargetPreviewStateRequestSchema.parse({
+        publicationTargetId: target.id,
+        expectedRevision: target.revision,
+        state,
+        changeReason: targetStateReason,
+        idempotencyKey,
+      });
+      return requestJson(
+        "/api/inventory-planning/admin/channel-exposure/publication-target-preview-state",
+        inventoryPublicationTargetCommandResultSchema,
+        jsonRequest("PUT", request),
+      );
+    },
+    onSuccess: async (result) => {
+      targetStateIdempotencyKey.current = null;
+      setTargetStateReason("");
+      await refreshExposure(queryClient);
+      toast({
+        title: result.state === "preview" ? "Target included in readiness preview" : "Target disabled",
+        description: "Runtime ATP and provider quantities are unchanged.",
+      });
+    },
+    onError: (error: Error) => toast({
+      title: "Publication target state was not changed",
+      description: error.message,
+      variant: "destructive",
+    }),
+  });
+
   const updatePolicy = (patch: Partial<PolicyForm>) => {
     setPolicyForm((current) => ({ ...current, ...patch }));
     policyIdempotencyKey.current = null;
@@ -237,6 +353,88 @@ export default function InventoryExposure() {
       </div>
 
       <Card>
+        <CardHeader>
+          <CardTitle>Create an exact provider destination</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            New targets start disabled. Creation and readiness preview do not call a provider or
+            change live channel quantities.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <Field label="Channel">
+              <select className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+                value={newTargetChannelId ?? ""} disabled={!canEdit}
+                onChange={(event) => {
+                  setNewTargetChannelId(Number(event.target.value));
+                  setNewTargetConnectionId(null);
+                  targetIdempotencyKey.current = null;
+                }}>
+                {view.channels.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Provider connection">
+              <select className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+                value={newTargetConnectionId ?? ""} disabled={!canEdit}
+                onChange={(event) => {
+                  setNewTargetConnectionId(Number(event.target.value));
+                  targetIdempotencyKey.current = null;
+                }}>
+                {newTargetConnections.length === 0 && <option value="">No connection</option>}
+                {newTargetConnections.map((item) => <option key={item.id} value={item.id}>
+                  {item.externalAccountLabel ?? `Connection #${item.id}`}
+                </option>)}
+              </select>
+            </Field>
+            <Field label="Compatibility node">
+              <select className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+                value={newTargetNodeId ?? ""} disabled={!canEdit}
+                onChange={(event) => {
+                  setNewTargetNodeId(Number(event.target.value));
+                  targetIdempotencyKey.current = null;
+                }}>
+                {view.fulfillmentNodes.map((node) => <option key={node.id} value={node.id}>
+                  {node.code} — {node.name}
+                </option>)}
+              </select>
+            </Field>
+            <SelectField label="Provider scope" value={newTargetScopeType}
+              disabled={!canEdit}
+              onChange={(value) => {
+                setNewTargetScopeType(value as "account" | "location");
+                targetIdempotencyKey.current = null;
+              }} options={["account", "location"]} />
+            <Field label="External account/location ID">
+              <Input value={newTargetExternalScopeId} disabled={!canEdit}
+                onChange={(event) => {
+                  setNewTargetExternalScopeId(event.target.value);
+                  targetIdempotencyKey.current = null;
+                }} />
+            </Field>
+            <SelectField label="Publication authority" value={newTargetAuthority}
+              disabled={!canEdit}
+              onChange={(value) => {
+                setNewTargetAuthority(value as "echelon" | "external_provider" | "manual");
+                targetIdempotencyKey.current = null;
+              }} options={["echelon", "external_provider", "manual"]} />
+          </div>
+          <Field label="Reason for creating this disabled target">
+            <Textarea value={newTargetReason} disabled={!canEdit}
+              onChange={(event) => {
+                setNewTargetReason(event.target.value);
+                targetIdempotencyKey.current = null;
+              }} />
+          </Field>
+          <Button disabled={!canEdit || newTargetConnectionId === null || newTargetNodeId === null
+            || newTargetExternalScopeId.trim().length === 0 || newTargetReason.trim().length === 0
+            || createTarget.isPending}
+            onClick={() => createTarget.mutate()}>
+            Create disabled target
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
         <CardHeader><CardTitle>Review scope</CardTitle></CardHeader>
         <CardContent className="grid gap-4 lg:grid-cols-2">
           <Field label="Product">
@@ -260,10 +458,28 @@ export default function InventoryExposure() {
               })}
             </select>
           </Field>
-          {target && <div className="lg:col-span-2 rounded-md border bg-muted/30 p-3 text-sm">
-            <strong>{channel?.name ?? `Channel ${target.channelId}`}</strong> via connection #{target.channelConnectionId};
-            provider authority <strong>{target.publicationAuthority}</strong>. The legacy single-node field
-            is #{target.legacyFulfillmentNodeId}; only the versioned source set below feeds the new preview.
+          {target && <div className="lg:col-span-2 space-y-3 rounded-md border bg-muted/30 p-3 text-sm">
+            <div>
+              <strong>{channel?.name ?? `Channel ${target.channelId}`}</strong> via connection #{target.channelConnectionId};
+              provider authority <strong>{target.publicationAuthority}</strong>; state <strong>{target.state}</strong>;
+              revision {target.revision}. The legacy single-node field is #{target.legacyFulfillmentNodeId};
+              only the versioned source set below feeds the new preview.
+            </div>
+            {target.state !== "live" && <div className="grid items-end gap-3 md:grid-cols-[1fr_auto]">
+              <Field label="Reason for changing readiness inclusion">
+                <Input value={targetStateReason} disabled={!canActivate}
+                  onChange={(event) => {
+                    setTargetStateReason(event.target.value);
+                    targetStateIdempotencyKey.current = null;
+                  }} />
+              </Field>
+              <Button variant={target.state === "preview" ? "outline" : "default"}
+                disabled={!canActivate || targetStateReason.trim().length === 0
+                  || setTargetPreviewState.isPending}
+                onClick={() => setTargetPreviewState.mutate()}>
+                {target.state === "preview" ? "Remove from readiness preview" : "Include in readiness preview"}
+              </Button>
+            </div>}
           </div>}
         </CardContent>
       </Card>
@@ -363,6 +579,23 @@ export default function InventoryExposure() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Exact target/SKU provider mappings</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Each sellable SKU needs an explicit inventory identity for this exact destination.
+            Legacy feed values are suggestions only; saving creates an inactive mapping draft.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {!target && <p className="text-sm text-muted-foreground">Select or create a publication target.</p>}
+          {target && view.selectedProduct?.variants
+            .filter((variant) => variant.isActive && variant.salesEligibility === "sellable")
+            .map((variant) => <VariantMappingRow key={`${target.id}:${variant.id}`}
+              target={target} variant={variant} view={view} canEdit={canEdit} />)}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Full calculation preview</CardTitle>
           <p className="text-sm text-muted-foreground">
             Canonical ATP is summed only across the selected source nodes. Share is applied first,
@@ -394,6 +627,7 @@ export default function InventoryExposure() {
                 <TableHead className="text-right">After holdback</TableHead>
                 <TableHead className="text-right">After cap</TableHead>
                 <TableHead className="text-right">Published</TableHead>
+                <TableHead>Source ATP</TableHead>
                 <TableHead>Semantics</TableHead>
               </TableRow></TableHeader>
               <TableBody>{previewQuery.data.rows.map((row) => <TableRow key={row.productVariantId}>
@@ -403,6 +637,14 @@ export default function InventoryExposure() {
                 <TableCell className="text-right tabular-nums">{row.afterHoldbackUnits}</TableCell>
                 <TableCell className="text-right tabular-nums">{row.cappedUnits}</TableCell>
                 <TableCell className="text-right font-medium tabular-nums">{row.publishedUnits}</TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {row.sourceWarehouseBreakdown.length === 0
+                    ? "none"
+                    : row.sourceWarehouseBreakdown.map((source) =>
+                      `${view.fulfillmentNodes.find((node) => node.warehouseId === source.warehouseId)
+                        ?.warehouseCode ?? `warehouse ${source.warehouseId}`}: ${source.canonicalAtpUnits}`)
+                      .join(" · ")}
+                </TableCell>
                 <TableCell>{row.policy?.allocationSemantics ?? "blocked"}</TableCell>
               </TableRow>)}</TableBody>
             </Table>
@@ -411,6 +653,99 @@ export default function InventoryExposure() {
       </Card>
     </div>
   );
+}
+
+function VariantMappingRow({ target, variant, view, canEdit }: {
+  target: InventoryChannelExposureAdminView["publicationTargets"][number];
+  variant: NonNullable<InventoryChannelExposureAdminView["selectedProduct"]>["variants"][number];
+  view: InventoryChannelExposureAdminView;
+  canEdit: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  const idempotencyKey = useRef<string | null>(null);
+  const head = view.variantMappingHeads.find((item) =>
+    item.publicationTargetId === target.id && item.productVariantId === variant.id) ?? null;
+  const selected = head?.draftMapping ?? head?.activeMapping ?? null;
+  const candidate = view.legacyMappingCandidates.find((item) =>
+    item.channelId === target.channelId && item.productVariantId === variant.id) ?? null;
+  const [externalInventoryItemId, setExternalInventoryItemId] = useState("");
+  const [externalSku, setExternalSku] = useState("");
+  const [reason, setReason] = useState("");
+
+  useEffect(() => {
+    setExternalInventoryItemId(selected?.externalInventoryItemId
+      ?? candidate?.externalInventoryItemId ?? "");
+    setExternalSku(selected?.externalSku ?? candidate?.externalSku ?? variant.sku ?? "");
+    setReason("");
+    idempotencyKey.current = null;
+  }, [candidate?.externalInventoryItemId, candidate?.externalSku, selected?.definitionHash,
+    target.id, variant.id, variant.sku]);
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const requestKey = idempotencyKey.current ?? crypto.randomUUID();
+      idempotencyKey.current = requestKey;
+      const request = savePublicationVariantMappingDraftRequestSchema.parse({
+        publicationTargetId: target.id,
+        productVariantId: variant.id,
+        externalInventoryItemId,
+        externalSku: externalSku.trim() || null,
+        expectedHeadRevision: head?.revision ?? "0",
+        expectedDraftMappingId: head?.draftMapping?.mappingId ?? null,
+        expectedDraftDefinitionHash: head?.draftMapping?.definitionHash ?? null,
+        changeReason: reason,
+        idempotencyKey: requestKey,
+      });
+      return requestJson(
+        "/api/inventory-planning/admin/channel-exposure/variant-mapping-draft",
+        channelExposureDraftSaveResultSchema,
+        jsonRequest("PUT", request),
+      );
+    },
+    onSuccess: async (result) => {
+      idempotencyKey.current = null;
+      setReason("");
+      await refreshExposure(queryClient);
+      toast({
+        title: "Exact SKU mapping draft saved",
+        description: `Draft v${result.version} was recorded without publishing inventory.`,
+      });
+    },
+    onError: (error: Error) => toast({
+      title: "Exact SKU mapping was not saved",
+      description: error.message,
+      variant: "destructive",
+    }),
+  });
+
+  const resetIdempotency = () => { idempotencyKey.current = null; };
+  return <div className="grid items-end gap-3 rounded-md border p-3 lg:grid-cols-[minmax(9rem,0.8fr)_1fr_1fr_1.3fr_auto]">
+    <div className="text-sm">
+      <div className="font-medium">{variant.sku ?? variant.name}</div>
+      <div className="text-xs text-muted-foreground">
+        {selected ? `${selected.lifecycleStatus} mapping v${selected.version}` : "mapping missing"}
+        {candidate ? ` · legacy ${candidate.mappingState} suggestion` : " · no legacy suggestion"}
+      </div>
+    </div>
+    <Field label="Provider inventory item ID">
+      <Input value={externalInventoryItemId} disabled={!canEdit}
+        onChange={(event) => { setExternalInventoryItemId(event.target.value); resetIdempotency(); }} />
+    </Field>
+    <Field label="External SKU">
+      <Input value={externalSku} disabled={!canEdit}
+        onChange={(event) => { setExternalSku(event.target.value); resetIdempotency(); }} />
+    </Field>
+    <Field label="Reason">
+      <Input value={reason} disabled={!canEdit}
+        onChange={(event) => { setReason(event.target.value); resetIdempotency(); }} />
+    </Field>
+    <Button disabled={!canEdit || externalInventoryItemId.trim().length === 0
+      || reason.trim().length === 0 || save.isPending}
+      onClick={() => save.mutate()}>
+      Save mapping draft
+    </Button>
+  </div>;
 }
 
 function scopeKey(scope: ChannelExposurePolicyScope): string {
@@ -463,11 +798,11 @@ function InputField({ label, value, placeholder, onChange }: {
     onChange={(event) => onChange(event.target.value)} /></Field>;
 }
 
-function SelectField({ label, value, options, onChange }: {
-  label: string; value: string; options: string[]; onChange(value: string): void;
+function SelectField({ label, value, options, disabled, onChange }: {
+  label: string; value: string; options: string[]; disabled?: boolean; onChange(value: string): void;
 }) {
   return <Field label={label}><select className="h-10 w-full rounded-md border bg-background px-3 text-sm"
-    value={value} onChange={(event) => onChange(event.target.value)}>
+    value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
     {options.map((option) => <option key={option} value={option}>{option.replaceAll("_", " ")}</option>)}
   </select></Field>;
 }

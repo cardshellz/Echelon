@@ -98,6 +98,50 @@ export const publicationSourceBindingHeadSchema = z.object({
   draftBinding: publicationSourceBindingVersionSchema.nullable(),
 }).strict();
 
+export const publicationVariantMappingVersionSchema = z.object({
+  mappingId: positiveInteger,
+  publicationTargetId: positiveInteger,
+  productVariantId: positiveInteger,
+  version: positiveInteger,
+  lifecycleStatus: z.enum(["draft", "sealed", "retired"]),
+  externalInventoryItemId: nonblank(240),
+  externalSku: z.string().trim().min(1).max(100).nullable(),
+  definitionHash: sha256Hex,
+  changeReason: nonblank(1000),
+  createdBy: nonblank(100),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+}).strict();
+
+export const publicationVariantMappingHeadSchema = z.object({
+  publicationTargetId: positiveInteger,
+  productVariantId: positiveInteger,
+  revision: postgresBigintString,
+  activeMapping: publicationVariantMappingVersionSchema.nullable(),
+  draftMapping: publicationVariantMappingVersionSchema.nullable(),
+}).strict();
+
+export const inventoryPublicationTargetAdminSchema = z.object({
+  id: positiveInteger,
+  channelId: positiveInteger,
+  channelConnectionId: positiveInteger,
+  legacyFulfillmentNodeId: positiveInteger,
+  providerScopeType: z.enum(["account", "location"]),
+  externalScopeId: nonblank(240),
+  publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
+  state: z.enum(["disabled", "preview", "live"]),
+  revision: postgresBigintString,
+}).strict();
+
+export const legacyPublicationMappingCandidateSchema = z.object({
+  channelId: positiveInteger,
+  productVariantId: positiveInteger,
+  feedId: positiveInteger,
+  mappingState: z.enum(["inactive", "active", "quarantined"]),
+  externalInventoryItemId: z.string().trim().min(1).max(240).nullable(),
+  externalSku: z.string().trim().min(1).max(100).nullable(),
+}).strict();
+
 export const inventoryChannelExposureAdminViewSchema = z.object({
   products: z.array(z.object({
     id: positiveInteger,
@@ -127,16 +171,7 @@ export const inventoryChannelExposureAdminViewSchema = z.object({
       externalAccountLabel: z.string().max(255).nullable(),
     }).strict()),
   }).strict()),
-  publicationTargets: z.array(z.object({
-    id: positiveInteger,
-    channelId: positiveInteger,
-    channelConnectionId: positiveInteger,
-    legacyFulfillmentNodeId: positiveInteger,
-    providerScopeType: z.enum(["account", "location"]),
-    externalScopeId: nonblank(240),
-    publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
-    state: z.enum(["disabled", "preview", "live"]),
-  }).strict()),
+  publicationTargets: z.array(inventoryPublicationTargetAdminSchema),
   fulfillmentNodes: z.array(z.object({
     id: positiveInteger,
     code: nonblank(60),
@@ -148,6 +183,8 @@ export const inventoryChannelExposureAdminViewSchema = z.object({
   }).strict()),
   policyHeads: z.array(channelExposurePolicyHeadSchema),
   sourceBindingHeads: z.array(publicationSourceBindingHeadSchema),
+  variantMappingHeads: z.array(publicationVariantMappingHeadSchema),
+  legacyMappingCandidates: z.array(legacyPublicationMappingCandidateSchema),
   runtimeAuthority: z.literal("legacy_channel_allocation_rules"),
   providerWriteEnabled: z.literal(false),
 }).strict();
@@ -195,6 +232,45 @@ export const savePublicationSourceBindingDraftRequestSchema = z.object({
   }
 });
 
+export const createInventoryPublicationTargetRequestSchema = z.object({
+  channelId: positiveInteger,
+  channelConnectionId: positiveInteger,
+  legacyFulfillmentNodeId: positiveInteger,
+  providerScopeType: z.enum(["account", "location"]),
+  externalScopeId: nonblank(240),
+  publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
+  changeReason: nonblank(1000),
+  idempotencyKey: nonblank(120),
+}).strict();
+
+export const setInventoryPublicationTargetPreviewStateRequestSchema = z.object({
+  publicationTargetId: positiveInteger,
+  expectedRevision: postgresBigintString,
+  state: z.enum(["disabled", "preview"]),
+  changeReason: nonblank(1000),
+  idempotencyKey: nonblank(120),
+}).strict();
+
+export const savePublicationVariantMappingDraftRequestSchema = z.object({
+  publicationTargetId: positiveInteger,
+  productVariantId: positiveInteger,
+  externalInventoryItemId: nonblank(240),
+  externalSku: z.string().trim().min(1).max(100).nullable(),
+  expectedHeadRevision: postgresBigintString,
+  expectedDraftMappingId: positiveInteger.nullable(),
+  expectedDraftDefinitionHash: sha256Hex.nullable(),
+  changeReason: nonblank(1000),
+  idempotencyKey: nonblank(120),
+}).strict().superRefine((request, context) => {
+  if ((request.expectedDraftMappingId === null) !== (request.expectedDraftDefinitionHash === null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["expectedDraftMappingId"],
+      message: "Expected mapping draft id and definition hash must be both present or both absent.",
+    });
+  }
+});
+
 export const channelExposureDraftSaveResultSchema = z.object({
   definitionId: positiveInteger,
   version: positiveInteger,
@@ -203,6 +279,16 @@ export const channelExposureDraftSaveResultSchema = z.object({
   alreadyApplied: z.boolean(),
   runtimeAuthorityChanged: z.literal(false),
   providerWriteAttempted: z.literal(false),
+}).strict();
+
+export const inventoryPublicationTargetCommandResultSchema = z.object({
+  publicationTargetId: positiveInteger,
+  revision: postgresBigintString,
+  state: z.enum(["disabled", "preview"]),
+  alreadyApplied: z.boolean(),
+  runtimeAuthorityChanged: z.literal(false),
+  providerWriteAttempted: z.literal(false),
+  outboxEnqueued: z.literal(false),
 }).strict();
 
 export const resolvedChannelExposurePolicySchema = z.object({
@@ -225,6 +311,12 @@ export const resolvedChannelExposurePolicySchema = z.object({
 export const inventoryChannelExposurePreviewSchema = z.object({
   publicationTargetId: positiveInteger,
   channelId: positiveInteger,
+  channelConnectionId: positiveInteger,
+  providerScopeType: z.enum(["account", "location"]),
+  externalScopeId: nonblank(240),
+  publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
+  publicationTargetState: z.enum(["disabled", "preview", "live"]),
+  publicationTargetRevision: postgresBigintString,
   productId: positiveInteger,
   shadowRunId: plannerPositiveQuantitySchema,
   snapshotFingerprint: sha256Hex,
@@ -254,7 +346,19 @@ export const inventoryChannelExposurePreviewSchema = z.object({
     afterHoldbackUnits: plannerNonnegativeQuantitySchema,
     cappedUnits: plannerNonnegativeQuantitySchema,
     publishedUnits: plannerNonnegativeQuantitySchema,
+    sourceWarehouseBreakdown: z.array(z.object({
+      warehouseId: positiveInteger,
+      canonicalAtpUnits: plannerNonnegativeQuantitySchema,
+    }).strict()),
     policy: resolvedChannelExposurePolicySchema.nullable(),
+    mapping: z.object({
+      mappingId: positiveInteger,
+      version: positiveInteger,
+      definitionHash: sha256Hex,
+      authority: z.enum(["draft", "active"]),
+      externalInventoryItemId: nonblank(240),
+      externalSku: z.string().trim().min(1).max(100).nullable(),
+    }).strict().nullable(),
   }).strict()),
   blockers: z.array(z.object({
     code: nonblank(100),
@@ -287,6 +391,21 @@ export const inventoryChannelExposurePreviewSchema = z.object({
       message: "Source-binding evidence must match its selected authority.",
     });
   }
+  preview.rows.forEach((row, index) => {
+    const warehouseIds = row.sourceWarehouseBreakdown.map((entry) => entry.warehouseId);
+    const warehouseTotal = row.sourceWarehouseBreakdown.reduce(
+      (total, entry) => total + BigInt(entry.canonicalAtpUnits),
+      BigInt(0),
+    );
+    if (new Set(warehouseIds).size !== warehouseIds.length
+      || warehouseTotal !== BigInt(row.canonicalAtpUnits)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["rows", index, "sourceWarehouseBreakdown"],
+        message: "Warehouse ATP rows must be unique and sum to target canonical ATP.",
+      });
+    }
+  });
 });
 
 export type ChannelExposurePolicyScope = z.infer<typeof channelExposurePolicyScopeSchema>;
@@ -295,6 +414,10 @@ export type ChannelExposurePolicyVersion = z.infer<typeof channelExposurePolicyV
 export type ChannelExposurePolicyHead = z.infer<typeof channelExposurePolicyHeadSchema>;
 export type PublicationSourceBindingVersion = z.infer<typeof publicationSourceBindingVersionSchema>;
 export type PublicationSourceBindingHead = z.infer<typeof publicationSourceBindingHeadSchema>;
+export type PublicationVariantMappingVersion = z.infer<typeof publicationVariantMappingVersionSchema>;
+export type PublicationVariantMappingHead = z.infer<typeof publicationVariantMappingHeadSchema>;
+export type InventoryPublicationTargetAdmin = z.infer<typeof inventoryPublicationTargetAdminSchema>;
+export type LegacyPublicationMappingCandidate = z.infer<typeof legacyPublicationMappingCandidateSchema>;
 export type InventoryChannelExposureAdminView = z.infer<typeof inventoryChannelExposureAdminViewSchema>;
 export type SaveChannelExposurePolicyDraftRequest = z.infer<
   typeof saveChannelExposurePolicyDraftRequestSchema
@@ -302,6 +425,18 @@ export type SaveChannelExposurePolicyDraftRequest = z.infer<
 export type SavePublicationSourceBindingDraftRequest = z.infer<
   typeof savePublicationSourceBindingDraftRequestSchema
 >;
+export type CreateInventoryPublicationTargetRequest = z.infer<
+  typeof createInventoryPublicationTargetRequestSchema
+>;
+export type SetInventoryPublicationTargetPreviewStateRequest = z.infer<
+  typeof setInventoryPublicationTargetPreviewStateRequestSchema
+>;
+export type SavePublicationVariantMappingDraftRequest = z.infer<
+  typeof savePublicationVariantMappingDraftRequestSchema
+>;
 export type ChannelExposureDraftSaveResult = z.infer<typeof channelExposureDraftSaveResultSchema>;
+export type InventoryPublicationTargetCommandResult = z.infer<
+  typeof inventoryPublicationTargetCommandResultSchema
+>;
 export type ResolvedChannelExposurePolicy = z.infer<typeof resolvedChannelExposurePolicySchema>;
 export type InventoryChannelExposurePreview = z.infer<typeof inventoryChannelExposurePreviewSchema>;

@@ -9,6 +9,7 @@ import * as databaseSchema from "@shared/schema";
 
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
 import { PostgresInventoryPromiseSafetyAdminStore } from "../../infrastructure/inventory-promise-safety-admin.repository";
+import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
 import { loadInventoryAvailabilityBackfillSources } from "../../infrastructure/inventory-availability-backfill.repository";
 import { planInventoryAvailabilityBackfill } from "../../domain/inventory-availability-backfill";
 import { transformationModelDefinitionSchema } from "../../domain/inventory-availability-master-data.contracts";
@@ -49,6 +50,10 @@ const demandObservationDaysMigrationSql = readFileSync(
 );
 const channelExposureMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0632_inventory_channel_exposure_policy.sql"),
+  "utf8",
+);
+const publicationReadinessMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0633_inventory_publication_readiness.sql"),
   "utf8",
 );
 const HASH = "a".repeat(64);
@@ -214,6 +219,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(backfillProvenanceRefreshMigrationSql);
       await migrationClient.query(demandObservationDaysMigrationSql);
       await migrationClient.query(channelExposureMigrationSql);
+      await migrationClient.query(publicationReadinessMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -2393,6 +2399,17 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       [target.rows[0]!.id, scope.variantIds[1], HASH, FIXED_TIME],
     );
     expect(standaloneReadback.rows[0]!.id).toBeTruthy();
+    await expectDatabaseError(
+      () => pool.query(
+        `INSERT INTO inventory.inventory_publication_readbacks (
+           publication_target_id, product_variant_id,
+           external_inventory_item_id_snapshot, observed_quantity,
+           matches_desired, evidence_hash, observed_at
+         ) VALUES ($1, $2, '   ', 7, NULL, $3, $4::timestamptz + interval '2 seconds')`,
+        [target.rows[0]!.id, scope.variantIds[1], HASH, FIXED_TIME],
+      ),
+      "inventory_publication_readbacks_identity_snapshot_chk",
+    );
 
     const linkedReadback = await pool.query<{ id: string }>(
       `INSERT INTO inventory.inventory_publication_readbacks (
@@ -2526,5 +2543,278 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       ),
       "source binding members may change only on the current draft",
     );
+  });
+
+  it("enforces publication-target revisions and append-only exact target/SKU mappings", async () => {
+    const scope = await seedProductAndWarehouse([1, 5]);
+    const channel = await pool.query<{ id: number }>(
+      "INSERT INTO channels.channels (name, provider) VALUES ('Readiness channel', 'shopify') RETURNING id",
+    );
+    const connection = await pool.query<{ id: number }>(
+      "INSERT INTO channels.channel_connections (channel_id) VALUES ($1) RETURNING id",
+      [channel.rows[0]!.id],
+    );
+    const node = await pool.query<{ id: number }>(
+      `INSERT INTO warehouse.fulfillment_nodes (
+         code, name, node_type, warehouse_id, inventory_authority,
+         fulfillment_authority, created_by
+       ) VALUES ('READINESS', 'Readiness node', 'internal_warehouse', $1,
+         'echelon', 'echelon', 'integration-test') RETURNING id`,
+      [scope.warehouseId],
+    );
+    const target = await pool.query<{ id: number; revision: string }>(
+      `INSERT INTO inventory.inventory_publication_targets (
+         channel_id, channel_connection_id, fulfillment_node_id,
+         provider_scope_type, external_scope_id, publication_authority,
+         state, change_reason, created_by
+       ) VALUES ($1, $2, $3, 'location', 'readiness-location', 'echelon',
+         'disabled', 'Integration readiness target', 'integration-test')
+       RETURNING id, revision`,
+      [channel.rows[0]!.id, connection.rows[0]!.id, node.rows[0]!.id],
+    );
+    expect(target.rows[0]!.revision).toBe("1");
+
+    const previewed = await pool.query<{ state: string; revision: string }>(
+      `UPDATE inventory.inventory_publication_targets
+       SET state = 'preview', activated_by = 'integration-test', activated_at = $2,
+           revision = revision + 1
+       WHERE id = $1 RETURNING state, revision`,
+      [target.rows[0]!.id, FIXED_TIME],
+    );
+    expect(previewed.rows[0]).toEqual({ state: "preview", revision: "2" });
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE inventory.inventory_publication_targets SET state = 'disabled' WHERE id = $1",
+        [target.rows[0]!.id],
+      ),
+      "inventory publication target revision must increment by 1",
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        `UPDATE inventory.inventory_publication_targets
+         SET external_scope_id = 'changed', revision = revision + 1 WHERE id = $1`,
+        [target.rows[0]!.id],
+      ),
+      "inventory publication target identity and creation evidence are immutable",
+    );
+
+    const disabledTarget = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.inventory_publication_targets (
+         channel_id, channel_connection_id, fulfillment_node_id,
+         provider_scope_type, external_scope_id, publication_authority,
+         state, change_reason, created_by
+       ) VALUES ($1, $2, $3, 'location', 'readiness-location-2', 'echelon',
+         'disabled', 'Second readiness target', 'integration-test') RETURNING id`,
+      [channel.rows[0]!.id, connection.rows[0]!.id, node.rows[0]!.id],
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        `UPDATE inventory.inventory_publication_targets
+         SET state = 'live', activated_by = 'integration-test', activated_at = $2,
+             revision = revision + 1
+         WHERE id = $1`,
+        [disabledTarget.rows[0]!.id, FIXED_TIME],
+      ),
+      "a publication target must be previewed before it becomes live",
+    );
+
+    let mappingId: number;
+    const mappingClient = await pool.connect();
+    try {
+      await mappingClient.query("BEGIN");
+      const mapping = await mappingClient.query<{ id: number }>(
+        `INSERT INTO inventory.publication_variant_mapping_versions (
+           publication_target_id, product_variant_id, version,
+           external_inventory_item_id, external_sku, definition_hash,
+           change_reason, idempotency_key, request_hash, created_by
+         ) VALUES ($1, $2, 1, 'inventory-item-1', 'EA', $3,
+           'Integration exact mapping', 'mapping:1', $3, 'integration-test') RETURNING id`,
+        [target.rows[0]!.id, scope.variantIds[0]!, HASH],
+      );
+      mappingId = mapping.rows[0]!.id;
+      await mappingClient.query(
+        `INSERT INTO inventory.publication_variant_mapping_heads (
+           publication_target_id, product_variant_id, draft_mapping_id,
+           revision, updated_by, update_reason
+         ) VALUES ($1, $2, $3, 1, 'integration-test', 'Integration exact mapping')`,
+        [target.rows[0]!.id, scope.variantIds[0]!, mappingId],
+      );
+      await mappingClient.query("COMMIT");
+    } catch (error) {
+      await mappingClient.query("ROLLBACK");
+      throw error;
+    } finally {
+      mappingClient.release();
+    }
+    await pool.query(
+      `UPDATE inventory.publication_variant_mapping_versions
+       SET external_sku = 'EA-UPDATED' WHERE id = $1`,
+      [mappingId],
+    );
+
+    await expectDatabaseError(async () => {
+      const duplicateClient = await pool.connect();
+      try {
+        await duplicateClient.query("BEGIN");
+        const duplicate = await duplicateClient.query<{ id: number }>(
+          `INSERT INTO inventory.publication_variant_mapping_versions (
+             publication_target_id, product_variant_id, version,
+             external_inventory_item_id, external_sku, definition_hash,
+             change_reason, idempotency_key, request_hash, created_by
+           ) VALUES ($1, $2, 1, 'inventory-item-1', 'P5', $3,
+             'Duplicate exact mapping', 'mapping:duplicate', $3, 'integration-test') RETURNING id`,
+          [target.rows[0]!.id, scope.variantIds[1]!, HASH],
+        );
+        await duplicateClient.query(
+          `INSERT INTO inventory.publication_variant_mapping_heads (
+             publication_target_id, product_variant_id, draft_mapping_id,
+             revision, updated_by, update_reason
+           ) VALUES ($1, $2, $3, 1, 'integration-test', 'Duplicate exact mapping')`,
+          [target.rows[0]!.id, scope.variantIds[1]!, duplicate.rows[0]!.id],
+        );
+        await duplicateClient.query("COMMIT");
+      } catch (error) {
+        await duplicateClient.query("ROLLBACK");
+        throw error;
+      } finally {
+        duplicateClient.release();
+      }
+    }, "one provider inventory item cannot map to multiple SKUs");
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `UPDATE inventory.publication_variant_mapping_versions
+         SET lifecycle_status = 'sealed', sealed_by = 'integration-test', sealed_at = $2
+         WHERE id = $1`,
+        [mappingId, FIXED_TIME],
+      );
+      await client.query(
+        `UPDATE inventory.publication_variant_mapping_heads
+         SET active_mapping_id = draft_mapping_id, draft_mapping_id = NULL,
+             revision = revision + 1
+         WHERE publication_target_id = $1 AND product_variant_id = $2`,
+        [target.rows[0]!.id, scope.variantIds[0]!],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE inventory.publication_variant_mapping_versions SET external_sku = 'CHANGED' WHERE id = $1",
+        [mappingId],
+      ),
+      "sealed publication variant mapping definition is immutable",
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        "DELETE FROM inventory.publication_variant_mapping_versions WHERE id = $1",
+        [mappingId],
+      ),
+      "inventory.publication_variant_mapping_versions is append-only",
+    );
+  });
+
+  it("creates only disabled targets and saves exact mapping drafts idempotently", async () => {
+    const scope = await seedProductAndWarehouse([1, 5]);
+    const channel = await pool.query<{ id: number }>(
+      "INSERT INTO channels.channels (name, provider) VALUES ('Readiness writer', 'shopify') RETURNING id",
+    );
+    const connection = await pool.query<{ id: number }>(
+      "INSERT INTO channels.channel_connections (channel_id) VALUES ($1) RETURNING id",
+      [channel.rows[0]!.id],
+    );
+    const node = await pool.query<{ id: number }>(
+      `INSERT INTO warehouse.fulfillment_nodes (
+         code, name, node_type, warehouse_id, inventory_authority,
+         fulfillment_authority, created_by
+       ) VALUES ('WRITER', 'Readiness writer node', 'internal_warehouse', $1,
+         'echelon', 'echelon', 'integration-test') RETURNING id`,
+      [scope.warehouseId],
+    );
+    const testDatabase = drizzle(pool, { schema: databaseSchema });
+    const store = new PostgresInventoryChannelExposureAdminStore(testDatabase as never);
+    const occurredAt = new Date(FIXED_TIME);
+    const targetCommand = {
+      channelId: channel.rows[0]!.id,
+      channelConnectionId: connection.rows[0]!.id,
+      legacyFulfillmentNodeId: node.rows[0]!.id,
+      providerScopeType: "location" as const,
+      externalScopeId: "writer-location",
+      publicationAuthority: "echelon" as const,
+      changeReason: "Integration disabled target",
+      idempotencyKey: "integration-target-writer-1",
+      actorId: "integration-test",
+      requestHash: HASH,
+      occurredAt,
+    };
+    const created = await store.createPublicationTarget(targetCommand);
+    expect(created).toMatchObject({
+      state: "disabled",
+      revision: "1",
+      alreadyApplied: false,
+      runtimeAuthorityChanged: false,
+      providerWriteAttempted: false,
+      outboxEnqueued: false,
+    });
+    await expect(store.createPublicationTarget(targetCommand)).resolves.toMatchObject({
+      publicationTargetId: created.publicationTargetId,
+      state: "disabled",
+      alreadyApplied: true,
+    });
+
+    const previewed = await store.setPublicationTargetPreviewState({
+      publicationTargetId: created.publicationTargetId,
+      expectedRevision: "1",
+      state: "preview",
+      changeReason: "Include exact target in readiness evidence",
+      idempotencyKey: "integration-target-preview-1",
+      actorId: "integration-test",
+      requestHash: "b".repeat(64),
+      occurredAt,
+    });
+    expect(previewed).toMatchObject({ state: "preview", revision: "2" });
+
+    const mappingCommand = {
+      publicationTargetId: created.publicationTargetId,
+      productVariantId: scope.variantIds[0]!,
+      externalInventoryItemId: "inventory-item-writer-1",
+      externalSku: "EA",
+      expectedHeadRevision: "0",
+      expectedDraftMappingId: null,
+      expectedDraftDefinitionHash: null,
+      changeReason: "Integration exact mapping",
+      idempotencyKey: "integration-mapping-writer-1",
+      actorId: "integration-test",
+      requestHash: "c".repeat(64),
+      occurredAt,
+    };
+    const mapping = await store.saveVariantMappingDraft(mappingCommand);
+    expect(mapping).toMatchObject({
+      version: 1,
+      headRevision: "1",
+      alreadyApplied: false,
+      runtimeAuthorityChanged: false,
+      providerWriteAttempted: false,
+    });
+    await expect(store.saveVariantMappingDraft(mappingCommand)).resolves.toMatchObject({
+      definitionId: mapping.definitionId,
+      alreadyApplied: true,
+    });
+    await expect(store.saveVariantMappingDraft({
+      ...mappingCommand,
+      productVariantId: scope.variantIds[1]!,
+      externalSku: "P5",
+      idempotencyKey: "integration-mapping-writer-duplicate",
+      requestHash: "d".repeat(64),
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "INVENTORY_PUBLICATION_VARIANT_MAPPING_IDENTITY_CONFLICT",
+    });
   });
 });
