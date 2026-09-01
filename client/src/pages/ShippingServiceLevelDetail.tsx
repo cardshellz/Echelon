@@ -10,6 +10,10 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
+  FulfillmentRoutingEditor,
+  type FulfillmentRoutingEditorState,
+} from "@/components/shipping/service-levels/FulfillmentRoutingEditor";
+import {
   fulfillmentModeLabel,
   loadShippingServiceLevels,
   refreshShippingServiceLevels,
@@ -92,6 +96,7 @@ export default function ShippingServiceLevelDetail() {
   const { toast } = useToast();
   const [step, setStep] = useState<FlowStep>("definition");
   const [definition, setDefinition] = useState<DefinitionDraft | null>(null);
+  const [routingState, setRoutingState] = useState<FulfillmentRoutingEditorState | null>(null);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: [SHIPPING_ADMIN_CONFIG_KEY],
@@ -190,12 +195,39 @@ export default function ShippingServiceLevelDetail() {
       setStep("routing");
       return;
     }
-    if (step === "routing") setStep("review");
+    if (step === "routing") {
+      if (!routingState?.loaded) {
+        toast({ title: "Fulfillment routing is still loading", variant: "destructive" });
+        return;
+      }
+      if (routingState.dirty) {
+        toast({
+          title: "Save fulfillment routing before review",
+          description: "The selected provider methods have not been saved.",
+          variant: "destructive",
+        });
+        return;
+      }
+      setStep("review");
+    }
   };
 
   const moveBack = () => {
     if (step === "review") setStep("routing");
     else if (step === "routing") setStep("definition");
+  };
+
+  const selectFlowStep = (target: FlowStep) => {
+    if (target === step) return;
+    if (step === "definition" && target !== "definition") {
+      moveForward();
+      return;
+    }
+    if (step === "routing" && target === "review") {
+      moveForward();
+      return;
+    }
+    setStep(target);
   };
 
   return (
@@ -238,7 +270,7 @@ export default function ShippingServiceLevelDetail() {
                         ? "border-primary bg-primary/5 font-medium"
                         : "border-transparent hover:bg-muted"
                     }`}
-                    onClick={() => setStep(flowStep.id)}
+                    onClick={() => selectFlowStep(flowStep.id)}
                     aria-current={isCurrent ? "step" : undefined}
                   >
                     <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border ${
@@ -342,34 +374,10 @@ export default function ShippingServiceLevelDetail() {
                 </p>
               </div>
 
-              <Alert>
-                <Truck className="h-4 w-4" />
-                <AlertTitle>Provider routing is not configured in the initial rollout</AlertTitle>
-                <AlertDescription>
-                  Standard Shipping is priced from its active rate table. Label purchase continues
-                  through the existing fulfillment workflow. Later, connected carrier accounts will
-                  supply an authoritative method catalog for routing and enforcement here.
-                </AlertDescription>
-              </Alert>
-
-              <dl className="grid gap-x-8 gap-y-5 border-y py-6 sm:grid-cols-2">
-                <div>
-                  <dt className="text-sm text-muted-foreground">Checkout pricing</dt>
-                  <dd className="mt-1 font-medium">Standard rate table</dd>
-                </div>
-                <div>
-                  <dt className="text-sm text-muted-foreground">Label method selection</dt>
-                  <dd className="mt-1 font-medium">Existing fulfillment workflow</dd>
-                </div>
-                <div>
-                  <dt className="text-sm text-muted-foreground">Carrier account sync</dt>
-                  <dd className="mt-1 font-medium">Planned</dd>
-                </div>
-                <div>
-                  <dt className="text-sm text-muted-foreground">Method enforcement</dt>
-                  <dd className="mt-1 font-medium">Planned</dd>
-                </div>
-              </dl>
+              <FulfillmentRoutingEditor
+                serviceLevelId={level.id}
+                onStateChange={setRoutingState}
+              />
             </section>
           )}
 
@@ -402,7 +410,24 @@ export default function ShippingServiceLevelDetail() {
                   <dt className="text-sm text-muted-foreground">Checkout pricing</dt>
                   <dd className="mt-1 font-medium">Active Standard rate table</dd>
                 </div>
+                <div>
+                  <dt className="text-sm text-muted-foreground">Allowed label methods</dt>
+                  <dd className="mt-1 font-medium">
+                    {routingState?.methodCount ?? 0} configured
+                  </dd>
+                </div>
               </dl>
+
+              {routingState?.methodCount === 0 && (
+                <Alert>
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertTitle>No fulfillment methods are allowed yet</AlertTitle>
+                  <AlertDescription>
+                    The routing resolver will fail closed until at least one method is configured.
+                    Checkout behavior is unchanged until a fulfillment consumer is explicitly wired.
+                  </AlertDescription>
+                </Alert>
+              )}
 
               <div className="flex items-center justify-between gap-4 rounded-md border p-4">
                 <div>

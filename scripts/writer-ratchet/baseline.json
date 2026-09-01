@@ -840,6 +840,12 @@
   "shipping.destination_scopes": [
     "modules/shipping-engine"
   ],
+  "shipping.fulfillment_routing_profiles": [
+    "modules/shipping-engine"
+  ],
+  "shipping.fulfillment_routing_revisions": [
+    "modules/shipping-engine"
+  ],
   "shipping.pack_plan_parcel_items": [
     "modules/cartonization"
   ],
@@ -891,6 +897,9 @@
     "modules/shipping-engine"
   ],
   "shipping.rate_tables": [
+    "modules/shipping-engine"
+  ],
+  "shipping.service_level_methods": [
     "modules/shipping-engine"
   ],
   "shipping.service_levels": [

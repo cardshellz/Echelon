@@ -3,6 +3,7 @@ import {
   bigint,
   boolean,
   check,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -968,15 +969,153 @@ export const shippingServiceLevels = shippingSchema.table("service_levels", {
   `),
 ]);
 
+export const shippingFulfillmentRoutingRevisions = shippingSchema.table("fulfillment_routing_revisions", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  serviceLevelId: integer("service_level_id").notNull()
+    .references(() => shippingServiceLevels.id, { onDelete: "restrict" }),
+  revision: integer("revision").notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  catalogHash: varchar("catalog_hash", { length: 64 }).notNull(),
+  catalogFetchedAt: timestamp("catalog_fetched_at", { withTimezone: true }).notNull(),
+  supersedesRevisionId: bigint("supersedes_revision_id", { mode: "number" }),
+  methodsSnapshot: jsonb("methods_snapshot").$type<unknown[]>().notNull(),
+  actorUserId: varchar("actor_user_id", { length: 120 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_fulfillment_routing_revision_version_idx").on(
+    table.serviceLevelId,
+    table.revision,
+  ),
+  uniqueIndex("shipping_fulfillment_routing_revision_id_scope_idx").on(
+    table.id,
+    table.serviceLevelId,
+  ),
+  uniqueIndex("shipping_fulfillment_routing_revision_head_idx").on(
+    table.id,
+    table.serviceLevelId,
+    table.revision,
+  ),
+  uniqueIndex("shipping_fulfillment_routing_revision_idempotency_idx").on(
+    table.serviceLevelId,
+    table.idempotencyKey,
+  ),
+  foreignKey({
+    columns: [table.supersedesRevisionId, table.serviceLevelId],
+    foreignColumns: [table.id, table.serviceLevelId],
+    name: "shipping_fulfillment_routing_revision_supersedes_fk",
+  }).onDelete("restrict"),
+  check("shipping_fulfillment_routing_revision_positive_chk", sql`${table.revision} > 0`),
+  check("shipping_fulfillment_routing_revision_request_hash_chk", sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`),
+  check("shipping_fulfillment_routing_revision_catalog_hash_chk", sql`${table.catalogHash} ~ '^[0-9a-f]{64}$'`),
+  check("shipping_fulfillment_routing_revision_idempotency_chk", sql`
+    char_length(btrim(${table.idempotencyKey})) BETWEEN 16 AND 200
+  `),
+  check("shipping_fulfillment_routing_revision_actor_chk", sql`
+    char_length(btrim(${table.actorUserId})) BETWEEN 1 AND 120
+  `),
+  check("shipping_fulfillment_routing_revision_snapshot_chk", sql`
+    jsonb_typeof(${table.methodsSnapshot}) = 'array'
+  `),
+  check("shipping_fulfillment_routing_revision_chain_chk", sql`
+    (${table.revision} = 1 AND ${table.supersedesRevisionId} IS NULL)
+    OR (${table.revision} > 1 AND ${table.supersedesRevisionId} IS NOT NULL)
+  `),
+]);
+
+export const shippingFulfillmentRoutingProfiles = shippingSchema.table("fulfillment_routing_profiles", {
+  serviceLevelId: integer("service_level_id").primaryKey()
+    .references(() => shippingServiceLevels.id, { onDelete: "restrict" }),
+  revision: integer("revision").notNull().default(0),
+  currentRevisionId: bigint("current_revision_id", { mode: "number" }),
+  updatedBy: varchar("updated_by", { length: 120 }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  foreignKey({
+    columns: [table.currentRevisionId, table.serviceLevelId, table.revision],
+    foreignColumns: [
+      shippingFulfillmentRoutingRevisions.id,
+      shippingFulfillmentRoutingRevisions.serviceLevelId,
+      shippingFulfillmentRoutingRevisions.revision,
+    ],
+    name: "shipping_fulfillment_routing_profile_current_revision_fk",
+  }).onDelete("restrict"),
+  check("shipping_fulfillment_routing_profile_revision_chk", sql`${table.revision} >= 0`),
+  check("shipping_fulfillment_routing_profile_state_chk", sql`
+    (
+      ${table.revision} = 0
+      AND ${table.currentRevisionId} IS NULL
+      AND ${table.updatedBy} IS NULL
+    )
+    OR (
+      ${table.revision} > 0
+      AND ${table.currentRevisionId} IS NOT NULL
+      AND ${table.updatedBy} IS NOT NULL
+      AND char_length(btrim(${table.updatedBy})) BETWEEN 1 AND 120
+    )
+  `),
+]);
+
 export const shippingServiceLevelMethods = shippingSchema.table("service_level_methods", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   serviceLevelId: integer("service_level_id").notNull().references(() => shippingServiceLevels.id, { onDelete: "cascade" }),
+  provider: varchar("provider", { length: 40 }).notNull(),
+  providerAccountId: varchar("provider_account_id", { length: 120 }),
+  providerAccountName: varchar("provider_account_name", { length: 160 }),
   carrier: varchar("carrier", { length: 50 }).notNull(),
+  carrierName: varchar("carrier_name", { length: 160 }),
   serviceCode: varchar("service_code", { length: 80 }).notNull(),
+  serviceName: varchar("service_name", { length: 160 }),
+  priority: integer("priority").notNull(),
+  domestic: boolean("domestic").notNull().default(false),
+  international: boolean("international").notNull().default(false),
+  revisionId: bigint("revision_id", { mode: "number" }),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("shipping_level_method_idx").on(table.serviceLevelId, table.carrier, table.serviceCode),
+  uniqueIndex("shipping_level_method_identity_idx").on(
+    table.serviceLevelId,
+    table.provider,
+    table.providerAccountId,
+    table.serviceCode,
+  ),
+  uniqueIndex("shipping_level_method_priority_idx")
+    .on(table.serviceLevelId, table.priority)
+    .where(sql`${table.providerAccountId} IS NOT NULL`),
+  foreignKey({
+    columns: [table.revisionId, table.serviceLevelId],
+    foreignColumns: [
+      shippingFulfillmentRoutingRevisions.id,
+      shippingFulfillmentRoutingRevisions.serviceLevelId,
+    ],
+    name: "shipping_level_method_revision_fk",
+  }).onDelete("restrict"),
+  check("shipping_level_method_provider_chk", sql`
+    ${table.provider} IN ('legacy_unscoped', 'shipstation_v2')
+  `),
+  check("shipping_level_method_priority_chk", sql`${table.priority} > 0`),
+  check("shipping_level_method_identity_chk", sql`
+    (
+      ${table.provider} = 'legacy_unscoped'
+      AND ${table.providerAccountId} IS NULL
+      AND ${table.revisionId} IS NULL
+    )
+    OR (
+      ${table.provider} = 'shipstation_v2'
+      AND ${table.providerAccountId} IS NOT NULL
+      AND ${table.providerAccountName} IS NOT NULL
+      AND ${table.carrierName} IS NOT NULL
+      AND ${table.serviceName} IS NOT NULL
+      AND char_length(btrim(${table.carrier})) BETWEEN 1 AND 50
+      AND char_length(btrim(${table.serviceCode})) BETWEEN 1 AND 80
+      AND char_length(btrim(${table.providerAccountId})) BETWEEN 1 AND 120
+      AND char_length(btrim(${table.providerAccountName})) BETWEEN 1 AND 160
+      AND char_length(btrim(${table.carrierName})) BETWEEN 1 AND 160
+      AND char_length(btrim(${table.serviceName})) BETWEEN 1 AND 160
+      AND ${table.revisionId} IS NOT NULL
+    )
+  `),
 ]);
 
 export const shippingTransitMatrix = shippingSchema.table("transit_matrix", {
@@ -1119,5 +1258,8 @@ export type ShippingBox = typeof shippingBoxCatalog.$inferSelect;
 export type InsertShippingBox = z.infer<typeof insertShippingBoxSchema>;
 export type ShippingVariantAttrs = typeof shippingVariantAttrs.$inferSelect;
 export type ShippingServiceLevelRecord = typeof shippingServiceLevels.$inferSelect;
+export type ShippingFulfillmentRoutingProfileRecord = typeof shippingFulfillmentRoutingProfiles.$inferSelect;
+export type ShippingFulfillmentRoutingRevisionRecord = typeof shippingFulfillmentRoutingRevisions.$inferSelect;
+export type ShippingServiceLevelMethodRecord = typeof shippingServiceLevelMethods.$inferSelect;
 export type ShippingPackPlan = typeof shippingPackPlans.$inferSelect;
 export type ShippingPackPlanParcel = typeof shippingPackPlanParcels.$inferSelect;
