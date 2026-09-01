@@ -104,6 +104,25 @@ describe("dropship eBay listing setup routes", () => {
     expect(JSON.stringify(response.body)).not.toContain("provider-secret-diagnostic");
   });
 
+  it("returns an actionable conflict when the managed warehouse address is incomplete", async () => {
+    service.getError = new DropshipError(
+      "DROPSHIP_EBAY_MANAGED_LOCATION_WAREHOUSE_ADDRESS_REQUIRED",
+      "The dropship origin warehouse is missing eBay location address data.",
+      { originWarehouseId: 1, field: "postalCode", retryable: false },
+    );
+    server = await startServer(buildApp(service, true));
+
+    const response = await jsonRequest(`${server.url}/api/dropship/ebay/listing-setup/44`);
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      error: {
+        code: "DROPSHIP_EBAY_MANAGED_LOCATION_WAREHOUSE_ADDRESS_REQUIRED",
+        context: { originWarehouseId: 1, field: "postalCode", retryable: false },
+      },
+    });
+  });
+
   it("requires a dropship session", async () => {
     server = await startServer(buildApp(service, false));
 

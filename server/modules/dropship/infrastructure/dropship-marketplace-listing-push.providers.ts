@@ -8,6 +8,9 @@ import type { DropshipSourcePlatform } from "../../../../shared/schema/dropship.
 import { EbayDropshipListingPushProvider } from "./dropship-ebay-listing-push.provider";
 import { createDropshipMarketplaceCredentialRepositoryFromEnv } from "./dropship-marketplace-credentials";
 import { ShopifyDropshipListingPushProvider } from "./dropship-shopify-listing-push.provider";
+import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./dropship-ebay-fulfillment-policy-guard.factory";
+import { createDropshipEbayRegistrationCredentialProviderFromEnv } from "./dropship-ebay-registration-credentials";
+import { PgDropshipEbayManagedLocationProvider } from "./dropship-ebay-managed-location.provider";
 
 export class DropshipMarketplaceListingPushProviderRouter implements DropshipMarketplaceListingPushProvider {
   constructor(
@@ -30,7 +33,15 @@ export class DropshipMarketplaceListingPushProviderRouter implements DropshipMar
 export function createDropshipMarketplaceListingPushProviderFromEnv(): DropshipMarketplaceListingPushProvider {
   const credentials = createDropshipMarketplaceCredentialRepositoryFromEnv();
   return new DropshipMarketplaceListingPushProviderRouter({
-    ebay: new EbayDropshipListingPushProvider(credentials),
+    ebay: new EbayDropshipListingPushProvider(
+      credentials,
+      fetch,
+      { now: () => new Date() },
+      createDropshipEbayFulfillmentPolicyGuardFromEnv(),
+      new PgDropshipEbayManagedLocationProvider({
+        credentials: createDropshipEbayRegistrationCredentialProviderFromEnv(),
+      }),
+    ),
     shopify: new ShopifyDropshipListingPushProvider(credentials),
   });
 }

@@ -11,6 +11,13 @@ import {
   type NormalizedDropshipStoreListingConfigInput,
 } from "../../application/dropship-listing-config-service";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
+import type {
+  DropshipEbayManagedLocationProvider,
+} from "../../application/dropship-ebay-managed-location-service";
+import type {
+  DropshipEbayFulfillmentCapability,
+  DropshipEbayFulfillmentPolicy,
+} from "../../domain/ebay-fulfillment-policy-compatibility";
 
 const now = new Date("2026-08-30T14:00:00.000Z");
 
@@ -30,6 +37,10 @@ describe("DropshipEbayListingSetupService", () => {
         "getForMember" | "replaceForMember" | "getForAdmin" | "replaceForAdmin"
       >,
       directory,
+      fulfillmentCapabilities: {
+        getForStoreConnection: async () => capability(),
+      },
+      managedLocations: managedLocations(directory),
       logger: {
         info: (event) => logs.push(event),
         warn: (event) => logs.push(event),
@@ -49,7 +60,7 @@ describe("DropshipEbayListingSetupService", () => {
       complete: true,
       marketplaceId: "EBAY_US",
       selection: {
-        merchantLocationKey: "warehouse-main",
+        merchantLocationKey: "cardshellz-dropship-wh-1",
         fulfillmentPolicyId: "fulfillment-1",
         returnPolicyId: "return-1",
         paymentPolicyId: "payment-1",
@@ -65,7 +76,7 @@ describe("DropshipEbayListingSetupService", () => {
     expect(listingConfig.config.marketplaceConfig).toMatchObject({
       unrelatedSetting: "preserved",
       marketplaceId: "EBAY_US",
-      merchantLocationKey: "warehouse-main",
+      merchantLocationKey: "cardshellz-dropship-wh-1",
       businessPolicies: {
         unrelatedPolicySetting: "preserved",
         fulfillmentPolicyId: "fulfillment-1",
@@ -79,7 +90,7 @@ describe("DropshipEbayListingSetupService", () => {
     });
   });
 
-  it("does not guess when more than one policy or location is available", async () => {
+  it("uses the Card Shellz-managed location even when other seller locations exist", async () => {
     directory.discovery = {
       ...directory.discovery,
       merchantLocations: [
@@ -100,15 +111,15 @@ describe("DropshipEbayListingSetupService", () => {
 
     expect(result.complete).toBe(false);
     expect(result.selection).toEqual({
-      merchantLocationKey: null,
+      merchantLocationKey: "cardshellz-dropship-wh-1",
       fulfillmentPolicyId: "fulfillment-1",
       returnPolicyId: "return-1",
       paymentPolicyId: null,
     });
-    expect(result.missingFields).toEqual(["merchantLocationKey", "paymentPolicyId"]);
+    expect(result.missingFields).toEqual(["paymentPolicyId"]);
   });
 
-  it("preserves an existing valid choice when multiple options exist", async () => {
+  it("replaces a seller-owned location while preserving valid policy choices", async () => {
     listingConfig.config = makeConfig({
       marketplaceId: "EBAY_US",
       merchantLocationKey: "warehouse-west",
@@ -125,8 +136,8 @@ describe("DropshipEbayListingSetupService", () => {
         { id: "warehouse-west", name: "West" },
       ],
       fulfillmentPolicies: [
-        { id: "fulfillment-1", name: "Standard" },
-        { id: "fulfillment-2", name: "Expedited" },
+        fulfillmentPolicy("fulfillment-1", "Standard"),
+        fulfillmentPolicy("fulfillment-2", "Expedited"),
       ],
     };
 
@@ -138,10 +149,32 @@ describe("DropshipEbayListingSetupService", () => {
 
     expect(result.complete).toBe(true);
     expect(result.selection).toMatchObject({
-      merchantLocationKey: "warehouse-west",
+      merchantLocationKey: "cardshellz-dropship-wh-1",
       fulfillmentPolicyId: "fulfillment-2",
     });
-    expect(listingConfig.replaceAdmin).not.toHaveBeenCalled();
+    expect(listingConfig.replaceAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks persisted location and policy ids incomplete after eBay stops returning them", async () => {
+    listingConfig.config = makeConfig({
+      marketplaceId: "EBAY_US",
+      merchantLocationKey: "deleted-location",
+      businessPolicies: {
+        fulfillmentPolicyId: "deleted-fulfillment",
+        returnPolicyId: "deleted-return",
+        paymentPolicyId: "deleted-payment",
+      },
+    });
+
+    const result = await service.getForMember("member-1", 44);
+
+    expect(result.complete).toBe(false);
+    expect(result.missingFields).toEqual([
+      "merchantLocationKey",
+      "fulfillmentPolicyId",
+      "returnPolicyId",
+      "paymentPolicyId",
+    ]);
   });
 
   it("rejects stale or fabricated vendor selections before writing config", async () => {
@@ -161,13 +194,12 @@ describe("DropshipEbayListingSetupService", () => {
     directory.discovery = {
       ...directory.discovery,
       fulfillmentPolicies: [
-        { id: "fulfillment-1", name: "Standard" },
-        { id: "fulfillment-2", name: "Expedited" },
+        fulfillmentPolicy("fulfillment-1", "Standard"),
+        fulfillmentPolicy("fulfillment-2", "Expedited"),
       ],
     };
 
     const result = await service.replaceForMember("member-1", 44, {
-      merchantLocationKey: "warehouse-main",
       fulfillmentPolicyId: "fulfillment-2",
       returnPolicyId: "return-1",
       paymentPolicyId: "payment-1",
@@ -189,13 +221,37 @@ describe("DropshipEbayListingSetupService", () => {
       },
     });
   });
+
+  it("rejects a real eBay policy whose handling promise is shorter than the OMS SLA", async () => {
+    directory.discovery = {
+      ...directory.discovery,
+      fulfillmentPolicies: [{
+        ...fulfillmentPolicy("fulfillment-fast", "Same day"),
+        handlingTime: { value: 0, unit: "DAY" },
+      }],
+    };
+
+    await expect(service.replaceForMember("member-1", 44, {
+      fulfillmentPolicyId: "fulfillment-fast",
+      returnPolicyId: "return-1",
+      paymentPolicyId: "payment-1",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE",
+      context: {
+        fulfillmentPolicyId: "fulfillment-fast",
+        issues: [expect.objectContaining({ code: "handling_time_too_short" })],
+        retryable: false,
+      },
+    });
+    expect(listingConfig.replaceMember).not.toHaveBeenCalled();
+  });
 });
 
 class FakeDirectory implements DropshipEbayListingSetupDirectory {
   discovery: DropshipEbayListingSetupDiscovery = {
     marketplaceId: "EBAY_US",
     merchantLocations: [{ id: "warehouse-main", name: "Main warehouse" }],
-    fulfillmentPolicies: [{ id: "fulfillment-1", name: "Standard" }],
+    fulfillmentPolicies: [fulfillmentPolicy("fulfillment-1", "Standard")],
     returnPolicies: [{ id: "return-1", name: "Thirty days" }],
     paymentPolicies: [{ id: "payment-1", name: "Managed payments" }],
   };
@@ -211,6 +267,51 @@ class FakeDirectory implements DropshipEbayListingSetupDirectory {
     this.accessTokenCall = input;
     return this.discovery;
   }
+
+  async getFulfillmentPolicyForStoreConnection(
+    input: Parameters<DropshipEbayListingSetupDirectory["getFulfillmentPolicyForStoreConnection"]>[0],
+  ): Promise<DropshipEbayFulfillmentPolicy> {
+    return this.requiredPolicy(input.fulfillmentPolicyId);
+  }
+
+  async getFulfillmentPolicyWithAccessToken(
+    input: Parameters<DropshipEbayListingSetupDirectory["getFulfillmentPolicyWithAccessToken"]>[0],
+  ): Promise<DropshipEbayFulfillmentPolicy> {
+    return this.requiredPolicy(input.fulfillmentPolicyId);
+  }
+
+  private requiredPolicy(id: string): DropshipEbayFulfillmentPolicy {
+    const policy = this.discovery.fulfillmentPolicies.find((candidate) => candidate.id === id);
+    if (!policy) throw new Error(`Missing fake policy ${id}`);
+    return policy;
+  }
+}
+
+function managedLocations(
+  directory: FakeDirectory,
+): DropshipEbayManagedLocationProvider {
+  const ensure = async () => {
+    const location = {
+      merchantLocationKey: "cardshellz-dropship-wh-1",
+      name: "Card Shellz Dropship - HQ",
+      originWarehouseId: 1,
+      action: "unchanged" as const,
+    };
+    directory.discovery = {
+      ...directory.discovery,
+      merchantLocations: [
+        ...directory.discovery.merchantLocations.filter(
+          (option) => option.id !== location.merchantLocationKey,
+        ),
+        { id: location.merchantLocationKey, name: location.name },
+      ],
+    };
+    return location;
+  };
+  return {
+    ensureForStoreConnection: ensure,
+    ensureWithAccessToken: ensure,
+  };
 }
 
 class FakeListingConfig {
@@ -290,5 +391,43 @@ function makeConfig(
     marketplaceConfig,
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+function fulfillmentPolicy(id: string, name: string): DropshipEbayFulfillmentPolicy {
+  return {
+    id,
+    name,
+    marketplaceId: "EBAY_US",
+    handlingTime: { value: 1, unit: "DAY" },
+    shippingOptions: [{ optionType: "DOMESTIC", shippingServiceCodes: ["USPSGround"] }],
+    localPickup: false,
+    freightShipping: false,
+    pickupDropOff: false,
+  };
+}
+
+function capability(): DropshipEbayFulfillmentCapability {
+  return {
+    marketplaceId: "EBAY_US",
+    requiredHandlingTimeBusinessDays: 1,
+    destinationCountry: "US",
+    destinationRegions: ["CA"],
+    destinationCoverageComplete: true,
+    supportedServices: [{
+      carrier: "USPS",
+      ebayServiceCode: "USPSGround",
+      serviceName: "USPS Ground Advantage",
+      shipStationCarrierCode: "usps",
+      shipStationServiceCode: "usps_ground_advantage",
+    }],
+    evidenceHash: "capability-hash",
+    source: {
+      omsChannelId: 103,
+      originWarehouseId: 1,
+      rateBookId: 34,
+      rateBookCode: "dropship-vendor-default",
+      rateTableId: 5,
+    },
   };
 }

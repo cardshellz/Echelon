@@ -19,6 +19,7 @@ import type {
   DropshipAtpProvider,
 } from "../../application/dropship-selection-atp-service";
 import type { DropshipStoreListingConfig } from "../../application/dropship-marketplace-listing-provider";
+import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override-service";
 import type {
   DropshipProvisionVendorRepositoryResult,
   DropshipProvisionedVendorProfile,
@@ -37,15 +38,36 @@ describe("DropshipListingPreviewService", () => {
   let repository: FakeListingPreviewRepository;
   let logs: DropshipLogEvent[];
   let service: DropshipListingPreviewService;
+  let ebayPolicyPreflight: {
+    compatible: boolean;
+    fulfillmentPolicyId: string;
+    capabilityEvidenceHash: string;
+    issues: Array<{ code: string; message: string }>;
+  };
+  let evaluatedFulfillmentPolicyIds: string[];
 
   beforeEach(() => {
     repository = new FakeListingPreviewRepository();
     logs = [];
+    ebayPolicyPreflight = {
+      compatible: true,
+      fulfillmentPolicyId: "fulfillment-policy",
+      capabilityEvidenceHash: "capability-hash",
+      issues: [],
+    };
+    evaluatedFulfillmentPolicyIds = [];
     service = new DropshipListingPreviewService({
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
       repository,
       atp: new FakeAtpProvider(),
       marketplaceListing: new ConfigDrivenDropshipMarketplaceListingProvider(),
+      ebayFulfillmentPolicyGuard: {
+        evaluateForStoreConnection: async (input) => {
+          evaluatedFulfillmentPolicyIds.push(input.fulfillmentPolicyId);
+          return { ...ebayPolicyPreflight, fulfillmentPolicyId: input.fulfillmentPolicyId };
+        },
+        evaluateWithAccessToken: async () => ebayPolicyPreflight,
+      },
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -155,6 +177,94 @@ describe("DropshipListingPreviewService", () => {
       blocker === "ebay_browse_category_required"
       || blocker === "missing_product_field:ebayBrowseCategoryId"
     ))).toEqual(["ebay_browse_category_required"]);
+  });
+
+  it("blocks preview when the selected eBay fulfillment policy exceeds current capabilities", async () => {
+    repository.context = { ...repository.context, platform: "ebay" };
+    repository.config = {
+      ...repository.config!,
+      platform: "ebay",
+      marketplaceConfig: {
+        profileId: "profile-1",
+        marketplaceId: "EBAY_US",
+        businessPolicies: { fulfillmentPolicyId: "fulfillment-policy" },
+      },
+    };
+    ebayPolicyPreflight = {
+      compatible: false,
+      fulfillmentPolicyId: "fulfillment-policy",
+      capabilityEvidenceHash: "capability-hash-2",
+      issues: [{
+        code: "shipping_service_unsupported:VendorCourier",
+        message: "VendorCourier is unsupported.",
+      }],
+    };
+
+    const result = await service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPriceCents: 1299,
+    });
+
+    expect(result.rows[0]).toMatchObject({
+      previewStatus: "blocked",
+      blockers: expect.arrayContaining([
+        "ebay_fulfillment_policy:shipping_service_unsupported:VendorCourier",
+      ]),
+    });
+  });
+
+  it("applies store-and-variant policy overrides and validates the effective fulfillment policy", async () => {
+    repository.context = { ...repository.context, platform: "ebay" };
+    repository.config = {
+      ...repository.config!,
+      platform: "ebay",
+      marketplaceConfig: {
+        profileId: "profile-1",
+        marketplaceId: "EBAY_US",
+        businessPolicies: {
+          fulfillmentPolicyId: "fulfillment-default",
+          returnPolicyId: "return-default",
+          paymentPolicyId: "payment-default",
+        },
+      },
+    };
+    repository.listingPolicyOverrides = [{
+      productVariantId: 101,
+      fulfillmentPolicyId: "fulfillment-override",
+      returnPolicyId: "return-override",
+      paymentPolicyId: null,
+      updatedAt: now,
+    }];
+
+    const result = await service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPriceCents: 1299,
+    });
+
+    expect(evaluatedFulfillmentPolicyIds).toEqual([
+      "fulfillment-default",
+      "fulfillment-override",
+    ]);
+    expect(result.rows[0]).toMatchObject({
+      previewStatus: "ready",
+      businessPolicySelection: {
+        fulfillmentPolicyId: "fulfillment-override",
+        returnPolicyId: "return-override",
+        paymentPolicyId: "payment-default",
+        overriddenFields: ["fulfillmentPolicyId", "returnPolicyId"],
+      },
+      listingIntent: {
+        marketplaceConfig: {
+          businessPolicies: {
+            fulfillmentPolicyId: "fulfillment-override",
+            returnPolicyId: "return-override",
+            paymentPolicyId: "payment-default",
+          },
+        },
+      },
+    });
   });
 
   it("allows an onboarding vendor to preview a launch-ready selected listing", async () => {
@@ -354,6 +464,9 @@ describe("DropshipListingPreviewService", () => {
       requestedRetailPricesByVariantId: {
         "101": 1399,
       },
+      previewHashesByVariantId: {
+        "101": first.preview.rows[0]!.previewHash,
+      },
     }));
     expect(repository.lastCreatedInput?.requestedRetailPricesByVariantId).toEqual({
       "101": 1399,
@@ -394,6 +507,7 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
     productVariantId: number;
     storeCategoryNames: string[];
   }> = [];
+  listingPolicyOverrides: DropshipEbayListingPolicyOverride[] = [];
   context: DropshipListingStoreContext = {
     vendorId: 10,
     vendorStatus: "active",
@@ -468,6 +582,10 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
     storeCategoryNames: string[];
   }>> {
     return this.storeCategoryAssignments;
+  }
+
+  async listEbayListingPolicyOverrides(): Promise<DropshipEbayListingPolicyOverride[]> {
+    return this.listingPolicyOverrides;
   }
 
   async getPackageReadiness(): Promise<Map<number, DropshipListingPackageReadiness>> {

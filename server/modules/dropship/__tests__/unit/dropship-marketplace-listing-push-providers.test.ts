@@ -60,7 +60,7 @@ describe("dropship marketplace listing push providers", () => {
       jsonResponse({ offerId: "offer-101" }),
       emptyResponse(),
     ]);
-    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
 
     const result = await provider.pushListing(makeRequest({
       platform: "ebay",
@@ -92,7 +92,7 @@ describe("dropship marketplace listing push providers", () => {
     expect(offerBody).toMatchObject({
       marketplaceId: "EBAY_US",
       categoryId: "183438",
-      merchantLocationKey: "vendor-location",
+      merchantLocationKey: "cardshellz-dropship-wh-1",
       pricingSummary: { price: { value: "12.99", currency: "USD" } },
     });
   });
@@ -105,7 +105,7 @@ describe("dropship marketplace listing push providers", () => {
       jsonResponse({ offerId: "offer-101" }),
       emptyResponse(),
     ]);
-    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
 
     await provider.pushListing(makeRequest({
       platform: "ebay",
@@ -127,7 +127,7 @@ describe("dropship marketplace listing push providers", () => {
   it("fails before calling eBay when a listing intent has no product browse category", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([]);
-    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
 
     await expect(provider.pushListing(makeRequest({
       platform: "ebay",
@@ -151,7 +151,7 @@ describe("dropship marketplace listing push providers", () => {
       emptyResponse(),
       jsonResponse({ listingId: "listing-101" }),
     ]);
-    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
 
     const result = await provider.pushListing(makeRequest({
       platform: "ebay",
@@ -174,7 +174,7 @@ describe("dropship marketplace listing push providers", () => {
       jsonResponse({ inventoryItemGroupKey: "GROUP-V2", variantSKUs: ["SKU-101"] }),
       emptyResponse(),
     ]);
-    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
 
     const session = await provider.createReplacementLifecycleClient({
       vendorId: 10,
@@ -232,7 +232,7 @@ describe("dropship marketplace listing push providers", () => {
       emptyResponse(),
       jsonResponse({ listingId: "listing-new" }),
     ]);
-    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
     const draft = makeGroupedRebuildDraft();
 
     const preview = await provider.previewListingRebuild({
@@ -276,7 +276,7 @@ describe("dropship marketplace listing push providers", () => {
     const fetcher = new FakeFetch([
       jsonResponse({ errors: [{ message: "Invalid package details" }] }, 400),
     ]);
-    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
 
     await expect(provider.pushListing(makeRequest({
       platform: "ebay",
@@ -290,7 +290,7 @@ describe("dropship marketplace listing push providers", () => {
   it("fails before calling eBay when the persisted listing intent lacks catalog weight", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([]);
-    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
 
     await expect(provider.pushListing(makeRequest({
       platform: "ebay",
@@ -306,7 +306,7 @@ describe("dropship marketplace listing push providers", () => {
   it("still marks the store for reauthorization on an eBay listing API 401", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([jsonResponse({ errors: [{ message: "Invalid token" }] }, 401)]);
-    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
 
     await expect(provider.pushListing(makeRequest({
       platform: "ebay",
@@ -318,7 +318,125 @@ describe("dropship marketplace listing push providers", () => {
       expect.objectContaining({ status: "needs_reauth", statusCode: 401 }),
     ]);
   });
+
+  it("fails before any eBay listing mutation when the selected fulfillment policy is incompatible", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([]);
+    const provider = new EbayDropshipListingPushProvider(
+      credentials,
+      fetcher.fetch,
+      { now: () => new Date("2026-09-01T12:00:00.000Z") },
+      {
+        evaluateForStoreConnection: async () => incompatiblePreflight(),
+        evaluateWithAccessToken: async () => incompatiblePreflight(),
+      },
+      managedLocationProvider(),
+    );
+
+    await expect(provider.pushListing(makeRequest({
+      platform: "ebay",
+      marketplaceConfig: ebayMarketplaceConfig(),
+    }))).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE",
+      context: {
+        fulfillmentPolicyId: "fulfillment-policy",
+        issues: [{ code: "handling_time_too_short" }],
+        retryable: false,
+      },
+    });
+    expect(fetcher.calls).toHaveLength(0);
+  });
+
+  it("blocks before any listing mutation when setup does not reference the managed warehouse", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([]);
+    const compatiblePreflight = {
+      compatible: true,
+      fulfillmentPolicyId: "fulfillment-policy",
+      capabilityEvidenceHash: "capability-hash",
+      originWarehouseId: 1,
+      issues: [],
+    } as const;
+    const provider = new EbayDropshipListingPushProvider(
+      credentials,
+      fetcher.fetch,
+      { now: () => new Date("2026-09-01T12:00:00.000Z") },
+      {
+        evaluateForStoreConnection: async () => compatiblePreflight,
+        evaluateWithAccessToken: async () => compatiblePreflight,
+      },
+      managedLocationProvider("cardshellz-dropship-wh-2"),
+    );
+
+    await expect(provider.pushListing(makeRequest({
+      platform: "ebay",
+      marketplaceConfig: ebayMarketplaceConfig(),
+    }))).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_MANAGED_LOCATION_CONFIG_MISMATCH",
+      context: {
+        storeConnectionId: 22,
+        originWarehouseId: 1,
+        retryable: false,
+      },
+    });
+    expect(fetcher.calls).toHaveLength(0);
+  });
 });
+
+function createEbayProvider(
+  credentials: DropshipMarketplaceCredentialRepository,
+  fetchFn: typeof fetch,
+): EbayDropshipListingPushProvider {
+  const compatiblePreflight = {
+    compatible: true,
+    fulfillmentPolicyId: "fulfillment-policy",
+    capabilityEvidenceHash: "capability-hash",
+    originWarehouseId: 1,
+    issues: [],
+  } as const;
+  return new EbayDropshipListingPushProvider(
+    credentials,
+    fetchFn,
+    { now: () => new Date("2026-09-01T12:00:00.000Z") },
+    {
+      evaluateForStoreConnection: async () => compatiblePreflight,
+      evaluateWithAccessToken: async () => compatiblePreflight,
+    },
+    managedLocationProvider(),
+  );
+}
+
+function incompatiblePreflight() {
+  return {
+    compatible: false,
+    fulfillmentPolicyId: "fulfillment-policy",
+    capabilityEvidenceHash: "capability-hash",
+    originWarehouseId: 1,
+    issues: [{
+      code: "handling_time_too_short",
+      message: "Policy handling time is too short.",
+    }],
+  };
+}
+
+function managedLocationProvider(
+  merchantLocationKey = "cardshellz-dropship-wh-1",
+) {
+  return {
+    ensureForStoreConnection: async () => ({
+      merchantLocationKey,
+      name: "Card Shellz Dropship - LEON",
+      originWarehouseId: 1,
+      action: "unchanged" as const,
+    }),
+    ensureWithAccessToken: async () => ({
+      merchantLocationKey,
+      name: "Card Shellz Dropship - LEON",
+      originWarehouseId: 1,
+      action: "unchanged" as const,
+    }),
+  };
+}
 
 class FakeCredentialRepository implements DropshipMarketplaceCredentialRepository {
   authFailures: DropshipMarketplaceStoreAuthFailureInput[] = [];
@@ -511,7 +629,7 @@ function ebayCredential(): DropshipMarketplaceStoreCredentials {
 function ebayMarketplaceConfig(): Record<string, unknown> {
   return {
     marketplaceId: "EBAY_US",
-    merchantLocationKey: "vendor-location",
+    merchantLocationKey: "cardshellz-dropship-wh-1",
     businessPolicies: {
       paymentPolicyId: "payment-policy",
       returnPolicyId: "return-policy",

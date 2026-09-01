@@ -1,6 +1,20 @@
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
+import {
+  evaluateDropshipEbayFulfillmentPolicyCompatibility,
+  type DropshipEbayFulfillmentCapability,
+  type DropshipEbayFulfillmentPolicy,
+  type DropshipEbayFulfillmentPolicyIssue,
+} from "../domain/ebay-fulfillment-policy-compatibility";
+import type {
+  DropshipEbayFulfillmentCapabilityProvider,
+} from "./dropship-ebay-fulfillment-capability-service";
+import {
+  managedMerchantLocationKeyForWarehouse,
+  type DropshipEbayManagedLocation,
+  type DropshipEbayManagedLocationProvider,
+} from "./dropship-ebay-managed-location-service";
 import type { DropshipLogger } from "./dropship-ports";
 import { replaceDropshipStoreListingConfigInputSchema } from "./dropship-listing-config-dtos";
 import {
@@ -15,10 +29,16 @@ export interface DropshipEbayListingSetupOption {
   name: string;
 }
 
+export interface DropshipEbayFulfillmentPolicyOption
+extends DropshipEbayListingSetupOption {
+  compatible: boolean;
+  compatibilityIssues: DropshipEbayFulfillmentPolicyIssue[];
+}
+
 export interface DropshipEbayListingSetupDiscovery {
   marketplaceId: string;
   merchantLocations: DropshipEbayListingSetupOption[];
-  fulfillmentPolicies: DropshipEbayListingSetupOption[];
+  fulfillmentPolicies: DropshipEbayFulfillmentPolicy[];
   returnPolicies: DropshipEbayListingSetupOption[];
   paymentPolicies: DropshipEbayListingSetupOption[];
 }
@@ -35,6 +55,17 @@ export interface DropshipEbayListingSetupDirectory {
     marketplaceId: string;
     storeConnectionId: number;
   }): Promise<DropshipEbayListingSetupDiscovery>;
+  getFulfillmentPolicyForStoreConnection(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    fulfillmentPolicyId: string;
+  }): Promise<DropshipEbayFulfillmentPolicy>;
+  getFulfillmentPolicyWithAccessToken(input: {
+    accessToken: string;
+    environment: "sandbox" | "production";
+    storeConnectionId: number;
+    fulfillmentPolicyId: string;
+  }): Promise<DropshipEbayFulfillmentPolicy>;
 }
 
 export interface DropshipEbayListingSetupSelection {
@@ -49,17 +80,20 @@ export interface DropshipEbayListingSetupResult {
   marketplaceId: string;
   complete: boolean;
   missingFields: string[];
+  fulfillmentCapability: DropshipEbayFulfillmentCapability;
   selection: DropshipEbayListingSetupSelection;
   options: {
     merchantLocations: DropshipEbayListingSetupOption[];
-    fulfillmentPolicies: DropshipEbayListingSetupOption[];
+    fulfillmentPolicies: DropshipEbayFulfillmentPolicyOption[];
     returnPolicies: DropshipEbayListingSetupOption[];
     paymentPolicies: DropshipEbayListingSetupOption[];
   };
 }
 
 export const replaceDropshipEbayListingSetupInputSchema = z.object({
-  merchantLocationKey: z.string().trim().min(1).max(100),
+  // Accepted only for rolling-deploy compatibility with the previous client.
+  // The value is ignored: Card Shellz owns the physical inventory location.
+  merchantLocationKey: z.string().trim().min(1).max(100).optional(),
   fulfillmentPolicyId: z.string().trim().min(1).max(100),
   returnPolicyId: z.string().trim().min(1).max(100),
   paymentPolicyId: z.string().trim().min(1).max(100),
@@ -78,6 +112,8 @@ export class DropshipEbayListingSetupService {
   constructor(private readonly deps: {
     listingConfig: ListingConfigPort;
     directory: DropshipEbayListingSetupDirectory;
+    fulfillmentCapabilities: DropshipEbayFulfillmentCapabilityProvider;
+    managedLocations: DropshipEbayManagedLocationProvider;
     logger: DropshipLogger;
   }) {}
 
@@ -88,12 +124,26 @@ export class DropshipEbayListingSetupService {
     const current = await this.deps.listingConfig.getForMember(memberId, storeConnectionId);
     assertEbayStore(current.storeConnection.platform, storeConnectionId);
     const marketplaceId = resolveMarketplaceId(current.config);
-    const discovery = await this.deps.directory.discoverForStoreConnection({
-      vendorId: current.vendor.vendorId,
+    const [discovery, fulfillmentCapability] = await Promise.all([
+      this.deps.directory.discoverForStoreConnection({
+        vendorId: current.vendor.vendorId,
+        storeConnectionId,
+        marketplaceId,
+      }),
+      this.deps.fulfillmentCapabilities.getForStoreConnection({
+        storeConnectionId,
+        marketplaceId,
+      }),
+    ]);
+    return buildListingSetupResult(
       storeConnectionId,
-      marketplaceId,
-    });
-    return buildListingSetupResult(storeConnectionId, current.config, discovery);
+      current.config,
+      discovery,
+      fulfillmentCapability,
+      managedMerchantLocationKeyForWarehouse(
+        fulfillmentCapability.source.originWarehouseId,
+      ),
+    );
   }
 
   async replaceForMember(
@@ -105,17 +155,43 @@ export class DropshipEbayListingSetupService {
     const current = await this.deps.listingConfig.getForMember(memberId, storeConnectionId);
     assertEbayStore(current.storeConnection.platform, storeConnectionId);
     const marketplaceId = resolveMarketplaceId(current.config);
-    const discovery = await this.deps.directory.discoverForStoreConnection({
-      vendorId: current.vendor.vendorId,
+    const fulfillmentCapability = await this.deps.fulfillmentCapabilities.getForStoreConnection({
       storeConnectionId,
       marketplaceId,
+      fresh: true,
     });
-    const selection = validateSelection(parsed, discovery, storeConnectionId);
+    const managedLocation = await this.deps.managedLocations.ensureForStoreConnection({
+      vendorId: current.vendor.vendorId,
+      storeConnectionId,
+      originWarehouseId: fulfillmentCapability.source.originWarehouseId,
+    });
+    const discovery = withManagedLocation(
+      await this.deps.directory.discoverForStoreConnection({
+        vendorId: current.vendor.vendorId,
+        storeConnectionId,
+        marketplaceId,
+      }),
+      managedLocation,
+    );
+    const selection = validateSelection(
+      parsed,
+      discovery,
+      fulfillmentCapability,
+      managedLocation.merchantLocationKey,
+      storeConnectionId,
+    );
     const nextConfig = mergeListingSetup(current.config, discovery.marketplaceId, selection);
     const replaced = configsEqual(current.config, nextConfig)
       ? current.config
       : (await this.deps.listingConfig.replaceForMember(memberId, storeConnectionId, nextConfig)).config;
-    const result = buildListingSetupResult(storeConnectionId, replaced, discovery);
+    const result = buildListingSetupResult(
+      storeConnectionId,
+      replaced,
+      discovery,
+      fulfillmentCapability,
+      managedLocation.merchantLocationKey,
+    );
+    this.logManagedLocation(managedLocation, storeConnectionId);
     this.logConfigured(result, "vendor");
     return result;
   }
@@ -131,13 +207,32 @@ export class DropshipEbayListingSetupService {
     });
     assertEbayStore(current.storeConnection.platform, input.storeConnectionId);
     const marketplaceId = resolveMarketplaceId(current.config);
-    const discovery = await this.deps.directory.discoverWithAccessToken({
+    const fulfillmentCapability = await this.deps.fulfillmentCapabilities.getForStoreConnection({
+      storeConnectionId: input.storeConnectionId,
+      marketplaceId,
+      fresh: true,
+    });
+    const managedLocation = await this.deps.managedLocations.ensureWithAccessToken({
       accessToken: input.accessToken,
       environment: input.environment,
-      marketplaceId,
       storeConnectionId: input.storeConnectionId,
+      originWarehouseId: fulfillmentCapability.source.originWarehouseId,
     });
-    const selection = resolveAutomaticSelection(current.config, discovery);
+    const discovery = withManagedLocation(
+      await this.deps.directory.discoverWithAccessToken({
+        accessToken: input.accessToken,
+        environment: input.environment,
+        marketplaceId,
+        storeConnectionId: input.storeConnectionId,
+      }),
+      managedLocation,
+    );
+    const selection = resolveAutomaticSelection(
+      current.config,
+      discovery,
+      fulfillmentCapability,
+      managedLocation.merchantLocationKey,
+    );
     const nextConfig = mergeListingSetup(current.config, discovery.marketplaceId, selection);
     const replaced = configsEqual(current.config, nextConfig)
       ? current.config
@@ -146,9 +241,32 @@ export class DropshipEbayListingSetupService {
           nextConfig,
           { actorType: "system", actorId: "ebay-post-connect-setup" },
         )).config;
-    const result = buildListingSetupResult(input.storeConnectionId, replaced, discovery);
+    const result = buildListingSetupResult(
+      input.storeConnectionId,
+      replaced,
+      discovery,
+      fulfillmentCapability,
+      managedLocation.merchantLocationKey,
+    );
+    this.logManagedLocation(managedLocation, input.storeConnectionId);
     this.logConfigured(result, "system");
     return result;
+  }
+
+  private logManagedLocation(
+    location: DropshipEbayManagedLocation,
+    storeConnectionId: number,
+  ): void {
+    this.deps.logger.info({
+      code: "DROPSHIP_EBAY_MANAGED_LOCATION_RECONCILED",
+      message: "The Card Shellz-managed eBay inventory location was reconciled.",
+      context: {
+        storeConnectionId,
+        originWarehouseId: location.originWarehouseId,
+        merchantLocationKey: location.merchantLocationKey,
+        action: location.action,
+      },
+    });
   }
 
   private logConfigured(result: DropshipEbayListingSetupResult, actorType: "vendor" | "system"): void {
@@ -185,18 +303,54 @@ function buildListingSetupResult(
   storeConnectionId: number,
   config: DropshipStoreListingConfigRecord,
   discovery: DropshipEbayListingSetupDiscovery,
+  fulfillmentCapability: DropshipEbayFulfillmentCapability,
+  managedMerchantLocationKey: string,
 ): DropshipEbayListingSetupResult {
   const selection = readSelection(config);
+  const fulfillmentPolicies = buildFulfillmentPolicyOptions(
+    discovery.fulfillmentPolicies,
+    fulfillmentCapability,
+  );
   const missingFields = missingSelectionFields(selection);
+  if (
+    selection.merchantLocationKey !== managedMerchantLocationKey
+    || !hasOption(managedMerchantLocationKey, discovery.merchantLocations)
+  ) {
+    missingFields.push("merchantLocationKey");
+  }
+  if (selection.fulfillmentPolicyId) {
+    const selectedFulfillmentPolicy = fulfillmentPolicies.find(
+      (policy) => policy.id === selection.fulfillmentPolicyId,
+    );
+    if (!selectedFulfillmentPolicy) {
+      missingFields.push("fulfillmentPolicyId");
+    } else if (!selectedFulfillmentPolicy.compatible) {
+      missingFields.push("fulfillmentPolicyCompatibility");
+    }
+  }
+  if (selection.returnPolicyId && !hasOption(
+    selection.returnPolicyId,
+    discovery.returnPolicies,
+  )) {
+    missingFields.push("returnPolicyId");
+  }
+  if (selection.paymentPolicyId && !hasOption(
+    selection.paymentPolicyId,
+    discovery.paymentPolicies,
+  )) {
+    missingFields.push("paymentPolicyId");
+  }
+  const uniqueMissingFields = [...new Set(missingFields)];
   return {
     storeConnectionId,
     marketplaceId: discovery.marketplaceId,
-    complete: missingFields.length === 0,
-    missingFields,
+    complete: uniqueMissingFields.length === 0,
+    missingFields: uniqueMissingFields,
+    fulfillmentCapability,
     selection,
     options: {
       merchantLocations: discovery.merchantLocations,
-      fulfillmentPolicies: discovery.fulfillmentPolicies,
+      fulfillmentPolicies,
       returnPolicies: discovery.returnPolicies,
       paymentPolicies: discovery.paymentPolicies,
     },
@@ -206,11 +360,19 @@ function buildListingSetupResult(
 function resolveAutomaticSelection(
   config: DropshipStoreListingConfigRecord,
   discovery: DropshipEbayListingSetupDiscovery,
+  fulfillmentCapability: DropshipEbayFulfillmentCapability,
+  managedMerchantLocationKey: string,
 ): DropshipEbayListingSetupSelection {
   const current = readSelection(config);
+  const compatiblePolicies = buildFulfillmentPolicyOptions(
+    discovery.fulfillmentPolicies,
+    fulfillmentCapability,
+  ).filter((policy) => policy.compatible);
   return {
-    merchantLocationKey: resolveOption(current.merchantLocationKey, discovery.merchantLocations),
-    fulfillmentPolicyId: resolveOption(current.fulfillmentPolicyId, discovery.fulfillmentPolicies),
+    merchantLocationKey: hasOption(managedMerchantLocationKey, discovery.merchantLocations)
+      ? managedMerchantLocationKey
+      : null,
+    fulfillmentPolicyId: resolveOption(current.fulfillmentPolicyId, compatiblePolicies),
     returnPolicyId: resolveOption(current.returnPolicyId, discovery.returnPolicies),
     paymentPolicyId: resolveOption(current.paymentPolicyId, discovery.paymentPolicies),
   };
@@ -224,24 +386,59 @@ function resolveOption(
   return options.length === 1 ? options[0].id : null;
 }
 
+function hasOption(
+  selectedId: string,
+  options: readonly DropshipEbayListingSetupOption[],
+): boolean {
+  return options.some((option) => option.id === selectedId);
+}
+
+export function buildFulfillmentPolicyOptions(
+  policies: readonly DropshipEbayFulfillmentPolicy[],
+  capability: DropshipEbayFulfillmentCapability,
+): DropshipEbayFulfillmentPolicyOption[] {
+  return policies.map((policy) => {
+    const compatibility = evaluateDropshipEbayFulfillmentPolicyCompatibility({
+      capability,
+      policy,
+    });
+    return {
+      id: policy.id,
+      name: policy.name,
+      compatible: compatibility.compatible,
+      compatibilityIssues: compatibility.issues,
+    };
+  });
+}
+
 function validateSelection(
   input: ReplaceDropshipEbayListingSetupInput,
   discovery: DropshipEbayListingSetupDiscovery,
+  fulfillmentCapability: DropshipEbayFulfillmentCapability,
+  managedMerchantLocationKey: string,
   storeConnectionId: number,
 ): DropshipEbayListingSetupSelection {
+  const merchantLocationKey = hasOption(
+    managedMerchantLocationKey,
+    discovery.merchantLocations,
+  ) ? managedMerchantLocationKey : null;
   const selection: DropshipEbayListingSetupSelection = {
-    merchantLocationKey: input.merchantLocationKey,
+    merchantLocationKey,
     fulfillmentPolicyId: input.fulfillmentPolicyId,
     returnPolicyId: input.returnPolicyId,
     paymentPolicyId: input.paymentPolicyId,
   };
+  const fulfillmentPolicies = buildFulfillmentPolicyOptions(
+    discovery.fulfillmentPolicies,
+    fulfillmentCapability,
+  );
   const checks: Array<{
     field: keyof DropshipEbayListingSetupSelection;
     id: string | null;
     options: readonly DropshipEbayListingSetupOption[];
   }> = [
     { field: "merchantLocationKey", id: selection.merchantLocationKey, options: discovery.merchantLocations },
-    { field: "fulfillmentPolicyId", id: selection.fulfillmentPolicyId, options: discovery.fulfillmentPolicies },
+    { field: "fulfillmentPolicyId", id: selection.fulfillmentPolicyId, options: fulfillmentPolicies },
     { field: "returnPolicyId", id: selection.returnPolicyId, options: discovery.returnPolicies },
     { field: "paymentPolicyId", id: selection.paymentPolicyId, options: discovery.paymentPolicies },
   ];
@@ -255,7 +452,38 @@ function validateSelection(
       { storeConnectionId, invalidFields, retryable: false },
     );
   }
+  const selectedFulfillmentPolicy = fulfillmentPolicies.find(
+    (policy) => policy.id === selection.fulfillmentPolicyId,
+  );
+  if (!selectedFulfillmentPolicy?.compatible) {
+    throw new DropshipError(
+      "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE",
+      "The selected eBay fulfillment policy exceeds Card Shellz fulfillment capabilities.",
+      {
+        storeConnectionId,
+        fulfillmentPolicyId: selection.fulfillmentPolicyId,
+        issues: selectedFulfillmentPolicy?.compatibilityIssues ?? [],
+        retryable: false,
+      },
+    );
+  }
   return selection;
+}
+
+function withManagedLocation(
+  discovery: DropshipEbayListingSetupDiscovery,
+  managedLocation: DropshipEbayManagedLocation,
+): DropshipEbayListingSetupDiscovery {
+  const merchantLocations = [
+    ...discovery.merchantLocations.filter(
+      (location) => location.id !== managedLocation.merchantLocationKey,
+    ),
+    {
+      id: managedLocation.merchantLocationKey,
+      name: managedLocation.name,
+    },
+  ].sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+  return { ...discovery, merchantLocations };
 }
 
 function readSelection(config: DropshipStoreListingConfigRecord): DropshipEbayListingSetupSelection {

@@ -3,6 +3,9 @@ import type {
   DropshipEbayListingSetupDiscovery,
   DropshipEbayListingSetupOption,
 } from "../application/dropship-ebay-listing-setup-service";
+import type {
+  DropshipEbayFulfillmentPolicy,
+} from "../domain/ebay-fulfillment-policy-compatibility";
 import { DropshipError } from "../domain/errors";
 import { isEbayTokenRefreshAuthFailureStatus } from "./dropship-ebay-auth-failure";
 import type { DropshipEbayRegistrationCredentialProvider } from "./dropship-ebay-registration-credentials";
@@ -60,6 +63,72 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
     });
   }
 
+  async getFulfillmentPolicyForStoreConnection(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    fulfillmentPolicyId: string;
+  }): Promise<DropshipEbayFulfillmentPolicy> {
+    let credential;
+    try {
+      credential = await this.credentials.loadFreshForStoreConnection(input);
+    } catch (error) {
+      if (requiresEbayListingSetupReauthorization(error)) {
+        throw new DropshipError(
+          "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
+          "eBay authorization must be refreshed before the fulfillment policy can be verified.",
+          {
+            storeConnectionId: input.storeConnectionId,
+            resource: "authorization",
+            status: providerStatus(error),
+            retryable: false,
+          },
+        );
+      }
+      throw error;
+    }
+    return this.getFulfillmentPolicyWithAccessToken({
+      accessToken: credential.accessToken,
+      environment: resolveDropshipEbayProviderEnvironment(credential),
+      storeConnectionId: input.storeConnectionId,
+      fulfillmentPolicyId: input.fulfillmentPolicyId,
+    });
+  }
+
+  async getFulfillmentPolicyWithAccessToken(input: {
+    accessToken: string;
+    environment: "sandbox" | "production";
+    storeConnectionId: number;
+    fulfillmentPolicyId: string;
+  }): Promise<DropshipEbayFulfillmentPolicy> {
+    const fulfillmentPolicyId = requiredIdentifier(
+      input.fulfillmentPolicyId,
+      "fulfillmentPolicyId",
+    );
+    const accessToken = input.accessToken.trim();
+    if (!accessToken) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_TOKEN_REQUIRED",
+        "eBay fulfillment-policy verification requires an access token.",
+        { storeConnectionId: input.storeConnectionId, retryable: false },
+      );
+    }
+    const resource: ProviderResource = {
+      key: "fulfillmentPolicies",
+      path: `/sell/account/v1/fulfillment_policy/${encodeURIComponent(fulfillmentPolicyId)}`,
+    };
+    const body = await this.fetchResource({
+      accessToken,
+      baseUrl: EBAY_API_BASE_URLS[input.environment],
+      resource,
+      storeConnectionId: input.storeConnectionId,
+    });
+    const policy = parseFulfillmentPolicyValue(body, input.storeConnectionId);
+    if (!policy || policy.id !== fulfillmentPolicyId) {
+      throw invalidResponse(input.storeConnectionId, "fulfillmentPolicies");
+    }
+    return policy;
+  }
+
   async discoverWithAccessToken(input: {
     accessToken: string;
     environment: "sandbox" | "production";
@@ -94,29 +163,49 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
         path: `/sell/account/v1/payment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`,
       },
     ];
-    const entries = await Promise.all(resources.map(async (resource) => {
-      const parsedOptions = resource.key === "merchantLocations"
-        ? await this.fetchAllMerchantLocations({
-            accessToken,
-            baseUrl,
-            resource,
-            storeConnectionId: input.storeConnectionId,
-          })
-        : parseOptions(resource.key, await this.fetchResource({
-            accessToken,
-            baseUrl,
-            resource,
-            storeConnectionId: input.storeConnectionId,
-          }), input.storeConnectionId);
-      return [resource.key, parsedOptions] as const;
-    }));
-    const options = Object.fromEntries(entries) as Record<ProviderResource["key"], DropshipEbayListingSetupOption[]>;
+    const [merchantLocations, fulfillmentBody, returnBody, paymentBody] = await Promise.all([
+      this.fetchAllMerchantLocations({
+        accessToken,
+        baseUrl,
+        resource: resources[0],
+        storeConnectionId: input.storeConnectionId,
+      }),
+      this.fetchResource({
+        accessToken,
+        baseUrl,
+        resource: resources[1],
+        storeConnectionId: input.storeConnectionId,
+      }),
+      this.fetchResource({
+        accessToken,
+        baseUrl,
+        resource: resources[2],
+        storeConnectionId: input.storeConnectionId,
+      }),
+      this.fetchResource({
+        accessToken,
+        baseUrl,
+        resource: resources[3],
+        storeConnectionId: input.storeConnectionId,
+      }),
+    ]);
     return {
       marketplaceId,
-      merchantLocations: options.merchantLocations,
-      fulfillmentPolicies: options.fulfillmentPolicies,
-      returnPolicies: options.returnPolicies,
-      paymentPolicies: options.paymentPolicies,
+      merchantLocations,
+      fulfillmentPolicies: parseFulfillmentPolicies(
+        fulfillmentBody,
+        input.storeConnectionId,
+      ),
+      returnPolicies: parseOptions(
+        "returnPolicies",
+        returnBody,
+        input.storeConnectionId,
+      ),
+      paymentPolicies: parseOptions(
+        "paymentPolicies",
+        paymentBody,
+        input.storeConnectionId,
+      ),
     };
   }
 
@@ -301,6 +390,120 @@ function parseOptions(
   });
 }
 
+export function parseFulfillmentPolicies(
+  body: Record<string, unknown>,
+  storeConnectionId: number,
+): DropshipEbayFulfillmentPolicy[] {
+  const raw = body.fulfillmentPolicies;
+  if (!Array.isArray(raw) || raw.length > MAX_SETUP_OPTIONS) {
+    throw invalidResponse(storeConnectionId, "fulfillmentPolicies");
+  }
+  const policies = raw.flatMap((value): DropshipEbayFulfillmentPolicy[] => {
+    const policy = parseFulfillmentPolicyValue(value, storeConnectionId);
+    return policy ? [policy] : [];
+  });
+  const deduplicated = new Map<string, DropshipEbayFulfillmentPolicy>();
+  for (const policy of policies) {
+    const existing = deduplicated.get(policy.id);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(policy)) {
+      throw invalidResponse(storeConnectionId, "fulfillmentPolicies");
+    }
+    deduplicated.set(policy.id, policy);
+  }
+  return [...deduplicated.values()].sort((left, right) => (
+    left.name.localeCompare(right.name) || left.id.localeCompare(right.id)
+  ));
+}
+
+function parseFulfillmentPolicyValue(
+  value: unknown,
+  storeConnectionId: number,
+): DropshipEbayFulfillmentPolicy | null {
+  if (!isRecord(value) || !supportsNonMotorListings(value.categoryTypes)) return null;
+  const id = optionalIdentifier(value.fulfillmentPolicyId);
+  if (!id) return null;
+  return {
+    id,
+    name: optionalName(value.name) ?? id,
+    marketplaceId: optionalIdentifier(value.marketplaceId),
+    handlingTime: parseHandlingTime(value.handlingTime),
+    shippingOptions: parseShippingOptions(value.shippingOptions, storeConnectionId),
+    localPickup: optionalProviderBoolean(
+      value.localPickup,
+      storeConnectionId,
+    ),
+    freightShipping: optionalProviderBoolean(
+      value.freightShipping,
+      storeConnectionId,
+    ),
+    pickupDropOff: optionalProviderBoolean(
+      value.pickupDropOff,
+      storeConnectionId,
+    ),
+  };
+}
+
+function parseHandlingTime(value: unknown): DropshipEbayFulfillmentPolicy["handlingTime"] {
+  if (!isRecord(value)) return null;
+  const unit = optionalBoundedString(value.unit, 30);
+  const rawValue = value.value;
+  const handlingValue = typeof rawValue === "number"
+    && Number.isInteger(rawValue)
+    && rawValue >= 0
+    && rawValue <= 365
+    ? rawValue
+    : null;
+  return { value: handlingValue, unit };
+}
+
+function parseShippingOptions(
+  value: unknown,
+  storeConnectionId: number,
+): DropshipEbayFulfillmentPolicy["shippingOptions"] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 50) {
+    throw invalidResponse(storeConnectionId, "fulfillmentPolicies");
+  }
+  return value.map((entry) => {
+    if (!isRecord(entry)) {
+      throw invalidResponse(storeConnectionId, "fulfillmentPolicies");
+    }
+    const optionType = optionalBoundedString(entry.optionType, 40);
+    if (!optionType) {
+      throw invalidResponse(storeConnectionId, "fulfillmentPolicies");
+    }
+    const rawServices = entry.shippingServices;
+    if (!Array.isArray(rawServices) || rawServices.length > 100) {
+      throw invalidResponse(storeConnectionId, "fulfillmentPolicies");
+    }
+    const shippingServiceCodes = rawServices.map((service) => {
+      if (!isRecord(service)) {
+        throw invalidResponse(storeConnectionId, "fulfillmentPolicies");
+      }
+      const code = optionalBoundedString(service.shippingServiceCode, 100);
+      if (!code) {
+        throw invalidResponse(storeConnectionId, "fulfillmentPolicies");
+      }
+      return code;
+    });
+    return {
+      optionType,
+      shippingServiceCodes: [...new Set(shippingServiceCodes)].sort(),
+    };
+  });
+}
+
+function optionalProviderBoolean(
+  value: unknown,
+  storeConnectionId: number,
+): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value !== "boolean") {
+    throw invalidResponse(storeConnectionId, "fulfillmentPolicies");
+  }
+  return value;
+}
+
 function supportsNonMotorListings(value: unknown): boolean {
   if (value === undefined || value === null) return true;
   if (!Array.isArray(value)) return false;
@@ -342,6 +545,12 @@ function optionalName(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   return normalized && normalized.length <= 300 ? normalized : null;
+}
+
+function optionalBoundedString(value: unknown, maxLength: number): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized && normalized.length <= maxLength ? normalized : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

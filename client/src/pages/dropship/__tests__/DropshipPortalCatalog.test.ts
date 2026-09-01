@@ -104,6 +104,27 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(comboboxSource).toContain('className="max-h-64 overflow-y-auto overscroll-contain"');
   });
 
+  it("keeps store policy defaults separate from revision-safe listing overrides", () => {
+    const catalogSource = readFileSync(
+      join(process.cwd(), "client", "src", "pages", "dropship", "DropshipPortalCatalog.tsx"),
+      "utf8",
+    );
+    const overrideSource = readFileSync(
+      join(process.cwd(), "client", "src", "pages", "dropship", "EbayListingPolicyOverridePanel.tsx"),
+      "utf8",
+    );
+    const setupPosition = catalogSource.indexOf("<EbayListingSetupPanel");
+    const overridePosition = catalogSource.indexOf("<EbayListingPolicyOverridePanel");
+    const storeCategoryPosition = catalogSource.indexOf("<EbayStoreCategoryAssignmentPanel");
+
+    expect(overridePosition).toBeGreaterThan(setupPosition);
+    expect(storeCategoryPosition).toBeGreaterThan(overridePosition);
+    expect(overrideSource).toContain("Store default —");
+    expect(overrideSource).toContain("expectedRevisionId");
+    expect(overrideSource).toContain("disabled={rowPending}");
+    expect(overrideSource).toContain("Search policies...");
+  });
+
   it("offers authorization recovery only for reconnectable eBay Store-category errors", () => {
     vi.stubGlobal("React", React);
     const permissionError = new DropshipApiError({

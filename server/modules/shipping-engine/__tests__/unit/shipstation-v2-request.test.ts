@@ -5,6 +5,7 @@ import {
   gramsToOunces,
   mapV2CarrierCode,
   mmToInches,
+  normalizeCarrierServicesResponse,
   normalizeCarriersResponse,
   normalizeRatesResponse,
   parseRetryAfterSeconds,
@@ -228,6 +229,33 @@ describe("parseRetryAfterSeconds", () => {
   });
 });
 
+describe("normalizeCarrierServicesResponse", () => {
+  it("normalizes enabled service metadata for a known carrier", () => {
+    expect(normalizeCarrierServicesResponse({
+      services: [
+        {
+          service_code: "usps_ground_advantage",
+          name: "USPS Ground Advantage",
+          domestic: true,
+          international: false,
+        },
+        { service_code: "", name: "invalid" },
+      ],
+    }, {
+      carrierId: "se-111",
+      code: "usps",
+      name: "USPS",
+    })).toEqual([{
+      carrierId: "se-111",
+      carrierCode: "usps",
+      serviceCode: "usps_ground_advantage",
+      serviceName: "USPS Ground Advantage",
+      domestic: true,
+      international: false,
+    }]);
+  });
+});
+
 describe("unconfigured adapter (no network)", () => {
   const adapter = createShipStationV2RatingAdapter({ apiKey: "  " });
 
@@ -242,6 +270,14 @@ describe("unconfigured adapter (no network)", () => {
   it("listCarriers resolves a typed configured:false result without throwing", async () => {
     await expect(adapter.listCarriers()).resolves.toEqual({ configured: false, carriers: [] });
   });
+
+  it("listCarrierServices resolves a typed configured:false result without throwing", async () => {
+    await expect(adapter.listCarrierServices({
+      carrierId: "se-111",
+      code: "usps",
+      name: "USPS",
+    })).resolves.toEqual({ configured: false, services: [] });
+  });
 });
 
 describe("configured adapter short-circuits", () => {
@@ -254,5 +290,38 @@ describe("configured adapter short-circuits", () => {
       configured: true,
       rates: [],
     });
+  });
+
+  it("loads services for the requested carrier without exposing the API key in the URL", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const adapter = createShipStationV2RatingAdapter({
+      apiKey: "test-key",
+      baseUrl: "https://shipstation.example/v2",
+      fetchFn: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return new Response(JSON.stringify({
+          services: [{
+            service_code: "ups_ground",
+            name: "UPS Ground",
+            domestic: true,
+            international: false,
+          }],
+        }), { status: 200 });
+      },
+    });
+
+    await expect(adapter.listCarrierServices({
+      carrierId: "se/ups",
+      code: "ups",
+      name: "UPS",
+    })).resolves.toMatchObject({
+      configured: true,
+      services: [{ serviceCode: "ups_ground" }],
+    });
+    expect(requests[0]?.url).toBe(
+      "https://shipstation.example/v2/carriers/se%2Fups/services",
+    );
+    expect(requests[0]?.url).not.toContain("test-key");
+    expect(requests[0]?.init?.headers).toMatchObject({ "API-Key": "test-key" });
   });
 });

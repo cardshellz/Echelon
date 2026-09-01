@@ -150,6 +150,12 @@
   "dropship.dropship_collection_attempts": [
     "modules/dropship"
   ],
+  "dropship.dropship_ebay_listing_policy_override_revisions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_ebay_listing_policy_overrides": [
+    "modules/dropship"
+  ],
   "dropship.dropship_ebay_store_category_assignment_revisions": [
     "modules/dropship"
   ],

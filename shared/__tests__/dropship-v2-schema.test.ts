@@ -15,6 +15,8 @@ import {
   dropshipListingPushJobs,
   dropshipStoreConnectionTokens,
   dropshipStoreListingConfigs,
+  dropshipEbayListingPolicyOverrideRevisions,
+  dropshipEbayListingPolicyOverrides,
   dropshipSourcePlatformEnum,
   dropshipStoreConnections,
   dropshipVendorSelectionRuleSetRevisions,
@@ -357,6 +359,24 @@ describe("Dropship V2 schema contract", () => {
     );
     expect(listingConfigBackfillMigrationSql).toContain(
       "ON CONFLICT (store_connection_id) DO NOTHING",
+    );
+  });
+
+  it("models revisioned eBay listing policy overrides at store-variant scope", () => {
+    expect((dropshipEbayListingPolicyOverrideRevisions as any).idempotencyKey.name).toBe(
+      "idempotency_key",
+    );
+    expect((dropshipEbayListingPolicyOverrideRevisions as any).requestHash.name).toBe(
+      "request_hash",
+    );
+    expect((dropshipEbayListingPolicyOverrides as any).storeConnectionId.name).toBe(
+      "store_connection_id",
+    );
+    expect((dropshipEbayListingPolicyOverrides as any).productVariantId.name).toBe(
+      "product_variant_id",
+    );
+    expect((dropshipEbayListingPolicyOverrides as any).fulfillmentPolicyId.name).toBe(
+      "fulfillment_policy_id",
     );
   });
 

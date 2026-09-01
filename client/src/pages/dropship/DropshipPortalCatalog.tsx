@@ -61,6 +61,7 @@ import {
 import { isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 import { EbayListingSetupPanel } from "./EbayListingSetupPanel";
+import { EbayListingPolicyOverridePanel } from "./EbayListingPolicyOverridePanel";
 import { EbayStoreCategoryAuthorizationRecovery } from "./EbayStoreCategoryAuthorizationRecovery";
 
 type PendingSelectionAction = string | null;
@@ -568,6 +569,16 @@ export default function DropshipPortalCatalog() {
           <>
             <EbayListingSetupPanel
               storeConnectionId={selectedStoreConnectionIdNumber}
+              onConfigurationChange={() => {
+                setListingPreview(null);
+                setListingPushResult(null);
+                setEmailCodeSent(false);
+                setVerificationCode("");
+              }}
+            />
+            <EbayListingPolicyOverridePanel
+              storeConnectionId={selectedStoreConnectionIdNumber}
+              rows={selectedCatalogRows}
               onConfigurationChange={() => {
                 setListingPreview(null);
                 setListingPushResult(null);
