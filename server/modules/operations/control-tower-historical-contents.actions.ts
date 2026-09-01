@@ -1,6 +1,15 @@
 import type { Pool } from "pg";
 
 import { createHistoricalShipStationContentsClient } from "../shipping/historical-shipstation-contents-audit.client";
+import { HistoricalShipStationContentsCorrectionDomainError } from "../shipping/historical-shipstation-contents-correction.domain";
+import {
+  HistoricalShipStationContentsCorrectionRepositoryError,
+  PgHistoricalShipStationContentsCorrectionRepository,
+} from "../shipping/historical-shipstation-contents-correction.repository";
+import {
+  HistoricalShipStationContentsCorrectionService,
+  HistoricalShipStationContentsCorrectionServiceError,
+} from "../shipping/historical-shipstation-contents-correction.service";
 import {
   HistoricalShipStationContentsReviewRepositoryError,
   PgHistoricalShipStationContentsReviewRepository,
@@ -26,6 +35,10 @@ interface HistoricalContentsReviewService {
   }>): Promise<unknown>;
 }
 
+interface HistoricalContentsCorrectionService {
+  preview(exceptionId: string): Promise<unknown>;
+}
+
 function actionError(error: unknown): never {
   if (error instanceof ControlTowerRequestError) throw error;
   if (error instanceof HistoricalShipStationContentsReviewServiceError) {
@@ -44,6 +57,20 @@ function actionError(error: unknown): never {
         : 409;
     throw new ControlTowerRequestError(error.message, statusCode, error.code);
   }
+  if (error instanceof HistoricalShipStationContentsCorrectionServiceError) {
+    throw new ControlTowerRequestError(
+      error.message,
+      error.code === "INVALID_COMMAND" ? 400 : 409,
+      error.code,
+    );
+  }
+  if (error instanceof HistoricalShipStationContentsCorrectionRepositoryError) {
+    const statusCode = error.code === "REVIEW_NOT_FOUND" ? 404 : 409;
+    throw new ControlTowerRequestError(error.message, statusCode, error.code);
+  }
+  if (error instanceof HistoricalShipStationContentsCorrectionDomainError) {
+    throw new ControlTowerRequestError(error.message, 409, error.code);
+  }
   throw error;
 }
 
@@ -51,6 +78,17 @@ function service(pool: Pool): HistoricalContentsReviewService {
   return new HistoricalShipStationContentsReviewService(
     new PgHistoricalShipStationContentsReviewRepository(pool),
     createHistoricalShipStationContentsClient(),
+  );
+}
+
+function correctionService(pool: Pool): HistoricalContentsCorrectionService {
+  const reviewService = new HistoricalShipStationContentsReviewService(
+    new PgHistoricalShipStationContentsReviewRepository(pool),
+    createHistoricalShipStationContentsClient(),
+  );
+  return new HistoricalShipStationContentsCorrectionService(
+    new PgHistoricalShipStationContentsCorrectionRepository(pool),
+    reviewService,
   );
 }
 
@@ -117,6 +155,20 @@ export async function getHistoricalContentsReviewPreview(input: Readonly<{
   try {
     const exceptionId = await exceptionIdForWorkItem(input);
     return await (input.reviewService ?? service(input.pool)).preview(exceptionId);
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+export async function getHistoricalContentsCorrectionPreview(input: Readonly<{
+  readonly pool: Pool;
+  readonly workItemId: number;
+  readonly correctionPreviewService?: HistoricalContentsCorrectionService;
+}>): Promise<unknown> {
+  try {
+    const exceptionId = await exceptionIdForWorkItem(input);
+    return await (input.correctionPreviewService ?? correctionService(input.pool))
+      .preview(exceptionId);
   } catch (error) {
     return actionError(error);
   }

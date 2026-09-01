@@ -32,6 +32,7 @@ import {
 } from "./control-tower-v2.triage";
 import {
   decideHistoricalContentsReview,
+  getHistoricalContentsCorrectionPreview,
   getHistoricalContentsReviewPreview,
 } from "./control-tower-historical-contents.actions";
 
@@ -283,6 +284,22 @@ export function registerOperationsControlTowerRoutes(app: Express) {
         }));
       } catch (error) {
         sendControlTowerV2Error(res, error, "Failed to record historical package-content decision");
+      }
+    },
+  );
+
+  app.get(
+    "/api/operations/control-tower/v2/work-items/:id/historical-contents-review/correction-preview",
+    requirePermission("operations", "view"),
+    async (req: Request, res: Response) => {
+      try {
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json(await getHistoricalContentsCorrectionPreview({
+          pool,
+          workItemId: parsePositiveWorkItemId(req.params.id),
+        }));
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to load historical contents correction preview");
       }
     },
   );

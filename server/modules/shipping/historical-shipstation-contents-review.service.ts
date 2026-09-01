@@ -55,6 +55,10 @@ export interface HistoricalShipStationContentsReviewSnapshot {
   readonly reason: HistoricalShipStationContentsReviewReason;
   readonly providerObservationHash: string;
   readonly providerRecoveryStatus: string;
+  readonly recordedDecision?:
+    | "provider_confirmed_pending_inventory_correction"
+    | "cannot_prove"
+    | null;
 }
 
 export interface HistoricalShipStationContentsReviewRecord {
@@ -169,6 +173,10 @@ export interface HistoricalShipStationContentsResolutionPreview {
   readonly orderNumber: string | null;
   readonly trackingNumber: string;
   readonly providerRecoveryStatus: string;
+  readonly recordedDecision:
+    | "provider_confirmed_pending_inventory_correction"
+    | "cannot_prove"
+    | null;
   readonly providerContents: readonly Readonly<{ readonly sku: string; readonly quantity: number }>[] | null;
   readonly wmsContents: readonly Readonly<{
     readonly wmsShipmentItemId: number;
@@ -397,6 +405,7 @@ export class HistoricalShipStationContentsReviewService {
         : null,
       trackingNumber: currentCandidate.trackingNumber,
       providerRecoveryStatus: provider.evidence.recoveryStatus,
+      recordedDecision: snapshot.recordedDecision ?? null,
       providerContents: provider.providerObservation.lines,
       wmsContents,
       allowedDecisions: currentCandidate.expectedContents.kind === "available"
