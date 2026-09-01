@@ -22,6 +22,9 @@ import {
   type DropshipEbayListingLifecycleClient,
 } from "./modules/dropship/infrastructure/dropship-ebay-listing-push.provider";
 import { PgDropshipMarketplaceCredentialRepository } from "./modules/dropship/infrastructure/dropship-marketplace-credentials";
+import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./modules/dropship/infrastructure/dropship-ebay-fulfillment-policy-guard.factory";
+import { createDropshipEbayRegistrationCredentialProviderFromEnv } from "./modules/dropship/infrastructure/dropship-ebay-registration-credentials";
+import { PgDropshipEbayManagedLocationProvider } from "./modules/dropship/infrastructure/dropship-ebay-managed-location.provider";
 import type { EbayInventoryItemGroup } from "./modules/channels/adapters/ebay/ebay-types";
 import {
   createEbayRouteListingLifecycleClient,
@@ -46,7 +49,15 @@ export function createMarketplaceListingReplacementResolverFromEnv(): Marketplac
     clock: { now: () => new Date() },
   });
   const credentials = new PgDropshipMarketplaceCredentialRepository(pool);
-  const dropshipEbay = new EbayDropshipListingPushProvider(credentials);
+  const dropshipEbay = new EbayDropshipListingPushProvider(
+    credentials,
+    fetch,
+    { now: () => new Date() },
+    createDropshipEbayFulfillmentPolicyGuardFromEnv(),
+    new PgDropshipEbayManagedLocationProvider({
+      credentials: createDropshipEbayRegistrationCredentialProviderFromEnv(),
+    }),
+  );
   const ebayProvider = new EbayMarketplaceListingReplacementProvider({
     async forOwner(owner) {
       if (owner.kind === "channel") {

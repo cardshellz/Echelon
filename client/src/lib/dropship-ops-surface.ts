@@ -1574,6 +1574,12 @@ export interface DropshipListingPreviewRow {
   marketplaceCategoryId: string | null;
   marketplaceCategoryName: string | null;
   storeCategoryNames: string[];
+  businessPolicySelection: {
+    fulfillmentPolicyId: string | null;
+    returnPolicyId: string | null;
+    paymentPolicyId: string | null;
+    overriddenFields: Array<"fulfillmentPolicyId" | "returnPolicyId" | "paymentPolicyId">;
+  } | null;
   previewHash: string;
 }
 
@@ -1652,6 +1658,35 @@ export interface DropshipEbayListingSetupOption {
   name: string;
 }
 
+export interface DropshipEbayFulfillmentPolicyOption
+extends DropshipEbayListingSetupOption {
+  compatible: boolean;
+  compatibilityIssues: Array<{ code: string; message: string }>;
+}
+
+export interface DropshipEbayFulfillmentCapability {
+  marketplaceId: string;
+  requiredHandlingTimeBusinessDays: number;
+  destinationCountry: "US";
+  destinationRegions: string[];
+  destinationCoverageComplete: boolean;
+  supportedServices: Array<{
+    carrier: string;
+    ebayServiceCode: string;
+    serviceName: string;
+    shipStationCarrierCode: string;
+    shipStationServiceCode: string;
+  }>;
+  evidenceHash: string;
+  source: {
+    omsChannelId: number;
+    originWarehouseId: number;
+    rateBookId: number;
+    rateBookCode: string;
+    rateTableId: number;
+  };
+}
+
 export interface DropshipEbayListingSetupSelection {
   merchantLocationKey: string | null;
   fulfillmentPolicyId: string | null;
@@ -1664,20 +1699,51 @@ export interface DropshipEbayListingSetupResponse {
   marketplaceId: string;
   complete: boolean;
   missingFields: string[];
+  fulfillmentCapability: DropshipEbayFulfillmentCapability;
   selection: DropshipEbayListingSetupSelection;
   options: {
     merchantLocations: DropshipEbayListingSetupOption[];
-    fulfillmentPolicies: DropshipEbayListingSetupOption[];
+    fulfillmentPolicies: DropshipEbayFulfillmentPolicyOption[];
     returnPolicies: DropshipEbayListingSetupOption[];
     paymentPolicies: DropshipEbayListingSetupOption[];
   };
 }
 
 export interface ReplaceDropshipEbayListingSetupInput {
-  merchantLocationKey: string;
   fulfillmentPolicyId: string;
   returnPolicyId: string;
   paymentPolicyId: string;
+}
+
+export interface DropshipEbayListingPolicyOverride {
+  productVariantId: number;
+  revisionId: number;
+  fulfillmentPolicyId: string | null;
+  returnPolicyId: string | null;
+  paymentPolicyId: string | null;
+  updatedAt: string;
+}
+
+export interface DropshipEbayListingPolicyOverrideResponse {
+  storeConnectionId: number;
+  defaults: {
+    fulfillmentPolicyId: string | null;
+    returnPolicyId: string | null;
+    paymentPolicyId: string | null;
+  };
+  options: {
+    fulfillmentPolicies: DropshipEbayFulfillmentPolicyOption[];
+    returnPolicies: DropshipEbayListingSetupOption[];
+    paymentPolicies: DropshipEbayListingSetupOption[];
+  };
+  assignments: DropshipEbayListingPolicyOverride[];
+  fetchedAt: string;
+}
+
+export interface ReplaceDropshipEbayListingPolicyOverrideResponse {
+  assignment: DropshipEbayListingPolicyOverride | null;
+  revisionId: number;
+  idempotentReplay: boolean;
 }
 
 export type DropshipVendorSelectionScope =

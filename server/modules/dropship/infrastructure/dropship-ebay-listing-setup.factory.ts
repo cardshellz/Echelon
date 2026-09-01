@@ -10,14 +10,19 @@ import type {
 import { DropshipError } from "../domain/errors";
 import { createDropshipEbayRegistrationCredentialProviderFromEnv } from "./dropship-ebay-registration-credentials";
 import { EbayDropshipListingSetupDirectory } from "./dropship-ebay-listing-setup.directory";
+import { createDropshipEbayFulfillmentCapabilityProviderFromEnv } from "./dropship-ebay-fulfillment-capability.provider";
+import { PgDropshipEbayManagedLocationProvider } from "./dropship-ebay-managed-location.provider";
 import { createDropshipListingConfigServiceFromEnv } from "./dropship-listing-config.factory";
 
 export function createDropshipEbayListingSetupServiceFromEnv(): DropshipEbayListingSetupService {
+  const credentials = createDropshipEbayRegistrationCredentialProviderFromEnv();
   return new DropshipEbayListingSetupService({
     listingConfig: createDropshipListingConfigServiceFromEnv(),
     directory: new EbayDropshipListingSetupDirectory(
-      createDropshipEbayRegistrationCredentialProviderFromEnv(),
+      credentials,
     ),
+    fulfillmentCapabilities: createDropshipEbayFulfillmentCapabilityProviderFromEnv(),
+    managedLocations: new PgDropshipEbayManagedLocationProvider({ credentials }),
     logger: makeDropshipListingConfigLogger(),
   });
 }

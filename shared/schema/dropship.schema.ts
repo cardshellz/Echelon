@@ -656,6 +656,115 @@ export const dropshipEbayStoreCategoryAssignments = dropshipSchema.table(
   ],
 );
 
+export const dropshipEbayListingPolicyOverrideRevisions = dropshipSchema.table(
+  "dropship_ebay_listing_policy_override_revisions",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    vendorId: integer("vendor_id")
+      .notNull()
+      .references(() => dropshipVendors.id, { onDelete: "cascade" }),
+    storeConnectionId: integer("store_connection_id")
+      .notNull()
+      .references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
+    productVariantId: integer("product_variant_id")
+      .notNull()
+      .references(() => productVariants.id, { onDelete: "cascade" }),
+    idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    fulfillmentPolicyId: varchar("fulfillment_policy_id", { length: 100 }),
+    returnPolicyId: varchar("return_policy_id", { length: 100 }),
+    paymentPolicyId: varchar("payment_policy_id", { length: 100 }),
+    actorType: varchar("actor_type", { length: 40 }).notNull(),
+    actorId: varchar("actor_id", { length: 255 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("dropship_ebay_listing_policy_override_revision_idem_idx").on(
+      table.vendorId,
+      table.idempotencyKey,
+    ),
+    index("dropship_ebay_listing_policy_override_revision_target_idx").on(
+      table.storeConnectionId,
+      table.productVariantId,
+      table.createdAt,
+    ),
+    check(
+      "dropship_ebay_listing_policy_override_revision_actor_chk",
+      sql`${table.actorType} IN ('vendor','admin','system')`,
+    ),
+    check(
+      "dropship_ebay_listing_policy_override_revision_fulfillment_chk",
+      sql`${table.fulfillmentPolicyId} IS NULL OR btrim(${table.fulfillmentPolicyId}) <> ''`,
+    ),
+    check(
+      "dropship_ebay_listing_policy_override_revision_return_chk",
+      sql`${table.returnPolicyId} IS NULL OR btrim(${table.returnPolicyId}) <> ''`,
+    ),
+    check(
+      "dropship_ebay_listing_policy_override_revision_payment_chk",
+      sql`${table.paymentPolicyId} IS NULL OR btrim(${table.paymentPolicyId}) <> ''`,
+    ),
+  ],
+);
+
+export const dropshipEbayListingPolicyOverrides = dropshipSchema.table(
+  "dropship_ebay_listing_policy_overrides",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    vendorId: integer("vendor_id")
+      .notNull()
+      .references(() => dropshipVendors.id, { onDelete: "cascade" }),
+    storeConnectionId: integer("store_connection_id")
+      .notNull()
+      .references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
+    productVariantId: integer("product_variant_id")
+      .notNull()
+      .references(() => productVariants.id, { onDelete: "cascade" }),
+    revisionId: integer("revision_id")
+      .notNull()
+      .references(() => dropshipEbayListingPolicyOverrideRevisions.id),
+    fulfillmentPolicyId: varchar("fulfillment_policy_id", { length: 100 }),
+    returnPolicyId: varchar("return_policy_id", { length: 100 }),
+    paymentPolicyId: varchar("payment_policy_id", { length: 100 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("dropship_ebay_listing_policy_override_target_idx").on(
+      table.storeConnectionId,
+      table.productVariantId,
+    ),
+    index("dropship_ebay_listing_policy_override_vendor_idx").on(
+      table.vendorId,
+      table.storeConnectionId,
+    ),
+    check(
+      "dropship_ebay_listing_policy_override_nonempty_chk",
+      sql`${table.fulfillmentPolicyId} IS NOT NULL
+          OR ${table.returnPolicyId} IS NOT NULL
+          OR ${table.paymentPolicyId} IS NOT NULL`,
+    ),
+    check(
+      "dropship_ebay_listing_policy_override_fulfillment_chk",
+      sql`${table.fulfillmentPolicyId} IS NULL OR btrim(${table.fulfillmentPolicyId}) <> ''`,
+    ),
+    check(
+      "dropship_ebay_listing_policy_override_return_chk",
+      sql`${table.returnPolicyId} IS NULL OR btrim(${table.returnPolicyId}) <> ''`,
+    ),
+    check(
+      "dropship_ebay_listing_policy_override_payment_chk",
+      sql`${table.paymentPolicyId} IS NULL OR btrim(${table.paymentPolicyId}) <> ''`,
+    ),
+  ],
+);
+
 export const dropshipStoreSetupChecks = dropshipSchema.table(
   "dropship_store_setup_checks",
   {

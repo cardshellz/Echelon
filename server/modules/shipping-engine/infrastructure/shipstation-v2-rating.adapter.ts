@@ -80,6 +80,19 @@ export type V2CarriersResult =
   | { configured: false; carriers: [] }
   | { configured: true; carriers: V2Carrier[] };
 
+export interface V2CarrierService {
+  carrierId: string;
+  carrierCode: string;
+  serviceCode: string;
+  serviceName: string;
+  domestic: boolean;
+  international: boolean;
+}
+
+export type V2CarrierServicesResult =
+  | { configured: false; services: [] }
+  | { configured: true; services: V2CarrierService[] };
+
 export class ShipStationV2Error extends Error {
   constructor(
     readonly code: string,
@@ -241,6 +254,40 @@ export function normalizeCarriersResponse(payload: unknown): V2Carrier[] {
   return normalized;
 }
 
+/** Normalize GET /v2/carriers/{carrier_id}/services for one known carrier. */
+export function normalizeCarrierServicesResponse(
+  payload: unknown,
+  carrier: V2Carrier,
+): V2CarrierService[] {
+  const services = (payload as { services?: unknown[] } | null)?.services;
+  if (!Array.isArray(services)) return [];
+
+  const normalized: V2CarrierService[] = [];
+  for (const entry of services) {
+    const service = entry as {
+      service_code?: string;
+      name?: string;
+      domestic?: boolean;
+      international?: boolean;
+    } | null;
+    if (!service || typeof service.service_code !== "string") continue;
+    const serviceCode = service.service_code.trim();
+    if (!serviceCode) continue;
+    normalized.push({
+      carrierId: carrier.carrierId,
+      carrierCode: carrier.code,
+      serviceCode,
+      serviceName:
+        typeof service.name === "string" && service.name.trim()
+          ? service.name.trim()
+          : serviceCode,
+      domestic: service.domestic === true,
+      international: service.international === true,
+    });
+  }
+  return normalized;
+}
+
 /** Retry-After header (seconds) → bounded wait. Exported for tests. */
 export function parseRetryAfterSeconds(headerValue: string | null): number {
   const parsed = Number.parseInt(headerValue ?? "", 10);
@@ -257,12 +304,15 @@ export interface ShipStationV2RatingAdapter {
   getRates(request: V2RateRequest): Promise<V2RateResult>;
   /** Calibration's first call, and the cheapest key-validation probe. */
   listCarriers(): Promise<V2CarriersResult>;
+  /** Services currently enabled for one connected ShipStation carrier account. */
+  listCarrierServices(carrier: V2Carrier): Promise<V2CarrierServicesResult>;
 }
 
 export interface ShipStationV2AdapterConfig {
   /** Defaults to process.env.SHIPSTATION_V2_API_KEY. */
   apiKey?: string;
   baseUrl?: string;
+  fetchFn?: typeof fetch;
 }
 
 export function createShipStationV2RatingAdapter(
@@ -270,6 +320,7 @@ export function createShipStationV2RatingAdapter(
 ): ShipStationV2RatingAdapter {
   const apiKey = (config.apiKey ?? process.env.SHIPSTATION_V2_API_KEY ?? "").trim();
   const baseUrl = config.baseUrl ?? SHIPSTATION_V2_BASE_URL;
+  const fetchFn = config.fetchFn ?? fetch;
 
   function isConfigured(): boolean {
     return apiKey.length > 0;
@@ -284,7 +335,7 @@ export function createShipStationV2RatingAdapter(
       const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
       let response: Response;
       try {
-        response = await fetch(url, {
+        response = await fetchFn(url, {
           method,
           headers: {
             "API-Key": apiKey,
@@ -347,5 +398,26 @@ export function createShipStationV2RatingAdapter(
     return { configured: true, carriers: normalizeCarriersResponse(payload) };
   }
 
-  return { isConfigured, getRates, listCarriers };
+  async function listCarrierServices(
+    carrier: V2Carrier,
+  ): Promise<V2CarrierServicesResult> {
+    if (!isConfigured()) return { configured: false, services: [] };
+    const carrierId = carrier.carrierId.trim();
+    if (!carrierId) {
+      throw new ShipStationV2Error(
+        "SHIPSTATION_V2_CARRIER_ID_REQUIRED",
+        "ShipStation v2 carrier services require a carrier id.",
+      );
+    }
+    const payload = await apiRequest<unknown>(
+      "GET",
+      `/carriers/${encodeURIComponent(carrierId)}/services`,
+    );
+    return {
+      configured: true,
+      services: normalizeCarrierServicesResponse(payload, carrier),
+    };
+  }
+
+  return { isConfigured, getRates, listCarriers, listCarrierServices };
 }

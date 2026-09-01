@@ -31,6 +31,13 @@ import {
   isEbayResourceAuthFailureStatus,
   isEbayTokenRefreshAuthFailureStatus,
 } from "./dropship-ebay-auth-failure";
+import type {
+  DropshipEbayFulfillmentPolicyGuard,
+  DropshipEbayFulfillmentPolicyPreflight,
+} from "../application/dropship-ebay-fulfillment-policy-guard";
+import type {
+  DropshipEbayManagedLocationProvider,
+} from "../application/dropship-ebay-managed-location-service";
 
 type FetchLike = typeof fetch;
 interface Clock {
@@ -116,6 +123,8 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     private readonly credentials: DropshipMarketplaceCredentialRepository,
     private readonly fetchImpl: FetchLike = fetch,
     private readonly clock: Clock = { now: () => new Date() },
+    private readonly fulfillmentPolicyGuard?: DropshipEbayFulfillmentPolicyGuard,
+    private readonly managedLocations?: DropshipEbayManagedLocationProvider,
   ) {}
 
   async pushListing(
@@ -133,6 +142,8 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     credential = await this.ensureFreshAccessToken(credential, config);
 
     assertEbayReady(input, config);
+    const preflight = await this.assertFulfillmentPolicyCompatible({ credential, config });
+    await this.reconcileManagedLocation({ credential, config, preflight });
     const baseUrl = EBAY_BASE_URLS[config.environment];
     const draft = buildDropshipEbayListingDraft(
       input,
@@ -223,6 +234,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       credential.config,
     );
     credential = await this.ensureFreshAccessToken(credential, config);
+    await this.assertFulfillmentPolicyCompatible({ credential, config });
     return {
       marketplaceId: config.marketplaceId,
       client: this.createConnectorClient({
@@ -231,6 +243,82 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         baseUrl: EBAY_BASE_URLS[config.environment],
       }),
     };
+  }
+  private async assertFulfillmentPolicyCompatible(input: {
+    credential: DropshipMarketplaceStoreCredentials;
+    config: EbayListingConfig;
+  }): Promise<DropshipEbayFulfillmentPolicyPreflight> {
+    if (!this.fulfillmentPolicyGuard) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_FULFILLMENT_POLICY_GUARD_REQUIRED",
+        "eBay listing push requires fulfillment policy compatibility validation.",
+        { retryable: false },
+      );
+    }
+    const preflight = await this.fulfillmentPolicyGuard.evaluateWithAccessToken({
+      storeConnectionId: input.credential.storeConnectionId,
+      marketplaceId: input.config.marketplaceId,
+      fulfillmentPolicyId: input.config.businessPolicies.fulfillmentPolicyId,
+      accessToken: input.credential.accessToken,
+      environment: input.config.environment,
+      fresh: true,
+    });
+    if (!preflight.compatible) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE",
+        "The selected eBay fulfillment policy exceeds current Card Shellz fulfillment capabilities.",
+        {
+          storeConnectionId: input.credential.storeConnectionId,
+          fulfillmentPolicyId: preflight.fulfillmentPolicyId,
+          capabilityEvidenceHash: preflight.capabilityEvidenceHash,
+          issues: preflight.issues,
+          retryable: false,
+        },
+      );
+    }
+    return preflight;
+  }
+  private async reconcileManagedLocation(input: {
+    credential: DropshipMarketplaceStoreCredentials;
+    config: EbayListingConfig;
+    preflight: DropshipEbayFulfillmentPolicyPreflight;
+  }): Promise<void> {
+    if (!this.managedLocations) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_MANAGED_LOCATION_PROVIDER_REQUIRED",
+        "eBay listing push requires the Card Shellz-managed inventory location provider.",
+        { retryable: false },
+      );
+    }
+    const originWarehouseId = input.preflight.originWarehouseId;
+    if (!Number.isSafeInteger(originWarehouseId) || (originWarehouseId ?? 0) <= 0) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_MANAGED_LOCATION_WAREHOUSE_REQUIRED",
+        "eBay listing push requires a verified Card Shellz origin warehouse.",
+        {
+          storeConnectionId: input.credential.storeConnectionId,
+          originWarehouseId,
+          retryable: false,
+        },
+      );
+    }
+    const location = await this.managedLocations.ensureWithAccessToken({
+      accessToken: input.credential.accessToken,
+      environment: input.config.environment,
+      storeConnectionId: input.credential.storeConnectionId,
+      originWarehouseId: originWarehouseId as number,
+    });
+    if (location.merchantLocationKey !== input.config.merchantLocationKey) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_MANAGED_LOCATION_CONFIG_MISMATCH",
+        "Save eBay listing setup before pushing so it uses the Card Shellz-managed inventory location.",
+        {
+          storeConnectionId: input.credential.storeConnectionId,
+          originWarehouseId,
+          retryable: false,
+        },
+      );
+    }
   }
   private createConnectorClient(input: {
     credential: DropshipMarketplaceStoreCredentials;

@@ -32,6 +32,13 @@ import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship
 import type {
   DropshipVendorProvisioningService,
 } from "./dropship-vendor-provisioning-service";
+import type {
+  DropshipEbayFulfillmentPolicyGuard,
+  DropshipEbayFulfillmentPolicyPreflight,
+} from "./dropship-ebay-fulfillment-policy-guard";
+import type {
+  DropshipEbayListingPolicyOverride,
+} from "./dropship-ebay-listing-policy-override-service";
 import {
   createListingPushJobInputSchema,
   generateVendorListingPreviewInputSchema,
@@ -98,6 +105,12 @@ export interface DropshipListingPreviewRow {
   marketplaceCategoryId: string | null;
   marketplaceCategoryName: string | null;
   storeCategoryNames: string[];
+  businessPolicySelection: {
+    fulfillmentPolicyId: string | null;
+    returnPolicyId: string | null;
+    paymentPolicyId: string | null;
+    overriddenFields: Array<"fulfillmentPolicyId" | "returnPolicyId" | "paymentPolicyId">;
+  } | null;
   previewHash: string;
   adminExposureDecision: DropshipCatalogExposureDecision;
   selectionDecision: DropshipVendorCatalogSelectionDecision;
@@ -182,6 +195,11 @@ export interface DropshipListingPreviewRepository {
     storeConnectionId: number;
     productVariantIds: readonly number[];
   }): Promise<Array<{ productVariantId: number; storeCategoryNames: string[] }>>;
+  listEbayListingPolicyOverrides(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    productVariantIds: readonly number[];
+  }): Promise<DropshipEbayListingPolicyOverride[]>;
   getPackageReadiness(productVariantIds: readonly number[]): Promise<Map<number, DropshipListingPackageReadiness>>;
   createListingPushJob(
     input: CreateDropshipListingPushJobRepositoryInput,
@@ -193,6 +211,7 @@ export interface DropshipListingPreviewServiceDependencies {
   repository: DropshipListingPreviewRepository;
   atp: DropshipAtpProvider;
   marketplaceListing: DropshipMarketplaceListingProvider;
+  ebayFulfillmentPolicyGuard: DropshipEbayFulfillmentPolicyGuard;
   clock: DropshipClock;
   logger: DropshipLogger;
 }
@@ -244,6 +263,7 @@ export class DropshipListingPreviewService {
       pricingPolicies,
       packageReadiness,
       ebayStoreCategoryAssignments,
+      ebayListingPolicyOverrides,
     ] = await Promise.all([
       this.deps.repository.listCatalogExposureRules(),
       this.deps.repository.listSelectionRules(parsed.vendorId),
@@ -265,7 +285,22 @@ export class DropshipListingPreviewService {
             productVariantIds: uniqueVariantIds,
           })
         : Promise.resolve([]),
+      context.platform === "ebay"
+        ? this.deps.repository.listEbayListingPolicyOverrides({
+            vendorId: parsed.vendorId,
+            storeConnectionId: parsed.storeConnectionId,
+            productVariantIds: uniqueVariantIds,
+          })
+        : Promise.resolve([]),
     ]);
+
+    const ebayFulfillmentPreflights = context.platform === "ebay" && config
+      ? await this.loadEbayFulfillmentPreflights({
+          context,
+          config,
+          policyOverrides: ebayListingPolicyOverrides,
+        })
+      : new Map<string, DropshipEbayFulfillmentPolicyPreflight>();
 
     const productIds = uniquePositiveIntegers(candidates.map((candidate) => candidate.productId));
     const atpByProductId = await this.deps.atp.getBaseAtpByProductIds(productIds);
@@ -277,6 +312,9 @@ export class DropshipListingPreviewService {
         assignment.productVariantId,
         assignment.storeCategoryNames,
       ]),
+    );
+    const listingPolicyOverridesByVariantId = new Map(
+      ebayListingPolicyOverrides.map((override) => [override.productVariantId, override]),
     );
     const rows = uniqueVariantIds.map((productVariantId) => {
       const candidate = candidatesByVariantId.get(productVariantId);
@@ -298,10 +336,21 @@ export class DropshipListingPreviewService {
         override: overridesByVariantId.get(productVariantId) ?? null,
       });
       const existingListing = listingsByVariantId.get(productVariantId) ?? null;
+      const listingPolicyOverride = listingPolicyOverridesByVariantId.get(productVariantId) ?? null;
+      const effectiveConfig = context.platform === "ebay"
+        ? applyEbayListingPolicyOverride(config, listingPolicyOverride)
+        : config;
+      const effectiveFulfillmentPolicyId = effectiveConfig
+        ? readNestedString(
+            effectiveConfig.marketplaceConfig,
+            "businessPolicies",
+            "fulfillmentPolicyId",
+          )
+        : null;
       return buildListingPreviewRow({
         candidate,
         context,
-        config,
+        config: effectiveConfig,
         selectionDecision,
         adminExposureDecision,
         packageReadiness: packageReadiness.get(productVariantId) ?? null,
@@ -313,6 +362,10 @@ export class DropshipListingPreviewService {
         marketplaceListing: this.deps.marketplaceListing,
         generatedAt,
         storeCategoryNames: storeCategoryNamesByVariantId.get(productVariantId) ?? [],
+        ebayFulfillmentPreflight: effectiveFulfillmentPolicyId
+          ? ebayFulfillmentPreflights.get(effectiveFulfillmentPolicyId) ?? null
+          : null,
+        ebayListingPolicyOverride: listingPolicyOverride,
       });
     });
 
@@ -324,6 +377,73 @@ export class DropshipListingPreviewService {
       rows,
       summary: summarizeRows(rows),
     };
+  }
+
+  private async loadEbayFulfillmentPreflights(input: {
+    context: DropshipListingStoreContext;
+    config: DropshipStoreListingConfig;
+    policyOverrides: readonly DropshipEbayListingPolicyOverride[];
+  }): Promise<Map<string, DropshipEbayFulfillmentPolicyPreflight>> {
+    const marketplaceId = readNestedString(
+      input.config.marketplaceConfig,
+      "marketplaceId",
+    );
+    const defaultFulfillmentPolicyId = readNestedString(
+      input.config.marketplaceConfig,
+      "businessPolicies",
+      "fulfillmentPolicyId",
+    );
+    if (!marketplaceId) return new Map();
+    const fulfillmentPolicyIds = Array.from(new Set([
+      defaultFulfillmentPolicyId,
+      ...input.policyOverrides.map((override) => override.fulfillmentPolicyId),
+    ].filter((value): value is string => Boolean(value))));
+    const preflights = await Promise.all(fulfillmentPolicyIds.map(async (fulfillmentPolicyId) => [
+      fulfillmentPolicyId,
+      await this.loadEbayFulfillmentPreflight({
+        context: input.context,
+        marketplaceId,
+        fulfillmentPolicyId,
+      }),
+    ] as const));
+    return new Map(preflights);
+  }
+
+  private async loadEbayFulfillmentPreflight(input: {
+    context: DropshipListingStoreContext;
+    marketplaceId: string;
+    fulfillmentPolicyId: string;
+  }): Promise<DropshipEbayFulfillmentPolicyPreflight> {
+    try {
+      return await this.deps.ebayFulfillmentPolicyGuard.evaluateForStoreConnection({
+        vendorId: input.context.vendorId,
+        storeConnectionId: input.context.storeConnectionId,
+        marketplaceId: input.marketplaceId,
+        fulfillmentPolicyId: input.fulfillmentPolicyId,
+      });
+    } catch (error) {
+      if (!(error instanceof DropshipError)) throw error;
+      this.deps.logger.warn({
+        code: "DROPSHIP_EBAY_FULFILLMENT_POLICY_PREFLIGHT_UNAVAILABLE",
+        message: "eBay fulfillment policy compatibility could not be verified for listing preview.",
+        context: {
+          vendorId: input.context.vendorId,
+          storeConnectionId: input.context.storeConnectionId,
+          fulfillmentPolicyId: input.fulfillmentPolicyId,
+          errorCode: error.code,
+        },
+      });
+      return {
+        compatible: false,
+        fulfillmentPolicyId: input.fulfillmentPolicyId,
+        capabilityEvidenceHash: "unavailable",
+        originWarehouseId: null,
+        issues: [{
+          code: "verification_unavailable",
+          message: "Fulfillment policy compatibility could not be verified. Refresh the setup before pushing.",
+        }],
+      };
+    }
   }
 
   async createListingPushJobForMember(memberId: string, input: unknown): Promise<{
@@ -379,6 +499,11 @@ export class DropshipListingPreviewService {
       productVariantIds: uniqueVariantIds,
       requestedRetailPriceCents: parsed.requestedRetailPriceCents ?? null,
       requestedRetailPricesByVariantId: serializedRequestedRetailPricesByVariantId,
+      previewHashesByVariantId: Object.fromEntries(
+        preview.rows
+          .map((row) => [String(row.productVariantId), row.previewHash] as const)
+          .sort(([left], [right]) => Number(left) - Number(right)),
+      ),
     });
     const result = await this.deps.repository.createListingPushJob({
       vendorId: parsed.vendorId,
@@ -475,6 +600,7 @@ export function hashListingPushJobRequest(input: {
   productVariantIds: readonly number[];
   requestedRetailPriceCents: number | null;
   requestedRetailPricesByVariantId?: Readonly<Record<string, number>>;
+  previewHashesByVariantId?: Readonly<Record<string, string>>;
 }): string {
   const requestedRetailPricesByVariantId = canonicalRequestedRetailPriceRecord(input.requestedRetailPricesByVariantId);
   const payload: Record<string, unknown> = {
@@ -485,6 +611,13 @@ export function hashListingPushJobRequest(input: {
   };
   if (Object.keys(requestedRetailPricesByVariantId).length > 0) {
     payload.requestedRetailPricesByVariantId = requestedRetailPricesByVariantId;
+  }
+  const previewHashesByVariantId = Object.fromEntries(
+    Object.entries(input.previewHashesByVariantId ?? {})
+      .sort(([left], [right]) => Number(left) - Number(right)),
+  );
+  if (Object.keys(previewHashesByVariantId).length > 0) {
+    payload.previewHashesByVariantId = previewHashesByVariantId;
   }
   return hashJson(payload);
 }
@@ -566,6 +699,8 @@ function buildListingPreviewRow(input: {
   marketplaceListing: DropshipMarketplaceListingProvider;
   generatedAt: Date;
   storeCategoryNames: readonly string[];
+  ebayFulfillmentPreflight: DropshipEbayFulfillmentPolicyPreflight | null;
+  ebayListingPolicyOverride: DropshipEbayListingPolicyOverride | null;
 }): DropshipListingPreviewRow {
   const blockers: string[] = [];
   const warnings: string[] = [];
@@ -607,6 +742,11 @@ function buildListingPreviewRow(input: {
     : { intent: null, blockers: [], warnings: [] };
   blockers.push(...marketplaceValidation.blockers);
   warnings.push(...marketplaceValidation.warnings);
+  if (input.ebayFulfillmentPreflight?.compatible === false) {
+    blockers.push(...input.ebayFulfillmentPreflight.issues.map(
+      (issue) => `ebay_fulfillment_policy:${issue.code}`,
+    ));
+  }
 
   const previewStatus = blockers.length > 0
     ? "blocked"
@@ -614,6 +754,9 @@ function buildListingPreviewRow(input: {
       ? "warning"
       : "ready";
   const title = input.candidate.title?.trim() || input.candidate.productName;
+  const businessPolicySelection = input.context.platform === "ebay"
+    ? buildBusinessPolicySelection(input.config, input.ebayListingPolicyOverride)
+    : null;
   const previewHash = hashJson({
     productVariantId: input.candidate.productVariantId,
     storeConnectionId: input.context.storeConnectionId,
@@ -629,6 +772,9 @@ function buildListingPreviewRow(input: {
     blockers,
     warnings,
     intent: marketplaceValidation.intent,
+    businessPolicySelection,
+    ebayFulfillmentCapabilityEvidenceHash:
+      input.ebayFulfillmentPreflight?.capabilityEvidenceHash ?? null,
   });
 
   return {
@@ -649,6 +795,7 @@ function buildListingPreviewRow(input: {
     marketplaceCategoryName: marketplaceValidation.intent?.marketplaceCategoryName
       ?? input.candidate.ebayBrowseCategoryName,
     storeCategoryNames: marketplaceValidation.intent?.storeCategoryNames ?? [],
+    businessPolicySelection,
     previewHash,
     adminExposureDecision: input.adminExposureDecision,
     selectionDecision: input.selectionDecision,
@@ -681,6 +828,7 @@ function missingCatalogPreviewRow(input: {
     marketplaceCategoryId: null,
     marketplaceCategoryName: null,
     storeCategoryNames: [],
+    businessPolicySelection: null,
     previewHash,
     adminExposureDecision: {
       exposed: false,
@@ -770,6 +918,87 @@ function uniquePositiveIntegers(values: readonly number[]): number[] {
 function normalizeString(value: string | null | undefined): string | null {
   const normalized = value?.trim().toLowerCase();
   return normalized ? normalized : null;
+}
+
+export function applyEbayListingPolicyOverride(
+  config: DropshipStoreListingConfig | null,
+  override: DropshipEbayListingPolicyOverride | null,
+): DropshipStoreListingConfig | null {
+  if (!config || !override) return config;
+  const currentBusinessPolicies = isPlainRecord(config.marketplaceConfig.businessPolicies)
+    ? config.marketplaceConfig.businessPolicies
+    : {};
+  return {
+    ...config,
+    marketplaceConfig: {
+      ...config.marketplaceConfig,
+      businessPolicies: {
+        ...currentBusinessPolicies,
+        ...(override.fulfillmentPolicyId !== null
+          ? { fulfillmentPolicyId: override.fulfillmentPolicyId }
+          : {}),
+        ...(override.returnPolicyId !== null
+          ? { returnPolicyId: override.returnPolicyId }
+          : {}),
+        ...(override.paymentPolicyId !== null
+          ? { paymentPolicyId: override.paymentPolicyId }
+          : {}),
+      },
+    },
+  };
+}
+
+function buildBusinessPolicySelection(
+  config: DropshipStoreListingConfig | null,
+  override: DropshipEbayListingPolicyOverride | null,
+): DropshipListingPreviewRow["businessPolicySelection"] {
+  if (!config) return null;
+  const overriddenFields: NonNullable<
+    DropshipListingPreviewRow["businessPolicySelection"]
+  >["overriddenFields"] = [];
+  if (override?.fulfillmentPolicyId !== null && override?.fulfillmentPolicyId !== undefined) {
+    overriddenFields.push("fulfillmentPolicyId");
+  }
+  if (override?.returnPolicyId !== null && override?.returnPolicyId !== undefined) {
+    overriddenFields.push("returnPolicyId");
+  }
+  if (override?.paymentPolicyId !== null && override?.paymentPolicyId !== undefined) {
+    overriddenFields.push("paymentPolicyId");
+  }
+  return {
+    fulfillmentPolicyId: readNestedString(
+      config.marketplaceConfig,
+      "businessPolicies",
+      "fulfillmentPolicyId",
+    ),
+    returnPolicyId: readNestedString(
+      config.marketplaceConfig,
+      "businessPolicies",
+      "returnPolicyId",
+    ),
+    paymentPolicyId: readNestedString(
+      config.marketplaceConfig,
+      "businessPolicies",
+      "paymentPolicyId",
+    ),
+    overriddenFields,
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readNestedString(
+  record: Record<string, unknown>,
+  ...path: string[]
+): string | null {
+  const value = path.reduce<unknown>((current, key) => (
+    current && typeof current === "object" && !Array.isArray(current)
+      ? (current as Record<string, unknown>)[key]
+      : undefined
+  ), record);
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function hashJson(value: unknown): string {

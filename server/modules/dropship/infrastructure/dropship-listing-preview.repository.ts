@@ -14,6 +14,7 @@ import type {
   DropshipPricingPolicyRecord,
 } from "../application/dropship-listing-preview-service";
 import type { DropshipStoreListingConfig } from "../application/dropship-marketplace-listing-provider";
+import type { DropshipEbayListingPolicyOverride } from "../application/dropship-ebay-listing-policy-override-service";
 import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { DropshipVendorSelectionRule, DropshipVendorVariantOverride } from "../domain/vendor-selection";
@@ -417,6 +418,44 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     }
   }
 
+  async listEbayListingPolicyOverrides(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    productVariantIds: readonly number[];
+  }): Promise<DropshipEbayListingPolicyOverride[]> {
+    if (input.productVariantIds.length === 0) return [];
+    const client = await this.dbPool.connect();
+    try {
+      const result = await client.query<{
+        product_variant_id: number;
+        revision_id: number;
+        fulfillment_policy_id: string | null;
+        return_policy_id: string | null;
+        payment_policy_id: string | null;
+        updated_at: Date;
+      }>(
+        `SELECT product_variant_id, revision_id, fulfillment_policy_id, return_policy_id,
+                payment_policy_id, updated_at
+         FROM dropship.dropship_ebay_listing_policy_overrides
+         WHERE vendor_id = $1
+           AND store_connection_id = $2
+           AND product_variant_id = ANY($3::int[])
+         ORDER BY product_variant_id ASC`,
+        [input.vendorId, input.storeConnectionId, input.productVariantIds],
+      );
+      return result.rows.map((row) => ({
+        productVariantId: row.product_variant_id,
+        revisionId: row.revision_id,
+        fulfillmentPolicyId: row.fulfillment_policy_id,
+        returnPolicyId: row.return_policy_id,
+        paymentPolicyId: row.payment_policy_id,
+        updatedAt: row.updated_at,
+      }));
+    } finally {
+      client.release();
+    }
+  }
+
   async listPricingPolicies(): Promise<DropshipPricingPolicyRecord[]> {
     const client = await this.dbPool.connect();
     try {
@@ -621,9 +660,10 @@ async function upsertVendorListingForPreview(
       JSON.stringify({
         lastPreviewStatus: row.previewStatus,
         blockers: row.blockers,
-        warnings: row.warnings,
-        listingMode: row.listingMode,
-      }),
+         warnings: row.warnings,
+         listingMode: row.listingMode,
+         businessPolicySelection: row.businessPolicySelection,
+       }),
       input.now,
     ],
   );
@@ -701,9 +741,12 @@ async function recordListingJobAuditEvent(
       JSON.stringify({
         idempotencyKey: input.idempotencyKey,
         requestHash: input.requestHash,
-        previewSummary: input.preview.summary,
-        requestedRetailPricesByVariantId: input.requestedRetailPricesByVariantId,
-      }),
+         previewSummary: input.preview.summary,
+         requestedRetailPricesByVariantId: input.requestedRetailPricesByVariantId,
+         previewHashesByVariantId: Object.fromEntries(
+           input.preview.rows.map((row) => [String(row.productVariantId), row.previewHash]),
+         ),
+       }),
       input.now,
     ],
   );

@@ -9,6 +9,7 @@ import { InventoryServiceDropshipAtpProvider } from "./dropship-atp.provider";
 import { ConfigDrivenDropshipMarketplaceListingProvider } from "./dropship-config-driven-marketplace-listing.provider";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
 import { createDropshipVendorProvisioningServiceFromEnv } from "./dropship-vendor-provisioning.factory";
+import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./dropship-ebay-fulfillment-policy-guard.factory";
 
 export function createDropshipListingPreviewServiceFromEnv(): DropshipListingPreviewService {
   return new DropshipListingPreviewService({
@@ -16,6 +17,7 @@ export function createDropshipListingPreviewServiceFromEnv(): DropshipListingPre
     repository: new PgDropshipListingPreviewRepository(),
     atp: new InventoryServiceDropshipAtpProvider(createInventoryAtpService(db)),
     marketplaceListing: new ConfigDrivenDropshipMarketplaceListingProvider(),
+    ebayFulfillmentPolicyGuard: createDropshipEbayFulfillmentPolicyGuardFromEnv(),
     clock: systemDropshipListingPreviewClock,
     logger: makeDropshipListingPreviewLogger(),
   });

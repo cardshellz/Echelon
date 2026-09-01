@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, CheckCircle2, ChevronsUpDown, RefreshCw, Save } from "lucide-react";
+import { Check, CheckCircle2, ChevronsUpDown, Clock3, MapPinned, RefreshCw, Save, Truck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,7 +28,6 @@ import { cn } from "@/lib/utils";
 import { EbayStoreCategoryAuthorizationRecovery } from "./EbayStoreCategoryAuthorizationRecovery";
 
 const EMPTY_SELECTION: ReplaceDropshipEbayListingSetupInput = {
-  merchantLocationKey: "",
   fulfillmentPolicyId: "",
   returnPolicyId: "",
   paymentPolicyId: "",
@@ -74,6 +74,9 @@ export function EbayListingSetupPanel({
     () => setupQuery.data ? !listingSetupSelectionMatches(setupQuery.data, draft) : false,
     [draft, setupQuery.data],
   );
+  const managedLocationNeedsReconciliation = Boolean(
+    setupQuery.data?.missingFields.includes("merchantLocationKey"),
+  );
 
   async function saveSetup(): Promise<void> {
     if (!draftComplete || saving) return;
@@ -108,10 +111,10 @@ export function EbayListingSetupPanel({
         <div>
           <h2 className="text-lg font-semibold">eBay listing setup</h2>
           <p className="mt-1 text-sm text-zinc-500">
-            Choose the connected store&apos;s inventory location and business policies. These are required only when a listing is pushed to eBay.
+            Choose your store&apos;s default eBay business policies. Card Shellz controls the physical inventory location used for dropship fulfillment.
           </p>
           <p className="mt-1 text-xs text-zinc-500">
-            Echelon fills in any unambiguous value automatically. When eBay returns more than one valid choice, you choose which one applies.
+            Your fulfillment policy can set buyer-facing shipping charges, but its handling time, destinations, and services must fit the capabilities below.
           </p>
         </div>
         {setupQuery.data && (
@@ -140,29 +143,27 @@ export function EbayListingSetupPanel({
           {setupQuery.data.complete && (
             <div className="mb-4 flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
               <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>The required eBay listing destination and business policies are configured.</span>
+              <span>The Card Shellz-managed inventory destination and your default eBay business policies are ready.</span>
             </div>
           )}
           <div className="mb-4 rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm">
             <span className="text-zinc-500">Marketplace</span>
             <span className="ml-2 font-medium">{setupQuery.data.marketplaceId}</span>
           </div>
+          <FulfillmentCapabilitySummary setup={setupQuery.data} />
           <div className="grid gap-4 md:grid-cols-2">
-            <ListingSetupField
-              label="Inventory location"
-              placeholder="Choose an enabled inventory location"
-              searchPlaceholder="Search inventory locations..."
-              emptyMessage="No matching inventory locations."
-              options={setupQuery.data.options.merchantLocations}
-              value={draft.merchantLocationKey}
-              onValueChange={(value) => setDraft((current) => ({ ...current, merchantLocationKey: value }))}
-            />
             <ListingSetupField
               label="Fulfillment policy"
               placeholder="Choose a fulfillment policy"
               searchPlaceholder="Search fulfillment policies..."
               emptyMessage="No matching fulfillment policies."
-              options={setupQuery.data.options.fulfillmentPolicies}
+              options={setupQuery.data.options.fulfillmentPolicies.map((policy) => ({
+                ...policy,
+                disabled: !policy.compatible,
+                description: policy.compatible
+                  ? "Compatible with Card Shellz fulfillment"
+                  : policy.compatibilityIssues[0]?.message ?? "Not compatible",
+              }))}
               value={draft.fulfillmentPolicyId}
               onValueChange={(value) => setDraft((current) => ({ ...current, fulfillmentPolicyId: value }))}
             />
@@ -186,9 +187,14 @@ export function EbayListingSetupPanel({
             />
           </div>
 
-          {hasMissingProviderOptions(setupQuery.data) && (
+          {managedLocationNeedsReconciliation && (
             <div className="mt-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
-              eBay did not return every required active location or policy. Create or enable the missing item in eBay Seller Hub, then refresh these options.
+              Card Shellz needs to create or repair the eBay warehouse destination for this store. Save setup to reconcile it automatically; the destination remains managed by Card Shellz.
+            </div>
+          )}
+          {hasMissingVendorOptions(setupQuery.data) && (
+            <div className="mt-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+              eBay did not return every required compatible business policy. Create or update the policy in eBay Seller Hub, then refresh these options.
             </div>
           )}
           {saveError && (
@@ -223,7 +229,7 @@ export function EbayListingSetupPanel({
             <Button
               type="button"
               className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-              disabled={saving || !draftComplete || !draftChanged}
+              disabled={saving || !draftComplete || (!draftChanged && !managedLocationNeedsReconciliation)}
               onClick={saveSetup}
             >
               <Save className="h-4 w-4" />
@@ -262,6 +268,80 @@ function ListingSetupError({ error }: { error: unknown }) {
   );
 }
 
+function FulfillmentCapabilitySummary({
+  setup,
+}: {
+  setup: DropshipEbayListingSetupResponse;
+}) {
+  const capability = setup.fulfillmentCapability;
+  const carriers = [...new Set(
+    capability.supportedServices.map((service) => service.carrier),
+  )];
+  return (
+    <div className="mb-4 rounded-md border border-violet-200 bg-violet-50/50 p-4">
+      <div className="font-medium text-zinc-950">Card Shellz fulfillment capabilities</div>
+      <p className="mt-1 text-xs text-zinc-600">
+        These are operational limits, not shipping-price rules. You remain responsible for the charges configured in your eBay policy.
+      </p>
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        <CapabilityFact
+          icon={<Clock3 className="h-4 w-4" />}
+          label="Handling time"
+          value={`At least ${capability.requiredHandlingTimeBusinessDays} business day${capability.requiredHandlingTimeBusinessDays === 1 ? "" : "s"}`}
+        />
+        <CapabilityFact
+          icon={<MapPinned className="h-4 w-4" />}
+          label="Direct destinations"
+          value={capability.destinationCoverageComplete
+            ? "United States, territories, and military mail"
+            : `${capability.destinationRegions.length} configured US regions`}
+        />
+        <CapabilityFact
+          icon={<Truck className="h-4 w-4" />}
+          label="Connected carriers"
+          value={carriers.join(", ") || "None verified"}
+        />
+      </div>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {capability.supportedServices.map((service) => (
+          <Badge
+            key={service.ebayServiceCode}
+            variant="outline"
+            className="border-violet-200 bg-white text-violet-900"
+          >
+            {service.carrier}: {service.serviceName}
+          </Badge>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CapabilityFact({
+  icon,
+  label,
+  value,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-violet-100 bg-white p-3">
+      <span className="mt-0.5 text-violet-700">{icon}</span>
+      <span>
+        <span className="block text-xs text-zinc-500">{label}</span>
+        <span className="block text-sm font-medium text-zinc-900">{value}</span>
+      </span>
+    </div>
+  );
+}
+
+export type ListingSetupDisplayOption = DropshipEbayListingSetupOption & {
+  disabled?: boolean;
+  description?: string;
+};
+
 function ListingSetupField({
   emptyMessage,
   label,
@@ -274,7 +354,7 @@ function ListingSetupField({
   emptyMessage: string;
   label: string;
   onValueChange: (value: string) => void;
-  options: readonly DropshipEbayListingSetupOption[];
+  options: readonly ListingSetupDisplayOption[];
   placeholder: string;
   searchPlaceholder: string;
   value: string;
@@ -300,8 +380,9 @@ function ListingSetupField({
   );
 }
 
-function ListingSetupCombobox({
+export function ListingSetupCombobox({
   ariaLabel,
+  disabled = false,
   emptyMessage,
   onValueChange,
   options,
@@ -310,9 +391,10 @@ function ListingSetupCombobox({
   value,
 }: {
   ariaLabel: string;
+  disabled?: boolean;
   emptyMessage: string;
   onValueChange: (value: string) => void;
-  options: readonly DropshipEbayListingSetupOption[];
+  options: readonly ListingSetupDisplayOption[];
   placeholder: string;
   searchPlaceholder: string;
   value: string;
@@ -320,15 +402,20 @@ function ListingSetupCombobox({
   const [open, setOpen] = useState(false);
   const selected = options.find((option) => option.id === value) ?? null;
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={disabled ? false : open}
+      onOpenChange={(nextOpen) => {
+        if (!disabled) setOpen(nextOpen);
+      }}
+    >
       <PopoverTrigger asChild>
         <Button
           type="button"
           variant="outline"
           role="combobox"
-          aria-expanded={open}
+          aria-expanded={disabled ? false : open}
           aria-label={ariaLabel}
-          disabled={options.length === 0}
+          disabled={disabled || options.length === 0}
           className="h-10 w-full justify-between gap-2 px-3 font-normal"
         >
           <span className={cn("min-w-0 truncate text-left", !selected && "text-muted-foreground")}>
@@ -358,6 +445,7 @@ function ListingSetupCombobox({
                 <CommandItem
                   key={option.id}
                   value={`${option.name} ${option.id}`}
+                  disabled={option.disabled}
                   onSelect={() => {
                     onValueChange(option.id);
                     setOpen(false);
@@ -374,6 +462,14 @@ function ListingSetupCombobox({
                   <span className="min-w-0">
                     <span className="block truncate font-medium">{option.name}</span>
                     <span className="block truncate font-mono text-xs text-muted-foreground">{option.id}</span>
+                    {option.description && (
+                      <span className={cn(
+                        "mt-0.5 block text-xs",
+                        option.disabled ? "text-rose-700" : "text-emerald-700",
+                      )}>
+                        {option.description}
+                      </span>
+                    )}
                   </span>
                 </CommandItem>
               ))}
@@ -389,8 +485,10 @@ export function buildEbayListingSetupDraft(
   setup: DropshipEbayListingSetupResponse,
 ): ReplaceDropshipEbayListingSetupInput {
   return {
-    merchantLocationKey: selectedOrOnly(setup.selection.merchantLocationKey, setup.options.merchantLocations),
-    fulfillmentPolicyId: selectedOrOnly(setup.selection.fulfillmentPolicyId, setup.options.fulfillmentPolicies),
+    fulfillmentPolicyId: selectedOrOnly(
+      setup.selection.fulfillmentPolicyId,
+      setup.options.fulfillmentPolicies.filter((policy) => policy.compatible),
+    ),
     returnPolicyId: selectedOrOnly(setup.selection.returnPolicyId, setup.options.returnPolicies),
     paymentPolicyId: selectedOrOnly(setup.selection.paymentPolicyId, setup.options.paymentPolicies),
   };
@@ -408,15 +506,13 @@ function listingSetupSelectionMatches(
   setup: DropshipEbayListingSetupResponse,
   draft: ReplaceDropshipEbayListingSetupInput,
 ): boolean {
-  return setup.selection.merchantLocationKey === draft.merchantLocationKey
-    && setup.selection.fulfillmentPolicyId === draft.fulfillmentPolicyId
+  return setup.selection.fulfillmentPolicyId === draft.fulfillmentPolicyId
     && setup.selection.returnPolicyId === draft.returnPolicyId
     && setup.selection.paymentPolicyId === draft.paymentPolicyId;
 }
 
-function hasMissingProviderOptions(setup: DropshipEbayListingSetupResponse): boolean {
-  return setup.options.merchantLocations.length === 0
-    || setup.options.fulfillmentPolicies.length === 0
+function hasMissingVendorOptions(setup: DropshipEbayListingSetupResponse): boolean {
+  return !setup.options.fulfillmentPolicies.some((policy) => policy.compatible)
     || setup.options.returnPolicies.length === 0
     || setup.options.paymentPolicies.length === 0;
 }

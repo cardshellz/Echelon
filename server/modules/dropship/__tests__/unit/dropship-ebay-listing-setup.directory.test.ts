@@ -60,14 +60,76 @@ describe("EbayDropshipListingSetupDirectory", () => {
         { id: "west", name: "West" },
       ],
       fulfillmentPolicies: [
-        { id: "fulfillment-a", name: "A expedited" },
-        { id: "fulfillment-z", name: "Z standard" },
+        parsedFulfillmentPolicy("fulfillment-a", "A expedited"),
+        parsedFulfillmentPolicy("fulfillment-z", "Z standard"),
       ],
       returnPolicies: [{ id: "return-1", name: "Thirty days" }],
       paymentPolicies: [{ id: "payment-1", name: "Managed payments" }],
     });
     expect(urls).toHaveLength(5);
     expect(urls.every((url) => url.startsWith("https://api.ebay.com/"))).toBe(true);
+  });
+
+  it("loads one selected fulfillment policy for a forced pre-push check", async () => {
+    const fetchFn = vi.fn(async (url: string | URL | Request) => {
+      expect(String(url)).toBe(
+        "https://api.ebay.com/sell/account/v1/fulfillment_policy/policy%2Fone",
+      );
+      return jsonResponse(policy(
+        "fulfillmentPolicyId",
+        "policy/one",
+        "Ground",
+      ));
+    });
+    const directory = new EbayDropshipListingSetupDirectory(
+      credentials(),
+      fetchFn as typeof fetch,
+    );
+
+    await expect(directory.getFulfillmentPolicyWithAccessToken({
+      accessToken: "access-token",
+      environment: "production",
+      storeConnectionId: 44,
+      fulfillmentPolicyId: "policy/one",
+    })).resolves.toEqual(parsedFulfillmentPolicy("policy/one", "Ground"));
+  });
+
+  it.each([
+    {
+      label: "shipping option",
+      mutate: (value: Record<string, unknown>) => {
+        value.shippingOptions = [null];
+      },
+    },
+    {
+      label: "shipping service",
+      mutate: (value: Record<string, unknown>) => {
+        value.shippingOptions = [{ optionType: "DOMESTIC", shippingServices: [{}] }];
+      },
+    },
+    {
+      label: "provider boolean",
+      mutate: (value: Record<string, unknown>) => {
+        value.localPickup = "false";
+      },
+    },
+  ])("rejects a malformed fulfillment-policy $label", async ({ mutate }) => {
+    const malformed = policy("fulfillmentPolicyId", "policy-1", "Ground");
+    mutate(malformed);
+    const directory = new EbayDropshipListingSetupDirectory(
+      credentials(),
+      vi.fn(async () => jsonResponse(malformed)) as unknown as typeof fetch,
+    );
+
+    await expect(directory.getFulfillmentPolicyWithAccessToken({
+      accessToken: "access-token",
+      environment: "production",
+      storeConnectionId: 44,
+      fulfillmentPolicyId: "policy-1",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_LISTING_SETUP_INVALID_RESPONSE",
+      context: { resource: "fulfillmentPolicies" },
+    });
   });
 
   it("classifies eBay Inventory or Account authorization failures without exposing the body", async () => {
@@ -214,6 +276,33 @@ function policy(
     [idKey]: id,
     name,
     categoryTypes: [{ name: categoryType }],
+    ...(idKey === "fulfillmentPolicyId" ? {
+      marketplaceId: "EBAY_US",
+      handlingTime: { value: 1, unit: "DAY" },
+      shippingOptions: [{
+        optionType: "DOMESTIC",
+        shippingServices: [{ shippingServiceCode: "USPSGround" }],
+      }],
+      localPickup: false,
+      freightShipping: false,
+      pickupDropOff: false,
+    } : {}),
+  };
+}
+
+function parsedFulfillmentPolicy(id: string, name: string) {
+  return {
+    id,
+    name,
+    marketplaceId: "EBAY_US",
+    handlingTime: { value: 1, unit: "DAY" },
+    shippingOptions: [{
+      optionType: "DOMESTIC",
+      shippingServiceCodes: ["USPSGround"],
+    }],
+    localPickup: false,
+    freightShipping: false,
+    pickupDropOff: false,
   };
 }
 
