@@ -94,6 +94,17 @@ describe("PurchaseOrderEdit catalog identity", () => {
     });
   });
 
+  it("keeps a catalog quote piece-based when no active receive variant is available", () => {
+    expect(catalogReceiveConfiguration({
+      productVariantId: null,
+      receiveUnitsPerVariant: null,
+    })).toEqual({
+      productVariantId: null,
+      expectedReceiveVariantId: null,
+      expectedReceiveUnitsPerVariant: null,
+    });
+  });
+
   it("does not mutate the purchase-order line before a valid quote draft is applied", () => {
     const draft = createVendorQuoteEditorDraft(
       quoteLine,
