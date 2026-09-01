@@ -349,6 +349,12 @@
   "inventory.build_runs": [
     "modules/inventory"
   ],
+  "inventory.channel_exposure_policy_heads": [
+    "modules/inventory-planning"
+  ],
+  "inventory.channel_exposure_policy_versions": [
+    "modules/inventory-planning"
+  ],
   "inventory.cost_adjustment_log": [
     "modules/inventory"
   ],
@@ -416,6 +422,15 @@
     "modules/inventory-planning"
   ],
   "inventory.promise_safety_policy_versions": [
+    "modules/inventory-planning"
+  ],
+  "inventory.publication_source_binding_heads": [
+    "modules/inventory-planning"
+  ],
+  "inventory.publication_source_binding_members": [
+    "modules/inventory-planning"
+  ],
+  "inventory.publication_source_binding_versions": [
     "modules/inventory-planning"
   ],
   "inventory.replen_rules": [
