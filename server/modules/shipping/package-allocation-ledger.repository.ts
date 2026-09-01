@@ -143,6 +143,15 @@ export interface PersistedPackageAllocationIntent {
   readonly executable: boolean;
 }
 
+export interface PersistedPackageAllocationEffectOutboxEntry {
+  readonly intentKey: string;
+  readonly idempotencyKey: string;
+  readonly payloadHash: string;
+  readonly state: "shadow";
+  readonly executionEnabled: false;
+  readonly attemptCount: 0;
+}
+
 export interface LockedPackageAllocationAuthorityEvidence {
   readonly evidenceKey: string;
   readonly persistedEvidence: PersistedDeclaredPackageEvidence;
@@ -211,6 +220,9 @@ export interface PackageAllocationLedgerTransaction {
   loadPlanByInputHash(groupId: string, inputHash: string): Promise<PersistedPackageAllocationPlan | null>;
   loadPlanEntries(planId: string): Promise<readonly PersistedPackageAllocationEntry[]>;
   loadPlanIntents(planId: string): Promise<readonly PersistedPackageAllocationIntent[]>;
+  loadPlanEffectOutbox(
+    planId: string,
+  ): Promise<readonly PersistedPackageAllocationEffectOutboxEntry[]>;
   appendPlan(input: AppendPackageAllocationPlanInput): Promise<string>;
 }
 
@@ -1486,6 +1498,52 @@ class PgPackageAllocationLedgerTransaction
     return Object.freeze(intents);
   }
 
+  async loadPlanEffectOutbox(
+    planId: string,
+  ): Promise<readonly PersistedPackageAllocationEffectOutboxEntry[]> {
+    const result = await this.client.query(
+      `SELECT
+         intent.intent_key,
+         outbox.idempotency_key,
+         outbox.payload_hash,
+         outbox.state,
+         outbox.execution_enabled,
+         outbox.attempt_count
+       FROM wms.package_allocation_effect_intents AS intent
+       JOIN wms.package_allocation_effect_outbox AS outbox
+         ON outbox.package_allocation_effect_intent_id = intent.id
+       WHERE intent.package_allocation_plan_id = $1::bigint
+       ORDER BY intent.intent_key`,
+      [planId],
+    );
+    const entries = result.rows.map((raw) => {
+      const row = raw as Record<string, unknown>;
+      const state = requiredText(row.state, "state");
+      const executionEnabled = booleanValue(
+        row.execution_enabled,
+        "execution_enabled",
+      );
+      const attemptCount = nonnegativeInteger(row.attempt_count, "attempt_count");
+      if (state !== "shadow" || executionEnabled || attemptCount !== 0) {
+        throw new PackageAllocationLedgerRepositoryError(
+          "INVALID_DATABASE_EVIDENCE",
+          "A package allocation effect outbox row is not inert",
+          { state, executionEnabled, attemptCount },
+        );
+      }
+      return Object.freeze({
+        intentKey: requiredText(row.intent_key, "intent_key"),
+        idempotencyKey: requiredText(row.idempotency_key, "idempotency_key"),
+        payloadHash: requiredText(row.payload_hash, "payload_hash"),
+        state: "shadow" as const,
+        executionEnabled: false as const,
+        attemptCount: 0 as const,
+      });
+    });
+    entries.sort((left, right) => compareText(left.intentKey, right.intentKey));
+    return Object.freeze(entries);
+  }
+
   async appendPlan(input: AppendPackageAllocationPlanInput): Promise<string> {
     const allocationSources = new Map<string, string>();
     for (const entry of input.entries) {
@@ -1686,6 +1744,25 @@ class PgPackageAllocationLedgerTransaction
         [planId, input.group.id, JSON.stringify(batch)],
       );
     }
+    await this.client.query(
+      `INSERT INTO wms.package_allocation_effect_outbox (
+         package_allocation_effect_intent_id,
+         idempotency_key,
+         payload_hash,
+         state,
+         execution_enabled
+       )
+       SELECT
+         intent.id,
+         intent.intent_key,
+         intent.payload_hash,
+         'shadow',
+         FALSE
+       FROM wms.package_allocation_effect_intents AS intent
+       WHERE intent.package_allocation_plan_id = $1::bigint
+       ORDER BY intent.intent_key`,
+      [planId],
+    );
 
     const casResult = await this.client.query(
       `UPDATE wms.package_allocation_groups

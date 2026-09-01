@@ -45,6 +45,7 @@ import {
 import {
   PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS,
   PgPackageAllocationLedgerRepository,
+  type PersistedPackageAllocationEffectOutboxEntry,
   type PersistedPackageAllocationEntry,
   type PersistedPackageAllocationIntent,
 } from "../../package-allocation-ledger.repository";
@@ -85,6 +86,7 @@ interface LedgerCounts {
   readonly plans: number;
   readonly entries: number;
   readonly intents: number;
+  readonly effectOutbox: number;
 }
 
 interface QueryContext {
@@ -490,7 +492,8 @@ async function loadLedgerCounts(pool: Pool): Promise<LedgerCounts> {
        (SELECT COUNT(*)::integer FROM wms.package_allocation_package_bindings) AS "packageBindings",
        (SELECT COUNT(*)::integer FROM wms.package_allocation_plans) AS "plans",
        (SELECT COUNT(*)::integer FROM wms.package_allocation_entries) AS "entries",
-       (SELECT COUNT(*)::integer FROM wms.package_allocation_effect_intents) AS "intents"`,
+       (SELECT COUNT(*)::integer FROM wms.package_allocation_effect_intents) AS "intents",
+       (SELECT COUNT(*)::integer FROM wms.package_allocation_effect_outbox) AS "effectOutbox"`,
   );
   return result.rows[0];
 }
@@ -529,6 +532,19 @@ function expectedIntent(
       quantity: intent.quantity,
     },
     executable: false,
+  };
+}
+
+function expectedEffectOutbox(
+  intent: PackageAllocationEffectIntentV1,
+): PersistedPackageAllocationEffectOutboxEntry {
+  return {
+    intentKey: intent.intentKey,
+    idempotencyKey: intent.intentKey,
+    payloadHash: intent.payloadHash,
+    state: "shadow",
+    executionEnabled: false,
+    attemptCount: 0,
   };
 }
 
@@ -1024,7 +1040,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       "package_membership_policy_unresolved",
       "physical_consumption_authority_policy_unresolved",
     ]);
-    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
+    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(9).fill(0));
 
     const freshAudit = await withExecutionAuditRole(pool, async (scopedPool) => {
       const scopedClient = await scopedPool.connect();
@@ -1646,7 +1662,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       "Total Cost": expect.any(Number),
       "Plan Rows": expect.any(Number),
     });
-    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
+    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(9).fill(0));
   });
 
 
@@ -1747,7 +1763,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       "package_membership_policy_unresolved",
       "physical_consumption_authority_policy_unresolved",
     ]);
-    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
+    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(9).fill(0));
   });
 
   it("resolves locked bootstrap evidence without creating ledger rows", async () => {
@@ -1799,7 +1815,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect(result.resolution?.plannerResult.state.desiredEffectIntents.every(
       (intent) => intent.executable === false,
     )).toBe(true);
-    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
+    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(9).fill(0));
   });
 
   it("discovers an empty sibling under the SELECT-only role without granting item authority", async () => {
@@ -1952,14 +1968,18 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       authority_snapshot: Record<string, unknown>;
       executable_count: number;
       intent_count: number;
+      outbox_count: number;
     }>(
       `SELECT
          plan.authority_snapshot,
          COUNT(intent.id) FILTER (WHERE intent.executable)::integer AS executable_count,
-         COUNT(intent.id)::integer AS intent_count
+         COUNT(intent.id)::integer AS intent_count,
+         COUNT(outbox.id)::integer AS outbox_count
        FROM wms.package_allocation_plans AS plan
        LEFT JOIN wms.package_allocation_effect_intents AS intent
          ON intent.package_allocation_plan_id = plan.id
+       LEFT JOIN wms.package_allocation_effect_outbox AS outbox
+         ON outbox.package_allocation_effect_intent_id = intent.id
        WHERE plan.id = $1::bigint
        GROUP BY plan.id`,
       [created.persistence?.planId],
@@ -1978,6 +1998,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       },
       executable_count: 0,
       intent_count: created.resolution?.plannerResult.state.desiredEffectIntents.length,
+      outbox_count: created.resolution?.plannerResult.state.desiredEffectIntents.length,
     });
     const counts = await loadLedgerCounts(pool);
     expect(counts).toMatchObject({
@@ -1988,6 +2009,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       plans: 1,
       entries: created.resolution?.plannerResult.state.allocations.length,
       intents: created.resolution?.plannerResult.state.desiredEffectIntents.length,
+      effectOutbox: created.resolution?.plannerResult.state.desiredEffectIntents.length,
     });
   });
 
@@ -2052,12 +2074,16 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     const persistedGraph = await repository.withSerializableTransaction(async (transaction) => ({
       entries: await transaction.loadPlanEntries(created.planId!),
       intents: await transaction.loadPlanIntents(created.planId!),
+      effectOutbox: await transaction.loadPlanEffectOutbox(created.planId!),
     }));
     expect(persistedGraph.entries).toEqual(
       created.plannerResult.ledgerEntriesToAppend.map(expectedEntry),
     );
     expect(persistedGraph.intents).toEqual(
       created.plannerResult.effectIntentsToAppend.map(expectedIntent),
+    );
+    expect(persistedGraph.effectOutbox).toEqual(
+      created.plannerResult.effectIntentsToAppend.map(expectedEffectOutbox),
     );
 
     const counts = await loadLedgerCounts(pool);
@@ -2072,6 +2098,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       plans: 1,
       entries: created.plannerResult.ledgerEntriesToAppend.length,
       intents: created.plannerResult.effectIntentsToAppend.length,
+      effectOutbox: created.plannerResult.effectIntentsToAppend.length,
     });
 
     const planEvidence = await pool.query<{
@@ -2126,6 +2153,16 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       all_package_targets_bound: true,
       all_package_intents_bound: true,
     });
+    await expect(pool.query(
+      `UPDATE wms.package_allocation_effect_outbox
+       SET state = 'ready'
+       WHERE package_allocation_effect_intent_id IN (
+         SELECT id
+         FROM wms.package_allocation_effect_intents
+         WHERE package_allocation_plan_id = $1::bigint
+       )`,
+      [created.planId],
+    )).rejects.toMatchObject({ code: "55000" });
 
     const immutableEvidence = await pool.query<{
       source_quantity: number;
@@ -2236,6 +2273,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       plan: await transaction.loadPlanByVersion(cancelled.groupId, 2),
       entries: await transaction.loadPlanEntries(cancelled.planId!),
       intents: await transaction.loadPlanIntents(cancelled.planId!),
+      effectOutbox: await transaction.loadPlanEffectOutbox(cancelled.planId!),
     }));
     expect(persistedGraph.plan).not.toBeNull();
     expect(persistedGraph.plan?.plannerVersion).toBe(PACKAGE_ALLOCATION_PLANNER_VERSION);
@@ -2250,6 +2288,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     );
     expect(persistedGraph.intents).toEqual(
       cancelled.plannerResult.effectIntentsToAppend.map(expectedIntent),
+    );
+    expect(persistedGraph.effectOutbox).toEqual(
+      cancelled.plannerResult.effectIntentsToAppend.map(expectedEffectOutbox),
     );
 
     const conservation = await pool.query<{
@@ -2297,6 +2338,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         initial.plannerResult.ledgerEntriesToAppend.length
         + cancelled.plannerResult.ledgerEntriesToAppend.length,
       intents:
+        initial.plannerResult.effectIntentsToAppend.length
+        + cancelled.plannerResult.effectIntentsToAppend.length,
+      effectOutbox:
         initial.plannerResult.effectIntentsToAppend.length
         + cancelled.plannerResult.effectIntentsToAppend.length,
     });
@@ -2359,7 +2403,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       code: "DATABASE_ERROR",
       context: { postgresCode: "P0001" },
     });
-    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(8).fill(0));
+    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(9).fill(0));
   });
 
   it("settles identical concurrent commands as one plan and one exact replay", async () => {
@@ -2398,6 +2442,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect(counts.plans).toBe(1);
     expect(counts.memberships).toBe(1);
     expect(counts.packageBindings).toBe(1);
+    expect(counts.effectOutbox).toBe(counts.intents);
   }, CONCURRENCY_TEST_TIMEOUT_MS);
 
   it("allows only one group to claim a source under a controlled concurrent race", async () => {
@@ -2456,5 +2501,6 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect(counts.intents).toBe(
       fulfilled[0].plannerResult.effectIntentsToAppend.length,
     );
+    expect(counts.effectOutbox).toBe(counts.intents);
   }, CONCURRENCY_TEST_TIMEOUT_MS);
 });
