@@ -330,6 +330,8 @@ export const physicalShipmentItems = wmsSchema.table("physical_shipment_items", 
   fulfillmentPlanLineId: bigint("fulfillment_plan_line_id", { mode: "number" }).references(() => fulfillmentPlanLines.id, { onDelete: "restrict" }),
   wmsOrderItemId: integer("wms_order_item_id").references(() => orderItems.id, { onDelete: "restrict" }),
   legacyWmsShipmentItemId: integer("legacy_wms_shipment_item_id").references(() => outboundShipmentItems.id, { onDelete: "restrict" }),
+  packageAllocationEntryId: bigint("package_allocation_entry_id", { mode: "number" })
+    .references((): AnyPgColumn => packageAllocationEntries.id, { onDelete: "restrict" }),
   shipmentItemPurpose: varchar("shipment_item_purpose", { length: 30 }).notNull().default("customer_fulfillment"),
   replacementForOrderItemId: integer("replacement_for_order_item_id").references(() => orderItems.id, { onDelete: "restrict" }),
   correctionForPhysicalShipmentItemId: bigint("correction_for_physical_shipment_item_id", { mode: "number" })
@@ -345,6 +347,13 @@ export const physicalShipmentItems = wmsSchema.table("physical_shipment_items", 
   uniqueIndex("uq_physical_shipment_items_legacy_item")
     .on(table.legacyWmsShipmentItemId)
     .where(sql`${table.legacyWmsShipmentItemId} IS NOT NULL`),
+  uniqueIndex("uq_physical_shipment_items_package_allocation_entry")
+    .on(table.packageAllocationEntryId)
+    .where(sql`${table.packageAllocationEntryId} IS NOT NULL`),
+  check(
+    "physical_shipment_items_single_source_provenance_chk",
+    sql`NUM_NONNULLS(${table.legacyWmsShipmentItemId}, ${table.packageAllocationEntryId}) <= 1`,
+  ),
   index("idx_physical_shipment_items_request_item_lookup")
     .on(table.shipmentRequestItemId, table.physicalShipmentId)
     .where(sql`${table.shipmentRequestItemId} IS NOT NULL`),

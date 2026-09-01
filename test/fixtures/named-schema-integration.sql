@@ -317,10 +317,23 @@ CREATE TABLE wms.physical_shipment_items (
     REFERENCES wms.physical_shipments(id) ON DELETE RESTRICT,
   shipment_request_item_id bigint
     REFERENCES wms.shipment_request_items(id) ON DELETE RESTRICT,
+  fulfillment_plan_line_id bigint,
+  wms_order_item_id integer
+    REFERENCES wms.order_items(id) ON DELETE RESTRICT,
   legacy_wms_shipment_item_id integer
     REFERENCES wms.outbound_shipment_items(id) ON DELETE RESTRICT,
+  shipment_item_purpose varchar(30) NOT NULL DEFAULT 'customer_fulfillment',
+  replacement_for_order_item_id integer
+    REFERENCES wms.order_items(id) ON DELETE RESTRICT,
+  correction_for_physical_shipment_item_id bigint
+    REFERENCES wms.physical_shipment_items(id) ON DELETE RESTRICT,
+  product_variant_id integer
+    REFERENCES catalog.product_variants(id) ON DELETE SET NULL,
   sku varchar(100) NOT NULL,
-  quantity_shipped integer NOT NULL
+  quantity_shipped integer NOT NULL,
+  provider_physical_shipment_line_id varchar(200),
+  provider_order_line_id varchar(200),
+  created_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE wms.shipping_provider_labels (

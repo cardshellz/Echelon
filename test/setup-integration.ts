@@ -88,6 +88,7 @@ export async function runMigrations(): Promise<void> {
   const sqlArtifacts = [
     "test/fixtures/named-schema-integration.sql",
     "migrations/109_oms_wms_reconciliation_exceptions.sql",
+    "migrations/182_physical_shipment_item_quantity_adjustments.sql",
     "migrations/198_package_allocation_ledger_foundation.sql",
     "migrations/199_package_allocation_persistence_foundation.sql",
     "migrations/0619_package_allocation_discovery_indexes.sql",
@@ -97,6 +98,7 @@ export async function runMigrations(): Promise<void> {
     "migrations/0634_package_allocation_authority_snapshot.sql",
     "migrations/0635_package_allocation_effect_outbox.sql",
     "migrations/0637_declared_package_business_shipments.sql",
+    "migrations/0638_package_allocation_physical_item_provenance.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;
