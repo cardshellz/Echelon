@@ -290,4 +290,35 @@ describe("shipping-group Shopify metafield synchronization", () => {
     expect(select).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });
+
+  it("ignores an archived duplicate so the live product beside it can still sync", async () => {
+    // Retired rows keep their old Shopify mapping (see the ZZ-DUPE/ZZ-RETIRED
+    // convention in the catalog). Counting them as owners made every archived
+    // duplicate permanently block assignment for the live product.
+    const client = createClient(
+      [{ productId: 5, shopifyProductId: "7120209903775", shippingGroupId: 1, code: "protection" }],
+      [
+        { productId: 5, shopifyProductId: "7120209903775", shippingGroupId: 1, shippingGroupCode: "protection", isActive: true },
+        { productId: 102, shopifyProductId: "7120209903775", shippingGroupId: 1, shippingGroupCode: "protection", isActive: false },
+      ] as any,
+    );
+
+    const result = await enqueueShippingGroupMetafields(client as unknown as ShippingGroupSyncClient, [5]);
+
+    expect(result.queuedProductCount).toBe(1);
+  });
+
+  it("still fails closed when the archived row is the one being assigned", async () => {
+    const client = createClient(
+      [{ productId: 102, shopifyProductId: "7120209903775", shippingGroupId: 1, code: "protection" }],
+      [
+        { productId: 5, shopifyProductId: "7120209903775", shippingGroupId: 1, shippingGroupCode: "protection", isActive: true },
+        { productId: 102, shopifyProductId: "7120209903775", shippingGroupId: 1, shippingGroupCode: "protection", isActive: false },
+      ] as any,
+    );
+
+    await expect(
+      enqueueShippingGroupMetafields(client as unknown as ShippingGroupSyncClient, [102]),
+    ).rejects.toThrow(/Multiple Echelon products map to the same Shopify product/);
+  });
 });
