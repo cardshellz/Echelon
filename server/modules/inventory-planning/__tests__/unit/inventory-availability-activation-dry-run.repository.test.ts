@@ -30,12 +30,24 @@ describe("Postgres inventory availability activation dry-run repository", () => 
         external_scope_id: "location-1",
         publication_authority: "echelon",
         state: "preview",
+        revision: "2",
+      }];
+      if (sql.includes("FROM inventory.publication_variant_mapping_heads")) return [{
+        publication_target_id: 5,
+        product_variant_id: 101,
+        pointer_type: "draft",
+        mapping_id: 70,
+        version: 2,
+        definition_hash: HASH,
+        external_inventory_item_id: "inventory-item-1",
+        external_sku: "EA",
       }];
       if (sql.includes("FROM inventory.inventory_publication_readbacks")) return [{
         publication_target_id: 5,
         product_variant_id: 101,
         observed_quantity: "6",
         observed_at: "2026-08-28T17:05:00.000Z",
+        external_inventory_item_id_snapshot: "inventory-item-1",
       }];
       throw new Error(`Unexpected SQL: ${sql}`);
     });
@@ -56,7 +68,17 @@ describe("Postgres inventory availability activation dry-run repository", () => 
         channelConnectionId: 44,
         externalScopeId: "location-1",
         publicationAuthority: "echelon",
+        revision: "2",
+        mapping: {
+          mappingId: 70,
+          version: 2,
+          definitionHash: HASH,
+          authority: "draft",
+          externalInventoryItemId: "inventory-item-1",
+          externalSku: "EA",
+        },
         latestReadbackUnits: "6",
+        latestReadbackExternalInventoryItemId: "inventory-item-1",
       }],
     });
     expect(client.query.mock.calls[0]?.[0]).toBe(

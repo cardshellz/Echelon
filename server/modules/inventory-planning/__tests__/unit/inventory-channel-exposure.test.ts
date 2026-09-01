@@ -6,6 +6,7 @@ import {
   calculateChannelExposure,
   calculateChannelExposureDefinitionHash,
   calculatePublicationSourceBindingDefinitionHash,
+  calculatePublicationVariantMappingDefinitionHash,
   channelExposurePolicyScopeKey,
   findPartitionedShareOverages,
   resolveChannelExposurePolicy,
@@ -142,6 +143,19 @@ describe("inventory channel exposure domain", () => {
       scope: { scopeType: "channel", channelId: 7 },
       value: completeChannelValue,
     })).toMatch(/^[0-9a-f]{64}$/);
+    const mappingHash = calculatePublicationVariantMappingDefinitionHash({
+      publicationTargetId: 5,
+      productVariantId: 13,
+      externalInventoryItemId: "inventory-item-13",
+      externalSku: "EA",
+    });
+    expect(mappingHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(mappingHash).toBe(calculatePublicationVariantMappingDefinitionHash({
+      externalSku: "EA",
+      externalInventoryItemId: "inventory-item-13",
+      productVariantId: 13,
+      publicationTargetId: 5,
+    }));
     expect(channelExposurePolicyScopeKey({
       scopeType: "variant", channelId: 7, productId: 11, productVariantId: 13,
     })).toBe("channel:7:variant:13");

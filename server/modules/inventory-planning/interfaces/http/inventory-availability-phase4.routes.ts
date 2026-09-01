@@ -15,6 +15,7 @@ import {
   InventoryAvailabilityActivationDryRunServiceError,
 } from "../../application/inventory-availability-activation-dry-run.service";
 import { InventoryAvailabilityBackfillService } from "../../application/inventory-availability-backfill.service";
+import { InventoryChannelExposureAdminService } from "../../application/inventory-channel-exposure-admin.service";
 import {
   InventoryAvailabilityActivationDryRunRepositoryError,
   PostgresInventoryAvailabilityActivationDryRunRepository,
@@ -22,6 +23,7 @@ import {
 import { PostgresInventoryAvailabilityBackfillRepository } from "../../infrastructure/inventory-availability-backfill.repository";
 import { PostgresInventoryAvailabilityChannelPreviewRepository } from "../../infrastructure/inventory-availability-channel-preview.repository";
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
+import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
 import {
   InventoryAvailabilityClaimSimulationRepositoryError,
   PostgresInventoryAvailabilityClaimSimulationRepository,
@@ -58,6 +60,7 @@ export function registerInventoryAvailabilityPhase4Routes(
         new PostgresInventoryAvailabilityChannelPreviewRepository(snapshotStore),
       ),
       activationDryRunRepository,
+      new InventoryChannelExposureAdminService(new PostgresInventoryChannelExposureAdminStore()),
     );
 
   app.post(

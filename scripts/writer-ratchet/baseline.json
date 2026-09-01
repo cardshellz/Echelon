@@ -394,6 +394,9 @@
   "inventory.inventory_lots": [
     "modules/inventory"
   ],
+  "inventory.inventory_publication_targets": [
+    "modules/inventory-planning"
+  ],
   "inventory.inventory_transactions": [
     "modules/channels",
     "modules/inventory",
@@ -431,6 +434,12 @@
     "modules/inventory-planning"
   ],
   "inventory.publication_source_binding_versions": [
+    "modules/inventory-planning"
+  ],
+  "inventory.publication_variant_mapping_heads": [
+    "modules/inventory-planning"
+  ],
+  "inventory.publication_variant_mapping_versions": [
     "modules/inventory-planning"
   ],
   "inventory.replen_rules": [

@@ -23,6 +23,9 @@ describe("inventory channel exposure routes", () => {
     preview: ReturnType<typeof vi.fn>;
     savePolicyDraft: ReturnType<typeof vi.fn>;
     saveSourceBindingDraft: ReturnType<typeof vi.fn>;
+    createPublicationTarget: ReturnType<typeof vi.fn>;
+    setPublicationTargetPreviewState: ReturnType<typeof vi.fn>;
+    saveVariantMappingDraft: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(async () => {
@@ -31,11 +34,15 @@ describe("inventory channel exposure routes", () => {
       getView: vi.fn(async () => ({
         products: [], selectedProduct: null, channels: [], publicationTargets: [],
         fulfillmentNodes: [], policyHeads: [], sourceBindingHeads: [],
+        variantMappingHeads: [], legacyMappingCandidates: [],
         runtimeAuthority: "legacy_channel_allocation_rules", providerWriteEnabled: false,
       })),
       preview: vi.fn(),
       savePolicyDraft: vi.fn(async () => saveResult()),
       saveSourceBindingDraft: vi.fn(async () => saveResult()),
+      createPublicationTarget: vi.fn(async () => targetResult()),
+      setPublicationTargetPreviewState: vi.fn(async () => targetResult("preview", "2")),
+      saveVariantMappingDraft: vi.fn(async () => saveResult()),
     };
     const app = express();
     app.use(express.json());
@@ -90,6 +97,79 @@ describe("inventory channel exposure routes", () => {
     });
     expect(service.saveSourceBindingDraft).not.toHaveBeenCalled();
   });
+
+  it("creates disabled targets with edit permission and never exposes live state", async () => {
+    const request = {
+      channelId: 36,
+      channelConnectionId: 44,
+      legacyFulfillmentNodeId: 1,
+      providerScopeType: "location",
+      externalScopeId: "location-1",
+      publicationAuthority: "echelon",
+      changeReason: "Register exact Shopify destination",
+      idempotencyKey: "route-target-1",
+    };
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target`,
+      { method: "POST", body: request },
+    );
+    expect(response.status).toBe(201);
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "edit");
+    expect(service.createPublicationTarget).toHaveBeenCalledWith(request, "operator-1");
+    expect(response.body).toMatchObject({ state: "disabled", providerWriteAttempted: false });
+  });
+
+  it("requires activate permission for the reversible readiness-preview state only", async () => {
+    const request = {
+      publicationTargetId: 5,
+      expectedRevision: "1",
+      state: "preview",
+      changeReason: "Include reviewed destination in readiness evidence",
+      idempotencyKey: "route-target-state-1",
+    };
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-preview-state`,
+      { method: "PUT", body: request },
+    );
+    expect(response.status).toBe(200);
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "activate");
+    expect(service.setPublicationTargetPreviewState).toHaveBeenCalledWith(request, "operator-1");
+
+    const malformed = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-preview-state`,
+      { method: "PUT", body: { ...request, state: "live" } },
+    );
+    expect(malformed.status).toBe(400);
+    expect(service.setPublicationTargetPreviewState).toHaveBeenCalledTimes(1);
+  });
+
+  it("validates exact target/SKU mapping drafts before persistence", async () => {
+    const request = {
+      publicationTargetId: 5,
+      productVariantId: 101,
+      externalInventoryItemId: "inventory-item-1",
+      externalSku: "EA",
+      expectedHeadRevision: "0",
+      expectedDraftMappingId: null,
+      expectedDraftDefinitionHash: null,
+      changeReason: "Map the exact provider inventory item",
+      idempotencyKey: "route-mapping-1",
+    };
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/variant-mapping-draft`,
+      { method: "PUT", body: request },
+    );
+    expect(response.status).toBe(201);
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "edit");
+    expect(service.saveVariantMappingDraft).toHaveBeenCalledWith(request, "operator-1");
+
+    const malformed = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/variant-mapping-draft`,
+      { method: "PUT", body: { ...request, externalInventoryItemId: "" } },
+    );
+    expect(malformed.status).toBe(400);
+    expect(service.saveVariantMappingDraft).toHaveBeenCalledTimes(1);
+  });
 });
 
 function saveResult() {
@@ -101,6 +181,18 @@ function saveResult() {
     alreadyApplied: false,
     runtimeAuthorityChanged: false,
     providerWriteAttempted: false,
+  };
+}
+
+function targetResult(state: "disabled" | "preview" = "disabled", revision = "1") {
+  return {
+    publicationTargetId: 5,
+    revision,
+    state,
+    alreadyApplied: false,
+    runtimeAuthorityChanged: false as const,
+    providerWriteAttempted: false as const,
+    outboxEnqueued: false as const,
   };
 }
 
