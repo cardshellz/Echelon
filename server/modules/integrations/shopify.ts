@@ -10,6 +10,8 @@ export interface ShopifyVariant {
   image_id?: number;
   barcode?: string;
   inventory_item_id?: number;
+  /** Absent on older payloads; treat unknown as shippable. */
+  requires_shipping?: boolean;
 }
 
 export interface ShopifyImage {
@@ -47,6 +49,8 @@ export interface ShopifyCatalogProduct {
   imageUrl: string | null;
   barcode: string | null;
   inventoryItemId: number | null;
+  /** Shopify's per-variant shipping flag. Unknown defaults to shippable. */
+  requiresShipping: boolean;
   allImages: { url: string; position: number }[];
 }
 
@@ -130,6 +134,7 @@ export async function fetchShopifyCatalogProducts(): Promise<ShopifyCatalogProdu
           imageUrl,
           barcode: variant.barcode?.trim() || null,
           inventoryItemId: variant.inventory_item_id ?? null,
+          requiresShipping: variant.requires_shipping !== false,
           allImages,
         });
       }
