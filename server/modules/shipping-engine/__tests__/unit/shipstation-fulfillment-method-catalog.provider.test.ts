@@ -7,7 +7,7 @@ describe("ShipStationFulfillmentMethodCatalogProvider", () => {
     const adapter = fakeAdapter();
     adapter.listCarriers.mockResolvedValue({ configured: false, carriers: [] });
 
-    await expect(provider(adapter).loadCatalog()).resolves.toMatchObject({
+    await expect(provider(adapter).loadCatalog(connection())).resolves.toMatchObject({
       status: "not_configured",
       code: "SHIPPING_FULFILLMENT_ROUTING_SHIPSTATION_NOT_CONFIGURED",
       methods: [],
@@ -36,28 +36,31 @@ describe("ShipStationFulfillmentMethodCatalogProvider", () => {
       }],
     }));
 
-    const result = await provider(adapter).loadCatalog();
+    const result = await provider(adapter).loadCatalog(connection());
 
     expect(result).toMatchObject({
       status: "available",
-      provider: "shipstation_v2",
-      fetchedAt: "2026-09-01T12:00:00.000Z",
     });
     if (result.status !== "available") throw new Error("Expected available catalog.");
-    expect(result.catalogHash).toMatch(/^[0-9a-f]{64}$/);
     expect(result.methods.map((method) => ({
+      providerConnectionId: method.providerConnectionId,
+      providerConnectionName: method.providerConnectionName,
       providerAccountId: method.providerAccountId,
       providerAccountName: method.providerAccountName,
       carrierName: method.carrierName,
       serviceCode: method.serviceCode,
     }))).toEqual([
       {
+        providerConnectionId: 11,
+        providerConnectionName: "Primary ShipStation",
         providerAccountId: "se-fedex",
         providerAccountName: "Warehouse FedEx",
         carrierName: "FedEx",
         serviceCode: "fedex_ground",
       },
       {
+        providerConnectionId: 11,
+        providerConnectionName: "Primary ShipStation",
         providerAccountId: "se-usps",
         providerAccountName: "Warehouse USPS",
         carrierName: "USPS",
@@ -74,20 +77,83 @@ describe("ShipStationFulfillmentMethodCatalogProvider", () => {
       { status: 503 },
     ));
 
-    await expect(provider(adapter).loadCatalog()).resolves.toMatchObject({
+    await expect(provider(adapter).loadCatalog(connection())).resolves.toMatchObject({
       status: "unavailable",
       code: "SHIPPING_FULFILLMENT_ROUTING_SHIPSTATION_UNAVAILABLE",
       retryable: true,
       methods: [],
     });
   });
+
+  it("classifies rejected credentials as non-retryable and actionable", async () => {
+    const adapter = fakeAdapter();
+    adapter.listCarriers.mockRejectedValue(new ShipStationV2Error(
+      "SHIPSTATION_V2_HTTP_ERROR",
+      "provider failed",
+      { status: 401 },
+    ));
+
+    await expect(provider(adapter).loadCatalog(connection())).resolves.toMatchObject({
+      status: "unavailable",
+      code: "SHIPPING_FULFILLMENT_ROUTING_SHIPSTATION_CREDENTIAL_REJECTED",
+      retryable: false,
+      methods: [],
+    });
+  });
+
+  it("identifies fields that conflict in a duplicate provider method", async () => {
+    const adapter = fakeAdapter();
+    adapter.listCarriers.mockResolvedValue({
+      configured: true,
+      carriers: [
+        { carrierId: "se-ups", code: "ups", name: "UPS account A" },
+        { carrierId: "se-ups", code: "ups", name: "UPS account B" },
+      ],
+    });
+    adapter.listCarrierServices.mockImplementation(async (carrier) => ({
+      configured: true as const,
+      services: [{
+        carrierId: carrier.carrierId,
+        carrierCode: carrier.code,
+        serviceCode: "ups_ground",
+        serviceName: "UPS Ground",
+        domestic: true,
+        international: false,
+      }],
+    }));
+
+    await expect(provider(adapter).loadCatalog(connection())).resolves.toMatchObject({
+      status: "unavailable",
+      code: "SHIPPING_FULFILLMENT_ROUTING_PROVIDER_INVALID_RESPONSE",
+      message: expect.stringContaining("providerAccountName"),
+      retryable: false,
+    });
+  });
+
+  it("constructs the ShipStation client from the selected connection credential", async () => {
+    const adapter = fakeAdapter();
+    adapter.listCarriers.mockResolvedValue({ configured: true, carriers: [] });
+    const adapterFactory = vi.fn().mockReturnValue(adapter);
+    const catalogProvider = new ShipStationFulfillmentMethodCatalogProvider({ adapterFactory });
+
+    await catalogProvider.loadCatalog({
+      connectionId: 22,
+      connectionName: "Secondary ShipStation",
+      credential: "connection-specific-key",
+    });
+
+    expect(adapterFactory).toHaveBeenCalledWith("connection-specific-key");
+  });
 });
 
 function provider(adapter: ShipStationV2RatingAdapter) {
   return new ShipStationFulfillmentMethodCatalogProvider({
     adapter,
-    clock: { now: () => new Date("2026-09-01T12:00:00.000Z") },
   });
+}
+
+function connection() {
+  return { connectionId: 11, connectionName: "Primary ShipStation", credential: "secret" };
 }
 
 function fakeAdapter() {

@@ -15,6 +15,8 @@ describe("PostgresFulfillmentRoutingStore", () => {
       }], rowCount: 1 },
       { rows: [
         {
+          provider_connection_id: "11",
+          provider_connection_name: "Primary ShipStation",
           provider: "shipstation_v2",
           provider_account_id: "se-fedex",
           provider_account_name: "FedEx account",
@@ -29,6 +31,8 @@ describe("PostgresFulfillmentRoutingStore", () => {
           is_active: true,
         },
         {
+          provider_connection_id: null,
+          provider_connection_name: null,
           provider: "legacy_unscoped",
           provider_account_id: null,
           provider_account_name: null,
@@ -59,7 +63,7 @@ describe("PostgresFulfillmentRoutingStore", () => {
       }],
     });
     expect(query.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/).slice(0, 2).join(" ")))
-      .toEqual(["BEGIN ISOLATION", "SELECT service_level_id,", "SELECT provider,", "COMMIT"]);
+      .toEqual(["BEGIN ISOLATION", "SELECT service_level_id,", "SELECT method.provider_connection_id,", "COMMIT"]);
     expect(release).toHaveBeenCalledOnce();
   });
 
@@ -74,6 +78,8 @@ describe("PostgresFulfillmentRoutingStore", () => {
         updated_at: new Date("2026-09-01T12:00:00.000Z"),
       }], rowCount: 1 },
       { rows: [{
+        provider_connection_id: "11",
+        provider_connection_name: "Primary ShipStation",
         provider: "shipstation_v2",
         provider_account_id: "se-fedex",
         provider_account_name: "FedEx account",
@@ -96,6 +102,44 @@ describe("PostgresFulfillmentRoutingStore", () => {
     });
     expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("locks and revalidates provider connections before a route write can proceed", async () => {
+    const { pool, query } = fakePool([
+      { rows: [], rowCount: null },
+      { rows: [{ id: "11" }], rowCount: 1 },
+      { rows: [{ id: "11", provider: "shipstation_v2", revision: 3, status: "active" }], rowCount: 1 },
+      { rows: [], rowCount: null },
+    ]);
+    const store = new PostgresFulfillmentRoutingStore(pool);
+
+    await store.transaction((tx) => tx.lockProviderConnections([{
+      connectionId: 11,
+      expectedRevision: 3,
+      provider: "shipstation_v2",
+    }]));
+
+    expect(String(query.mock.calls[1][0])).toContain("FOR UPDATE");
+    expect(String(query.mock.calls[2][0])).toContain("SELECT id, provider, revision, status");
+  });
+
+  it("rejects a provider connection disabled while a route change is in flight", async () => {
+    const { pool, query } = fakePool([
+      { rows: [], rowCount: null },
+      { rows: [{ id: "11" }], rowCount: 1 },
+      { rows: [{ id: "11", provider: "shipstation_v2", revision: 3, status: "disabled" }], rowCount: 1 },
+      { rows: [], rowCount: null },
+    ]);
+    const store = new PostgresFulfillmentRoutingStore(pool);
+
+    await expect(store.transaction((tx) => tx.lockProviderConnections([{
+      connectionId: 11,
+      expectedRevision: 3,
+      provider: "shipstation_v2",
+    }]))).rejects.toMatchObject({
+      code: "SHIPPING_FULFILLMENT_ROUTING_PROVIDER_CONNECTION_UNAVAILABLE",
+    });
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
   });
 });
 

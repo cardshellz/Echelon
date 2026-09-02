@@ -885,6 +885,15 @@
   "shipping.destination_scopes": [
     "modules/shipping-engine"
   ],
+  "shipping.fulfillment_provider_connection_events": [
+    "modules/shipping-engine"
+  ],
+  "shipping.fulfillment_provider_connections": [
+    "modules/shipping-engine"
+  ],
+  "shipping.fulfillment_provider_credentials": [
+    "modules/shipping-engine"
+  ],
   "shipping.fulfillment_routing_profiles": [
     "modules/shipping-engine"
   ],

@@ -89,6 +89,7 @@ import { registerInventoryAvailabilityPhase4Routes } from "./modules/inventory-p
 import { registerInventoryChannelExposureRoutes } from "./modules/inventory-planning/interfaces/http/inventory-channel-exposure.routes";
 import { registerShippingDestinationNormalizationRoutes } from "./modules/shipping-engine/interfaces/http/shipping-destination-normalization.routes";
 import { registerFulfillmentRoutingAdminRoutes } from "./modules/shipping-engine/interfaces/http/fulfillment-routing-admin.routes";
+import { registerFulfillmentProviderConnectionAdminRoutes } from "./modules/shipping-engine/interfaces/http/fulfillment-provider-connections-admin.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -118,6 +119,7 @@ export async function registerRoutes(
   registerDropshipAdminCarrierClaimRoutes(app);
   registerDropshipAdminReturnPolicyRoutes(app);
   registerShippingAdminRoutes(app);
+  registerFulfillmentProviderConnectionAdminRoutes(app);
   registerFulfillmentRoutingAdminRoutes(app);
   registerShadowAdminRoutes(app);
   registerPackingRoutes(app);

@@ -49,6 +49,7 @@ describe("fulfillment routing admin routes", () => {
       expectedRevision: 1,
       idempotencyKey: "routing-command-00000001",
       methods: [{
+        providerConnectionId: 11,
         provider: "shipstation_v2",
         providerAccountId: "se-fedex-1",
         serviceCode: "fedex_ground",
@@ -73,7 +74,7 @@ describe("fulfillment routing admin routes", () => {
     expect(requirePermissionMock).toHaveBeenCalledWith("settings", "edit");
   });
 
-  it("rejects invented providers before calling the application service", async () => {
+  it("rejects malformed provider identities before calling the application service", async () => {
     const response = await jsonRequest(
       `${server.url}/api/shipping/admin/service-levels/7/fulfillment-routing`,
       {
@@ -83,7 +84,8 @@ describe("fulfillment routing admin routes", () => {
           expectedRevision: 0,
           idempotencyKey: "routing-command-00000002",
           methods: [{
-            provider: "other",
+            providerConnectionId: 11,
+            provider: "Other Provider!",
             providerAccountId: "account",
             serviceCode: "service",
           }],
