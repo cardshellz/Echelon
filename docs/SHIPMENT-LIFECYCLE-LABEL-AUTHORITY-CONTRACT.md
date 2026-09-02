@@ -817,9 +817,15 @@ Implementation status: migration `0637_declared_package_business_shipments.sql`
 records one append-only package-level business-shipped fact in the same database
 transaction as a new label event only when retained provider evidence explicitly
 contains `isReturnLabel: false`. Unknown and return direction do not qualify, and
-historical rows are not inferred from old direction defaults. This fact has no
-item-level or remote-effect consumer yet; the remaining Phase 2 steps stay
-inactive.
+historical rows are not inferred from old direction defaults. Migration
+`0641_package_allocation_commercial_fulfillment_shadow.sql` and the OMS
+fulfillment-authority repository can now bind a newly emitted commercial intent
+to the exact `primary_transfer` entries from the same still-current plan,
+materialize split-safe physical items, and persist canonical channel commands in
+the non-dispatching `shadow` state. Exact replay is read-only, stale
+unmaterialized plans fail closed, and the existing worker still claims only
+`pending` and `retry`. No runtime caller or `shadow`-to-`pending` activation gate
+is enabled yet; inventory and tracking effects remain separate later slices.
 
 1. On any newly observed outbound label, record the monotonic package-level
    business-shipment fact immediately; do not wait for exact contents or a
