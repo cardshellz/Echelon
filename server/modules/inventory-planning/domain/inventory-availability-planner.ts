@@ -53,6 +53,7 @@ type Resource = {
 
 type ResourceClaim = {
   lineKey: string;
+  consumerOperationKey: string | null;
   warehouseId: number;
   warehouseLocationId: number;
   inventoryLevelId: number;
@@ -64,9 +65,11 @@ type PlannedOperation = {
   lineKey: string;
   warehouseId: number;
   operationKey: string;
+  parentOperationKey: string | null;
   operationType: "break_pack" | "assemble_pack" | "directed_conversion" | "component_build";
   authorityId: number;
   sourceVariantIds: number[];
+  inputs: Array<{ sourceVariantId: number; requiredQty: bigint }>;
   destinationVariantId: number;
   plannedExecutions: bigint;
   outputQty: bigint;
@@ -87,6 +90,7 @@ type Context = {
   safetyEvidence: SafetyEvidence[];
   resourceClaims: ResourceClaim[];
   operations: PlannedOperation[];
+  nextOperationSequence: number;
   directEvidence: ReadonlyMap<number, { exactPhysical: bigint; claims: bigint; protected: bigint }>;
   simulation: boolean;
 };
@@ -679,6 +683,7 @@ function buildContext(snapshot: PlannerSupplySnapshot, warehouseId: number, simu
     safetyEvidence,
     resourceClaims: [],
     operations: [],
+    nextOperationSequence: 1,
     directEvidence,
     simulation,
   };
@@ -695,11 +700,18 @@ function cloneContext(context: Context): Context {
     safetyEvidence: [...context.safetyEvidence],
     resourceClaims: [],
     operations: [],
+    nextOperationSequence: context.nextOperationSequence,
     simulation: true,
   };
 }
 
-function consumeDirect(context: Context, variantId: number, requestedQty: bigint, lineKey: string): bigint {
+function consumeDirect(
+  context: Context,
+  variantId: number,
+  requestedQty: bigint,
+  lineKey: string,
+  consumerOperationKey: string | null,
+): bigint {
   let remaining = requestedQty;
   for (const resource of context.resourcesByVariant.get(variantId) ?? []) {
     if (remaining === BigInt(0)) break;
@@ -710,6 +722,7 @@ function consumeDirect(context: Context, variantId: number, requestedQty: bigint
     if (!context.simulation) {
       context.resourceClaims.push({
         lineKey,
+        consumerOperationKey,
         warehouseId: context.warehouseId,
         warehouseLocationId: resource.warehouseLocationId,
         inventoryLevelId: resource.inventoryLevelId,
@@ -719,6 +732,17 @@ function consumeDirect(context: Context, variantId: number, requestedQty: bigint
     }
   }
   return requestedQty - remaining;
+}
+
+function nextOperationKey(
+  context: Context,
+  lineKey: string,
+  authorityKind: "path" | "recipe",
+  authorityId: number,
+): string {
+  const sequence = context.nextOperationSequence;
+  context.nextOperationSequence += 1;
+  return `${lineKey}:warehouse:${context.warehouseId}:${authorityKind}:${authorityId}:operation:${sequence}`;
 }
 
 function emptyBreakdown(): Breakdown {
@@ -796,13 +820,14 @@ function fulfillUpTo(
   requestedQty: bigint,
   lineKey: string,
   stack: ReadonlySet<number>,
+  consumerOperationKey: string | null = null,
 ): Breakdown {
   if (requestedQty <= BigInt(0) || !context.variantsById.get(targetVariantId)?.isActive
     || stack.has(targetVariantId)) return emptyBreakdown();
   const nextStack = new Set(stack);
   nextStack.add(targetVariantId);
   const result = emptyBreakdown();
-  const direct = consumeDirect(context, targetVariantId, requestedQty, lineKey);
+  const direct = consumeDirect(context, targetVariantId, requestedQty, lineKey, consumerOperationKey);
   result.total += direct;
   result.direct += direct;
   let remaining = requestedQty - direct;
@@ -825,12 +850,14 @@ function fulfillUpTo(
     const executions = sourceCapacity / inputQty;
     if (executions === BigInt(0)) continue;
     const sourceRequired = multiply(executions, inputQty, "path.sourceRequired");
+    const operationKey = nextOperationKey(context, lineKey, "path", path.pathId);
     const sourcePlan = fulfillUpTo(
       context,
       path.sourceVariantId,
       sourceRequired,
       lineKey,
       nextStack,
+      operationKey,
     );
     if (sourcePlan.total !== sourceRequired) {
       throw new InventoryAvailabilityPlannerError(
@@ -848,10 +875,12 @@ function fulfillUpTo(
       context.operations.push({
         lineKey,
         warehouseId: context.warehouseId,
-        operationKey: `${lineKey}:path:${path.pathId}:${context.operations.length + 1}`,
+        operationKey,
+        parentOperationKey: consumerOperationKey,
         operationType: path.operationType,
         authorityId: path.pathId,
         sourceVariantIds: [path.sourceVariantId],
+        inputs: [{ sourceVariantId: path.sourceVariantId, requiredQty: sourceRequired }],
         destinationVariantId: path.destinationVariantId,
         plannedExecutions: executions,
         outputQty: produced,
@@ -868,6 +897,8 @@ function fulfillUpTo(
         const requestedBuilds = ceilDivide(remaining, outputQty);
         const builds = maxBuilds(context, recipe, requestedBuilds, lineKey, nextStack);
         if (builds > BigInt(0)) {
+          const operationKey = nextOperationKey(context, lineKey, "recipe", recipe.bindingId);
+          const inputs: PlannedOperation["inputs"] = [];
           for (const component of recipe.components.slice().sort((left, right) =>
             left.componentVariantId - right.componentVariantId)) {
             const required = multiply(
@@ -875,12 +906,14 @@ function fulfillUpTo(
               qty(component.componentQty, "recipe.componentQty"),
               "recipe.componentRequired",
             );
+            inputs.push({ sourceVariantId: component.componentVariantId, requiredQty: required });
             if (fulfillUpTo(
               context,
               component.componentVariantId,
               required,
               lineKey,
               nextStack,
+              operationKey,
             ).total !== required) {
               throw new InventoryAvailabilityPlannerError(
                 "NONDETERMINISTIC_BUILD_PLAN",
@@ -897,12 +930,14 @@ function fulfillUpTo(
             context.operations.push({
               lineKey,
               warehouseId: context.warehouseId,
-              operationKey: `${lineKey}:recipe:${recipe.bindingId}:${context.operations.length + 1}`,
+              operationKey,
+              parentOperationKey: consumerOperationKey,
               operationType: "component_build",
               authorityId: recipe.bindingId,
               sourceVariantIds: recipe.components
                 .map((component) => component.componentVariantId)
                 .sort((left, right) => left - right),
+              inputs,
               destinationVariantId: recipe.outputVariantId,
               plannedExecutions: builds,
               outputQty: produced,
@@ -1017,6 +1052,7 @@ function mergeClaims(claims: readonly ResourceClaim[]): ResourceClaim[] {
   for (const claim of claims) {
     const key = [
       claim.lineKey,
+      claim.consumerOperationKey ?? "direct",
       claim.warehouseId,
       claim.warehouseLocationId,
       claim.inventoryLevelId,
@@ -1028,6 +1064,7 @@ function mergeClaims(claims: readonly ResourceClaim[]): ResourceClaim[] {
   }
   return [...byKey.values()].sort((left, right) =>
     left.lineKey.localeCompare(right.lineKey)
+    || String(left.consumerOperationKey ?? "").localeCompare(String(right.consumerOperationKey ?? ""))
     || left.warehouseId - right.warehouseId
     || left.warehouseLocationId - right.warehouseLocationId
     || left.sourceVariantId - right.sourceVariantId);
@@ -1112,6 +1149,10 @@ export function planCanonicalClaim(
       .map((claim) => ({ ...claim, claimedQty: claim.claimedQty.toString() })),
     operations: contexts.flatMap((context) => context.operations).map((operation) => ({
       ...operation,
+      inputs: operation.inputs.map((input) => ({
+        ...input,
+        requiredQty: input.requiredQty.toString(),
+      })),
       plannedExecutions: operation.plannedExecutions.toString(),
       outputQty: operation.outputQty.toString(),
     })),

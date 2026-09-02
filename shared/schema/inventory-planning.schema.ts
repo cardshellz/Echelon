@@ -19,7 +19,8 @@ import { z } from "zod";
 
 import { products, productVariants } from "./catalog.schema";
 import { channelConnections, channels } from "./channels.schema";
-import { buildRecipes } from "./inventory.schema";
+import { buildRecipes, inventoryLevels, inventoryLots } from "./inventory.schema";
+import { orderItems, orders } from "./orders.schema";
 import { warehouseLocations, warehouses } from "./warehouse.schema";
 
 const inventoryPlanningSchema = pgSchema("inventory");
@@ -1290,6 +1291,370 @@ export const inventoryAvailabilityRuntimeAuthority = inventoryPlanningSchema.tab
   }),
 );
 
+export const inventoryAvailabilityClaims = inventoryPlanningSchema.table(
+  "availability_claims",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    claimKey: varchar("claim_key", { length: 200 }).notNull(),
+    orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "restrict" }),
+    revision: integer("revision").notNull(),
+    status: varchar("status", { length: 30 }).notNull(),
+    planStatus: varchar("plan_status", { length: 20 }).notNull(),
+    scopeKind: varchar("scope_kind", { length: 20 }).notNull(),
+    scopeWarehouseId: integer("scope_warehouse_id")
+      .references(() => warehouses.id, { onDelete: "restrict" }),
+    activationRunId: bigint("activation_run_id", { mode: "bigint" }).notNull()
+      .references(() => inventoryAvailabilityActivationRuns.id, { onDelete: "restrict" }),
+    runtimeAuthorityRevision: bigint("runtime_authority_revision", { mode: "bigint" }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    planHash: varchar("plan_hash", { length: 64 }).notNull(),
+    snapshotFingerprint: varchar("snapshot_fingerprint", { length: 64 }).notNull(),
+    requestPayload: jsonb("request_payload").notNull(),
+    planPayload: jsonb("plan_payload").notNull(),
+    modelEvidence: jsonb("model_evidence").notNull(),
+    requestedBy: varchar("requested_by", { length: 100 }).notNull(),
+    reason: varchar("reason", { length: 1000 }).notNull(),
+    reservedAt: timestamp("reserved_at", { withTimezone: true }).notNull(),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    keyUnique: uniqueIndex("availability_claims_key_uq").on(table.claimKey),
+    orderRevisionUnique: uniqueIndex("availability_claims_order_revision_uq")
+      .on(table.orderId, table.revision),
+    idKeyUnique: uniqueIndex("availability_claims_id_key_uq").on(table.id, table.claimKey),
+    activeOrderUnique: uniqueIndex("availability_claims_one_active_order_uq")
+      .on(table.orderId).where(sql`${table.status} = 'active'`),
+    orderLookup: index("availability_claims_order_idx").on(table.orderId, table.revision.desc(), table.id.desc()),
+    revisionValid: check("availability_claims_revision_chk", sql`${table.revision} > 0`),
+    statusValid: check(
+      "availability_claims_status_chk",
+      sql`${table.status} IN ('active', 'released', 'cancelled', 'superseded', 'failed')`,
+    ),
+    planStatusValid: check(
+      "availability_claims_plan_status_chk",
+      sql`${table.planStatus} IN ('satisfied', 'partial')`,
+    ),
+    scopeValid: check(
+      "availability_claims_scope_chk",
+      sql`(${table.scopeKind} = 'network' AND ${table.scopeWarehouseId} IS NULL)
+        OR (${table.scopeKind} = 'warehouse' AND ${table.scopeWarehouseId} IS NOT NULL)`,
+    ),
+    hashValid: check(
+      "availability_claims_hash_chk",
+      sql`${table.requestHash} ~ '^[0-9a-f]{64}$'
+        AND ${table.planHash} ~ '^[0-9a-f]{64}$'
+        AND ${table.snapshotFingerprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    authorityValid: check(
+      "availability_claims_authority_chk",
+      sql`${table.runtimeAuthorityRevision} > 0`,
+    ),
+    actorValid: check(
+      "availability_claims_actor_chk",
+      sql`btrim(${table.claimKey}) <> '' AND btrim(${table.requestedBy}) <> '' AND btrim(${table.reason}) <> ''`,
+    ),
+    evidenceValid: check(
+      "availability_claims_evidence_chk",
+      sql`jsonb_typeof(${table.requestPayload}) = 'object'
+        AND jsonb_typeof(${table.planPayload}) = 'object'
+        AND jsonb_typeof(${table.modelEvidence}) = 'array'
+        AND ${table.requestPayload} ->> 'requestKey' = ${table.claimKey}
+        AND ${table.planPayload} ->> 'requestKey' = ${table.claimKey}
+        AND ${table.planPayload} ->> 'status' = ${table.planStatus}
+        AND ${table.planPayload} ->> 'snapshotFingerprint' = ${table.snapshotFingerprint}`,
+    ),
+    lifecycleValid: check(
+      "availability_claims_lifecycle_chk",
+      sql`(${table.status} = 'active' AND ${table.releasedAt} IS NULL
+            AND ${table.cancelledAt} IS NULL AND ${table.supersededAt} IS NULL)
+        OR (${table.status} = 'released' AND ${table.releasedAt} IS NOT NULL
+            AND ${table.cancelledAt} IS NULL AND ${table.supersededAt} IS NULL)
+        OR (${table.status} = 'cancelled' AND ${table.cancelledAt} IS NOT NULL
+            AND ${table.supersededAt} IS NULL)
+        OR (${table.status} = 'superseded' AND ${table.supersededAt} IS NOT NULL)
+        OR ${table.status} = 'failed'`,
+    ),
+  }),
+);
+
+export const inventoryAvailabilityClaimLines = inventoryPlanningSchema.table(
+  "availability_claim_lines",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    claimId: bigint("claim_id", { mode: "bigint" }).notNull()
+      .references(() => inventoryAvailabilityClaims.id, { onDelete: "restrict" }),
+    lineKey: varchar("line_key", { length: 200 }).notNull(),
+    orderItemId: integer("order_item_id").notNull().references(() => orderItems.id, { onDelete: "restrict" }),
+    targetVariantId: integer("target_variant_id").notNull()
+      .references(() => productVariants.id, { onDelete: "restrict" }),
+    requestedQty: bigint("requested_qty", { mode: "bigint" }).notNull(),
+    plannedQty: bigint("planned_qty", { mode: "bigint" }).notNull(),
+    shortfallQty: bigint("shortfall_qty", { mode: "bigint" }).notNull(),
+    releasedTargetQty: bigint("released_target_qty", { mode: "bigint" }).notNull().default(BigInt(0)),
+    consumedTargetQty: bigint("consumed_target_qty", { mode: "bigint" }).notNull().default(BigInt(0)),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    claimKeyUnique: uniqueIndex("availability_claim_lines_claim_key_uq").on(table.claimId, table.lineKey),
+    claimItemUnique: uniqueIndex("availability_claim_lines_claim_item_uq").on(table.claimId, table.orderItemId),
+    idClaimUnique: uniqueIndex("availability_claim_lines_id_claim_uq").on(table.id, table.claimId),
+    orderItemLookup: index("availability_claim_lines_order_item_idx").on(table.orderItemId, table.claimId.desc()),
+    quantityValid: check(
+      "availability_claim_lines_quantity_chk",
+      sql`${table.requestedQty} > 0
+        AND ${table.plannedQty} >= 0
+        AND ${table.shortfallQty} >= 0
+        AND ${table.requestedQty} = ${table.plannedQty} + ${table.shortfallQty}
+        AND ${table.releasedTargetQty} >= 0
+        AND ${table.consumedTargetQty} >= 0
+        AND ${table.releasedTargetQty} + ${table.consumedTargetQty} <= ${table.plannedQty}`,
+    ),
+  }),
+);
+
+export const inventoryAvailabilityClaimOperations = inventoryPlanningSchema.table(
+  "availability_claim_operations",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    claimId: bigint("claim_id", { mode: "bigint" }).notNull()
+      .references(() => inventoryAvailabilityClaims.id, { onDelete: "restrict" }),
+    claimLineId: bigint("claim_line_id", { mode: "bigint" }).notNull(),
+    operationKey: varchar("operation_key", { length: 300 }).notNull(),
+    parentOperationKey: varchar("parent_operation_key", { length: 300 }),
+    warehouseId: integer("warehouse_id").notNull().references(() => warehouses.id, { onDelete: "restrict" }),
+    operationType: varchar("operation_type", { length: 30 }).notNull(),
+    authorityId: integer("authority_id").notNull(),
+    destinationVariantId: integer("destination_variant_id").notNull()
+      .references(() => productVariants.id, { onDelete: "restrict" }),
+    plannedExecutions: bigint("planned_executions", { mode: "bigint" }).notNull(),
+    outputQty: bigint("output_qty", { mode: "bigint" }).notNull(),
+    outputLocationId: integer("output_location_id")
+      .references(() => warehouseLocations.id, { onDelete: "restrict" }),
+    status: varchar("status", { length: 30 }).notNull().default("pending"),
+    executedExecutions: bigint("executed_executions", { mode: "bigint" }).notNull().default(BigInt(0)),
+    releasedExecutions: bigint("released_executions", { mode: "bigint" }).notNull().default(BigInt(0)),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    lineForeignKey: foreignKey({
+      columns: [table.claimLineId, table.claimId],
+      foreignColumns: [inventoryAvailabilityClaimLines.id, inventoryAvailabilityClaimLines.claimId],
+      name: "availability_claim_operations_line_fk",
+    }).onDelete("restrict"),
+    parentForeignKey: foreignKey({
+      columns: [table.claimId, table.parentOperationKey],
+      foreignColumns: [table.claimId, table.operationKey],
+      name: "availability_claim_operations_parent_fk",
+    }),
+    claimKeyUnique: uniqueIndex("availability_claim_operations_claim_key_uq")
+      .on(table.claimId, table.operationKey),
+    idClaimUnique: uniqueIndex("availability_claim_operations_id_claim_uq").on(table.id, table.claimId),
+    dispatchLookup: index("availability_claim_operations_dispatch_idx")
+      .on(table.status, table.warehouseId, table.id)
+      .where(sql`${table.status} IN ('pending', 'ready', 'failed')`),
+    typeValid: check(
+      "availability_claim_operations_type_chk",
+      sql`${table.operationType} IN ('break_pack', 'assemble_pack', 'directed_conversion', 'component_build')`,
+    ),
+    statusValid: check(
+      "availability_claim_operations_status_chk",
+      sql`${table.status} IN ('pending', 'ready', 'executing', 'completed', 'released', 'failed')`,
+    ),
+    quantityValid: check(
+      "availability_claim_operations_quantity_chk",
+      sql`${table.plannedExecutions} > 0 AND ${table.outputQty} > 0
+        AND ${table.executedExecutions} >= 0 AND ${table.releasedExecutions} >= 0
+        AND ${table.executedExecutions} + ${table.releasedExecutions} <= ${table.plannedExecutions}`,
+    ),
+    authorityValid: check("availability_claim_operations_authority_chk", sql`${table.authorityId} > 0`),
+  }),
+);
+
+export const inventoryAvailabilityClaimOperationInputs = inventoryPlanningSchema.table(
+  "availability_claim_operation_inputs",
+  {
+    claimOperationId: bigint("claim_operation_id", { mode: "bigint" }).notNull(),
+    claimId: bigint("claim_id", { mode: "bigint" }).notNull(),
+    sourceVariantId: integer("source_variant_id").notNull()
+      .references(() => productVariants.id, { onDelete: "restrict" }),
+    requiredQty: bigint("required_qty", { mode: "bigint" }).notNull(),
+    inputOrdinal: integer("input_ordinal").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    primaryKey: primaryKey({ columns: [table.claimOperationId, table.sourceVariantId] }),
+    operationForeignKey: foreignKey({
+      columns: [table.claimOperationId, table.claimId],
+      foreignColumns: [inventoryAvailabilityClaimOperations.id, inventoryAvailabilityClaimOperations.claimId],
+      name: "availability_claim_operation_inputs_operation_fk",
+    }).onDelete("restrict"),
+    ordinalUnique: uniqueIndex("availability_claim_operation_inputs_ordinal_uq")
+      .on(table.claimOperationId, table.inputOrdinal),
+    quantityValid: check("availability_claim_operation_inputs_quantity_chk", sql`${table.requiredQty} > 0`),
+    ordinalValid: check("availability_claim_operation_inputs_ordinal_chk", sql`${table.inputOrdinal} >= 0`),
+  }),
+);
+
+export const inventoryAvailabilityClaimResources = inventoryPlanningSchema.table(
+  "availability_claim_resources",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    claimId: bigint("claim_id", { mode: "bigint" }).notNull()
+      .references(() => inventoryAvailabilityClaims.id, { onDelete: "restrict" }),
+    claimLineId: bigint("claim_line_id", { mode: "bigint" }).notNull(),
+    consumerOperationKey: varchar("consumer_operation_key", { length: 300 }),
+    warehouseId: integer("warehouse_id").notNull().references(() => warehouses.id, { onDelete: "restrict" }),
+    warehouseLocationId: integer("warehouse_location_id").notNull()
+      .references(() => warehouseLocations.id, { onDelete: "restrict" }),
+    inventoryLevelId: integer("inventory_level_id").notNull()
+      .references(() => inventoryLevels.id, { onDelete: "restrict" }),
+    sourceVariantId: integer("source_variant_id").notNull()
+      .references(() => productVariants.id, { onDelete: "restrict" }),
+    claimedQty: bigint("claimed_qty", { mode: "bigint" }).notNull(),
+    releasedQty: bigint("released_qty", { mode: "bigint" }).notNull().default(BigInt(0)),
+    consumedQty: bigint("consumed_qty", { mode: "bigint" }).notNull().default(BigInt(0)),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    lineForeignKey: foreignKey({
+      columns: [table.claimLineId, table.claimId],
+      foreignColumns: [inventoryAvailabilityClaimLines.id, inventoryAvailabilityClaimLines.claimId],
+      name: "availability_claim_resources_line_fk",
+    }).onDelete("restrict"),
+    operationForeignKey: foreignKey({
+      columns: [table.claimId, table.consumerOperationKey],
+      foreignColumns: [inventoryAvailabilityClaimOperations.claimId, inventoryAvailabilityClaimOperations.operationKey],
+      name: "availability_claim_resources_operation_fk",
+    }),
+    identityUnique: uniqueIndex("availability_claim_resources_identity_uq").on(
+      table.claimLineId,
+      table.warehouseId,
+      table.warehouseLocationId,
+      table.inventoryLevelId,
+      table.sourceVariantId,
+      sql`COALESCE(${table.consumerOperationKey}, '')`,
+    ),
+    idClaimUnique: uniqueIndex("availability_claim_resources_id_claim_uq").on(table.id, table.claimId),
+    levelLookup: index("availability_claim_resources_level_idx").on(table.inventoryLevelId, table.claimId),
+    quantityValid: check(
+      "availability_claim_resources_quantity_chk",
+      sql`${table.claimedQty} > 0 AND ${table.releasedQty} >= 0 AND ${table.consumedQty} >= 0
+        AND ${table.releasedQty} + ${table.consumedQty} <= ${table.claimedQty}`,
+    ),
+  }),
+);
+
+export const inventoryAvailabilityClaimLotAllocations = inventoryPlanningSchema.table(
+  "availability_claim_lot_allocations",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    claimId: bigint("claim_id", { mode: "bigint" }).notNull()
+      .references(() => inventoryAvailabilityClaims.id, { onDelete: "restrict" }),
+    claimResourceId: bigint("claim_resource_id", { mode: "bigint" }).notNull(),
+    inventoryLotId: integer("inventory_lot_id").notNull()
+      .references(() => inventoryLots.id, { onDelete: "restrict" }),
+    claimedQty: bigint("claimed_qty", { mode: "bigint" }).notNull(),
+    releasedQty: bigint("released_qty", { mode: "bigint" }).notNull().default(BigInt(0)),
+    consumedQty: bigint("consumed_qty", { mode: "bigint" }).notNull().default(BigInt(0)),
+    unitCostMills: bigint("unit_cost_mills", { mode: "bigint" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    resourceForeignKey: foreignKey({
+      columns: [table.claimResourceId, table.claimId],
+      foreignColumns: [inventoryAvailabilityClaimResources.id, inventoryAvailabilityClaimResources.claimId],
+      name: "availability_claim_lot_allocations_resource_fk",
+    }).onDelete("restrict"),
+    resourceLotUnique: uniqueIndex("availability_claim_lot_allocations_resource_lot_uq")
+      .on(table.claimResourceId, table.inventoryLotId),
+    lotLookup: index("availability_claim_lot_allocations_lot_idx").on(table.inventoryLotId, table.claimId),
+    quantityValid: check(
+      "availability_claim_lot_allocations_quantity_chk",
+      sql`${table.claimedQty} > 0 AND ${table.releasedQty} >= 0 AND ${table.consumedQty} >= 0
+        AND ${table.releasedQty} + ${table.consumedQty} <= ${table.claimedQty}`,
+    ),
+    costValid: check("availability_claim_lot_allocations_cost_chk", sql`${table.unitCostMills} >= 0`),
+  }),
+);
+
+export const inventoryAvailabilityClaimCommands = inventoryPlanningSchema.table(
+  "availability_claim_commands",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    claimId: bigint("claim_id", { mode: "bigint" })
+      .references(() => inventoryAvailabilityClaims.id, { onDelete: "restrict" }),
+    orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "restrict" }),
+    commandType: varchar("command_type", { length: 30 }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    resultHash: varchar("result_hash", { length: 64 }).notNull(),
+    requestPayload: jsonb("request_payload").notNull(),
+    resultPayload: jsonb("result_payload").notNull(),
+    actor: varchar("actor", { length: 100 }).notNull(),
+    reason: varchar("reason", { length: 1000 }).notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    idempotencyUnique: uniqueIndex("availability_claim_commands_idempotency_uq").on(table.idempotencyKey),
+    claimLookup: index("availability_claim_commands_claim_idx").on(table.claimId, table.occurredAt, table.id),
+    typeValid: check(
+      "availability_claim_commands_type_chk",
+      sql`${table.commandType} IN ('claim', 'release', 'cancel', 'execute')`,
+    ),
+    hashValid: check(
+      "availability_claim_commands_hash_chk",
+      sql`${table.requestHash} ~ '^[0-9a-f]{64}$' AND ${table.resultHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    actorValid: check(
+      "availability_claim_commands_actor_chk",
+      sql`btrim(${table.idempotencyKey}) <> '' AND btrim(${table.actor}) <> '' AND btrim(${table.reason}) <> ''`,
+    ),
+    evidenceValid: check(
+      "availability_claim_commands_evidence_chk",
+      sql`jsonb_typeof(${table.requestPayload}) = 'object' AND jsonb_typeof(${table.resultPayload}) = 'object'`,
+    ),
+  }),
+);
+
+export const inventoryAvailabilityClaimEvents = inventoryPlanningSchema.table(
+  "availability_claim_events",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    claimId: bigint("claim_id", { mode: "bigint" }).notNull()
+      .references(() => inventoryAvailabilityClaims.id, { onDelete: "restrict" }),
+    eventType: varchar("event_type", { length: 50 }).notNull(),
+    fromStatus: varchar("from_status", { length: 30 }),
+    toStatus: varchar("to_status", { length: 30 }),
+    evidencePayload: jsonb("evidence_payload").notNull(),
+    evidenceHash: varchar("evidence_hash", { length: 64 }).notNull(),
+    actor: varchar("actor", { length: 100 }).notNull(),
+    reason: varchar("reason", { length: 1000 }).notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    claimLookup: index("availability_claim_events_claim_idx").on(table.claimId, table.occurredAt, table.id),
+    hashValid: check("availability_claim_events_hash_chk", sql`${table.evidenceHash} ~ '^[0-9a-f]{64}$'`),
+    actorValid: check(
+      "availability_claim_events_actor_chk",
+      sql`btrim(${table.eventType}) <> '' AND btrim(${table.actor}) <> '' AND btrim(${table.reason}) <> ''`,
+    ),
+    evidenceValid: check(
+      "availability_claim_events_evidence_chk",
+      sql`jsonb_typeof(${table.evidencePayload}) = 'object'`,
+    ),
+  }),
+);
+
 export const inventoryAvailabilityActivationCommands = inventoryPlanningSchema.table(
   "availability_activation_commands",
   {
@@ -2132,6 +2497,28 @@ export const insertInventoryAvailabilityActivationRunSchema = createInsertSchema
 export const insertInventoryAvailabilityRuntimeAuthoritySchema = createInsertSchema(
   inventoryAvailabilityRuntimeAuthority,
 ).omit({ changedAt: true });
+export const insertInventoryAvailabilityClaimSchema = createInsertSchema(inventoryAvailabilityClaims)
+  .omit({ id: true, createdAt: true, updatedAt: true });
+export const insertInventoryAvailabilityClaimLineSchema = createInsertSchema(inventoryAvailabilityClaimLines)
+  .omit({ id: true, createdAt: true, updatedAt: true });
+export const insertInventoryAvailabilityClaimOperationSchema = createInsertSchema(
+  inventoryAvailabilityClaimOperations,
+).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertInventoryAvailabilityClaimOperationInputSchema = createInsertSchema(
+  inventoryAvailabilityClaimOperationInputs,
+).omit({ createdAt: true });
+export const insertInventoryAvailabilityClaimResourceSchema = createInsertSchema(
+  inventoryAvailabilityClaimResources,
+).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertInventoryAvailabilityClaimLotAllocationSchema = createInsertSchema(
+  inventoryAvailabilityClaimLotAllocations,
+).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertInventoryAvailabilityClaimCommandSchema = createInsertSchema(
+  inventoryAvailabilityClaimCommands,
+).omit({ id: true, createdAt: true });
+export const insertInventoryAvailabilityClaimEventSchema = createInsertSchema(
+  inventoryAvailabilityClaimEvents,
+).omit({ id: true, createdAt: true });
 export const insertInventoryAvailabilityActivationCommandSchema = createInsertSchema(
   inventoryAvailabilityActivationCommands,
 ).omit({ id: true, createdAt: true });
@@ -2188,6 +2575,16 @@ export type PlannerShadowResult = typeof plannerShadowResults.$inferSelect;
 export type PlannerClaimSimulationRun = typeof plannerClaimSimulationRuns.$inferSelect;
 export type InventoryAvailabilityActivationRun = typeof inventoryAvailabilityActivationRuns.$inferSelect;
 export type InventoryAvailabilityRuntimeAuthority = typeof inventoryAvailabilityRuntimeAuthority.$inferSelect;
+export type InventoryAvailabilityClaim = typeof inventoryAvailabilityClaims.$inferSelect;
+export type InventoryAvailabilityClaimLine = typeof inventoryAvailabilityClaimLines.$inferSelect;
+export type InventoryAvailabilityClaimOperation = typeof inventoryAvailabilityClaimOperations.$inferSelect;
+export type InventoryAvailabilityClaimOperationInput =
+  typeof inventoryAvailabilityClaimOperationInputs.$inferSelect;
+export type InventoryAvailabilityClaimResource = typeof inventoryAvailabilityClaimResources.$inferSelect;
+export type InventoryAvailabilityClaimLotAllocation =
+  typeof inventoryAvailabilityClaimLotAllocations.$inferSelect;
+export type InventoryAvailabilityClaimCommand = typeof inventoryAvailabilityClaimCommands.$inferSelect;
+export type InventoryAvailabilityClaimEvent = typeof inventoryAvailabilityClaimEvents.$inferSelect;
 export type InventoryAvailabilityActivationCommand = typeof inventoryAvailabilityActivationCommands.$inferSelect;
 export type InventoryAvailabilityActivationFreeze = typeof inventoryAvailabilityActivationFreezes.$inferSelect;
 export type InventoryAvailabilityActivationProductEvidence =
@@ -2235,6 +2632,28 @@ export type InsertInventoryAvailabilityActivationRun = z.infer<
 >;
 export type InsertInventoryAvailabilityRuntimeAuthority = z.infer<
   typeof insertInventoryAvailabilityRuntimeAuthoritySchema
+>;
+export type InsertInventoryAvailabilityClaim = z.infer<typeof insertInventoryAvailabilityClaimSchema>;
+export type InsertInventoryAvailabilityClaimLine = z.infer<
+  typeof insertInventoryAvailabilityClaimLineSchema
+>;
+export type InsertInventoryAvailabilityClaimOperation = z.infer<
+  typeof insertInventoryAvailabilityClaimOperationSchema
+>;
+export type InsertInventoryAvailabilityClaimOperationInput = z.infer<
+  typeof insertInventoryAvailabilityClaimOperationInputSchema
+>;
+export type InsertInventoryAvailabilityClaimResource = z.infer<
+  typeof insertInventoryAvailabilityClaimResourceSchema
+>;
+export type InsertInventoryAvailabilityClaimLotAllocation = z.infer<
+  typeof insertInventoryAvailabilityClaimLotAllocationSchema
+>;
+export type InsertInventoryAvailabilityClaimCommand = z.infer<
+  typeof insertInventoryAvailabilityClaimCommandSchema
+>;
+export type InsertInventoryAvailabilityClaimEvent = z.infer<
+  typeof insertInventoryAvailabilityClaimEventSchema
 >;
 export type InsertInventoryAvailabilityActivationCommand = z.infer<
   typeof insertInventoryAvailabilityActivationCommandSchema
