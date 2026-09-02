@@ -30,6 +30,25 @@ export const canonicalAvailabilityClaimOperationExecutionCommandSchema = z.objec
   reason: nonblank(1000),
 }).strict();
 
+export const canonicalAvailabilityClaimBuildHandoffCommandSchema = z.object({
+  claimId: positiveBigintString,
+  operationKey: nonblank(300),
+  idempotencyKey: nonblank(120),
+  actor: nonblank(100),
+  reason: nonblank(1000),
+}).strict();
+
+export const canonicalAvailabilityClaimBuildHandoffResultSchema = z.object({
+  outcome: z.literal("build_handed_off"),
+  claimId: positiveBigintString,
+  claimOperationId: positiveBigintString,
+  operationKey: nonblank(300),
+  buildOrderId: positiveInteger,
+  buildSystemNumber: nonblank(40),
+  adoptedReservationQty: positiveBigintString,
+  idempotentReplay: z.boolean(),
+}).strict();
+
 export const canonicalAvailabilityClaimOperationExecutionResultSchema = z.object({
   outcome: z.literal("executed"),
   claimId: positiveBigintString,
@@ -85,4 +104,10 @@ export type CanonicalAvailabilityClaimOperationExecutionCommand = z.infer<
 >;
 export type CanonicalAvailabilityClaimOperationExecutionResult = z.infer<
   typeof canonicalAvailabilityClaimOperationExecutionResultSchema
+>;
+export type CanonicalAvailabilityClaimBuildHandoffCommand = z.infer<
+  typeof canonicalAvailabilityClaimBuildHandoffCommandSchema
+>;
+export type CanonicalAvailabilityClaimBuildHandoffResult = z.infer<
+  typeof canonicalAvailabilityClaimBuildHandoffResultSchema
 >;

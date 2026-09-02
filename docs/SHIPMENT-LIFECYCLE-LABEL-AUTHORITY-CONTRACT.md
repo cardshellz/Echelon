@@ -824,8 +824,16 @@ to the exact `primary_transfer` entries from the same still-current plan,
 materialize split-safe physical items, and persist canonical channel commands in
 the non-dispatching `shadow` state. Exact replay is read-only, stale
 unmaterialized plans fail closed, and the existing worker still claims only
-`pending` and `retry`. No runtime caller or `shadow`-to-`pending` activation gate
-is enabled yet; inventory and tracking effects remain separate later slices.
+`pending` and `retry`. Migration
+`0645_package_allocation_commercial_fulfillment_activation.sql` adds immutable
+per-command activation evidence. The normal ShipStation `SHIP_NOTIFY` path now
+reconciles label lineage, persists or replays the exact package plan, materializes
+commercial commands, and atomically promotes only the plan's fully covered
+`shadow` commands to `pending`. Missing, malformed, stale, or otherwise
+non-authoritative evidence creates a durable Operations Tower review instead.
+The existing channel worker remains the only remote dispatcher, and
+`PACKAGE_ALLOCATION_COMMERCIAL_FULFILLMENT_DISABLED=true` is the emergency stop.
+Inventory and carrier-possession effects remain separate later slices.
 
 1. On any newly observed outbound label, record the monotonic package-level
    business-shipment fact immediately; do not wait for exact contents or a

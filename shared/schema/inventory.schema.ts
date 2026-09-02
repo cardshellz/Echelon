@@ -965,6 +965,9 @@ export const buildComponentReservations = inventorySchema.table("build_component
   reservedQty: integer("reserved_qty").notNull(),
   consumedQty: integer("consumed_qty").notNull().default(0),
   releasedQty: integer("released_qty").notNull().default(0),
+  reservationOwner: varchar("reservation_owner", { length: 30 }).notNull().default("build_order"),
+  availabilityClaimId: bigint("availability_claim_id", { mode: "bigint" }),
+  availabilityClaimLotAllocationId: bigint("availability_claim_lot_allocation_id", { mode: "bigint" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -979,6 +982,18 @@ export const buildComponentReservations = inventorySchema.table("build_component
     "build_component_reservations_balance_chk",
     sql`${table.consumedQty} + ${table.releasedQty} <= ${table.reservedQty}`,
   ),
+  ownerValid: check(
+    "build_component_reservations_owner_chk",
+    sql`(${table.reservationOwner} = 'build_order'
+          AND ${table.availabilityClaimId} IS NULL
+          AND ${table.availabilityClaimLotAllocationId} IS NULL)
+      OR (${table.reservationOwner} = 'availability_claim'
+          AND ${table.availabilityClaimId} IS NOT NULL
+          AND ${table.availabilityClaimLotAllocationId} IS NOT NULL)`,
+  ),
+  claimAllocationUnique: uniqueIndex("build_component_reservations_claim_allocation_uq")
+    .on(table.availabilityClaimLotAllocationId)
+    .where(sql`${table.availabilityClaimLotAllocationId} IS NOT NULL`),
 }));
 
 export const buildRunConsumptions = inventorySchema.table("build_run_consumptions", {

@@ -334,6 +334,9 @@
   "inventory.availability_activation_runs": [
     "modules/inventory-planning"
   ],
+  "inventory.availability_claim_build_handoffs": [
+    "modules/inventory-planning"
+  ],
   "inventory.availability_claim_commands": [
     "modules/inventory-planning"
   ],
@@ -646,6 +649,9 @@
     "modules/catalog"
   ],
   "oms.order_line_adjustments": [
+    "modules/oms"
+  ],
+  "oms.package_allocation_commercial_fulfillment_activations": [
     "modules/oms"
   ],
   "oms.shopify_order_bridge_checkpoints": [
