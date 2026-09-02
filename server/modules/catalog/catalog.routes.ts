@@ -131,6 +131,10 @@ import {
   BinAssignmentFilterError,
   parseBinAssignmentVariantIdsQuery,
 } from "../warehouse/bin-assignment-filter";
+import {
+  BinAssignmentValidationError,
+  parseBinAssignmentWriteRequest,
+} from "../warehouse/bin-assignment-contracts";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
 
@@ -2926,19 +2930,15 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
   app.put("/api/bin-assignments", requirePermission("inventory", "edit"), async (req, res) => {
     try {
-      const { productVariantId, warehouseLocationId, isPrimary } = req.body;
-      if (!productVariantId || !warehouseLocationId) {
-        return res.status(400).json({ error: "productVariantId and warehouseLocationId are required" });
-      }
-      const result = await binAssignment.assignVariantToLocation({
-        productVariantId,
-        warehouseLocationId,
-        isPrimary,
-      });
-
-
+      // Validated at the boundary: an unchecked isPrimary from the body once
+      // wrote 0 onto a variant's only slot (see bin-assignment-contracts.ts).
+      const request = parseBinAssignmentWriteRequest(req.body);
+      const result = await binAssignment.assignVariantToLocation(request);
       res.json(result);
     } catch (error: any) {
+      if (error instanceof BinAssignmentValidationError) {
+        return res.status(400).json({ error: error.message, code: error.code });
+      }
       console.error("Error upserting bin assignment:", error);
       res.status(500).json({ error: error.message || "Failed to update bin assignment" });
     }
