@@ -13,10 +13,12 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   closeTestDb,
   describeWithDisposableDb,
+  getTestDb,
   getTestPool,
   runMigrations,
   truncateTestData,
 } from "../../../../../test/setup-integration";
+import { createChannelFulfillmentAuthorityRepository } from "../../../oms/channel-fulfillment-authority.repository";
 import type {
   PackageAllocationEffectIntentV1,
   PackageAllocationEntryV1,
@@ -211,6 +213,131 @@ async function seedCustomerFulfillmentSource(
     [orderItem.rows[0].id, quantity],
   );
   return shipmentItem.rows[0].id;
+}
+
+async function seedCommercialFulfillmentAuthoritySource(
+  pool: Pool,
+  sku: string,
+  quantity: number,
+): Promise<number> {
+  const channel = await pool.query<{ id: number }>(
+    `INSERT INTO channels.channels (name, provider, status)
+     VALUES ('Package allocation integration', 'shopify', 'active')
+     RETURNING id`,
+  );
+  const omsOrder = await pool.query<{ id: string }>(
+    `INSERT INTO oms.oms_orders (
+       external_order_id, channel_id, status, financial_status
+     ) VALUES ('gid://shopify/Order/640001', $1::integer, 'open', 'paid')
+     RETURNING id::text AS id`,
+    [channel.rows[0].id],
+  );
+  const omsLine = await pool.query<{ id: string }>(
+    `INSERT INTO oms.oms_order_lines (
+       order_id, external_line_item_id, fulfillment_provider,
+       paid_quantity, authority_fulfillable_quantity
+     ) VALUES ($1::bigint, 'gid://shopify/LineItem/640002', 'shopify', $2::integer, $2::integer)
+     RETURNING id::text AS id`,
+    [omsOrder.rows[0].id, quantity],
+  );
+  await pool.query(
+    `INSERT INTO oms.oms_order_line_authority_events (order_line_id, paid_quantity)
+     VALUES ($1::bigint, $2::integer)`,
+    [omsLine.rows[0].id, quantity],
+  );
+  const product = await pool.query<{ id: number }>(
+    `INSERT INTO catalog.products (sku, name)
+     VALUES ($1, 'Package allocation integration product')
+     RETURNING id`,
+    [sku],
+  );
+  const variant = await pool.query<{ id: number }>(
+    `INSERT INTO catalog.product_variants (product_id, sku, name)
+     VALUES ($1::integer, $2, 'Package allocation integration variant')
+     RETURNING id`,
+    [product.rows[0].id, sku],
+  );
+  const order = await pool.query<{ id: number }>(
+    `INSERT INTO wms.orders (
+       order_number, oms_fulfillment_order_id,
+       shipping_name, shipping_address, shipping_city,
+       shipping_state, shipping_postal_code, shipping_country
+     ) VALUES (
+       'PACKAGE-COMMERCIAL-640001', $1,
+       'Integration Customer', '1 Test Way', 'Charlotte',
+       'NC', '28202', 'US'
+     )
+     RETURNING id`,
+    [omsOrder.rows[0].id],
+  );
+  const orderItem = await pool.query<{ id: number }>(
+    `INSERT INTO wms.order_items (
+       order_id, oms_order_line_id, sku, quantity
+     ) VALUES ($1::integer, $2::bigint, $3, $4::integer)
+     RETURNING id`,
+    [order.rows[0].id, omsLine.rows[0].id, sku, quantity],
+  );
+  const shipment = await pool.query<{ id: number }>(
+    `INSERT INTO wms.outbound_shipments (
+       order_id, status, shipment_purpose, shipping_engine,
+       engine_order_ref, shipstation_order_key,
+       external_fulfillment_id, tracking_number, carrier
+     ) VALUES (
+       $1::integer, 'pending', 'customer_fulfillment', 'shipstation',
+       '99001', 'provider-order-key-99001',
+       'shipstation_shipment:44010', '1Z0000000000044010', 'ups'
+     )
+     RETURNING id`,
+    [order.rows[0].id],
+  );
+  const shipmentItem = await pool.query<{ id: number }>(
+    `INSERT INTO wms.outbound_shipment_items (
+       shipment_id, order_item_id, shipment_item_purpose,
+       product_variant_id, qty
+     ) VALUES ($1::integer, $2::integer, 'customer_fulfillment', $3::integer, $4::integer)
+     RETURNING id`,
+    [shipment.rows[0].id, orderItem.rows[0].id, variant.rows[0].id, quantity],
+  );
+  return shipmentItem.rows[0].id;
+}
+
+async function seedOutboundBusinessShipmentLabel(
+  pool: Pool,
+  input: {
+    readonly providerPhysicalShipmentId: string;
+    readonly trackingNumber: string;
+    readonly labelStatus: "active" | "voided";
+    readonly ordinal: number;
+  },
+): Promise<void> {
+  const label = await pool.query<{ id: string }>(
+    `INSERT INTO wms.shipping_provider_labels (
+       provider, provider_label_id, provider_order_id, provider_order_key,
+       tracking_number, normalized_tracking_number, label_status, label_direction,
+       carrier, service_code, first_observed_at, last_observed_at
+     ) VALUES (
+       'shipstation', $1, '99001', 'provider-order-key-99001',
+       $2, $2, $3, 'outbound', 'ups', 'ups_ground',
+       '2026-08-22T14:00:00.000Z', '2026-08-22T14:00:00.000Z'
+     )
+     RETURNING id::text AS id`,
+    [input.providerPhysicalShipmentId, input.trackingNumber, input.labelStatus],
+  );
+  await pool.query(
+    `INSERT INTO wms.shipping_provider_label_events (
+       shipping_provider_label_id, event_hash, event_type, label_status,
+       tracking_number, provider_occurred_at, received_at, sanitized_payload
+     ) VALUES (
+       $1::bigint, $2, 'label_observed', 'active',
+       $3, '2026-08-22T13:59:50.000Z', '2026-08-22T14:00:00.000Z',
+       '{"isReturnLabel":false}'::jsonb
+     )`,
+    [
+      label.rows[0].id,
+      input.ordinal.toString(16).padStart(64, "0"),
+      input.trackingNumber,
+    ],
+  );
 }
 
 async function installAuthorityReadinessTestRelations(pool: Pool): Promise<void> {
@@ -2549,6 +2676,266 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
        ) VALUES ($1::bigint, $2::bigint, $3::integer, $4, 2)`,
       [physical.rows[0].id, ...values],
     )).rejects.toMatchObject({ code: "23505" });
+  });
+
+  it("materializes an exact B/C split into inert channel commands and replays without duplicates", async () => {
+    const sourceId = await seedCommercialFulfillmentAuthoritySource(
+      pool,
+      "SKU-COMMERCIAL-SPLIT",
+      2,
+    );
+    await seedOutboundBusinessShipmentLabel(pool, {
+      providerPhysicalShipmentId: "44010",
+      trackingNumber: "1Z0000000000044010",
+      labelStatus: "voided",
+      ordinal: 44010,
+    });
+    await seedOutboundBusinessShipmentLabel(pool, {
+      providerPhysicalShipmentId: "44011",
+      trackingNumber: "1Z0000000000044011",
+      labelStatus: "active",
+      ordinal: 44011,
+    });
+    await seedOutboundBusinessShipmentLabel(pool, {
+      providerPhysicalShipmentId: "44012",
+      trackingNumber: "1Z0000000000044012",
+      labelStatus: "active",
+      ordinal: 44012,
+    });
+    const repository = new PgPackageAllocationLedgerRepository(pool);
+    const planning = new PackageAllocationPlanningService(repository);
+    const persisted = await planning.persist({
+      contractVersion: 1,
+      authorityMode: "shadow_only",
+      groupKey: "a6e1be0d-c7d8-4c91-919f-04f5eb547f81",
+      expectedGroupVersion: 0,
+      sourceLines: [{
+        wmsShipmentItemId: sourceId,
+        sourceQuantity: 2,
+        physicalConsumptionAuthorityQuantity: 2,
+        authorityVersion: 1,
+      }],
+      packages: [
+        {
+          packageKey: "A",
+          allocationRole: "primary",
+          membership: { status: "proven", evidenceKey: "membership:A" },
+          lifecycle: {
+            provider: "shipstation",
+            providerPhysicalShipmentId: "44010",
+            events: [
+              {
+                kind: "outbound_label_observed",
+                eventKey: "shipstation:44010:observed",
+                observedAt: "2026-08-22T14:00:00.000Z",
+                providerOccurredAt: "2026-08-22T13:59:50.000Z",
+                trackingNumber: "1Z0000000000044010",
+                contentsEvidence: {
+                  status: "authoritative",
+                  lines: [{ wmsShipmentItemId: sourceId, quantity: 2 }],
+                },
+              },
+              {
+                kind: "outbound_label_voided",
+                eventKey: "shipstation:44010:voided",
+                observedAt: "2026-08-22T14:01:00.000Z",
+                providerOccurredAt: "2026-08-22T14:00:50.000Z",
+              },
+            ],
+          },
+        },
+        ...[44011, 44012].map((providerPhysicalShipmentId, index) => ({
+          packageKey: index === 0 ? "B" : "C",
+          allocationRole: "replacement_candidate" as const,
+          membership: {
+            status: "proven" as const,
+            evidenceKey: `membership:${index === 0 ? "B" : "C"}`,
+          },
+          lifecycle: {
+            provider: "shipstation",
+            providerPhysicalShipmentId: String(providerPhysicalShipmentId),
+            events: [{
+              kind: "outbound_label_observed" as const,
+              eventKey: `shipstation:${providerPhysicalShipmentId}:observed`,
+              observedAt: "2026-08-22T14:02:00.000Z",
+              providerOccurredAt: "2026-08-22T14:01:50.000Z",
+              trackingNumber: `1Z00000000000${providerPhysicalShipmentId}`,
+              contentsEvidence: {
+                status: "authoritative" as const,
+                lines: [{ wmsShipmentItemId: sourceId, quantity: 1 }],
+              },
+            }],
+          },
+        })),
+      ],
+      actions: [{
+        kind: "transfer_awaiting_allocation",
+        actionKey: "commercial-split:A:1",
+        fromPackageKey: "A",
+        targets: [
+          { packageKey: "B", wmsShipmentItemId: sourceId, quantity: 1 },
+          { packageKey: "C", wmsShipmentItemId: sourceId, quantity: 1 },
+        ],
+        authorization: {
+          kind: "lead_approved",
+          actor: "lead:integration",
+          reason: "Prove exact split commercial materialization",
+        },
+      }],
+      writeContext: {
+        createdBy: "package-allocation-commercial-integration",
+        reason: "Prove exact split commercial materialization",
+      },
+    });
+    expect(persisted.planId).not.toBeNull();
+
+    const fulfillmentRepository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    const first = await fulfillmentRepository.materializePackageAllocationCommercialFulfillment({
+      packageAllocationPlanId: persisted.planId!,
+      source: "package-allocation-commercial-integration",
+    });
+    expect(first).toMatchObject({
+      packageAllocationPlanId: persisted.planId,
+      customerFulfillmentItemCount: 2,
+      replayed: false,
+    });
+    expect(first.physicalShipmentIds).toHaveLength(2);
+    expect(first.channelCommands).toHaveLength(2);
+    expect(first.channelCommands.every((command) => command.pushStatus === "shadow")).toBe(true);
+
+    const persistedLines = await pool.query<{
+      provider_physical_shipment_id: string;
+      physical_quantity: number;
+      quantity_pushed: number;
+      push_status: string;
+      attempt_count: number;
+      package_allocation_entry_id: string;
+      package_allocation_effect_intent_id: string;
+      legacy_wms_shipment_item_id: number | null;
+    }>(
+      `SELECT
+         physical.provider_physical_shipment_id,
+         item.quantity_shipped AS physical_quantity,
+         push_item.quantity_pushed,
+         push.push_status,
+         push.attempt_count,
+         item.package_allocation_entry_id::text,
+         push_item.package_allocation_effect_intent_id::text,
+         item.legacy_wms_shipment_item_id
+       FROM oms.channel_fulfillment_push_items AS push_item
+       JOIN oms.channel_fulfillment_pushes AS push
+         ON push.id = push_item.channel_fulfillment_push_id
+       JOIN wms.physical_shipment_items AS item
+         ON item.id = push_item.physical_shipment_item_id
+       JOIN wms.physical_shipments AS physical
+         ON physical.id = item.physical_shipment_id
+       ORDER BY physical.provider_physical_shipment_id`,
+    );
+    expect(persistedLines.rows).toEqual([
+      expect.objectContaining({
+        provider_physical_shipment_id: "44011",
+        physical_quantity: 1,
+        quantity_pushed: 1,
+        push_status: "shadow",
+        attempt_count: 0,
+        legacy_wms_shipment_item_id: null,
+      }),
+      expect.objectContaining({
+        provider_physical_shipment_id: "44012",
+        physical_quantity: 1,
+        quantity_pushed: 1,
+        push_status: "shadow",
+        attempt_count: 0,
+        legacy_wms_shipment_item_id: null,
+      }),
+    ]);
+    expect(new Set(persistedLines.rows.map((row) => row.package_allocation_entry_id)).size).toBe(2);
+    expect(new Set(persistedLines.rows.map((row) => row.package_allocation_effect_intent_id)).size).toBe(1);
+
+    await expect(fulfillmentRepository.claimCommands({
+      now: new Date("2026-08-22T14:05:00.000Z"),
+      leaseToken: "commercial-shadow-must-not-dispatch",
+      leaseDurationMs: 60_000,
+      limit: 10,
+    })).resolves.toEqual([]);
+
+    const replay = await fulfillmentRepository.materializePackageAllocationCommercialFulfillment({
+      packageAllocationPlanId: persisted.planId!,
+      source: "package-allocation-commercial-integration",
+    });
+    expect(replay).toMatchObject({
+      customerFulfillmentItemCount: 2,
+      replayed: true,
+    });
+    const counts = await pool.query<{
+      physical_items: number;
+      pushes: number;
+      push_items: number;
+    }>(
+      `SELECT
+         (SELECT COUNT(*)::int FROM wms.physical_shipment_items) AS physical_items,
+         (SELECT COUNT(*)::int FROM oms.channel_fulfillment_pushes) AS pushes,
+         (SELECT COUNT(*)::int FROM oms.channel_fulfillment_push_items) AS push_items`,
+    );
+    expect(counts.rows[0]).toEqual({ physical_items: 2, pushes: 2, push_items: 2 });
+  });
+
+  it("rejects an unmaterialized commercial intent after its originating plan becomes stale", async () => {
+    const sourceId = await seedCommercialFulfillmentAuthoritySource(
+      pool,
+      "SKU-COMMERCIAL-STALE",
+      2,
+    );
+    await seedOutboundBusinessShipmentLabel(pool, {
+      providerPhysicalShipmentId: "44100",
+      trackingNumber: "1Z0000000000044100",
+      labelStatus: "active",
+      ordinal: 44100,
+    });
+    const repository = new PgPackageAllocationLedgerRepository(pool);
+    const planning = new PackageAllocationPlanningService(repository);
+    const initialCommand = commandFor(sourceId, {
+      groupKey: "b6e1be0d-c7d8-4c91-919f-04f5eb547f82",
+      providerPhysicalShipmentId: "44100",
+      trackingNumber: "1Z0000000000044100",
+    });
+    const first = await planning.persist(initialCommand);
+    expect(first.planId).not.toBeNull();
+    const initialPackage = initialCommand.packages[0];
+    await planning.persist({
+      ...initialCommand,
+      expectedGroupVersion: first.currentGroupVersion,
+      packages: [{
+        ...initialPackage,
+        lifecycle: {
+          ...initialPackage.lifecycle,
+          events: [
+            ...initialPackage.lifecycle.events,
+            {
+              kind: "carrier_possession_confirmed",
+              eventKey: "carrier:44100:accepted",
+              observedAt: "2026-08-22T14:05:00.000Z",
+              providerOccurredAt: "2026-08-22T14:04:50.000Z",
+              carrierTrackingEventId: 134_100,
+            },
+          ],
+        },
+      }],
+    });
+
+    const fulfillmentRepository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    await expect(
+      fulfillmentRepository.materializePackageAllocationCommercialFulfillment({
+        packageAllocationPlanId: first.planId!,
+        source: "package-allocation-commercial-integration",
+      }),
+    ).rejects.toMatchObject({ code: "PACKAGE_ALLOCATION_PLAN_STALE" });
+    const counts = await pool.query<{ physical_items: number; pushes: number }>(
+      `SELECT
+         (SELECT COUNT(*)::int FROM wms.physical_shipment_items) AS physical_items,
+         (SELECT COUNT(*)::int FROM oms.channel_fulfillment_pushes) AS pushes`,
+    );
+    expect(counts.rows[0]).toEqual({ physical_items: 0, pushes: 0 });
   });
 
   it("persists a partial cancellation with exact action evidence and replays without duplicates", async () => {

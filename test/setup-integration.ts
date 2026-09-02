@@ -99,6 +99,8 @@ export async function runMigrations(): Promise<void> {
     "migrations/0635_package_allocation_effect_outbox.sql",
     "migrations/0637_declared_package_business_shipments.sql",
     "migrations/0639_package_allocation_physical_item_provenance.sql",
+    "test/fixtures/channel-fulfillment-package-allocation-integration.sql",
+    "migrations/0640_package_allocation_commercial_fulfillment_shadow.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;
@@ -128,6 +130,8 @@ export async function runMigrations(): Promise<void> {
 }
 
 const TRUNCATE_TABLES = [
+  "oms.channel_fulfillment_push_items",
+  "oms.channel_fulfillment_pushes",
   "wms.reconciliation_exceptions",
   "wms.shipping_provider_label_content_attestation_resolutions",
   "wms.shipping_provider_label_content_attestations",
@@ -144,6 +148,8 @@ const TRUNCATE_TABLES = [
   "wms.shipping_provider_label_links",
   "wms.physical_shipment_items",
   "wms.physical_shipments",
+  "wms.fulfillment_plan_lines",
+  "wms.fulfillment_plans",
   "wms.shipping_engine_order_provider_refs",
   "wms.shipping_engine_order_requests",
   "wms.shipping_engine_orders",
@@ -156,6 +162,9 @@ const TRUNCATE_TABLES = [
   "inventory.inventory_levels",
   "wms.order_items",
   "wms.orders",
+  "oms.oms_order_line_authority_events",
+  "oms.oms_order_lines",
+  "oms.oms_orders",
   "channels.allocation_audit_log",
   "channels.source_lock_config",
   "channels.channel_variant_overrides",

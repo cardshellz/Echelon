@@ -91,6 +91,7 @@ export const carrierTrackingMatchStatusValues = [
   "review",
 ] as const;
 export const channelFulfillmentPushStatusValues = [
+  "shadow",
   "pending",
   "processing",
   "retry",
@@ -1459,12 +1460,20 @@ export const channelFulfillmentPushItems = omsSchema.table("channel_fulfillment_
   omsOrderLineId: bigint("oms_order_line_id", { mode: "number" }).notNull().references(() => omsOrderLines.id, { onDelete: "restrict" }),
   channelOrderLineId: varchar("channel_order_line_id", { length: 200 }),
   quantityPushed: integer("quantity_pushed").notNull(),
+  packageAllocationEffectIntentId: bigint("package_allocation_effect_intent_id", { mode: "number" })
+    .references(() => packageAllocationEffectIntents.id, { onDelete: "restrict" }),
   metadata: jsonb("metadata").notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("uq_channel_fulfillment_push_items_physical_item")
     .on(table.channelFulfillmentPushId, table.physicalShipmentItemId)
     .where(sql`${table.physicalShipmentItemId} IS NOT NULL`),
+  uniqueIndex("uq_channel_fulfillment_push_items_package_effect_physical")
+    .on(table.packageAllocationEffectIntentId, table.physicalShipmentItemId)
+    .where(sql`${table.packageAllocationEffectIntentId} IS NOT NULL`),
+  uniqueIndex("uq_channel_fulfillment_push_items_package_effect_item")
+    .on(table.physicalShipmentItemId)
+    .where(sql`${table.packageAllocationEffectIntentId} IS NOT NULL`),
   index("idx_channel_fulfillment_push_items_push_oms_line").on(table.channelFulfillmentPushId, table.omsOrderLineId),
   index("idx_channel_fulfillment_push_items_oms_line").on(table.omsOrderLineId),
 ]);
