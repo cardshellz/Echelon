@@ -788,10 +788,12 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
   afterAll(async () => {
     let roleCleanupFailure: unknown;
-    try {
-      await removeExecutionAuditRole(pool);
-    } catch (error) {
-      roleCleanupFailure = error;
+    if (pool) {
+      try {
+        await removeExecutionAuditRole(pool);
+      } catch (error) {
+        roleCleanupFailure = error;
+      }
     }
     try {
       await closeTestDb();

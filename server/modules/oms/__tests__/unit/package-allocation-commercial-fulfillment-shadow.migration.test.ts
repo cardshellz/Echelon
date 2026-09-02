@@ -14,6 +14,14 @@ const repository = readFileSync(
   resolve(process.cwd(), "server/modules/oms/channel-fulfillment-authority.repository.ts"),
   "utf8",
 );
+const integrationSchema = readFileSync(
+  resolve(process.cwd(), "test/fixtures/named-schema-integration.sql"),
+  "utf8",
+);
+const integrationSetup = readFileSync(
+  resolve(process.cwd(), "test/setup-integration.ts"),
+  "utf8",
+);
 
 describe("package-allocation commercial fulfillment shadow migration", () => {
   it("adds an explicitly non-dispatching canonical command state", () => {
@@ -50,5 +58,23 @@ describe("package-allocation commercial fulfillment shadow migration", () => {
     expect(schema).toContain("${table.pushStatus} IN ('pending', 'retry')");
     expect(repository).toContain("push_status IN ('pending', 'retry')");
     expect(repository).not.toMatch(/push_status IN \('shadow',[ ]*'pending',[ ]*'retry'\)/);
+  });
+
+  it("rebuilds the OMS schema before applying the canonical fulfillment fixture", () => {
+    expect(integrationSchema).toContain("DROP SCHEMA IF EXISTS oms CASCADE");
+    expect(integrationSchema).toContain("CREATE SCHEMA oms");
+
+    const baseSchemaIndex = integrationSetup.indexOf(
+      '"test/fixtures/named-schema-integration.sql"',
+    );
+    const fulfillmentFixtureIndex = integrationSetup.indexOf(
+      '"test/fixtures/channel-fulfillment-package-allocation-integration.sql"',
+    );
+    const migrationIndex = integrationSetup.indexOf(
+      '"migrations/0640_package_allocation_commercial_fulfillment_shadow.sql"',
+    );
+    expect(baseSchemaIndex).toBeGreaterThanOrEqual(0);
+    expect(fulfillmentFixtureIndex).toBeGreaterThan(baseSchemaIndex);
+    expect(migrationIndex).toBeGreaterThan(fulfillmentFixtureIndex);
   });
 });
