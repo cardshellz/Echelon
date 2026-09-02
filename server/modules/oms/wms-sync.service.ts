@@ -25,6 +25,7 @@ import { omsOrderEvents } from "@shared/schema/oms.schema";
 import type { ServiceRegistry } from "../../services";
 import { computeSortRank, getShippingBase, resolveSlaDueAt, type ShippingServiceLevel } from "../orders/sort-rank";
 import { getSlaCutoffConfig } from "../warehouse/settings.resolver";
+import { selectPickBinCandidate } from "../warehouse/pick-bin-candidate";
 import {
   validateOmsOrderFinancials,
   buildWmsOrderFinancialSnapshot,
@@ -151,33 +152,57 @@ function toNullableBoolean(value: unknown): boolean | null {
   return value === true || value === 1 || value === "1" || value === "true";
 }
 
-async function resolvePrimaryBinLocation(
+/**
+ * Resolve the bin an order line is stamped with.
+ *
+ * Every bin-backed slot row of the variant is a candidate; the primary flag
+ * only ranks them. See pick-bin-candidate.ts for why the flag must not be a
+ * gate: a pre-2026-05-14 writer bug left real slots with is_primary = 0, and
+ * a hard `is_primary = 1` filter here returned null for them and stamped
+ * UNASSIGNED on every order line (SHLZ-MAG-STND-P5, 2026-09). Rows without a
+ * warehouse location are excluded by the inner join — they cannot direct a
+ * picker anywhere.
+ */
+async function resolveAssignedBinLocation(
   database: DbLike,
   variantId: number,
 ): Promise<WmsBinLocation | null> {
-  const [row] = await database
+  const rows: Array<{
+    slotId: number;
+    slotStatus: string | null;
+    isPrimary: number | null;
+    code: string;
+    warehouseZone: string | null;
+    productZone: string | null;
+    locationIsActive: number | null;
+    locationIsPickable: number | null;
+    locationType: string | null;
+    cycleCountFreezeId: number | null;
+  }> = await database
     .select({
+      slotId: productLocations.id,
+      slotStatus: productLocations.status,
+      isPrimary: productLocations.isPrimary,
       code: warehouseLocations.code,
       warehouseZone: warehouseLocations.zone,
       productZone: productLocations.zone,
+      locationIsActive: warehouseLocations.isActive,
+      locationIsPickable: warehouseLocations.isPickable,
+      locationType: warehouseLocations.locationType,
+      cycleCountFreezeId: warehouseLocations.cycleCountFreezeId,
     })
     .from(productLocations)
     .innerJoin(
       warehouseLocations,
       eq(productLocations.warehouseLocationId, warehouseLocations.id),
     )
-    .where(
-      and(
-        eq(productLocations.productVariantId, variantId),
-        eq(productLocations.isPrimary, 1),
-      ),
-    )
-    .limit(1);
+    .where(eq(productLocations.productVariantId, variantId));
 
-  return row
+  const best = selectPickBinCandidate(rows);
+  return best
     ? {
-        location: String(row.code),
-        zone: row.warehouseZone || row.productZone || "U",
+        location: String(best.code),
+        zone: best.warehouseZone || best.productZone || "U",
       }
     : null;
 }
@@ -222,7 +247,7 @@ async function buildWmsLineItemFromOmsLine(
   let binLocation: WmsBinLocation | null = null;
   if (variantId) {
     try {
-      binLocation = await resolvePrimaryBinLocation(database, variantId);
+      binLocation = await resolveAssignedBinLocation(database, variantId);
     } catch (err: any) {
       console.warn(`[WMS Sync] Could not resolve bin for variant ${variantId}: ${err?.message ?? err}`);
     }
@@ -2097,7 +2122,7 @@ export class WmsSyncService {
           omsLine.productVariantId !== wmsItem.productId
         ) {
           updates.productId = omsLine.productVariantId;
-          const bin = await resolvePrimaryBinLocation(db, omsLine.productVariantId);
+          const bin = await resolveAssignedBinLocation(db, omsLine.productVariantId);
           if (bin) {
             updates.location = bin.location;
             updates.zone = bin.zone;
@@ -2127,7 +2152,7 @@ export class WmsSyncService {
           omsLine.productVariantId !== wmsItem.productId
         ) {
           updates.productId = omsLine.productVariantId;
-          const bin = await resolvePrimaryBinLocation(db, omsLine.productVariantId);
+          const bin = await resolveAssignedBinLocation(db, omsLine.productVariantId);
           if (bin) {
             updates.location = bin.location;
             updates.zone = bin.zone;

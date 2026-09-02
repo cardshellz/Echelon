@@ -68,8 +68,9 @@ describe("WMS inventory integrity monitor", () => {
 
   it("derives least-privilege audit grants from every qualified check relation", () => {
     const relations = requiredWmsIntegrityAuditRelations();
-    expect(relations).toHaveLength(16);
+    expect(relations).toHaveLength(17);
     expect(relations).toContain("inventory.inventory_levels");
+    expect(relations).toContain("warehouse.product_locations");
     expect(relations).toContain("wms.order_items");
     expect(relations).toContain("procurement.receiving_orders");
     const statements = buildAuditCredentialStatements("wms_integrity_auditor").join(";\n");

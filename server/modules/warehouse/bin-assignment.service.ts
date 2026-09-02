@@ -13,6 +13,11 @@ import type {
   WarehouseLocation,
 } from "@shared/schema";
 import { normalizeBinAssignmentVariantIds } from "./bin-assignment-filter";
+import {
+  BinAssignmentValidationError,
+  PRIMARY_SLOT_FLAG,
+  parseSlotPrimaryFlag,
+} from "./bin-assignment-contracts";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -260,12 +265,26 @@ export class BinAssignmentService {
    * Assign a product variant to a pickable warehouse location.
    * Validates that the target location has `is_pickable = 1`.
    * If the variant already has a pick assignment, moves it to the new location.
+   *
+   * This writer keeps exactly one slot row per variant (duplicates are
+   * consolidated below), so that row is always the variant's primary.
+   * `isPrimary` is accepted for API compatibility and must be 1 or omitted:
+   * a 0 used to skip sibling demotion and land on the variant's only slot,
+   * hiding the SKU from every reader that required the flag (2026-09).
    */
   async assignVariantToLocation(params: {
     productVariantId: number;
     warehouseLocationId: number;
     isPrimary?: number;
   }): Promise<ProductLocation> {
+    // Input validation precedes every read: a rejected command must leave no trace.
+    if (parseSlotPrimaryFlag(params.isPrimary) !== PRIMARY_SLOT_FLAG) {
+      throw new BinAssignmentValidationError(
+        "BIN_ASSIGNMENT_PRIMARY_REQUIRED",
+        `Variant ${params.productVariantId} keeps a single pick slot, which must be primary; isPrimary=0 is not allowed here`,
+      );
+    }
+
     const variant = await this.storage.getProductVariantById(params.productVariantId);
     if (!variant) throw new Error(`Variant ${params.productVariantId} not found`);
 
@@ -285,8 +304,6 @@ export class BinAssignmentService {
     }
 
     const product = await this.storage.getProductById(variant.productId);
-
-    const isPrimary = params.isPrimary ?? 1;
     const upperSku = (variant.sku || product?.sku || "").toUpperCase();
 
     const assigned = await this.db.transaction(async (tx) => {
@@ -320,21 +337,23 @@ export class BinAssignmentService {
       const existingIds = existingResult.rows.map((row: any) => Number(row.id)).filter(Number.isInteger);
       const canonicalId = existingIds[0];
 
-      if (isPrimary === 1) {
-        await tx.execute(sql`
-          UPDATE warehouse.product_locations
-          SET is_primary = 0, updated_at = NOW()
-          WHERE status = 'active'
-            AND (
-              product_variant_id = ${params.productVariantId}
-              OR (
-                product_variant_id IS NULL
-                AND sku IS NOT NULL
-                AND UPPER(sku) = ${upperSku}
-              )
+      // Demotion is scoped to THIS variant (plus legacy SKU-keyed rows that
+      // never got a variant id). It must never widen to the product: until
+      // 2026-05-14 it did, and every sibling pack size lost its flag whenever
+      // a new variant was slotted.
+      await tx.execute(sql`
+        UPDATE warehouse.product_locations
+        SET is_primary = 0, updated_at = NOW()
+        WHERE status = 'active'
+          AND (
+            product_variant_id = ${params.productVariantId}
+            OR (
+              product_variant_id IS NULL
+              AND sku IS NOT NULL
+              AND UPPER(sku) = ${upperSku}
             )
-        `);
-      }
+          )
+      `);
 
       if (canonicalId) {
         const result = await tx
@@ -348,7 +367,7 @@ export class BinAssignmentService {
             warehouseLocationId: params.warehouseLocationId,
             location: loc.code,
             zone: loc.zone || "U",
-            isPrimary,
+            isPrimary: PRIMARY_SLOT_FLAG,
             status: "active",
             updatedAt: new Date(),
           })
@@ -383,7 +402,7 @@ export class BinAssignmentService {
           location: loc.code,
           zone: loc.zone || "U",
           warehouseLocationId: params.warehouseLocationId,
-          isPrimary,
+          isPrimary: PRIMARY_SLOT_FLAG,
           status: "active",
           barcode: variant.barcode || null,
         })

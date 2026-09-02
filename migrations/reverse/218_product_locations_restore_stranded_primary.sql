@@ -1,0 +1,6 @@
+-- Reverse migration: 218_product_locations_restore_stranded_primary
+--
+-- Intentionally a no-op. The forward migration is an idempotent data repair
+-- that restores the primary flag on a variant's only bin-backed pick slot and
+-- re-stamps open order lines with that bin. Reversing it would strip the flag
+-- again and send pick lines back to UNASSIGNED, recreating the defect it fixes.

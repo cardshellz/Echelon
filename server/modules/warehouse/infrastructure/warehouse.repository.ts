@@ -14,6 +14,7 @@ import {
   inArray,
   notInArray,
 } from "../../../storage/base";
+import { ne } from "drizzle-orm";
 // wms.order_items belongs to modules/orders (writer-ratchet P2.1) — write via its public API.
 import { backfillOpenOrderItemBinAssignment } from "../../orders/bin-location-backfill";
 import type {
@@ -295,88 +296,31 @@ export async function getProductLocationByComposite(productId: number, warehouse
   return result[0];
 }
 
-export async function addProductToLocation(data: {
-  productId: number; productVariantId?: number | null; warehouseLocationId: number;
-  sku?: string | null; shopifyVariantId?: number | null; name: string;
-  location: string; zone: string; isPrimary?: number; imageUrl?: string | null; barcode?: string | null;
-}, tx: Tx = db): Promise<ProductLocation> {
-  const [loc] = await tx.select({
-    code: warehouseLocations.code,
-    warehouseId: warehouseLocations.warehouseId,
-    locationType: warehouseLocations.locationType,
-    isPickable: warehouseLocations.isPickable,
-    isActive: warehouseLocations.isActive,
-  }).from(warehouseLocations).where(eq(warehouseLocations.id, data.warehouseLocationId)).limit(1);
-  if (!loc) throw new Error(`Warehouse location ${data.warehouseLocationId} not found`);
-  if (loc.isActive !== 1) throw new Error(`Location ${loc.code} is inactive - cannot assign products`);
-  if (loc.warehouseId == null) throw new Error(`Location ${loc.code} is not assigned to a warehouse - cannot assign products`);
-  if (loc.locationType !== "pick" || loc.isPickable !== 1) throw new Error(`Location ${loc.code} is not a pick face - cannot assign products`);
-
-  const existingByTarget = data.productVariantId != null
-    ? await tx.select().from(productLocations).where(eq(productLocations.productVariantId, data.productVariantId))
-    : data.sku
-      ? await tx.select().from(productLocations).where(eq(productLocations.sku, data.sku.toUpperCase()))
-      : await tx.select().from(productLocations).where(eq(productLocations.productId, data.productId));
-
-  if (existingByTarget.length > 0) {
-    const existing = existingByTarget[0];
-    const result = await tx.update(productLocations).set({
-      productVariantId: data.productVariantId ?? existing.productVariantId,
-      warehouseLocationId: data.warehouseLocationId, sku: data.sku?.toUpperCase() || existing.sku,
-      shopifyVariantId: data.shopifyVariantId || existing.shopifyVariantId, name: data.name || existing.name,
-      location: data.location.toUpperCase(), zone: data.zone.toUpperCase(), isPrimary: data.isPrimary ?? 1,
-      imageUrl: data.imageUrl || existing.imageUrl, barcode: data.barcode || existing.barcode, updatedAt: new Date(),
-    }).where(eq(productLocations.id, existing.id)).returning();
-    await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
-    return result[0];
-  }
-
-  if (!data.productVariantId && data.sku) {
-    const existingBySku = await tx.select().from(productLocations).where(eq(productLocations.sku, data.sku.toUpperCase()));
-    if (existingBySku.length > 0) {
-      const existing = existingBySku[0];
-      const result = await tx.update(productLocations).set({
-        productId: data.productId, productVariantId: data.productVariantId ?? existing.productVariantId,
-        warehouseLocationId: data.warehouseLocationId, shopifyVariantId: data.shopifyVariantId || existing.shopifyVariantId,
-        name: data.name || existing.name, location: data.location.toUpperCase(), zone: data.zone.toUpperCase(),
-        isPrimary: data.isPrimary ?? 1, imageUrl: data.imageUrl || existing.imageUrl, barcode: data.barcode || existing.barcode, updatedAt: new Date(),
-      }).where(eq(productLocations.id, existing.id)).returning();
-      await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
-      return result[0];
-    }
-  }
-
-  if (data.isPrimary === 1) {
-    if (data.productVariantId != null) {
-      await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.productVariantId, data.productVariantId));
-    } else if (data.sku) {
-      await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.sku, data.sku.toUpperCase()));
-    } else {
-      await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.productId, data.productId));
-    }
-  }
-
-  const result = await tx.insert(productLocations).values({
-    productId: data.productId, productVariantId: data.productVariantId || null,
-    warehouseLocationId: data.warehouseLocationId, sku: data.sku?.toUpperCase() || null,
-    shopifyVariantId: data.shopifyVariantId || null, name: data.name,
-    location: data.location.toUpperCase(), zone: data.zone.toUpperCase(),
-    isPrimary: data.isPrimary ?? 1, status: "active", imageUrl: data.imageUrl || null, barcode: data.barcode || null,
-  }).returning();
-  await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
-  return result[0];
-}
-
+/**
+ * Make one slot row the primary for its variant.
+ *
+ * Demotion is scoped to the variant — never to the product. A product-wide
+ * demotion (the pre-2026-05-14 behaviour, commit 0faaa645) stripped the flag
+ * from every sibling pack size and left them invisible to flag-gated readers.
+ * Legacy rows without a variant id are scoped by their SKU string, the key
+ * every other slot reader uses for them; a row with neither cannot be scoped
+ * safely and is refused.
+ */
 export async function setPrimaryLocation(productLocationId: number, tx: Tx = db): Promise<ProductLocation | undefined> {
   const location = await getProductLocationById(productLocationId, tx);
-  if (!location || !location.productId) return undefined;
+  if (!location) return undefined;
 
+  const now = new Date();
   if (location.productVariantId != null) {
-    await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.productVariantId, location.productVariantId));
+    await tx.update(productLocations).set({ isPrimary: 0, updatedAt: now })
+      .where(and(eq(productLocations.productVariantId, location.productVariantId), ne(productLocations.id, productLocationId)));
+  } else if (location.sku) {
+    await tx.update(productLocations).set({ isPrimary: 0, updatedAt: now })
+      .where(and(eq(productLocations.sku, location.sku.toUpperCase()), ne(productLocations.id, productLocationId)));
   } else {
-    await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.productId, location.productId));
+    throw new Error(`Product location ${productLocationId} has neither a variant nor a SKU; refusing to scope a primary demotion`);
   }
-  const result = await tx.update(productLocations).set({ isPrimary: 1, updatedAt: new Date() }).where(eq(productLocations.id, productLocationId)).returning();
+  const result = await tx.update(productLocations).set({ isPrimary: 1, updatedAt: now }).where(eq(productLocations.id, productLocationId)).returning();
   await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
   return result[0];
 }
@@ -419,9 +363,97 @@ export async function updateProductLocation(id: number, location: UpdateProductL
   return result[0];
 }
 
+export type PromotedSlot = { id: number; sku: string | null; location: string; zone: string };
+
+/**
+ * Flag the best remaining active, bin-backed slot of a variant as primary.
+ * Ranking mirrors assignVariantToLocation's canonical-row choice: a usable pick
+ * face first, then an already-flagged row, then the most recently touched row,
+ * then the lowest id. Legacy rows without a variant id are matched by SKU.
+ * Returns the promoted row, or null when the variant has no eligible slot.
+ */
+export async function promoteBestRemainingSlot(
+  executor: Tx,
+  scope: { productVariantId: number | null; sku: string | null; excludeId?: number | null },
+): Promise<PromotedSlot | null> {
+  const upperSku = scope.sku ? scope.sku.toUpperCase() : null;
+  if (scope.productVariantId == null && !upperSku) return null;
+
+  const variantMatch = scope.productVariantId != null
+    ? sql`pl.product_variant_id = ${scope.productVariantId}`
+    : sql`FALSE`;
+  const result = await executor.execute(sql`
+    UPDATE warehouse.product_locations
+    SET is_primary = 1, updated_at = NOW()
+    WHERE id = (
+      SELECT pl.id
+      FROM warehouse.product_locations pl
+      LEFT JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
+      WHERE pl.status = 'active'
+        AND pl.warehouse_location_id IS NOT NULL
+        AND pl.id <> ${scope.excludeId ?? -1}
+        AND (
+          ${variantMatch}
+          OR (pl.product_variant_id IS NULL AND pl.sku IS NOT NULL AND UPPER(pl.sku) = ${upperSku})
+        )
+      ORDER BY
+        CASE
+          WHEN wl.id IS NOT NULL
+           AND wl.warehouse_id IS NOT NULL
+           AND wl.is_active = 1
+           AND wl.location_type = 'pick'
+           AND wl.is_pickable = 1
+          THEN 0 ELSE 1
+        END,
+        pl.is_primary DESC,
+        pl.updated_at DESC,
+        pl.id ASC
+      LIMIT 1
+    )
+    RETURNING id, sku, location, zone
+  `);
+  const row = result.rows?.[0] as { id: number; sku: string | null; location: string; zone: string } | undefined;
+  return row
+    ? { id: Number(row.id), sku: row.sku ?? null, location: String(row.location), zone: String(row.zone) }
+    : null;
+}
+
+/**
+ * Delete a slot row. When the deleted row was the variant's primary, the best
+ * remaining active, bin-backed sibling is promoted in the same transaction, so
+ * a variant is never left with slots but no primary (that state hid SKUs from
+ * every flag-gated reader, 2026-09). Open UNASSIGNED order lines are then
+ * re-stamped with the promoted bin — best-effort, after the commit, like every
+ * other slot writer here.
+ */
 export async function deleteProductLocation(id: number, tx: Tx = db): Promise<boolean> {
-  const result = await tx.delete(productLocations).where(eq(productLocations.id, id)).returning();
-  return result.length > 0;
+  const outcome: { deleted: boolean; promoted: PromotedSlot | null } = await tx.transaction(async (t: Tx) => {
+    const deleted = await t.execute(sql`
+      DELETE FROM warehouse.product_locations
+      WHERE id = ${id}
+      RETURNING id, product_variant_id, sku, is_primary
+    `);
+    const row = deleted.rows?.[0] as
+      | { id: number; product_variant_id: number | null; sku: string | null; is_primary: number }
+      | undefined;
+    if (!row) return { deleted: false, promoted: null };
+    if (Number(row.is_primary) !== 1) return { deleted: true, promoted: null };
+
+    const promoted = await promoteBestRemainingSlot(t, {
+      productVariantId: row.product_variant_id == null ? null : Number(row.product_variant_id),
+      sku: row.sku ?? null,
+    });
+    return { deleted: true, promoted };
+  });
+
+  if (outcome.promoted) {
+    await backfillOpenOrderItemBinAssignment({
+      sku: outcome.promoted.sku,
+      locationCode: outcome.promoted.location,
+      zone: outcome.promoted.zone,
+    });
+  }
+  return outcome.deleted;
 }
 
 export async function upsertProductLocationBySku(sku: string, name: string, status?: string, imageUrl?: string, barcode?: string, tx: Tx = db): Promise<ProductLocation> {
