@@ -438,10 +438,12 @@ BEGIN
     FALSE
   );
   IF revision_snapshot IS NOT NULL
-     AND revision_snapshot IS DISTINCT FROM CASE
-       WHEN snapshot_has_connection_identity THEN current_snapshot
-       ELSE legacy_current_snapshot
-     END THEN
+     AND revision_snapshot IS DISTINCT FROM (
+       CASE
+         WHEN snapshot_has_connection_identity THEN current_snapshot
+         ELSE legacy_current_snapshot
+       END
+     ) THEN
     RAISE EXCEPTION 'current fulfillment methods must match the immutable revision snapshot';
   END IF;
   RETURN NULL;
