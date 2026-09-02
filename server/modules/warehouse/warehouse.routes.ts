@@ -1,6 +1,10 @@
 import type { Express } from "express";
 import { z } from "zod";
 import { createBinAssignmentService, warehouseStorage } from "../warehouse";
+import {
+  BinAssignmentValidationError,
+  parseBinAssignmentWriteRequest,
+} from "./bin-assignment-contracts";
 import { catalogStorage } from "../catalog";
 import { inventoryStorage } from "../inventory";
 import { db } from "../../storage/base";
@@ -790,23 +794,25 @@ export function registerWarehouseRoutes(app: Express) {
         return res.status(400).json({ error: "Invalid location ID" });
       }
 
-      const { productVariantId, isPrimary } = req.body;
-      if (!productVariantId) {
-        return res.status(400).json({ error: "productVariantId is required" });
-      }
+      // Validated at the boundary: an unchecked isPrimary from the body once
+      // wrote 0 onto a variant's only slot (see bin-assignment-contracts.ts).
+      const request = parseBinAssignmentWriteRequest({
+        productVariantId: req.body?.productVariantId,
+        warehouseLocationId,
+        isPrimary: req.body?.isPrimary,
+      });
 
       const warehouseLocation = await storage.getWarehouseLocationById(warehouseLocationId);
       if (!warehouseLocation) {
         return res.status(404).json({ error: "Warehouse location not found" });
       }
 
-      const productLocation = await binAssignments.assignVariantToLocation({
-        productVariantId,
-        warehouseLocationId,
-        isPrimary: isPrimary ?? 1,
-      });
+      const productLocation = await binAssignments.assignVariantToLocation(request);
       res.status(201).json(productLocation);
     } catch (error: any) {
+      if (error instanceof BinAssignmentValidationError) {
+        return res.status(400).json({ error: error.message, code: error.code });
+      }
       console.error("Error assigning product to location:", error);
       const message = error.message || "Failed to assign product";
       const status = /not found/i.test(message)
