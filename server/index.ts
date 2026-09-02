@@ -1117,6 +1117,26 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     logSchedulerDisabled("scheduler", "OMS WMS reconciliation", "OMS_WMS_RECONCILE_DISABLED");
   }
 
+  // Shopify product-mapping reconciliation. Webhooks keep identity current; this
+  // is the backstop for what they miss (a webhook that never fired, a bulk edit,
+  // a restore). Reports by default; set SHOPIFY_MAPPING_AUTO_RETIRE=1 to let it
+  // retire the mappings the domain has already judged safe.
+  if (!schedulersDisabled("SHOPIFY_MAPPING_RECONCILE_DISABLED")) {
+    const runShopifyMappingReconcile = async () => {
+      try {
+        const { runShopifyMappingReconciliation } = await import("./jobs/shopify-mapping-reconciliation.job");
+        await runShopifyMappingReconciliation();
+      } catch (err: any) {
+        console.warn("[mapping-reconciler] sweep error:", err?.message);
+      }
+    };
+    // Well clear of boot so a scan never competes with startup work.
+    setTimeout(runShopifyMappingReconcile, 5 * 60 * 1000);
+    setInterval(runShopifyMappingReconcile, 24 * 60 * 60 * 1000);
+  } else {
+    logSchedulerDisabled("scheduler", "Shopify mapping reconciliation", "SHOPIFY_MAPPING_RECONCILE_DISABLED");
+  }
+
   // Startup reconciliation for orders whose line state is already terminal
   // but whose aggregate warehouse status remained active. This may transition
   // only the order aggregate through its owning service. It must not infer
