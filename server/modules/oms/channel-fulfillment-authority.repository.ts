@@ -105,6 +105,7 @@ export interface ResolvedLegacyPhysicalPackage {
 
 export interface ClaimedChannelFulfillmentCommandItem {
   readonly physicalShipmentItemId: number;
+  readonly packageAllocationEntryId: number | null;
   readonly shipmentRequestItemId: number;
   readonly legacyWmsShipmentId: number;
   readonly legacyWmsShipmentItemId: number;
@@ -2382,8 +2383,15 @@ export function createChannelFulfillmentAuthorityRepository(
         SELECT
           push_item.channel_fulfillment_push_id,
           push_item.physical_shipment_item_id,
-          physical_item.shipment_request_item_id,
-          physical_item.legacy_wms_shipment_item_id,
+          physical_item.package_allocation_entry_id,
+          COALESCE(
+            physical_item.shipment_request_item_id,
+            allocation_source.shipment_request_item_id
+          ) AS shipment_request_item_id,
+          COALESCE(
+            physical_item.legacy_wms_shipment_item_id,
+            allocation_source.source_wms_shipment_item_id
+          ) AS legacy_wms_shipment_item_id,
           legacy_item.shipment_id AS legacy_wms_shipment_id,
           push_item.oms_order_line_id,
           push_item.channel_order_line_id,
@@ -2391,8 +2399,15 @@ export function createChannelFulfillmentAuthorityRepository(
         FROM oms.channel_fulfillment_push_items AS push_item
         JOIN wms.physical_shipment_items AS physical_item
           ON physical_item.id = push_item.physical_shipment_item_id
+        LEFT JOIN wms.package_allocation_entries AS allocation_entry
+          ON allocation_entry.id = physical_item.package_allocation_entry_id
+        LEFT JOIN wms.package_allocation_source_lines AS allocation_source
+          ON allocation_source.id = allocation_entry.package_allocation_source_line_id
         JOIN wms.outbound_shipment_items AS legacy_item
-          ON legacy_item.id = physical_item.legacy_wms_shipment_item_id
+          ON legacy_item.id = COALESCE(
+            physical_item.legacy_wms_shipment_item_id,
+            allocation_source.source_wms_shipment_item_id
+          )
         WHERE push_item.channel_fulfillment_push_id IN (${buildIdList(dueIds)})
         ORDER BY push_item.channel_fulfillment_push_id, push_item.physical_shipment_item_id
       `));
@@ -2401,6 +2416,7 @@ export function createChannelFulfillmentAuthorityRepository(
         const commandId = Number(item.channel_fulfillment_push_id);
         const list = itemsByCommand.get(commandId) ?? [];
         const physicalShipmentItemId = asPositiveInteger(item.physical_shipment_item_id);
+        const packageAllocationEntryId = asPositiveInteger(item.package_allocation_entry_id);
         const shipmentRequestItemId = asPositiveInteger(item.shipment_request_item_id);
         const legacyWmsShipmentId = asPositiveInteger(item.legacy_wms_shipment_id);
         const legacyWmsShipmentItemId = asPositiveInteger(item.legacy_wms_shipment_item_id);
@@ -2424,6 +2440,7 @@ export function createChannelFulfillmentAuthorityRepository(
         }
         list.push(Object.freeze({
           physicalShipmentItemId,
+          packageAllocationEntryId,
           shipmentRequestItemId,
           legacyWmsShipmentId,
           legacyWmsShipmentItemId,

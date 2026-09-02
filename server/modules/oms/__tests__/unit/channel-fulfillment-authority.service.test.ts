@@ -31,6 +31,7 @@ function command(overrides: Partial<ClaimedChannelFulfillmentCommand> = {}): Cla
     metadata: Object.freeze({ legacyWmsShipmentIds: [501] }),
     items: Object.freeze([{
       physicalShipmentItemId: 300,
+      packageAllocationEntryId: null,
       shipmentRequestItemId: 250,
       legacyWmsShipmentId: 501,
       legacyWmsShipmentItemId: 700,
@@ -266,6 +267,7 @@ describe("channel fulfillment authority service", () => {
       items: Object.freeze([
         {
           physicalShipmentItemId: 301,
+          packageAllocationEntryId: null,
           shipmentRequestItemId: 251,
           legacyWmsShipmentId: 502,
           legacyWmsShipmentItemId: 701,
@@ -275,6 +277,7 @@ describe("channel fulfillment authority service", () => {
         },
         {
           physicalShipmentItemId: 300,
+          packageAllocationEntryId: null,
           shipmentRequestItemId: 250,
           legacyWmsShipmentId: 501,
           legacyWmsShipmentItemId: 700,
@@ -321,6 +324,7 @@ describe("channel fulfillment authority service", () => {
       items: Object.freeze([
         {
           physicalShipmentItemId: 300,
+          packageAllocationEntryId: null,
           shipmentRequestItemId: 250,
           legacyWmsShipmentId: 501,
           legacyWmsShipmentItemId: 700,
@@ -330,6 +334,7 @@ describe("channel fulfillment authority service", () => {
         },
         {
           physicalShipmentItemId: 301,
+          packageAllocationEntryId: null,
           shipmentRequestItemId: 251,
           legacyWmsShipmentId: 502,
           legacyWmsShipmentItemId: 701,

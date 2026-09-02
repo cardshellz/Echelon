@@ -2430,6 +2430,127 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     }]);
   });
 
+  it("binds one exact current package allocation entry to one matching physical shipment item", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-PROVENANCE", 2);
+    const repository = new PgPackageAllocationLedgerRepository(pool);
+    const service = new PackageAllocationPlanningService(repository);
+    const persisted = await service.persist(commandFor(sourceId));
+    expect(persisted.planId).not.toBeNull();
+
+    const provenance = await pool.query<{
+      entry_id: string;
+      order_item_id: number;
+    }>(
+      `SELECT
+         entry.id::text AS entry_id,
+         source.order_item_id
+       FROM wms.package_allocation_entries AS entry
+       JOIN wms.package_allocation_source_lines AS source
+         ON source.id = entry.package_allocation_source_line_id
+       WHERE entry.package_allocation_plan_id = $1::bigint
+         AND entry.target_kind = 'package'`,
+      [persisted.planId],
+    );
+    expect(provenance.rows).toHaveLength(1);
+
+    const physical = await pool.query<{ id: string }>(
+      `INSERT INTO wms.physical_shipments (
+         provider,
+         provider_physical_shipment_id
+       ) VALUES ('shipstation', '44001')
+       RETURNING id::text AS id`,
+    );
+    const mismatchedPhysical = await pool.query<{ id: string }>(
+      `INSERT INTO wms.physical_shipments (
+         provider,
+         provider_physical_shipment_id
+       ) VALUES ('shipstation', '99999')
+       RETURNING id::text AS id`,
+    );
+    const values = [
+      provenance.rows[0].entry_id,
+      provenance.rows[0].order_item_id,
+      "SKU-PROVENANCE",
+    ] as const;
+
+    await expect(pool.query(
+      `INSERT INTO wms.physical_shipment_items (
+         physical_shipment_id,
+         package_allocation_entry_id,
+         wms_order_item_id,
+         sku,
+         quantity_shipped
+       ) VALUES ($1::bigint, $2::bigint, $3::integer, $4, 1)`,
+      [physical.rows[0].id, ...values],
+    )).rejects.toMatchObject({ code: "23514" });
+
+    await expect(pool.query(
+      `INSERT INTO wms.physical_shipment_items (
+         physical_shipment_id,
+         package_allocation_entry_id,
+         wms_order_item_id,
+         sku,
+         quantity_shipped
+       ) VALUES ($1::bigint, $2::bigint, $3::integer, $4, 2)`,
+      [mismatchedPhysical.rows[0].id, ...values],
+    )).rejects.toMatchObject({ code: "23514" });
+
+    await expect(pool.query(
+      `INSERT INTO wms.physical_shipment_items (
+         physical_shipment_id,
+         legacy_wms_shipment_item_id,
+         package_allocation_entry_id,
+         wms_order_item_id,
+         sku,
+         quantity_shipped
+       ) VALUES ($1::bigint, $2::integer, $3::bigint, $4::integer, $5, 2)`,
+      [physical.rows[0].id, sourceId, ...values],
+    )).rejects.toMatchObject({ code: "23514" });
+
+    const inserted = await pool.query<{
+      id: string;
+      package_allocation_entry_id: string;
+    }>(
+      `INSERT INTO wms.physical_shipment_items (
+         physical_shipment_id,
+         package_allocation_entry_id,
+         wms_order_item_id,
+         sku,
+         quantity_shipped
+       ) VALUES ($1::bigint, $2::bigint, $3::integer, $4, 2)
+       RETURNING id::text AS id, package_allocation_entry_id::text`,
+      [physical.rows[0].id, ...values],
+    );
+    expect(inserted.rows[0].package_allocation_entry_id).toBe(
+      provenance.rows[0].entry_id,
+    );
+
+    const effective = await pool.query<{
+      package_allocation_entry_id: string;
+      quantity_shipped: number;
+    }>(
+      `SELECT package_allocation_entry_id::text, quantity_shipped
+       FROM wms.effective_physical_shipment_items
+       WHERE id = $1::bigint`,
+      [inserted.rows[0].id],
+    );
+    expect(effective.rows).toEqual([{
+      package_allocation_entry_id: provenance.rows[0].entry_id,
+      quantity_shipped: 2,
+    }]);
+
+    await expect(pool.query(
+      `INSERT INTO wms.physical_shipment_items (
+         physical_shipment_id,
+         package_allocation_entry_id,
+         wms_order_item_id,
+         sku,
+         quantity_shipped
+       ) VALUES ($1::bigint, $2::bigint, $3::integer, $4, 2)`,
+      [physical.rows[0].id, ...values],
+    )).rejects.toMatchObject({ code: "23505" });
+  });
+
   it("persists a partial cancellation with exact action evidence and replays without duplicates", async () => {
     const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-CANCEL", 2);
     const baseCommand = commandFor(sourceId);
