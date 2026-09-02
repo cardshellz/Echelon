@@ -29,6 +29,7 @@ function createInventoryWriter() {
     reserveResource: vi.fn(async () => []),
     releaseResources: vi.fn(async () => undefined),
     executePackageOperation: vi.fn(),
+    executeBuildOperation: vi.fn(),
   };
 }
 
@@ -524,6 +525,273 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     expect(buildWriter.handoffOperation).not.toHaveBeenCalled();
     expect(inventoryWriter.reserveResource).not.toHaveBeenCalled();
     expect(inventoryWriter.executePackageOperation).not.toHaveBeenCalled();
+  });
+
+  it("executes a handed-off claim build and records its output ownership atomically", async () => {
+    const plan = buildClaimPlan();
+    const command = {
+      claimId: "9",
+      operationKey: plan.operations[0].operationKey,
+      idempotencyKey: "execute-build:9:1",
+      actor: "test-user",
+      reason: "unit test build execution",
+    };
+    const fake = createPool(async (text) => {
+      if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
+      if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
+      if (text.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
+      }
+      if (text.includes("FROM inventory.availability_claims")) {
+        return { rows: [{
+          id: "9",
+          claim_key: plan.requestKey,
+          order_id: 70,
+          revision: 1,
+          runtime_authority_revision: "2",
+          plan_hash: hash(plan),
+          plan_payload: plan,
+        }] };
+      }
+      if (text.includes("FROM catalog.product_variants") && text.includes("product_id")) {
+        return { rows: [{ id: 101, product_id: 10 }, { id: 105, product_id: 10 }] };
+      }
+      if (text.includes("pg_advisory_xact_lock") || text.includes("FROM inventory.transformation_model_heads")) {
+        return { rows: [] };
+      }
+      if (text.includes("FROM wms.orders")) {
+        return { rows: [{ order_id: 70, warehouse_id: 1, warehouse_status: "ready" }] };
+      }
+      if (text.includes("FROM wms.order_items")) {
+        return { rows: [{
+          order_item_id: 71,
+          sku: "P5",
+          stored_product_id: 10,
+          order_item_requires_shipping: 1,
+          target_variant_id: 105,
+          requested_qty: 3,
+          root_product_id: 10,
+          is_active: true,
+          requires_shipping: true,
+          track_inventory: true,
+          sales_eligibility: "sellable",
+        }] };
+      }
+      if (text.includes("JOIN inventory.availability_claim_build_handoffs AS handoff")) {
+        return { rows: [{
+          id: "10",
+          claim_line_id: "20",
+          order_item_id: 71,
+          operation_key: command.operationKey,
+          parent_operation_key: null,
+          warehouse_id: 1,
+          operation_type: "component_build",
+          authority_id: 7,
+          destination_variant_id: 105,
+          planned_executions: "1",
+          output_qty: "3",
+          committed_output_qty: "3",
+          output_location_id: 3,
+          status: "executing",
+          executed_executions: "0",
+          released_executions: "0",
+          handoff_id: "30",
+          build_order_id: 91,
+          adopted_reservation_qty: "5",
+          handoff_status: "handed_off",
+        }] };
+      }
+      if (text.includes("parent_operation_key = $2")) return { rows: [] };
+      if (text.includes("FROM inventory.availability_claim_operation_inputs")) {
+        return { rows: [{ source_variant_id: 101, required_qty: "5" }] };
+      }
+      if (text.includes("FROM inventory.availability_claim_resources")) {
+        return { rows: [{
+          id: "12",
+          claim_line_id: "20",
+          warehouse_id: 1,
+          warehouse_location_id: 2,
+          inventory_level_id: 11,
+          source_variant_id: 101,
+          claimed_qty: "5",
+          released_qty: "0",
+          consumed_qty: "0",
+        }] };
+      }
+      if (text.includes("FROM inventory.availability_claim_lot_allocations")) {
+        return { rows: [{
+          id: "21",
+          claim_resource_id: "12",
+          inventory_lot_id: 51,
+          claimed_qty: "5",
+          released_qty: "0",
+          consumed_qty: "0",
+          unit_cost_mills: "125",
+          po_unit_cost_mills: "100",
+          packaging_unit_cost_mills: "20",
+          landed_unit_cost_mills: "5",
+        }] };
+      }
+      if (text.startsWith("UPDATE inventory.availability_claim_lot_allocations")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.availability_claim_resources")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("INSERT INTO inventory.availability_claim_resources")) return { rows: [{ id: "13" }], rowCount: 1 };
+      if (text.startsWith("INSERT INTO inventory.availability_claim_lot_allocations")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.availability_claim_operations")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.availability_claim_build_handoffs")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("INSERT INTO inventory.availability_claim_commands")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("INSERT INTO inventory.availability_claim_events")) return { rows: [], rowCount: 1 };
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const buildWriter = {
+      handoffOperation: vi.fn(),
+      cancelOperation: vi.fn(),
+      executeOperation: vi.fn(async () => ({
+        buildOrderId: 91,
+        buildRunId: 92,
+        buildSystemNumber: "BLD-00000091",
+        outputInventoryLevelId: 12,
+        committedLotAllocations: [{
+          inventoryLotId: 61,
+          qty: 3,
+          unitCostMills: BigInt(208),
+          poUnitCostMills: BigInt(166),
+          packagingUnitCostMills: BigInt(33),
+          landedUnitCostMills: BigInt(9),
+        }],
+        totalInputCostMills: BigInt(625),
+      })),
+    };
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      createInventoryWriter(),
+      fake.pool,
+      () => FIXED_TIME,
+      buildWriter,
+    );
+
+    await expect(repository.executeBuildOperation(command)).resolves.toEqual({
+      outcome: "executed",
+      claimId: "9",
+      claimOperationId: "10",
+      operationKey: command.operationKey,
+      outputResourceId: "13",
+      producedQty: "3",
+      committedQty: "3",
+      surplusQty: "0",
+      totalInputCostMills: "625",
+      idempotentReplay: false,
+    });
+    expect(buildWriter.executeOperation).toHaveBeenCalledWith(expect.objectContaining({
+      claimId: BigInt(9),
+      claimOperationId: BigInt(10),
+      buildOrderId: 91,
+      plannedBuilds: BigInt(1),
+      committedOutputQty: BigInt(3),
+    }));
+    const commandInsert = fake.query.mock.calls.find(([text]) =>
+      String(text).startsWith("INSERT INTO inventory.availability_claim_commands"));
+    expect(commandInsert?.[1]?.[2]).toBe("execute_build");
+  });
+
+  it("cancels unexecuted build handoffs before releasing their claim-owned inventory", async () => {
+    const plan = buildClaimPlan();
+    const command = {
+      orderId: 70,
+      disposition: "cancel" as const,
+      idempotencyKey: "cancel-claim:70",
+      actor: "test-user",
+      reason: "order cancelled",
+    };
+    const fake = createPool(async (text) => {
+      if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
+      if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
+      if (text.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
+      }
+      if (text.includes("FROM inventory.availability_claims")) {
+        return { rows: [{ id: "9", claim_key: plan.requestKey, order_id: 70, revision: 1, runtime_authority_revision: "2", plan_hash: hash(plan), plan_payload: plan }] };
+      }
+      if (text.includes("FROM catalog.product_variants") && text.includes("product_id")) {
+        return { rows: [{ id: 101, product_id: 10 }, { id: 105, product_id: 10 }] };
+      }
+      if (text.includes("pg_advisory_xact_lock") || text.includes("FROM inventory.transformation_model_heads")) return { rows: [] };
+      if (text.includes("FROM wms.orders")) return { rows: [{ order_id: 70, warehouse_id: 1, warehouse_status: "cancelled" }] };
+      if (text.includes("FROM wms.order_items")) return { rows: [] };
+      if (text.includes("FROM inventory.availability_claim_build_handoffs AS handoff")) {
+        return { rows: [{
+          id: "30",
+          claim_operation_id: "10",
+          build_order_id: 91,
+          adopted_reservation_qty: "5",
+          status: "handed_off",
+          operation_key: plan.operations[0].operationKey,
+          operation_status: "executing",
+          executed_executions: "0",
+          released_executions: "0",
+        }] };
+      }
+      if (text.includes("FROM inventory.availability_claim_resources AS resource")) {
+        return { rows: [{
+          id: "12",
+          claim_line_id: "20",
+          inventory_level_id: 11,
+          warehouse_location_id: 2,
+          source_variant_id: 101,
+          claimed_qty: "5",
+          released_qty: "0",
+          consumed_qty: "0",
+          order_item_id: 71,
+        }] };
+      }
+      if (text.includes("FROM inventory.availability_claim_lot_allocations AS allocation")) {
+        return { rows: [{ id: "21", claim_resource_id: "12", inventory_lot_id: 51, claimed_qty: "5", released_qty: "0", consumed_qty: "0" }] };
+      }
+      if (text.startsWith("UPDATE inventory.availability_claim_build_handoffs")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.availability_claim_lot_allocations")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.availability_claim_resources")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.availability_claim_lines")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.availability_claim_operations")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.availability_claims")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("INSERT INTO inventory.availability_claim_commands")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("INSERT INTO inventory.availability_claim_events")) return { rows: [], rowCount: 1 };
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const inventoryWriter = createInventoryWriter();
+    const buildWriter = {
+      handoffOperation: vi.fn(),
+      executeOperation: vi.fn(),
+      cancelOperation: vi.fn(async () => ({
+        buildOrderId: 91,
+        buildSystemNumber: "BLD-00000091",
+        releasedReservationQty: BigInt(5),
+      })),
+    };
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      inventoryWriter,
+      fake.pool,
+      () => FIXED_TIME,
+      buildWriter,
+    );
+
+    await expect(repository.releaseOrderClaim(command)).resolves.toEqual({
+      outcome: "released",
+      claimId: "9",
+      claimKey: plan.requestKey,
+      orderId: 70,
+      status: "cancelled",
+      releasedResourceQty: "5",
+      releasedLotQty: "5",
+      idempotentReplay: false,
+    });
+    expect(buildWriter.cancelOperation).toHaveBeenCalledWith(expect.objectContaining({
+      claimId: BigInt(9),
+      claimOperationId: BigInt(10),
+      buildOrderId: 91,
+      expectedReservationQty: BigInt(5),
+    }));
+    expect(inventoryWriter.releaseResources).toHaveBeenCalledWith(expect.objectContaining({
+      claimId: BigInt(9),
+      resources: [expect.objectContaining({ claimResourceId: BigInt(12), releaseQty: BigInt(5) })],
+    }));
   });
 
   it("rejects reuse of a package-execution receipt as a build-handoff receipt", async () => {

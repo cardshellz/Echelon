@@ -7,6 +7,10 @@ const migration = readFileSync(
   resolve(process.cwd(), "migrations/0644_inventory_availability_claim_build_handoff.sql"),
   "utf8",
 );
+const executionMigration = readFileSync(
+  resolve(process.cwd(), "migrations/0646_inventory_availability_claim_build_execution.sql"),
+  "utf8",
+);
 const claimRepository = readFileSync(
   resolve(process.cwd(), "server/modules/inventory-planning/infrastructure/inventory-availability-claim.repository.ts"),
   "utf8",
@@ -43,10 +47,19 @@ describe("canonical claim build handoff migration", () => {
     expect(buildWriter).toContain("availability_claim_lot_allocation_id");
   });
 
-  it("keeps unsafe downstream actions closed until claim-aware completion and cancellation exist", () => {
+  it("keeps generic build actions closed while exposing only claim-aware execution and cancellation", () => {
     expect(buildExecution).toContain("CLAIM_BUILD_EXECUTION_NOT_AVAILABLE");
     expect(buildExecution).toContain("CLAIM_BUILD_CANCEL_REQUIRES_CLAIM_COMMAND");
-    expect(claimRepository).toContain("CLAIM_BUILD_HANDOFF_RELEASE_REQUIRED");
+    expect(buildExecution).toContain("CLAIM_BUILD_RELEASE_REQUIRES_CLAIM_COMMAND");
+    expect(buildExecution).toContain("CLAIM_BUILD_REVERSAL_REQUIRES_CLAIM_COMMAND");
+    expect(buildExecution).toContain('assertClaimBuildActionAvailable(tx, buildOrderId, "release")');
+    expect(buildExecution).toContain('assertClaimBuildActionAvailable(tx, input.buildOrderId, "execute")');
+    expect(buildExecution).toContain('assertClaimBuildActionAvailable(tx, input.buildOrderId, "cancel")');
+    expect(buildExecution).toContain('assertClaimBuildActionAvailable(tx, input.buildOrderId, "reverse")');
+    expect(claimRepository).toContain("async executeBuildOperation");
+    expect(claimRepository).toContain("cancelOpenBuildHandoffs");
+    expect(claimRepository).toContain('commandType: "execute_build"');
+    expect(executionMigration).toContain("'execute_build'");
   });
 
   it("does not mutate authority or physical inventory during deployment", () => {
@@ -55,5 +68,7 @@ describe("canonical claim build handoff migration", () => {
     expect(migration).not.toMatch(/UPDATE\s+inventory\.inventory_lots/i);
     expect(migration).not.toMatch(/INSERT\s+INTO\s+inventory\.inventory_transactions/i);
     expect(migration).not.toMatch(/DELETE\s+FROM/i);
+    expect(executionMigration).not.toMatch(/UPDATE\s+inventory\.inventory_(levels|lots)/i);
+    expect(executionMigration).not.toMatch(/INSERT\s+INTO\s+inventory\.inventory_transactions/i);
   });
 });

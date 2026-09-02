@@ -1681,7 +1681,7 @@ export const inventoryAvailabilityClaimCommands = inventoryPlanningSchema.table(
     claimLookup: index("availability_claim_commands_claim_idx").on(table.claimId, table.occurredAt, table.id),
     typeValid: check(
       "availability_claim_commands_type_chk",
-      sql`${table.commandType} IN ('claim', 'release', 'cancel', 'execute', 'handoff_build')`,
+      sql`${table.commandType} IN ('claim', 'release', 'cancel', 'execute', 'handoff_build', 'execute_build')`,
     ),
     hashValid: check(
       "availability_claim_commands_hash_chk",
