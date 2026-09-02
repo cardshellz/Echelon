@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const migration = readFileSync(
-  resolve(process.cwd(), "migrations/0638_package_allocation_physical_item_provenance.sql"),
+  resolve(process.cwd(), "migrations/0639_package_allocation_physical_item_provenance.sql"),
   "utf8",
 );
 const schema = readFileSync(
@@ -51,7 +51,7 @@ describe("package-allocation physical-item provenance migration", () => {
     expect(schema).toContain('uniqueIndex("uq_physical_shipment_items_package_allocation_entry")');
     expect(schema).toContain('"physical_shipment_items_single_source_provenance_chk"');
     expect(integrationSetup).toContain(
-      '"migrations/0638_package_allocation_physical_item_provenance.sql"',
+      '"migrations/0639_package_allocation_physical_item_provenance.sql"',
     );
   });
 });
