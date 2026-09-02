@@ -11,7 +11,7 @@ const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const DISPOSABLE_DB = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeWithDisposableDb = TEST_DB_URL && DISPOSABLE_DB ? describe : describe.skip;
 const sourceMigration = readFileSync(
-  resolve(process.cwd(), "migrations/0642_shipping_fulfillment_provider_connections.sql"),
+  resolve(process.cwd(), "migrations/0643_shipping_fulfillment_provider_connections.sql"),
   "utf8",
 );
 

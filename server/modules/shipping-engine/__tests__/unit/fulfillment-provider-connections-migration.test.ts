@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const migration = readFileSync(
-  resolve(process.cwd(), "migrations/0642_shipping_fulfillment_provider_connections.sql"),
+  resolve(process.cwd(), "migrations/0643_shipping_fulfillment_provider_connections.sql"),
   "utf8",
 );
 
@@ -23,6 +24,10 @@ describe("shipping fulfillment provider connections migration", () => {
 
   it("backfills existing ShipStation routes through a deployment-managed connection", () => {
     expect(migration).toContain("'SHIPSTATION_V2_API_KEY'");
+    const migrationCommand = "migration:0643:shipstation-environment";
+    const requestHash = createHash("sha256").update(migrationCommand).digest("hex");
+    expect(migration).toContain(`'${migrationCommand}'`);
+    expect(migration).toContain(`'${requestHash}'`);
     expect(migration).toContain("ADD COLUMN provider_connection_id BIGINT");
     expect(migration).toMatch(/UPDATE shipping\.service_level_methods AS method[\s\S]+SET provider_connection_id = connection\.id/);
     expect(migration).toContain("shipping_level_method_provider_connection_fk");

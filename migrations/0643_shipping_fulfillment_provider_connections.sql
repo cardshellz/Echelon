@@ -140,9 +140,9 @@ VALUES (
   NULL,
   NULL,
   NULL,
-  'system:migration:0642',
+  'system:migration:0643',
   transaction_timestamp(),
-  'system:migration:0642',
+  'system:migration:0643',
   transaction_timestamp()
 )
 ON CONFLICT DO NOTHING;
@@ -161,8 +161,8 @@ INSERT INTO shipping.fulfillment_provider_connection_events (
 SELECT connection.id,
        'created',
        1,
-       'migration:0642:shipstation-environment',
-       'd59075b11f38e7f60e8f4b0247ce87265e48feb711beee6d560b00cc5322cfc8',
+       'migration:0643:shipstation-environment',
+       'd138fdcaaed7db6deb65ad3626c166bda66ec8150f37409e712fe5f6c057a749',
        NULL,
        jsonb_build_object(
          'id', connection.id,
@@ -184,7 +184,7 @@ SELECT connection.id,
          'lastErrorCode', NULL,
          'lastErrorMessage', NULL
        ),
-       'system:migration:0642',
+       'system:migration:0643',
        transaction_timestamp()
 FROM shipping.fulfillment_provider_connections AS connection
 WHERE connection.provider = 'shipstation_v2'

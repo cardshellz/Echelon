@@ -25,7 +25,7 @@ It does not require a new routing table or provider enum migration.
 
 ## Credentials
 
-Migration `0642_shipping_fulfillment_provider_connections.sql` creates one
+Migration `0643_shipping_fulfillment_provider_connections.sql` creates one
 system-managed ShipStation connection backed by `SHIPSTATION_V2_API_KEY`. This
 preserves existing routing after deployment.
 
