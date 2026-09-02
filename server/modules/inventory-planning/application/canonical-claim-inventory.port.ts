@@ -6,6 +6,9 @@ export type CanonicalClaimLotAllocation = {
   inventoryLotId: number;
   qty: number;
   unitCostMills: bigint;
+  poUnitCostMills: bigint;
+  packagingUnitCostMills: bigint;
+  landedUnitCostMills: bigint;
 };
 
 export type CanonicalClaimInventoryReleaseResource = {
@@ -19,6 +22,38 @@ export type CanonicalClaimInventoryReleaseResource = {
     releaseQty: bigint;
   }[];
   orderItemId: number;
+};
+
+export type CanonicalClaimInventoryExecutionResource = {
+  claimResourceId: bigint;
+  inventoryLevelId: number;
+  warehouseLocationId: number;
+  sourceVariantId: number;
+  consumeQty: bigint;
+  lotAllocations: readonly {
+    claimLotAllocationId: bigint;
+    inventoryLotId: number;
+    consumeQty: bigint;
+    unitCostMills: bigint;
+    poUnitCostMills: bigint;
+    packagingUnitCostMills: bigint;
+    landedUnitCostMills: bigint;
+  }[];
+};
+
+export type CanonicalClaimProducedLotAllocation = {
+  inventoryLotId: number;
+  qty: number;
+  unitCostMills: bigint;
+  poUnitCostMills: bigint;
+  packagingUnitCostMills: bigint;
+  landedUnitCostMills: bigint;
+};
+
+export type CanonicalClaimPackageExecutionResult = {
+  outputInventoryLevelId: number;
+  committedLotAllocations: readonly CanonicalClaimProducedLotAllocation[];
+  totalInputCostMills: bigint;
 };
 
 export interface CanonicalClaimInventoryMutationPort {
@@ -46,4 +81,22 @@ export interface CanonicalClaimInventoryMutationPort {
     reason: string;
     occurredAt: Date;
   }): Promise<void>;
+
+  executePackageOperation(input: {
+    client: CanonicalClaimTransactionClient;
+    claimId: bigint;
+    claimOperationId: bigint;
+    operationKey: string;
+    operationType: "break_pack" | "assemble_pack" | "directed_conversion";
+    resources: readonly CanonicalClaimInventoryExecutionResource[];
+    destinationVariantId: number;
+    outputLocationId: number;
+    outputQty: bigint;
+    committedOutputQty: bigint;
+    orderId: number;
+    orderItemId: number;
+    actor: string;
+    reason: string;
+    occurredAt: Date;
+  }): Promise<CanonicalClaimPackageExecutionResult>;
 }

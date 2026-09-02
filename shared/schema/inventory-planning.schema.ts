@@ -1433,6 +1433,7 @@ export const inventoryAvailabilityClaimOperations = inventoryPlanningSchema.tabl
       .references(() => productVariants.id, { onDelete: "restrict" }),
     plannedExecutions: bigint("planned_executions", { mode: "bigint" }).notNull(),
     outputQty: bigint("output_qty", { mode: "bigint" }).notNull(),
+    committedOutputQty: bigint("committed_output_qty", { mode: "bigint" }),
     outputLocationId: integer("output_location_id")
       .references(() => warehouseLocations.id, { onDelete: "restrict" }),
     status: varchar("status", { length: 30 }).notNull().default("pending"),
@@ -1472,6 +1473,11 @@ export const inventoryAvailabilityClaimOperations = inventoryPlanningSchema.tabl
         AND ${table.executedExecutions} >= 0 AND ${table.releasedExecutions} >= 0
         AND ${table.executedExecutions} + ${table.releasedExecutions} <= ${table.plannedExecutions}`,
     ),
+    committedOutputValid: check(
+      "availability_claim_operations_committed_output_chk",
+      sql`${table.committedOutputQty} IS NULL
+        OR (${table.committedOutputQty} > 0 AND ${table.committedOutputQty} <= ${table.outputQty})`,
+    ),
     authorityValid: check("availability_claim_operations_authority_chk", sql`${table.authorityId} > 0`),
   }),
 );
@@ -1509,6 +1515,7 @@ export const inventoryAvailabilityClaimResources = inventoryPlanningSchema.table
       .references(() => inventoryAvailabilityClaims.id, { onDelete: "restrict" }),
     claimLineId: bigint("claim_line_id", { mode: "bigint" }).notNull(),
     consumerOperationKey: varchar("consumer_operation_key", { length: 300 }),
+    producerOperationKey: varchar("producer_operation_key", { length: 300 }),
     warehouseId: integer("warehouse_id").notNull().references(() => warehouses.id, { onDelete: "restrict" }),
     warehouseLocationId: integer("warehouse_location_id").notNull()
       .references(() => warehouseLocations.id, { onDelete: "restrict" }),
@@ -1533,6 +1540,11 @@ export const inventoryAvailabilityClaimResources = inventoryPlanningSchema.table
       foreignColumns: [inventoryAvailabilityClaimOperations.claimId, inventoryAvailabilityClaimOperations.operationKey],
       name: "availability_claim_resources_operation_fk",
     }),
+    producerOperationForeignKey: foreignKey({
+      columns: [table.claimId, table.producerOperationKey],
+      foreignColumns: [inventoryAvailabilityClaimOperations.claimId, inventoryAvailabilityClaimOperations.operationKey],
+      name: "availability_claim_resources_producer_operation_fk",
+    }),
     identityUnique: uniqueIndex("availability_claim_resources_identity_uq").on(
       table.claimLineId,
       table.warehouseId,
@@ -1540,6 +1552,7 @@ export const inventoryAvailabilityClaimResources = inventoryPlanningSchema.table
       table.inventoryLevelId,
       table.sourceVariantId,
       sql`COALESCE(${table.consumerOperationKey}, '')`,
+      sql`COALESCE(${table.producerOperationKey}, '')`,
     ),
     idClaimUnique: uniqueIndex("availability_claim_resources_id_claim_uq").on(table.id, table.claimId),
     levelLookup: index("availability_claim_resources_level_idx").on(table.inventoryLevelId, table.claimId),
@@ -1564,6 +1577,9 @@ export const inventoryAvailabilityClaimLotAllocations = inventoryPlanningSchema.
     releasedQty: bigint("released_qty", { mode: "bigint" }).notNull().default(BigInt(0)),
     consumedQty: bigint("consumed_qty", { mode: "bigint" }).notNull().default(BigInt(0)),
     unitCostMills: bigint("unit_cost_mills", { mode: "bigint" }).notNull(),
+    poUnitCostMills: bigint("po_unit_cost_mills", { mode: "bigint" }),
+    packagingUnitCostMills: bigint("packaging_unit_cost_mills", { mode: "bigint" }),
+    landedUnitCostMills: bigint("landed_unit_cost_mills", { mode: "bigint" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1582,6 +1598,15 @@ export const inventoryAvailabilityClaimLotAllocations = inventoryPlanningSchema.
         AND ${table.releasedQty} + ${table.consumedQty} <= ${table.claimedQty}`,
     ),
     costValid: check("availability_claim_lot_allocations_cost_chk", sql`${table.unitCostMills} >= 0`),
+    costBreakdownValid: check(
+      "availability_claim_lot_allocations_cost_breakdown_chk",
+      sql`(${table.poUnitCostMills} IS NULL AND ${table.packagingUnitCostMills} IS NULL
+          AND ${table.landedUnitCostMills} IS NULL)
+        OR (${table.poUnitCostMills} >= 0 AND ${table.packagingUnitCostMills} >= 0
+          AND ${table.landedUnitCostMills} >= 0
+          AND ${table.poUnitCostMills} + ${table.packagingUnitCostMills}
+            + ${table.landedUnitCostMills} = ${table.unitCostMills})`,
+    ),
   }),
 );
 
