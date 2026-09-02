@@ -19,7 +19,7 @@ import { z } from "zod";
 
 import { products, productVariants } from "./catalog.schema";
 import { channelConnections, channels } from "./channels.schema";
-import { buildRecipes, inventoryLevels, inventoryLots } from "./inventory.schema";
+import { buildOrders, buildRecipes, inventoryLevels, inventoryLots } from "./inventory.schema";
 import { orderItems, orders } from "./orders.schema";
 import { warehouseLocations, warehouses } from "./warehouse.schema";
 
@@ -1591,6 +1591,8 @@ export const inventoryAvailabilityClaimLotAllocations = inventoryPlanningSchema.
     }).onDelete("restrict"),
     resourceLotUnique: uniqueIndex("availability_claim_lot_allocations_resource_lot_uq")
       .on(table.claimResourceId, table.inventoryLotId),
+    idClaimUnique: uniqueIndex("availability_claim_lot_allocations_id_claim_uq")
+      .on(table.id, table.claimId),
     lotLookup: index("availability_claim_lot_allocations_lot_idx").on(table.inventoryLotId, table.claimId),
     quantityValid: check(
       "availability_claim_lot_allocations_quantity_chk",
@@ -1606,6 +1608,52 @@ export const inventoryAvailabilityClaimLotAllocations = inventoryPlanningSchema.
           AND ${table.landedUnitCostMills} >= 0
           AND ${table.poUnitCostMills} + ${table.packagingUnitCostMills}
             + ${table.landedUnitCostMills} = ${table.unitCostMills})`,
+    ),
+  }),
+);
+
+export const inventoryAvailabilityClaimBuildHandoffs = inventoryPlanningSchema.table(
+  "availability_claim_build_handoffs",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    claimId: bigint("claim_id", { mode: "bigint" }).notNull()
+      .references(() => inventoryAvailabilityClaims.id, { onDelete: "restrict" }),
+    claimOperationId: bigint("claim_operation_id", { mode: "bigint" }).notNull(),
+    buildOrderId: integer("build_order_id").notNull()
+      .references(() => buildOrders.id, { onDelete: "restrict" }),
+    status: varchar("status", { length: 30 }).notNull(),
+    adoptedReservationQty: bigint("adopted_reservation_qty", { mode: "bigint" }).notNull(),
+    createdBy: varchar("created_by", { length: 100 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operationForeignKey: foreignKey({
+      columns: [table.claimOperationId, table.claimId],
+      foreignColumns: [inventoryAvailabilityClaimOperations.id, inventoryAvailabilityClaimOperations.claimId],
+      name: "availability_claim_build_handoffs_operation_fk",
+    }).onDelete("restrict"),
+    operationUnique: uniqueIndex("availability_claim_build_handoffs_operation_uq")
+      .on(table.claimId, table.claimOperationId),
+    buildOrderUnique: uniqueIndex("availability_claim_build_handoffs_build_order_uq").on(table.buildOrderId),
+    claimStatusLookup: index("availability_claim_build_handoffs_claim_status_idx")
+      .on(table.claimId, table.status, table.id),
+    quantityValid: check(
+      "availability_claim_build_handoffs_quantity_chk",
+      sql`${table.adoptedReservationQty} > 0`,
+    ),
+    actorValid: check("availability_claim_build_handoffs_actor_chk", sql`btrim(${table.createdBy}) <> ''`),
+    statusValid: check(
+      "availability_claim_build_handoffs_status_chk",
+      sql`${table.status} IN ('handed_off', 'completed', 'cancelled')`,
+    ),
+    lifecycleValid: check(
+      "availability_claim_build_handoffs_lifecycle_chk",
+      sql`(${table.status} = 'handed_off' AND ${table.completedAt} IS NULL AND ${table.cancelledAt} IS NULL)
+        OR (${table.status} = 'completed' AND ${table.completedAt} IS NOT NULL AND ${table.cancelledAt} IS NULL)
+        OR (${table.status} = 'cancelled' AND ${table.completedAt} IS NULL AND ${table.cancelledAt} IS NOT NULL)`,
     ),
   }),
 );
@@ -1633,7 +1681,7 @@ export const inventoryAvailabilityClaimCommands = inventoryPlanningSchema.table(
     claimLookup: index("availability_claim_commands_claim_idx").on(table.claimId, table.occurredAt, table.id),
     typeValid: check(
       "availability_claim_commands_type_chk",
-      sql`${table.commandType} IN ('claim', 'release', 'cancel', 'execute')`,
+      sql`${table.commandType} IN ('claim', 'release', 'cancel', 'execute', 'handoff_build')`,
     ),
     hashValid: check(
       "availability_claim_commands_hash_chk",
@@ -2608,6 +2656,8 @@ export type InventoryAvailabilityClaimOperationInput =
 export type InventoryAvailabilityClaimResource = typeof inventoryAvailabilityClaimResources.$inferSelect;
 export type InventoryAvailabilityClaimLotAllocation =
   typeof inventoryAvailabilityClaimLotAllocations.$inferSelect;
+export type InventoryAvailabilityClaimBuildHandoff =
+  typeof inventoryAvailabilityClaimBuildHandoffs.$inferSelect;
 export type InventoryAvailabilityClaimCommand = typeof inventoryAvailabilityClaimCommands.$inferSelect;
 export type InventoryAvailabilityClaimEvent = typeof inventoryAvailabilityClaimEvents.$inferSelect;
 export type InventoryAvailabilityActivationCommand = typeof inventoryAvailabilityActivationCommands.$inferSelect;
