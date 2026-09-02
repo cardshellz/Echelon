@@ -21,6 +21,7 @@ import {
   sourceEventIdFromRetryPayload,
   type ShopifyFulfillmentWebhookTopic,
 } from "../modules/oms/shopify-fulfillment-webhook-retry";
+import { retireDeletedShopifyProduct } from "../modules/catalog/shopify-product-retirement.service";
 
 // ---------------------------------------------------------------------------
 // Shopify carrier-name → canonical carrier code mapping (§6 Commit 26).
@@ -857,13 +858,19 @@ export function registerShopifyRoutes(app: Express) {
         return res.status(401).json({ error: "Invalid signature" });
       }
 
-      const payload = req.body;
-      const skus = extractSkusFromWebhookPayload(payload);
-      const skuList = skus.map(s => s.sku);
-      
-      const deleted = await storage.deleteProductLocationsBySku(skuList);
-      console.log(`Webhook: Deleted ${deleted} SKUs from product delete`);
-      
+      // Shopify's delete payload carries only the product id — no variants —
+      // so the SKU-based path this used to take could never match anything.
+      // Retire the mapping instead, and resolve SKUs from our own catalog.
+      const deletedShopifyProductId = req.body?.id;
+      const result = await retireDeletedShopifyProduct(deletedShopifyProductId);
+      console.log(JSON.stringify({
+        event: "shopify_product_deleted",
+        shopifyProductId: result.shopifyProductId,
+        mappingsRetired: result.mappingsRetired,
+        pickLocationsRemoved: result.pickLocationsRemoved,
+        retiredProductIds: result.retiredProductIds,
+      }));
+
       res.status(200).json({ received: true });
     } catch (error) {
       console.error("Product delete webhook error:", error);
