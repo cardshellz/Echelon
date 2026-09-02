@@ -231,7 +231,7 @@ export class BuildExecutionRepository {
   private async assertClaimBuildActionAvailable(
     tx: Db,
     buildOrderId: number,
-    action: "execute" | "cancel",
+    action: "release" | "execute" | "cancel" | "reverse",
   ): Promise<void> {
     const handoffResult = await tx.execute(sql`
       SELECT claim_id, claim_operation_id, status
@@ -240,18 +240,41 @@ export class BuildExecutionRepository {
       FOR SHARE
     `);
     const handoff = handoffResult.rows[0];
-    if (!handoff || String(handoff.status) !== "handed_off") return;
+    if (!handoff) return;
+
+    const handoffStatus = String(handoff.status);
+    const blocked = action === "reverse"
+      ? handoffStatus === "handed_off" || handoffStatus === "completed"
+      : handoffStatus === "handed_off";
+    if (!blocked) return;
+
+    const errorByAction = {
+      release: {
+        code: "CLAIM_BUILD_RELEASE_REQUIRES_CLAIM_COMMAND",
+        message: "A canonical claim build is already released by its claim handoff and cannot use generic component reservation",
+      },
+      execute: {
+        code: "CLAIM_BUILD_EXECUTION_NOT_AVAILABLE",
+        message: "A canonical claim build must be executed through the claim-aware command so input consumption and output ownership remain atomic",
+      },
+      cancel: {
+        code: "CLAIM_BUILD_CANCEL_REQUIRES_CLAIM_COMMAND",
+        message: "A canonical claim build must be cancelled through the claim-aware command so its adopted reservations remain single-owned",
+      },
+      reverse: {
+        code: "CLAIM_BUILD_REVERSAL_REQUIRES_CLAIM_COMMAND",
+        message: "A canonical claim build cannot use generic reversal because the claim owns its output and lineage",
+      },
+    } as const;
+    const failure = errorByAction[action];
     throw new BuildDomainError(
-      action === "execute"
-        ? "CLAIM_BUILD_EXECUTION_NOT_AVAILABLE"
-        : "CLAIM_BUILD_CANCEL_REQUIRES_CLAIM_COMMAND",
-      action === "execute"
-        ? "Canonical claim build execution remains disabled until atomic claim output ownership is installed"
-        : "A canonical claim build must be cancelled through the claim-aware command so its adopted reservations remain single-owned",
+      failure.code,
+      failure.message,
       {
         buildOrderId,
         claimId: String(handoff.claim_id),
         claimOperationId: String(handoff.claim_operation_id),
+        handoffStatus,
       },
     );
   }
@@ -411,6 +434,7 @@ export class BuildExecutionRepository {
 
   async releaseOrder(buildOrderId: number, actorId?: string, txOverride?: Db): Promise<any> {
     const work = async (tx: Db) => {
+      await this.assertClaimBuildActionAvailable(tx, buildOrderId, "release");
       const order = await this.lockOrder(tx, buildOrderId);
       if (order.status === "completed") return order;
       if (order.status !== "draft" && order.status !== "released") {
@@ -451,6 +475,7 @@ export class BuildExecutionRepository {
   }
 
   private async executeInTransaction(tx: Db, input: ExecuteBuildRunInput): Promise<BuildExecutionResult> {
+    await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "execute");
     const order = await this.lockOrder(tx, input.buildOrderId);
     const existingResult = await tx.execute(sql`
       SELECT *
@@ -486,8 +511,6 @@ export class BuildExecutionRepository {
         { status: order.status },
       );
     }
-    await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "execute");
-
     const components = await this.lockComponents(tx, input.buildOrderId);
     await this.assertConfigurationCurrent(tx, order, components);
     const quantities = calculateBuildRunQuantities({
@@ -913,6 +936,7 @@ export class BuildExecutionRepository {
 
   async cancelOrder(input: CancelBuildOrderInput, txOverride?: Db): Promise<BuildCancellationResult> {
     const work = async (tx: Db): Promise<BuildCancellationResult> => {
+      await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "cancel");
       const order = await this.lockOrder(tx, input.buildOrderId);
       if (order.status === "cancelled") {
         if (String(order.cancellation_reason ?? "") !== input.reason) {
@@ -939,7 +963,6 @@ export class BuildExecutionRepository {
           { status: order.status },
         );
       }
-      await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "cancel");
       const releasedReservationQty = await this.releaseOpenReservations(tx, order, input.actorId);
       await tx.execute(sql`
         UPDATE inventory.build_orders
@@ -966,6 +989,7 @@ export class BuildExecutionRepository {
 
   async reverseRun(input: ReverseBuildRunInput): Promise<BuildReversalResult> {
     return this.db.transaction(async (tx) => {
+      await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "reverse");
       const order = await this.lockOrder(tx, input.buildOrderId);
       if (order.status === "cancelled") {
         throw new BuildDomainError(

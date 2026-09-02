@@ -9,6 +9,10 @@ import type {
 import { allocateBuildCostLayers } from "../domain/build.domain";
 import { buildMillsToRoundedCents, normalizeBuildLotCosts } from "./build.repository";
 
+type CanonicalTransformationExecutionInput =
+  | Parameters<CanonicalClaimInventoryMutationPort["executePackageOperation"]>[0]
+  | Parameters<CanonicalClaimInventoryMutationPort["executeBuildOperation"]>[0];
+
 function rows(result: { rows: any[] }): any[] {
   return Array.isArray(result.rows) ? result.rows : [];
 }
@@ -276,6 +280,18 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
   async executePackageOperation(
     input: Parameters<CanonicalClaimInventoryMutationPort["executePackageOperation"]>[0],
   ): Promise<Awaited<ReturnType<CanonicalClaimInventoryMutationPort["executePackageOperation"]>>> {
+    return this.executeTransformationOperation(input);
+  }
+
+  async executeBuildOperation(
+    input: Parameters<CanonicalClaimInventoryMutationPort["executeBuildOperation"]>[0],
+  ): Promise<Awaited<ReturnType<CanonicalClaimInventoryMutationPort["executeBuildOperation"]>>> {
+    return this.executeTransformationOperation(input);
+  }
+
+  private async executeTransformationOperation(
+    input: CanonicalTransformationExecutionInput,
+  ): Promise<Awaited<ReturnType<CanonicalClaimInventoryMutationPort["executePackageOperation"]>>> {
     validateAuditInput(input);
     positiveBigInt(input.claimOperationId, "claimOperation.id");
     const operationKey = nonblank(input.operationKey, "operation.key", 300);
@@ -296,15 +312,39 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     if (input.resources.length === 0) {
       throw new CanonicalClaimInventoryMutationError(
         "CLAIM_OPERATION_INPUTS_MISSING",
-        "A package transformation requires exact claim-owned source resources.",
+        "A transformation requires exact claim-owned source resources.",
       );
     }
     if (input.resources.some((resource) => resource.sourceVariantId === destinationVariantId)) {
       throw new CanonicalClaimInventoryMutationError(
         "CLAIM_OPERATION_SELF_TRANSFORMATION",
-        "A package transformation cannot consume and produce the same variant.",
+        "A transformation cannot consume and produce the same variant.",
         { destinationVariantId },
       );
+    }
+
+    const build = "build" in input ? input.build : null;
+    const buildComponentsByVariant = new Map<number, number>();
+    if (build) {
+      positiveInteger(build.buildOrderId, "buildOrder.id");
+      positiveInteger(build.buildRunId, "buildRun.id");
+      positiveInteger(build.buildRunNumber, "buildRun.runNumber");
+      nonblank(build.buildSystemNumber, "buildOrder.systemNumber", 40);
+      for (const component of build.components) {
+        const sourceVariantId = positiveInteger(component.sourceVariantId, "buildComponent.sourceVariantId");
+        const buildOrderComponentId = positiveInteger(
+          component.buildOrderComponentId,
+          "buildComponent.id",
+        );
+        if (buildComponentsByVariant.has(sourceVariantId)) {
+          throw new CanonicalClaimInventoryMutationError(
+            "DUPLICATE_CLAIM_BUILD_COMPONENT",
+            "A claim build may contain only one immutable component snapshot per source variant.",
+            { sourceVariantId },
+          );
+        }
+        buildComponentsByVariant.set(sourceVariantId, buildOrderComponentId);
+      }
     }
 
     const resources = [...input.resources].sort(compareExecutionResources);
@@ -552,30 +592,55 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       const variantBefore = running.variantQty;
       running.variantQty -= consumeQty;
       running.reservedQty -= consumeQty;
-      await input.client.query(
-        `INSERT INTO inventory.inventory_transactions (
-           product_variant_id, from_location_id, transaction_type,
-           variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
-           source_state, target_state, unit_cost_cents, inventory_lot_id,
-           order_id, order_item_id, reference_type, reference_id, user_id, notes, created_at
-         ) VALUES ($1, $2, 'transform', $3, $4, $5, $3, 'committed', 'consumed',
-                   $6, $7, $8, $9, 'availability_claim_operation', $10, $11, $12, $13)`,
-        [
-          resource.sourceVariantId,
-          resource.warehouseLocationId,
-          -consumeQty,
-          variantBefore,
-          running.variantQty,
-          buildMillsToRoundedCents(allocation.unitCostMills).toString(),
-          allocation.inventoryLotId,
-          input.orderId,
-          input.orderItemId,
-          referenceId,
-          input.actor,
-          input.reason,
-          input.occurredAt,
-        ],
-      );
+      const transactionValues = [
+        resource.sourceVariantId,
+        resource.warehouseLocationId,
+        -consumeQty,
+        variantBefore,
+        running.variantQty,
+        buildMillsToRoundedCents(allocation.unitCostMills).toString(),
+        allocation.inventoryLotId,
+        input.orderId,
+        input.orderItemId,
+        referenceId,
+        input.actor,
+        input.reason,
+        input.occurredAt,
+      ];
+      if (build) {
+        const componentId = buildComponentsByVariant.get(resource.sourceVariantId);
+        if (!componentId) {
+          throw new CanonicalClaimInventoryMutationError(
+            "CLAIM_BUILD_COMPONENT_MISSING",
+            "A claim-owned build source has no matching immutable build component.",
+            { sourceVariantId: resource.sourceVariantId },
+          );
+        }
+        await input.client.query(
+          `INSERT INTO inventory.inventory_transactions (
+             product_variant_id, from_location_id, transaction_type,
+             variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
+             source_state, target_state, unit_cost_cents, inventory_lot_id,
+             order_id, order_item_id, reference_type, reference_id,
+             build_order_id, build_order_component_id, build_run_id,
+             user_id, notes, created_at
+           ) VALUES ($1, $2, 'assemble', $3, $4, $5, $3, 'committed', 'consumed',
+                     $6, $7, $8, $9, 'availability_claim_operation', $10,
+                     $14, $15, $16, $11, $12, $13)`,
+          [...transactionValues, build.buildOrderId, componentId, build.buildRunId],
+        );
+      } else {
+        await input.client.query(
+          `INSERT INTO inventory.inventory_transactions (
+             product_variant_id, from_location_id, transaction_type,
+             variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
+             source_state, target_state, unit_cost_cents, inventory_lot_id,
+             order_id, order_item_id, reference_type, reference_id, user_id, notes, created_at
+           ) VALUES ($1, $2, 'transform', $3, $4, $5, $3, 'committed', 'consumed',
+                     $6, $7, $8, $9, 'availability_claim_operation', $10, $11, $12, $13)`,
+          transactionValues,
+        );
+      }
     }
     for (const [levelId, consumeQty] of [...consumeByLevel].sort(([left], [right]) => left - right)) {
       const updatedLevel = await input.client.query(
@@ -635,7 +700,9 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     const committedLotAllocations: CanonicalClaimProducedLotAllocation[] = [];
     let outputVariantBefore = nonnegativeInteger(outputLevel.variant_qty, "outputInventoryLevel.variantQty");
     for (const [index, segment] of outputSegments.entries()) {
-      const lotNumber = `CLM-${input.claimId}-${input.claimOperationId}-${String(index + 1).padStart(2, "0")}`;
+      const lotNumber = build
+        ? `${build.buildSystemNumber}-R${build.buildRunNumber}-${String(index + 1).padStart(2, "0")}`
+        : `CLM-${input.claimId}-${input.claimOperationId}-${String(index + 1).padStart(2, "0")}`;
       if (lotNumber.length > 50) {
         throw new CanonicalClaimInventoryMutationError(
           "CLAIM_OUTPUT_LOT_IDENTITY_OVERFLOW",
@@ -648,63 +715,94 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       postgresBigInt(segment.packagingMills, "outputLot.packagingUnitCostMills");
       postgresBigInt(segment.landedMills, "outputLot.landedUnitCostMills");
       const totalCostCents = buildMillsToRoundedCents(segment.totalMills).toString();
+      const lotValues = [
+        lotNumber,
+        destinationVariantId,
+        outputLocationId,
+        totalCostCents,
+        buildMillsToRoundedCents(segment.poMills).toString(),
+        buildMillsToRoundedCents(segment.packagingMills).toString(),
+        buildMillsToRoundedCents(segment.landedMills).toString(),
+        segment.totalMills.toString(),
+        segment.poMills.toString(),
+        segment.packagingMills.toString(),
+        segment.landedMills.toString(),
+        segment.qty,
+        segment.reservedQty,
+        input.occurredAt,
+        build
+          ? `Output from canonical claim build ${build.buildSystemNumber}`
+          : `Output from canonical operation ${operationKey}`,
+      ];
       const insertedLot = rows(await input.client.query(
-        `INSERT INTO inventory.inventory_lots (
-           lot_number, product_variant_id, warehouse_location_id,
-           unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
-           landed_cost_cents, total_unit_cost_cents, unit_cost_mills,
-           po_unit_cost_mills, packaging_cost_mills, landed_cost_mills,
-           total_unit_cost_mills, qty_received, qty_on_hand, qty_reserved,
-           qty_picked, qty_consumed, received_at, status, cost_provisional,
-           cost_source, notes, created_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $4, $8, $9, $10, $11, $8,
-                   $12, $12, $13, 0, 0, $14, 'active', 0, 'transformation', $15, $14)
-         RETURNING id`,
-        [
-          lotNumber,
-          destinationVariantId,
-          outputLocationId,
-          totalCostCents,
-          buildMillsToRoundedCents(segment.poMills).toString(),
-          buildMillsToRoundedCents(segment.packagingMills).toString(),
-          buildMillsToRoundedCents(segment.landedMills).toString(),
-          segment.totalMills.toString(),
-          segment.poMills.toString(),
-          segment.packagingMills.toString(),
-          segment.landedMills.toString(),
-          segment.qty,
-          segment.reservedQty,
-          input.occurredAt,
-          `Output from canonical operation ${operationKey}`,
-        ],
+        build
+          ? `INSERT INTO inventory.inventory_lots (
+               lot_number, product_variant_id, warehouse_location_id, build_order_id, build_run_id,
+               unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
+               landed_cost_cents, total_unit_cost_cents, unit_cost_mills,
+               po_unit_cost_mills, packaging_cost_mills, landed_cost_mills,
+               total_unit_cost_mills, qty_received, qty_on_hand, qty_reserved,
+               qty_picked, qty_consumed, received_at, status, cost_provisional,
+               cost_source, notes, created_at
+             ) VALUES ($1, $2, $3, $16, $17, $4, $5, $6, $7, $4, $8, $9, $10, $11, $8,
+                       $12, $12, $13, 0, 0, $14, 'active', 0, 'build', $15, $14)
+             RETURNING id`
+          : `INSERT INTO inventory.inventory_lots (
+               lot_number, product_variant_id, warehouse_location_id,
+               unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
+               landed_cost_cents, total_unit_cost_cents, unit_cost_mills,
+               po_unit_cost_mills, packaging_cost_mills, landed_cost_mills,
+               total_unit_cost_mills, qty_received, qty_on_hand, qty_reserved,
+               qty_picked, qty_consumed, received_at, status, cost_provisional,
+               cost_source, notes, created_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $4, $8, $9, $10, $11, $8,
+                       $12, $12, $13, 0, 0, $14, 'active', 0, 'transformation', $15, $14)
+             RETURNING id`,
+        build ? [...lotValues, build.buildOrderId, build.buildRunId] : lotValues,
       ))[0];
       const outputLotId = positiveInteger(insertedLot?.id, "outputInventoryLot.id");
-      await input.client.query(
-        `INSERT INTO inventory.inventory_transactions (
-           product_variant_id, to_location_id, transaction_type,
-           variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
-           source_state, target_state, unit_cost_cents, inventory_lot_id,
-           order_id, order_item_id, reference_type, reference_id, user_id, notes, created_at
-         ) VALUES ($1, $2, 'transform', $3, $4, $5, $6, 'transformed', $7,
-                   $8, $9, $10, $11, 'availability_claim_operation', $12, $13, $14, $15)`,
-        [
-          destinationVariantId,
-          outputLocationId,
-          segment.qty,
-          outputVariantBefore,
-          outputVariantBefore + segment.qty,
-          segment.reservedQty,
-          segment.reservedQty > 0 ? "committed" : "on_hand",
-          totalCostCents,
-          outputLotId,
-          input.orderId,
-          input.orderItemId,
-          referenceId,
-          input.actor,
-          input.reason,
-          input.occurredAt,
-        ],
-      );
+      const outputTransactionValues = [
+        destinationVariantId,
+        outputLocationId,
+        segment.qty,
+        outputVariantBefore,
+        outputVariantBefore + segment.qty,
+        segment.reservedQty,
+        segment.reservedQty > 0 ? "committed" : "on_hand",
+        totalCostCents,
+        outputLotId,
+        input.orderId,
+        input.orderItemId,
+        referenceId,
+        input.actor,
+        input.reason,
+        input.occurredAt,
+      ];
+      if (build) {
+        await input.client.query(
+          `INSERT INTO inventory.inventory_transactions (
+             product_variant_id, to_location_id, transaction_type,
+             variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
+             source_state, target_state, unit_cost_cents, inventory_lot_id,
+             order_id, order_item_id, reference_type, reference_id,
+             build_order_id, build_run_id, user_id, notes, created_at
+           ) VALUES ($1, $2, 'assemble', $3, $4, $5, $6, 'built', $7,
+                     $8, $9, $10, $11, 'availability_claim_operation', $12,
+                     $16, $17, $13, $14, $15)`,
+          [...outputTransactionValues, build.buildOrderId, build.buildRunId],
+        );
+      } else {
+        await input.client.query(
+          `INSERT INTO inventory.inventory_transactions (
+             product_variant_id, to_location_id, transaction_type,
+             variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
+             source_state, target_state, unit_cost_cents, inventory_lot_id,
+             order_id, order_item_id, reference_type, reference_id, user_id, notes, created_at
+           ) VALUES ($1, $2, 'transform', $3, $4, $5, $6, 'transformed', $7,
+                     $8, $9, $10, $11, 'availability_claim_operation', $12, $13, $14, $15)`,
+          outputTransactionValues,
+        );
+      }
       outputVariantBefore += segment.qty;
       if (segment.reservedQty > 0) {
         committedLotAllocations.push({

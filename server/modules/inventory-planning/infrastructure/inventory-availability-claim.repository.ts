@@ -161,6 +161,9 @@ export interface InventoryAvailabilityClaimStore {
   executePackageOperation(
     command: CanonicalAvailabilityClaimOperationExecutionCommand,
   ): Promise<CanonicalAvailabilityClaimOperationExecutionResult>;
+  executeBuildOperation(
+    command: CanonicalAvailabilityClaimOperationExecutionCommand,
+  ): Promise<CanonicalAvailabilityClaimOperationExecutionResult>;
   handoffBuildOperation(
     command: CanonicalAvailabilityClaimBuildHandoffCommand,
   ): Promise<CanonicalAvailabilityClaimBuildHandoffResult>;
@@ -194,6 +197,7 @@ async function loadOperationExecutionReplay(
   client: PoolClient,
   idempotencyKey: string,
   requestHash: string,
+  expectedCommandType: "execute" | "execute_build",
 ): Promise<CanonicalAvailabilityClaimOperationExecutionResult | null> {
   const row = rows(await client.query(
     `SELECT command_type, request_hash, result_payload
@@ -203,7 +207,7 @@ async function loadOperationExecutionReplay(
     [idempotencyKey],
   ))[0];
   if (!row) return null;
-  if (String(row.command_type) !== "execute" || String(row.request_hash) !== requestHash) {
+  if (String(row.command_type) !== expectedCommandType || String(row.request_hash) !== requestHash) {
     throw new InventoryAvailabilityClaimRepositoryError(
       "IDEMPOTENCY_KEY_REUSED",
       "The canonical operation idempotency key was already used with a different request.",
@@ -1366,6 +1370,93 @@ async function lockBuildOperation(
   };
 }
 
+type LockedClaimBuildHandoff = {
+  id: bigint;
+  buildOrderId: number;
+  adoptedReservationQty: bigint;
+};
+
+async function lockHandedOffBuildOperation(
+  client: PoolClient,
+  claimId: bigint,
+  operationKey: string,
+): Promise<{ operation: LockedClaimBuildOperation; handoff: LockedClaimBuildHandoff }> {
+  const row = rows(await client.query(
+    `SELECT operation.id, operation.claim_line_id, line.order_item_id,
+            operation.operation_key, operation.parent_operation_key, operation.warehouse_id,
+            operation.operation_type, operation.authority_id, operation.destination_variant_id,
+            operation.planned_executions, operation.output_qty,
+            operation.committed_output_qty, operation.output_location_id,
+            operation.status, operation.executed_executions, operation.released_executions,
+            handoff.id AS handoff_id, handoff.build_order_id,
+            handoff.adopted_reservation_qty, handoff.status AS handoff_status
+     FROM inventory.availability_claim_operations AS operation
+     JOIN inventory.availability_claim_lines AS line
+       ON line.id = operation.claim_line_id AND line.claim_id = operation.claim_id
+     JOIN inventory.availability_claim_build_handoffs AS handoff
+       ON handoff.claim_id = operation.claim_id AND handoff.claim_operation_id = operation.id
+     WHERE operation.claim_id = $1 AND operation.operation_key = $2
+     FOR UPDATE OF operation, handoff`,
+    [claimId.toString(), operationKey],
+  ))[0];
+  if (!row) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_BUILD_HANDOFF_NOT_FOUND",
+      "The requested component build has no active claim handoff.",
+      { claimId: claimId.toString(), operationKey },
+    );
+  }
+  if (String(row.operation_type) !== "component_build"
+    || String(row.status) !== "executing"
+    || String(row.handoff_status) !== "handed_off"
+    || BigInt(String(row.executed_executions)) !== BigInt(0)
+    || BigInt(String(row.released_executions)) !== BigInt(0)) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_BUILD_OPERATION_NOT_EXECUTABLE",
+      "The claim build is not in an exact handed-off execution state.",
+      {
+        claimId: claimId.toString(),
+        operationKey,
+        operationStatus: row.status,
+        handoffStatus: row.handoff_status,
+      },
+    );
+  }
+  if (row.committed_output_qty == null || row.output_location_id == null) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_BUILD_EXECUTION_EVIDENCE_MISSING",
+      "The handed-off build lacks exact committed-output or output-location evidence and must be replanned.",
+      { claimId: claimId.toString(), operationKey },
+    );
+  }
+  return {
+    operation: {
+      id: positiveBigInt(row.id, "claimOperation.id"),
+      claimLineId: positiveBigInt(row.claim_line_id, "claimOperation.claimLineId"),
+      orderItemId: positiveInteger(row.order_item_id, "claimLine.orderItemId"),
+      operationKey: String(row.operation_key),
+      parentOperationKey: row.parent_operation_key == null ? null : String(row.parent_operation_key),
+      warehouseId: positiveInteger(row.warehouse_id, "claimOperation.warehouseId"),
+      operationType: "component_build",
+      authorityId: positiveInteger(row.authority_id, "claimOperation.authorityId"),
+      destinationVariantId: positiveInteger(row.destination_variant_id, "claimOperation.destinationVariantId"),
+      plannedExecutions: positiveBigInt(row.planned_executions, "claimOperation.plannedExecutions"),
+      outputQty: positiveBigInt(row.output_qty, "claimOperation.outputQty"),
+      committedOutputQty: positiveBigInt(row.committed_output_qty, "claimOperation.committedOutputQty"),
+      outputLocationId: positiveInteger(row.output_location_id, "claimOperation.outputLocationId"),
+      status: "executing",
+    },
+    handoff: {
+      id: positiveBigInt(row.handoff_id, "claimBuildHandoff.id"),
+      buildOrderId: positiveInteger(row.build_order_id, "claimBuildHandoff.buildOrderId"),
+      adoptedReservationQty: positiveBigInt(
+        row.adopted_reservation_qty,
+        "claimBuildHandoff.adoptedReservationQty",
+      ),
+    },
+  };
+}
+
 function assertOperationMatchesPlan(
   claim: PersistedClaim,
   operation: LockedClaimOperation,
@@ -1593,11 +1684,11 @@ async function loadOperationExecutionResources(
   return executionResources;
 }
 
-async function recordPackageOperationExecution(
+async function recordOperationExecution(
   client: PoolClient,
   input: {
     claim: PersistedClaim;
-    operation: LockedClaimPackageOperation;
+    operation: LockedClaimOperation;
     resources: readonly CanonicalClaimInventoryExecutionResource[];
     command: CanonicalAvailabilityClaimOperationExecutionCommand;
     requestHash: string;
@@ -1605,6 +1696,9 @@ async function recordPackageOperationExecution(
     committedLotAllocations: Awaited<ReturnType<CanonicalClaimInventoryMutationPort["executePackageOperation"]>>["committedLotAllocations"];
     totalInputCostMills: bigint;
     occurredAt: Date;
+    commandType: "execute" | "execute_build";
+    eventType: "claim_operation_executed" | "claim_build_executed";
+    buildHandoffId?: bigint;
   },
 ): Promise<CanonicalAvailabilityClaimOperationExecutionResult> {
   for (const resource of input.resources) {
@@ -1694,16 +1788,31 @@ async function recordPackageOperationExecution(
     `UPDATE inventory.availability_claim_operations
      SET status = 'completed', executed_executions = planned_executions, updated_at = $3
      WHERE id = $1 AND claim_id = $2
-       AND status IN ('pending', 'ready')
+       AND status = $4
        AND executed_executions = 0 AND released_executions = 0`,
-    [input.operation.id.toString(), input.claim.id.toString(), input.occurredAt],
+    [input.operation.id.toString(), input.claim.id.toString(), input.occurredAt, input.operation.status],
   );
   if (updatedOperation.rowCount !== 1) {
     throw new InventoryAvailabilityClaimRepositoryError(
       "CLAIM_OPERATION_STATE_CHANGED",
-      "The locked package operation changed before completion was recorded.",
+      "The locked claim operation changed before completion was recorded.",
       { operationKey: input.operation.operationKey },
     );
+  }
+  if (input.buildHandoffId != null) {
+    const updatedHandoff = await client.query(
+      `UPDATE inventory.availability_claim_build_handoffs
+       SET status = 'completed', completed_at = $3, updated_at = $3
+       WHERE id = $1 AND claim_id = $2 AND status = 'handed_off'`,
+      [input.buildHandoffId.toString(), input.claim.id.toString(), input.occurredAt],
+    );
+    if (updatedHandoff.rowCount !== 1) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_BUILD_HANDOFF_STATE_CHANGED",
+        "The claim build handoff changed before completion was recorded.",
+        { operationKey: input.operation.operationKey, buildHandoffId: input.buildHandoffId.toString() },
+      );
+    }
   }
 
   const result = canonicalAvailabilityClaimOperationExecutionResultSchema.parse({
@@ -1722,10 +1831,11 @@ async function recordPackageOperationExecution(
     `INSERT INTO inventory.availability_claim_commands (
        claim_id, order_id, command_type, idempotency_key, request_hash, result_hash,
        request_payload, result_payload, actor, reason, occurred_at
-     ) VALUES ($1, $2, 'execute', $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10)`,
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11)`,
     [
       input.claim.id.toString(),
       input.claim.orderId,
+      input.commandType,
       input.command.idempotencyKey,
       input.requestHash,
       hash(result),
@@ -1738,7 +1848,7 @@ async function recordPackageOperationExecution(
   );
   const evidence = {
     schemaVersion: "inventory_availability_claim_operation_event_v1",
-    eventType: "claim_operation_executed",
+    eventType: input.eventType,
     claimId: input.claim.id.toString(),
     operationKey: input.operation.operationKey,
     result,
@@ -1747,9 +1857,10 @@ async function recordPackageOperationExecution(
     `INSERT INTO inventory.availability_claim_events (
        claim_id, event_type, from_status, to_status, evidence_payload,
        evidence_hash, actor, reason, occurred_at
-     ) VALUES ($1, 'claim_operation_executed', $2, 'completed', $3::jsonb, $4, $5, $6, $7)`,
+     ) VALUES ($1, $2, $3, 'completed', $4::jsonb, $5, $6, $7, $8)`,
     [
       input.claim.id.toString(),
+      input.eventType,
       input.operation.status,
       JSON.stringify(evidence),
       hash(evidence),
@@ -1858,23 +1969,101 @@ async function recordBuildHandoff(
   return result;
 }
 
-async function assertNoOpenBuildHandoffs(client: PoolClient, claimId: bigint): Promise<void> {
+async function cancelOpenBuildHandoffs(
+  client: PoolClient,
+  buildWriter: CanonicalClaimBuildMutationPort | undefined,
+  claim: PersistedClaim,
+  command: CanonicalAvailabilityClaimReleaseCommand,
+  occurredAt: Date,
+): Promise<void> {
   const openHandoffs = rows(await client.query(
-    `SELECT id, claim_operation_id, build_order_id, status
-     FROM inventory.availability_claim_build_handoffs
-     WHERE claim_id = $1 AND status = 'handed_off'
-     ORDER BY id
-     FOR UPDATE`,
-    [claimId.toString()],
+    `SELECT handoff.id, handoff.claim_operation_id, handoff.build_order_id,
+            handoff.adopted_reservation_qty, handoff.status,
+            operation.operation_key, operation.status AS operation_status,
+            operation.executed_executions, operation.released_executions
+     FROM inventory.availability_claim_build_handoffs AS handoff
+     JOIN inventory.availability_claim_operations AS operation
+       ON operation.id = handoff.claim_operation_id AND operation.claim_id = handoff.claim_id
+     WHERE handoff.claim_id = $1 AND handoff.status = 'handed_off'
+     ORDER BY handoff.id
+     FOR UPDATE OF handoff, operation`,
+    [claim.id.toString()],
   ));
-  if (openHandoffs.length > 0) {
+  if (openHandoffs.length === 0) return;
+  if (!buildWriter) {
     throw new InventoryAvailabilityClaimRepositoryError(
-      "CLAIM_BUILD_HANDOFF_RELEASE_REQUIRED",
-      "The claim owns active build handoffs that must be cancelled through the claim-aware build contract before release.",
+      "CLAIM_BUILD_CANCELLATION_NOT_CONFIGURED",
+      "The claim owns active build handoffs, but its cancellation port is not configured.",
       {
-        claimId: claimId.toString(),
+        claimId: claim.id.toString(),
         buildOrderIds: openHandoffs.map((row) => positiveInteger(row.build_order_id, "buildHandoff.buildOrderId")),
       },
+    );
+  }
+  for (const handoff of openHandoffs) {
+    if (String(handoff.operation_status) !== "executing"
+      || BigInt(String(handoff.executed_executions)) !== BigInt(0)
+      || BigInt(String(handoff.released_executions)) !== BigInt(0)) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_BUILD_CANCELLATION_STATE_DRIFT",
+        "An open build handoff is not in an unexecuted canonical operation state.",
+        {
+          claimId: claim.id.toString(),
+          claimOperationId: String(handoff.claim_operation_id),
+          operationStatus: handoff.operation_status,
+        },
+      );
+    }
+    const cancellation = await buildWriter.cancelOperation({
+      client,
+      claimId: claim.id,
+      claimOperationId: positiveBigInt(handoff.claim_operation_id, "claimOperation.id"),
+      buildOrderId: positiveInteger(handoff.build_order_id, "buildHandoff.buildOrderId"),
+      expectedReservationQty: positiveBigInt(
+        handoff.adopted_reservation_qty,
+        "buildHandoff.adoptedReservationQty",
+      ),
+      actor: command.actor,
+      reason: command.reason,
+      occurredAt,
+    });
+    const updatedHandoff = await client.query(
+      `UPDATE inventory.availability_claim_build_handoffs
+       SET status = 'cancelled', cancelled_at = $3, updated_at = $3
+       WHERE id = $1 AND claim_id = $2 AND status = 'handed_off'`,
+      [String(handoff.id), claim.id.toString(), occurredAt],
+    );
+    if (updatedHandoff.rowCount !== 1) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_BUILD_HANDOFF_STATE_CHANGED",
+        "The build handoff changed while claim cancellation was being recorded.",
+        { claimId: claim.id.toString(), buildOrderId: cancellation.buildOrderId },
+      );
+    }
+    const evidence = {
+      schemaVersion: "inventory_availability_claim_build_cancellation_event_v1",
+      eventType: "claim_build_cancelled",
+      claimId: claim.id.toString(),
+      claimOperationId: String(handoff.claim_operation_id),
+      operationKey: String(handoff.operation_key),
+      buildOrderId: cancellation.buildOrderId,
+      buildSystemNumber: cancellation.buildSystemNumber,
+      releasedReservationQty: cancellation.releasedReservationQty.toString(),
+      disposition: command.disposition,
+    };
+    await client.query(
+      `INSERT INTO inventory.availability_claim_events (
+         claim_id, event_type, from_status, to_status, evidence_payload,
+         evidence_hash, actor, reason, occurred_at
+       ) VALUES ($1, 'claim_build_cancelled', 'executing', 'released', $2::jsonb, $3, $4, $5, $6)`,
+      [
+        claim.id.toString(),
+        JSON.stringify(evidence),
+        hash(evidence),
+        command.actor,
+        command.reason,
+        occurredAt,
+      ],
     );
   }
 }
@@ -2184,6 +2373,148 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     );
   }
 
+  async executeBuildOperation(
+    rawCommand: CanonicalAvailabilityClaimOperationExecutionCommand,
+  ): Promise<CanonicalAvailabilityClaimOperationExecutionResult> {
+    const command = canonicalAvailabilityClaimOperationExecutionCommandSchema.parse(rawCommand);
+    const requestHash = hash(command);
+    const occurredAt = this.clock();
+    if (Number.isNaN(occurredAt.getTime())) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "INVALID_CLOCK",
+        "Canonical build-execution clock returned an invalid time.",
+      );
+    }
+    const claimId = positiveBigInt(command.claimId, "claim.id");
+
+    let lastRetryableError: unknown;
+    for (let attempt = 1; attempt <= MAX_SERIALIZATION_ATTEMPTS; attempt += 1) {
+      const client = await this.connectionPool.connect();
+      try {
+        await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        const replay = await loadOperationExecutionReplay(
+          client,
+          command.idempotencyKey,
+          requestHash,
+          "execute_build",
+        );
+        if (replay) {
+          await client.query("COMMIT");
+          return replay;
+        }
+        await requireCanonicalAuthority(client);
+        if (!this.buildWriter) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_BUILD_EXECUTION_NOT_CONFIGURED",
+            "The canonical build execution port is not configured.",
+          );
+        }
+        const preliminaryClaim = await loadActiveClaimById(client, claimId, false);
+        if (!preliminaryClaim) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ACTIVE_CLAIM_NOT_FOUND",
+            "The requested canonical claim is not active.",
+            { claimId: claimId.toString() },
+          );
+        }
+        const graphProductIds = await loadClaimProductIds(client, preliminaryClaim);
+        if (graphProductIds.length === 0 || graphProductIds.length > MAX_GRAPH_PRODUCTS) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "INVALID_CLAIM_MODEL_EVIDENCE",
+            "The active claim does not contain a bounded model-evidence graph.",
+            { claimId: claimId.toString(), productCount: graphProductIds.length },
+          );
+        }
+        await lockGraphProducts(client, graphProductIds);
+        const order = await loadOrder(client, preliminaryClaim.orderId, true);
+        if (["cancelled", "shipped"].includes(order.warehouseStatus)) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_ORDER_NOT_EXECUTABLE",
+            "A cancelled or shipped order cannot execute a claim build.",
+            { claimId: claimId.toString(), orderId: order.orderId, warehouseStatus: order.warehouseStatus },
+          );
+        }
+        const claim = await loadActiveClaimById(client, claimId, true);
+        if (!claim || claim.id !== preliminaryClaim.id || claim.orderId !== preliminaryClaim.orderId) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ACTIVE_CLAIM_CHANGED",
+            "The active canonical claim changed while build-execution locks were being acquired.",
+            { claimId: claimId.toString() },
+          );
+        }
+        const locked = await lockHandedOffBuildOperation(client, claim.id, command.operationKey);
+        const plannedOperation = assertOperationMatchesPlan(claim, locked.operation);
+        const resources = await loadOperationExecutionResources(
+          client,
+          claim.id,
+          locked.operation,
+          plannedOperation,
+        );
+        const execution = await this.buildWriter.executeOperation({
+          client,
+          claimId: claim.id,
+          claimOperationId: locked.operation.id,
+          operationKey: locked.operation.operationKey,
+          buildOrderId: locked.handoff.buildOrderId,
+          warehouseId: locked.operation.warehouseId,
+          plannedBuilds: locked.operation.plannedExecutions,
+          destinationVariantId: locked.operation.destinationVariantId,
+          outputLocationId: locked.operation.outputLocationId,
+          outputQty: locked.operation.outputQty,
+          committedOutputQty: locked.operation.committedOutputQty,
+          inputs: plannedOperation.inputs.map((entry) => ({
+            sourceVariantId: entry.sourceVariantId,
+            requiredQty: positiveBigInt(entry.requiredQty, "plannedOperation.input.requiredQty"),
+          })),
+          resources,
+          orderId: claim.orderId,
+          orderItemId: locked.operation.orderItemId,
+          actor: command.actor,
+          reason: command.reason,
+          occurredAt,
+        });
+        const result = await recordOperationExecution(client, {
+          claim,
+          operation: locked.operation,
+          resources,
+          command,
+          requestHash,
+          outputInventoryLevelId: execution.outputInventoryLevelId,
+          committedLotAllocations: execution.committedLotAllocations,
+          totalInputCostMills: execution.totalInputCostMills,
+          occurredAt,
+          commandType: "execute_build",
+          eventType: "claim_build_executed",
+          buildHandoffId: locked.handoff.id,
+        });
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        try {
+          await rollback(client, error);
+        } catch (rolledBackError) {
+          if (isRetryableTransactionError(rolledBackError) && attempt < MAX_SERIALIZATION_ATTEMPTS) {
+            lastRetryableError = rolledBackError;
+            continue;
+          }
+          if (isRetryableTransactionError(rolledBackError)) {
+            lastRetryableError = rolledBackError;
+            break;
+          }
+          throw rolledBackError;
+        }
+      } finally {
+        client.release();
+      }
+    }
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_BUILD_EXECUTION_RETRY_EXHAUSTED",
+      "Canonical build execution could not serialize after bounded retries.",
+      { attempts: MAX_SERIALIZATION_ATTEMPTS },
+      { cause: lastRetryableError },
+    );
+  }
+
   async executePackageOperation(
     rawCommand: CanonicalAvailabilityClaimOperationExecutionCommand,
   ): Promise<CanonicalAvailabilityClaimOperationExecutionResult> {
@@ -2203,7 +2534,12 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
       const client = await this.connectionPool.connect();
       try {
         await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-        const replay = await loadOperationExecutionReplay(client, command.idempotencyKey, requestHash);
+        const replay = await loadOperationExecutionReplay(
+          client,
+          command.idempotencyKey,
+          requestHash,
+          "execute",
+        );
         if (replay) {
           await client.query("COMMIT");
           return replay;
@@ -2262,7 +2598,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           reason: command.reason,
           occurredAt,
         });
-        const result = await recordPackageOperationExecution(client, {
+        const result = await recordOperationExecution(client, {
           claim,
           operation,
           resources,
@@ -2272,6 +2608,8 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           committedLotAllocations: execution.committedLotAllocations,
           totalInputCostMills: execution.totalInputCostMills,
           occurredAt,
+          commandType: "execute",
+          eventType: "claim_operation_executed",
         });
         await client.query("COMMIT");
         return result;
@@ -2354,7 +2692,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             { orderId: command.orderId, preliminaryClaimId: preliminaryClaim.id.toString() },
           );
         }
-        await assertNoOpenBuildHandoffs(client, claim.id);
+        await cancelOpenBuildHandoffs(client, this.buildWriter, claim, command, occurredAt);
         const released = await releaseClaimResources(client, {
           inventoryWriter: this.inventoryWriter,
           claim,

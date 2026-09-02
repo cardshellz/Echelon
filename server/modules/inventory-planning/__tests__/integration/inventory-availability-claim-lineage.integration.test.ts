@@ -22,6 +22,10 @@ const buildHandoffMigration = readFileSync(
   resolve(process.cwd(), "migrations/0644_inventory_availability_claim_build_handoff.sql"),
   "utf8",
 );
+const buildExecutionMigration = readFileSync(
+  resolve(process.cwd(), "migrations/0646_inventory_availability_claim_build_execution.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -50,6 +54,11 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     .replaceAll("catalog.", `"${schemas.catalog}".`)
     .replaceAll("wms.", `"${schemas.wms}".`);
   const qualifiedBuildHandoffMigration = buildHandoffMigration
+    .replaceAll("inventory.", `"${schemas.inventory}".`)
+    .replaceAll("warehouse.", `"${schemas.warehouse}".`)
+    .replaceAll("catalog.", `"${schemas.catalog}".`)
+    .replaceAll("wms.", `"${schemas.wms}".`);
+  const qualifiedBuildExecutionMigration = buildExecutionMigration
     .replaceAll("inventory.", `"${schemas.inventory}".`)
     .replaceAll("warehouse.", `"${schemas.warehouse}".`)
     .replaceAll("catalog.", `"${schemas.catalog}".`)
@@ -88,6 +97,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     await pool.query(qualifiedMigration);
     await pool.query(qualifiedExecutionContractMigration);
     await pool.query(qualifiedBuildHandoffMigration);
+    await pool.query(qualifiedBuildExecutionMigration);
   }, 300_000);
 
   afterAll(async () => {
@@ -204,5 +214,17 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       "build_component_reservations_claim_allocation_fk",
       "build_component_reservations_owner_chk",
     ]);
+  });
+
+  it("keeps build execution receipts distinct from package execution receipts", async () => {
+    const constraint = await pool.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition
+       FROM pg_constraint
+       WHERE connamespace = $1::regnamespace
+         AND conname = 'availability_claim_commands_type_chk'`,
+      [schemas.inventory],
+    );
+    expect(constraint.rows).toHaveLength(1);
+    expect(constraint.rows[0]?.definition).toContain("execute_build");
   });
 });

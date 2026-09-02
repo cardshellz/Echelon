@@ -1,9 +1,15 @@
 import type {
+  CanonicalClaimBuildCancellationResult,
+  CanonicalClaimBuildExecutionResult,
   CanonicalClaimBuildMutationPort,
   CanonicalClaimBuildHandoffResult,
 } from "../../inventory-planning/application/canonical-claim-build.port";
-import type { CanonicalClaimInventoryExecutionResource } from "../../inventory-planning/application/canonical-claim-inventory.port";
+import type {
+  CanonicalClaimInventoryExecutionResource,
+  CanonicalClaimInventoryMutationPort,
+} from "../../inventory-planning/application/canonical-claim-inventory.port";
 import { BuildDomainError } from "../domain/build.domain";
+import { PostgresCanonicalClaimInventoryRepository } from "./canonical-claim-inventory.repository";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 
@@ -79,6 +85,10 @@ function assertCostSnapshot(
 }
 
 export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuildMutationPort {
+  constructor(
+    private readonly inventoryWriter: CanonicalClaimInventoryMutationPort = new PostgresCanonicalClaimInventoryRepository(),
+  ) {}
+
   async handoffOperation(
     input: Parameters<CanonicalClaimBuildMutationPort["handoffOperation"]>[0],
   ): Promise<CanonicalClaimBuildHandoffResult> {
@@ -406,5 +416,444 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
       adoptedReservationQty += allocation.consumeQty;
     }
     return { buildOrderId, buildSystemNumber, adoptedReservationQty };
+  }
+
+  async executeOperation(
+    input: Parameters<CanonicalClaimBuildMutationPort["executeOperation"]>[0],
+  ): Promise<CanonicalClaimBuildExecutionResult> {
+    requireText(input.operationKey, "operationKey");
+    requireText(input.actor, "actor");
+    requireText(input.reason, "reason");
+    positiveBigInt(input.claimId, "claim.id");
+    positiveBigInt(input.claimOperationId, "claimOperation.id");
+    const buildOrderId = positiveInteger(input.buildOrderId, "buildOrder.id");
+    const plannedBuilds = asPostgresInteger(input.plannedBuilds, "plannedBuilds");
+    const outputQty = asPostgresInteger(input.outputQty, "outputQty");
+    asPostgresInteger(input.committedOutputQty, "committedOutputQty");
+
+    const order = rows(await input.client.query(
+      `SELECT id, system_number, recipe_id, output_variant_id, output_qty_per_build,
+              planned_builds, completed_builds, warehouse_id, output_location_id,
+              status, total_component_cost_mills
+       FROM inventory.build_orders
+       WHERE id = $1
+       FOR UPDATE`,
+      [buildOrderId],
+    ))[0];
+    if (!order) {
+      throw new BuildDomainError("CLAIM_BUILD_ORDER_NOT_FOUND", "The handed-off build order no longer exists", {
+        buildOrderId,
+      });
+    }
+    const buildSystemNumber = requireText(order.system_number, "buildOrder.systemNumber");
+    const orderMatchesOperation =
+      String(order.status) === "released"
+      && positiveInteger(order.output_variant_id, "buildOrder.outputVariantId") === input.destinationVariantId
+      && positiveInteger(order.output_location_id, "buildOrder.outputLocationId") === input.outputLocationId
+      && positiveInteger(order.warehouse_id, "buildOrder.warehouseId") === input.warehouseId
+      && positiveInteger(order.planned_builds, "buildOrder.plannedBuilds") === plannedBuilds
+      && Number(order.completed_builds) === 0
+      && BigInt(String(order.output_qty_per_build)) * input.plannedBuilds === input.outputQty;
+    if (!orderMatchesOperation) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_ORDER_STATE_DRIFT",
+        "The handed-off build order no longer matches its canonical claim operation",
+        { buildOrderId, status: order.status },
+      );
+    }
+
+    const componentRows = rows(await input.client.query(
+      `SELECT id, component_variant_id, qty_per_build, planned_qty, consumed_qty
+       FROM inventory.build_order_components
+       WHERE build_order_id = $1
+       ORDER BY component_variant_id, id
+       FOR UPDATE`,
+      [buildOrderId],
+    ));
+    const expectedInputs = new Map(input.inputs.map((entry) => [entry.sourceVariantId, entry.requiredQty]));
+    if (expectedInputs.size !== input.inputs.length || componentRows.length !== expectedInputs.size) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_COMPONENT_SET_DRIFT",
+        "The handed-off build component set no longer matches the canonical operation",
+        { buildOrderId },
+      );
+    }
+    const componentIdsByVariant = new Map<number, number>();
+    for (const component of componentRows) {
+      const sourceVariantId = positiveInteger(component.component_variant_id, "buildComponent.sourceVariantId");
+      const componentId = positiveInteger(component.id, "buildComponent.id");
+      const requiredQty = expectedInputs.get(sourceVariantId);
+      if (requiredQty == null
+        || BigInt(String(component.planned_qty)) !== requiredQty
+        || BigInt(String(component.qty_per_build)) * input.plannedBuilds !== requiredQty
+        || Number(component.consumed_qty) !== 0) {
+        throw new BuildDomainError(
+          "CLAIM_BUILD_COMPONENT_STATE_DRIFT",
+          "A handed-off build component no longer matches its canonical input contract",
+          { buildOrderId, componentId, sourceVariantId },
+        );
+      }
+      componentIdsByVariant.set(sourceVariantId, componentId);
+    }
+
+    const expectedAllocations = new Map<string, {
+      resource: CanonicalClaimInventoryExecutionResource;
+      allocation: CanonicalClaimInventoryExecutionResource["lotAllocations"][number];
+    }>();
+    for (const resource of input.resources) {
+      for (const allocation of resource.lotAllocations) {
+        const key = positiveBigInt(allocation.claimLotAllocationId, "claimLotAllocation.id").toString();
+        if (expectedAllocations.has(key)) {
+          throw new BuildDomainError(
+            "CLAIM_BUILD_ALLOCATION_DUPLICATED",
+            "A claim lot allocation cannot appear twice in one build execution",
+            { claimLotAllocationId: key },
+          );
+        }
+        expectedAllocations.set(key, { resource, allocation });
+      }
+    }
+    const reservationRows = rows(await input.client.query(
+      `SELECT reservation.id, reservation.inventory_lot_id, reservation.reserved_qty,
+              reservation.consumed_qty, reservation.released_qty,
+              reservation.reservation_owner, reservation.availability_claim_id,
+              reservation.availability_claim_lot_allocation_id,
+              component.id AS build_order_component_id,
+              component.component_variant_id
+       FROM inventory.build_component_reservations AS reservation
+       JOIN inventory.build_order_components AS component
+         ON component.id = reservation.build_order_component_id
+       WHERE component.build_order_id = $1
+       ORDER BY component.component_variant_id,
+                reservation.availability_claim_lot_allocation_id,
+                reservation.inventory_lot_id,
+                reservation.id
+       FOR UPDATE OF reservation`,
+      [buildOrderId],
+    ));
+    if (reservationRows.length !== expectedAllocations.size) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_RESERVATION_SET_DRIFT",
+        "The adopted build reservations no longer match the exact canonical lot allocations",
+        { buildOrderId, expectedCount: expectedAllocations.size, actualCount: reservationRows.length },
+      );
+    }
+    const seenAllocationIds = new Set<string>();
+    for (const reservation of reservationRows) {
+      const allocationId = positiveBigInt(
+        reservation.availability_claim_lot_allocation_id,
+        "buildReservation.claimLotAllocationId",
+      ).toString();
+      const expected = expectedAllocations.get(allocationId);
+      const sourceVariantId = positiveInteger(reservation.component_variant_id, "buildComponent.sourceVariantId");
+      const reservationClaimId = reservation.availability_claim_id == null
+        ? null
+        : positiveBigInt(reservation.availability_claim_id, "buildReservation.claimId");
+      const openQty = BigInt(String(reservation.reserved_qty))
+        - BigInt(String(reservation.consumed_qty))
+        - BigInt(String(reservation.released_qty));
+      if (!expected
+         || seenAllocationIds.has(allocationId)
+         || String(reservation.reservation_owner) !== "availability_claim"
+        || reservationClaimId !== input.claimId
+        || positiveInteger(reservation.inventory_lot_id, "buildReservation.inventoryLotId")
+          !== expected.allocation.inventoryLotId
+        || sourceVariantId !== expected.resource.sourceVariantId
+        || positiveInteger(reservation.build_order_component_id, "buildComponent.id")
+          !== componentIdsByVariant.get(sourceVariantId)
+        || openQty !== expected.allocation.consumeQty
+        || BigInt(String(reservation.consumed_qty)) !== BigInt(0)
+        || BigInt(String(reservation.released_qty)) !== BigInt(0)) {
+        throw new BuildDomainError(
+          "CLAIM_BUILD_RESERVATION_STATE_DRIFT",
+          "An adopted build reservation no longer matches its canonical lot allocation",
+          { buildOrderId, claimLotAllocationId: allocationId },
+        );
+      }
+      seenAllocationIds.add(allocationId);
+    }
+
+    const runIdempotencyKey = `claim-build-run:${input.claimId}:${input.claimOperationId}`;
+    const run = rows(await input.client.query(
+      `INSERT INTO inventory.build_runs (
+         build_order_id, run_number, idempotency_key, builds_completed, output_qty, posted_by
+       ) VALUES ($1, 1, $2, $3, $4, $5)
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING id, run_number`,
+      [buildOrderId, runIdempotencyKey, plannedBuilds, outputQty, input.actor],
+    ))[0];
+    if (!run) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_RUN_CONFLICT",
+        "The deterministic claim build run already exists without its canonical command receipt",
+        { buildOrderId, idempotencyKey: runIdempotencyKey },
+      );
+    }
+    const buildRunId = positiveInteger(run.id, "buildRun.id");
+    const buildRunNumber = positiveInteger(run.run_number, "buildRun.runNumber");
+    const inventoryResult = await this.inventoryWriter.executeBuildOperation({
+      client: input.client,
+      claimId: input.claimId,
+      claimOperationId: input.claimOperationId,
+      operationKey: input.operationKey,
+      operationType: "component_build",
+      resources: input.resources,
+      destinationVariantId: input.destinationVariantId,
+      outputLocationId: input.outputLocationId,
+      outputQty: input.outputQty,
+      committedOutputQty: input.committedOutputQty,
+      orderId: input.orderId,
+      orderItemId: input.orderItemId,
+      build: {
+        buildOrderId,
+        buildRunId,
+        buildRunNumber,
+        buildSystemNumber,
+        components: [...componentIdsByVariant].map(([sourceVariantId, buildOrderComponentId]) => ({
+          sourceVariantId,
+          buildOrderComponentId,
+        })),
+      },
+      actor: input.actor,
+      reason: input.reason,
+      occurredAt: input.occurredAt,
+    });
+
+    let recordedInputCostMills = BigInt(0);
+    const consumedByComponent = new Map<number, bigint>();
+    for (const { resource, allocation } of expectedAllocations.values()) {
+      const componentId = componentIdsByVariant.get(resource.sourceVariantId)!;
+      const consumeQty = asPostgresInteger(allocation.consumeQty, "claimAllocation.consumeQty");
+      await input.client.query(
+        `INSERT INTO inventory.build_run_consumptions (
+           build_run_id, build_order_component_id, inventory_lot_id, qty,
+           po_unit_cost_mills, packaging_unit_cost_mills,
+           landed_unit_cost_mills, total_unit_cost_mills
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          buildRunId,
+          componentId,
+          allocation.inventoryLotId,
+          consumeQty,
+          allocation.poUnitCostMills.toString(),
+          allocation.packagingUnitCostMills.toString(),
+          allocation.landedUnitCostMills.toString(),
+          allocation.unitCostMills.toString(),
+        ],
+      );
+      const reservationUpdate = await input.client.query(
+        `UPDATE inventory.build_component_reservations
+         SET consumed_qty = consumed_qty + $1, updated_at = $3
+         WHERE availability_claim_lot_allocation_id = $2
+           AND reservation_owner = 'availability_claim'
+           AND reserved_qty - consumed_qty - released_qty = $1`,
+        [consumeQty, allocation.claimLotAllocationId.toString(), input.occurredAt],
+      );
+      if (reservationUpdate.rowCount !== 1) {
+        throw new BuildDomainError(
+          "CLAIM_BUILD_RESERVATION_STATE_CHANGED",
+          "An adopted build reservation changed while its consumption was being recorded",
+          { buildOrderId, claimLotAllocationId: allocation.claimLotAllocationId.toString() },
+        );
+      }
+      consumedByComponent.set(
+        componentId,
+        (consumedByComponent.get(componentId) ?? BigInt(0)) + allocation.consumeQty,
+      );
+      recordedInputCostMills += allocation.unitCostMills * allocation.consumeQty;
+    }
+    if (recordedInputCostMills !== inventoryResult.totalInputCostMills) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_COST_LINEAGE_MISMATCH",
+        "Build consumption evidence does not reconcile to the canonical inventory cost result",
+        {
+          buildOrderId,
+          recordedInputCostMills: recordedInputCostMills.toString(),
+          inventoryInputCostMills: inventoryResult.totalInputCostMills.toString(),
+        },
+      );
+    }
+    for (const [componentId, consumedQty] of consumedByComponent) {
+      const componentUpdate = await input.client.query(
+        `UPDATE inventory.build_order_components
+         SET consumed_qty = consumed_qty + $1, updated_at = $3
+         WHERE id = $2 AND planned_qty - consumed_qty = $1`,
+        [asPostgresInteger(consumedQty, "buildComponent.consumedQty"), componentId, input.occurredAt],
+      );
+      if (componentUpdate.rowCount !== 1) {
+        throw new BuildDomainError(
+          "CLAIM_BUILD_COMPONENT_STATE_CHANGED",
+          "A build component changed while canonical consumption was being recorded",
+          { buildOrderId, componentId },
+        );
+      }
+    }
+    const runUpdate = await input.client.query(
+      `UPDATE inventory.build_runs
+       SET status = 'posted', total_component_cost_mills = $1, posted_at = $2
+       WHERE id = $3 AND status = 'posting'`,
+      [inventoryResult.totalInputCostMills.toString(), input.occurredAt, buildRunId],
+    );
+    if (runUpdate.rowCount !== 1) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_RUN_STATE_CHANGED",
+        "The build run changed while canonical completion was being recorded",
+        { buildOrderId, buildRunId },
+      );
+    }
+    const orderUpdate = await input.client.query(
+      `UPDATE inventory.build_orders
+       SET status = 'completed', completed_builds = planned_builds,
+           total_component_cost_mills = $1, started_at = COALESCE(started_at, $2),
+           completed_by = $3, completed_at = $2,
+           failure_code = NULL, failure_message = NULL, updated_at = $2
+       WHERE id = $4 AND status = 'released' AND completed_builds = 0`,
+      [inventoryResult.totalInputCostMills.toString(), input.occurredAt, input.actor, buildOrderId],
+    );
+    if (orderUpdate.rowCount !== 1) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_ORDER_STATE_CHANGED",
+        "The build order changed while canonical completion was being recorded",
+        { buildOrderId },
+      );
+    }
+    return {
+      buildOrderId,
+      buildRunId,
+      buildSystemNumber,
+      outputInventoryLevelId: inventoryResult.outputInventoryLevelId,
+      committedLotAllocations: inventoryResult.committedLotAllocations,
+      totalInputCostMills: inventoryResult.totalInputCostMills,
+    };
+  }
+
+  async cancelOperation(
+    input: Parameters<CanonicalClaimBuildMutationPort["cancelOperation"]>[0],
+  ): Promise<CanonicalClaimBuildCancellationResult> {
+    requireText(input.actor, "actor");
+    requireText(input.reason, "reason");
+    positiveBigInt(input.claimId, "claim.id");
+    positiveBigInt(input.claimOperationId, "claimOperation.id");
+    const buildOrderId = positiveInteger(input.buildOrderId, "buildOrder.id");
+    const expectedReservationQty = asPostgresInteger(
+      input.expectedReservationQty,
+      "expectedReservationQty",
+    );
+    const order = rows(await input.client.query(
+      `SELECT id, system_number, status, completed_builds
+       FROM inventory.build_orders
+       WHERE id = $1
+       FOR UPDATE`,
+      [buildOrderId],
+    ))[0];
+    if (!order) {
+      throw new BuildDomainError("CLAIM_BUILD_ORDER_NOT_FOUND", "The handed-off build order no longer exists", {
+        buildOrderId,
+      });
+    }
+    if (String(order.status) !== "released" || Number(order.completed_builds) !== 0) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_CANCELLATION_STATE_DRIFT",
+        "Only an unexecuted handed-off build may be cancelled with its claim",
+        { buildOrderId, status: order.status, completedBuilds: order.completed_builds },
+      );
+    }
+    const postedRuns = rows(await input.client.query(
+      `SELECT id, status
+       FROM inventory.build_runs
+       WHERE build_order_id = $1
+       ORDER BY id
+       FOR UPDATE`,
+      [buildOrderId],
+    ));
+    if (postedRuns.length > 0) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_CANCELLATION_RUN_CONFLICT",
+        "An unexecuted claim build cannot contain build-run evidence",
+        { buildOrderId, buildRunIds: postedRuns.map((row) => row.id) },
+      );
+    }
+    const reservations = rows(await input.client.query(
+      `SELECT reservation.id, reservation.reserved_qty,
+              reservation.consumed_qty, reservation.released_qty,
+              reservation.reservation_owner, reservation.availability_claim_id,
+              reservation.availability_claim_lot_allocation_id
+       FROM inventory.build_component_reservations AS reservation
+       JOIN inventory.build_order_components AS component
+         ON component.id = reservation.build_order_component_id
+       WHERE component.build_order_id = $1
+       ORDER BY reservation.availability_claim_lot_allocation_id, reservation.id
+       FOR UPDATE OF reservation`,
+      [buildOrderId],
+    ));
+    let releasedReservationQty = BigInt(0);
+    for (const reservation of reservations) {
+      const reservationClaimId = reservation.availability_claim_id == null
+        ? null
+        : positiveBigInt(reservation.availability_claim_id, "buildReservation.claimId");
+      const openQty = BigInt(String(reservation.reserved_qty))
+        - BigInt(String(reservation.consumed_qty))
+        - BigInt(String(reservation.released_qty));
+      if (String(reservation.reservation_owner) !== "availability_claim"
+        || reservationClaimId !== input.claimId
+        || reservation.availability_claim_lot_allocation_id == null
+        || BigInt(String(reservation.consumed_qty)) !== BigInt(0)
+        || BigInt(String(reservation.released_qty)) !== BigInt(0)
+        || openQty <= BigInt(0)) {
+        throw new BuildDomainError(
+          "CLAIM_BUILD_CANCELLATION_RESERVATION_DRIFT",
+          "An adopted build reservation cannot be released exactly once",
+          { buildOrderId, reservationId: reservation.id },
+        );
+      }
+      const quantity = asPostgresInteger(openQty, "buildReservation.openQty");
+      const updated = await input.client.query(
+        `UPDATE inventory.build_component_reservations
+         SET released_qty = released_qty + $1, updated_at = $3
+         WHERE id = $2 AND consumed_qty = 0 AND released_qty = 0
+           AND reserved_qty = $1`,
+        [quantity, positiveInteger(reservation.id, "buildReservation.id"), input.occurredAt],
+      );
+      if (updated.rowCount !== 1) {
+        throw new BuildDomainError(
+          "CLAIM_BUILD_CANCELLATION_RESERVATION_CHANGED",
+          "An adopted build reservation changed during cancellation",
+          { buildOrderId, reservationId: reservation.id },
+        );
+      }
+      releasedReservationQty += openQty;
+    }
+    if (releasedReservationQty !== input.expectedReservationQty
+      || releasedReservationQty !== BigInt(expectedReservationQty)) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_CANCELLATION_QUANTITY_MISMATCH",
+        "Cancelled build reservations do not reconcile to the handoff quantity",
+        {
+          buildOrderId,
+          expectedReservationQty: input.expectedReservationQty.toString(),
+          releasedReservationQty: releasedReservationQty.toString(),
+        },
+      );
+    }
+    const orderUpdate = await input.client.query(
+      `UPDATE inventory.build_orders
+       SET status = 'cancelled', cancelled_by = $1, cancellation_reason = $2,
+           cancelled_reservation_qty = $3, cancelled_at = $4,
+           failure_code = NULL, failure_message = NULL, updated_at = $4
+       WHERE id = $5 AND status = 'released' AND completed_builds = 0`,
+      [input.actor, input.reason, expectedReservationQty, input.occurredAt, buildOrderId],
+    );
+    if (orderUpdate.rowCount !== 1) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_CANCELLATION_STATE_CHANGED",
+        "The handed-off build order changed during cancellation",
+        { buildOrderId },
+      );
+    }
+    return {
+      buildOrderId,
+      buildSystemNumber: requireText(order.system_number, "buildOrder.systemNumber"),
+      releasedReservationQty,
+    };
   }
 }
