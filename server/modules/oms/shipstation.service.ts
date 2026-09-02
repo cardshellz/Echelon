@@ -33,6 +33,10 @@ import {
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "./shipstation-unmapped-physical";
 import type { ShippingProviderLabelObserver } from "../shipping/carrier-tracking.service";
+import type { StoredShippingProviderLabelObservation } from "../shipping/carrier-tracking.repository";
+import type {
+  PackageAllocationLabelCommercialFulfillmentService,
+} from "../shipping/package-allocation-label-commercial-fulfillment.service";
 import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
 import { normalizeTrackingNumber } from "../shipping/carrier-tracking.domain";
 import {
@@ -956,6 +960,10 @@ export function createShipStationService(
   dependencies: {
     providerLabelObserver?: ShippingProviderLabelObserver;
     fulfillmentAuthority?: ChannelFulfillmentAuthorityService;
+    labelCommercialFulfillment?: Pick<
+      PackageAllocationLabelCommercialFulfillmentService,
+      "process"
+    >;
   } = {},
 ) {
   const baseUrl = "https://ssapi.shipstation.com";
@@ -3981,8 +3989,10 @@ export function createShipStationService(
     return detailedShipment;
   }
 
-  async function observeProviderLabel(shipment: ShipStationShipment): Promise<void> {
-    await requireProviderLabelObserver().observeShipStationLabel(shipment);
+  async function observeProviderLabel(
+    shipment: ShipStationShipment,
+  ): Promise<StoredShippingProviderLabelObservation> {
+    return requireProviderLabelObserver().observeShipStationLabel(shipment);
   }
 
   async function observeProviderLabels(shipments: ShipStationShipment[]): Promise<void> {
@@ -3996,9 +4006,9 @@ export function createShipStationService(
     // SHIP_NOTIFY proves only that ShipStation created, changed, or voided a
     // label. It does not prove carrier possession. Persist every label as
     // provider evidence; an explicit outbound observation records only the
-    // package-level business-shipped fact. The carrier tracking dispatcher
-    // remains the sole runtime path for item, inventory, and channel effects
-    // until the Phase 2 outbox cutover is separately enabled.
+    // package-level business-shipped fact. Exact outbound contents may also
+    // create audited commercial-only channel commands; carrier possession and
+    // inventory remain under the carrier tracking dispatcher.
     const data = await apiRequest<{ shipments: ShipStationShipment[] }>(
       "GET",
       withShipmentItemsIncluded(baseUrl, resourceUrl),
@@ -4011,7 +4021,13 @@ export function createShipStationService(
     for (const shipment of shipments) {
       try {
         const detailedShipment = await hydrateReturnLabelDirection(shipment);
-        await observeProviderLabel(detailedShipment);
+        const labelObservation = await observeProviderLabel(detailedShipment);
+        if (dependencies.labelCommercialFulfillment) {
+          await dependencies.labelCommercialFulfillment.process(
+            detailedShipment,
+            labelObservation,
+          );
+        }
         if (detailedShipment.isReturnLabel === true) {
           await resolveShipStationUnmappedPhysicalExceptionForReturnLabel(db, {
             shipment: detailedShipment,

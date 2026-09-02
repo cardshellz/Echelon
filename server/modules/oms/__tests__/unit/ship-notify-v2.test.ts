@@ -95,6 +95,9 @@ function makeDb(executeResponses: Array<{ rows: any[] }>) {
       eventInserted: true,
     }),
   };
+  const labelCommercialFulfillment = {
+    process: vi.fn().mockResolvedValue({ outcome: "activated", planId: "501", commandIds: [301] }),
+  };
 
   const execute = vi.fn(async (query: any) => {
     const chunks: unknown[] = query?.queryChunks ?? [];
@@ -167,6 +170,7 @@ function makeDb(executeResponses: Array<{ rows: any[] }>) {
     calls,
     fulfillmentAuthority,
     providerLabelObserver,
+    labelCommercialFulfillment,
   };
 }
 
@@ -174,6 +178,7 @@ function createTestShipStationService(mock: ReturnType<typeof makeDb>, inventory
   return createShipStationService(mock.db, inventoryCore, {
     fulfillmentAuthority: mock.fulfillmentAuthority as any,
     providerLabelObserver: mock.providerLabelObserver as any,
+    labelCommercialFulfillment: mock.labelCommercialFulfillment as any,
   });
 }
 
@@ -1897,6 +1902,7 @@ describe("processShipNotify V2 :: error resilience", () => {
       failures: [{ shipmentId: 1002, message: "simulated label authority failure" }],
     });
     expect(mock.providerLabelObserver.observeShipStationLabel).toHaveBeenCalledTimes(3);
+    expect(mock.labelCommercialFulfillment.process).toHaveBeenCalledTimes(2);
     expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
   });
 
@@ -1915,6 +1921,10 @@ describe("processShipNotify V2 :: error resilience", () => {
     expect(observed).toBe(1);
     expect(mock.providerLabelObserver.observeShipStationLabel).toHaveBeenCalledWith(
       expect.objectContaining({ shipmentId: 1010, voidDate: voided.voidDate }),
+    );
+    expect(mock.labelCommercialFulfillment.process).toHaveBeenCalledWith(
+      expect.objectContaining({ shipmentId: 1010, voidDate: voided.voidDate }),
+      expect.objectContaining({ shippingProviderLabelId: 60001 }),
     );
     expect(mock.execute).not.toHaveBeenCalled();
     expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
