@@ -1,20 +1,25 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
-import { SHIPPING_FULFILLMENT_PROVIDERS } from "@shared/types/shipping-fulfillment-routing";
 import { requirePermission } from "../../../../routes/middleware";
+import {
+  ConnectedFulfillmentMethodCatalogService,
+} from "../../application/connected-fulfillment-method-catalog.service";
 import {
   FulfillmentRoutingError,
   FulfillmentRoutingService,
 } from "../../application/fulfillment-routing.service";
 import { PostgresFulfillmentRoutingStore } from "../../infrastructure/fulfillment-routing.repository";
-import { ShipStationFulfillmentMethodCatalogProvider } from "../../infrastructure/shipstation-fulfillment-method-catalog.provider";
+import { AesGcmFulfillmentProviderCredentialCipher } from "../../infrastructure/fulfillment-provider-credential-cipher";
+import { PostgresFulfillmentProviderConnectionStore } from "../../infrastructure/fulfillment-provider-connections.repository";
+import { createFulfillmentProviderRegistry } from "../../infrastructure/fulfillment-provider-registry";
 
 const idSchema = z.coerce.number().int().positive();
 const replaceProfileSchema = z.object({
   expectedRevision: z.number().int().min(0),
   idempotencyKey: z.string().trim().min(16).max(200),
   methods: z.array(z.object({
-    provider: z.enum(SHIPPING_FULFILLMENT_PROVIDERS),
+    providerConnectionId: z.number().int().positive(),
+    provider: z.string().trim().regex(/^[a-z][a-z0-9_]{1,79}$/),
     providerAccountId: z.string().trim().min(1).max(120),
     serviceCode: z.string().trim().min(1).max(80),
   }).strict()).max(200),
@@ -33,10 +38,7 @@ export function registerFulfillmentRoutingAdminRoutes(
   app: Express,
   dependencies: FulfillmentRoutingAdminRouteDependencies = {},
 ): void {
-  const service = dependencies.service ?? new FulfillmentRoutingService({
-    store: new PostgresFulfillmentRoutingStore(),
-    catalogProvider: new ShipStationFulfillmentMethodCatalogProvider(),
-  });
+  const service = dependencies.service ?? defaultService();
 
   app.get(
     "/api/shipping/admin/service-levels/:serviceLevelId/fulfillment-routing",
@@ -66,6 +68,20 @@ export function registerFulfillmentRoutingAdminRoutes(
       }
     },
   );
+}
+
+function defaultService(): FulfillmentRoutingService {
+  const environment = process.env;
+  const connectionStore = new PostgresFulfillmentProviderConnectionStore();
+  return new FulfillmentRoutingService({
+    store: new PostgresFulfillmentRoutingStore(),
+    catalogProvider: new ConnectedFulfillmentMethodCatalogService({
+      store: connectionStore,
+      registry: createFulfillmentProviderRegistry(),
+      credentialCipher: AesGcmFulfillmentProviderCredentialCipher.fromEnvOrNull(environment),
+      environment,
+    }),
+  });
 }
 
 function parseId(value: string): number {

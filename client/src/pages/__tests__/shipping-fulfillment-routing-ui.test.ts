@@ -32,4 +32,29 @@ describe("shipping fulfillment routing admin UI", () => {
     expect(detail).toContain("Save fulfillment routing before review");
     expect(detail).toContain("The routing resolver will fail closed");
   });
+
+  it("surfaces provider connection management separately from service-level routing", () => {
+    const settings = readFileSync(
+      join(process.cwd(), "client", "src", "pages", "ShippingSettings.tsx"),
+      "utf8",
+    );
+    const connections = readFileSync(
+      join(
+        process.cwd(),
+        "client",
+        "src",
+        "components",
+        "shipping",
+        "provider-connections",
+        "FulfillmentProviderConnectionsTab.tsx",
+      ),
+      "utf8",
+    );
+
+    expect(settings).toContain('TabsTrigger value="fulfillment-providers"');
+    expect(connections).toContain("Connect fulfillment provider");
+    expect(connections).toMatch(/Service levels map to methods from these\s+connections/);
+    expect(connections).toContain("The credential is verified before it is encrypted and stored");
+    expect(connections).not.toMatch(/value=\{connection\.credential\}/);
+  });
 });
