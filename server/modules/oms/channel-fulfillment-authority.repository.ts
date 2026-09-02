@@ -14,10 +14,15 @@ import {
 } from "./channel-fulfillment-command-reconciliation";
 import {
   evaluateChannelFulfillmentWritebackPolicy,
+  type ChannelFulfillmentWritebackPolicyDecision,
 } from "./channel-fulfillment-authority.policy";
 import { resolveProviderOrderId } from "./shipping-engine-order-identity";
 
 const positiveIntegerSchema = z.number().int().positive();
+const positiveBigintTextSchema = z.string().regex(/^[1-9]\d*$/).refine(
+  (value) => BigInt(value) <= BigInt("9223372036854775807"),
+  "must fit in a PostgreSQL bigint",
+);
 const optionalIdentifier = (maxLength: number) =>
   z.string().trim().min(1).max(maxLength).nullable().optional();
 
@@ -44,6 +49,17 @@ const materializeInputSchema = z.object({
 
 export type MaterializePhysicalPackageInput = z.input<typeof materializeInputSchema>;
 
+const packageAllocationCommercialMaterializationInputSchema = z.object({
+  packageAllocationPlanId: positiveBigintTextSchema,
+  source: z.string().trim().min(1).max(80),
+  correlationId: optionalIdentifier(100),
+  causationId: optionalIdentifier(100),
+}).strict();
+
+export type MaterializePackageAllocationCommercialFulfillmentInput = z.input<
+  typeof packageAllocationCommercialMaterializationInputSchema
+>;
+
 export type FulfillmentAuthorityErrorCode =
   | "INVALID_INPUT"
   | "LEGACY_SHIPMENT_NOT_FOUND"
@@ -53,6 +69,10 @@ export type FulfillmentAuthorityErrorCode =
   | "PROVIDER_ORDER_IDENTITY_MISSING"
   | "OMS_LINEAGE_MISSING"
   | "CHANNEL_LINE_IDENTITY_MISSING"
+  | "PACKAGE_ALLOCATION_PLAN_NOT_FOUND"
+  | "PACKAGE_ALLOCATION_PLAN_STALE"
+  | "PACKAGE_ALLOCATION_EFFECT_CONFLICT"
+  | "CHANNEL_WRITEBACK_NOT_AUTHORIZED"
   | "FULFILLMENT_AUTHORITY_EXCEEDED"
   | "DUPLICATE_WMS_LINEAGE"
   | "CANONICAL_STATE_CONFLICT"
@@ -90,6 +110,14 @@ export interface MaterializePhysicalPackageResult {
   readonly nonCustomerItemCount: number;
 }
 
+export interface MaterializePackageAllocationCommercialFulfillmentResult {
+  readonly packageAllocationPlanId: string;
+  readonly physicalShipmentIds: readonly number[];
+  readonly channelCommands: readonly MaterializedChannelCommand[];
+  readonly customerFulfillmentItemCount: number;
+  readonly replayed: boolean;
+}
+
 export interface ResolvedLegacyPhysicalPackage {
   readonly legacyWmsShipmentIds: readonly number[];
   readonly shippingProvider: string;
@@ -106,6 +134,7 @@ export interface ResolvedLegacyPhysicalPackage {
 export interface ClaimedChannelFulfillmentCommandItem {
   readonly physicalShipmentItemId: number;
   readonly packageAllocationEntryId: number | null;
+  readonly packageAllocationEffectIntentId: number | null;
   readonly shipmentRequestItemId: number;
   readonly legacyWmsShipmentId: number;
   readonly legacyWmsShipmentItemId: number;
@@ -166,6 +195,9 @@ export interface ClaimChannelFulfillmentCommandsInput {
 export interface ChannelFulfillmentAuthorityRepository {
   resolveLegacyPhysicalPackage(legacyWmsShipmentId: number): Promise<ResolvedLegacyPhysicalPackage>;
   materializePhysicalPackage(input: MaterializePhysicalPackageInput): Promise<MaterializePhysicalPackageResult>;
+  materializePackageAllocationCommercialFulfillment(
+    input: MaterializePackageAllocationCommercialFulfillmentInput,
+  ): Promise<MaterializePackageAllocationCommercialFulfillmentResult>;
   claimCommands(input: ClaimChannelFulfillmentCommandsInput): Promise<readonly ClaimedChannelFulfillmentCommand[]>;
   completeAttempt(input: CompleteChannelFulfillmentAttemptInput): Promise<void>;
 }
@@ -240,7 +272,49 @@ interface MaterializedCustomerItem extends CanonicalCustomerItem {
   physicalShipmentItemId: number;
 }
 
-const ACTIVE_COMMAND_STATUSES = new Set(["pending", "processing", "retry", "review"]);
+interface PackageAllocationCommercialIntent {
+  readonly id: string;
+  readonly packageAllocationSourceLineId: string;
+  readonly sourceWmsShipmentItemId: number;
+  readonly quantity: number;
+}
+
+interface PackageAllocationCommercialEntry {
+  readonly id: string;
+  readonly packageAllocationEffectIntentId: string;
+  readonly packageAllocationSourceLineId: string;
+  readonly sourceWmsShipmentItemId: number;
+  readonly packageAllocationPackageBindingId: string;
+  readonly provider: string;
+  readonly providerPhysicalShipmentId: string;
+  readonly providerOrderId: string | null;
+  readonly providerOrderKey: string | null;
+  readonly trackingNumber: string;
+  readonly carrier: string;
+  readonly serviceCode: string | null;
+  readonly businessShipmentRecognizedAt: Date;
+  readonly quantity: number;
+}
+
+interface MaterializedPackageAllocationCommercialItem extends MaterializedCustomerItem {
+  readonly packageAllocationEntryId: string;
+  readonly packageAllocationEffectIntentId: string;
+  readonly allocatedQuantity: number;
+}
+
+interface PackageAllocationCommercialPackage {
+  readonly provider: string;
+  readonly providerPhysicalShipmentId: string;
+  readonly providerOrderId: string | null;
+  readonly providerOrderKey: string | null;
+  readonly trackingNumber: string;
+  readonly carrier: string;
+  readonly serviceCode: string | null;
+  readonly businessShipmentRecognizedAt: Date;
+  readonly entries: readonly PackageAllocationCommercialEntry[];
+}
+
+const ACTIVE_COMMAND_STATUSES = new Set(["shadow", "pending", "processing", "retry", "review"]);
 function rowsOf<T>(result: any): T[] {
   return Array.isArray(result?.rows) ? result.rows as T[] : [];
 }
@@ -264,6 +338,16 @@ function toDateOrNull(value: unknown): Date | null {
   if (value == null) return null;
   const date = value instanceof Date ? value : new Date(String(value));
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function bigintTextOrNull(value: unknown): string | null {
+  const normalized = normalizedNullable(value);
+  if (!normalized || !/^[1-9]\d*$/.test(normalized)) return null;
+  try {
+    return BigInt(normalized) <= BigInt("9223372036854775807") ? normalized : null;
+  } catch {
+    return null;
+  }
 }
 
 function hash(value: string): string {
@@ -385,6 +469,24 @@ function canonicalizeInput(input: MaterializePhysicalPackageInput) {
       [...new Set(parsed.data.suppressChannelProviders ?? [])].sort(),
     ),
   };
+}
+
+function canonicalizePackageAllocationCommercialInput(
+  input: MaterializePackageAllocationCommercialFulfillmentInput,
+) {
+  const parsed = packageAllocationCommercialMaterializationInputSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new FulfillmentAuthorityError(
+      "INVALID_INPUT",
+      "Package-allocation commercial fulfillment input is invalid",
+      { issues: parsed.error.issues },
+    );
+  }
+  return Object.freeze({
+    ...parsed.data,
+    correlationId: parsed.data.correlationId ?? null,
+    causationId: parsed.data.causationId ?? null,
+  });
 }
 
 function assertCompatibleIdentity(
@@ -545,6 +647,364 @@ function normalizeCustomerItems(rows: readonly LegacyPackageRow[]): {
   }
 
   return { customerItems, nonCustomerRows };
+}
+
+async function lockCurrentPackageAllocationCommercialPlan(
+  tx: any,
+  packageAllocationPlanId: string,
+): Promise<{
+  readonly current: boolean;
+  readonly outcome: string;
+  readonly planVersion: number;
+  readonly currentGroupVersion: number;
+}> {
+  const plan = firstRow<{
+    id: string;
+    plan_version: number;
+    outcome: string;
+    current_version: number;
+  }>(await tx.execute(sql`
+    SELECT
+      plan.id::text AS id,
+      plan.plan_version,
+      plan.outcome,
+      allocation_group.current_version
+    FROM wms.package_allocation_plans AS plan
+    JOIN wms.package_allocation_groups AS allocation_group
+      ON allocation_group.id = plan.package_allocation_group_id
+    WHERE plan.id = ${packageAllocationPlanId}::bigint
+    FOR UPDATE OF allocation_group
+  `));
+  if (!plan) {
+    throw new FulfillmentAuthorityError(
+      "PACKAGE_ALLOCATION_PLAN_NOT_FOUND",
+      "The package-allocation plan does not exist",
+      { packageAllocationPlanId },
+    );
+  }
+  const outcome = String(plan.outcome);
+  const planVersion = Number(plan.plan_version);
+  const currentGroupVersion = Number(plan.current_version);
+  return Object.freeze({
+    current: outcome === "proposed" && planVersion === currentGroupVersion,
+    outcome,
+    planVersion,
+    currentGroupVersion,
+  });
+}
+
+async function loadPackageAllocationCommercialIntents(
+  tx: any,
+  packageAllocationPlanId: string,
+): Promise<readonly PackageAllocationCommercialIntent[]> {
+  const rows = rowsOf<Record<string, unknown>>(await tx.execute(sql`
+    SELECT
+      intent.id::text AS id,
+      intent.package_allocation_source_line_id::text AS package_allocation_source_line_id,
+      source.source_wms_shipment_item_id,
+      intent.quantity
+    FROM wms.package_allocation_effect_intents AS intent
+    JOIN wms.package_allocation_source_lines AS source
+      ON source.id = intent.package_allocation_source_line_id
+    WHERE intent.package_allocation_plan_id = ${packageAllocationPlanId}::bigint
+      AND intent.effect_type = 'commercial_fulfillment'
+      AND intent.executable = FALSE
+    ORDER BY source.source_wms_shipment_item_id, intent.id
+    FOR UPDATE OF intent
+  `));
+  return Object.freeze(rows.map((row) => {
+    const id = bigintTextOrNull(row.id);
+    const sourceId = bigintTextOrNull(row.package_allocation_source_line_id);
+    const sourceWmsShipmentItemId = asPositiveInteger(row.source_wms_shipment_item_id);
+    const quantity = asPositiveInteger(row.quantity);
+    if (!id || !sourceId || !sourceWmsShipmentItemId || !quantity) {
+      throw new FulfillmentAuthorityError(
+        "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+        "A persisted commercial intent has invalid identity or quantity",
+        { packageAllocationPlanId, intentId: row.id },
+      );
+    }
+    return Object.freeze({
+      id,
+      packageAllocationSourceLineId: sourceId,
+      sourceWmsShipmentItemId,
+      quantity,
+    });
+  }));
+}
+
+async function loadPackageAllocationCommercialCustomerItems(
+  tx: any,
+  packageAllocationPlanId: string,
+  expectedIntentCount: number,
+): Promise<ReadonlyMap<number, CanonicalCustomerItem>> {
+  const rows = rowsOf<LegacyPackageRow>(await tx.execute(sql`
+    SELECT
+      shipment.id AS legacy_shipment_id,
+      wms_order.id AS wms_order_id,
+      shipment.status::text AS shipment_status,
+      shipment.shipment_purpose,
+      COALESCE(
+        NULLIF(BTRIM(shipment.shipping_engine), ''),
+        CASE WHEN shipment.shipstation_order_id IS NOT NULL THEN 'shipstation' END
+      ) AS persisted_shipping_provider,
+      COALESCE(
+        NULLIF(BTRIM(shipment.engine_order_ref), ''),
+        shipment.shipstation_order_id::text
+      ) AS persisted_provider_order_id,
+      NULLIF(BTRIM(shipment.shipstation_order_key), '') AS persisted_provider_order_key,
+      shipment.external_fulfillment_id AS persisted_physical_identity,
+      shipment.tracking_number AS persisted_tracking_number,
+      shipment.carrier AS persisted_carrier,
+      shipment.requires_review,
+      shipment.review_reason,
+      NULLIF(BTRIM(wms_order.oms_fulfillment_order_id), '') AS wms_oms_order_ref,
+      oms_order.id AS oms_order_id,
+      oms_order.external_order_id AS oms_external_order_id,
+      wms_order.warehouse_id,
+      wms_order.sort_rank AS priority_rank,
+      jsonb_build_object(
+        'name', wms_order.shipping_name,
+        'company', wms_order.shipping_company,
+        'address1', wms_order.shipping_address,
+        'address2', wms_order.shipping_address2,
+        'city', wms_order.shipping_city,
+        'state', wms_order.shipping_state,
+        'postalCode', wms_order.shipping_postal_code,
+        'country', wms_order.shipping_country
+      ) AS ship_to_snapshot,
+      source.source_wms_shipment_item_id AS legacy_shipment_item_id,
+      source.shipment_item_purpose,
+      source.order_item_id,
+      source.replacement_for_order_item_id,
+      source.correction_for_shipment_item_id,
+      source.product_variant_id,
+      source.sku,
+      source.source_quantity::int AS quantity_shipped,
+      order_item.oms_order_line_id,
+      channel.provider AS channel_provider,
+      oms_line.fulfillment_provider AS line_fulfillment_provider,
+      oms_line.external_line_item_id AS channel_order_line_id,
+      oms_order.status AS oms_order_status,
+      oms_order.financial_status AS oms_financial_status,
+      oms_line.paid_quantity::int AS paid_quantity,
+      oms_line.authority_fulfillable_quantity::int AS authority_fulfillable_quantity,
+      GREATEST(
+        COALESCE(oms_line.paid_quantity, 0),
+        COALESCE(authority.max_paid_quantity, 0)
+      )::int AS max_authorized_quantity
+    FROM wms.package_allocation_effect_intents AS intent
+    JOIN wms.package_allocation_source_lines AS source
+      ON source.id = intent.package_allocation_source_line_id
+    JOIN wms.outbound_shipment_items AS shipment_item
+      ON shipment_item.id = source.source_wms_shipment_item_id
+    JOIN wms.outbound_shipments AS shipment
+      ON shipment.id = shipment_item.shipment_id
+    JOIN wms.orders AS wms_order
+      ON wms_order.id = shipment.order_id
+    LEFT JOIN wms.order_items AS order_item
+      ON order_item.id = source.order_item_id
+    LEFT JOIN oms.oms_order_lines AS oms_line
+      ON oms_line.id = order_item.oms_order_line_id
+    LEFT JOIN oms.oms_orders AS oms_order
+      ON oms_order.id = oms_line.order_id
+    LEFT JOIN channels.channels AS channel
+      ON channel.id = oms_order.channel_id
+    LEFT JOIN LATERAL (
+      SELECT MAX(event.paid_quantity)::int AS max_paid_quantity
+      FROM oms.oms_order_line_authority_events AS event
+      WHERE event.order_line_id = oms_line.id
+    ) AS authority ON TRUE
+    WHERE intent.package_allocation_plan_id = ${packageAllocationPlanId}::bigint
+      AND intent.effect_type = 'commercial_fulfillment'
+      AND intent.executable = FALSE
+    ORDER BY source.source_wms_shipment_item_id
+    FOR UPDATE OF shipment
+  `));
+  if (rows.length !== expectedIntentCount) {
+    throw new FulfillmentAuthorityError(
+      "OMS_LINEAGE_MISSING",
+      "One or more commercial intents lack exact outbound-shipment lineage",
+      { packageAllocationPlanId, expectedIntentCount, actualSourceCount: rows.length },
+    );
+  }
+  const normalized = normalizeCustomerItems(rows);
+  if (normalized.nonCustomerRows.length > 0 || normalized.customerItems.length !== expectedIntentCount) {
+    throw new FulfillmentAuthorityError(
+      "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+      "Commercial fulfillment intents may materialize only customer-fulfillment source lines",
+      {
+        packageAllocationPlanId,
+        commercialIntentCount: expectedIntentCount,
+        customerSourceCount: normalized.customerItems.length,
+        nonCustomerSourceCount: normalized.nonCustomerRows.length,
+      },
+    );
+  }
+  return new Map(normalized.customerItems.map((item) => [item.legacyWmsShipmentItemId, item]));
+}
+
+async function loadPackageAllocationCommercialEntries(
+  tx: any,
+  packageAllocationPlanId: string,
+  intents: readonly PackageAllocationCommercialIntent[],
+): Promise<readonly PackageAllocationCommercialEntry[]> {
+  const intentBySource = new Map(intents.map((intent) => [intent.packageAllocationSourceLineId, intent]));
+  const rows = rowsOf<Record<string, unknown>>(await tx.execute(sql`
+    SELECT
+      entry.id::text AS id,
+      entry.package_allocation_source_line_id::text AS package_allocation_source_line_id,
+      source.source_wms_shipment_item_id,
+      entry.package_allocation_package_binding_id::text AS package_allocation_package_binding_id,
+      binding.provider,
+      binding.provider_physical_shipment_id,
+      label.provider_order_id,
+      label.provider_order_key,
+      label.tracking_number,
+      label.carrier,
+      label.service_code,
+      business.business_shipment_recognized_at,
+      entry.quantity
+    FROM wms.package_allocation_entries AS entry
+    JOIN wms.package_allocation_source_lines AS source
+      ON source.id = entry.package_allocation_source_line_id
+    JOIN wms.package_allocation_package_bindings AS binding
+      ON binding.id = entry.package_allocation_package_binding_id
+     AND binding.package_allocation_group_id = entry.package_allocation_group_id
+    JOIN wms.shipping_provider_labels AS label
+      ON LOWER(BTRIM(label.provider)) = LOWER(BTRIM(binding.provider))
+     AND BTRIM(label.provider_label_id) = BTRIM(binding.provider_physical_shipment_id)
+    JOIN wms.declared_package_business_shipments AS business
+      ON business.shipping_provider_label_id = label.id
+    WHERE entry.package_allocation_plan_id = ${packageAllocationPlanId}::bigint
+      AND entry.allocation_kind = 'primary_transfer'
+      AND entry.target_kind = 'package'
+      AND entry.package_allocation_source_line_id IN (
+        SELECT commercial_intent.package_allocation_source_line_id
+        FROM wms.package_allocation_effect_intents AS commercial_intent
+        WHERE commercial_intent.package_allocation_plan_id = entry.package_allocation_plan_id
+          AND commercial_intent.effect_type = 'commercial_fulfillment'
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM wms.package_allocation_effect_intents AS package_intent
+        WHERE package_intent.package_allocation_plan_id = entry.package_allocation_plan_id
+          AND package_intent.package_allocation_package_binding_id = entry.package_allocation_package_binding_id
+          AND (
+            (
+              package_intent.effect_type = 'active_label_tracking'
+              AND label.label_status = 'active'
+            )
+            OR package_intent.effect_type = 'carrier_tracking'
+          )
+      )
+    ORDER BY binding.provider, binding.provider_physical_shipment_id,
+      source.source_wms_shipment_item_id, entry.id
+  `));
+  const totals = new Map<string, number>();
+  const entries = rows.map((row): PackageAllocationCommercialEntry => {
+    const id = bigintTextOrNull(row.id);
+    const sourceId = bigintTextOrNull(row.package_allocation_source_line_id);
+    const bindingId = bigintTextOrNull(row.package_allocation_package_binding_id);
+    const sourceWmsShipmentItemId = asPositiveInteger(row.source_wms_shipment_item_id);
+    const quantity = asPositiveInteger(row.quantity);
+    const provider = normalizedNullable(row.provider)?.toLowerCase() ?? null;
+    const providerPhysicalShipmentId = normalizedNullable(row.provider_physical_shipment_id);
+    const trackingNumber = normalizedNullable(row.tracking_number);
+    const carrier = normalizedNullable(row.carrier);
+    const recognizedAt = toDateOrNull(row.business_shipment_recognized_at);
+    const intent = sourceId ? intentBySource.get(sourceId) : undefined;
+    if (
+      !id || !sourceId || !bindingId || !sourceWmsShipmentItemId || !quantity
+      || !provider || !providerPhysicalShipmentId || !trackingNumber || !carrier
+      || !recognizedAt || !intent
+    ) {
+      throw new FulfillmentAuthorityError(
+        "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+        "A commercial allocation entry lacks exact current package, label, or intent evidence",
+        { packageAllocationPlanId, allocationEntryId: row.id },
+      );
+    }
+    totals.set(sourceId, (totals.get(sourceId) ?? 0) + quantity);
+    return Object.freeze({
+      id,
+      packageAllocationEffectIntentId: intent.id,
+      packageAllocationSourceLineId: sourceId,
+      sourceWmsShipmentItemId,
+      packageAllocationPackageBindingId: bindingId,
+      provider,
+      providerPhysicalShipmentId,
+      providerOrderId: normalizedNullable(row.provider_order_id),
+      providerOrderKey: normalizedNullable(row.provider_order_key),
+      trackingNumber,
+      carrier,
+      serviceCode: normalizedNullable(row.service_code),
+      businessShipmentRecognizedAt: recognizedAt,
+      quantity,
+    });
+  });
+  for (const intent of intents) {
+    const allocatedQuantity = totals.get(intent.packageAllocationSourceLineId) ?? 0;
+    if (allocatedQuantity !== intent.quantity) {
+      throw new FulfillmentAuthorityError(
+        "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+        "Commercial intent quantity is not exactly covered by its originating package plan",
+        {
+          packageAllocationPlanId,
+          packageAllocationEffectIntentId: intent.id,
+          intentQuantity: intent.quantity,
+          allocatedQuantity,
+        },
+      );
+    }
+  }
+  return Object.freeze(entries);
+}
+
+function groupPackageAllocationCommercialEntries(
+  entries: readonly PackageAllocationCommercialEntry[],
+): readonly PackageAllocationCommercialPackage[] {
+  const packages = new Map<string, PackageAllocationCommercialPackage & {
+    entries: PackageAllocationCommercialEntry[];
+  }>();
+  for (const entry of entries) {
+    const key = JSON.stringify([entry.provider, entry.providerPhysicalShipmentId]);
+    const existing = packages.get(key);
+    if (existing) {
+      if (
+        existing.providerOrderId !== entry.providerOrderId
+        || existing.providerOrderKey !== entry.providerOrderKey
+        || existing.trackingNumber !== entry.trackingNumber
+        || existing.carrier !== entry.carrier
+        || existing.serviceCode !== entry.serviceCode
+        || existing.businessShipmentRecognizedAt.getTime()
+          !== entry.businessShipmentRecognizedAt.getTime()
+      ) {
+        throw new FulfillmentAuthorityError(
+          "PACKAGE_IDENTITY_CONFLICT",
+          "One package-allocation binding resolved to conflicting label evidence",
+          { provider: entry.provider, providerPhysicalShipmentId: entry.providerPhysicalShipmentId },
+        );
+      }
+      existing.entries.push(entry);
+      continue;
+    }
+    packages.set(key, {
+      provider: entry.provider,
+      providerPhysicalShipmentId: entry.providerPhysicalShipmentId,
+      providerOrderId: entry.providerOrderId,
+      providerOrderKey: entry.providerOrderKey,
+      trackingNumber: entry.trackingNumber,
+      carrier: entry.carrier,
+      serviceCode: entry.serviceCode,
+      businessShipmentRecognizedAt: entry.businessShipmentRecognizedAt,
+      entries: [entry],
+    });
+  }
+  return Object.freeze([...packages.values()].map((pkg) => Object.freeze({
+    ...pkg,
+    entries: Object.freeze(pkg.entries),
+  })));
 }
 
 async function acquireIdentityLocks(
@@ -1220,6 +1680,95 @@ async function findOrCreatePhysicalCustomerItem(
   return Number(inserted.id);
 }
 
+async function findOrCreatePhysicalPackageAllocationCustomerItem(
+  tx: any,
+  item: Omit<MaterializedCustomerItem, "physicalShipmentItemId">,
+  entry: PackageAllocationCommercialEntry,
+  physicalShipmentId: number,
+): Promise<number> {
+  const existing = firstRow<{
+    id: number;
+    physical_shipment_id: number;
+    shipment_request_item_id: number;
+    fulfillment_plan_line_id: number;
+    wms_order_item_id: number;
+    quantity_shipped: number;
+    sku: string;
+  }>(await tx.execute(sql`
+    SELECT
+      id,
+      physical_shipment_id,
+      shipment_request_item_id,
+      fulfillment_plan_line_id,
+      wms_order_item_id,
+      quantity_shipped,
+      sku
+    FROM wms.physical_shipment_items
+    WHERE package_allocation_entry_id = ${entry.id}::bigint
+    FOR UPDATE
+  `));
+  if (existing) {
+    if (
+      Number(existing.physical_shipment_id) !== physicalShipmentId
+      || Number(existing.shipment_request_item_id) !== item.shipmentRequestItemId
+      || Number(existing.fulfillment_plan_line_id) !== item.fulfillmentPlanLineId
+      || Number(existing.wms_order_item_id) !== item.wmsOrderItemId
+      || Number(existing.quantity_shipped) !== entry.quantity
+      || String(existing.sku) !== item.sku
+    ) {
+      throw new FulfillmentAuthorityError(
+        "CANONICAL_STATE_CONFLICT",
+        `Physical shipment item ${existing.id} conflicts with package allocation entry ${entry.id}`,
+        {
+          packageAllocationEntryId: entry.id,
+          physicalShipmentItemId: existing.id,
+          expectedPhysicalShipmentId: physicalShipmentId,
+        },
+      );
+    }
+    return Number(existing.id);
+  }
+
+  const inserted = firstRow<{ id: number }>(await tx.execute(sql`
+    INSERT INTO wms.physical_shipment_items (
+      physical_shipment_id,
+      shipment_request_item_id,
+      fulfillment_plan_line_id,
+      wms_order_item_id,
+      legacy_wms_shipment_item_id,
+      package_allocation_entry_id,
+      shipment_item_purpose,
+      replacement_for_order_item_id,
+      product_variant_id,
+      sku,
+      quantity_shipped,
+      created_at
+    ) VALUES (
+      ${physicalShipmentId},
+      ${item.shipmentRequestItemId},
+      ${item.fulfillmentPlanLineId},
+      ${item.wmsOrderItemId},
+      NULL,
+      ${entry.id}::bigint,
+      'customer_fulfillment',
+      NULL,
+      ${item.productVariantId},
+      ${item.sku},
+      ${entry.quantity},
+      NOW()
+    )
+    RETURNING id
+  `));
+  if (!inserted) {
+    throw new FulfillmentAuthorityError(
+      "CANONICAL_STATE_CONFLICT",
+      "Failed to create package-allocation physical shipment item",
+      { packageAllocationEntryId: entry.id },
+    );
+  }
+  return Number(inserted.id);
+}
+
 async function materializeNonCustomerItems(
   tx: any,
   rows: readonly LegacyPackageRow[],
@@ -1416,11 +1965,11 @@ async function recalculatePlanLine(tx: any, fulfillmentPlanLineId: number): Prom
   `);
 }
 
-async function findLineWritebackEligibility(
+async function findLineWritebackDecisions(
   tx: any,
   items: readonly MaterializedCustomerItem[],
-): Promise<Map<number, boolean>> {
-  const eligibility = new Map<number, boolean>();
+): Promise<Map<number, ChannelFulfillmentWritebackPolicyDecision>> {
+  const decisions = new Map<number, ChannelFulfillmentWritebackPolicyDecision>();
   const uniqueLines = new Map<number, MaterializedCustomerItem>();
   for (const item of items) uniqueLines.set(item.fulfillmentPlanLineId, item);
 
@@ -1442,7 +1991,7 @@ async function findLineWritebackEligibility(
       currentAuthorizedQuantity: item.currentAuthorizedQuantity,
       cumulativePhysicalQuantity: shippedQuantity,
     });
-    eligibility.set(fulfillmentPlanLineId, decision.allowed);
+    decisions.set(fulfillmentPlanLineId, decision);
 
     if (decision.reasons.includes("physical_quantity_exceeds_current_authority")) {
       const affectedLegacyShipmentIds = [...new Set(
@@ -1464,7 +2013,20 @@ async function findLineWritebackEligibility(
     }
   }
 
-  return eligibility;
+  return decisions;
+}
+
+async function findLineWritebackEligibility(
+  tx: any,
+  items: readonly MaterializedCustomerItem[],
+): Promise<Map<number, boolean>> {
+  const decisions = await findLineWritebackDecisions(tx, items);
+  return new Map(
+    [...decisions.entries()].map(([fulfillmentPlanLineId, decision]) => [
+      fulfillmentPlanLineId,
+      decision.allowed,
+    ]),
+  );
 }
 
 async function insertChannelCommand(
@@ -1595,6 +2157,306 @@ async function insertChannelCommand(
     pushStatus: String(inserted.push_status),
     replayed: false,
   };
+}
+
+async function insertPackageAllocationShadowChannelCommand(
+  tx: any,
+  command: ChannelFulfillmentCommand,
+  input: ReturnType<typeof canonicalizePackageAllocationCommercialInput>,
+  pkg: PackageAllocationCommercialPackage,
+  legacyShipmentIds: readonly number[],
+  materializedItems: readonly MaterializedPackageAllocationCommercialItem[],
+): Promise<MaterializedChannelCommand> {
+  const itemByPhysicalId = new Map(
+    materializedItems.map((item) => [item.physicalShipmentItemId, item]),
+  );
+  const expectedItems = command.items.map((commandItem) => {
+    const materialized = itemByPhysicalId.get(commandItem.physicalShipmentItemId);
+    if (!materialized || materialized.allocatedQuantity !== commandItem.quantity) {
+      throw new FulfillmentAuthorityError(
+        "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+        "A planned shadow command item lacks exact commercial intent lineage",
+        {
+          commandKey: command.commandKey,
+          physicalShipmentItemId: commandItem.physicalShipmentItemId,
+        },
+      );
+    }
+    return {
+      ...commandItem,
+      packageAllocationEntryId: materialized.packageAllocationEntryId,
+      packageAllocationEffectIntentId: materialized.packageAllocationEffectIntentId,
+    };
+  });
+  const existing = firstRow<{
+    id: number;
+    request_hash: string | null;
+    push_status: string;
+  }>(await tx.execute(sql`
+    SELECT id, request_hash, push_status
+    FROM oms.channel_fulfillment_pushes
+    WHERE command_key = ${command.commandKey}
+    FOR UPDATE
+  `));
+  if (existing) {
+    if (existing.request_hash !== command.requestHash || String(existing.push_status) !== "shadow") {
+      throw new FulfillmentAuthorityError(
+        "COMMAND_REQUEST_CONFLICT",
+        "A package-allocation shadow command conflicts with prior canonical command state",
+        {
+          commandId: Number(existing.id),
+          commandKey: command.commandKey,
+          existingRequestHash: existing.request_hash,
+          incomingRequestHash: command.requestHash,
+          existingStatus: String(existing.push_status),
+        },
+      );
+    }
+    const persistedItems = rowsOf<Record<string, unknown>>(await tx.execute(sql`
+      SELECT
+        physical_shipment_item_id,
+        package_allocation_effect_intent_id::text AS package_allocation_effect_intent_id,
+        oms_order_line_id,
+        channel_order_line_id,
+        quantity_pushed
+      FROM oms.channel_fulfillment_push_items
+      WHERE channel_fulfillment_push_id = ${Number(existing.id)}
+      ORDER BY physical_shipment_item_id
+    `));
+    const expected = expectedItems
+      .map((item) => ({
+        physicalShipmentItemId: item.physicalShipmentItemId,
+        packageAllocationEffectIntentId: item.packageAllocationEffectIntentId,
+        omsOrderLineId: item.omsOrderLineId,
+        channelOrderLineId: item.channelOrderLineId,
+        quantity: item.quantity,
+      }))
+      .sort((left, right) => left.physicalShipmentItemId - right.physicalShipmentItemId);
+    const actual = persistedItems.map((row) => ({
+      physicalShipmentItemId: asPositiveInteger(row.physical_shipment_item_id),
+      packageAllocationEffectIntentId: bigintTextOrNull(row.package_allocation_effect_intent_id),
+      omsOrderLineId: asPositiveInteger(row.oms_order_line_id),
+      channelOrderLineId: normalizedNullable(row.channel_order_line_id),
+      quantity: asPositiveInteger(row.quantity_pushed),
+    }));
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new FulfillmentAuthorityError(
+        "COMMAND_REQUEST_CONFLICT",
+        "A replayed package-allocation shadow command has conflicting item provenance",
+        { commandId: Number(existing.id), commandKey: command.commandKey },
+      );
+    }
+    return {
+      id: Number(existing.id),
+      commandKey: command.commandKey,
+      pushStatus: "shadow",
+      replayed: true,
+    };
+  }
+
+  const metadata = {
+    contractVersion: 1,
+    materializationContract: "package-allocation-commercial-shadow-v1",
+    packageAllocationPlanId: input.packageAllocationPlanId,
+    source: input.source,
+    shippingProvider: pkg.provider,
+    providerPhysicalShipmentId: pkg.providerPhysicalShipmentId,
+    providerOrderId: pkg.providerOrderId,
+    legacyWmsShipmentIds: [...legacyShipmentIds].sort((left, right) => left - right),
+  };
+  const inserted = firstRow<{ id: number; push_status: string }>(await tx.execute(sql`
+    INSERT INTO oms.channel_fulfillment_pushes (
+      oms_order_id,
+      physical_shipment_id,
+      channel_provider,
+      channel_fulfillment_scope_key,
+      command_key,
+      request_hash,
+      tracking_number,
+      carrier,
+      tracking_url,
+      shipped_at,
+      push_status,
+      attempt_count,
+      max_attempts,
+      next_attempt_at,
+      correlation_id,
+      causation_id,
+      metadata,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${command.omsOrderId},
+      ${command.physicalShipmentId},
+      ${command.channelProvider},
+      ${command.channelFulfillmentScopeKey},
+      ${command.commandKey},
+      ${command.requestHash},
+      ${command.trackingNumber},
+      ${command.carrier},
+      ${command.trackingUrl},
+      ${command.shippedAt ? new Date(command.shippedAt) : null},
+      'shadow',
+      0,
+      12,
+      NOW(),
+      ${input.correlationId},
+      ${input.causationId},
+      ${JSON.stringify(metadata)}::jsonb,
+      NOW(),
+      NOW()
+    )
+    RETURNING id, push_status
+  `));
+  if (!inserted) {
+    throw new FulfillmentAuthorityError(
+      "CANONICAL_STATE_CONFLICT",
+      "Failed to create package-allocation shadow channel command",
+      { commandKey: command.commandKey },
+    );
+  }
+  for (const item of expectedItems) {
+    await tx.execute(sql`
+      INSERT INTO oms.channel_fulfillment_push_items (
+        channel_fulfillment_push_id,
+        physical_shipment_item_id,
+        oms_order_line_id,
+        channel_order_line_id,
+        quantity_pushed,
+        package_allocation_effect_intent_id,
+        metadata,
+        created_at
+      ) VALUES (
+        ${Number(inserted.id)},
+        ${item.physicalShipmentItemId},
+        ${item.omsOrderLineId},
+        ${item.channelOrderLineId},
+        ${item.quantity},
+        ${item.packageAllocationEffectIntentId}::bigint,
+        ${JSON.stringify({
+          contractVersion: 1,
+          shipmentRequestItemId: item.shipmentRequestItemId,
+          packageAllocationEntryId: item.packageAllocationEntryId,
+        })}::jsonb,
+        NOW()
+      )
+    `);
+  }
+  return {
+    id: Number(inserted.id),
+    commandKey: command.commandKey,
+    pushStatus: String(inserted.push_status),
+    replayed: false,
+  };
+}
+
+async function assertPackageAllocationCommercialIntentCoverage(
+  tx: any,
+  intents: readonly PackageAllocationCommercialIntent[],
+): Promise<void> {
+  if (intents.length === 0) return;
+  const intentIds = sql.join(intents.map((intent) => sql`${intent.id}::bigint`), sql`, `);
+  const rows = rowsOf<Record<string, unknown>>(await tx.execute(sql`
+    SELECT
+      package_allocation_effect_intent_id::text AS intent_id,
+      COALESCE(SUM(quantity_pushed), 0)::int AS materialized_quantity
+    FROM oms.channel_fulfillment_push_items
+    WHERE package_allocation_effect_intent_id IN (${intentIds})
+    GROUP BY package_allocation_effect_intent_id
+    ORDER BY package_allocation_effect_intent_id
+  `));
+  const totals = new Map(rows.map((row) => [
+    bigintTextOrNull(row.intent_id),
+    Number(row.materialized_quantity),
+  ]));
+  for (const intent of intents) {
+    const materializedQuantity = totals.get(intent.id) ?? 0;
+    if (materializedQuantity !== intent.quantity) {
+      throw new FulfillmentAuthorityError(
+        "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+        "Commercial intent was not exactly covered by its shadow command items",
+        {
+          packageAllocationEffectIntentId: intent.id,
+          intentQuantity: intent.quantity,
+          materializedQuantity,
+        },
+      );
+    }
+  }
+}
+
+async function loadCompletedPackageAllocationCommercialMaterialization(
+  tx: any,
+  input: ReturnType<typeof canonicalizePackageAllocationCommercialInput>,
+  intents: readonly PackageAllocationCommercialIntent[],
+): Promise<MaterializePackageAllocationCommercialFulfillmentResult | null> {
+  if (intents.length === 0) return null;
+  const intentIds = sql.join(intents.map((intent) => sql`${intent.id}::bigint`), sql`, `);
+  const coverageRows = rowsOf<Record<string, unknown>>(await tx.execute(sql`
+    SELECT
+      package_allocation_effect_intent_id::text AS intent_id,
+      COALESCE(SUM(quantity_pushed), 0)::int AS materialized_quantity
+    FROM oms.channel_fulfillment_push_items
+    WHERE package_allocation_effect_intent_id IN (${intentIds})
+    GROUP BY package_allocation_effect_intent_id
+  `));
+  const coverage = new Map(coverageRows.map((row) => [
+    bigintTextOrNull(row.intent_id),
+    Number(row.materialized_quantity),
+  ]));
+  if (intents.some((intent) => coverage.get(intent.id) !== intent.quantity)) return null;
+
+  const rows = rowsOf<Record<string, unknown>>(await tx.execute(sql`
+    SELECT DISTINCT
+      command.id,
+      command.command_key,
+      command.push_status,
+      command.physical_shipment_id,
+      command.metadata
+    FROM oms.channel_fulfillment_push_items AS item
+    JOIN oms.channel_fulfillment_pushes AS command
+      ON command.id = item.channel_fulfillment_push_id
+    WHERE item.package_allocation_effect_intent_id IN (${intentIds})
+    ORDER BY command.physical_shipment_id, command.id
+  `));
+  if (rows.length === 0) return null;
+  const commands: MaterializedChannelCommand[] = [];
+  const physicalShipmentIds = new Set<number>();
+  for (const row of rows) {
+    const id = asPositiveInteger(row.id);
+    const physicalShipmentId = asPositiveInteger(row.physical_shipment_id);
+    const commandKey = normalizedNullable(row.command_key);
+    const pushStatus = normalizedNullable(row.push_status);
+    const metadata = row.metadata && typeof row.metadata === "object"
+      ? row.metadata as Record<string, unknown>
+      : null;
+    if (
+      !id || !physicalShipmentId || !commandKey || !pushStatus || !metadata
+      || metadata.materializationContract !== "package-allocation-commercial-shadow-v1"
+      || metadata.packageAllocationPlanId !== input.packageAllocationPlanId
+      || metadata.source !== input.source
+    ) {
+      throw new FulfillmentAuthorityError(
+        "COMMAND_REQUEST_CONFLICT",
+        "Persisted package-allocation commercial coverage has conflicting command metadata",
+        { packageAllocationPlanId: input.packageAllocationPlanId, commandId: row.id },
+      );
+    }
+    physicalShipmentIds.add(physicalShipmentId);
+    commands.push({ id, commandKey, pushStatus, replayed: true });
+  }
+  const countRow = firstRow<{ item_count: number }>(await tx.execute(sql`
+    SELECT COUNT(DISTINCT physical_shipment_item_id)::int AS item_count
+    FROM oms.channel_fulfillment_push_items
+    WHERE package_allocation_effect_intent_id IN (${intentIds})
+  `));
+  return Object.freeze({
+    packageAllocationPlanId: input.packageAllocationPlanId,
+    physicalShipmentIds: Object.freeze([...physicalShipmentIds].sort((left, right) => left - right)),
+    channelCommands: Object.freeze(commands),
+    customerFulfillmentItemCount: Number(countRow?.item_count ?? 0),
+    replayed: true,
+  });
 }
 
 async function loadExistingChannelCommandSnapshots(
@@ -2019,6 +2881,279 @@ export function createChannelFulfillmentAuthorityRepository(
     };
   }
 
+  async function materializePackageAllocationCommercialFulfillment(
+    rawInput: MaterializePackageAllocationCommercialFulfillmentInput,
+  ): Promise<MaterializePackageAllocationCommercialFulfillmentResult> {
+    const input = canonicalizePackageAllocationCommercialInput(rawInput);
+    if (typeof db?.transaction !== "function") {
+      throw new FulfillmentAuthorityError(
+        "INVALID_INPUT",
+        "Package-allocation commercial materialization requires transactional database support",
+      );
+    }
+
+    return db.transaction(async (tx: any) => {
+      const planState = await lockCurrentPackageAllocationCommercialPlan(
+        tx,
+        input.packageAllocationPlanId,
+      );
+      const intents = await loadPackageAllocationCommercialIntents(
+        tx,
+        input.packageAllocationPlanId,
+      );
+      if (intents.length === 0) {
+        return Object.freeze({
+          packageAllocationPlanId: input.packageAllocationPlanId,
+          physicalShipmentIds: Object.freeze([]),
+          channelCommands: Object.freeze([]),
+          customerFulfillmentItemCount: 0,
+          replayed: true,
+        });
+      }
+      const completed = await loadCompletedPackageAllocationCommercialMaterialization(
+        tx,
+        input,
+        intents,
+      );
+      if (completed) return completed;
+      if (!planState.current) {
+        throw new FulfillmentAuthorityError(
+          "PACKAGE_ALLOCATION_PLAN_STALE",
+          "Commercial fulfillment requires the current proposed package-allocation plan",
+          {
+            packageAllocationPlanId: input.packageAllocationPlanId,
+            planVersion: planState.planVersion,
+            currentGroupVersion: planState.currentGroupVersion,
+            outcome: planState.outcome,
+          },
+        );
+      }
+      const customerItems = await loadPackageAllocationCommercialCustomerItems(
+        tx,
+        input.packageAllocationPlanId,
+        intents.length,
+      );
+      const entries = await loadPackageAllocationCommercialEntries(
+        tx,
+        input.packageAllocationPlanId,
+        intents,
+      );
+      const packages = groupPackageAllocationCommercialEntries(entries);
+      if (packages.length === 0) {
+        throw new FulfillmentAuthorityError(
+          "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+          "Commercial intents have no exact qualifying physical packages",
+          { packageAllocationPlanId: input.packageAllocationPlanId },
+        );
+      }
+
+      const lockKeys = new Set<string>();
+      for (const pkg of packages) {
+        const providerOrderIdentity = pkg.providerOrderId ?? pkg.providerOrderKey;
+        if (!providerOrderIdentity) {
+          throw new FulfillmentAuthorityError(
+            "PROVIDER_ORDER_IDENTITY_MISSING",
+            "A package-allocation commercial package requires provider order identity",
+            {
+              packageAllocationPlanId: input.packageAllocationPlanId,
+              shippingProvider: pkg.provider,
+              providerPhysicalShipmentId: pkg.providerPhysicalShipmentId,
+            },
+          );
+        }
+        lockKeys.add(`fulfillment:provider-order:${pkg.provider}:${providerOrderIdentity}`);
+        lockKeys.add(`fulfillment:physical-package:${pkg.provider}:${pkg.providerPhysicalShipmentId}`);
+      }
+      for (const key of [...lockKeys].sort()) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+      }
+
+      const stagedBySourceItemId = new Map<
+        number,
+        Omit<MaterializedCustomerItem, "physicalShipmentItemId">
+      >();
+      for (const item of [...customerItems.values()].sort(
+        (left, right) => left.legacyWmsShipmentItemId - right.legacyWmsShipmentItemId,
+      )) {
+        const fulfillmentPlanId = await findOrCreatePlan(tx, item, input.source);
+        const fulfillmentPlanLineId = await findOrCreatePlanLine(tx, item, fulfillmentPlanId);
+        const shipmentRequestId = await findOrCreateShipmentRequest(
+          tx,
+          item,
+          fulfillmentPlanId,
+          input.source,
+        );
+        const shipmentRequestItemId = await findOrCreateRequestItem(
+          tx,
+          item,
+          shipmentRequestId,
+          fulfillmentPlanLineId,
+        );
+        stagedBySourceItemId.set(item.legacyWmsShipmentItemId, {
+          ...item,
+          fulfillmentPlanId,
+          fulfillmentPlanLineId,
+          shipmentRequestId,
+          shipmentRequestItemId,
+        });
+      }
+
+      const materializedPackages: Array<{
+        readonly pkg: PackageAllocationCommercialPackage;
+        readonly canonicalInput: ReturnType<typeof canonicalizeInput>;
+        readonly physicalShipmentId: number;
+        readonly items: readonly MaterializedPackageAllocationCommercialItem[];
+      }> = [];
+      for (const pkg of packages) {
+        const packageItems = pkg.entries.map((entry) => {
+          const staged = stagedBySourceItemId.get(entry.sourceWmsShipmentItemId);
+          if (!staged) {
+            throw new FulfillmentAuthorityError(
+              "OMS_LINEAGE_MISSING",
+              "A package allocation entry has no staged OMS/WMS source lineage",
+              {
+                packageAllocationPlanId: input.packageAllocationPlanId,
+                packageAllocationEntryId: entry.id,
+              },
+            );
+          }
+          return { entry, staged };
+        });
+        const legacyShipmentIds = [...new Set(
+          packageItems.map(({ staged }) => staged.legacyWmsShipmentId),
+        )].sort((left, right) => left - right);
+        const canonicalInput = canonicalizeInput({
+          legacyWmsShipmentIds: legacyShipmentIds,
+          shippingProvider: pkg.provider,
+          providerPhysicalShipmentId: pkg.providerPhysicalShipmentId,
+          providerOrderId: pkg.providerOrderId,
+          providerOrderKey: pkg.providerOrderKey,
+          trackingNumber: pkg.trackingNumber,
+          carrier: pkg.carrier,
+          trackingUrl: null,
+          serviceCode: pkg.serviceCode,
+          shippedAt: pkg.businessShipmentRecognizedAt,
+          source: input.source,
+          correlationId: input.correlationId,
+          causationId: input.causationId,
+          suppressChannelWriteback: false,
+          suppressChannelProviders: [],
+          legacyHeaderPolicy: "aggregate_projection",
+        });
+        const shippingEngineOrderId = await findOrCreateShippingEngineOrder(
+          tx,
+          canonicalInput,
+        );
+        await linkShippingEngineRequests(
+          tx,
+          shippingEngineOrderId,
+          packageItems.map(({ staged }) => staged.shipmentRequestId),
+        );
+        const physicalShipmentId = await findOrCreatePhysicalShipment(
+          tx,
+          canonicalInput,
+          shippingEngineOrderId,
+        );
+        const materializedItems: MaterializedPackageAllocationCommercialItem[] = [];
+        for (const { entry, staged } of packageItems) {
+          const physicalShipmentItemId = await findOrCreatePhysicalPackageAllocationCustomerItem(
+            tx,
+            staged,
+            entry,
+            physicalShipmentId,
+          );
+          materializedItems.push({
+            ...staged,
+            physicalShipmentItemId,
+            packageAllocationEntryId: entry.id,
+            packageAllocationEffectIntentId: entry.packageAllocationEffectIntentId,
+            allocatedQuantity: entry.quantity,
+          });
+        }
+        materializedPackages.push({
+          pkg,
+          canonicalInput,
+          physicalShipmentId,
+          items: Object.freeze(materializedItems),
+        });
+      }
+
+      const allMaterializedItems = materializedPackages.flatMap((pkg) => pkg.items);
+      const planLineIds = [...new Set(
+        allMaterializedItems.map((item) => item.fulfillmentPlanLineId),
+      )].sort((left, right) => left - right);
+      for (const fulfillmentPlanLineId of planLineIds) {
+        await recalculatePlanLine(tx, fulfillmentPlanLineId);
+      }
+      const writebackDecisions = await findLineWritebackDecisions(
+        tx,
+        allMaterializedItems,
+      );
+      const blockedLines = [...writebackDecisions.entries()]
+        .filter(([, decision]) => !decision.allowed)
+        .map(([fulfillmentPlanLineId, decision]) => ({
+          fulfillmentPlanLineId,
+          reasons: decision.reasons,
+        }));
+      if (blockedLines.length > 0) {
+        throw new FulfillmentAuthorityError(
+          "CHANNEL_WRITEBACK_NOT_AUTHORIZED",
+          "Package-allocation commercial fulfillment is blocked by current OMS authority",
+          { packageAllocationPlanId: input.packageAllocationPlanId, blockedLines },
+        );
+      }
+
+      const persistedCommands: MaterializedChannelCommand[] = [];
+      for (const materializedPackage of materializedPackages) {
+        const commands = planChannelFulfillmentCommands({
+          physicalShipmentId: materializedPackage.physicalShipmentId,
+          shippingProvider: materializedPackage.pkg.provider,
+          providerPhysicalShipmentId: materializedPackage.pkg.providerPhysicalShipmentId,
+          trackingNumber: materializedPackage.pkg.trackingNumber,
+          carrier: materializedPackage.pkg.carrier,
+          trackingUrl: null,
+          shippedAt: materializedPackage.pkg.businessShipmentRecognizedAt.toISOString(),
+          items: materializedPackage.items.map((item) => ({
+            physicalShipmentItemId: item.physicalShipmentItemId,
+            shipmentRequestItemId: item.shipmentRequestItemId,
+            omsOrderId: item.omsOrderId,
+            omsOrderLineId: item.omsOrderLineId,
+            channelProvider: item.channelProvider,
+            channelOrderLineId: item.channelOrderLineId,
+            channelFulfillmentScopeKey: "order",
+            quantityShipped: item.allocatedQuantity,
+          })),
+        });
+        for (const command of commands) {
+          const commandItems = materializedPackage.items.filter((item) => (
+            item.omsOrderId === command.omsOrderId
+            && item.channelProvider === command.channelProvider
+          ));
+          const legacyShipmentIds = [...new Set(
+            commandItems.map((item) => item.legacyWmsShipmentId),
+          )];
+          persistedCommands.push(await insertPackageAllocationShadowChannelCommand(
+            tx,
+            command,
+            input,
+            materializedPackage.pkg,
+            legacyShipmentIds,
+            commandItems,
+          ));
+        }
+      }
+      await assertPackageAllocationCommercialIntentCoverage(tx, intents);
+
+      return Object.freeze({
+        packageAllocationPlanId: input.packageAllocationPlanId,
+        physicalShipmentIds: Object.freeze(materializedPackages.map((pkg) => pkg.physicalShipmentId)),
+        channelCommands: Object.freeze(persistedCommands),
+        customerFulfillmentItemCount: allMaterializedItems.length,
+        replayed: persistedCommands.every((command) => command.replayed),
+      });
+    });
+  }
+
   async function materializePhysicalPackage(
     rawInput: MaterializePhysicalPackageInput,
   ): Promise<MaterializePhysicalPackageResult> {
@@ -2383,6 +3518,7 @@ export function createChannelFulfillmentAuthorityRepository(
         SELECT
           push_item.channel_fulfillment_push_id,
           push_item.physical_shipment_item_id,
+          push_item.package_allocation_effect_intent_id,
           physical_item.package_allocation_entry_id,
           COALESCE(
             physical_item.shipment_request_item_id,
@@ -2417,6 +3553,9 @@ export function createChannelFulfillmentAuthorityRepository(
         const list = itemsByCommand.get(commandId) ?? [];
         const physicalShipmentItemId = asPositiveInteger(item.physical_shipment_item_id);
         const packageAllocationEntryId = asPositiveInteger(item.package_allocation_entry_id);
+        const packageAllocationEffectIntentId = asPositiveInteger(
+          item.package_allocation_effect_intent_id,
+        );
         const shipmentRequestItemId = asPositiveInteger(item.shipment_request_item_id);
         const legacyWmsShipmentId = asPositiveInteger(item.legacy_wms_shipment_id);
         const legacyWmsShipmentItemId = asPositiveInteger(item.legacy_wms_shipment_item_id);
@@ -2441,6 +3580,7 @@ export function createChannelFulfillmentAuthorityRepository(
         list.push(Object.freeze({
           physicalShipmentItemId,
           packageAllocationEntryId,
+          packageAllocationEffectIntentId,
           shipmentRequestItemId,
           legacyWmsShipmentId,
           legacyWmsShipmentItemId,
@@ -2572,6 +3712,7 @@ export function createChannelFulfillmentAuthorityRepository(
   return {
     resolveLegacyPhysicalPackage,
     materializePhysicalPackage,
+    materializePackageAllocationCommercialFulfillment,
     claimCommands,
     completeAttempt,
   };
