@@ -146,6 +146,7 @@ const NON_EXECUTION_FAILURE_CODES = new Set([
   "BUILD_ORDER_NOT_FOUND",
   "BUILD_RUN_EXCEEDS_REMAINING",
   "BUILD_RUN_INCOMPLETE",
+  "CLAIM_BUILD_EXECUTION_NOT_AVAILABLE",
   "IDEMPOTENCY_KEY_REUSED",
   "INVALID_BUILD_INPUT",
   "INVALID_BUILD_PROGRESS",
@@ -227,6 +228,34 @@ export class BuildExecutionRepository {
     });
   }
 
+  private async assertClaimBuildActionAvailable(
+    tx: Db,
+    buildOrderId: number,
+    action: "execute" | "cancel",
+  ): Promise<void> {
+    const handoffResult = await tx.execute(sql`
+      SELECT claim_id, claim_operation_id, status
+      FROM inventory.availability_claim_build_handoffs
+      WHERE build_order_id = ${buildOrderId}
+      FOR SHARE
+    `);
+    const handoff = handoffResult.rows[0];
+    if (!handoff || String(handoff.status) !== "handed_off") return;
+    throw new BuildDomainError(
+      action === "execute"
+        ? "CLAIM_BUILD_EXECUTION_NOT_AVAILABLE"
+        : "CLAIM_BUILD_CANCEL_REQUIRES_CLAIM_COMMAND",
+      action === "execute"
+        ? "Canonical claim build execution remains disabled until atomic claim output ownership is installed"
+        : "A canonical claim build must be cancelled through the claim-aware command so its adopted reservations remain single-owned",
+      {
+        buildOrderId,
+        claimId: String(handoff.claim_id),
+        claimOperationId: String(handoff.claim_operation_id),
+      },
+    );
+  }
+
   private async reserveOutstandingComponents(
     tx: Db,
     order: any,
@@ -237,15 +266,6 @@ export class BuildExecutionRepository {
     for (const component of components) {
       const componentId = Number(component.id);
       const variantId = Number(component.component_variant_id);
-      const locationId = Number(component.source_location_id);
-      if (!Number.isSafeInteger(locationId) || locationId <= 0) {
-        throw new BuildDomainError(
-          "BUILD_SOURCE_LOCATION_REQUIRED",
-          `Component variant ${variantId} requires a source location`,
-          { buildOrderId: Number(order.id), componentVariantId: variantId },
-        );
-      }
-
       const activeReservation = await tx.execute(sql`
         SELECT COALESCE(SUM(reserved_qty - consumed_qty - released_qty), 0) AS active_qty
         FROM inventory.build_component_reservations
@@ -268,6 +288,15 @@ export class BuildExecutionRepository {
         );
       }
       if (missingQty === 0) continue;
+
+      const locationId = Number(component.source_location_id);
+      if (!Number.isSafeInteger(locationId) || locationId <= 0) {
+        throw new BuildDomainError(
+          "BUILD_SOURCE_LOCATION_REQUIRED",
+          `Component variant ${variantId} requires a source location when the build must reserve more inventory`,
+          { buildOrderId: Number(order.id), componentVariantId: variantId, missingQty },
+        );
+      }
 
       const levelResult = await tx.execute(sql`
         SELECT id, variant_qty, reserved_qty
@@ -457,6 +486,7 @@ export class BuildExecutionRepository {
         { status: order.status },
       );
     }
+    await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "execute");
 
     const components = await this.lockComponents(tx, input.buildOrderId);
     await this.assertConfigurationCurrent(tx, order, components);
@@ -909,6 +939,7 @@ export class BuildExecutionRepository {
           { status: order.status },
         );
       }
+      await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "cancel");
       const releasedReservationQty = await this.releaseOpenReservations(tx, order, input.actorId);
       await tx.execute(sql`
         UPDATE inventory.build_orders

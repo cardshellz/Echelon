@@ -18,6 +18,10 @@ const executionContractMigration = readFileSync(
   resolve(process.cwd(), "migrations/0642_inventory_availability_claim_execution_contract.sql"),
   "utf8",
 );
+const buildHandoffMigration = readFileSync(
+  resolve(process.cwd(), "migrations/0644_inventory_availability_claim_build_handoff.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -41,6 +45,11 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     .replaceAll("catalog.", `"${schemas.catalog}".`)
     .replaceAll("wms.", `"${schemas.wms}".`);
   const qualifiedExecutionContractMigration = executionContractMigration
+    .replaceAll("inventory.", `"${schemas.inventory}".`)
+    .replaceAll("warehouse.", `"${schemas.warehouse}".`)
+    .replaceAll("catalog.", `"${schemas.catalog}".`)
+    .replaceAll("wms.", `"${schemas.wms}".`);
+  const qualifiedBuildHandoffMigration = buildHandoffMigration
     .replaceAll("inventory.", `"${schemas.inventory}".`)
     .replaceAll("warehouse.", `"${schemas.warehouse}".`)
     .replaceAll("catalog.", `"${schemas.catalog}".`)
@@ -73,9 +82,12 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       CREATE TABLE "${schemas.inventory}".availability_activation_runs (id bigint PRIMARY KEY);
       CREATE TABLE "${schemas.inventory}".inventory_levels (id integer PRIMARY KEY);
       CREATE TABLE "${schemas.inventory}".inventory_lots (id integer PRIMARY KEY);
+      CREATE TABLE "${schemas.inventory}".build_orders (id integer PRIMARY KEY);
+      CREATE TABLE "${schemas.inventory}".build_component_reservations (id integer PRIMARY KEY);
     `);
     await pool.query(qualifiedMigration);
     await pool.query(qualifiedExecutionContractMigration);
+    await pool.query(qualifiedBuildHandoffMigration);
   }, 300_000);
 
   afterAll(async () => {
@@ -97,6 +109,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       "availability_claim_operation_inputs",
       "availability_claim_resources",
       "availability_claim_lot_allocations",
+      "availability_claim_build_handoffs",
       "availability_claim_commands",
       "availability_claim_events",
     ]) {
@@ -156,6 +169,40 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       "availability_claim_lot_allocations_cost_breakdown_chk",
       "availability_claim_operations_committed_output_chk",
       "availability_claim_resources_producer_operation_fk",
+    ]);
+  });
+
+  it("installs one-to-one build handoff and exact adopted-reservation ownership", async () => {
+    const columns = await pool.query<{ table_name: string; column_name: string }>(
+      `SELECT table_name, column_name
+       FROM information_schema.columns
+       WHERE table_schema = $1
+         AND (table_name, column_name) IN (
+           ('build_component_reservations', 'reservation_owner'),
+           ('build_component_reservations', 'availability_claim_id'),
+           ('build_component_reservations', 'availability_claim_lot_allocation_id')
+         )`,
+      [schemas.inventory],
+    );
+    expect(columns.rows).toHaveLength(3);
+
+    const constraints = await pool.query<{ conname: string }>(
+      `SELECT conname
+       FROM pg_constraint
+       WHERE connamespace = $1::regnamespace
+         AND conname IN (
+           'availability_claim_build_handoffs_operation_uq',
+           'availability_claim_build_handoffs_build_order_uq',
+           'build_component_reservations_claim_allocation_fk',
+           'build_component_reservations_owner_chk'
+         )`,
+      [schemas.inventory],
+    );
+    expect(constraints.rows.map((row) => row.conname).sort()).toEqual([
+      "availability_claim_build_handoffs_build_order_uq",
+      "availability_claim_build_handoffs_operation_uq",
+      "build_component_reservations_claim_allocation_fk",
+      "build_component_reservations_owner_chk",
     ]);
   });
 });
