@@ -8,6 +8,9 @@ import {
   FulfillmentAuthorityError,
   type ChannelFulfillmentAuthorityRepository,
   type ClaimedChannelFulfillmentCommand,
+  type ActivatePackageAllocationCommercialFulfillmentResult,
+  type MaterializePackageAllocationCommercialFulfillmentInput,
+  type MaterializePackageAllocationCommercialFulfillmentResult,
   type MaterializePhysicalPackageInput,
   type MaterializePhysicalPackageResult,
 } from "./channel-fulfillment-authority.repository";
@@ -64,6 +67,17 @@ export interface MaterializeAndDispatchResult {
   readonly dispatch: ChannelFulfillmentBatchResult;
 }
 
+export interface MaterializeAndActivatePackageAllocationCommercialFulfillmentInput
+  extends MaterializePackageAllocationCommercialFulfillmentInput {
+  readonly activatedBy: string;
+  readonly activationReason: string;
+}
+
+export interface MaterializeAndActivatePackageAllocationCommercialFulfillmentResult {
+  readonly materialized: MaterializePackageAllocationCommercialFulfillmentResult;
+  readonly activation: ActivatePackageAllocationCommercialFulfillmentResult;
+}
+
 export interface ChannelFulfillmentAuthorityService {
   recordPhysicalPackage(
     input: MaterializePhysicalPackageInput,
@@ -78,6 +92,9 @@ export interface ChannelFulfillmentAuthorityService {
       suppressChannelProviders?: readonly string[];
     },
   ): Promise<MaterializeAndDispatchResult>;
+  materializeAndActivatePackageAllocationCommercialFulfillment(
+    input: MaterializeAndActivatePackageAllocationCommercialFulfillmentInput,
+  ): Promise<MaterializeAndActivatePackageAllocationCommercialFulfillmentResult>;
   projectPhysicalPackage(physicalShipmentId: number): Promise<void>;
   runDueBatch(options?: {
     commandIds?: readonly number[];
@@ -407,6 +424,37 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
     return Object.freeze({ materialized, dispatch });
   }
 
+  async function materializeAndActivatePackageAllocationCommercialFulfillment(
+    input: MaterializeAndActivatePackageAllocationCommercialFulfillmentInput,
+  ): Promise<MaterializeAndActivatePackageAllocationCommercialFulfillmentResult> {
+    const materialized = await dependencies.repository
+      .materializePackageAllocationCommercialFulfillment({
+        packageAllocationPlanId: input.packageAllocationPlanId,
+        source: input.source,
+        correlationId: input.correlationId,
+        causationId: input.causationId,
+      });
+    for (const physicalShipmentId of materialized.physicalShipmentIds) {
+      await dependencies.projector.projectPhysicalShipment(physicalShipmentId);
+    }
+    const activation = await dependencies.repository
+      .activatePackageAllocationCommercialFulfillment({
+        packageAllocationPlanId: input.packageAllocationPlanId,
+        activatedBy: input.activatedBy,
+        reason: input.activationReason,
+        activatedAt: clock.now(),
+        correlationId: input.correlationId,
+        causationId: input.causationId,
+      });
+    logger.info({
+      code: "PACKAGE_ALLOCATION_COMMERCIAL_FULFILLMENT_ACTIVATED",
+      packageAllocationPlanId: input.packageAllocationPlanId,
+      commandIds: activation.commandIds,
+      replayed: activation.replayed,
+    });
+    return Object.freeze({ materialized, activation });
+  }
+
   async function projectPhysicalPackage(physicalShipmentId: number): Promise<void> {
     await dependencies.projector.projectPhysicalShipment(physicalShipmentId);
   }
@@ -432,5 +480,11 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
     }, options);
   }
 
-  return { recordPhysicalPackage, ensureLegacyShipment, projectPhysicalPackage, runDueBatch };
+  return {
+    recordPhysicalPackage,
+    ensureLegacyShipment,
+    materializeAndActivatePackageAllocationCommercialFulfillment,
+    projectPhysicalPackage,
+    runDueBatch,
+  };
 }
