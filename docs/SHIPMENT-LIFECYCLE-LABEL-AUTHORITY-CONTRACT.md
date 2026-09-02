@@ -825,7 +825,7 @@ materialize split-safe physical items, and persist canonical channel commands in
 the non-dispatching `shadow` state. Exact replay is read-only, stale
 unmaterialized plans fail closed, and the existing worker still claims only
 `pending` and `retry`. Migration
-`0642_package_allocation_commercial_fulfillment_activation.sql` adds immutable
+`0643_package_allocation_commercial_fulfillment_activation.sql` adds immutable
 per-command activation evidence. The normal ShipStation `SHIP_NOTIFY` path now
 reconciles label lineage, persists or replays the exact package plan, materializes
 commercial commands, and atomically promotes only the plan's fully covered

@@ -1,4 +1,4 @@
--- Migration 0642: audited activation for exact package-allocation commercial fulfillment.
+-- Migration 0643: audited activation for exact package-allocation commercial fulfillment.
 --
 -- The package-allocation materializer introduced by migration 0641 writes only
 -- non-dispatching shadow commands. Each command must receive an immutable
