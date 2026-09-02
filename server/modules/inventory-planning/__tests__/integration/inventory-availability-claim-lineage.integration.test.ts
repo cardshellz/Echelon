@@ -14,6 +14,10 @@ const sourceMigration = readFileSync(
   resolve(process.cwd(), "migrations/0640_inventory_availability_claim_lineage.sql"),
   "utf8",
 );
+const executionContractMigration = readFileSync(
+  resolve(process.cwd(), "migrations/0642_inventory_availability_claim_execution_contract.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -32,6 +36,11 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
   } as const;
 
   const qualifiedMigration = sourceMigration
+    .replaceAll("inventory.", `"${schemas.inventory}".`)
+    .replaceAll("warehouse.", `"${schemas.warehouse}".`)
+    .replaceAll("catalog.", `"${schemas.catalog}".`)
+    .replaceAll("wms.", `"${schemas.wms}".`);
+  const qualifiedExecutionContractMigration = executionContractMigration
     .replaceAll("inventory.", `"${schemas.inventory}".`)
     .replaceAll("warehouse.", `"${schemas.warehouse}".`)
     .replaceAll("catalog.", `"${schemas.catalog}".`)
@@ -66,6 +75,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       CREATE TABLE "${schemas.inventory}".inventory_lots (id integer PRIMARY KEY);
     `);
     await pool.query(qualifiedMigration);
+    await pool.query(qualifiedExecutionContractMigration);
   }, 300_000);
 
   afterAll(async () => {
@@ -113,5 +123,39 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       `UPDATE "${schemas.inventory}".availability_claim_commands
        SET reason = 'changed' WHERE idempotency_key = 'noop:1'`,
     )).rejects.toThrow(/append-only/);
+  });
+
+  it("installs exact committed-output, producer, and cost-breakdown evidence", async () => {
+    const columns = await pool.query<{ table_name: string; column_name: string }>(
+      `SELECT table_name, column_name
+       FROM information_schema.columns
+       WHERE table_schema = $1
+         AND (table_name, column_name) IN (
+           ('availability_claim_operations', 'committed_output_qty'),
+           ('availability_claim_resources', 'producer_operation_key'),
+           ('availability_claim_lot_allocations', 'po_unit_cost_mills'),
+           ('availability_claim_lot_allocations', 'packaging_unit_cost_mills'),
+           ('availability_claim_lot_allocations', 'landed_unit_cost_mills')
+         )`,
+      [schemas.inventory],
+    );
+    expect(columns.rows).toHaveLength(5);
+
+    const constraints = await pool.query<{ conname: string }>(
+      `SELECT conname
+       FROM pg_constraint
+       WHERE connamespace = $1::regnamespace
+         AND conname IN (
+           'availability_claim_operations_committed_output_chk',
+           'availability_claim_resources_producer_operation_fk',
+           'availability_claim_lot_allocations_cost_breakdown_chk'
+         )`,
+      [schemas.inventory],
+    );
+    expect(constraints.rows.map((row) => row.conname).sort()).toEqual([
+      "availability_claim_lot_allocations_cost_breakdown_chk",
+      "availability_claim_operations_committed_output_chk",
+      "availability_claim_resources_producer_operation_fk",
+    ]);
   });
 });

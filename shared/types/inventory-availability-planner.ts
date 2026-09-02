@@ -329,8 +329,17 @@ export const plannerOperationSchema = z.object({
   destinationVariantId: positiveInteger,
   plannedExecutions: plannerPositiveQuantitySchema,
   outputQty: plannerPositiveQuantitySchema,
+  committedOutputQty: plannerPositiveQuantitySchema,
   outputLocationId: positiveInteger.nullable(),
-}).strict();
+}).strict().superRefine((operation, context) => {
+  if (BigInt(operation.committedOutputQty) > BigInt(operation.outputQty)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["committedOutputQty"],
+      message: "Committed operation output cannot exceed physical operation output",
+    });
+  }
+});
 
 export const claimPlanSchema = z.object({
   requestKey: nonblank(200),
