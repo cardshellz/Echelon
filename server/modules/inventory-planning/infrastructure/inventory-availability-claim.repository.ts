@@ -5,9 +5,13 @@ import { pool } from "../../../db";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   canonicalAvailabilityClaimCommandSchema,
+  canonicalAvailabilityClaimOperationExecutionCommandSchema,
+  canonicalAvailabilityClaimOperationExecutionResultSchema,
   canonicalAvailabilityClaimReleaseCommandSchema,
   canonicalAvailabilityClaimResultSchema,
   type CanonicalAvailabilityClaimCommand,
+  type CanonicalAvailabilityClaimOperationExecutionCommand,
+  type CanonicalAvailabilityClaimOperationExecutionResult,
   type CanonicalAvailabilityClaimReleaseCommand,
   type CanonicalAvailabilityClaimResult,
 } from "@shared/types/inventory-availability-claims";
@@ -20,6 +24,7 @@ import {
 } from "@shared/types/inventory-availability-planner";
 import type {
   CanonicalClaimInventoryMutationPort,
+  CanonicalClaimInventoryExecutionResource,
   CanonicalClaimInventoryReleaseResource,
 } from "../application/canonical-claim-inventory.port";
 import { planCanonicalClaim } from "../domain/inventory-availability-planner";
@@ -55,8 +60,10 @@ type RuntimeAuthority = {
 type PersistedClaim = {
   id: bigint;
   claimKey: string;
+  orderId: number;
   revision: number;
   runtimeAuthorityRevision: bigint;
+  planHash: string;
   plan: ClaimPlanDto;
 };
 
@@ -146,6 +153,9 @@ export class InventoryAvailabilityClaimRepositoryError extends Error {
 export interface InventoryAvailabilityClaimStore {
   claimOrder(command: CanonicalAvailabilityClaimCommand): Promise<CanonicalAvailabilityClaimResult>;
   releaseOrderClaim(command: CanonicalAvailabilityClaimReleaseCommand): Promise<CanonicalAvailabilityClaimResult>;
+  executePackageOperation(
+    command: CanonicalAvailabilityClaimOperationExecutionCommand,
+  ): Promise<CanonicalAvailabilityClaimOperationExecutionResult>;
 }
 
 async function loadCommandReplay(
@@ -169,6 +179,30 @@ async function loadCommandReplay(
     );
   }
   const replay = canonicalAvailabilityClaimResultSchema.parse(row.result_payload);
+  return { ...replay, idempotentReplay: true };
+}
+
+async function loadOperationExecutionReplay(
+  client: PoolClient,
+  idempotencyKey: string,
+  requestHash: string,
+): Promise<CanonicalAvailabilityClaimOperationExecutionResult | null> {
+  const row = rows(await client.query(
+    `SELECT request_hash, result_payload
+     FROM inventory.availability_claim_commands
+     WHERE idempotency_key = $1
+     FOR SHARE`,
+    [idempotencyKey],
+  ))[0];
+  if (!row) return null;
+  if (String(row.request_hash) !== requestHash) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "IDEMPOTENCY_KEY_REUSED",
+      "The canonical operation idempotency key was already used with a different request.",
+      { idempotencyKey },
+    );
+  }
+  const replay = canonicalAvailabilityClaimOperationExecutionResultSchema.parse(row.result_payload);
   return { ...replay, idempotentReplay: true };
 }
 
@@ -404,19 +438,61 @@ async function loadActiveClaim(
   lock = true,
 ): Promise<PersistedClaim | null> {
   const row = rows(await client.query(
-    `SELECT id, claim_key, revision, runtime_authority_revision, plan_payload
+    `SELECT id, claim_key, order_id, revision, runtime_authority_revision, plan_hash, plan_payload
      FROM inventory.availability_claims
      WHERE order_id = $1 AND status = 'active'
      ${lock ? "FOR UPDATE" : ""}`,
     [orderId],
   ))[0];
   if (!row) return null;
+  const plan = claimPlanSchema.parse(row.plan_payload);
+  if (hash(plan) !== String(row.plan_hash)) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PLAN_HASH_MISMATCH",
+      "The active claim planner payload no longer matches its persisted hash.",
+      { claimId: String(row.id) },
+    );
+  }
   return {
     id: positiveBigInt(row.id, "claim.id"),
     claimKey: String(row.claim_key),
+    orderId: positiveInteger(row.order_id, "claim.orderId"),
     revision: positiveInteger(row.revision, "claim.revision"),
     runtimeAuthorityRevision: positiveBigInt(row.runtime_authority_revision, "claim.runtimeAuthorityRevision"),
-    plan: claimPlanSchema.parse(row.plan_payload),
+    planHash: String(row.plan_hash),
+    plan,
+  };
+}
+
+async function loadActiveClaimById(
+  client: PoolClient,
+  claimId: bigint,
+  lock = true,
+): Promise<PersistedClaim | null> {
+  const row = rows(await client.query(
+    `SELECT id, claim_key, order_id, revision, runtime_authority_revision, plan_hash, plan_payload
+     FROM inventory.availability_claims
+     WHERE id = $1 AND status = 'active'
+     ${lock ? "FOR UPDATE" : ""}`,
+    [claimId.toString()],
+  ))[0];
+  if (!row) return null;
+  const plan = claimPlanSchema.parse(row.plan_payload);
+  if (hash(plan) !== String(row.plan_hash)) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PLAN_HASH_MISMATCH",
+      "The active claim planner payload no longer matches its persisted hash.",
+      { claimId: String(row.id) },
+    );
+  }
+  return {
+    id: positiveBigInt(row.id, "claim.id"),
+    claimKey: String(row.claim_key),
+    orderId: positiveInteger(row.order_id, "claim.orderId"),
+    revision: positiveInteger(row.revision, "claim.revision"),
+    runtimeAuthorityRevision: positiveBigInt(row.runtime_authority_revision, "claim.runtimeAuthorityRevision"),
+    planHash: String(row.plan_hash),
+    plan,
   };
 }
 
@@ -650,8 +726,8 @@ async function insertClaimOperations(
       `INSERT INTO inventory.availability_claim_operations (
          claim_id, claim_line_id, operation_key, parent_operation_key, warehouse_id,
          operation_type, authority_id, destination_variant_id, planned_executions,
-         output_qty, output_location_id
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         output_qty, committed_output_qty, output_location_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id`,
       [
         claimId.toString(),
@@ -664,6 +740,7 @@ async function insertClaimOperations(
         operation.destinationVariantId,
         operation.plannedExecutions,
         operation.outputQty,
+        operation.committedOutputQty,
         operation.outputLocationId,
       ],
     ))[0];
@@ -728,14 +805,18 @@ async function reserveClaimResource(
   for (const allocation of lotAllocations) {
     await client.query(
       `INSERT INTO inventory.availability_claim_lot_allocations (
-         claim_id, claim_resource_id, inventory_lot_id, claimed_qty, unit_cost_mills
-       ) VALUES ($1, $2, $3, $4, $5)`,
+         claim_id, claim_resource_id, inventory_lot_id, claimed_qty, unit_cost_mills,
+         po_unit_cost_mills, packaging_unit_cost_mills, landed_unit_cost_mills
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         input.claimId.toString(),
         claimResourceId.toString(),
         allocation.inventoryLotId,
         allocation.qty,
         allocation.unitCostMills.toString(),
+        allocation.poUnitCostMills.toString(),
+        allocation.packagingUnitCostMills.toString(),
+        allocation.landedUnitCostMills.toString(),
       ],
     );
   }
@@ -1074,6 +1155,505 @@ async function persistReleaseCommandAndEvent(
   );
 }
 
+type LockedClaimPackageOperation = {
+  id: bigint;
+  claimLineId: bigint;
+  orderItemId: number;
+  operationKey: string;
+  parentOperationKey: string | null;
+  warehouseId: number;
+  operationType: "break_pack" | "assemble_pack" | "directed_conversion";
+  authorityId: number;
+  destinationVariantId: number;
+  plannedExecutions: bigint;
+  outputQty: bigint;
+  committedOutputQty: bigint;
+  outputLocationId: number;
+  status: string;
+};
+
+async function lockPackageOperation(
+  client: PoolClient,
+  claimId: bigint,
+  operationKey: string,
+): Promise<LockedClaimPackageOperation> {
+  const row = rows(await client.query(
+    `SELECT operation.id, operation.claim_line_id, line.order_item_id,
+            operation.operation_key, operation.parent_operation_key, operation.warehouse_id,
+            operation.operation_type, operation.authority_id, operation.destination_variant_id,
+            operation.planned_executions, operation.output_qty,
+            operation.committed_output_qty, operation.output_location_id,
+            operation.status, operation.executed_executions, operation.released_executions
+     FROM inventory.availability_claim_operations AS operation
+     JOIN inventory.availability_claim_lines AS line
+       ON line.id = operation.claim_line_id AND line.claim_id = operation.claim_id
+     WHERE operation.claim_id = $1 AND operation.operation_key = $2
+     FOR UPDATE OF operation`,
+    [claimId.toString(), operationKey],
+  ))[0];
+  if (!row) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_NOT_FOUND",
+      "The requested operation does not belong to the active canonical claim.",
+      { claimId: claimId.toString(), operationKey },
+    );
+  }
+  if (row.operation_type === "component_build") {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_REQUIRES_BUILD_HANDOFF",
+      "Component-build operations must use the claim-to-build handoff contract.",
+      { claimId: claimId.toString(), operationKey },
+    );
+  }
+  if (!["break_pack", "assemble_pack", "directed_conversion"].includes(String(row.operation_type))) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "INVALID_CLAIM_OPERATION_TYPE",
+      "The claim operation has an unsupported package-transformation type.",
+      { claimId: claimId.toString(), operationKey, operationType: row.operation_type },
+    );
+  }
+  if (row.committed_output_qty == null) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_EXECUTION_EVIDENCE_MISSING",
+      "This operation predates the exact committed-output contract and must be replanned.",
+      { claimId: claimId.toString(), operationKey },
+    );
+  }
+  if (row.output_location_id == null) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_OUTPUT_LOCATION_MISSING",
+      "A package transformation cannot execute without its planned output location.",
+      { claimId: claimId.toString(), operationKey },
+    );
+  }
+  if (String(row.status) !== "pending" && String(row.status) !== "ready") {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_NOT_EXECUTABLE",
+      "The package transformation is not in an executable state.",
+      { claimId: claimId.toString(), operationKey, status: row.status },
+    );
+  }
+  if (BigInt(String(row.executed_executions)) !== BigInt(0)
+    || BigInt(String(row.released_executions)) !== BigInt(0)) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_PROGRESS_CONFLICT",
+      "A pending package transformation already contains execution or release progress.",
+      { claimId: claimId.toString(), operationKey },
+    );
+  }
+  return {
+    id: positiveBigInt(row.id, "claimOperation.id"),
+    claimLineId: positiveBigInt(row.claim_line_id, "claimOperation.claimLineId"),
+    orderItemId: positiveInteger(row.order_item_id, "claimLine.orderItemId"),
+    operationKey: String(row.operation_key),
+    parentOperationKey: row.parent_operation_key == null ? null : String(row.parent_operation_key),
+    warehouseId: positiveInteger(row.warehouse_id, "claimOperation.warehouseId"),
+    operationType: row.operation_type,
+    authorityId: positiveInteger(row.authority_id, "claimOperation.authorityId"),
+    destinationVariantId: positiveInteger(row.destination_variant_id, "claimOperation.destinationVariantId"),
+    plannedExecutions: positiveBigInt(row.planned_executions, "claimOperation.plannedExecutions"),
+    outputQty: positiveBigInt(row.output_qty, "claimOperation.outputQty"),
+    committedOutputQty: positiveBigInt(row.committed_output_qty, "claimOperation.committedOutputQty"),
+    outputLocationId: positiveInteger(row.output_location_id, "claimOperation.outputLocationId"),
+    status: String(row.status),
+  };
+}
+
+function assertPackageOperationMatchesPlan(
+  claim: PersistedClaim,
+  operation: LockedClaimPackageOperation,
+): ClaimPlanDto["operations"][number] {
+  const planned = claim.plan.operations.find((candidate) => candidate.operationKey === operation.operationKey);
+  if (!planned) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_PLAN_EVIDENCE_MISSING",
+      "The relational operation is absent from the claim's hashed planner payload.",
+      { claimId: claim.id.toString(), operationKey: operation.operationKey },
+    );
+  }
+  const persistedEvidence = {
+    lineKey: `order-item:${operation.orderItemId}`,
+    warehouseId: operation.warehouseId,
+    operationKey: operation.operationKey,
+    parentOperationKey: operation.parentOperationKey,
+    operationType: operation.operationType,
+    authorityId: operation.authorityId,
+    destinationVariantId: operation.destinationVariantId,
+    plannedExecutions: operation.plannedExecutions.toString(),
+    outputQty: operation.outputQty.toString(),
+    committedOutputQty: operation.committedOutputQty.toString(),
+    outputLocationId: operation.outputLocationId,
+  };
+  const plannedEvidence = {
+    lineKey: planned.lineKey,
+    warehouseId: planned.warehouseId,
+    operationKey: planned.operationKey,
+    parentOperationKey: planned.parentOperationKey,
+    operationType: planned.operationType,
+    authorityId: planned.authorityId,
+    destinationVariantId: planned.destinationVariantId,
+    plannedExecutions: planned.plannedExecutions,
+    outputQty: planned.outputQty,
+    committedOutputQty: planned.committedOutputQty,
+    outputLocationId: planned.outputLocationId,
+  };
+  if (canonicalJson(persistedEvidence) !== canonicalJson(plannedEvidence)) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_PLAN_EVIDENCE_MISMATCH",
+      "The relational operation differs from the claim's hashed planner payload.",
+      { claimId: claim.id.toString(), operationKey: operation.operationKey, persistedEvidence, plannedEvidence },
+    );
+  }
+  return planned;
+}
+
+async function loadOperationExecutionResources(
+  client: PoolClient,
+  claimId: bigint,
+  operation: LockedClaimPackageOperation,
+  plannedOperation: ClaimPlanDto["operations"][number],
+): Promise<CanonicalClaimInventoryExecutionResource[]> {
+  const prerequisiteRows = rows(await client.query(
+    `SELECT operation_key, status
+     FROM inventory.availability_claim_operations
+     WHERE claim_id = $1 AND parent_operation_key = $2
+     ORDER BY operation_key
+     FOR SHARE`,
+    [claimId.toString(), operation.operationKey],
+  ));
+  const incompletePrerequisites = prerequisiteRows
+    .filter((row) => String(row.status) !== "completed")
+    .map((row) => ({ operationKey: String(row.operation_key), status: String(row.status) }));
+  if (incompletePrerequisites.length > 0) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_PREREQUISITE_INCOMPLETE",
+      "Every child operation must complete before its parent can consume the produced output.",
+      { claimId: claimId.toString(), operationKey: operation.operationKey, incompletePrerequisites },
+    );
+  }
+
+  const inputRows = rows(await client.query(
+    `SELECT source_variant_id, required_qty
+     FROM inventory.availability_claim_operation_inputs
+     WHERE claim_operation_id = $1 AND claim_id = $2
+     ORDER BY input_ordinal, source_variant_id
+     FOR SHARE`,
+    [operation.id.toString(), claimId.toString()],
+  ));
+  if (inputRows.length === 0) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_INPUTS_MISSING",
+      "The package transformation has no persisted input contract.",
+      { claimId: claimId.toString(), operationKey: operation.operationKey },
+    );
+  }
+  const expectedByVariant = new Map<number, bigint>();
+  for (const row of inputRows) {
+    expectedByVariant.set(
+      positiveInteger(row.source_variant_id, "claimOperationInput.sourceVariantId"),
+      positiveBigInt(row.required_qty, "claimOperationInput.requiredQty"),
+    );
+  }
+  const plannedInputs = [...plannedOperation.inputs]
+    .sort((left, right) => left.sourceVariantId - right.sourceVariantId)
+    .map((input) => [input.sourceVariantId, input.requiredQty]);
+  const persistedInputs = [...expectedByVariant]
+    .sort(([left], [right]) => left - right)
+    .map(([variantId, quantity]) => [variantId, quantity.toString()]);
+  if (canonicalJson(persistedInputs) !== canonicalJson(plannedInputs)) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_INPUT_PLAN_MISMATCH",
+      "The relational operation inputs differ from the claim's hashed planner payload.",
+      { operationKey: operation.operationKey, plannedInputs, persistedInputs },
+    );
+  }
+
+  const resourceRows = rows(await client.query(
+    `SELECT id, claim_line_id, warehouse_id, warehouse_location_id,
+            inventory_level_id, source_variant_id, claimed_qty, released_qty, consumed_qty
+     FROM inventory.availability_claim_resources
+     WHERE claim_id = $1 AND consumer_operation_key = $2
+     ORDER BY warehouse_id, warehouse_location_id, source_variant_id, inventory_level_id, id
+     FOR UPDATE`,
+    [claimId.toString(), operation.operationKey],
+  ));
+  if (resourceRows.length === 0) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_RESOURCES_MISSING",
+      "The package transformation has no claim-owned source resources.",
+      { claimId: claimId.toString(), operationKey: operation.operationKey },
+    );
+  }
+  const resourceIds = resourceRows.map((row) => positiveBigInt(row.id, "claimResource.id").toString());
+  const allocationRows = rows(await client.query(
+    `SELECT id, claim_resource_id, inventory_lot_id, claimed_qty, released_qty, consumed_qty,
+            unit_cost_mills, po_unit_cost_mills, packaging_unit_cost_mills, landed_unit_cost_mills
+     FROM inventory.availability_claim_lot_allocations
+     WHERE claim_id = $1 AND claim_resource_id = ANY($2::bigint[])
+     ORDER BY claim_resource_id, inventory_lot_id, id
+     FOR UPDATE`,
+    [claimId.toString(), resourceIds],
+  ));
+  const allocationsByResource = new Map<string, any[]>();
+  for (const allocation of allocationRows) {
+    const key = String(allocation.claim_resource_id);
+    const candidates = allocationsByResource.get(key) ?? [];
+    candidates.push(allocation);
+    allocationsByResource.set(key, candidates);
+  }
+
+  const actualByVariant = new Map<number, bigint>();
+  const executionResources: CanonicalClaimInventoryExecutionResource[] = [];
+  for (const row of resourceRows) {
+    const claimResourceId = positiveBigInt(row.id, "claimResource.id");
+    if (positiveBigInt(row.claim_line_id, "claimResource.claimLineId") !== operation.claimLineId
+      || positiveInteger(row.warehouse_id, "claimResource.warehouseId") !== operation.warehouseId) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_OPERATION_RESOURCE_SCOPE_MISMATCH",
+        "A claim-owned source resource is outside the operation line or warehouse.",
+        { claimId: claimId.toString(), operationKey: operation.operationKey, claimResourceId: claimResourceId.toString() },
+      );
+    }
+    const claimed = positiveBigInt(row.claimed_qty, "claimResource.claimedQty");
+    const released = BigInt(String(row.released_qty));
+    const consumed = BigInt(String(row.consumed_qty));
+    const open = claimed - released - consumed;
+    if (open <= BigInt(0)) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_OPERATION_RESOURCE_NOT_OPEN",
+        "Every source resource must remain open until its operation executes.",
+        { claimResourceId: claimResourceId.toString(), openQty: open.toString() },
+      );
+    }
+    const sourceVariantId = positiveInteger(row.source_variant_id, "claimResource.sourceVariantId");
+    const lotAllocations: CanonicalClaimInventoryExecutionResource["lotAllocations"][number][] = [];
+    let lotOpenTotal = BigInt(0);
+    for (const allocation of allocationsByResource.get(claimResourceId.toString()) ?? []) {
+      if (allocation.po_unit_cost_mills == null
+        || allocation.packaging_unit_cost_mills == null
+        || allocation.landed_unit_cost_mills == null) {
+        throw new InventoryAvailabilityClaimRepositoryError(
+          "CLAIM_OPERATION_COST_EVIDENCE_MISSING",
+          "This claim lot predates the exact cost-breakdown contract and must be replanned.",
+          { claimLotAllocationId: String(allocation.id) },
+        );
+      }
+      const lotOpen = positiveBigInt(allocation.claimed_qty, "claimLot.claimedQty")
+        - BigInt(String(allocation.released_qty))
+        - BigInt(String(allocation.consumed_qty));
+      if (lotOpen <= BigInt(0)) continue;
+      lotAllocations.push({
+        claimLotAllocationId: positiveBigInt(allocation.id, "claimLot.id"),
+        inventoryLotId: positiveInteger(allocation.inventory_lot_id, "claimLot.inventoryLotId"),
+        consumeQty: lotOpen,
+        unitCostMills: BigInt(String(allocation.unit_cost_mills)),
+        poUnitCostMills: BigInt(String(allocation.po_unit_cost_mills)),
+        packagingUnitCostMills: BigInt(String(allocation.packaging_unit_cost_mills)),
+        landedUnitCostMills: BigInt(String(allocation.landed_unit_cost_mills)),
+      });
+      lotOpenTotal += lotOpen;
+    }
+    if (lotOpenTotal !== open) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_EXECUTION_LINEAGE_MISMATCH",
+        "Exact open lot allocations do not reconcile to their claim resource.",
+        { claimResourceId: claimResourceId.toString(), resourceQty: open.toString(), lotQty: lotOpenTotal.toString() },
+      );
+    }
+    actualByVariant.set(sourceVariantId, (actualByVariant.get(sourceVariantId) ?? BigInt(0)) + open);
+    executionResources.push({
+      claimResourceId,
+      inventoryLevelId: positiveInteger(row.inventory_level_id, "claimResource.inventoryLevelId"),
+      warehouseLocationId: positiveInteger(row.warehouse_location_id, "claimResource.warehouseLocationId"),
+      sourceVariantId,
+      consumeQty: open,
+      lotAllocations,
+    });
+  }
+  const expected = [...expectedByVariant]
+    .sort(([left], [right]) => left - right)
+    .map(([variantId, quantity]) => [variantId, quantity.toString()]);
+  const actual = [...actualByVariant]
+    .sort(([left], [right]) => left - right)
+    .map(([variantId, quantity]) => [variantId, quantity.toString()]);
+  if (canonicalJson(actual) !== canonicalJson(expected)) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_INPUT_MISMATCH",
+      "Claim-owned source resources do not equal the operation input contract.",
+      { operationKey: operation.operationKey, expected, actual },
+    );
+  }
+  return executionResources;
+}
+
+async function recordPackageOperationExecution(
+  client: PoolClient,
+  input: {
+    claim: PersistedClaim;
+    operation: LockedClaimPackageOperation;
+    resources: readonly CanonicalClaimInventoryExecutionResource[];
+    command: CanonicalAvailabilityClaimOperationExecutionCommand;
+    requestHash: string;
+    outputInventoryLevelId: number;
+    committedLotAllocations: Awaited<ReturnType<CanonicalClaimInventoryMutationPort["executePackageOperation"]>>["committedLotAllocations"];
+    totalInputCostMills: bigint;
+    occurredAt: Date;
+  },
+): Promise<CanonicalAvailabilityClaimOperationExecutionResult> {
+  for (const resource of input.resources) {
+    for (const allocation of resource.lotAllocations) {
+      const updatedAllocation = await client.query(
+        `UPDATE inventory.availability_claim_lot_allocations
+         SET consumed_qty = consumed_qty + $1, updated_at = $3
+         WHERE id = $2 AND claimed_qty - released_qty - consumed_qty = $1`,
+        [allocation.consumeQty.toString(), allocation.claimLotAllocationId.toString(), input.occurredAt],
+      );
+      if (updatedAllocation.rowCount !== 1) {
+        throw new InventoryAvailabilityClaimRepositoryError(
+          "CLAIM_LOT_EXECUTION_STATE_CHANGED",
+          "A locked claim lot allocation changed before its consumption was recorded.",
+          { claimLotAllocationId: allocation.claimLotAllocationId.toString() },
+        );
+      }
+    }
+    const updatedResource = await client.query(
+      `UPDATE inventory.availability_claim_resources
+       SET consumed_qty = consumed_qty + $1, updated_at = $3
+       WHERE id = $2 AND claimed_qty - released_qty - consumed_qty = $1`,
+      [resource.consumeQty.toString(), resource.claimResourceId.toString(), input.occurredAt],
+    );
+    if (updatedResource.rowCount !== 1) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_RESOURCE_EXECUTION_STATE_CHANGED",
+        "A locked claim resource changed before its consumption was recorded.",
+        { claimResourceId: resource.claimResourceId.toString() },
+      );
+    }
+  }
+
+  const outputResourceRow = rows(await client.query(
+    `INSERT INTO inventory.availability_claim_resources (
+       claim_id, claim_line_id, consumer_operation_key, producer_operation_key,
+       warehouse_id, warehouse_location_id, inventory_level_id, source_variant_id, claimed_qty
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id`,
+    [
+      input.claim.id.toString(),
+      input.operation.claimLineId.toString(),
+      input.operation.parentOperationKey,
+      input.operation.operationKey,
+      input.operation.warehouseId,
+      input.operation.outputLocationId,
+      input.outputInventoryLevelId,
+      input.operation.destinationVariantId,
+      input.operation.committedOutputQty.toString(),
+    ],
+  ))[0];
+  const outputResourceId = positiveBigInt(outputResourceRow?.id, "outputClaimResource.id");
+  for (const allocation of input.committedLotAllocations) {
+    await client.query(
+      `INSERT INTO inventory.availability_claim_lot_allocations (
+         claim_id, claim_resource_id, inventory_lot_id, claimed_qty, unit_cost_mills,
+         po_unit_cost_mills, packaging_unit_cost_mills, landed_unit_cost_mills
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        input.claim.id.toString(),
+        outputResourceId.toString(),
+        allocation.inventoryLotId,
+        allocation.qty,
+        allocation.unitCostMills.toString(),
+        allocation.poUnitCostMills.toString(),
+        allocation.packagingUnitCostMills.toString(),
+        allocation.landedUnitCostMills.toString(),
+      ],
+    );
+  }
+  const committedLotQty = input.committedLotAllocations.reduce(
+    (total, allocation) => total + BigInt(allocation.qty),
+    BigInt(0),
+  );
+  if (committedLotQty !== input.operation.committedOutputQty) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OUTPUT_LINEAGE_MISMATCH",
+      "Produced claim-owned lots do not reconcile to committed operation output.",
+      {
+        operationKey: input.operation.operationKey,
+        committedQty: input.operation.committedOutputQty.toString(),
+        lotQty: committedLotQty.toString(),
+      },
+    );
+  }
+  const updatedOperation = await client.query(
+    `UPDATE inventory.availability_claim_operations
+     SET status = 'completed', executed_executions = planned_executions, updated_at = $3
+     WHERE id = $1 AND claim_id = $2
+       AND status IN ('pending', 'ready')
+       AND executed_executions = 0 AND released_executions = 0`,
+    [input.operation.id.toString(), input.claim.id.toString(), input.occurredAt],
+  );
+  if (updatedOperation.rowCount !== 1) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_OPERATION_STATE_CHANGED",
+      "The locked package operation changed before completion was recorded.",
+      { operationKey: input.operation.operationKey },
+    );
+  }
+
+  const result = canonicalAvailabilityClaimOperationExecutionResultSchema.parse({
+    outcome: "executed",
+    claimId: input.claim.id.toString(),
+    claimOperationId: input.operation.id.toString(),
+    operationKey: input.operation.operationKey,
+    outputResourceId: outputResourceId.toString(),
+    producedQty: input.operation.outputQty.toString(),
+    committedQty: input.operation.committedOutputQty.toString(),
+    surplusQty: (input.operation.outputQty - input.operation.committedOutputQty).toString(),
+    totalInputCostMills: input.totalInputCostMills.toString(),
+    idempotentReplay: false,
+  });
+  await client.query(
+    `INSERT INTO inventory.availability_claim_commands (
+       claim_id, order_id, command_type, idempotency_key, request_hash, result_hash,
+       request_payload, result_payload, actor, reason, occurred_at
+     ) VALUES ($1, $2, 'execute', $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10)`,
+    [
+      input.claim.id.toString(),
+      input.claim.orderId,
+      input.command.idempotencyKey,
+      input.requestHash,
+      hash(result),
+      JSON.stringify(input.command),
+      JSON.stringify(result),
+      input.command.actor,
+      input.command.reason,
+      input.occurredAt,
+    ],
+  );
+  const evidence = {
+    schemaVersion: "inventory_availability_claim_operation_event_v1",
+    eventType: "claim_operation_executed",
+    claimId: input.claim.id.toString(),
+    operationKey: input.operation.operationKey,
+    result,
+  };
+  await client.query(
+    `INSERT INTO inventory.availability_claim_events (
+       claim_id, event_type, from_status, to_status, evidence_payload,
+       evidence_hash, actor, reason, occurred_at
+     ) VALUES ($1, 'claim_operation_executed', $2, 'completed', $3::jsonb, $4, $5, $6, $7)`,
+    [
+      input.claim.id.toString(),
+      input.operation.status,
+      JSON.stringify(evidence),
+      hash(evidence),
+      input.command.actor,
+      input.command.reason,
+      input.occurredAt,
+    ],
+  );
+  return result;
+}
+
 async function rollback(client: PoolClient, originalError: unknown): Promise<never> {
   try {
     await client.query("ROLLBACK");
@@ -1212,8 +1792,10 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         const result = resultFromClaim(command.orderId, {
           id: claimId,
           claimKey: request.requestKey,
+          orderId: command.orderId,
           revision,
           runtimeAuthorityRevision: authority.revision,
+          planHash: hash(plan),
           plan,
         }, false);
         await persistCommandAndEvent(client, {
@@ -1247,6 +1829,123 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     throw new InventoryAvailabilityClaimRepositoryError(
       "CLAIM_TRANSACTION_RETRY_EXHAUSTED",
       "Canonical claim transaction could not serialize after bounded retries.",
+      { attempts: MAX_SERIALIZATION_ATTEMPTS },
+      { cause: lastRetryableError },
+    );
+  }
+
+  async executePackageOperation(
+    rawCommand: CanonicalAvailabilityClaimOperationExecutionCommand,
+  ): Promise<CanonicalAvailabilityClaimOperationExecutionResult> {
+    const command = canonicalAvailabilityClaimOperationExecutionCommandSchema.parse(rawCommand);
+    const requestHash = hash(command);
+    const occurredAt = this.clock();
+    if (Number.isNaN(occurredAt.getTime())) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "INVALID_CLOCK",
+        "Canonical operation clock returned an invalid time.",
+      );
+    }
+    const claimId = positiveBigInt(command.claimId, "claim.id");
+
+    let lastRetryableError: unknown;
+    for (let attempt = 1; attempt <= MAX_SERIALIZATION_ATTEMPTS; attempt += 1) {
+      const client = await this.connectionPool.connect();
+      try {
+        await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        const replay = await loadOperationExecutionReplay(client, command.idempotencyKey, requestHash);
+        if (replay) {
+          await client.query("COMMIT");
+          return replay;
+        }
+        await requireCanonicalAuthority(client);
+        const preliminaryClaim = await loadActiveClaimById(client, claimId, false);
+        if (!preliminaryClaim) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ACTIVE_CLAIM_NOT_FOUND",
+            "The requested canonical claim is not active.",
+            { claimId: claimId.toString() },
+          );
+        }
+        const graphProductIds = await loadClaimProductIds(client, preliminaryClaim);
+        if (graphProductIds.length === 0 || graphProductIds.length > MAX_GRAPH_PRODUCTS) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "INVALID_CLAIM_MODEL_EVIDENCE",
+            "The active claim does not contain a bounded model-evidence graph.",
+            { claimId: claimId.toString(), productCount: graphProductIds.length },
+          );
+        }
+        await lockGraphProducts(client, graphProductIds);
+        const order = await loadOrder(client, preliminaryClaim.orderId, true);
+        if (["cancelled", "shipped"].includes(order.warehouseStatus)) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_ORDER_NOT_EXECUTABLE",
+            "A cancelled or shipped order cannot execute a claim transformation.",
+            { claimId: claimId.toString(), orderId: order.orderId, warehouseStatus: order.warehouseStatus },
+          );
+        }
+        const claim = await loadActiveClaimById(client, claimId, true);
+        if (!claim || claim.id !== preliminaryClaim.id || claim.orderId !== preliminaryClaim.orderId) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ACTIVE_CLAIM_CHANGED",
+            "The active canonical claim changed while operation locks were being acquired.",
+            { claimId: claimId.toString() },
+          );
+        }
+        const operation = await lockPackageOperation(client, claim.id, command.operationKey);
+        const plannedOperation = assertPackageOperationMatchesPlan(claim, operation);
+        const resources = await loadOperationExecutionResources(client, claim.id, operation, plannedOperation);
+        const execution = await this.inventoryWriter.executePackageOperation({
+          client,
+          claimId: claim.id,
+          claimOperationId: operation.id,
+          operationKey: operation.operationKey,
+          operationType: operation.operationType,
+          resources,
+          destinationVariantId: operation.destinationVariantId,
+          outputLocationId: operation.outputLocationId,
+          outputQty: operation.outputQty,
+          committedOutputQty: operation.committedOutputQty,
+          orderId: claim.orderId,
+          orderItemId: operation.orderItemId,
+          actor: command.actor,
+          reason: command.reason,
+          occurredAt,
+        });
+        const result = await recordPackageOperationExecution(client, {
+          claim,
+          operation,
+          resources,
+          command,
+          requestHash,
+          outputInventoryLevelId: execution.outputInventoryLevelId,
+          committedLotAllocations: execution.committedLotAllocations,
+          totalInputCostMills: execution.totalInputCostMills,
+          occurredAt,
+        });
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        try {
+          await rollback(client, error);
+        } catch (rolledBackError) {
+          if (isRetryableTransactionError(rolledBackError) && attempt < MAX_SERIALIZATION_ATTEMPTS) {
+            lastRetryableError = rolledBackError;
+            continue;
+          }
+          if (isRetryableTransactionError(rolledBackError)) {
+            lastRetryableError = rolledBackError;
+            break;
+          }
+          throw rolledBackError;
+        }
+      } finally {
+        client.release();
+      }
+    }
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_TRANSACTION_RETRY_EXHAUSTED",
+      "Canonical operation execution could not serialize after bounded retries.",
       { attempts: MAX_SERIALIZATION_ATTEMPTS },
       { cause: lastRetryableError },
     );
