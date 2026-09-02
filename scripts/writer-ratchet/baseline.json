@@ -334,6 +334,30 @@
   "inventory.availability_activation_runs": [
     "modules/inventory-planning"
   ],
+  "inventory.availability_claim_commands": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_claim_events": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_claim_lines": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_claim_lot_allocations": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_claim_operation_inputs": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_claim_operations": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_claim_resources": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_claims": [
+    "modules/inventory-planning"
+  ],
   "inventory.build_component_reservations": [
     "modules/inventory"
   ],
