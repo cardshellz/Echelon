@@ -334,6 +334,9 @@
   "inventory.availability_activation_runs": [
     "modules/inventory-planning"
   ],
+  "inventory.availability_claim_build_handoffs": [
+    "modules/inventory-planning"
+  ],
   "inventory.availability_claim_commands": [
     "modules/inventory-planning"
   ],
