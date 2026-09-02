@@ -1,4 +1,4 @@
--- Exact package-allocation commercial fulfillment materialization.
+-- Migration 0641: exact package-allocation commercial fulfillment materialization.
 --
 -- Canonical channel commands produced from package-allocation evidence remain
 -- non-dispatching until a separately reviewed activation gate promotes them.

@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const migration = readFileSync(
-  resolve(process.cwd(), "migrations/0640_package_allocation_commercial_fulfillment_shadow.sql"),
+  resolve(process.cwd(), "migrations/0641_package_allocation_commercial_fulfillment_shadow.sql"),
   "utf8",
 );
 const schema = readFileSync(
@@ -71,7 +71,7 @@ describe("package-allocation commercial fulfillment shadow migration", () => {
       '"test/fixtures/channel-fulfillment-package-allocation-integration.sql"',
     );
     const migrationIndex = integrationSetup.indexOf(
-      '"migrations/0640_package_allocation_commercial_fulfillment_shadow.sql"',
+      '"migrations/0641_package_allocation_commercial_fulfillment_shadow.sql"',
     );
     expect(baseSchemaIndex).toBeGreaterThanOrEqual(0);
     expect(fulfillmentFixtureIndex).toBeGreaterThan(baseSchemaIndex);

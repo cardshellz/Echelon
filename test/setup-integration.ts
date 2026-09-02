@@ -100,7 +100,7 @@ export async function runMigrations(): Promise<void> {
     "migrations/0637_declared_package_business_shipments.sql",
     "migrations/0639_package_allocation_physical_item_provenance.sql",
     "test/fixtures/channel-fulfillment-package-allocation-integration.sql",
-    "migrations/0640_package_allocation_commercial_fulfillment_shadow.sql",
+    "migrations/0641_package_allocation_commercial_fulfillment_shadow.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;

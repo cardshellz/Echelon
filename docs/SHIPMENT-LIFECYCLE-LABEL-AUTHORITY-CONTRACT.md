@@ -818,7 +818,7 @@ records one append-only package-level business-shipped fact in the same database
 transaction as a new label event only when retained provider evidence explicitly
 contains `isReturnLabel: false`. Unknown and return direction do not qualify, and
 historical rows are not inferred from old direction defaults. Migration
-`0640_package_allocation_commercial_fulfillment_shadow.sql` and the OMS
+`0641_package_allocation_commercial_fulfillment_shadow.sql` and the OMS
 fulfillment-authority repository can now bind a newly emitted commercial intent
 to the exact `primary_transfer` entries from the same still-current plan,
 materialize split-safe physical items, and persist canonical channel commands in
