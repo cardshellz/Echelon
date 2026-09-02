@@ -7,6 +7,8 @@
  * leaks past the adapter boundary.
  */
 
+import { knownCarrierCode } from "@shared/utils/carrier-identity";
+
 // Re-export the shared enums so callers import from one place.
 export {
   SHIPMENT_STATUS_VALUES,
@@ -28,12 +30,7 @@ export type CanonicalCarrier =
   | "OTHER";
 
 export function normalizeCarrier(raw: string): CanonicalCarrier {
-  const upper = raw.toUpperCase();
-  if (upper === "USPS" || upper === "STAMPS_COM") return "USPS";
-  if (upper === "FEDEX") return "FEDEX";
-  if (upper === "UPS" || upper === "UPS_WALLETED") return "UPS";
-  if (upper.startsWith("DHL")) return "DHL";
-  return "OTHER";
+  return knownCarrierCode(raw) ?? "OTHER";
 }
 
 // ─── Engine reference triple ────────────────────────────────────────

@@ -16,6 +16,7 @@
 
 import { eq, sql } from "drizzle-orm";
 import { omsOrders, omsOrderLines, omsOrderEvents, channels } from "@shared/schema";
+import { knownCarrierCode } from "@shared/utils/carrier-identity";
 import { incr } from "../../instrumentation/metrics";
 import {
   sqlBigintArray,
@@ -37,23 +38,8 @@ import {
 // Carrier code mapping: WMS/internal → eBay carrier codes
 // ---------------------------------------------------------------------------
 
-const CARRIER_MAP: Record<string, string> = {
-  usps: "USPS",
-  "us postal service": "USPS",
-  ups: "UPS",
-  "united parcel service": "UPS",
-  fedex: "FEDEX",
-  "federal express": "FEDEX",
-  dhl: "DHL",
-  // Pass through if already correct
-  USPS: "USPS",
-  UPS: "UPS",
-  FEDEX: "FEDEX",
-  DHL: "DHL",
-};
-
 function mapCarrierCode(carrier: string): string {
-  return CARRIER_MAP[carrier.toLowerCase()] || CARRIER_MAP[carrier] || carrier.toUpperCase();
+  return knownCarrierCode(carrier) ?? carrier.toUpperCase();
 }
 
 // ---------------------------------------------------------------------------

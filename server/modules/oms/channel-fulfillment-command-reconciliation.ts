@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { carrierIdentity } from "@shared/utils/carrier-identity";
 
 import type {
   ChannelFulfillmentCommand,
@@ -34,10 +35,6 @@ export type ChannelCommandSetReconciliation =
 function normalizedText(value: string | null): string | null {
   const normalized = value?.trim() ?? "";
   return normalized.length > 0 ? normalized : null;
-}
-
-function normalizedCarrier(value: string | null): string | null {
-  return normalizedText(value)?.toLowerCase() ?? null;
 }
 
 function itemEvidence(item: ChannelFulfillmentCommandItem): Record<string, unknown> {
@@ -87,7 +84,7 @@ export function reconcileChannelFulfillmentCommandSet(input: {
     const existingPhysicalId = normalizedText(existing.providerPhysicalShipmentId);
     if (
       existingTracking !== incomingTracking
-      || normalizedCarrier(existing.carrier) !== normalizedCarrier(input.incomingCommand.carrier)
+      || carrierIdentity(existing.carrier) !== carrierIdentity(input.incomingCommand.carrier)
       || (existingProvider !== null && existingProvider !== input.shippingProvider)
       || (
         existingPhysicalId !== null
