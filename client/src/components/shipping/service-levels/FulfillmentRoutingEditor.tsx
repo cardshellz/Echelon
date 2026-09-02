@@ -27,6 +27,7 @@ import {
   Save,
   Search,
   ServerCog,
+  Settings2,
   Trash2,
 } from "lucide-react";
 
@@ -121,7 +122,7 @@ export function FulfillmentRoutingEditor({
     mutationFn: async () => {
       if (!query.data) throw new Error("Fulfillment routing is not loaded.");
       if (query.data.catalog.status !== "available") {
-        throw new Error("Refresh the ShipStation method catalog before saving.");
+        throw new Error("Refresh the connected provider catalogs before saving.");
       }
       if (staleSelectionCount > 0) {
         throw new Error("Remove methods that are no longer available before saving.");
@@ -184,7 +185,7 @@ export function FulfillmentRoutingEditor({
   }
 
   const catalog = query.data.catalog;
-  const accountCount = new Set(catalogMethods.map((method) => method.providerAccountId)).size;
+  const connectionCount = new Set(catalogMethods.map((method) => method.providerConnectionId)).size;
 
   return (
     <div className="space-y-6">
@@ -194,7 +195,7 @@ export function FulfillmentRoutingEditor({
         <SummaryCard
           label="Provider catalog"
           value={catalog.status === "available"
-            ? `${accountCount} ${accountCount === 1 ? "account" : "accounts"}`
+            ? `${connectionCount} ${connectionCount === 1 ? "connection" : "connections"}`
             : "Unavailable"}
         />
       </div>
@@ -213,13 +214,20 @@ export function FulfillmentRoutingEditor({
       {catalog.status !== "available" && (
         <Alert variant="destructive">
           <ServerCog className="h-4 w-4" />
-          <AlertTitle>ShipStation method catalog unavailable</AlertTitle>
+          <AlertTitle>Fulfillment provider catalog unavailable</AlertTitle>
           <AlertDescription className="mt-2 space-y-3">
             <p>{catalog.message}</p>
-            <Button type="button" size="sm" variant="outline" onClick={() => query.refetch()}>
-              <RefreshCw className="mr-2 h-4 w-4" />
-              Refresh provider catalog
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" size="sm" variant="outline" asChild>
+                <a href="/shipping-settings?tab=fulfillment-providers">
+                  <Settings2 className="mr-2 h-4 w-4" /> Manage connections
+                </a>
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => query.refetch()}>
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Refresh provider catalog
+              </Button>
+            </div>
           </AlertDescription>
         </Alert>
       )}
@@ -246,8 +254,8 @@ export function FulfillmentRoutingEditor({
                 </p>
                 <p className="truncate text-xs text-muted-foreground">
                   {row.method
-                    ? `${row.method.carrierName} · ${row.method.providerAccountName}`
-                    : `${row.identity.providerAccountId} · ${row.identity.serviceCode}`}
+                    ? `${row.method.carrierName} · ${row.method.providerConnectionName} · ${row.method.providerAccountName}`
+                    : `Connection ${row.identity.providerConnectionId} · ${row.identity.providerAccountId} · ${row.identity.serviceCode}`}
                 </p>
               </div>
               {!row.available && <Badge variant="destructive">No longer available</Badge>}
@@ -297,12 +305,31 @@ export function FulfillmentRoutingEditor({
             </p>
           </div>
           {catalog.status === "available" && (
-            <Button type="button" size="sm" variant="outline" onClick={() => query.refetch()}>
-              <RefreshCw className="mr-2 h-4 w-4" />
-              Refresh catalog
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" size="sm" variant="outline" asChild>
+                <a href="/shipping-settings?tab=fulfillment-providers">
+                  <Settings2 className="mr-2 h-4 w-4" /> Manage connections
+                </a>
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => query.refetch()}>
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Refresh catalog
+              </Button>
+            </div>
           )}
         </div>
+
+        {catalog.connections.some((connection) => connection.status !== "available") && (
+          <div className="space-y-2">
+            {catalog.connections.filter((connection) => connection.status !== "available").map((connection) => (
+              <Alert key={connection.connectionId} variant="destructive">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertTitle>{connection.connectionName} is unavailable</AlertTitle>
+                <AlertDescription>{connection.message}</AlertDescription>
+              </Alert>
+            ))}
+          </div>
+        )}
 
         {catalog.status === "available" && (
           <>
@@ -323,7 +350,7 @@ export function FulfillmentRoutingEditor({
               {filteredCatalog.length === 0 ? (
                 <p className="p-4 text-sm text-muted-foreground">
                   {catalogMethods.length === 0
-                    ? "ShipStation returned no connected carrier methods."
+                    ? "Connected providers returned no carrier methods."
                     : "No connected methods match this search."}
                 </p>
               ) : filteredCatalog.map((method) => {
@@ -351,7 +378,7 @@ export function FulfillmentRoutingEditor({
                         {method.international && <Badge variant="secondary">International</Badge>}
                       </span>
                       <span className="block text-xs text-muted-foreground">
-                        {method.carrierName} · {method.providerAccountName} · {method.serviceCode}
+                        {method.carrierName} · {method.providerConnectionName} · {method.providerAccountName} · {method.serviceCode}
                       </span>
                     </span>
                   </label>
@@ -368,7 +395,7 @@ export function FulfillmentRoutingEditor({
           <AlertTitle>Remove unavailable methods before saving</AlertTitle>
           <AlertDescription>
             A provider account or service changed after this profile was saved. Routing fails closed
-            until the unavailable selection is removed or restored in ShipStation.
+            until the unavailable selection is removed or restored at its provider connection.
           </AlertDescription>
         </Alert>
       )}
@@ -428,6 +455,7 @@ function methodIdentity(
   method: ShippingFulfillmentCatalogMethod | ShippingFulfillmentRouteMethod,
 ): ShippingFulfillmentMethodIdentity {
   return {
+    providerConnectionId: method.providerConnectionId,
     provider: method.provider,
     providerAccountId: method.providerAccountId,
     serviceCode: method.serviceCode,
@@ -435,7 +463,7 @@ function methodIdentity(
 }
 
 function methodKey(method: ShippingFulfillmentMethodIdentity): string {
-  return `${method.provider}\u0000${method.providerAccountId}\u0000${method.serviceCode}`;
+  return `${method.providerConnectionId}\u0000${method.provider}\u0000${method.providerAccountId}\u0000${method.serviceCode}`;
 }
 
 function methodSequence(methods: readonly ShippingFulfillmentMethodIdentity[]): string {

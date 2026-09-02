@@ -24,6 +24,7 @@ import { useToast } from "@/hooks/use-toast";
 import { PricingProgramsTab } from "@/components/shipping/pricing-programs/PricingProgramsTab";
 import { ChannelRoutingTab } from "@/components/shipping/channel-routing/ChannelRoutingTab";
 import { DestinationScopesTab } from "@/components/shipping/channel-routing/DestinationScopesTab";
+import { FulfillmentProviderConnectionsTab } from "@/components/shipping/provider-connections/FulfillmentProviderConnectionsTab";
 import {
   Archive,
   Box,
@@ -1269,10 +1270,11 @@ export default function ShippingSettings() {
         </CardContent>
       </Card>
 
-      <Tabs defaultValue="boxes">
-        <TabsList>
+      <Tabs defaultValue={initialShippingSettingsTab()}>
+        <TabsList className="h-auto flex-wrap justify-start">
           <TabsTrigger value="boxes">Box catalog</TabsTrigger>
           <TabsTrigger value="packing-attrs">Packing attributes</TabsTrigger>
+          <TabsTrigger value="fulfillment-providers">Fulfillment providers</TabsTrigger>
           <TabsTrigger value="destinations">Destinations</TabsTrigger>
           <TabsTrigger value="pricing-programs">Pricing programs</TabsTrigger>
           <TabsTrigger value="channel-routing">Channel routing</TabsTrigger>
@@ -1282,6 +1284,9 @@ export default function ShippingSettings() {
         </TabsContent>
         <TabsContent value="packing-attrs" className="mt-4">
           <PackingAttributesTab />
+        </TabsContent>
+        <TabsContent value="fulfillment-providers" className="mt-4">
+          <FulfillmentProviderConnectionsTab />
         </TabsContent>
         <TabsContent value="destinations" className="mt-4">
           <DestinationScopesTab />
@@ -1295,4 +1300,10 @@ export default function ShippingSettings() {
       </Tabs>
     </div>
   );
+}
+
+function initialShippingSettingsTab(): string {
+  if (typeof window === "undefined") return "boxes";
+  const requested = new URLSearchParams(window.location.search).get("tab");
+  return requested === "fulfillment-providers" ? requested : "boxes";
 }

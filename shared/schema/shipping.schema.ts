@@ -1023,6 +1023,136 @@ export const shippingFulfillmentRoutingRevisions = shippingSchema.table("fulfill
   `),
 ]);
 
+export const shippingFulfillmentProviderConnections = shippingSchema.table("fulfillment_provider_connections", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  provider: varchar("provider", { length: 80 }).notNull(),
+  name: varchar("name", { length: 160 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull(),
+  credentialSource: varchar("credential_source", { length: 20 }).notNull(),
+  credentialRef: varchar("credential_ref", { length: 120 }),
+  systemManaged: boolean("system_managed").notNull().default(false),
+  revision: integer("revision").notNull().default(1),
+  lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }),
+  lastErrorCode: varchar("last_error_code", { length: 120 }),
+  lastErrorMessage: varchar("last_error_message", { length: 500 }),
+  createdBy: varchar("created_by", { length: 120 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedBy: varchar("updated_by", { length: 120 }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_fulfillment_provider_connection_id_provider_idx").on(
+    table.id,
+    table.provider,
+  ),
+  uniqueIndex("shipping_fulfillment_provider_connection_name_idx").on(
+    table.provider,
+    sql`lower(${table.name})`,
+  ),
+  check("shipping_fulfillment_provider_connection_provider_chk", sql`
+    ${table.provider} ~ '^[a-z][a-z0-9_]{1,79}$'
+  `),
+  check("shipping_fulfillment_provider_connection_name_chk", sql`
+    char_length(btrim(${table.name})) BETWEEN 1 AND 160
+  `),
+  check("shipping_fulfillment_provider_connection_status_chk", sql`
+    ${table.status} IN ('active', 'disabled', 'error')
+  `),
+  check("shipping_fulfillment_provider_connection_credential_source_chk", sql`
+    ${table.credentialSource} IN ('environment', 'vault')
+  `),
+  check("shipping_fulfillment_provider_connection_credential_ref_chk", sql`
+    (
+      ${table.credentialSource} = 'environment'
+      AND ${table.credentialRef} IS NOT NULL
+      AND char_length(btrim(${table.credentialRef})) BETWEEN 1 AND 120
+      AND ${table.systemManaged} = TRUE
+    )
+    OR (
+      ${table.credentialSource} = 'vault'
+      AND ${table.credentialRef} IS NULL
+      AND ${table.systemManaged} = FALSE
+    )
+  `),
+  check("shipping_fulfillment_provider_connection_revision_chk", sql`${table.revision} > 0`),
+  check("shipping_fulfillment_provider_connection_error_chk", sql`
+    (
+      ${table.status} = 'error'
+      AND ${table.lastErrorCode} IS NOT NULL
+      AND ${table.lastErrorMessage} IS NOT NULL
+    )
+    OR (
+      ${table.status} <> 'error'
+      AND ${table.lastErrorCode} IS NULL
+      AND ${table.lastErrorMessage} IS NULL
+    )
+  `),
+  check("shipping_fulfillment_provider_connection_actor_chk", sql`
+    char_length(btrim(${table.createdBy})) BETWEEN 1 AND 120
+    AND char_length(btrim(${table.updatedBy})) BETWEEN 1 AND 120
+  `),
+]);
+
+export const shippingFulfillmentProviderCredentials = shippingSchema.table("fulfillment_provider_credentials", {
+  connectionId: bigint("connection_id", { mode: "number" }).primaryKey()
+    .references(() => shippingFulfillmentProviderConnections.id, { onDelete: "restrict" }),
+  keyId: varchar("key_id", { length: 120 }).notNull(),
+  ciphertext: text("ciphertext").notNull(),
+  iv: text("iv").notNull(),
+  authTag: text("auth_tag").notNull(),
+  updatedBy: varchar("updated_by", { length: 120 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  check("shipping_fulfillment_provider_credential_payload_chk", sql`
+    char_length(btrim(${table.keyId})) BETWEEN 1 AND 120
+    AND char_length(btrim(${table.ciphertext})) > 0
+    AND char_length(btrim(${table.iv})) > 0
+    AND char_length(btrim(${table.authTag})) > 0
+    AND char_length(btrim(${table.updatedBy})) BETWEEN 1 AND 120
+  `),
+]);
+
+export const shippingFulfillmentProviderConnectionEvents = shippingSchema.table("fulfillment_provider_connection_events", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  connectionId: bigint("connection_id", { mode: "number" }).notNull()
+    .references(() => shippingFulfillmentProviderConnections.id, { onDelete: "restrict" }),
+  action: varchar("action", { length: 40 }).notNull(),
+  connectionRevision: integer("connection_revision").notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  beforeSnapshot: jsonb("before_snapshot").$type<Record<string, unknown> | null>(),
+  afterSnapshot: jsonb("after_snapshot").$type<Record<string, unknown>>().notNull(),
+  actorUserId: varchar("actor_user_id", { length: 120 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_fulfillment_provider_connection_event_idempotency_idx")
+    .on(table.idempotencyKey),
+  uniqueIndex("shipping_fulfillment_provider_connection_event_revision_idx")
+    .on(table.connectionId, table.connectionRevision),
+  check("shipping_fulfillment_provider_connection_event_action_chk", sql`
+    ${table.action} IN (
+      'created', 'credential_replaced', 'verified', 'verification_failed',
+      'enabled', 'disabled'
+    )
+  `),
+  check("shipping_fulfillment_provider_connection_event_revision_chk", sql`
+    ${table.connectionRevision} > 0
+  `),
+  check("shipping_fulfillment_provider_connection_event_idempotency_chk", sql`
+    char_length(btrim(${table.idempotencyKey})) BETWEEN 16 AND 200
+  `),
+  check("shipping_fulfillment_provider_connection_event_request_hash_chk", sql`
+    ${table.requestHash} ~ '^[0-9a-f]{64}$'
+  `),
+  check("shipping_fulfillment_provider_connection_event_snapshot_chk", sql`
+    (${table.beforeSnapshot} IS NULL OR jsonb_typeof(${table.beforeSnapshot}) = 'object')
+    AND jsonb_typeof(${table.afterSnapshot}) = 'object'
+  `),
+  check("shipping_fulfillment_provider_connection_event_actor_chk", sql`
+    char_length(btrim(${table.actorUserId})) BETWEEN 1 AND 120
+  `),
+]);
+
 export const shippingFulfillmentRoutingProfiles = shippingSchema.table("fulfillment_routing_profiles", {
   serviceLevelId: integer("service_level_id").primaryKey()
     .references(() => shippingServiceLevels.id, { onDelete: "restrict" }),
@@ -1059,7 +1189,8 @@ export const shippingFulfillmentRoutingProfiles = shippingSchema.table("fulfillm
 export const shippingServiceLevelMethods = shippingSchema.table("service_level_methods", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   serviceLevelId: integer("service_level_id").notNull().references(() => shippingServiceLevels.id, { onDelete: "cascade" }),
-  provider: varchar("provider", { length: 40 }).notNull(),
+  provider: varchar("provider", { length: 80 }).notNull(),
+  providerConnectionId: bigint("provider_connection_id", { mode: "number" }),
   providerAccountId: varchar("provider_account_id", { length: 120 }),
   providerAccountName: varchar("provider_account_name", { length: 160 }),
   carrier: varchar("carrier", { length: 50 }).notNull(),
@@ -1076,13 +1207,21 @@ export const shippingServiceLevelMethods = shippingSchema.table("service_level_m
 }, (table) => [
   uniqueIndex("shipping_level_method_identity_idx").on(
     table.serviceLevelId,
-    table.provider,
+    table.providerConnectionId,
     table.providerAccountId,
     table.serviceCode,
   ),
   uniqueIndex("shipping_level_method_priority_idx")
     .on(table.serviceLevelId, table.priority)
-    .where(sql`${table.providerAccountId} IS NOT NULL`),
+    .where(sql`${table.providerConnectionId} IS NOT NULL`),
+  foreignKey({
+    columns: [table.providerConnectionId, table.provider],
+    foreignColumns: [
+      shippingFulfillmentProviderConnections.id,
+      shippingFulfillmentProviderConnections.provider,
+    ],
+    name: "shipping_level_method_provider_connection_fk",
+  }).onDelete("restrict"),
   foreignKey({
     columns: [table.revisionId, table.serviceLevelId],
     foreignColumns: [
@@ -1092,17 +1231,20 @@ export const shippingServiceLevelMethods = shippingSchema.table("service_level_m
     name: "shipping_level_method_revision_fk",
   }).onDelete("restrict"),
   check("shipping_level_method_provider_chk", sql`
-    ${table.provider} IN ('legacy_unscoped', 'shipstation_v2')
+    ${table.provider} = 'legacy_unscoped'
+    OR ${table.provider} ~ '^[a-z][a-z0-9_]{1,79}$'
   `),
   check("shipping_level_method_priority_chk", sql`${table.priority} > 0`),
   check("shipping_level_method_identity_chk", sql`
     (
       ${table.provider} = 'legacy_unscoped'
+      AND ${table.providerConnectionId} IS NULL
       AND ${table.providerAccountId} IS NULL
       AND ${table.revisionId} IS NULL
     )
     OR (
-      ${table.provider} = 'shipstation_v2'
+      ${table.provider} <> 'legacy_unscoped'
+      AND ${table.providerConnectionId} IS NOT NULL
       AND ${table.providerAccountId} IS NOT NULL
       AND ${table.providerAccountName} IS NOT NULL
       AND ${table.carrierName} IS NOT NULL
@@ -1260,6 +1402,9 @@ export type ShippingVariantAttrs = typeof shippingVariantAttrs.$inferSelect;
 export type ShippingServiceLevelRecord = typeof shippingServiceLevels.$inferSelect;
 export type ShippingFulfillmentRoutingProfileRecord = typeof shippingFulfillmentRoutingProfiles.$inferSelect;
 export type ShippingFulfillmentRoutingRevisionRecord = typeof shippingFulfillmentRoutingRevisions.$inferSelect;
+export type ShippingFulfillmentProviderConnectionRecord = typeof shippingFulfillmentProviderConnections.$inferSelect;
+export type ShippingFulfillmentProviderCredentialRecord = typeof shippingFulfillmentProviderCredentials.$inferSelect;
+export type ShippingFulfillmentProviderConnectionEventRecord = typeof shippingFulfillmentProviderConnectionEvents.$inferSelect;
 export type ShippingServiceLevelMethodRecord = typeof shippingServiceLevelMethods.$inferSelect;
 export type ShippingPackPlan = typeof shippingPackPlans.$inferSelect;
 export type ShippingPackPlanParcel = typeof shippingPackPlanParcels.$inferSelect;

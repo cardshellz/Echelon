@@ -56,6 +56,8 @@ function profile(): ShippingFulfillmentRoutingProfile {
     updatedAt: "2026-09-01T12:00:00.000Z",
     methods: [
       {
+        providerConnectionId: 11,
+        providerConnectionName: "Primary ShipStation",
         provider: "shipstation_v2",
         providerAccountId: "se-usps",
         providerAccountName: "USPS account",
@@ -68,6 +70,8 @@ function profile(): ShippingFulfillmentRoutingProfile {
         priority: 1,
       },
       {
+        providerConnectionId: 11,
+        providerConnectionName: "Primary ShipStation",
         provider: "shipstation_v2",
         providerAccountId: "se-fedex",
         providerAccountName: "FedEx account",
