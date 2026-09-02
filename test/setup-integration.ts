@@ -101,6 +101,7 @@ export async function runMigrations(): Promise<void> {
     "migrations/0639_package_allocation_physical_item_provenance.sql",
     "test/fixtures/channel-fulfillment-package-allocation-integration.sql",
     "migrations/0641_package_allocation_commercial_fulfillment_shadow.sql",
+    "migrations/0645_package_allocation_commercial_fulfillment_activation.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;
@@ -130,6 +131,7 @@ export async function runMigrations(): Promise<void> {
 }
 
 const TRUNCATE_TABLES = [
+  "oms.package_allocation_commercial_fulfillment_activations",
   "oms.channel_fulfillment_push_items",
   "oms.channel_fulfillment_pushes",
   "wms.reconciliation_exceptions",

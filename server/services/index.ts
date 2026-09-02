@@ -75,6 +75,8 @@ import { createChannelFulfillmentIngressRepository } from "../modules/oms/channe
 import { createChannelFulfillmentIngressService } from "../modules/oms/channel-fulfillment-ingress.service";
 import { markShipmentCancelled } from "../modules/orders/shipment-rollup";
 import { withAdvisoryLock } from "../infrastructure/scheduler-lock";
+import { envFlagEnabled } from "../infrastructure/scheduler-config";
+import type { Pool } from "pg";
 import { createShipStationService } from "../modules/oms/shipstation.service";
 import { createShipStationEngine } from "../modules/shipping";
 import { createDrizzleCarrierTrackingRepository } from "../modules/shipping/carrier-tracking.repository";
@@ -83,6 +85,14 @@ import {
   makeCarrierTrackingLogger,
   systemCarrierTrackingClock,
 } from "../modules/shipping/carrier-tracking.service";
+import { PgPackageAllocationLedgerRepository } from "../modules/shipping/package-allocation-ledger.repository";
+import { PackageAllocationBootstrapPersistenceService } from "../modules/shipping/package-allocation-bootstrap.service";
+import {
+  PackageAllocationLabelCommercialFulfillmentService,
+} from "../modules/shipping/package-allocation-label-commercial-fulfillment.service";
+import {
+  createPackageAllocationLabelCommercialReviewRepository,
+} from "../modules/shipping/package-allocation-label-commercial-review.repository";
 import {
   CarrierDispatchAuthorityError,
   type CarrierDispatchAuthority,
@@ -117,7 +127,10 @@ import { InventoryPublicationReadbackService } from "../modules/inventory-planni
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
-export function createServices(db: any) {
+export function createServices(
+  db: any,
+  databasePool: Pick<Pool, "connect">,
+) {
   // Foundation
   const inventoryLots = createInventoryLotService(db);
   const cogs = createCOGSService(db);
@@ -406,9 +419,19 @@ export function createServices(db: any) {
     trackingEventsClient: createShipStationTrackingEventsClient(),
     dispatchAuthority: dispatchAuthorityProxy,
   });
+  const packageAllocationLedger = new PgPackageAllocationLedgerRepository(databasePool);
+  const labelCommercialFulfillment =
+    new PackageAllocationLabelCommercialFulfillmentService({
+      enabled: !envFlagEnabled("PACKAGE_ALLOCATION_COMMERCIAL_FULFILLMENT_DISABLED"),
+      labelLinker: carrierTracking,
+      bootstrap: new PackageAllocationBootstrapPersistenceService(packageAllocationLedger),
+      fulfillmentAuthority: channelFulfillmentAuthority,
+      reviewRepository: createPackageAllocationLabelCommercialReviewRepository(db),
+    });
   const shipStation = createShipStationService(db, inventoryCore as any, {
     providerLabelObserver: carrierTracking,
     fulfillmentAuthority: channelFulfillmentAuthority,
+    labelCommercialFulfillment,
   });
   providerDispatchAuthority = shipStation;
   const shipStationPhysicalRecovery = createShipStationPhysicalRecoveryService(db, {

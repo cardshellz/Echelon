@@ -3,6 +3,7 @@ import type {
   ReplaceShippingFulfillmentRoutingInput,
   ReplaceShippingFulfillmentRoutingResult,
   ShippingFulfillmentCatalog,
+  ShippingFulfillmentCatalogConnectionResult,
   ShippingFulfillmentCatalogMethod,
   ShippingFulfillmentMethodIdentity,
   ShippingFulfillmentRouteMethod,
@@ -17,6 +18,7 @@ import {
 } from "../domain/fulfillment-routing";
 
 const MAX_ROUTING_METHODS = 200;
+const PROVIDER_PATTERN = /^[a-z][a-z0-9_]{1,79}$/;
 
 export class FulfillmentRoutingError extends Error {
   constructor(
@@ -64,8 +66,17 @@ export interface CreateFulfillmentRoutingRevisionInput {
   now: Date;
 }
 
+export interface FulfillmentRoutingProviderConnectionExpectation {
+  connectionId: number;
+  expectedRevision: number;
+  provider: string;
+}
+
 export interface FulfillmentRoutingTransaction {
   getServiceLevelForUpdate(serviceLevelId: number): Promise<ShippingFulfillmentRoutingServiceLevel | null>;
+  lockProviderConnections(
+    connections: readonly FulfillmentRoutingProviderConnectionExpectation[],
+  ): Promise<void>;
   ensureProfile(serviceLevelId: number, now: Date): Promise<void>;
   getProfileForUpdate(serviceLevelId: number): Promise<FulfillmentRoutingProfileState>;
   findRevisionByIdempotencyKey(
@@ -174,6 +185,7 @@ export class FulfillmentRoutingService {
       );
     }
     const methods = resolveRequestedMethods(command.methods, catalog.methods);
+    const providerConnections = selectedConnectionExpectations(methods, catalog.connections);
     const requestHash = commandHash(serviceLevelId, command.methods);
     const catalogFetchedAt = parseCatalogTimestamp(catalog.fetchedAt);
     const now = cloneDate((this.deps.clock ?? systemClock).now());
@@ -213,6 +225,7 @@ export class FulfillmentRoutingService {
           [`Expected revision ${command.expectedRevision}; current revision is ${before.revision}.`],
         );
       }
+      await tx.lockProviderConnections(providerConnections);
 
       const nextRevision = before.revision + 1;
       const revisionId = await tx.createRevision({
@@ -307,11 +320,17 @@ function normalizeCommand(
 
   const seen = new Set<string>();
   const methods = command.methods.map((method, index) => {
-    if (!method || typeof method !== "object" || method.provider !== "shipstation_v2") {
-      invalidInput(`methods.${index}.provider`, "must be shipstation_v2");
+    if (!method || typeof method !== "object") invalidInput(`methods.${index}`, "is required");
+    const provider = requiredString(method.provider, `methods.${index}.provider`, 80);
+    if (!PROVIDER_PATTERN.test(provider)) {
+      invalidInput(`methods.${index}.provider`, "has an invalid format");
     }
     const normalized: ShippingFulfillmentMethodIdentity = {
-      provider: "shipstation_v2",
+      providerConnectionId: positiveInteger(
+        method.providerConnectionId,
+        `methods.${index}.providerConnectionId`,
+      ),
+      provider,
       providerAccountId: requiredString(
         method.providerAccountId,
         `methods.${index}.providerAccountId`,
@@ -365,6 +384,7 @@ export function commandHash(
   return createHash("sha256").update(JSON.stringify({
     serviceLevelId,
     methods: methods.map((method) => ({
+      providerConnectionId: method.providerConnectionId,
       provider: method.provider,
       providerAccountId: method.providerAccountId,
       serviceCode: method.serviceCode,
@@ -373,7 +393,36 @@ export function commandHash(
 }
 
 function methodKey(method: ShippingFulfillmentMethodIdentity): string {
-  return `${method.provider}\u0000${method.providerAccountId}\u0000${method.serviceCode}`;
+  return `${method.providerConnectionId}\u0000${method.provider}\u0000${method.providerAccountId}\u0000${method.serviceCode}`;
+}
+
+function selectedConnectionExpectations(
+  methods: readonly ShippingFulfillmentRouteMethod[],
+  connections: readonly ShippingFulfillmentCatalogConnectionResult[],
+): FulfillmentRoutingProviderConnectionExpectation[] {
+  const catalogConnections = new Map(
+    connections.map((connection) => [connection.connectionId, connection]),
+  );
+  const selected = new Map<number, FulfillmentRoutingProviderConnectionExpectation>();
+  for (const method of methods) {
+    const connection = catalogConnections.get(method.providerConnectionId);
+    if (!connection || connection.status !== "available" || connection.provider !== method.provider) {
+      throw new FulfillmentRoutingError(
+        503,
+        "SHIPPING_FULFILLMENT_ROUTING_PROVIDER_INVALID_RESPONSE",
+        "The provider catalog omitted connection revision evidence for a selected method.",
+      );
+    }
+    selected.set(connection.connectionId, {
+      connectionId: connection.connectionId,
+      expectedRevision: positiveInteger(
+        connection.connectionRevision,
+        `connections.${connection.connectionId}.connectionRevision`,
+      ),
+      provider: connection.provider,
+    });
+  }
+  return [...selected.values()].sort((left, right) => left.connectionId - right.connectionId);
 }
 
 function parseCatalogTimestamp(value: string): Date {

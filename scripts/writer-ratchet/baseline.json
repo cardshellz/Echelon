@@ -334,6 +334,9 @@
   "inventory.availability_activation_runs": [
     "modules/inventory-planning"
   ],
+  "inventory.availability_claim_build_handoffs": [
+    "modules/inventory-planning"
+  ],
   "inventory.availability_claim_commands": [
     "modules/inventory-planning"
   ],
@@ -648,6 +651,9 @@
   "oms.order_line_adjustments": [
     "modules/oms"
   ],
+  "oms.package_allocation_commercial_fulfillment_activations": [
+    "modules/oms"
+  ],
   "oms.shopify_order_bridge_checkpoints": [
     "modules/oms"
   ],
@@ -883,6 +889,15 @@
     "modules/shipping-engine"
   ],
   "shipping.destination_scopes": [
+    "modules/shipping-engine"
+  ],
+  "shipping.fulfillment_provider_connection_events": [
+    "modules/shipping-engine"
+  ],
+  "shipping.fulfillment_provider_connections": [
+    "modules/shipping-engine"
+  ],
+  "shipping.fulfillment_provider_credentials": [
     "modules/shipping-engine"
   ],
   "shipping.fulfillment_routing_profiles": [

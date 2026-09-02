@@ -21,6 +21,8 @@ const serviceLevel: ShippingFulfillmentRoutingServiceLevel = {
 };
 
 const fedexGround: ShippingFulfillmentCatalogMethod = {
+  providerConnectionId: 11,
+  providerConnectionName: "Primary ShipStation",
   provider: "shipstation_v2",
   providerAccountId: "se-fedex-1",
   providerAccountName: "Card Shellz FedEx",
@@ -33,6 +35,8 @@ const fedexGround: ShippingFulfillmentCatalogMethod = {
 };
 
 const uspsGround: ShippingFulfillmentCatalogMethod = {
+  providerConnectionId: 11,
+  providerConnectionName: "Primary ShipStation",
   provider: "shipstation_v2",
   providerAccountId: "se-usps-1",
   providerAccountName: "Card Shellz USPS",
@@ -87,6 +91,11 @@ describe("FulfillmentRoutingService", () => {
       actorUserId: "operator-1",
       catalogHash: "a".repeat(64),
     }));
+    expect(tx.lockProviderConnections).toHaveBeenCalledWith([{
+      connectionId: 11,
+      expectedRevision: 1,
+      provider: "shipstation_v2",
+    }]);
     expect(tx.replaceMethods).toHaveBeenCalledWith(expect.objectContaining({
       serviceLevelId: 7,
       revisionId: 91,
@@ -185,6 +194,33 @@ describe("FulfillmentRoutingService", () => {
     expect(tx.createRevision).not.toHaveBeenCalled();
   });
 
+  it("does not write a routing revision when a provider connection changes after catalog load", async () => {
+    const { store, tx } = fakeStore(profile());
+    tx.lockProviderConnections.mockRejectedValue(new FulfillmentRoutingError(
+      409,
+      "SHIPPING_FULFILLMENT_ROUTING_PROVIDER_CONNECTION_UNAVAILABLE",
+      "Provider connection changed.",
+    ));
+    const service = new FulfillmentRoutingService({
+      store,
+      catalogProvider: provider(availableCatalog()),
+    });
+
+    await expect(service.replaceProfile({
+      serviceLevelId: 7,
+      actorUserId: "operator-1",
+      command: {
+        expectedRevision: 0,
+        idempotencyKey: "routing-command-00000006",
+        methods: [identity(fedexGround)],
+      },
+    })).rejects.toMatchObject({
+      code: "SHIPPING_FULFILLMENT_ROUTING_PROVIDER_CONNECTION_UNAVAILABLE",
+    });
+    expect(tx.createRevision).not.toHaveBeenCalled();
+    expect(tx.replaceMethods).not.toHaveBeenCalled();
+  });
+
   it("returns the saved routing profile even when the provider catalog is unavailable", async () => {
     const current = profile({
       revision: 1,
@@ -196,11 +232,11 @@ describe("FulfillmentRoutingService", () => {
       store,
       catalogProvider: provider({
         status: "unavailable",
-        provider: "shipstation_v2",
         code: "SHIPPING_FULFILLMENT_ROUTING_SHIPSTATION_UNAVAILABLE",
         message: "Provider is unavailable.",
         retryable: true,
         methods: [],
+        connections: [],
       }),
     });
 
@@ -255,6 +291,7 @@ function fakeStore(current: FulfillmentRoutingProfileState): {
 } {
   const tx = {
     getServiceLevelForUpdate: vi.fn().mockResolvedValue(serviceLevel),
+    lockProviderConnections: vi.fn().mockResolvedValue(undefined),
     ensureProfile: vi.fn().mockResolvedValue(undefined),
     getProfileForUpdate: vi.fn().mockResolvedValue(current),
     findRevisionByIdempotencyKey: vi.fn().mockResolvedValue(null),
@@ -295,17 +332,32 @@ function provider(catalog: ShippingFulfillmentCatalog) {
 function availableCatalog(
   methods: ShippingFulfillmentCatalogMethod[] = [fedexGround, uspsGround],
 ): ShippingFulfillmentCatalog {
+  const connections = [...new Map(methods.map((method) => [method.providerConnectionId, {
+    connectionId: method.providerConnectionId,
+    connectionRevision: 1,
+    connectionName: method.providerConnectionName,
+    provider: method.provider,
+    providerDisplayName: "ShipStation",
+    status: "available" as const,
+    methodCount: methods.filter((candidate) => (
+      candidate.providerConnectionId === method.providerConnectionId
+    )).length,
+    code: null,
+    message: null,
+    retryable: false,
+  }])).values()];
   return {
     status: "available",
-    provider: "shipstation_v2",
     catalogHash: "a".repeat(64),
     fetchedAt: "2026-09-01T11:59:00.000Z",
     methods,
+    connections,
   };
 }
 
 function identity(method: ShippingFulfillmentCatalogMethod) {
   return {
+    providerConnectionId: method.providerConnectionId,
     provider: method.provider,
     providerAccountId: method.providerAccountId,
     serviceCode: method.serviceCode,

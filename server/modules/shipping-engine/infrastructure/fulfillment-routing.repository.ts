@@ -8,6 +8,7 @@ import {
   FulfillmentRoutingError,
   type CreateFulfillmentRoutingRevisionInput,
   type FulfillmentRoutingProfileState,
+  type FulfillmentRoutingProviderConnectionExpectation,
   type FulfillmentRoutingRevisionIdentity,
   type FulfillmentRoutingStore,
   type FulfillmentRoutingTransaction,
@@ -30,6 +31,8 @@ interface ProfileRow {
 }
 
 interface MethodRow {
+  provider_connection_id: string | number | null;
+  provider_connection_name: string | null;
   provider: string;
   provider_account_id: string | null;
   provider_account_name: string | null;
@@ -117,6 +120,79 @@ implements FulfillmentRoutingTransaction {
     return result.rows[0] ? mapServiceLevel(result.rows[0]) : null;
   }
 
+  async lockProviderConnections(
+    connections: readonly FulfillmentRoutingProviderConnectionExpectation[],
+  ): Promise<void> {
+    const requested = new Map<number, FulfillmentRoutingProviderConnectionExpectation>();
+    for (const connection of connections) {
+      const existing = requested.get(connection.connectionId);
+      if (
+        existing
+        && (
+          existing.provider !== connection.provider
+          || existing.expectedRevision !== connection.expectedRevision
+        )
+      ) {
+        throw new FulfillmentRoutingError(
+          409,
+          "SHIPPING_FULFILLMENT_ROUTING_PROVIDER_CONNECTION_MISMATCH",
+          "A provider connection was selected with conflicting provider identities.",
+        );
+      }
+      requested.set(connection.connectionId, connection);
+    }
+    const connectionIds = [...requested.keys()].sort((left, right) => left - right);
+    if (connectionIds.length === 0) return;
+
+    await this.client.query(
+      `SELECT id
+       FROM shipping.fulfillment_provider_connections
+       WHERE id = ANY($1::bigint[])
+       ORDER BY id
+       FOR UPDATE`,
+      [connectionIds],
+    );
+    const result = await this.client.query<{
+      id: string | number;
+      provider: string;
+      revision: number;
+      status: string;
+    }>(
+      `SELECT id, provider, revision, status
+       FROM shipping.fulfillment_provider_connections
+       WHERE id = ANY($1::bigint[])
+       ORDER BY id`,
+      [connectionIds],
+    );
+    if (result.rows.length !== connectionIds.length) {
+      throw providerConnectionUnavailable("A selected fulfillment provider connection no longer exists.");
+    }
+    for (const row of result.rows) {
+      const connectionId = safeId(row.id, "fulfillment provider connection id");
+      const expected = requested.get(connectionId);
+      if (!expected || expected.provider !== row.provider) {
+        throw new FulfillmentRoutingError(
+          409,
+          "SHIPPING_FULFILLMENT_ROUTING_PROVIDER_CONNECTION_MISMATCH",
+          "A selected method no longer belongs to its fulfillment provider connection.",
+        );
+      }
+      if (row.revision !== expected.expectedRevision) {
+        throw providerConnectionUnavailable(
+          "A selected fulfillment provider connection changed after its method catalog was loaded. Refresh and retry.",
+        );
+      }
+      if (row.status === "disabled") {
+        throw providerConnectionUnavailable(
+          "A selected fulfillment provider connection was disabled before the routing change completed.",
+        );
+      }
+      if (row.status !== "active" && row.status !== "error") {
+        throw dataIntegrityError("A fulfillment provider connection has an unknown status.");
+      }
+    }
+  }
+
   async ensureProfile(serviceLevelId: number, now: Date): Promise<void> {
     await this.client.query(
       `INSERT INTO shipping.fulfillment_routing_profiles
@@ -189,6 +265,7 @@ implements FulfillmentRoutingTransaction {
     if (input.methods.length === 0) return;
 
     const payload = input.methods.map((method) => ({
+      provider_connection_id: method.providerConnectionId,
       provider: method.provider,
       provider_account_id: method.providerAccountId,
       provider_account_name: method.providerAccountName,
@@ -202,10 +279,11 @@ implements FulfillmentRoutingTransaction {
     }));
     await this.client.query(
       `INSERT INTO shipping.service_level_methods
-        (service_level_id, provider, provider_account_id, provider_account_name,
+        (service_level_id, provider_connection_id, provider, provider_account_id, provider_account_name,
          carrier, carrier_name, service_code, service_name, priority, domestic,
          international, revision_id, is_active, created_at, updated_at)
        SELECT $1,
+              method.provider_connection_id,
               method.provider,
               method.provider_account_id,
               method.provider_account_name,
@@ -221,6 +299,7 @@ implements FulfillmentRoutingTransaction {
               $4,
               $4
        FROM jsonb_to_recordset($3::jsonb) AS method(
+         provider_connection_id BIGINT,
          provider TEXT,
          provider_account_id TEXT,
          provider_account_name TEXT,
@@ -282,16 +361,23 @@ async function loadProfile(
     [serviceLevelId],
   );
   const methodResult = await client.query<MethodRow>(
-    `SELECT provider, provider_account_id, provider_account_name, carrier,
+    `SELECT method.provider_connection_id,
+            connection.name AS provider_connection_name,
+            method.provider,
+            method.provider_account_id,
+            method.provider_account_name,
+            method.carrier,
             carrier_name, service_code, service_name, priority, domestic,
             international, revision_id, is_active
-     FROM shipping.service_level_methods
-     WHERE service_level_id = $1
-     ORDER BY priority ASC, id ASC${forUpdate ? " FOR UPDATE" : ""}`,
+     FROM shipping.service_level_methods AS method
+     LEFT JOIN shipping.fulfillment_provider_connections AS connection
+       ON connection.id = method.provider_connection_id
+     WHERE method.service_level_id = $1
+     ORDER BY method.priority ASC, method.id ASC${forUpdate ? " FOR UPDATE OF method" : ""}`,
     [serviceLevelId],
   );
   const head = profileResult.rows[0] ?? null;
-  const scopedRows = methodResult.rows.filter((row) => row.provider_account_id !== null);
+  const scopedRows = methodResult.rows.filter((row) => row.provider_connection_id !== null);
   const legacyUnscopedMethodCount = methodResult.rows.length - scopedRows.length;
   const currentRevisionId = head?.current_revision_id == null
     ? null
@@ -330,7 +416,9 @@ function mapServiceLevel(row: ServiceLevelRow): ShippingFulfillmentRoutingServic
 
 function mapMethod(row: MethodRow): ShippingFulfillmentRouteMethod {
   if (
-    row.provider !== "shipstation_v2"
+    row.provider_connection_id === null
+    || row.provider_connection_name === null
+    || !row.provider.trim()
     || row.provider_account_id === null
     || row.provider_account_name === null
     || row.carrier_name === null
@@ -339,7 +427,9 @@ function mapMethod(row: MethodRow): ShippingFulfillmentRouteMethod {
     throw dataIntegrityError("A scoped fulfillment method has incomplete provider identity.");
   }
   return {
-    provider: "shipstation_v2",
+    providerConnectionId: safeId(row.provider_connection_id, "fulfillment provider connection id"),
+    providerConnectionName: row.provider_connection_name,
+    provider: row.provider,
     providerAccountId: row.provider_account_id,
     providerAccountName: row.provider_account_name,
     carrierCode: row.carrier,
@@ -366,6 +456,14 @@ function dataIntegrityError(detail: string): FulfillmentRoutingError {
     "SHIPPING_FULFILLMENT_ROUTING_DATA_INTEGRITY_ERROR",
     "Fulfillment routing data is inconsistent.",
     [detail],
+  );
+}
+
+function providerConnectionUnavailable(message: string): FulfillmentRoutingError {
+  return new FulfillmentRoutingError(
+    409,
+    "SHIPPING_FULFILLMENT_ROUTING_PROVIDER_CONNECTION_UNAVAILABLE",
+    message,
   );
 }
 

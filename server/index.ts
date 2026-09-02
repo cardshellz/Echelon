@@ -430,7 +430,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   }
 
   // Create WMS service container and attach to app for route handlers
-  const services = createServices(db);
+  const services = createServices(db, dbPool);
   app.locals.services = services;
   app.locals.db = db; // Provide db to routes that expect it
   // REMOVED: initOrderSyncServices deleted with order-sync-listener

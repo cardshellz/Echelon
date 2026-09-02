@@ -287,6 +287,26 @@ type BlockingAllocationExceptionResult = {
 
 export type PickQueueOrder = any; // Pass-through type from storage
 
+/**
+ * The pickable bin holding the most stock, for the no-bin failure report.
+ * Ties keep the caller's order (pickable levels arrive sorted pick > pallet).
+ * Returns null when no pickable bin has any stock.
+ */
+function findBestStockedPickableLevel<T extends { level: { variantQty: number }; loc?: WarehouseLocation }>(
+  candidates: readonly T[],
+): (T & { loc: WarehouseLocation }) | null {
+  let best: (T & { loc: WarehouseLocation }) | null = null;
+  for (const candidate of candidates) {
+    if (!candidate.loc) continue;
+    const qty = Number(candidate.level.variantQty ?? 0);
+    if (qty <= 0) continue;
+    if (!best || qty > Number(best.level.variantQty ?? 0)) {
+      best = candidate as T & { loc: WarehouseLocation };
+    }
+  }
+  return best;
+}
+
 function emptyPickInventoryContext(sku: string): PickInventoryContext {
   return {
     deducted: false,
@@ -1930,18 +1950,28 @@ export class PickingUseCases {
     }
 
     if (!pickLocationId) {
-      // Truly zero stock anywhere — nothing to deduct
-      const assignedLevel = assignedLocationId
-        ? levels.find((l: any) => l.warehouseLocationId === assignedLocationId)
-        : null;
+      // Nothing to deduct from. Only reachable when the line carries no
+      // picker-facing bin (an assigned bin is always trusted above), so the
+      // exception must describe the real shelf state. The previous message
+      // said "no stock" and reported systemQty 0 whenever stock existed but no
+      // single bin held the full quantity, which sent operators hunting for a
+      // bin-assignment fault instead of a shortfall (2026-09). Reporting only:
+      // the pick still fails and nothing moves. The picker-side fix is a bin
+      // confirmation, which also repairs the slot setup.
+      const bestStocked = findBestStockedPickableLevel(pickableLevels);
+      const bestQty = bestStocked ? Number(bestStocked.level.variantQty ?? 0) : 0;
+      const message = bestStocked
+        ? `${item.sku} has no assigned pick bin on this line and no single pickable bin holds ${pickedQty}: `
+          + `best is ${bestStocked.loc.code} with ${bestQty}. Confirm the bin on the gun to pick from it.`
+        : `No pickable location has any stock for ${item.sku}`;
       return {
         success: false,
         error: "no_inventory",
-        message: `No pickable location has any stock for ${item.sku}`,
+        message,
         productVariantId: productVariant.id,
-        locationId: assignedLocationId,
-        locationCode: assignedLocationCode,
-        systemQty: assignedLevel?.variantQty ?? 0,
+        locationId: bestStocked?.loc.id ?? assignedLocationId,
+        locationCode: bestStocked?.loc.code ?? assignedLocationCode,
+        systemQty: bestQty,
         pickerBlocking: false,
         shipmentBlocking: true,
       };

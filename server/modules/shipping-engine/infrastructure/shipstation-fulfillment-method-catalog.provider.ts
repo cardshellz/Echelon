@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
 import type {
-  ShippingFulfillmentCatalog,
   ShippingFulfillmentCatalogMethod,
 } from "@shared/types/shipping-fulfillment-routing";
-import type { FulfillmentMethodCatalogProvider } from "../application/fulfillment-routing.service";
+import type {
+  FulfillmentProviderAdapter,
+  FulfillmentProviderConnectionCatalog,
+} from "../application/connected-fulfillment-method-catalog.service";
 import {
   createShipStationV2RatingAdapter,
   mapV2CarrierCode,
@@ -16,10 +17,6 @@ const MAX_CONNECTED_CARRIERS = 100;
 const MAX_CATALOG_METHODS = 5_000;
 const SERVICE_FETCH_CONCURRENCY = 5;
 
-interface Clock {
-  now(): Date;
-}
-
 class CatalogValidationError extends Error {
   constructor(readonly details: string[]) {
     super("ShipStation returned an invalid fulfillment method catalog.");
@@ -28,14 +25,35 @@ class CatalogValidationError extends Error {
 }
 
 export class ShipStationFulfillmentMethodCatalogProvider
-implements FulfillmentMethodCatalogProvider {
+implements FulfillmentProviderAdapter {
+  readonly descriptor = {
+    provider: "shipstation_v2",
+    displayName: "ShipStation",
+    credentialLabel: "ShipStation V2 API key",
+    supportsManagedConnections: true,
+  } as const;
+
   constructor(private readonly deps: {
     adapter?: ShipStationV2RatingAdapter;
-    clock?: Clock;
+    adapterFactory?: (credential: string) => ShipStationV2RatingAdapter;
   } = {}) {}
 
-  async loadCatalog(): Promise<ShippingFulfillmentCatalog> {
-    const adapter = this.deps.adapter ?? createShipStationV2RatingAdapter();
+  verifyCredential(credential: string): Promise<FulfillmentProviderConnectionCatalog> {
+    return this.loadCatalog({
+      connectionId: 1,
+      connectionName: "ShipStation credential verification",
+      credential,
+    });
+  }
+
+  async loadCatalog(input: {
+    connectionId: number;
+    connectionName: string;
+    credential: string;
+  }): Promise<FulfillmentProviderConnectionCatalog> {
+    const adapter = this.deps.adapter
+      ?? this.deps.adapterFactory?.(input.credential)
+      ?? createShipStationV2RatingAdapter({ apiKey: input.credential });
     try {
       const carriersResult = await adapter.listCarriers();
       if (!carriersResult.configured) {
@@ -66,7 +84,7 @@ implements FulfillmentMethodCatalogProvider {
         ]);
       }
 
-      const methods = normalizeCatalog(serviceResults.flatMap(({ carrier, result }) => (
+      const methods = normalizeCatalog(input, serviceResults.flatMap(({ carrier, result }) => (
         result.configured
           ? result.services.map((service) => ({ carrier, service }))
           : []
@@ -76,16 +94,21 @@ implements FulfillmentMethodCatalogProvider {
           `methodCount exceeds ${MAX_CATALOG_METHODS}`,
         ]);
       }
-      const fetchedAt = cloneDate((this.deps.clock ?? systemClock).now());
       return {
         status: "available",
-        provider: "shipstation_v2",
-        catalogHash: catalogHash(methods),
-        fetchedAt: fetchedAt.toISOString(),
         methods,
       };
     } catch (error) {
       if (error instanceof ShipStationV2Error) {
+        const status = typeof error.context.status === "number" ? error.context.status : null;
+        if (status === 401 || status === 403) {
+          return unavailableCatalog(
+            "unavailable",
+            "SHIPPING_FULFILLMENT_ROUTING_SHIPSTATION_CREDENTIAL_REJECTED",
+            "ShipStation rejected this connection credential. Replace the API key before retrying.",
+            false,
+          );
+        }
         return unavailableCatalog(
           "unavailable",
           "SHIPPING_FULFILLMENT_ROUTING_SHIPSTATION_UNAVAILABLE",
@@ -106,7 +129,9 @@ implements FulfillmentMethodCatalogProvider {
   }
 }
 
-function normalizeCatalog(entries: Array<{
+function normalizeCatalog(
+  connection: { connectionId: number; connectionName: string },
+  entries: Array<{
   carrier: V2Carrier;
   service: {
     carrierId: string;
@@ -116,7 +141,8 @@ function normalizeCatalog(entries: Array<{
     domestic: boolean;
     international: boolean;
   };
-}>): ShippingFulfillmentCatalogMethod[] {
+  }>,
+): ShippingFulfillmentCatalogMethod[] {
   const byIdentity = new Map<string, ShippingFulfillmentCatalogMethod>();
   for (const { carrier, service } of entries) {
     const providerAccountId = boundedString(carrier.carrierId, 120, "carrierId");
@@ -128,6 +154,8 @@ function normalizeCatalog(entries: Array<{
       throw new CatalogValidationError(["Carrier service code did not match its parent carrier."]);
     }
     const method: ShippingFulfillmentCatalogMethod = {
+      providerConnectionId: connection.connectionId,
+      providerConnectionName: boundedString(connection.connectionName, 160, "connectionName"),
       provider: "shipstation_v2",
       providerAccountId,
       providerAccountName: boundedString(carrier.name, 160, "carrierName"),
@@ -141,8 +169,9 @@ function normalizeCatalog(entries: Array<{
     const key = methodKey(method);
     const existing = byIdentity.get(key);
     if (existing && JSON.stringify(existing) !== JSON.stringify(method)) {
+      const fields = conflictingMethodFields(existing, method);
       throw new CatalogValidationError([
-        `Conflicting duplicate method ${providerAccountId} / ${method.serviceCode}.`,
+        `Conflicting duplicate method ${providerAccountId} / ${method.serviceCode}; differing fields: ${fields.join(", ")}.`,
       ]);
     }
     byIdentity.set(key, method);
@@ -191,19 +220,14 @@ function methodKey(method: ShippingFulfillmentCatalogMethod): string {
   return `${method.provider}\u0000${method.providerAccountId}\u0000${method.serviceCode}`;
 }
 
-function catalogHash(methods: readonly ShippingFulfillmentCatalogMethod[]): string {
-  return createHash("sha256").update(JSON.stringify(methods)).digest("hex");
-}
-
 function unavailableCatalog(
   status: "not_configured" | "unavailable",
   code: string,
   message: string,
   retryable: boolean,
-): ShippingFulfillmentCatalog {
+): FulfillmentProviderConnectionCatalog {
   return {
     status,
-    provider: "shipstation_v2",
     code,
     message,
     retryable,
@@ -211,12 +235,22 @@ function unavailableCatalog(
   };
 }
 
-function cloneDate(value: Date): Date {
-  const cloned = new Date(value.getTime());
-  if (Number.isNaN(cloned.getTime())) {
-    throw new Error("Fulfillment method catalog clock returned an invalid date.");
-  }
-  return cloned;
+function conflictingMethodFields(
+  left: ShippingFulfillmentCatalogMethod,
+  right: ShippingFulfillmentCatalogMethod,
+): string[] {
+  const fields: Array<keyof ShippingFulfillmentCatalogMethod> = [
+    "providerConnectionId",
+    "providerConnectionName",
+    "provider",
+    "providerAccountId",
+    "providerAccountName",
+    "carrierCode",
+    "carrierName",
+    "serviceCode",
+    "serviceName",
+    "domestic",
+    "international",
+  ];
+  return fields.filter((field) => left[field] !== right[field]);
 }
-
-const systemClock: Clock = { now: () => new Date() };

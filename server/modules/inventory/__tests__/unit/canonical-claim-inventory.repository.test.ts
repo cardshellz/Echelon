@@ -221,6 +221,103 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
       .toEqual([4, 3, 12, OCCURRED_AT]);
   });
 
+  it("posts canonical build inventory with build-linked lots and ledger evidence", async () => {
+    const fake = createClient(async (text) => {
+      if (text.startsWith("INSERT INTO inventory.inventory_levels")) return { rows: [], rowCount: 1 };
+      if (text.includes("FROM inventory.inventory_levels") && text.includes("OR (product_variant_id")) {
+        return { rows: [
+          { id: 11, warehouse_location_id: 2, product_variant_id: 101, variant_qty: 5, reserved_qty: 5 },
+          { id: 12, warehouse_location_id: 3, product_variant_id: 105, variant_qty: 0, reserved_qty: 0 },
+        ] };
+      }
+      if (text.includes("FROM inventory.inventory_lots") && text.includes("ANY($1::integer[])")) {
+        return { rows: [{
+          id: 51,
+          product_variant_id: 101,
+          warehouse_location_id: 2,
+          qty_on_hand: 5,
+          qty_reserved: 5,
+          qty_picked: 0,
+          status: "active",
+          received_at: OCCURRED_AT,
+          unit_cost_mills: "125",
+          po_unit_cost_mills: "100",
+          packaging_cost_mills: "20",
+          landed_cost_mills: "5",
+          total_unit_cost_mills: "125",
+        }] };
+      }
+      if (text.startsWith("UPDATE inventory.inventory_lots")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.inventory_levels")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("INSERT INTO inventory.inventory_lots")) return { rows: [{ id: 61 }], rowCount: 1 };
+      if (text.startsWith("INSERT INTO inventory.inventory_transactions")) return { rows: [], rowCount: 1 };
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.executeBuildOperation({
+      client: fake.client,
+      claimId: BigInt(9),
+      claimOperationId: BigInt(10),
+      operationKey: "line:1:build:1",
+      operationType: "component_build",
+      resources: [{
+        claimResourceId: BigInt(12),
+        inventoryLevelId: 11,
+        warehouseLocationId: 2,
+        sourceVariantId: 101,
+        consumeQty: BigInt(5),
+        lotAllocations: [{
+          claimLotAllocationId: BigInt(21),
+          inventoryLotId: 51,
+          consumeQty: BigInt(5),
+          unitCostMills: BigInt(125),
+          poUnitCostMills: BigInt(100),
+          packagingUnitCostMills: BigInt(20),
+          landedUnitCostMills: BigInt(5),
+        }],
+      }],
+      destinationVariantId: 105,
+      outputLocationId: 3,
+      outputQty: BigInt(1),
+      committedOutputQty: BigInt(1),
+      orderId: 70,
+      orderItemId: 71,
+      build: {
+        buildOrderId: 91,
+        buildRunId: 94,
+        buildRunNumber: 1,
+        buildSystemNumber: "BLD-00000091",
+        components: [{ sourceVariantId: 101, buildOrderComponentId: 92 }],
+      },
+      actor: "unit-test",
+      reason: "claim build execution",
+      occurredAt: OCCURRED_AT,
+    })).resolves.toEqual({
+      outputInventoryLevelId: 12,
+      committedLotAllocations: [{
+        inventoryLotId: 61,
+        qty: 1,
+        unitCostMills: BigInt(625),
+        poUnitCostMills: BigInt(500),
+        packagingUnitCostMills: BigInt(100),
+        landedUnitCostMills: BigInt(25),
+      }],
+      totalInputCostMills: BigInt(625),
+    });
+
+    const calls = fake.query.mock.calls.map(([text, values]) => ({ text: String(text), values }));
+    const inventoryTransactions = calls.filter((call) => call.text.startsWith("INSERT INTO inventory.inventory_transactions"));
+    expect(inventoryTransactions).toHaveLength(2);
+    expect(inventoryTransactions[0].text).toContain("build_order_component_id");
+    expect(inventoryTransactions[0].values?.slice(-3)).toEqual([91, 92, 94]);
+    expect(inventoryTransactions[1].text).toContain("build_order_id, build_run_id");
+    expect(inventoryTransactions[1].values?.slice(-2)).toEqual([91, 94]);
+    const outputLot = calls.find((call) => call.text.startsWith("INSERT INTO inventory.inventory_lots"));
+    expect(outputLot?.text).toContain("build_order_id, build_run_id");
+    expect(outputLot?.values?.slice(-2)).toEqual([91, 94]);
+  });
+
   it("locks every level before every lot and releases exact claim-owned quantities", async () => {
     const fake = createClient(async (text, values) => {
       if (text.includes("FROM inventory.inventory_levels") && text.includes("ANY($1::integer[])")) {

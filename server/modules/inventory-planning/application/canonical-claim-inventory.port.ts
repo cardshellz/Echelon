@@ -56,6 +56,17 @@ export type CanonicalClaimPackageExecutionResult = {
   totalInputCostMills: bigint;
 };
 
+export type CanonicalClaimBuildInventoryContext = {
+  buildOrderId: number;
+  buildRunId: number;
+  buildRunNumber: number;
+  buildSystemNumber: string;
+  components: readonly {
+    sourceVariantId: number;
+    buildOrderComponentId: number;
+  }[];
+};
+
 export interface CanonicalClaimInventoryMutationPort {
   reserveResource(input: {
     client: CanonicalClaimTransactionClient;
@@ -95,6 +106,25 @@ export interface CanonicalClaimInventoryMutationPort {
     committedOutputQty: bigint;
     orderId: number;
     orderItemId: number;
+    actor: string;
+    reason: string;
+    occurredAt: Date;
+  }): Promise<CanonicalClaimPackageExecutionResult>;
+
+  executeBuildOperation(input: {
+    client: CanonicalClaimTransactionClient;
+    claimId: bigint;
+    claimOperationId: bigint;
+    operationKey: string;
+    operationType: "component_build";
+    resources: readonly CanonicalClaimInventoryExecutionResource[];
+    destinationVariantId: number;
+    outputLocationId: number;
+    outputQty: bigint;
+    committedOutputQty: bigint;
+    orderId: number;
+    orderItemId: number;
+    build: CanonicalClaimBuildInventoryContext;
     actor: string;
     reason: string;
     occurredAt: Date;

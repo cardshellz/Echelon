@@ -135,6 +135,7 @@ const CHECK_IDENTITY_COLUMNS: Record<string, readonly string[]> = {
   lot_cost_mirror_drift: ["inventory_lot_id"],
   order_item_cost_mirror_drift: ["order_item_cost_id"],
   duplicate_lot_number: ["lot_number"],
+  variant_slot_without_primary_pick_bin: ["product_variant_id"],
 };
 
 function usage(): string {
@@ -1252,6 +1253,32 @@ export function buildWmsIntegrityChecks(): WmsIntegrityCheck[] {
         ORDER BY lot_count DESC, last_created_at DESC
       `,
     },
+    {
+      id: "variant_slot_without_primary_pick_bin",
+      category: "picking",
+      severity: "warning",
+      description:
+        "A variant with an active bin-backed pick slot must have exactly one such slot flagged primary; "
+        + "replenishment triggers, putaway defaults and shipment defaults still require the flag and cannot see the bin otherwise.",
+      remediationTarget: "warehouse.product_locations is_primary (re-save the slot in Slotting Setup)",
+      sql: `
+        SELECT
+          pl.product_variant_id,
+          MIN(pl.sku) AS sku,
+          COUNT(*) FILTER (WHERE pl.warehouse_location_id IS NOT NULL)::int AS bin_backed_slot_count,
+          COUNT(*) FILTER (WHERE pl.is_primary = 1 AND pl.warehouse_location_id IS NOT NULL)::int AS primary_bin_backed_slot_count,
+          ARRAY_AGG(pl.id ORDER BY pl.id) AS slot_ids,
+          ARRAY_AGG(pl.location ORDER BY pl.id) AS slot_locations,
+          ARRAY_AGG(pl.is_primary ORDER BY pl.id) AS slot_primary_flags
+        FROM warehouse.product_locations pl
+        WHERE pl.product_variant_id IS NOT NULL
+          AND pl.status = 'active'
+        GROUP BY pl.product_variant_id
+        HAVING COUNT(*) FILTER (WHERE pl.warehouse_location_id IS NOT NULL) > 0
+           AND COUNT(*) FILTER (WHERE pl.is_primary = 1 AND pl.warehouse_location_id IS NOT NULL) <> 1
+        ORDER BY pl.product_variant_id
+      `,
+    },
   ];
 
   return checks.map((check) => {
@@ -1428,6 +1455,10 @@ export function findingMagnitude(checkId: string, row: Record<string, unknown>):
       break;
     case "duplicate_lot_number":
       magnitude = integerField(row, "lot_count");
+      break;
+    case "variant_slot_without_primary_pick_bin":
+      // Distance from the invariant "exactly one": 1 for none, n-1 for duplicates.
+      magnitude = abs(integerField(row, "primary_bin_backed_slot_count") - BigInt(1));
       break;
     default:
       magnitude = BigInt(1);

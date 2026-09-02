@@ -1,6 +1,8 @@
 # Cardshellz Shipping Engine — Dev Team Handoff
 
-*Updated July 16, 2026 · service-level pricing and pallet-freight support are in progress; the engine remains dormant. Full design: [SHIPPING-ENGINE-DESIGN.md](./SHIPPING-ENGINE-DESIGN.md).*
+*Updated September 2, 2026 · **the engine is LIVE**: it prices 100% of US Shopify checkout and Parcelify has been uninstalled. Full design: [SHIPPING-ENGINE-DESIGN.md](./SHIPPING-ENGINE-DESIGN.md).*
+
+> **August 27 cutover:** Standard Shipping went live for all US Shopify checkout and **Parcelify was uninstalled**. `Echelon Shipping` is now the only CarrierService on the store and is attached to every US delivery zone (General/Domestic, General/HIPRAK, Storage Boxes/Lower-48, Storage Boxes/HIPRAK). `SHOPIFY_CHECKOUT_RATE_MODE=live`, bound to `SHOPIFY_CHECKOUT_CHANNEL_ID=36`. Verified 2026-09-02: 450–850 checkout quotes/day for seven consecutive days, ~100% returning a rate.
 
 > **July 16 service-level pricing decision:** local rate tables price Card Shellz-owned checkout options, not carrier service codes. A table references a service level and uses either `shipment_weight` or `pallet_count`. Pallet Freight has a dedicated freight context with pallet count, optional total shipment weight, freight class, and reserved accessorials. Provider-method mapping and enforcement remain a later fulfillment capability.
 
@@ -10,13 +12,15 @@
 
 ## 0 · TL;DR
 
-The local zone/rate-table core, service levels, ETA data, callback shell, and snapshots are deployed but dormant. Migration 137 adds shared zone sets, rate books, and deterministic channel/warehouse assignments; existing retail data backfills into `shopify-retail-default`. The engine is **not cutover-ready yet**: active rate/service configuration is still absent, comparison testing against Parcelify remains, and dropship's distinct vendor rates still need import + dual-run before their provider can switch. Variant dimensions are not a checkout requirement. Echelon catalog weights win; Shopify weights fill temporary gaps; a line missing both is excluded with warnings so checkout can continue at a deliberately low estimate.
+**The engine is in production and is the sole source of US Shopify checkout rates.** Standard Shipping is active, priced from two active rate tables (820 rows) in the `shopify-retail-default` book, and Parcelify is gone. Variant dimensions are still not a checkout requirement: Echelon catalog weights win, Shopify weights fill gaps with a warning, and a line missing both is underquoted rather than blocked.
+
+What is **not** yet live: Priority, Overnight and Pallet Freight remain inactive; dropship still prices through its legacy provider (`DROPSHIP_SHARED_SHIPPING_CUTOVER_MODE` unset ⇒ `legacy`); cartonization remains an optional shadow path with no enforcement; and the first-party website quote API is unbuilt.
 
 ## 1 · Vision & model
 
 Checkout sells **service levels** (Standard / Priority / Overnight / Pallet Freight), not carriers. The shared engine owns geography resolution, rate-book selection, service-level pricing, and delivery promises. Channel adapters own how that capability is consumed. Parcel checkout uses one total shipment weight; freight callers provide pallet context. The standalone cartonizer remains replaceable and optional.
 
-- **Replaces Parcelify** (static zip/weight/value tiers) at checkout. Parcelify is still active today serving US zones only; its admin UI has stopped loading for us (unresolved, app-side), which raises the urgency of cutover.
+- **Replaced Parcelify** (static zip/weight/value tiers) at checkout on 2026-08-27. Parcelify is uninstalled; `Echelon Shipping` is the only CarrierService on the store. Third-party calculated rates survived the uninstall, so the entitlement came from the plan, not the app.
 - **Long-term replaces ShipStation** via the per-carrier provider seam (FedEx own account first ≈10% of volume, then USPS ≈54%, UPS ≈36%). Commercial gate: own-account rates vs ShipStation wallet rates.
 - International checkout is **Global-e** (DHL/UPS carrier participants) and stays out of scope for v1. The engine's zone rules are deliberately US-only.
 
@@ -90,34 +94,42 @@ Everything lives in `server/modules/shipping-engine/` (hexagonal layout), regist
 
 ## 4 · Data model & current prod state
 
-Schema: `shipping.*` in the shared Postgres (Echelon owns it; the club app owns `membership`). Created in migration 117, extended through 135. Verified state as of Jul 14, 2026:
+Schema: `shipping.*` in the shared Postgres (Echelon owns it; the club app owns `membership`). Created in migration 117, extended through 137. **Prod state verified 2026-09-02:**
 
 | Table | Purpose | Prod state |
 |---|---|---|
 | `zone_rules` | country + postal-prefix → zone | 48 active US rules → `US-48` / `US-HIPRAK`; region labels NULLed by mig 124 (they made resolveZone skip HIPRAK rules) |
-| `rate_tables` + `rate_table_rows` | internal service level, pricing basis, status, effective dating; state/ZIP × shipment-measure cents | clean service-level shape is being introduced before activation; existing unused shared drafts can be discarded rather than migrated |
-| `zone_sets` + `rate_books` + `rate_book_assignments` | reusable geography, independently priced books, deterministic channel/warehouse selection | migration 137 backfills all current shipping zones/tables to `shopify-retail-default`; dropship is not imported or activated |
+| `rate_tables` + `rate_table_rows` | internal service level, pricing basis, status, effective dating; state/ZIP × shipment-measure cents | **2 active tables / 820 rows** pricing live checkout, plus 7 superseded revisions retained for history |
+| `zone_sets` + `rate_books` + `rate_book_assignments` | reusable geography, independently priced books, deterministic channel/warehouse selection | both books **active**: `shopify-retail-default` → (`shopify`, `customer_checkout`) and (`internal`, `customer_checkout`); `dropship-vendor-default` → (`dropship`, `vendor_fulfillment_charge`). The dropship assignment exists but is not yet consumed — see the cutover flag below |
 | `box_catalog` | boxes: inner dims, tare, optional lower max weight, cost, fill factor | **14 seeded Jul 9** from 4,259 real ShipStation shipments (top 14 dim combos ≈ 85% of volume, incl. 2 storage-box flats); dimensions/tare/cost still require review in admin. NULL max weight uses the automatic 22,679 g handling ceiling. |
-| `service_levels` | sellable checkout options | Standard is the only initial option and remains the checkout kill-switch; priority, overnight, and pallet freight are inactive future options |
+| `service_levels` | sellable checkout options | **`standard` ACTIVE** (Standard Shipping) and serving checkout; `expedited` (Priority), `express` (Overnight) and `pallet_freight` remain inactive. Deactivating `standard` is still the fastest rate-level kill-switch |
 | `service_level_methods` + `fulfillment_routing_profiles` / `fulfillment_routing_revisions` | ordered, exact provider-account methods allowed to fulfill each service level, with optimistic locking and immutable command evidence | operator-managed control plane backed by the ShipStation v2 method catalog; checkout pricing is separate, and neither label purchase nor dropship consumes the profile until each integration is explicitly wired and validated |
 | `transit_matrix` | historical carrier/method transit windows | 24 rows seeded (mig 120); retained for later fulfillment validation, not checkout-price identity |
-| `quote_snapshots` | every quote (checkout/shadow/manual) — calibration dataset | accumulating; first shadow run persisted Jul 9 |
+| `quote_snapshots` | every quote (checkout/shadow/manual) — calibration dataset | **live checkout dataset**: 450–850 `checkout` rows/day, ~100% carrying a returned rate. This is the input for the calibration loop |
 | pack plans + actuals | fulfillment plane | schema live (migrations 122 + 135); plans are test/shadow artifacts and are not required for any WMS status transition |
 
 Variant fulfillment data lives on the catalog (`ProductDetail → Fulfillment characteristics`): weight, dims, shipping group, ships-in-own-container.
 
 ## 5 · Build board — status & readiness
 
+*Verified against production 2026-09-02.*
+
 | Metric | State |
 |---|---|
-| Shipping engine | Core deployed and dormant; channel-neutral runtime quote contracts are the current slice |
-| Active variant weights | **251/305**; missing weights reduce quote accuracy but do not block checkout |
-| Active variant dimensions | **1/305**; required for later cartonization, not shipping-engine launch |
+| Shipping engine | **LIVE** — sole source of US Shopify checkout rates since 2026-08-27 |
+| Checkout traffic | **450–850 quotes/day**, ~100% returning a rate, 7 consecutive days |
+| Service levels | **`standard` ACTIVE**; Priority / Overnight / Pallet Freight inactive |
+| Rate tables | **2 active / 820 rows** (+7 superseded revisions) |
+| Active variant weights | **256/485**; missing weights reduce accuracy but never block checkout |
+| Active variant dimensions | **10/485**; required for cartonization only, not for checkout |
 | Boxes | 14 seeded from shipment history |
-| Rate tables | 2 draft tables / 11 rows; inactive and awaiting weight-only comparison testing |
-| Service levels | standard / expedited / express all inactive |
-| Runtime configuration | callback token, origin override, ShipStation v2 key, and cartonization flags all unset |
-| `SHIPSTATION_V2_API_KEY` | not set (blocks calibration + HIPRAK live rates; v1 key does NOT work on v2 API) |
+| `SHOPIFY_CHECKOUT_RATE_MODE` | `live` |
+| `SHOPIFY_CHECKOUT_CHANNEL_ID` | `36` (explicit policy binding in place) |
+| `SHIPPING_CALLBACK_TOKEN` | set — endpoint is registered and serving |
+| `SHIPPING_CALLBACK_ORIGIN_WAREHOUSE_ID` | unset ⇒ every quote prices from warehouse 1 |
+| `SHIPSTATION_V2_API_KEY` | **set** — calibration and HIPRAK live rating are now unblocked |
+| `DROPSHIP_SHARED_SHIPPING_CUTOVER_MODE` | unset ⇒ `legacy`; dropship has not moved to the shared engine |
+| `SHIPPING_WMS_CARTONIZATION_SHADOW_ENABLED` | unset ⇒ no automatic cartonization observation |
 
 **Cartonization shadow run (Jul 9, 100 real orders / 7 days):** pipeline ran end-to-end cleanly on all 100 orders. `packingFallback: 100/100` and `ratesEmpty: 100/100` were expected. This remains useful cartonization diagnostics, but it is not the acceptance test for the weight-only Shopify launch path.
 
@@ -125,14 +137,16 @@ Variant fulfillment data lives on the catalog (`ProductDetail → Fulfillment ch
 
 ## 6 · Activation runbook — path to cutover
 
-Each step is independently reversible; only allowlisted test carts can receive Echelon rates in step 6, and normal customer traffic remains untouched until step 7.
+**Steps 1–8 are complete — the cutover happened on 2026-08-27.** They are kept here because they are the reversal order if you ever need to back out, and because the same sequence applies to activating a further service level.
+
+Each step is independently reversible; `SHOPIFY_CHECKOUT_RATE_MODE` gates traffic (`off` → `test` → `live`).
 
 1. **DONE — Separate shipping from packing and prices:** shared shipment, Echelon-weight resolver, parcel/rate providers, pricing context, zone sets, and independently assigned rate books are in place. eBay shopper checkout remains policy-owned.
-2. **NEXT — Improve Echelon weight coverage:** resolve active variants with no `catalog.product_variants.weight_grams` and verify representative carts. Shopify weight is a warned fallback during transition; missing both sources is recorded and underquoted by policy, not blocked.
-3. **NEXT — Finish base-rate configuration:** create internal service-level tables for Standard, Priority, Overnight, and any Pallet Freight programs needed by assigned rate books. Keep tables and service levels inactive.
-4. **NEXT — Verify active US rates:** activate one reviewed rate-table revision, open its Pricing Program detail, and use `Test live US rates` with representative warehouses, states, ZIPs, and weights. This calls the production assignment selector and active tables, persists a `manual` quote snapshot, and reports if a different program owns the route. Drafts are never included.
-5. **NEXT — Weight-only shadow comparison:** replay representative Shopify carts through the same runtime quote service, compare offers against Parcelify, and review missing-weight/zone/band failures. Do not use cartonization readiness as the pass criterion.
-6. **Controlled Shopify checkout validation:**
+2. **PARTLY DONE — Improve Echelon weight coverage:** 256/485 active variants carry a weight. Still worth finishing; missing weights underquote rather than block. Original note: resolve active variants with no `catalog.product_variants.weight_grams` and verify representative carts. Shopify weight is a warned fallback during transition; missing both sources is recorded and underquoted by policy, not blocked.
+3. **DONE for Standard — Finish base-rate configuration:** Standard is configured and active (2 tables / 820 rows). Priority, Overnight and Pallet Freight still need theirs. Original note: create internal service-level tables for Standard, Priority, Overnight, and any Pallet Freight programs needed by assigned rate books. Keep tables and service levels inactive.
+4. **DONE — Verify active US rates:** activate one reviewed rate-table revision, open its Pricing Program detail, and use `Test live US rates` with representative warehouses, states, ZIPs, and weights. This calls the production assignment selector and active tables, persists a `manual` quote snapshot, and reports if a different program owns the route. Drafts are never included.
+5. **DONE — Weight-only shadow comparison:** replay representative Shopify carts through the same runtime quote service, compare offers against Parcelify, and review missing-weight/zone/band failures. Do not use cartonization readiness as the pass criterion.
+6. **DONE — Controlled Shopify checkout validation:**
    - Before enabling test rates, verify the canonical delivery-group benefit
      contract end to end: Echelon product `shipping_group_id` resolves to the
      exact `catalog.shipping_groups.code`; the matching Shopify product has
@@ -153,15 +167,22 @@ Each step is independently reversible; only allowlisted test carts can receive E
    - Create an isolated Shopify test shipping profile with hidden test variants and US-only zones. Attach Echelon only to that profile; leave Parcelify and the two production profiles unchanged.
    - Set exact test variant SKUs in `SHOPIFY_CHECKOUT_RATE_TEST_SKUS`, then change `SHOPIFY_CHECKOUT_RATE_MODE=test`. Every cart line must be allowlisted or Echelon returns no rates.
    - Use the unpublished theme to exercise representative Lower-48 and HIPRAK addresses. Verify callback snapshots and quoted prices before proceeding; the theme is a test entry point, not the isolation boundary.
-7. **Go live (Standard only):**
-   - Activate the `standard` service level and its reviewed rate table.
-   - Return `SHOPIFY_CHECKOUT_RATE_MODE` to `off`, attach Echelon alongside Parcelify to the four audited US zones in General profile and Storage Boxes, and verify that Echelon remains silent.
-   - During a controlled window, set `SHOPIFY_CHECKOUT_RATE_MODE=live`, verify real checkout parity, then remove Parcelify from those US zones. Do not alter Shopify-managed international zones.
-   - **Open item before uninstalling Parcelify entirely:** confirm how CarrierService (third-party calculated rates) is enabled on the current Shopify plan — Parcelify being installed may be what grants it today.
-8. **Decommission Parcelify** once the engine has served checkout cleanly for an agreed soak period.
-9. **After checkout is stable:** expose the runtime service to first-party websites, import dropship's distinct vendor rates into its own book, dual-run old/new dropship quotes before switching providers, keep eBay fulfillment-policy selection in its adapter, and advance cartonization through its separate test/shadow program.
+7. **DONE — Go live (Standard only):** completed 2026-08-27. The sequence as executed, and the one to repeat for any further service level:
+   - Activate the service level and its reviewed rate table.
+   - With `SHOPIFY_CHECKOUT_RATE_MODE=off`, attach Echelon alongside the incumbent on the four audited US zones (General profile and Storage Boxes) and verify Echelon stays silent.
+   - During a controlled window set `SHOPIFY_CHECKOUT_RATE_MODE=live`, verify real checkout parity, then remove the incumbent from those US zones. Never alter Shopify-managed international zones.
+   - ~~Open item: confirm how third-party calculated rates are enabled on this plan.~~ **Resolved** — rates kept working after the uninstall, so the entitlement is plan-level.
+8. **DONE — Decommission Parcelify.** Uninstalled 2026-08-27. Third-party calculated rates kept working afterwards, which settled the open question above: the entitlement comes from the Shopify plan, not from Parcelify being installed.
+9. **REMAINING — the actual forward work.** Checkout is stable, so the next moves are:
+   - **Finish weight coverage** — 229 active variants still have no weight. Each one underquotes silently.
+   - **Additional service levels** — Priority, Overnight, Pallet Freight: configure tables + routing profiles, then activate one at a time via the step-7 sequence.
+   - **Turn on the calibration loop** — `SHIPSTATION_V2_API_KEY` is now set, so quoted-vs-actual comparison against the live `quote_snapshots` dataset is unblocked. This is how the rate grid stops being a one-off derivation.
+   - **Dropship shared-engine migration** — the `dropship-vendor-default` book and assignment already exist; `DROPSHIP_SHARED_SHIPPING_CUTOVER_MODE` is unset, so nothing uses them. Move to `test`, compare against `DropshipShippingRateProvider`, then `live` at parity.
+   - **First-party website quote API** — reuse the runtime service with authenticated Shellz Club benefit context.
+   - **Cartonization** — explicit per-order plans first, then opt-in shadow (`SHIPPING_WMS_CARTONIZATION_SHADOW_ENABLED`), capturing actual box/weight/cost before anyone proposes enforcement. Dimensions coverage is 10/485, so this is a data problem before it is a code problem.
+   - eBay shopper checkout stays external-policy managed — not a migration target.
 
-> **Rollback at any point:** set `SHOPIFY_CHECKOUT_RATE_MODE=off` first, confirm Echelon returns no rates, and keep or re-attach Parcelify to the US zones. Deactivating service levels is a secondary rate-level stop; unsetting `SHIPPING_CALLBACK_TOKEN` makes the endpoint return 404 and is the final credential revocation step.
+> **Rollback now that Parcelify is gone:** setting `SHOPIFY_CHECKOUT_RATE_MODE=off` stops Echelon quoting, but there is **no fallback rate provider left on the US zones** — checkout would show no shipping option at all. Treat `off` as an emergency stop for mispricing, not a routine lever, and restore rates by fixing the rate table or reactivating `standard`. Deactivating the service level is the narrower rate-level stop; unsetting `SHIPPING_CALLBACK_TOKEN` 404s the endpoint and is the final credential revocation.
 
 ## 7 · Key mechanics & invariants (do not break)
 
@@ -204,7 +225,7 @@ Each step is independently reversible; only allowlisted test carts can receive E
 - **Migration numbering:** duplicate numeric prefixes abort the deploy. CI fails PRs on collisions (`server/__tests__/unit/migration-prefix-collision.test.ts`, #851) and the *main protection* ruleset requires the check + up-to-date branches. Still: pick your number against latest main *and* open PRs.
 - **Writer-ratchet:** `scripts/writer-ratchet/baseline.json` freezes which modules may write which tables. New shipping-engine writers must be hand-added to the baseline in the same PR (alphabetical; never wholesale-regenerate on Windows).
 - **Shared DB:** the club app shares this Postgres (owns `membership`). Dry-run migrations (`BEGIN … ROLLBACK`) against it before shipping.
-- **ShipStation keys:** the v1 key/secret does NOT work on the v2 API — `SHIPSTATION_V2_API_KEY` is a separate credential, still unset.
+- **ShipStation keys:** the v1 key/secret does NOT work on the v2 API — `SHIPSTATION_V2_API_KEY` is a separate credential, **now set**, so calibration and HIPRAK live rating are unblocked.
 - **wms data quirks:** `wms.orders.shipping_cents = 0` is unreliable for `globale`-tagged (international) orders — always verify against Shopify admin. `wms.order_items` has no variant-id column; resolve by `sku` (quantity column is `quantity`).
 - **Shopify Functions:** metafields >10KB read as NULL inside Functions (this silently killed the shipping Function once — the plan-thresholds metafield is deliberately compact at 523B). Function changes need `npx @shopify/cli@latest app deploy` — merging alone changes nothing in checkout.
 
@@ -221,4 +242,4 @@ Each step is independently reversible; only allowlisted test carts can receive E
 
 ---
 
-*Sources: [SHIPPING-ENGINE-DESIGN.md](./SHIPPING-ENGINE-DESIGN.md) (full design), Echelon PRs #800–#851, shellz-club-functions #15. Every number in this doc was verified against production on Jul 8–9, 2026.*
+*Sources: [SHIPPING-ENGINE-DESIGN.md](./SHIPPING-ENGINE-DESIGN.md) (full design), Echelon PRs #800–#1335, shellz-club-functions #15. Every status figure in §0, §4, §5 and §6 was verified against production on 2026-09-02 — Shopify Admin API (carrier services, delivery zones), `shipping.*` tables, and Heroku config. Architecture and invariant sections are unchanged from the July design work.*
