@@ -55,8 +55,22 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
       actor: "unit-test",
       occurredAt: OCCURRED_AT,
     })).resolves.toEqual([
-      { inventoryLotId: 51, qty: 2, unitCostMills: BigInt(125) },
-      { inventoryLotId: 52, qty: 2, unitCostMills: BigInt(200) },
+      {
+        inventoryLotId: 51,
+        qty: 2,
+        unitCostMills: BigInt(125),
+        poUnitCostMills: BigInt(125),
+        packagingUnitCostMills: BigInt(0),
+        landedUnitCostMills: BigInt(0),
+      },
+      {
+        inventoryLotId: 52,
+        qty: 2,
+        unitCostMills: BigInt(200),
+        poUnitCostMills: BigInt(200),
+        packagingUnitCostMills: BigInt(0),
+        landedUnitCostMills: BigInt(0),
+      },
     ]);
 
     const calls = fake.query.mock.calls.map(([text, values]) => ({ text: String(text), values }));
@@ -97,6 +111,114 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
       code: "CLAIM_LOT_SHORTFALL",
     }));
     expect(fake.query.mock.calls.some(([text]) => /^\s*(UPDATE|INSERT)/i.test(String(text)))).toBe(false);
+  });
+
+  it("consumes only claim-owned lots and reserves only committed transformation output", async () => {
+    let outputLotId = 60;
+    const fake = createClient(async (text) => {
+      if (text.startsWith("INSERT INTO inventory.inventory_levels")) return { rows: [], rowCount: 1 };
+      if (text.includes("FROM inventory.inventory_levels") && text.includes("OR (product_variant_id")) {
+        return {
+          rows: [
+            { id: 11, warehouse_location_id: 2, product_variant_id: 101, variant_qty: 10, reserved_qty: 5 },
+            { id: 12, warehouse_location_id: 3, product_variant_id: 105, variant_qty: 2, reserved_qty: 0 },
+          ],
+        };
+      }
+      if (text.includes("FROM inventory.inventory_lots") && text.includes("ANY($1::integer[])")) {
+        return {
+          rows: [{
+            id: 51,
+            product_variant_id: 101,
+            warehouse_location_id: 2,
+            qty_on_hand: 5,
+            qty_reserved: 5,
+            qty_picked: 0,
+            status: "active",
+            received_at: OCCURRED_AT,
+            unit_cost_mills: "125",
+            po_unit_cost_mills: "100",
+            packaging_cost_mills: "20",
+            landed_cost_mills: "5",
+            total_unit_cost_mills: "125",
+          }],
+        };
+      }
+      if (text.startsWith("UPDATE inventory.inventory_lots")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.inventory_levels")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("INSERT INTO inventory.inventory_lots")) {
+        outputLotId += 1;
+        return { rows: [{ id: outputLotId }], rowCount: 1 };
+      }
+      if (text.startsWith("INSERT INTO inventory.inventory_transactions")) return { rows: [], rowCount: 1 };
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.executePackageOperation({
+      client: fake.client,
+      claimId: BigInt(9),
+      claimOperationId: BigInt(10),
+      operationKey: "line:1:operation:1",
+      operationType: "assemble_pack",
+      resources: [{
+        claimResourceId: BigInt(12),
+        inventoryLevelId: 11,
+        warehouseLocationId: 2,
+        sourceVariantId: 101,
+        consumeQty: BigInt(5),
+        lotAllocations: [{
+          claimLotAllocationId: BigInt(21),
+          inventoryLotId: 51,
+          consumeQty: BigInt(5),
+          unitCostMills: BigInt(125),
+          poUnitCostMills: BigInt(100),
+          packagingUnitCostMills: BigInt(20),
+          landedUnitCostMills: BigInt(5),
+        }],
+      }],
+      destinationVariantId: 105,
+      outputLocationId: 3,
+      outputQty: BigInt(4),
+      committedOutputQty: BigInt(3),
+      orderId: 70,
+      orderItemId: 71,
+      actor: "unit-test",
+      reason: "claim execution",
+      occurredAt: OCCURRED_AT,
+    })).resolves.toEqual({
+      outputInventoryLevelId: 12,
+      committedLotAllocations: [
+        {
+          inventoryLotId: 61,
+          qty: 1,
+          unitCostMills: BigInt(157),
+          poUnitCostMills: BigInt(125),
+          packagingUnitCostMills: BigInt(25),
+          landedUnitCostMills: BigInt(7),
+        },
+        {
+          inventoryLotId: 62,
+          qty: 2,
+          unitCostMills: BigInt(156),
+          poUnitCostMills: BigInt(125),
+          packagingUnitCostMills: BigInt(25),
+          landedUnitCostMills: BigInt(6),
+        },
+      ],
+      totalInputCostMills: BigInt(625),
+    });
+
+    const calls = fake.query.mock.calls.map(([text, values]) => ({ text: String(text), values }));
+    const levelLockIndex = calls.findIndex((call) => call.text.includes("FROM inventory.inventory_levels"));
+    const lotLockIndex = calls.findIndex((call) => call.text.includes("FROM inventory.inventory_lots"));
+    const firstConsumeIndex = calls.findIndex((call) => call.text.startsWith("UPDATE inventory.inventory_lots"));
+    expect(levelLockIndex).toBeGreaterThanOrEqual(0);
+    expect(lotLockIndex).toBeGreaterThan(levelLockIndex);
+    expect(firstConsumeIndex).toBeGreaterThan(lotLockIndex);
+    expect(calls.filter((call) => call.text.startsWith("INSERT INTO inventory.inventory_lots"))).toHaveLength(3);
+    expect(calls.find((call) => call.text.includes("SET variant_qty = variant_qty + $1"))?.values)
+      .toEqual([4, 3, 12, OCCURRED_AT]);
   });
 
   it("locks every level before every lot and releases exact claim-owned quantities", async () => {
