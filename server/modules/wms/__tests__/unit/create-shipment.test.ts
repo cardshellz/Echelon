@@ -25,6 +25,23 @@ import {
   ECHELON_SYNC_SHIPMENT_SOURCE,
 } from "../../create-shipment";
 
+// The session-lock path pins a real pool connection in production. Replace the
+// default runner with a recording fake so these tests stay pool-free and can
+// assert the lock key.
+const sessionLockCalls = vi.hoisted(
+  () => [] as Array<{ namespace: number; key: number; label: string }>,
+);
+vi.mock("../../../../infrastructure/session-advisory-lock", () => ({
+  getDefaultSessionAdvisoryLockRunner: () =>
+    async (
+      lock: { namespace: number; key: number; label: string },
+      fn: () => Promise<unknown>,
+    ) => {
+      sessionLockCalls.push(lock);
+      return fn();
+    },
+}));
+
 const CREATE_SHIPMENT_SRC = readFileSync(
   fileURLToPath(new URL("../../create-shipment.ts", import.meta.url)),
   "utf8",
@@ -316,5 +333,48 @@ describe("createShipmentForOrder :: source constant", () => {
     const shipmentInsert = mock.getInserts()[0];
     expect(shipmentInsert.values.source).toBe("echelon_sync");
     expect(ECHELON_SYNC_SHIPMENT_SOURCE).toBe("echelon_sync");
+  });
+});
+
+// ─── Session lock path ───────────────────────────────────────────────
+
+describe("createShipmentForOrder :: session advisory lock", () => {
+  beforeEach(() => {
+    sessionLockCalls.length = 0;
+  });
+
+  it("runs the session path under the pinned-client runner keyed on the WMS order", async () => {
+    const mock = makeMockDb(null);
+    const result = await createShipmentForOrder(mock.db as any, 42, 7, []);
+
+    expect(result.created).toBe(true);
+    expect(sessionLockCalls).toEqual([
+      { namespace: 918406, key: 42, label: "wms.create_shipment" },
+    ]);
+    expect(isAdvisoryLockQuery).toBeTypeOf("function");
+    expect(mock.db.execute.mock.calls.some((args: any[]) => isAdvisoryLockQuery(args[0]))).toBe(false);
+  });
+
+  it("prefers an injected runner over the default one", async () => {
+    const mock = makeMockDb(null);
+    const injected = vi.fn(
+      async (_lock: unknown, fn: () => Promise<unknown>) => fn(),
+    );
+
+    await createShipmentForOrder(mock.db as any, 42, 7, [], { sessionLock: injected as any });
+
+    expect(injected).toHaveBeenCalledTimes(1);
+    expect(injected.mock.calls[0][0]).toEqual({ namespace: 918406, key: 42, label: "wms.create_shipment" });
+    expect(sessionLockCalls).toEqual([]);
+  });
+
+  it("never issues a session advisory lock through the pooled db handle on the xact path either", async () => {
+    const mock = makeMockDb(null);
+    await createShipmentForOrder(mock.db as any, 42, 7, [], { useXactLock: true });
+
+    const statements = mock.db.execute.mock.calls.map((args: any[]) => JSON.stringify(args[0]));
+    expect(statements.some((text) => text.includes("pg_advisory_xact_lock"))).toBe(true);
+    expect(statements.some((text) => text.includes("pg_advisory_lock("))).toBe(false);
+    expect(sessionLockCalls).toEqual([]);
   });
 });

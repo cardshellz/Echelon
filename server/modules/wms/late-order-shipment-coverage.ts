@@ -7,6 +7,11 @@ import {
   type DbLike,
   type ProviderMembershipState,
 } from "./create-shipment";
+import {
+  getDefaultSessionAdvisoryLockRunner,
+  type SessionAdvisoryLockRunner,
+} from "../../infrastructure/session-advisory-lock";
+import { WMS_ORDER_SHIPMENT_LOCK_NAMESPACE } from "./shipment-lock-namespaces";
 
 export interface AppendUncoveredShipmentItemsResult {
   shipmentId: number;
@@ -35,26 +40,41 @@ function normalizePositiveIntegerIds(values: readonly number[], field: string): 
   return normalized;
 }
 
+interface OrderShipmentLockOptions {
+  /** True when the caller already runs inside a transaction on `db`. */
+  useXactLock: boolean;
+  /** Pinned-client session lock runner; defaults to the application pool. */
+  sessionLock?: SessionAdvisoryLockRunner;
+}
+
 async function withOrderShipmentLock<T>(
   db: DbLike,
   wmsOrderId: number,
-  useXactLock: boolean,
+  lock: OrderShipmentLockOptions,
   operation: () => Promise<T>,
 ): Promise<T> {
   if (!Number.isInteger(wmsOrderId) || wmsOrderId <= 0) {
     throw new Error(`wmsOrderId must be a positive integer, got ${wmsOrderId}`);
   }
-  if (useXactLock) {
-    await db.execute(sql`SELECT pg_advisory_xact_lock(918406, ${wmsOrderId})`);
+  if (lock.useXactLock) {
+    await db.execute(
+      sql`SELECT pg_advisory_xact_lock(${WMS_ORDER_SHIPMENT_LOCK_NAMESPACE}, ${wmsOrderId})`,
+    );
     return operation();
   }
 
-  await db.execute(sql`SELECT pg_advisory_lock(918406, ${wmsOrderId})`);
-  try {
-    return await operation();
-  } finally {
-    await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
-  }
+  // Session path: the lock must live on ONE pinned connection. Issuing
+  // pg_advisory_lock through the pooled db handle serialized nothing (see
+  // server/infrastructure/session-advisory-lock.ts).
+  const sessionLock = lock.sessionLock ?? getDefaultSessionAdvisoryLockRunner();
+  return sessionLock(
+    {
+      namespace: WMS_ORDER_SHIPMENT_LOCK_NAMESPACE,
+      key: wmsOrderId,
+      label: "wms.late_order_shipment_coverage",
+    },
+    operation,
+  );
 }
 
 /**
@@ -73,6 +93,7 @@ export async function appendUncoveredItemsToShipment(
   options: {
     providerMembershipState: ProviderMembershipState;
     useXactLock?: boolean;
+    sessionLock?: SessionAdvisoryLockRunner;
   },
 ): Promise<AppendUncoveredShipmentItemsResult> {
   if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
@@ -94,7 +115,7 @@ export async function appendUncoveredItemsToShipment(
   return withOrderShipmentLock(
     db,
     wmsOrderId,
-    options.useXactLock === true,
+    { useXactLock: options.useXactLock === true, sessionLock: options.sessionLock },
     async () => {
       const target = await db.execute(sql`
         SELECT id
@@ -213,7 +234,7 @@ export async function createLateEditResidualShipment(
   wmsOrderId: number,
   channelId: number | null,
   orderItemIds: readonly number[],
-  options?: { useXactLock?: boolean },
+  options?: { useXactLock?: boolean; sessionLock?: SessionAdvisoryLockRunner },
 ): Promise<CreateLateEditResidualShipmentResult> {
   if (
     channelId != null &&
@@ -229,7 +250,7 @@ export async function createLateEditResidualShipment(
   return withOrderShipmentLock(
     db,
     wmsOrderId,
-    options?.useXactLock === true,
+    { useXactLock: options?.useXactLock === true, sessionLock: options?.sessionLock },
     async () => {
       const existing = await db.execute(sql`
         SELECT id
@@ -288,7 +309,7 @@ export async function movePendingShipmentItemsToLateEditResidual(
   db: DbLike,
   sourceShipmentId: number,
   shipmentItemIds: readonly number[],
-  options?: { useXactLock?: boolean },
+  options?: { useXactLock?: boolean; sessionLock?: SessionAdvisoryLockRunner },
 ): Promise<MovePendingShipmentItemsResult> {
   if (!Number.isInteger(sourceShipmentId) || sourceShipmentId <= 0) {
     throw new Error(
@@ -315,7 +336,7 @@ export async function movePendingShipmentItemsToLateEditResidual(
   return withOrderShipmentLock(
     db,
     wmsOrderId,
-    options?.useXactLock === true,
+    { useXactLock: options?.useXactLock === true, sessionLock: options?.sessionLock },
     async () => {
       const itemResult = await db.execute(sql`
         SELECT

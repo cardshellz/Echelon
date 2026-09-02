@@ -129,6 +129,12 @@ No race conditions on balances, inventory, or order state. Use row locks, transa
 and atomic conditional updates (e.g., claim-order via guarded `UPDATE ... WHERE status = ?`).
 Re-check order state before mutating inventory (e.g., reject picks on cancelled/held orders).
 
+**Advisory locks:** use `pg_advisory_xact_lock` inside a transaction, or the pinned-client
+runner in `server/infrastructure/session-advisory-lock.ts`. Never issue
+`SELECT pg_advisory_lock(...)` through the pooled `db` handle: each statement runs on an
+arbitrary connection, so the lock serializes nothing and the unlock strands it
+(root cause of the #62452 double ShipStation push).
+
 ---
 
 ## 10. Logging & Auditability

@@ -38,6 +38,11 @@ import {
   type InsertOutboundShipment,
   type InsertOutboundShipmentItem,
 } from "@shared/schema";
+import {
+  getDefaultSessionAdvisoryLockRunner,
+  type SessionAdvisoryLockRunner,
+} from "../../infrastructure/session-advisory-lock";
+import { WMS_ORDER_SHIPMENT_LOCK_NAMESPACE } from "./shipment-lock-namespaces";
 
 /**
  * Minimal structural type for the db handle the helper needs. We keep
@@ -215,7 +220,11 @@ export async function createShipmentForOrder(
   wmsOrderId: number,
   channelId: number | null,
   orderItems: ReadonlyArray<CreateShipmentInput>,
-  options?: { useXactLock?: boolean },
+  options?: {
+    useXactLock?: boolean;
+    /** Pinned-client session lock runner; defaults to the application pool. */
+    sessionLock?: SessionAdvisoryLockRunner;
+  },
 ): Promise<CreateShipmentResult> {
   if (!Number.isInteger(wmsOrderId) || wmsOrderId <= 0) {
     throw new Error(
@@ -265,23 +274,26 @@ export async function createShipmentForOrder(
 
   // Advisory lock keyed on order_id prevents two concurrent callers
   // from both passing the probe and both inserting.
-  // Key space: 918406 (C3 shipment core) + order_id.
+  // Key space: WMS_ORDER_SHIPMENT_LOCK_NAMESPACE (918406) + order_id.
   //
   // When running inside a caller-provided transaction (useXactLock),
   // use pg_advisory_xact_lock which auto-releases on commit/rollback.
-  // Otherwise use session-level pg_advisory_lock with explicit unlock.
+  // Otherwise take a session-level lock on a PINNED connection: issuing
+  // pg_advisory_lock through the pooled db handle serialized nothing, because
+  // each statement ran on an arbitrary connection (see
+  // server/infrastructure/session-advisory-lock.ts).
   if (options?.useXactLock) {
-    await db.execute(sql`SELECT pg_advisory_xact_lock(918406, ${wmsOrderId})`);
+    await db.execute(
+      sql`SELECT pg_advisory_xact_lock(${WMS_ORDER_SHIPMENT_LOCK_NAMESPACE}, ${wmsOrderId})`,
+    );
     return createShipmentForOrderLocked(db, wmsOrderId, channelId, normalizedOrderItems);
   }
 
-  await db.execute(sql`SELECT pg_advisory_lock(918406, ${wmsOrderId})`);
-
-  try {
-    return await createShipmentForOrderLocked(db, wmsOrderId, channelId, normalizedOrderItems);
-  } finally {
-    await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
-  }
+  const sessionLock = options?.sessionLock ?? getDefaultSessionAdvisoryLockRunner();
+  return sessionLock(
+    { namespace: WMS_ORDER_SHIPMENT_LOCK_NAMESPACE, key: wmsOrderId, label: "wms.create_shipment" },
+    () => createShipmentForOrderLocked(db, wmsOrderId, channelId, normalizedOrderItems),
+  );
 }
 
 async function createShipmentForOrderLocked(

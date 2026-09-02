@@ -51,6 +51,31 @@ import {
   isPositivePostgresInteger,
   parseExactPositiveWmsShipmentItems,
 } from "../shipping/shipstation-provider-contents.domain";
+import {
+  createShipStationApiRequester,
+  ShipStationRateLimitError,
+  ShipStationRequestTimeoutError,
+  ShipStationTransientError,
+  SS_RATE_LIMITED,
+  SS_REQUEST_TIMEOUT,
+  type ShipStationApiRequester,
+} from "./shipstation-api-request";
+import {
+  getDefaultSessionAdvisoryLockRunner,
+  type SessionAdvisoryLockRunner,
+} from "../../infrastructure/session-advisory-lock";
+import {
+  WMS_ORDER_SHIPMENT_LOCK_NAMESPACE,
+  WMS_SHIPMENT_PUSH_LOCK_NAMESPACE,
+} from "../wms/shipment-lock-namespaces";
+
+export {
+  ShipStationRateLimitError,
+  ShipStationRequestTimeoutError,
+  ShipStationTransientError,
+  SS_RATE_LIMITED,
+  SS_REQUEST_TIMEOUT,
+};
 
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
@@ -956,9 +981,49 @@ export function createShipStationService(
   dependencies: {
     providerLabelObserver?: ShippingProviderLabelObserver;
     fulfillmentAuthority?: ChannelFulfillmentAuthorityService;
+    /**
+     * Pinned-client session advisory lock runner. Defaults to the application
+     * pool; unit tests inject a fake so no database pool is ever opened.
+     */
+    sessionLock?: SessionAdvisoryLockRunner;
+    /** Rate-limit back-off sleeper; injected by tests for determinism. */
+    sleep?: (ms: number) => Promise<void>;
   } = {},
 ) {
   const baseUrl = "https://ssapi.shipstation.com";
+  const sessionLock: SessionAdvisoryLockRunner =
+    dependencies.sessionLock ?? getDefaultSessionAdvisoryLockRunner();
+
+  /**
+   * Serializes engine push/amend work for ONE shipment across every caller
+   * (webhooks, wms-sync, retry worker, reconcilers, manual routes). The
+   * critical section spans read → ShipStation write → linkage write-back, so it
+   * must be a session lock held on a pinned connection; see
+   * server/infrastructure/session-advisory-lock.ts for why the pooled
+   * pg_advisory_lock idiom serialized nothing.
+   */
+  function withShipmentPushLock<T>(shipmentId: number, fn: () => Promise<T>): Promise<T> {
+    return sessionLock(
+      {
+        namespace: WMS_SHIPMENT_PUSH_LOCK_NAMESPACE,
+        key: shipmentId,
+        label: "shipstation.shipment_push",
+      },
+      fn,
+    );
+  }
+
+  /** Serializes shipment-row creation for ONE WMS order (shared key space with create-shipment.ts). */
+  function withOrderShipmentLock<T>(wmsOrderId: number, fn: () => Promise<T>): Promise<T> {
+    return sessionLock(
+      {
+        namespace: WMS_ORDER_SHIPMENT_LOCK_NAMESPACE,
+        key: wmsOrderId,
+        label: "shipstation.order_shipment",
+      },
+      fn,
+    );
+  }
   const apiKey = process.env.SHIPSTATION_API_KEY;
   const apiSecret = process.env.SHIPSTATION_API_SECRET;
 
@@ -973,45 +1038,14 @@ export function createShipStationService(
     return !!(apiKey && apiSecret);
   }
 
-  async function apiRequest<T>(
-    method: string,
-    path: string,
-    body?: unknown,
-    retries = 3
-  ): Promise<T> {
-    const url = buildShipStationUrl(baseUrl, path);
-    const headers: Record<string, string> = {
-      Authorization: getAuthHeader(),
-      "Content-Type": "application/json",
-    };
-
-    let attempt = 0;
-    while (attempt <= retries) {
-      const res = await fetch(url, {
-        method,
-        headers,
-        body: body ? JSON.stringify(body) : undefined,
-      });
-
-      if (!res.ok) {
-        if (res.status === 429 && attempt < retries) {
-          // ShipStation standard format: X-Rate-Limit-Reset gives seconds until limit resets
-          const retryAfter = res.headers.get("x-rate-limit-reset") || res.headers.get("retry-after") || "5";
-          const waitSecs = parseInt(retryAfter, 10);
-          console.warn(`[ShipStation] 429 Rate Limit hit. Waiting ${waitSecs}s before retry ${attempt + 1}/${retries}...`);
-          await new Promise(r => setTimeout(r, (waitSecs + 1) * 1000)); // wait required + 1s buffer
-          attempt++;
-          continue;
-        }
-
-        const errorBody = await res.text();
-        throw new Error(`ShipStation API ${method} ${path} failed (${res.status}): ${errorBody}`);
-      }
-
-      return res.json() as Promise<T>;
-    }
-    throw new Error("ShipStation API request failed after max retries.");
-  }
+  // Replay policy, timeouts, and transient error classification live in
+  // shipstation-api-request.ts. Mutations are NOT replayed after a 429 unless
+  // the call site opts in with { replaySafe: true } (idempotent upsert by id).
+  const apiRequest: ShipStationApiRequester = createShipStationApiRequester({
+    buildUrl: (path) => buildShipStationUrl(baseUrl, path),
+    getAuthHeader,
+    sleep: dependencies.sleep,
+  });
 
   // -------------------------------------------------------------------------
   // REMOVED: pushOrder (legacy OMS-level push to ShipStation)
@@ -2078,8 +2112,11 @@ export function createShipStationService(
           );
         }
 
-        await db.execute(sql`SELECT pg_advisory_lock(918406, ${wmsOrderId})`);
-        try {
+        // Serialize the synthetic-child insert per WMS order on a pinned
+        // session lock. (The old pooled pg_advisory_lock idiom serialized
+        // nothing, and this block also unlocked twice on the already-exists
+        // path.) The returned row falls through to the shared groups.push below.
+        shipmentRow = await withOrderShipmentLock(wmsOrderId, async () => {
           const externalFulfillmentId =
             `shipstation_combined:${shipment.shipmentId}:order:${wmsOrderId}`;
           const existingSynthetic: any = await db.execute(sql`
@@ -2088,11 +2125,9 @@ export function createShipStationService(
             WHERE external_fulfillment_id = ${externalFulfillmentId}
             LIMIT 1
           `);
-          shipmentRow = existingSynthetic?.rows?.[0] ?? null;
-          if (shipmentRow) {
-            groups.push({ row: shipmentRow, sourceShipmentItemIds: groupSourceIds });
-            await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
-            continue;
+          const existingRow = existingSynthetic?.rows?.[0] ?? null;
+          if (existingRow) {
+            return existingRow;
           }
 
           const inserted: any = await db.execute(sql`
@@ -2109,10 +2144,8 @@ export function createShipStationService(
                NOW(), NOW())
             RETURNING id, order_id, status, shipstation_order_id
           `);
-          shipmentRow = inserted?.rows?.[0] ?? null;
-        } finally {
-          await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
-        }
+          return inserted?.rows?.[0] ?? null;
+        });
       }
 
       if (shipmentRow) {
@@ -4375,6 +4408,9 @@ export function createShipStationService(
       }
 
       // Subscribe
+      // Not replay-safe: a replayed subscribe can register a duplicate
+      // webhook. A 429 here surfaces as a transient error and registration
+      // (idempotent by target + event) is retried at the next boot.
       await apiRequest("POST", "/webhooks/subscribe", {
         target_url: targetUrl,
         event: "SHIP_NOTIFY",
@@ -4403,7 +4439,7 @@ export function createShipStationService(
       await apiRequest("POST", "/orders/holduntil", {
         orderId: shipstationOrderId,
         holdUntilDate: "2099-12-31",
-      });
+      }, { replaySafe: true });
       console.log(`[ShipStation] Order ${shipstationOrderId} placed on hold`);
     } catch (err: any) {
       console.error(`[ShipStation] Failed to hold order ${shipstationOrderId}:`, err.message);
@@ -4419,7 +4455,7 @@ export function createShipStationService(
     try {
       await apiRequest("POST", "/orders/restorefromhold", {
         orderId: shipstationOrderId,
-      });
+      }, { replaySafe: true });
       console.log(`[ShipStation] Order ${shipstationOrderId} released from hold`);
     } catch (err: any) {
       console.error(`[ShipStation] Failed to release order ${shipstationOrderId} from hold:`, err.message);
@@ -4491,7 +4527,8 @@ export function createShipStationService(
       };
 
       try {
-        await apiRequest("POST", "/orders/markasshipped", payload);
+        // Idempotent by orderId: a replay re-asserts the same shipped state.
+        await apiRequest("POST", "/orders/markasshipped", payload, { replaySafe: true });
         console.log(`[ShipStation] Order ${shipstationOrderId} marked shipped via markasshipped endpoint`);
         return { alreadyInState: false };
       } catch (postErr: any) {
@@ -4542,7 +4579,7 @@ export function createShipStationService(
       await apiRequest("POST", "/orders/createorder", {
         ...existing,
         orderStatus: "cancelled",
-      });
+      }, { replaySafe: true });
 
       console.log(`[ShipStation] Order ${shipstationOrderId} cancelled via createorder upsert`);
       return { alreadyInState: false, state: "cancelled" };
@@ -4605,7 +4642,7 @@ export function createShipStationService(
         ...(ssOrder.advancedOptions || {}),
         customField1: sortRank,
       },
-    });
+    }, { replaySafe: true });
   }
 
   async function updateSortRankForShipmentRows(
@@ -4770,7 +4807,7 @@ export function createShipStationService(
           country: normalizeCountryToIso2(order.shipping_country) ?? "US",
           phone: ssOrder.shipTo?.phone || "",
         },
-      });
+      }, { replaySafe: true });
       updated += 1;
       console.log(
         `[ShipStation] Ship-to address updated on SS order ${ssOrderId} (WMS order ${wmsOrderId}, shipment ${row.id}) after address change`,
@@ -4825,9 +4862,10 @@ export function createShipStationService(
       );
     }
 
-    const SHIPMENT_PUSH_LOCK_NS = 918407;
-    await db.execute(sql`SELECT pg_advisory_lock(${SHIPMENT_PUSH_LOCK_NS}, ${shipmentId})`);
-    try {
+    // Same per-shipment pinned session lock as pushShipment: the amend reads
+    // the live provider order, writes it back, then verifies — an interleaved
+    // push or amend on the same shipment would clobber the provider state.
+    return withShipmentPushLock<EngineShipmentItemAppendResult>(shipmentId, async () => {
       const shipmentResult: any = await db.execute(sql`
         SELECT
           id,
@@ -4950,7 +4988,7 @@ export function createShipStationService(
         await apiRequest("POST", "/orders/createorder", {
           ...liveOrder,
           items: [...liveItems, ...missingItems],
-        });
+        }, { replaySafe: true });
 
         const verifiedOrder = await apiRequest<any>("GET", `/orders/${shipstationOrderId}`);
         const verifiedKeys = new Set(
@@ -4983,9 +5021,7 @@ export function createShipStationService(
         state: allPresent ? "already_applied" : "applied",
         providerStatus,
       };
-    } finally {
-      await db.execute(sql`SELECT pg_advisory_unlock(${SHIPMENT_PUSH_LOCK_NS}, ${shipmentId})`);
-    }
+    });
   }
   // -------------------------------------------------------------------------
   // pushShipment — WMS-only reader (Commit 11 — §6 refactor plan).
@@ -5023,15 +5059,20 @@ export function createShipStationService(
     // firing within milliseconds) both read shipstation_order_id = null before
     // either writes it back, so both take the CREATE path. ShipStation's
     // orderKey upsert is NOT atomic under that race, so it ends up with TWO
-    // orders for the same shipment (see #58408). The advisory lock makes the
+    // orders for the same shipment (see #58408, #62452). The lock makes the
     // second push wait for the first to finish and persist its order id — it
     // then sees the id and UPDATES the existing SS order instead of creating a
-    // duplicate. (Matches the pg_advisory_lock idiom used elsewhere in this
-    // file; the namespace key differs so it never collides with the
-    // order-level lock 918406.)
-    const SHIPMENT_PUSH_LOCK_NS = 918407;
-    await db.execute(sql`SELECT pg_advisory_lock(${SHIPMENT_PUSH_LOCK_NS}, ${shipmentId})`);
-    try {
+    // duplicate. It MUST be a session lock on a pinned connection: issuing
+    // pg_advisory_lock through the pooled db handle serialized nothing (see
+    // server/infrastructure/session-advisory-lock.ts).
+    return withShipmentPushLock(shipmentId, () => pushShipmentLocked(shipmentId, opts));
+  }
+
+  /** Body of pushShipment. Only ever invoked under withShipmentPushLock. */
+  async function pushShipmentLocked(
+    shipmentId: number,
+    opts: { overrideReview?: boolean },
+  ): Promise<{ shipstationOrderId: number; orderKey: string }> {
 
     // ─── 1. Load shipment header (WMS only) ─────────────────────────
     const shipmentRows = await db.select({
@@ -5489,10 +5530,17 @@ export function createShipStationService(
       );
     }
 
+    // A keyed CREATE (no orderId) is never replayed after a 429: the first
+    // attempt's outcome is unknown and ShipStation's orderKey upsert does not
+    // reliably dedup a replay (#58408, #62452). The transient error re-drives
+    // the whole push through the retry ladder, where getOrderByKey adopts
+    // whatever landed. An UPDATE (orderId present) is an idempotent upsert
+    // addressed by id and may replay.
     const result = await apiRequest<ShipStationCreateOrderResponse>(
       "POST",
       "/orders/createorder",
       payload,
+      { replaySafe: Boolean(payload.orderId) },
     );
 
     // ─── 7. Mark shipment queued + persist engine refs ────────────────
@@ -5538,9 +5586,6 @@ export function createShipStationService(
     );
 
     return { shipstationOrderId: result.orderId, orderKey };
-    } finally {
-      await db.execute(sql`SELECT pg_advisory_unlock(${SHIPMENT_PUSH_LOCK_NS}, ${shipmentId})`);
-    }
   }
 
   return {

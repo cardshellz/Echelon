@@ -318,15 +318,19 @@ describe("D-DUP regression: duplicate shipment prevention", () => {
     expect(migrationSql).toContain("WHERE status IN");
   });
 
-  it("create-shipment.ts uses pg_advisory_lock for serialization", async () => {
+  it("create-shipment.ts serializes the session path on a pinned-client advisory lock", async () => {
     const { readFileSync } = await import("fs");
     const { resolve } = await import("path");
     const src = readFileSync(
       resolve(__dirname, "../../../../modules/wms/create-shipment.ts"),
       "utf8",
     );
-    expect(src).toContain("pg_advisory_lock(918406");
-    expect(src).toContain("pg_advisory_unlock(918406");
+    expect(src).toContain("getDefaultSessionAdvisoryLockRunner");
+    expect(src).toContain("WMS_ORDER_SHIPMENT_LOCK_NAMESPACE");
+    // The pooled idiom serialized nothing (pg-pool hands out connections per
+    // statement); it must never come back.
+    expect(src).not.toContain("SELECT pg_advisory_lock(");
+    expect(src).not.toContain("SELECT pg_advisory_unlock(");
   });
 });
 
