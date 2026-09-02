@@ -306,6 +306,7 @@ export const claimPlanRequestSchema = z.object({
 
 export const resourceClaimSegmentSchema = z.object({
   lineKey: nonblank(200),
+  consumerOperationKey: nonblank(300).nullable().default(null),
   warehouseId: positiveInteger,
   warehouseLocationId: positiveInteger,
   inventoryLevelId: positiveInteger,
@@ -317,9 +318,14 @@ export const plannerOperationSchema = z.object({
   lineKey: nonblank(200),
   warehouseId: positiveInteger,
   operationKey: nonblank(300),
+  parentOperationKey: nonblank(300).nullable().default(null),
   operationType: z.enum(["break_pack", "assemble_pack", "directed_conversion", "component_build"]),
   authorityId: positiveInteger,
   sourceVariantIds: z.array(positiveInteger).min(1),
+  inputs: z.array(z.object({
+    sourceVariantId: positiveInteger,
+    requiredQty: plannerPositiveQuantitySchema,
+  }).strict()).default([]),
   destinationVariantId: positiveInteger,
   plannedExecutions: plannerPositiveQuantitySchema,
   outputQty: plannerPositiveQuantitySchema,

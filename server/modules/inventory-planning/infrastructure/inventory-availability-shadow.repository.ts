@@ -23,8 +23,10 @@ import {
 } from "@shared/catalog/variant-sales-eligibility";
 
 type QueryResult = { rows: any[] };
-type QueryClient = Pick<PoolClient, "query">;
+export type InventoryAvailabilitySnapshotQueryClient = Pick<PoolClient, "query">;
+type QueryClient = InventoryAvailabilitySnapshotQueryClient;
 type ClientPool = Pick<Pool, "connect">;
+type SnapshotSelection = "draft_preferred" | "active_only";
 
 // Defensive corruption/abuse bound: a package/build graph spanning this many products
 // cannot be reviewed or calculated safely inside a synchronous admin shadow request.
@@ -158,7 +160,14 @@ function validateProductId(productId: number): number {
 
 type LoadedModel = SupplySnapshotDto["transformationModels"][number];
 
-async function loadSelectedModel(client: QueryClient, productId: number): Promise<LoadedModel | null> {
+async function loadSelectedModel(
+  client: QueryClient,
+  productId: number,
+  selection: SnapshotSelection,
+): Promise<LoadedModel | null> {
+  const selectedModelExpression = selection === "active_only"
+    ? "head.active_model_id"
+    : "COALESCE(head.draft_model_id, head.active_model_id)";
   const modelRow = rows(await client.query(
     `SELECT head.product_id,
             head.draft_model_id,
@@ -172,7 +181,7 @@ async function loadSelectedModel(client: QueryClient, productId: number): Promis
             model.validation_errors
      FROM inventory.transformation_model_heads AS head
      JOIN inventory.transformation_model_versions AS model
-       ON model.id = COALESCE(head.draft_model_id, head.active_model_id)
+       ON model.id = ${selectedModelExpression}
       AND model.product_id = head.product_id
      WHERE head.product_id = $1`,
     [productId],
@@ -246,7 +255,9 @@ async function loadSelectedModel(client: QueryClient, productId: number): Promis
     modelId,
     productId,
     version: integer(modelRow.version, "model.version"),
-    lifecycleSelection: modelRow.draft_model_id == null ? "active_head" : "draft_head",
+    lifecycleSelection: selection === "active_only" || modelRow.draft_model_id == null
+      ? "active_head"
+      : "draft_head",
     lifecycleStatus: modelRow.lifecycle_status,
     buildToPromiseEnabled: bool(modelRow.build_to_promise_enabled),
     definitionHash: String(modelRow.definition_hash),
@@ -276,6 +287,7 @@ async function loadSelectedModel(client: QueryClient, productId: number): Promis
 async function loadModelGraphForProducts(
   client: QueryClient,
   rootProductIds: readonly number[],
+  selection: SnapshotSelection,
 ): Promise<LoadedModel[]> {
   const queue = uniqueSorted(rootProductIds);
   const visited = new Set<number>();
@@ -291,7 +303,7 @@ async function loadModelGraphForProducts(
         { rootProductIds: uniqueSorted(rootProductIds), limit: MAX_TRANSFORMATION_GRAPH_PRODUCTS },
       );
     }
-    const model = await loadSelectedModel(client, current);
+    const model = await loadSelectedModel(client, current, selection);
     if (!model) continue;
     models.push(model);
     for (const componentProductId of model.recipeBindings.flatMap((binding) =>
@@ -383,9 +395,10 @@ async function captureGraphInsideTransaction(
   client: QueryClient,
   rootProducts: readonly SnapshotProduct[],
   capturedAt: string,
+  selection: SnapshotSelection,
 ): Promise<CapturedGraphContent> {
   const rootProductIds = rootProducts.map((product) => product.productId);
-  const models = await loadModelGraphForProducts(client, rootProductIds);
+  const models = await loadModelGraphForProducts(client, rootProductIds, selection);
   const modelProductIds = new Set<number>(rootProductIds);
   for (const model of models) {
     modelProductIds.add(model.productId);
@@ -499,6 +512,9 @@ async function captureGraphInsideTransaction(
     ...inventoryPositions.map((entry) => entry.warehouseLocationId),
     ...outputLocations.map((entry) => entry.warehouseLocationId),
   ]);
+  const selectedLocationPolicyExpression = selection === "active_only"
+    ? "head.active_policy_id"
+    : "COALESCE(head.draft_policy_id, head.active_policy_id)";
   const locationRows = locationIds.length === 0 ? [] : rows(await client.query(
     `SELECT location.id,
             location.warehouse_id,
@@ -516,7 +532,7 @@ async function captureGraphInsideTransaction(
      LEFT JOIN inventory.location_promise_policy_heads AS head
        ON head.warehouse_location_id = location.id
      LEFT JOIN inventory.location_promise_policy_versions AS policy
-       ON policy.id = COALESCE(head.draft_policy_id, head.active_policy_id)
+       ON policy.id = ${selectedLocationPolicyExpression}
       AND policy.warehouse_location_id = location.id
      WHERE location.id = ANY($1::integer[])
      ORDER BY location.id`,
@@ -533,12 +549,17 @@ async function captureGraphInsideTransaction(
     promisePolicy: row.policy_id == null ? null : {
       policyId: integer(row.policy_id, "locationPolicy.id"),
       version: integer(row.policy_version, "locationPolicy.version"),
-      lifecycleSelection: row.draft_policy_id == null ? "active_head" : "draft_head",
+      lifecycleSelection: selection === "active_only" || row.draft_policy_id == null
+        ? "active_head"
+        : "draft_head",
       eligibilityMode: row.eligibility_mode,
       definitionHash: String(row.definition_hash),
     },
   }));
 
+  const selectedSafetyPolicyExpression = selection === "active_only"
+    ? "head.active_policy_id"
+    : "COALESCE(head.draft_policy_id, head.active_policy_id)";
   const safetyRows = rows(await client.query(
     `SELECT head.draft_policy_id,
             policy.id AS policy_id,
@@ -555,7 +576,7 @@ async function captureGraphInsideTransaction(
             policy.definition_hash
      FROM inventory.promise_safety_policy_heads AS head
      JOIN inventory.promise_safety_policy_versions AS policy
-       ON policy.id = COALESCE(head.draft_policy_id, head.active_policy_id)
+       ON policy.id = ${selectedSafetyPolicyExpression}
       AND policy.scope_key = head.scope_key
      WHERE policy.scope_key = 'business'
         OR policy.product_variant_id = ANY($1::integer[])
@@ -565,7 +586,9 @@ async function captureGraphInsideTransaction(
   const safetyPolicies: SupplySnapshotDto["safetyPolicies"] = safetyRows.map((row) => ({
     policyId: integer(row.policy_id, "safetyPolicy.id"),
     version: integer(row.version, "safetyPolicy.version"),
-    lifecycleSelection: row.draft_policy_id == null ? "active_head" : "draft_head",
+    lifecycleSelection: selection === "active_only" || row.draft_policy_id == null
+      ? "active_head"
+      : "draft_head",
     scopeKey: String(row.scope_key),
     scopeType: row.scope_type,
     productVariantId: nullableInteger(row.product_variant_id, "safetyPolicy.productVariantId"),
@@ -669,7 +692,7 @@ async function captureInsideTransaction(client: QueryClient, productId: number):
   ))[0];
   const [product] = await loadSnapshotProducts(client, [productId]);
   const capturedAt = iso(snapshotRow?.captured_at, "snapshot.capturedAt");
-  const graph = await captureGraphInsideTransaction(client, [product!], capturedAt);
+  const graph = await captureGraphInsideTransaction(client, [product!], capturedAt, "draft_preferred");
   const content: SupplySnapshotContentDto = {
     schemaVersion: "inventory_availability_snapshot_v1",
     productId: product!.productId,
@@ -682,6 +705,7 @@ async function captureInsideTransaction(client: QueryClient, productId: number):
 async function captureClaimInsideTransaction(
   client: QueryClient,
   targetVariantIds: readonly number[],
+  selection: SnapshotSelection,
 ): Promise<ClaimSupplySnapshotDto> {
   const uniqueVariantIds = uniqueSorted(targetVariantIds);
   if (uniqueVariantIds.length === 0 || uniqueVariantIds.length > 500) {
@@ -727,7 +751,7 @@ async function captureClaimInsideTransaction(
     targetRows.map((row) => integer(row.product_id, "targetVariant.productId")),
   );
   const capturedAt = iso(snapshotRow?.captured_at, "snapshot.capturedAt");
-  const graph = await captureGraphInsideTransaction(client, products, capturedAt);
+  const graph = await captureGraphInsideTransaction(client, products, capturedAt, selection);
   return sealClaimSupplySnapshot({
     schemaVersion: "inventory_availability_claim_snapshot_v1",
     rootProducts: products.map((product) => ({
@@ -736,6 +760,13 @@ async function captureClaimInsideTransaction(
     })),
     ...graph,
   });
+}
+
+export async function captureActiveClaimSupplySnapshotInsideTransaction(
+  client: InventoryAvailabilitySnapshotQueryClient,
+  targetVariantIds: readonly number[],
+): Promise<ClaimSupplySnapshotDto> {
+  return captureClaimInsideTransaction(client, targetVariantIds, "active_only");
 }
 
 function validatePersistenceInput(input: PersistPlannerShadowRunInput): {
@@ -1041,7 +1072,7 @@ implements InventoryAvailabilityShadowStore, InventoryAvailabilityClaimSnapshotS
     return inTransaction(
       this.connectionPool,
       "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-      (client) => captureClaimInsideTransaction(client, targetVariantIds),
+      (client) => captureClaimInsideTransaction(client, targetVariantIds, "draft_preferred"),
     );
   }
 

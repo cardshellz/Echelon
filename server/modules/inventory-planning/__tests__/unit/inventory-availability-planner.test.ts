@@ -467,6 +467,13 @@ describe("inventory availability canonical planner", () => {
       { lineKey: "line:p5", targetVariantId: 105, requestedQty: "20", plannedQty: "0", shortfallQty: "20" },
     ]);
     expect(plan.resourceClaims.reduce((sum, claim) => sum + Number(claim.claimedQty), 0)).toBe(100);
+    expect(plan.operations).toHaveLength(1);
+    expect(plan.resourceClaims.every((claim) =>
+      claim.consumerOperationKey === plan.operations[0]!.operationKey)).toBe(true);
+    expect(plan.operations[0]).toEqual(expect.objectContaining({
+      parentOperationKey: null,
+      inputs: [{ sourceVariantId: 101, requiredQty: "100" }],
+    }));
   });
 
   it("conserves the actual source resource across a deterministic basket matrix", () => {
@@ -564,7 +571,13 @@ describe("inventory availability canonical planner", () => {
       lines: [{ lineKey: "line:ea", targetVariantId: 101, requestedQty: "4" }],
     });
     expect(plan.resourceClaims).toEqual([expect.objectContaining({ sourceVariantId: 201, claimedQty: "8" })]);
-    expect(plan.operations).toEqual([expect.objectContaining({ operationType: "component_build", outputQty: "4" })]);
+    expect(plan.operations).toEqual([expect.objectContaining({
+      operationType: "component_build",
+      outputQty: "4",
+      parentOperationKey: null,
+      inputs: [{ sourceVariantId: 201, requiredQty: "8" }],
+    })]);
+    expect(plan.resourceClaims[0]!.consumerOperationKey).toBe(plan.operations[0]!.operationKey);
   });
 
   it("plans different root products against one shared component pool", () => {
