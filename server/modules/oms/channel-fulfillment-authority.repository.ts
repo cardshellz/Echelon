@@ -60,6 +60,19 @@ export type MaterializePackageAllocationCommercialFulfillmentInput = z.input<
   typeof packageAllocationCommercialMaterializationInputSchema
 >;
 
+const packageAllocationCommercialActivationInputSchema = z.object({
+  packageAllocationPlanId: positiveBigintTextSchema,
+  activatedBy: z.string().trim().min(1).max(200),
+  reason: z.string().trim().min(1).max(500),
+  activatedAt: z.date(),
+  correlationId: optionalIdentifier(100),
+  causationId: optionalIdentifier(100),
+}).strict();
+
+export type ActivatePackageAllocationCommercialFulfillmentInput = z.input<
+  typeof packageAllocationCommercialActivationInputSchema
+>;
+
 export type FulfillmentAuthorityErrorCode =
   | "INVALID_INPUT"
   | "LEGACY_SHIPMENT_NOT_FOUND"
@@ -72,6 +85,7 @@ export type FulfillmentAuthorityErrorCode =
   | "PACKAGE_ALLOCATION_PLAN_NOT_FOUND"
   | "PACKAGE_ALLOCATION_PLAN_STALE"
   | "PACKAGE_ALLOCATION_EFFECT_CONFLICT"
+  | "PACKAGE_ALLOCATION_ACTIVATION_CONFLICT"
   | "CHANNEL_WRITEBACK_NOT_AUTHORIZED"
   | "FULFILLMENT_AUTHORITY_EXCEEDED"
   | "DUPLICATE_WMS_LINEAGE"
@@ -115,6 +129,13 @@ export interface MaterializePackageAllocationCommercialFulfillmentResult {
   readonly physicalShipmentIds: readonly number[];
   readonly channelCommands: readonly MaterializedChannelCommand[];
   readonly customerFulfillmentItemCount: number;
+  readonly replayed: boolean;
+}
+
+export interface ActivatePackageAllocationCommercialFulfillmentResult {
+  readonly packageAllocationPlanId: string;
+  readonly commandIds: readonly number[];
+  readonly activatedCommandCount: number;
   readonly replayed: boolean;
 }
 
@@ -198,6 +219,9 @@ export interface ChannelFulfillmentAuthorityRepository {
   materializePackageAllocationCommercialFulfillment(
     input: MaterializePackageAllocationCommercialFulfillmentInput,
   ): Promise<MaterializePackageAllocationCommercialFulfillmentResult>;
+  activatePackageAllocationCommercialFulfillment(
+    input: ActivatePackageAllocationCommercialFulfillmentInput,
+  ): Promise<ActivatePackageAllocationCommercialFulfillmentResult>;
   claimCommands(input: ClaimChannelFulfillmentCommandsInput): Promise<readonly ClaimedChannelFulfillmentCommand[]>;
   completeAttempt(input: CompleteChannelFulfillmentAttemptInput): Promise<void>;
 }
@@ -486,6 +510,25 @@ function canonicalizePackageAllocationCommercialInput(
     ...parsed.data,
     correlationId: parsed.data.correlationId ?? null,
     causationId: parsed.data.causationId ?? null,
+  });
+}
+
+function canonicalizePackageAllocationCommercialActivationInput(
+  input: ActivatePackageAllocationCommercialFulfillmentInput,
+) {
+  const parsed = packageAllocationCommercialActivationInputSchema.safeParse(input);
+  if (!parsed.success || Number.isNaN(parsed.data?.activatedAt.getTime())) {
+    throw new FulfillmentAuthorityError(
+      "INVALID_INPUT",
+      "Package-allocation commercial fulfillment activation input is invalid",
+      { issues: parsed.success ? [{ path: ["activatedAt"], message: "Invalid date" }] : parsed.error.issues },
+    );
+  }
+  return Object.freeze({
+    ...parsed.data,
+    correlationId: parsed.data.correlationId ?? null,
+    causationId: parsed.data.causationId ?? null,
+    activatedAt: new Date(parsed.data.activatedAt),
   });
 }
 
@@ -3154,6 +3197,303 @@ export function createChannelFulfillmentAuthorityRepository(
     });
   }
 
+  async function activatePackageAllocationCommercialFulfillment(
+    rawInput: ActivatePackageAllocationCommercialFulfillmentInput,
+  ): Promise<ActivatePackageAllocationCommercialFulfillmentResult> {
+    const input = canonicalizePackageAllocationCommercialActivationInput(rawInput);
+    if (typeof db?.transaction !== "function") {
+      throw new FulfillmentAuthorityError(
+        "INVALID_INPUT",
+        "Package-allocation commercial fulfillment activation requires transactional database support",
+      );
+    }
+
+    return db.transaction(async (tx: any) => {
+      const plan = firstRow<Record<string, unknown>>(await tx.execute(sql`
+        SELECT
+          allocation_plan.id::text AS plan_id,
+          allocation_plan.plan_version,
+          allocation_plan.outcome,
+          allocation_group.current_version
+        FROM wms.package_allocation_plans AS allocation_plan
+        JOIN wms.package_allocation_groups AS allocation_group
+          ON allocation_group.id = allocation_plan.package_allocation_group_id
+        WHERE allocation_plan.id = ${input.packageAllocationPlanId}::bigint
+        FOR UPDATE OF allocation_plan, allocation_group
+      `));
+      if (!plan) {
+        throw new FulfillmentAuthorityError(
+          "PACKAGE_ALLOCATION_PLAN_NOT_FOUND",
+          "Package-allocation commercial fulfillment activation requires an existing plan",
+          { packageAllocationPlanId: input.packageAllocationPlanId },
+        );
+      }
+
+      const intents = rowsOf<Record<string, unknown>>(await tx.execute(sql`
+        SELECT
+          intent.id::text AS intent_id,
+          intent.effect_type,
+          intent.quantity,
+          intent.executable,
+          COALESCE(SUM(push_item.quantity_pushed), 0)::integer AS materialized_quantity
+        FROM wms.package_allocation_effect_intents AS intent
+        LEFT JOIN oms.channel_fulfillment_push_items AS push_item
+          ON push_item.package_allocation_effect_intent_id = intent.id
+        WHERE intent.package_allocation_plan_id = ${input.packageAllocationPlanId}::bigint
+          AND intent.effect_type = 'commercial_fulfillment'
+        GROUP BY intent.id, intent.effect_type, intent.quantity, intent.executable
+        ORDER BY intent.id
+      `));
+      if (intents.length === 0) {
+        throw new FulfillmentAuthorityError(
+          "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+          "Package-allocation commercial fulfillment activation found no effect intents",
+          { packageAllocationPlanId: input.packageAllocationPlanId },
+        );
+      }
+      for (const intent of intents) {
+        const intentId = bigintTextOrNull(intent.intent_id);
+        const quantity = asPositiveInteger(intent.quantity);
+        const materializedQuantity = asPositiveInteger(intent.materialized_quantity);
+        if (
+          !intentId
+          || intent.effect_type !== "commercial_fulfillment"
+          || intent.executable !== false
+          || !quantity
+          || materializedQuantity !== quantity
+        ) {
+          throw new FulfillmentAuthorityError(
+            "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+            "Package-allocation commercial fulfillment activation requires exact inert intent coverage",
+            {
+              packageAllocationPlanId: input.packageAllocationPlanId,
+              packageAllocationEffectIntentId: intentId,
+              effectType: intent.effect_type,
+              executable: intent.executable,
+              intentQuantity: quantity,
+              materializedQuantity,
+            },
+          );
+        }
+      }
+
+      const commands = rowsOf<Record<string, unknown>>(await tx.execute(sql`
+        SELECT
+          channel_command.id,
+          channel_command.push_status,
+          channel_command.metadata,
+          EXISTS (
+            SELECT 1
+            FROM oms.channel_fulfillment_push_items AS unscoped_item
+            WHERE unscoped_item.channel_fulfillment_push_id = channel_command.id
+              AND unscoped_item.package_allocation_effect_intent_id IS NULL
+          ) AS has_unscoped_items,
+          EXISTS (
+            SELECT 1
+            FROM oms.channel_fulfillment_push_items AS other_item
+            JOIN wms.package_allocation_effect_intents AS other_intent
+              ON other_intent.id = other_item.package_allocation_effect_intent_id
+            WHERE other_item.channel_fulfillment_push_id = channel_command.id
+              AND other_intent.package_allocation_plan_id
+                    IS DISTINCT FROM ${input.packageAllocationPlanId}::bigint
+          ) AS has_other_plan_items
+        FROM oms.channel_fulfillment_pushes AS channel_command
+        WHERE EXISTS (
+          SELECT 1
+          FROM oms.channel_fulfillment_push_items AS push_item
+          JOIN wms.package_allocation_effect_intents AS intent
+            ON intent.id = push_item.package_allocation_effect_intent_id
+          WHERE push_item.channel_fulfillment_push_id = channel_command.id
+            AND intent.package_allocation_plan_id = ${input.packageAllocationPlanId}::bigint
+        )
+        ORDER BY channel_command.id
+        FOR UPDATE OF channel_command
+      `));
+      if (commands.length === 0) {
+        throw new FulfillmentAuthorityError(
+          "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+          "Package-allocation commercial fulfillment activation found no exact channel commands",
+          { packageAllocationPlanId: input.packageAllocationPlanId },
+        );
+      }
+      const commandIds = commands.map((command) => {
+        const commandId = asPositiveInteger(command.id);
+        const metadata = command.metadata && typeof command.metadata === "object"
+          && !Array.isArray(command.metadata)
+          ? command.metadata as Record<string, unknown>
+          : null;
+        if (
+          !commandId
+          || !metadata
+          || command.has_unscoped_items !== false
+          || command.has_other_plan_items !== false
+          || metadata.materializationContract !== "package-allocation-commercial-shadow-v1"
+          || metadata.packageAllocationPlanId !== input.packageAllocationPlanId
+        ) {
+          throw new FulfillmentAuthorityError(
+            "PACKAGE_ALLOCATION_ACTIVATION_CONFLICT",
+            "Package-allocation commercial fulfillment command provenance is invalid",
+            {
+              packageAllocationPlanId: input.packageAllocationPlanId,
+              commandId: command.id,
+            },
+          );
+        }
+        return commandId;
+      });
+      const commandIdList = buildIdList(commandIds);
+      const activations = rowsOf<Record<string, unknown>>(await tx.execute(sql`
+        SELECT
+          package_allocation_plan_id::text AS package_allocation_plan_id,
+          channel_fulfillment_push_id
+        FROM oms.package_allocation_commercial_fulfillment_activations
+        WHERE channel_fulfillment_push_id IN (${commandIdList})
+        ORDER BY channel_fulfillment_push_id
+      `));
+      for (const activation of activations) {
+        if (activation.package_allocation_plan_id !== input.packageAllocationPlanId) {
+          throw new FulfillmentAuthorityError(
+            "PACKAGE_ALLOCATION_ACTIVATION_CONFLICT",
+            "A channel command was activated for a different package-allocation plan",
+            {
+              packageAllocationPlanId: input.packageAllocationPlanId,
+              existingPackageAllocationPlanId: activation.package_allocation_plan_id,
+              commandId: activation.channel_fulfillment_push_id,
+            },
+          );
+        }
+      }
+      const activatedCommandIds = new Set(
+        activations.map((activation) => asPositiveInteger(activation.channel_fulfillment_push_id)),
+      );
+      if (activatedCommandIds.has(null) || (
+        activatedCommandIds.size > 0 && activatedCommandIds.size !== commandIds.length
+      )) {
+        throw new FulfillmentAuthorityError(
+          "PACKAGE_ALLOCATION_ACTIVATION_CONFLICT",
+          "Package-allocation commercial fulfillment has partial or invalid activation evidence",
+          {
+            packageAllocationPlanId: input.packageAllocationPlanId,
+            commandIds,
+            activatedCommandIds: [...activatedCommandIds],
+          },
+        );
+      }
+      if (activatedCommandIds.size === commandIds.length) {
+        if (commands.some((command) => command.push_status === "shadow")) {
+          throw new FulfillmentAuthorityError(
+            "PACKAGE_ALLOCATION_ACTIVATION_CONFLICT",
+            "An activated package-allocation command unexpectedly remains in shadow",
+            { packageAllocationPlanId: input.packageAllocationPlanId, commandIds },
+          );
+        }
+        return Object.freeze({
+          packageAllocationPlanId: input.packageAllocationPlanId,
+          commandIds: Object.freeze(commandIds),
+          activatedCommandCount: commandIds.length,
+          replayed: true,
+        });
+      }
+
+      const planVersion = asPositiveInteger(plan.plan_version);
+      const currentGroupVersion = asPositiveInteger(plan.current_version);
+      if (
+        !planVersion
+        || currentGroupVersion !== planVersion
+        || plan.outcome !== "proposed"
+      ) {
+        throw new FulfillmentAuthorityError(
+          "PACKAGE_ALLOCATION_PLAN_STALE",
+          "Only the current proposed package-allocation plan may activate commercial fulfillment",
+          {
+            packageAllocationPlanId: input.packageAllocationPlanId,
+            planVersion,
+            currentGroupVersion,
+            outcome: plan.outcome,
+          },
+        );
+      }
+      const nonShadowCommands = commands
+        .filter((command) => command.push_status !== "shadow")
+        .map((command) => ({ id: command.id, pushStatus: command.push_status }));
+      if (nonShadowCommands.length > 0) {
+        throw new FulfillmentAuthorityError(
+          "PACKAGE_ALLOCATION_ACTIVATION_CONFLICT",
+          "Unaudited package-allocation commands must remain in shadow before activation",
+          {
+            packageAllocationPlanId: input.packageAllocationPlanId,
+            nonShadowCommands,
+          },
+        );
+      }
+
+      for (const commandId of commandIds) {
+        await tx.execute(sql`
+          INSERT INTO oms.package_allocation_commercial_fulfillment_activations (
+            package_allocation_plan_id,
+            channel_fulfillment_push_id,
+            activated_by,
+            reason,
+            correlation_id,
+            causation_id,
+            metadata,
+            activated_at,
+            created_at
+          ) VALUES (
+            ${input.packageAllocationPlanId}::bigint,
+            ${commandId},
+            ${input.activatedBy},
+            ${input.reason},
+            ${input.correlationId},
+            ${input.causationId},
+            ${JSON.stringify({
+              contractVersion: 1,
+              activationContract: "package-allocation-commercial-activation-v1",
+            })}::jsonb,
+            ${input.activatedAt},
+            ${input.activatedAt}
+          )
+        `);
+      }
+      const updated = rowsOf<{ id: number }>(await tx.execute(sql`
+        UPDATE oms.channel_fulfillment_pushes
+        SET
+          push_status = 'pending',
+          next_attempt_at = COALESCE(
+            LEAST(next_attempt_at, ${input.activatedAt}::timestamptz),
+            ${input.activatedAt}::timestamptz
+          ),
+          updated_at = GREATEST(updated_at, ${input.activatedAt}::timestamptz)
+        WHERE id IN (${commandIdList})
+          AND push_status = 'shadow'
+        RETURNING id
+      `));
+      const updatedIds = updated.map((row) => asPositiveInteger(row.id)).sort(
+        (left, right) => Number(left) - Number(right),
+      );
+      if (
+        updatedIds.some((id) => id === null)
+        || JSON.stringify(updatedIds) !== JSON.stringify(commandIds)
+      ) {
+        throw new FulfillmentAuthorityError(
+          "PACKAGE_ALLOCATION_ACTIVATION_CONFLICT",
+          "Package-allocation commercial fulfillment activation did not promote the exact command set",
+          {
+            packageAllocationPlanId: input.packageAllocationPlanId,
+            commandIds,
+            updatedIds,
+          },
+        );
+      }
+      return Object.freeze({
+        packageAllocationPlanId: input.packageAllocationPlanId,
+        commandIds: Object.freeze(commandIds),
+        activatedCommandCount: commandIds.length,
+        replayed: false,
+      });
+    });
+  }
+
   async function materializePhysicalPackage(
     rawInput: MaterializePhysicalPackageInput,
   ): Promise<MaterializePhysicalPackageResult> {
@@ -3713,6 +4053,7 @@ export function createChannelFulfillmentAuthorityRepository(
     resolveLegacyPhysicalPackage,
     materializePhysicalPackage,
     materializePackageAllocationCommercialFulfillment,
+    activatePackageAllocationCommercialFulfillment,
     claimCommands,
     completeAttempt,
   };

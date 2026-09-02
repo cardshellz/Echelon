@@ -49,12 +49,66 @@ function repositoryMock(
   return {
     resolveLegacyPhysicalPackage: vi.fn(),
     materializePhysicalPackage: vi.fn(),
+    materializePackageAllocationCommercialFulfillment: vi.fn(),
+    activatePackageAllocationCommercialFulfillment: vi.fn(),
     claimCommands: vi.fn().mockResolvedValue(claimed),
     completeAttempt: vi.fn().mockResolvedValue(undefined),
   };
 }
 
 describe("channel fulfillment authority service", () => {
+  it("materializes, projects, and activates exact package-allocation commands without remote dispatch", async () => {
+    const repository = repositoryMock([]);
+    vi.mocked(repository.materializePackageAllocationCommercialFulfillment).mockResolvedValue({
+      packageAllocationPlanId: "501",
+      physicalShipmentIds: Object.freeze([202, 201]),
+      channelCommands: Object.freeze([
+        { id: 302, commandKey: "command-302", pushStatus: "shadow", replayed: false },
+        { id: 301, commandKey: "command-301", pushStatus: "shadow", replayed: false },
+      ]),
+      customerFulfillmentItemCount: 2,
+      replayed: false,
+    });
+    vi.mocked(repository.activatePackageAllocationCommercialFulfillment).mockResolvedValue({
+      packageAllocationPlanId: "501",
+      commandIds: Object.freeze([301, 302]),
+      activatedCommandCount: 2,
+      replayed: false,
+    });
+    const projector = { projectPhysicalShipment: vi.fn().mockResolvedValue(undefined) };
+    const providerExecutor = { execute: vi.fn() };
+    const activatedAt = new Date("2026-09-02T14:30:00.000Z");
+    const service = createChannelFulfillmentAuthorityService({
+      repository,
+      projector,
+      providerExecutor,
+      clock: { now: () => activatedAt },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    const result = await service.materializeAndActivatePackageAllocationCommercialFulfillment({
+      packageAllocationPlanId: "501",
+      source: "shipstation_label_observed",
+      correlationId: "shipping-provider-label:42",
+      causationId: "shipstation-shipment:44001",
+      activatedBy: "system:test",
+      activationReason: "Prove label-time activation",
+    });
+
+    expect(result.activation).toMatchObject({ commandIds: [301, 302], replayed: false });
+    expect(projector.projectPhysicalShipment.mock.calls).toEqual([[202], [201]]);
+    expect(repository.activatePackageAllocationCommercialFulfillment).toHaveBeenCalledWith({
+      packageAllocationPlanId: "501",
+      activatedBy: "system:test",
+      reason: "Prove label-time activation",
+      activatedAt,
+      correlationId: "shipping-provider-label:42",
+      causationId: "shipstation-shipment:44001",
+    });
+    expect(repository.claimCommands).not.toHaveBeenCalled();
+    expect(providerExecutor.execute).not.toHaveBeenCalled();
+  });
+
   it("derives OMS order authority from exact OMS-line lineage, not a legacy aggregate cast", () => {
     const repositorySource = readFileSync(
       resolve(__dirname, "../../channel-fulfillment-authority.repository.ts"),

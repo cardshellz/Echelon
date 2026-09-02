@@ -2869,6 +2869,68 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       customerFulfillmentItemCount: 2,
       replayed: true,
     });
+    await expect(pool.query(
+      `UPDATE oms.channel_fulfillment_pushes
+       SET push_status = 'pending'
+       WHERE id = $1::bigint`,
+      [first.channelCommands[0].id],
+    )).rejects.toMatchObject({ code: "23514" });
+    const activatedAt = new Date("2026-08-22T14:06:00.000Z");
+    const activation = await fulfillmentRepository
+      .activatePackageAllocationCommercialFulfillment({
+        packageAllocationPlanId: persisted.planId!,
+        activatedBy: "system:package-allocation-commercial-integration",
+        reason: "Prove audited label-time commercial activation",
+        activatedAt,
+        correlationId: "shipping-provider-label:44011",
+        causationId: "integration:package-allocation-commercial-activation",
+      });
+    expect(activation).toEqual({
+      packageAllocationPlanId: persisted.planId,
+      commandIds: first.channelCommands.map((command) => command.id).sort((left, right) => left - right),
+      activatedCommandCount: 2,
+      replayed: false,
+    });
+    await expect(fulfillmentRepository.activatePackageAllocationCommercialFulfillment({
+      packageAllocationPlanId: persisted.planId!,
+      activatedBy: "system:package-allocation-commercial-integration",
+      reason: "Prove audited label-time commercial activation",
+      activatedAt,
+      correlationId: "shipping-provider-label:44011",
+      causationId: "integration:package-allocation-commercial-activation",
+    })).resolves.toMatchObject({ replayed: true, activatedCommandCount: 2 });
+    const claimable = await fulfillmentRepository.claimCommands({
+      now: activatedAt,
+      leaseToken: "commercial-activation-is-claimable",
+      leaseDurationMs: 60_000,
+      limit: 10,
+    });
+    expect(claimable).toHaveLength(2);
+    expect(claimable.every((command) => command.items.every(
+      (item) => item.packageAllocationEffectIntentId !== null,
+    ))).toBe(true);
+    const activationAudit = await pool.query<{
+      package_allocation_plan_id: string;
+      channel_fulfillment_push_id: string;
+      activated_by: string;
+    }>(
+      `SELECT
+         package_allocation_plan_id::text,
+         channel_fulfillment_push_id::text,
+         activated_by
+       FROM oms.package_allocation_commercial_fulfillment_activations
+       ORDER BY channel_fulfillment_push_id`,
+    );
+    expect(activationAudit.rows).toHaveLength(2);
+    expect(activationAudit.rows.every((row) => (
+      row.package_allocation_plan_id === persisted.planId
+      && row.activated_by === "system:package-allocation-commercial-integration"
+    ))).toBe(true);
+    await expect(pool.query(
+      `DELETE FROM oms.package_allocation_commercial_fulfillment_activations
+       WHERE channel_fulfillment_push_id = $1::bigint`,
+      [first.channelCommands[0].id],
+    )).rejects.toMatchObject({ code: "23514" });
     const counts = await pool.query<{
       physical_items: number;
       pushes: number;

@@ -648,6 +648,9 @@
   "oms.order_line_adjustments": [
     "modules/oms"
   ],
+  "oms.package_allocation_commercial_fulfillment_activations": [
+    "modules/oms"
+  ],
   "oms.shopify_order_bridge_checkpoints": [
     "modules/oms"
   ],
