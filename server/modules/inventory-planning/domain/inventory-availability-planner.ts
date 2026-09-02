@@ -73,6 +73,7 @@ type PlannedOperation = {
   destinationVariantId: number;
   plannedExecutions: bigint;
   outputQty: bigint;
+  committedOutputQty: bigint;
   outputLocationId: number | null;
 };
 
@@ -884,6 +885,7 @@ function fulfillUpTo(
         destinationVariantId: path.destinationVariantId,
         plannedExecutions: executions,
         outputQty: produced,
+        committedOutputQty: fulfilled,
         outputLocationId: context.outputLocations.get(path.destinationVariantId) ?? null,
       });
     }
@@ -941,6 +943,7 @@ function fulfillUpTo(
               destinationVariantId: recipe.outputVariantId,
               plannedExecutions: builds,
               outputQty: produced,
+              committedOutputQty: fulfilled,
               outputLocationId: context.outputLocations.get(recipe.outputVariantId) ?? null,
             });
           }
@@ -1155,6 +1158,7 @@ export function planCanonicalClaim(
       })),
       plannedExecutions: operation.plannedExecutions.toString(),
       outputQty: operation.outputQty.toString(),
+      committedOutputQty: operation.committedOutputQty.toString(),
     })),
     fulfillmentGroups: [...lineAllocationsByWarehouse]
       .sort(([left], [right]) => left - right)

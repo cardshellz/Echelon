@@ -548,7 +548,7 @@ describe("inventory availability canonical planner", () => {
           outputProductId: 10,
           outputVariantId: 101,
           outputUnitsPerVariant: 1,
-          outputQty: "1",
+          outputQty: "4",
           validationState: "valid",
           validationErrors: [],
           components: [{
@@ -564,18 +564,19 @@ describe("inventory availability canonical planner", () => {
     expect(projectCanonicalAtp(snapshot, {
       targetVariantId: 101,
       scope: { kind: "warehouse", warehouseId: 1 },
-    }).buildableUnits).toBe("4");
+    }).buildableUnits).toBe("16");
     const plan = planCanonicalClaim(snapshot, {
       requestKey: "order:build",
       scope: { kind: "warehouse", warehouseId: 1 },
-      lines: [{ lineKey: "line:ea", targetVariantId: 101, requestedQty: "4" }],
+      lines: [{ lineKey: "line:ea", targetVariantId: 101, requestedQty: "3" }],
     });
-    expect(plan.resourceClaims).toEqual([expect.objectContaining({ sourceVariantId: 201, claimedQty: "8" })]);
+    expect(plan.resourceClaims).toEqual([expect.objectContaining({ sourceVariantId: 201, claimedQty: "2" })]);
     expect(plan.operations).toEqual([expect.objectContaining({
       operationType: "component_build",
       outputQty: "4",
+      committedOutputQty: "3",
       parentOperationKey: null,
-      inputs: [{ sourceVariantId: 201, requiredQty: "8" }],
+      inputs: [{ sourceVariantId: 201, requiredQty: "2" }],
     })]);
     expect(plan.resourceClaims[0]!.consumerOperationKey).toBe(plan.operations[0]!.operationKey);
   });
