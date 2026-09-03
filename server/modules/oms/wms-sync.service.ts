@@ -2003,7 +2003,8 @@ export class WmsSyncService {
    */
   async propagateOmsEditsToWms(
     omsOrderId: number,
-    shopifyLineItems?: any[],
+    shopifyLineItems: any[] | undefined,
+    sourceEventId: string,
   ): Promise<{
     updated: number;
     added: number;
@@ -2270,8 +2271,10 @@ export class WmsSyncService {
       result.added++;
     }
 
+    const demandChanged = result.updated > 0 || result.added > 0 || result.removed > 0;
+
     // 6. Recalculate order-level counts
-    if (result.updated > 0 || result.added > 0 || result.removed > 0) {
+    if (demandChanged) {
       const updatedItems = await db
         .select()
         .from(wmsOrderItems)
@@ -2298,18 +2301,26 @@ export class WmsSyncService {
       `);
 
       await this.refreshOmsLineMaterializedQuantities(omsOrderId);
+    }
 
-      // Re-reserve inventory (release all then re-reserve for updated items)
-      try {
-        await this.services.reservation.releaseOrderReservation(
-          wmsOrderId,
-          "Order edited — re-reserving for updated items",
-        );
-        await this.services.reservation.reserveOrder(wmsOrderId);
-      } catch (e: any) {
-        console.warn(`${LOG} Reservation rebalance failed for order ${wmsOrderId}: ${e.message}`);
-      }
+    // Always present the durable event to the authority-aware reconciler. On
+    // retry the WMS rows may already contain the new demand, so `demandChanged`
+    // can be false even though the canonical claim still needs reconciliation.
+    let shouldRepush = demandChanged;
+    try {
+      const claimReconciliation = await this.services.reservation.reconcileOrderDemand({
+        orderId: wmsOrderId,
+        sourceEventId,
+        demandChanged,
+        reason: "Order edited — reconciling inventory claim for updated items",
+      });
+      shouldRepush = shouldRepush || claimReconciliation.reconciled === true;
+    } catch (e: any) {
+      if (e?.code === "CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC") throw e;
+      console.warn(`${LOG} Reservation rebalance failed for order ${wmsOrderId}: ${e.message}`);
+    }
 
+    if (shouldRepush) {
       // Re-push planned shipments to ShipStation so SS reflects updated items.
       // Only push 'planned' — 'queued'/'labeled' shipments are already in SS
       // and re-pushing would overwrite the SS order (undoing any SS-side

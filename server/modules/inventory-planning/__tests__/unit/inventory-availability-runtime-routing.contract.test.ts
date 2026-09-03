@@ -56,3 +56,46 @@ describe("inventory availability runtime ATP routing contract", () => {
     expect(runtimeRepository).not.toMatch(/DELETE\s+FROM\s+inventory\./i);
   });
 });
+
+describe("inventory availability runtime claim routing contract", () => {
+  it("constructs only the authority-aware reservation service at the production composition root", () => {
+    const services = source("server/services/index.ts");
+    expect(services).toContain(
+      "const reservation = createAuthorityAwareReservationService({",
+    );
+    expect(services).toContain("canonical: inventoryAvailabilityClaims,");
+    expect(services).not.toContain("const reservation = createReservationService(");
+    expect(services).not.toContain("createLegacyInventoryAtpService(");
+  });
+
+  it("pins claim routing to the persisted authority without activating it", () => {
+    const runtimeRepository = source(
+      "server/modules/inventory-planning/infrastructure/inventory-availability-runtime-claim.repository.ts",
+    );
+    expect(runtimeRepository).toContain("FROM inventory.availability_runtime_authority");
+    expect(runtimeRepository).toContain("FOR SHARE");
+    expect(runtimeRepository).not.toMatch(/UPDATE\s+inventory\.availability_runtime_authority/i);
+    expect(runtimeRepository).not.toMatch(/DELETE\s+FROM\s+inventory\.availability_runtime_authority/i);
+  });
+
+  it("releases canonical routing locks only because the schema forbids rollback to legacy", () => {
+    const runtimeRepository = source(
+      "server/modules/inventory-planning/infrastructure/inventory-availability-runtime-claim.repository.ts",
+    );
+    const cutoverMigration = source("migrations/0638_inventory_availability_cutover.sql");
+    expect(runtimeRepository).toContain('if (authority.authority === "canonical")');
+    expect(runtimeRepository).toMatch(/authority\.authority === "canonical"[\s\S]*?connectedClient\.query\("COMMIT"\)[\s\S]*?return work\(canonicalContext/);
+    expect(cutoverMigration).toContain("OLD.authority = 'canonical' AND NEW.authority <> 'canonical'");
+    expect(cutoverMigration).toContain("the first canonical cutover cannot return to legacy authority");
+  });
+
+  it("routes durable order-edit events through one demand-reconciliation contract", () => {
+    const wmsSync = source("server/modules/oms/wms-sync.service.ts");
+    const webhooks = source("server/modules/oms/oms-webhooks.ts");
+    expect(wmsSync).toContain("this.services.reservation.reconcileOrderDemand({");
+    expect(wmsSync).toContain("demandChanged,");
+    expect(wmsSync).not.toContain("// Re-reserve inventory (release all then re-reserve for updated items)");
+    expect(webhooks).toContain("orderData.sourceEventId,");
+    expect(webhooks).toContain('propErr?.code === "CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC"');
+  });
+});

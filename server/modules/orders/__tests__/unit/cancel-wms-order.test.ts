@@ -34,7 +34,12 @@ describe("cancelWmsOrderAndRelease (P0.1c)", () => {
 
     expect(outcome.transitioned).toBe(true);
     expect(reservation.releaseOrderReservation).toHaveBeenCalledTimes(1);
-    expect(reservation.releaseOrderReservation).toHaveBeenCalledWith(42, "test_reason", undefined);
+    expect(reservation.releaseOrderReservation).toHaveBeenCalledWith(
+      42,
+      "test_reason",
+      undefined,
+      { disposition: "cancel" },
+    );
     expect(outcome.releasedItems).toBe(2);
     expect(outcome.releaseFailed).toBe(false);
   });

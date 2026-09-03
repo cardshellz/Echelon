@@ -168,6 +168,32 @@ describe("releaseOrderReservation — order-scoped + idempotent (P0.1b)", () => 
     expect(releaseCalls[0].qty).toBe(3);
     expect(releaseCalls[1].qty).toBe(1);
   });
+
+  it("rethrows a release failure inside a caller-supplied transaction", async () => {
+    const { mockInventoryCore, mockChannelSync, mockAtpService } = makeHarness();
+    const transactionDb = makeDb(
+      [
+        [ITEM],
+        [VARIANT],
+        [{ id: 1, warehouseLocationId: 10, reservedQty: 2, productVariantId: 9 }],
+      ],
+      [ledgerRow({ delta_sum: 2 })],
+    );
+    mockInventoryCore.releaseReservation.mockRejectedValueOnce(new Error("write failed"));
+    const svc = createReservationService(
+      {} as any,
+      mockInventoryCore,
+      mockChannelSync,
+      mockAtpService,
+    );
+
+    await expect(svc.releaseOrderReservation(
+      42,
+      "transactional release",
+      undefined,
+      { disposition: "release", dbOverride: transactionDb },
+    )).rejects.toThrow("write failed");
+  });
 });
 
 function queryText(query: any): string {

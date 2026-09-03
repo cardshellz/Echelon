@@ -15,7 +15,7 @@ import {
   VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE,
 } from "@shared/catalog/variant-sales-eligibility";
 
-type DrizzleDb = {
+export type DrizzleDb = {
   select: (...args: any[]) => any;
   insert: (...args: any[]) => any;
   update: (...args: any[]) => any;
@@ -28,19 +28,19 @@ type DrizzleDb = {
 // 918405-918407 are taken by flow-reconciliation / shipment-creation / push.
 const RESERVATION_LOCK_NS = 918410;
 
-interface ChannelSync {
+export interface ChannelSync {
   queueSyncAfterInventoryChange(variantId: number): Promise<void>;
 }
 
 interface AtpService {
-  getAtpPerVariant(productId: number): Promise<VariantAtp[]>;
+  getAtpPerVariant(productId: number, dbOverride?: any): Promise<VariantAtp[]>;
   getProductInventoryStrategy(
     productId: number,
     dbOverride?: any,
   ): Promise<ProductInventoryStrategy>;
 }
 
-interface RecipeBuildPromise {
+export interface RecipeBuildPromise {
   claimOrderItem(input: {
     productId: number;
     variantId: number;
@@ -53,6 +53,7 @@ interface RecipeBuildPromise {
     orderId: number,
     reason: string,
     actorId?: string,
+    dbOverride?: any,
   ): Promise<{
     cancelledDemands: number;
     cancelledBuildOrders: number;
@@ -95,6 +96,89 @@ export interface ReleaseOrderItemReservationResult {
   idempotentReplay: boolean;
 }
 
+export interface ReleaseOrderReservationOptions {
+  /** Canonical lifecycle outcome. Legacy reservation counters use the same release mechanics. */
+  disposition?: "release" | "cancel";
+  /** Internal transaction propagation used by the authority-aware runtime adapter. */
+  dbOverride?: any;
+}
+
+export interface ReleaseOrderReservationResult {
+  released: number;
+  failed: Array<{ sku: string; orderItemId: number; reason: string }>;
+}
+
+export interface ReconcileOrderDemandCommand {
+  orderId: number;
+  /** Durable upstream event identity used by the canonical replacement command. */
+  sourceEventId: string;
+  /** Whether this invocation changed persisted WMS demand. Retries still carry the same event identity. */
+  demandChanged: boolean;
+  reason: string;
+  userId?: string;
+  /** Internal transaction propagation used by the authority-aware runtime adapter. */
+  dbOverride?: any;
+}
+
+export interface ReconcileOrderDemandResult {
+  /** True when this event caused reservation/claim state to be reconciled. */
+  reconciled: boolean;
+  release: ReleaseOrderReservationResult;
+  reservation: ReservationResult;
+}
+
+export interface OrderReservationStatus {
+  sku: string;
+  orderItemId: number;
+  reservedQty: number;
+  promisedQty: number;
+  demandStatus: string | null;
+  isReserved: boolean;
+  isPromised: boolean;
+}
+
+export interface ReservationServiceContract {
+  reserveForOrder(
+    productId: number,
+    variantId: number,
+    orderQty: number,
+    orderId: number,
+    orderItemId: number,
+    userId?: string,
+    dbOverride?: any,
+  ): Promise<ReserveForOrderResult>;
+  reserveOrder(orderId: number, userId?: string, dbOverride?: any): Promise<ReservationResult>;
+  releaseOrderReservation(
+    orderId: number,
+    reason: string,
+    userId?: string,
+    options?: ReleaseOrderReservationOptions,
+  ): Promise<ReleaseOrderReservationResult>;
+  releaseOrderItemReservation(params: {
+    orderId: number;
+    orderItemId: number;
+    quantity: number;
+    sourceEventId: string;
+    reason: string;
+    userId?: string;
+    dbOverride?: any;
+  }): Promise<ReleaseOrderItemReservationResult>;
+  reconcileOrderDemand(command: ReconcileOrderDemandCommand): Promise<ReconcileOrderDemandResult>;
+  reallocateOrphaned(
+    productVariantId: number,
+    warehouseLocationId: number,
+    userId?: string,
+    orphanedQty?: number,
+    dbOverride?: any,
+  ): Promise<{ released: number; reallocated: number; failed: number }>;
+  getOrderReservationStatus(orderId: number, dbOverride?: any): Promise<OrderReservationStatus[]>;
+  autoReserveOnSync(
+    shopifyOrderId: string,
+    userId?: string,
+    dbOverride?: any,
+  ): Promise<ReservationResult | null>;
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -111,7 +195,7 @@ export interface ReleaseOrderItemReservationResult {
  * - Individual item failures are collected -- they never block other items.
  * - Every mutation is audited via the inventory transactions ledger.
  */
-class ReservationService {
+class ReservationService implements ReservationServiceContract {
   constructor(
     private readonly db: DrizzleDb,
     private readonly inventoryCore: any,
@@ -223,7 +307,7 @@ class ReservationService {
     dbh: any,
   ): Promise<ReserveForOrderResult> {
     // Step 1: Get strategy-aware ATP for the ordered variant
-    const variantAtps = await this.atpService.getAtpPerVariant(productId);
+    const variantAtps = await this.atpService.getAtpPerVariant(productId, dbh);
     const variantAtp = variantAtps.find((v) => v.productVariantId === variantId);
     const atpUnits = variantAtp?.atpUnits ?? 0;
 
@@ -440,6 +524,7 @@ class ReservationService {
           });
         }
       } catch (err) {
+        if (dbOverride != null) throw err;
         const message = err instanceof Error ? err.message : String(err);
         result.failed.push({
           sku: item.sku,
@@ -491,13 +576,20 @@ class ReservationService {
     orderId: number,
     reason: string,
     userId?: string,
-  ): Promise<{ released: number; failed: Array<{ sku: string; orderItemId: number; reason: string }> }> {
+    options?: ReleaseOrderReservationOptions,
+  ): Promise<ReleaseOrderReservationResult> {
+    const dbh = options?.dbOverride ?? this.db;
     const result = { released: 0, failed: [] as Array<{ sku: string; orderItemId: number; reason: string }> };
     const syncVariantIds = new Set<number>();
 
     if (this.recipeBuildPromise) {
       try {
-        const cancellation = await this.recipeBuildPromise.cancelOrderDemands(orderId, reason, userId);
+        const cancellation = await this.recipeBuildPromise.cancelOrderDemands(
+          orderId,
+          reason,
+          userId,
+          dbh,
+        );
         for (const failure of cancellation.failures) {
           result.failed.push({
             sku: "[recipe-build]",
@@ -506,6 +598,7 @@ class ReservationService {
           });
         }
       } catch (error) {
+        if (options?.dbOverride != null) throw error;
         result.failed.push({
           sku: "[recipe-build]",
           orderItemId: 0,
@@ -514,7 +607,7 @@ class ReservationService {
       }
     }
 
-    const items = await this.db
+    const items = await dbh
       .select()
       .from(orderItems)
       .where(eq(orderItems.orderId, orderId));
@@ -522,7 +615,7 @@ class ReservationService {
     for (const item of items) {
       try {
         // Resolve variant (wms.order_items carries sku, not variant id)
-        const [variant] = await this.db
+        const [variant] = await dbh
           .select()
           .from(productVariants)
           .where(eq(productVariants.sku, item.sku))
@@ -538,7 +631,7 @@ class ReservationService {
         }
 
         // Open reservation for THIS item, from the ledger.
-        const ledger: any = await this.db.execute(sql`
+        const ledger: any = await dbh.execute(sql`
           SELECT
             COALESCE(SUM(reserved_qty_delta), 0)::int AS delta_sum,
             COUNT(*) FILTER (
@@ -571,7 +664,7 @@ class ReservationService {
         }
 
         // Release the open amount from levels actually holding reservations.
-        const levels = await this.db
+        const levels = await dbh
           .select()
           .from(inventoryLevels)
           .where(
@@ -598,11 +691,12 @@ class ReservationService {
               orderItemId: item.id,
               reason,
               userId,
-            });
+            }, dbh);
             remaining -= releaseQty;
             result.released++;
             syncVariantIds.add(variant.id);
           } catch (releaseErr) {
+            if (options?.dbOverride != null) throw releaseErr;
             const msg = releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
             console.error(
               `[RESERVATION] Failed to release ${releaseQty} units for SKU "${item.sku}" ` +
@@ -626,6 +720,7 @@ class ReservationService {
           );
         }
       } catch (err) {
+        if (options?.dbOverride != null) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         console.error(
           `[RESERVATION] Error releasing reservation for order item ${item.id}: ${msg}`,
@@ -664,6 +759,7 @@ class ReservationService {
     sourceEventId: string;
     reason: string;
     userId?: string;
+    dbOverride?: any;
   }): Promise<ReleaseOrderItemReservationResult> {
     if (!Number.isInteger(params.orderId) || params.orderId <= 0) {
       throw new Error("orderId must be a positive integer");
@@ -677,7 +773,7 @@ class ReservationService {
     const sourceEventId = String(params.sourceEventId ?? "").trim();
     if (!sourceEventId) throw new Error("sourceEventId is required");
 
-    const outcome = await this.db.transaction(async (tx: any) => {
+    const releaseWithinTransaction = async (tx: any) => {
       const itemResult: any = await tx.execute(sql`
         SELECT
           oi.id AS order_item_id,
@@ -849,12 +945,67 @@ class ReservationService {
         openReservationAfter: Math.max(openQuantity - releasedQuantity, 0),
         idempotentReplay: remainingRequest === 0,
       } satisfies ReleaseOrderItemReservationResult;
-    });
+    };
+    const outcome = params.dbOverride
+      ? await releaseWithinTransaction(params.dbOverride)
+      : await this.db.transaction(releaseWithinTransaction);
 
     if (outcome.releasedQuantity > 0) {
       await this.channelSync.queueSyncAfterInventoryChange(outcome.productVariantId);
     }
     return outcome;
+  }
+
+  /**
+   * Reconcile a legacy order reservation after the durable WMS demand changed.
+   *
+   * Legacy storage has no whole-order replacement primitive, so this retains
+   * the deployed idempotent release-then-reserve sequence behind one contract.
+   * The authority-aware adapter rejects this implementation in canonical mode
+   * until replacement can be committed atomically with exact predecessor
+   * lineage.
+   */
+  async reconcileOrderDemand(
+    command: ReconcileOrderDemandCommand,
+  ): Promise<ReconcileOrderDemandResult> {
+    if (!Number.isInteger(command.orderId) || command.orderId <= 0) {
+      throw new Error("orderId must be a positive integer");
+    }
+    if (!String(command.sourceEventId ?? "").trim()) {
+      throw new Error("sourceEventId is required");
+    }
+    const reason = String(command.reason ?? "").trim();
+    if (!reason) throw new Error("reason is required");
+    if (typeof command.demandChanged !== "boolean") {
+      throw new Error("demandChanged must be a boolean");
+    }
+    if (!command.demandChanged) {
+      return {
+        reconciled: false,
+        release: { released: 0, failed: [] },
+        reservation: {
+          orderId: command.orderId,
+          reserved: 0,
+          promised: 0,
+          failed: [],
+          totalBaseUnits: 0,
+          totalPromisedBaseUnits: 0,
+        },
+      };
+    }
+
+    const releaseOptions: ReleaseOrderReservationOptions = { disposition: "release" };
+    if (command.dbOverride != null) releaseOptions.dbOverride = command.dbOverride;
+    const release = await this.releaseOrderReservation(
+      command.orderId,
+      reason,
+      command.userId,
+      releaseOptions,
+    );
+    const reservation = command.dbOverride == null
+      ? await this.reserveOrder(command.orderId, command.userId)
+      : await this.reserveOrder(command.orderId, command.userId, command.dbOverride);
+    return { reconciled: true, release, reservation };
   }
 
   // ---------------------------------------------------------------------------
@@ -879,7 +1030,9 @@ class ReservationService {
     warehouseLocationId: number,
     userId?: string,
     orphanedQty?: number,
+    dbOverride?: any,
   ): Promise<{ released: number; reallocated: number; failed: number }> {
+    const dbh = dbOverride ?? this.db;
     const result = { released: 0, reallocated: 0, failed: 0 };
     let excess = 0;
 
@@ -890,7 +1043,7 @@ class ReservationService {
       if (excess <= 0) return result;
     } else {
       // Fallback: Check the DB for orphaned reservations manually
-      const [level] = await this.db
+      const [level] = await dbh
         .select()
         .from(inventoryLevels)
         .where(
@@ -922,7 +1075,7 @@ class ReservationService {
         qty: excess,
         reason: "Orphaned reservation released: inventory count dropped below reserved amount",
         userId,
-      });
+      }, dbh);
       result.released = trimmed;
       excess = trimmed;
     }
@@ -932,7 +1085,7 @@ class ReservationService {
       // Caller already adjusted the counter — record the ledger row here.
       // unreserve rows never change on-hand: variantQtyDelta must be 0
       // (the old -excess here corrupted on-hand ledger replay).
-      await this.db.insert(inventoryTransactions).values({
+      await dbh.insert(inventoryTransactions).values({
         productVariantId,
         fromLocationId: warehouseLocationId,
         transactionType: "unreserve",
@@ -944,7 +1097,7 @@ class ReservationService {
     }
 
     // 3. Find affected orders: distinct orders that had reserves at this location
-    const reserveTxns = await this.db
+    const reserveTxns = await dbh
       .select({
         orderId: inventoryTransactions.orderId,
       })
@@ -974,7 +1127,7 @@ class ReservationService {
     for (const orderId of affectedOrderIds) {
       try {
         // Check if order is still unfulfilled
-        const [order] = await this.db
+        const [order] = await dbh
           .select()
           .from(orders)
           .where(eq(orders.id, orderId))
@@ -985,12 +1138,12 @@ class ReservationService {
         }
 
         // Find the order item(s) for this variant
-        const items = await this.db
+        const items = await dbh
           .select()
           .from(orderItems)
           .where(eq(orderItems.orderId, orderId));
 
-        const [variant] = await this.db
+        const [variant] = await dbh
           .select()
           .from(productVariants)
           .where(eq(productVariants.id, productVariantId))
@@ -1009,6 +1162,7 @@ class ReservationService {
             orderId,
             item.id,
             userId,
+            dbh,
           );
 
           if (res.reserved > 0 || res.promised > 0) {
@@ -1035,6 +1189,7 @@ class ReservationService {
           }
         }
       } catch (err) {
+        if (dbOverride != null) throw err;
         result.failed++;
         console.error(
           JSON.stringify({
@@ -1071,18 +1226,10 @@ class ReservationService {
    */
   async getOrderReservationStatus(
     orderId: number,
-  ): Promise<
-    Array<{
-      sku: string;
-      orderItemId: number;
-      reservedQty: number;
-      promisedQty: number;
-      demandStatus: string | null;
-      isReserved: boolean;
-      isPromised: boolean;
-    }>
-  > {
-    const items = await this.db
+    dbOverride?: any,
+  ): Promise<OrderReservationStatus[]> {
+    const dbh = dbOverride ?? this.db;
+    const items = await dbh
       .select()
       .from(orderItems)
       .where(eq(orderItems.orderId, orderId));
@@ -1098,7 +1245,7 @@ class ReservationService {
     }> = [];
 
     for (const item of items) {
-      const ledger: any = await this.db.execute(sql`
+      const ledger: any = await dbh.execute(sql`
         SELECT
           COALESCE(SUM(reserved_qty_delta), 0)::int AS delta_sum,
           COUNT(*) FILTER (
@@ -1129,7 +1276,7 @@ class ReservationService {
         );
       }
 
-      const demandResult: any = await this.db.execute(sql`
+      const demandResult: any = await dbh.execute(sql`
         SELECT promised_qty, status
         FROM wms.order_build_demands
         WHERE order_item_id = ${item.id}
@@ -1172,9 +1319,11 @@ class ReservationService {
   async autoReserveOnSync(
     shopifyOrderId: string,
     userId?: string,
+    dbOverride?: any,
   ): Promise<ReservationResult | null> {
+    const dbh = dbOverride ?? this.db;
     // Look up the internal order by Shopify order ID
-    const [order] = await this.db
+    const [order] = await dbh
       .select()
       .from(orders)
       .where(eq(orders.shopifyOrderId, shopifyOrderId))
@@ -1197,7 +1346,7 @@ class ReservationService {
 
     // Check if any items already have reservations (idempotency guard).
     // If any reservation exists for this order's items, assume it's done.
-    const items = await this.db
+    const items = await dbh
       .select()
       .from(orderItems)
       .where(eq(orderItems.orderId, order.id));
@@ -1213,7 +1362,7 @@ class ReservationService {
     let allReserved = true;
 
     for (const item of items) {
-      const [variant] = await this.db
+      const [variant] = await dbh
         .select()
         .from(productVariants)
         .where(eq(productVariants.sku, item.sku))
@@ -1224,7 +1373,7 @@ class ReservationService {
         continue;
       }
 
-      const [existing] = await this.db
+      const [existing] = await dbh
         .select()
         .from(inventoryTransactions)
         .where(
@@ -1236,7 +1385,7 @@ class ReservationService {
         )
         .limit(1);
 
-      const demandResult: any = await this.db.execute(sql`
+      const demandResult: any = await dbh.execute(sql`
         SELECT status
         FROM wms.order_build_demands
         WHERE order_item_id = ${item.id}
@@ -1255,7 +1404,7 @@ class ReservationService {
       return null;
     }
 
-    return this.reserveOrder(order.id, userId);
+    return this.reserveOrder(order.id, userId, dbh);
   }
 }
 
@@ -1277,6 +1426,12 @@ class ReservationService {
  * await reservations.reserveOrder(orderId);
  * ```
  */
-export function createReservationService(db: any, inventoryCore: any, channelSync: any, atpService: any, recipeBuildPromise?: RecipeBuildPromise) {
+export function createReservationService(
+  db: any,
+  inventoryCore: any,
+  channelSync: any,
+  atpService: any,
+  recipeBuildPromise?: RecipeBuildPromise,
+): ReservationServiceContract {
   return new ReservationService(db, inventoryCore, channelSync, atpService, recipeBuildPromise);
 }

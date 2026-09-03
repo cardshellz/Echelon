@@ -55,6 +55,7 @@ export interface FlowReconciliationReservation {
     orderId: number,
     reason: string,
     userId?: string,
+    options?: { disposition?: "release" | "cancel" },
   ): Promise<{ released: number; failed: Array<{ sku: string; orderItemId: number; reason: string }> }>;
 }
 export interface OmsFlowReconciliationDependencies {
@@ -1632,6 +1633,8 @@ export async function remediateOmsFlowIssue(
           await dependencies.reservation.releaseOrderReservation(
             wmsOrderId,
             "oms_flow_reconcile_cancel_release",
+            undefined,
+            { disposition: "cancel" },
           );
         } catch (err: any) {
           console.error(

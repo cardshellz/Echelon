@@ -60,6 +60,7 @@ describe("ReservationService.reserveForOrder freeze-check (H1)", () => {
     const result = await svc.reserveForOrder(100, 1, 3, 500, 600);
 
     expect(result.reserved).toBe(3);
+    expect(mockAtpService.getAtpPerVariant).toHaveBeenCalledWith(100, mockDb);
     expect(reserveCalls).toHaveLength(1);
     expect(reserveCalls[0].warehouseLocationId).toBe(42);
   });
