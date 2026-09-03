@@ -15,6 +15,7 @@ import {
   canonicalAvailabilityCycleCountReconciliationResultSchema,
   type CanonicalAvailabilityCycleCountReconciliationCommand,
   type CanonicalAvailabilityCycleCountReconciliationResult,
+  type CanonicalAvailabilityReservationStatusProjection,
 } from "@shared/types/inventory-availability-claims";
 import {
   isCustomerSellableVariant,
@@ -175,6 +176,10 @@ export interface OrderReservationStatus {
   isPromised: boolean;
 }
 
+export type OrderReservationStatusResult =
+  | OrderReservationStatus[]
+  | CanonicalAvailabilityReservationStatusProjection;
+
 export interface ReservationServiceContract {
   reserveForOrder(
     productId: number,
@@ -218,7 +223,7 @@ export interface ReservationServiceContract {
     dbOverride?: any,
     deferUntilCommit?: (effect: () => Promise<void>) => void,
   ): Promise<{ released: number; reallocated: number; failed: number }>;
-  getOrderReservationStatus(orderId: number, dbOverride?: any): Promise<OrderReservationStatus[]>;
+  getOrderReservationStatus(orderId: number, dbOverride?: any): Promise<OrderReservationStatusResult>;
   autoReserveOnSync(
     shopifyOrderId: string,
     userId?: string,

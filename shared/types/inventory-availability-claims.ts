@@ -1,6 +1,9 @@
 import { z } from "zod";
 
-import { claimPlanSchema } from "./inventory-availability-planner";
+import {
+  claimPlanSchema,
+  fulfillmentScopeSchema,
+} from "./inventory-availability-planner";
 
 const positiveInteger = z.number().int().positive().max(2_147_483_647);
 const nonblank = (maximum: number) => z.string().trim().min(1).max(maximum);
@@ -253,6 +256,95 @@ export const canonicalAvailabilityClaimReplacementResultSchema = z.object({
   idempotentReplay: z.boolean(),
 }).strict();
 
+export const canonicalAvailabilityReservationStatusCommandSchema = z.object({
+  orderId: positiveInteger,
+}).strict();
+
+const canonicalAvailabilityReservationStatusResourceSchema = z.object({
+  claimResourceId: positiveBigintString,
+  consumerOperationKey: nonblank(300).nullable(),
+  producerOperationKey: nonblank(300).nullable(),
+  warehouseId: positiveInteger,
+  warehouseLocationId: positiveInteger,
+  inventoryLevelId: positiveInteger,
+  sourceVariantId: positiveInteger,
+  claimedQty: positiveBigintString,
+  releasedQty: nonnegativeBigintString,
+  consumedQty: nonnegativeBigintString,
+  pickedQty: nonnegativeBigintString,
+  openQty: nonnegativeBigintString,
+}).strict();
+
+const canonicalAvailabilityReservationStatusOperationSchema = z.object({
+  claimOperationId: positiveBigintString,
+  operationKey: nonblank(300),
+  parentOperationKey: nonblank(300).nullable(),
+  warehouseId: positiveInteger,
+  operationType: z.enum(["break_pack", "assemble_pack", "directed_conversion", "component_build"]),
+  authorityId: positiveInteger,
+  inputs: z.array(z.object({
+    sourceVariantId: positiveInteger,
+    requiredQty: positiveBigintString,
+  }).strict()).min(1),
+  destinationVariantId: positiveInteger,
+  plannedExecutions: positiveBigintString,
+  executedExecutions: nonnegativeBigintString,
+  releasedExecutions: nonnegativeBigintString,
+  remainingExecutions: nonnegativeBigintString,
+  outputQty: positiveBigintString,
+  committedOutputQty: positiveBigintString,
+  outputLocationId: positiveInteger.nullable(),
+  status: z.enum(["pending", "ready", "executing", "completed", "released", "failed"]),
+  buildHandoff: z.object({
+    buildHandoffId: positiveBigintString,
+    buildOrderId: positiveInteger,
+    buildSystemNumber: nonblank(40),
+    status: z.enum(["handed_off", "completed", "cancelled"]),
+    adoptedReservationQty: positiveBigintString,
+  }).strict().nullable(),
+}).strict();
+
+const canonicalAvailabilityReservationStatusLineSchema = z.object({
+  claimLineId: positiveBigintString,
+  lineKey: nonblank(200),
+  orderItemId: positiveInteger,
+  sku: nonblank(100),
+  targetVariantId: positiveInteger,
+  requestedQty: positiveBigintString,
+  plannedQty: nonnegativeBigintString,
+  shortfallQty: nonnegativeBigintString,
+  releasedTargetQty: nonnegativeBigintString,
+  consumedTargetQty: nonnegativeBigintString,
+  pickedTargetQty: nonnegativeBigintString,
+  openPlannedQty: nonnegativeBigintString,
+  resources: z.array(canonicalAvailabilityReservationStatusResourceSchema),
+  operations: z.array(canonicalAvailabilityReservationStatusOperationSchema),
+}).strict();
+
+/**
+ * Exact read model for canonical order ownership. Quantities remain decimal
+ * strings so PostgreSQL bigint evidence is never rounded by JSON consumers.
+ */
+export const canonicalAvailabilityReservationStatusProjectionSchema = z.object({
+  schemaVersion: z.literal("inventory_availability_reservation_status_v1"),
+  authority: z.literal("canonical"),
+  authorityRevision: positiveBigintString,
+  activationRunId: positiveBigintString,
+  orderId: positiveInteger,
+  claim: z.object({
+    claimId: positiveBigintString,
+    claimKey: nonblank(200),
+    revision: positiveInteger,
+    activationRunId: positiveBigintString,
+    runtimeAuthorityRevision: positiveBigintString,
+    planStatus: z.enum(["satisfied", "partial"]),
+    scope: fulfillmentScopeSchema,
+    planHash: z.string().regex(/^[0-9a-f]{64}$/),
+    snapshotFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+    lines: z.array(canonicalAvailabilityReservationStatusLineSchema),
+  }).strict().nullable(),
+}).strict();
+
 export type CanonicalAvailabilityClaimCommand = z.infer<
   typeof canonicalAvailabilityClaimCommandSchema
 >;
@@ -294,4 +386,10 @@ export type CanonicalAvailabilityCycleCountReconciliationCommand = z.infer<
 >;
 export type CanonicalAvailabilityCycleCountReconciliationResult = z.infer<
   typeof canonicalAvailabilityCycleCountReconciliationResultSchema
+>;
+export type CanonicalAvailabilityReservationStatusCommand = z.infer<
+  typeof canonicalAvailabilityReservationStatusCommandSchema
+>;
+export type CanonicalAvailabilityReservationStatusProjection = z.infer<
+  typeof canonicalAvailabilityReservationStatusProjectionSchema
 >;

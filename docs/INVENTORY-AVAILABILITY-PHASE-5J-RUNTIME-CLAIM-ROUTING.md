@@ -2,8 +2,9 @@
 
 > Phase 5K subsequently closes the atomic accepted-order demand-reconciliation
 > blocker described below. Phase 5L closes the Shopify refund-grouping blocker.
-> Phase 5M closes the cycle-count claim-repair blocker. The other activation
-> blockers remain in force.
+> Phase 5M closes the cycle-count claim-repair blocker. Phase 5N closes the
+> canonical reservation-status blocker. The other activation blockers remain in
+> force.
 
 ## Scope
 
@@ -84,9 +85,9 @@ falling back to legacy inventory state:
 2. Item-level refund release remains unsupported; Phase 5L routes the production
    refund cascade through one grouped whole-order demand reconciliation instead.
 3. Cycle-count orphan trimming/reallocation until it updates exact claim
-   ownership.
+   ownership (closed by Phase 5M).
 4. Legacy reservation-status projection until a canonical claim/resource DTO
-   replaces it.
+   replaces it (closed by Phase 5N).
 5. Any caller-owned Drizzle transaction passed across the reservation boundary.
 
 Picker pick/unpick remains a separate activation blocker: the deployed picker
@@ -96,7 +97,7 @@ It must be refactored as one transaction-aware orchestration before activation.
 
 ## Activation status
 
-Canonical authority remains inactive. Activation is still prohibited until
-cycle-count claim repair, canonical reservation status, and transaction-aware
-picker routing are built and verified together with ATP, publishers, and
-reservation callers.
+Canonical authority remains inactive. Phases 5M and 5N subsequently close
+cycle-count claim repair and canonical reservation status. Activation is still
+prohibited until transaction-aware picker routing is built and verified together
+with ATP, publishers, reservation callers, and provider readback.

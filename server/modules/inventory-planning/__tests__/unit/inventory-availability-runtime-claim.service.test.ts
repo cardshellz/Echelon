@@ -199,8 +199,26 @@ describe("AuthorityAwareReservationService", () => {
     await expect(service.reallocateOrphaned(101, 2)).rejects.toMatchObject({
       code: "CANONICAL_ORPHAN_REALLOCATION_UNSUPPORTED",
     });
-    await expect(service.getOrderReservationStatus(42)).rejects.toMatchObject({
-      code: "CANONICAL_RESERVATION_STATUS_PROJECTION_REQUIRED",
+  });
+
+  it("returns the exact canonical reservation-status projection without legacy fallback", async () => {
+    const projection = {
+      schemaVersion: "inventory_availability_reservation_status_v1" as const,
+      authority: "canonical" as const,
+      authorityRevision: "9",
+      activationRunId: "44",
+      orderId: 42,
+      claim: null,
+    };
+    const canonical = { getReservationStatus: vi.fn(async () => projection) };
+    const legacy = fakeLegacy();
+    const service = new AuthorityAwareReservationService(executor({ authority: "canonical", canonical, legacy }));
+
+    await expect(service.getOrderReservationStatus(42)).resolves.toEqual(projection);
+    expect(canonical.getReservationStatus).toHaveBeenCalledWith({ orderId: 42 });
+    expect(legacy.getOrderReservationStatus).not.toHaveBeenCalled();
+    await expect(service.getOrderReservationStatus(42, {})).rejects.toMatchObject({
+      code: "CANONICAL_EXTERNAL_RESERVATION_STATUS_TRANSACTION_UNSUPPORTED",
     });
   });
 
@@ -693,7 +711,7 @@ describe("AuthorityAwareReservationService", () => {
 function executor(input: {
   authority: "legacy" | "canonical";
   legacy?: ReservationServiceContract;
-  canonical?: InventoryAvailabilityRuntimeClaimContext["canonical"];
+  canonical?: Partial<InventoryAvailabilityRuntimeClaimContext["canonical"]>;
   getLatestClaim?: InventoryAvailabilityRuntimeClaimContext["getLatestClaim"];
   getVariantMetadata?: InventoryAvailabilityRuntimeClaimContext["getVariantMetadata"];
 }): InventoryAvailabilityRuntimeClaimExecutor {
@@ -703,11 +721,13 @@ function executor(input: {
       authorityRevision: "9",
       activationRunId: input.authority === "canonical" ? "44" : null,
       legacy: input.legacy ?? fakeLegacy(),
-      canonical: input.canonical ?? {
+      canonical: {
+        getReservationStatus: vi.fn(),
         claimOrder: vi.fn(),
         replaceOrderClaim: vi.fn(),
         releaseOrderClaim: vi.fn(),
         reconcileCycleCount: vi.fn(),
+        ...input.canonical,
       },
       getLatestClaim: input.getLatestClaim ?? vi.fn(async () => null),
       getVariantMetadata: input.getVariantMetadata ?? vi.fn(async () => new Map()),

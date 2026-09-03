@@ -13,6 +13,8 @@ import type {
   CanonicalAvailabilityClaimUnpickCommand,
   CanonicalAvailabilityCycleCountReconciliationCommand,
   CanonicalAvailabilityCycleCountReconciliationResult,
+  CanonicalAvailabilityReservationStatusCommand,
+  CanonicalAvailabilityReservationStatusProjection,
 } from "@shared/types/inventory-availability-claims";
 
 /**
@@ -20,6 +22,9 @@ import type {
  * Runtime callers depend on this port; PostgreSQL remains an implementation detail.
  */
 export interface InventoryAvailabilityClaimStore {
+  getReservationStatus(
+    command: CanonicalAvailabilityReservationStatusCommand,
+  ): Promise<CanonicalAvailabilityReservationStatusProjection>;
   claimOrder(command: CanonicalAvailabilityClaimCommand): Promise<CanonicalAvailabilityClaimResult>;
   replaceOrderClaim(
     command: CanonicalAvailabilityClaimReplacementCommand,

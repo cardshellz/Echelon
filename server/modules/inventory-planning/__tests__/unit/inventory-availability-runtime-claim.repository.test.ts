@@ -329,6 +329,7 @@ function fakeClient(
 
 function fakeCanonical(): InventoryAvailabilityClaimService {
   return new InventoryAvailabilityClaimService({
+    getReservationStatus: vi.fn(),
     claimOrder: vi.fn(),
     replaceOrderClaim: vi.fn(),
     releaseOrderClaim: vi.fn(),

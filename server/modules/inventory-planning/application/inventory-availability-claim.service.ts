@@ -15,17 +15,21 @@ import {
   canonicalAvailabilityClaimUnpickCommandSchema,
   canonicalAvailabilityCycleCountReconciliationCommandSchema,
   canonicalAvailabilityCycleCountReconciliationResultSchema,
+  canonicalAvailabilityReservationStatusCommandSchema,
+  canonicalAvailabilityReservationStatusProjectionSchema,
   type CanonicalAvailabilityClaimBuildHandoffResult,
   type CanonicalAvailabilityClaimOperationExecutionResult,
   type CanonicalAvailabilityClaimPickResult,
   type CanonicalAvailabilityClaimReplacementResult,
   type CanonicalAvailabilityClaimResult,
   type CanonicalAvailabilityCycleCountReconciliationResult,
+  type CanonicalAvailabilityReservationStatusProjection,
 } from "@shared/types/inventory-availability-claims";
 
 import type { InventoryAvailabilityClaimStore } from "./inventory-availability-claim.port";
 
 export type InventoryAvailabilityClaimOperation =
+  | "get_reservation_status"
   | "claim_order"
   | "replace_order_claim"
   | "release_order_claim"
@@ -61,6 +65,16 @@ export class InventoryAvailabilityClaimServiceError extends Error {
  */
 export class InventoryAvailabilityClaimService {
   constructor(private readonly store: InventoryAvailabilityClaimStore) {}
+
+  async getReservationStatus(input: unknown): Promise<CanonicalAvailabilityReservationStatusProjection> {
+    const operation = "get_reservation_status";
+    const command = parseCommand(canonicalAvailabilityReservationStatusCommandSchema, input, operation);
+    return parseResult(
+      canonicalAvailabilityReservationStatusProjectionSchema,
+      await this.store.getReservationStatus(command),
+      operation,
+    );
+  }
 
   async claimOrder(input: unknown): Promise<CanonicalAvailabilityClaimResult> {
     const operation = "claim_order";
