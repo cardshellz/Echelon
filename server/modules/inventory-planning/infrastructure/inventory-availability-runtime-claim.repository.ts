@@ -199,6 +199,10 @@ function bindLegacyReservationToTransaction(
       rejectExternalTransaction(command.dbOverride);
       return legacy.reconcileOrderDemand({ ...command, dbOverride: transactionDb });
     },
+    reconcileRefundOrderDemand: (command) => {
+      rejectExternalTransaction(command.dbOverride);
+      return legacy.reconcileRefundOrderDemand({ ...command, dbOverride: transactionDb });
+    },
     reallocateOrphaned: (
       productVariantId,
       warehouseLocationId,

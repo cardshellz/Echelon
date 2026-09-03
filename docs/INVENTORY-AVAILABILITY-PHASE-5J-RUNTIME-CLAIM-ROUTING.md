@@ -1,7 +1,8 @@
 # Inventory Availability Phase 5J — Runtime Claim Routing
 
 > Phase 5K subsequently closes the atomic accepted-order demand-reconciliation
-> blocker described below. The other activation blockers remain in force.
+> blocker described below. Phase 5L closes the Shopify refund-grouping blocker.
+> The other activation blockers remain in force.
 
 ## Scope
 
@@ -79,8 +80,8 @@ The following operations fail closed under canonical authority instead of
 falling back to legacy inventory state:
 
 1. Item-level reserve (`reserveForOrder`).
-2. Refund item release until the refund cascade submits one whole-order demand
-   reconciliation event.
+2. Item-level refund release remains unsupported; Phase 5L routes the production
+   refund cascade through one grouped whole-order demand reconciliation instead.
 3. Cycle-count orphan trimming/reallocation until it updates exact claim
    ownership.
 4. Legacy reservation-status projection until a canonical claim/resource DTO
@@ -95,6 +96,6 @@ It must be refactored as one transaction-aware orchestration before activation.
 ## Activation status
 
 Canonical authority remains inactive. Activation is still prohibited until
-refund grouping, cycle-count claim repair, canonical reservation status, and
-transaction-aware picker routing are built and verified together with ATP,
-publishers, and reservation callers.
+cycle-count claim repair, canonical reservation status, and transaction-aware
+picker routing are built and verified together with ATP, publishers, and
+reservation callers.

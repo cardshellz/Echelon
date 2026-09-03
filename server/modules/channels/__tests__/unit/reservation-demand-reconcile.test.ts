@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 import { createReservationService } from "../../reservation.service";
 
@@ -86,11 +87,82 @@ describe("legacy reservation demand reconciliation", () => {
     );
     expect(reserve).toHaveBeenCalledWith(42, undefined, dbOverride);
   });
+
+  it("locks every refund target and product deterministically before grouped line releases", async () => {
+    const dialect = new PgDialect();
+    const executed: Array<{ sql: string; params: unknown[] }> = [];
+    const tx = {
+      execute: vi.fn(async (query: any) => {
+        const rendered = dialect.sqlToQuery(query);
+        executed.push({ sql: rendered.sql, params: rendered.params });
+        if (rendered.sql.includes("FROM wms.order_items oi")) {
+          return { rows: [
+            { order_item_id: 700, product_variant_id: 107, catalog_product_id: 5 },
+            { order_item_id: 600, product_variant_id: 106, catalog_product_id: 3 },
+          ] };
+        }
+        if (rendered.sql.includes("pg_advisory_xact_lock")) return { rows: [] };
+        throw new Error(`Unexpected grouped refund query: ${rendered.sql}`);
+      }),
+    };
+    const db = {
+      transaction: vi.fn(async (work: (transaction: typeof tx) => Promise<unknown>) => work(tx)),
+    };
+    const service = createService(db);
+    const release = vi.spyOn(service, "releaseOrderItemReservation")
+      .mockImplementation(async (command) => ({
+        orderId: command.orderId,
+        orderItemId: command.orderItemId,
+        productVariantId: command.orderItemId === 600 ? 106 : 107,
+        requestedQuantity: command.quantity,
+        previouslyReleasedQuantity: 0,
+        releasedQuantity: command.quantity,
+        openReservationAfter: 0,
+        idempotentReplay: false,
+      }));
+
+    await expect(service.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:901",
+      releaseTargets: [
+        { orderItemId: 700, quantity: 2 },
+        { orderItemId: 600, quantity: 1 },
+      ],
+      reason: "refund demand changed",
+    })).resolves.toEqual({ releasedReservationQuantity: 3 });
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(release.mock.calls.map(([command]) => command)).toEqual([
+      expect.objectContaining({ orderItemId: 600, quantity: 1, dbOverride: tx }),
+      expect.objectContaining({ orderItemId: 700, quantity: 2, dbOverride: tx }),
+    ]);
+    const productLocks = executed.filter((query) => query.sql.includes("pg_advisory_xact_lock"));
+    expect(productLocks.map((query) => query.params)).toEqual([
+      [918410, 3],
+      [918410, 5],
+    ]);
+  });
+
+  it("rejects duplicate refund targets before opening a transaction", async () => {
+    const db = { transaction: vi.fn() };
+    const service = createService(db);
+
+    await expect(service.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:duplicate",
+      releaseTargets: [
+        { orderItemId: 600, quantity: 1 },
+        { orderItemId: 600, quantity: 2 },
+      ],
+      reason: "refund demand changed",
+    })).rejects.toThrow("duplicate order item 600");
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
 });
 
-function createService() {
+function createService(db: any = {}) {
   return createReservationService(
-    {} as never,
+    db,
     {} as never,
     { queueSyncAfterInventoryChange: vi.fn() },
     {} as never,

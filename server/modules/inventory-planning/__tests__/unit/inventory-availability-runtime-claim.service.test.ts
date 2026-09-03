@@ -18,10 +18,20 @@ describe("AuthorityAwareReservationService", () => {
       demandChanged: true,
       reason: "order edited",
     };
+    const refund = {
+      orderId: 42,
+      sourceEventId: "refund:901",
+      releaseTargets: [
+        { orderItemId: 12, quantity: 2 },
+        { orderItemId: 11, quantity: 1 },
+      ],
+      reason: "refund demand changed",
+    };
 
     await service.reserveOrder(42, "user:7");
     await service.releaseOrderReservation(42, "cancelled", "user:7", { disposition: "cancel" });
     await service.reconcileOrderDemand(reconcile);
+    await service.reconcileRefundOrderDemand(refund);
 
     expect(legacy.reserveOrder).toHaveBeenCalledWith(42, "user:7", undefined);
     expect(legacy.releaseOrderReservation).toHaveBeenCalledWith(
@@ -31,6 +41,13 @@ describe("AuthorityAwareReservationService", () => {
       { disposition: "cancel" },
     );
     expect(legacy.reconcileOrderDemand).toHaveBeenCalledWith(reconcile);
+    expect(legacy.reconcileRefundOrderDemand).toHaveBeenCalledWith({
+      ...refund,
+      releaseTargets: [
+        { orderItemId: 11, quantity: 1 },
+        { orderItemId: 12, quantity: 2 },
+      ],
+    });
   });
 
   it("claims the complete order and maps canonical direct, build, and shortfall evidence", async () => {
@@ -210,6 +227,77 @@ describe("AuthorityAwareReservationService", () => {
     expect(canonical.releaseOrderClaim).not.toHaveBeenCalled();
   });
 
+  it("reconciles every refunded line through one canonical replacement", async () => {
+    const currentPlan = canonicalPlan();
+    const replacementPlan = {
+      ...canonicalPlan(),
+      requestKey: "order:42:availability:revision:4",
+      lines: [
+        { lineKey: "order-item:11", targetVariantId: 101, requestedQty: "2", plannedQty: "1", shortfallQty: "1" },
+        { lineKey: "order-item:12", targetVariantId: 102, requestedQty: "1", plannedQty: "1", shortfallQty: "0" },
+      ],
+      operations: [],
+    } satisfies ClaimPlanDto;
+    const canonical = {
+      claimOrder: vi.fn(),
+      replaceOrderClaim: vi.fn(async () => ({
+        outcome: "replaced" as const,
+        orderId: 42,
+        supersededClaimId: "70",
+        supersededClaimKey: currentPlan.requestKey,
+        supersededRevision: 3,
+        replacementClaim: {
+          claimId: "71",
+          claimKey: replacementPlan.requestKey,
+          revision: 4,
+          runtimeAuthorityRevision: "9",
+          plan: replacementPlan,
+        },
+        releasedResourceQty: "26",
+        releasedLotQty: "26",
+        idempotentReplay: false,
+      })),
+      releaseOrderClaim: vi.fn(),
+    };
+    const legacy = fakeLegacy();
+    const service = new AuthorityAwareReservationService(executor({
+      authority: "canonical",
+      legacy,
+      canonical,
+      getLatestClaim: vi.fn(async () => ({
+        claimId: "70",
+        revision: 3,
+        status: "active",
+        plan: currentPlan,
+      })),
+      getVariantMetadata: vi.fn(async () => new Map([
+        [101, { productVariantId: 101, sku: "EA", unitsPerVariant: 1 }],
+        [102, { productVariantId: 102, sku: "C25", unitsPerVariant: 25 }],
+      ])),
+    }));
+
+    await expect(service.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:901",
+      releaseTargets: [
+        { orderItemId: 12, quantity: 5 },
+        { orderItemId: 11, quantity: 1 },
+      ],
+      reason: "Shopify refund 901 demand reconciliation",
+    })).resolves.toEqual({ releasedReservationQuantity: 2 });
+
+    expect(canonical.replaceOrderClaim).toHaveBeenCalledTimes(1);
+    expect(canonical.replaceOrderClaim).toHaveBeenCalledWith(expect.objectContaining({
+      orderId: 42,
+      expectedClaimId: "70",
+      idempotencyKey: expect.stringMatching(
+        /^inventory-runtime:reconcile-order-demand-replace:[0-9a-f]{64}$/,
+      ),
+    }));
+    expect(legacy.releaseOrderItemReservation).not.toHaveBeenCalled();
+    expect(legacy.reconcileRefundOrderDemand).not.toHaveBeenCalled();
+  });
+
   it("releases the exact active claim only after locked demand is proven empty", async () => {
     const plan = canonicalPlan();
     const canonical = {
@@ -264,6 +352,45 @@ describe("AuthorityAwareReservationService", () => {
         /^inventory-runtime:reconcile-order-demand-release:[0-9a-f]{64}$/,
       ),
     }));
+  });
+
+  it("reports only event-attributed target units when a refund removes the last claimable demand", async () => {
+    const plan = canonicalPlan();
+    const canonical = {
+      claimOrder: vi.fn(),
+      replaceOrderClaim: vi.fn(async () => {
+        throw Object.assign(new Error("no remaining demand"), {
+          code: "REPLACEMENT_ORDER_NOT_CLAIMABLE",
+          context: { warehouseStatus: "ready" },
+        });
+      }),
+      releaseOrderClaim: vi.fn(async () => ({
+        outcome: "released" as const,
+        claimId: "70",
+        claimKey: plan.requestKey,
+        orderId: 42,
+        status: "released" as const,
+        releasedResourceQty: "52",
+        releasedLotQty: "52",
+        idempotentReplay: false,
+      })),
+    };
+    const service = new AuthorityAwareReservationService(executor({
+      authority: "canonical",
+      canonical,
+      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active", plan })),
+    }));
+
+    await expect(service.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:remove-last-demand",
+      releaseTargets: [
+        { orderItemId: 11, quantity: 2 },
+        { orderItemId: 12, quantity: 1 },
+      ],
+      reason: "all remaining physical demand refunded",
+    })).resolves.toEqual({ releasedReservationQuantity: 3 });
+    expect(canonical.releaseOrderClaim).toHaveBeenCalledTimes(1);
   });
 
   it("cancels the exact active claim when the locked order is cancelled", async () => {
@@ -371,6 +498,44 @@ describe("AuthorityAwareReservationService", () => {
     expect(canonical.releaseOrderClaim).not.toHaveBeenCalled();
   });
 
+  it("reports zero released refund demand when the canonical plan is unchanged", async () => {
+    const plan = canonicalPlan();
+    const canonical = {
+      claimOrder: vi.fn(async () => ({
+        outcome: "claimed" as const,
+        claimId: "70",
+        claimKey: plan.requestKey,
+        orderId: 42,
+        revision: 3,
+        runtimeAuthorityRevision: "9",
+        plan,
+        idempotentReplay: false,
+      })),
+      replaceOrderClaim: vi.fn(async () => {
+        throw Object.assign(new Error("demand unchanged"), { code: "ORDER_DEMAND_UNCHANGED" });
+      }),
+      releaseOrderClaim: vi.fn(),
+    };
+    const service = new AuthorityAwareReservationService(executor({
+      authority: "canonical",
+      canonical,
+      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active", plan })),
+      getVariantMetadata: vi.fn(async () => new Map([
+        [101, { productVariantId: 101, sku: "EA", unitsPerVariant: 1 }],
+        [102, { productVariantId: 102, sku: "C25", unitsPerVariant: 25 }],
+      ])),
+    }));
+
+    await expect(service.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:902",
+      releaseTargets: [{ orderItemId: 11, quantity: 1 }],
+      reason: "refund replay",
+    })).resolves.toEqual({ releasedReservationQuantity: 0 });
+    expect(canonical.replaceOrderClaim).toHaveBeenCalledTimes(1);
+    expect(canonical.releaseOrderClaim).not.toHaveBeenCalled();
+  });
+
   it("keeps a failed canonical demand reconciliation retryable without legacy fallback", async () => {
     const plan = canonicalPlan();
     const canonical = {
@@ -408,7 +573,21 @@ describe("AuthorityAwareReservationService", () => {
         causeCode: "ORDER_STILL_HAS_CLAIMABLE_DEMAND",
       }),
     });
+    await expect(service.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:903",
+      releaseTargets: [{ orderItemId: 11, quantity: 1 }],
+      reason: "concurrent refund demand change",
+    })).rejects.toMatchObject({
+      code: "CANONICAL_DEMAND_RECONCILIATION_FAILED",
+      context: expect.objectContaining({
+        orderId: 42,
+        sourceEventId: "refund:903",
+        causeCode: "ORDER_STILL_HAS_CLAIMABLE_DEMAND",
+      }),
+    });
     expect(legacy.reconcileOrderDemand).not.toHaveBeenCalled();
+    expect(legacy.reconcileRefundOrderDemand).not.toHaveBeenCalled();
   });
 
   it("rejects a caller-owned transaction after canonical cutover", async () => {
@@ -433,6 +612,15 @@ describe("AuthorityAwareReservationService", () => {
       sourceEventId: "webhook_inbox:904",
       demandChanged: true,
       reason: "order edited",
+      dbOverride: {},
+    })).rejects.toMatchObject({
+      code: "CANONICAL_EXTERNAL_RESERVATION_TRANSACTION_UNSUPPORTED",
+    });
+    await expect(service.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:904",
+      releaseTargets: [{ orderItemId: 11, quantity: 1 }],
+      reason: "refund",
       dbOverride: {},
     })).rejects.toMatchObject({
       code: "CANONICAL_EXTERNAL_RESERVATION_TRANSACTION_UNSUPPORTED",
@@ -492,6 +680,12 @@ function fakeLegacy(): ReservationServiceContract {
       reconciled: true,
       release: { released: 1, failed: [] },
       reservation,
+    })),
+    reconcileRefundOrderDemand: vi.fn(async (command) => ({
+      releasedReservationQuantity: command.releaseTargets.reduce(
+        (total, target) => total + target.quantity,
+        0,
+      ),
     })),
     reallocateOrphaned: vi.fn(async () => ({ released: 0, reallocated: 0, failed: 0 })),
     getOrderReservationStatus: vi.fn(async () => []),

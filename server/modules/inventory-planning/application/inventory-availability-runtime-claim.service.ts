@@ -9,6 +9,9 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 
 import type {
   OrderReservationStatus,
+  RefundDemandReleaseTarget,
+  ReconcileRefundOrderDemandCommand,
+  ReconcileRefundOrderDemandResult,
   ReconcileOrderDemandCommand,
   ReconcileOrderDemandResult,
   ReleaseOrderItemReservationResult,
@@ -58,6 +61,12 @@ export interface InventoryAvailabilityRuntimeClaimExecutor {
   execute<T>(
     work: (context: InventoryAvailabilityRuntimeClaimContext) => Promise<T>,
   ): Promise<T>;
+}
+
+interface CanonicalDemandReconciliationOutcome {
+  result: ReconcileOrderDemandResult;
+  previousPlan: ClaimPlanDto | null;
+  nextPlan: ClaimPlanDto | null;
 }
 
 export class InventoryAvailabilityRuntimeClaimError extends Error {
@@ -244,26 +253,64 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
         );
       }
       try {
-        return await reconcileCanonicalOrderDemand(
+        const outcome = await reconcileCanonicalOrderDemand(
           context,
           orderId,
           sourceEventId,
           command.userId,
           reason,
         );
+        return outcome.result;
       } catch (error) {
-        throw new InventoryAvailabilityRuntimeClaimError(
-          "CANONICAL_DEMAND_RECONCILIATION_FAILED",
-          "Canonical order-demand reconciliation failed and must be retried without falling back to legacy reservations.",
-          {
-            orderId,
-            sourceEventId,
-            authorityRevision: context.authorityRevision,
-            activationRunId: context.activationRunId,
-            causeCode: structuredErrorCode(error),
-          },
-          { cause: error },
+        throw demandReconciliationFailed(context, orderId, sourceEventId, error);
+      }
+    });
+  }
+
+  async reconcileRefundOrderDemand(
+    command: ReconcileRefundOrderDemandCommand,
+  ): Promise<ReconcileRefundOrderDemandResult> {
+    const orderId = positiveInteger(command.orderId, "orderId");
+    const sourceEventId = nonblank(command.sourceEventId, "sourceEventId", 500);
+    const reason = nonblank(command.reason, "reason", 1000);
+    const releaseTargets = validateRefundReleaseTargets(command.releaseTargets);
+
+    return this.executor.execute(async (context) => {
+      if (context.authority === "legacy") {
+        return context.legacy.reconcileRefundOrderDemand({
+          ...command,
+          orderId,
+          sourceEventId,
+          releaseTargets,
+          reason,
+        });
+      }
+      if (command.dbOverride != null) {
+        throw unsupportedCanonicalMutation(
+          "CANONICAL_EXTERNAL_RESERVATION_TRANSACTION_UNSUPPORTED",
+          "Canonical refund demand reconciliation owns its serializable transactions and cannot join a legacy Drizzle transaction.",
+          context,
+          { orderId, sourceEventId },
         );
+      }
+      try {
+        const outcome = await reconcileCanonicalOrderDemand(
+          context,
+          orderId,
+          sourceEventId,
+          command.userId,
+          reason,
+        );
+        return {
+          releasedReservationQuantity: releasedRefundTargetQuantity(
+            orderId,
+            releaseTargets,
+            outcome.previousPlan,
+            outcome.nextPlan,
+          ),
+        };
+      } catch (error) {
+        throw demandReconciliationFailed(context, orderId, sourceEventId, error);
       }
     });
   }
@@ -384,7 +431,7 @@ async function reconcileCanonicalOrderDemand(
   sourceEventId: string,
   userId: string | undefined,
   reason: string,
-): Promise<ReconcileOrderDemandResult> {
+): Promise<CanonicalDemandReconciliationOutcome> {
   const actor = canonicalActor(userId);
   const cursor = await context.getLatestClaim(orderId);
   if (!cursor || cursor.status !== "active") {
@@ -399,15 +446,23 @@ async function reconcileCanonicalOrderDemand(
       reason,
     });
     if (result.outcome === "no_claim_required") {
-      return emptyDemandReconciliationResult(orderId);
+      return {
+        result: emptyDemandReconciliationResult(orderId),
+        previousPlan: null,
+        nextPlan: null,
+      };
     }
     if (result.outcome !== "claimed") {
       throw invalidCanonicalResult("reconcile_order_demand_claim", result, context);
     }
     return {
-      reconciled: !result.idempotentReplay,
-      release: { released: 0, failed: [] },
-      reservation: await mapCanonicalPlanToReservationResult(context, orderId, result.plan),
+      result: {
+        reconciled: !result.idempotentReplay,
+        release: { released: 0, failed: [] },
+        reservation: await mapCanonicalPlanToReservationResult(context, orderId, result.plan),
+      },
+      previousPlan: null,
+      nextPlan: result.plan,
     };
   }
 
@@ -424,16 +479,20 @@ async function reconcileCanonicalOrderDemand(
       reason,
     });
     return {
-      reconciled: !replacement.idempotentReplay,
-      release: {
-        released: replacement.idempotentReplay ? 0 : claimLineCount(cursor.plan),
-        failed: [],
+      result: {
+        reconciled: !replacement.idempotentReplay,
+        release: {
+          released: replacement.idempotentReplay ? 0 : claimLineCount(cursor.plan),
+          failed: [],
+        },
+        reservation: await mapCanonicalPlanToReservationResult(
+          context,
+          orderId,
+          replacement.replacementClaim.plan,
+        ),
       },
-      reservation: await mapCanonicalPlanToReservationResult(
-        context,
-        orderId,
-        replacement.replacementClaim.plan,
-      ),
+      previousPlan: cursor.plan,
+      nextPlan: replacement.replacementClaim.plan,
     };
   } catch (error) {
     const code = structuredErrorCode(error);
@@ -452,9 +511,13 @@ async function reconcileCanonicalOrderDemand(
         throw invalidCanonicalResult("reconcile_order_demand_unchanged", replay, context);
       }
       return {
-        reconciled: false,
-        release: { released: 0, failed: [] },
-        reservation: await mapCanonicalPlanToReservationResult(context, orderId, replay.plan),
+        result: {
+          reconciled: false,
+          release: { released: 0, failed: [] },
+          reservation: await mapCanonicalPlanToReservationResult(context, orderId, replay.plan),
+        },
+        previousPlan: cursor.plan,
+        nextPlan: replay.plan,
       };
     }
     if (code === "REPLACEMENT_ORDER_NOT_CLAIMABLE") {
@@ -478,12 +541,16 @@ async function reconcileCanonicalOrderDemand(
         throw invalidCanonicalResult("reconcile_order_demand_release", release, context);
       }
       return {
-        reconciled: !release.idempotentReplay,
-        release: {
-          released: release.idempotentReplay ? 0 : claimLineCount(cursor.plan),
-          failed: [],
+        result: {
+          reconciled: !release.idempotentReplay,
+          release: {
+            released: release.idempotentReplay ? 0 : claimLineCount(cursor.plan),
+            failed: [],
+          },
+          reservation: emptyReservationResult(orderId),
         },
-        reservation: emptyReservationResult(orderId),
+        previousPlan: cursor.plan,
+        nextPlan: null,
       };
     }
     throw error;
@@ -562,6 +629,76 @@ function emptyDemandReconciliationResult(orderId: number): ReconcileOrderDemandR
 
 function claimLineCount(plan: ClaimPlanDto): number {
   return plan.lines.filter((line) => BigInt(line.plannedQty) > BigInt(0)).length;
+}
+
+function validateRefundReleaseTargets(
+  targets: unknown,
+): RefundDemandReleaseTarget[] {
+  if (!Array.isArray(targets) || targets.length === 0) {
+    throw invalidInput("releaseTargets", targets);
+  }
+  const seenOrderItemIds = new Set<number>();
+  return targets.map((target, index) => {
+    if (typeof target !== "object" || target === null) {
+      throw invalidInput(`releaseTargets[${index}]`, target);
+    }
+    const candidate = target as { orderItemId?: unknown; quantity?: unknown };
+    const orderItemId = positiveInteger(
+      candidate.orderItemId,
+      `releaseTargets[${index}].orderItemId`,
+    );
+    const quantity = positiveInteger(candidate.quantity, `releaseTargets[${index}].quantity`);
+    if (seenOrderItemIds.has(orderItemId)) {
+      throw invalidInput(`releaseTargets[${index}].orderItemId`, candidate.orderItemId);
+    }
+    seenOrderItemIds.add(orderItemId);
+    return { orderItemId, quantity };
+  }).sort((left, right) => left.orderItemId - right.orderItemId);
+}
+
+function releasedRefundTargetQuantity(
+  orderId: number,
+  targets: readonly RefundDemandReleaseTarget[],
+  previousPlan: ClaimPlanDto | null,
+  nextPlan: ClaimPlanDto | null,
+): number {
+  const previousQuantities = claimLineQuantities(previousPlan);
+  const nextQuantities = claimLineQuantities(nextPlan);
+  let released = BigInt(0);
+  for (const target of targets) {
+    const lineKey = `order-item:${target.orderItemId}`;
+    const previous = previousQuantities.get(lineKey) ?? BigInt(0);
+    const next = nextQuantities.get(lineKey) ?? BigInt(0);
+    const reduction = previous > next ? previous - next : BigInt(0);
+    released += reduction < BigInt(target.quantity) ? reduction : BigInt(target.quantity);
+  }
+  return safeInteger(released, "releasedReservationQuantity", orderId);
+}
+
+function claimLineQuantities(plan: ClaimPlanDto | null): Map<string, bigint> {
+  return new Map(
+    (plan?.lines ?? []).map((line) => [line.lineKey, BigInt(line.plannedQty)] as const),
+  );
+}
+
+function demandReconciliationFailed(
+  context: InventoryAvailabilityRuntimeClaimContext,
+  orderId: number,
+  sourceEventId: string,
+  error: unknown,
+): InventoryAvailabilityRuntimeClaimError {
+  return new InventoryAvailabilityRuntimeClaimError(
+    "CANONICAL_DEMAND_RECONCILIATION_FAILED",
+    "Canonical order-demand reconciliation failed and must be retried without falling back to legacy reservations.",
+    {
+      orderId,
+      sourceEventId,
+      authorityRevision: context.authorityRevision,
+      activationRunId: context.activationRunId,
+      causeCode: structuredErrorCode(error),
+    },
+    { cause: error },
+  );
 }
 
 function structuredErrorCode(error: unknown): string | null {

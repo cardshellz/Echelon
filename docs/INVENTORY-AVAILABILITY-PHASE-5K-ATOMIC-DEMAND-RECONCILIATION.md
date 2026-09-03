@@ -7,6 +7,9 @@ deployed `reconcileOrderDemand` boundary now reconciles canonical claims instead
 of rejecting canonical authority. Legacy authority retains its existing
 transaction-bound release-then-reserve behavior.
 
+Phase 5L subsequently applies this whole-order lifecycle to grouped Shopify
+refund demand reductions.
+
 This deployment remains inert while runtime authority is `legacy`. It does not
 change the authority row, activate canonical claims, publish channel quantities,
 backfill data, or call an external provider.
@@ -62,6 +65,6 @@ Unit coverage proves:
 ## Remaining activation blockers
 
 Canonical authority remains prohibited until the remaining Phase 5J blockers are
-closed: refund grouping, cycle-count claim repair, canonical reservation-status
-projection, transaction-aware picker routing, complete canonical publisher
-coverage, concurrency/crash-recovery verification, and provider readback.
+closed: cycle-count claim repair, canonical reservation-status projection,
+transaction-aware picker routing, complete canonical publisher coverage,
+concurrency/crash-recovery verification, and provider readback.
