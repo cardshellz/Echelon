@@ -121,6 +121,8 @@ function capability(): DropshipEbayFulfillmentCapability {
       rateBookId: 34,
       rateBookCode: "dropship-vendor-default",
       rateTableId: 5,
+      serviceLevelId: 7,
+      fulfillmentRoutingRevision: 4,
     },
   };
 }

@@ -14,6 +14,7 @@ export interface DropshipEbayInternalFulfillmentEvidence {
   rateBookId: number;
   rateBookCode: string;
   rateTableId: number;
+  serviceLevelId: number;
   offeredDestinations: Array<{
     country: string;
     region: string | null;
@@ -28,14 +29,23 @@ export interface DropshipEbayInternalFulfillmentEvidenceRepository {
 }
 
 export interface DropshipCarrierServiceCapability {
+  provider: string;
   carrierCode: string;
   serviceCode: string;
   serviceName: string;
   domestic: boolean;
 }
 
+export interface DropshipCarrierServiceCapabilitySnapshot {
+  serviceLevelId: number;
+  routingRevision: number;
+  services: DropshipCarrierServiceCapability[];
+}
+
 export interface DropshipCarrierServiceCapabilityProvider {
-  listServices(): Promise<DropshipCarrierServiceCapability[]>;
+  listServices(input: {
+    serviceLevelId: number;
+  }): Promise<DropshipCarrierServiceCapabilitySnapshot>;
 }
 
 export interface DropshipEbayFulfillmentCapabilityProvider {
@@ -56,69 +66,80 @@ interface CacheEntry {
 }
 
 interface EbayServiceMapping {
-  shipStationCarrierCodes: readonly string[];
-  shipStationServiceCode: string;
+  provider: string;
+  providerCarrierCodes: readonly string[];
+  providerServiceCode: string;
   carrier: string;
   ebayServiceCode: string;
 }
 
 /**
  * Only mappings with an exact, provider-documented eBay service code belong
- * here. Ambiguous ShipStation aliases fail closed instead of silently making a
- * fulfillment promise Card Shellz may not be able to perform.
+ * here. Provider identity is part of the key so a future adapter cannot reuse
+ * a coincidentally matching service code. Ambiguous aliases fail closed rather
+ * than silently making a promise Card Shellz may not be able to perform.
  */
 export const DROPSHIP_EBAY_SERVICE_MAPPINGS: readonly EbayServiceMapping[] = [
   {
-    shipStationCarrierCodes: ["usps", "stamps_com"],
-    shipStationServiceCode: "usps_ground_advantage",
+    provider: "shipstation_v2",
+    providerCarrierCodes: ["usps", "stamps_com"],
+    providerServiceCode: "usps_ground_advantage",
     carrier: "USPS",
     ebayServiceCode: "USPSGround",
   },
   {
-    shipStationCarrierCodes: ["fedex"],
-    shipStationServiceCode: "fedex_ground",
+    provider: "shipstation_v2",
+    providerCarrierCodes: ["fedex"],
+    providerServiceCode: "fedex_ground",
     carrier: "FedEx",
     ebayServiceCode: "FedExGround",
   },
   {
-    shipStationCarrierCodes: ["fedex"],
-    shipStationServiceCode: "fedex_home_delivery",
+    provider: "shipstation_v2",
+    providerCarrierCodes: ["fedex"],
+    providerServiceCode: "fedex_home_delivery",
     carrier: "FedEx",
     ebayServiceCode: "FedExHomeDelivery",
   },
   {
-    shipStationCarrierCodes: ["fedex"],
-    shipStationServiceCode: "fedex_2day",
+    provider: "shipstation_v2",
+    providerCarrierCodes: ["fedex"],
+    providerServiceCode: "fedex_2day",
     carrier: "FedEx",
     ebayServiceCode: "FedEx2Day",
   },
   {
-    shipStationCarrierCodes: ["fedex"],
-    shipStationServiceCode: "fedex_express_saver",
+    provider: "shipstation_v2",
+    providerCarrierCodes: ["fedex"],
+    providerServiceCode: "fedex_express_saver",
     carrier: "FedEx",
     ebayServiceCode: "FedExExpressSaver",
   },
   {
-    shipStationCarrierCodes: ["fedex"],
-    shipStationServiceCode: "fedex_standard_overnight",
+    provider: "shipstation_v2",
+    providerCarrierCodes: ["fedex"],
+    providerServiceCode: "fedex_standard_overnight",
     carrier: "FedEx",
     ebayServiceCode: "FedExStandardOvernight",
   },
   {
-    shipStationCarrierCodes: ["ups", "ups_walleted"],
-    shipStationServiceCode: "ups_ground",
+    provider: "shipstation_v2",
+    providerCarrierCodes: ["ups", "ups_walleted"],
+    providerServiceCode: "ups_ground",
     carrier: "UPS",
     ebayServiceCode: "UPSGround",
   },
   {
-    shipStationCarrierCodes: ["ups", "ups_walleted"],
-    shipStationServiceCode: "ups_3_day_select",
+    provider: "shipstation_v2",
+    providerCarrierCodes: ["ups", "ups_walleted"],
+    providerServiceCode: "ups_3_day_select",
     carrier: "UPS",
     ebayServiceCode: "UPS3rdDay",
   },
   {
-    shipStationCarrierCodes: ["ups", "ups_walleted"],
-    shipStationServiceCode: "ups_next_day_air",
+    provider: "shipstation_v2",
+    providerCarrierCodes: ["ups", "ups_walleted"],
+    providerServiceCode: "ups_next_day_air",
     carrier: "UPS",
     ebayServiceCode: "UPSNextDayAir",
   },
@@ -190,19 +211,34 @@ implements DropshipEbayFulfillmentCapabilityProvider {
     marketplaceId: string;
     evaluatedAt: Date;
   }): Promise<DropshipEbayFulfillmentCapability> {
-    const [evidence, connectedServices] = await Promise.all([
-      this.deps.evidence.loadForStoreConnection({
-        storeConnectionId: input.storeConnectionId,
-        evaluatedAt: input.evaluatedAt,
-      }),
-      this.deps.carrierServices.listServices(),
-    ]);
-    const supportedServices = mapConnectedServicesToEbay(connectedServices);
+    const evidence = await this.deps.evidence.loadForStoreConnection({
+      storeConnectionId: input.storeConnectionId,
+      evaluatedAt: input.evaluatedAt,
+    });
+    const routed = await this.deps.carrierServices.listServices({
+      serviceLevelId: evidence.serviceLevelId,
+    });
+    if (routed.serviceLevelId !== evidence.serviceLevelId) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_FULFILLMENT_ROUTING_MISMATCH",
+        "Fulfillment routing returned a different service level than the active dropship rate table.",
+        {
+          expectedServiceLevelId: evidence.serviceLevelId,
+          returnedServiceLevelId: routed.serviceLevelId,
+          retryable: false,
+        },
+      );
+    }
+    const supportedServices = mapRoutedServicesToEbay(routed.services);
     if (supportedServices.length === 0) {
       throw new DropshipError(
         "DROPSHIP_EBAY_FULFILLMENT_SERVICES_REQUIRED",
-        "No connected ShipStation carrier service has a verified eBay fulfillment mapping.",
-        { storeConnectionId: input.storeConnectionId, retryable: false },
+        "No allowed fulfillment routing method has a verified eBay service mapping.",
+        {
+          storeConnectionId: input.storeConnectionId,
+          serviceLevelId: evidence.serviceLevelId,
+          retryable: false,
+        },
       );
     }
     const destinationRegions = uniqueSorted(
@@ -229,6 +265,8 @@ implements DropshipEbayFulfillmentCapabilityProvider {
         rateBookId: evidence.rateBookId,
         rateBookCode: evidence.rateBookCode,
         rateTableId: evidence.rateTableId,
+        serviceLevelId: evidence.serviceLevelId,
+        fulfillmentRoutingRevision: routed.routingRevision,
       },
     };
     return {
@@ -238,14 +276,15 @@ implements DropshipEbayFulfillmentCapabilityProvider {
   }
 }
 
-export function mapConnectedServicesToEbay(
-  connectedServices: readonly DropshipCarrierServiceCapability[],
+export function mapRoutedServicesToEbay(
+  routedServices: readonly DropshipCarrierServiceCapability[],
 ): DropshipEbayFulfillmentServiceCapability[] {
-  const mapped = connectedServices.flatMap((service) => {
+  const mapped = routedServices.flatMap((service) => {
     if (!service.domestic) return [];
     const mapping = DROPSHIP_EBAY_SERVICE_MAPPINGS.find((candidate) => (
-      candidate.shipStationCarrierCodes.includes(service.carrierCode.toLowerCase())
-      && candidate.shipStationServiceCode === service.serviceCode
+      candidate.provider === service.provider
+      && candidate.providerCarrierCodes.includes(service.carrierCode.toLowerCase())
+      && candidate.providerServiceCode === service.serviceCode
     ));
     if (!mapping) return [];
     return [{

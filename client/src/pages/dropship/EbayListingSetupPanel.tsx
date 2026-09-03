@@ -298,8 +298,8 @@ function FulfillmentCapabilitySummary({
         />
         <CapabilityFact
           icon={<Truck className="h-4 w-4" />}
-          label="Connected carriers"
-          value={carriers.join(", ") || "None verified"}
+          label="Allowed carriers"
+          value={carriers.join(", ") || "None configured"}
         />
       </div>
       <div className="mt-3 flex flex-wrap gap-1.5">

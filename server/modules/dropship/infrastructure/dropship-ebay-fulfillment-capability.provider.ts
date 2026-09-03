@@ -1,14 +1,20 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import {
-  createShipStationV2RatingAdapter,
-  ShipStationV2Error,
-  type ShipStationV2RatingAdapter,
-} from "../../shipping-engine/infrastructure/shipstation-v2-rating.adapter";
+  FulfillmentRoutingError,
+  FulfillmentRoutingResolver,
+} from "../../shipping-engine/application/fulfillment-routing.service";
+import type {
+  FulfillmentRouteResolution,
+} from "../../shipping-engine/domain/fulfillment-routing";
+import {
+  PostgresFulfillmentRoutingStore,
+} from "../../shipping-engine/infrastructure/fulfillment-routing.repository";
 import {
   DropshipEbayFulfillmentCapabilityService,
   type DropshipCarrierServiceCapability,
   type DropshipCarrierServiceCapabilityProvider,
+  type DropshipCarrierServiceCapabilitySnapshot,
   type DropshipEbayInternalFulfillmentEvidence,
   type DropshipEbayInternalFulfillmentEvidenceRepository,
 } from "../application/dropship-ebay-fulfillment-capability-service";
@@ -20,7 +26,6 @@ const DROPSHIP_RATE_CONTEXT = {
   pricingChannel: "dropship",
   purpose: "vendor_fulfillment_charge",
 } as const;
-const MAX_CONNECTED_CARRIERS = 100;
 
 interface StoreConfigRow {
   config: Record<string, unknown> | null;
@@ -40,6 +45,7 @@ interface RateBookAssignmentRow {
 
 interface RateTableRow {
   rate_table_id: number;
+  service_level_id: number;
 }
 
 interface CoverageDestinationRow {
@@ -70,57 +76,64 @@ implements DropshipEbayInternalFulfillmentEvidenceRepository {
   }
 }
 
-export class ShipStationDropshipCarrierServiceCapabilityProvider
+interface FulfillmentRoutingResolverPort {
+  resolve(input: {
+    serviceLevelId: number;
+    scope: "domestic" | "international";
+  }): Promise<FulfillmentRouteResolution>;
+}
+
+export class FulfillmentRoutingDropshipCarrierServiceCapabilityProvider
 implements DropshipCarrierServiceCapabilityProvider {
   constructor(
-    private readonly adapter: ShipStationV2RatingAdapter =
-      createShipStationV2RatingAdapter(),
+    private readonly resolver: FulfillmentRoutingResolverPort =
+      new FulfillmentRoutingResolver(new PostgresFulfillmentRoutingStore()),
   ) {}
 
-  async listServices(): Promise<DropshipCarrierServiceCapability[]> {
+  async listServices(input: {
+    serviceLevelId: number;
+  }): Promise<DropshipCarrierServiceCapabilitySnapshot> {
+    let resolution: FulfillmentRouteResolution;
     try {
-      const carriersResult = await this.adapter.listCarriers();
-      if (!carriersResult.configured) {
-        throw new DropshipError(
-          "DROPSHIP_EBAY_FULFILLMENT_SHIPSTATION_REQUIRED",
-          "ShipStation v2 credentials are required to verify eBay fulfillment services.",
-          { env: "SHIPSTATION_V2_API_KEY", retryable: false },
-        );
-      }
-      if (carriersResult.carriers.length > MAX_CONNECTED_CARRIERS) {
-        throw new DropshipError(
-          "DROPSHIP_EBAY_FULFILLMENT_SHIPSTATION_INVALID_RESPONSE",
-          "ShipStation returned too many connected carriers.",
-          { carrierCount: carriersResult.carriers.length, retryable: false },
-        );
-      }
-      const results = await Promise.all(
-        carriersResult.carriers.map((carrier) => this.adapter.listCarrierServices(carrier)),
-      );
-      const services = results.flatMap((result) => (
-        result.configured ? result.services : []
-      ));
-      return services.map((service) => ({
-        carrierCode: service.carrierCode,
-        serviceCode: service.serviceCode,
-        serviceName: service.serviceName,
-        domestic: service.domestic,
-      }));
+      resolution = await this.resolver.resolve({
+        serviceLevelId: input.serviceLevelId,
+        scope: "domestic",
+      });
     } catch (error) {
       if (error instanceof DropshipError) throw error;
-      if (error instanceof ShipStationV2Error) {
-        throw new DropshipError(
-          "DROPSHIP_EBAY_FULFILLMENT_SHIPSTATION_UNAVAILABLE",
-          "ShipStation carrier capabilities could not be verified.",
-          {
-            providerCode: error.code,
-            retryable: true,
-            ...safeShipStationContext(error.context),
-          },
-        );
-      }
-      throw error;
+      throw new DropshipError(
+        "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE",
+        "Card Shellz fulfillment routing could not be verified.",
+        {
+          serviceLevelId: input.serviceLevelId,
+          routingCode: error instanceof FulfillmentRoutingError ? error.code : null,
+          retryable: !(error instanceof FulfillmentRoutingError),
+        },
+      );
     }
+    if (!resolution.ok) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_FULFILLMENT_ROUTING_REQUIRED",
+        "Standard Shipping needs at least one allowed domestic fulfillment method before eBay policies can be validated.",
+        {
+          serviceLevelId: input.serviceLevelId,
+          routingCode: resolution.code,
+          routingRevision: resolution.profileRevision,
+          retryable: false,
+        },
+      );
+    }
+    return {
+      serviceLevelId: resolution.serviceLevelId,
+      routingRevision: resolution.profileRevision,
+      services: resolution.candidates.map((method): DropshipCarrierServiceCapability => ({
+        provider: method.provider,
+        carrierCode: method.carrierCode,
+        serviceCode: method.serviceCode,
+        serviceName: method.serviceName,
+        domestic: method.domestic,
+      })),
+    };
   }
 }
 
@@ -128,7 +141,7 @@ export function createDropshipEbayFulfillmentCapabilityProviderFromEnv():
 DropshipEbayFulfillmentCapabilityService {
   return new DropshipEbayFulfillmentCapabilityService({
     evidence: new PgDropshipEbayInternalFulfillmentEvidenceRepository(),
-    carrierServices: new ShipStationDropshipCarrierServiceCapabilityProvider(),
+    carrierServices: new FulfillmentRoutingDropshipCarrierServiceCapabilityProvider(),
   });
 }
 
@@ -226,7 +239,8 @@ async function loadEvidenceWithClient(
   }
 
   const tableResult = await client.query<RateTableRow>(
-    `SELECT rate_table.id AS rate_table_id
+    `SELECT rate_table.id AS rate_table_id,
+            rate_table.service_level_id
      FROM shipping.rate_tables rate_table
      JOIN shipping.service_levels service_level
        ON service_level.id = rate_table.service_level_id
@@ -251,7 +265,8 @@ async function loadEvidenceWithClient(
       },
     );
   }
-  const rateTableId = tableResult.rows[0].rate_table_id;
+  const rateTable = tableResult.rows[0];
+  const rateTableId = rateTable.rate_table_id;
   const coverageResult = await client.query<CoverageDestinationRow>(
     `SELECT DISTINCT destination.destination_country,
                      destination.destination_region
@@ -283,6 +298,7 @@ async function loadEvidenceWithClient(
     rateBookId: selectedAssignment.assignment.rateBookId,
     rateBookCode: selectedAssignment.assignment.rateBookCode,
     rateTableId,
+    serviceLevelId: rateTable.service_level_id,
     offeredDestinations: coverageResult.rows.map((row) => ({
       country: row.destination_country,
       region: row.destination_region,
@@ -319,14 +335,4 @@ function nestedConfigValue(
   return parent && typeof parent === "object" && !Array.isArray(parent)
     ? (parent as Record<string, unknown>)[childKey]
     : undefined;
-}
-
-function safeShipStationContext(
-  context: Record<string, unknown>,
-): Record<string, unknown> {
-  const safe: Record<string, unknown> = {};
-  for (const key of ["method", "path", "status"] as const) {
-    if (context[key] !== undefined) safe[key] = context[key];
-  }
-  return safe;
 }

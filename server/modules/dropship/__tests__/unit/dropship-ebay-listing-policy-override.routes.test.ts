@@ -137,6 +137,37 @@ describe("dropship eBay listing policy override routes", () => {
     });
   });
 
+  it("preserves missing fulfillment routing as an actionable 409 response", async () => {
+    service.listError = new DropshipError(
+      "DROPSHIP_EBAY_FULFILLMENT_ROUTING_REQUIRED",
+      "Standard Shipping needs at least one allowed domestic fulfillment method before eBay policies can be validated.",
+      {
+        serviceLevelId: 7,
+        routingCode: "SHIPPING_FULFILLMENT_ROUTING_NO_ELIGIBLE_METHODS",
+        routingRevision: 4,
+        retryable: false,
+      },
+    );
+    server = await startServer(buildApp(service, true));
+
+    const response = await jsonRequest(
+      `${server.url}/api/dropship/ebay/listing-policy-overrides/44`,
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      error: {
+        code: "DROPSHIP_EBAY_FULFILLMENT_ROUTING_REQUIRED",
+        context: {
+          serviceLevelId: 7,
+          routingCode: "SHIPPING_FULFILLMENT_ROUTING_NO_ELIGIBLE_METHODS",
+          routingRevision: 4,
+          retryable: false,
+        },
+      },
+    });
+  });
+
   it("returns 409 with revision evidence for an optimistic concurrency conflict", async () => {
     service.replaceError = new DropshipError(
       "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_VERSION_CONFLICT",
