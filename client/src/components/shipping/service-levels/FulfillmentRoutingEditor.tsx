@@ -16,21 +16,20 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
 import {
   fulfillmentRoutingKey,
   loadFulfillmentRouting,
   saveFulfillmentRouting,
 } from "./api";
-import {
-  groupFulfillmentCatalogMethodsByScope,
-  type FulfillmentCatalogDestinationScope,
-} from "./fulfillment-catalog-display";
+import { groupFulfillmentCatalogMethodsByScope } from "./fulfillment-catalog-display";
 import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
   CheckCircle2,
+  Info,
   Loader2,
   RefreshCw,
   Save,
@@ -281,36 +280,43 @@ export function FulfillmentRoutingEditor({
             from first choice to last fallback. Checkout prices are configured separately.
           </p>
         </div>
-        <div className="divide-y rounded-md border">
+        <div
+          className="max-h-56 divide-y overflow-y-auto rounded-md border"
+          role="list"
+          aria-label="Selected routing methods"
+        >
           {selectedRows.length === 0 ? (
             <p className="p-4 text-sm text-muted-foreground">
               No provider method is currently allowed for this service level.
             </p>
           ) : selectedRows.map((row, index) => (
-            <div key={methodKey(row.identity)} className="flex flex-wrap items-center gap-3 p-3">
-              <Badge variant="outline" className="w-8 justify-center">{index + 1}</Badge>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium">
+            <div
+              key={methodKey(row.identity)}
+              className="flex min-h-10 items-center gap-2 px-2 py-1.5"
+              role="listitem"
+            >
+              <Badge variant="outline" className="h-6 w-6 shrink-0 justify-center p-0">
+                {index + 1}
+              </Badge>
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <p className="min-w-0 truncate text-sm font-medium">
                   {row.method?.serviceName ?? row.identity.serviceCode}
                 </p>
-                <p className="truncate text-xs text-muted-foreground">
-                  {row.method
-                    ? `${row.method.carrierName} · ${row.method.providerConnectionName} · ${row.method.providerAccountName}`
-                    : `Connection ${row.identity.providerConnectionId} · ${row.identity.providerAccountId} · ${row.identity.serviceCode}`}
-                </p>
                 {row.method && (
-                  <div className="mt-1 space-y-1">
-                    <MethodScopeBadges method={row.method} />
-                    <MethodCapabilitySummary capabilities={row.method.capabilities} />
-                  </div>
+                  <span className="hidden max-w-48 truncate text-xs text-muted-foreground md:inline">
+                    {row.method.providerAccountName}
+                  </span>
                 )}
+                {row.method && <MethodScopeBadges method={row.method} />}
               </div>
               {!row.available && <Badge variant="destructive">No longer available</Badge>}
-              <div className="flex items-center gap-1">
+              <MethodDetailsPopover identity={row.identity} method={row.method} />
+              <div className="flex shrink-0 items-center gap-0.5">
                 <Button
                   type="button"
                   size="icon"
                   variant="ghost"
+                  className="h-7 w-7"
                   disabled={index === 0 || saveMutation.isPending}
                   onClick={() => setSelected(move(selected, index, index - 1))}
                   aria-label={`Move ${row.method?.serviceName ?? row.identity.serviceCode} up`}
@@ -321,6 +327,7 @@ export function FulfillmentRoutingEditor({
                   type="button"
                   size="icon"
                   variant="ghost"
+                  className="h-7 w-7"
                   disabled={index === selectedRows.length - 1 || saveMutation.isPending}
                   onClick={() => setSelected(move(selected, index, index + 1))}
                   aria-label={`Move ${row.method?.serviceName ?? row.identity.serviceCode} down`}
@@ -331,6 +338,7 @@ export function FulfillmentRoutingEditor({
                   type="button"
                   size="icon"
                   variant="ghost"
+                  className="h-7 w-7"
                   disabled={saveMutation.isPending}
                   onClick={() => setSelected(selected.filter((_, candidate) => candidate !== index))}
                   aria-label={`Remove ${row.method?.serviceName ?? row.identity.serviceCode}`}
@@ -420,16 +428,18 @@ export function FulfillmentRoutingEditor({
                     </Badge>
                   </div>
                   <div className="divide-y">
-                    {group.methods.map((method) => {
+                    {group.methods.map((method, methodIndex) => {
                       const key = methodKey(method);
                       const checked = selectedKeys.has(key);
+                      const checkboxId = `catalog-method-${group.scope}-${method.providerConnectionId}-${methodIndex}`;
                       return (
-                        <label
+                        <div
                           key={key}
-                          className="flex cursor-pointer items-start gap-3 p-3 hover:bg-muted/40"
+                          className="flex min-h-10 items-center gap-2 px-3 py-1.5 hover:bg-muted/40"
                         >
                           <Checkbox
-                            className="mt-0.5"
+                            id={checkboxId}
+                            className="shrink-0"
                             checked={checked}
                             disabled={saveMutation.isPending}
                             onCheckedChange={(next) => {
@@ -441,18 +451,19 @@ export function FulfillmentRoutingEditor({
                             }}
                             aria-label={`Allow ${method.serviceName} for ${group.label.toLowerCase()} destinations from ${method.providerAccountName}`}
                           />
-                          <div className="min-w-0 flex-1 space-y-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-sm font-medium">{method.serviceName}</span>
-                              <CrossScopeBadge method={method} displayedScope={group.scope} />
-                            </div>
-                            <p className="text-xs text-muted-foreground">
-                              {method.carrierName} · {method.providerConnectionName}
-                              {" · "}{method.providerAccountName} · {method.serviceCode}
-                            </p>
-                            <MethodCapabilitySummary capabilities={method.capabilities} />
+                          <div className="flex min-w-0 flex-1 items-center gap-2">
+                            <Label
+                              htmlFor={checkboxId}
+                              className="min-w-0 cursor-pointer truncate text-sm font-medium"
+                            >
+                              {method.serviceName}
+                            </Label>
+                            <span className="hidden max-w-56 truncate text-xs text-muted-foreground md:inline">
+                              {method.carrierName} · {method.providerAccountName}
+                            </span>
                           </div>
-                        </label>
+                          <MethodDetailsPopover identity={method} method={method} />
+                        </div>
                       );
                     })}
                   </div>
@@ -569,21 +580,6 @@ function MethodScopeBadges({
   );
 }
 
-function CrossScopeBadge({
-  method,
-  displayedScope,
-}: {
-  method: Pick<ShippingFulfillmentMethodIdentity, "domestic" | "international">;
-  displayedScope: FulfillmentCatalogDestinationScope;
-}) {
-  if (!method.domestic || !method.international) return null;
-  return (
-    <Badge variant="secondary">
-      Also {displayedScope === "domestic" ? "international" : "domestic"}
-    </Badge>
-  );
-}
-
 function CatalogRefreshButton({
   pending,
   onRefresh,
@@ -606,6 +602,55 @@ function CatalogRefreshButton({
 function formatCatalogFetchedAt(value: string): string {
   const timestamp = new Date(value);
   return Number.isNaN(timestamp.getTime()) ? "unknown time" : timestamp.toLocaleString();
+}
+
+function MethodDetailsPopover({
+  identity,
+  method,
+}: {
+  identity: ShippingFulfillmentMethodIdentity;
+  method: ShippingFulfillmentCatalogMethod | ShippingFulfillmentRouteMethod | null;
+}) {
+  const serviceName = method?.serviceName ?? identity.serviceCode;
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          className="h-7 w-7 shrink-0"
+          aria-label={`View details for ${serviceName}`}
+        >
+          <Info className="h-4 w-4" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80 space-y-3">
+        <div>
+          <p className="text-sm font-medium">{serviceName}</p>
+          <p className="text-xs text-muted-foreground">Exact provider routing identity</p>
+        </div>
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
+          <dt className="text-muted-foreground">Carrier</dt>
+          <dd className="truncate">{method?.carrierName ?? "Not captured"}</dd>
+          <dt className="text-muted-foreground">Connection</dt>
+          <dd className="truncate">
+            {method?.providerConnectionName ?? `Connection ${identity.providerConnectionId}`}
+          </dd>
+          <dt className="text-muted-foreground">Account</dt>
+          <dd className="truncate">{method?.providerAccountName ?? identity.providerAccountId}</dd>
+          <dt className="text-muted-foreground">Service code</dt>
+          <dd className="break-all font-mono">{identity.serviceCode}</dd>
+          <dt className="text-muted-foreground">Destinations</dt>
+          <dd>{shippingFulfillmentMethodScopeLabel(identity)}</dd>
+        </dl>
+        <div className="space-y-1 border-t pt-3">
+          <p className="text-xs font-medium">Provider capabilities</p>
+          <MethodCapabilitySummary capabilities={method?.capabilities ?? null} />
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 function MethodCapabilitySummary({

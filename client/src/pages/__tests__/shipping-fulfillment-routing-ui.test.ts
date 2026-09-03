@@ -32,6 +32,11 @@ describe("shipping fulfillment routing admin UI", () => {
     expect(editor).toContain("Domestic");
     expect(editor).toContain("International");
     expect(editor).not.toContain("variant</span>");
+    expect(editor).toContain('aria-label="Selected routing methods"');
+    expect(editor).toContain("max-h-56 divide-y overflow-y-auto rounded-md border");
+    expect(editor).toContain("Exact provider routing identity");
+    expect(editor).toContain("Provider capabilities");
+    expect(editor).not.toContain("<MethodCapabilitySummary capabilities={row.method.capabilities} />");
     expect(editor).toContain("Provider catalog refreshed");
     expect(editor).toContain("Refreshing catalog...");
     expect(editor).toContain("Last provider refresh:");
