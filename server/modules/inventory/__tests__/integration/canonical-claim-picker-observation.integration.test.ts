@@ -153,9 +153,12 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
         source_state varchar(30),
         target_state varchar(30),
         unit_cost_cents numeric(10,4),
+        unit_cost_mills bigint,
+        total_cost_mills bigint,
         inventory_lot_id integer,
         order_id integer,
         order_item_id integer,
+        cycle_count_id integer,
         reference_type varchar(50),
         reference_id varchar(300),
         user_id varchar(100),
@@ -430,5 +433,116 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
         shipmentBlocking: false,
       }),
     })]);
+  });
+
+  it("commits a counted shortage from unreserved FIFO layers with exact item lineage", async () => {
+    await pool.query(`
+      INSERT INTO "${schemas.inventory}".inventory_levels (
+        id, product_variant_id, warehouse_location_id, variant_qty, reserved_qty, updated_at
+      ) VALUES (21, 205, 4, 10, 4, '${OCCURRED_AT.toISOString()}');
+      INSERT INTO "${schemas.inventory}".inventory_lots (
+        id, lot_number, product_variant_id, warehouse_location_id,
+        unit_cost_cents, po_unit_cost_cents, total_unit_cost_cents,
+        unit_cost_mills, po_unit_cost_mills, total_unit_cost_mills,
+        qty_received, qty_on_hand, qty_reserved, received_at, status,
+        cost_provisional, cost_source, created_at
+      ) VALUES
+        (61, 'COUNT-61', 205, 4, 1.25, 1.25, 1.25, 125, 125, 125,
+         6, 6, 4, '${OCCURRED_AT.toISOString()}', 'active', 0, 'purchase_order', '${OCCURRED_AT.toISOString()}'),
+        (62, 'COUNT-62', 205, 4, 2.00, 2.00, 2.00, 200, 200, 200,
+         4, 4, 0, '${OCCURRED_AT.toISOString()}', 'active', 0, 'purchase_order', '${OCCURRED_AT.toISOString()}');
+    `);
+    const client = await pool.connect();
+    const rewritingClient = {
+      query: (text: string, values?: unknown[]) => client.query(qualify(text), values),
+    };
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+    let adjustmentTransactionId: number;
+    try {
+      await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+      const result = await repository.applyCycleCountAdjustment({
+        client: rewritingClient,
+        inventoryLevelId: 21,
+        productVariantId: 205,
+        warehouseLocationId: 4,
+        quantityBefore: 10,
+        countedQty: 6,
+        cycleCountId: 8,
+        cycleCountItemId: 81,
+        actor: "integration-test",
+        reason: "verified physical count",
+        occurredAt: OCCURRED_AT,
+      });
+      adjustmentTransactionId = result.adjustmentTransactionId;
+      expect(result).toMatchObject({ consumedQty: BigInt(4), consumedCostMills: BigInt(650) });
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    const level = await pool.query<{ variant_qty: number; reserved_qty: number }>(
+      `SELECT variant_qty, reserved_qty
+       FROM "${schemas.inventory}".inventory_levels WHERE id = 21`,
+    );
+    expect(level.rows).toEqual([{ variant_qty: 6, reserved_qty: 4 }]);
+    const lots = await pool.query<{ id: number; qty_on_hand: number; qty_reserved: number }>(
+      `SELECT id, qty_on_hand, qty_reserved
+       FROM "${schemas.inventory}".inventory_lots WHERE id IN (61, 62) ORDER BY id`,
+    );
+    expect(lots.rows).toEqual([
+      { id: 61, qty_on_hand: 4, qty_reserved: 4 },
+      { id: 62, qty_on_hand: 2, qty_reserved: 0 },
+    ]);
+    const ledger = await pool.query<{
+      id: string;
+      from_location_id: number;
+      variant_qty_delta: number;
+      variant_qty_before: number;
+      variant_qty_after: number;
+      inventory_lot_id: number;
+      unit_cost_mills: string;
+      total_cost_mills: string;
+      cycle_count_id: number;
+      reference_type: string;
+      reference_id: string;
+    }>(
+      `SELECT id, from_location_id, variant_qty_delta, variant_qty_before,
+              variant_qty_after, inventory_lot_id, unit_cost_mills,
+              total_cost_mills, cycle_count_id, reference_type, reference_id
+       FROM "${schemas.inventory}".inventory_transactions
+       WHERE cycle_count_id = 8 AND reference_type = 'cycle_count_item'
+         AND reference_id = '81'
+       ORDER BY id`,
+    );
+    expect(Number(ledger.rows[0]?.id)).toBe(adjustmentTransactionId!);
+    expect(ledger.rows).toEqual([
+      expect.objectContaining({
+        from_location_id: 4,
+        variant_qty_delta: -2,
+        variant_qty_before: 10,
+        variant_qty_after: 8,
+        inventory_lot_id: 61,
+        unit_cost_mills: "125",
+        total_cost_mills: "250",
+        cycle_count_id: 8,
+        reference_type: "cycle_count_item",
+        reference_id: "81",
+      }),
+      expect.objectContaining({
+        from_location_id: 4,
+        variant_qty_delta: -2,
+        variant_qty_before: 8,
+        variant_qty_after: 6,
+        inventory_lot_id: 62,
+        unit_cost_mills: "200",
+        total_cost_mills: "400",
+        cycle_count_id: 8,
+        reference_type: "cycle_count_item",
+        reference_id: "81",
+      }),
+    ]);
   });
 });

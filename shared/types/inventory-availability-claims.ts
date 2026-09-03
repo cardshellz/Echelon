@@ -6,6 +6,8 @@ const positiveInteger = z.number().int().positive().max(2_147_483_647);
 const nonblank = (maximum: number) => z.string().trim().min(1).max(maximum);
 const positiveBigintString = z.string().regex(/^[1-9][0-9]*$/);
 const nonnegativeBigintString = z.string().regex(/^(0|[1-9][0-9]*)$/);
+const postgresInteger = z.number().int().min(-2_147_483_648).max(2_147_483_647);
+const nonnegativePostgresInteger = z.number().int().nonnegative().max(2_147_483_647);
 
 export const canonicalAvailabilityClaimCommandSchema = z.object({
   orderId: positiveInteger,
@@ -111,6 +113,31 @@ export const canonicalAvailabilityClaimUnpickCommandSchema = z.object({
   idempotencyKey: nonblank(120),
   actor: nonblank(100),
   reason: nonblank(1000),
+}).strict();
+
+export const canonicalAvailabilityCycleCountReconciliationCommandSchema = z.object({
+  cycleCountId: positiveInteger,
+  cycleCountItemId: positiveInteger,
+  productVariantId: positiveInteger,
+  warehouseLocationId: positiveInteger,
+  countedQty: nonnegativePostgresInteger,
+  reasonCode: nonblank(50),
+  actor: nonblank(100),
+  reason: nonblank(1000),
+}).strict();
+
+export const canonicalAvailabilityCycleCountReconciliationResultSchema = z.object({
+  outcome: z.literal("cycle_count_reconciled"),
+  cycleCountId: positiveInteger,
+  cycleCountItemId: positiveInteger,
+  productVariantId: positiveInteger,
+  warehouseLocationId: positiveInteger,
+  quantityBefore: nonnegativePostgresInteger,
+  quantityAfter: nonnegativePostgresInteger,
+  quantityDelta: postgresInteger,
+  adjustmentTransactionId: positiveInteger.nullable(),
+  displacedOrderIds: z.array(positiveInteger).max(1000),
+  idempotentReplay: z.boolean(),
 }).strict();
 
 export const canonicalAvailabilityClaimPickResultSchema = z.discriminatedUnion("outcome", [
@@ -261,4 +288,10 @@ export type CanonicalAvailabilityClaimUnpickCommand = z.infer<
 >;
 export type CanonicalAvailabilityClaimPickResult = z.infer<
   typeof canonicalAvailabilityClaimPickResultSchema
+>;
+export type CanonicalAvailabilityCycleCountReconciliationCommand = z.infer<
+  typeof canonicalAvailabilityCycleCountReconciliationCommandSchema
+>;
+export type CanonicalAvailabilityCycleCountReconciliationResult = z.infer<
+  typeof canonicalAvailabilityCycleCountReconciliationResultSchema
 >;

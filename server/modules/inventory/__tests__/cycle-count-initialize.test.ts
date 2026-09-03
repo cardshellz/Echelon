@@ -33,6 +33,7 @@ function makeService({
     {} as any,
     {} as any,
     storage as any,
+    {} as any,
   );
 
   return { db, service, storage };

@@ -38,6 +38,7 @@ function makeService(options?: {
     {} as any,
     replenishment as any,
     storage as any,
+    {} as any,
   );
 
   return { db, replenishment, service, storage };

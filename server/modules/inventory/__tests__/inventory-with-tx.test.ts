@@ -87,13 +87,20 @@ describe("InventoryUseCases.withTx", () => {
       where: vi.fn().mockReturnThis(),
       limit: vi.fn().mockResolvedValue([{ cycleCountFreezeId: null }]),
     };
-    const tx = { select: vi.fn(() => unfrozenSelectChain) };
+    const tx = {
+      select: vi.fn(() => unfrozenSelectChain),
+      update: vi.fn(),
+      insert: vi.fn(),
+      execute: vi.fn(),
+    };
     const rootDb = {
       select: vi.fn(() => unfrozenSelectChain),
       update: vi.fn(),
       insert: vi.fn(),
       execute: vi.fn(),
-      transaction: vi.fn(async (fn: (tx: any) => Promise<unknown>) => fn(tx)),
+      transaction: vi.fn(async () => {
+        throw new Error("root transaction should not be opened by tx-bound clone");
+      }),
     };
 
     const storage = {
@@ -117,6 +124,7 @@ describe("InventoryUseCases.withTx", () => {
       }),
       createInventoryTransaction: vi.fn(async (_txn: any, activeTx: any) => {
         expect(activeTx).toBe(tx);
+        return { id: 901 };
       }),
     } as any;
     const adjustLots = vi.fn(async () => ({ consumedCostCents: 0, consumedQty: 0 }));
@@ -128,15 +136,23 @@ describe("InventoryUseCases.withTx", () => {
     };
 
     const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any);
+    const inventoryChanged = vi.fn();
+    inventory.onInventoryChange(inventoryChanged);
+    const txBoundInventory = inventory.withTx(tx);
+    const postCommitEffects: Array<() => Promise<void>> = [];
 
-    const result = await inventory.adjustInventory({
+    const result = await txBoundInventory.adjustInventory({
       productVariantId: 30,
       warehouseLocationId: 20,
       qtyDelta: -5,
       reason: "cycle count correction",
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      deferUntilCommit: (effect) => postCommitEffects.push(effect),
     });
 
-    expect(result).toMatchObject({ orphanedQty: 3 });
+    expect(result).toMatchObject({ orphanedQty: 3, adjustmentTransactionId: 901 });
+    expect(rootDb.transaction).not.toHaveBeenCalled();
     expect(storage.adjustInventoryLevel).toHaveBeenCalledWith(
       10,
       { variantQty: -5, reservedQty: -3 },
@@ -149,5 +165,16 @@ describe("InventoryUseCases.withTx", () => {
       reservedQtyDelta: -3,
       notes: "cycle count correction",
     });
+    expect(storage.createInventoryTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cycleCountId: 8,
+        referenceType: "cycle_count_item",
+        referenceId: "81",
+      }),
+      tx,
+    );
+    expect(inventoryChanged).not.toHaveBeenCalled();
+    await postCommitEffects[0]!();
+    expect(inventoryChanged).toHaveBeenCalledWith(30, "adjustment");
   });
 });

@@ -394,6 +394,8 @@ CREATE TABLE inventory.inventory_transactions (
   source_state varchar(20),
   target_state varchar(20),
   unit_cost_cents bigint,
+  unit_cost_mills bigint,
+  total_cost_mills bigint,
   inventory_lot_id integer,
   order_id integer REFERENCES wms.orders(id),
   order_item_id integer REFERENCES wms.order_items(id),

@@ -11,6 +11,12 @@ import {
 import type { VariantAtp } from "../inventory/atp.service";
 import type { ProductInventoryStrategy } from "@shared/catalog/inventory-strategy";
 import {
+  canonicalAvailabilityCycleCountReconciliationCommandSchema,
+  canonicalAvailabilityCycleCountReconciliationResultSchema,
+  type CanonicalAvailabilityCycleCountReconciliationCommand,
+  type CanonicalAvailabilityCycleCountReconciliationResult,
+} from "@shared/types/inventory-availability-claims";
+import {
   isCustomerSellableVariant,
   VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE,
 } from "@shared/catalog/variant-sales-eligibility";
@@ -151,6 +157,14 @@ export interface ReconcileRefundOrderDemandResult {
   releasedReservationQuantity: number;
 }
 
+export interface ReconcileCycleCountInventoryCommand
+extends CanonicalAvailabilityCycleCountReconciliationCommand {
+  /** Internal transaction propagation used by the authority-aware runtime adapter. */
+  dbOverride?: any;
+  /** Internal hook used to defer channel sync until the authority transaction commits. */
+  deferUntilCommit?: (effect: () => Promise<void>) => void;
+}
+
 export interface OrderReservationStatus {
   sku: string;
   orderItemId: number;
@@ -193,12 +207,16 @@ export interface ReservationServiceContract {
   reconcileRefundOrderDemand(
     command: ReconcileRefundOrderDemandCommand,
   ): Promise<ReconcileRefundOrderDemandResult>;
+  reconcileCycleCountInventory(
+    command: ReconcileCycleCountInventoryCommand,
+  ): Promise<CanonicalAvailabilityCycleCountReconciliationResult>;
   reallocateOrphaned(
     productVariantId: number,
     warehouseLocationId: number,
     userId?: string,
     orphanedQty?: number,
     dbOverride?: any,
+    deferUntilCommit?: (effect: () => Promise<void>) => void,
   ): Promise<{ released: number; reallocated: number; failed: number }>;
   getOrderReservationStatus(orderId: number, dbOverride?: any): Promise<OrderReservationStatus[]>;
   autoReserveOnSync(
@@ -231,6 +249,7 @@ class ReservationService implements ReservationServiceContract {
     private readonly channelSync: ChannelSync,
     private readonly atpService: AtpService,
     private readonly recipeBuildPromise?: RecipeBuildPromise,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -1216,6 +1235,7 @@ class ReservationService implements ReservationServiceContract {
     userId?: string,
     orphanedQty?: number,
     dbOverride?: any,
+    deferUntilCommit?: (effect: () => Promise<void>) => void,
   ): Promise<{ released: number; reallocated: number; failed: number }> {
     const dbh = dbOverride ?? this.db;
     const result = { released: 0, reallocated: 0, failed: 0 };
@@ -1392,10 +1412,215 @@ class ReservationService implements ReservationServiceContract {
     }
 
     // Fire channel sync after reallocation
-    this.channelSync.queueSyncAfterInventoryChange(productVariantId).catch((err: any) =>
+    const syncAfterCommit = () => this.channelSync.queueSyncAfterInventoryChange(productVariantId);
+    if (deferUntilCommit) deferUntilCommit(syncAfterCommit);
+    else syncAfterCommit().catch((err: any) =>
       console.warn(`[ChannelSync] Post-reallocation sync failed for variant ${productVariantId}:`, err),
     );
 
+    return result;
+  }
+
+  async reconcileCycleCountInventory(
+    rawCommand: ReconcileCycleCountInventoryCommand,
+  ): Promise<CanonicalAvailabilityCycleCountReconciliationResult> {
+    const command = canonicalAvailabilityCycleCountReconciliationCommandSchema.parse({
+      cycleCountId: rawCommand.cycleCountId,
+      cycleCountItemId: rawCommand.cycleCountItemId,
+      productVariantId: rawCommand.productVariantId,
+      warehouseLocationId: rawCommand.warehouseLocationId,
+      countedQty: rawCommand.countedQty,
+      reasonCode: rawCommand.reasonCode,
+      actor: rawCommand.actor,
+      reason: rawCommand.reason,
+    });
+    if (rawCommand.dbOverride != null && typeof rawCommand.deferUntilCommit !== "function") {
+      throw new Error(
+        "A cycle-count reconciliation inside a caller-owned transaction requires a post-commit effect registrar",
+      );
+    }
+    if (rawCommand.dbOverride == null && rawCommand.deferUntilCommit != null) {
+      throw new Error("deferUntilCommit is only valid with a caller-owned transaction");
+    }
+    const postCommitEffects: Array<() => Promise<void>> = [];
+    const deferUntilCommit = rawCommand.dbOverride == null
+      ? (effect: () => Promise<void>) => postCommitEffects.push(effect)
+      : rawCommand.deferUntilCommit!;
+    const occurredAt = this.clock();
+    if (Number.isNaN(occurredAt.getTime())) throw new Error("Cycle-count reconciliation clock is invalid");
+    const reconcile = async (dbh: any): Promise<CanonicalAvailabilityCycleCountReconciliationResult> => {
+      const cycleCountResult = await dbh.execute(sql`
+        SELECT id, status
+        FROM inventory.cycle_counts
+        WHERE id = ${command.cycleCountId}
+        FOR UPDATE
+      `);
+      const cycleCount = cycleCountResult.rows[0] as any;
+      if (!cycleCount) throw new Error(`Cycle count ${command.cycleCountId} not found`);
+      const itemResult = await dbh.execute(sql`
+        SELECT id, cycle_count_id, warehouse_location_id, product_variant_id,
+               counted_qty, status, adjustment_transaction_id
+        FROM inventory.cycle_count_items
+        WHERE id = ${command.cycleCountItemId}
+        FOR UPDATE
+      `);
+      const item = itemResult.rows[0] as any;
+      if (!item) throw new Error(`Cycle count item ${command.cycleCountItemId} not found`);
+      if (Number(item.cycle_count_id) !== command.cycleCountId
+        || Number(item.warehouse_location_id) !== command.warehouseLocationId
+        || Number(item.product_variant_id) !== command.productVariantId
+        || Number(item.counted_qty) !== command.countedQty) {
+        throw new Error(`Cycle count item ${command.cycleCountItemId} no longer matches the submitted reconciliation`);
+      }
+      if (String(item.status) !== "approved" && String(cycleCount.status) !== "in_progress") {
+        throw new Error(
+          `Cycle count ${command.cycleCountId} is not reconcilable from status ${cycleCount.status}`,
+        );
+      }
+
+      if (String(item.status) === "approved") {
+        let quantityBefore = command.countedQty;
+        let quantityAfter = command.countedQty;
+        let quantityDelta = 0;
+        const adjustmentTransactionId = item.adjustment_transaction_id == null
+          ? null
+          : Number(item.adjustment_transaction_id);
+        if (adjustmentTransactionId == null) {
+          throw new Error(
+            `Approved cycle count item ${command.cycleCountItemId} has no durable adjustment or no-op evidence`,
+          );
+        }
+        {
+          const transactionResult = await dbh.execute(sql`
+            SELECT variant_qty_before, variant_qty_after, variant_qty_delta,
+                   product_variant_id, from_location_id, to_location_id,
+                   transaction_type, cycle_count_id, reference_type, reference_id
+            FROM inventory.inventory_transactions
+            WHERE id = ${adjustmentTransactionId}
+            FOR SHARE
+          `);
+          const transaction = transactionResult.rows[0] as any;
+          if (!transaction
+            || String(transaction.transaction_type) !== "adjustment"
+            || Number(transaction.product_variant_id) !== command.productVariantId
+            || Number(transaction.cycle_count_id) !== command.cycleCountId
+            || !(
+              (String(transaction.reference_type) === "cycle_count_item"
+                && String(transaction.reference_id) === String(command.cycleCountItemId))
+              || (String(transaction.reference_type) === "cycle_count"
+                && String(transaction.reference_id) === String(command.cycleCountId))
+            )) {
+            throw new Error(`Cycle count item ${command.cycleCountItemId} has invalid adjustment lineage`);
+          }
+          quantityBefore = Number(transaction.variant_qty_before);
+          quantityAfter = Number(transaction.variant_qty_after);
+          quantityDelta = Number(transaction.variant_qty_delta);
+          const expectedFromLocationId = quantityDelta < 0
+            ? command.warehouseLocationId : quantityDelta === 0 ? command.warehouseLocationId : null;
+          const expectedToLocationId = quantityDelta > 0
+            ? command.warehouseLocationId : quantityDelta === 0 ? command.warehouseLocationId : null;
+          if (!Number.isSafeInteger(quantityBefore)
+            || !Number.isSafeInteger(quantityAfter)
+            || !Number.isSafeInteger(quantityDelta)
+            || quantityAfter !== command.countedQty
+            || quantityBefore + quantityDelta !== quantityAfter
+            || (transaction.from_location_id == null ? null : Number(transaction.from_location_id)) !== expectedFromLocationId
+            || (transaction.to_location_id == null ? null : Number(transaction.to_location_id)) !== expectedToLocationId) {
+            throw new Error(`Cycle count item ${command.cycleCountItemId} has inconsistent adjustment quantities or location`);
+          }
+        }
+        return canonicalAvailabilityCycleCountReconciliationResultSchema.parse({
+          outcome: "cycle_count_reconciled",
+          cycleCountId: command.cycleCountId,
+          cycleCountItemId: command.cycleCountItemId,
+          productVariantId: command.productVariantId,
+          warehouseLocationId: command.warehouseLocationId,
+          quantityBefore,
+          quantityAfter,
+          quantityDelta,
+          adjustmentTransactionId,
+          displacedOrderIds: [],
+          idempotentReplay: true,
+        });
+      }
+      if (!["counted", "variance", "investigate"].includes(String(item.status))) {
+        throw new Error(`Cycle count item ${command.cycleCountItemId} is not approvable from status ${item.status}`);
+      }
+
+      const levelResult = await dbh.execute(sql`
+        SELECT id, variant_qty
+        FROM inventory.inventory_levels
+        WHERE product_variant_id = ${command.productVariantId}
+          AND warehouse_location_id = ${command.warehouseLocationId}
+        FOR UPDATE
+      `);
+      const quantityBefore = Number((levelResult.rows[0] as any)?.variant_qty ?? 0);
+      if (!Number.isSafeInteger(quantityBefore) || quantityBefore < 0) {
+        throw new Error(`Inventory level has invalid physical quantity for cycle count item ${command.cycleCountItemId}`);
+      }
+      const quantityDelta = command.countedQty - quantityBefore;
+      let adjustmentTransactionId: number | null = null;
+      const displacedOrderIds: number[] = [];
+      const inventory = this.inventoryCore.withTx(dbh);
+      if (quantityDelta !== 0) {
+        const adjustment = await inventory.adjustInventory({
+          productVariantId: command.productVariantId,
+          warehouseLocationId: command.warehouseLocationId,
+          qtyDelta: quantityDelta,
+          reason: command.reason,
+          cycleCountId: command.cycleCountId,
+          cycleCountItemId: command.cycleCountItemId,
+          userId: command.actor,
+          deferUntilCommit,
+        });
+        adjustmentTransactionId = adjustment.adjustmentTransactionId;
+        if (adjustment.orphanedQty > 0) {
+          await this.reallocateOrphaned(
+            command.productVariantId,
+            command.warehouseLocationId,
+            command.actor,
+            adjustment.orphanedQty,
+            dbh,
+            deferUntilCommit,
+          );
+        }
+      } else {
+        const noOp = await inventory.recordCycleCountReconciliationNoop({
+          productVariantId: command.productVariantId,
+          warehouseLocationId: command.warehouseLocationId,
+          countedQty: command.countedQty,
+          cycleCountId: command.cycleCountId,
+          cycleCountItemId: command.cycleCountItemId,
+          actor: command.actor,
+          reason: command.reason,
+        });
+        adjustmentTransactionId = noOp.adjustmentTransactionId;
+      }
+      await inventory.approveCycleCountItemReconciliation({
+        cycleCountItemId: command.cycleCountItemId,
+        expectedStatus: String(item.status),
+        actor: command.actor,
+        reasonCode: command.reasonCode,
+        adjustmentTransactionId,
+        occurredAt,
+      });
+      return canonicalAvailabilityCycleCountReconciliationResultSchema.parse({
+        outcome: "cycle_count_reconciled",
+        cycleCountId: command.cycleCountId,
+        cycleCountItemId: command.cycleCountItemId,
+        productVariantId: command.productVariantId,
+        warehouseLocationId: command.warehouseLocationId,
+        quantityBefore,
+        quantityAfter: command.countedQty,
+        quantityDelta,
+        adjustmentTransactionId,
+        displacedOrderIds,
+        idempotentReplay: false,
+      });
+    };
+    if (rawCommand.dbOverride != null) return reconcile(rawCommand.dbOverride);
+    const result = await this.db.transaction(reconcile);
+    for (const effect of postCommitEffects) await effect();
     return result;
   }
 
@@ -1617,6 +1842,7 @@ export function createReservationService(
   channelSync: any,
   atpService: any,
   recipeBuildPromise?: RecipeBuildPromise,
+  clock?: () => Date,
 ): ReservationServiceContract {
-  return new ReservationService(db, inventoryCore, channelSync, atpService, recipeBuildPromise);
+  return new ReservationService(db, inventoryCore, channelSync, atpService, recipeBuildPromise, clock);
 }

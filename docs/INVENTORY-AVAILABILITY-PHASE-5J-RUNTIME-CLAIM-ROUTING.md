@@ -2,7 +2,8 @@
 
 > Phase 5K subsequently closes the atomic accepted-order demand-reconciliation
 > blocker described below. Phase 5L closes the Shopify refund-grouping blocker.
-> The other activation blockers remain in force.
+> Phase 5M closes the cycle-count claim-repair blocker. The other activation
+> blockers remain in force.
 
 ## Scope
 

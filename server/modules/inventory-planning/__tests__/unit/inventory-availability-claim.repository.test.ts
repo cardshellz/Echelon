@@ -6,6 +6,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   InventoryAvailabilityClaimRepositoryError,
   PostgresInventoryAvailabilityClaimRepository,
+  selectCycleCountDisplacedClaims,
 } from "../../infrastructure/inventory-availability-claim.repository";
 
 const FIXED_TIME = new Date("2026-09-02T02:00:00.000Z");
@@ -27,6 +28,9 @@ function createPool(handler: (text: string, values: unknown[]) => Promise<any>) 
 function createInventoryWriter() {
   return {
     ensureInventoryLevel: vi.fn(),
+    applyCycleCountAdjustment: vi.fn(),
+    recordCycleCountNoop: vi.fn(async () => ({ adjustmentTransactionId: 900 })),
+    approveCycleCountItem: vi.fn(async () => undefined),
     reserveResource: vi.fn(async () => []),
     releaseResources: vi.fn(async () => undefined),
     reconcilePickResource: vi.fn(async () => []),
@@ -138,7 +142,7 @@ function directClaimPlan(requestedQty = 3, revision = 1) {
 
 function createClaimReplacementPool(
   oldPlan = directClaimPlan(),
-  options: { currentRequestedQty?: number; pickedTargetQty?: string } = {},
+  options: { currentRequestedQty?: number; pickedTargetQty?: string; cycleCountShortage?: boolean } = {},
 ) {
   let snapshotInventoryReads = 0;
   const pickedQty = options.pickedTargetQty ?? "0";
@@ -150,7 +154,24 @@ function createClaimReplacementPool(
     if (sql.includes("FROM inventory.availability_runtime_authority")) {
       return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
     }
+    if (options.cycleCountShortage && sql.includes("FROM inventory.cycle_counts")) {
+      return { rows: [{ id: 8, status: "in_progress" }] };
+    }
+    if (options.cycleCountShortage && sql.includes("FROM inventory.cycle_count_items")) {
+      return { rows: [{
+        id: 81,
+        cycle_count_id: 8,
+        warehouse_location_id: 11,
+        product_variant_id: 101,
+        counted_qty: 1,
+        status: "variance",
+        adjustment_transaction_id: null,
+      }] };
+    }
     if (sql.includes("COALESCE(MAX(revision)")) return { rows: [{ revision: 2 }] };
+    if (options.cycleCountShortage && sql.includes("SELECT claim.id AS claim_id")) {
+      return { rows: [{ claim_id: "9", order_id: 70, claim_resource_id: "12", open_qty: "3" }] };
+    }
     if (sql.includes("FROM inventory.availability_claims")) {
       return { rows: [{
         id: "9",
@@ -222,13 +243,20 @@ function createClaimReplacementPool(
       return { rows: [{ id: 1, code: "LEON", is_active: true, hub_warehouse_id: null }] };
     }
     if (sql.includes("FROM inventory.inventory_levels")) {
+      if (options.cycleCountShortage && sql.includes("WHERE product_variant_id = $1")
+        && sql.includes("warehouse_location_id = $2")) {
+        return { rows: [{ id: 1, variant_qty: 5, reserved_qty: 3 }] };
+      }
+      if (options.cycleCountShortage && sql.includes("WHERE id = $1") && sql.includes("FOR UPDATE")) {
+        return { rows: [{ id: 1, variant_qty: 5, reserved_qty: 3 }] };
+      }
       if (sql.includes("SELECT id") && sql.includes("FOR UPDATE")) return { rows: [{ id: 1 }] };
       snapshotInventoryReads += 1;
       return { rows: [{
         id: 1,
         warehouse_location_id: 11,
         product_variant_id: 101,
-        variant_qty: "10",
+        variant_qty: options.cycleCountShortage && snapshotInventoryReads > 1 ? "1" : options.cycleCountShortage ? "5" : "10",
         reserved_qty: snapshotInventoryReads === 1 ? openClaimQty : "0",
         picked_qty: pickedQty,
         packed_qty: "0",
@@ -325,6 +353,120 @@ function createClaimReplacementPool(
 }
 
 describe("PostgresInventoryAvailabilityClaimRepository", () => {
+  it("selects the newest whole claims needed to fit a counted shortage", () => {
+    const claims = [
+      { claimId: BigInt(7), orderId: 70, openQty: BigInt(3) },
+      { claimId: BigInt(8), orderId: 71, openQty: BigInt(4) },
+      { claimId: BigInt(9), orderId: 72, openQty: BigInt(3) },
+    ];
+
+    expect(selectCycleCountDisplacedClaims(claims, 10, 7)).toEqual([claims[2]]);
+    expect(selectCycleCountDisplacedClaims(claims, 10, 4)).toEqual([claims[1], claims[2]]);
+    expect(selectCycleCountDisplacedClaims(claims, 10, 10)).toEqual([]);
+  });
+
+  it("refuses displacement when aggregate reserved quantity lacks exact claim ownership", () => {
+    expect(() => selectCycleCountDisplacedClaims([
+      { claimId: BigInt(7), orderId: 70, openQty: BigInt(3) },
+    ], 4, 2)).toThrow(expect.objectContaining({ code: "CYCLE_COUNT_CLAIM_OWNERSHIP_MISMATCH" }));
+  });
+
+  it("releases, adjusts, partially replans, and approves a counted shortage in one transaction", async () => {
+    const oldPlan = directClaimPlan(3);
+    const fake = createClaimReplacementPool(oldPlan, {
+      currentRequestedQty: 3,
+      cycleCountShortage: true,
+    });
+    const writer = createInventoryWriter();
+    writer.applyCycleCountAdjustment.mockResolvedValue({
+      adjustmentTransactionId: 901,
+      consumedQty: BigInt(4),
+      consumedCostMills: BigInt(500),
+    });
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.reconcileCycleCount({
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 11,
+      countedQty: 1,
+      reasonCode: "verified",
+      actor: "user:7",
+      reason: "verified physical shortage",
+    })).resolves.toEqual({
+      outcome: "cycle_count_reconciled",
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 11,
+      quantityBefore: 5,
+      quantityAfter: 1,
+      quantityDelta: -4,
+      adjustmentTransactionId: 901,
+      displacedOrderIds: [70],
+      idempotentReplay: false,
+    });
+
+    expect(writer.releaseResources).toHaveBeenCalledWith(expect.objectContaining({
+      claimId: BigInt(9),
+      orderId: 70,
+      resources: [expect.objectContaining({ releaseQty: BigInt(3) })],
+    }));
+    expect(writer.applyCycleCountAdjustment).toHaveBeenCalledWith(expect.objectContaining({
+      quantityBefore: 5,
+      countedQty: 1,
+      cycleCountItemId: 81,
+    }));
+    expect(writer.reserveResource).toHaveBeenCalledWith(expect.objectContaining({
+      orderId: 70,
+      claimedQty: 1,
+    }));
+    expect(writer.approveCycleCountItem).toHaveBeenCalledWith(expect.objectContaining({
+      cycleCountItemId: 81,
+      adjustmentTransactionId: 901,
+    }));
+    expect(writer.releaseResources.mock.invocationCallOrder[0])
+      .toBeLessThan(writer.applyCycleCountAdjustment.mock.invocationCallOrder[0]);
+    expect(writer.applyCycleCountAdjustment.mock.invocationCallOrder[0])
+      .toBeLessThan(writer.reserveResource.mock.invocationCallOrder[0]);
+    expect(writer.reserveResource.mock.invocationCallOrder[0])
+      .toBeLessThan(writer.approveCycleCountItem.mock.invocationCallOrder[0]);
+    expect(fake.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+
+  it("rolls back a counted shortage when replacement reservation fails", async () => {
+    const fake = createClaimReplacementPool(directClaimPlan(3), {
+      currentRequestedQty: 3,
+      cycleCountShortage: true,
+    });
+    const writer = createInventoryWriter();
+    writer.applyCycleCountAdjustment.mockResolvedValue({
+      adjustmentTransactionId: 901,
+      consumedQty: BigInt(4),
+      consumedCostMills: BigInt(500),
+    });
+    writer.reserveResource.mockRejectedValueOnce(new Error("replacement reservation failed"));
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.reconcileCycleCount({
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 11,
+      countedQty: 1,
+      reasonCode: "verified",
+      actor: "user:7",
+      reason: "verified physical shortage",
+    })).rejects.toThrow("replacement reservation failed");
+
+    expect(writer.releaseResources).toHaveBeenCalledOnce();
+    expect(writer.applyCycleCountAdjustment).toHaveBeenCalledOnce();
+    expect(writer.approveCycleCountItem).not.toHaveBeenCalled();
+    expect(fake.query.mock.calls.some(([text]) => text === "ROLLBACK")).toBe(true);
+    expect(fake.query.mock.calls.some(([text]) => text === "COMMIT")).toBe(false);
+  });
+
   it("fails closed before claim pick when canonical authority is inactive", async () => {
     const fake = createPool(async (text) => {
       if (text.startsWith("BEGIN")) return { rows: [] };
@@ -2669,5 +2811,266 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       actor: "test-user",
       reason: "unit test",
     })).rejects.toEqual(expect.objectContaining({ code: "IDEMPOTENCY_KEY_REUSED" }));
+  });
+
+  it("approves an unchanged cycle count without an inventory mutation", async () => {
+    const fake = createPool(async (text) => {
+      if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
+      if (text.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "9", revision: "2" }] };
+      }
+      if (text.includes("FROM inventory.cycle_counts")) {
+        return { rows: [{ id: 8, status: "in_progress" }] };
+      }
+      if (text.includes("FROM inventory.cycle_count_items")) {
+        return { rows: [{
+          id: 81,
+          cycle_count_id: 8,
+          warehouse_location_id: 2,
+          product_variant_id: 101,
+          counted_qty: 6,
+          status: "variance",
+          adjustment_transaction_id: null,
+        }] };
+      }
+      if (text.includes("FROM inventory.inventory_levels")) {
+        return { rows: [{ id: 11, variant_qty: 6, reserved_qty: 0 }] };
+      }
+      if (text.includes("FROM inventory.availability_claims")) return { rows: [] };
+      if (text.startsWith("UPDATE inventory.cycle_count_items")) return { rows: [], rowCount: 1 };
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.reconcileCycleCount({
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      countedQty: 6,
+      reasonCode: "verified",
+      actor: "user:7",
+      reason: "verified physical count",
+    })).resolves.toEqual({
+      outcome: "cycle_count_reconciled",
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      quantityBefore: 6,
+      quantityAfter: 6,
+      quantityDelta: 0,
+      adjustmentTransactionId: 900,
+      displacedOrderIds: [],
+      idempotentReplay: false,
+    });
+    expect(writer.applyCycleCountAdjustment).not.toHaveBeenCalled();
+    expect(writer.recordCycleCountNoop).toHaveBeenCalledWith({
+      client: expect.any(Object),
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      countedQty: 6,
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      actor: "user:7",
+      reason: "verified physical count",
+      occurredAt: FIXED_TIME,
+    });
+    expect(writer.approveCycleCountItem).toHaveBeenCalledWith({
+      client: expect.any(Object),
+      cycleCountItemId: 81,
+      expectedStatus: "variance",
+      actor: "user:7",
+      reasonCode: "verified",
+      adjustmentTransactionId: 900,
+      occurredAt: FIXED_TIME,
+    });
+    expect(fake.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+
+  it("replays exact cycle-count adjustment and displaced-order evidence", async () => {
+    const fake = createPool(async (text, values) => {
+      if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
+      if (text.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "9", revision: "2" }] };
+      }
+      if (text.includes("FROM inventory.cycle_counts")) {
+        return { rows: [{ id: 8, status: "completed" }] };
+      }
+      if (text.includes("FROM inventory.cycle_count_items")) {
+        return { rows: [{
+          id: 81,
+          cycle_count_id: 8,
+          warehouse_location_id: 2,
+          product_variant_id: 101,
+          counted_qty: 6,
+          status: "approved",
+          adjustment_transaction_id: 901,
+        }] };
+      }
+      if (text.includes("FROM inventory.inventory_transactions")) {
+        return { rows: [
+          {
+            id: 901,
+            product_variant_id: 101,
+            from_location_id: 2,
+            to_location_id: null,
+            transaction_type: "adjustment",
+            variant_qty_before: 10,
+            variant_qty_after: 8,
+            variant_qty_delta: -2,
+            cycle_count_id: 8,
+            reference_type: "cycle_count_item",
+            reference_id: "81",
+          },
+          {
+            id: 902,
+            product_variant_id: 101,
+            from_location_id: 2,
+            to_location_id: null,
+            transaction_type: "adjustment",
+            variant_qty_before: 8,
+            variant_qty_after: 6,
+            variant_qty_delta: -2,
+            cycle_count_id: 8,
+            reference_type: "cycle_count_item",
+            reference_id: "81",
+          },
+        ] };
+      }
+      if (text.includes("SELECT DISTINCT order_id") && text.includes("availability_claim_commands")) {
+        expect(values).toEqual(["cycle-count:8:81:claim:"]);
+        return { rows: [{ order_id: 70 }, { order_id: 72 }] };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.reconcileCycleCount({
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      countedQty: 6,
+      reasonCode: "verified",
+      actor: "user:7",
+      reason: "retry verified physical count",
+    })).resolves.toEqual({
+      outcome: "cycle_count_reconciled",
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      quantityBefore: 10,
+      quantityAfter: 6,
+      quantityDelta: -4,
+      adjustmentTransactionId: 901,
+      displacedOrderIds: [70, 72],
+      idempotentReplay: true,
+    });
+    expect(writer.applyCycleCountAdjustment).not.toHaveBeenCalled();
+  });
+
+  it("fails approved replay closed when no durable adjustment or no-op evidence exists", async () => {
+    const fake = createPool(async (text) => {
+      if (text.startsWith("BEGIN") || text === "ROLLBACK") return { rows: [] };
+      if (text.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "9", revision: "2" }] };
+      }
+      if (text.includes("FROM inventory.cycle_counts")) {
+        return { rows: [{ id: 8, status: "completed" }] };
+      }
+      if (text.includes("FROM inventory.cycle_count_items")) {
+        return { rows: [{
+          id: 81,
+          cycle_count_id: 8,
+          warehouse_location_id: 2,
+          product_variant_id: 101,
+          counted_qty: 6,
+          status: "approved",
+          adjustment_transaction_id: null,
+        }] };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.reconcileCycleCount({
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      countedQty: 6,
+      reasonCode: "verified",
+      actor: "user:7",
+      reason: "retry historical count",
+    })).rejects.toEqual(expect.objectContaining({ code: "CYCLE_COUNT_REPLAY_EVIDENCE_MISSING" }));
+    expect(writer.applyCycleCountAdjustment).not.toHaveBeenCalled();
+  });
+
+  it("refuses a new reconciliation after the parent count is completed", async () => {
+    const fake = createPool(async (text) => {
+      if (text.startsWith("BEGIN") || text === "ROLLBACK") return { rows: [] };
+      if (text.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "9", revision: "2" }] };
+      }
+      if (text.includes("FROM inventory.cycle_counts")) {
+        return { rows: [{ id: 8, status: "completed" }] };
+      }
+      if (text.includes("FROM inventory.cycle_count_items")) {
+        return { rows: [{
+          id: 81,
+          cycle_count_id: 8,
+          warehouse_location_id: 2,
+          product_variant_id: 101,
+          counted_qty: 6,
+          status: "variance",
+          adjustment_transaction_id: null,
+        }] };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.reconcileCycleCount({
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      countedQty: 6,
+      reasonCode: "verified",
+      actor: "user:7",
+      reason: "late approval",
+    })).rejects.toEqual(expect.objectContaining({ code: "CYCLE_COUNT_NOT_IN_PROGRESS" }));
+    expect(writer.applyCycleCountAdjustment).not.toHaveBeenCalled();
+  });
+
+  it("fails a cycle count closed before reading the item when canonical authority is inactive", async () => {
+    const fake = createPool(async (text) => {
+      if (text.startsWith("BEGIN") || text === "ROLLBACK") return { rows: [] };
+      if (text.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "legacy", activation_run_id: null, revision: "1" }] };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.reconcileCycleCount({
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      countedQty: 6,
+      reasonCode: "verified",
+      actor: "user:7",
+      reason: "verified physical count",
+    })).rejects.toEqual(expect.objectContaining({ code: "CANONICAL_AUTHORITY_NOT_ACTIVE" }));
+    expect(fake.query.mock.calls.some(([text]) => String(text).includes("cycle_count_items"))).toBe(false);
+    expect(writer.applyCycleCountAdjustment).not.toHaveBeenCalled();
   });
 });

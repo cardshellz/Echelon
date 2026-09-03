@@ -28,7 +28,14 @@ function makeService(options?: {
     deleteCycleCount: vi.fn(async () => true),
   };
 
-  const service = new CycleCountUseCases(db as any, {} as any, {} as any, replenishment as any, storage as any);
+  const service = new CycleCountUseCases(
+    db as any,
+    {} as any,
+    {} as any,
+    replenishment as any,
+    storage as any,
+    {} as any,
+  );
   return { db, replenishment, service, storage };
 }
 

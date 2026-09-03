@@ -430,6 +430,8 @@ export const inventoryTransactions = inventorySchema.table("inventory_transactio
 
   // Cost & lot tracking
   unitCostCents: bigint("unit_cost_cents", { mode: "number" }), // Cost traceability on every transaction
+  unitCostMills: bigint("unit_cost_mills", { mode: "bigint" }), // Exact cost in 1/100 cent
+  totalCostMills: bigint("total_cost_mills", { mode: "bigint" }), // Absolute extended cost in 1/100 cent
   inventoryLotId: integer("inventory_lot_id").references(() => inventoryLots.id, { onDelete: "set null" }), // Lot linkage (FK added after inventoryLots table definition)
 
   // Reference links - which operation triggered this transaction
