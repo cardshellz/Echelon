@@ -266,6 +266,51 @@ describe("AuthorityAwareReservationService", () => {
     }));
   });
 
+  it("cancels the exact active claim when the locked order is cancelled", async () => {
+    const plan = canonicalPlan();
+    const canonical = {
+      claimOrder: vi.fn(),
+      replaceOrderClaim: vi.fn(async () => {
+        throw Object.assign(new Error("order cancelled"), {
+          code: "REPLACEMENT_ORDER_NOT_CLAIMABLE",
+          context: { warehouseStatus: "cancelled" },
+        });
+      }),
+      releaseOrderClaim: vi.fn(async () => ({
+        outcome: "released" as const,
+        claimId: "70",
+        claimKey: plan.requestKey,
+        orderId: 42,
+        status: "cancelled" as const,
+        releasedResourceQty: "52",
+        releasedLotQty: "52",
+        idempotentReplay: false,
+      })),
+    };
+    const service = new AuthorityAwareReservationService(executor({
+      authority: "canonical",
+      canonical,
+      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active", plan })),
+    }));
+
+    await expect(service.reconcileOrderDemand({
+      orderId: 42,
+      sourceEventId: "webhook_inbox:cancelled-901",
+      demandChanged: true,
+      reason: "order cancelled",
+    })).resolves.toMatchObject({
+      reconciled: true,
+      release: { released: 2, failed: [] },
+    });
+    expect(canonical.releaseOrderClaim).toHaveBeenCalledWith(expect.objectContaining({
+      orderId: 42,
+      disposition: "cancel",
+      expectedClaimId: "70",
+      expectedWarehouseStatus: "cancelled",
+      requireNoClaimableDemand: true,
+    }));
+  });
+
   it("records an unchanged canonical demand event without replacing or releasing", async () => {
     const plan = canonicalPlan();
     const canonical = {
