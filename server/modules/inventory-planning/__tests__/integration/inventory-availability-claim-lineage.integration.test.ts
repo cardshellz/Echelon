@@ -30,6 +30,10 @@ const pickLineageMigration = readFileSync(
   resolve(process.cwd(), "migrations/0647_inventory_availability_claim_pick_lineage.sql"),
   "utf8",
 );
+const pickerObservationMigration = readFileSync(
+  resolve(process.cwd(), "migrations/0648_inventory_availability_claim_picker_observation.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -74,6 +78,8 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     .replaceAll("catalog.", `"${schemas.catalog}".`)
     .replaceAll("wms.", `"${schemas.wms}".`)
     .replaceAll("oms.", `"${schemas.oms}".`);
+  const qualifiedPickerObservationMigration = pickerObservationMigration
+    .replaceAll("inventory.", `"${schemas.inventory}".`);
 
   beforeAll(async () => {
     const protectedUrls = [
@@ -112,6 +118,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     await pool.query(qualifiedBuildHandoffMigration);
     await pool.query(qualifiedBuildExecutionMigration);
     await pool.query(qualifiedPickLineageMigration);
+    await pool.query(qualifiedPickerObservationMigration);
   }, 300_000);
 
   afterAll(async () => {
@@ -244,6 +251,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     expect(constraint.rows[0]?.definition).toContain("execute_build");
     expect(constraint.rows[0]?.definition).toContain("pick");
     expect(constraint.rows[0]?.definition).toContain("unpick");
+    expect(constraint.rows[0]?.definition).toContain("pick_observation");
   });
 
   it("installs picked balances and append-only movement evidence", async () => {

@@ -26,9 +26,11 @@ function createPool(handler: (text: string, values: unknown[]) => Promise<any>) 
 
 function createInventoryWriter() {
   return {
+    ensureInventoryLevel: vi.fn(),
     reserveResource: vi.fn(async () => []),
     releaseResources: vi.fn(async () => undefined),
     reconcilePickResource: vi.fn(async () => []),
+    reconcileObservedPickResource: vi.fn(),
     pickResources: vi.fn(),
     unpickResources: vi.fn(),
     executePackageOperation: vi.fn(),
@@ -164,6 +166,73 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     });
     expect(writer.pickResources).not.toHaveBeenCalled();
     expect(writer.reconcilePickResource).not.toHaveBeenCalled();
+  });
+
+  it("replays an exact picker-observation receipt without duplicating inventory or review writes", async () => {
+    const command = {
+      claimId: "9",
+      orderItemId: 71,
+      warehouseLocationId: 3,
+      quantity: "3",
+      locationStrategy: "reconcile_picker_observation" as const,
+      observation: {
+        kind: "validated_item_scan" as const,
+        observedPhysicalQty: "3",
+        locationCode: "P-3",
+        deviceType: "scanner",
+        sessionId: "session-1",
+      },
+      idempotencyKey: "pick:9:71:observation:1",
+      actor: "test-user",
+      reason: "picker found stock missing from the system",
+    };
+    const persisted = {
+      outcome: "picked_with_observation" as const,
+      claimId: "9",
+      claimLineId: "20",
+      orderId: 70,
+      orderItemId: 71,
+      warehouseLocationIds: [3],
+      quantity: "3",
+      reconciledQuantity: "3",
+      recordedReconciledQuantity: "1",
+      observedRelocatedQuantity: "2",
+      inventoryReviewId: 88,
+      observationKind: "validated_item_scan" as const,
+      totalCostMills: "375",
+      idempotentReplay: false,
+    };
+    const fake = createPool(async (text) => {
+      if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
+      if (text.includes("FROM inventory.availability_claim_commands")) {
+        return {
+          rows: [{
+            command_type: "pick_observation",
+            request_hash: hash(command),
+            result_payload: persisted,
+          }],
+        };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const writer = createInventoryWriter();
+    const reviewWriter = { recordReview: vi.fn() };
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      writer,
+      fake.pool,
+      () => FIXED_TIME,
+      undefined,
+      reviewWriter,
+    );
+
+    await expect(repository.pickClaimLine(command)).resolves.toEqual({
+      ...persisted,
+      idempotentReplay: true,
+    });
+    expect(writer.ensureInventoryLevel).not.toHaveBeenCalled();
+    expect(writer.reconcileObservedPickResource).not.toHaveBeenCalled();
+    expect(writer.pickResources).not.toHaveBeenCalled();
+    expect(reviewWriter.recordReview).not.toHaveBeenCalled();
   });
 
   it("picks an exact claim line and persists command, movement, and event evidence atomically", async () => {
@@ -716,6 +785,316 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     const reconciliationEvent = fake.query.mock.calls.find(([text, values]) =>
       String(text).includes("claim_pick_location_reconciled") && String(values?.[1] ?? "").includes("claim_pick_location_reconciled"));
     expect(reconciliationEvent).toBeDefined();
+  });
+
+  it("atomically records a picker-observed shortage, review evidence, and the resulting pick", async () => {
+    const plan = packageClaimPlan();
+    let resourceRead = 0;
+    let lotRead = 0;
+    let targetAllocationId = 21;
+    const command = {
+      claimId: "9",
+      orderItemId: 71,
+      warehouseLocationId: 3,
+      quantity: "3",
+      locationStrategy: "reconcile_picker_observation" as const,
+      observation: {
+        kind: "validated_item_scan" as const,
+        observedPhysicalQty: "3",
+        locationCode: "P-3",
+        deviceType: "scanner",
+        sessionId: "session-1",
+      },
+      idempotencyKey: "pick:9:71:observation:1",
+      actor: "test-user",
+      reason: "picker found stock missing from the system",
+    };
+    const fake = createPool(async (text) => {
+      if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
+      if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
+      if (text.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
+      }
+      if (text.includes("FROM inventory.availability_claims")) {
+        return { rows: [{
+          id: "9",
+          claim_key: plan.requestKey,
+          order_id: 70,
+          revision: 1,
+          status: "active",
+          runtime_authority_revision: "2",
+          plan_hash: hash(plan),
+          plan_payload: plan,
+        }] };
+      }
+      if (text.includes("FROM catalog.product_variants") && text.includes("product_id")) {
+        return { rows: [{ id: 101, product_id: 10 }, { id: 105, product_id: 10 }] };
+      }
+      if (text.includes("pg_advisory_xact_lock") || text.includes("FROM inventory.transformation_model_heads")) {
+        return { rows: [] };
+      }
+      if (text.includes("FROM wms.orders")) {
+        return { rows: [{ order_id: 70, warehouse_id: 1, warehouse_status: "ready", on_hold: 0 }] };
+      }
+      if (text.trimStart().startsWith("SELECT") && text.includes("FROM wms.order_items")) {
+        return { rows: [{
+          order_item_id: 71,
+          sku: "P5",
+          stored_product_id: 10,
+          order_item_requires_shipping: 1,
+          target_variant_id: 105,
+          requested_qty: 3,
+          root_product_id: 10,
+          is_active: true,
+          requires_shipping: true,
+          track_inventory: true,
+          sales_eligibility: "sellable",
+        }] };
+      }
+      if (text.startsWith("INSERT INTO inventory.inventory_levels")) return { rows: [], rowCount: 1 };
+      if (text.includes("FROM warehouse.warehouse_locations AS location")) {
+        return { rows: [{
+          inventory_level_id: 15,
+          warehouse_id: 1,
+          code: "P-3",
+          is_active: 1,
+          is_pickable: 1,
+          cycle_count_freeze_id: null,
+        }] };
+      }
+      if (text.includes("FROM warehouse.warehouse_locations")) {
+        return { rows: [{ warehouse_id: 1, is_active: 1, is_pickable: 1, cycle_count_freeze_id: null }] };
+      }
+      if (text.includes("FROM inventory.availability_claim_lines")) {
+        return { rows: [{
+          id: "20",
+          order_item_id: 71,
+          target_variant_id: 105,
+          planned_qty: "3",
+          released_target_qty: "0",
+          consumed_target_qty: "0",
+          picked_target_qty: "0",
+        }] };
+      }
+      if (text.includes("FROM inventory.availability_claim_resources")) {
+        resourceRead += 1;
+        return resourceRead === 1
+          ? { rows: [{
+              id: "12",
+              inventory_level_id: 11,
+              warehouse_id: 1,
+              warehouse_location_id: 2,
+              source_variant_id: 105,
+              claimed_qty: "3",
+              released_qty: "0",
+              consumed_qty: "0",
+              picked_qty: "0",
+            }] }
+          : { rows: [
+              {
+                id: "12",
+                inventory_level_id: 11,
+                warehouse_id: 1,
+                warehouse_location_id: 2,
+                source_variant_id: 105,
+                claimed_qty: "3",
+                released_qty: "3",
+                consumed_qty: "0",
+                picked_qty: "0",
+              },
+              {
+                id: "13",
+                inventory_level_id: 15,
+                warehouse_id: 1,
+                warehouse_location_id: 3,
+                source_variant_id: 105,
+                claimed_qty: "3",
+                released_qty: "0",
+                consumed_qty: "0",
+                picked_qty: "0",
+              },
+            ] };
+      }
+      if (text.includes("FROM inventory.availability_claim_lot_allocations")) {
+        lotRead += 1;
+        return lotRead === 1
+          ? { rows: [{
+              id: "21",
+              claim_resource_id: "12",
+              inventory_lot_id: 51,
+              claimed_qty: "3",
+              released_qty: "0",
+              consumed_qty: "0",
+              picked_qty: "0",
+              unit_cost_mills: "125",
+              po_unit_cost_mills: "100",
+              packaging_unit_cost_mills: "20",
+              landed_unit_cost_mills: "5",
+            }] }
+          : { rows: [
+              {
+                id: "21",
+                claim_resource_id: "12",
+                inventory_lot_id: 51,
+                claimed_qty: "3",
+                released_qty: "3",
+                consumed_qty: "0",
+                picked_qty: "0",
+                unit_cost_mills: "125",
+                po_unit_cost_mills: "100",
+                packaging_unit_cost_mills: "20",
+                landed_unit_cost_mills: "5",
+              },
+              {
+                id: "22",
+                claim_resource_id: "13",
+                inventory_lot_id: 52,
+                claimed_qty: "1",
+                released_qty: "0",
+                consumed_qty: "0",
+                picked_qty: "0",
+                unit_cost_mills: "125",
+                po_unit_cost_mills: "100",
+                packaging_unit_cost_mills: "20",
+                landed_unit_cost_mills: "5",
+              },
+              {
+                id: "23",
+                claim_resource_id: "13",
+                inventory_lot_id: 53,
+                claimed_qty: "2",
+                released_qty: "0",
+                consumed_qty: "0",
+                picked_qty: "0",
+                unit_cost_mills: "125",
+                po_unit_cost_mills: "100",
+                packaging_unit_cost_mills: "20",
+                landed_unit_cost_mills: "5",
+              },
+            ] };
+      }
+      if (text.startsWith("INSERT INTO inventory.availability_claim_resources")) {
+        return { rows: [{ id: "13" }], rowCount: 1 };
+      }
+      if (text.startsWith("INSERT INTO inventory.availability_claim_lot_allocations")) {
+        targetAllocationId += 1;
+        return { rows: [{ id: String(targetAllocationId) }], rowCount: 1 };
+      }
+      if (text.startsWith("UPDATE inventory.availability_claim_lot_allocations")
+        || text.startsWith("UPDATE inventory.availability_claim_resources")
+        || text.startsWith("UPDATE inventory.availability_claim_lines")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (text.startsWith("INSERT INTO wms.allocation_exceptions")) {
+        return { rows: [{ id: 88 }], rowCount: 1 };
+      }
+      if (text.startsWith("INSERT INTO inventory.availability_claim_commands")) {
+        return { rows: [{ id: "41" }], rowCount: 1 };
+      }
+      if (text.startsWith("INSERT INTO inventory.availability_claim_pick_movements")
+        || text.startsWith("INSERT INTO inventory.availability_claim_events")) {
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const writer = createInventoryWriter();
+    writer.ensureInventoryLevel.mockResolvedValue(15);
+    writer.reconcileObservedPickResource.mockResolvedValue({
+      allocations: [
+        {
+          inventoryLotId: 52,
+          qty: 1,
+          unitCostMills: BigInt(125),
+          poUnitCostMills: BigInt(100),
+          packagingUnitCostMills: BigInt(20),
+          landedUnitCostMills: BigInt(5),
+        },
+        {
+          inventoryLotId: 53,
+          qty: 2,
+          unitCostMills: BigInt(125),
+          poUnitCostMills: BigInt(100),
+          packagingUnitCostMills: BigInt(20),
+          landedUnitCostMills: BigInt(5),
+        },
+      ],
+      recordedReconciledQuantity: BigInt(1),
+      observedRelocatedQuantity: BigInt(2),
+      relocatedInventoryLotIds: [53],
+      systemLevelQuantityBefore: BigInt(1),
+      systemLotQuantityBefore: BigInt(1),
+      recordedUnreservedQuantityBefore: BigInt(1),
+    });
+    writer.pickResources.mockResolvedValue({
+      movements: [
+        {
+          claimResourceId: BigInt(13),
+          claimLotAllocationId: BigInt(22),
+          inventoryLotId: 52,
+          quantity: BigInt(1),
+          unitCostMills: BigInt(125),
+          totalCostMills: BigInt(125),
+          orderItemCostId: 81,
+          reversesPickMovementId: null,
+        },
+        {
+          claimResourceId: BigInt(13),
+          claimLotAllocationId: BigInt(23),
+          inventoryLotId: 53,
+          quantity: BigInt(2),
+          unitCostMills: BigInt(125),
+          totalCostMills: BigInt(250),
+          orderItemCostId: 82,
+          reversesPickMovementId: null,
+        },
+      ],
+      totalCostMills: BigInt(375),
+    });
+    const reviewWriter = { recordReview: vi.fn().mockResolvedValue(88) };
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      writer,
+      fake.pool,
+      () => FIXED_TIME,
+      undefined,
+      reviewWriter,
+    );
+
+    await expect(repository.pickClaimLine(command)).resolves.toEqual({
+      outcome: "picked_with_observation",
+      claimId: "9",
+      claimLineId: "20",
+      orderId: 70,
+      orderItemId: 71,
+      warehouseLocationIds: [3],
+      quantity: "3",
+      reconciledQuantity: "3",
+      recordedReconciledQuantity: "1",
+      observedRelocatedQuantity: "2",
+      inventoryReviewId: 88,
+      observationKind: "validated_item_scan",
+      totalCostMills: "375",
+      idempotentReplay: false,
+    });
+    expect(writer.reconcileObservedPickResource).toHaveBeenCalledWith(expect.objectContaining({
+      observationReference: hash(command),
+      target: expect.objectContaining({ claimedQty: 3, warehouseLocationId: 3 }),
+    }));
+    const calls = fake.query.mock.calls.map(([text, values]) => ({ text: String(text), values }));
+    const commandIndex = calls.findIndex((call) => call.text.startsWith("INSERT INTO inventory.availability_claim_commands"));
+    expect(reviewWriter.recordReview).toHaveBeenCalledWith(expect.objectContaining({
+      client: expect.any(Object),
+      orderId: 70,
+      orderItemId: 71,
+      requestedQty: 3,
+      selectedLocationId: 3,
+      metadata: expect.objectContaining({
+        observedRelocatedQty: "2",
+        relocatedInventoryLotIds: [53],
+      }),
+    }));
+    expect(commandIndex).toBeGreaterThanOrEqual(0);
+    expect(calls[commandIndex]?.values?.[2]).toBe("pick_observation");
+    expect(calls.at(-1)?.text).toBe("COMMIT");
   });
 
   it("fails closed before operation execution when canonical authority is inactive", async () => {

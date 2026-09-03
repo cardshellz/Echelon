@@ -13,6 +13,74 @@ function createClient(handler: (text: string, values: unknown[]) => Promise<any>
 }
 
 describe("PostgresCanonicalClaimInventoryRepository", () => {
+  it("creates a zero inventory level only through the physical inventory writer", async () => {
+    const fake = createClient(async (text, values) => {
+      if (text.startsWith("INSERT INTO inventory.inventory_levels")) {
+        expect(text).toContain("VALUES ($1, $2, 0, 0, 0, 0, 0, $3)");
+        expect(text).toContain("ON CONFLICT (product_variant_id, warehouse_location_id) DO NOTHING");
+        expect(text).toContain("RETURNING id");
+        expect(values).toEqual([105, 3, OCCURRED_AT]);
+        return { rows: [{ id: 15 }], rowCount: 1 };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.ensureInventoryLevel({
+      client: fake.client,
+      productVariantId: 105,
+      warehouseLocationId: 3,
+      occurredAt: OCCURRED_AT,
+    })).resolves.toBe(15);
+    expect(fake.query).toHaveBeenCalledOnce();
+  });
+
+  it("reuses an existing target level without updating it", async () => {
+    const fake = createClient(async (text, values) => {
+      if (text.startsWith("INSERT INTO inventory.inventory_levels")) {
+        expect(text).toContain("DO NOTHING");
+        expect(values).toEqual([105, 3, OCCURRED_AT]);
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes("FROM inventory.inventory_levels")) {
+        expect(text).not.toContain("FOR UPDATE");
+        expect(values).toEqual([105, 3]);
+        return { rows: [{ id: 15 }], rowCount: 1 };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.ensureInventoryLevel({
+      client: fake.client,
+      productVariantId: 105,
+      warehouseLocationId: 3,
+      occurredAt: OCCURRED_AT,
+    })).resolves.toBe(15);
+  });
+
+  it("fails closed when a target inventory level cannot be resolved after creation", async () => {
+    const fake = createClient(async (text) => {
+      if (text.startsWith("INSERT INTO inventory.inventory_levels")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes("FROM inventory.inventory_levels")) {
+        return { rows: [], rowCount: 0 };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.ensureInventoryLevel({
+      client: fake.client,
+      productVariantId: 105,
+      warehouseLocationId: 3,
+      occurredAt: OCCURRED_AT,
+    })).rejects.toEqual(expect.objectContaining<Partial<CanonicalClaimInventoryMutationError>>({
+      code: "INVENTORY_LEVEL_CREATION_CONFLICT",
+    }));
+  });
+
   it("reserves exact FIFO lots, the aggregate level, and an auditable ledger row", async () => {
     const fake = createClient(async (text) => {
       if (text.includes("FROM inventory.inventory_levels") && text.includes("WHERE id = $1")) {
@@ -111,6 +179,183 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
       code: "CLAIM_LOT_SHORTFALL",
     }));
     expect(fake.query.mock.calls.some(([text]) => /^\s*(UPDATE|INSERT)/i.test(String(text)))).toBe(false);
+  });
+
+  it("uses recorded stock first, relocates only the observed shortage, and preserves exact lot lineage", async () => {
+    let observedLotId = 52;
+    const sourceLevel = {
+      id: 11,
+      warehouse_location_id: 2,
+      product_variant_id: 105,
+      warehouse_id: 1,
+      variant_qty: 3,
+      reserved_qty: 3,
+    };
+    const targetLevel = {
+      id: 15,
+      warehouse_location_id: 3,
+      product_variant_id: 105,
+      warehouse_id: 1,
+      variant_qty: 1,
+      reserved_qty: 0,
+    };
+    const sourceLot = {
+      id: 51,
+      product_variant_id: 105,
+      warehouse_location_id: 2,
+      qty_on_hand: 3,
+      qty_reserved: 3,
+      qty_picked: 0,
+      status: "active",
+      received_at: OCCURRED_AT,
+      unit_cost_mills: "125",
+      po_unit_cost_mills: "100",
+      packaging_cost_mills: "20",
+      landed_cost_mills: "5",
+      total_unit_cost_mills: "125",
+      receiving_order_id: 401,
+      purchase_order_id: 402,
+      inbound_shipment_id: 403,
+      build_order_id: null,
+      build_run_id: null,
+      po_line_id: 404,
+      cost_provisional: 0,
+      cost_source: "purchase_order",
+    };
+    const targetLot = {
+      id: 52,
+      product_variant_id: 105,
+      warehouse_location_id: 3,
+      qty_on_hand: 1,
+      qty_reserved: 0,
+      qty_picked: 0,
+      status: "active",
+      received_at: OCCURRED_AT,
+      unit_cost_mills: "125",
+      po_unit_cost_mills: "100",
+      packaging_cost_mills: "20",
+      landed_cost_mills: "5",
+      total_unit_cost_mills: "125",
+    };
+    const fake = createClient(async (text, values) => {
+      if (text.includes("FROM inventory.inventory_levels") && text.includes("ANY($1::integer[])")) {
+        const ids = values[0] as number[];
+        return { rows: ids.includes(15) ? [sourceLevel, targetLevel] : [sourceLevel] };
+      }
+      if (text.includes("FROM inventory.inventory_levels") && text.includes("WHERE id = $1")) {
+        return { rows: [targetLevel] };
+      }
+      if (text.includes("FROM inventory.inventory_lots") && text.includes("OR (product_variant_id")) {
+        return { rows: [sourceLot, targetLot] };
+      }
+      if (text.includes("FROM inventory.inventory_lots") && text.includes("ANY($1::integer[])")) {
+        return { rows: [sourceLot] };
+      }
+      if (text.includes("FROM inventory.inventory_lots") && text.includes("WHERE product_variant_id = $1")) {
+        return { rows: [targetLot] };
+      }
+      if (text.startsWith("INSERT INTO inventory.inventory_lots")) {
+        observedLotId += 1;
+        return { rows: [{ id: observedLotId }], rowCount: 1 };
+      }
+      if (text.startsWith("UPDATE inventory.inventory_lots")
+        || text.startsWith("UPDATE inventory.inventory_levels")
+        || text.startsWith("INSERT INTO inventory.inventory_transactions")) {
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.reconcileObservedPickResource({
+      client: fake.client,
+      claimId: BigInt(9),
+      releases: [{
+        claimResourceId: BigInt(12),
+        inventoryLevelId: 11,
+        warehouseLocationId: 2,
+        sourceVariantId: 105,
+        releaseQty: BigInt(3),
+        lotAllocations: [{ inventoryLotId: 51, releaseQty: BigInt(3) }],
+        orderItemId: 71,
+      }],
+      sourceCostLayers: [{
+        inventoryLotId: 51,
+        quantity: BigInt(3),
+        unitCostMills: BigInt(125),
+        poUnitCostMills: BigInt(100),
+        packagingUnitCostMills: BigInt(20),
+        landedUnitCostMills: BigInt(5),
+      }],
+      target: {
+        claimResourceId: BigInt(13),
+        inventoryLevelId: 15,
+        warehouseLocationId: 3,
+        sourceVariantId: 105,
+        claimedQty: 3,
+        orderItemId: 71,
+      },
+      observationReference: "a".repeat(64),
+      orderId: 70,
+      actor: "unit-test",
+      reason: "picker observed three units",
+      occurredAt: OCCURRED_AT,
+    })).resolves.toEqual({
+      allocations: [
+        {
+          inventoryLotId: 52,
+          qty: 1,
+          unitCostMills: BigInt(125),
+          poUnitCostMills: BigInt(100),
+          packagingUnitCostMills: BigInt(20),
+          landedUnitCostMills: BigInt(5),
+        },
+        {
+          inventoryLotId: 53,
+          qty: 2,
+          unitCostMills: BigInt(125),
+          poUnitCostMills: BigInt(100),
+          packagingUnitCostMills: BigInt(20),
+          landedUnitCostMills: BigInt(5),
+        },
+      ],
+      recordedReconciledQuantity: BigInt(1),
+      observedRelocatedQuantity: BigInt(2),
+      relocatedInventoryLotIds: [53],
+      systemLevelQuantityBefore: BigInt(1),
+      systemLotQuantityBefore: BigInt(1),
+      recordedUnreservedQuantityBefore: BigInt(1),
+    });
+
+    const calls = fake.query.mock.calls.map(([text, values]) => ({ text: String(text), values }));
+    const firstLevelLock = calls.findIndex((call) => call.text.includes("FROM inventory.inventory_levels"));
+    const firstLotLock = calls.findIndex((call) => call.text.includes("FROM inventory.inventory_lots"));
+    const firstWrite = calls.findIndex((call) => /^\s*(UPDATE|INSERT)/i.test(call.text));
+    expect(firstLevelLock).toBeGreaterThanOrEqual(0);
+    expect(firstLotLock).toBeGreaterThan(firstLevelLock);
+    expect(firstWrite).toBeGreaterThan(firstLotLock);
+    const observedLot = calls.find((call) => call.text.startsWith("INSERT INTO inventory.inventory_lots"));
+    expect(observedLot?.text).toContain("cost_provisional");
+    expect(observedLot?.text).toContain("build_order_id, build_run_id");
+    expect(observedLot?.values?.[3]).toBe(401);
+    expect(observedLot?.values?.[17]).toBe(2);
+    expect(observedLot?.values?.[19]).toBe(0);
+    expect(observedLot?.values?.[20]).toBe("purchase_order");
+    const sourceLevelUpdate = calls.find((call) =>
+      call.text.startsWith("UPDATE inventory.inventory_levels")
+      && call.text.includes("variant_qty = variant_qty - $1"));
+    expect(sourceLevelUpdate?.values).toEqual([2, 11, OCCURRED_AT]);
+    const observationLevelUpdate = calls.find((call) =>
+      call.text.startsWith("UPDATE inventory.inventory_levels")
+      && call.text.includes("variant_qty = variant_qty + $1"));
+    expect(observationLevelUpdate?.values).toEqual([2, 15, OCCURRED_AT]);
+    const transferRows = calls.filter((call) =>
+      call.text.startsWith("INSERT INTO inventory.inventory_transactions")
+      && (call.text.includes("'transfer'") || call.text.includes("'reserve_move'")));
+    expect(transferRows.map((call) => call.text)).toEqual([
+      expect.stringContaining("'transfer'"),
+      expect.stringContaining("'reserve_move'"),
+    ]);
   });
 
   it("consumes only claim-owned lots and reserves only committed transformation output", async () => {

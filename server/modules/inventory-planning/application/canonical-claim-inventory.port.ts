@@ -115,7 +115,33 @@ export type CanonicalClaimInventoryPickResult = {
   totalCostMills: bigint;
 };
 
+export type CanonicalClaimInventoryObservationCostLayer = {
+  inventoryLotId: number;
+  quantity: bigint;
+  unitCostMills: bigint;
+  poUnitCostMills: bigint;
+  packagingUnitCostMills: bigint;
+  landedUnitCostMills: bigint;
+};
+
+export type CanonicalClaimInventoryObservedReconciliationResult = {
+  allocations: readonly CanonicalClaimLotAllocation[];
+  recordedReconciledQuantity: bigint;
+  observedRelocatedQuantity: bigint;
+  relocatedInventoryLotIds: readonly number[];
+  systemLevelQuantityBefore: bigint;
+  systemLotQuantityBefore: bigint;
+  recordedUnreservedQuantityBefore: bigint;
+};
+
 export interface CanonicalClaimInventoryMutationPort {
+  ensureInventoryLevel(input: {
+    client: CanonicalClaimTransactionClient;
+    productVariantId: number;
+    warehouseLocationId: number;
+    occurredAt: Date;
+  }): Promise<number>;
+
   reserveResource(input: {
     client: CanonicalClaimTransactionClient;
     claimId: bigint;
@@ -158,6 +184,26 @@ export interface CanonicalClaimInventoryMutationPort {
     reason: string;
     occurredAt: Date;
   }): Promise<readonly CanonicalClaimLotAllocation[]>;
+
+  reconcileObservedPickResource(input: {
+    client: CanonicalClaimTransactionClient;
+    claimId: bigint;
+    releases: readonly CanonicalClaimInventoryReleaseResource[];
+    sourceCostLayers: readonly CanonicalClaimInventoryObservationCostLayer[];
+    target: {
+      claimResourceId: bigint;
+      inventoryLevelId: number;
+      warehouseLocationId: number;
+      sourceVariantId: number;
+      claimedQty: number;
+      orderItemId: number;
+    };
+    observationReference: string;
+    orderId: number;
+    actor: string;
+    reason: string;
+    occurredAt: Date;
+  }): Promise<CanonicalClaimInventoryObservedReconciliationResult>;
 
   pickResources(input: {
     client: CanonicalClaimTransactionClient;

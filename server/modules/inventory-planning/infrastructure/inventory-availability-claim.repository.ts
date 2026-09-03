@@ -26,6 +26,10 @@ import {
   type CanonicalAvailabilityClaimUnpickCommand,
 } from "@shared/types/inventory-availability-claims";
 import type { CanonicalClaimBuildMutationPort } from "../application/canonical-claim-build.port";
+import type {
+  CanonicalClaimPickerObservationReviewMetadata,
+  CanonicalClaimPickerObservationReviewPort,
+} from "../application/canonical-claim-picker-observation-review.port";
 import {
   claimPlanRequestSchema,
   claimPlanSchema,
@@ -133,7 +137,7 @@ function uniqueSorted(values: Iterable<number>): number[] {
 
 function isRetryableTransactionError(error: unknown): boolean {
   const code = String((error as { code?: unknown })?.code ?? "");
-  if (code === "40001" || code === "40P01") return true;
+  if (code === "40001" || code === "40P01" || code === "INVENTORY_LEVEL_CREATION_CONFLICT") return true;
   return code === "23505"
     && String((error as { constraint?: unknown })?.constraint ?? "")
       === "availability_claim_commands_idempotency_uq";
@@ -257,7 +261,7 @@ async function loadPickReplay(
   client: PoolClient,
   idempotencyKey: string,
   requestHash: string,
-  expectedCommandType: "pick" | "unpick",
+  expectedCommandType: "pick" | "pick_observation" | "unpick",
 ): Promise<CanonicalAvailabilityClaimPickResult | null> {
   const row = rows(await client.query(
     `SELECT command_type, request_hash, result_payload
@@ -2411,27 +2415,62 @@ function selectReconciliationReleases(
   line: FulfillmentClaimLine,
   selectedLocationId: number,
   quantity: bigint,
+  sourceWarehouseId?: number,
 ): Array<{
   inventory: CanonicalClaimInventoryReleaseResource;
-  allocations: readonly { allocationId: bigint; releaseQty: bigint }[];
+  allocations: readonly {
+    allocationId: bigint;
+    inventoryLotId: number;
+    releaseQty: bigint;
+    unitCostMills: bigint;
+    poUnitCostMills: bigint;
+    packagingUnitCostMills: bigint;
+    landedUnitCostMills: bigint;
+  }[];
 }> {
   let remaining = quantity;
   const releases: Array<{
     inventory: CanonicalClaimInventoryReleaseResource;
-    allocations: readonly { allocationId: bigint; releaseQty: bigint }[];
+    allocations: readonly {
+      allocationId: bigint;
+      inventoryLotId: number;
+      releaseQty: bigint;
+      unitCostMills: bigint;
+      poUnitCostMills: bigint;
+      packagingUnitCostMills: bigint;
+      landedUnitCostMills: bigint;
+    }[];
   }> = [];
-  for (const resource of line.resources.filter((entry) => entry.warehouseLocationId !== selectedLocationId)) {
+  for (const resource of line.resources.filter((entry) =>
+    entry.warehouseLocationId !== selectedLocationId
+    && (sourceWarehouseId == null || entry.warehouseId === sourceWarehouseId))) {
     if (remaining === BigInt(0)) break;
     const take = openResourceQty(resource) < remaining ? openResourceQty(resource) : remaining;
     if (take <= BigInt(0)) continue;
     let lotRemaining = take;
-    const allocations: { allocationId: bigint; inventoryLotId: number; releaseQty: bigint }[] = [];
+    const allocations: Array<{
+      allocationId: bigint;
+      inventoryLotId: number;
+      releaseQty: bigint;
+      unitCostMills: bigint;
+      poUnitCostMills: bigint;
+      packagingUnitCostMills: bigint;
+      landedUnitCostMills: bigint;
+    }> = [];
     for (const lot of resource.lots) {
       if (lotRemaining === BigInt(0)) break;
       const available = openLotQty(lot);
       const lotTake = available < lotRemaining ? available : lotRemaining;
       if (lotTake <= BigInt(0)) continue;
-      allocations.push({ allocationId: lot.id, inventoryLotId: lot.inventoryLotId, releaseQty: lotTake });
+      allocations.push({
+        allocationId: lot.id,
+        inventoryLotId: lot.inventoryLotId,
+        releaseQty: lotTake,
+        unitCostMills: lot.unitCostMills,
+        poUnitCostMills: lot.poUnitCostMills,
+        packagingUnitCostMills: lot.packagingUnitCostMills,
+        landedUnitCostMills: lot.landedUnitCostMills,
+      });
       lotRemaining -= lotTake;
     }
     if (lotRemaining !== BigInt(0)) {
@@ -2451,7 +2490,15 @@ function selectReconciliationReleases(
         lotAllocations: allocations.map(({ inventoryLotId, releaseQty }) => ({ inventoryLotId, releaseQty })),
         orderItemId: line.orderItemId,
       },
-      allocations: allocations.map(({ allocationId, releaseQty }) => ({ allocationId, releaseQty })),
+      allocations: allocations.map((allocation) => ({
+        allocationId: allocation.allocationId,
+        inventoryLotId: allocation.inventoryLotId,
+        releaseQty: allocation.releaseQty,
+        unitCostMills: allocation.unitCostMills,
+        poUnitCostMills: allocation.poUnitCostMills,
+        packagingUnitCostMills: allocation.packagingUnitCostMills,
+        landedUnitCostMills: allocation.landedUnitCostMills,
+      })),
     });
     remaining -= take;
   }
@@ -2663,13 +2710,267 @@ async function reconcilePickLocation(
   );
 }
 
+type PickerObservationCommand = Extract<
+  CanonicalAvailabilityClaimPickCommand,
+  { locationStrategy: "reconcile_picker_observation" }
+>;
+
+async function reconcileObservedPickLocation(
+  client: PoolClient,
+  inventoryWriter: CanonicalClaimInventoryMutationPort,
+  observationReviewWriter: CanonicalClaimPickerObservationReviewPort,
+  input: {
+    claim: FulfillmentClaim;
+    line: FulfillmentClaimLine;
+    orderWarehouseId: number | null;
+    quantity: bigint;
+    command: PickerObservationCommand;
+    requestHash: string;
+    occurredAt: Date;
+  },
+): Promise<{
+  inventoryReviewId: number;
+  recordedReconciledQuantity: bigint;
+  observedRelocatedQuantity: bigint;
+}> {
+  const targetRow = rows(await client.query(
+    `SELECT location.warehouse_id, location.code,
+            location.is_active, location.is_pickable, location.cycle_count_freeze_id
+     FROM warehouse.warehouse_locations AS location
+     WHERE location.id = $1`,
+    [input.command.warehouseLocationId],
+  ))[0];
+  if (!targetRow) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PICK_LOCATION_NOT_FOUND",
+      "The observed pick location does not exist.",
+      {
+        warehouseLocationId: input.command.warehouseLocationId,
+        targetVariantId: input.line.targetVariantId,
+      },
+    );
+  }
+  const targetLocationCode = String(targetRow.code ?? "").trim();
+  if (targetLocationCode === ""
+    || targetLocationCode.toUpperCase() !== input.command.observation.locationCode.trim().toUpperCase()) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PICK_OBSERVATION_LOCATION_MISMATCH",
+      "The observed location code does not match the selected warehouse location.",
+      {
+        warehouseLocationId: input.command.warehouseLocationId,
+        observedLocationCode: input.command.observation.locationCode,
+        actualLocationCode: targetLocationCode || null,
+      },
+    );
+  }
+  const targetWarehouseId = await requirePickableLocation(
+    client,
+    input.command.warehouseLocationId,
+    input.orderWarehouseId,
+  );
+  const targetInventoryLevelId = await inventoryWriter.ensureInventoryLevel({
+    client,
+    productVariantId: input.line.targetVariantId,
+    warehouseLocationId: input.command.warehouseLocationId,
+    occurredAt: input.occurredAt,
+  });
+  const releases = selectReconciliationReleases(
+    input.line,
+    input.command.warehouseLocationId,
+    input.quantity,
+    targetWarehouseId,
+  );
+  const targetResourceRow = rows(await client.query(
+    `INSERT INTO inventory.availability_claim_resources (
+       claim_id, claim_line_id, consumer_operation_key, producer_operation_key,
+       warehouse_id, warehouse_location_id, inventory_level_id, source_variant_id, claimed_qty
+     ) VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $7)
+     ON CONFLICT (
+       claim_line_id, warehouse_id, warehouse_location_id, inventory_level_id,
+       source_variant_id, COALESCE(consumer_operation_key, ''), COALESCE(producer_operation_key, '')
+     ) DO UPDATE
+       SET claimed_qty = inventory.availability_claim_resources.claimed_qty + EXCLUDED.claimed_qty,
+           updated_at = $8
+     RETURNING id`,
+    [
+      input.claim.id.toString(),
+      input.line.id.toString(),
+      targetWarehouseId,
+      input.command.warehouseLocationId,
+      targetInventoryLevelId,
+      input.line.targetVariantId,
+      input.quantity.toString(),
+      input.occurredAt,
+    ],
+  ))[0];
+  const targetResourceId = positiveBigInt(targetResourceRow?.id, "targetClaimResource.id");
+  const reconciled = await inventoryWriter.reconcileObservedPickResource({
+    client,
+    claimId: input.claim.id,
+    releases: releases.map((release) => release.inventory),
+    sourceCostLayers: releases.flatMap((release) => release.allocations.map((allocation) => ({
+      inventoryLotId: allocation.inventoryLotId,
+      quantity: allocation.releaseQty,
+      unitCostMills: allocation.unitCostMills,
+      poUnitCostMills: allocation.poUnitCostMills,
+      packagingUnitCostMills: allocation.packagingUnitCostMills,
+      landedUnitCostMills: allocation.landedUnitCostMills,
+    }))),
+    target: {
+      claimResourceId: targetResourceId,
+      inventoryLevelId: targetInventoryLevelId,
+      warehouseLocationId: input.command.warehouseLocationId,
+      sourceVariantId: input.line.targetVariantId,
+      claimedQty: Number(input.quantity),
+      orderItemId: input.line.orderItemId,
+    },
+    observationReference: input.requestHash,
+    orderId: input.claim.orderId,
+    actor: input.command.actor,
+    reason: input.command.reason,
+    occurredAt: input.occurredAt,
+  });
+  for (const release of releases) {
+    for (const allocation of release.allocations) {
+      const updated = await client.query(
+        `UPDATE inventory.availability_claim_lot_allocations
+         SET released_qty = released_qty + $1, updated_at = $3
+         WHERE id = $2
+           AND claimed_qty - released_qty - consumed_qty - picked_qty >= $1`,
+        [allocation.releaseQty.toString(), allocation.allocationId.toString(), input.occurredAt],
+      );
+      if (updated.rowCount !== 1) {
+        throw new InventoryAvailabilityClaimRepositoryError(
+          "CLAIM_OBSERVATION_STATE_CHANGED",
+          "A source claim lot changed while picker-observation reconciliation was recorded.",
+          { claimLotAllocationId: allocation.allocationId.toString() },
+        );
+      }
+    }
+    const updated = await client.query(
+      `UPDATE inventory.availability_claim_resources
+       SET released_qty = released_qty + $1, updated_at = $3
+       WHERE id = $2
+         AND claimed_qty - released_qty - consumed_qty - picked_qty >= $1`,
+      [release.inventory.releaseQty.toString(), release.inventory.claimResourceId.toString(), input.occurredAt],
+    );
+    if (updated.rowCount !== 1) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_OBSERVATION_STATE_CHANGED",
+        "A source claim resource changed while picker-observation reconciliation was recorded.",
+        { claimResourceId: release.inventory.claimResourceId.toString() },
+      );
+    }
+  }
+  for (const allocation of reconciled.allocations) {
+    const inserted = await client.query(
+      `INSERT INTO inventory.availability_claim_lot_allocations (
+         claim_id, claim_resource_id, inventory_lot_id, claimed_qty, unit_cost_mills,
+         po_unit_cost_mills, packaging_unit_cost_mills, landed_unit_cost_mills
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (claim_resource_id, inventory_lot_id) DO UPDATE
+         SET claimed_qty = inventory.availability_claim_lot_allocations.claimed_qty + EXCLUDED.claimed_qty,
+             updated_at = $9
+         WHERE inventory.availability_claim_lot_allocations.unit_cost_mills = EXCLUDED.unit_cost_mills
+           AND inventory.availability_claim_lot_allocations.po_unit_cost_mills = EXCLUDED.po_unit_cost_mills
+           AND inventory.availability_claim_lot_allocations.packaging_unit_cost_mills = EXCLUDED.packaging_unit_cost_mills
+           AND inventory.availability_claim_lot_allocations.landed_unit_cost_mills = EXCLUDED.landed_unit_cost_mills
+       RETURNING id`,
+      [
+        input.claim.id.toString(),
+        targetResourceId.toString(),
+        allocation.inventoryLotId,
+        allocation.qty,
+        allocation.unitCostMills.toString(),
+        allocation.poUnitCostMills.toString(),
+        allocation.packagingUnitCostMills.toString(),
+        allocation.landedUnitCostMills.toString(),
+        input.occurredAt,
+      ],
+    );
+    if (inserted.rowCount !== 1) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_OBSERVATION_COST_CHANGED",
+        "The reconciled FIFO lot cost no longer matches existing claim lineage.",
+        { inventoryLotId: allocation.inventoryLotId },
+      );
+    }
+  }
+  const exceptionMetadata = {
+    schemaVersion: "inventory_availability_claim_picker_observation_v1",
+    pickerNonBlocking: true,
+    shipmentBlocking: false,
+    claimId: input.claim.id.toString(),
+    claimLineId: input.line.id.toString(),
+    observationKind: input.command.observation.kind,
+    observedPhysicalQty: input.command.observation.observedPhysicalQty,
+    systemLevelQtyBefore: reconciled.systemLevelQuantityBefore.toString(),
+    systemLotQtyBefore: reconciled.systemLotQuantityBefore.toString(),
+    recordedUnreservedQtyBefore: reconciled.recordedUnreservedQuantityBefore.toString(),
+    recordedReconciledQty: reconciled.recordedReconciledQuantity.toString(),
+    observedRelocatedQty: reconciled.observedRelocatedQuantity.toString(),
+    relocatedInventoryLotIds: reconciled.relocatedInventoryLotIds,
+    releasedClaimResourceIds: releases.map((release) => release.inventory.claimResourceId.toString()),
+    deviceType: input.command.observation.deviceType ?? null,
+    sessionId: input.command.observation.sessionId ?? null,
+    actor: input.command.actor,
+  } satisfies CanonicalClaimPickerObservationReviewMetadata;
+  const inventoryReviewId = await observationReviewWriter.recordReview({
+    client,
+    orderId: input.claim.orderId,
+    orderItemId: input.line.orderItemId,
+    targetVariantId: input.line.targetVariantId,
+    requestedQty: Number(input.command.quantity),
+    selectedLocationId: input.command.warehouseLocationId,
+    resolution: input.command.observation.kind === "validated_item_scan"
+      ? "picker_scan_count_correction"
+      : "picker_confirmed_count_correction",
+    reviewReason: input.command.reason,
+    metadata: exceptionMetadata,
+    occurredAt: input.occurredAt,
+  });
+  const evidence = {
+    schemaVersion: "inventory_availability_claim_picker_observation_event_v1",
+    eventType: "claim_pick_observation_reconciled",
+    claimId: input.claim.id.toString(),
+    claimLineId: input.line.id.toString(),
+    orderItemId: input.line.orderItemId,
+    targetWarehouseLocationId: input.command.warehouseLocationId,
+    targetLocationCode,
+    targetClaimResourceId: targetResourceId.toString(),
+    quantity: input.quantity.toString(),
+    inventoryReviewId,
+    observation: exceptionMetadata,
+  };
+  await client.query(
+    `INSERT INTO inventory.availability_claim_events (
+       claim_id, event_type, from_status, to_status, evidence_payload,
+       evidence_hash, actor, reason, occurred_at
+     ) VALUES ($1, 'claim_pick_observation_reconciled', 'active', 'active', $2::jsonb, $3, $4, $5, $6)`,
+    [
+      input.claim.id.toString(),
+      JSON.stringify(evidence),
+      hash(evidence),
+      input.command.actor,
+      input.command.reason,
+      input.occurredAt,
+    ],
+  );
+  return {
+    inventoryReviewId,
+    recordedReconciledQuantity: reconciled.recordedReconciledQuantity,
+    observedRelocatedQuantity: reconciled.observedRelocatedQuantity,
+  };
+}
+
 async function persistPickCommandAndEvent(
   client: PoolClient,
   input: {
     claim: FulfillmentClaim;
     line: FulfillmentClaimLine;
     command: CanonicalAvailabilityClaimPickCommand | CanonicalAvailabilityClaimUnpickCommand;
-    commandType: "pick" | "unpick";
+    commandType: "pick" | "pick_observation" | "unpick";
+    movementType: "pick" | "unpick";
     requestHash: string;
     result: CanonicalAvailabilityClaimPickResult;
     movements: Awaited<ReturnType<CanonicalClaimInventoryMutationPort["pickResources"]>>["movements"];
@@ -2700,7 +3001,7 @@ async function persistPickCommandAndEvent(
       [
         input.claim.id.toString(), input.line.id.toString(), movement.claimResourceId.toString(),
         movement.claimLotAllocationId.toString(), movement.inventoryLotId, commandId.toString(),
-        movement.orderItemCostId, input.commandType, movement.quantity.toString(),
+        movement.orderItemCostId, input.movementType, movement.quantity.toString(),
         movement.reversesPickMovementId?.toString() ?? null, movement.unitCostMills.toString(),
         movement.totalCostMills.toString(), input.occurredAt,
       ],
@@ -2708,7 +3009,7 @@ async function persistPickCommandAndEvent(
   }
   const evidence = {
     schemaVersion: "inventory_availability_claim_pick_event_v1",
-    eventType: input.commandType === "pick" ? "claim_line_picked" : "claim_line_unpicked",
+    eventType: input.commandType === "unpick" ? "claim_line_unpicked" : "claim_line_picked",
     claimId: input.claim.id.toString(),
     claimLineId: input.line.id.toString(),
     result: input.result,
@@ -2743,6 +3044,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     private readonly connectionPool: ClientPool = pool,
     private readonly clock: () => Date = () => new Date(),
     private readonly buildWriter?: CanonicalClaimBuildMutationPort,
+    private readonly observationReviewWriter?: CanonicalClaimPickerObservationReviewPort,
   ) {}
 
   async claimOrder(rawCommand: CanonicalAvailabilityClaimCommand): Promise<CanonicalAvailabilityClaimResult> {
@@ -2917,13 +3219,16 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     }
     const claimId = positiveBigInt(command.claimId, "claim.id");
     const quantity = BigInt(positiveInteger(command.quantity, "pick.quantity"));
+    const commandType = command.locationStrategy === "reconcile_picker_observation"
+      ? "pick_observation" as const
+      : "pick" as const;
 
     let lastRetryableError: unknown;
     for (let attempt = 1; attempt <= MAX_SERIALIZATION_ATTEMPTS; attempt += 1) {
       const client = await this.connectionPool.connect();
       try {
         await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-        const replay = await loadPickReplay(client, command.idempotencyKey, requestHash, "pick");
+        const replay = await loadPickReplay(client, command.idempotencyKey, requestHash, commandType);
         if (replay) {
           await client.query("COMMIT");
           return replay;
@@ -2981,9 +3286,22 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           .filter((resource) => resource.warehouseLocationId === command.warehouseLocationId)
           .reduce((total, resource) => total + openResourceQty(resource), BigInt(0));
         let reconciledQuantity = BigInt(0);
+        let observationReconciliation: Awaited<ReturnType<typeof reconcileObservedPickLocation>> | null = null;
+        if (selectedOpen >= quantity && command.locationStrategy === "reconcile_picker_observation") {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_PICK_OBSERVATION_NOT_REQUIRED",
+            "The selected location already owns enough open claim inventory; use a normal strict pick.",
+            {
+              claimLineId: line.id.toString(),
+              warehouseLocationId: command.warehouseLocationId,
+              requestedQty: quantity.toString(),
+              selectedOpenQty: selectedOpen.toString(),
+            },
+          );
+        }
         if (selectedOpen < quantity) {
           reconciledQuantity = quantity - selectedOpen;
-          if (command.locationStrategy !== "reconcile_recorded_stock") {
+          if (command.locationStrategy === "strict") {
             throw new InventoryAvailabilityClaimRepositoryError(
               "CLAIM_PICK_LOCATION_SHORTFALL",
               "The selected location does not own enough open claim inventory and strict location mode forbids reallocation.",
@@ -2995,16 +3313,39 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
               },
             );
           }
-          await reconcilePickLocation(client, this.inventoryWriter, {
-            claim,
-            line,
-            orderWarehouseId: order.warehouseId,
-            warehouseLocationId: command.warehouseLocationId,
-            quantity: reconciledQuantity,
-            actor: command.actor,
-            reason: command.reason,
-            occurredAt,
-          });
+          if (command.locationStrategy === "reconcile_picker_observation") {
+            if (!this.observationReviewWriter) {
+              throw new InventoryAvailabilityClaimRepositoryError(
+                "CLAIM_PICK_OBSERVATION_REVIEW_WRITER_MISSING",
+                "Picker-observation reconciliation requires an atomic warehouse-review writer.",
+              );
+            }
+            observationReconciliation = await reconcileObservedPickLocation(
+              client,
+              this.inventoryWriter,
+              this.observationReviewWriter,
+              {
+                claim,
+                line,
+                orderWarehouseId: order.warehouseId,
+                quantity: reconciledQuantity,
+                command,
+                requestHash,
+                occurredAt,
+              },
+            );
+          } else {
+            await reconcilePickLocation(client, this.inventoryWriter, {
+              claim,
+              line,
+              orderWarehouseId: order.warehouseId,
+              warehouseLocationId: command.warehouseLocationId,
+              quantity: reconciledQuantity,
+              actor: command.actor,
+              reason: command.reason,
+              occurredAt,
+            });
+          }
           line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
         }
         const pickResources = selectPickResources(line, command.warehouseLocationId, quantity);
@@ -3065,8 +3406,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             { claimLineId: line.id.toString() },
           );
         }
-        const result = canonicalAvailabilityClaimPickResultSchema.parse({
-          outcome: "picked",
+        const commonResult = {
           claimId: claim.id.toString(),
           claimLineId: line.id.toString(),
           orderId: claim.orderId,
@@ -3076,12 +3416,25 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           reconciledQuantity: reconciledQuantity.toString(),
           totalCostMills: picked.totalCostMills.toString(),
           idempotentReplay: false,
-        });
+        };
+        const result = canonicalAvailabilityClaimPickResultSchema.parse(
+          command.locationStrategy === "reconcile_picker_observation" && observationReconciliation
+            ? {
+                outcome: "picked_with_observation",
+                ...commonResult,
+                recordedReconciledQuantity: observationReconciliation.recordedReconciledQuantity.toString(),
+                observedRelocatedQuantity: observationReconciliation.observedRelocatedQuantity.toString(),
+                inventoryReviewId: observationReconciliation.inventoryReviewId,
+                observationKind: command.observation.kind,
+              }
+            : { outcome: "picked", ...commonResult },
+        );
         await persistPickCommandAndEvent(client, {
           claim,
           line,
           command,
-          commandType: "pick",
+          commandType,
+          movementType: "pick",
           requestHash,
           result,
           movements: picked.movements,
@@ -3365,6 +3718,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           line,
           command,
           commandType: "unpick",
+          movementType: "unpick",
           requestHash,
           result,
           movements: unpicked.movements,
