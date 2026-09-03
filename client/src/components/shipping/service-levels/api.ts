@@ -52,6 +52,7 @@ export function loadFulfillmentRouting(
 ): Promise<ShippingFulfillmentRoutingAdminView> {
   return getJson<ShippingFulfillmentRoutingAdminView>(
     fulfillmentRoutingKey(serviceLevelId),
+    { cache: "no-store" },
   );
 }
 

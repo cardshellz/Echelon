@@ -7,7 +7,6 @@ import type {
   ShippingFulfillmentRouteMethod,
 } from "@shared/types/shipping-fulfillment-routing";
 import {
-  shippingFulfillmentMethodGroupKey,
   shippingFulfillmentMethodIdentityKey as methodKey,
   shippingFulfillmentMethodScopeLabel,
 } from "@shared/lib/shipping-fulfillment-method-identity";
@@ -23,6 +22,10 @@ import {
   loadFulfillmentRouting,
   saveFulfillmentRouting,
 } from "./api";
+import {
+  groupFulfillmentCatalogMethodsByScope,
+  type FulfillmentCatalogDestinationScope,
+} from "./fulfillment-catalog-display";
 import {
   AlertTriangle,
   ArrowDown,
@@ -107,7 +110,7 @@ export function FulfillmentRoutingEditor({
       shippingFulfillmentMethodScopeLabel(method),
     ].some((value) => value.toLowerCase().includes(normalizedSearch))
   ));
-  const groupedCatalog = groupCatalogMethods(filteredCatalog);
+  const catalogScopeGroups = groupFulfillmentCatalogMethodsByScope(filteredCatalog);
   const selectedRows = selected.map((identity) => ({
     identity,
     method: catalogByKey.get(methodKey(identity)) ?? storedByKey.get(methodKey(identity)) ?? null,
@@ -162,6 +165,35 @@ export function FulfillmentRoutingEditor({
     onError: (error: Error) => {
       toast({
         title: "Could not save fulfillment routing",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const refreshCatalogMutation = useMutation({
+    mutationFn: () => loadFulfillmentRouting(serviceLevelId),
+    onSuccess: (result) => {
+      queryClient.setQueryData(queryKeyAsArray(queryKey), result);
+      if (result.catalog.status !== "available") {
+        toast({
+          title: "Provider catalog is unavailable",
+          description: result.catalog.message,
+          variant: "destructive",
+        });
+        return;
+      }
+      const availableConnections = result.catalog.connections.filter(
+        (connection) => connection.status === "available",
+      ).length;
+      toast({
+        title: "Provider catalog refreshed",
+        description: `${result.catalog.methods.length} methods loaded from ${availableConnections} available ${availableConnections === 1 ? "connection" : "connections"}.`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Could not refresh provider catalog",
         description: error.message,
         variant: "destructive",
       });
@@ -231,10 +263,11 @@ export function FulfillmentRoutingEditor({
                   <Settings2 className="mr-2 h-4 w-4" /> Manage connections
                 </a>
               </Button>
-              <Button type="button" size="sm" variant="outline" onClick={() => query.refetch()}>
-                <RefreshCw className="mr-2 h-4 w-4" />
-                Refresh provider catalog
-              </Button>
+              <CatalogRefreshButton
+                pending={refreshCatalogMutation.isPending}
+                onRefresh={() => refreshCatalogMutation.mutate()}
+                label="Refresh provider catalog"
+              />
             </div>
           </AlertDescription>
         </Alert>
@@ -325,13 +358,22 @@ export function FulfillmentRoutingEditor({
                   <Settings2 className="mr-2 h-4 w-4" /> Manage connections
                 </a>
               </Button>
-              <Button type="button" size="sm" variant="outline" onClick={() => query.refetch()}>
-                <RefreshCw className="mr-2 h-4 w-4" />
-                Refresh catalog
-              </Button>
+              <CatalogRefreshButton
+                pending={refreshCatalogMutation.isPending}
+                onRefresh={() => refreshCatalogMutation.mutate()}
+                label="Refresh catalog"
+              />
             </div>
           )}
         </div>
+
+        {catalog.status === "available" && (
+          <p className="text-xs text-muted-foreground" aria-live="polite">
+            {refreshCatalogMutation.isPending
+              ? "Refreshing directly from connected providers..."
+              : `Last provider refresh: ${formatCatalogFetchedAt(catalog.fetchedAt)}`}
+          </p>
+        )}
 
         {catalog.connections.some((connection) => connection.status !== "available") && (
           <div className="space-y-2">
@@ -360,31 +402,31 @@ export function FulfillmentRoutingEditor({
                 />
               </div>
             </div>
-            <div className="max-h-80 divide-y overflow-y-auto rounded-md border">
+            <div className="max-h-80 overflow-y-auto rounded-md border">
               {filteredCatalog.length === 0 ? (
                 <p className="p-4 text-sm text-muted-foreground">
                   {catalogMethods.length === 0
                     ? "Connected providers returned no carrier methods."
                     : "No connected methods match this search."}
                 </p>
-              ) : groupedCatalog.map((group) => (
-                <div key={group.key}>
-                  <div className="bg-muted/30 px-3 py-2">
-                    <p className="text-sm font-medium">{group.methods[0].serviceName}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {group.methods[0].carrierName} · {group.methods[0].providerConnectionName}
-                      {" · "}{group.methods[0].providerAccountName} · {group.methods[0].serviceCode}
+              ) : catalogScopeGroups.map((group) => (
+                <section key={group.scope} aria-labelledby={`catalog-${group.scope}-heading`}>
+                  <div className="sticky top-0 z-10 flex items-center justify-between border-b bg-muted px-3 py-2">
+                    <p id={`catalog-${group.scope}-heading`} className="text-sm font-semibold">
+                      {group.label}
                     </p>
+                    <Badge variant="outline">
+                      {group.methods.length} {group.methods.length === 1 ? "service" : "services"}
+                    </Badge>
                   </div>
-                  <div className="divide-y border-t">
+                  <div className="divide-y">
                     {group.methods.map((method) => {
                       const key = methodKey(method);
                       const checked = selectedKeys.has(key);
-                      const scopeLabel = shippingFulfillmentMethodScopeLabel(method);
                       return (
-                        <div
+                        <label
                           key={key}
-                          className="flex items-start gap-3 py-3 pl-6 pr-3 hover:bg-muted/40"
+                          className="flex cursor-pointer items-start gap-3 p-3 hover:bg-muted/40"
                         >
                           <Checkbox
                             className="mt-0.5"
@@ -397,20 +439,24 @@ export function FulfillmentRoutingEditor({
                                   : [...current, methodIdentity(method)]
                                 : current.filter((candidate) => methodKey(candidate) !== key));
                             }}
-                            aria-label={`Allow ${method.serviceName} (${scopeLabel}) from ${method.providerAccountName}`}
+                            aria-label={`Allow ${method.serviceName} for ${group.label.toLowerCase()} destinations from ${method.providerAccountName}`}
                           />
                           <div className="min-w-0 flex-1 space-y-1">
                             <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-sm font-medium">{scopeLabel} variant</span>
-                              <MethodScopeBadges method={method} />
+                              <span className="text-sm font-medium">{method.serviceName}</span>
+                              <CrossScopeBadge method={method} displayedScope={group.scope} />
                             </div>
+                            <p className="text-xs text-muted-foreground">
+                              {method.carrierName} · {method.providerConnectionName}
+                              {" · "}{method.providerAccountName} · {method.serviceCode}
+                            </p>
                             <MethodCapabilitySummary capabilities={method.capabilities} />
                           </div>
-                        </div>
+                        </label>
                       );
                     })}
                   </div>
-                </div>
+                </section>
               ))}
             </div>
           </>
@@ -510,19 +556,6 @@ function queryKeyAsArray(key: string): [string] {
   return [key];
 }
 
-function groupCatalogMethods(
-  methods: readonly ShippingFulfillmentCatalogMethod[],
-): Array<{ key: string; methods: ShippingFulfillmentCatalogMethod[] }> {
-  const groups = new Map<string, ShippingFulfillmentCatalogMethod[]>();
-  for (const method of methods) {
-    const key = shippingFulfillmentMethodGroupKey(method);
-    const existing = groups.get(key);
-    if (existing) existing.push(method);
-    else groups.set(key, [method]);
-  }
-  return [...groups].map(([key, groupedMethods]) => ({ key, methods: groupedMethods }));
-}
-
 function MethodScopeBadges({
   method,
 }: {
@@ -534,6 +567,45 @@ function MethodScopeBadges({
       {method.international && <Badge variant="secondary">International</Badge>}
     </div>
   );
+}
+
+function CrossScopeBadge({
+  method,
+  displayedScope,
+}: {
+  method: Pick<ShippingFulfillmentMethodIdentity, "domestic" | "international">;
+  displayedScope: FulfillmentCatalogDestinationScope;
+}) {
+  if (!method.domestic || !method.international) return null;
+  return (
+    <Badge variant="secondary">
+      Also {displayedScope === "domestic" ? "international" : "domestic"}
+    </Badge>
+  );
+}
+
+function CatalogRefreshButton({
+  pending,
+  onRefresh,
+  label,
+}: {
+  pending: boolean;
+  onRefresh: () => void;
+  label: string;
+}) {
+  return (
+    <Button type="button" size="sm" variant="outline" disabled={pending} onClick={onRefresh}>
+      {pending
+        ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+        : <RefreshCw className="mr-2 h-4 w-4" />}
+      {pending ? "Refreshing catalog..." : label}
+    </Button>
+  );
+}
+
+function formatCatalogFetchedAt(value: string): string {
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? "unknown time" : timestamp.toLocaleString();
 }
 
 function MethodCapabilitySummary({

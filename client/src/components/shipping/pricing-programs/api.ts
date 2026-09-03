@@ -368,8 +368,8 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return response.json();
 }
 
-export function getJson<T>(url: string): Promise<T> {
-  return request<T>(url);
+export function getJson<T>(url: string, init?: RequestInit): Promise<T> {
+  return request<T>(url, init);
 }
 
 export function postJson<T>(url: string, body: unknown): Promise<T> {
