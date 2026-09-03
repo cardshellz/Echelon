@@ -129,6 +129,37 @@ describe("PostgresInventoryAvailabilityRuntimeClaimExecutor", () => {
     expect(postCommitEffect).not.toHaveBeenCalled();
   });
 
+  it("propagates a post-commit refund effect failure without attempting to roll back the commit", async () => {
+    const client = fakeClient({
+      authority: "legacy",
+      authority_revision: "1",
+      activation_run_id: null,
+    });
+    const legacy = fakeLegacy();
+    vi.mocked(legacy.reconcileRefundOrderDemand).mockImplementation(async (command) => {
+      command.deferUntilCommit?.(async () => {
+        throw new Error("channel sync queue unavailable");
+      });
+      return { releasedReservationQuantity: 1 };
+    });
+    const executor = new PostgresInventoryAvailabilityRuntimeClaimExecutor(
+      legacy,
+      fakeCanonical(),
+      { connect: vi.fn(async () => client) } as never,
+    );
+
+    await expect(executor.execute((context) => context.legacy.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:post-commit-failure",
+      releaseTargets: [{ orderItemId: 11, quantity: 1 }],
+      reason: "refund demand changed",
+    }))).rejects.toThrow("channel sync queue unavailable");
+
+    const transactionCommands = client.query.mock.calls.map((call) => String(call[0]).trim());
+    expect(transactionCommands.at(-1)).toBe("COMMIT");
+    expect(transactionCommands).not.toContain("ROLLBACK");
+  });
+
   it("rejects caller-owned transactions before delegated legacy work", async () => {
     const client = fakeClient({
       authority: "legacy",
