@@ -496,8 +496,8 @@ class FakeVendorProvisioningService {
 }
 
 class FakeAtpProvider implements DropshipAtpProvider {
-  async getBaseAtpByProductIds(): Promise<Map<number, number>> {
-    return new Map([[501, 12]]);
+  async getVariantAtp(): Promise<Map<number, number>> {
+    return new Map([[101, 4]]);
   }
 }
 

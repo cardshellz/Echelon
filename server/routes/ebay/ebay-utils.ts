@@ -1,8 +1,8 @@
 import { eq } from "drizzle-orm";
-import { createInventoryAtpService } from "../../modules/inventory/atp.service";
+import { createAuthorityAwareInventoryAtpService } from "../../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import https from "https";
-import { db } from "../../db";
-export const atpService = createInventoryAtpService(db);
+import { db, pool } from "../../db";
+export const atpService = createAuthorityAwareInventoryAtpService(pool);
 import { channelConnections } from "@shared/schema";
 import { EbayAuthService, createEbayAuthConfig } from "../../modules/channels/adapters/ebay/ebay-auth.service";
 

@@ -1,8 +1,8 @@
 import { and, asc, eq } from "drizzle-orm";
 
 import { channelConnections, channels, products, productVariants } from "@shared/schema";
-import { db as defaultDb } from "../../../../db";
-import { createInventoryAtpService } from "../../../inventory";
+import { db as defaultDb, pool as defaultPool } from "../../../../db";
+import { createAuthorityAwareInventoryAtpService } from "../../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import { MarketplaceListingRegistrationError } from "../../../marketplace-listings/domain/registration-errors";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import type {
@@ -15,7 +15,10 @@ import type {
 type EbayMarketplaceRegistrationReadDb = Pick<typeof defaultDb, "select">;
 
 export interface EbayRegistrationAtpReader {
-  getAtpBase(productId: number): Promise<number>;
+  getAtpPerVariant(productId: number): Promise<readonly {
+    productVariantId: number;
+    atpUnits: number;
+  }[]>;
 }
 
 /**
@@ -30,7 +33,7 @@ export class PgEbayMarketplaceRegistrationOwnerRepository
   constructor(
     private readonly db: EbayMarketplaceRegistrationReadDb = defaultDb,
     private readonly atp: EbayRegistrationAtpReader =
-      createInventoryAtpService(db),
+      createAuthorityAwareInventoryAtpService(defaultPool),
   ) {}
 
   async loadChannel(
@@ -84,14 +87,13 @@ export class PgEbayMarketplaceRegistrationOwnerRepository
   async loadAllProductVariants(
     productId: number,
   ): Promise<readonly EbayRegistrationVariantRecord[]> {
-    const [rows, atpBase] = await Promise.all([
+    const [rows, variantAtp] = await Promise.all([
       this.db
         .select({
           id: productVariants.id,
           productId: productVariants.productId,
           sku: productVariants.sku,
           isActive: productVariants.isActive,
-          unitsPerVariant: productVariants.unitsPerVariant,
           requiresShipping: productVariants.requiresShipping,
           trackInventory: productVariants.trackInventory,
         })
@@ -101,38 +103,36 @@ export class PgEbayMarketplaceRegistrationOwnerRepository
           eq(productVariants.salesEligibility, "sellable"),
         ))
         .orderBy(asc(productVariants.id)),
-      this.atp.getAtpBase(productId),
+      this.atp.getAtpPerVariant(productId),
     ]);
-    if (!Number.isSafeInteger(atpBase)) {
-      throw repositoryError(
-        "CHANNEL_MARKETPLACE_REGISTRATION_ATP_INVALID",
-        "The authoritative inventory service returned an invalid ATP value.",
-        { productId },
-      );
-    }
+    const atpByVariantId = new Map(variantAtp.map((variant) => [
+      variant.productVariantId,
+      normalizeVariantAtp(variant.atpUnits, productId, variant.productVariantId),
+    ] as const));
 
     return rows.map((row) => {
-      if (
-        !Number.isSafeInteger(row.unitsPerVariant) ||
-        row.unitsPerVariant <= 0
-      ) {
-        throw repositoryError(
-          "CHANNEL_MARKETPLACE_REGISTRATION_UNITS_PER_VARIANT_INVALID",
-          "A catalog variant has invalid units-per-variant configuration.",
-          { productId, productVariantId: row.id },
-        );
-      }
       return {
         id: row.id,
         productId: row.productId,
         sku: row.sku,
         isActive: row.isActive,
         availableQuantity: isInventoryManagedVariant(row)
-          ? Math.floor(atpBase / row.unitsPerVariant)
+          ? atpByVariantId.get(row.id) ?? 0
           : 0,
       };
     });
   }
+}
+
+function normalizeVariantAtp(value: number, productId: number, productVariantId: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw repositoryError(
+      "CHANNEL_MARKETPLACE_REGISTRATION_ATP_INVALID",
+      "The authoritative inventory service returned an invalid variant ATP value.",
+      { productId, productVariantId, value },
+    );
+  }
+  return value;
 }
 
 function asMetadata(value: unknown): Readonly<Record<string, unknown>> {

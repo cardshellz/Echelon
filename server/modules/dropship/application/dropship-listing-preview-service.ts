@@ -302,8 +302,10 @@ export class DropshipListingPreviewService {
         })
       : new Map<string, DropshipEbayFulfillmentPolicyPreflight>();
 
-    const productIds = uniquePositiveIntegers(candidates.map((candidate) => candidate.productId));
-    const atpByProductId = await this.deps.atp.getBaseAtpByProductIds(productIds);
+    const atpByVariantId = await this.deps.atp.getVariantAtp(candidates.map((candidate) => ({
+      productId: candidate.productId,
+      productVariantId: candidate.productVariantId,
+    })));
     const candidatesByVariantId = new Map(candidates.map((candidate) => [candidate.productVariantId, candidate]));
     const overridesByVariantId = new Map(overrides.map((override) => [override.productVariantId, override]));
     const listingsByVariantId = new Map(existingListings.map((listing) => [listing.productVariantId, listing]));
@@ -325,9 +327,7 @@ export class DropshipListingPreviewService {
         });
       }
       const adminExposureDecision = evaluateDropshipCatalogExposure(candidate, adminRules, generatedAt);
-      const rawAtpUnits = Math.floor(
-        Math.max(0, atpByProductId.get(candidate.productId) ?? 0) / Math.max(1, candidate.unitsPerVariant),
-      );
+      const rawAtpUnits = atpByVariantId.get(productVariantId) ?? 0;
       const selectionDecision = evaluateDropshipVendorCatalogSelection({
         candidate,
         adminExposureDecision,

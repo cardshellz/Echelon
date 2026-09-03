@@ -10,8 +10,8 @@ vi.mock("../../../../db", () => ({
   pool: {},
 }));
 
-vi.mock("../../../inventory/atp.service", () => ({
-  createInventoryAtpService: () => ({}),
+vi.mock("../../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository", () => ({
+  createAuthorityAwareInventoryAtpService: () => ({}),
 }));
 
 describe("dropship vendor catalog routes", () => {
