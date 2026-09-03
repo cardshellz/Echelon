@@ -30,6 +30,7 @@ import {
   type CanonicalAvailabilityClaimUnpickCommand,
 } from "@shared/types/inventory-availability-claims";
 import type { CanonicalClaimBuildMutationPort } from "../application/canonical-claim-build.port";
+import type { InventoryAvailabilityClaimStore } from "../application/inventory-availability-claim.port";
 import type {
   CanonicalClaimPickerObservationReviewMetadata,
   CanonicalClaimPickerObservationReviewPort,
@@ -202,25 +203,6 @@ export class InventoryAvailabilityClaimRepositoryError extends Error {
     super(message, options);
     this.name = "InventoryAvailabilityClaimRepositoryError";
   }
-}
-
-export interface InventoryAvailabilityClaimStore {
-  claimOrder(command: CanonicalAvailabilityClaimCommand): Promise<CanonicalAvailabilityClaimResult>;
-  replaceOrderClaim(
-    command: CanonicalAvailabilityClaimReplacementCommand,
-  ): Promise<CanonicalAvailabilityClaimReplacementResult>;
-  releaseOrderClaim(command: CanonicalAvailabilityClaimReleaseCommand): Promise<CanonicalAvailabilityClaimResult>;
-  executePackageOperation(
-    command: CanonicalAvailabilityClaimOperationExecutionCommand,
-  ): Promise<CanonicalAvailabilityClaimOperationExecutionResult>;
-  executeBuildOperation(
-    command: CanonicalAvailabilityClaimOperationExecutionCommand,
-  ): Promise<CanonicalAvailabilityClaimOperationExecutionResult>;
-  handoffBuildOperation(
-    command: CanonicalAvailabilityClaimBuildHandoffCommand,
-  ): Promise<CanonicalAvailabilityClaimBuildHandoffResult>;
-  pickClaimLine(command: CanonicalAvailabilityClaimPickCommand): Promise<CanonicalAvailabilityClaimPickResult>;
-  unpickClaimLine(command: CanonicalAvailabilityClaimUnpickCommand): Promise<CanonicalAvailabilityClaimPickResult>;
 }
 
 async function loadCommandReplay(
