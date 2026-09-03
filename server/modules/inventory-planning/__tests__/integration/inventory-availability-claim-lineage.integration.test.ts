@@ -26,6 +26,10 @@ const buildExecutionMigration = readFileSync(
   resolve(process.cwd(), "migrations/0646_inventory_availability_claim_build_execution.sql"),
   "utf8",
 );
+const pickLineageMigration = readFileSync(
+  resolve(process.cwd(), "migrations/0647_inventory_availability_claim_pick_lineage.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -41,6 +45,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     warehouse: `claim_warehouse_${suffix}`,
     catalog: `claim_catalog_${suffix}`,
     wms: `claim_wms_${suffix}`,
+    oms: `claim_oms_${suffix}`,
   } as const;
 
   const qualifiedMigration = sourceMigration
@@ -63,6 +68,12 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     .replaceAll("warehouse.", `"${schemas.warehouse}".`)
     .replaceAll("catalog.", `"${schemas.catalog}".`)
     .replaceAll("wms.", `"${schemas.wms}".`);
+  const qualifiedPickLineageMigration = pickLineageMigration
+    .replaceAll("inventory.", `"${schemas.inventory}".`)
+    .replaceAll("warehouse.", `"${schemas.warehouse}".`)
+    .replaceAll("catalog.", `"${schemas.catalog}".`)
+    .replaceAll("wms.", `"${schemas.wms}".`)
+    .replaceAll("oms.", `"${schemas.oms}".`);
 
   beforeAll(async () => {
     const protectedUrls = [
@@ -82,6 +93,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       CREATE SCHEMA "${schemas.warehouse}";
       CREATE SCHEMA "${schemas.inventory}";
       CREATE SCHEMA "${schemas.wms}";
+      CREATE SCHEMA "${schemas.oms}";
 
       CREATE TABLE "${schemas.catalog}".product_variants (id integer PRIMARY KEY);
       CREATE TABLE "${schemas.warehouse}".warehouses (id integer PRIMARY KEY);
@@ -91,6 +103,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       CREATE TABLE "${schemas.inventory}".availability_activation_runs (id bigint PRIMARY KEY);
       CREATE TABLE "${schemas.inventory}".inventory_levels (id integer PRIMARY KEY);
       CREATE TABLE "${schemas.inventory}".inventory_lots (id integer PRIMARY KEY);
+      CREATE TABLE "${schemas.oms}".order_item_costs (id integer PRIMARY KEY);
       CREATE TABLE "${schemas.inventory}".build_orders (id integer PRIMARY KEY);
       CREATE TABLE "${schemas.inventory}".build_component_reservations (id integer PRIMARY KEY);
     `);
@@ -98,6 +111,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     await pool.query(qualifiedExecutionContractMigration);
     await pool.query(qualifiedBuildHandoffMigration);
     await pool.query(qualifiedBuildExecutionMigration);
+    await pool.query(qualifiedPickLineageMigration);
   }, 300_000);
 
   afterAll(async () => {
@@ -107,6 +121,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       DROP SCHEMA IF EXISTS "${schemas.warehouse}" CASCADE;
       DROP SCHEMA IF EXISTS "${schemas.catalog}" CASCADE;
       DROP SCHEMA IF EXISTS "${schemas.wms}" CASCADE;
+      DROP SCHEMA IF EXISTS "${schemas.oms}" CASCADE;
     `);
     await pool.end();
   });
@@ -120,6 +135,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       "availability_claim_resources",
       "availability_claim_lot_allocations",
       "availability_claim_build_handoffs",
+      "availability_claim_pick_movements",
       "availability_claim_commands",
       "availability_claim_events",
     ]) {
@@ -226,5 +242,34 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     );
     expect(constraint.rows).toHaveLength(1);
     expect(constraint.rows[0]?.definition).toContain("execute_build");
+    expect(constraint.rows[0]?.definition).toContain("pick");
+    expect(constraint.rows[0]?.definition).toContain("unpick");
+  });
+
+  it("installs picked balances and append-only movement evidence", async () => {
+    const columns = await pool.query<{ table_name: string; column_name: string }>(
+      `SELECT table_name, column_name
+       FROM information_schema.columns
+       WHERE table_schema = $1
+         AND (table_name, column_name) IN (
+           ('availability_claim_lines', 'picked_target_qty'),
+           ('availability_claim_resources', 'picked_qty'),
+           ('availability_claim_lot_allocations', 'picked_qty'),
+           ('availability_claim_pick_movements', 'reverses_pick_movement_id'),
+           ('availability_claim_pick_movements', 'order_item_cost_id')
+         )`,
+      [schemas.inventory],
+    );
+    expect(columns.rows).toHaveLength(5);
+
+    const trigger = await pool.query<{ trigger_name: string }>(
+      `SELECT trigger_name
+       FROM information_schema.triggers
+       WHERE event_object_schema = $1
+         AND event_object_table = 'availability_claim_pick_movements'
+         AND trigger_name = 'availability_claim_pick_movements_append_only'`,
+      [schemas.inventory],
+    );
+    expect(trigger.rows).toHaveLength(2);
   });
 });

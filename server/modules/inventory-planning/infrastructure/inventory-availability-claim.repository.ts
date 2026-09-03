@@ -9,15 +9,21 @@ import {
   canonicalAvailabilityClaimCommandSchema,
   canonicalAvailabilityClaimOperationExecutionCommandSchema,
   canonicalAvailabilityClaimOperationExecutionResultSchema,
+  canonicalAvailabilityClaimPickCommandSchema,
+  canonicalAvailabilityClaimPickResultSchema,
   canonicalAvailabilityClaimReleaseCommandSchema,
   canonicalAvailabilityClaimResultSchema,
+  canonicalAvailabilityClaimUnpickCommandSchema,
   type CanonicalAvailabilityClaimBuildHandoffCommand,
   type CanonicalAvailabilityClaimBuildHandoffResult,
   type CanonicalAvailabilityClaimCommand,
   type CanonicalAvailabilityClaimOperationExecutionCommand,
   type CanonicalAvailabilityClaimOperationExecutionResult,
+  type CanonicalAvailabilityClaimPickCommand,
+  type CanonicalAvailabilityClaimPickResult,
   type CanonicalAvailabilityClaimReleaseCommand,
   type CanonicalAvailabilityClaimResult,
+  type CanonicalAvailabilityClaimUnpickCommand,
 } from "@shared/types/inventory-availability-claims";
 import type { CanonicalClaimBuildMutationPort } from "../application/canonical-claim-build.port";
 import {
@@ -30,7 +36,9 @@ import {
 import type {
   CanonicalClaimInventoryMutationPort,
   CanonicalClaimInventoryExecutionResource,
+  CanonicalClaimInventoryPickResource,
   CanonicalClaimInventoryReleaseResource,
+  CanonicalClaimInventoryUnpickResource,
 } from "../application/canonical-claim-inventory.port";
 import { planCanonicalClaim } from "../domain/inventory-availability-planner";
 import { captureActiveClaimSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
@@ -54,6 +62,7 @@ type LockedOrder = {
   orderId: number;
   warehouseId: number | null;
   warehouseStatus: string;
+  onHold: boolean;
   lines: OrderLine[];
 };
 
@@ -167,6 +176,8 @@ export interface InventoryAvailabilityClaimStore {
   handoffBuildOperation(
     command: CanonicalAvailabilityClaimBuildHandoffCommand,
   ): Promise<CanonicalAvailabilityClaimBuildHandoffResult>;
+  pickClaimLine(command: CanonicalAvailabilityClaimPickCommand): Promise<CanonicalAvailabilityClaimPickResult>;
+  unpickClaimLine(command: CanonicalAvailabilityClaimUnpickCommand): Promise<CanonicalAvailabilityClaimPickResult>;
 }
 
 async function loadCommandReplay(
@@ -242,6 +253,31 @@ async function loadBuildHandoffReplay(
   return { ...replay, idempotentReplay: true };
 }
 
+async function loadPickReplay(
+  client: PoolClient,
+  idempotencyKey: string,
+  requestHash: string,
+  expectedCommandType: "pick" | "unpick",
+): Promise<CanonicalAvailabilityClaimPickResult | null> {
+  const row = rows(await client.query(
+    `SELECT command_type, request_hash, result_payload
+     FROM inventory.availability_claim_commands
+     WHERE idempotency_key = $1
+     FOR SHARE`,
+    [idempotencyKey],
+  ))[0];
+  if (!row) return null;
+  if (String(row.command_type) !== expectedCommandType || String(row.request_hash) !== requestHash) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "IDEMPOTENCY_KEY_REUSED",
+      "The canonical fulfillment idempotency key was already used with a different request.",
+      { idempotencyKey },
+    );
+  }
+  const replay = canonicalAvailabilityClaimPickResultSchema.parse(row.result_payload);
+  return { ...replay, idempotentReplay: true };
+}
+
 async function requireCanonicalAuthority(client: PoolClient): Promise<RuntimeAuthority> {
   const row = rows(await client.query(
     `SELECT authority, activation_run_id, revision
@@ -264,7 +300,7 @@ async function requireCanonicalAuthority(client: PoolClient): Promise<RuntimeAut
 
 async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Promise<LockedOrder> {
   const orderRow = rows(await client.query(
-    `SELECT id AS order_id, warehouse_id, warehouse_status
+    `SELECT id AS order_id, warehouse_id, warehouse_status, on_hold
      FROM wms.orders
      WHERE id = $1
      ${lock ? "FOR UPDATE" : ""}`,
@@ -358,12 +394,21 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
       requestedQty,
     });
   }
+  const onHold = nonnegativeInteger(orderRow.on_hold ?? 0, "order.onHold");
+  if (onHold !== 0 && onHold !== 1) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "INVALID_ORDER_HOLD_STATE",
+      "The canonical claim order has an invalid hold state.",
+      { orderId, onHold },
+    );
+  }
   return {
     orderId: positiveInteger(orderRow.order_id, "order.id"),
     warehouseId: orderRow.warehouse_id == null
       ? null
       : positiveInteger(orderRow.warehouse_id, "order.warehouseId"),
     warehouseStatus: String(orderRow.warehouse_status ?? ""),
+    onHold: onHold === 1,
     lines,
   };
 }
@@ -968,6 +1013,7 @@ async function releaseClaimResources(
             resource.claimed_qty,
              resource.released_qty,
              resource.consumed_qty,
+             resource.picked_qty,
              line.order_item_id
      FROM inventory.availability_claim_resources AS resource
      JOIN inventory.availability_claim_lines AS line
@@ -984,7 +1030,8 @@ async function releaseClaimResources(
             allocation.inventory_lot_id,
              allocation.claimed_qty,
              allocation.released_qty,
-             allocation.consumed_qty
+             allocation.consumed_qty,
+             allocation.picked_qty
      FROM inventory.availability_claim_lot_allocations AS allocation
      WHERE allocation.claim_id = $1
      ORDER BY allocation.claim_resource_id, allocation.inventory_lot_id, allocation.id
@@ -1009,12 +1056,19 @@ async function releaseClaimResources(
     const claimed = positiveBigInt(resource.claimed_qty, "claimResource.claimedQty");
     const released = BigInt(String(resource.released_qty));
     const consumed = BigInt(String(resource.consumed_qty));
-    const open = claimed - released - consumed;
+    const picked = BigInt(String(resource.picked_qty ?? 0));
+    const open = claimed - released - consumed - picked;
     if (open < BigInt(0)) {
       throw new InventoryAvailabilityClaimRepositoryError(
         "INVALID_CLAIM_RESOURCE_BALANCE",
-        "A canonical claim resource has released or consumed more than it claimed.",
-        { claimResourceId: String(resource.id), claimed: claimed.toString(), released: released.toString(), consumed: consumed.toString() },
+        "A canonical claim resource has released, consumed, or picked more than it claimed.",
+        {
+          claimResourceId: String(resource.id),
+          claimed: claimed.toString(),
+          released: released.toString(),
+          consumed: consumed.toString(),
+          picked: picked.toString(),
+        },
       );
     }
 
@@ -1024,11 +1078,12 @@ async function releaseClaimResources(
       const lotClaimed = positiveBigInt(lot.claimed_qty, "claimLot.claimedQty");
       const lotReleased = BigInt(String(lot.released_qty));
       const lotConsumed = BigInt(String(lot.consumed_qty));
-      const lotOpen = lotClaimed - lotReleased - lotConsumed;
+      const lotPicked = BigInt(String(lot.picked_qty ?? 0));
+      const lotOpen = lotClaimed - lotReleased - lotConsumed - lotPicked;
       if (lotOpen < BigInt(0)) {
         throw new InventoryAvailabilityClaimRepositoryError(
           "INVALID_CLAIM_LOT_BALANCE",
-          "A canonical claim lot allocation has released or consumed more than it claimed.",
+          "A canonical claim lot allocation has released, consumed, or picked more than it claimed.",
           { claimLotAllocationId: String(lot.id) },
         );
       }
@@ -1080,10 +1135,10 @@ async function releaseClaimResources(
     for (const allocation of release.claimLotAllocations) {
       const updatedAllocation = await client.query(
         `UPDATE inventory.availability_claim_lot_allocations
-         SET released_qty = released_qty + $1, updated_at = now()
+         SET released_qty = released_qty + $1, updated_at = $3
          WHERE id = $2
-           AND claimed_qty - released_qty - consumed_qty = $1`,
-        [allocation.releaseQty.toString(), allocation.allocationId.toString()],
+           AND claimed_qty - released_qty - consumed_qty - picked_qty = $1`,
+        [allocation.releaseQty.toString(), allocation.allocationId.toString(), input.occurredAt],
       );
       if (updatedAllocation.rowCount !== 1) {
         throw new InventoryAvailabilityClaimRepositoryError(
@@ -1096,10 +1151,10 @@ async function releaseClaimResources(
     }
     const updatedResource = await client.query(
       `UPDATE inventory.availability_claim_resources
-       SET released_qty = released_qty + $1, updated_at = now()
+       SET released_qty = released_qty + $1, updated_at = $3
        WHERE id = $2
-         AND claimed_qty - released_qty - consumed_qty = $1`,
-      [release.inventory.releaseQty.toString(), release.inventory.claimResourceId.toString()],
+         AND claimed_qty - released_qty - consumed_qty - picked_qty = $1`,
+      [release.inventory.releaseQty.toString(), release.inventory.claimResourceId.toString(), input.occurredAt],
     );
     if (updatedResource.rowCount !== 1) {
       throw new InventoryAvailabilityClaimRepositoryError(
@@ -1113,23 +1168,23 @@ async function releaseClaimResources(
 
   await client.query(
     `UPDATE inventory.availability_claim_lines
-     SET released_target_qty = planned_qty - consumed_target_qty, updated_at = now()
+     SET released_target_qty = planned_qty - consumed_target_qty - picked_target_qty, updated_at = $2
      WHERE claim_id = $1`,
-    [input.claim.id.toString()],
+    [input.claim.id.toString(), input.occurredAt],
   );
   await client.query(
     `UPDATE inventory.availability_claim_operations
      SET released_executions = planned_executions - executed_executions,
          status = CASE WHEN executed_executions = planned_executions THEN status ELSE 'released' END,
-         updated_at = now()
+         updated_at = $2
      WHERE claim_id = $1`,
-    [input.claim.id.toString()],
+    [input.claim.id.toString(), input.occurredAt],
   );
   const status = input.disposition === "cancel" ? "cancelled" : "released";
   const timestampColumn = input.disposition === "cancel" ? "cancelled_at" : "released_at";
   await client.query(
     `UPDATE inventory.availability_claims
-     SET status = $1, ${timestampColumn} = $2, updated_at = now()
+     SET status = $1, ${timestampColumn} = $2, updated_at = $2
      WHERE id = $3 AND status = 'active'`,
     [status, input.occurredAt, input.claim.id.toString()],
   );
@@ -1568,7 +1623,7 @@ async function loadOperationExecutionResources(
 
   const resourceRows = rows(await client.query(
     `SELECT id, claim_line_id, warehouse_id, warehouse_location_id,
-            inventory_level_id, source_variant_id, claimed_qty, released_qty, consumed_qty
+            inventory_level_id, source_variant_id, claimed_qty, released_qty, consumed_qty, picked_qty
      FROM inventory.availability_claim_resources
      WHERE claim_id = $1 AND consumer_operation_key = $2
      ORDER BY warehouse_id, warehouse_location_id, source_variant_id, inventory_level_id, id
@@ -1584,7 +1639,7 @@ async function loadOperationExecutionResources(
   }
   const resourceIds = resourceRows.map((row) => positiveBigInt(row.id, "claimResource.id").toString());
   const allocationRows = rows(await client.query(
-    `SELECT id, claim_resource_id, inventory_lot_id, claimed_qty, released_qty, consumed_qty,
+    `SELECT id, claim_resource_id, inventory_lot_id, claimed_qty, released_qty, consumed_qty, picked_qty,
             unit_cost_mills, po_unit_cost_mills, packaging_unit_cost_mills, landed_unit_cost_mills
      FROM inventory.availability_claim_lot_allocations
      WHERE claim_id = $1 AND claim_resource_id = ANY($2::bigint[])
@@ -1615,7 +1670,8 @@ async function loadOperationExecutionResources(
     const claimed = positiveBigInt(row.claimed_qty, "claimResource.claimedQty");
     const released = BigInt(String(row.released_qty));
     const consumed = BigInt(String(row.consumed_qty));
-    const open = claimed - released - consumed;
+    const picked = BigInt(String(row.picked_qty ?? 0));
+    const open = claimed - released - consumed - picked;
     if (open <= BigInt(0)) {
       throw new InventoryAvailabilityClaimRepositoryError(
         "CLAIM_OPERATION_RESOURCE_NOT_OPEN",
@@ -1638,7 +1694,8 @@ async function loadOperationExecutionResources(
       }
       const lotOpen = positiveBigInt(allocation.claimed_qty, "claimLot.claimedQty")
         - BigInt(String(allocation.released_qty))
-        - BigInt(String(allocation.consumed_qty));
+        - BigInt(String(allocation.consumed_qty))
+        - BigInt(String(allocation.picked_qty ?? 0));
       if (lotOpen <= BigInt(0)) continue;
       lotAllocations.push({
         claimLotAllocationId: positiveBigInt(allocation.id, "claimLot.id"),
@@ -1706,7 +1763,7 @@ async function recordOperationExecution(
       const updatedAllocation = await client.query(
         `UPDATE inventory.availability_claim_lot_allocations
          SET consumed_qty = consumed_qty + $1, updated_at = $3
-         WHERE id = $2 AND claimed_qty - released_qty - consumed_qty = $1`,
+         WHERE id = $2 AND claimed_qty - released_qty - consumed_qty - picked_qty = $1`,
         [allocation.consumeQty.toString(), allocation.claimLotAllocationId.toString(), input.occurredAt],
       );
       if (updatedAllocation.rowCount !== 1) {
@@ -1720,7 +1777,7 @@ async function recordOperationExecution(
     const updatedResource = await client.query(
       `UPDATE inventory.availability_claim_resources
        SET consumed_qty = consumed_qty + $1, updated_at = $3
-       WHERE id = $2 AND claimed_qty - released_qty - consumed_qty = $1`,
+       WHERE id = $2 AND claimed_qty - released_qty - consumed_qty - picked_qty = $1`,
       [resource.consumeQty.toString(), resource.claimResourceId.toString(), input.occurredAt],
     );
     if (updatedResource.rowCount !== 1) {
@@ -2068,6 +2125,606 @@ async function cancelOpenBuildHandoffs(
   }
 }
 
+type FulfillmentClaim = PersistedClaim & {
+  status: "active" | "released" | "cancelled" | "superseded" | "failed";
+};
+
+type FulfillmentClaimLot = {
+  id: bigint;
+  inventoryLotId: number;
+  claimedQty: bigint;
+  releasedQty: bigint;
+  consumedQty: bigint;
+  pickedQty: bigint;
+  unitCostMills: bigint;
+  poUnitCostMills: bigint;
+  packagingUnitCostMills: bigint;
+  landedUnitCostMills: bigint;
+};
+
+type FulfillmentClaimResource = {
+  id: bigint;
+  inventoryLevelId: number;
+  warehouseId: number;
+  warehouseLocationId: number;
+  sourceVariantId: number;
+  claimedQty: bigint;
+  releasedQty: bigint;
+  consumedQty: bigint;
+  pickedQty: bigint;
+  lots: FulfillmentClaimLot[];
+};
+
+type FulfillmentClaimLine = {
+  id: bigint;
+  orderItemId: number;
+  targetVariantId: number;
+  plannedQty: bigint;
+  releasedTargetQty: bigint;
+  consumedTargetQty: bigint;
+  pickedTargetQty: bigint;
+  resources: FulfillmentClaimResource[];
+};
+
+function nonnegativeBigInt(value: unknown, field: string): bigint {
+  try {
+    const parsed = BigInt(String(value));
+    if (parsed < BigInt(0)) throw new Error("negative");
+    return parsed;
+  } catch (cause) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "INVALID_DATABASE_EVIDENCE",
+      `${field} must be a nonnegative bigint`,
+      { field, value, cause: cause instanceof Error ? cause.message : String(cause) },
+    );
+  }
+}
+
+function openResourceQty(resource: FulfillmentClaimResource): bigint {
+  return resource.claimedQty - resource.releasedQty - resource.consumedQty - resource.pickedQty;
+}
+
+function openLotQty(lot: FulfillmentClaimLot): bigint {
+  return lot.claimedQty - lot.releasedQty - lot.consumedQty - lot.pickedQty;
+}
+
+async function loadClaimById(
+  client: PoolClient,
+  claimId: bigint,
+  lock: boolean,
+): Promise<FulfillmentClaim | null> {
+  const row = rows(await client.query(
+    `SELECT id, claim_key, order_id, revision, status,
+            runtime_authority_revision, plan_hash, plan_payload
+     FROM inventory.availability_claims
+     WHERE id = $1
+     ${lock ? "FOR UPDATE" : ""}`,
+    [claimId.toString()],
+  ))[0];
+  if (!row) return null;
+  const plan = claimPlanSchema.parse(row.plan_payload);
+  if (hash(plan) !== String(row.plan_hash)) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PLAN_HASH_MISMATCH",
+      "The claim planner payload no longer matches its persisted hash.",
+      { claimId: String(row.id) },
+    );
+  }
+  const status = String(row.status);
+  if (!["active", "released", "cancelled", "superseded", "failed"].includes(status)) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "INVALID_CLAIM_STATUS",
+      "The canonical claim has an unsupported persisted status.",
+      { claimId: String(row.id), status },
+    );
+  }
+  return {
+    id: positiveBigInt(row.id, "claim.id"),
+    claimKey: String(row.claim_key),
+    orderId: positiveInteger(row.order_id, "claim.orderId"),
+    revision: positiveInteger(row.revision, "claim.revision"),
+    status: status as FulfillmentClaim["status"],
+    runtimeAuthorityRevision: positiveBigInt(row.runtime_authority_revision, "claim.runtimeAuthorityRevision"),
+    planHash: String(row.plan_hash),
+    plan,
+  };
+}
+
+async function loadFulfillmentClaimLine(
+  client: PoolClient,
+  claimId: bigint,
+  orderItemId: number,
+): Promise<FulfillmentClaimLine> {
+  const lineRow = rows(await client.query(
+    `SELECT id, order_item_id, target_variant_id, planned_qty,
+            released_target_qty, consumed_target_qty, picked_target_qty
+     FROM inventory.availability_claim_lines
+     WHERE claim_id = $1 AND order_item_id = $2
+     FOR UPDATE`,
+    [claimId.toString(), orderItemId],
+  ))[0];
+  if (!lineRow) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_LINE_NOT_FOUND",
+      "The requested order item does not belong to this canonical claim.",
+      { claimId: claimId.toString(), orderItemId },
+    );
+  }
+  const lineId = positiveBigInt(lineRow.id, "claimLine.id");
+  const targetVariantId = positiveInteger(lineRow.target_variant_id, "claimLine.targetVariantId");
+  const resourceRows = rows(await client.query(
+    `SELECT id, inventory_level_id, warehouse_id, warehouse_location_id,
+            source_variant_id, claimed_qty, released_qty, consumed_qty, picked_qty
+     FROM inventory.availability_claim_resources
+     WHERE claim_id = $1 AND claim_line_id = $2
+       AND consumer_operation_key IS NULL
+       AND source_variant_id = $3
+     ORDER BY warehouse_id, warehouse_location_id, inventory_level_id, id
+     FOR UPDATE`,
+    [claimId.toString(), lineId.toString(), targetVariantId],
+  ));
+  const resourceIds = resourceRows.map((row) => positiveBigInt(row.id, "claimResource.id"));
+  const lotRows = resourceIds.length === 0 ? [] : rows(await client.query(
+    `SELECT id, claim_resource_id, inventory_lot_id, claimed_qty, released_qty,
+            consumed_qty, picked_qty, unit_cost_mills, po_unit_cost_mills,
+            packaging_unit_cost_mills, landed_unit_cost_mills
+     FROM inventory.availability_claim_lot_allocations
+     WHERE claim_resource_id = ANY($1::bigint[])
+     ORDER BY claim_resource_id, inventory_lot_id, id
+     FOR UPDATE`,
+    [resourceIds.map(String)],
+  ));
+  const lotsByResource = new Map<string, FulfillmentClaimLot[]>();
+  for (const row of lotRows) {
+    if (row.po_unit_cost_mills == null
+      || row.packaging_unit_cost_mills == null
+      || row.landed_unit_cost_mills == null) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_PICK_COST_EVIDENCE_MISSING",
+        "This claim lot predates exact cost lineage and must be replanned before fulfillment.",
+        { claimLotAllocationId: String(row.id) },
+      );
+    }
+    const lot: FulfillmentClaimLot = {
+      id: positiveBigInt(row.id, "claimLot.id"),
+      inventoryLotId: positiveInteger(row.inventory_lot_id, "claimLot.inventoryLotId"),
+      claimedQty: positiveBigInt(row.claimed_qty, "claimLot.claimedQty"),
+      releasedQty: nonnegativeBigInt(row.released_qty, "claimLot.releasedQty"),
+      consumedQty: nonnegativeBigInt(row.consumed_qty, "claimLot.consumedQty"),
+      pickedQty: nonnegativeBigInt(row.picked_qty, "claimLot.pickedQty"),
+      unitCostMills: nonnegativeBigInt(row.unit_cost_mills, "claimLot.unitCostMills"),
+      poUnitCostMills: nonnegativeBigInt(row.po_unit_cost_mills, "claimLot.poUnitCostMills"),
+      packagingUnitCostMills: nonnegativeBigInt(row.packaging_unit_cost_mills, "claimLot.packagingUnitCostMills"),
+      landedUnitCostMills: nonnegativeBigInt(row.landed_unit_cost_mills, "claimLot.landedUnitCostMills"),
+    };
+    const resourceKey = String(row.claim_resource_id);
+    const existing = lotsByResource.get(resourceKey) ?? [];
+    existing.push(lot);
+    lotsByResource.set(resourceKey, existing);
+  }
+  const resources = resourceRows.map((row): FulfillmentClaimResource => {
+    const resourceId = positiveBigInt(row.id, "claimResource.id");
+    const resource: FulfillmentClaimResource = {
+      id: resourceId,
+      inventoryLevelId: positiveInteger(row.inventory_level_id, "claimResource.inventoryLevelId"),
+      warehouseId: positiveInteger(row.warehouse_id, "claimResource.warehouseId"),
+      warehouseLocationId: positiveInteger(row.warehouse_location_id, "claimResource.warehouseLocationId"),
+      sourceVariantId: positiveInteger(row.source_variant_id, "claimResource.sourceVariantId"),
+      claimedQty: positiveBigInt(row.claimed_qty, "claimResource.claimedQty"),
+      releasedQty: nonnegativeBigInt(row.released_qty, "claimResource.releasedQty"),
+      consumedQty: nonnegativeBigInt(row.consumed_qty, "claimResource.consumedQty"),
+      pickedQty: nonnegativeBigInt(row.picked_qty, "claimResource.pickedQty"),
+      lots: lotsByResource.get(resourceId.toString()) ?? [],
+    };
+    const resourceOpen = openResourceQty(resource);
+    const lotOpen = resource.lots.reduce((total, lot) => total + openLotQty(lot), BigInt(0));
+    if (resourceOpen < BigInt(0) || resource.lots.some((lot) => openLotQty(lot) < BigInt(0))
+      || resourceOpen !== lotOpen) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_PICK_LINEAGE_MISMATCH",
+        "Open claim resource and lot balances do not reconcile before fulfillment.",
+        { claimResourceId: resourceId.toString(), resourceOpen: resourceOpen.toString(), lotOpen: lotOpen.toString() },
+      );
+    }
+    return resource;
+  });
+  const plannedQty = nonnegativeBigInt(lineRow.planned_qty, "claimLine.plannedQty");
+  const releasedTargetQty = nonnegativeBigInt(lineRow.released_target_qty, "claimLine.releasedTargetQty");
+  const consumedTargetQty = nonnegativeBigInt(lineRow.consumed_target_qty, "claimLine.consumedTargetQty");
+  const pickedTargetQty = nonnegativeBigInt(lineRow.picked_target_qty, "claimLine.pickedTargetQty");
+  if (releasedTargetQty + consumedTargetQty + pickedTargetQty > plannedQty) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "INVALID_CLAIM_LINE_BALANCE",
+      "The canonical claim line has released, consumed, or picked more than it planned.",
+      { claimLineId: lineId.toString() },
+    );
+  }
+  return {
+    id: lineId,
+    orderItemId: positiveInteger(lineRow.order_item_id, "claimLine.orderItemId"),
+    targetVariantId,
+    plannedQty,
+    releasedTargetQty,
+    consumedTargetQty,
+    pickedTargetQty,
+    resources,
+  };
+}
+
+function selectPickResources(
+  line: FulfillmentClaimLine,
+  warehouseLocationId: number,
+  quantity: bigint,
+): CanonicalClaimInventoryPickResource[] {
+  let remaining = quantity;
+  const selected: CanonicalClaimInventoryPickResource[] = [];
+  for (const resource of line.resources.filter((entry) => entry.warehouseLocationId === warehouseLocationId)) {
+    if (remaining === BigInt(0)) break;
+    const resourceTake = openResourceQty(resource) < remaining ? openResourceQty(resource) : remaining;
+    if (resourceTake <= BigInt(0)) continue;
+    let lotRemaining = resourceTake;
+    const lotAllocations: CanonicalClaimInventoryPickResource["lotAllocations"][number][] = [];
+    for (const lot of resource.lots) {
+      if (lotRemaining === BigInt(0)) break;
+      const available = openLotQty(lot);
+      const take = available < lotRemaining ? available : lotRemaining;
+      if (take <= BigInt(0)) continue;
+      lotAllocations.push({
+        claimLotAllocationId: lot.id,
+        inventoryLotId: lot.inventoryLotId,
+        pickQty: take,
+        unitCostMills: lot.unitCostMills,
+        poUnitCostMills: lot.poUnitCostMills,
+        packagingUnitCostMills: lot.packagingUnitCostMills,
+        landedUnitCostMills: lot.landedUnitCostMills,
+      });
+      lotRemaining -= take;
+    }
+    if (lotRemaining !== BigInt(0)) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_PICK_LINEAGE_MISMATCH",
+        "The selected claim resource has insufficient exact open lot ownership.",
+        { claimResourceId: resource.id.toString() },
+      );
+    }
+    selected.push({
+      claimResourceId: resource.id,
+      inventoryLevelId: resource.inventoryLevelId,
+      warehouseLocationId: resource.warehouseLocationId,
+      sourceVariantId: resource.sourceVariantId,
+      pickQty: resourceTake,
+      lotAllocations,
+    });
+    remaining -= resourceTake;
+  }
+  if (remaining !== BigInt(0)) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PICK_LOCATION_SHORTFALL",
+      "The selected location does not own enough open claim inventory for this pick.",
+      { claimLineId: line.id.toString(), warehouseLocationId, requestedQty: quantity.toString(), shortfallQty: remaining.toString() },
+    );
+  }
+  return selected;
+}
+
+function selectReconciliationReleases(
+  line: FulfillmentClaimLine,
+  selectedLocationId: number,
+  quantity: bigint,
+): Array<{
+  inventory: CanonicalClaimInventoryReleaseResource;
+  allocations: readonly { allocationId: bigint; releaseQty: bigint }[];
+}> {
+  let remaining = quantity;
+  const releases: Array<{
+    inventory: CanonicalClaimInventoryReleaseResource;
+    allocations: readonly { allocationId: bigint; releaseQty: bigint }[];
+  }> = [];
+  for (const resource of line.resources.filter((entry) => entry.warehouseLocationId !== selectedLocationId)) {
+    if (remaining === BigInt(0)) break;
+    const take = openResourceQty(resource) < remaining ? openResourceQty(resource) : remaining;
+    if (take <= BigInt(0)) continue;
+    let lotRemaining = take;
+    const allocations: { allocationId: bigint; inventoryLotId: number; releaseQty: bigint }[] = [];
+    for (const lot of resource.lots) {
+      if (lotRemaining === BigInt(0)) break;
+      const available = openLotQty(lot);
+      const lotTake = available < lotRemaining ? available : lotRemaining;
+      if (lotTake <= BigInt(0)) continue;
+      allocations.push({ allocationId: lot.id, inventoryLotId: lot.inventoryLotId, releaseQty: lotTake });
+      lotRemaining -= lotTake;
+    }
+    if (lotRemaining !== BigInt(0)) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_RECONCILIATION_LINEAGE_MISMATCH",
+        "The source claim resource has insufficient exact lot ownership for reconciliation.",
+        { claimResourceId: resource.id.toString() },
+      );
+    }
+    releases.push({
+      inventory: {
+        claimResourceId: resource.id,
+        inventoryLevelId: resource.inventoryLevelId,
+        warehouseLocationId: resource.warehouseLocationId,
+        sourceVariantId: resource.sourceVariantId,
+        releaseQty: take,
+        lotAllocations: allocations.map(({ inventoryLotId, releaseQty }) => ({ inventoryLotId, releaseQty })),
+        orderItemId: line.orderItemId,
+      },
+      allocations: allocations.map(({ allocationId, releaseQty }) => ({ allocationId, releaseQty })),
+    });
+    remaining -= take;
+  }
+  if (remaining !== BigInt(0)) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_RECONCILIATION_SOURCE_SHORTFALL",
+      "The claim does not own enough open inventory at other locations to rebind this pick.",
+      { claimLineId: line.id.toString(), requestedQty: quantity.toString(), shortfallQty: remaining.toString() },
+    );
+  }
+  return releases;
+}
+
+async function requirePickableLocation(
+  client: PoolClient,
+  warehouseLocationId: number,
+  orderWarehouseId: number | null,
+): Promise<number> {
+  const row = rows(await client.query(
+    `SELECT warehouse_id, is_active, is_pickable, cycle_count_freeze_id
+     FROM warehouse.warehouse_locations
+     WHERE id = $1
+     FOR SHARE`,
+    [warehouseLocationId],
+  ))[0];
+  if (!row) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PICK_LOCATION_NOT_FOUND",
+      "The selected pick location does not exist.",
+      { warehouseLocationId },
+    );
+  }
+  const warehouseId = positiveInteger(row.warehouse_id, "warehouseLocation.warehouseId");
+  if (orderWarehouseId != null && warehouseId !== orderWarehouseId) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PICK_WRONG_WAREHOUSE",
+      "The selected pick location does not belong to the order warehouse.",
+      { warehouseLocationId, targetWarehouseId: warehouseId, orderWarehouseId },
+    );
+  }
+  if (Number(row.is_active) !== 1 || Number(row.is_pickable) !== 1 || row.cycle_count_freeze_id != null) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PICK_LOCATION_UNAVAILABLE",
+      "The selected location is inactive, non-pickable, or frozen for cycle count.",
+      { warehouseLocationId },
+    );
+  }
+  return warehouseId;
+}
+
+async function reconcilePickLocation(
+  client: PoolClient,
+  inventoryWriter: CanonicalClaimInventoryMutationPort,
+  input: {
+    claim: FulfillmentClaim;
+    line: FulfillmentClaimLine;
+    orderWarehouseId: number | null;
+    warehouseLocationId: number;
+    quantity: bigint;
+    actor: string;
+    reason: string;
+    occurredAt: Date;
+  },
+): Promise<void> {
+  const targetRow = rows(await client.query(
+    `SELECT level.id AS inventory_level_id, location.warehouse_id,
+            location.is_active, location.is_pickable, location.cycle_count_freeze_id
+     FROM warehouse.warehouse_locations AS location
+     LEFT JOIN inventory.inventory_levels AS level
+       ON level.warehouse_location_id = location.id
+      AND level.product_variant_id = $2
+     WHERE location.id = $1`,
+    [input.warehouseLocationId, input.line.targetVariantId],
+  ))[0];
+  if (!targetRow || targetRow.inventory_level_id == null) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PICK_LOCATION_INVENTORY_MISSING",
+      "The selected pick location has no recorded inventory level for the claim target variant.",
+      { warehouseLocationId: input.warehouseLocationId, targetVariantId: input.line.targetVariantId },
+    );
+  }
+  const targetWarehouseId = await requirePickableLocation(
+    client,
+    input.warehouseLocationId,
+    input.orderWarehouseId,
+  );
+  const releases = selectReconciliationReleases(input.line, input.warehouseLocationId, input.quantity);
+  const targetResourceRow = rows(await client.query(
+    `INSERT INTO inventory.availability_claim_resources (
+       claim_id, claim_line_id, consumer_operation_key, producer_operation_key,
+       warehouse_id, warehouse_location_id, inventory_level_id, source_variant_id, claimed_qty
+     ) VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $7)
+     ON CONFLICT (
+       claim_line_id, warehouse_id, warehouse_location_id, inventory_level_id,
+       source_variant_id, COALESCE(consumer_operation_key, ''), COALESCE(producer_operation_key, '')
+     ) DO UPDATE
+       SET claimed_qty = inventory.availability_claim_resources.claimed_qty + EXCLUDED.claimed_qty,
+           updated_at = $8
+     RETURNING id`,
+    [
+      input.claim.id.toString(),
+      input.line.id.toString(),
+      targetWarehouseId,
+      input.warehouseLocationId,
+      positiveInteger(targetRow.inventory_level_id, "inventoryLevel.id"),
+      input.line.targetVariantId,
+      input.quantity.toString(),
+      input.occurredAt,
+    ],
+  ))[0];
+  const targetResourceId = positiveBigInt(targetResourceRow?.id, "targetClaimResource.id");
+  const allocations = await inventoryWriter.reconcilePickResource({
+    client,
+    claimId: input.claim.id,
+    releases: releases.map((release) => release.inventory),
+    target: {
+      claimResourceId: targetResourceId,
+      inventoryLevelId: positiveInteger(targetRow.inventory_level_id, "inventoryLevel.id"),
+      warehouseLocationId: input.warehouseLocationId,
+      sourceVariantId: input.line.targetVariantId,
+      claimedQty: Number(input.quantity),
+      orderItemId: input.line.orderItemId,
+    },
+    orderId: input.claim.orderId,
+    actor: input.actor,
+    reason: input.reason,
+    occurredAt: input.occurredAt,
+  });
+  for (const release of releases) {
+    for (const allocation of release.allocations) {
+      const updated = await client.query(
+        `UPDATE inventory.availability_claim_lot_allocations
+         SET released_qty = released_qty + $1, updated_at = $3
+         WHERE id = $2
+           AND claimed_qty - released_qty - consumed_qty - picked_qty >= $1`,
+        [allocation.releaseQty.toString(), allocation.allocationId.toString(), input.occurredAt],
+      );
+      if (updated.rowCount !== 1) {
+        throw new InventoryAvailabilityClaimRepositoryError(
+          "CLAIM_RECONCILIATION_STATE_CHANGED",
+          "A source claim lot changed while pick-location reconciliation was recorded.",
+          { claimLotAllocationId: allocation.allocationId.toString() },
+        );
+      }
+    }
+    const updated = await client.query(
+      `UPDATE inventory.availability_claim_resources
+       SET released_qty = released_qty + $1, updated_at = $3
+       WHERE id = $2
+         AND claimed_qty - released_qty - consumed_qty - picked_qty >= $1`,
+      [release.inventory.releaseQty.toString(), release.inventory.claimResourceId.toString(), input.occurredAt],
+    );
+    if (updated.rowCount !== 1) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_RECONCILIATION_STATE_CHANGED",
+        "A source claim resource changed while pick-location reconciliation was recorded.",
+        { claimResourceId: release.inventory.claimResourceId.toString() },
+      );
+    }
+  }
+  for (const allocation of allocations) {
+    const inserted = await client.query(
+      `INSERT INTO inventory.availability_claim_lot_allocations (
+         claim_id, claim_resource_id, inventory_lot_id, claimed_qty, unit_cost_mills,
+         po_unit_cost_mills, packaging_unit_cost_mills, landed_unit_cost_mills
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (claim_resource_id, inventory_lot_id) DO UPDATE
+         SET claimed_qty = inventory.availability_claim_lot_allocations.claimed_qty + EXCLUDED.claimed_qty,
+             updated_at = $9
+         WHERE inventory.availability_claim_lot_allocations.unit_cost_mills = EXCLUDED.unit_cost_mills
+           AND inventory.availability_claim_lot_allocations.po_unit_cost_mills = EXCLUDED.po_unit_cost_mills
+           AND inventory.availability_claim_lot_allocations.packaging_unit_cost_mills = EXCLUDED.packaging_unit_cost_mills
+           AND inventory.availability_claim_lot_allocations.landed_unit_cost_mills = EXCLUDED.landed_unit_cost_mills
+       RETURNING id`,
+      [
+        input.claim.id.toString(), targetResourceId.toString(), allocation.inventoryLotId, allocation.qty,
+        allocation.unitCostMills.toString(), allocation.poUnitCostMills.toString(),
+        allocation.packagingUnitCostMills.toString(), allocation.landedUnitCostMills.toString(), input.occurredAt,
+      ],
+    );
+    if (inserted.rowCount !== 1) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_RECONCILIATION_COST_CHANGED",
+        "The target FIFO lot cost no longer matches existing claim lineage.",
+        { inventoryLotId: allocation.inventoryLotId },
+      );
+    }
+  }
+  const evidence = {
+    schemaVersion: "inventory_availability_claim_pick_reconciliation_event_v1",
+    eventType: "claim_pick_location_reconciled",
+    claimId: input.claim.id.toString(),
+    claimLineId: input.line.id.toString(),
+    orderItemId: input.line.orderItemId,
+    targetWarehouseLocationId: input.warehouseLocationId,
+    targetClaimResourceId: targetResourceId.toString(),
+    quantity: input.quantity.toString(),
+    releasedClaimResourceIds: releases.map((release) => release.inventory.claimResourceId.toString()),
+  };
+  await client.query(
+    `INSERT INTO inventory.availability_claim_events (
+       claim_id, event_type, from_status, to_status, evidence_payload,
+       evidence_hash, actor, reason, occurred_at
+     ) VALUES ($1, 'claim_pick_location_reconciled', 'active', 'active', $2::jsonb, $3, $4, $5, $6)`,
+    [
+      input.claim.id.toString(), JSON.stringify(evidence), hash(evidence), input.actor,
+      input.reason, input.occurredAt,
+    ],
+  );
+}
+
+async function persistPickCommandAndEvent(
+  client: PoolClient,
+  input: {
+    claim: FulfillmentClaim;
+    line: FulfillmentClaimLine;
+    command: CanonicalAvailabilityClaimPickCommand | CanonicalAvailabilityClaimUnpickCommand;
+    commandType: "pick" | "unpick";
+    requestHash: string;
+    result: CanonicalAvailabilityClaimPickResult;
+    movements: Awaited<ReturnType<CanonicalClaimInventoryMutationPort["pickResources"]>>["movements"];
+    occurredAt: Date;
+  },
+): Promise<void> {
+  const commandRow = rows(await client.query(
+    `INSERT INTO inventory.availability_claim_commands (
+       claim_id, order_id, command_type, idempotency_key, request_hash, result_hash,
+       request_payload, result_payload, actor, reason, occurred_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11)
+     RETURNING id`,
+    [
+      input.claim.id.toString(), input.claim.orderId, input.commandType,
+      input.command.idempotencyKey, input.requestHash, hash(input.result),
+      JSON.stringify(input.command), JSON.stringify(input.result), input.command.actor,
+      input.command.reason, input.occurredAt,
+    ],
+  ))[0];
+  const commandId = positiveBigInt(commandRow?.id, "claimCommand.id");
+  for (const movement of input.movements) {
+    await client.query(
+      `INSERT INTO inventory.availability_claim_pick_movements (
+         claim_id, claim_line_id, claim_resource_id, claim_lot_allocation_id,
+         inventory_lot_id, command_id, order_item_cost_id, movement_type, quantity,
+         reverses_pick_movement_id, unit_cost_mills, total_cost_mills, occurred_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        input.claim.id.toString(), input.line.id.toString(), movement.claimResourceId.toString(),
+        movement.claimLotAllocationId.toString(), movement.inventoryLotId, commandId.toString(),
+        movement.orderItemCostId, input.commandType, movement.quantity.toString(),
+        movement.reversesPickMovementId?.toString() ?? null, movement.unitCostMills.toString(),
+        movement.totalCostMills.toString(), input.occurredAt,
+      ],
+    );
+  }
+  const evidence = {
+    schemaVersion: "inventory_availability_claim_pick_event_v1",
+    eventType: input.commandType === "pick" ? "claim_line_picked" : "claim_line_unpicked",
+    claimId: input.claim.id.toString(),
+    claimLineId: input.line.id.toString(),
+    result: input.result,
+  };
+  await client.query(
+    `INSERT INTO inventory.availability_claim_events (
+       claim_id, event_type, from_status, to_status, evidence_payload,
+       evidence_hash, actor, reason, occurred_at
+     ) VALUES ($1, $2, $3, $3, $4::jsonb, $5, $6, $7, $8)`,
+    [
+      input.claim.id.toString(), evidence.eventType, input.claim.status, JSON.stringify(evidence),
+      hash(evidence), input.command.actor, input.command.reason, input.occurredAt,
+    ],
+  );
+}
+
 async function rollback(client: PoolClient, originalError: unknown): Promise<never> {
   try {
     await client.query("ROLLBACK");
@@ -2244,6 +2901,498 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     throw new InventoryAvailabilityClaimRepositoryError(
       "CLAIM_TRANSACTION_RETRY_EXHAUSTED",
       "Canonical claim transaction could not serialize after bounded retries.",
+      { attempts: MAX_SERIALIZATION_ATTEMPTS },
+      { cause: lastRetryableError },
+    );
+  }
+
+  async pickClaimLine(
+    rawCommand: CanonicalAvailabilityClaimPickCommand,
+  ): Promise<CanonicalAvailabilityClaimPickResult> {
+    const command = canonicalAvailabilityClaimPickCommandSchema.parse(rawCommand);
+    const requestHash = hash(command);
+    const occurredAt = this.clock();
+    if (Number.isNaN(occurredAt.getTime())) {
+      throw new InventoryAvailabilityClaimRepositoryError("INVALID_CLOCK", "Canonical pick clock returned an invalid time.");
+    }
+    const claimId = positiveBigInt(command.claimId, "claim.id");
+    const quantity = BigInt(positiveInteger(command.quantity, "pick.quantity"));
+
+    let lastRetryableError: unknown;
+    for (let attempt = 1; attempt <= MAX_SERIALIZATION_ATTEMPTS; attempt += 1) {
+      const client = await this.connectionPool.connect();
+      try {
+        await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        const replay = await loadPickReplay(client, command.idempotencyKey, requestHash, "pick");
+        if (replay) {
+          await client.query("COMMIT");
+          return replay;
+        }
+        await requireCanonicalAuthority(client);
+        const preliminaryClaim = await loadClaimById(client, claimId, false);
+        if (!preliminaryClaim || preliminaryClaim.status !== "active") {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ACTIVE_CLAIM_NOT_FOUND",
+            "The requested canonical claim is not active.",
+            { claimId: claimId.toString() },
+          );
+        }
+        const graphProductIds = await loadClaimProductIds(client, preliminaryClaim);
+        if (graphProductIds.length === 0 || graphProductIds.length > MAX_GRAPH_PRODUCTS) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "INVALID_CLAIM_MODEL_EVIDENCE",
+            "The active claim does not contain a bounded model-evidence graph.",
+            { claimId: claimId.toString(), productCount: graphProductIds.length },
+          );
+        }
+        await lockGraphProducts(client, graphProductIds);
+        const order = await loadOrder(client, preliminaryClaim.orderId, true);
+        if (["cancelled", "shipped"].includes(order.warehouseStatus) || order.onHold) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_ORDER_NOT_PICKABLE",
+            "A cancelled, shipped, or held order cannot consume a canonical claim pick.",
+            {
+              claimId: claimId.toString(),
+              orderId: order.orderId,
+              warehouseStatus: order.warehouseStatus,
+              onHold: order.onHold,
+            },
+          );
+        }
+        const claim = await loadClaimById(client, claimId, true);
+        if (!claim || claim.status !== "active" || claim.orderId !== preliminaryClaim.orderId) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ACTIVE_CLAIM_CHANGED",
+            "The active canonical claim changed while fulfillment locks were being acquired.",
+            { claimId: claimId.toString() },
+          );
+        }
+        await requirePickableLocation(client, command.warehouseLocationId, order.warehouseId);
+        let line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
+        const openTarget = line.plannedQty - line.releasedTargetQty - line.consumedTargetQty - line.pickedTargetQty;
+        if (openTarget < quantity) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_LINE_PICK_OVERAGE",
+            "The pick exceeds the claim line's remaining planned target quantity.",
+            { claimLineId: line.id.toString(), requestedQty: quantity.toString(), openQty: openTarget.toString() },
+          );
+        }
+        const selectedOpen = line.resources
+          .filter((resource) => resource.warehouseLocationId === command.warehouseLocationId)
+          .reduce((total, resource) => total + openResourceQty(resource), BigInt(0));
+        let reconciledQuantity = BigInt(0);
+        if (selectedOpen < quantity) {
+          reconciledQuantity = quantity - selectedOpen;
+          if (command.locationStrategy !== "reconcile_recorded_stock") {
+            throw new InventoryAvailabilityClaimRepositoryError(
+              "CLAIM_PICK_LOCATION_SHORTFALL",
+              "The selected location does not own enough open claim inventory and strict location mode forbids reallocation.",
+              {
+                claimLineId: line.id.toString(),
+                warehouseLocationId: command.warehouseLocationId,
+                requestedQty: quantity.toString(),
+                selectedOpenQty: selectedOpen.toString(),
+              },
+            );
+          }
+          await reconcilePickLocation(client, this.inventoryWriter, {
+            claim,
+            line,
+            orderWarehouseId: order.warehouseId,
+            warehouseLocationId: command.warehouseLocationId,
+            quantity: reconciledQuantity,
+            actor: command.actor,
+            reason: command.reason,
+            occurredAt,
+          });
+          line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
+        }
+        const pickResources = selectPickResources(line, command.warehouseLocationId, quantity);
+        const picked = await this.inventoryWriter.pickResources({
+          client,
+          claimId: claim.id,
+          claimLineId: line.id,
+          resources: pickResources,
+          orderId: claim.orderId,
+          orderItemId: line.orderItemId,
+          actor: command.actor,
+          reason: command.reason,
+          occurredAt,
+        });
+        for (const resource of pickResources) {
+          for (const allocation of resource.lotAllocations) {
+            const updated = await client.query(
+              `UPDATE inventory.availability_claim_lot_allocations
+               SET picked_qty = picked_qty + $1, updated_at = $3
+               WHERE id = $2
+                 AND claimed_qty - released_qty - consumed_qty - picked_qty >= $1`,
+              [allocation.pickQty.toString(), allocation.claimLotAllocationId.toString(), occurredAt],
+            );
+            if (updated.rowCount !== 1) {
+              throw new InventoryAvailabilityClaimRepositoryError(
+                "CLAIM_PICK_STATE_CHANGED",
+                "A claim lot allocation changed while its pick was recorded.",
+                { claimLotAllocationId: allocation.claimLotAllocationId.toString() },
+              );
+            }
+          }
+          const updated = await client.query(
+            `UPDATE inventory.availability_claim_resources
+             SET picked_qty = picked_qty + $1, updated_at = $3
+             WHERE id = $2
+               AND claimed_qty - released_qty - consumed_qty - picked_qty >= $1`,
+            [resource.pickQty.toString(), resource.claimResourceId.toString(), occurredAt],
+          );
+          if (updated.rowCount !== 1) {
+            throw new InventoryAvailabilityClaimRepositoryError(
+              "CLAIM_PICK_STATE_CHANGED",
+              "A claim resource changed while its pick was recorded.",
+              { claimResourceId: resource.claimResourceId.toString() },
+            );
+          }
+        }
+        const updatedLine = await client.query(
+          `UPDATE inventory.availability_claim_lines
+           SET picked_target_qty = picked_target_qty + $1, updated_at = $3
+           WHERE id = $2
+             AND planned_qty - released_target_qty - consumed_target_qty - picked_target_qty >= $1`,
+          [quantity.toString(), line.id.toString(), occurredAt],
+        );
+        if (updatedLine.rowCount !== 1) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_PICK_STATE_CHANGED",
+            "The claim line changed while its pick was recorded.",
+            { claimLineId: line.id.toString() },
+          );
+        }
+        const result = canonicalAvailabilityClaimPickResultSchema.parse({
+          outcome: "picked",
+          claimId: claim.id.toString(),
+          claimLineId: line.id.toString(),
+          orderId: claim.orderId,
+          orderItemId: line.orderItemId,
+          warehouseLocationIds: [command.warehouseLocationId],
+          quantity: quantity.toString(),
+          reconciledQuantity: reconciledQuantity.toString(),
+          totalCostMills: picked.totalCostMills.toString(),
+          idempotentReplay: false,
+        });
+        await persistPickCommandAndEvent(client, {
+          claim,
+          line,
+          command,
+          commandType: "pick",
+          requestHash,
+          result,
+          movements: picked.movements,
+          occurredAt,
+        });
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        try {
+          await rollback(client, error);
+        } catch (rolledBackError) {
+          if (isRetryableTransactionError(rolledBackError) && attempt < MAX_SERIALIZATION_ATTEMPTS) {
+            lastRetryableError = rolledBackError;
+            continue;
+          }
+          if (isRetryableTransactionError(rolledBackError)) {
+            lastRetryableError = rolledBackError;
+            break;
+          }
+          throw rolledBackError;
+        }
+      } finally {
+        client.release();
+      }
+    }
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PICK_RETRY_EXHAUSTED",
+      "Canonical claim pick could not serialize after bounded retries.",
+      { attempts: MAX_SERIALIZATION_ATTEMPTS },
+      { cause: lastRetryableError },
+    );
+  }
+
+  async unpickClaimLine(
+    rawCommand: CanonicalAvailabilityClaimUnpickCommand,
+  ): Promise<CanonicalAvailabilityClaimPickResult> {
+    const command = canonicalAvailabilityClaimUnpickCommandSchema.parse(rawCommand);
+    const requestHash = hash(command);
+    const occurredAt = this.clock();
+    if (Number.isNaN(occurredAt.getTime())) {
+      throw new InventoryAvailabilityClaimRepositoryError("INVALID_CLOCK", "Canonical unpick clock returned an invalid time.");
+    }
+    const claimId = positiveBigInt(command.claimId, "claim.id");
+    const quantity = BigInt(positiveInteger(command.quantity, "unpick.quantity"));
+
+    let lastRetryableError: unknown;
+    for (let attempt = 1; attempt <= MAX_SERIALIZATION_ATTEMPTS; attempt += 1) {
+      const client = await this.connectionPool.connect();
+      try {
+        await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        const replay = await loadPickReplay(client, command.idempotencyKey, requestHash, "unpick");
+        if (replay) {
+          await client.query("COMMIT");
+          return replay;
+        }
+        await requireCanonicalAuthority(client);
+        const preliminaryClaim = await loadClaimById(client, claimId, false);
+        if (!preliminaryClaim) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_NOT_FOUND",
+            "The requested canonical claim does not exist.",
+            { claimId: claimId.toString() },
+          );
+        }
+        const graphProductIds = await loadClaimProductIds(client, preliminaryClaim);
+        if (graphProductIds.length === 0 || graphProductIds.length > MAX_GRAPH_PRODUCTS) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "INVALID_CLAIM_MODEL_EVIDENCE",
+            "The claim does not contain a bounded model-evidence graph.",
+            { claimId: claimId.toString(), productCount: graphProductIds.length },
+          );
+        }
+        await lockGraphProducts(client, graphProductIds);
+        const order = await loadOrder(client, preliminaryClaim.orderId, true);
+        if (["packing", "packed", "shipped"].includes(order.warehouseStatus) || order.onHold) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_ORDER_NOT_UNPICKABLE",
+            "A held, packing, packed, or shipped order cannot reverse a canonical pick.",
+            { orderId: order.orderId, warehouseStatus: order.warehouseStatus, onHold: order.onHold },
+          );
+        }
+        const claim = await loadClaimById(client, claimId, true);
+        if (!claim || claim.orderId !== preliminaryClaim.orderId || claim.status !== preliminaryClaim.status) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_CHANGED",
+            "The canonical claim changed while unpick locks were being acquired.",
+            { claimId: claimId.toString() },
+          );
+        }
+        const line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
+        if (line.pickedTargetQty < quantity) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_LINE_UNPICK_OVERAGE",
+            "The unpick exceeds the claim line's currently picked quantity.",
+            { claimLineId: line.id.toString(), requestedQty: quantity.toString(), pickedQty: line.pickedTargetQty.toString() },
+          );
+        }
+        const movementRows = rows(await client.query(
+          `SELECT movement.id, movement.claim_resource_id, movement.claim_lot_allocation_id,
+                  movement.inventory_lot_id, movement.movement_type, movement.quantity,
+                  movement.reverses_pick_movement_id,
+                  resource.inventory_level_id, resource.warehouse_location_id,
+                  resource.source_variant_id,
+                  cost.order_id AS cost_order_id, cost.order_item_id AS cost_order_item_id,
+                  cost.inventory_lot_id AS cost_inventory_lot_id,
+                  cost.product_variant_id AS cost_product_variant_id,
+                  cost.qty AS cost_qty, cost.unit_cost_mills, cost.total_cost_mills
+           FROM inventory.availability_claim_pick_movements AS movement
+           JOIN inventory.availability_claim_resources AS resource
+             ON resource.id = movement.claim_resource_id AND resource.claim_id = movement.claim_id
+           JOIN oms.order_item_costs AS cost ON cost.id = movement.order_item_cost_id
+           WHERE movement.claim_id = $1 AND movement.claim_line_id = $2
+           ORDER BY movement.id
+           FOR UPDATE OF movement, cost`,
+          [claim.id.toString(), line.id.toString()],
+        ));
+        const reversedByPick = new Map<string, bigint>();
+        for (const row of movementRows) {
+          if (String(row.movement_type) !== "unpick") continue;
+          const reverseId = positiveBigInt(row.reverses_pick_movement_id, "unpickMovement.reversesPickMovementId").toString();
+          reversedByPick.set(reverseId, (reversedByPick.get(reverseId) ?? BigInt(0))
+            + positiveBigInt(row.quantity, "unpickMovement.quantity"));
+        }
+        let remaining = quantity;
+        const selectedRows: Array<{ row: any; quantity: bigint }> = [];
+        for (const row of [...movementRows].reverse()) {
+          if (remaining === BigInt(0)) break;
+          if (String(row.movement_type) !== "pick") continue;
+          const movementId = positiveBigInt(row.id, "pickMovement.id");
+          const pickedQty = positiveBigInt(row.quantity, "pickMovement.quantity");
+          const available = pickedQty - (reversedByPick.get(movementId.toString()) ?? BigInt(0));
+          if (available < BigInt(0)) {
+            throw new InventoryAvailabilityClaimRepositoryError(
+              "CLAIM_UNPICK_LINEAGE_MISMATCH",
+              "Compensating unpick movements exceed their original pick movement.",
+              { pickMovementId: movementId.toString() },
+            );
+          }
+          const take = available < remaining ? available : remaining;
+          if (take > BigInt(0)) selectedRows.push({ row, quantity: take });
+          remaining -= take;
+        }
+        if (remaining !== BigInt(0)) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_UNPICK_MOVEMENT_SHORTFALL",
+            "Append-only pick movements do not contain enough unreversed quantity.",
+            { claimLineId: line.id.toString(), shortfallQty: remaining.toString() },
+          );
+        }
+        const byResource = new Map<string, CanonicalClaimInventoryUnpickResource>();
+        for (const selected of selectedRows) {
+          const row = selected.row;
+          const movementQty = positiveBigInt(row.quantity, "pickMovement.quantity");
+          const costQty = positiveBigInt(row.cost_qty, "orderItemCost.qty");
+          const unitCostMills = nonnegativeBigInt(row.unit_cost_mills, "orderItemCost.unitCostMills");
+          const totalCostMills = nonnegativeBigInt(row.total_cost_mills, "orderItemCost.totalCostMills");
+          if (positiveInteger(row.cost_order_id, "orderItemCost.orderId") !== claim.orderId
+            || positiveInteger(row.cost_order_item_id, "orderItemCost.orderItemId") !== line.orderItemId
+            || positiveInteger(row.cost_inventory_lot_id, "orderItemCost.inventoryLotId")
+              !== positiveInteger(row.inventory_lot_id, "pickMovement.inventoryLotId")
+            || positiveInteger(row.cost_product_variant_id, "orderItemCost.productVariantId")
+              !== positiveInteger(row.source_variant_id, "claimResource.sourceVariantId")
+            || costQty !== movementQty
+            || totalCostMills !== unitCostMills * costQty) {
+            throw new InventoryAvailabilityClaimRepositoryError(
+              "CLAIM_PICK_COGS_EVIDENCE_INVALID",
+              "The original canonical pick COGS row does not match its immutable movement identity or cost.",
+              { pickMovementId: String(row.id) },
+            );
+          }
+          const resourceId = positiveBigInt(row.claim_resource_id, "claimResource.id");
+          const key = resourceId.toString();
+          const existing = byResource.get(key) ?? {
+            claimResourceId: resourceId,
+            inventoryLevelId: positiveInteger(row.inventory_level_id, "claimResource.inventoryLevelId"),
+            warehouseLocationId: positiveInteger(row.warehouse_location_id, "claimResource.warehouseLocationId"),
+            sourceVariantId: positiveInteger(row.source_variant_id, "claimResource.sourceVariantId"),
+            unpickQty: BigInt(0),
+            lotAllocations: [],
+          };
+          const allocation = {
+            claimLotAllocationId: positiveBigInt(row.claim_lot_allocation_id, "claimLotAllocation.id"),
+            inventoryLotId: positiveInteger(row.inventory_lot_id, "inventoryLot.id"),
+            unpickQty: selected.quantity,
+            reversesPickMovementId: positiveBigInt(row.id, "pickMovement.id"),
+            unitCostMills,
+          };
+          byResource.set(key, {
+            ...existing,
+            unpickQty: existing.unpickQty + selected.quantity,
+            lotAllocations: [...existing.lotAllocations, allocation],
+          });
+        }
+        const restoreReservation = claim.status === "active";
+        const unpicked = await this.inventoryWriter.unpickResources({
+          client,
+          claimId: claim.id,
+          claimLineId: line.id,
+          resources: [...byResource.values()],
+          orderId: claim.orderId,
+          orderItemId: line.orderItemId,
+          restoreReservation,
+          actor: command.actor,
+          reason: command.reason,
+          occurredAt,
+        });
+        for (const resource of byResource.values()) {
+          for (const allocation of resource.lotAllocations) {
+            const updated = await client.query(
+              `UPDATE inventory.availability_claim_lot_allocations
+               SET picked_qty = picked_qty - $1,
+                   released_qty = released_qty + $2,
+                   updated_at = $4
+               WHERE id = $3 AND picked_qty >= $1`,
+              [
+                allocation.unpickQty.toString(),
+                restoreReservation ? "0" : allocation.unpickQty.toString(),
+                allocation.claimLotAllocationId.toString(),
+                occurredAt,
+              ],
+            );
+            if (updated.rowCount !== 1) {
+              throw new InventoryAvailabilityClaimRepositoryError(
+                "CLAIM_UNPICK_STATE_CHANGED",
+                "A claim lot allocation changed while its unpick was recorded.",
+                { claimLotAllocationId: allocation.claimLotAllocationId.toString() },
+              );
+            }
+          }
+          const updated = await client.query(
+            `UPDATE inventory.availability_claim_resources
+             SET picked_qty = picked_qty - $1,
+                 released_qty = released_qty + $2,
+                 updated_at = $4
+             WHERE id = $3 AND picked_qty >= $1`,
+            [
+              resource.unpickQty.toString(),
+              restoreReservation ? "0" : resource.unpickQty.toString(),
+              resource.claimResourceId.toString(),
+              occurredAt,
+            ],
+          );
+          if (updated.rowCount !== 1) {
+            throw new InventoryAvailabilityClaimRepositoryError(
+              "CLAIM_UNPICK_STATE_CHANGED",
+              "A claim resource changed while its unpick was recorded.",
+              { claimResourceId: resource.claimResourceId.toString() },
+            );
+          }
+        }
+        const updatedLine = await client.query(
+          `UPDATE inventory.availability_claim_lines
+           SET picked_target_qty = picked_target_qty - $1,
+               released_target_qty = released_target_qty + $2,
+               updated_at = $4
+           WHERE id = $3 AND picked_target_qty >= $1`,
+          [quantity.toString(), restoreReservation ? "0" : quantity.toString(), line.id.toString(), occurredAt],
+        );
+        if (updatedLine.rowCount !== 1) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_UNPICK_STATE_CHANGED",
+            "The claim line changed while its unpick was recorded.",
+            { claimLineId: line.id.toString() },
+          );
+        }
+        const locationIds = uniqueSorted([...byResource.values()].map((resource) => resource.warehouseLocationId));
+        const result = canonicalAvailabilityClaimPickResultSchema.parse({
+          outcome: "unpicked",
+          claimId: claim.id.toString(),
+          claimLineId: line.id.toString(),
+          orderId: claim.orderId,
+          orderItemId: line.orderItemId,
+          warehouseLocationIds: locationIds,
+          quantity: quantity.toString(),
+          reservationRestored: restoreReservation,
+          totalCostMills: unpicked.totalCostMills.toString(),
+          idempotentReplay: false,
+        });
+        await persistPickCommandAndEvent(client, {
+          claim,
+          line,
+          command,
+          commandType: "unpick",
+          requestHash,
+          result,
+          movements: unpicked.movements,
+          occurredAt,
+        });
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        try {
+          await rollback(client, error);
+        } catch (rolledBackError) {
+          if (isRetryableTransactionError(rolledBackError) && attempt < MAX_SERIALIZATION_ATTEMPTS) {
+            lastRetryableError = rolledBackError;
+            continue;
+          }
+          if (isRetryableTransactionError(rolledBackError)) {
+            lastRetryableError = rolledBackError;
+            break;
+          }
+          throw rolledBackError;
+        }
+      } finally {
+        client.release();
+      }
+    }
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_UNPICK_RETRY_EXHAUSTED",
+      "Canonical claim unpick could not serialize after bounded retries.",
       { attempts: MAX_SERIALIZATION_ATTEMPTS },
       { cause: lastRetryableError },
     );

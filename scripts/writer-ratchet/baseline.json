@@ -355,6 +355,9 @@
   "inventory.availability_claim_operations": [
     "modules/inventory-planning"
   ],
+  "inventory.availability_claim_pick_movements": [
+    "modules/inventory-planning"
+  ],
   "inventory.availability_claim_resources": [
     "modules/inventory-planning"
   ],

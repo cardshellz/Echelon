@@ -67,6 +67,54 @@ export type CanonicalClaimBuildInventoryContext = {
   }[];
 };
 
+export type CanonicalClaimInventoryPickResource = {
+  claimResourceId: bigint;
+  inventoryLevelId: number;
+  warehouseLocationId: number;
+  sourceVariantId: number;
+  pickQty: bigint;
+  lotAllocations: readonly {
+    claimLotAllocationId: bigint;
+    inventoryLotId: number;
+    pickQty: bigint;
+    unitCostMills: bigint;
+    poUnitCostMills: bigint;
+    packagingUnitCostMills: bigint;
+    landedUnitCostMills: bigint;
+  }[];
+};
+
+export type CanonicalClaimInventoryUnpickResource = {
+  claimResourceId: bigint;
+  inventoryLevelId: number;
+  warehouseLocationId: number;
+  sourceVariantId: number;
+  unpickQty: bigint;
+  lotAllocations: readonly {
+    claimLotAllocationId: bigint;
+    inventoryLotId: number;
+    unpickQty: bigint;
+    reversesPickMovementId: bigint;
+    unitCostMills: bigint;
+  }[];
+};
+
+export type CanonicalClaimInventoryPickMovement = {
+  claimResourceId: bigint;
+  claimLotAllocationId: bigint;
+  inventoryLotId: number;
+  quantity: bigint;
+  unitCostMills: bigint;
+  totalCostMills: bigint;
+  orderItemCostId: number;
+  reversesPickMovementId: bigint | null;
+};
+
+export type CanonicalClaimInventoryPickResult = {
+  movements: readonly CanonicalClaimInventoryPickMovement[];
+  totalCostMills: bigint;
+};
+
 export interface CanonicalClaimInventoryMutationPort {
   reserveResource(input: {
     client: CanonicalClaimTransactionClient;
@@ -92,6 +140,49 @@ export interface CanonicalClaimInventoryMutationPort {
     reason: string;
     occurredAt: Date;
   }): Promise<void>;
+
+  reconcilePickResource(input: {
+    client: CanonicalClaimTransactionClient;
+    claimId: bigint;
+    releases: readonly CanonicalClaimInventoryReleaseResource[];
+    target: {
+      claimResourceId: bigint;
+      inventoryLevelId: number;
+      warehouseLocationId: number;
+      sourceVariantId: number;
+      claimedQty: number;
+      orderItemId: number;
+    };
+    orderId: number;
+    actor: string;
+    reason: string;
+    occurredAt: Date;
+  }): Promise<readonly CanonicalClaimLotAllocation[]>;
+
+  pickResources(input: {
+    client: CanonicalClaimTransactionClient;
+    claimId: bigint;
+    claimLineId: bigint;
+    resources: readonly CanonicalClaimInventoryPickResource[];
+    orderId: number;
+    orderItemId: number;
+    actor: string;
+    reason: string;
+    occurredAt: Date;
+  }): Promise<CanonicalClaimInventoryPickResult>;
+
+  unpickResources(input: {
+    client: CanonicalClaimTransactionClient;
+    claimId: bigint;
+    claimLineId: bigint;
+    resources: readonly CanonicalClaimInventoryUnpickResource[];
+    orderId: number;
+    orderItemId: number;
+    restoreReservation: boolean;
+    actor: string;
+    reason: string;
+    occurredAt: Date;
+  }): Promise<CanonicalClaimInventoryPickResult>;
 
   executePackageOperation(input: {
     client: CanonicalClaimTransactionClient;

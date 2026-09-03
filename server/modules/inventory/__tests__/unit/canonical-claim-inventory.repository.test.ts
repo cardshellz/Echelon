@@ -318,6 +318,182 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
     expect(outputLot?.values?.slice(-2)).toEqual([91, 94]);
   });
 
+  it("moves exact reserved claim lots to picked and records immutable COGS evidence", async () => {
+    let nextCostId = 80;
+    const fake = createClient(async (text) => {
+      if (text.includes("FROM inventory.inventory_levels") && text.includes("ANY($1::integer[])")) {
+        return {
+          rows: [{
+            id: 11,
+            warehouse_location_id: 2,
+            product_variant_id: 101,
+            variant_qty: 10,
+            reserved_qty: 4,
+            picked_qty: 1,
+          }],
+        };
+      }
+      if (text.includes("FROM inventory.inventory_lots") && text.includes("ANY($1::integer[])")) {
+        return {
+          rows: [{
+            id: 51,
+            warehouse_location_id: 2,
+            product_variant_id: 101,
+            qty_on_hand: 6,
+            qty_reserved: 4,
+            qty_picked: 1,
+            status: "active",
+            received_at: OCCURRED_AT,
+            unit_cost_mills: "125",
+            po_unit_cost_mills: "100",
+            packaging_cost_mills: "20",
+            landed_cost_mills: "5",
+            total_unit_cost_mills: "125",
+          }],
+        };
+      }
+      if (text.startsWith("UPDATE inventory.inventory_lots")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("INSERT INTO oms.order_item_costs")) {
+        nextCostId += 1;
+        return { rows: [{ id: nextCostId }], rowCount: 1 };
+      }
+      if (text.startsWith("INSERT INTO inventory.inventory_transactions")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.inventory_levels")) return { rows: [], rowCount: 1 };
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.pickResources({
+      client: fake.client,
+      claimId: BigInt(9),
+      claimLineId: BigInt(10),
+      resources: [{
+        claimResourceId: BigInt(12),
+        inventoryLevelId: 11,
+        warehouseLocationId: 2,
+        sourceVariantId: 101,
+        pickQty: BigInt(3),
+        lotAllocations: [{
+          claimLotAllocationId: BigInt(21),
+          inventoryLotId: 51,
+          pickQty: BigInt(3),
+          unitCostMills: BigInt(125),
+          poUnitCostMills: BigInt(100),
+          packagingUnitCostMills: BigInt(20),
+          landedUnitCostMills: BigInt(5),
+        }],
+      }],
+      orderId: 70,
+      orderItemId: 71,
+      actor: "unit-test",
+      reason: "picker completed line",
+      occurredAt: OCCURRED_AT,
+    })).resolves.toEqual({
+      movements: [{
+        claimResourceId: BigInt(12),
+        claimLotAllocationId: BigInt(21),
+        inventoryLotId: 51,
+        quantity: BigInt(3),
+        unitCostMills: BigInt(125),
+        totalCostMills: BigInt(375),
+        orderItemCostId: 81,
+        reversesPickMovementId: null,
+      }],
+      totalCostMills: BigInt(375),
+    });
+
+    const calls = fake.query.mock.calls.map(([text, values]) => ({ text: String(text), values }));
+    expect(calls.find((call) => call.text.startsWith("UPDATE inventory.inventory_lots"))?.text)
+      .toContain("qty_picked = qty_picked + $1");
+    expect(calls.find((call) => call.text.startsWith("UPDATE inventory.inventory_levels"))?.text)
+      .toContain("picked_qty = picked_qty + $1");
+    expect(calls.find((call) => call.text.startsWith("INSERT INTO oms.order_item_costs"))?.values)
+      .toEqual([70, 71, 51, 101, 3, "1", "4", "125", "375", OCCURRED_AT]);
+  });
+
+  it("unpick restores an active claim reservation and appends compensating COGS", async () => {
+    const fake = createClient(async (text) => {
+      if (text.includes("FROM inventory.inventory_levels") && text.includes("ANY($1::integer[])")) {
+        return {
+          rows: [{
+            id: 11,
+            warehouse_location_id: 2,
+            product_variant_id: 101,
+            variant_qty: 7,
+            reserved_qty: 1,
+            picked_qty: 3,
+          }],
+        };
+      }
+      if (text.includes("FROM inventory.inventory_lots") && text.includes("ANY($1::integer[])")) {
+        return {
+          rows: [{
+            id: 51,
+            warehouse_location_id: 2,
+            product_variant_id: 101,
+            qty_on_hand: 3,
+            qty_reserved: 1,
+            qty_picked: 3,
+            status: "active",
+            received_at: OCCURRED_AT,
+          }],
+        };
+      }
+      if (text.startsWith("UPDATE inventory.inventory_lots")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("INSERT INTO oms.order_item_costs")) return { rows: [{ id: 82 }], rowCount: 1 };
+      if (text.startsWith("INSERT INTO inventory.inventory_transactions")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.inventory_levels")) return { rows: [], rowCount: 1 };
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.unpickResources({
+      client: fake.client,
+      claimId: BigInt(9),
+      claimLineId: BigInt(10),
+      resources: [{
+        claimResourceId: BigInt(12),
+        inventoryLevelId: 11,
+        warehouseLocationId: 2,
+        sourceVariantId: 101,
+        unpickQty: BigInt(2),
+        lotAllocations: [{
+          claimLotAllocationId: BigInt(21),
+          inventoryLotId: 51,
+          unpickQty: BigInt(2),
+          reversesPickMovementId: BigInt(31),
+          unitCostMills: BigInt(125),
+        }],
+      }],
+      orderId: 70,
+      orderItemId: 71,
+      restoreReservation: true,
+      actor: "unit-test",
+      reason: "picker corrected quantity",
+      occurredAt: OCCURRED_AT,
+    })).resolves.toEqual({
+      movements: [{
+        claimResourceId: BigInt(12),
+        claimLotAllocationId: BigInt(21),
+        inventoryLotId: 51,
+        quantity: BigInt(2),
+        unitCostMills: BigInt(125),
+        totalCostMills: BigInt(250),
+        orderItemCostId: 82,
+        reversesPickMovementId: BigInt(31),
+      }],
+      totalCostMills: BigInt(250),
+    });
+
+    const calls = fake.query.mock.calls.map(([text, values]) => ({ text: String(text), values }));
+    expect(calls.find((call) => call.text.startsWith("UPDATE inventory.inventory_lots"))?.values)
+      .toEqual([2, 2, 51]);
+    expect(calls.find((call) => call.text.startsWith("UPDATE inventory.inventory_levels"))?.values)
+      .toEqual([2, 2, 11, OCCURRED_AT]);
+    expect(calls.find((call) => call.text.startsWith("INSERT INTO oms.order_item_costs"))?.values)
+      .toEqual([70, 71, 51, 101, -2, "1", "-3", "125", "-250", OCCURRED_AT]);
+  });
+
   it("locks every level before every lot and releases exact claim-owned quantities", async () => {
     const fake = createClient(async (text, values) => {
       if (text.includes("FROM inventory.inventory_levels") && text.includes("ANY($1::integer[])")) {
