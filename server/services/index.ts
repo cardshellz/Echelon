@@ -129,7 +129,7 @@ import { PostgresCanonicalClaimInventoryRepository } from "../modules/inventory/
 import { PostgresCanonicalClaimBuildRepository } from "../modules/inventory/infrastructure/canonical-claim-build.repository";
 import { PostgresCanonicalClaimPickerObservationReviewRepository } from "../modules/orders/canonical-claim-picker-observation-review.repository";
 import { createAuthorityAwareInventoryAtpService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
-import { createAuthorityAwareReservationService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-claim.repository";
+import { createAuthorityAwareReservationRuntime } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-claim.repository";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
 
@@ -177,13 +177,14 @@ export function createServices(
 
   // Depends on inventoryCore (+ channelSync for reservation).
   const breakAssembly = createBreakAssemblyService(db, inventoryCore);
-  const reservation = createAuthorityAwareReservationService({
+  const reservationRuntime = createAuthorityAwareReservationRuntime({
     db,
     inventoryCore: inventoryCore as any,
     channelSync,
     recipeBuildPromise,
     canonical: inventoryAvailabilityClaims,
   }, databasePool);
+  const reservation = reservationRuntime.reservation;
   const replenishment = createReplenishmentService(db, inventoryCore);
   const returns = createReturnsService(db, inventoryCore as any);
 
@@ -195,7 +196,7 @@ export function createServices(
     ...inventoryStorage,
     ...channelsStorage,
     ...identityStorage,
-  }, channelSync);
+  }, channelSync, undefined, undefined, reservationRuntime.executor);
 
   // Standalone
   const inventoryAlerts = createInventoryAlertService(db);

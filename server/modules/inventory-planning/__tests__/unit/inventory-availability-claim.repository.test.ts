@@ -602,8 +602,9 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     expect(reviewWriter.recordReview).not.toHaveBeenCalled();
   });
 
-  it("picks an exact claim line and persists command, movement, and event evidence atomically", async () => {
+  it("picks an exact claim line with WMS progress and rolls the transaction back when the WMS compare-and-set fails", async () => {
     const plan = packageClaimPlan();
+    let rejectWmsProgress = false;
     const command = {
       claimId: "9",
       orderItemId: 71,
@@ -613,9 +614,15 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       idempotencyKey: "pick:9:71:1",
       actor: "test-user",
       reason: "picker completed line",
+      wmsProgress: {
+        expectedStatus: "pending" as const,
+        expectedPickedQuantity: 0,
+        targetStatus: "completed" as const,
+        targetPickedQuantity: 3,
+      },
     };
     const fake = createPool(async (text) => {
-      if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
+      if (text.startsWith("BEGIN") || text === "COMMIT" || text === "ROLLBACK") return { rows: [] };
       if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
       if (text.includes("FROM inventory.availability_runtime_authority")) {
         return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
@@ -715,6 +722,14 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
         || text.startsWith("UPDATE inventory.availability_claim_lines")) {
         return { rows: [], rowCount: 1 };
       }
+      if (text.startsWith("UPDATE wms.order_items")) {
+        return rejectWmsProgress
+          ? { rows: [], rowCount: 0 }
+          : { rows: [{ id: 71 }], rowCount: 1 };
+      }
+      if (text.startsWith("UPDATE wms.outbound_shipment_items")) {
+        return { rows: [], rowCount: 1 };
+      }
       if (text.startsWith("INSERT INTO inventory.availability_claim_commands")) {
         return { rows: [{ id: "31" }], rowCount: 1 };
       }
@@ -756,7 +771,17 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     expect(writer.pickResources).toHaveBeenCalledOnce();
     expect(fake.query.mock.calls.some(([text]) => String(text).startsWith("INSERT INTO inventory.availability_claim_pick_movements")))
       .toBe(true);
+    const statements = fake.query.mock.calls.map(([text]) => String(text));
+    expect(statements.findIndex((text) => text.startsWith("UPDATE wms.order_items")))
+      .toBeLessThan(statements.findIndex((text) => text.startsWith("INSERT INTO inventory.availability_claim_commands")));
     expect(fake.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+
+    rejectWmsProgress = true;
+    await expect(repository.pickClaimLine({
+      ...command,
+      idempotencyKey: "pick:9:71:wms-state-changed",
+    })).rejects.toMatchObject({ code: "WMS_PICK_PROGRESS_CHANGED" });
+    expect(fake.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
   });
 
   it("reverses the latest unreversed pick movement and restores an active reservation", async () => {
@@ -768,6 +793,12 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       idempotencyKey: "unpick:9:71:1",
       actor: "test-user",
       reason: "picker corrected quantity",
+      wmsProgress: {
+        expectedStatus: "in_progress" as const,
+        expectedPickedQuantity: 3,
+        targetStatus: "in_progress" as const,
+        targetPickedQuantity: 1,
+      },
     };
     const fake = createPool(async (text) => {
       if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
@@ -872,6 +903,12 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
         || text.startsWith("UPDATE inventory.availability_claim_lines")) {
         return { rows: [], rowCount: 1 };
       }
+      if (text.startsWith("UPDATE wms.order_items")) {
+        return { rows: [{ id: 71 }], rowCount: 1 };
+      }
+      if (text.startsWith("UPDATE wms.orders AS order_header")) {
+        return { rows: [], rowCount: 1 };
+      }
       if (text.startsWith("INSERT INTO inventory.availability_claim_commands")) {
         return { rows: [{ id: "41" }], rowCount: 1 };
       }
@@ -910,6 +947,9 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       idempotentReplay: false,
     });
     expect(writer.unpickResources).toHaveBeenCalledWith(expect.objectContaining({ restoreReservation: true }));
+    const statements = fake.query.mock.calls.map(([text]) => String(text));
+    expect(statements.findIndex((text) => text.startsWith("UPDATE wms.order_items")))
+      .toBeLessThan(statements.findIndex((text) => text.startsWith("INSERT INTO inventory.availability_claim_commands")));
     expect(fake.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
   });
 

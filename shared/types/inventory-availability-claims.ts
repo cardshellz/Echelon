@@ -12,6 +12,13 @@ const nonnegativeBigintString = z.string().regex(/^(0|[1-9][0-9]*)$/);
 const postgresInteger = z.number().int().min(-2_147_483_648).max(2_147_483_647);
 const nonnegativePostgresInteger = z.number().int().nonnegative().max(2_147_483_647);
 
+const canonicalWmsPickProgressSchema = z.object({
+  expectedStatus: z.enum(["pending", "in_progress", "completed", "short"]),
+  expectedPickedQuantity: nonnegativePostgresInteger,
+  targetStatus: z.enum(["pending", "in_progress", "completed", "short"]),
+  targetPickedQuantity: nonnegativePostgresInteger,
+}).strict();
+
 export const canonicalAvailabilityClaimCommandSchema = z.object({
   orderId: positiveInteger,
   idempotencyKey: nonblank(120),
@@ -79,6 +86,12 @@ const canonicalAvailabilityClaimPickCommandBaseSchema = z.object({
   idempotencyKey: nonblank(120),
   actor: nonblank(100),
   reason: nonblank(1000),
+  /**
+   * Runtime picker materialization to commit beside claim, inventory, and COGS
+   * evidence. It remains optional for inactive claim-only simulations and
+   * repository tests; the authority-aware picker boundary requires it.
+   */
+  wmsProgress: canonicalWmsPickProgressSchema.optional(),
 });
 
 export const canonicalAvailabilityClaimPickCommandSchema = z.discriminatedUnion("locationStrategy", [
@@ -116,6 +129,7 @@ export const canonicalAvailabilityClaimUnpickCommandSchema = z.object({
   idempotencyKey: nonblank(120),
   actor: nonblank(100),
   reason: nonblank(1000),
+  wmsProgress: canonicalWmsPickProgressSchema.optional(),
 }).strict();
 
 export const canonicalAvailabilityCycleCountReconciliationCommandSchema = z.object({

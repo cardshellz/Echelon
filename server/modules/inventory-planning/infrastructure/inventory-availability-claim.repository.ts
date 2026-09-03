@@ -62,6 +62,7 @@ import {
   planCanonicalClaim,
 } from "../domain/inventory-availability-planner";
 import { captureActiveClaimSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
+import { persistCanonicalWmsPickProgress } from "../../wms/order-item-commands";
 
 type ClientPool = Pick<Pool, "connect">;
 type QueryResult = { rows: any[]; rowCount?: number | null };
@@ -5079,6 +5080,16 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             { claimLineId: line.id.toString() },
           );
         }
+        await persistCanonicalWmsPickProgress(client, {
+          movementType: "pick",
+          movementQuantity: Number(quantity),
+          orderId: claim.orderId,
+          orderItemId: line.orderItemId,
+          targetVariantId: line.targetVariantId,
+          warehouseLocationId: command.warehouseLocationId,
+          progress: command.wmsProgress,
+          occurredAt,
+        });
         const commonResult = {
           claimId: claim.id.toString(),
           claimLineId: line.id.toString(),
@@ -5373,6 +5384,14 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             { claimLineId: line.id.toString() },
           );
         }
+        await persistCanonicalWmsPickProgress(client, {
+          movementType: "unpick",
+          movementQuantity: Number(quantity),
+          orderId: claim.orderId,
+          orderItemId: line.orderItemId,
+          progress: command.wmsProgress,
+          occurredAt,
+        });
         const locationIds = uniqueSorted([...byResource.values()].map((resource) => resource.warehouseLocationId));
         const result = canonicalAvailabilityClaimPickResultSchema.parse({
           outcome: "unpicked",
