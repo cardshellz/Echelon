@@ -114,6 +114,11 @@ function publicDropshipEbayListingSetupErrorContext(
     "issues",
     "fulfillmentPolicyId",
     "originWarehouseId",
+    "serviceLevelId",
+    "expectedServiceLevelId",
+    "returnedServiceLevelId",
+    "routingCode",
+    "routingRevision",
     "field",
     "country",
   ] as const;
@@ -147,6 +152,8 @@ function statusForDropshipEbayListingSetupError(code: string): number {
     case "DROPSHIP_EBAY_FULFILLMENT_MARKETPLACE_UNSUPPORTED":
     case "DROPSHIP_EBAY_FULFILLMENT_SHIPSTATION_REQUIRED":
     case "DROPSHIP_EBAY_FULFILLMENT_SERVICES_REQUIRED":
+    case "DROPSHIP_EBAY_FULFILLMENT_ROUTING_REQUIRED":
+    case "DROPSHIP_EBAY_FULFILLMENT_ROUTING_MISMATCH":
     case "DROPSHIP_EBAY_FULFILLMENT_WAREHOUSE_REQUIRED":
     case "DROPSHIP_EBAY_FULFILLMENT_SLA_REQUIRED":
     case "DROPSHIP_EBAY_FULFILLMENT_NO_RATE_BOOK":
@@ -157,6 +164,8 @@ function statusForDropshipEbayListingSetupError(code: string): number {
     case "DROPSHIP_EBAY_MANAGED_LOCATION_WAREHOUSE_ADDRESS_REQUIRED":
     case "DROPSHIP_EBAY_MANAGED_LOCATION_COUNTRY_UNSUPPORTED":
       return 409;
+    case "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE":
+      return 503;
     case "DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE":
     case "DROPSHIP_EBAY_LISTING_SETUP_INVALID_RESPONSE":
     case "DROPSHIP_EBAY_FULFILLMENT_SHIPSTATION_UNAVAILABLE":

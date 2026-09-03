@@ -20,6 +20,8 @@ export interface DropshipEbayFulfillmentCapability {
     rateBookId: number;
     rateBookCode: string;
     rateTableId: number;
+    serviceLevelId: number;
+    fulfillmentRoutingRevision: number;
   };
 }
 
@@ -146,7 +148,7 @@ export function evaluateDropshipEbayFulfillmentPolicyCompatibility(input: {
       if (!supportedServiceCodes.has(serviceCode)) {
         issues.push(issue(
           `shipping_service_unsupported:${serviceCode}`,
-          `Shipping service ${serviceCode} is not available through Card Shellz's connected carriers.`,
+          `Shipping service ${serviceCode} is not allowed by Card Shellz's fulfillment routing.`,
         ));
       }
     }

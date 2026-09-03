@@ -102,6 +102,11 @@ function publicContext(context: Record<string, unknown> | undefined): Record<str
     "invalidFields",
     "issues",
     "fulfillmentPolicyId",
+    "serviceLevelId",
+    "expectedServiceLevelId",
+    "returnedServiceLevelId",
+    "routingCode",
+    "routingRevision",
     "retryable",
   ] as const;
   const safe = Object.fromEntries(
@@ -136,6 +141,8 @@ function statusForError(code: string): number {
     case "DROPSHIP_EBAY_FULFILLMENT_MARKETPLACE_UNSUPPORTED":
     case "DROPSHIP_EBAY_FULFILLMENT_SHIPSTATION_REQUIRED":
     case "DROPSHIP_EBAY_FULFILLMENT_SERVICES_REQUIRED":
+    case "DROPSHIP_EBAY_FULFILLMENT_ROUTING_REQUIRED":
+    case "DROPSHIP_EBAY_FULFILLMENT_ROUTING_MISMATCH":
     case "DROPSHIP_EBAY_FULFILLMENT_WAREHOUSE_REQUIRED":
     case "DROPSHIP_EBAY_FULFILLMENT_SLA_REQUIRED":
     case "DROPSHIP_EBAY_FULFILLMENT_NO_RATE_BOOK":
@@ -143,6 +150,8 @@ function statusForError(code: string): number {
     case "DROPSHIP_EBAY_FULFILLMENT_RATE_TABLE_REQUIRED":
     case "DROPSHIP_EBAY_FULFILLMENT_DESTINATION_COVERAGE_REQUIRED":
       return 409;
+    case "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE":
+      return 503;
     case "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_INVALID":
       return 422;
     case "DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE":
