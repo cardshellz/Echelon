@@ -1,5 +1,7 @@
 import type {
   CanonicalClaimInventoryExecutionResource,
+  CanonicalClaimInventoryObservationCostLayer,
+  CanonicalClaimInventoryObservedReconciliationResult,
   CanonicalClaimInventoryReleaseResource,
   CanonicalClaimInventoryMutationPort,
   CanonicalClaimInventoryPickResource,
@@ -136,6 +138,48 @@ async function lockLevel(
 }
 
 export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaimInventoryMutationPort {
+  async ensureInventoryLevel(
+    input: Parameters<CanonicalClaimInventoryMutationPort["ensureInventoryLevel"]>[0],
+  ): Promise<number> {
+    const productVariantId = positiveInteger(input.productVariantId, "inventoryLevel.productVariantId");
+    const warehouseLocationId = positiveInteger(
+      input.warehouseLocationId,
+      "inventoryLevel.warehouseLocationId",
+    );
+    if (!(input.occurredAt instanceof Date) || Number.isNaN(input.occurredAt.getTime())) {
+      throw new CanonicalClaimInventoryMutationError(
+        "INVALID_INVENTORY_TIMESTAMP",
+        "Inventory-level creation time must be a valid Date.",
+      );
+    }
+    const inserted = rows(await input.client.query(
+      `INSERT INTO inventory.inventory_levels (
+         product_variant_id, warehouse_location_id, variant_qty, reserved_qty,
+         picked_qty, packed_qty, backorder_qty, updated_at
+       ) VALUES ($1, $2, 0, 0, 0, 0, 0, $3)
+       ON CONFLICT (product_variant_id, warehouse_location_id) DO NOTHING
+       RETURNING id`,
+      [productVariantId, warehouseLocationId, input.occurredAt],
+    ))[0];
+    if (inserted) {
+      return positiveInteger(inserted.id, "inventoryLevel.id");
+    }
+    const row = rows(await input.client.query(
+      `SELECT id
+       FROM inventory.inventory_levels
+       WHERE product_variant_id = $1 AND warehouse_location_id = $2`,
+      [productVariantId, warehouseLocationId],
+    ))[0];
+    if (!row) {
+      throw new CanonicalClaimInventoryMutationError(
+        "INVENTORY_LEVEL_CREATION_CONFLICT",
+        "A concurrently created picker-observation target inventory level is not visible in this serializable snapshot.",
+        { productVariantId, warehouseLocationId },
+      );
+    }
+    return positiveInteger(row?.id, "inventoryLevel.id");
+  }
+
   async reserveResource(
     input: Parameters<CanonicalClaimInventoryMutationPort["reserveResource"]>[0],
   ): Promise<readonly CanonicalClaimLotAllocation[]> {
@@ -370,6 +414,564 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       actor: input.actor,
       occurredAt: input.occurredAt,
     });
+  }
+
+  async reconcileObservedPickResource(
+    input: Parameters<CanonicalClaimInventoryMutationPort["reconcileObservedPickResource"]>[0],
+  ): Promise<CanonicalClaimInventoryObservedReconciliationResult> {
+    validateAuditInput(input);
+    const claimedQty = positiveInteger(input.target.claimedQty, "target.claimedQty");
+    positiveBigInt(input.target.claimResourceId, "target.claimResource.id");
+    positiveInteger(input.target.inventoryLevelId, "target.inventoryLevel.id");
+    positiveInteger(input.target.warehouseLocationId, "target.warehouseLocation.id");
+    positiveInteger(input.target.sourceVariantId, "target.sourceVariant.id");
+    positiveInteger(input.target.orderItemId, "target.orderItem.id");
+    const observationReference = nonblank(input.observationReference, "observation.reference", 64);
+    if (!/^[a-f0-9]{64}$/i.test(observationReference)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "INVALID_OBSERVATION_REFERENCE",
+        "The picker observation must carry the canonical command request hash.",
+      );
+    }
+    if (input.releases.length === 0 || input.sourceCostLayers.length === 0) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_OBSERVATION_SOURCE_MISSING",
+        "A picker observation must rebind exact open claim ownership and its cost evidence.",
+      );
+    }
+    const releaseQty = input.releases.reduce((total, resource) => total + resource.releaseQty, BigInt(0));
+    const sourceCostQty = input.sourceCostLayers.reduce((total, layer) => total + layer.quantity, BigInt(0));
+    if (releaseQty !== BigInt(claimedQty) || sourceCostQty !== BigInt(claimedQty)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_OBSERVATION_QUANTITY_MISMATCH",
+        "Released claim ownership and source cost evidence must equal the observed reconciliation quantity.",
+        { releaseQty: releaseQty.toString(), sourceCostQty: sourceCostQty.toString(), claimedQty },
+      );
+    }
+    const costsByInventoryLotId = new Map<number, CanonicalClaimInventoryObservationCostLayer>();
+    for (const layer of input.sourceCostLayers) {
+      const inventoryLotId = positiveInteger(layer.inventoryLotId, "observationCost.inventoryLotId");
+      if (costsByInventoryLotId.has(inventoryLotId)) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_OBSERVATION_COST_DUPLICATED",
+          "A source FIFO lot may appear only once in picker-observation cost evidence.",
+          { inventoryLotId },
+        );
+      }
+      positivePostgresInteger(layer.quantity, "observationCost.quantity");
+      const total = postgresBigInt(layer.unitCostMills, "observationCost.unitCostMills");
+      const po = postgresBigInt(layer.poUnitCostMills, "observationCost.poUnitCostMills");
+      const packaging = postgresBigInt(
+        layer.packagingUnitCostMills,
+        "observationCost.packagingUnitCostMills",
+      );
+      const landed = postgresBigInt(layer.landedUnitCostMills, "observationCost.landedUnitCostMills");
+      if (po + packaging + landed !== total) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_OBSERVATION_COST_MISMATCH",
+          "Picker-observation cost components must reconcile to the source claim cost snapshot.",
+        );
+      }
+      costsByInventoryLotId.set(inventoryLotId, layer);
+    }
+    const releasedByInventoryLotId = new Map<number, bigint>();
+    for (const resource of input.releases) {
+      if (resource.inventoryLevelId === input.target.inventoryLevelId
+        || resource.warehouseLocationId === input.target.warehouseLocationId
+        || resource.sourceVariantId !== input.target.sourceVariantId
+        || resource.orderItemId !== input.target.orderItemId) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_OBSERVATION_IDENTITY_MISMATCH",
+          "Picker-observation reconciliation must move the same order-line variant from another location.",
+          { claimResourceId: resource.claimResourceId.toString() },
+        );
+      }
+      const lotTotal = resource.lotAllocations.reduce((total, allocation) => {
+        const inventoryLotId = positiveInteger(allocation.inventoryLotId, "releaseLot.inventoryLotId");
+        releasedByInventoryLotId.set(
+          inventoryLotId,
+          (releasedByInventoryLotId.get(inventoryLotId) ?? BigInt(0)) + allocation.releaseQty,
+        );
+        return total + allocation.releaseQty;
+      }, BigInt(0));
+      if (lotTotal !== resource.releaseQty) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_OBSERVATION_RELEASE_LINEAGE_MISMATCH",
+          "Each source resource must reconcile to its exact source FIFO quantities.",
+          { claimResourceId: resource.claimResourceId.toString() },
+        );
+      }
+    }
+    if (releasedByInventoryLotId.size !== costsByInventoryLotId.size
+      || [...releasedByInventoryLotId].some(([inventoryLotId, quantity]) =>
+        costsByInventoryLotId.get(inventoryLotId)?.quantity !== quantity)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_OBSERVATION_COST_LINEAGE_MISMATCH",
+        "Source claim cost evidence must match every released FIFO lot exactly.",
+      );
+    }
+
+    const levelIds = [...new Set([
+      ...input.releases.map((resource) => resource.inventoryLevelId),
+      input.target.inventoryLevelId,
+    ])];
+    const lockedLevels = rows(await input.client.query(
+      `SELECT level.id, level.warehouse_location_id, level.product_variant_id,
+              level.variant_qty, level.reserved_qty, location.warehouse_id
+       FROM inventory.inventory_levels AS level
+       JOIN warehouse.warehouse_locations AS location
+         ON location.id = level.warehouse_location_id
+       WHERE level.id = ANY($1::integer[])
+       ORDER BY level.warehouse_location_id, level.product_variant_id, level.id
+       FOR UPDATE OF level`,
+      [levelIds],
+    ));
+    const targetLevel = lockedLevels.find((row) => Number(row.id) === input.target.inventoryLevelId);
+    if (!targetLevel
+      || positiveInteger(targetLevel.warehouse_location_id, "targetLevel.locationId")
+        !== input.target.warehouseLocationId
+      || positiveInteger(targetLevel.product_variant_id, "targetLevel.variantId")
+        !== input.target.sourceVariantId) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_OBSERVATION_TARGET_CHANGED",
+        "The observed pick location no longer matches its inventory level identity.",
+        { inventoryLevelId: input.target.inventoryLevelId },
+      );
+    }
+    const targetWarehouseId = positiveInteger(targetLevel.warehouse_id, "targetLevel.warehouseId");
+    const sourceLotIds = [...new Set(input.releases.flatMap((resource) =>
+      resource.lotAllocations.map((allocation) => allocation.inventoryLotId)))];
+    const lockedLots = rows(await input.client.query(
+      `SELECT id, product_variant_id, warehouse_location_id, qty_on_hand, qty_reserved,
+              qty_picked, status, received_at, receiving_order_id, purchase_order_id,
+              inbound_shipment_id, build_order_id, build_run_id, po_line_id,
+              cost_provisional, cost_source, unit_cost_cents, po_unit_cost_cents,
+              packaging_cost_cents, landed_cost_cents, total_unit_cost_cents,
+              unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
+              landed_cost_mills, total_unit_cost_mills
+       FROM inventory.inventory_lots
+       WHERE id = ANY($1::integer[])
+          OR (product_variant_id = $2 AND warehouse_location_id = $3 AND status = 'active')
+       ORDER BY warehouse_location_id, product_variant_id, received_at, id
+       FOR UPDATE`,
+      [sourceLotIds, input.target.sourceVariantId, input.target.warehouseLocationId],
+    ));
+    const systemLevelQuantityBefore = BigInt(nonnegativeInteger(
+      targetLevel.variant_qty,
+      "targetLevel.variantQty",
+    ));
+    const targetReservedBefore = BigInt(nonnegativeInteger(
+      targetLevel.reserved_qty,
+      "targetLevel.reservedQty",
+    ));
+    const targetLots = lockedLots.filter((lot) =>
+      Number(lot.product_variant_id) === input.target.sourceVariantId
+      && Number(lot.warehouse_location_id) === input.target.warehouseLocationId
+      && String(lot.status) === "active");
+    const systemLotQuantityBefore = targetLots.reduce(
+      (total, lot) => total + BigInt(nonnegativeInteger(lot.qty_on_hand, "targetLot.qtyOnHand")),
+      BigInt(0),
+    );
+    const targetLotUnreserved = targetLots.reduce((total, lot) => {
+      const onHand = nonnegativeInteger(lot.qty_on_hand, "targetLot.qtyOnHand");
+      const reserved = nonnegativeInteger(lot.qty_reserved, "targetLot.qtyReserved");
+      return total + BigInt(Math.max(0, onHand - reserved));
+    }, BigInt(0));
+    const targetLevelUnreserved = systemLevelQuantityBefore > targetReservedBefore
+      ? systemLevelQuantityBefore - targetReservedBefore
+      : BigInt(0);
+    const recordedUnreservedQuantityBefore = targetLevelUnreserved < targetLotUnreserved
+      ? targetLevelUnreserved
+      : targetLotUnreserved;
+    const recordedReconciledQuantity = recordedUnreservedQuantityBefore < BigInt(claimedQty)
+      ? recordedUnreservedQuantityBefore
+      : BigInt(claimedQty);
+    const observedRelocatedQuantity = BigInt(claimedQty) - recordedReconciledQuantity;
+    if (observedRelocatedQuantity === BigInt(0)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_PICK_OBSERVATION_NOT_REQUIRED",
+        "Recorded unreserved stock can cover this rebind; use recorded-stock reconciliation instead.",
+        { inventoryLevelId: input.target.inventoryLevelId, claimedQty },
+      );
+    }
+
+    let recordedRemaining = recordedReconciledQuantity;
+    const recordedReleases: CanonicalClaimInventoryReleaseResource[] = [];
+    const relocations: Array<{
+      resource: CanonicalClaimInventoryReleaseResource;
+      inventoryLotId: number;
+      quantity: bigint;
+      costs: CanonicalClaimInventoryObservationCostLayer;
+    }> = [];
+    for (const resource of input.releases) {
+      const recordedAllocations: Array<{ inventoryLotId: number; releaseQty: bigint }> = [];
+      let recordedResourceQty = BigInt(0);
+      for (const allocation of resource.lotAllocations) {
+        const recordedTake = allocation.releaseQty < recordedRemaining
+          ? allocation.releaseQty
+          : recordedRemaining;
+        if (recordedTake > BigInt(0)) {
+          recordedAllocations.push({
+            inventoryLotId: allocation.inventoryLotId,
+            releaseQty: recordedTake,
+          });
+          recordedResourceQty += recordedTake;
+          recordedRemaining -= recordedTake;
+        }
+        const relocateQty = allocation.releaseQty - recordedTake;
+        if (relocateQty > BigInt(0)) {
+          relocations.push({
+            resource,
+            inventoryLotId: allocation.inventoryLotId,
+            quantity: relocateQty,
+            costs: costsByInventoryLotId.get(allocation.inventoryLotId)!,
+          });
+        }
+      }
+      if (recordedResourceQty > BigInt(0)) {
+        recordedReleases.push({
+          ...resource,
+          releaseQty: recordedResourceQty,
+          lotAllocations: recordedAllocations,
+        });
+      }
+    }
+    if (recordedRemaining !== BigInt(0)
+      || relocations.reduce((total, relocation) => total + relocation.quantity, BigInt(0))
+        !== observedRelocatedQuantity) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_OBSERVATION_SPLIT_MISMATCH",
+        "Recorded rebind and observed relocation could not partition the exact source claim ownership.",
+      );
+    }
+
+    const levelsById = new Map(lockedLevels.map((level) => [Number(level.id), level] as const));
+    const lotsById = new Map(lockedLots.map((lot) => [Number(lot.id), lot] as const));
+    const relocationByLevel = new Map<number, bigint>();
+    for (const relocation of relocations) {
+      const level = levelsById.get(relocation.resource.inventoryLevelId);
+      const lot = lotsById.get(relocation.inventoryLotId);
+      if (!level || !lot
+        || positiveInteger(level.warehouse_id, "sourceLevel.warehouseId") !== targetWarehouseId
+        || Number(level.warehouse_location_id) !== relocation.resource.warehouseLocationId
+        || Number(level.product_variant_id) !== relocation.resource.sourceVariantId
+        || Number(lot.warehouse_location_id) !== relocation.resource.warehouseLocationId
+        || Number(lot.product_variant_id) !== relocation.resource.sourceVariantId
+        || String(lot.status) !== "active") {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_OBSERVATION_SOURCE_CHANGED",
+          "An exact claim-owned source level or FIFO lot no longer matches the observed relocation.",
+          { inventoryLotId: relocation.inventoryLotId },
+        );
+      }
+      const quantity = positivePostgresInteger(relocation.quantity, "observationRelocation.quantity");
+      if (nonnegativeInteger(lot.qty_on_hand, "sourceLot.qtyOnHand") < quantity
+        || nonnegativeInteger(lot.qty_reserved, "sourceLot.qtyReserved") < quantity) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_OBSERVATION_SOURCE_SHORTFALL",
+          "The exact claim-owned source FIFO lot cannot support the observed relocation.",
+          { inventoryLotId: relocation.inventoryLotId, quantity },
+        );
+      }
+      let liveCosts: ReturnType<typeof normalizeBuildLotCosts>;
+      try {
+        liveCosts = normalizeBuildLotCosts(lot);
+      } catch (cause) {
+        throw new CanonicalClaimInventoryMutationError(
+          "INVALID_CLAIM_LOT_COST",
+          "A source FIFO lot has invalid cost evidence for observed relocation.",
+          { inventoryLotId: relocation.inventoryLotId, cause: cause instanceof Error ? cause.message : String(cause) },
+        );
+      }
+      if (liveCosts.totalMills !== relocation.costs.unitCostMills
+        || liveCosts.poMills !== relocation.costs.poUnitCostMills
+        || liveCosts.packagingMills !== relocation.costs.packagingUnitCostMills
+        || liveCosts.landedMills !== relocation.costs.landedUnitCostMills) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_OBSERVATION_SOURCE_COST_CHANGED",
+          "A source FIFO lot no longer matches the claim cost snapshot used for observed relocation.",
+          { inventoryLotId: relocation.inventoryLotId },
+        );
+      }
+      relocationByLevel.set(
+        relocation.resource.inventoryLevelId,
+        (relocationByLevel.get(relocation.resource.inventoryLevelId) ?? BigInt(0)) + relocation.quantity,
+      );
+    }
+    for (const [inventoryLevelId, quantity] of relocationByLevel) {
+      const level = levelsById.get(inventoryLevelId)!;
+      const moveQty = positivePostgresInteger(quantity, "observationLevel.relocationQty");
+      if (nonnegativeInteger(level.variant_qty, "sourceLevel.variantQty") < moveQty
+        || nonnegativeInteger(level.reserved_qty, "sourceLevel.reservedQty") < moveQty) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_OBSERVATION_SOURCE_LEVEL_SHORTFALL",
+          "A source inventory level cannot support its exact observed relocation.",
+          { inventoryLevelId, moveQty },
+        );
+      }
+    }
+
+    if (recordedReleases.length > 0) {
+      await this.releaseResources({
+        client: input.client,
+        claimId: input.claimId,
+        resources: recordedReleases,
+        orderId: input.orderId,
+        actor: input.actor,
+        reason: input.reason,
+        occurredAt: input.occurredAt,
+      });
+    }
+
+    const allocations: CanonicalClaimLotAllocation[] = [];
+    if (recordedReconciledQuantity > BigInt(0)) {
+      allocations.push(...await this.reserveResource({
+        client: input.client,
+        claimId: input.claimId,
+        claimResourceId: input.target.claimResourceId,
+        inventoryLevelId: input.target.inventoryLevelId,
+        warehouseLocationId: input.target.warehouseLocationId,
+        sourceVariantId: input.target.sourceVariantId,
+        claimedQty: Number(recordedReconciledQuantity),
+        orderId: input.orderId,
+        orderItemId: input.target.orderItemId,
+        consumerOperationKey: null,
+        actor: input.actor,
+        occurredAt: input.occurredAt,
+      }));
+    }
+
+    const relocatedInventoryLotIds: number[] = [];
+    const recordedByLevel = new Map<number, bigint>();
+    for (const resource of recordedReleases) {
+      recordedByLevel.set(
+        resource.inventoryLevelId,
+        (recordedByLevel.get(resource.inventoryLevelId) ?? BigInt(0)) + resource.releaseQty,
+      );
+    }
+    const runningSourceLevels = new Map<number, { variantQty: number; reservedQty: number }>();
+    for (const [inventoryLevelId] of relocationByLevel) {
+      const level = levelsById.get(inventoryLevelId)!;
+      runningSourceLevels.set(inventoryLevelId, {
+        variantQty: nonnegativeInteger(level.variant_qty, "sourceLevel.variantQty"),
+        reservedQty: nonnegativeInteger(level.reserved_qty, "sourceLevel.reservedQty")
+          - Number(recordedByLevel.get(inventoryLevelId) ?? BigInt(0)),
+      });
+    }
+    for (const [index, relocation] of relocations.entries()) {
+      const layer = relocation.costs;
+      const sourceLot = lotsById.get(relocation.inventoryLotId)!;
+      const quantity = positivePostgresInteger(relocation.quantity, "observationLot.quantity");
+      if (sourceLot.cost_provisional == null) {
+        throw new CanonicalClaimInventoryMutationError(
+          "INVALID_CLAIM_LOT_COST",
+          "A source FIFO lot is missing its provisional-cost marker.",
+          { inventoryLotId: relocation.inventoryLotId },
+        );
+      }
+      const costProvisional = nonnegativeInteger(sourceLot.cost_provisional, "sourceLot.costProvisional");
+      if (costProvisional !== 0 && costProvisional !== 1) {
+        throw new CanonicalClaimInventoryMutationError(
+          "INVALID_CLAIM_LOT_COST",
+          "A source FIFO lot has an invalid provisional-cost marker.",
+          { inventoryLotId: relocation.inventoryLotId, costProvisional },
+        );
+      }
+      const costSource = sourceLot.cost_source == null
+        ? null
+        : nonblank(String(sourceLot.cost_source), "sourceLot.costSource", 20);
+      if (!(sourceLot.received_at instanceof Date) || Number.isNaN(sourceLot.received_at.getTime())) {
+        throw new CanonicalClaimInventoryMutationError(
+          "INVALID_CLAIM_LOT_RECEIPT_TIME",
+          "A source FIFO lot must retain a valid receipt time during observed relocation.",
+          { inventoryLotId: relocation.inventoryLotId },
+        );
+      }
+      const lotNumber = `OBS-${input.claimId}-${observationReference.slice(0, 12)}-${String(index + 1).padStart(2, "0")}`;
+      if (lotNumber.length > 50) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_OBSERVATION_LOT_IDENTITY_OVERFLOW",
+          "The deterministic picker-observation lot number exceeds its database limit.",
+          { lotNumber },
+        );
+      }
+      const totalCostCents = buildMillsToRoundedCents(layer.unitCostMills).toString();
+      const updatedSourceLot = await input.client.query(
+        `UPDATE inventory.inventory_lots
+         SET qty_on_hand = qty_on_hand - $1,
+             qty_reserved = qty_reserved - $1,
+             status = CASE
+               WHEN qty_on_hand - $1 = 0 AND qty_reserved - $1 = 0 AND qty_picked = 0
+               THEN 'depleted' ELSE status END
+         WHERE id = $2 AND qty_on_hand >= $1 AND qty_reserved >= $1`,
+        [quantity, relocation.inventoryLotId],
+      );
+      if (updatedSourceLot.rowCount !== 1) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_OBSERVATION_SOURCE_CONFLICT",
+          "An exact source FIFO lot changed while observed relocation was posting.",
+          { inventoryLotId: relocation.inventoryLotId, quantity },
+        );
+      }
+      const insertedLot = rows(await input.client.query(
+        `INSERT INTO inventory.inventory_lots (
+           lot_number, product_variant_id, warehouse_location_id, receiving_order_id,
+           purchase_order_id, inbound_shipment_id, build_order_id, build_run_id, po_line_id,
+           unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
+           landed_cost_cents, total_unit_cost_cents, unit_cost_mills,
+           po_unit_cost_mills, packaging_cost_mills, landed_cost_mills,
+           total_unit_cost_mills, qty_received, qty_on_hand, qty_reserved,
+           qty_picked, qty_consumed, received_at, status, cost_provisional,
+           cost_source, notes, created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                   $10, $11, $12, $13, $10, $14, $15, $16, $17, $14,
+                   $18, $18, $18, 0, 0, $19, 'active', $20,
+                   $21, $22, $23)
+         RETURNING id`,
+        [
+          lotNumber,
+          input.target.sourceVariantId,
+          input.target.warehouseLocationId,
+          sourceLot.receiving_order_id == null
+            ? null : positiveInteger(sourceLot.receiving_order_id, "sourceLot.receivingOrderId"),
+          sourceLot.purchase_order_id == null
+            ? null : positiveInteger(sourceLot.purchase_order_id, "sourceLot.purchaseOrderId"),
+          sourceLot.inbound_shipment_id == null
+            ? null : positiveInteger(sourceLot.inbound_shipment_id, "sourceLot.inboundShipmentId"),
+          sourceLot.build_order_id == null
+            ? null : positiveInteger(sourceLot.build_order_id, "sourceLot.buildOrderId"),
+          sourceLot.build_run_id == null
+            ? null : positiveInteger(sourceLot.build_run_id, "sourceLot.buildRunId"),
+          sourceLot.po_line_id == null
+            ? null : positiveInteger(sourceLot.po_line_id, "sourceLot.poLineId"),
+          totalCostCents,
+          buildMillsToRoundedCents(layer.poUnitCostMills).toString(),
+          buildMillsToRoundedCents(layer.packagingUnitCostMills).toString(),
+          buildMillsToRoundedCents(layer.landedUnitCostMills).toString(),
+          layer.unitCostMills.toString(),
+          layer.poUnitCostMills.toString(),
+          layer.packagingUnitCostMills.toString(),
+          layer.landedUnitCostMills.toString(),
+          quantity,
+          sourceLot.received_at,
+          costProvisional,
+          costSource,
+          `Relocated by picker observation for claim ${input.claimId} from lot ${relocation.inventoryLotId}`,
+          input.occurredAt,
+        ],
+      ))[0];
+      const inventoryLotId = positiveInteger(insertedLot?.id, "observationInventoryLot.id");
+      relocatedInventoryLotIds.push(inventoryLotId);
+      allocations.push({
+        inventoryLotId,
+        qty: quantity,
+        unitCostMills: layer.unitCostMills,
+        poUnitCostMills: layer.poUnitCostMills,
+        packagingUnitCostMills: layer.packagingUnitCostMills,
+        landedUnitCostMills: layer.landedUnitCostMills,
+      });
+      const runningSource = runningSourceLevels.get(relocation.resource.inventoryLevelId)!;
+      await input.client.query(
+        `INSERT INTO inventory.inventory_transactions (
+           product_variant_id, from_location_id, to_location_id, transaction_type,
+           variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
+           source_state, target_state, unit_cost_cents, inventory_lot_id,
+           order_id, order_item_id, reference_type, reference_id, user_id, notes, created_at
+         ) VALUES ($1, $2, $3, 'transfer', $4, $5, $6, 0,
+                   'committed', 'committed', $7, $8, $9, $10,
+                   'availability_claim_observation', $11, $12, $13, $14)`,
+        [
+          input.target.sourceVariantId,
+          relocation.resource.warehouseLocationId,
+          input.target.warehouseLocationId,
+          quantity,
+          runningSource.variantQty,
+          runningSource.variantQty - quantity,
+          totalCostCents,
+          relocation.inventoryLotId,
+          input.orderId,
+          input.target.orderItemId,
+          `claim:${input.claimId}:resource:${input.target.claimResourceId}:observation:${observationReference}:to-lot:${inventoryLotId}`,
+          input.actor,
+          input.reason,
+          input.occurredAt,
+        ],
+      );
+      await input.client.query(
+        `INSERT INTO inventory.inventory_transactions (
+           product_variant_id, from_location_id, to_location_id, transaction_type,
+           variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
+           source_state, target_state, unit_cost_cents, inventory_lot_id,
+           order_id, order_item_id, reference_type, reference_id, user_id, notes, created_at
+         ) VALUES ($1, $2, $3, 'reserve_move', $4, $5, $6, $4,
+                   'reserved', 'reserved', $7, $8, $9, $10,
+                   'availability_claim_observation', $11, $12, $13, $14)`,
+        [
+          input.target.sourceVariantId,
+          relocation.resource.warehouseLocationId,
+          input.target.warehouseLocationId,
+          quantity,
+          runningSource.reservedQty,
+          runningSource.reservedQty - quantity,
+          totalCostCents,
+          relocation.inventoryLotId,
+          input.orderId,
+          input.target.orderItemId,
+          `claim:${input.claimId}:resource:${input.target.claimResourceId}:observation:${observationReference}:reserved-to-lot:${inventoryLotId}`,
+          input.actor,
+          input.reason,
+          input.occurredAt,
+        ],
+      );
+      runningSource.variantQty -= quantity;
+      runningSource.reservedQty -= quantity;
+    }
+    for (const [inventoryLevelId, quantity] of relocationByLevel) {
+      const relocateQty = positivePostgresInteger(quantity, "observationLevel.relocationQty");
+      const updatedSourceLevel = await input.client.query(
+        `UPDATE inventory.inventory_levels
+         SET variant_qty = variant_qty - $1,
+             reserved_qty = reserved_qty - $1,
+             updated_at = $3
+         WHERE id = $2 AND variant_qty >= $1 AND reserved_qty >= $1`,
+        [relocateQty, inventoryLevelId, input.occurredAt],
+      );
+      if (updatedSourceLevel.rowCount !== 1) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_OBSERVATION_SOURCE_LEVEL_CONFLICT",
+          "A source inventory level changed while observed relocation was posting.",
+          { inventoryLevelId, relocateQty },
+        );
+      }
+    }
+    const observedQty = positivePostgresInteger(observedRelocatedQuantity, "observation.relocatedQty");
+    const updatedLevel = await input.client.query(
+      `UPDATE inventory.inventory_levels
+       SET variant_qty = variant_qty + $1,
+           reserved_qty = reserved_qty + $1,
+           updated_at = $3
+       WHERE id = $2
+         AND variant_qty <= 2147483647 - $1
+         AND reserved_qty <= 2147483647 - $1`,
+      [observedQty, input.target.inventoryLevelId, input.occurredAt],
+    );
+    if (updatedLevel.rowCount !== 1) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_OBSERVATION_LEVEL_CONFLICT",
+        "The observed inventory relocation could not be applied to its locked target level.",
+        { inventoryLevelId: input.target.inventoryLevelId, observedQty },
+      );
+    }
+
+    return {
+      allocations,
+      recordedReconciledQuantity,
+      observedRelocatedQuantity,
+      relocatedInventoryLotIds,
+      systemLevelQuantityBefore,
+      systemLotQuantityBefore,
+      recordedUnreservedQuantityBefore,
+    };
   }
 
   async pickResources(

@@ -38,16 +38,43 @@ export const canonicalAvailabilityClaimBuildHandoffCommandSchema = z.object({
   reason: nonblank(1000),
 }).strict();
 
-export const canonicalAvailabilityClaimPickCommandSchema = z.object({
+const canonicalAvailabilityClaimPickCommandBaseSchema = z.object({
   claimId: positiveBigintString,
   orderItemId: positiveInteger,
   warehouseLocationId: positiveInteger,
   quantity: positiveBigintString,
-  locationStrategy: z.enum(["strict", "reconcile_recorded_stock"]),
   idempotencyKey: nonblank(120),
   actor: nonblank(100),
   reason: nonblank(1000),
-}).strict();
+});
+
+export const canonicalAvailabilityClaimPickCommandSchema = z.discriminatedUnion("locationStrategy", [
+  canonicalAvailabilityClaimPickCommandBaseSchema.extend({
+    locationStrategy: z.literal("strict"),
+  }).strict(),
+  canonicalAvailabilityClaimPickCommandBaseSchema.extend({
+    locationStrategy: z.literal("reconcile_recorded_stock"),
+  }).strict(),
+  canonicalAvailabilityClaimPickCommandBaseSchema.extend({
+    locationStrategy: z.literal("reconcile_picker_observation"),
+    observation: z.object({
+      kind: z.enum(["validated_item_scan", "picker_confirmed_physical_stock"]),
+      observedPhysicalQty: positiveBigintString,
+      locationCode: nonblank(50),
+      deviceType: nonblank(50).optional(),
+      sessionId: nonblank(120).optional(),
+    }).strict(),
+  }).strict(),
+]).superRefine((command, context) => {
+  if (command.locationStrategy !== "reconcile_picker_observation") return;
+  if (BigInt(command.observation.observedPhysicalQty) < BigInt(command.quantity)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["observation", "observedPhysicalQty"],
+      message: "Observed physical quantity must cover the requested pick quantity",
+    });
+  }
+});
 
 export const canonicalAvailabilityClaimUnpickCommandSchema = z.object({
   claimId: positiveBigintString,
@@ -80,6 +107,22 @@ export const canonicalAvailabilityClaimPickResultSchema = z.discriminatedUnion("
     warehouseLocationIds: z.array(positiveInteger).min(1).max(1000),
     quantity: positiveBigintString,
     reservationRestored: z.boolean(),
+    totalCostMills: nonnegativeBigintString,
+    idempotentReplay: z.boolean(),
+  }).strict(),
+  z.object({
+    outcome: z.literal("picked_with_observation"),
+    claimId: positiveBigintString,
+    claimLineId: positiveBigintString,
+    orderId: positiveInteger,
+    orderItemId: positiveInteger,
+    warehouseLocationIds: z.array(positiveInteger).length(1),
+    quantity: positiveBigintString,
+    reconciledQuantity: positiveBigintString,
+    recordedReconciledQuantity: nonnegativeBigintString,
+    observedRelocatedQuantity: positiveBigintString,
+    inventoryReviewId: positiveInteger,
+    observationKind: z.enum(["validated_item_scan", "picker_confirmed_physical_stock"]),
     totalCostMills: nonnegativeBigintString,
     idempotentReplay: z.boolean(),
   }).strict(),
