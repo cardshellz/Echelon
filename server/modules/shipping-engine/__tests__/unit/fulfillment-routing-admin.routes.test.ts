@@ -53,6 +53,8 @@ describe("fulfillment routing admin routes", () => {
         provider: "shipstation_v2",
         providerAccountId: "se-fedex-1",
         serviceCode: "fedex_ground",
+        domestic: true,
+        international: false,
       }],
     };
 

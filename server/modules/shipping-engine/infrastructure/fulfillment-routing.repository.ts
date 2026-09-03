@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import type {
+  ShippingFulfillmentMethodCapabilities,
   ShippingFulfillmentRouteMethod,
   ShippingFulfillmentRoutingServiceLevel,
 } from "@shared/types/shipping-fulfillment-routing";
@@ -43,6 +44,7 @@ interface MethodRow {
   priority: number;
   domestic: boolean;
   international: boolean;
+  provider_capabilities: unknown;
   revision_id: string | number | null;
   is_active: boolean;
 }
@@ -276,12 +278,13 @@ implements FulfillmentRoutingTransaction {
       priority: method.priority,
       domestic: method.domestic,
       international: method.international,
+      provider_capabilities: serializeCapabilities(method.capabilities),
     }));
     await this.client.query(
       `INSERT INTO shipping.service_level_methods
         (service_level_id, provider_connection_id, provider, provider_account_id, provider_account_name,
          carrier, carrier_name, service_code, service_name, priority, domestic,
-         international, revision_id, is_active, created_at, updated_at)
+         international, provider_capabilities, revision_id, is_active, created_at, updated_at)
        SELECT $1,
               method.provider_connection_id,
               method.provider,
@@ -294,6 +297,7 @@ implements FulfillmentRoutingTransaction {
               method.priority,
               method.domestic,
               method.international,
+              method.provider_capabilities,
               $2,
               TRUE,
               $4,
@@ -309,7 +313,8 @@ implements FulfillmentRoutingTransaction {
          service_name TEXT,
          priority INTEGER,
          domestic BOOLEAN,
-         international BOOLEAN
+         international BOOLEAN,
+         provider_capabilities JSONB
        )`,
       [input.serviceLevelId, input.revisionId, JSON.stringify(payload), input.now],
     );
@@ -368,7 +373,7 @@ async function loadProfile(
             method.provider_account_name,
             method.carrier,
             carrier_name, service_code, service_name, priority, domestic,
-            international, revision_id, is_active
+            international, provider_capabilities, revision_id, is_active
      FROM shipping.service_level_methods AS method
      LEFT JOIN shipping.fulfillment_provider_connections AS connection
        ON connection.id = method.provider_connection_id
@@ -439,6 +444,57 @@ function mapMethod(row: MethodRow): ShippingFulfillmentRouteMethod {
     priority: row.priority,
     domestic: row.domestic,
     international: row.international,
+    capabilities: parseStoredCapabilities(row.provider_capabilities),
+  };
+}
+
+function serializeCapabilities(
+  value: ShippingFulfillmentMethodCapabilities | null,
+): ShippingFulfillmentMethodCapabilities {
+  if (value === null) {
+    throw dataIntegrityError("A newly saved fulfillment method is missing provider capabilities.");
+  }
+  return parseCapabilities(value, "A newly saved fulfillment method has invalid provider capabilities.");
+}
+
+function parseStoredCapabilities(value: unknown): ShippingFulfillmentMethodCapabilities | null {
+  if (value === null || value === undefined) return null;
+  return parseCapabilities(value, "A stored fulfillment method has invalid provider capabilities.");
+}
+
+function parseCapabilities(
+  value: unknown,
+  errorMessage: string,
+): ShippingFulfillmentMethodCapabilities {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw dataIntegrityError(errorMessage);
+  }
+  const candidate = value as Record<string, unknown>;
+  const booleanFields = [
+    "supportsMultiPackage",
+    "supportsReturns",
+    "supportsPrepaidDutiesTaxes",
+    "sendRates",
+  ] as const;
+  if (booleanFields.some((field) => typeof candidate[field] !== "boolean")) {
+    throw dataIntegrityError(errorMessage);
+  }
+  if (
+    !Array.isArray(candidate.displaySchemes)
+    || candidate.displaySchemes.length > 20
+    || candidate.displaySchemes.some((entry) => (
+      typeof entry !== "string" || !entry.trim() || entry.length > 80
+    ))
+    || new Set(candidate.displaySchemes).size !== candidate.displaySchemes.length
+  ) {
+    throw dataIntegrityError(errorMessage);
+  }
+  return {
+    supportsMultiPackage: candidate.supportsMultiPackage as boolean,
+    supportsReturns: candidate.supportsReturns as boolean,
+    supportsPrepaidDutiesTaxes: candidate.supportsPrepaidDutiesTaxes as boolean,
+    sendRates: candidate.sendRates as boolean,
+    displaySchemes: [...candidate.displaySchemes] as string[],
   };
 }
 

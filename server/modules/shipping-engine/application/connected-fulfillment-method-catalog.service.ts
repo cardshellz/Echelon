@@ -5,6 +5,7 @@ import type {
   ShippingFulfillmentCatalogMethod,
   ShippingFulfillmentProviderDescriptor,
 } from "@shared/types/shipping-fulfillment-routing";
+import { shippingFulfillmentMethodIdentityKey } from "@shared/lib/shipping-fulfillment-method-identity";
 
 const PROVIDER_PATTERN = /^[a-z][a-z0-9_]{1,79}$/;
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{1,119}$/;
@@ -352,17 +353,48 @@ function validateAvailableCatalog(
         return `method ${index} has an invalid ${field}.`;
       }
     }
-    if (typeof method.domestic !== "boolean" || typeof method.international !== "boolean") {
+    if (
+      typeof method.domestic !== "boolean"
+      || typeof method.international !== "boolean"
+      || (!method.domestic && !method.international)
+    ) {
       return `method ${index} has invalid destination flags.`;
     }
-    const identity = [
-      method.providerConnectionId,
-      method.provider,
-      method.providerAccountId,
-      method.serviceCode,
-    ].join("\u0000");
+    const capabilitiesReason = validateCapabilities(method.capabilities);
+    if (capabilitiesReason) return `method ${index} ${capabilitiesReason}`;
+    const identity = shippingFulfillmentMethodIdentityKey(method);
     if (seen.has(identity)) return `method ${index} duplicates another method identity.`;
     seen.add(identity);
+  }
+  return null;
+}
+
+function validateCapabilities(
+  capabilities: ShippingFulfillmentCatalogMethod["capabilities"],
+): string | null {
+  if (!capabilities || typeof capabilities !== "object") {
+    return "has invalid capabilities.";
+  }
+  const booleanFields: Array<keyof Omit<typeof capabilities, "displaySchemes">> = [
+    "supportsMultiPackage",
+    "supportsReturns",
+    "supportsPrepaidDutiesTaxes",
+    "sendRates",
+  ];
+  if (booleanFields.some((field) => typeof capabilities[field] !== "boolean")) {
+    return "has invalid capability flags.";
+  }
+  if (!Array.isArray(capabilities.displaySchemes) || capabilities.displaySchemes.length > 20) {
+    return "has invalid display schemes.";
+  }
+  const normalizedSchemes = capabilities.displaySchemes.map((value) => (
+    typeof value === "string" ? value.trim() : ""
+  ));
+  if (
+    normalizedSchemes.some((value) => !value || value.length > 80)
+    || new Set(normalizedSchemes).size !== normalizedSchemes.length
+  ) {
+    return "has invalid display schemes.";
   }
   return null;
 }
@@ -412,7 +444,9 @@ function compareMethods(
     || left.providerAccountId.localeCompare(right.providerAccountId)
     || left.carrierName.localeCompare(right.carrierName)
     || left.serviceName.localeCompare(right.serviceName)
-    || left.serviceCode.localeCompare(right.serviceCode);
+    || left.serviceCode.localeCompare(right.serviceCode)
+    || Number(right.domestic) - Number(left.domestic)
+    || Number(right.international) - Number(left.international);
 }
 
 async function mapWithConcurrency<T, R>(

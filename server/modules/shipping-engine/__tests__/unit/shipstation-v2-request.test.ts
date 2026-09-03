@@ -238,6 +238,11 @@ describe("normalizeCarrierServicesResponse", () => {
           name: "USPS Ground Advantage",
           domestic: true,
           international: false,
+          is_multi_package_supported: true,
+          is_return_supported: true,
+          is_prepaid_duties_taxes_supported: false,
+          send_rates: true,
+          display_schemes: ["label"],
         },
         { service_code: "", name: "invalid" },
       ],
@@ -252,7 +257,60 @@ describe("normalizeCarrierServicesResponse", () => {
       serviceName: "USPS Ground Advantage",
       domestic: true,
       international: false,
+      supportsMultiPackage: true,
+      supportsReturns: true,
+      supportsPrepaidDutiesTaxes: false,
+      sendRates: true,
+      displaySchemes: ["label"],
     }]);
+  });
+
+  it("preserves distinct domestic and international records sharing one service code", () => {
+    const carrier = { carrierId: "se-342200", code: "ups", name: "UPS" };
+
+    expect(normalizeCarrierServicesResponse({
+      services: [
+        {
+          carrier_id: "se-342200",
+          carrier_code: "ups",
+          service_code: "ups_worldwide_saver",
+          name: "UPS Worldwide Saver®",
+          domestic: false,
+          international: true,
+          is_multi_package_supported: true,
+          is_return_supported: false,
+          is_prepaid_duties_taxes_supported: true,
+          send_rates: true,
+          display_schemes: ["label"],
+        },
+        {
+          carrier_id: "se-342200",
+          carrier_code: "ups",
+          service_code: "ups_worldwide_saver",
+          name: "UPS Worldwide Saver®",
+          domestic: true,
+          international: false,
+          is_multi_package_supported: true,
+          is_return_supported: true,
+          is_prepaid_duties_taxes_supported: true,
+          send_rates: true,
+          display_schemes: ["label"],
+        },
+      ],
+    }, carrier)).toMatchObject([
+      {
+        serviceCode: "ups_worldwide_saver",
+        domestic: false,
+        international: true,
+        supportsReturns: false,
+      },
+      {
+        serviceCode: "ups_worldwide_saver",
+        domestic: true,
+        international: false,
+        supportsReturns: true,
+      },
+    ]);
   });
 });
 

@@ -2,9 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   ShippingFulfillmentCatalogMethod,
+  ShippingFulfillmentMethodCapabilities,
   ShippingFulfillmentMethodIdentity,
   ShippingFulfillmentRouteMethod,
 } from "@shared/types/shipping-fulfillment-routing";
+import {
+  shippingFulfillmentMethodGroupKey,
+  shippingFulfillmentMethodIdentityKey as methodKey,
+  shippingFulfillmentMethodScopeLabel,
+} from "@shared/lib/shipping-fulfillment-method-identity";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -98,8 +104,10 @@ export function FulfillmentRoutingEditor({
       method.carrierCode,
       method.serviceName,
       method.serviceCode,
+      shippingFulfillmentMethodScopeLabel(method),
     ].some((value) => value.toLowerCase().includes(normalizedSearch))
   ));
+  const groupedCatalog = groupCatalogMethods(filteredCatalog);
   const selectedRows = selected.map((identity) => ({
     identity,
     method: catalogByKey.get(methodKey(identity)) ?? storedByKey.get(methodKey(identity)) ?? null,
@@ -257,6 +265,12 @@ export function FulfillmentRoutingEditor({
                     ? `${row.method.carrierName} · ${row.method.providerConnectionName} · ${row.method.providerAccountName}`
                     : `Connection ${row.identity.providerConnectionId} · ${row.identity.providerAccountId} · ${row.identity.serviceCode}`}
                 </p>
+                {row.method && (
+                  <div className="mt-1 space-y-1">
+                    <MethodScopeBadges method={row.method} />
+                    <MethodCapabilitySummary capabilities={row.method.capabilities} />
+                  </div>
+                )}
               </div>
               {!row.available && <Badge variant="destructive">No longer available</Badge>}
               <div className="flex items-center gap-1">
@@ -353,37 +367,51 @@ export function FulfillmentRoutingEditor({
                     ? "Connected providers returned no carrier methods."
                     : "No connected methods match this search."}
                 </p>
-              ) : filteredCatalog.map((method) => {
-                const key = methodKey(method);
-                const checked = selectedKeys.has(key);
-                return (
-                  <label key={key} className="flex cursor-pointer items-start gap-3 p-3 hover:bg-muted/40">
-                    <Checkbox
-                      className="mt-0.5"
-                      checked={checked}
-                      disabled={saveMutation.isPending}
-                      onCheckedChange={(next) => {
-                        setSelected((current) => next === true
-                          ? current.some((candidate) => methodKey(candidate) === key)
-                            ? current
-                            : [...current, methodIdentity(method)]
-                          : current.filter((candidate) => methodKey(candidate) !== key));
-                      }}
-                      aria-label={`Allow ${method.serviceName} from ${method.providerAccountName}`}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="flex flex-wrap items-center gap-2">
-                        <span className="text-sm font-medium">{method.serviceName}</span>
-                        {method.domestic && <Badge variant="secondary">Domestic</Badge>}
-                        {method.international && <Badge variant="secondary">International</Badge>}
-                      </span>
-                      <span className="block text-xs text-muted-foreground">
-                        {method.carrierName} · {method.providerConnectionName} · {method.providerAccountName} · {method.serviceCode}
-                      </span>
-                    </span>
-                  </label>
-                );
-              })}
+              ) : groupedCatalog.map((group) => (
+                <div key={group.key}>
+                  <div className="bg-muted/30 px-3 py-2">
+                    <p className="text-sm font-medium">{group.methods[0].serviceName}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {group.methods[0].carrierName} · {group.methods[0].providerConnectionName}
+                      {" · "}{group.methods[0].providerAccountName} · {group.methods[0].serviceCode}
+                    </p>
+                  </div>
+                  <div className="divide-y border-t">
+                    {group.methods.map((method) => {
+                      const key = methodKey(method);
+                      const checked = selectedKeys.has(key);
+                      const scopeLabel = shippingFulfillmentMethodScopeLabel(method);
+                      return (
+                        <div
+                          key={key}
+                          className="flex items-start gap-3 py-3 pl-6 pr-3 hover:bg-muted/40"
+                        >
+                          <Checkbox
+                            className="mt-0.5"
+                            checked={checked}
+                            disabled={saveMutation.isPending}
+                            onCheckedChange={(next) => {
+                              setSelected((current) => next === true
+                                ? current.some((candidate) => methodKey(candidate) === key)
+                                  ? current
+                                  : [...current, methodIdentity(method)]
+                                : current.filter((candidate) => methodKey(candidate) !== key));
+                            }}
+                            aria-label={`Allow ${method.serviceName} (${scopeLabel}) from ${method.providerAccountName}`}
+                          />
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-sm font-medium">{scopeLabel} variant</span>
+                              <MethodScopeBadges method={method} />
+                            </div>
+                            <MethodCapabilitySummary capabilities={method.capabilities} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
             </div>
           </>
         )}
@@ -459,11 +487,9 @@ function methodIdentity(
     provider: method.provider,
     providerAccountId: method.providerAccountId,
     serviceCode: method.serviceCode,
+    domestic: method.domestic,
+    international: method.international,
   };
-}
-
-function methodKey(method: ShippingFulfillmentMethodIdentity): string {
-  return `${method.providerConnectionId}\u0000${method.provider}\u0000${method.providerAccountId}\u0000${method.serviceCode}`;
 }
 
 function methodSequence(methods: readonly ShippingFulfillmentMethodIdentity[]): string {
@@ -482,4 +508,58 @@ function move<T>(values: readonly T[], from: number, to: number): T[] {
 
 function queryKeyAsArray(key: string): [string] {
   return [key];
+}
+
+function groupCatalogMethods(
+  methods: readonly ShippingFulfillmentCatalogMethod[],
+): Array<{ key: string; methods: ShippingFulfillmentCatalogMethod[] }> {
+  const groups = new Map<string, ShippingFulfillmentCatalogMethod[]>();
+  for (const method of methods) {
+    const key = shippingFulfillmentMethodGroupKey(method);
+    const existing = groups.get(key);
+    if (existing) existing.push(method);
+    else groups.set(key, [method]);
+  }
+  return [...groups].map(([key, groupedMethods]) => ({ key, methods: groupedMethods }));
+}
+
+function MethodScopeBadges({
+  method,
+}: {
+  method: Pick<ShippingFulfillmentMethodIdentity, "domestic" | "international">;
+}) {
+  return (
+    <div className="inline-flex flex-wrap gap-1">
+      {method.domestic && <Badge variant="secondary">Domestic</Badge>}
+      {method.international && <Badge variant="secondary">International</Badge>}
+    </div>
+  );
+}
+
+function MethodCapabilitySummary({
+  capabilities,
+}: {
+  capabilities: ShippingFulfillmentMethodCapabilities | null;
+}) {
+  if (!capabilities) {
+    return (
+      <span className="block text-xs text-muted-foreground">
+        Provider capabilities were not captured for this saved route.
+      </span>
+    );
+  }
+  const schemes = capabilities.displaySchemes.length > 0
+    ? capabilities.displaySchemes.join(", ")
+    : "none";
+  return (
+    <span className="block text-xs text-muted-foreground">
+      Provider flags: multi-package {yesNo(capabilities.supportsMultiPackage)} · returns {yesNo(capabilities.supportsReturns)}
+      {" · "}prepaid duties/taxes {yesNo(capabilities.supportsPrepaidDutiesTaxes)} · send rates {yesNo(capabilities.sendRates)}
+      {" · "}display schemes {schemes}
+    </span>
+  );
+}
+
+function yesNo(value: boolean): "yes" | "no" {
+  return value ? "yes" : "no";
 }

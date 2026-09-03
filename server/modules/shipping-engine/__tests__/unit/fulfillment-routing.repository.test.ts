@@ -27,6 +27,13 @@ describe("PostgresFulfillmentRoutingStore", () => {
           priority: 1,
           domestic: true,
           international: false,
+          provider_capabilities: {
+            supportsMultiPackage: true,
+            supportsReturns: true,
+            supportsPrepaidDutiesTaxes: false,
+            sendRates: true,
+            displaySchemes: ["label"],
+          },
           revision_id: "92",
           is_active: true,
         },
@@ -60,6 +67,7 @@ describe("PostgresFulfillmentRoutingStore", () => {
         providerAccountId: "se-fedex",
         serviceCode: "fedex_ground",
         priority: 1,
+        capabilities: { supportsReturns: true },
       }],
     });
     expect(query.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/).slice(0, 2).join(" ")))
@@ -140,6 +148,69 @@ describe("PostgresFulfillmentRoutingStore", () => {
       code: "SHIPPING_FULFILLMENT_ROUTING_PROVIDER_CONNECTION_UNAVAILABLE",
     });
     expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
+
+  it("persists same-code scope variants and their capability snapshots independently", async () => {
+    const { pool, query } = fakePool([
+      { rows: [], rowCount: null },
+      { rows: [], rowCount: 2 },
+      { rows: [], rowCount: 2 },
+      { rows: [], rowCount: null },
+    ]);
+    const store = new PostgresFulfillmentRoutingStore(pool);
+    const capabilities = {
+      supportsMultiPackage: true,
+      supportsReturns: true,
+      supportsPrepaidDutiesTaxes: false,
+      sendRates: true,
+      displaySchemes: ["label"],
+    };
+
+    await store.transaction((tx) => tx.replaceMethods({
+      serviceLevelId: 7,
+      revisionId: 93,
+      now: new Date("2026-09-03T12:00:00.000Z"),
+      methods: [
+        {
+          providerConnectionId: 11,
+          providerConnectionName: "Primary ShipStation",
+          provider: "shipstation_v2",
+          providerAccountId: "se-ups",
+          providerAccountName: "UPS account",
+          carrierCode: "ups",
+          carrierName: "UPS",
+          serviceCode: "ups_worldwide_saver",
+          serviceName: "UPS Worldwide Saver®",
+          domestic: true,
+          international: false,
+          capabilities,
+          priority: 1,
+        },
+        {
+          providerConnectionId: 11,
+          providerConnectionName: "Primary ShipStation",
+          provider: "shipstation_v2",
+          providerAccountId: "se-ups",
+          providerAccountName: "UPS account",
+          carrierCode: "ups",
+          carrierName: "UPS",
+          serviceCode: "ups_worldwide_saver",
+          serviceName: "UPS Worldwide Saver®",
+          domestic: false,
+          international: true,
+          capabilities: { ...capabilities, supportsReturns: false },
+          priority: 2,
+        },
+      ],
+    }));
+
+    const insertSql = String(query.mock.calls[2]?.[0]);
+    const payload = JSON.parse(String(query.mock.calls[2]?.[1]?.[2])) as Array<Record<string, unknown>>;
+    expect(insertSql).toContain("provider_capabilities");
+    expect(payload).toMatchObject([
+      { domestic: true, international: false, provider_capabilities: { supportsReturns: true } },
+      { domestic: false, international: true, provider_capabilities: { supportsReturns: false } },
+    ]);
   });
 });
 

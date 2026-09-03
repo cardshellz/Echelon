@@ -197,18 +197,22 @@ implements FulfillmentProviderConnectionTransaction {
       provider: string;
       provider_account_id: string;
       service_code: string;
+      domestic: boolean;
+      international: boolean;
     }>(
-      `SELECT provider, provider_account_id, service_code
+      `SELECT provider, provider_account_id, service_code, domestic, international
        FROM shipping.service_level_methods
        WHERE provider_connection_id = $1
          AND is_active = TRUE
-       ORDER BY provider_account_id, service_code`,
+       ORDER BY provider_account_id, service_code, domestic DESC, international DESC`,
       [connectionId],
     );
     return result.rows.map((row) => ({
       provider: row.provider,
       providerAccountId: row.provider_account_id,
       serviceCode: row.service_code,
+      domestic: row.domestic,
+      international: row.international,
     }));
   }
 

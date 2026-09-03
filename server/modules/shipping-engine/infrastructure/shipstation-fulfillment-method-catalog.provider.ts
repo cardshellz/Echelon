@@ -1,6 +1,7 @@
 import type {
   ShippingFulfillmentCatalogMethod,
 } from "@shared/types/shipping-fulfillment-routing";
+import { shippingFulfillmentMethodIdentityKey } from "@shared/lib/shipping-fulfillment-method-identity";
 import type {
   FulfillmentProviderAdapter,
   FulfillmentProviderConnectionCatalog,
@@ -11,6 +12,7 @@ import {
   ShipStationV2Error,
   type ShipStationV2RatingAdapter,
   type V2Carrier,
+  type V2CarrierService,
 } from "./shipstation-v2-rating.adapter";
 
 const MAX_CONNECTED_CARRIERS = 100;
@@ -133,14 +135,7 @@ function normalizeCatalog(
   connection: { connectionId: number; connectionName: string },
   entries: Array<{
   carrier: V2Carrier;
-  service: {
-    carrierId: string;
-    carrierCode: string;
-    serviceCode: string;
-    serviceName: string;
-    domestic: boolean;
-    international: boolean;
-  };
+  service: V2CarrierService;
   }>,
 ): ShippingFulfillmentCatalogMethod[] {
   const byIdentity = new Map<string, ShippingFulfillmentCatalogMethod>();
@@ -153,6 +148,13 @@ function normalizeCatalog(
     if (carrierCode !== boundedString(carrier.code, 50, "carrier.code")) {
       throw new CatalogValidationError(["Carrier service code did not match its parent carrier."]);
     }
+    const domestic = service.domestic === true;
+    const international = service.international === true;
+    if (!domestic && !international) {
+      throw new CatalogValidationError([
+        `Method ${providerAccountId} / ${service.serviceCode} has no destination scope.`,
+      ]);
+    }
     const method: ShippingFulfillmentCatalogMethod = {
       providerConnectionId: connection.connectionId,
       providerConnectionName: boundedString(connection.connectionName, 160, "connectionName"),
@@ -163,10 +165,17 @@ function normalizeCatalog(
       carrierName: boundedString(mapV2CarrierCode(carrierCode), 160, "canonicalCarrierName"),
       serviceCode: boundedString(service.serviceCode, 80, "serviceCode"),
       serviceName: boundedString(service.serviceName, 160, "serviceName"),
-      domestic: service.domestic === true,
-      international: service.international === true,
+      domestic,
+      international,
+      capabilities: {
+        supportsMultiPackage: service.supportsMultiPackage === true,
+        supportsReturns: service.supportsReturns === true,
+        supportsPrepaidDutiesTaxes: service.supportsPrepaidDutiesTaxes === true,
+        sendRates: service.sendRates === true,
+        displaySchemes: boundedStringList(service.displaySchemes, 20, 80, "displaySchemes"),
+      },
     };
-    const key = methodKey(method);
+    const key = shippingFulfillmentMethodIdentityKey(method);
     const existing = byIdentity.get(key);
     if (existing && JSON.stringify(existing) !== JSON.stringify(method)) {
       const fields = conflictingMethodFields(existing, method);
@@ -182,6 +191,8 @@ function normalizeCatalog(
     || left.carrierName.localeCompare(right.carrierName)
     || left.serviceName.localeCompare(right.serviceName)
     || left.serviceCode.localeCompare(right.serviceCode)
+    || Number(right.domestic) - Number(left.domestic)
+    || Number(right.international) - Number(left.international)
   ));
 }
 
@@ -216,8 +227,22 @@ function boundedString(value: string, maxLength: number, field: string): string 
   return normalized;
 }
 
-function methodKey(method: ShippingFulfillmentCatalogMethod): string {
-  return `${method.provider}\u0000${method.providerAccountId}\u0000${method.serviceCode}`;
+function boundedStringList(
+  value: readonly string[],
+  maxItems: number,
+  maxItemLength: number,
+  field: string,
+): string[] {
+  if (!Array.isArray(value) || value.length > maxItems) {
+    throw new CatalogValidationError([`${field} must contain at most ${maxItems} values.`]);
+  }
+  const normalized = value.map((entry, index) => (
+    boundedString(entry, maxItemLength, `${field}.${index}`)
+  ));
+  if (new Set(normalized).size !== normalized.length) {
+    throw new CatalogValidationError([`${field} contains duplicate values.`]);
+  }
+  return normalized;
 }
 
 function unavailableCatalog(
@@ -252,5 +277,9 @@ function conflictingMethodFields(
     "domestic",
     "international",
   ];
-  return fields.filter((field) => left[field] !== right[field]);
+  const conflicts = fields.filter((field) => left[field] !== right[field]);
+  if (JSON.stringify(left.capabilities) !== JSON.stringify(right.capabilities)) {
+    conflicts.push("capabilities");
+  }
+  return conflicts;
 }

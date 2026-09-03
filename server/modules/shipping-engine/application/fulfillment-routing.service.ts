@@ -16,6 +16,7 @@ import {
   type FulfillmentRouteResolution,
   type FulfillmentRouteScope,
 } from "../domain/fulfillment-routing";
+import { shippingFulfillmentMethodIdentityKey } from "@shared/lib/shipping-fulfillment-method-identity";
 
 const MAX_ROUTING_METHODS = 200;
 const PROVIDER_PATTERN = /^[a-z][a-z0-9_]{1,79}$/;
@@ -337,8 +338,13 @@ function normalizeCommand(
         120,
       ),
       serviceCode: requiredString(method.serviceCode, `methods.${index}.serviceCode`, 80),
+      domestic: requiredBoolean(method.domestic, `methods.${index}.domestic`),
+      international: requiredBoolean(method.international, `methods.${index}.international`),
     };
-    const key = methodKey(normalized);
+    if (!normalized.domestic && !normalized.international) {
+      invalidInput(`methods.${index}`, "must support at least one destination scope");
+    }
+    const key = shippingFulfillmentMethodIdentityKey(normalized);
     if (seen.has(key)) invalidInput(`methods.${index}`, "duplicates another method");
     seen.add(key);
     return normalized;
@@ -351,15 +357,21 @@ function resolveRequestedMethods(
   requested: readonly ShippingFulfillmentMethodIdentity[],
   catalog: readonly ShippingFulfillmentCatalogMethod[],
 ): ShippingFulfillmentRouteMethod[] {
-  const catalogByKey = new Map(catalog.map((method) => [methodKey(method), method]));
+  const catalogByKey = new Map(catalog.map((method) => [
+    shippingFulfillmentMethodIdentityKey(method),
+    method,
+  ]));
   return requested.map((identity, index) => {
-    const method = catalogByKey.get(methodKey(identity));
+    const method = catalogByKey.get(shippingFulfillmentMethodIdentityKey(identity));
     if (!method) {
       throw new FulfillmentRoutingError(
         409,
         "SHIPPING_FULFILLMENT_ROUTING_METHOD_NOT_AVAILABLE",
         "A selected fulfillment method is no longer available in the connected provider account.",
-        [`${identity.providerAccountId} / ${identity.serviceCode}`],
+        [
+          `${identity.providerAccountId} / ${identity.serviceCode}`
+          + ` / domestic=${identity.domestic} / international=${identity.international}`,
+        ],
       );
     }
     return { ...method, priority: index + 1 };
@@ -388,12 +400,10 @@ export function commandHash(
       provider: method.provider,
       providerAccountId: method.providerAccountId,
       serviceCode: method.serviceCode,
+      domestic: method.domestic,
+      international: method.international,
     })),
   })).digest("hex");
-}
-
-function methodKey(method: ShippingFulfillmentMethodIdentity): string {
-  return `${method.providerConnectionId}\u0000${method.provider}\u0000${method.providerAccountId}\u0000${method.serviceCode}`;
 }
 
 function selectedConnectionExpectations(
@@ -449,6 +459,11 @@ function requiredString(value: string, field: string, maxLength: number): string
     invalidInput(field, `must contain between 1 and ${maxLength} characters`);
   }
   return normalized;
+}
+
+function requiredBoolean(value: boolean, field: string): boolean {
+  if (typeof value !== "boolean") invalidInput(field, "must be a boolean");
+  return value;
 }
 
 function invalidInput(field: string, reason: string): never {

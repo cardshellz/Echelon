@@ -27,6 +27,7 @@ import type {
   ShippingChannelRouteMode,
   ShippingDestinationScopeStatus,
 } from "../types/shipping-channel-routing";
+import type { ShippingFulfillmentMethodCapabilities } from "../types/shipping-fulfillment-routing";
 
 // First-party shipping engine (quote plane). Design: docs/SHIPPING-ENGINE-DESIGN.md.
 // The fulfillment plane (wms.fulfillment_plans → shipment_requests → physical_shipments)
@@ -1200,6 +1201,8 @@ export const shippingServiceLevelMethods = shippingSchema.table("service_level_m
   priority: integer("priority").notNull(),
   domestic: boolean("domestic").notNull().default(false),
   international: boolean("international").notNull().default(false),
+  providerCapabilities: jsonb("provider_capabilities")
+    .$type<ShippingFulfillmentMethodCapabilities | null>(),
   revisionId: bigint("revision_id", { mode: "number" }),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -1210,6 +1213,8 @@ export const shippingServiceLevelMethods = shippingSchema.table("service_level_m
     table.providerConnectionId,
     table.providerAccountId,
     table.serviceCode,
+    table.domestic,
+    table.international,
   ),
   uniqueIndex("shipping_level_method_priority_idx")
     .on(table.serviceLevelId, table.priority)
@@ -1235,6 +1240,31 @@ export const shippingServiceLevelMethods = shippingSchema.table("service_level_m
     OR ${table.provider} ~ '^[a-z][a-z0-9_]{1,79}$'
   `),
   check("shipping_level_method_priority_chk", sql`${table.priority} > 0`),
+  check("shipping_level_method_scope_chk", sql`
+    ${table.provider} = 'legacy_unscoped'
+    OR ${table.domestic}
+    OR ${table.international}
+  `),
+  check("shipping_level_method_scoped_capabilities_chk", sql`
+    ${table.provider} = 'legacy_unscoped'
+    OR ${table.providerCapabilities} IS NOT NULL
+  `),
+  check("shipping_level_method_capabilities_chk", sql`
+    ${table.providerCapabilities} IS NULL
+    OR CASE
+      WHEN jsonb_typeof(${table.providerCapabilities}) = 'object' THEN
+        jsonb_typeof(${table.providerCapabilities} -> 'supportsMultiPackage') IS NOT DISTINCT FROM 'boolean'
+        AND jsonb_typeof(${table.providerCapabilities} -> 'supportsReturns') IS NOT DISTINCT FROM 'boolean'
+        AND jsonb_typeof(${table.providerCapabilities} -> 'supportsPrepaidDutiesTaxes') IS NOT DISTINCT FROM 'boolean'
+        AND jsonb_typeof(${table.providerCapabilities} -> 'sendRates') IS NOT DISTINCT FROM 'boolean'
+        AND CASE
+          WHEN jsonb_typeof(${table.providerCapabilities} -> 'displaySchemes') = 'array'
+            THEN jsonb_array_length(${table.providerCapabilities} -> 'displaySchemes') <= 20
+          ELSE FALSE
+        END
+      ELSE FALSE
+    END
+  `),
   check("shipping_level_method_identity_chk", sql`
     (
       ${table.provider} = 'legacy_unscoped'
