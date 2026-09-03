@@ -399,6 +399,36 @@ export function parseClaimSupplySnapshot(raw: unknown): ClaimSupplySnapshotDto {
   return snapshot;
 }
 
+export function createVerifiedCycleCountPlanningSnapshot(
+  rawSnapshot: ClaimSupplySnapshotDto,
+  warehouseLocationId: number,
+): ClaimSupplySnapshotDto {
+  const snapshot = parseClaimSupplySnapshot(rawSnapshot);
+  const countedLocation = snapshot.locations.find((location) => location.id === warehouseLocationId);
+  if (!countedLocation) {
+    throw new InventoryAvailabilityPlannerError(
+      "CYCLE_COUNT_LOCATION_MISSING_FROM_SNAPSHOT",
+      "The verified cycle-count location is missing from the claim supply snapshot.",
+      { warehouseLocationId },
+    );
+  }
+  if (!countedLocation.isFrozen) {
+    throw new InventoryAvailabilityPlannerError(
+      "CYCLE_COUNT_LOCATION_NOT_FROZEN",
+      "A verified cycle-count planning snapshot may only override a location that remains frozen.",
+      { warehouseLocationId },
+    );
+  }
+
+  const { snapshotFingerprint: _snapshotFingerprint, ...content } = snapshot;
+  return sealClaimSupplySnapshot({
+    ...content,
+    locations: content.locations.map((location) => location.id === warehouseLocationId
+      ? { ...location, isFrozen: false }
+      : location),
+  });
+}
+
 function parseClaimPlannerSnapshot(raw: unknown): PlannerSupplySnapshot {
   if (
     raw

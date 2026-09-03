@@ -42,6 +42,7 @@ describe("canonical cycle-count reconciliation source contract", () => {
     const approvalHelper = methodBody(reconciliation, "const approveAndCommit = async (", "if (levelRow == null)");
 
     expect(reconciliation).toContain("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+    expect(reconciliation).toContain("createVerifiedCycleCountPlanningSnapshot(");
     expect(selectedClaimLock).toBeGreaterThanOrEqual(0);
     expect(selectedClaimLock).toBeLessThan(resourceLock);
     expect(resourceLock).toBeLessThan(levelVerification);
