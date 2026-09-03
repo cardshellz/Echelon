@@ -98,6 +98,7 @@ implements InventoryAvailabilityRuntimeClaimExecutor {
         authority: authority.authority,
         authorityRevision: authority.authorityRevision,
         activationRunId: authority.activationRunId,
+        legacyDb: transactionDb,
         legacy: bindLegacyReservationToTransaction(
           this.legacy,
           transactionDb,
@@ -105,6 +106,10 @@ implements InventoryAvailabilityRuntimeClaimExecutor {
         ),
         canonical: this.canonical,
         getLatestClaim: (orderId) => getLatestClaim(connectedClient, orderId),
+        getClaimOwningPickedLine: (orderId, orderItemId) =>
+          getClaimOwningPickedLine(connectedClient, orderId, orderItemId),
+        getClaimLinePickMovementCursor: (claimId, orderItemId) =>
+          getClaimLinePickMovementCursor(connectedClient, claimId, orderItemId),
         getVariantMetadata: (productVariantIds) => getVariantMetadata(connectedClient, productVariantIds),
         getOrderIdByShopifyOrderId: (shopifyOrderId) =>
           getOrderIdByShopifyOrderId(connectedClient, shopifyOrderId),
@@ -266,6 +271,14 @@ function canonicalContext(
       connectionPool,
       (client) => getLatestClaim(client, orderId),
     ),
+    getClaimOwningPickedLine: (orderId, orderItemId) => withClient(
+      connectionPool,
+      (client) => getClaimOwningPickedLine(client, orderId, orderItemId),
+    ),
+    getClaimLinePickMovementCursor: (claimId, orderItemId) => withClient(
+      connectionPool,
+      (client) => getClaimLinePickMovementCursor(client, claimId, orderItemId),
+    ),
     getVariantMetadata: (productVariantIds) => withClient(
       connectionPool,
       (client) => getVariantMetadata(client, productVariantIds),
@@ -334,6 +347,22 @@ export function createAuthorityAwareReservationService(
   },
   connectionPool: ClientPool = defaultPool,
 ): AuthorityAwareReservationService {
+  return createAuthorityAwareReservationRuntime(dependencies, connectionPool).reservation;
+}
+
+export function createAuthorityAwareReservationRuntime(
+  dependencies: {
+    db: DrizzleDb;
+    inventoryCore: any;
+    channelSync: ChannelSync;
+    recipeBuildPromise?: RecipeBuildPromise;
+    canonical: InventoryAvailabilityClaimService;
+  },
+  connectionPool: ClientPool = defaultPool,
+): {
+  reservation: AuthorityAwareReservationService;
+  executor: InventoryAvailabilityRuntimeClaimExecutor;
+} {
   // This calculator is reachable only after the executor has pinned legacy
   // authority. It avoids nesting a second authority transaction (and pool
   // connection) inside one reservation operation.
@@ -345,13 +374,15 @@ export function createAuthorityAwareReservationService(
     legacyAtp,
     dependencies.recipeBuildPromise,
   );
-  return new AuthorityAwareReservationService(
-    new PostgresInventoryAvailabilityRuntimeClaimExecutor(
-      legacy,
-      dependencies.canonical,
-      connectionPool,
-    ),
+  const executor = new PostgresInventoryAvailabilityRuntimeClaimExecutor(
+    legacy,
+    dependencies.canonical,
+    connectionPool,
   );
+  return {
+    reservation: new AuthorityAwareReservationService(executor),
+    executor,
+  };
 }
 
 async function loadAndLockRuntimeAuthority(client: PoolClient): Promise<{
@@ -396,6 +427,65 @@ async function getLatestClaim(
   );
   const row = result.rows[0];
   if (!row) return null;
+  return parseClaimCursor(row, orderId);
+}
+
+async function getClaimOwningPickedLine(
+  client: PoolClient,
+  orderId: number,
+  orderItemId: number,
+): Promise<CanonicalClaimCursor | null> {
+  const result = await client.query<ClaimCursorRow>(
+    `SELECT claim.id::text AS id, claim.revision, claim.status, claim.plan_payload
+     FROM inventory.availability_claims AS claim
+     JOIN inventory.availability_claim_lines AS line ON line.claim_id = claim.id
+     WHERE claim.order_id = $1
+       AND line.order_item_id = $2
+       AND line.picked_target_qty > 0
+     ORDER BY claim.revision DESC, claim.id DESC
+     LIMIT 1`,
+    [orderId, orderItemId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return parseClaimCursor(row, orderId);
+}
+
+async function getClaimLinePickMovementCursor(
+  client: PoolClient,
+  claimId: string,
+  orderItemId: number,
+): Promise<string> {
+  if (!/^[1-9][0-9]*$/.test(claimId)) {
+    throw new InventoryAvailabilityRuntimeClaimError(
+      "CANONICAL_CLAIM_CURSOR_INVALID",
+      "The canonical claim pick cursor requires a positive claim identifier.",
+      { claimId, orderItemId },
+    );
+  }
+  const result = await client.query<{ movement_cursor: string }>(
+    `SELECT COALESCE(MAX(movement.id), 0)::text AS movement_cursor
+     FROM inventory.availability_claim_lines AS line
+     LEFT JOIN inventory.availability_claim_pick_movements AS movement
+       ON movement.claim_id = line.claim_id
+      AND movement.claim_line_id = line.id
+     WHERE line.claim_id = $1
+       AND line.order_item_id = $2
+     GROUP BY line.id`,
+    [claimId, orderItemId],
+  );
+  const movementCursor = String(result.rows[0]?.movement_cursor ?? "");
+  if (!/^(0|[1-9][0-9]*)$/.test(movementCursor)) {
+    throw new InventoryAvailabilityRuntimeClaimError(
+      "CANONICAL_CLAIM_PICK_CURSOR_INVALID",
+      "The canonical claim line is missing or has invalid pick-movement evidence.",
+      { claimId, orderItemId, movementCursor: movementCursor || null },
+    );
+  }
+  return movementCursor;
+}
+
+function parseClaimCursor(row: ClaimCursorRow, orderId: number): CanonicalClaimCursor {
   const claimId = String(row.id);
   const revision = Number(row.revision);
   const status = String(row.status);

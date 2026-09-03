@@ -317,6 +317,169 @@ export async function persistWmsOrderItemPickProgress(
   return updated ?? null;
 }
 
+export interface CanonicalWmsPickProgress {
+  expectedStatus: ItemStatus;
+  expectedPickedQuantity: number;
+  targetStatus: ItemStatus;
+  targetPickedQuantity: number;
+}
+
+type WmsSqlTransaction = {
+  query(
+    statement: string,
+    values?: any[],
+  ): Promise<{ rows?: any[]; rowCount?: number | null }>;
+};
+
+/**
+ * Owns the WMS side of a canonical pick transaction. The caller supplies the
+ * existing PostgreSQL transaction so claim, inventory, COGS, and WMS evidence
+ * commit or roll back together without adding a second table writer.
+ */
+export async function persistCanonicalWmsPickProgress(
+  executor: WmsSqlTransaction,
+  input: {
+    movementType: "pick" | "unpick";
+    movementQuantity: number;
+    orderId: number;
+    orderItemId: number;
+    targetVariantId?: number;
+    warehouseLocationId?: number;
+    progress?: CanonicalWmsPickProgress;
+    occurredAt: Date;
+  },
+): Promise<void> {
+  const progress = input.progress;
+  if (!progress) return;
+
+  assertPositiveInteger(input.movementQuantity, "movementQuantity");
+  assertPositiveInteger(input.orderId, "orderId");
+  assertPositiveInteger(input.orderItemId, "orderItemId");
+  assertNonNegativeInteger(progress.expectedPickedQuantity, "expectedPickedQuantity");
+  assertNonNegativeInteger(progress.targetPickedQuantity, "targetPickedQuantity");
+
+  if (input.movementType === "pick") {
+    if (progress.targetStatus !== "completed"
+      || progress.targetPickedQuantity !== input.movementQuantity
+      || progress.expectedPickedQuantity > progress.targetPickedQuantity
+      || !["pending", "in_progress", "short"].includes(progress.expectedStatus)) {
+      throw new WmsOrderItemCommandError(
+        "INVALID_WMS_PICK_PROGRESS",
+        "A canonical runtime pick must atomically complete the full WMS order-item quantity.",
+        { orderItemId: input.orderItemId, progress, movementQuantity: input.movementQuantity },
+      );
+    }
+    if (input.targetVariantId == null || input.warehouseLocationId == null) {
+      throw new WmsOrderItemCommandError(
+        "INVALID_WMS_PICK_PROGRESS",
+        "A canonical runtime pick requires its exact variant and warehouse location.",
+        { orderItemId: input.orderItemId },
+      );
+    }
+    assertPositiveInteger(input.targetVariantId, "targetVariantId");
+    assertPositiveInteger(input.warehouseLocationId, "warehouseLocationId");
+
+    const updated = await executor.query(
+      `UPDATE wms.order_items
+       SET status = 'completed', picked_quantity = $1, picked_at = $2
+       WHERE id = $3
+         AND order_id = $4
+         AND status = $5
+         AND picked_quantity = $6
+         AND quantity = $1
+       RETURNING id`,
+      [
+        progress.targetPickedQuantity,
+        input.occurredAt,
+        input.orderItemId,
+        input.orderId,
+        progress.expectedStatus,
+        progress.expectedPickedQuantity,
+      ],
+    );
+    if (Number(updated.rowCount ?? updated.rows?.length ?? 0) !== 1) {
+      throw new WmsOrderItemCommandError(
+        "WMS_PICK_PROGRESS_CHANGED",
+        "The WMS order item changed while its canonical pick was being recorded.",
+        { orderId: input.orderId, orderItemId: input.orderItemId, progress },
+      );
+    }
+
+    await executor.query(
+      `UPDATE wms.outbound_shipment_items AS shipment_item
+       SET from_location_id = $1
+       FROM wms.outbound_shipments AS shipment
+       WHERE shipment_item.shipment_id = shipment.id
+         AND shipment_item.order_item_id = $2
+         AND shipment_item.product_variant_id = $3
+         AND shipment_item.from_location_id IS NULL
+         AND shipment.status IN ('planned', 'queued')`,
+      [input.warehouseLocationId, input.orderItemId, input.targetVariantId],
+    );
+    return;
+  }
+
+  const expectedTargetQuantity = progress.expectedPickedQuantity - input.movementQuantity;
+  const expectedTargetStatus = expectedTargetQuantity === 0 ? "pending" : "in_progress";
+  if (!["completed", "in_progress"].includes(progress.expectedStatus)
+    || progress.targetPickedQuantity !== expectedTargetQuantity
+    || progress.targetStatus !== expectedTargetStatus) {
+    throw new WmsOrderItemCommandError(
+      "INVALID_WMS_UNPICK_PROGRESS",
+      "A canonical runtime unpick must atomically reduce WMS order-item progress backed by canonical picked quantity.",
+      { orderItemId: input.orderItemId, progress, movementQuantity: input.movementQuantity },
+    );
+  }
+
+  const updated = await executor.query(
+    `UPDATE wms.order_items
+     SET status = $1,
+         picked_quantity = $2,
+         picked_at = CASE WHEN $2 = 0 THEN NULL ELSE picked_at END
+     WHERE id = $3
+       AND order_id = $4
+       AND status = $5
+       AND picked_quantity = $6
+       AND $2 BETWEEN 0 AND quantity
+     RETURNING id`,
+    [
+      progress.targetStatus,
+      progress.targetPickedQuantity,
+      input.orderItemId,
+      input.orderId,
+      progress.expectedStatus,
+      progress.expectedPickedQuantity,
+    ],
+  );
+  if (Number(updated.rowCount ?? updated.rows?.length ?? 0) !== 1) {
+    throw new WmsOrderItemCommandError(
+      "WMS_PICK_PROGRESS_CHANGED",
+      "The WMS order item changed while its canonical unpick was being recorded.",
+      { orderId: input.orderId, orderItemId: input.orderItemId, progress },
+    );
+  }
+  await executor.query(
+    `UPDATE wms.orders AS order_header
+     SET picked_count = rollup.picked_count,
+         item_count = rollup.item_count,
+         unit_count = rollup.unit_count,
+         warehouse_status = 'in_progress',
+         completed_at = NULL,
+         exception_at = NULL
+     FROM (
+       SELECT item.order_id,
+              COALESCE(SUM(item.picked_quantity) FILTER (WHERE item.requires_shipping = 1), 0)::int AS picked_count,
+              COUNT(*)::int AS item_count,
+              COALESCE(SUM(item.quantity), 0)::int AS unit_count
+       FROM wms.order_items AS item
+       WHERE item.order_id = $1
+       GROUP BY item.order_id
+     ) AS rollup
+     WHERE order_header.id = rollup.order_id`,
+    [input.orderId],
+  );
+}
+
 export async function setWmsOrderItemLocation(
   executor: WmsOrderItemExecutor,
   args: {

@@ -61,8 +61,10 @@ describe("inventory availability runtime claim routing contract", () => {
   it("constructs only the authority-aware reservation service at the production composition root", () => {
     const services = source("server/services/index.ts");
     expect(services).toContain(
-      "const reservation = createAuthorityAwareReservationService({",
+      "const reservationRuntime = createAuthorityAwareReservationRuntime({",
     );
+    expect(services).toContain("const reservation = reservationRuntime.reservation;");
+    expect(services).toContain("reservationRuntime.executor");
     expect(services).toContain("canonical: inventoryAvailabilityClaims,");
     expect(services).not.toContain("const reservation = createReservationService(");
     expect(services).not.toContain("createLegacyInventoryAtpService(");
