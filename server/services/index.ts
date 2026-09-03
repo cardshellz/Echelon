@@ -124,9 +124,17 @@ import { InventoryPublicationOutboxService } from "../modules/inventory-planning
 import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
 import { InventoryPublicationReadbackService } from "../modules/inventory-planning/application/inventory-publication-readback.service";
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
+import { InventoryAvailabilityClaimService } from "../modules/inventory-planning/application/inventory-availability-claim.service";
+import { PostgresInventoryAvailabilityClaimRepository } from "../modules/inventory-planning/infrastructure/inventory-availability-claim.repository";
+import { PostgresCanonicalClaimInventoryRepository } from "../modules/inventory/infrastructure/canonical-claim-inventory.repository";
+import { PostgresCanonicalClaimBuildRepository } from "../modules/inventory/infrastructure/canonical-claim-build.repository";
+import { PostgresCanonicalClaimPickerObservationReviewRepository } from "../modules/orders/canonical-claim-picker-observation-review.repository";
 import { createAuthorityAwareInventoryAtpService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
+
+const systemCanonicalClaimClock = (): Date => new Date();
+
 export function createServices(
   db: any,
   databasePool: Pick<Pool, "connect">,
@@ -297,6 +305,18 @@ export function createServices(
   const inventoryPublicationReadback = new InventoryPublicationReadbackService(
     new PostgresInventoryPublicationReadbackRepository(),
     adapterRegistry,
+  );
+  const canonicalClaimInventory = new PostgresCanonicalClaimInventoryRepository();
+  const canonicalClaimBuild = new PostgresCanonicalClaimBuildRepository(canonicalClaimInventory);
+  const canonicalClaimObservationReview = new PostgresCanonicalClaimPickerObservationReviewRepository();
+  const inventoryAvailabilityClaims = new InventoryAvailabilityClaimService(
+    new PostgresInventoryAvailabilityClaimRepository(
+      canonicalClaimInventory,
+      databasePool,
+      systemCanonicalClaimClock,
+      canonicalClaimBuild,
+      canonicalClaimObservationReview,
+    ),
   );
 
   // Wire orchestrator into legacy channelSync so event-driven syncs
@@ -517,6 +537,7 @@ export function createServices(
     variantAvailabilitySync,
     inventoryPublicationOutbox,
     inventoryPublicationReadback,
+    inventoryAvailabilityClaims,
     oms,
     fulfillmentPush,
     channelFulfillmentAuthority,
