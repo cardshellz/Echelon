@@ -38,6 +38,53 @@ export const canonicalAvailabilityClaimBuildHandoffCommandSchema = z.object({
   reason: nonblank(1000),
 }).strict();
 
+export const canonicalAvailabilityClaimPickCommandSchema = z.object({
+  claimId: positiveBigintString,
+  orderItemId: positiveInteger,
+  warehouseLocationId: positiveInteger,
+  quantity: positiveBigintString,
+  locationStrategy: z.enum(["strict", "reconcile_recorded_stock"]),
+  idempotencyKey: nonblank(120),
+  actor: nonblank(100),
+  reason: nonblank(1000),
+}).strict();
+
+export const canonicalAvailabilityClaimUnpickCommandSchema = z.object({
+  claimId: positiveBigintString,
+  orderItemId: positiveInteger,
+  quantity: positiveBigintString,
+  idempotencyKey: nonblank(120),
+  actor: nonblank(100),
+  reason: nonblank(1000),
+}).strict();
+
+export const canonicalAvailabilityClaimPickResultSchema = z.discriminatedUnion("outcome", [
+  z.object({
+    outcome: z.literal("picked"),
+    claimId: positiveBigintString,
+    claimLineId: positiveBigintString,
+    orderId: positiveInteger,
+    orderItemId: positiveInteger,
+    warehouseLocationIds: z.array(positiveInteger).min(1).max(1000),
+    quantity: positiveBigintString,
+    reconciledQuantity: nonnegativeBigintString,
+    totalCostMills: nonnegativeBigintString,
+    idempotentReplay: z.boolean(),
+  }).strict(),
+  z.object({
+    outcome: z.literal("unpicked"),
+    claimId: positiveBigintString,
+    claimLineId: positiveBigintString,
+    orderId: positiveInteger,
+    orderItemId: positiveInteger,
+    warehouseLocationIds: z.array(positiveInteger).min(1).max(1000),
+    quantity: positiveBigintString,
+    reservationRestored: z.boolean(),
+    totalCostMills: nonnegativeBigintString,
+    idempotentReplay: z.boolean(),
+  }).strict(),
+]);
+
 export const canonicalAvailabilityClaimBuildHandoffResultSchema = z.object({
   outcome: z.literal("build_handed_off"),
   claimId: positiveBigintString,
@@ -110,4 +157,13 @@ export type CanonicalAvailabilityClaimBuildHandoffCommand = z.infer<
 >;
 export type CanonicalAvailabilityClaimBuildHandoffResult = z.infer<
   typeof canonicalAvailabilityClaimBuildHandoffResultSchema
+>;
+export type CanonicalAvailabilityClaimPickCommand = z.infer<
+  typeof canonicalAvailabilityClaimPickCommandSchema
+>;
+export type CanonicalAvailabilityClaimUnpickCommand = z.infer<
+  typeof canonicalAvailabilityClaimUnpickCommandSchema
+>;
+export type CanonicalAvailabilityClaimPickResult = z.infer<
+  typeof canonicalAvailabilityClaimPickResultSchema
 >;

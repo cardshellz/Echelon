@@ -2,6 +2,8 @@ import type {
   CanonicalClaimInventoryExecutionResource,
   CanonicalClaimInventoryReleaseResource,
   CanonicalClaimInventoryMutationPort,
+  CanonicalClaimInventoryPickResource,
+  CanonicalClaimInventoryUnpickResource,
   CanonicalClaimLotAllocation,
   CanonicalClaimProducedLotAllocation,
   CanonicalClaimTransactionClient,
@@ -104,7 +106,7 @@ function validateAuditInput(input: {
   if (input.actor.trim() === "" || (input.reason != null && input.reason.trim() === "")) {
     throw new CanonicalClaimInventoryMutationError(
       "INVALID_INVENTORY_AUDIT_ACTOR",
-      "Canonical inventory mutations require a nonblank actor and, for release, a nonblank reason.",
+      "Canonical inventory mutations require a nonblank actor and a nonblank reason when the command supplies one.",
     );
   }
 }
@@ -275,6 +277,351 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       ],
     );
     return allocations;
+  }
+
+  async reconcilePickResource(
+    input: Parameters<CanonicalClaimInventoryMutationPort["reconcilePickResource"]>[0],
+  ): Promise<readonly CanonicalClaimLotAllocation[]> {
+    validateAuditInput(input);
+    const claimedQty = positiveInteger(input.target.claimedQty, "target.claimedQty");
+    positiveBigInt(input.target.claimResourceId, "target.claimResource.id");
+    positiveInteger(input.target.inventoryLevelId, "target.inventoryLevel.id");
+    positiveInteger(input.target.warehouseLocationId, "target.warehouseLocation.id");
+    positiveInteger(input.target.sourceVariantId, "target.sourceVariant.id");
+    positiveInteger(input.target.orderItemId, "target.orderItem.id");
+    if (input.releases.length === 0) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_RECONCILIATION_SOURCE_MISSING",
+        "Pick-location reconciliation requires exact claim-owned source resources.",
+      );
+    }
+    const releaseQty = input.releases.reduce((total, resource) => total + resource.releaseQty, BigInt(0));
+    if (releaseQty !== BigInt(claimedQty)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_RECONCILIATION_QUANTITY_MISMATCH",
+        "The released claim ownership must equal the ownership reserved at the selected pick location.",
+        { releaseQty: releaseQty.toString(), claimedQty },
+      );
+    }
+    if (input.releases.some((resource) => resource.inventoryLevelId === input.target.inventoryLevelId)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_RECONCILIATION_SELF_MOVE",
+        "Pick-location reconciliation cannot release and reserve the same inventory level.",
+        { inventoryLevelId: input.target.inventoryLevelId },
+      );
+    }
+    if (input.releases.some((resource) =>
+      resource.sourceVariantId !== input.target.sourceVariantId
+      || resource.orderItemId !== input.target.orderItemId)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_RECONCILIATION_IDENTITY_MISMATCH",
+        "Pick-location reconciliation must preserve target variant and order-line ownership.",
+        { sourceVariantId: input.target.sourceVariantId, orderItemId: input.target.orderItemId },
+      );
+    }
+
+    // Acquire every physical row in the global level-then-lot order before
+    // either side of the reservation rebind writes. The public release/reserve
+    // methods revalidate these already-held locks and retain their audit logs.
+    const levelIds = [...new Set([
+      ...input.releases.map((resource) => resource.inventoryLevelId),
+      input.target.inventoryLevelId,
+    ])];
+    await input.client.query(
+      `SELECT id
+       FROM inventory.inventory_levels
+       WHERE id = ANY($1::integer[])
+       ORDER BY warehouse_location_id, product_variant_id, id
+       FOR UPDATE`,
+      [levelIds],
+    );
+    const sourceLotIds = [...new Set(input.releases.flatMap((resource) =>
+      resource.lotAllocations.map((allocation) => allocation.inventoryLotId)))];
+    await input.client.query(
+      `SELECT id
+       FROM inventory.inventory_lots
+       WHERE id = ANY($1::integer[])
+          OR (product_variant_id = $2 AND warehouse_location_id = $3 AND status = 'active')
+       ORDER BY warehouse_location_id, product_variant_id, received_at, id
+       FOR UPDATE`,
+      [sourceLotIds, input.target.sourceVariantId, input.target.warehouseLocationId],
+    );
+
+    await this.releaseResources({
+      client: input.client,
+      claimId: input.claimId,
+      resources: input.releases,
+      orderId: input.orderId,
+      actor: input.actor,
+      reason: input.reason,
+      occurredAt: input.occurredAt,
+    });
+    return this.reserveResource({
+      client: input.client,
+      claimId: input.claimId,
+      claimResourceId: input.target.claimResourceId,
+      inventoryLevelId: input.target.inventoryLevelId,
+      warehouseLocationId: input.target.warehouseLocationId,
+      sourceVariantId: input.target.sourceVariantId,
+      claimedQty,
+      orderId: input.orderId,
+      orderItemId: input.target.orderItemId,
+      consumerOperationKey: null,
+      actor: input.actor,
+      occurredAt: input.occurredAt,
+    });
+  }
+
+  async pickResources(
+    input: Parameters<CanonicalClaimInventoryMutationPort["pickResources"]>[0],
+  ): Promise<Awaited<ReturnType<CanonicalClaimInventoryMutationPort["pickResources"]>>> {
+    validateAuditInput(input);
+    positiveBigInt(input.claimLineId, "claimLine.id");
+    positiveInteger(input.orderItemId, "orderItem.id");
+    const resources = validatePickResources(input.resources);
+    const { levelsById, lotsById } = await lockPickInventory(input.client, resources);
+    validatePickInventory(resources, levelsById, lotsById);
+
+    const runningLevels = new Map<number, { variantQty: number; reservedQty: number }>(
+      [...levelsById].map(([id, level]) => [id, {
+        variantQty: nonnegativeInteger(level.variant_qty, "inventoryLevel.variantQty"),
+        reservedQty: nonnegativeInteger(level.reserved_qty, "inventoryLevel.reservedQty"),
+      }]),
+    );
+    const movements: Awaited<ReturnType<CanonicalClaimInventoryMutationPort["pickResources"]>>["movements"][number][] = [];
+    let totalCostMills = BigInt(0);
+    for (const resource of resources) {
+      for (const allocation of resource.lotAllocations) {
+        const pickQty = positivePostgresInteger(allocation.pickQty, "claimLot.pickQty");
+        const totalMills = allocation.unitCostMills * BigInt(pickQty);
+        postgresBigInt(totalMills, "claimLot.totalCostMills");
+        const updatedLot = await input.client.query(
+          `UPDATE inventory.inventory_lots
+           SET qty_on_hand = qty_on_hand - $1,
+               qty_reserved = qty_reserved - $1,
+               qty_picked = qty_picked + $1
+           WHERE id = $2 AND qty_on_hand >= $1 AND qty_reserved >= $1
+             AND qty_picked <= 2147483647 - $1`,
+          [pickQty, allocation.inventoryLotId],
+        );
+        if (updatedLot.rowCount !== 1) {
+          throw new CanonicalClaimInventoryMutationError(
+            "CLAIM_LOT_PICK_CONFLICT",
+            "An exact claim-owned FIFO lot changed while its pick was posting.",
+            { inventoryLotId: allocation.inventoryLotId, pickQty },
+          );
+        }
+        const cogsRow = rows(await input.client.query(
+          `INSERT INTO oms.order_item_costs (
+             order_id, order_item_id, inventory_lot_id, product_variant_id, qty,
+             unit_cost_cents, total_cost_cents, unit_cost_mills, total_cost_mills, created_at
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           RETURNING id`,
+          [
+            input.orderId,
+            input.orderItemId,
+            allocation.inventoryLotId,
+            resource.sourceVariantId,
+            pickQty,
+            buildMillsToRoundedCents(allocation.unitCostMills).toString(),
+            buildMillsToRoundedCents(totalMills).toString(),
+            allocation.unitCostMills.toString(),
+            totalMills.toString(),
+            input.occurredAt,
+          ],
+        ))[0];
+        const running = runningLevels.get(resource.inventoryLevelId)!;
+        const variantBefore = running.variantQty;
+        running.variantQty -= pickQty;
+        running.reservedQty -= pickQty;
+        await input.client.query(
+          `INSERT INTO inventory.inventory_transactions (
+             product_variant_id, from_location_id, transaction_type,
+             variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
+             source_state, target_state, unit_cost_cents, inventory_lot_id,
+             order_id, order_item_id, reference_type, reference_id, user_id, notes, created_at
+           ) VALUES ($1, $2, 'pick', $3, $4, $5, $3, 'committed', 'picked',
+                     $6, $7, $8, $9, 'availability_claim_pick', $10, $11, $12, $13)`,
+          [
+            resource.sourceVariantId,
+            resource.warehouseLocationId,
+            -pickQty,
+            variantBefore,
+            running.variantQty,
+            buildMillsToRoundedCents(allocation.unitCostMills).toString(),
+            allocation.inventoryLotId,
+            input.orderId,
+            input.orderItemId,
+            `claim:${input.claimId}:line:${input.claimLineId}:resource:${resource.claimResourceId}`,
+            input.actor,
+            input.reason,
+            input.occurredAt,
+          ],
+        );
+        movements.push({
+          claimResourceId: resource.claimResourceId,
+          claimLotAllocationId: allocation.claimLotAllocationId,
+          inventoryLotId: allocation.inventoryLotId,
+          quantity: BigInt(pickQty),
+          unitCostMills: allocation.unitCostMills,
+          totalCostMills: totalMills,
+          orderItemCostId: positiveInteger(cogsRow?.id, "orderItemCost.id"),
+          reversesPickMovementId: null,
+        });
+        totalCostMills += totalMills;
+        postgresBigInt(totalCostMills, "pick.totalCostMills");
+      }
+    }
+    for (const [levelId, quantities] of [...sumPickByLevel(resources)].sort(([left], [right]) => left - right)) {
+      const qty = positivePostgresInteger(quantities, "inventoryLevel.pickQty");
+      const updatedLevel = await input.client.query(
+        `UPDATE inventory.inventory_levels
+         SET variant_qty = variant_qty - $1,
+             reserved_qty = reserved_qty - $1,
+             picked_qty = picked_qty + $1,
+             updated_at = $3
+         WHERE id = $2 AND variant_qty >= $1 AND reserved_qty >= $1
+           AND picked_qty <= 2147483647 - $1`,
+        [qty, levelId, input.occurredAt],
+      );
+      if (updatedLevel.rowCount !== 1) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_LEVEL_PICK_CONFLICT",
+          "An exact claim-owned inventory level changed while its pick was posting.",
+          { inventoryLevelId: levelId, pickQty: qty },
+        );
+      }
+    }
+    return { movements, totalCostMills };
+  }
+
+  async unpickResources(
+    input: Parameters<CanonicalClaimInventoryMutationPort["unpickResources"]>[0],
+  ): Promise<Awaited<ReturnType<CanonicalClaimInventoryMutationPort["unpickResources"]>>> {
+    validateAuditInput(input);
+    positiveBigInt(input.claimLineId, "claimLine.id");
+    positiveInteger(input.orderItemId, "orderItem.id");
+    const resources = validateUnpickResources(input.resources);
+    const { levelsById, lotsById } = await lockUnpickInventory(input.client, resources);
+    validateUnpickInventory(resources, levelsById, lotsById, input.restoreReservation);
+
+    const runningLevels = new Map<number, { variantQty: number; reservedQty: number }>(
+      [...levelsById].map(([id, level]) => [id, {
+        variantQty: nonnegativeInteger(level.variant_qty, "inventoryLevel.variantQty"),
+        reservedQty: nonnegativeInteger(level.reserved_qty, "inventoryLevel.reservedQty"),
+      }]),
+    );
+    const movements: Awaited<ReturnType<CanonicalClaimInventoryMutationPort["unpickResources"]>>["movements"][number][] = [];
+    let totalCostMills = BigInt(0);
+    for (const resource of resources) {
+      for (const allocation of resource.lotAllocations) {
+        const unpickQty = positivePostgresInteger(allocation.unpickQty, "claimLot.unpickQty");
+        const totalMills = allocation.unitCostMills * BigInt(unpickQty);
+        postgresBigInt(totalMills, "claimLot.totalCostMills");
+        const updatedLot = await input.client.query(
+          `UPDATE inventory.inventory_lots
+           SET qty_on_hand = qty_on_hand + $1,
+               qty_reserved = qty_reserved + $2,
+               qty_picked = qty_picked - $1,
+               status = 'active'
+           WHERE id = $3 AND qty_picked >= $1
+             AND qty_on_hand <= 2147483647 - $1
+             AND qty_reserved <= 2147483647 - $2`,
+          [unpickQty, input.restoreReservation ? unpickQty : 0, allocation.inventoryLotId],
+        );
+        if (updatedLot.rowCount !== 1) {
+          throw new CanonicalClaimInventoryMutationError(
+            "CLAIM_LOT_UNPICK_CONFLICT",
+            "An exact canonical picked FIFO lot changed while its unpick was posting.",
+            { inventoryLotId: allocation.inventoryLotId, unpickQty },
+          );
+        }
+        const cogsRow = rows(await input.client.query(
+          `INSERT INTO oms.order_item_costs (
+             order_id, order_item_id, inventory_lot_id, product_variant_id, qty,
+             unit_cost_cents, total_cost_cents, unit_cost_mills, total_cost_mills, created_at
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           RETURNING id`,
+          [
+            input.orderId,
+            input.orderItemId,
+            allocation.inventoryLotId,
+            resource.sourceVariantId,
+            -unpickQty,
+            buildMillsToRoundedCents(allocation.unitCostMills).toString(),
+            (-buildMillsToRoundedCents(totalMills)).toString(),
+            allocation.unitCostMills.toString(),
+            (-totalMills).toString(),
+            input.occurredAt,
+          ],
+        ))[0];
+        const running = runningLevels.get(resource.inventoryLevelId)!;
+        const variantBefore = running.variantQty;
+        running.variantQty += unpickQty;
+        if (input.restoreReservation) running.reservedQty += unpickQty;
+        await input.client.query(
+          `INSERT INTO inventory.inventory_transactions (
+             product_variant_id, to_location_id, transaction_type,
+             variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
+             source_state, target_state, unit_cost_cents, inventory_lot_id,
+             order_id, order_item_id, reference_type, reference_id, user_id, notes, created_at
+           ) VALUES ($1, $2, 'unpick', $3, $4, $5, $6, 'picked', $7,
+                     $8, $9, $10, $11, 'availability_claim_unpick', $12, $13, $14, $15)`,
+          [
+            resource.sourceVariantId,
+            resource.warehouseLocationId,
+            unpickQty,
+            variantBefore,
+            running.variantQty,
+            input.restoreReservation ? unpickQty : 0,
+            input.restoreReservation ? "committed" : "on_hand",
+            buildMillsToRoundedCents(allocation.unitCostMills).toString(),
+            allocation.inventoryLotId,
+            input.orderId,
+            input.orderItemId,
+            `claim:${input.claimId}:line:${input.claimLineId}:pick:${allocation.reversesPickMovementId}`,
+            input.actor,
+            input.reason,
+            input.occurredAt,
+          ],
+        );
+        movements.push({
+          claimResourceId: resource.claimResourceId,
+          claimLotAllocationId: allocation.claimLotAllocationId,
+          inventoryLotId: allocation.inventoryLotId,
+          quantity: BigInt(unpickQty),
+          unitCostMills: allocation.unitCostMills,
+          totalCostMills: totalMills,
+          orderItemCostId: positiveInteger(cogsRow?.id, "orderItemCost.id"),
+          reversesPickMovementId: allocation.reversesPickMovementId,
+        });
+        totalCostMills += totalMills;
+        postgresBigInt(totalCostMills, "unpick.totalCostMills");
+      }
+    }
+    for (const [levelId, quantity] of [...sumUnpickByLevel(resources)].sort(([left], [right]) => left - right)) {
+      const qty = positivePostgresInteger(quantity, "inventoryLevel.unpickQty");
+      const reservedRestore = input.restoreReservation ? qty : 0;
+      const updatedLevel = await input.client.query(
+        `UPDATE inventory.inventory_levels
+         SET variant_qty = variant_qty + $1,
+             reserved_qty = reserved_qty + $2,
+             picked_qty = picked_qty - $1,
+             updated_at = $4
+         WHERE id = $3 AND picked_qty >= $1
+           AND variant_qty <= 2147483647 - $1
+           AND reserved_qty <= 2147483647 - $2`,
+        [qty, reservedRestore, levelId, input.occurredAt],
+      );
+      if (updatedLevel.rowCount !== 1) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_LEVEL_UNPICK_CONFLICT",
+          "An exact canonical picked inventory level changed while its unpick was posting.",
+          { inventoryLevelId: levelId, unpickQty: qty },
+        );
+      }
+    }
+    return { movements, totalCostMills };
   }
 
   async executePackageOperation(
@@ -964,6 +1311,356 @@ function compareExecutionResources(
     || left.sourceVariantId - right.sourceVariantId
     || left.inventoryLevelId - right.inventoryLevelId
     || (left.claimResourceId < right.claimResourceId ? -1 : left.claimResourceId > right.claimResourceId ? 1 : 0);
+}
+
+function validatePickResources(
+  resources: readonly CanonicalClaimInventoryPickResource[],
+): CanonicalClaimInventoryPickResource[] {
+  if (resources.length === 0) {
+    throw new CanonicalClaimInventoryMutationError(
+      "CLAIM_PICK_RESOURCES_MISSING",
+      "A canonical pick requires exact claim-owned resources.",
+    );
+  }
+  const ordered = [...resources].sort((left, right) =>
+    left.warehouseLocationId - right.warehouseLocationId
+    || left.sourceVariantId - right.sourceVariantId
+    || left.inventoryLevelId - right.inventoryLevelId
+    || (left.claimResourceId < right.claimResourceId ? -1 : left.claimResourceId > right.claimResourceId ? 1 : 0));
+  const resourceIds = new Set<string>();
+  const allocationIds = new Set<string>();
+  for (const resource of ordered) {
+    const resourceId = positiveBigInt(resource.claimResourceId, "claimResource.id").toString();
+    if (resourceIds.has(resourceId)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "DUPLICATE_CLAIM_PICK_RESOURCE",
+        "A claim resource may appear only once in a canonical pick.",
+        { claimResourceId: resourceId },
+      );
+    }
+    resourceIds.add(resourceId);
+    positiveInteger(resource.inventoryLevelId, "inventoryLevel.id");
+    positiveInteger(resource.warehouseLocationId, "warehouseLocation.id");
+    positiveInteger(resource.sourceVariantId, "sourceVariant.id");
+    positivePostgresInteger(resource.pickQty, "claimResource.pickQty");
+    let lotTotal = BigInt(0);
+    for (const allocation of resource.lotAllocations) {
+      const allocationId = positiveBigInt(allocation.claimLotAllocationId, "claimLotAllocation.id").toString();
+      if (allocationIds.has(allocationId)) {
+        throw new CanonicalClaimInventoryMutationError(
+          "DUPLICATE_CLAIM_PICK_ALLOCATION",
+          "A claim lot allocation may appear only once in a canonical pick.",
+          { claimLotAllocationId: allocationId },
+        );
+      }
+      allocationIds.add(allocationId);
+      positiveInteger(allocation.inventoryLotId, "inventoryLot.id");
+      positivePostgresInteger(allocation.pickQty, "claimLot.pickQty");
+      const total = postgresBigInt(allocation.unitCostMills, "claimLot.unitCostMills");
+      const po = postgresBigInt(allocation.poUnitCostMills, "claimLot.poUnitCostMills");
+      const packaging = postgresBigInt(allocation.packagingUnitCostMills, "claimLot.packagingUnitCostMills");
+      const landed = postgresBigInt(allocation.landedUnitCostMills, "claimLot.landedUnitCostMills");
+      if (po + packaging + landed !== total) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_PICK_COST_LINEAGE_MISMATCH",
+          "Claim pick cost components do not reconcile to their authoritative total.",
+          { claimLotAllocationId: allocationId },
+        );
+      }
+      lotTotal += allocation.pickQty;
+    }
+    if (lotTotal !== resource.pickQty) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_PICK_LINEAGE_MISMATCH",
+        "Exact claim lot pick quantities do not reconcile to their resource.",
+        { claimResourceId: resourceId, resourceQty: resource.pickQty.toString(), lotQty: lotTotal.toString() },
+      );
+    }
+  }
+  return ordered;
+}
+
+function validateUnpickResources(
+  resources: readonly CanonicalClaimInventoryUnpickResource[],
+): CanonicalClaimInventoryUnpickResource[] {
+  if (resources.length === 0) {
+    throw new CanonicalClaimInventoryMutationError(
+      "CLAIM_UNPICK_RESOURCES_MISSING",
+      "A canonical unpick requires exact prior pick movements.",
+    );
+  }
+  const ordered = [...resources].sort((left, right) =>
+    left.warehouseLocationId - right.warehouseLocationId
+    || left.sourceVariantId - right.sourceVariantId
+    || left.inventoryLevelId - right.inventoryLevelId
+    || (left.claimResourceId < right.claimResourceId ? -1 : left.claimResourceId > right.claimResourceId ? 1 : 0));
+  const resourceIds = new Set<string>();
+  const movementIds = new Set<string>();
+  for (const resource of ordered) {
+    const resourceId = positiveBigInt(resource.claimResourceId, "claimResource.id").toString();
+    if (resourceIds.has(resourceId)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "DUPLICATE_CLAIM_UNPICK_RESOURCE",
+        "A claim resource may appear only once in a canonical unpick.",
+        { claimResourceId: resourceId },
+      );
+    }
+    resourceIds.add(resourceId);
+    positiveInteger(resource.inventoryLevelId, "inventoryLevel.id");
+    positiveInteger(resource.warehouseLocationId, "warehouseLocation.id");
+    positiveInteger(resource.sourceVariantId, "sourceVariant.id");
+    positivePostgresInteger(resource.unpickQty, "claimResource.unpickQty");
+    let lotTotal = BigInt(0);
+    for (const allocation of resource.lotAllocations) {
+      positiveBigInt(allocation.claimLotAllocationId, "claimLotAllocation.id");
+      positiveInteger(allocation.inventoryLotId, "inventoryLot.id");
+      positivePostgresInteger(allocation.unpickQty, "claimLot.unpickQty");
+      const movementId = positiveBigInt(allocation.reversesPickMovementId, "pickMovement.id").toString();
+      if (movementIds.has(movementId)) {
+        throw new CanonicalClaimInventoryMutationError(
+          "DUPLICATE_CLAIM_UNPICK_MOVEMENT",
+          "A canonical unpick may reverse each prior pick movement only once per command.",
+          { pickMovementId: movementId },
+        );
+      }
+      movementIds.add(movementId);
+      postgresBigInt(allocation.unitCostMills, "pickMovement.unitCostMills");
+      lotTotal += allocation.unpickQty;
+    }
+    if (lotTotal !== resource.unpickQty) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_UNPICK_LINEAGE_MISMATCH",
+        "Exact canonical unpick quantities do not reconcile to their resource.",
+        { claimResourceId: resource.claimResourceId.toString() },
+      );
+    }
+  }
+  return ordered;
+}
+
+async function lockPickInventory(
+  client: CanonicalClaimTransactionClient,
+  resources: readonly CanonicalClaimInventoryPickResource[],
+): Promise<{ levelsById: Map<number, any>; lotsById: Map<number, any> }> {
+  const levelIds = [...new Set(resources.map((resource) => resource.inventoryLevelId))];
+  const levelRows = rows(await client.query(
+    `SELECT id, warehouse_location_id, product_variant_id, variant_qty, reserved_qty, picked_qty
+     FROM inventory.inventory_levels
+     WHERE id = ANY($1::integer[])
+     ORDER BY warehouse_location_id, product_variant_id, id
+     FOR UPDATE`,
+    [levelIds],
+  ));
+  const lots = resources.flatMap((resource) => resource.lotAllocations.map((allocation) => allocation.inventoryLotId));
+  const lotIds = [...new Set(lots)];
+  const lotRows = rows(await client.query(
+    `SELECT id, product_variant_id, warehouse_location_id, qty_on_hand, qty_reserved,
+            qty_picked, status, received_at, unit_cost_cents, po_unit_cost_cents,
+            packaging_cost_cents, landed_cost_cents, total_unit_cost_cents,
+            unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
+            landed_cost_mills, total_unit_cost_mills
+     FROM inventory.inventory_lots
+     WHERE id = ANY($1::integer[])
+     ORDER BY warehouse_location_id, product_variant_id, received_at, id
+     FOR UPDATE`,
+    [lotIds],
+  ));
+  const levelsById = new Map(levelRows.map((level) => [positiveInteger(level.id, "inventoryLevel.id"), level] as const));
+  const lotsById = new Map(lotRows.map((lot) => [positiveInteger(lot.id, "inventoryLot.id"), lot] as const));
+  if (levelsById.size !== levelIds.length || lotsById.size !== lotIds.length) {
+    throw new CanonicalClaimInventoryMutationError(
+      "CLAIM_PICK_INVENTORY_MISSING",
+      "One or more exact claim-owned levels or FIFO lots no longer exist.",
+      { levelIds, lockedLevelIds: [...levelsById.keys()], lotIds, lockedLotIds: [...lotsById.keys()] },
+    );
+  }
+  return { levelsById, lotsById };
+}
+
+async function lockUnpickInventory(
+  client: CanonicalClaimTransactionClient,
+  resources: readonly CanonicalClaimInventoryUnpickResource[],
+): Promise<{ levelsById: Map<number, any>; lotsById: Map<number, any> }> {
+  return lockPickInventory(client, resources.map((resource) => ({
+    claimResourceId: resource.claimResourceId,
+    inventoryLevelId: resource.inventoryLevelId,
+    warehouseLocationId: resource.warehouseLocationId,
+    sourceVariantId: resource.sourceVariantId,
+    pickQty: resource.unpickQty,
+    lotAllocations: resource.lotAllocations.map((allocation) => ({
+      claimLotAllocationId: allocation.claimLotAllocationId,
+      inventoryLotId: allocation.inventoryLotId,
+      pickQty: allocation.unpickQty,
+      unitCostMills: allocation.unitCostMills,
+      poUnitCostMills: BigInt(0),
+      packagingUnitCostMills: BigInt(0),
+      landedUnitCostMills: allocation.unitCostMills,
+    })),
+  })));
+}
+
+function validatePickInventory(
+  resources: readonly CanonicalClaimInventoryPickResource[],
+  levelsById: ReadonlyMap<number, any>,
+  lotsById: ReadonlyMap<number, any>,
+): void {
+  const byLevel = sumPickByLevel(resources);
+  const byLot = new Map<number, bigint>();
+  for (const resource of resources) {
+    const level = levelsById.get(resource.inventoryLevelId);
+    if (!level
+      || positiveInteger(level.warehouse_location_id, "inventoryLevel.locationId") !== resource.warehouseLocationId
+      || positiveInteger(level.product_variant_id, "inventoryLevel.variantId") !== resource.sourceVariantId) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_PICK_LEVEL_IDENTITY_CHANGED",
+        "A claim-owned pick resource no longer matches its inventory level.",
+        { claimResourceId: resource.claimResourceId.toString() },
+      );
+    }
+    for (const allocation of resource.lotAllocations) {
+      const lot = lotsById.get(allocation.inventoryLotId);
+      if (!lot
+        || positiveInteger(lot.warehouse_location_id, "inventoryLot.locationId") !== resource.warehouseLocationId
+        || positiveInteger(lot.product_variant_id, "inventoryLot.variantId") !== resource.sourceVariantId
+        || String(lot.status) !== "active") {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_PICK_LOT_IDENTITY_CHANGED",
+          "A claim-owned pick allocation no longer matches an active FIFO lot.",
+          { claimLotAllocationId: allocation.claimLotAllocationId.toString(), inventoryLotId: allocation.inventoryLotId },
+        );
+      }
+      let liveCosts: ReturnType<typeof normalizeBuildLotCosts>;
+      try {
+        liveCosts = normalizeBuildLotCosts(lot);
+      } catch (cause) {
+        throw new CanonicalClaimInventoryMutationError(
+          "INVALID_CLAIM_PICK_LOT_COST",
+          "A claim-owned FIFO lot has invalid current cost evidence.",
+          { inventoryLotId: allocation.inventoryLotId, cause: cause instanceof Error ? cause.message : String(cause) },
+        );
+      }
+      if (liveCosts.totalMills !== allocation.unitCostMills
+        || liveCosts.poMills !== allocation.poUnitCostMills
+        || liveCosts.packagingMills !== allocation.packagingUnitCostMills
+        || liveCosts.landedMills !== allocation.landedUnitCostMills) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_PICK_LOT_COST_CHANGED",
+          "A claim-owned FIFO lot was re-costed after claiming and must be replanned before pick.",
+          { inventoryLotId: allocation.inventoryLotId },
+        );
+      }
+      byLot.set(allocation.inventoryLotId, (byLot.get(allocation.inventoryLotId) ?? BigInt(0)) + allocation.pickQty);
+    }
+  }
+  for (const [levelId, quantity] of byLevel) {
+    const level = levelsById.get(levelId);
+    const variantQty = BigInt(nonnegativeInteger(level?.variant_qty, "inventoryLevel.variantQty"));
+    const reservedQty = BigInt(nonnegativeInteger(level?.reserved_qty, "inventoryLevel.reservedQty"));
+    const pickedQty = BigInt(nonnegativeInteger(level?.picked_qty, "inventoryLevel.pickedQty"));
+    if (variantQty < quantity || reservedQty < quantity || pickedQty + quantity > BigInt(2_147_483_647)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_LEVEL_PICK_CONFLICT",
+        "A claim-owned level does not contain the exact physical and reserved pick quantity.",
+        { inventoryLevelId: levelId, quantity: quantity.toString() },
+      );
+    }
+  }
+  for (const [lotId, quantity] of byLot) {
+    const lot = lotsById.get(lotId);
+    const onHand = BigInt(nonnegativeInteger(lot?.qty_on_hand, "inventoryLot.qtyOnHand"));
+    const reserved = BigInt(nonnegativeInteger(lot?.qty_reserved, "inventoryLot.qtyReserved"));
+    const picked = BigInt(nonnegativeInteger(lot?.qty_picked, "inventoryLot.qtyPicked"));
+    if (onHand < quantity || reserved < quantity || picked + quantity > BigInt(2_147_483_647)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_LOT_PICK_CONFLICT",
+        "A claim-owned FIFO lot does not contain the exact physical and reserved pick quantity.",
+        { inventoryLotId: lotId, quantity: quantity.toString() },
+      );
+    }
+  }
+}
+
+function validateUnpickInventory(
+  resources: readonly CanonicalClaimInventoryUnpickResource[],
+  levelsById: ReadonlyMap<number, any>,
+  lotsById: ReadonlyMap<number, any>,
+  restoreReservation: boolean,
+): void {
+  const byLevel = sumUnpickByLevel(resources);
+  const byLot = new Map<number, bigint>();
+  for (const resource of resources) {
+    const level = levelsById.get(resource.inventoryLevelId);
+    if (!level
+      || positiveInteger(level.warehouse_location_id, "inventoryLevel.locationId") !== resource.warehouseLocationId
+      || positiveInteger(level.product_variant_id, "inventoryLevel.variantId") !== resource.sourceVariantId) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_UNPICK_LEVEL_IDENTITY_CHANGED",
+        "A canonical picked resource no longer matches its inventory level.",
+        { claimResourceId: resource.claimResourceId.toString() },
+      );
+    }
+    for (const allocation of resource.lotAllocations) {
+      const lot = lotsById.get(allocation.inventoryLotId);
+      if (!lot
+        || positiveInteger(lot.warehouse_location_id, "inventoryLot.locationId") !== resource.warehouseLocationId
+        || positiveInteger(lot.product_variant_id, "inventoryLot.variantId") !== resource.sourceVariantId) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CLAIM_UNPICK_LOT_IDENTITY_CHANGED",
+          "A canonical picked movement no longer matches its FIFO lot.",
+          { pickMovementId: allocation.reversesPickMovementId.toString() },
+        );
+      }
+      byLot.set(allocation.inventoryLotId, (byLot.get(allocation.inventoryLotId) ?? BigInt(0)) + allocation.unpickQty);
+    }
+  }
+  for (const [levelId, quantity] of byLevel) {
+    const level = levelsById.get(levelId);
+    const variant = BigInt(nonnegativeInteger(level?.variant_qty, "inventoryLevel.variantQty"));
+    const reserved = BigInt(nonnegativeInteger(level?.reserved_qty, "inventoryLevel.reservedQty"));
+    const picked = BigInt(nonnegativeInteger(level?.picked_qty, "inventoryLevel.pickedQty"));
+    if (picked < quantity || variant + quantity > BigInt(2_147_483_647)
+      || (restoreReservation && reserved + quantity > variant + quantity)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_LEVEL_UNPICK_CONFLICT",
+        "A canonical picked level cannot restore the exact requested quantity.",
+        { inventoryLevelId: levelId, quantity: quantity.toString() },
+      );
+    }
+  }
+  for (const [lotId, quantity] of byLot) {
+    const lot = lotsById.get(lotId);
+    const onHand = BigInt(nonnegativeInteger(lot?.qty_on_hand, "inventoryLot.qtyOnHand"));
+    const reserved = BigInt(nonnegativeInteger(lot?.qty_reserved, "inventoryLot.qtyReserved"));
+    const picked = BigInt(nonnegativeInteger(lot?.qty_picked, "inventoryLot.qtyPicked"));
+    if (picked < quantity || onHand + quantity > BigInt(2_147_483_647)
+      || (restoreReservation && reserved + quantity > onHand + quantity)) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_LOT_UNPICK_CONFLICT",
+        "A canonical picked FIFO lot cannot restore the exact requested quantity.",
+        { inventoryLotId: lotId, quantity: quantity.toString() },
+      );
+    }
+  }
+}
+
+function sumPickByLevel(
+  resources: readonly CanonicalClaimInventoryPickResource[],
+): Map<number, bigint> {
+  const result = new Map<number, bigint>();
+  for (const resource of resources) {
+    result.set(resource.inventoryLevelId, (result.get(resource.inventoryLevelId) ?? BigInt(0)) + resource.pickQty);
+  }
+  return result;
+}
+
+function sumUnpickByLevel(
+  resources: readonly CanonicalClaimInventoryUnpickResource[],
+): Map<number, bigint> {
+  const result = new Map<number, bigint>();
+  for (const resource of resources) {
+    result.set(resource.inventoryLevelId, (result.get(resource.inventoryLevelId) ?? BigInt(0)) + resource.unpickQty);
+  }
+  return result;
 }
 
 function compareReleaseResources(
