@@ -14,6 +14,7 @@ import {
   requireDropshipAuth,
   requireDropshipSensitiveActionProof,
 } from "./dropship-auth.routes";
+import { buildDropshipPortalOAuthRedirect } from "./dropship-oauth-redirect";
 
 const DROPSHIP_PORTAL_URL = process.env.DROPSHIP_PORTAL_URL || "https://cardshellz.io";
 
@@ -46,13 +47,24 @@ export function registerDropshipStoreConnectionRoutes(
   );
 
   app.get("/api/dropship/store-connections/oauth/callback", async (req, res) => {
+    let returnTo: string | null = null;
     try {
       const input = parseDropshipOAuthCallbackQuery(req.query);
+      returnTo = service.resolveOAuthCallbackReturnTo(input.state);
       const result = await service.completeOAuthCallback(input);
-      return res.redirect(buildPortalRedirect("connected", result.returnTo));
+      return res.redirect(buildDropshipPortalOAuthRedirect({
+        portalUrl: DROPSHIP_PORTAL_URL,
+        status: "connected",
+        returnTo: result.returnTo,
+      }));
     } catch (error) {
       const code = error instanceof DropshipError ? error.code : "DROPSHIP_STORE_CONNECTION_INTERNAL_ERROR";
-      return res.redirect(buildPortalRedirect("error", null, code));
+      return res.redirect(buildDropshipPortalOAuthRedirect({
+        portalUrl: DROPSHIP_PORTAL_URL,
+        status: "error",
+        returnTo,
+        errorCode: code,
+      }));
     }
   });
 
@@ -182,13 +194,4 @@ function parsePositiveInteger(value: string | undefined, key: string): number {
     });
   }
   return parsed;
-}
-
-function buildPortalRedirect(status: "connected" | "error", returnTo: string | null, errorCode?: string): string {
-  const url = new URL(returnTo || "/settings", DROPSHIP_PORTAL_URL);
-  url.searchParams.set("storeConnection", status);
-  if (errorCode) {
-    url.searchParams.set("error", errorCode);
-  }
-  return url.toString();
 }

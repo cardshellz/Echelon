@@ -590,6 +590,56 @@ describe("DropshipChannelReturnTrackingProvider", () => {
       trackingNumber: "9400111899223399001234",
     })).toBeNull();
   });
+
+  it("refreshes credentials before use and preserves the grant after an access-token 401", async () => {
+    const credentials = makeNullCredentials();
+    const credential = await credentials.loadForStoreConnection({
+      vendorId: 10,
+      storeConnectionId: 5,
+      platform: "ebay",
+    });
+    const recordAuthFailure = vi.fn(async (input) => ({
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      platform: input.platform,
+      previousStatus: "connected",
+      status: input.status,
+      transitioned: true,
+    }));
+    credentials.recordAuthFailure = recordAuthFailure;
+    const loadFreshForStoreConnection = vi.fn(async () => credential);
+    const provider = new DropshipChannelReturnTrackingProvider({
+      credentials,
+      ebayCredentials: { loadFreshForStoreConnection },
+      repository: {
+        findChannelReturnForTracking: async () => ({ platform: "ebay", channel_return_id: "ret-9001" }),
+      },
+      fetchImpl: (async () => new Response(
+        JSON.stringify({ errors: [{ message: "Invalid token" }] }),
+        { status: 401 },
+      )) as typeof fetch,
+      clock: { now: () => new Date("2026-09-03T12:00:00.000Z") },
+    });
+
+    await expect(provider.fetchReturnTracking({
+      vendorId: 10,
+      storeConnectionId: 5,
+      trackingNumber: "9400111899223399001234",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_RETURN_TRACKING_HTTP_ERROR",
+      context: { retryable: true, status: 401 },
+    });
+    expect(loadFreshForStoreConnection).toHaveBeenCalledWith({
+      vendorId: 10,
+      storeConnectionId: 5,
+    });
+    expect(recordAuthFailure).toHaveBeenCalledWith(expect.objectContaining({
+      status: "refresh_failed",
+      statusCode: 401,
+      retryable: true,
+      invalidateAccessToken: true,
+    }));
+  });
 });
 
 // ---------------------------------------------------------------------------

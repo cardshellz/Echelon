@@ -15,8 +15,10 @@ import {
   type EbayReturnCase,
 } from "./dropship-ebay-return-intake.mapper";
 import {
+  ebayTokenRefreshErrorContext,
   isEbayResourceAuthFailureStatus,
-  isEbayTokenRefreshAuthFailureStatus,
+  recordEbayAccessTokenRejection,
+  recordEbayTokenRefreshFailure,
 } from "./dropship-ebay-auth-failure";
 import { buildEbayPostOrderAuthorization } from "./dropship-ebay-post-order-auth";
 
@@ -27,7 +29,7 @@ import { buildEbayPostOrderAuthorization } from "./dropship-ebay-post-order-auth
  * service / intake service.
  *
  * Auth mirrors the eBay order-intake provider: user token via refresh-token
- * grant, needs_reauth recorded on 401/403, bounded retry on 429/5xx.
+ * grant, access-token refresh forced on 401, bounded retry on 429/5xx.
  */
 
 type FetchLike = typeof fetch;
@@ -196,21 +198,24 @@ export class EbayDropshipReturnIntakeProvider implements DropshipReturnIntakePro
     });
     const text = await response.text();
     if (!response.ok) {
-      if (isEbayTokenRefreshAuthFailureStatus(response.status)) {
-        await this.recordNeedsReauth(credential, {
-          failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
-          message: `eBay token refresh failed with HTTP ${response.status}.`,
-          statusCode: response.status,
-        });
-      }
+      const message = `eBay token refresh failed with HTTP ${response.status}.`;
+      const classification = await recordEbayTokenRefreshFailure({
+        credentials: this.credentials,
+        credential,
+        status: response.status,
+        responseBody: text,
+        failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
+        message,
+        now: this.clock.now(),
+      });
       throw new DropshipError(
         "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
-        `eBay token refresh failed with HTTP ${response.status}.`,
-        {
-          retryable: response.status >= 500 || response.status === 429,
+        message,
+        ebayTokenRefreshErrorContext({
           status: response.status,
-          body: text.slice(0, 1000),
-        },
+          responseBody: text,
+          classification,
+        }),
       );
     }
     const token = parseEbayJson<EbayTokenResponse>({
@@ -275,16 +280,14 @@ export class EbayDropshipReturnIntakeProvider implements DropshipReturnIntakePro
           message: "eBay return intake returned invalid JSON.",
         });
       }
-      if (isEbayResourceAuthFailureStatus(response.status)) {
-        await this.credentials.recordAuthFailure?.({
-          vendorId: input.credential.vendorId,
-          storeConnectionId: input.credential.storeConnectionId,
-          platform: "ebay",
-          status: "needs_reauth",
+      const accessTokenRejected = isEbayResourceAuthFailureStatus(response.status);
+      if (accessTokenRejected) {
+        await recordEbayAccessTokenRejection({
+          credentials: this.credentials,
+          credential: input.credential,
+          status: response.status,
           failureCode: "DROPSHIP_EBAY_RETURN_INTAKE_HTTP_ERROR",
           message: `eBay return intake failed with HTTP ${response.status}.`,
-          retryable: false,
-          statusCode: response.status,
           now: this.clock.now(),
         });
       }
@@ -297,7 +300,7 @@ export class EbayDropshipReturnIntakeProvider implements DropshipReturnIntakePro
         "DROPSHIP_EBAY_RETURN_INTAKE_HTTP_ERROR",
         `eBay return intake failed with HTTP ${response.status}.`,
         {
-          retryable,
+          retryable: retryable || accessTokenRejected,
           status: response.status,
           body: text.slice(0, 1000),
         },

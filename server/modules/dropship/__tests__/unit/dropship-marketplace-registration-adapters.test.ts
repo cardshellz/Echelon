@@ -20,6 +20,8 @@ import {
 } from "../../infrastructure/dropship-ebay-registration-credentials";
 import type {
   DropshipMarketplaceCredentialRepository,
+  DropshipMarketplaceStoreAuthFailureInput,
+  DropshipMarketplaceStoreAuthFailureRecord,
   DropshipMarketplaceStoreCredentials,
 } from "../../infrastructure/dropship-marketplace-credentials";
 import { PgDropshipMarketplaceRegistrationOwnerRepository } from "../../infrastructure/dropship-marketplace-registration-owner.repository";
@@ -325,6 +327,62 @@ describe("RefreshingDropshipEbayRegistrationCredentialProvider", () => {
       now: observedAt,
     });
   });
+
+  it.each([
+    ["invalid_grant", "needs_reauth"],
+    ["invalid_scope", "refresh_failed"],
+  ] as const)(
+    "classifies eBay %s refresh errors without guessing that every HTTP 400 revokes the grant",
+    async (providerErrorCode, expectedStatus) => {
+      const expired = makeCredentials({
+        accessToken: "expired-access-token",
+        accessTokenExpiresAt: new Date("2026-08-04T13:00:00.000Z"),
+      });
+      const recordAuthFailure = vi.fn(async (
+        input: DropshipMarketplaceStoreAuthFailureInput,
+      ): Promise<DropshipMarketplaceStoreAuthFailureRecord> => ({
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        platform: input.platform,
+        previousStatus: "connected",
+        status: input.status,
+        transitioned: true,
+      }));
+      const repository: DropshipMarketplaceCredentialRepository = {
+        loadForStoreConnection: vi.fn(async () => expired),
+        replaceTokens: vi.fn(),
+        recordAuthFailure,
+      };
+      const responseBody = JSON.stringify({
+        error: providerErrorCode,
+        error_description: `provider described ${providerErrorCode}`,
+      });
+      const provider = new RefreshingDropshipEbayRegistrationCredentialProvider(
+        repository,
+        { clientId: "client-id", clientSecret: "client-secret" },
+        vi.fn(async () => new Response(responseBody, { status: 400 })) as unknown as typeof fetch,
+        { now: () => observedAt },
+      );
+
+      await expect(provider.loadFreshForStoreConnection({
+        vendorId: 10,
+        storeConnectionId: 21,
+      })).rejects.toMatchObject({
+        code: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
+        context: {
+          status: 400,
+          authFailureStatus: expectedStatus,
+          providerErrorCode,
+          providerErrorDescription: `provider described ${providerErrorCode}`,
+        },
+      });
+      expect(recordAuthFailure).toHaveBeenCalledWith(expect.objectContaining({
+        status: expectedStatus,
+        providerErrorCode,
+        providerErrorDescription: `provider described ${providerErrorCode}`,
+      }));
+    },
+  );
 });
 
 describe("DropshipEbayRegistrationCredentialAdapter", () => {

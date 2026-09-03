@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { DropshipError } from "../domain/errors";
 import {
   DROPSHIP_OAUTH_STATE_TTL_MINUTES,
@@ -507,12 +507,29 @@ export class DropshipStoreConnectionService {
         hasDisplayName: grant.externalDisplayName !== null,
       },
     });
-    assertOAuthGrantMatchesIntent({
-      intent,
-      platform,
-      targetConnection,
-      grant,
-    });
+    try {
+      assertOAuthGrantMatchesIntent({
+        intent,
+        platform,
+        targetConnection,
+        grant,
+      });
+    } catch (error) {
+      this.deps.logger.error({
+        code: error instanceof DropshipError
+          ? error.code
+          : "DROPSHIP_STORE_OAUTH_IDENTITY_VALIDATION_FAILED",
+        message: "Dropship store OAuth identity validation failed.",
+        context: {
+          platform,
+          intent,
+          vendorId: vendor.vendorId,
+          storeConnectionId: targetConnection?.storeConnectionId ?? null,
+          ...(error instanceof DropshipError ? error.context : {}),
+        },
+      });
+      throw error;
+    }
     const persistedIdentity = resolveOAuthGrantIdentityForPersistence({
       intent,
       platform,
@@ -596,6 +613,10 @@ export class DropshipStoreConnectionService {
       connection,
       returnTo: state.returnTo,
     };
+  }
+
+  resolveOAuthCallbackReturnTo(state: string): string | null {
+    return this.deps.stateSigner.verify(state, this.deps.clock.now()).returnTo;
   }
 
   async disconnect(memberId: string, storeConnectionId: number, input: {
@@ -1059,8 +1080,18 @@ function assertOAuthGrantMatchesIntent(input: {
       "The authorized marketplace account did not match the store connection being refreshed.",
       {
         platform: input.platform,
-        expectedExternalAccountId: input.targetConnection.externalAccountId,
-        actualExternalAccountId: input.grant.externalAccountId,
+        expectedAccountFingerprint: marketplaceAccountFingerprint({
+          platform: input.platform,
+          providerEnvironment: input.targetConnection.providerEnvironment,
+          identityScheme: input.targetConnection.externalAccountIdentityScheme,
+          externalAccountId: input.targetConnection.externalAccountId,
+        }),
+        actualAccountFingerprint: marketplaceAccountFingerprint({
+          platform: input.platform,
+          providerEnvironment: input.grant.providerEnvironment,
+          identityScheme: input.grant.externalAccountIdentityScheme,
+          externalAccountId: input.grant.externalAccountId,
+        }),
       },
     );
   }
@@ -1079,6 +1110,24 @@ function assertOAuthGrantMatchesIntent(input: {
       },
     );
   }
+}
+
+function marketplaceAccountFingerprint(input: {
+  platform: DropshipSupportedStorePlatform;
+  providerEnvironment: string | null;
+  identityScheme: string | null;
+  externalAccountId: string | null;
+}): string | null {
+  if (input.externalAccountId === null) return null;
+  return createHash("sha256")
+    .update([
+      input.platform,
+      input.providerEnvironment ?? "",
+      input.identityScheme ?? "",
+      input.externalAccountId,
+    ].join("\u0000"))
+    .digest("hex")
+    .slice(0, 16);
 }
 
 interface PersistedOAuthIdentity {

@@ -11,8 +11,10 @@ import type {
 import { buildEbayShippingFulfillmentPath, extractEbayFulfillmentIdFromLocation, normalizeEbayTrackingNumber } from "../../channels/adapters/ebay/ebay-fulfillment.util";
 import { mapCarrierToEbay } from "../../channels/adapters/ebay/ebay-category-map";
 import {
+  ebayTokenRefreshErrorContext,
   isEbayResourceAuthFailureStatus,
-  isEbayTokenRefreshAuthFailureStatus,
+  recordEbayAccessTokenRejection,
+  recordEbayTokenRefreshFailure,
 } from "./dropship-ebay-auth-failure";
 
 type FetchLike = typeof fetch;
@@ -152,21 +154,24 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
     });
     const text = await response.text();
     if (!response.ok) {
-      if (isEbayTokenRefreshAuthFailureStatus(response.status)) {
-        await this.recordNeedsReauth(credential, {
-          failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
-          message: `eBay token refresh failed with HTTP ${response.status}.`,
-          statusCode: response.status,
-        });
-      }
+      const message = `eBay token refresh failed with HTTP ${response.status}.`;
+      const classification = await recordEbayTokenRefreshFailure({
+        credentials: this.credentials,
+        credential,
+        status: response.status,
+        responseBody: text,
+        failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
+        message,
+        now: this.clock.now(),
+      });
       throw new DropshipError(
         "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
-        `eBay token refresh failed with HTTP ${response.status}.`,
-        {
-          retryable: response.status >= 500 || response.status === 429,
+        message,
+        ebayTokenRefreshErrorContext({
           status: response.status,
-          body: text.slice(0, 1000),
-        },
+          responseBody: text,
+          classification,
+        }),
       );
     }
     const token = parseEbayJson<EbayTokenResponse>({
@@ -235,16 +240,14 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
         };
       }
       const retryable = response.status === 429 || response.status >= 500;
-      if (isEbayResourceAuthFailureStatus(response.status)) {
-        await this.credentials.recordAuthFailure?.({
-          vendorId: input.credential.vendorId,
-          storeConnectionId: input.credential.storeConnectionId,
-          platform: "ebay",
-          status: "needs_reauth",
+      const accessTokenRejected = isEbayResourceAuthFailureStatus(response.status);
+      if (accessTokenRejected) {
+        await recordEbayAccessTokenRejection({
+          credentials: this.credentials,
+          credential: input.credential,
+          status: response.status,
           failureCode: "DROPSHIP_EBAY_TRACKING_HTTP_ERROR",
           message: `eBay tracking push failed with HTTP ${response.status}.`,
-          retryable: false,
-          statusCode: response.status,
           now: this.clock.now(),
         });
       }
@@ -256,7 +259,7 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
         "DROPSHIP_EBAY_TRACKING_HTTP_ERROR",
         `eBay tracking push failed with HTTP ${response.status}.`,
         {
-          retryable,
+          retryable: retryable || accessTokenRejected,
           status: response.status,
           body: text.slice(0, 1000),
         },

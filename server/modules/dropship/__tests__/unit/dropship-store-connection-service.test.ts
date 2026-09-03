@@ -444,6 +444,23 @@ describe("DropshipStoreConnectionService", () => {
     expect(stateSigner.lastPayload).toBeNull();
   });
 
+  it("recovers the signed portal return target before callback completion", () => {
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+      returnTo: "/dropship/onboarding",
+      intent: "refresh_connection",
+    };
+
+    expect(service.resolveOAuthCallbackReturnTo("signed")).toBe("/dropship/onboarding");
+  });
+
   it("completes OAuth by connecting the store with sealed token refs", async () => {
     stateSigner.payload = {
       version: 1,
@@ -781,9 +798,20 @@ describe("DropshipStoreConnectionService", () => {
       platform: "ebay",
     })).rejects.toMatchObject({
       code: "DROPSHIP_STORE_OAUTH_ACCOUNT_MISMATCH",
+      context: {
+        expectedAccountFingerprint: expect.stringMatching(/^[a-f0-9]{16}$/),
+        actualAccountFingerprint: expect.stringMatching(/^[a-f0-9]{16}$/),
+      },
     });
 
     expect(repository.lastConnectInput).toBeNull();
+    expect(logs).toContainEqual(expect.objectContaining({
+      code: "DROPSHIP_STORE_OAUTH_ACCOUNT_MISMATCH",
+      message: "Dropship store OAuth identity validation failed.",
+      context: expect.objectContaining({ storeConnectionId: 21 }),
+    }));
+    expect(JSON.stringify(logs)).not.toContain("external-ebay");
+    expect(JSON.stringify(logs)).not.toContain("different-ebay");
   });
 
   it("rejects refresh OAuth when eBay returns a different provider environment", async () => {

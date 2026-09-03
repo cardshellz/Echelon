@@ -303,7 +303,7 @@ describe("dropship marketplace listing push providers", () => {
     expect(fetcher.calls).toHaveLength(0);
   });
 
-  it("still marks the store for reauthorization on an eBay listing API 401", async () => {
+  it("forces an access-token refresh without deleting the grant on an eBay listing API 401", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([jsonResponse({ errors: [{ message: "Invalid token" }] }, 401)]);
     const provider = createEbayProvider(credentials, fetcher.fetch);
@@ -315,7 +315,12 @@ describe("dropship marketplace listing push providers", () => {
     }))).rejects.toMatchObject({ code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR" });
 
     expect(credentials.authFailures).toEqual([
-      expect.objectContaining({ status: "needs_reauth", statusCode: 401 }),
+      expect.objectContaining({
+        status: "refresh_failed",
+        statusCode: 401,
+        retryable: true,
+        invalidateAccessToken: true,
+      }),
     ]);
   });
 

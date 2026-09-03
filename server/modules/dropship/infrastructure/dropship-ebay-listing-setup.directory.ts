@@ -7,7 +7,6 @@ import type {
   DropshipEbayFulfillmentPolicy,
 } from "../domain/ebay-fulfillment-policy-compatibility";
 import { DropshipError } from "../domain/errors";
-import { isEbayTokenRefreshAuthFailureStatus } from "./dropship-ebay-auth-failure";
 import type { DropshipEbayRegistrationCredentialProvider } from "./dropship-ebay-registration-credentials";
 import { resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-registration-credentials";
 
@@ -315,7 +314,7 @@ function requiresEbayListingSetupReauthorization(error: unknown): error is Drops
     return true;
   }
   return error.code === "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED"
-    && isEbayTokenRefreshAuthFailureStatus(providerStatus(error) ?? 0);
+    && error.context?.authFailureStatus === "needs_reauth";
 }
 
 function providerStatus(error: DropshipError): number | undefined {

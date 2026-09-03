@@ -14,6 +14,7 @@ import { EbayAuthService, type EbayAuthConfig } from "../modules/channels/adapte
 import { createDropshipStoreConnectionServiceFromEnv } from "../modules/dropship/infrastructure/dropship-store-connection.factory";
 import { DropshipError } from "../modules/dropship/domain/errors";
 import { parseDropshipOAuthCallbackQuery } from "../modules/dropship/interfaces/http/dropship-store-connection.routes";
+import { buildDropshipPortalOAuthRedirect } from "../modules/dropship/interfaces/http/dropship-oauth-redirect";
 
 const DROPSHIP_PORTAL_URL = process.env.DROPSHIP_PORTAL_URL || "https://cardshellz.io";
 
@@ -216,17 +217,28 @@ export function registerEbayOAuthRoutes(app: Express): void {
 }
 
 async function handleDropshipEbayOAuthCallback(req: Request, res: Response): Promise<void> {
+  let returnTo: string | null = null;
   try {
     const input = parseDropshipOAuthCallbackQuery(req.query);
     const service = createDropshipStoreConnectionServiceFromEnv();
+    returnTo = service.resolveOAuthCallbackReturnTo(input.state);
     const result = await service.completeOAuthCallback({
       ...input,
       platform: "ebay",
     });
-    res.redirect(buildDropshipPortalRedirect("connected", result.returnTo));
+    res.redirect(buildDropshipPortalOAuthRedirect({
+      portalUrl: DROPSHIP_PORTAL_URL,
+      status: "connected",
+      returnTo: result.returnTo,
+    }));
   } catch (error) {
     const code = error instanceof DropshipError ? error.code : "DROPSHIP_STORE_CONNECTION_INTERNAL_ERROR";
-    res.redirect(buildDropshipPortalRedirect("error", null, code));
+    res.redirect(buildDropshipPortalOAuthRedirect({
+      portalUrl: DROPSHIP_PORTAL_URL,
+      status: "error",
+      returnTo,
+      errorCode: code,
+    }));
   }
 }
 
@@ -254,15 +266,6 @@ export function isLikelyDropshipOAuthState(value: unknown): value is string {
   } catch {
     return false;
   }
-}
-
-function buildDropshipPortalRedirect(status: "connected" | "error", returnTo: string | null, errorCode?: string): string {
-  const url = new URL(returnTo || "/settings", DROPSHIP_PORTAL_URL);
-  url.searchParams.set("storeConnection", status);
-  if (errorCode) {
-    url.searchParams.set("error", errorCode);
-  }
-  return url.toString();
 }
 
 function singleQueryParam(value: unknown): string | undefined {
