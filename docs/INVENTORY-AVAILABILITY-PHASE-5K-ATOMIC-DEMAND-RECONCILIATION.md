@@ -29,8 +29,9 @@ The current claim cursor selects one of these guarded paths:
 
 The guarded release locks the WMS order and active claim, then rechecks all three
 conditions before releasing any resource. If demand reappears, the order status
-changes, or another claim becomes active, the transaction rolls back. The router
-never falls back to legacy after canonical authority has been selected.
+changes, or another claim becomes active, the transaction rolls back. A cancelled
+order cancels the claim; other zero-demand or terminal states release it. The
+router never falls back to legacy after canonical authority has been selected.
 
 ## Retry and failure contract
 
