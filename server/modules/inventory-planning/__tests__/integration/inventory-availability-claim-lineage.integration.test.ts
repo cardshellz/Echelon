@@ -358,26 +358,55 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       ],
     )).rejects.toMatchObject({ constraint: "availability_claims_supersedes_same_order_fk" });
 
-    const duplicateSuccessorEvidence = claimEvidence("order:2:availability:revision:3");
+    await expect(pool.query(
+      `UPDATE "${schemas.inventory}".availability_claims
+       SET supersedes_claim_id = NULL
+       WHERE order_id = 2 AND revision = 2`,
+    )).rejects.toMatchObject({
+      constraint: "availability_claims_replacement_lineage_immutable_chk",
+    });
+
+    const skippedRevisionEvidence = claimEvidence("order:4:availability:revision:3");
+    await expect(pool.query(
+      `INSERT INTO "${schemas.inventory}".availability_claims (
+         claim_key, order_id, revision, supersedes_claim_id, status, plan_status, scope_kind,
+         activation_run_id, runtime_authority_revision, request_hash, plan_hash,
+         snapshot_fingerprint, request_payload, plan_payload, model_evidence,
+         requested_by, reason, reserved_at
+       ) VALUES ($1, 4, 3, $2, 'active', 'satisfied', 'network',
+                 1, 1, $3, $4, $5, $6::jsonb, $7::jsonb, '[]'::jsonb,
+                 'integration-test', 'invalid skipped revision', now())`,
+      [
+        skippedRevisionEvidence.request.requestKey,
+        crossOrderPredecessor.rows[0]!.id,
+        "4".repeat(64),
+        "5".repeat(64),
+        "c".repeat(64),
+        JSON.stringify(skippedRevisionEvidence.request),
+        JSON.stringify(skippedRevisionEvidence.plan),
+      ],
+    )).rejects.toMatchObject({ constraint: "availability_claims_supersedes_revision_chk" });
+
+    const inactiveSuccessorEvidence = claimEvidence("order:4:availability:revision:2");
     await expect(pool.query(
       `INSERT INTO "${schemas.inventory}".availability_claims (
          claim_key, order_id, revision, supersedes_claim_id, status, plan_status, scope_kind,
          activation_run_id, runtime_authority_revision, request_hash, plan_hash,
          snapshot_fingerprint, request_payload, plan_payload, model_evidence,
          requested_by, reason, reserved_at, released_at
-       ) VALUES ($1, 2, 3, $2, 'released', 'satisfied', 'network',
+       ) VALUES ($1, 4, 2, $2, 'released', 'satisfied', 'network',
                  1, 1, $3, $4, $5, $6::jsonb, $7::jsonb, '[]'::jsonb,
-                 'integration-test', 'invalid duplicate successor', now(), now())`,
+                 'integration-test', 'invalid inactive successor', now(), now())`,
       [
-        duplicateSuccessorEvidence.request.requestKey,
-        predecessorId,
-        "4".repeat(64),
-        "5".repeat(64),
+        inactiveSuccessorEvidence.request.requestKey,
+        crossOrderPredecessor.rows[0]!.id,
+        "6".repeat(64),
+        "7".repeat(64),
         "c".repeat(64),
-        JSON.stringify(duplicateSuccessorEvidence.request),
-        JSON.stringify(duplicateSuccessorEvidence.plan),
+        JSON.stringify(inactiveSuccessorEvidence.request),
+        JSON.stringify(inactiveSuccessorEvidence.plan),
       ],
-    )).rejects.toMatchObject({ constraint: "availability_claims_supersedes_claim_uq" });
+    )).rejects.toMatchObject({ constraint: "availability_claims_supersedes_status_chk" });
   });
 
   it("installs picked balances and append-only movement evidence", async () => {
@@ -443,6 +472,16 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       [schemas.inventory],
     );
     expect(indexes.rows).toHaveLength(1);
+
+    const triggers = await pool.query<{ trigger_name: string }>(
+      `SELECT trigger_name
+       FROM information_schema.triggers
+       WHERE event_object_schema = $1
+         AND event_object_table = 'availability_claims'
+         AND trigger_name = 'availability_claims_replacement_lineage_guard'`,
+      [schemas.inventory],
+    );
+    expect(triggers.rows).toHaveLength(2);
 
     const commandType = await pool.query<{ definition: string }>(
       `SELECT pg_get_constraintdef(oid) AS definition

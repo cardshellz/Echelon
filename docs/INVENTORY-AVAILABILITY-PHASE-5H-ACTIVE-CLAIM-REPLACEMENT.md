@@ -75,8 +75,11 @@ after the predecessor's open reservation has been returned inside the transactio
 
 Migration `0649_inventory_availability_claim_replacement.sql` adds a same-order composite
 foreign key for `supersedes_claim_id`, permits only one successor to reference a given
-predecessor, rejects self-reference, and adds `replace` to the canonical command
-discriminator. Existing claims remain valid with a null predecessor.
+predecessor, rejects self-reference, and requires the successor to start active at the
+immediately following revision after a predecessor already marked `superseded` in the
+same transaction. Replacement lineage cannot be rewritten after insertion. The
+migration also adds `replace` to the canonical command discriminator. Existing claims
+remain valid with a null predecessor.
 
 ## Deliberate boundaries
 

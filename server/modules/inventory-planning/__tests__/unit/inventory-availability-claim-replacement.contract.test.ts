@@ -81,6 +81,11 @@ describe("canonical availability claim replacement contract", () => {
     expect(migration).toContain("ADD COLUMN supersedes_claim_id BIGINT");
     expect(migration).toContain("availability_claims_supersedes_same_order_fk");
     expect(migration).toContain("availability_claims_supersedes_claim_uq");
+    expect(migration).toContain("availability_claims_replacement_lineage_guard");
+    expect(migration).toContain("availability_claims_replacement_lineage_immutable_chk");
+    expect(migration).toContain("predecessor_status <> 'superseded'");
+    expect(migration).toContain("predecessor_revision + 1 <> NEW.revision");
+    expect(migration).toContain("NEW.status <> 'active'");
     expect(migration).toContain("'replace'");
     expect(migration).not.toMatch(/UPDATE\s+inventory\.availability_runtime_authority/i);
     expect(migration).not.toMatch(/UPDATE\s+inventory\.inventory_levels/i);
