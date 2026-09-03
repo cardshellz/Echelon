@@ -20,7 +20,6 @@ describe("shipping fulfillment routing admin UI", () => {
       ),
       "utf8",
     );
-
     expect(detail).toContain("<FulfillmentRoutingEditor");
     expect(detail).not.toContain("Provider routing is not configured in the initial rollout");
     expect(editor).toContain("Allowed routing methods");
@@ -29,9 +28,13 @@ describe("shipping fulfillment routing admin UI", () => {
     expect(editor).toContain("onChange={(event) => setSearch(event.target.value)}");
     expect(editor).toContain("Save fulfillment routing");
     expect(editor).toContain("No longer available");
-    expect(editor).toContain("groupCatalogMethods(filteredCatalog)");
+    expect(editor).toContain("groupFulfillmentCatalogMethodsByScope(filteredCatalog)");
     expect(editor).toContain("Domestic");
     expect(editor).toContain("International");
+    expect(editor).not.toContain("variant</span>");
+    expect(editor).toContain("Provider catalog refreshed");
+    expect(editor).toContain("Refreshing catalog...");
+    expect(editor).toContain("Last provider refresh:");
     expect(editor).toContain("Provider flags: multi-package");
     expect(detail).toContain("Save fulfillment routing before review");
     expect(detail).toContain("The routing resolver will fail closed");
