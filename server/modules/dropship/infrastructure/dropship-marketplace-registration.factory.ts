@@ -1,4 +1,4 @@
-import { db } from "../../../db";
+import { pool } from "../../../db";
 import type {
   MarketplaceListingProviderAccountClaimer,
   MarketplaceListingRegistrationObserver,
@@ -12,7 +12,7 @@ import {
   type EbayRegistrationCredentialProvider,
   type EbayRegistrationReadTransport,
 } from "../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
-import { createInventoryAtpService } from "../../inventory";
+import { createAuthorityAwareInventoryAtpService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import { DropshipMarketplaceRegistrationAccountClaimer } from "../application/dropship-marketplace-registration-account-claimer";
 import {
   DropshipMarketplaceRegistrationOwnerReader,
@@ -84,7 +84,7 @@ export function createDropshipMarketplaceRegistrationOwnerAdaptersFromEnv(
   options: CreateDropshipMarketplaceRegistrationOwnerAdaptersFromEnvOptions = {},
 ): DropshipMarketplaceRegistrationOwnerAdapters {
   const atp = new InventoryServiceDropshipAtpProvider(
-    createInventoryAtpService(db),
+    createAuthorityAwareInventoryAtpService(pool),
   );
   const ownerRepository = new PgDropshipMarketplaceRegistrationOwnerRepository(
     atp,

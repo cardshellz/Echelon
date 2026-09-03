@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
-import { db } from "../../../../db";
-import { createInventoryAtpService } from "../../../inventory/atp.service";
+import { pool } from "../../../../db";
+import { createAuthorityAwareInventoryAtpService } from "../../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import {
   DropshipSelectionAtpService,
   makeDropshipSelectionAtpLogger,
@@ -76,7 +76,7 @@ function createDropshipSelectionAtpServiceFromEnv(): DropshipSelectionAtpService
     clock: systemDropshipSelectionAtpClock,
     logger: makeDropshipSelectionAtpLogger(),
     repository: new PgDropshipSelectionAtpRepository(),
-    atp: new InventoryServiceDropshipAtpProvider(createInventoryAtpService(db)),
+    atp: new InventoryServiceDropshipAtpProvider(createAuthorityAwareInventoryAtpService(pool)),
   });
 }
 

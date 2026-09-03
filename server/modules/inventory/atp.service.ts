@@ -67,6 +67,41 @@ export interface ProductAtpSummary {
     physicalQty: number;
   }>;
 }
+
+/** Backward-compatible inventory-page projection. */
+export interface InventoryItemAtpSummary {
+  productId: number;
+  baseSku: string;
+  name: string;
+  totalOnHandPieces: number;
+  totalReservedPieces: number;
+  totalAtpPieces: number;
+  variants: InventoryItemVariantSummary[];
+}
+
+/**
+ * Operational ATP read contract.
+ *
+ * The legacy implementation and the authority-aware runtime router both
+ * implement this surface so callers cannot accidentally retain a direct
+ * reference to the legacy calculator during the atomic cutover.
+ */
+export interface InventoryAtpServiceContract {
+  getProductInventoryStrategy(productId: number): Promise<ProductInventoryStrategy>;
+  getTotalBaseUnits(productId: number): Promise<BaseUnitTotals>;
+  getAtpBase(productId: number): Promise<number>;
+  getAtpBaseByWarehouse(productId: number, warehouseId: number): Promise<number>;
+  getDirectVariantAtpByWarehouse(
+    variantIds: number[],
+    warehouseId: number,
+  ): Promise<Map<number, number>>;
+  getAtpPerVariantByWarehouse(productId: number, warehouseId: number): Promise<VariantAtp[]>;
+  getAtpPerVariant(productId: number): Promise<VariantAtp[]>;
+  getAtpForChannel(productId: number, channelId: number): Promise<ChannelVariantAtp[]>;
+  getProductSummary(productId: number): Promise<ProductAtpSummary | null>;
+  getInventoryItemSummary(productId: number): Promise<InventoryItemAtpSummary | null>;
+  getBulkAtp(productIds: number[]): Promise<Map<number, number>>;
+}
 interface VariantPhysicalRow {
   productVariantId: number;
   sku: string | null;
@@ -116,7 +151,7 @@ interface InventoryItemVariantSummary {
  *
  * This service never writes to the database.
  */
-class InventoryAtpService {
+class InventoryAtpService implements InventoryAtpServiceContract {
   constructor(
     private readonly db: any,
     private readonly recipeCapacity: RecipeCapacityService,
@@ -642,25 +677,7 @@ class InventoryAtpService {
   // 6. getInventoryItemSummary (backward-compatible shape)
   // --------------------------------------------------------------------------
 
-  async getInventoryItemSummary(productId: number): Promise<{
-    productId: number;
-    baseSku: string;
-    name: string;
-    totalOnHandPieces: number;
-    totalReservedPieces: number;
-    totalAtpPieces: number;
-    variants: Array<{
-      variantId: number;
-      sku: string;
-      name: string;
-      unitsPerVariant: number;
-      available: number;
-      variantQty: number;
-      reservedQty: number;
-      pickedQty: number;
-      atpPieces: number;
-    }>;
-  } | null> {
+  async getInventoryItemSummary(productId: number): Promise<InventoryItemAtpSummary | null> {
     const [product] = await this.db
       .select({
         id: products.id,
@@ -808,6 +825,7 @@ class InventoryAtpService {
 // Factory
 // ============================================================================
 
-export function createInventoryAtpService(db: any, recipeCapacity = createRecipeCapacityService(db)) {
+/** Internal legacy calculator. Operational callers must use the authority-aware runtime factory. */
+export function createLegacyInventoryAtpService(db: any, recipeCapacity = createRecipeCapacityService(db)) {
   return new InventoryAtpService(db, recipeCapacity);
 }

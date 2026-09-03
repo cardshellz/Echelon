@@ -192,7 +192,8 @@ describe("DropshipSelectionAtpService", () => {
       updatedAt: now,
     }];
     const atp = new FakeAtpProvider();
-    atp.baseAtpByProductId.set(10, 17);
+    atp.variantAtpByVariantId.set(20, 3);
+    atp.variantAtpByVariantId.set(21, 3);
     const service = makeService(repository, atp);
 
     const result = await service.previewCatalog({
@@ -305,12 +306,14 @@ class FakeDropshipSelectionAtpRepository implements DropshipSelectionAtpReposito
 }
 
 class FakeAtpProvider implements DropshipAtpProvider {
-  baseAtpByProductId = new Map<number, number>();
+  variantAtpByVariantId = new Map<number, number>();
 
-  async getBaseAtpByProductIds(productIds: readonly number[]): Promise<Map<number, number>> {
-    return new Map(productIds.map((productId) => [
-      productId,
-      this.baseAtpByProductId.get(productId) ?? 0,
+  async getVariantAtp(
+    targets: readonly { productId: number; productVariantId: number }[],
+  ): Promise<Map<number, number>> {
+    return new Map(targets.map((target) => [
+      target.productVariantId,
+      this.variantAtpByVariantId.get(target.productVariantId) ?? 0,
     ]));
   }
 }

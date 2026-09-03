@@ -27,7 +27,6 @@ export const inventoryStorage: InventoryModuleStorage = {
 export { InventoryUseCases } from "./application/inventory.use-cases";
 
 // Services
-export { createInventoryAtpService } from "./atp.service";
 export { createRecipeCapacityService, RecipeCapacityService } from "./recipe-capacity.service";
 export { createInventoryLotService, InventoryLotService } from "./lots.service";
 export { createInventoryAlertService } from "./alerts.service";
@@ -41,6 +40,13 @@ export { registerReplenishmentRoutes } from "./replenishment.routes";
 export { registerBuildRoutes } from "./build.routes";
 
 // Service types
-export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary } from "./atp.service";
+export type {
+  BaseUnitTotals,
+  VariantAtp,
+  ChannelVariantAtp,
+  ProductAtpSummary,
+  InventoryItemAtpSummary,
+  InventoryAtpServiceContract,
+} from "./atp.service";
 export type { BreakResult, AssembleResult, ConversionPreview } from "./application/break-assembly.use-cases";
 export type { CycleCountUseCases, CycleCountError, ApproveResult, BulkApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "./application/cycle-count.use-cases";

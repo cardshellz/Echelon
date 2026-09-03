@@ -30,7 +30,6 @@ interface ProductVariantRow {
   product_id: number;
   sku: string | null;
   is_active: boolean;
-  units_per_variant: number;
   requires_shipping: boolean;
   track_inventory: boolean | null;
 }
@@ -141,7 +140,6 @@ export class PgDropshipMarketplaceRegistrationOwnerRepository
                 pv.product_id,
                 pv.sku,
                 pv.is_active,
-                pv.units_per_variant,
                 pv.requires_shipping,
                 pv.track_inventory
          FROM catalog.product_variants pv
@@ -156,13 +154,10 @@ export class PgDropshipMarketplaceRegistrationOwnerRepository
     }
 
     if (rows.length === 0) return [];
-    const atpByProductId = await this.atp.getBaseAtpByProductIds([
-      input.productId,
-    ]);
-    const baseAtp = normalizeBaseAtp(
-      atpByProductId.get(input.productId) ?? 0,
-      input.productId,
-    );
+    const atpByVariantId = await this.atp.getVariantAtp(rows.map((row) => ({
+      productId: input.productId,
+      productVariantId: row.id,
+    })));
     return rows.map((row) => ({
       id: row.id,
       productId: row.product_id,
@@ -171,7 +166,7 @@ export class PgDropshipMarketplaceRegistrationOwnerRepository
       availableQuantity: isInventoryManagedVariant({
         requiresShipping: row.requires_shipping,
         trackInventory: row.track_inventory,
-      }) ? variantAtp(baseAtp, row) : 0,
+      }) ? normalizeVariantAtp(atpByVariantId.get(row.id) ?? 0, input.productId, row.id) : 0,
     }));
   }
 }
@@ -196,42 +191,15 @@ function addMarketplaceId(target: Set<string>, value: unknown): void {
   if (normalized) target.add(normalized);
 }
 
-function normalizeBaseAtp(value: number, productId: number): number {
-  if (!Number.isFinite(value)) {
+function normalizeVariantAtp(value: number, productId: number, productVariantId: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
     throw registrationOwnerError(
       "DROPSHIP_MARKETPLACE_REGISTRATION_ATP_INVALID",
-      "Inventory ATP returned a non-finite product quantity.",
-      { productId },
+      "Inventory ATP returned an invalid variant quantity.",
+      { productId, productVariantId, value },
     );
   }
-  const normalized = Math.max(0, Math.floor(value));
-  if (!Number.isSafeInteger(normalized)) {
-    throw registrationOwnerError(
-      "DROPSHIP_MARKETPLACE_REGISTRATION_ATP_INVALID",
-      "Inventory ATP exceeded the supported safe-integer range.",
-      { productId },
-    );
-  }
-  return normalized;
-}
-
-function variantAtp(baseAtp: number, row: ProductVariantRow): number {
-  if (!Number.isSafeInteger(row.units_per_variant) || row.units_per_variant <= 0) {
-    throw registrationOwnerError(
-      "DROPSHIP_MARKETPLACE_REGISTRATION_UNITS_PER_VARIANT_INVALID",
-      "A catalog variant has invalid units-per-variant data.",
-      { productVariantId: row.id, unitsPerVariant: row.units_per_variant },
-    );
-  }
-  const quantity = Math.floor(baseAtp / row.units_per_variant);
-  if (!Number.isSafeInteger(quantity)) {
-    throw registrationOwnerError(
-      "DROPSHIP_MARKETPLACE_REGISTRATION_QUANTITY_INVALID",
-      "The derived variant ATP exceeded the supported safe-integer range.",
-      { productVariantId: row.id },
-    );
-  }
-  return quantity;
+  return value;
 }
 
 function registrationOwnerError(

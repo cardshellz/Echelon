@@ -180,7 +180,10 @@ describe("PgDropshipMarketplaceRegistrationOwnerRepository", () => {
       connect: vi.fn(async () => ({ query, release })),
     } as unknown as Pool;
     const atp = {
-      getBaseAtpByProductIds: vi.fn(async () => new Map([[70, 500]])),
+      getVariantAtp: vi.fn(async () => new Map([
+        [701, 4],
+        [702, 3],
+      ])),
     };
     const repository = new PgDropshipMarketplaceRegistrationOwnerRepository(
       atp,
@@ -207,11 +210,15 @@ describe("PgDropshipMarketplaceRegistrationOwnerRepository", () => {
     });
     expect(access).toEqual({ vendorId: 10, productId: 70, canList: true });
     expect(variants).toEqual([
-      { id: 701, productId: 70, sku: "ARM-ENV-SGL-C750", isActive: true, availableQuantity: 0 },
-      { id: 702, productId: 70, sku: "ARM-ENV-SGL-C700", isActive: false, availableQuantity: 0 },
+      { id: 701, productId: 70, sku: "ARM-ENV-SGL-C750", isActive: true, availableQuantity: 4 },
+      { id: 702, productId: 70, sku: "ARM-ENV-SGL-C700", isActive: false, availableQuantity: 3 },
       { id: 703, productId: 70, sku: "ARM-ENV-SGL-P50", isActive: true, availableQuantity: 0 },
     ]);
-    expect(atp.getBaseAtpByProductIds).toHaveBeenCalledWith([70]);
+    expect(atp.getVariantAtp).toHaveBeenCalledWith([
+      { productId: 70, productVariantId: 701 },
+      { productId: 70, productVariantId: 702 },
+      { productId: 70, productVariantId: 703 },
+    ]);
     const accessQuery = queries.find((entry) => entry.sql.includes("AS can_list"));
     expect(accessQuery?.params).toEqual([10, 21, 70]);
     expect(accessQuery?.sql).not.toContain("dvl.status");
