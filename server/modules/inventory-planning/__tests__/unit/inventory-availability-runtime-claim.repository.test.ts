@@ -21,7 +21,13 @@ describe("PostgresInventoryAvailabilityRuntimeClaimExecutor", () => {
       authority: context.authority,
       authorityRevision: context.authorityRevision,
       activationRunId: context.activationRunId,
-    }))).resolves.toEqual({ authority: "legacy", authorityRevision: "1", activationRunId: null });
+      hasLegacyDb: context.legacyDb != null,
+    }))).resolves.toEqual({
+      authority: "legacy",
+      authorityRevision: "1",
+      activationRunId: null,
+      hasLegacyDb: true,
+    });
     expect(client.query.mock.calls.map((call) => String(call[0]).trim())).toEqual([
       "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ",
       expect.stringContaining("FOR SHARE"),
@@ -228,6 +234,44 @@ describe("PostgresInventoryAvailabilityRuntimeClaimExecutor", () => {
     expect(client.release).toHaveBeenCalledTimes(4);
   });
 
+  it("finds the exact claim and movement cursor that own a completed line", async () => {
+    const client = fakeClient({
+      authority: "canonical",
+      authority_revision: "9",
+      activation_run_id: "44",
+    }, {
+      claim: {
+        id: "70",
+        revision: 3,
+        status: "superseded",
+        plan_payload: plan(),
+      },
+      movementCursor: "91",
+    });
+    const connect = vi.fn(async () => client);
+    const executor = new PostgresInventoryAvailabilityRuntimeClaimExecutor(
+      fakeLegacy(),
+      fakeCanonical(),
+      { connect } as never,
+    );
+
+    const result = await executor.execute(async (context) => ({
+      claim: await context.getClaimOwningPickedLine?.(42, 11),
+      movementCursor: await context.getClaimLinePickMovementCursor?.("70", 11),
+    }));
+
+    expect(result).toEqual({
+      claim: expect.objectContaining({ claimId: "70", revision: 3, status: "superseded" }),
+      movementCursor: "91",
+    });
+    expect(client.query.mock.calls.some(([text]) =>
+      String(text).includes("line.picked_target_qty > 0"))).toBe(true);
+    expect(client.query.mock.calls.some(([text]) =>
+      String(text).includes("MAX(movement.id)"))).toBe(true);
+    expect(connect).toHaveBeenCalledTimes(3);
+    expect(client.release).toHaveBeenCalledTimes(3);
+  });
+
   it("fails at composition when the configured pool cannot support post-commit work", () => {
     expect(() => new PostgresInventoryAvailabilityRuntimeClaimExecutor(
       fakeLegacy(),
@@ -309,6 +353,7 @@ function fakeClient(
     claim?: Record<string, unknown>;
     variants?: Record<string, unknown>[];
     orderId?: number;
+    movementCursor?: string;
   } = {},
 ) {
   const query = vi.fn(async (statement: unknown) => {
@@ -316,6 +361,9 @@ function fakeClient(
     if (sql.startsWith("SELECT authority")) return { rows: authority ? [authority] : [] };
     if (sql.includes("FROM inventory.availability_claims")) {
       return { rows: evidence.claim ? [evidence.claim] : [] };
+    }
+    if (sql.includes("MAX(movement.id)")) {
+      return { rows: evidence.movementCursor == null ? [] : [{ movement_cursor: evidence.movementCursor }] };
     }
     if (sql.includes("FROM catalog.product_variants")) return { rows: evidence.variants ?? [] };
     if (sql.includes("FROM wms.orders")) {

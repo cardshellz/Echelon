@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type {
   CanonicalAvailabilityClaimReplacementResult,
   CanonicalAvailabilityClaimResult,
+  CanonicalAvailabilityClaimPickResult,
   CanonicalAvailabilityCycleCountReconciliationResult,
   CanonicalAvailabilityReservationStatusProjection,
 } from "@shared/types/inventory-availability-claims";
@@ -12,6 +13,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import type {
   OrderReservationStatusResult,
   RefundDemandReleaseTarget,
+  DrizzleDb,
   ReconcileRefundOrderDemandCommand,
   ReconcileRefundOrderDemandResult,
   ReconcileOrderDemandCommand,
@@ -46,6 +48,8 @@ export interface RuntimeCanonicalClaimService {
   claimOrder(input: unknown): Promise<CanonicalAvailabilityClaimResult>;
   replaceOrderClaim(input: unknown): Promise<CanonicalAvailabilityClaimReplacementResult>;
   releaseOrderClaim(input: unknown): Promise<CanonicalAvailabilityClaimResult>;
+  pickClaimLine(input: unknown): Promise<CanonicalAvailabilityClaimPickResult>;
+  unpickClaimLine(input: unknown): Promise<CanonicalAvailabilityClaimPickResult>;
   reconcileCycleCount(input: unknown): Promise<CanonicalAvailabilityCycleCountReconciliationResult>;
 }
 
@@ -53,9 +57,13 @@ export interface InventoryAvailabilityRuntimeClaimContext {
   authority: InventoryAvailabilityRuntimeAuthority;
   authorityRevision: string;
   activationRunId: string | null;
+  /** Present only while legacy authority is pinned by the executor transaction. */
+  legacyDb?: DrizzleDb;
   legacy: ReservationServiceContract;
   canonical: RuntimeCanonicalClaimService;
   getLatestClaim(orderId: number): Promise<CanonicalClaimCursor | null>;
+  getClaimOwningPickedLine?(orderId: number, orderItemId: number): Promise<CanonicalClaimCursor | null>;
+  getClaimLinePickMovementCursor?(claimId: string, orderItemId: number): Promise<string>;
   getVariantMetadata(
     productVariantIds: readonly number[],
   ): Promise<Map<number, CanonicalClaimVariantMetadata>>;

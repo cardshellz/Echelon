@@ -115,7 +115,8 @@ Focused tests prove:
 ## Remaining activation blockers
 
 Canonical authority remains prohibited. This slice closes reservation status only.
-Transaction-aware deployed picker routing, complete canonical publisher coverage,
+Phase 5O subsequently closes transaction-aware deployed picker routing.
+Claim-aware replenishment execution, complete canonical publisher coverage,
 concurrency and crash-recovery verification, provider readback, external endpoint
 consumer verification, and the separately reviewed and explicitly authorized
 production activation operation remain open.

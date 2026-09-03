@@ -28,44 +28,34 @@ const INVENTORY_SRC = readFileSync(
   "utf8",
 );
 
+const LEGACY_PICK_TRANSACTION = PICKING_SRC.substring(
+  PICKING_SRC.indexOf("private async completeLegacyPickTransaction"),
+  PICKING_SRC.indexOf("private async persistNonInventoryPickProgress"),
+);
+
 // ─── D-PICKGUARD structural checks ─────────────────────────────────
 
 describe("D-PICKGUARD: pickItem order-state guard", () => {
   it("locks the parent order row with FOR UPDATE before deducting", () => {
-    const txBlock = PICKING_SRC.substring(
-      PICKING_SRC.indexOf('status === "completed" && beforeItem.status !== "completed"'),
-      PICKING_SRC.indexOf("const txInventoryCore"),
-    );
-    expect(txBlock).toContain("FROM wms.orders");
-    expect(txBlock).toContain("FOR UPDATE");
+    expect(LEGACY_PICK_TRANSACTION).not.toBe("");
+    expect(LEGACY_PICK_TRANSACTION).toContain("FROM wms.orders");
+    expect(LEGACY_PICK_TRANSACTION).toContain("FOR UPDATE");
   });
 
   it("checks warehouse_status before allowing deduction", () => {
-    const txBlock = PICKING_SRC.substring(
-      PICKING_SRC.indexOf("D-PICKGUARD"),
-      PICKING_SRC.indexOf("Lock the item row"),
-    );
-    expect(txBlock).toContain("warehouse_status");
-    expect(txBlock).toContain("cancelled");
-    expect(txBlock).toContain("shipped");
+    expect(LEGACY_PICK_TRANSACTION).toContain("warehouse_status");
+    expect(LEGACY_PICK_TRANSACTION).toContain("cancelled");
+    expect(LEGACY_PICK_TRANSACTION).toContain("shipped");
   });
 
   it("throws IntegrityError for cancelled orders", () => {
-    const guardBlock = PICKING_SRC.substring(
-      PICKING_SRC.indexOf("blockedStatuses"),
-      PICKING_SRC.indexOf("Lock the item row"),
-    );
-    expect(guardBlock).toContain('["cancelled", "shipped"]');
-    expect(guardBlock).toContain("IntegrityError");
+    expect(LEGACY_PICK_TRANSACTION).toContain('["cancelled", "shipped"]');
+    expect(LEGACY_PICK_TRANSACTION).toContain("IntegrityError");
   });
 
   it("order lock precedes item lock (correct lock ordering)", () => {
-    const txBlock = PICKING_SRC.substring(
-      PICKING_SRC.indexOf('status === "completed" && beforeItem.status !== "completed"'),
-      PICKING_SRC.indexOf("alreadyCompleted: true"),
-    );
-    const orderLockPos = txBlock.indexOf("FROM wms.orders");
-    const itemLockPos = txBlock.indexOf("FROM wms.order_items");
+    const orderLockPos = LEGACY_PICK_TRANSACTION.indexOf("FROM wms.orders");
+    const itemLockPos = LEGACY_PICK_TRANSACTION.indexOf("FROM wms.order_items");
     expect(orderLockPos).toBeGreaterThan(-1);
     expect(itemLockPos).toBeGreaterThan(-1);
     expect(orderLockPos).toBeLessThan(itemLockPos);
@@ -76,29 +66,20 @@ describe("D-PICKGUARD: pickItem order-state guard", () => {
 
 describe("D-LEDGER: item status conditional on deduction success", () => {
   it("status assignment references deductResult.success", () => {
-    const statusBlock = PICKING_SRC.substring(
-      PICKING_SRC.indexOf("D-LEDGER"),
-      PICKING_SRC.indexOf("const updatedItem = await persistWmsOrderItemPickProgress"),
-    );
-    expect(statusBlock).toContain("deductResult.success");
-    expect(statusBlock).toContain("beforeItem.status");
+    expect(LEGACY_PICK_TRANSACTION).toContain("deductResult.success");
+    expect(LEGACY_PICK_TRANSACTION).toContain("input.beforeItem.status");
   });
 
   it("does NOT unconditionally set status to 'completed'", () => {
-    const txBlock = PICKING_SRC.substring(
-      PICKING_SRC.indexOf("D-LEDGER"),
-      PICKING_SRC.indexOf("alreadyCompleted: false"),
+    expect(LEGACY_PICK_TRANSACTION).toContain(
+      "deductResult.success ? input.status : input.beforeItem.status",
     );
-    expect(txBlock).toContain("deductResult.success ? status : beforeItem.status");
   });
 
   it("only sets pickedQuantity on successful deduction", () => {
-    const dLedgerPos = PICKING_SRC.indexOf("D-LEDGER");
-    const updateBlock = PICKING_SRC.substring(
-      dLedgerPos,
-      PICKING_SRC.indexOf("const updatedItem = await persistWmsOrderItemPickProgress", dLedgerPos),
+    expect(LEGACY_PICK_TRANSACTION).toContain(
+      "pickedQuantity: deductResult.success ? input.effectivePickedQuantity : undefined",
     );
-    expect(updateBlock).toContain("if (deductResult.success)");
   });
 });
 
