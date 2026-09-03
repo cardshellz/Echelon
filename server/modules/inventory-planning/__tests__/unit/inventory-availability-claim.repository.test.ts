@@ -99,6 +99,231 @@ function buildClaimPlan() {
   };
 }
 
+function directClaimPlan(requestedQty = 3, revision = 1) {
+  return {
+    requestKey: `order:70:availability:revision:${revision}`,
+    scope: { kind: "warehouse" as const, warehouseId: 1 },
+    status: "satisfied" as const,
+    lines: [{
+      lineKey: "order-item:71",
+      targetVariantId: 101,
+      requestedQty: String(requestedQty),
+      plannedQty: String(requestedQty),
+      shortfallQty: "0",
+    }],
+    resourceClaims: [{
+      lineKey: "order-item:71",
+      consumerOperationKey: null,
+      warehouseId: 1,
+      warehouseLocationId: 11,
+      inventoryLevelId: 1,
+      sourceVariantId: 101,
+      claimedQty: String(requestedQty),
+    }],
+    operations: [],
+    fulfillmentGroups: [{
+      groupKey: `order:70:availability:revision:${revision}:warehouse:1`,
+      warehouseId: 1,
+      lineAllocations: [{
+        lineKey: "order-item:71",
+        targetVariantId: 101,
+        plannedQty: String(requestedQty),
+      }],
+    }],
+    modelEvidence: [],
+    blockers: [],
+    snapshotFingerprint: "b".repeat(64),
+  };
+}
+
+function createClaimReplacementPool(
+  oldPlan = directClaimPlan(),
+  options: { currentRequestedQty?: number; pickedTargetQty?: string } = {},
+) {
+  let snapshotInventoryReads = 0;
+  const pickedQty = options.pickedTargetQty ?? "0";
+  const openClaimQty = String(BigInt("3") - BigInt(pickedQty));
+  const fake = createPool(async (text) => {
+    const sql = text.trim();
+    if (sql.startsWith("BEGIN") || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+    if (sql.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
+    if (sql.includes("FROM inventory.availability_runtime_authority")) {
+      return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
+    }
+    if (sql.includes("COALESCE(MAX(revision)")) return { rows: [{ revision: 2 }] };
+    if (sql.includes("FROM inventory.availability_claims")) {
+      return { rows: [{
+        id: "9",
+        claim_key: oldPlan.requestKey,
+        order_id: 70,
+        revision: 1,
+        runtime_authority_revision: "2",
+        plan_hash: hash(oldPlan),
+        plan_payload: oldPlan,
+      }] };
+    }
+    if (sql.includes("FROM wms.orders")) {
+      return { rows: [{ order_id: 70, warehouse_id: 1, warehouse_status: "ready", on_hold: 0 }] };
+    }
+    if (sql.includes("FROM wms.order_items")) {
+      return { rows: [{
+        order_item_id: 71,
+        sku: "EA",
+        stored_product_id: 101,
+        order_item_requires_shipping: 1,
+        target_variant_id: 101,
+        requested_qty: options.currentRequestedQty ?? 2,
+        root_product_id: 10,
+        is_active: true,
+        requires_shipping: true,
+        track_inventory: true,
+        sales_eligibility: "sellable",
+      }] };
+    }
+    if (sql.includes("WITH RECURSIVE graph")) return { rows: [{ product_id: 10 }] };
+    if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
+    if (sql.includes("transaction_timestamp() AS captured_at")) {
+      return { rows: [{ captured_at: FIXED_TIME.toISOString() }] };
+    }
+    if (sql.includes("FROM catalog.products")) {
+      return { rows: [{ id: 10, inventory_strategy: "physical_only" }] };
+    }
+    if (sql.includes("FROM catalog.product_variants")) {
+      return { rows: [{
+        id: 101,
+        product_id: 10,
+        sku: "EA",
+        name: "Each",
+        units_per_variant: 1,
+        is_active: true,
+        requires_shipping: true,
+        track_inventory: true,
+        sales_eligibility: "sellable",
+      }] };
+    }
+    if (sql.includes("FROM inventory.transformation_model_heads")) {
+      return { rows: [{
+        product_id: 10,
+        draft_model_id: null,
+        active_model_id: 501,
+        model_id: 501,
+        version: 1,
+        lifecycle_status: "sealed",
+        build_to_promise_enabled: false,
+        definition_hash: "a".repeat(64),
+        validation_state: "valid",
+        validation_errors: [],
+      }] };
+    }
+    if (sql.includes("FROM inventory.transformation_model_paths")
+      || sql.includes("FROM inventory.transformation_recipe_bindings")
+      || sql.includes("FROM inventory.build_recipes")) return { rows: [] };
+    if (sql.includes("FROM warehouse.warehouses")) {
+      return { rows: [{ id: 1, code: "LEON", is_active: true, hub_warehouse_id: null }] };
+    }
+    if (sql.includes("FROM inventory.inventory_levels")) {
+      if (sql.includes("SELECT id") && sql.includes("FOR UPDATE")) return { rows: [{ id: 1 }] };
+      snapshotInventoryReads += 1;
+      return { rows: [{
+        id: 1,
+        warehouse_location_id: 11,
+        product_variant_id: 101,
+        variant_qty: "10",
+        reserved_qty: snapshotInventoryReads === 1 ? openClaimQty : "0",
+        picked_qty: pickedQty,
+        packed_qty: "0",
+      }] };
+    }
+    if (sql.includes("FROM inventory.inventory_lots")) return { rows: [] };
+    if (sql.includes("FROM warehouse.product_locations")) {
+      return { rows: [{ product_variant_id: 101, warehouse_id: 1, warehouse_location_id: 11 }] };
+    }
+    if (sql.includes("FROM warehouse.warehouse_locations AS location")) {
+      return { rows: [{
+        id: 11,
+        warehouse_id: 1,
+        code: "PICK-1",
+        location_type: "pick",
+        is_pickable: true,
+        is_active: true,
+        cycle_count_freeze_id: null,
+        draft_policy_id: null,
+        policy_id: null,
+      }] };
+    }
+    if (sql.includes("FROM inventory.promise_safety_policy_heads")) {
+      if (sql.includes("SELECT scope_key")) return { rows: [] };
+      return { rows: [{
+        draft_policy_id: null,
+        policy_id: 1,
+        version: 1,
+        scope_key: "business",
+        scope_type: "business",
+        product_variant_id: null,
+        warehouse_id: null,
+        policy_mode: "off",
+        fixed_units: null,
+        days_of_cover_milli_days: null,
+        untrusted_demand_fallback_units: null,
+        demand_method_version: null,
+        definition_hash: "c".repeat(64),
+      }] };
+    }
+    if (sql.includes("FROM inventory.location_promise_policy_heads")
+      || sql.includes("FROM inventory.demand_evidence_snapshots")) return { rows: [] };
+    if (sql.includes("FROM inventory.availability_claim_build_handoffs")) return { rows: [] };
+    if (sql.includes("FROM inventory.availability_claim_lines") && sql.includes("FOR SHARE")) {
+      return { rows: [{
+        line_key: "order-item:71",
+        target_variant_id: 101,
+        requested_qty: "3",
+        planned_qty: "3",
+        shortfall_qty: "0",
+        released_target_qty: "0",
+        consumed_target_qty: "0",
+        picked_target_qty: pickedQty,
+      }] };
+    }
+    if (sql.includes("FROM inventory.availability_claim_resources AS resource")) {
+      return { rows: [{
+        id: "12",
+        claim_line_id: "20",
+        inventory_level_id: 1,
+        warehouse_location_id: 11,
+        source_variant_id: 101,
+        claimed_qty: "3",
+        released_qty: "0",
+        consumed_qty: "0",
+        picked_qty: pickedQty,
+        order_item_id: 71,
+      }] };
+    }
+    if (sql.includes("FROM inventory.availability_claim_lot_allocations AS allocation")) {
+      return { rows: [{
+        id: "21",
+        claim_resource_id: "12",
+        inventory_lot_id: 51,
+        claimed_qty: "3",
+        released_qty: "0",
+        consumed_qty: "0",
+        picked_qty: pickedQty,
+      }] };
+    }
+    if (sql.startsWith("UPDATE inventory.availability_claims")
+      || sql.startsWith("UPDATE inventory.availability_claim_")) return { rows: [], rowCount: 1 };
+    if (sql.startsWith("INSERT INTO inventory.availability_claims")) return { rows: [{ id: "10" }], rowCount: 1 };
+    if (sql.startsWith("INSERT INTO inventory.availability_claim_lines")) {
+      return { rows: [{ id: "30" }], rowCount: 1 };
+    }
+    if (sql.startsWith("INSERT INTO inventory.availability_claim_resources")) {
+      return { rows: [{ id: "31" }], rowCount: 1 };
+    }
+    if (sql.startsWith("INSERT INTO inventory.availability_claim_")) return { rows: [], rowCount: 1 };
+    throw new Error(`Unexpected query: ${text}`);
+  });
+  return { ...fake, getSnapshotInventoryReads: () => snapshotInventoryReads };
+}
+
 describe("PostgresInventoryAvailabilityClaimRepository", () => {
   it("fails closed before claim pick when canonical authority is inactive", async () => {
     const fake = createPool(async (text) => {
@@ -1821,6 +2046,238 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     await expect(repository.handoffBuildOperation(command)).rejects.toEqual(expect.objectContaining({
       code: "IDEMPOTENCY_KEY_REUSED",
     }));
+  });
+
+  it("replays an exact claim replacement receipt without releasing or reserving inventory", async () => {
+    const command = {
+      orderId: 70,
+      expectedClaimId: "9",
+      idempotencyKey: "replace:70:9:2",
+      actor: "test-user",
+      reason: "accepted order quantity changed",
+    };
+    const persisted = {
+      outcome: "replaced" as const,
+      orderId: 70,
+      supersededClaimId: "9",
+      supersededClaimKey: "order:70:availability:revision:1",
+      supersededRevision: 1,
+      replacementClaim: {
+        claimId: "10",
+        claimKey: "order:70:availability:revision:2",
+        revision: 2,
+        runtimeAuthorityRevision: "2",
+        plan: directClaimPlan(2, 2),
+      },
+      releasedResourceQty: "3",
+      releasedLotQty: "3",
+      idempotentReplay: false,
+    };
+    const fake = createPool(async (text) => {
+      if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
+      if (text.includes("FROM inventory.availability_claim_commands")) {
+        return { rows: [{ command_type: "replace", request_hash: hash(command), result_payload: persisted }] };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.replaceOrderClaim(command)).resolves.toEqual({
+      ...persisted,
+      idempotentReplay: true,
+    });
+    expect(writer.releaseResources).not.toHaveBeenCalled();
+    expect(writer.reserveResource).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before reading an order when claim replacement authority is inactive", async () => {
+    const fake = createPool(async (text) => {
+      if (text.startsWith("BEGIN") || text === "ROLLBACK") return { rows: [] };
+      if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
+      if (text.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "legacy", activation_run_id: null, revision: "1" }] };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.replaceOrderClaim({
+      orderId: 70,
+      expectedClaimId: "9",
+      idempotencyKey: "replace:70:9:2",
+      actor: "test-user",
+      reason: "accepted order quantity changed",
+    })).rejects.toEqual(expect.objectContaining({ code: "CANONICAL_AUTHORITY_NOT_ACTIVE" }));
+    expect(fake.query.mock.calls.some(([text]) => String(text).includes("FROM wms.orders"))).toBe(false);
+    expect(writer.releaseResources).not.toHaveBeenCalled();
+  });
+
+  it("rejects claim replacement when the expected predecessor is no longer active", async () => {
+    const plan = directClaimPlan();
+    const fake = createPool(async (text) => {
+      if (text.startsWith("BEGIN") || text === "ROLLBACK") return { rows: [] };
+      if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
+      if (text.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
+      }
+      if (text.includes("FROM inventory.availability_claims")) {
+        return { rows: [{
+          id: "10",
+          claim_key: plan.requestKey,
+          order_id: 70,
+          revision: 1,
+          runtime_authority_revision: "2",
+          plan_hash: hash(plan),
+          plan_payload: plan,
+        }] };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.replaceOrderClaim({
+      orderId: 70,
+      expectedClaimId: "9",
+      idempotencyKey: "replace:70:9:2",
+      actor: "test-user",
+      reason: "accepted order quantity changed",
+    })).rejects.toEqual(expect.objectContaining({
+      code: "ACTIVE_CLAIM_CHANGED",
+      context: expect.objectContaining({ expectedClaimId: "9", activeClaimId: "10" }),
+    }));
+    expect(writer.releaseResources).not.toHaveBeenCalled();
+  });
+
+  it("atomically supersedes, replans, and reserves changed accepted-order demand after a partial pick", async () => {
+    const fake = createClaimReplacementPool(directClaimPlan(), {
+      currentRequestedQty: 1,
+      pickedTargetQty: "1",
+    });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    const result = await repository.replaceOrderClaim({
+      orderId: 70,
+      expectedClaimId: "9",
+      idempotencyKey: "replace:70:9:2",
+      actor: "test-user",
+      reason: "accepted order quantity changed from three to two after one pick",
+    });
+
+    expect(result).toMatchObject({
+      outcome: "replaced",
+      orderId: 70,
+      supersededClaimId: "9",
+      supersededRevision: 1,
+      replacementClaim: {
+        claimId: "10",
+        claimKey: "order:70:availability:revision:2",
+        revision: 2,
+        runtimeAuthorityRevision: "2",
+        plan: {
+          lines: [{ lineKey: "order-item:71", requestedQty: "1", plannedQty: "1" }],
+          resourceClaims: [{ claimedQty: "1", inventoryLevelId: 1 }],
+        },
+      },
+      releasedResourceQty: "2",
+      releasedLotQty: "2",
+      idempotentReplay: false,
+    });
+    expect(fake.getSnapshotInventoryReads()).toBe(2);
+    expect(writer.releaseResources).toHaveBeenCalledWith(expect.objectContaining({
+      claimId: BigInt(9),
+      resources: [expect.objectContaining({ claimResourceId: BigInt(12), releaseQty: BigInt(2) })],
+    }));
+    expect(writer.reserveResource).toHaveBeenCalledWith(expect.objectContaining({
+      claimId: BigInt(10),
+      claimedQty: 1,
+    }));
+    expect(writer.releaseResources.mock.invocationCallOrder[0])
+      .toBeLessThan(writer.reserveResource.mock.invocationCallOrder[0]!);
+
+    const replacementHeader = fake.query.mock.calls.find(([text]) =>
+      String(text).startsWith("INSERT INTO inventory.availability_claims"));
+    expect(replacementHeader?.[1]?.[3]).toBe("9");
+    const replacementReceipt = fake.query.mock.calls.find(([text]) =>
+      String(text).startsWith("INSERT INTO inventory.availability_claim_commands"));
+    expect(String(replacementReceipt?.[0])).toContain("'replace'");
+    expect(fake.query.mock.calls.filter(([text]) =>
+      String(text).startsWith("INSERT INTO inventory.availability_claim_events"))).toHaveLength(2);
+    expect(fake.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+
+  it("does not replace a claim merely because its picked quantity reduced remaining order demand", async () => {
+    const fake = createClaimReplacementPool(directClaimPlan(), { pickedTargetQty: "1" });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.replaceOrderClaim({
+      orderId: 70,
+      expectedClaimId: "9",
+      idempotencyKey: "replace:70:9:2",
+      actor: "test-user",
+      reason: "verify accepted order demand",
+    })).rejects.toEqual(expect.objectContaining({ code: "ORDER_DEMAND_UNCHANGED" }));
+
+    expect(writer.releaseResources).not.toHaveBeenCalled();
+    expect(writer.reserveResource).not.toHaveBeenCalled();
+    expect(fake.query.mock.calls.some(([text]) => text === "ROLLBACK")).toBe(true);
+  });
+
+  it("replays the active claim when a pick reduced order and claim remaining demand equally", async () => {
+    const plan = directClaimPlan();
+    const fake = createClaimReplacementPool(plan, {
+      currentRequestedQty: 2,
+      pickedTargetQty: "1",
+    });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.claimOrder({
+      orderId: 70,
+      idempotencyKey: "claim:70:after-pick",
+      actor: "test-user",
+      reason: "retry accepted order claim after normal pick progress",
+    })).resolves.toEqual({
+      outcome: "claimed",
+      claimId: "9",
+      claimKey: plan.requestKey,
+      orderId: 70,
+      revision: 1,
+      runtimeAuthorityRevision: "2",
+      plan,
+      idempotentReplay: false,
+    });
+
+    expect(writer.releaseResources).not.toHaveBeenCalled();
+    expect(writer.reserveResource).not.toHaveBeenCalled();
+    expect(fake.query.mock.calls.some(([text]) => text === "COMMIT")).toBe(true);
+  });
+
+  it("rolls back the released predecessor when replacement reservation fails", async () => {
+    const fake = createClaimReplacementPool();
+    const writer = createInventoryWriter();
+    writer.reserveResource.mockRejectedValueOnce(Object.assign(new Error("replacement stock moved"), {
+      code: "CLAIM_RESOURCE_CONFLICT",
+    }));
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+
+    await expect(repository.replaceOrderClaim({
+      orderId: 70,
+      expectedClaimId: "9",
+      idempotencyKey: "replace:70:9:2",
+      actor: "test-user",
+      reason: "accepted order quantity changed from three to two",
+    })).rejects.toThrow("replacement stock moved");
+
+    expect(writer.releaseResources).toHaveBeenCalledOnce();
+    expect(fake.query.mock.calls.some(([text]) => text === "ROLLBACK")).toBe(true);
+    expect(fake.query.mock.calls.some(([text]) => text === "COMMIT")).toBe(false);
+    expect(fake.query.mock.calls.some(([text]) =>
+      String(text).startsWith("INSERT INTO inventory.availability_claim_commands"))).toBe(false);
   });
 
   it("fails closed before reading or mutating order inventory when canonical authority is inactive", async () => {

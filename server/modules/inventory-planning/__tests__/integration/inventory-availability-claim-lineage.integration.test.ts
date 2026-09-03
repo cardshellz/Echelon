@@ -34,6 +34,10 @@ const pickerObservationMigration = readFileSync(
   resolve(process.cwd(), "migrations/0648_inventory_availability_claim_picker_observation.sql"),
   "utf8",
 );
+const claimReplacementMigration = readFileSync(
+  resolve(process.cwd(), "migrations/0649_inventory_availability_claim_replacement.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -80,6 +84,8 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     .replaceAll("oms.", `"${schemas.oms}".`);
   const qualifiedPickerObservationMigration = pickerObservationMigration
     .replaceAll("inventory.", `"${schemas.inventory}".`);
+  const qualifiedClaimReplacementMigration = claimReplacementMigration
+    .replaceAll("inventory.", `"${schemas.inventory}".`);
 
   beforeAll(async () => {
     const protectedUrls = [
@@ -119,6 +125,7 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     await pool.query(qualifiedBuildExecutionMigration);
     await pool.query(qualifiedPickLineageMigration);
     await pool.query(qualifiedPickerObservationMigration);
+    await pool.query(qualifiedClaimReplacementMigration);
   }, 300_000);
 
   afterAll(async () => {
@@ -252,6 +259,125 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     expect(constraint.rows[0]?.definition).toContain("pick");
     expect(constraint.rows[0]?.definition).toContain("unpick");
     expect(constraint.rows[0]?.definition).toContain("pick_observation");
+    expect(constraint.rows[0]?.definition).toContain("replace");
+  });
+
+  it("enforces one same-order predecessor for each replacement claim", async () => {
+    await pool.query(`
+      INSERT INTO "${schemas.wms}".orders (id) VALUES (2), (3), (4);
+      INSERT INTO "${schemas.inventory}".availability_activation_runs (id) VALUES (1);
+    `);
+    const claimEvidence = (claimKey: string) => ({
+      request: { requestKey: claimKey },
+      plan: {
+        requestKey: claimKey,
+        status: "satisfied",
+        snapshotFingerprint: "c".repeat(64),
+      },
+    });
+    const predecessorEvidence = claimEvidence("order:2:availability:revision:1");
+    const predecessor = await pool.query<{ id: string }>(
+      `INSERT INTO "${schemas.inventory}".availability_claims (
+         claim_key, order_id, revision, status, plan_status, scope_kind,
+         activation_run_id, runtime_authority_revision, request_hash, plan_hash,
+         snapshot_fingerprint, request_payload, plan_payload, model_evidence,
+         requested_by, reason, reserved_at, superseded_at
+       ) VALUES ($1, 2, 1, 'superseded', 'satisfied', 'network',
+                 1, 1, $2, $3, $4, $5::jsonb, $6::jsonb, '[]'::jsonb,
+                 'integration-test', 'changed accepted demand', now(), now())
+       RETURNING id`,
+      [
+        predecessorEvidence.request.requestKey,
+        "a".repeat(64),
+        "b".repeat(64),
+        "c".repeat(64),
+        JSON.stringify(predecessorEvidence.request),
+        JSON.stringify(predecessorEvidence.plan),
+      ],
+    );
+    const predecessorId = predecessor.rows[0]!.id;
+    const crossOrderPredecessorEvidence = claimEvidence("order:4:availability:revision:1");
+    const crossOrderPredecessor = await pool.query<{ id: string }>(
+      `INSERT INTO "${schemas.inventory}".availability_claims (
+         claim_key, order_id, revision, status, plan_status, scope_kind,
+         activation_run_id, runtime_authority_revision, request_hash, plan_hash,
+         snapshot_fingerprint, request_payload, plan_payload, model_evidence,
+         requested_by, reason, reserved_at, superseded_at
+       ) VALUES ($1, 4, 1, 'superseded', 'satisfied', 'network',
+                 1, 1, $2, $3, $4, $5::jsonb, $6::jsonb, '[]'::jsonb,
+                 'integration-test', 'cross-order constraint fixture', now(), now())
+       RETURNING id`,
+      [
+        crossOrderPredecessorEvidence.request.requestKey,
+        "2".repeat(64),
+        "3".repeat(64),
+        "c".repeat(64),
+        JSON.stringify(crossOrderPredecessorEvidence.request),
+        JSON.stringify(crossOrderPredecessorEvidence.plan),
+      ],
+    );
+    const replacementEvidence = claimEvidence("order:2:availability:revision:2");
+    await pool.query(
+      `INSERT INTO "${schemas.inventory}".availability_claims (
+         claim_key, order_id, revision, supersedes_claim_id, status, plan_status, scope_kind,
+         activation_run_id, runtime_authority_revision, request_hash, plan_hash,
+         snapshot_fingerprint, request_payload, plan_payload, model_evidence,
+         requested_by, reason, reserved_at
+       ) VALUES ($1, 2, 2, $2, 'active', 'satisfied', 'network',
+                 1, 1, $3, $4, $5, $6::jsonb, $7::jsonb, '[]'::jsonb,
+                 'integration-test', 'changed accepted demand', now())`,
+      [
+        replacementEvidence.request.requestKey,
+        predecessorId,
+        "d".repeat(64),
+        "e".repeat(64),
+        "c".repeat(64),
+        JSON.stringify(replacementEvidence.request),
+        JSON.stringify(replacementEvidence.plan),
+      ],
+    );
+
+    const wrongOrderEvidence = claimEvidence("order:3:availability:revision:1");
+    await expect(pool.query(
+      `INSERT INTO "${schemas.inventory}".availability_claims (
+         claim_key, order_id, revision, supersedes_claim_id, status, plan_status, scope_kind,
+         activation_run_id, runtime_authority_revision, request_hash, plan_hash,
+         snapshot_fingerprint, request_payload, plan_payload, model_evidence,
+         requested_by, reason, reserved_at, released_at
+       ) VALUES ($1, 3, 1, $2, 'released', 'satisfied', 'network',
+                 1, 1, $3, $4, $5, $6::jsonb, $7::jsonb, '[]'::jsonb,
+                 'integration-test', 'invalid cross-order predecessor', now(), now())`,
+      [
+        wrongOrderEvidence.request.requestKey,
+        crossOrderPredecessor.rows[0]!.id,
+        "f".repeat(64),
+        "1".repeat(64),
+        "c".repeat(64),
+        JSON.stringify(wrongOrderEvidence.request),
+        JSON.stringify(wrongOrderEvidence.plan),
+      ],
+    )).rejects.toMatchObject({ constraint: "availability_claims_supersedes_same_order_fk" });
+
+    const duplicateSuccessorEvidence = claimEvidence("order:2:availability:revision:3");
+    await expect(pool.query(
+      `INSERT INTO "${schemas.inventory}".availability_claims (
+         claim_key, order_id, revision, supersedes_claim_id, status, plan_status, scope_kind,
+         activation_run_id, runtime_authority_revision, request_hash, plan_hash,
+         snapshot_fingerprint, request_payload, plan_payload, model_evidence,
+         requested_by, reason, reserved_at, released_at
+       ) VALUES ($1, 2, 3, $2, 'released', 'satisfied', 'network',
+                 1, 1, $3, $4, $5, $6::jsonb, $7::jsonb, '[]'::jsonb,
+                 'integration-test', 'invalid duplicate successor', now(), now())`,
+      [
+        duplicateSuccessorEvidence.request.requestKey,
+        predecessorId,
+        "4".repeat(64),
+        "5".repeat(64),
+        "c".repeat(64),
+        JSON.stringify(duplicateSuccessorEvidence.request),
+        JSON.stringify(duplicateSuccessorEvidence.plan),
+      ],
+    )).rejects.toMatchObject({ constraint: "availability_claims_supersedes_claim_uq" });
   });
 
   it("installs picked balances and append-only movement evidence", async () => {
@@ -279,5 +405,52 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
       [schemas.inventory],
     );
     expect(trigger.rows).toHaveLength(2);
+  });
+
+  it("installs one same-order successor per superseded claim and a distinct replacement receipt", async () => {
+    const column = await pool.query<{ column_name: string }>(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_schema = $1
+         AND table_name = 'availability_claims'
+         AND column_name = 'supersedes_claim_id'`,
+      [schemas.inventory],
+    );
+    expect(column.rows).toHaveLength(1);
+
+    const constraints = await pool.query<{ conname: string }>(
+      `SELECT conname
+       FROM pg_constraint
+       WHERE connamespace = $1::regnamespace
+         AND conname IN (
+           'availability_claims_id_order_uq',
+           'availability_claims_supersedes_same_order_fk',
+           'availability_claims_supersedes_chk'
+         )`,
+      [schemas.inventory],
+    );
+    expect(constraints.rows.map((row) => row.conname).sort()).toEqual([
+      "availability_claims_id_order_uq",
+      "availability_claims_supersedes_chk",
+      "availability_claims_supersedes_same_order_fk",
+    ]);
+
+    const indexes = await pool.query<{ indexname: string }>(
+      `SELECT indexname
+       FROM pg_indexes
+       WHERE schemaname = $1
+         AND indexname = 'availability_claims_supersedes_claim_uq'`,
+      [schemas.inventory],
+    );
+    expect(indexes.rows).toHaveLength(1);
+
+    const commandType = await pool.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition
+       FROM pg_constraint
+       WHERE connamespace = $1::regnamespace
+         AND conname = 'availability_claim_commands_type_chk'`,
+      [schemas.inventory],
+    );
+    expect(commandType.rows[0]?.definition).toContain("replace");
   });
 });
