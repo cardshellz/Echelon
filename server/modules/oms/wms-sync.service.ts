@@ -2316,7 +2316,7 @@ export class WmsSyncService {
       });
       shouldRepush = shouldRepush || claimReconciliation.reconciled === true;
     } catch (e: any) {
-      if (e?.code === "CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC") throw e;
+      if (e?.code === "CANONICAL_DEMAND_RECONCILIATION_FAILED") throw e;
       console.warn(`${LOG} Reservation rebalance failed for order ${wmsOrderId}: ${e.message}`);
     }
 

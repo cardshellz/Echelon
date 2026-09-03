@@ -1547,7 +1547,7 @@ export function registerOmsWebhooks(
                 );
               }
             } catch (propErr: any) {
-              if (propErr?.code === "CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC") {
+              if (propErr?.code === "CANONICAL_DEMAND_RECONCILIATION_FAILED") {
                 throw propErr;
               }
               console.error(

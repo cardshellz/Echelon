@@ -17,10 +17,30 @@ export const canonicalAvailabilityClaimCommandSchema = z.object({
 export const canonicalAvailabilityClaimReleaseCommandSchema = z.object({
   orderId: positiveInteger,
   disposition: z.enum(["release", "cancel"]),
+  expectedClaimId: positiveBigintString.optional(),
+  expectedWarehouseStatus: nonblank(30).optional(),
+  requireNoClaimableDemand: z.literal(true).optional(),
   idempotencyKey: nonblank(120),
   actor: nonblank(100),
   reason: nonblank(1000),
-}).strict();
+}).strict().superRefine((command, context) => {
+  if (command.requireNoClaimableDemand === true) {
+    if (command.expectedClaimId == null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["expectedClaimId"],
+        message: "expectedClaimId is required when claimable demand must be absent",
+      });
+    }
+    if (command.expectedWarehouseStatus == null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["expectedWarehouseStatus"],
+        message: "expectedWarehouseStatus is required when claimable demand must be absent",
+      });
+    }
+  }
+});
 
 export const canonicalAvailabilityClaimReplacementCommandSchema = z.object({
   orderId: positiveInteger,

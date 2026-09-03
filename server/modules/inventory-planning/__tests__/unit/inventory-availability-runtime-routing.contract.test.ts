@@ -96,6 +96,9 @@ describe("inventory availability runtime claim routing contract", () => {
     expect(wmsSync).toContain("demandChanged,");
     expect(wmsSync).not.toContain("// Re-reserve inventory (release all then re-reserve for updated items)");
     expect(webhooks).toContain("orderData.sourceEventId,");
-    expect(webhooks).toContain('propErr?.code === "CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC"');
+    expect(wmsSync).toContain('e?.code === "CANONICAL_DEMAND_RECONCILIATION_FAILED"');
+    expect(webhooks).toContain('propErr?.code === "CANONICAL_DEMAND_RECONCILIATION_FAILED"');
+    expect(wmsSync).not.toContain("CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC");
+    expect(webhooks).not.toContain("CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC");
   });
 });
