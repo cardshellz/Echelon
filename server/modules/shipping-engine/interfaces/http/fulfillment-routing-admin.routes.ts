@@ -22,6 +22,8 @@ const replaceProfileSchema = z.object({
     provider: z.string().trim().regex(/^[a-z][a-z0-9_]{1,79}$/),
     providerAccountId: z.string().trim().min(1).max(120),
     serviceCode: z.string().trim().min(1).max(80),
+    domestic: z.boolean(),
+    international: z.boolean(),
   }).strict()).max(200),
 }).strict();
 

@@ -50,21 +50,40 @@ export interface ShippingFulfillmentMethodIdentity {
   provider: ShippingFulfillmentProvider;
   providerAccountId: string;
   serviceCode: string;
+  /**
+   * Provider service codes are not globally unique within a carrier account.
+   * Destination scope is therefore part of the executable method identity.
+   */
+  domestic: boolean;
+  international: boolean;
 }
 
-export interface ShippingFulfillmentCatalogMethod
+export interface ShippingFulfillmentMethodCapabilities {
+  supportsMultiPackage: boolean;
+  supportsReturns: boolean;
+  supportsPrepaidDutiesTaxes: boolean;
+  sendRates: boolean;
+  displaySchemes: string[];
+}
+
+export interface ShippingFulfillmentMethodDescriptor
 extends ShippingFulfillmentMethodIdentity {
   providerConnectionName: string;
   providerAccountName: string;
   carrierCode: string;
   carrierName: string;
   serviceName: string;
-  domestic: boolean;
-  international: boolean;
+}
+
+export interface ShippingFulfillmentCatalogMethod
+extends ShippingFulfillmentMethodDescriptor {
+  capabilities: ShippingFulfillmentMethodCapabilities;
 }
 
 export interface ShippingFulfillmentRouteMethod
-extends ShippingFulfillmentCatalogMethod {
+extends ShippingFulfillmentMethodDescriptor {
+  /** Null only for routes saved before provider capability snapshots existed. */
+  capabilities: ShippingFulfillmentMethodCapabilities | null;
   priority: number;
 }
 

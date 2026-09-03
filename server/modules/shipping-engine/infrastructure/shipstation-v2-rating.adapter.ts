@@ -87,6 +87,11 @@ export interface V2CarrierService {
   serviceName: string;
   domestic: boolean;
   international: boolean;
+  supportsMultiPackage: boolean;
+  supportsReturns: boolean;
+  supportsPrepaidDutiesTaxes: boolean;
+  sendRates: boolean;
+  displaySchemes: string[];
 }
 
 export type V2CarrierServicesResult =
@@ -265,17 +270,30 @@ export function normalizeCarrierServicesResponse(
   const normalized: V2CarrierService[] = [];
   for (const entry of services) {
     const service = entry as {
+      carrier_id?: string;
+      carrier_code?: string;
       service_code?: string;
       name?: string;
       domestic?: boolean;
       international?: boolean;
+      is_multi_package_supported?: boolean;
+      is_return_supported?: boolean;
+      is_prepaid_duties_taxes_supported?: boolean;
+      send_rates?: boolean;
+      display_schemes?: unknown;
     } | null;
     if (!service || typeof service.service_code !== "string") continue;
     const serviceCode = service.service_code.trim();
     if (!serviceCode) continue;
     normalized.push({
-      carrierId: carrier.carrierId,
-      carrierCode: carrier.code,
+      carrierId:
+        typeof service.carrier_id === "string" && service.carrier_id.trim()
+          ? service.carrier_id.trim()
+          : carrier.carrierId,
+      carrierCode:
+        typeof service.carrier_code === "string" && service.carrier_code.trim()
+          ? service.carrier_code.trim()
+          : carrier.code,
       serviceCode,
       serviceName:
         typeof service.name === "string" && service.name.trim()
@@ -283,9 +301,23 @@ export function normalizeCarrierServicesResponse(
           : serviceCode,
       domestic: service.domestic === true,
       international: service.international === true,
+      supportsMultiPackage: service.is_multi_package_supported === true,
+      supportsReturns: service.is_return_supported === true,
+      supportsPrepaidDutiesTaxes: service.is_prepaid_duties_taxes_supported === true,
+      sendRates: service.send_rates === true,
+      displaySchemes: normalizeStringList(service.display_schemes),
     });
   }
   return normalized;
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.flatMap((entry) => {
+    if (typeof entry !== "string") return [];
+    const normalized = entry.trim();
+    return normalized ? [normalized] : [];
+  }))].sort((left, right) => left.localeCompare(right));
 }
 
 /** Retry-After header (seconds) → bounded wait. Exported for tests. */

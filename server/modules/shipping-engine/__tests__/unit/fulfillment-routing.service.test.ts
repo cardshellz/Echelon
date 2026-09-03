@@ -5,6 +5,7 @@ import type {
   ShippingFulfillmentRoutingServiceLevel,
 } from "@shared/types/shipping-fulfillment-routing";
 import {
+  commandHash,
   FulfillmentRoutingError,
   FulfillmentRoutingService,
   type FulfillmentRoutingProfileState,
@@ -20,6 +21,14 @@ const serviceLevel: ShippingFulfillmentRoutingServiceLevel = {
   isActive: true,
 };
 
+const METHOD_CAPABILITIES = {
+  supportsMultiPackage: true,
+  supportsReturns: true,
+  supportsPrepaidDutiesTaxes: false,
+  sendRates: true,
+  displaySchemes: ["label"],
+};
+
 const fedexGround: ShippingFulfillmentCatalogMethod = {
   providerConnectionId: 11,
   providerConnectionName: "Primary ShipStation",
@@ -32,6 +41,7 @@ const fedexGround: ShippingFulfillmentCatalogMethod = {
   serviceName: "FedEx Ground",
   domestic: true,
   international: false,
+  capabilities: METHOD_CAPABILITIES,
 };
 
 const uspsGround: ShippingFulfillmentCatalogMethod = {
@@ -46,11 +56,41 @@ const uspsGround: ShippingFulfillmentCatalogMethod = {
   serviceName: "USPS Ground Advantage",
   domestic: true,
   international: false,
+  capabilities: METHOD_CAPABILITIES,
 };
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("FulfillmentRoutingService", () => {
+  it("includes destination scope in the idempotency hash", () => {
+    const domestic = identity(fedexGround);
+    const international = { ...domestic, domestic: false, international: true };
+
+    expect(commandHash(7, [domestic])).not.toBe(commandHash(7, [international]));
+  });
+
+  it("rejects a selected identity with no destination scope", async () => {
+    const { store } = fakeStore(profile());
+    const service = new FulfillmentRoutingService({
+      store,
+      catalogProvider: provider(availableCatalog()),
+    });
+
+    await expect(service.replaceProfile({
+      serviceLevelId: 7,
+      actorUserId: "operator-1",
+      command: {
+        expectedRevision: 0,
+        idempotencyKey: "routing-command-invalid-scope",
+        methods: [{ ...identity(fedexGround), domestic: false, international: false }],
+      },
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "SHIPPING_FULFILLMENT_ROUTING_INVALID_INPUT",
+    });
+    expect(store.transaction).not.toHaveBeenCalled();
+  });
+
   it("resolves exact provider methods, preserves preference order, and writes one audited revision", async () => {
     const { store, tx } = fakeStore(profile());
     const audit = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -133,6 +173,37 @@ describe("FulfillmentRoutingService", () => {
     expect(store.transaction).not.toHaveBeenCalled();
   });
 
+  it("saves domestic and international variants sharing one provider service code", async () => {
+    const domestic = { ...fedexGround, serviceCode: "shared_service" };
+    const international = {
+      ...domestic,
+      domestic: false,
+      international: true,
+      capabilities: { ...METHOD_CAPABILITIES, supportsReturns: false },
+    };
+    const { store, tx } = fakeStore(profile());
+    const service = new FulfillmentRoutingService({
+      store,
+      catalogProvider: provider(availableCatalog([domestic, international])),
+    });
+
+    const result = await service.replaceProfile({
+      serviceLevelId: 7,
+      actorUserId: "operator-1",
+      command: {
+        expectedRevision: 0,
+        idempotencyKey: "routing-command-scoped-variants",
+        methods: [identity(domestic), identity(international)],
+      },
+    });
+
+    expect(result.profile.methods).toMatchObject([
+      { serviceCode: "shared_service", domestic: true, international: false, priority: 1 },
+      { serviceCode: "shared_service", domestic: false, international: true, priority: 2 },
+    ]);
+    expect(tx.replaceMethods).toHaveBeenCalledOnce();
+  });
+
   it("rejects a stale optimistic revision after locking the service level", async () => {
     const { store, tx } = fakeStore(profile({ revision: 3, currentRevisionId: 89 }));
     const service = new FulfillmentRoutingService({
@@ -171,8 +242,7 @@ describe("FulfillmentRoutingService", () => {
       idempotencyKey: "routing-command-00000004",
       methods: [identity(fedexGround)],
     };
-    const requestHash = (await import("../../application/fulfillment-routing.service"))
-      .commandHash(7, command.methods);
+    const requestHash = commandHash(7, command.methods);
     tx.findRevisionByIdempotencyKey.mockResolvedValue({
       id: 91,
       serviceLevelId: 7,
@@ -361,5 +431,7 @@ function identity(method: ShippingFulfillmentCatalogMethod) {
     provider: method.provider,
     providerAccountId: method.providerAccountId,
     serviceCode: method.serviceCode,
+    domestic: method.domestic,
+    international: method.international,
   };
 }

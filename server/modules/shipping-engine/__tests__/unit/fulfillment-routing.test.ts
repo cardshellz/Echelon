@@ -25,6 +25,33 @@ describe("resolveFulfillmentRouteCandidates", () => {
     });
   });
 
+  it("routes same-code variants by destination scope without collapsing them", () => {
+    const domestic = profile().methods[0];
+    const scopedProfile: ShippingFulfillmentRoutingProfile = {
+      ...profile(),
+      methods: [
+        { ...domestic, serviceCode: "shared_service", priority: 1 },
+        {
+          ...domestic,
+          serviceCode: "shared_service",
+          domestic: false,
+          international: true,
+          priority: 2,
+        },
+      ],
+    };
+
+    const domesticResult = resolveFulfillmentRouteCandidates(scopedProfile, "domestic");
+    const internationalResult = resolveFulfillmentRouteCandidates(scopedProfile, "international");
+
+    expect(domesticResult.ok && domesticResult.candidates).toMatchObject([
+      { serviceCode: "shared_service", domestic: true, international: false },
+    ]);
+    expect(internationalResult.ok && internationalResult.candidates).toMatchObject([
+      { serviceCode: "shared_service", domestic: false, international: true },
+    ]);
+  });
+
   it("does not treat an empty initial profile as a valid route", () => {
     expect(resolveFulfillmentRouteCandidates({
       ...profile(),
@@ -67,6 +94,7 @@ function profile(): ShippingFulfillmentRoutingProfile {
         serviceName: "USPS Ground Advantage",
         domestic: true,
         international: false,
+        capabilities: null,
         priority: 1,
       },
       {
@@ -81,6 +109,7 @@ function profile(): ShippingFulfillmentRoutingProfile {
         serviceName: "FedEx Ground",
         domestic: true,
         international: false,
+        capabilities: null,
         priority: 2,
       },
     ],

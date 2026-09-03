@@ -8,12 +8,21 @@ boundaries. They are intentionally separate from:
 - checkout pricing; and
 - channel or dropship activation.
 
-The routing identity is:
+The executable routing identity is:
 
-`provider connection -> provider carrier account -> service code`
+`provider connection -> provider carrier account -> service code -> destination scope`
 
 This prevents two provider accounts that expose the same carrier service code
-from becoming interchangeable by accident.
+from becoming interchangeable by accident. It also preserves providers that
+return the same account and service code as separate domestic and international
+records. The admin UI may group those records under one service heading, but
+each destination-scope variant remains independently selectable and routable.
+
+Migration `0650_shipping_fulfillment_method_scope_capabilities.sql` adds scope
+to the persisted uniqueness boundary and stores the provider capability flags
+captured when a route is saved. Historical routes remain readable with an
+explicitly unknown capability snapshot until an operator saves them again from
+a current provider catalog.
 
 ## Installed providers
 

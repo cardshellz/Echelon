@@ -29,6 +29,10 @@ describe("shipping fulfillment routing admin UI", () => {
     expect(editor).toContain("onChange={(event) => setSearch(event.target.value)}");
     expect(editor).toContain("Save fulfillment routing");
     expect(editor).toContain("No longer available");
+    expect(editor).toContain("groupCatalogMethods(filteredCatalog)");
+    expect(editor).toContain("Domestic");
+    expect(editor).toContain("International");
+    expect(editor).toContain("Provider flags: multi-package");
     expect(detail).toContain("Save fulfillment routing before review");
     expect(detail).toContain("The routing resolver will fail closed");
   });

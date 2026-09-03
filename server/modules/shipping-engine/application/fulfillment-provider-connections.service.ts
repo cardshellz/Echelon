@@ -55,6 +55,8 @@ export interface FulfillmentProviderRoutedMethodIdentity {
   provider: string;
   providerAccountId: string;
   serviceCode: string;
+  domestic: boolean;
+  international: boolean;
 }
 
 export interface CreateFulfillmentProviderConnectionRecordInput {
@@ -693,11 +695,15 @@ function assertRoutedMethodsRemainAvailable(
     method.provider,
     method.providerAccountId,
     method.serviceCode,
+    method.domestic ? "domestic" : "",
+    method.international ? "international" : "",
   ].join("\u0000")));
   const missing = routedMethods.filter((method) => !available.has([
     method.provider,
     method.providerAccountId,
     method.serviceCode,
+    method.domestic ? "domestic" : "",
+    method.international ? "international" : "",
   ].join("\u0000")));
   if (missing.length === 0) return;
   throw new FulfillmentProviderConnectionError(
@@ -706,6 +712,7 @@ function assertRoutedMethodsRemainAvailable(
     "The replacement credential does not expose every method currently used by fulfillment routing.",
     missing.slice(0, 20).map((method) => (
       `${method.providerAccountId} / ${method.serviceCode}`
+      + ` / domestic=${method.domestic} / international=${method.international}`
     )),
   );
 }

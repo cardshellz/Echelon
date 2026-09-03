@@ -7,6 +7,14 @@ import {
   type FulfillmentProviderCredentialRecord,
 } from "../../application/connected-fulfillment-method-catalog.service";
 
+const METHOD_CAPABILITIES = {
+  supportsMultiPackage: true,
+  supportsReturns: true,
+  supportsPrepaidDutiesTaxes: false,
+  sendRates: true,
+  displaySchemes: ["label"],
+};
+
 describe("ConnectedFulfillmentMethodCatalogService", () => {
   it("rejects invalid or duplicate adapter registrations at composition time", () => {
     const adapter = fakeAdapter(async () => ({ status: "available", methods: [] }));
@@ -43,6 +51,7 @@ describe("ConnectedFulfillmentMethodCatalogService", () => {
           serviceName: "Ground",
           domestic: true,
           international: false,
+          capabilities: METHOD_CAPABILITIES,
         }],
       })),
     } satisfies FulfillmentProviderAdapter;
@@ -231,6 +240,56 @@ describe("ConnectedFulfillmentMethodCatalogService", () => {
     });
   });
 
+  it("keeps separate destination-scope variants with the same account and service code", async () => {
+    const adapter = fakeAdapter(async (input) => ({
+      status: "available",
+      methods: [
+        method(input.connectionId, input.connectionName),
+        {
+          ...method(input.connectionId, input.connectionName),
+          domestic: false,
+          international: true,
+          capabilities: { ...METHOD_CAPABILITIES, supportsReturns: false },
+        },
+      ],
+    }));
+    const service = catalogService({
+      connections: [connection()],
+      adapter,
+      environment: { SHIPSTATION_V2_API_KEY: "secret" },
+    });
+
+    const result = await service.loadCatalog();
+
+    expect(result.status).toBe("available");
+    if (result.status !== "available") throw new Error("Expected available catalog.");
+    expect(result.methods).toMatchObject([
+      { domestic: true, international: false, capabilities: { supportsReturns: true } },
+      { domestic: false, international: true, capabilities: { supportsReturns: false } },
+    ]);
+  });
+
+  it("rejects a method with no executable destination scope", async () => {
+    const adapter = fakeAdapter(async (input) => ({
+      status: "available",
+      methods: [{
+        ...method(input.connectionId, input.connectionName),
+        domestic: false,
+        international: false,
+      }],
+    }));
+    const service = catalogService({
+      connections: [connection()],
+      adapter,
+      environment: { SHIPSTATION_V2_API_KEY: "secret" },
+    });
+
+    await expect(service.loadCatalog()).resolves.toMatchObject({
+      status: "unavailable",
+      code: "SHIPPING_FULFILLMENT_ROUTING_PROVIDER_INVALID_RESPONSE",
+    });
+  });
+
   it("requires at least one enabled connection", async () => {
     const adapter = fakeAdapter(async () => ({ status: "available", methods: [] }));
     const service = catalogService({ connections: [], adapter, environment: {} });
@@ -299,5 +358,6 @@ function method(connectionId: number, connectionName: string) {
     serviceName: "UPS Ground",
     domestic: true,
     international: false,
+    capabilities: METHOD_CAPABILITIES,
   };
 }

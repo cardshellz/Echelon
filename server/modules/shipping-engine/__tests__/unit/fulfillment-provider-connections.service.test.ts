@@ -128,6 +128,8 @@ describe("FulfillmentProviderConnectionService", () => {
       provider: "shipstation_v2",
       providerAccountId: "se-ups",
       serviceCode: "ups_ground",
+      domestic: true,
+      international: false,
     }]);
     memory.credential = encryptedCredential();
     const service = buildService(memory.store, adapter);
@@ -143,7 +145,7 @@ describe("FulfillmentProviderConnectionService", () => {
     })).rejects.toMatchObject({
       code: "SHIPPING_FULFILLMENT_PROVIDER_CREDENTIAL_BREAKS_ACTIVE_ROUTES",
       status: 409,
-      details: ["se-ups / ups_ground"],
+      details: ["se-ups / ups_ground / domestic=true / international=false"],
     });
     expect(memory.credential).toEqual(encryptedCredential());
     expect(memory.events).toHaveLength(0);
@@ -164,12 +166,21 @@ describe("FulfillmentProviderConnectionService", () => {
         serviceName: "UPS Ground",
         domestic: true,
         international: false,
+        capabilities: {
+          supportsMultiPackage: true,
+          supportsReturns: true,
+          supportsPrepaidDutiesTaxes: false,
+          sendRates: true,
+          displaySchemes: ["label"],
+        },
       }],
     });
     const memory = memoryStore(connection({ routedMethodCount: 1 }), [{
       provider: "shipstation_v2",
       providerAccountId: "se-ups",
       serviceCode: "ups_ground",
+      domestic: true,
+      international: false,
     }]);
     memory.credential = encryptedCredential();
     const service = buildService(memory.store, adapter);
@@ -190,6 +201,56 @@ describe("FulfillmentProviderConnectionService", () => {
       action: "credential_replaced",
       connectionRevision: 2,
       actorUserId: "operator-2",
+    });
+  });
+
+  it("does not substitute a domestic same-code method for an international active route", async () => {
+    const adapter = fakeAdapter({
+      status: "available",
+      methods: [{
+        providerConnectionId: 1,
+        providerConnectionName: "Credential verification",
+        provider: "shipstation_v2",
+        providerAccountId: "se-ups",
+        providerAccountName: "UPS account",
+        carrierCode: "ups",
+        carrierName: "UPS",
+        serviceCode: "ups_worldwide_saver",
+        serviceName: "UPS Worldwide Saver®",
+        domestic: true,
+        international: false,
+        capabilities: {
+          supportsMultiPackage: true,
+          supportsReturns: true,
+          supportsPrepaidDutiesTaxes: true,
+          sendRates: true,
+          displaySchemes: ["label"],
+        },
+      }],
+    });
+    const memory = memoryStore(connection({ routedMethodCount: 1 }), [{
+      provider: "shipstation_v2",
+      providerAccountId: "se-ups",
+      serviceCode: "ups_worldwide_saver",
+      domestic: false,
+      international: true,
+    }]);
+    memory.credential = encryptedCredential();
+    const service = buildService(memory.store, adapter);
+
+    await expect(service.replaceCredential({
+      connectionId: 11,
+      command: {
+        credential: "replacement-secret",
+        expectedRevision: 1,
+        idempotencyKey: "provider-credential-scoped-variant",
+      },
+      actorUserId: "operator-2",
+    })).rejects.toMatchObject({
+      code: "SHIPPING_FULFILLMENT_PROVIDER_CREDENTIAL_BREAKS_ACTIVE_ROUTES",
+      details: [
+        "se-ups / ups_worldwide_saver / domestic=false / international=true",
+      ],
     });
   });
 });
@@ -235,6 +296,8 @@ function memoryStore(
     provider: string;
     providerAccountId: string;
     serviceCode: string;
+    domestic: boolean;
+    international: boolean;
   }> = [],
 ): {
   store: FulfillmentProviderConnectionStore & { transaction: ReturnType<typeof vi.fn> };

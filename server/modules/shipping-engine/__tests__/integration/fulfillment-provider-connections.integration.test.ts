@@ -14,6 +14,10 @@ const sourceMigration = readFileSync(
   resolve(process.cwd(), "migrations/0643_shipping_fulfillment_provider_connections.sql"),
   "utf8",
 );
+const scopedMethodMigration = readFileSync(
+  resolve(process.cwd(), "migrations/0650_shipping_fulfillment_method_scope_capabilities.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -25,6 +29,8 @@ describeWithDisposableDb.sequential("fulfillment provider connection PostgreSQL 
   let pool: pg.Pool;
   const schema = `shipping_provider_connections_${process.pid}`;
   const qualifiedMigration = sourceMigration.replaceAll("shipping.", `"${schema}".`);
+  const qualifiedScopedMethodMigration = scopedMethodMigration
+    .replaceAll("shipping.", `"${schema}".`);
 
   beforeAll(async () => {
     const protectedUrls = [
@@ -110,6 +116,7 @@ describeWithDisposableDb.sequential("fulfillment provider connection PostgreSQL 
       );
     `);
     await pool.query(qualifiedMigration);
+    await pool.query(qualifiedScopedMethodMigration);
   }, 300_000);
 
   afterAll(async () => {
@@ -140,6 +147,43 @@ describeWithDisposableDb.sequential("fulfillment provider connection PostgreSQL 
     }]);
   });
 
+  it("persists domestic and international variants sharing one service code", async () => {
+    await pool.query(`
+      INSERT INTO "${schema}".fulfillment_routing_revisions
+        (id, service_level_id, revision, methods_snapshot)
+      VALUES (92, 8, 1, '[]'::jsonb);
+
+      INSERT INTO "${schema}".service_level_methods (
+        service_level_id, provider_connection_id, provider, provider_account_id,
+        provider_account_name, carrier, carrier_name, service_code, service_name,
+        priority, domestic, international, provider_capabilities, revision_id, is_active
+      ) VALUES
+        (
+          8, 1, 'shipstation_v2', 'se-ups', 'UPS account', 'ups', 'UPS',
+          'ups_worldwide_saver', 'UPS Worldwide Saver®', 1, TRUE, FALSE,
+          '{"supportsMultiPackage":true,"supportsReturns":true,"supportsPrepaidDutiesTaxes":true,"sendRates":true,"displaySchemes":["label"]}'::jsonb,
+          92, TRUE
+        ),
+        (
+          8, 1, 'shipstation_v2', 'se-ups', 'UPS account', 'ups', 'UPS',
+          'ups_worldwide_saver', 'UPS Worldwide Saver®', 2, FALSE, TRUE,
+          '{"supportsMultiPackage":true,"supportsReturns":false,"supportsPrepaidDutiesTaxes":true,"sendRates":true,"displaySchemes":["label"]}'::jsonb,
+          92, TRUE
+        );
+    `);
+
+    const result = await pool.query<{ domestic: boolean; international: boolean }>(`
+      SELECT domestic, international
+      FROM "${schema}".service_level_methods
+      WHERE service_level_id = 8
+      ORDER BY priority
+    `);
+    expect(result.rows).toEqual([
+      { domestic: true, international: false },
+      { domestic: false, international: true },
+    ]);
+  });
+
   it("retains coherence with a routing revision written before connection identity existed", async () => {
     await pool.query(`
       CREATE CONSTRAINT TRIGGER test_fulfillment_routing_methods_coherence_guard
@@ -153,6 +197,33 @@ describeWithDisposableDb.sequential("fulfillment provider connection PostgreSQL 
       SET updated_at = updated_at
       WHERE service_level_id = 7
     `)).resolves.toBeDefined();
+  });
+
+  it("requires capability evidence for every newly inserted scoped route", async () => {
+    await expect(pool.query(`
+      INSERT INTO "${schema}".service_level_methods (
+        service_level_id, provider_connection_id, provider, provider_account_id,
+        provider_account_name, carrier, carrier_name, service_code, service_name,
+        priority, domestic, international, provider_capabilities, revision_id, is_active
+      ) VALUES (
+        8, 1, 'shipstation_v2', 'se-ups', 'UPS account', 'ups', 'UPS',
+        'ups_2nd_day_air', 'UPS 2nd Day Air', 3, TRUE, FALSE, NULL, 92, TRUE
+      )
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "shipping_level_method_scoped_capabilities_chk",
+    });
+  });
+
+  it("does not allow a capability-unknown historical route to be repurposed", async () => {
+    await expect(pool.query(`
+      UPDATE "${schema}".service_level_methods
+      SET service_code = 'ups_ground_repurposed'
+      WHERE service_level_id = 7
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "shipping_level_method_scoped_capabilities_chk",
+    });
   });
 
   it("rejects disabling a connection referenced by an active route", async () => {

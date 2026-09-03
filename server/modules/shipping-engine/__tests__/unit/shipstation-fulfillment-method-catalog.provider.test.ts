@@ -2,6 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { ShipStationV2Error, type ShipStationV2RatingAdapter } from "../../infrastructure/shipstation-v2-rating.adapter";
 import { ShipStationFulfillmentMethodCatalogProvider } from "../../infrastructure/shipstation-fulfillment-method-catalog.provider";
 
+const DEFAULT_SERVICE_CAPABILITIES = {
+  supportsMultiPackage: true,
+  supportsReturns: true,
+  supportsPrepaidDutiesTaxes: false,
+  sendRates: true,
+  displaySchemes: ["label"],
+} as const;
+
 describe("ShipStationFulfillmentMethodCatalogProvider", () => {
   it("returns an explicit not-configured state without attempting service calls", async () => {
     const adapter = fakeAdapter();
@@ -33,6 +41,7 @@ describe("ShipStationFulfillmentMethodCatalogProvider", () => {
         serviceName: carrier.code === "fedex" ? "FedEx Ground" : "USPS Ground Advantage",
         domestic: true,
         international: false,
+        ...DEFAULT_SERVICE_CAPABILITIES,
       }],
     }));
 
@@ -119,6 +128,7 @@ describe("ShipStationFulfillmentMethodCatalogProvider", () => {
         serviceName: "UPS Ground",
         domestic: true,
         international: false,
+        ...DEFAULT_SERVICE_CAPABILITIES,
       }],
     }));
 
@@ -128,6 +138,64 @@ describe("ShipStationFulfillmentMethodCatalogProvider", () => {
       message: expect.stringContaining("providerAccountName"),
       retryable: false,
     });
+  });
+
+  it("accepts and preserves scoped variants that share a provider service code", async () => {
+    const adapter = fakeAdapter();
+    adapter.listCarriers.mockResolvedValue({
+      configured: true,
+      carriers: [{ carrierId: "se-342200", code: "ups", name: "UPS" }],
+    });
+    adapter.listCarrierServices.mockResolvedValue({
+      configured: true,
+      services: [
+        {
+          carrierId: "se-342200",
+          carrierCode: "ups",
+          serviceCode: "ups_worldwide_saver",
+          serviceName: "UPS Worldwide Saver®",
+          domestic: false,
+          international: true,
+          supportsMultiPackage: true,
+          supportsReturns: false,
+          supportsPrepaidDutiesTaxes: true,
+          sendRates: true,
+          displaySchemes: ["label"],
+        },
+        {
+          carrierId: "se-342200",
+          carrierCode: "ups",
+          serviceCode: "ups_worldwide_saver",
+          serviceName: "UPS Worldwide Saver®",
+          domestic: true,
+          international: false,
+          supportsMultiPackage: true,
+          supportsReturns: true,
+          supportsPrepaidDutiesTaxes: true,
+          sendRates: true,
+          displaySchemes: ["label"],
+        },
+      ],
+    });
+
+    const result = await provider(adapter).loadCatalog(connection());
+
+    expect(result.status).toBe("available");
+    if (result.status !== "available") throw new Error("Expected available catalog.");
+    expect(result.methods).toMatchObject([
+      {
+        serviceCode: "ups_worldwide_saver",
+        domestic: true,
+        international: false,
+        capabilities: { supportsReturns: true },
+      },
+      {
+        serviceCode: "ups_worldwide_saver",
+        domestic: false,
+        international: true,
+        capabilities: { supportsReturns: false },
+      },
+    ]);
   });
 
   it("constructs the ShipStation client from the selected connection credential", async () => {
