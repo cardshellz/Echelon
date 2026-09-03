@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 
 import { sql } from "drizzle-orm";
 import { z } from "zod";
+import {
+  canonicalCarrierValue,
+  carrierIdentity,
+} from "@shared/utils/carrier-identity";
 
 import {
   type ChannelFulfillmentCommand,
@@ -483,7 +487,7 @@ function canonicalizeInput(input: MaterializePhysicalPackageInput) {
     providerOrderId: parsed.data.providerOrderId ?? null,
     providerOrderKey: parsed.data.providerOrderKey ?? null,
     trackingNumber: parsed.data.trackingNumber ?? null,
-    carrier: parsed.data.carrier ?? null,
+    carrier: canonicalCarrierValue(parsed.data.carrier),
     trackingUrl: parsed.data.trackingUrl ?? null,
     serviceCode: parsed.data.serviceCode ?? null,
     shippedAt: parsed.data.shippedAt ?? null,
@@ -544,6 +548,30 @@ function assertCompatibleIdentity(
       "PACKAGE_IDENTITY_CONFLICT",
       `Legacy shipment ${legacyShipmentId} has conflicting ${field}`,
       { field, legacyShipmentId, persisted: normalizedPersisted, incoming },
+    );
+  }
+}
+
+function assertCompatibleCarrierIdentity(
+  persisted: unknown,
+  incoming: string | null,
+  legacyShipmentId: number,
+): void {
+  const normalizedPersisted = normalizedNullable(persisted);
+  const persistedIdentity = carrierIdentity(normalizedPersisted);
+  const incomingIdentity = carrierIdentity(incoming);
+  if (persistedIdentity && incomingIdentity && persistedIdentity !== incomingIdentity) {
+    throw new FulfillmentAuthorityError(
+      "PACKAGE_IDENTITY_CONFLICT",
+      `Legacy shipment ${legacyShipmentId} has conflicting carrier`,
+      {
+        field: "carrier",
+        legacyShipmentId,
+        persisted: normalizedPersisted,
+        incoming,
+        persistedIdentity,
+        incomingIdentity,
+      },
     );
   }
 }
@@ -1618,7 +1646,7 @@ async function findOrCreatePhysicalShipment(
       );
     }
     assertCompatibleIdentity("trackingNumber", existing.tracking_number, input.trackingNumber, input.legacyWmsShipmentIds[0]);
-    assertCompatibleIdentity("carrier", existing.carrier, input.carrier, input.legacyWmsShipmentIds[0]);
+    assertCompatibleCarrierIdentity(existing.carrier, input.carrier, input.legacyWmsShipmentIds[0]);
     return Number(existing.id);
   }
 
@@ -2813,7 +2841,7 @@ function validateLegacyHeaders(
       assertCompatibleIdentity("providerOrderId", row.persisted_provider_order_id, input.providerOrderId, row.legacy_shipment_id);
       assertCompatibleIdentity("providerOrderKey", row.persisted_provider_order_key, input.providerOrderKey, row.legacy_shipment_id);
       assertCompatibleIdentity("trackingNumber", row.persisted_tracking_number, input.trackingNumber, row.legacy_shipment_id);
-      assertCompatibleIdentity("carrier", row.persisted_carrier, input.carrier, row.legacy_shipment_id);
+      assertCompatibleCarrierIdentity(row.persisted_carrier, input.carrier, row.legacy_shipment_id);
     }
   }
 }
@@ -3153,7 +3181,7 @@ export function createChannelFulfillmentAuthorityRepository(
           shippingProvider: materializedPackage.pkg.provider,
           providerPhysicalShipmentId: materializedPackage.pkg.providerPhysicalShipmentId,
           trackingNumber: materializedPackage.pkg.trackingNumber,
-          carrier: materializedPackage.pkg.carrier,
+          carrier: materializedPackage.canonicalInput.carrier!,
           trackingUrl: null,
           shippedAt: materializedPackage.pkg.businessShipmentRecognizedAt.toISOString(),
           items: materializedPackage.items.map((item) => ({
