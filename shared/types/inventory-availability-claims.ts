@@ -22,6 +22,14 @@ export const canonicalAvailabilityClaimReleaseCommandSchema = z.object({
   reason: nonblank(1000),
 }).strict();
 
+export const canonicalAvailabilityClaimReplacementCommandSchema = z.object({
+  orderId: positiveInteger,
+  expectedClaimId: positiveBigintString,
+  idempotencyKey: nonblank(120),
+  actor: nonblank(100),
+  reason: nonblank(1000),
+}).strict();
+
 export const canonicalAvailabilityClaimOperationExecutionCommandSchema = z.object({
   claimId: positiveBigintString,
   operationKey: nonblank(300),
@@ -180,6 +188,24 @@ export const canonicalAvailabilityClaimResultSchema = z.discriminatedUnion("outc
   }).strict(),
 ]);
 
+export const canonicalAvailabilityClaimReplacementResultSchema = z.object({
+  outcome: z.literal("replaced"),
+  orderId: positiveInteger,
+  supersededClaimId: positiveBigintString,
+  supersededClaimKey: nonblank(200),
+  supersededRevision: positiveInteger,
+  replacementClaim: z.object({
+    claimId: positiveBigintString,
+    claimKey: nonblank(200),
+    revision: positiveInteger,
+    runtimeAuthorityRevision: positiveBigintString,
+    plan: claimPlanSchema,
+  }).strict(),
+  releasedResourceQty: nonnegativeBigintString,
+  releasedLotQty: nonnegativeBigintString,
+  idempotentReplay: z.boolean(),
+}).strict();
+
 export type CanonicalAvailabilityClaimCommand = z.infer<
   typeof canonicalAvailabilityClaimCommandSchema
 >;
@@ -188,6 +214,12 @@ export type CanonicalAvailabilityClaimResult = z.infer<
 >;
 export type CanonicalAvailabilityClaimReleaseCommand = z.infer<
   typeof canonicalAvailabilityClaimReleaseCommandSchema
+>;
+export type CanonicalAvailabilityClaimReplacementCommand = z.infer<
+  typeof canonicalAvailabilityClaimReplacementCommandSchema
+>;
+export type CanonicalAvailabilityClaimReplacementResult = z.infer<
+  typeof canonicalAvailabilityClaimReplacementResultSchema
 >;
 export type CanonicalAvailabilityClaimOperationExecutionCommand = z.infer<
   typeof canonicalAvailabilityClaimOperationExecutionCommandSchema

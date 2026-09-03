@@ -1298,6 +1298,7 @@ export const inventoryAvailabilityClaims = inventoryPlanningSchema.table(
     claimKey: varchar("claim_key", { length: 200 }).notNull(),
     orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "restrict" }),
     revision: integer("revision").notNull(),
+    supersedesClaimId: bigint("supersedes_claim_id", { mode: "bigint" }),
     status: varchar("status", { length: 30 }).notNull(),
     planStatus: varchar("plan_status", { length: 20 }).notNull(),
     scopeKind: varchar("scope_kind", { length: 20 }).notNull(),
@@ -1326,10 +1327,23 @@ export const inventoryAvailabilityClaims = inventoryPlanningSchema.table(
     orderRevisionUnique: uniqueIndex("availability_claims_order_revision_uq")
       .on(table.orderId, table.revision),
     idKeyUnique: uniqueIndex("availability_claims_id_key_uq").on(table.id, table.claimKey),
+    idOrderUnique: uniqueIndex("availability_claims_id_order_uq").on(table.id, table.orderId),
+    supersededOnce: uniqueIndex("availability_claims_supersedes_claim_uq")
+      .on(table.supersedesClaimId)
+      .where(sql`${table.supersedesClaimId} IS NOT NULL`),
+    supersedesSameOrder: foreignKey({
+      columns: [table.supersedesClaimId, table.orderId],
+      foreignColumns: [table.id, table.orderId],
+      name: "availability_claims_supersedes_same_order_fk",
+    }).onDelete("restrict"),
     activeOrderUnique: uniqueIndex("availability_claims_one_active_order_uq")
       .on(table.orderId).where(sql`${table.status} = 'active'`),
     orderLookup: index("availability_claims_order_idx").on(table.orderId, table.revision.desc(), table.id.desc()),
     revisionValid: check("availability_claims_revision_chk", sql`${table.revision} > 0`),
+    supersedesValid: check(
+      "availability_claims_supersedes_chk",
+      sql`${table.supersedesClaimId} IS NULL OR ${table.supersedesClaimId} <> ${table.id}`,
+    ),
     statusValid: check(
       "availability_claims_status_chk",
       sql`${table.status} IN ('active', 'released', 'cancelled', 'superseded', 'failed')`,
@@ -1681,7 +1695,10 @@ export const inventoryAvailabilityClaimCommands = inventoryPlanningSchema.table(
     claimLookup: index("availability_claim_commands_claim_idx").on(table.claimId, table.occurredAt, table.id),
     typeValid: check(
       "availability_claim_commands_type_chk",
-      sql`${table.commandType} IN ('claim', 'release', 'cancel', 'execute', 'handoff_build', 'execute_build')`,
+      sql`${table.commandType} IN (
+        'claim', 'replace', 'release', 'cancel', 'execute', 'handoff_build',
+        'execute_build', 'pick', 'pick_observation', 'unpick'
+      )`,
     ),
     hashValid: check(
       "availability_claim_commands_hash_chk",

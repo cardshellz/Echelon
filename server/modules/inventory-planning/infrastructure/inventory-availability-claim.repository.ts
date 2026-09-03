@@ -12,6 +12,8 @@ import {
   canonicalAvailabilityClaimPickCommandSchema,
   canonicalAvailabilityClaimPickResultSchema,
   canonicalAvailabilityClaimReleaseCommandSchema,
+  canonicalAvailabilityClaimReplacementCommandSchema,
+  canonicalAvailabilityClaimReplacementResultSchema,
   canonicalAvailabilityClaimResultSchema,
   canonicalAvailabilityClaimUnpickCommandSchema,
   type CanonicalAvailabilityClaimBuildHandoffCommand,
@@ -22,6 +24,8 @@ import {
   type CanonicalAvailabilityClaimPickCommand,
   type CanonicalAvailabilityClaimPickResult,
   type CanonicalAvailabilityClaimReleaseCommand,
+  type CanonicalAvailabilityClaimReplacementCommand,
+  type CanonicalAvailabilityClaimReplacementResult,
   type CanonicalAvailabilityClaimResult,
   type CanonicalAvailabilityClaimUnpickCommand,
 } from "@shared/types/inventory-availability-claims";
@@ -74,6 +78,13 @@ type RuntimeAuthority = {
   activationRunId: bigint;
   revision: bigint;
 };
+
+type ClaimAuditCommand = {
+  actor: string;
+  reason: string;
+};
+
+type ClaimLifecycleDisposition = "release" | "cancel" | "supersede";
 
 type PersistedClaim = {
   id: bigint;
@@ -156,6 +167,31 @@ function resultFromClaim(orderId: number, claim: PersistedClaim, idempotentRepla
   });
 }
 
+function replacementResult(
+  supersededClaim: PersistedClaim,
+  replacementClaim: PersistedClaim,
+  released: { releasedResourceQty: bigint; releasedLotQty: bigint },
+  idempotentReplay: boolean,
+): CanonicalAvailabilityClaimReplacementResult {
+  return canonicalAvailabilityClaimReplacementResultSchema.parse({
+    outcome: "replaced",
+    orderId: supersededClaim.orderId,
+    supersededClaimId: supersededClaim.id.toString(),
+    supersededClaimKey: supersededClaim.claimKey,
+    supersededRevision: supersededClaim.revision,
+    replacementClaim: {
+      claimId: replacementClaim.id.toString(),
+      claimKey: replacementClaim.claimKey,
+      revision: replacementClaim.revision,
+      runtimeAuthorityRevision: replacementClaim.runtimeAuthorityRevision.toString(),
+      plan: replacementClaim.plan,
+    },
+    releasedResourceQty: released.releasedResourceQty.toString(),
+    releasedLotQty: released.releasedLotQty.toString(),
+    idempotentReplay,
+  });
+}
+
 export class InventoryAvailabilityClaimRepositoryError extends Error {
   constructor(
     readonly code: string,
@@ -170,6 +206,9 @@ export class InventoryAvailabilityClaimRepositoryError extends Error {
 
 export interface InventoryAvailabilityClaimStore {
   claimOrder(command: CanonicalAvailabilityClaimCommand): Promise<CanonicalAvailabilityClaimResult>;
+  replaceOrderClaim(
+    command: CanonicalAvailabilityClaimReplacementCommand,
+  ): Promise<CanonicalAvailabilityClaimReplacementResult>;
   releaseOrderClaim(command: CanonicalAvailabilityClaimReleaseCommand): Promise<CanonicalAvailabilityClaimResult>;
   executePackageOperation(
     command: CanonicalAvailabilityClaimOperationExecutionCommand,
@@ -205,6 +244,30 @@ async function loadCommandReplay(
     );
   }
   const replay = canonicalAvailabilityClaimResultSchema.parse(row.result_payload);
+  return { ...replay, idempotentReplay: true };
+}
+
+async function loadReplacementReplay(
+  client: PoolClient,
+  idempotencyKey: string,
+  requestHash: string,
+): Promise<CanonicalAvailabilityClaimReplacementResult | null> {
+  const row = rows(await client.query(
+    `SELECT command_type, request_hash, result_payload
+     FROM inventory.availability_claim_commands
+     WHERE idempotency_key = $1
+     FOR SHARE`,
+    [idempotencyKey],
+  ))[0];
+  if (!row) return null;
+  if (String(row.command_type) !== "replace" || String(row.request_hash) !== requestHash) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "IDEMPOTENCY_KEY_REUSED",
+      "The canonical claim replacement idempotency key was already used with a different request.",
+      { idempotencyKey },
+    );
+  }
+  const replay = canonicalAvailabilityClaimReplacementResultSchema.parse(row.result_payload);
   return { ...replay, idempotentReplay: true };
 }
 
@@ -605,21 +668,67 @@ function buildPlanRequest(order: LockedOrder, revision: number): ClaimPlanReques
   });
 }
 
-function orderDemandMatchesClaim(order: LockedOrder, claim: PersistedClaim): boolean {
+async function orderDemandMatchesClaim(
+  client: PoolClient,
+  order: LockedOrder,
+  claim: PersistedClaim,
+): Promise<boolean> {
   const currentScope = order.warehouseId == null
     ? { kind: "network" as const }
     : { kind: "warehouse" as const, warehouseId: order.warehouseId };
   if (canonicalJson(currentScope) !== canonicalJson(claim.plan.scope)) return false;
+
+  const lineRows = rows(await client.query(
+    `SELECT line_key, target_variant_id, requested_qty, planned_qty, shortfall_qty,
+            released_target_qty, consumed_target_qty, picked_target_qty
+     FROM inventory.availability_claim_lines
+     WHERE claim_id = $1
+     ORDER BY line_key
+     FOR SHARE`,
+    [claim.id.toString()],
+  ));
+  if (lineRows.length !== claim.plan.lines.length) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_DEMAND_LINEAGE_MISMATCH",
+      "The active claim's relational line evidence no longer matches its hashed planner payload.",
+      { claimId: claim.id.toString(), planLineCount: claim.plan.lines.length, persistedLineCount: lineRows.length },
+    );
+  }
+
+  const planLineByKey = new Map(claim.plan.lines.map((line) => [line.lineKey, line] as const));
+  const persisted = lineRows.flatMap((row) => {
+    const lineKey = String(row.line_key);
+    const planLine = planLineByKey.get(lineKey);
+    const targetVariantId = positiveInteger(row.target_variant_id, "claimLine.targetVariantId");
+    const requestedQty = positiveBigInt(row.requested_qty, "claimLine.requestedQty");
+    const plannedQty = nonnegativeBigInt(row.planned_qty, "claimLine.plannedQty");
+    const shortfallQty = nonnegativeBigInt(row.shortfall_qty, "claimLine.shortfallQty");
+    const releasedTargetQty = nonnegativeBigInt(row.released_target_qty, "claimLine.releasedTargetQty");
+    const consumedTargetQty = nonnegativeBigInt(row.consumed_target_qty, "claimLine.consumedTargetQty");
+    const pickedTargetQty = nonnegativeBigInt(row.picked_target_qty, "claimLine.pickedTargetQty");
+    if (!planLine
+      || planLine.targetVariantId !== targetVariantId
+      || BigInt(planLine.requestedQty) !== requestedQty
+      || BigInt(planLine.plannedQty) !== plannedQty
+      || BigInt(planLine.shortfallQty) !== shortfallQty
+      || requestedQty !== plannedQty + shortfallQty
+      || releasedTargetQty + consumedTargetQty + pickedTargetQty > plannedQty) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_DEMAND_LINEAGE_MISMATCH",
+        "The active claim's relational line evidence no longer matches its hashed planner payload.",
+        { claimId: claim.id.toString(), lineKey },
+      );
+    }
+    const remainingQty = requestedQty - releasedTargetQty - consumedTargetQty - pickedTargetQty;
+    return remainingQty === BigInt(0)
+      ? []
+      : [{ lineKey, targetVariantId, requestedQty: remainingQty.toString() }];
+  });
   const current = order.lines.map((line) => ({
     lineKey: `order-item:${line.orderItemId}`,
     targetVariantId: line.targetVariantId,
     requestedQty: String(line.requestedQty),
-  }));
-  const persisted = claim.plan.lines.map((line) => ({
-    lineKey: line.lineKey,
-    targetVariantId: line.targetVariantId,
-    requestedQty: line.requestedQty,
-  }));
+  })).sort((left, right) => left.lineKey.localeCompare(right.lineKey));
   return canonicalJson(current) === canonicalJson(persisted);
 }
 
@@ -706,25 +815,28 @@ async function insertClaimHeader(
     authority: RuntimeAuthority;
     request: ClaimPlanRequestDto;
     plan: ClaimPlanDto;
-    command: CanonicalAvailabilityClaimCommand;
+    command: ClaimAuditCommand;
+    supersedesClaimId?: bigint;
     occurredAt: Date;
   },
 ): Promise<bigint> {
   const inserted = rows(await client.query(
     `INSERT INTO inventory.availability_claims (
-       claim_key, order_id, revision, status, plan_status, scope_kind, scope_warehouse_id,
+       claim_key, order_id, revision, supersedes_claim_id,
+       status, plan_status, scope_kind, scope_warehouse_id,
        activation_run_id, runtime_authority_revision, request_hash, plan_hash,
        snapshot_fingerprint, request_payload, plan_payload, model_evidence,
        requested_by, reason, reserved_at
      ) VALUES (
-       $1, $2, $3, 'active', $4, $5, $6, $7, $8, $9, $10, $11,
-       $12::jsonb, $13::jsonb, $14::jsonb, $15, $16, $17
+       $1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12,
+       $13::jsonb, $14::jsonb, $15::jsonb, $16, $17, $18
      )
      RETURNING id`,
     [
       input.request.requestKey,
       input.order.orderId,
       input.revision,
+      input.supersedesClaimId?.toString() ?? null,
       input.plan.status,
       input.request.scope.kind,
       input.request.scope.kind === "warehouse" ? input.request.scope.warehouseId : null,
@@ -1004,7 +1116,7 @@ async function releaseClaimResources(
     orderId: number;
     actor: string;
     reason: string;
-    disposition: "release" | "cancel";
+    disposition: ClaimLifecycleDisposition;
     occurredAt: Date;
   },
 ): Promise<{ releasedResourceQty: bigint; releasedLotQty: bigint }> {
@@ -1184,14 +1296,29 @@ async function releaseClaimResources(
      WHERE claim_id = $1`,
     [input.claim.id.toString(), input.occurredAt],
   );
-  const status = input.disposition === "cancel" ? "cancelled" : "released";
-  const timestampColumn = input.disposition === "cancel" ? "cancelled_at" : "released_at";
-  await client.query(
+  const status = input.disposition === "cancel"
+    ? "cancelled"
+    : input.disposition === "supersede"
+      ? "superseded"
+      : "released";
+  const timestampColumn = input.disposition === "cancel"
+    ? "cancelled_at"
+    : input.disposition === "supersede"
+      ? "superseded_at"
+      : "released_at";
+  const updatedClaim = await client.query(
     `UPDATE inventory.availability_claims
      SET status = $1, ${timestampColumn} = $2, updated_at = $2
      WHERE id = $3 AND status = 'active'`,
     [status, input.occurredAt, input.claim.id.toString()],
   );
+  if (updatedClaim.rowCount !== 1) {
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "ACTIVE_CLAIM_STATE_CHANGED",
+      "The locked canonical claim changed before its terminal state was recorded.",
+      { claimId: input.claim.id.toString(), status },
+    );
+  }
   return { releasedResourceQty, releasedLotQty };
 }
 
@@ -1243,6 +1370,79 @@ async function persistReleaseCommandAndEvent(
       toStatus,
       JSON.stringify(evidence),
       hash(evidence),
+      input.command.actor,
+      input.command.reason,
+      input.occurredAt,
+    ],
+  );
+}
+
+async function persistReplacementCommandAndEvents(
+  client: PoolClient,
+  input: {
+    supersededClaim: PersistedClaim;
+    replacementClaimId: bigint;
+    command: CanonicalAvailabilityClaimReplacementCommand;
+    requestHash: string;
+    result: CanonicalAvailabilityClaimReplacementResult;
+    occurredAt: Date;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO inventory.availability_claim_commands (
+       claim_id, order_id, command_type, idempotency_key, request_hash, result_hash,
+       request_payload, result_payload, actor, reason, occurred_at
+     ) VALUES ($1, $2, 'replace', $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10)`,
+    [
+      input.replacementClaimId.toString(),
+      input.command.orderId,
+      input.command.idempotencyKey,
+      input.requestHash,
+      hash(input.result),
+      JSON.stringify(input.command),
+      JSON.stringify(input.result),
+      input.command.actor,
+      input.command.reason,
+      input.occurredAt,
+    ],
+  );
+  const supersededEvidence = {
+    schemaVersion: "inventory_availability_claim_replacement_event_v1",
+    eventType: "claim_superseded",
+    supersededClaimId: input.supersededClaim.id.toString(),
+    replacementClaimId: input.replacementClaimId.toString(),
+    result: input.result,
+  };
+  await client.query(
+    `INSERT INTO inventory.availability_claim_events (
+       claim_id, event_type, from_status, to_status, evidence_payload,
+       evidence_hash, actor, reason, occurred_at
+     ) VALUES ($1, 'claim_superseded', 'active', 'superseded', $2::jsonb, $3, $4, $5, $6)`,
+    [
+      input.supersededClaim.id.toString(),
+      JSON.stringify(supersededEvidence),
+      hash(supersededEvidence),
+      input.command.actor,
+      input.command.reason,
+      input.occurredAt,
+    ],
+  );
+  const replacementEvidence = {
+    schemaVersion: "inventory_availability_claim_replacement_event_v1",
+    eventType: "claim_reserved",
+    supersededClaimId: input.supersededClaim.id.toString(),
+    replacementClaimId: input.replacementClaimId.toString(),
+    result: input.result,
+  };
+  await client.query(
+    `INSERT INTO inventory.availability_claim_events (
+       claim_id, event_type, from_status, to_status, evidence_payload,
+       evidence_hash, actor, reason, occurred_at
+     ) VALUES ($1, 'claim_reserved', NULL, 'active', $2::jsonb, $3, $4, $5, $6)`,
+    [
+      input.replacementClaimId.toString(),
+      JSON.stringify(replacementEvidence),
+      hash(replacementEvidence),
       input.command.actor,
       input.command.reason,
       input.occurredAt,
@@ -2034,7 +2234,7 @@ async function cancelOpenBuildHandoffs(
   client: PoolClient,
   buildWriter: CanonicalClaimBuildMutationPort | undefined,
   claim: PersistedClaim,
-  command: CanonicalAvailabilityClaimReleaseCommand,
+  command: ClaimAuditCommand & { disposition: ClaimLifecycleDisposition },
   occurredAt: Date,
 ): Promise<void> {
   const openHandoffs = rows(await client.query(
@@ -3106,7 +3306,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
 
         const activeClaim = await loadActiveClaim(client, command.orderId);
         if (activeClaim) {
-          if (!orderDemandMatchesClaim(lockedOrder, activeClaim)) {
+          if (!await orderDemandMatchesClaim(client, lockedOrder, activeClaim)) {
             throw new InventoryAvailabilityClaimRepositoryError(
               "ACTIVE_CLAIM_REPLACEMENT_REQUIRED",
               "The locked order demand differs from its active canonical claim and must be replaced atomically.",
@@ -3203,6 +3403,240 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     throw new InventoryAvailabilityClaimRepositoryError(
       "CLAIM_TRANSACTION_RETRY_EXHAUSTED",
       "Canonical claim transaction could not serialize after bounded retries.",
+      { attempts: MAX_SERIALIZATION_ATTEMPTS },
+      { cause: lastRetryableError },
+    );
+  }
+
+  async replaceOrderClaim(
+    rawCommand: CanonicalAvailabilityClaimReplacementCommand,
+  ): Promise<CanonicalAvailabilityClaimReplacementResult> {
+    const command = canonicalAvailabilityClaimReplacementCommandSchema.parse(rawCommand);
+    const expectedClaimId = positiveBigInt(command.expectedClaimId, "replacement.expectedClaimId");
+    const requestHash = hash(command);
+    const occurredAt = this.clock();
+    if (Number.isNaN(occurredAt.getTime())) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "INVALID_CLOCK",
+        "Canonical claim replacement clock returned an invalid time.",
+      );
+    }
+
+    let lastRetryableError: unknown;
+    for (let attempt = 1; attempt <= MAX_SERIALIZATION_ATTEMPTS; attempt += 1) {
+      const client = await this.connectionPool.connect();
+      try {
+        await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        const replay = await loadReplacementReplay(client, command.idempotencyKey, requestHash);
+        if (replay) {
+          await client.query("COMMIT");
+          return replay;
+        }
+
+        const authority = await requireCanonicalAuthority(client);
+        const preliminaryClaim = await loadActiveClaim(client, command.orderId, false);
+        if (!preliminaryClaim) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ACTIVE_CLAIM_NOT_FOUND",
+            "The order does not have an active canonical claim to replace.",
+            { orderId: command.orderId, expectedClaimId: command.expectedClaimId },
+          );
+        }
+        if (preliminaryClaim.id !== expectedClaimId) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ACTIVE_CLAIM_CHANGED",
+            "The order's active canonical claim does not match the expected replacement predecessor.",
+            {
+              orderId: command.orderId,
+              expectedClaimId: command.expectedClaimId,
+              activeClaimId: preliminaryClaim.id.toString(),
+            },
+          );
+        }
+
+        const preliminaryOrder = await loadOrder(client, command.orderId, false);
+        if (["cancelled", "shipped"].includes(preliminaryOrder.warehouseStatus)
+          || preliminaryOrder.lines.length === 0) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "REPLACEMENT_ORDER_NOT_CLAIMABLE",
+            "A terminal order or an order without remaining claimable demand must use canonical release or cancellation.",
+            { orderId: command.orderId, warehouseStatus: preliminaryOrder.warehouseStatus },
+          );
+        }
+        const preliminaryClaimProducts = await loadClaimProductIds(client, preliminaryClaim);
+        const preliminaryOrderProducts = await discoverActiveGraphProducts(
+          client,
+          preliminaryOrder.lines.map((line) => line.rootProductId),
+        );
+        const preliminaryGraphProducts = uniqueSorted([
+          ...preliminaryClaimProducts,
+          ...preliminaryOrderProducts,
+        ]);
+        if (preliminaryGraphProducts.length === 0 || preliminaryGraphProducts.length > MAX_GRAPH_PRODUCTS) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "INVALID_CLAIM_MODEL_EVIDENCE",
+            "The replacement claim graph is empty or exceeds the bounded product limit.",
+            { orderId: command.orderId, productCount: preliminaryGraphProducts.length },
+          );
+        }
+        await lockGraphProducts(client, preliminaryGraphProducts);
+
+        const preliminaryTargetVariantIds = uniqueSorted([
+          ...preliminaryClaim.plan.lines.map((line) => line.targetVariantId),
+          ...preliminaryOrder.lines.map((line) => line.targetVariantId),
+        ]);
+        const preliminarySnapshot = await captureActiveClaimSupplySnapshotInsideTransaction(
+          client,
+          preliminaryTargetVariantIds,
+        );
+        await lockPlanningPolicyHeads(client, preliminarySnapshot);
+
+        const lockedOrder = await loadOrder(client, command.orderId, true);
+        if (["cancelled", "shipped"].includes(lockedOrder.warehouseStatus)
+          || lockedOrder.lines.length === 0) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "REPLACEMENT_ORDER_NOT_CLAIMABLE",
+            "The order became terminal or lost all claimable demand while replacement locks were being acquired.",
+            { orderId: command.orderId, warehouseStatus: lockedOrder.warehouseStatus },
+          );
+        }
+        const claim = await loadActiveClaim(client, command.orderId, true);
+        if (!claim || claim.id !== preliminaryClaim.id || claim.id !== expectedClaimId) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ACTIVE_CLAIM_CHANGED",
+            "The active canonical claim changed while replacement locks were being acquired.",
+            {
+              orderId: command.orderId,
+              expectedClaimId: command.expectedClaimId,
+              preliminaryClaimId: preliminaryClaim.id.toString(),
+              lockedClaimId: claim?.id.toString() ?? null,
+            },
+          );
+        }
+        const lockedTargetVariantIds = uniqueSorted([
+          ...claim.plan.lines.map((line) => line.targetVariantId),
+          ...lockedOrder.lines.map((line) => line.targetVariantId),
+        ]);
+        if (canonicalJson(preliminaryTargetVariantIds) !== canonicalJson(lockedTargetVariantIds)) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ORDER_DEMAND_IDENTITY_CHANGED",
+            "The order's target variant identities changed while replacement locks were being acquired.",
+            { orderId: command.orderId, preliminaryTargetVariantIds, lockedTargetVariantIds },
+          );
+        }
+        if (await orderDemandMatchesClaim(client, lockedOrder, claim)) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ORDER_DEMAND_UNCHANGED",
+            "The locked order demand still matches its active canonical claim.",
+            { orderId: command.orderId, claimId: claim.id.toString() },
+          );
+        }
+
+        const lockedClaimProducts = await loadClaimProductIds(client, claim);
+        const lockedOrderProducts = await discoverActiveGraphProducts(
+          client,
+          lockedOrder.lines.map((line) => line.rootProductId),
+        );
+        const lockedGraphProducts = uniqueSorted([...lockedClaimProducts, ...lockedOrderProducts]);
+        if (canonicalJson(preliminaryGraphProducts) !== canonicalJson(lockedGraphProducts)) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "TRANSFORMATION_GRAPH_CHANGED",
+            "The active transformation graph changed while replacement locks were being acquired.",
+            { preliminaryGraphProducts, lockedGraphProducts },
+          );
+        }
+
+        await lockSnapshotResources(client, preliminarySnapshot);
+        const lifecycleCommand = { ...command, disposition: "supersede" as const };
+        await cancelOpenBuildHandoffs(client, this.buildWriter, claim, lifecycleCommand, occurredAt);
+        const released = await releaseClaimResources(client, {
+          inventoryWriter: this.inventoryWriter,
+          claim,
+          orderId: command.orderId,
+          actor: command.actor,
+          reason: command.reason,
+          disposition: "supersede",
+          occurredAt,
+        });
+
+        const snapshot = await captureActiveClaimSupplySnapshotInsideTransaction(
+          client,
+          lockedOrder.lines.map((line) => line.targetVariantId),
+        );
+        const revision = await nextClaimRevision(client, command.orderId);
+        const request = buildPlanRequest(lockedOrder, revision);
+        const plan = planCanonicalClaim(snapshot, request);
+        if (plan.status === "blocked") {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CANONICAL_CLAIM_REPLACEMENT_BLOCKED",
+            "The active canonical planner blocked the whole-order replacement claim.",
+            { orderId: command.orderId, supersededClaimId: claim.id.toString(), blockers: plan.blockers },
+          );
+        }
+
+        const replacementClaimId = await insertClaimHeader(client, {
+          order: lockedOrder,
+          revision,
+          authority,
+          request,
+          plan,
+          command,
+          supersedesClaimId: claim.id,
+          occurredAt,
+        });
+        const lineIds = await insertClaimLines(client, replacementClaimId, lockedOrder, plan);
+        await insertClaimOperations(client, replacementClaimId, lineIds, plan);
+        await reserveClaimResources(
+          client,
+          this.inventoryWriter,
+          replacementClaimId,
+          lockedOrder,
+          lineIds,
+          plan,
+          command.actor,
+          occurredAt,
+        );
+        const replacementClaim: PersistedClaim = {
+          id: replacementClaimId,
+          claimKey: request.requestKey,
+          orderId: command.orderId,
+          revision,
+          runtimeAuthorityRevision: authority.revision,
+          planHash: hash(plan),
+          plan,
+        };
+        const result = replacementResult(claim, replacementClaim, released, false);
+        await persistReplacementCommandAndEvents(client, {
+          supersededClaim: claim,
+          replacementClaimId,
+          command,
+          requestHash,
+          result,
+          occurredAt,
+        });
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        try {
+          await rollback(client, error);
+        } catch (rolledBackError) {
+          if (isRetryableTransactionError(rolledBackError) && attempt < MAX_SERIALIZATION_ATTEMPTS) {
+            lastRetryableError = rolledBackError;
+            continue;
+          }
+          if (isRetryableTransactionError(rolledBackError)) {
+            lastRetryableError = rolledBackError;
+            break;
+          }
+          throw rolledBackError;
+        }
+      } finally {
+        client.release();
+      }
+    }
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_REPLACEMENT_RETRY_EXHAUSTED",
+      "Canonical claim replacement could not serialize after bounded retries.",
       { attempts: MAX_SERIALIZATION_ATTEMPTS },
       { cause: lastRetryableError },
     );
