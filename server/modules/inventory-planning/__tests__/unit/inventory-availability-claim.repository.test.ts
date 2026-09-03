@@ -274,7 +274,7 @@ function createClaimReplacementPool(
         location_type: "pick",
         is_pickable: true,
         is_active: true,
-        cycle_count_freeze_id: null,
+        cycle_count_freeze_id: options.cycleCountShortage ? 8 : null,
         draft_policy_id: null,
         policy_id: null,
       }] };

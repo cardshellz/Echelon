@@ -9,6 +9,7 @@ import {
   calculateLegacyAtpFromSnapshot,
   calculateSupplySnapshotFingerprint,
   classifyShadowDifference,
+  createVerifiedCycleCountPlanningSnapshot,
   planCanonicalClaim,
   projectCanonicalAtp,
   sealClaimSupplySnapshot,
@@ -676,6 +677,77 @@ describe("inventory availability canonical planner", () => {
     const snapshot = sealSupplySnapshot(first);
     const request = { targetVariantId: 101, scope: { kind: "network" as const } };
     expect(projectCanonicalAtp(snapshot, request)).toEqual(projectCanonicalAtp(snapshot, request));
+  });
+
+  it("replans verified counted stock without unfreezing the persisted location", () => {
+    const base = content({
+      locations: [{
+        id: 11,
+        warehouseId: 1,
+        code: "COUNTING",
+        locationType: "pick",
+        isPickable: true,
+        isActive: true,
+        isFrozen: true,
+        promisePolicy: null,
+      }],
+      inventoryPositions: [position({ id: 1, variantId: 101, physical: 6 })],
+    });
+    const frozenSnapshot = sealClaimSupplySnapshot({
+      schemaVersion: "inventory_availability_claim_snapshot_v1",
+      capturedAt: base.capturedAt,
+      rootProducts: [{ productId: 10, legacyInventoryStrategy: "physical_only" }],
+      variants: base.variants,
+      warehouses: base.warehouses,
+      locations: base.locations,
+      inventoryPositions: base.inventoryPositions,
+      safetyPolicies: base.safetyPolicies,
+      demandEvidence: base.demandEvidence,
+      transformationModels: base.transformationModels,
+      legacyRecipes: base.legacyRecipes,
+      outputLocations: base.outputLocations,
+      claimProjectionSource: base.claimProjectionSource,
+    });
+
+    const planningSnapshot = createVerifiedCycleCountPlanningSnapshot(frozenSnapshot, 11);
+    const plan = planCanonicalClaim(planningSnapshot, {
+      requestKey: "cycle-count:claim-replacement",
+      scope: { kind: "network" },
+      lines: [{ lineKey: "order-item:1", targetVariantId: 101, requestedQty: "8" }],
+    });
+
+    expect(frozenSnapshot.locations[0]?.isFrozen).toBe(true);
+    expect(planningSnapshot.locations[0]?.isFrozen).toBe(false);
+    expect(planningSnapshot.snapshotFingerprint).not.toBe(frozenSnapshot.snapshotFingerprint);
+    expect(plan).toMatchObject({
+      status: "partial",
+      lines: [{ plannedQty: "6", shortfallQty: "2" }],
+      resourceClaims: [{ warehouseLocationId: 11, claimedQty: "6" }],
+    });
+  });
+
+  it("rejects a cycle-count planning override without exact frozen-location evidence", () => {
+    const base = content();
+    const activeSnapshot = sealClaimSupplySnapshot({
+      schemaVersion: "inventory_availability_claim_snapshot_v1",
+      capturedAt: base.capturedAt,
+      rootProducts: [{ productId: 10, legacyInventoryStrategy: "physical_only" }],
+      variants: base.variants,
+      warehouses: base.warehouses,
+      locations: base.locations,
+      inventoryPositions: base.inventoryPositions,
+      safetyPolicies: base.safetyPolicies,
+      demandEvidence: base.demandEvidence,
+      transformationModels: base.transformationModels,
+      legacyRecipes: base.legacyRecipes,
+      outputLocations: base.outputLocations,
+      claimProjectionSource: base.claimProjectionSource,
+    });
+
+    expect(() => createVerifiedCycleCountPlanningSnapshot(activeSnapshot, 11))
+      .toThrow(expect.objectContaining({ code: "CYCLE_COUNT_LOCATION_NOT_FROZEN" }));
+    expect(() => createVerifiedCycleCountPlanningSnapshot(activeSnapshot, 999))
+      .toThrow(expect.objectContaining({ code: "CYCLE_COUNT_LOCATION_MISSING_FROM_SNAPSHOT" }));
   });
 
   it("rejects snapshot content that was changed after its fingerprint was sealed", () => {
