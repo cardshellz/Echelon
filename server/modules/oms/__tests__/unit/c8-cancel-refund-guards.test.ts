@@ -211,10 +211,11 @@ describe("P0.5: cancelled-order retries re-run an incomplete cascade", () => {
 
 // ─── D-REFUNDREL structural checks ────────────────────────────────
 
-describe("D-REFUNDREL: line-level refund reservation and return boundaries", () => {
-  it("requires line-scoped reservation release and lets failure reach the webhook retry boundary", () => {
-    expect(REFUND_CASCADE_SRC).toContain("Line-level reservation release is not configured");
-    expect(REFUND_CASCADE_SRC).toContain("await helpers.releaseOrderItemReservation!");
+describe("D-REFUNDREL: grouped refund demand reconciliation and return boundaries", () => {
+  it("requires one whole-order demand reconciliation and lets failure reach the webhook retry boundary", () => {
+    expect(REFUND_CASCADE_SRC).toContain("Whole-order demand reconciliation is not configured");
+    expect(REFUND_CASCADE_SRC).toContain("await helpers.reconcileRefundOrderDemand!");
+    expect(REFUND_CASCADE_SRC).toContain("releaseTargets: internal.releaseTargets");
     expect(REFUND_CASCADE_SRC).toContain("sourceEventId: refundExternalId");
   });
 

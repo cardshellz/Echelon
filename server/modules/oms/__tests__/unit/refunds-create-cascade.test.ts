@@ -103,7 +103,7 @@ function refundPayload(overrides: Record<string, unknown> = {}) {
 function helpers(overrides: Record<string, unknown> = {}) {
   return {
     resolveOmsOrder: vi.fn(async () => ({ id: 242960 })),
-    releaseOrderItemReservation: vi.fn(async () => ({ releasedQuantity: 25 })),
+    reconcileRefundOrderDemand: vi.fn(async () => ({ releasedReservationQuantity: 25 })),
     pushShipment: vi.fn(async () => undefined),
     shippingEngine: { cancel: vi.fn(async () => undefined) },
     ...overrides,
@@ -128,6 +128,25 @@ describe("refund-event reservation release calculation", () => {
     });
 
     expect(quantity).toBe(0);
+  });
+
+  it("releases only the unconsumed portion of a partially fulfilled return", () => {
+    const quantity = refundCascadeTest.deriveRefundEventReservationReleaseQuantity({
+      line: omsLine({
+        paid_quantity: 5,
+        refund_other_quantity: 5,
+      }),
+      adjustment: {
+        externalLineItemId: "441680952",
+        quantity: 5,
+        restockPolicy: "return",
+        raw: {},
+      },
+      pickedQuantity: 2,
+      fulfilledQuantity: 2,
+    });
+
+    expect(quantity).toBe(3);
   });
 
   it("does not double-release a quantity already removed by cancellation authority", () => {
@@ -232,7 +251,7 @@ describe("applyShopifyRefundCascade", () => {
       outcome: "line_dispositions_applied",
       releasedReservationQuantity: 0,
     });
-    expect(serviceHelpers.releaseOrderItemReservation).not.toHaveBeenCalled();
+    expect(serviceHelpers.reconcileRefundOrderDemand).not.toHaveBeenCalled();
   });
 
   it("repairs #60037 as a no-restock line disposition without inventing a return", async () => {
@@ -304,12 +323,12 @@ describe("applyShopifyRefundCascade", () => {
       releasedReservationQuantity: 25,
       cancelledShipments: 1,
     });
-    expect(serviceHelpers.releaseOrderItemReservation).toHaveBeenCalledWith({
+    expect(serviceHelpers.reconcileRefundOrderDemand).toHaveBeenCalledTimes(1);
+    expect(serviceHelpers.reconcileRefundOrderDemand).toHaveBeenCalledWith({
       orderId: 204464,
-      orderItemId: 312850,
-      quantity: 25,
       sourceEventId: "1036275548319",
-      reason: "Shopify line refund 1036275548319",
+      releaseTargets: [{ orderItemId: 312850, quantity: 25 }],
+      reason: "Shopify refund 1036275548319 demand reconciliation",
       userId: "system:shopify_refund",
     });
     expect(markShipmentCancelled).toHaveBeenCalledWith(
@@ -338,6 +357,102 @@ describe("applyShopifyRefundCascade", () => {
         authorityFulfillableQuantity: 0,
         authorizationStatus: "refunded",
       }),
+    }));
+  });
+
+  it("submits every line from one refund through one grouped demand reconciliation", async () => {
+    const secondOriginalLine = omsLine({
+      id: 110467,
+      external_line_item_id: "441680953",
+      channel_observed_quantity: 10,
+      paid_quantity: 10,
+      authority_fulfillable_quantity: 10,
+    });
+    const mock = makeDb((text) => {
+      if (text.includes("FROM wms.orders") && text.includes("ORDER BY id")) {
+        return { rows: [{ id: 204464 }] };
+      }
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.oms_order_lines ol") && text.includes("FOR UPDATE OF ol")) {
+        return { rows: [omsLine(), secondOriginalLine] };
+      }
+      if (text.includes("INSERT INTO oms.order_line_adjustments")) {
+        return { rows: [{ id: 1026 }, { id: 1027 }] };
+      }
+      if (text.includes("LEFT JOIN oms.order_line_adjustments")) {
+        return { rows: [
+          omsLine({ refund_other_quantity: 5 }),
+          omsLine({
+            ...secondOriginalLine,
+            refund_other_quantity: 7,
+          }),
+        ] };
+      }
+      if (text.includes("UPDATE oms.oms_order_lines")) return { rows: [] };
+      if (text.includes("FROM wms.order_items wi") && text.includes("FOR UPDATE OF wi")) {
+        return { rows: [
+          {
+            id: 312850,
+            oms_order_line_id: 110466,
+            external_line_item_id: "441680952",
+            quantity: 25,
+            product_id: 9,
+            picked_quantity: 0,
+            fulfilled_quantity: 0,
+            status: "pending",
+            requires_shipping: true,
+          },
+          {
+            id: 312851,
+            oms_order_line_id: 110467,
+            external_line_item_id: "441680953",
+            quantity: 10,
+            product_id: 10,
+            picked_quantity: 0,
+            fulfilled_quantity: 0,
+            status: "pending",
+            requires_shipping: true,
+          },
+        ] };
+      }
+      if (text.includes("UPDATE wms.order_items")) return { rows: [] };
+      if (text.includes("UPDATE wms.orders o")) return { rows: [] };
+      if (text.includes("wms_materialized_quantity = COALESCE(materialized.quantity, 0)")) {
+        return { rows: [] };
+      }
+      if (text.includes("FROM wms.outbound_shipment_items si") && text.includes("FOR UPDATE OF si, os")) {
+        return { rows: [] };
+      }
+      if (text.includes("FROM wms.outbound_shipments os") && text.includes("terminal_provider_sibling")) {
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected SQL in grouped refund test: ${text}`);
+    });
+    const serviceHelpers = helpers({
+      reconcileRefundOrderDemand: vi.fn(async () => ({ releasedReservationQuantity: 12 })),
+    });
+
+    const result = await applyShopifyRefundCascade(
+      mock.db,
+      refundPayload({
+        refund_line_items: [
+          { line_item_id: 441680952, quantity: 5, restock_type: "no_restock" },
+          { line_item_id: 441680953, quantity: 7, restock_type: "no_restock" },
+        ],
+      }),
+      serviceHelpers,
+      { channelId: 36, sourceInboxId: 75059, now: NOW },
+    );
+
+    expect(result.releasedReservationQuantity).toBe(12);
+    expect(serviceHelpers.reconcileRefundOrderDemand).toHaveBeenCalledTimes(1);
+    expect(serviceHelpers.reconcileRefundOrderDemand).toHaveBeenCalledWith(expect.objectContaining({
+      orderId: 204464,
+      sourceEventId: "1036275548319",
+      releaseTargets: [
+        { orderItemId: 312850, quantity: 5 },
+        { orderItemId: 312851, quantity: 7 },
+      ],
     }));
   });
 
@@ -378,7 +493,7 @@ describe("applyShopifyRefundCascade", () => {
       throw new Error(`Unexpected SQL in return test: ${text}`);
     });
     const serviceHelpers = helpers({
-      releaseOrderItemReservation: vi.fn(async () => ({ releasedQuantity: 0 })),
+      reconcileRefundOrderDemand: vi.fn(async () => ({ releasedReservationQuantity: 0 })),
     });
 
     const result = await applyShopifyRefundCascade(
@@ -398,7 +513,7 @@ describe("applyShopifyRefundCascade", () => {
     });
     expect(mock.calls.some((text) => text.includes("INSERT INTO wms.returns") && text.includes("source_event_key"))).toBe(true);
     expect(mock.calls.some((text) => text.includes("INSERT INTO wms.return_items") && text.includes("expected_qty"))).toBe(true);
-    expect(serviceHelpers.releaseOrderItemReservation).not.toHaveBeenCalled();
+    expect(serviceHelpers.reconcileRefundOrderDemand).not.toHaveBeenCalled();
   });
 
   it("is idempotent when the same no-restock refund is replayed", async () => {
@@ -435,7 +550,7 @@ describe("applyShopifyRefundCascade", () => {
       throw new Error(`Unexpected SQL in replay test: ${text}`);
     });
     const serviceHelpers = helpers({
-      releaseOrderItemReservation: vi.fn(async () => ({ releasedQuantity: 0 })),
+      reconcileRefundOrderDemand: vi.fn(async () => ({ releasedReservationQuantity: 0 })),
     });
 
     const result = await applyShopifyRefundCascade(
@@ -447,6 +562,12 @@ describe("applyShopifyRefundCascade", () => {
 
     expect(result.outcome).toBe("idempotent_skip");
     expect(result.releasedReservationQuantity).toBe(0);
+    expect(serviceHelpers.reconcileRefundOrderDemand).toHaveBeenCalledTimes(1);
+    expect(serviceHelpers.reconcileRefundOrderDemand).toHaveBeenCalledWith(expect.objectContaining({
+      orderId: 204464,
+      sourceEventId: "1036275548319",
+      releaseTargets: [{ orderItemId: 312850, quantity: 25 }],
+    }));
     expect(markShipmentCancelled).not.toHaveBeenCalled();
     expect(mock.calls.some(
       (text) => text.includes("wms_materialized_quantity = COALESCE(materialized.quantity, 0)"),

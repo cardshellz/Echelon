@@ -116,14 +116,13 @@ interface WmsServices {
       userId?: string,
       options?: { disposition?: "release" | "cancel" },
     ) => Promise<any>;
-    releaseOrderItemReservation: (args: {
+    reconcileRefundOrderDemand: (args: {
       orderId: number;
-      orderItemId: number;
-      quantity: number;
       sourceEventId: string;
+      releaseTargets: readonly { orderItemId: number; quantity: number }[];
       reason: string;
       userId?: string;
-    }) => Promise<{ releasedQuantity: number }>;
+    }) => Promise<{ releasedReservationQuantity: number }>;
   };
   fulfillmentRouter: {
     routeOrder: (ctx: any) => Promise<any>;
@@ -1978,8 +1977,8 @@ export function registerOmsWebhooks(
         {
           // OMS already resolved above — short-circuit the helper.
           resolveOmsOrder: async () => ({ id: existing.id }),
-          releaseOrderItemReservation: wmsServices
-            ? async (args) => wmsServices.reservation.releaseOrderItemReservation(args)
+          reconcileRefundOrderDemand: wmsServices
+            ? async (args) => wmsServices.reservation.reconcileRefundOrderDemand(args)
             : undefined,
           shipstation: shipStationService
             ? {

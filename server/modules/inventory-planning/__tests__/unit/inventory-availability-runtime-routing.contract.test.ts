@@ -101,4 +101,15 @@ describe("inventory availability runtime claim routing contract", () => {
     expect(wmsSync).not.toContain("CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC");
     expect(webhooks).not.toContain("CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC");
   });
+
+  it("routes each Shopify refund through one grouped whole-order demand reconciliation", () => {
+    const cascade = source("server/modules/oms/shopify-refund-cascade.service.ts");
+    const webhooks = source("server/modules/oms/oms-webhooks.ts");
+
+    expect(cascade).toContain("await helpers.reconcileRefundOrderDemand!");
+    expect(cascade).toContain("releaseTargets: internal.releaseTargets");
+    expect(cascade).not.toContain("helpers.releaseOrderItemReservation");
+    expect(webhooks).toContain("wmsServices.reservation.reconcileRefundOrderDemand(args)");
+    expect(webhooks).not.toContain("wmsServices.reservation.releaseOrderItemReservation(args)");
+  });
 });

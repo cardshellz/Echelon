@@ -45,8 +45,8 @@ export interface ApplyShopifyRefundCascadeResult {
   warnings: string[];
 }
 
-interface ReservationReleaseResult {
-  releasedQuantity: number;
+interface RefundDemandReconciliationResult {
+  releasedReservationQuantity: number;
 }
 
 export interface ShopifyRefundCascadeHelpers {
@@ -54,14 +54,13 @@ export interface ShopifyRefundCascadeHelpers {
     db: any,
     args: { shopifyOrderId: string | number; channelId: number },
   ) => Promise<{ id: number } | null>;
-  releaseOrderItemReservation?: (args: {
+  reconcileRefundOrderDemand?: (args: {
     orderId: number;
-    orderItemId: number;
-    quantity: number;
     sourceEventId: string;
+    releaseTargets: readonly { orderItemId: number; quantity: number }[];
     reason: string;
     userId?: string;
-  }) => Promise<ReservationReleaseResult>;
+  }) => Promise<RefundDemandReconciliationResult>;
   shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
   shippingEngine?: {
     cancel: (ref: {
@@ -164,8 +163,6 @@ function deriveRefundEventReservationReleaseQuantity(args: {
   pickedQuantity: number;
   fulfilledQuantity: number;
 }): number {
-  if (args.adjustment.restockPolicy === "return") return 0;
-
   const paidQuantity = Math.max(0, Number(args.line.paid_quantity ?? 0));
   const cancelledQuantity = Math.max(0, Number(args.line.cancelled_quantity ?? 0));
   const cumulativeCancelQuantity = Math.max(
@@ -1292,21 +1289,26 @@ export async function applyShopifyRefundCascade(
   });
 
   let releasedReservationQuantity = 0;
-  if (internal.releaseTargets.length > 0 && !helpers.releaseOrderItemReservation) {
+  if (internal.releaseTargets.length > 0 && !helpers.reconcileRefundOrderDemand) {
     throw new Error(
-      `Line-level reservation release is not configured for refund ${refundExternalId}`,
+      `Whole-order demand reconciliation is not configured for refund ${refundExternalId}`,
     );
   }
-  for (const target of internal.releaseTargets) {
-    const release = await helpers.releaseOrderItemReservation!({
+  if (internal.releaseTargets.length > 0) {
+    const reconciliation = await helpers.reconcileRefundOrderDemand!({
       orderId: wmsOrderId!,
-      orderItemId: target.orderItemId,
-      quantity: target.quantity,
       sourceEventId: refundExternalId,
-      reason: `Shopify line refund ${refundExternalId}`,
+      releaseTargets: internal.releaseTargets,
+      reason: `Shopify refund ${refundExternalId} demand reconciliation`,
       userId: "system:shopify_refund",
     });
-    releasedReservationQuantity += Number(release?.releasedQuantity ?? 0);
+    const released = reconciliation?.releasedReservationQuantity;
+    if (typeof released !== "number" || !Number.isSafeInteger(released) || released < 0) {
+      throw new Error(
+        `Whole-order demand reconciliation returned an invalid released quantity for refund ${refundExternalId}`,
+      );
+    }
+    releasedReservationQuantity = released;
   }
 
   let cancelledShipments = 0;

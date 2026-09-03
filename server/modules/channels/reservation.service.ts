@@ -127,6 +127,30 @@ export interface ReconcileOrderDemandResult {
   reservation: ReservationResult;
 }
 
+export interface RefundDemandReleaseTarget {
+  orderItemId: number;
+  quantity: number;
+}
+
+export interface ReconcileRefundOrderDemandCommand {
+  orderId: number;
+  /** Durable Shopify refund identity shared by every affected line. */
+  sourceEventId: string;
+  /** Event-attributed, unconsumed line demand to release under legacy authority. */
+  releaseTargets: readonly RefundDemandReleaseTarget[];
+  reason: string;
+  userId?: string;
+  /** Internal transaction propagation used by the authority-aware runtime adapter. */
+  dbOverride?: any;
+  /** Internal hook used to defer channel sync until the authority transaction commits. */
+  deferUntilCommit?: (effect: () => Promise<void>) => void;
+}
+
+export interface ReconcileRefundOrderDemandResult {
+  /** Target-variant units actually removed from reservation/claim ownership by this attempt. */
+  releasedReservationQuantity: number;
+}
+
 export interface OrderReservationStatus {
   sku: string;
   orderItemId: number;
@@ -162,8 +186,13 @@ export interface ReservationServiceContract {
     reason: string;
     userId?: string;
     dbOverride?: any;
+    /** Internal grouped-refund control; requires a caller-owned transaction. */
+    deferChannelSync?: boolean;
   }): Promise<ReleaseOrderItemReservationResult>;
   reconcileOrderDemand(command: ReconcileOrderDemandCommand): Promise<ReconcileOrderDemandResult>;
+  reconcileRefundOrderDemand(
+    command: ReconcileRefundOrderDemandCommand,
+  ): Promise<ReconcileRefundOrderDemandResult>;
   reallocateOrphaned(
     productVariantId: number,
     warehouseLocationId: number,
@@ -760,6 +789,7 @@ class ReservationService implements ReservationServiceContract {
     reason: string;
     userId?: string;
     dbOverride?: any;
+    deferChannelSync?: boolean;
   }): Promise<ReleaseOrderItemReservationResult> {
     if (!Number.isInteger(params.orderId) || params.orderId <= 0) {
       throw new Error("orderId must be a positive integer");
@@ -772,6 +802,9 @@ class ReservationService implements ReservationServiceContract {
     }
     const sourceEventId = String(params.sourceEventId ?? "").trim();
     if (!sourceEventId) throw new Error("sourceEventId is required");
+    if (params.deferChannelSync === true && params.dbOverride == null) {
+      throw new Error("deferChannelSync requires a caller-owned transaction");
+    }
 
     const releaseWithinTransaction = async (tx: any) => {
       const itemResult: any = await tx.execute(sql`
@@ -950,10 +983,162 @@ class ReservationService implements ReservationServiceContract {
       ? await releaseWithinTransaction(params.dbOverride)
       : await this.db.transaction(releaseWithinTransaction);
 
-    if (outcome.releasedQuantity > 0) {
+    if (outcome.releasedQuantity > 0 && params.deferChannelSync !== true) {
       await this.channelSync.queueSyncAfterInventoryChange(outcome.productVariantId);
     }
     return outcome;
+  }
+
+  /**
+   * Reconcile every line reduction from one Shopify refund as one transaction.
+   *
+   * The refund cascade supplies the complete event-level target set. Legacy
+   * authority retains its exact line-ledger release semantics, but all target
+   * rows and product locks are acquired in deterministic order before any
+   * inventory mutation. Canonical authority replaces this implementation at
+   * the runtime adapter with one whole-order claim reconciliation.
+   */
+  async reconcileRefundOrderDemand(
+    command: ReconcileRefundOrderDemandCommand,
+  ): Promise<ReconcileRefundOrderDemandResult> {
+    if (
+      !Number.isSafeInteger(command.orderId) ||
+      command.orderId <= 0 ||
+      command.orderId > 2_147_483_647
+    ) {
+      throw new Error("orderId must be a positive integer");
+    }
+    const sourceEventId = String(command.sourceEventId ?? "").trim();
+    if (!sourceEventId || sourceEventId.length > 500) {
+      throw new Error("sourceEventId must contain between 1 and 500 characters");
+    }
+    const reason = String(command.reason ?? "").trim();
+    if (!reason || reason.length > 1000) {
+      throw new Error("reason must contain between 1 and 1000 characters");
+    }
+    if (!Array.isArray(command.releaseTargets) || command.releaseTargets.length === 0) {
+      throw new Error("releaseTargets must contain at least one refund demand reduction");
+    }
+    if (command.dbOverride != null && typeof command.deferUntilCommit !== "function") {
+      throw new Error(
+        "A grouped refund inside a caller-owned transaction requires a post-commit effect registrar",
+      );
+    }
+    if (command.dbOverride == null && command.deferUntilCommit != null) {
+      throw new Error("deferUntilCommit is only valid with a caller-owned transaction");
+    }
+
+    const seenOrderItemIds = new Set<number>();
+    const releaseTargets = command.releaseTargets.map((target) => {
+      if (
+        !Number.isSafeInteger(target.orderItemId) ||
+        target.orderItemId <= 0 ||
+        target.orderItemId > 2_147_483_647
+      ) {
+        throw new Error("releaseTargets.orderItemId must be a positive integer");
+      }
+      if (
+        !Number.isSafeInteger(target.quantity) ||
+        target.quantity <= 0 ||
+        target.quantity > 2_147_483_647
+      ) {
+        throw new Error("releaseTargets.quantity must be a positive integer");
+      }
+      if (seenOrderItemIds.has(target.orderItemId)) {
+        throw new Error(`releaseTargets contains duplicate order item ${target.orderItemId}`);
+      }
+      seenOrderItemIds.add(target.orderItemId);
+      return { orderItemId: target.orderItemId, quantity: target.quantity };
+    }).sort((left, right) => left.orderItemId - right.orderItemId);
+
+    const reconcileWithinTransaction = async (tx: any) => {
+      const orderItemIds = releaseTargets.map((target) => target.orderItemId);
+      const identityResult: any = await tx.execute(sql`
+        SELECT
+          oi.id AS order_item_id,
+          oi.product_id AS product_variant_id,
+          pv.product_id AS catalog_product_id
+        FROM wms.order_items oi
+        LEFT JOIN catalog.product_variants pv ON pv.id = oi.product_id
+        WHERE oi.order_id = ${command.orderId}
+          AND oi.id = ANY(ARRAY[${sql.join(orderItemIds, sql`, `)}]::int[])
+        ORDER BY oi.id
+        FOR UPDATE OF oi
+      `);
+      const identityRows = identityResult?.rows ?? [];
+      if (identityRows.length !== releaseTargets.length) {
+        throw new Error(
+          `Refund ${sourceEventId} does not resolve every release target on WMS order ${command.orderId}`,
+        );
+      }
+      const productIds = new Set<number>();
+      for (const row of identityRows) {
+        if (row.product_variant_id == null || row.catalog_product_id == null) {
+          throw new Error(
+            `Refund ${sourceEventId} release target ${row.order_item_id} has no active catalog identity`,
+          );
+        }
+        const productId = Number(row.catalog_product_id);
+        if (!Number.isInteger(productId) || productId <= 0) {
+          throw new Error(
+            `Refund ${sourceEventId} release target ${row.order_item_id} has an invalid catalog product identity`,
+          );
+        }
+        productIds.add(productId);
+      }
+      for (const productId of [...productIds].sort((left, right) => left - right)) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(${RESERVATION_LOCK_NS}, ${productId})`);
+      }
+
+      let releasedReservationQuantity = 0;
+      const productVariantIds = new Set<number>();
+      for (const target of releaseTargets) {
+        const release = await this.releaseOrderItemReservation({
+          orderId: command.orderId,
+          orderItemId: target.orderItemId,
+          quantity: target.quantity,
+          sourceEventId,
+          reason,
+          userId: command.userId,
+          dbOverride: tx,
+          deferChannelSync: true,
+        });
+        if (
+          !Number.isSafeInteger(release.releasedQuantity) ||
+          release.releasedQuantity < 0 ||
+          releasedReservationQuantity > Number.MAX_SAFE_INTEGER - release.releasedQuantity
+        ) {
+          throw new Error(
+            `Refund ${sourceEventId} produced an invalid released quantity for order item ${target.orderItemId}`,
+          );
+        }
+        releasedReservationQuantity += release.releasedQuantity;
+        productVariantIds.add(release.productVariantId);
+      }
+      return {
+        releasedReservationQuantity,
+        productVariantIds: [...productVariantIds].sort((left, right) => left - right),
+      };
+    };
+
+    const outcome = command.dbOverride
+      ? reconcileWithinTransaction(command.dbOverride)
+      : this.db.transaction(reconcileWithinTransaction);
+    const committed = await outcome;
+    const queueChannelSync = async () => {
+      await Promise.all(
+        committed.productVariantIds.map((productVariantId) =>
+          this.channelSync.queueSyncAfterInventoryChange(productVariantId)),
+      );
+    };
+    if (command.dbOverride != null) {
+      command.deferUntilCommit!(queueChannelSync);
+    } else {
+      await queueChannelSync();
+    }
+    return {
+      releasedReservationQuantity: committed.releasedReservationQuantity,
+    } satisfies ReconcileRefundOrderDemandResult;
   }
 
   /**
@@ -961,9 +1146,9 @@ class ReservationService implements ReservationServiceContract {
    *
    * Legacy storage has no whole-order replacement primitive, so this retains
    * the deployed idempotent release-then-reserve sequence behind one contract.
-   * The authority-aware adapter rejects this implementation in canonical mode
-   * until replacement can be committed atomically with exact predecessor
-   * lineage.
+   * The authority-aware adapter selects this implementation only while legacy
+   * authority is pinned; canonical authority uses exact-predecessor claim
+   * replacement instead.
    */
   async reconcileOrderDemand(
     command: ReconcileOrderDemandCommand,

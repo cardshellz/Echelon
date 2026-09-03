@@ -58,6 +58,108 @@ describe("PostgresInventoryAvailabilityRuntimeClaimExecutor", () => {
     expect(legacy.reserveOrder).toHaveBeenCalledWith(42, undefined, expect.any(Object));
   });
 
+  it("binds grouped legacy refund reconciliation to the authority transaction", async () => {
+    const client = fakeClient({
+      authority: "legacy",
+      authority_revision: "1",
+      activation_run_id: null,
+    });
+    const legacy = fakeLegacy();
+    const postCommitEffect = vi.fn(async () => {
+      expect(client.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+    });
+    vi.mocked(legacy.reconcileRefundOrderDemand).mockImplementation(async (command) => {
+      command.deferUntilCommit?.(postCommitEffect);
+      return { releasedReservationQuantity: 3 };
+    });
+    const executor = new PostgresInventoryAvailabilityRuntimeClaimExecutor(
+      legacy,
+      fakeCanonical(),
+      { connect: vi.fn(async () => client) } as never,
+    );
+
+    await executor.execute((context) => context.legacy.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:901",
+      releaseTargets: [{ orderItemId: 11, quantity: 3 }],
+      reason: "refund demand changed",
+    }));
+
+    expect(legacy.reconcileRefundOrderDemand).toHaveBeenCalledWith({
+      orderId: 42,
+      sourceEventId: "refund:901",
+      releaseTargets: [{ orderItemId: 11, quantity: 3 }],
+      reason: "refund demand changed",
+      dbOverride: expect.any(Object),
+      deferUntilCommit: expect.any(Function),
+    });
+    expect(client.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+    expect(postCommitEffect).toHaveBeenCalledOnce();
+  });
+
+  it("does not run grouped refund effects when the authority transaction rolls back", async () => {
+    const client = fakeClient({
+      authority: "legacy",
+      authority_revision: "1",
+      activation_run_id: null,
+    });
+    const legacy = fakeLegacy();
+    const postCommitEffect = vi.fn(async () => {});
+    vi.mocked(legacy.reconcileRefundOrderDemand).mockImplementation(async (command) => {
+      command.deferUntilCommit?.(postCommitEffect);
+      throw new Error("second refund line failed");
+    });
+    const executor = new PostgresInventoryAvailabilityRuntimeClaimExecutor(
+      legacy,
+      fakeCanonical(),
+      { connect: vi.fn(async () => client) } as never,
+    );
+
+    await expect(executor.execute((context) => context.legacy.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:rollback",
+      releaseTargets: [
+        { orderItemId: 11, quantity: 1 },
+        { orderItemId: 12, quantity: 1 },
+      ],
+      reason: "refund demand changed",
+    }))).rejects.toThrow("second refund line failed");
+
+    expect(client.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(postCommitEffect).not.toHaveBeenCalled();
+  });
+
+  it("propagates a post-commit refund effect failure without attempting to roll back the commit", async () => {
+    const client = fakeClient({
+      authority: "legacy",
+      authority_revision: "1",
+      activation_run_id: null,
+    });
+    const legacy = fakeLegacy();
+    vi.mocked(legacy.reconcileRefundOrderDemand).mockImplementation(async (command) => {
+      command.deferUntilCommit?.(async () => {
+        throw new Error("channel sync queue unavailable");
+      });
+      return { releasedReservationQuantity: 1 };
+    });
+    const executor = new PostgresInventoryAvailabilityRuntimeClaimExecutor(
+      legacy,
+      fakeCanonical(),
+      { connect: vi.fn(async () => client) } as never,
+    );
+
+    await expect(executor.execute((context) => context.legacy.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:post-commit-failure",
+      releaseTargets: [{ orderItemId: 11, quantity: 1 }],
+      reason: "refund demand changed",
+    }))).rejects.toThrow("channel sync queue unavailable");
+
+    const transactionCommands = client.query.mock.calls.map((call) => String(call[0]).trim());
+    expect(transactionCommands.at(-1)).toBe("COMMIT");
+    expect(transactionCommands).not.toContain("ROLLBACK");
+  });
+
   it("rejects caller-owned transactions before delegated legacy work", async () => {
     const client = fakeClient({
       authority: "legacy",
@@ -245,6 +347,7 @@ function fakeLegacy(): ReservationServiceContract {
     releaseOrderReservation: vi.fn(),
     releaseOrderItemReservation: vi.fn(),
     reconcileOrderDemand: vi.fn(),
+    reconcileRefundOrderDemand: vi.fn(),
     reallocateOrphaned: vi.fn(),
     getOrderReservationStatus: vi.fn(),
     autoReserveOnSync: vi.fn(),

@@ -93,11 +93,16 @@ implements InventoryAvailabilityRuntimeClaimExecutor {
       }
 
       const transactionDb = drizzle(connectedClient, { schema });
+      const postCommitEffects: Array<() => Promise<void>> = [];
       const result = await work({
         authority: authority.authority,
         authorityRevision: authority.authorityRevision,
         activationRunId: authority.activationRunId,
-        legacy: bindLegacyReservationToTransaction(this.legacy, transactionDb),
+        legacy: bindLegacyReservationToTransaction(
+          this.legacy,
+          transactionDb,
+          (effect) => postCommitEffects.push(effect),
+        ),
         canonical: this.canonical,
         getLatestClaim: (orderId) => getLatestClaim(connectedClient, orderId),
         getVariantMetadata: (productVariantIds) => getVariantMetadata(connectedClient, productVariantIds),
@@ -106,6 +111,7 @@ implements InventoryAvailabilityRuntimeClaimExecutor {
       });
       await connectedClient.query("COMMIT");
       began = false;
+      for (const effect of postCommitEffects) await effect();
       return result;
     } catch (error) {
       if (began && client) {
@@ -158,6 +164,7 @@ class AsyncSemaphore {
 function bindLegacyReservationToTransaction(
   legacy: ReservationServiceContract,
   transactionDb: DrizzleDb,
+  deferUntilCommit: (effect: () => Promise<void>) => void,
 ): ReservationServiceContract {
   return {
     reserveForOrder: (
@@ -198,6 +205,14 @@ function bindLegacyReservationToTransaction(
     reconcileOrderDemand: (command) => {
       rejectExternalTransaction(command.dbOverride);
       return legacy.reconcileOrderDemand({ ...command, dbOverride: transactionDb });
+    },
+    reconcileRefundOrderDemand: (command) => {
+      rejectExternalTransaction(command.dbOverride);
+      return legacy.reconcileRefundOrderDemand({
+        ...command,
+        dbOverride: transactionDb,
+        deferUntilCommit,
+      });
     },
     reallocateOrphaned: (
       productVariantId,
