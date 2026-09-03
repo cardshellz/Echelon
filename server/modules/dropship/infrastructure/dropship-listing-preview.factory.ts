@@ -1,5 +1,5 @@
-import { db } from "../../../db";
-import { createInventoryAtpService } from "../../inventory";
+import { pool } from "../../../db";
+import { createAuthorityAwareInventoryAtpService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import {
   DropshipListingPreviewService,
   makeDropshipListingPreviewLogger,
@@ -15,7 +15,7 @@ export function createDropshipListingPreviewServiceFromEnv(): DropshipListingPre
   return new DropshipListingPreviewService({
     vendorProvisioning: createDropshipVendorProvisioningServiceFromEnv(),
     repository: new PgDropshipListingPreviewRepository(),
-    atp: new InventoryServiceDropshipAtpProvider(createInventoryAtpService(db)),
+    atp: new InventoryServiceDropshipAtpProvider(createAuthorityAwareInventoryAtpService(pool)),
     marketplaceListing: new ConfigDrivenDropshipMarketplaceListingProvider(),
     ebayFulfillmentPolicyGuard: createDropshipEbayFulfillmentPolicyGuardFromEnv(),
     clock: systemDropshipListingPreviewClock,

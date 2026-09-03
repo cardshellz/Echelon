@@ -120,7 +120,9 @@ export interface DropshipSelectionAtpRepository {
 }
 
 export interface DropshipAtpProvider {
-  getBaseAtpByProductIds(productIds: readonly number[]): Promise<Map<number, number>>;
+  getVariantAtp(
+    targets: readonly { productId: number; productVariantId: number }[],
+  ): Promise<Map<number, number>>;
 }
 
 export interface DropshipSelectionAtpServiceDependencies {
@@ -230,10 +232,12 @@ export class DropshipSelectionAtpService {
     });
     const facets = buildCatalogFacets(exposedFacetCandidates);
 
-    const productIds = uniqueNumbers(candidates.map((candidate) => candidate.productId));
     const productVariantIds = uniqueNumbers(candidates.map((candidate) => candidate.productVariantId));
-    const [baseAtpByProductId, overrideRows] = await Promise.all([
-      this.deps.atp.getBaseAtpByProductIds(productIds),
+    const [atpByVariantId, overrideRows] = await Promise.all([
+      this.deps.atp.getVariantAtp(candidates.map((candidate) => ({
+        productId: candidate.productId,
+        productVariantId: candidate.productVariantId,
+      }))),
       this.deps.repository.listVariantOverrides({
         vendorId: parsed.vendorId,
         productVariantIds,
@@ -245,9 +249,7 @@ export class DropshipSelectionAtpService {
     );
     const evaluatedRows = candidates.map((candidate) => {
       const adminExposureDecision = evaluateDropshipCatalogExposure(candidate, adminRules, now);
-      const productAtpBase = baseAtpByProductId.get(candidate.productId) ?? 0;
-      const unitsPerVariant = Math.max(1, candidate.unitsPerVariant);
-      const rawAtpUnits = Math.floor(Math.max(0, productAtpBase) / unitsPerVariant);
+      const rawAtpUnits = atpByVariantId.get(candidate.productVariantId) ?? 0;
       const selectionDecision = evaluateDropshipVendorCatalogSelection({
         candidate,
         adminExposureDecision,

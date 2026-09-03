@@ -686,13 +686,17 @@ async function loadSnapshotProducts(
   }));
 }
 
-async function captureInsideTransaction(client: QueryClient, productId: number): Promise<SupplySnapshotDto> {
+async function captureInsideTransaction(
+  client: QueryClient,
+  productId: number,
+  selection: SnapshotSelection,
+): Promise<SupplySnapshotDto> {
   const snapshotRow = rows(await client.query(
     `SELECT transaction_timestamp() AS captured_at`,
   ))[0];
   const [product] = await loadSnapshotProducts(client, [productId]);
   const capturedAt = iso(snapshotRow?.captured_at, "snapshot.capturedAt");
-  const graph = await captureGraphInsideTransaction(client, [product!], capturedAt, "draft_preferred");
+  const graph = await captureGraphInsideTransaction(client, [product!], capturedAt, selection);
   const content: SupplySnapshotContentDto = {
     schemaVersion: "inventory_availability_snapshot_v1",
     productId: product!.productId,
@@ -700,6 +704,17 @@ async function captureInsideTransaction(client: QueryClient, productId: number):
     ...graph,
   };
   return sealSupplySnapshot(content);
+}
+
+/**
+ * Capture only activated planning definitions on an existing transaction.
+ * Runtime readers must never use the draft-preferred admin snapshot.
+ */
+export async function captureActiveSupplySnapshotInsideTransaction(
+  client: InventoryAvailabilitySnapshotQueryClient,
+  productId: number,
+): Promise<SupplySnapshotDto> {
+  return captureInsideTransaction(client, validateProductId(productId), "active_only");
 }
 
 async function captureClaimInsideTransaction(
@@ -1062,7 +1077,7 @@ implements InventoryAvailabilityShadowStore, InventoryAvailabilityClaimSnapshotS
     return inTransaction(
       this.connectionPool,
       "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-      (client) => captureInsideTransaction(client, validatedProductId),
+      (client) => captureInsideTransaction(client, validatedProductId, "draft_preferred"),
     );
   }
 

@@ -13,6 +13,7 @@ import {
   sealSupplySnapshot,
 } from "../../domain/inventory-availability-planner";
 import {
+  captureActiveSupplySnapshotInsideTransaction,
   InventoryAvailabilityShadowRepositoryError,
   PostgresInventoryAvailabilityShadowRepository,
 } from "../../infrastructure/inventory-availability-shadow.repository";
@@ -22,6 +23,20 @@ const CAPTURED_AT = "2026-08-27T12:00:00.000Z";
 const COMPLETED_AT = new Date("2026-08-27T12:00:01.000Z");
 
 describe("Postgres inventory availability shadow repository", () => {
+  it("captures runtime ATP from active heads only on the caller's transaction", async () => {
+    const client = fakeSnapshotClient();
+
+    const snapshot = await captureActiveSupplySnapshotInsideTransaction(client as never, 10);
+
+    expect(snapshot.transformationModels[0]?.lifecycleSelection).toBe("active_head");
+    const modelQuery = client.query.mock.calls.find((call) =>
+      String(call[0]).includes("FROM inventory.transformation_model_heads"));
+    expect(String(modelQuery?.[0])).toContain("model.id = head.active_model_id");
+    expect(client.query).not.toHaveBeenCalledWith(
+      "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+    );
+  });
+
   it("captures physical, authority, safety, and method-specific demand in one read-only snapshot", async () => {
     const client = fakeSnapshotClient();
     const repository = new PostgresInventoryAvailabilityShadowRepository(

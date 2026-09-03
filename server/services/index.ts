@@ -29,7 +29,6 @@ import {
   InventoryUseCases,
   createInventoryLotService,
   createCOGSService,
-  createInventoryAtpService,
   createRecipeCapacityService,
   createBreakAssemblyService,
   createBuildUseCases,
@@ -125,6 +124,7 @@ import { InventoryPublicationOutboxService } from "../modules/inventory-planning
 import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
 import { InventoryPublicationReadbackService } from "../modules/inventory-planning/application/inventory-publication-readback.service";
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
+import { createAuthorityAwareInventoryAtpService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
 export function createServices(
@@ -137,7 +137,7 @@ export function createServices(
   const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs); // Temporary mapping
   const inventoryUseCases = inventoryCore;
   const recipeCapacity = createRecipeCapacityService(db);
-  const atp = createInventoryAtpService(db, recipeCapacity);
+  const atp = createAuthorityAwareInventoryAtpService(databasePool);
 
   // Channel sync depends on ATP and must precede reservation wiring.
   const channelSync = createChannelSyncService(db, atp);
@@ -535,7 +535,7 @@ export function createServices(
 export type ServiceRegistry = ReturnType<typeof createServices>;
 
 // Re-export factory functions for individual service creation
-export { createBreakAssemblyService, createReplenishmentService, createCycleCountService, createInventoryAtpService, createInventoryAlertService } from "../modules/inventory";
+export { createBreakAssemblyService, createReplenishmentService, createCycleCountService, createInventoryAlertService } from "../modules/inventory";
 export { createReservationService } from "../modules/channels/reservation.service";
 export { createChannelSyncService } from "../modules/channels/sync.service";
 export { createReturnsService } from "../modules/orders/returns.service";
