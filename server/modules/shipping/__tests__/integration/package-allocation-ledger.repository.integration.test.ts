@@ -308,6 +308,7 @@ async function seedOutboundBusinessShipmentLabel(
     readonly trackingNumber: string;
     readonly labelStatus: "active" | "voided";
     readonly ordinal: number;
+    readonly carrier?: string;
   },
 ): Promise<void> {
   const label = await pool.query<{ id: string }>(
@@ -315,13 +316,18 @@ async function seedOutboundBusinessShipmentLabel(
        provider, provider_label_id, provider_order_id, provider_order_key,
        tracking_number, normalized_tracking_number, label_status, label_direction,
        carrier, service_code, first_observed_at, last_observed_at
-     ) VALUES (
-       'shipstation', $1, '99001', 'provider-order-key-99001',
-       $2, $2, $3, 'outbound', 'ups', 'ups_ground',
-       '2026-08-22T14:00:00.000Z', '2026-08-22T14:00:00.000Z'
-     )
-     RETURNING id::text AS id`,
-    [input.providerPhysicalShipmentId, input.trackingNumber, input.labelStatus],
+      ) VALUES (
+        'shipstation', $1, '99001', 'provider-order-key-99001',
+        $2, $2, $3, 'outbound', $4, 'ups_ground',
+        '2026-08-22T14:00:00.000Z', '2026-08-22T14:00:00.000Z'
+      )
+      RETURNING id::text AS id`,
+    [
+      input.providerPhysicalShipmentId,
+      input.trackingNumber,
+      input.labelStatus,
+      input.carrier ?? "ups",
+    ],
   );
   await pool.query(
     `INSERT INTO wms.shipping_provider_label_events (
@@ -2697,13 +2703,22 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       trackingNumber: "1Z0000000000044011",
       labelStatus: "active",
       ordinal: 44011,
+      carrier: "stamps_com",
     });
     await seedOutboundBusinessShipmentLabel(pool, {
       providerPhysicalShipmentId: "44012",
       trackingNumber: "1Z0000000000044012",
       labelStatus: "active",
       ordinal: 44012,
+      carrier: "stamps_com",
     });
+    await pool.query(
+      `INSERT INTO wms.physical_shipments (
+         provider, provider_physical_shipment_id, tracking_number, carrier, status
+       ) VALUES
+         ('shipstation', '44011', '1Z0000000000044011', 'USPS', 'shipped'),
+         ('shipstation', '44012', '1Z0000000000044012', 'USPS', 'shipped')`,
+    );
     const repository = new PgPackageAllocationLedgerRepository(pool);
     const planning = new PackageAllocationPlanningService(repository);
     const persisted = await planning.persist({
@@ -2811,6 +2826,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       quantity_pushed: number;
       push_status: string;
       attempt_count: number;
+      carrier: string;
       package_allocation_entry_id: string;
       package_allocation_effect_intent_id: string;
       legacy_wms_shipment_item_id: number | null;
@@ -2821,6 +2837,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
          push_item.quantity_pushed,
          push.push_status,
          push.attempt_count,
+         push.carrier,
          item.package_allocation_entry_id::text,
          push_item.package_allocation_effect_intent_id::text,
          item.legacy_wms_shipment_item_id
@@ -2840,6 +2857,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         quantity_pushed: 1,
         push_status: "shadow",
         attempt_count: 0,
+        carrier: "USPS",
         legacy_wms_shipment_item_id: null,
       }),
       expect.objectContaining({
@@ -2848,6 +2866,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         quantity_pushed: 1,
         push_status: "shadow",
         attempt_count: 0,
+        carrier: "USPS",
         legacy_wms_shipment_item_id: null,
       }),
     ]);
@@ -2906,6 +2925,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       limit: 10,
     });
     expect(claimable).toHaveLength(2);
+    expect(claimable.every((command) => command.carrier === "USPS")).toBe(true);
     expect(claimable.every((command) => command.items.every(
       (item) => item.packageAllocationEffectIntentId !== null,
     ))).toBe(true);

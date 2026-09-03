@@ -137,6 +137,29 @@ describe("channel fulfillment command-set reconciliation", () => {
     });
   });
 
+  it("accepts a canonical USPS command replayed from a ShipStation carrier alias", () => {
+    const result = reconcileChannelFulfillmentCommandSet({
+      existingCommands: [snapshot({ carrier: "USPS" })],
+      incomingCommand: { ...command(), carrier: "stamps_com" },
+      shippingProvider: "shipstation",
+      providerPhysicalShipmentId: "9001",
+    });
+    expect(result).toMatchObject({ kind: "compatible" });
+  });
+
+  it("fails closed for different unknown carrier identities", () => {
+    const result = reconcileChannelFulfillmentCommandSet({
+      existingCommands: [snapshot({ carrier: "regional_one" })],
+      incomingCommand: { ...command(), carrier: "regional_two" },
+      shippingProvider: "shipstation",
+      providerPhysicalShipmentId: "9001",
+    });
+    expect(result).toMatchObject({
+      kind: "conflict",
+      reason: "immutable_package_identity_changed",
+    });
+  });
+
   it("builds the same supplemental scope regardless of item order", () => {
     expect(buildSupplementalChannelFulfillmentScope([firstItem, secondItem]))
       .toBe(buildSupplementalChannelFulfillmentScope([secondItem, firstItem]));
