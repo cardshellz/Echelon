@@ -57,7 +57,10 @@ import type {
   CanonicalClaimInventoryReleaseResource,
   CanonicalClaimInventoryUnpickResource,
 } from "../application/canonical-claim-inventory.port";
-import { planCanonicalClaim } from "../domain/inventory-availability-planner";
+import {
+  createVerifiedCycleCountPlanningSnapshot,
+  planCanonicalClaim,
+} from "../domain/inventory-availability-planner";
 import { captureActiveClaimSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 
 type ClientPool = Pick<Pool, "connect">;
@@ -4779,9 +4782,16 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           const order = lockedOrders.get(claim.orderId)!;
           const revision = await nextClaimRevision(client, claim.orderId);
           const request = buildPlanRequest(order, revision);
-          const snapshot = await captureActiveClaimSupplySnapshotInsideTransaction(
+          const frozenSnapshot = await captureActiveClaimSupplySnapshotInsideTransaction(
             client,
             order.lines.map((line) => line.targetVariantId),
+          );
+          // The persisted location remains frozen for every warehouse operation.
+          // Only this post-count replacement plan may use the quantity physically
+          // verified by the same locked cycle-count transaction.
+          const snapshot = createVerifiedCycleCountPlanningSnapshot(
+            frozenSnapshot,
+            command.warehouseLocationId,
           );
           const plan = planCanonicalClaim(snapshot, request);
           if (plan.status === "blocked") {

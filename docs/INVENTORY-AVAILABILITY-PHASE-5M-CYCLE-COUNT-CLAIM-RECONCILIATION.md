@@ -118,6 +118,13 @@ replacement plan; it does not prevent recording the physical count. A planner
 `blocked` result means policy/model evidence is invalid, so the entire transaction
 fails closed and the observed variance remains available for review.
 
+The location remains frozen in persisted warehouse state while those replacements
+are planned. The repository creates a newly sealed in-memory planning snapshot in
+which only the physically counted location is temporarily eligible. This preserves
+claim ownership of the units just verified by the count without allowing pickers,
+other claims, or publishers to use the frozen bin. The persisted freeze is removed
+only by the existing cycle-count completion or cancellation workflow.
+
 Claim repair is still performed when the counted quantity equals recorded
 `variant_qty`. That equality means no physical adjustment is needed; it does not make
 an existing `reserved_qty > counted_qty` ownership conflict safe to ignore.
@@ -205,8 +212,9 @@ Focused coverage proves:
 - negative adjustments consume only unreserved FIFO quantities and preserve
   reserved lot ownership, with one exact-cost ledger row per affected lot;
 - a counted shortage releases displaced ownership before adjustment, replans
-  each affected whole order after adjustment, and rolls the transaction back
-  when replacement reservation fails; and
+  each affected whole order against the verified counted quantity while the
+  persisted bin remains frozen, and rolls the transaction back when replacement
+  reservation fails; and
 - transfer matches remain preview-only during bulk approval; and
 - the source-level transaction contract preserves release-before-adjust-before-replan
   ordering and the canonical lock order.
