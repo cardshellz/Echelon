@@ -83,7 +83,7 @@ describe("C2 Phase 2: tx-aware pipeline structural checks", () => {
     const xactBlock = CREATE_SHIPMENT_SRC.substring(
       CREATE_SHIPMENT_SRC.indexOf("if (options?.useXactLock)"),
       CREATE_SHIPMENT_SRC.indexOf(
-        "await db.execute(sql`SELECT pg_advisory_lock(",
+        "const sessionLock = options?.sessionLock",
       ),
     );
     expect(xactBlock).toContain("pg_advisory_xact_lock");
@@ -226,34 +226,55 @@ describe("createShipmentForOrder :: useXactLock option", () => {
     expect(unlockCalls.length).toBe(0);
   });
 
-  it("uses session-level pg_advisory_lock/unlock when useXactLock is not set", async () => {
+  // The session path no longer issues pg_advisory_lock/unlock through the
+  // pooled db handle (that idiom serialized nothing — each statement ran on an
+  // arbitrary connection). It runs the critical section under the pinned-client
+  // runner, which these tests replace with a recording fake.
+  function makeRecordingSessionLock() {
+    const calls: Array<{ namespace: number; key: number; label: string }> = [];
+    const runner = vi.fn(
+      async (lock: { namespace: number; key: number; label: string }, fn: () => Promise<unknown>) => {
+        calls.push(lock);
+        return fn();
+      },
+    );
+    return { runner, calls };
+  }
+
+  it("runs the session path under the pinned-client advisory lock runner when useXactLock is not set", async () => {
     const mock = makeMockDb(9002);
-    await createShipmentForOrder(mock.db as any, 43, 7, [
-      { id: 102, quantity: 1 },
+    const sessionLock = makeRecordingSessionLock();
+    await createShipmentForOrder(
+      mock.db as any,
+      43,
+      7,
+      [{ id: 102, quantity: 1 }],
+      { sessionLock: sessionLock.runner as any },
+    );
+
+    expect(sessionLock.calls).toEqual([
+      { namespace: 918406, key: 43, label: "wms.create_shipment" },
     ]);
-
     const lockCalls = mock.executeCalls.filter((q) => isAdvisoryLockQuery(q));
-    const xactCalls = lockCalls.filter((q) => isXactLockQuery(q));
-    const unlockCalls = lockCalls.filter((q) => isUnlockQuery(q));
-
-    expect(xactCalls.length).toBe(0);
-    expect(unlockCalls.length).toBe(1);
+    expect(lockCalls.filter((q) => isXactLockQuery(q)).length).toBe(0);
+    expect(lockCalls.filter((q) => isUnlockQuery(q)).length).toBe(0);
+    expect(lockCalls.length).toBe(0);
   });
 
-  it("uses session-level lock when useXactLock is explicitly false", async () => {
+  it("uses the pinned-client runner when useXactLock is explicitly false", async () => {
     const mock = makeMockDb(9003);
+    const sessionLock = makeRecordingSessionLock();
     await createShipmentForOrder(
       mock.db as any,
       44,
       7,
       [{ id: 103, quantity: 1 }],
-      { useXactLock: false },
+      { useXactLock: false, sessionLock: sessionLock.runner as any },
     );
 
-    const lockCalls = mock.executeCalls.filter((q) => isAdvisoryLockQuery(q));
-    const unlockCalls = lockCalls.filter((q) => isUnlockQuery(q));
-
-    expect(unlockCalls.length).toBe(1);
+    expect(sessionLock.runner).toHaveBeenCalledTimes(1);
+    expect(sessionLock.calls[0]).toEqual({ namespace: 918406, key: 44, label: "wms.create_shipment" });
+    expect(mock.executeCalls.filter((q) => isAdvisoryLockQuery(q)).length).toBe(0);
   });
 });
 

@@ -491,9 +491,9 @@ function makeDb(
   const select = vi.fn(() => chainable);
 
   const execute = vi.fn(async (query: any) => {
-    // pushShipment serializes per-shipment with pg_advisory_lock/unlock.
-    // Those are infrastructure, not data — don't consume a scripted response
-    // for them, so the order-based scripts below stay unchanged.
+    // Advisory locks no longer flow through db.execute: they run on a pinned
+    // client via the injected sessionLock runner (see fakeSessionLock below),
+    // so every execute call here is domain data or bookkeeping.
     let text = "";
     try {
       const chunks = (query as any)?.queryChunks;
@@ -502,9 +502,6 @@ function makeDb(
         : String(query);
     } catch {
       text = "";
-    }
-    if (/advisory_(lock|unlock)/i.test(text)) {
-      return { rows: [] };
     }
     const override = options.executeOverride?.(text);
     if (override !== undefined) {
@@ -583,6 +580,11 @@ function mockFetchQueue(responses: any[]) {
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
+// Pass-through session lock: the real runner pins a pool connection, which a
+// unit test must never open. Serialization itself is covered by
+// server/infrastructure/__tests__/session-advisory-lock.test.ts.
+const fakeSessionLock = async <T>(_lock: unknown, fn: () => Promise<T>): Promise<T> => fn();
+
 
 describe("appendShipmentItems :: amend existing provider order", () => {
   beforeEach(() => {
@@ -652,7 +654,7 @@ describe("appendShipmentItems :: amend existing provider order", () => {
     ]);
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     const result = await svc.appendShipmentItems(9001, [222]);
 
     expect(result).toEqual({ state: "applied", providerStatus: "awaiting_shipment" });
@@ -705,7 +707,7 @@ describe("appendShipmentItems :: amend existing provider order", () => {
     }]);
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     const result = await svc.appendShipmentItems(9001, [222]);
 
     expect(result).toEqual({
@@ -745,7 +747,7 @@ describe("appendShipmentItems :: amend existing provider order", () => {
     }]);
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     const result = await svc.appendShipmentItems(9001, [222]);
 
     expect(result).toEqual({ state: "not_editable", providerStatus: "shipped" });
@@ -782,7 +784,7 @@ describe("appendShipmentItems :: amend existing provider order", () => {
     }]);
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     const error = await svc.appendShipmentItems(9001, [222]).catch((err) => err);
 
     expect(error).toBeInstanceOf(ShipStationPushError);
@@ -828,7 +830,7 @@ describe("pushShipment :: happy path", () => {
     });
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     const result = await svc.pushShipment(shipmentRow.id);
 
     expect(result.shipstationOrderId).toBe(555000);
@@ -907,7 +909,7 @@ describe("pushShipment :: happy path", () => {
     });
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await expect(svc.pushShipment(shipmentRow.id)).resolves.toEqual({
       shipstationOrderId: 770729188,
       orderKey: `echelon-wms-shp-${shipmentRow.id}`,
@@ -940,7 +942,7 @@ describe("pushShipment :: happy path", () => {
     });
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await svc.pushShipment(shipmentRow.id);
 
     const createOrderCall = fetchMock.mock.calls.find(([url]) =>
@@ -976,7 +978,7 @@ describe("pushShipment :: happy path", () => {
     });
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await svc.pushShipment(shipmentRow.id);
 
     const createOrderCall = fetchMock.mock.calls.find(([url]) =>
@@ -1016,7 +1018,7 @@ describe("pushShipment :: happy path", () => {
     });
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     const result = await svc.pushShipment(shipmentRow.id);
 
     expect(result.shipstationOrderId).toBe(555000);
@@ -1077,7 +1079,7 @@ describe("pushShipment :: happy path", () => {
     });
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     const result = await svc.pushShipment(shipmentRow.id);
 
     expect(result.shipstationOrderId).toBe(555000);
@@ -1113,7 +1115,7 @@ describe("pushShipment :: happy path", () => {
     });
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await svc.pushShipment(shipmentRow.id);
 
     const postCall = fetchMock.mock.calls.find(([, i]: any) => i?.method === "POST")!;
@@ -1145,7 +1147,7 @@ describe("pushShipment :: happy path", () => {
       orderStatus: "awaiting_shipment",
     }) as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await svc.pushShipment(shipmentRow.id);
 
     const postCall = (globalThis.fetch as any).mock.calls.find(([, i]: any) => i?.method === "POST")!;
@@ -1273,7 +1275,7 @@ describe("pushShipment :: sibling-shipment dedup", () => {
     });
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db as any);
+    const svc = createShipStationService(mock.db as any, undefined, { sessionLock: fakeSessionLock });
     const result = await svc.pushShipment(shipmentRow.id);
 
     // SS push must carry the sibling's orderId (an UPDATE, not a CREATE)
@@ -1306,7 +1308,7 @@ describe("pushShipment :: sibling-shipment dedup", () => {
     });
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db as any);
+    const svc = createShipStationService(mock.db as any, undefined, { sessionLock: fakeSessionLock });
     const result = await svc.pushShipment(shipmentRow.id);
 
     const postCall = fetchMock.mock.calls.find(([, i]: any) => i?.method === "POST")!;
@@ -1347,7 +1349,7 @@ describe("pushShipment :: sibling-shipment dedup", () => {
     });
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db as any);
+    const svc = createShipStationService(mock.db as any, undefined, { sessionLock: fakeSessionLock });
     const result = await svc.pushShipment(shipmentRow.id);
 
     const postCall = fetchMock.mock.calls.find(([, i]: any) => i?.method === "POST")!;
@@ -1392,7 +1394,7 @@ describe("ShipStation WMS hold/sort sync", () => {
     ]);
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await expect(
       svc.syncWmsOrderShipStationHoldState(202542, "hold"),
     ).resolves.toEqual({ touched: 2 });
@@ -1434,7 +1436,7 @@ describe("ShipStation WMS hold/sort sync", () => {
     ]);
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await expect(
       svc.syncWmsOrderShipStationHoldState(202542, "release"),
     ).resolves.toEqual({ touched: 1 });
@@ -1462,7 +1464,7 @@ describe("pushShipment :: error cases", () => {
 
   it("throws ShipStationPushError when shipment is not found", async () => {
     const mock = makeDb([{ rows: [] }]);
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await expect(svc.pushShipment(9999)).rejects.toBeInstanceOf(
       ShipStationPushError,
     );
@@ -1472,7 +1474,7 @@ describe("pushShipment :: error cases", () => {
     const mock = makeDb([
       { rows: [okShipment({ status: "shipped" })] },
     ]);
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     let err: ShipStationPushError | undefined;
     try {
       await svc.pushShipment(okShipment().id);
@@ -1488,7 +1490,7 @@ describe("pushShipment :: error cases", () => {
     const mock = makeDb([
       { rows: [okShipment({ status: "cancelled" })] },
     ]);
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await expect(svc.pushShipment(okShipment().id)).rejects.toBeInstanceOf(
       ShipStationPushError,
     );
@@ -1506,7 +1508,7 @@ describe("pushShipment :: error cases", () => {
         ],
       },
     ]);
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     let err: ShipStationPushError | undefined;
     try {
       await svc.pushShipment(okShipment().id);
@@ -1522,7 +1524,7 @@ describe("pushShipment :: error cases", () => {
     const mock = makeDb([
       { rows: [okShipment({ status: "queued", held: true })] },
     ]);
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     let err: ShipStationPushError | undefined;
     try {
       await svc.pushShipment(okShipment().id);
@@ -1548,7 +1550,7 @@ describe("pushShipment :: error cases", () => {
         ],
       },
     ]);
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     const err = await svc
       .pushShipment(shipmentRow.id)
       .catch((e: any) => e);
@@ -1577,7 +1579,7 @@ describe("pushShipment :: error cases", () => {
       orderId: 42,
       orderStatus: "awaiting_shipment",
     }) as any;
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await expect(svc.pushShipment(shipmentRow.id)).resolves.toMatchObject({
       shipstationOrderId: 42,
     });
@@ -1599,7 +1601,7 @@ describe("pushShipment :: error cases", () => {
       },
       { rows: [{ status: "shipped", fulfillment_status: "fulfilled", financial_status: "paid" }] },
     ]);
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     const err = await svc
       .pushShipment(shipmentRow.id)
       .catch((e: any) => e);
@@ -1629,7 +1631,7 @@ describe("pushShipment :: error cases", () => {
       orderKey: `echelon-wms-shp-${shipmentRow.id}`,
       orderStatus: "awaiting_shipment",
     }) as any;
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await expect(svc.pushShipment(shipmentRow.id)).resolves.toMatchObject({
       shipstationOrderId: 42,
     });
@@ -1642,7 +1644,7 @@ describe("pushShipment :: error cases", () => {
       { rows: [okShipment()] },
       { rows: [] }, // order missing
     ]);
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     let err: ShipStationPushError | undefined;
     try {
       await svc.pushShipment(okShipment().id);
@@ -1660,7 +1662,7 @@ describe("pushShipment :: error cases", () => {
       { rows: [{ non_shipping_total_cents: 0 }] },
       { rows: [] }, // items missing
     ]);
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     let err: ShipStationPushError | undefined;
     try {
       await svc.pushShipment(okShipment().id);
@@ -1696,7 +1698,7 @@ describe("pushShipment :: error cases", () => {
       });
     globalThis.fetch = fetchMock as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await expect(svc.pushShipment(okShipment().id)).rejects.toThrow(
       /ShipStation API POST/,
     );
@@ -1708,7 +1710,7 @@ describe("pushShipment :: error cases", () => {
 
   it("rejects invalid shipmentId (zero / negative / float) up front", async () => {
     const mock = makeDb([]);
-    const svc = createShipStationService(mock.db);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
     await expect(svc.pushShipment(0)).rejects.toBeInstanceOf(
       ShipStationPushError,
     );
