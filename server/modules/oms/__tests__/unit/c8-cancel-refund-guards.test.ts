@@ -66,9 +66,10 @@ describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
 
   it("the entrypoint releases reservations after a successful transition", () => {
     const cancelPos = CANCEL_HELPER_SRC.indexOf("await cancelOrder(db, orderId, reason)");
-    const releasePos = CANCEL_HELPER_SRC.indexOf("releaseOrderReservation(orderId, reason");
+    const releasePos = CANCEL_HELPER_SRC.indexOf("const rel = await reservation.releaseOrderReservation(");
     expect(cancelPos).toBeGreaterThan(-1);
     expect(releasePos).toBeGreaterThan(cancelPos);
+    expect(CANCEL_HELPER_SRC).toContain('{ disposition }');
     // no release without a transition:
     expect(CANCEL_HELPER_SRC).toContain("if (!trans.transitioned)");
   });

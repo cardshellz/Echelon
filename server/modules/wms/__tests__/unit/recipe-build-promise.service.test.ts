@@ -438,4 +438,33 @@ describe("RecipeBuildPromiseService", () => {
     });
     expect(tx.set).toHaveBeenCalledWith({ onHold: false, holdReason: null });
   });
+
+  it("uses the supplied authority transaction for demand cancellation", async () => {
+    const tx = makeExecutor([[], []]);
+    const deps = makeDependencies();
+    const db = {
+      ...tx,
+      transaction: vi.fn(async () => {
+        throw new Error("must not open a nested transaction");
+      }),
+    };
+    const service = createRecipeBuildPromiseService(
+      db as any,
+      deps.recipeCapacity as any,
+      deps.builds as any,
+      deps.inventoryCore,
+    );
+
+    await expect(service.cancelOrderDemands(
+      500,
+      "customer cancelled",
+      "test-user",
+      tx as any,
+    )).resolves.toEqual({
+      cancelledDemands: 0,
+      cancelledBuildOrders: 0,
+      failures: [],
+    });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
 });

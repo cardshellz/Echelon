@@ -642,7 +642,12 @@ export function registerShopifyRoutes(app: Express) {
         await storage.updateOrderStatus(order.id, "cancelled");
         try {
           const { reservation } = app.locals.services;
-          await reservation.releaseOrderReservation(order.id, "Order cancelled in Shopify");
+          await reservation.releaseOrderReservation(
+            order.id,
+            "Order cancelled in Shopify",
+            undefined,
+            { disposition: "cancel" },
+          );
         } catch (e) {
           console.error(`Failed to release reservations for cancelled order ${order.orderNumber}:`, e);
         }

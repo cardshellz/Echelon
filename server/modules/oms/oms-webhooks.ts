@@ -110,7 +110,12 @@ async function ensureOmsOrderQueuedForWmsSync(
 interface WmsServices {
   reservation: {
     reserveOrder: (orderId: number) => Promise<any>;
-    releaseOrderReservation: (orderId: number, reason: string) => Promise<any>;
+    releaseOrderReservation: (
+      orderId: number,
+      reason: string,
+      userId?: string,
+      options?: { disposition?: "release" | "cancel" },
+    ) => Promise<any>;
     releaseOrderItemReservation: (args: {
       orderId: number;
       orderItemId: number;
@@ -432,6 +437,8 @@ export async function cancelOrderCascade(
         await opts.wmsServices.reservation.releaseOrderReservation(
           wmsRow.id,
           opts.source,
+          undefined,
+          { disposition: "cancel" },
         );
         console.log(`${LOG} Released reservations for WMS order ${wmsRow.id}`);
       } catch (e: any) {
@@ -1525,6 +1532,7 @@ export function registerOmsWebhooks(
               const propagation = await wmsSyncService.propagateOmsEditsToWms(
                 existing.id,
                 newLineItems,
+                orderData.sourceEventId,
               );
               if (propagation.updated > 0 || propagation.added > 0 || propagation.removed > 0) {
                 console.log(
@@ -1539,6 +1547,9 @@ export function registerOmsWebhooks(
                 );
               }
             } catch (propErr: any) {
+              if (propErr?.code === "CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC") {
+                throw propErr;
+              }
               console.error(
                 `${LOG_PREFIX} WMS edit propagation failed for order ${shopifyOrder.name || externalOrderId}: ${propErr.message}`,
               );

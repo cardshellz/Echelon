@@ -166,11 +166,16 @@ class InventoryAtpService implements InventoryAtpServiceContract {
       salesEligibility: VariantSalesEligibility;
     }>,
     warehouseId?: number,
+    dbOverride: any = this.db,
   ): Promise<VariantAtp[]> {
     return Promise.all(variants.map(async (variant) => {
       let atpUnits = 0;
       try {
-        atpUnits = await this.recipeCapacity.getVariantCapacity(variant.id, warehouseId);
+        atpUnits = await this.recipeCapacity.getVariantCapacity(
+          variant.id,
+          warehouseId,
+          dbOverride,
+        );
       } catch (error: any) {
         console.error(JSON.stringify({
           event: "recipe_atp_calculation_failed",
@@ -221,8 +226,11 @@ class InventoryAtpService implements InventoryAtpServiceContract {
    * @param productId - The product whose base-unit totals to compute.
    * @returns Aggregated base-unit totals. All fields default to 0.
    */
-  async getTotalBaseUnits(productId: number): Promise<BaseUnitTotals> {
-    const [row] = await this.db
+  async getTotalBaseUnits(
+    productId: number,
+    dbOverride: any = this.db,
+  ): Promise<BaseUnitTotals> {
+    const [row] = await dbOverride
       .select({
         onHand: sql<number>`COALESCE(SUM(${inventoryLevels.variantQty} * ${productVariants.unitsPerVariant}), 0)`,
         reserved: sql<number>`COALESCE(SUM(${inventoryLevels.reservedQty} * ${productVariants.unitsPerVariant}), 0)`,
@@ -260,8 +268,8 @@ class InventoryAtpService implements InventoryAtpServiceContract {
    * Formula: ATP = totalOnHand - totalReserved. Picked and packed units have
    * already left on-hand and remain visible only as workflow counters.
    */
-  async getAtpBase(productId: number): Promise<number> {
-    const totals = await this.getTotalBaseUnits(productId);
+  async getAtpBase(productId: number, dbOverride: any = this.db): Promise<number> {
+    const totals = await this.getTotalBaseUnits(productId, dbOverride);
     return calculateFungibleAtpBase(totals);
   }
 
@@ -371,9 +379,12 @@ class InventoryAtpService implements InventoryAtpServiceContract {
     return result;
   }
 
-  private async getDirectVariantAtp(variantIds: number[]): Promise<Map<number, number>> {
+  private async getDirectVariantAtp(
+    variantIds: number[],
+    dbOverride: any = this.db,
+  ): Promise<Map<number, number>> {
     if (variantIds.length === 0) return new Map();
-    const rows = await this.db
+    const rows = await dbOverride
       .select({
         productVariantId: inventoryLevels.productVariantId,
         atp: sql<number>`COALESCE(SUM(GREATEST(${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty}, 0)), 0)`,
@@ -469,10 +480,13 @@ class InventoryAtpService implements InventoryAtpServiceContract {
    * For each active variant of a product, compute how many sellable
    * units can be promised based on the shared ATP pool.
    */
-  async getAtpPerVariant(productId: number): Promise<VariantAtp[]> {
+  async getAtpPerVariant(
+    productId: number,
+    dbOverride: any = this.db,
+  ): Promise<VariantAtp[]> {
     const [inventoryStrategy, variants] = await Promise.all([
-      this.getProductInventoryStrategy(productId),
-      this.db
+      this.getProductInventoryStrategy(productId, dbOverride),
+      dbOverride
         .select({
           id: productVariants.id,
           sku: productVariants.sku,
@@ -491,14 +505,17 @@ class InventoryAtpService implements InventoryAtpServiceContract {
         ),
     ]);
     if (inventoryStrategy === "recipe_managed") {
-      return this.getRecipeVariantAtp(variants);
+      return this.getRecipeVariantAtp(variants, undefined, dbOverride);
     }
     const sharedAtpBase = usesFungibleBaseUnitPool(inventoryStrategy)
-      ? await this.getAtpBase(productId)
+      ? await this.getAtpBase(productId, dbOverride)
       : 0;
     const directAtp = usesFungibleBaseUnitPool(inventoryStrategy)
       ? new Map<number, number>()
-      : await this.getDirectVariantAtp(variants.map((variant: any) => variant.id));
+      : await this.getDirectVariantAtp(
+        variants.map((variant: any) => variant.id),
+        dbOverride,
+      );
 
     return variants.map(
       (v: {

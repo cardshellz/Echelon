@@ -519,13 +519,14 @@ export class RecipeBuildPromiseService {
     orderId: number,
     reason: string,
     actorId?: string,
+    txOverride?: TransactionExecutor,
   ): Promise<RecipeBuildCancellationResult> {
     positiveInteger(orderId, "orderId");
     const cancellationReason = String(reason ?? "").trim();
     if (!cancellationReason) {
       throw new RecipeCapacityError("INVALID_RECIPE_PROMISE_INPUT", "Cancellation reason is required");
     }
-    const claimed = await this.db.transaction(async (tx) => {
+    const cancelDemandsWithinTransaction = async (tx: TransactionExecutor) => {
       const result = await tx.execute(sql`
         SELECT demand.*,
                demand.hold_reason AS demand_hold_reason,
@@ -564,7 +565,11 @@ export class RecipeBuildPromiseService {
         demandId: Number(demand.id),
         rootBuildOrderId: demand.root_build_order_id == null ? null : Number(demand.root_build_order_id),
       }));
-    });
+    };
+    const claimed = txOverride
+      ? await cancelDemandsWithinTransaction(txOverride)
+      : await this.db.transaction(cancelDemandsWithinTransaction);
+    const dbh = txOverride ?? this.db;
 
     const result: RecipeBuildCancellationResult = {
       cancelledDemands: claimed.length,
@@ -573,7 +578,7 @@ export class RecipeBuildPromiseService {
     };
     for (const demand of claimed) {
       if (!demand.rootBuildOrderId) continue;
-      const graph = await this.db.execute(sql`
+      const graph = await dbh.execute(sql`
         WITH RECURSIVE build_graph AS (
           SELECT id, 0 AS depth
           FROM inventory.build_orders
@@ -596,10 +601,11 @@ export class RecipeBuildPromiseService {
             buildOrderId,
             reason: `Order ${orderId} cancelled: ${cancellationReason}`.slice(0, 2000),
             actorId: actorId ?? AUTOMATION_ACTOR,
-          });
+          }, txOverride as any);
           result.cancelledBuildOrders += 1;
         } catch (error: any) {
           if (error?.code === "INVALID_BUILD_STATUS") continue;
+          if (txOverride) throw error;
           result.failures.push({
             buildOrderId,
             reason: error?.message ?? String(error),

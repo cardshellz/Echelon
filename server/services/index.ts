@@ -36,7 +36,6 @@ import {
   createCycleCountService,
   createInventoryAlertService,
 } from "../modules/inventory";
-import { createReservationService } from "../modules/channels/reservation.service";
 import {
   createRecipeBuildPromiseService,
   type RecipeBuildPromiseService,
@@ -130,6 +129,7 @@ import { PostgresCanonicalClaimInventoryRepository } from "../modules/inventory/
 import { PostgresCanonicalClaimBuildRepository } from "../modules/inventory/infrastructure/canonical-claim-build.repository";
 import { PostgresCanonicalClaimPickerObservationReviewRepository } from "../modules/orders/canonical-claim-picker-observation-review.repository";
 import { createAuthorityAwareInventoryAtpService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
+import { createAuthorityAwareReservationService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-claim.repository";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
 
@@ -146,6 +146,18 @@ export function createServices(
   const inventoryUseCases = inventoryCore;
   const recipeCapacity = createRecipeCapacityService(db);
   const atp = createAuthorityAwareInventoryAtpService(databasePool);
+  const canonicalClaimInventory = new PostgresCanonicalClaimInventoryRepository();
+  const canonicalClaimBuild = new PostgresCanonicalClaimBuildRepository(canonicalClaimInventory);
+  const canonicalClaimObservationReview = new PostgresCanonicalClaimPickerObservationReviewRepository();
+  const inventoryAvailabilityClaims = new InventoryAvailabilityClaimService(
+    new PostgresInventoryAvailabilityClaimRepository(
+      canonicalClaimInventory,
+      databasePool,
+      systemCanonicalClaimClock,
+      canonicalClaimBuild,
+      canonicalClaimObservationReview,
+    ),
+  );
 
   // Channel sync depends on ATP and must precede reservation wiring.
   const channelSync = createChannelSyncService(db, atp);
@@ -165,13 +177,13 @@ export function createServices(
 
   // Depends on inventoryCore (+ channelSync for reservation).
   const breakAssembly = createBreakAssemblyService(db, inventoryCore);
-  const reservation = createReservationService(
+  const reservation = createAuthorityAwareReservationService({
     db,
-    inventoryCore as any,
+    inventoryCore: inventoryCore as any,
     channelSync,
-    atp,
     recipeBuildPromise,
-  );
+    canonical: inventoryAvailabilityClaims,
+  }, databasePool);
   const replenishment = createReplenishmentService(db, inventoryCore);
   const returns = createReturnsService(db, inventoryCore as any);
 
@@ -306,19 +318,6 @@ export function createServices(
     new PostgresInventoryPublicationReadbackRepository(),
     adapterRegistry,
   );
-  const canonicalClaimInventory = new PostgresCanonicalClaimInventoryRepository();
-  const canonicalClaimBuild = new PostgresCanonicalClaimBuildRepository(canonicalClaimInventory);
-  const canonicalClaimObservationReview = new PostgresCanonicalClaimPickerObservationReviewRepository();
-  const inventoryAvailabilityClaims = new InventoryAvailabilityClaimService(
-    new PostgresInventoryAvailabilityClaimRepository(
-      canonicalClaimInventory,
-      databasePool,
-      systemCanonicalClaimClock,
-      canonicalClaimBuild,
-      canonicalClaimObservationReview,
-    ),
-  );
-
   // Wire orchestrator into legacy channelSync so event-driven syncs
   // respect channel_allocation_rules (fixed/share/mirror modes).
   // This breaks the chicken-and-egg dependency between channelSync and orchestrator.

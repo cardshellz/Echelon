@@ -29,6 +29,7 @@ export interface ReservationReleaser {
     orderId: number,
     reason: string,
     userId?: string,
+    options?: { disposition?: "release" | "cancel" },
   ): Promise<{
     released: number;
     failed: Array<{ sku: string; orderItemId: number; reason: string }>;
@@ -59,7 +60,7 @@ export async function cancelWmsOrderAndRelease(
   );
 
   const release = await releaseOrderReservationBestEffort(
-    reservation, orderId, reason, userId, "WMS Cancel",
+    reservation, orderId, reason, userId, "cancel", "WMS Cancel",
   );
   return { ...trans, ...release };
 }
@@ -89,7 +90,7 @@ export async function completeWmsOrderAndRelease(
   }
 
   const release = await releaseOrderReservationBestEffort(
-    reservation, orderId, reason, userId, "WMS Complete",
+    reservation, orderId, reason, userId, "release", "WMS Complete",
   );
   return { ...trans, ...release };
 }
@@ -99,12 +100,18 @@ async function releaseOrderReservationBestEffort(
   orderId: number,
   reason: string,
   userId: string | undefined,
+  disposition: "release" | "cancel",
   logTag: string,
 ): Promise<{ releasedItems: number; releaseFailed: boolean }> {
   let releasedItems = 0;
   let releaseFailed = false;
   try {
-    const rel = await reservation.releaseOrderReservation(orderId, reason, userId);
+    const rel = await reservation.releaseOrderReservation(
+      orderId,
+      reason,
+      userId,
+      { disposition },
+    );
     releasedItems = rel.released;
     releaseFailed = rel.failed.length > 0;
     if (releaseFailed) {

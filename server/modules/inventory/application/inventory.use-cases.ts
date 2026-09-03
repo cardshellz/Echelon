@@ -1188,10 +1188,10 @@ export class InventoryUseCases {
     qty: number;
     reason: string;
     userId?: string;
-  }): Promise<number> {
+  }, txOverride?: any): Promise<number> {
     if (params.qty <= 0) return 0;
 
-    const trimmed = await this.db.transaction(async (tx) => {
+    const trimWithinTransaction = async (tx: any) => {
       const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
@@ -1227,7 +1227,10 @@ export class InventoryUseCases {
       }, tx);
 
       return qty;
-    });
+    };
+    const trimmed = txOverride
+      ? await trimWithinTransaction(txOverride)
+      : await this.db.transaction(trimWithinTransaction);
 
     if (trimmed > 0) {
       this.triggerNotifyChange(params.productVariantId, "unreserve");

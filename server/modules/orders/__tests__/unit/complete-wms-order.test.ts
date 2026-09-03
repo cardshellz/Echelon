@@ -41,6 +41,7 @@ describe("completeWmsOrderAndRelease", () => {
       59539,
       "self_heal_zero_shippable",
       undefined,
+      { disposition: "release" },
     );
     expect(outcome.releasedItems).toBe(3);
     expect(outcome.releaseFailed).toBe(false);
