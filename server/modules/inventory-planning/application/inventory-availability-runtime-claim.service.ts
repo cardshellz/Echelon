@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type {
+  CanonicalAvailabilityClaimReplacementResult,
   CanonicalAvailabilityClaimResult,
 } from "@shared/types/inventory-availability-claims";
 import type { ClaimPlanDto } from "@shared/types/inventory-availability-planner";
@@ -36,6 +37,7 @@ export interface CanonicalClaimVariantMetadata {
 
 export interface RuntimeCanonicalClaimService {
   claimOrder(input: unknown): Promise<CanonicalAvailabilityClaimResult>;
+  replaceOrderClaim(input: unknown): Promise<CanonicalAvailabilityClaimReplacementResult>;
   releaseOrderClaim(input: unknown): Promise<CanonicalAvailabilityClaimResult>;
 }
 
@@ -176,6 +178,7 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
       const result = await context.canonical.releaseOrderClaim({
         orderId: validatedOrderId,
         disposition,
+        ...(cursor?.status === "active" ? { expectedClaimId: cursor.claimId } : {}),
         idempotencyKey,
         actor,
         reason: validatedReason,
@@ -222,7 +225,7 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
     if (typeof command.demandChanged !== "boolean") {
       throw invalidInput("demandChanged", command.demandChanged);
     }
-    return this.executor.execute((context) => {
+    return this.executor.execute(async (context) => {
       if (context.authority === "legacy") {
         return context.legacy.reconcileOrderDemand({
           ...command,
@@ -232,12 +235,36 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
           reason,
         });
       }
-      throw unsupportedCanonicalMutation(
-        "CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC",
-        "Canonical demand reconciliation is blocked until exact claim replacement or terminal release is selected inside one serializable transaction.",
-        context,
-        { orderId, sourceEventId, demandChanged: command.demandChanged },
-      );
+      if (command.dbOverride != null) {
+        throw unsupportedCanonicalMutation(
+          "CANONICAL_EXTERNAL_RESERVATION_TRANSACTION_UNSUPPORTED",
+          "Canonical demand reconciliation owns its serializable transactions and cannot join a legacy Drizzle transaction.",
+          context,
+          { orderId, sourceEventId },
+        );
+      }
+      try {
+        return await reconcileCanonicalOrderDemand(
+          context,
+          orderId,
+          sourceEventId,
+          command.userId,
+          reason,
+        );
+      } catch (error) {
+        throw new InventoryAvailabilityRuntimeClaimError(
+          "CANONICAL_DEMAND_RECONCILIATION_FAILED",
+          "Canonical order-demand reconciliation failed and must be retried without falling back to legacy reservations.",
+          {
+            orderId,
+            sourceEventId,
+            authorityRevision: context.authorityRevision,
+            activationRunId: context.activationRunId,
+            causeCode: structuredErrorCode(error),
+          },
+          { cause: error },
+        );
+      }
     });
   }
 
@@ -351,6 +378,118 @@ async function claimCanonicalOrder(
   return mapCanonicalPlanToReservationResult(context, orderId, result.plan);
 }
 
+async function reconcileCanonicalOrderDemand(
+  context: InventoryAvailabilityRuntimeClaimContext,
+  orderId: number,
+  sourceEventId: string,
+  userId: string | undefined,
+  reason: string,
+): Promise<ReconcileOrderDemandResult> {
+  const actor = canonicalActor(userId);
+  const cursor = await context.getLatestClaim(orderId);
+  if (!cursor || cursor.status !== "active") {
+    const result = await context.canonical.claimOrder({
+      orderId,
+      idempotencyKey: commandKey("reconcile-order-demand-claim", {
+        orderId,
+        sourceEventId,
+        lifecycle: `next:${(cursor?.revision ?? 0) + 1}`,
+      }),
+      actor,
+      reason,
+    });
+    if (result.outcome === "no_claim_required") {
+      return emptyDemandReconciliationResult(orderId);
+    }
+    if (result.outcome !== "claimed") {
+      throw invalidCanonicalResult("reconcile_order_demand_claim", result, context);
+    }
+    return {
+      reconciled: !result.idempotentReplay,
+      release: { released: 0, failed: [] },
+      reservation: await mapCanonicalPlanToReservationResult(context, orderId, result.plan),
+    };
+  }
+
+  try {
+    const replacement = await context.canonical.replaceOrderClaim({
+      orderId,
+      expectedClaimId: cursor.claimId,
+      idempotencyKey: commandKey("reconcile-order-demand-replace", {
+        orderId,
+        sourceEventId,
+        expectedClaimId: cursor.claimId,
+      }),
+      actor,
+      reason,
+    });
+    return {
+      reconciled: !replacement.idempotentReplay,
+      release: {
+        released: replacement.idempotentReplay ? 0 : claimLineCount(cursor.plan),
+        failed: [],
+      },
+      reservation: await mapCanonicalPlanToReservationResult(
+        context,
+        orderId,
+        replacement.replacementClaim.plan,
+      ),
+    };
+  } catch (error) {
+    const code = structuredErrorCode(error);
+    if (code === "ORDER_DEMAND_UNCHANGED") {
+      const replay = await context.canonical.claimOrder({
+        orderId,
+        idempotencyKey: commandKey("reconcile-order-demand-unchanged", {
+          orderId,
+          sourceEventId,
+          claimId: cursor.claimId,
+        }),
+        actor,
+        reason,
+      });
+      if (replay.outcome !== "claimed") {
+        throw invalidCanonicalResult("reconcile_order_demand_unchanged", replay, context);
+      }
+      return {
+        reconciled: false,
+        release: { released: 0, failed: [] },
+        reservation: await mapCanonicalPlanToReservationResult(context, orderId, replay.plan),
+      };
+    }
+    if (code === "REPLACEMENT_ORDER_NOT_CLAIMABLE") {
+      const expectedWarehouseStatus = structuredErrorContextString(error, "warehouseStatus");
+      if (expectedWarehouseStatus === null) throw error;
+      const release = await context.canonical.releaseOrderClaim({
+        orderId,
+        disposition: expectedWarehouseStatus === "cancelled" ? "cancel" : "release",
+        expectedClaimId: cursor.claimId,
+        expectedWarehouseStatus,
+        requireNoClaimableDemand: true,
+        idempotencyKey: commandKey("reconcile-order-demand-release", {
+          orderId,
+          sourceEventId,
+          expectedClaimId: cursor.claimId,
+        }),
+        actor,
+        reason,
+      });
+      if (release.outcome !== "released") {
+        throw invalidCanonicalResult("reconcile_order_demand_release", release, context);
+      }
+      return {
+        reconciled: !release.idempotentReplay,
+        release: {
+          released: release.idempotentReplay ? 0 : claimLineCount(cursor.plan),
+          failed: [],
+        },
+        reservation: emptyReservationResult(orderId),
+      };
+    }
+    throw error;
+  }
+}
+
 async function mapCanonicalPlanToReservationResult(
   context: InventoryAvailabilityRuntimeClaimContext,
   orderId: number,
@@ -411,6 +550,32 @@ function emptyReservationResult(orderId: number): ReservationResult {
     totalBaseUnits: 0,
     totalPromisedBaseUnits: 0,
   };
+}
+
+function emptyDemandReconciliationResult(orderId: number): ReconcileOrderDemandResult {
+  return {
+    reconciled: false,
+    release: { released: 0, failed: [] },
+    reservation: emptyReservationResult(orderId),
+  };
+}
+
+function claimLineCount(plan: ClaimPlanDto): number {
+  return plan.lines.filter((line) => BigInt(line.plannedQty) > BigInt(0)).length;
+}
+
+function structuredErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null || !("code" in error)) return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+function structuredErrorContextString(error: unknown, field: string): string | null {
+  if (typeof error !== "object" || error === null || !("context" in error)) return null;
+  const context = (error as { context?: unknown }).context;
+  if (typeof context !== "object" || context === null || !(field in context)) return null;
+  const value = (context as Record<string, unknown>)[field];
+  return typeof value === "string" && value.trim() !== "" ? value : null;
 }
 
 function canonicalActor(userId: string | undefined): string {

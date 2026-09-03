@@ -2021,6 +2021,124 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     }));
   });
 
+  it("releases the exact active claim when the locked order has no claimable demand", async () => {
+    const fake = createClaimReplacementPool(directClaimPlan(), { currentRequestedQty: 0 });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      writer,
+      fake.pool,
+      () => FIXED_TIME,
+    );
+
+    await expect(repository.releaseOrderClaim({
+      orderId: 70,
+      disposition: "release",
+      expectedClaimId: "9",
+      expectedWarehouseStatus: "ready",
+      requireNoClaimableDemand: true,
+      idempotencyKey: "demand-reconcile:70:empty",
+      actor: "oms-order-sync",
+      reason: "all physical order lines were removed",
+    })).resolves.toMatchObject({
+      outcome: "released",
+      claimId: "9",
+      orderId: 70,
+      status: "released",
+      releasedResourceQty: "3",
+      releasedLotQty: "3",
+      idempotentReplay: false,
+    });
+    expect(writer.releaseResources).toHaveBeenCalledOnce();
+    expect(fake.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+
+  it("rejects a guarded release when locked claimable demand still exists", async () => {
+    const fake = createClaimReplacementPool(directClaimPlan(), { currentRequestedQty: 2 });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      writer,
+      fake.pool,
+      () => FIXED_TIME,
+    );
+
+    await expect(repository.releaseOrderClaim({
+      orderId: 70,
+      disposition: "release",
+      expectedClaimId: "9",
+      expectedWarehouseStatus: "ready",
+      requireNoClaimableDemand: true,
+      idempotencyKey: "demand-reconcile:70:nonempty",
+      actor: "oms-order-sync",
+      reason: "attempt zero-demand release",
+    })).rejects.toMatchObject({
+      code: "ORDER_STILL_HAS_CLAIMABLE_DEMAND",
+      context: expect.objectContaining({
+        orderId: 70,
+        expectedClaimId: "9",
+        claimableLineCount: 1,
+      }),
+    });
+    expect(writer.releaseResources).not.toHaveBeenCalled();
+    expect(fake.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
+
+  it("rejects a guarded release when the locked order status changed", async () => {
+    const fake = createClaimReplacementPool(directClaimPlan(), { currentRequestedQty: 0 });
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      writer,
+      fake.pool,
+      () => FIXED_TIME,
+    );
+
+    await expect(repository.releaseOrderClaim({
+      orderId: 70,
+      disposition: "release",
+      expectedClaimId: "9",
+      expectedWarehouseStatus: "packing",
+      requireNoClaimableDemand: true,
+      idempotencyKey: "demand-reconcile:70:status-race",
+      actor: "oms-order-sync",
+      reason: "all physical order lines were removed",
+    })).rejects.toMatchObject({
+      code: "ORDER_WAREHOUSE_STATUS_CHANGED",
+      context: expect.objectContaining({
+        expectedWarehouseStatus: "packing",
+        lockedWarehouseStatus: "ready",
+      }),
+    });
+    expect(writer.releaseResources).not.toHaveBeenCalled();
+    expect(fake.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
+
+  it("rejects a release when the active claim is not the expected target", async () => {
+    const fake = createClaimReplacementPool();
+    const writer = createInventoryWriter();
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      writer,
+      fake.pool,
+      () => FIXED_TIME,
+    );
+
+    await expect(repository.releaseOrderClaim({
+      orderId: 70,
+      disposition: "release",
+      expectedClaimId: "10",
+      idempotencyKey: "demand-reconcile:70:stale-claim",
+      actor: "oms-order-sync",
+      reason: "stale demand event",
+    })).rejects.toMatchObject({
+      code: "ACTIVE_CLAIM_CHANGED",
+      context: expect.objectContaining({
+        orderId: 70,
+        expectedClaimId: "10",
+        activeClaimId: "9",
+      }),
+    });
+    expect(writer.releaseResources).not.toHaveBeenCalled();
+    expect(fake.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
+
   it("rejects reuse of a package-execution receipt as a build-handoff receipt", async () => {
     const command = {
       claimId: "9",

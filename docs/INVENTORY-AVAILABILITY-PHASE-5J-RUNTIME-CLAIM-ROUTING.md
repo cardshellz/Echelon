@@ -1,5 +1,8 @@
 # Inventory Availability Phase 5J — Runtime Claim Routing
 
+> Phase 5K subsequently closes the atomic accepted-order demand-reconciliation
+> blocker described below. The other activation blockers remain in force.
+
 ## Scope
 
 This slice routes the deployed reservation service container through the same
@@ -66,9 +69,9 @@ event identity, and whether this attempt changed WMS demand to
 The event is submitted even when a retry observes no new WMS row changes. This
 matters because an earlier attempt can persist WMS demand and then fail before
 claim reconciliation. Legacy authority performs the same deployed idempotent
-release-then-reserve sequence only when demand changed. Canonical authority
-fails the webhook with `CANONICAL_DEMAND_RECONCILIATION_NOT_ATOMIC`; the inbox
-therefore remains retryable until an atomic reconcile command is deployed.
+release-then-reserve sequence only when demand changed. Phase 5J initially
+failed canonical reconciliation closed; Phase 5K replaces that temporary block
+with exact-predecessor replacement and guarded zero-demand release.
 
 ## Explicit canonical blockers
 
@@ -76,15 +79,13 @@ The following operations fail closed under canonical authority instead of
 falling back to legacy inventory state:
 
 1. Item-level reserve (`reserveForOrder`).
-2. Demand replacement until exact predecessor selection and zero-demand
-   release occur inside one serializable transaction.
-3. Refund item release until the refund cascade submits one whole-order demand
+2. Refund item release until the refund cascade submits one whole-order demand
    reconciliation event.
-4. Cycle-count orphan trimming/reallocation until it updates exact claim
+3. Cycle-count orphan trimming/reallocation until it updates exact claim
    ownership.
-5. Legacy reservation-status projection until a canonical claim/resource DTO
+4. Legacy reservation-status projection until a canonical claim/resource DTO
    replaces it.
-6. Any caller-owned Drizzle transaction passed across the reservation boundary.
+5. Any caller-owned Drizzle transaction passed across the reservation boundary.
 
 Picker pick/unpick remains a separate activation blocker: the deployed picker
 updates WMS state and inventory inside one caller-owned transaction, while the
@@ -94,6 +95,6 @@ It must be refactored as one transaction-aware orchestration before activation.
 ## Activation status
 
 Canonical authority remains inactive. Activation is still prohibited until
-atomic demand reconciliation, refund grouping, cycle-count claim repair,
-canonical reservation status, and transaction-aware picker routing are built
-and verified together with ATP, publishers, and reservation callers.
+refund grouping, cycle-count claim repair, canonical reservation status, and
+transaction-aware picker routing are built and verified together with ATP,
+publishers, and reservation callers.

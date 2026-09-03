@@ -4562,6 +4562,9 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     rawCommand: CanonicalAvailabilityClaimReleaseCommand,
   ): Promise<CanonicalAvailabilityClaimResult> {
     const command = canonicalAvailabilityClaimReleaseCommandSchema.parse(rawCommand);
+    const expectedClaimId = command.expectedClaimId == null
+      ? null
+      : positiveBigInt(command.expectedClaimId, "release.expectedClaimId");
     const requestHash = hash(command);
     const occurredAt = this.clock();
     if (Number.isNaN(occurredAt.getTime())) {
@@ -4582,6 +4585,13 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
 
         const preliminaryClaim = await loadActiveClaim(client, command.orderId, false);
         if (!preliminaryClaim) {
+          if (expectedClaimId !== null) {
+            throw new InventoryAvailabilityClaimRepositoryError(
+              "ACTIVE_CLAIM_CHANGED",
+              "The order no longer has the active canonical claim expected by the release command.",
+              { orderId: command.orderId, expectedClaimId: command.expectedClaimId },
+            );
+          }
           await loadOrder(client, command.orderId, true);
           const result = await persistNoopCommand(
             client,
@@ -4593,6 +4603,17 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           await client.query("COMMIT");
           return result;
         }
+        if (expectedClaimId !== null && preliminaryClaim.id !== expectedClaimId) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ACTIVE_CLAIM_CHANGED",
+            "The order's active canonical claim does not match the expected release target.",
+            {
+              orderId: command.orderId,
+              expectedClaimId: command.expectedClaimId,
+              activeClaimId: preliminaryClaim.id.toString(),
+            },
+          );
+        }
         const graphProductIds = await loadClaimProductIds(client, preliminaryClaim);
         if (graphProductIds.length === 0 || graphProductIds.length > MAX_GRAPH_PRODUCTS) {
           throw new InventoryAvailabilityClaimRepositoryError(
@@ -4602,13 +4623,46 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           );
         }
         await lockGraphProducts(client, graphProductIds);
-        await loadOrder(client, command.orderId, true);
+        const lockedOrder = await loadOrder(client, command.orderId, true);
         const claim = await loadActiveClaim(client, command.orderId, true);
-        if (!claim || claim.id !== preliminaryClaim.id) {
+        if (!claim
+          || claim.id !== preliminaryClaim.id
+          || (expectedClaimId !== null && claim.id !== expectedClaimId)) {
           throw new InventoryAvailabilityClaimRepositoryError(
             "ACTIVE_CLAIM_CHANGED",
             "The active canonical claim changed while release locks were being acquired.",
-            { orderId: command.orderId, preliminaryClaimId: preliminaryClaim.id.toString() },
+            {
+              orderId: command.orderId,
+              expectedClaimId: command.expectedClaimId ?? null,
+              preliminaryClaimId: preliminaryClaim.id.toString(),
+              lockedClaimId: claim?.id.toString() ?? null,
+            },
+          );
+        }
+        if (command.requireNoClaimableDemand === true
+          && lockedOrder.warehouseStatus !== command.expectedWarehouseStatus) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ORDER_WAREHOUSE_STATUS_CHANGED",
+            "The guarded canonical release was rejected because the locked order status changed.",
+            {
+              orderId: command.orderId,
+              expectedClaimId: command.expectedClaimId,
+              expectedWarehouseStatus: command.expectedWarehouseStatus,
+              lockedWarehouseStatus: lockedOrder.warehouseStatus,
+            },
+          );
+        }
+        if (command.requireNoClaimableDemand === true
+          && !["cancelled", "shipped"].includes(lockedOrder.warehouseStatus)
+          && lockedOrder.lines.length > 0) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "ORDER_STILL_HAS_CLAIMABLE_DEMAND",
+            "The guarded canonical release was rejected because the locked order still has claimable demand.",
+            {
+              orderId: command.orderId,
+              expectedClaimId: command.expectedClaimId,
+              claimableLineCount: lockedOrder.lines.length,
+            },
           );
         }
         await cancelOpenBuildHandoffs(client, this.buildWriter, claim, command, occurredAt);

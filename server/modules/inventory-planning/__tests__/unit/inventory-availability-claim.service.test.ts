@@ -137,7 +137,10 @@ describe("InventoryAvailabilityClaimService", () => {
     })).resolves.toEqual(replacementResult);
     await expect(service.releaseOrderClaim({
       orderId: 70,
-      disposition: "cancel",
+      disposition: "release",
+      expectedClaimId: "9",
+      expectedWarehouseStatus: "ready",
+      requireNoClaimableDemand: true,
       ...audit,
     })).resolves.toEqual(noClaimResult);
     await expect(service.executePackageOperation({
@@ -178,7 +181,10 @@ describe("InventoryAvailabilityClaimService", () => {
     });
     expect(store.releaseOrderClaim).toHaveBeenCalledWith({
       orderId: 70,
-      disposition: "cancel",
+      disposition: "release",
+      expectedClaimId: "9",
+      expectedWarehouseStatus: "ready",
+      requireNoClaimableDemand: true,
       ...audit,
     });
     expect(store.executePackageOperation).toHaveBeenCalledTimes(1);
@@ -201,7 +207,17 @@ describe("InventoryAvailabilityClaimService", () => {
       code: "INVALID_CANONICAL_CLAIM_COMMAND",
       context: expect.objectContaining({ operation: "replace_order_claim" }),
     }));
+    await expect(service.releaseOrderClaim({
+      orderId: 70,
+      disposition: "release",
+      requireNoClaimableDemand: true,
+      ...audit,
+    })).rejects.toEqual(expect.objectContaining<Partial<InventoryAvailabilityClaimServiceError>>({
+      code: "INVALID_CANONICAL_CLAIM_COMMAND",
+      context: expect.objectContaining({ operation: "release_order_claim" }),
+    }));
     expect(store.replaceOrderClaim).not.toHaveBeenCalled();
+    expect(store.releaseOrderClaim).not.toHaveBeenCalled();
   });
 
   it("fails closed when a store returns an invalid result", async () => {
