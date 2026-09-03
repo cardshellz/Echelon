@@ -1,5 +1,8 @@
 import { DropshipError } from "../domain/errors";
-import { isEbayTokenRefreshAuthFailureStatus } from "./dropship-ebay-auth-failure";
+import {
+  ebayTokenRefreshErrorContext,
+  recordEbayTokenRefreshFailure,
+} from "./dropship-ebay-auth-failure";
 import {
   createDropshipMarketplaceCredentialRepositoryFromEnv,
   type DropshipMarketplaceCredentialRepository,
@@ -132,22 +135,24 @@ export class RefreshingDropshipEbayRegistrationCredentialProvider
     }
     const text = await response.text();
     if (!response.ok) {
-      if (isEbayTokenRefreshAuthFailureStatus(response.status)) {
-        await this.recordAuthFailure(credential, {
-          failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
-          message: `eBay token refresh failed with HTTP ${response.status}.`,
-          statusCode: response.status,
-          now,
-        });
-      }
+      const message = `eBay token refresh failed with HTTP ${response.status}.`;
+      const classification = await recordEbayTokenRefreshFailure({
+        credentials: this.credentials,
+        credential,
+        status: response.status,
+        responseBody: text,
+        failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
+        message,
+        now,
+      });
       throw new DropshipError(
         "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
-        `eBay token refresh failed with HTTP ${response.status}.`,
-        {
-          retryable: response.status >= 500 || response.status === 429,
+        message,
+        ebayTokenRefreshErrorContext({
           status: response.status,
-          body: text.slice(0, 1_000),
-        },
+          responseBody: text,
+          classification,
+        }),
       );
     }
     const token = parseTokenResponse(text);

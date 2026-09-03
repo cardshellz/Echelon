@@ -7,8 +7,12 @@ import type {
   DropshipMarketplaceCredentialRepository,
   DropshipMarketplaceStoreCredentials,
 } from "./dropship-marketplace-credentials";
-import { isEbayResourceAuthFailureStatus } from "./dropship-ebay-auth-failure";
+import {
+  isEbayResourceAuthFailureStatus,
+  recordEbayAccessTokenRejection,
+} from "./dropship-ebay-auth-failure";
 import { buildEbayPostOrderAuthorization } from "./dropship-ebay-post-order-auth";
+import type { DropshipEbayRegistrationCredentialProvider } from "./dropship-ebay-registration-credentials";
 
 /**
  * Return-leg tracking provider (stack 4/4, item E): implements the PR 3
@@ -77,6 +81,7 @@ export class DropshipChannelReturnTrackingProvider implements DropshipReturnTrac
   constructor(
     private readonly deps: {
       credentials: DropshipMarketplaceCredentialRepository;
+      ebayCredentials?: DropshipEbayRegistrationCredentialProvider;
       repository: DropshipReturnTrackingRepository;
       fetchImpl?: FetchLike;
       clock?: Clock;
@@ -98,11 +103,16 @@ export class DropshipChannelReturnTrackingProvider implements DropshipReturnTrac
       return null;
     }
 
-    const credential = await this.deps.credentials.loadForStoreConnection({
-      vendorId: input.vendorId,
-      storeConnectionId: input.storeConnectionId,
-      platform: "ebay",
-    });
+    const credential = this.deps.ebayCredentials
+      ? await this.deps.ebayCredentials.loadFreshForStoreConnection({
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+        })
+      : await this.deps.credentials.loadForStoreConnection({
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+          platform: "ebay",
+        });
     const environment = resolveEbayEnvironment(credential.config);
     const marketplaceId = resolveMarketplaceId(credential.config);
 
@@ -178,16 +188,14 @@ export class DropshipChannelReturnTrackingProvider implements DropshipReturnTrac
           );
         }
       }
-      if (isEbayResourceAuthFailureStatus(response.status)) {
-        await this.deps.credentials.recordAuthFailure?.({
-          vendorId: input.credential.vendorId,
-          storeConnectionId: input.credential.storeConnectionId,
-          platform: "ebay",
-          status: "needs_reauth",
+      const accessTokenRejected = isEbayResourceAuthFailureStatus(response.status);
+      if (accessTokenRejected) {
+        await recordEbayAccessTokenRejection({
+          credentials: this.deps.credentials,
+          credential: input.credential,
+          status: response.status,
           failureCode: "DROPSHIP_RETURN_TRACKING_HTTP_ERROR",
           message: `eBay return tracking fetch failed with HTTP ${response.status}.`,
-          retryable: false,
-          statusCode: response.status,
           now: clock.now(),
         });
       }
@@ -199,7 +207,11 @@ export class DropshipChannelReturnTrackingProvider implements DropshipReturnTrac
       throw new DropshipError(
         "DROPSHIP_RETURN_TRACKING_HTTP_ERROR",
         `eBay return tracking fetch failed with HTTP ${response.status}.`,
-        { retryable, status: response.status, body: text.slice(0, 1000) },
+        {
+          retryable: retryable || accessTokenRejected,
+          status: response.status,
+          body: text.slice(0, 1000),
+        },
       );
     }
     throw new DropshipError(

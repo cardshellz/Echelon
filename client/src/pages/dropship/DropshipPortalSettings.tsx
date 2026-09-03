@@ -36,6 +36,10 @@ import {
   type DropshipSensitiveAction,
 } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
+import {
+  readStoreOAuthCallbackStatus,
+  storeOAuthCallbackMessage,
+} from "./store-oauth-callback-status";
 import { storeOAuthEmailVerificationMessage } from "./store-oauth-verification-copy";
 
 type PendingStoreAction =
@@ -87,6 +91,11 @@ export default function DropshipPortalSettings() {
   });
   const settings = settingsQuery.data?.settings;
   const storeConnections = storeConnectionsQuery.data?.connections ?? [];
+  const connectionStatus = readStoreOAuthCallbackStatus(window.location.search);
+  const callbackEbayConnections = storeConnections.filter((connection) => connection.platform === "ebay");
+  const callbackStoreName = callbackEbayConnections.length === 1
+    ? connectionDisplayName(callbackEbayConnections[0])
+    : null;
   const verificationTargetId = emailChallengeAction === "connect_store"
     ? reauthorizeTargetId
     : emailChallengeAction === "disconnect_store"
@@ -278,6 +287,15 @@ export default function DropshipPortalSettings() {
           </h1>
           <p className="mt-1 text-sm text-zinc-500">Account, store connection, wallet, notification, return contact, and Phase 2 surfaces.</p>
         </div>
+
+        {connectionStatus && (
+          <Alert className={connectionStatus.kind === "connected" ? "mt-5 border-emerald-200 bg-emerald-50 text-emerald-900" : "mt-5 border-rose-200 bg-rose-50 text-rose-900"}>
+            {connectionStatus.kind === "connected" ? <CheckCircle2 className="h-4 w-4" /> : <AlertCircle className="h-4 w-4" />}
+            <AlertDescription>
+              {storeOAuthCallbackMessage(connectionStatus, callbackStoreName)}
+            </AlertDescription>
+          </Alert>
+        )}
 
         {settingsQuery.error && (
           <Alert variant="destructive" className="mt-5">

@@ -45,6 +45,9 @@ export interface DropshipMarketplaceStoreAuthFailureInput {
   message: string;
   retryable: boolean;
   statusCode?: number;
+  providerErrorCode?: string | null;
+  providerErrorDescription?: string | null;
+  invalidateAccessToken?: boolean;
   now: Date;
 }
 
@@ -190,18 +193,23 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
         await insertTokenRecord(client, input.storeConnectionId, refreshRecord);
       }
 
+      await resolveStoreAuthHealthCheck(client, input.storeConnectionId, input.now);
+      const hasOpenBlockers = await hasOpenStoreSetupBlockers(client, input.storeConnectionId);
       await client.query(
         `UPDATE dropship.dropship_store_connections
          SET access_token_ref = $2,
              refresh_token_ref = COALESCE($3, refresh_token_ref),
              token_expires_at = $4,
-             updated_at = $5
+             status = 'connected',
+             setup_status = $5,
+             updated_at = $6
          WHERE id = $1`,
         [
           input.storeConnectionId,
           accessRecord.tokenRef,
           refreshRecord?.tokenRef ?? null,
           input.accessTokenExpiresAt,
+          hasOpenBlockers ? "attention_required" : "ready",
           input.now,
         ],
       );
@@ -211,8 +219,8 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
         access_token_ref: accessRecord.tokenRef,
         refresh_token_ref: refreshRecord?.tokenRef ?? connection.refresh_token_ref,
         token_expires_at: input.accessTokenExpiresAt,
+        status: "connected",
       };
-      await resolveStoreAuthHealthCheck(client, input.storeConnectionId, input.now);
       const tokens = await loadTokenRows(client, input.storeConnectionId);
       await client.query("COMMIT");
       return mapCredentials({
@@ -235,7 +243,11 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
       await client.query("BEGIN");
       const connection = await loadConnectionForHealthUpdate(client, input);
       const previousStatus = connection.status;
-      const transitioned = previousStatus !== input.status
+      const effectiveStatus = previousStatus === "needs_reauth"
+        ? "needs_reauth"
+        : input.status;
+      const effectiveInput = { ...input, status: effectiveStatus };
+      const transitioned = previousStatus !== effectiveStatus
         && previousStatus !== "disconnected"
         && previousStatus !== "grace_period"
         && previousStatus !== "paused";
@@ -245,9 +257,13 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
           `UPDATE dropship.dropship_store_connections
            SET status = $4,
                setup_status = 'attention_required',
-               access_token_ref = NULL,
-               refresh_token_ref = NULL,
-               token_expires_at = NULL,
+               access_token_ref = CASE WHEN $4 = 'needs_reauth' THEN NULL ELSE access_token_ref END,
+               refresh_token_ref = CASE WHEN $4 = 'needs_reauth' THEN NULL ELSE refresh_token_ref END,
+               token_expires_at = CASE
+                 WHEN $4 = 'needs_reauth' THEN NULL
+                 WHEN $6::boolean THEN to_timestamp(0)
+                 ELSE token_expires_at
+               END,
                updated_at = $5
            WHERE id = $1
              AND vendor_id = $2
@@ -256,23 +272,26 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
             input.storeConnectionId,
             input.vendorId,
             input.platform,
-            input.status,
+            effectiveStatus,
             input.now,
+            effectiveStatus === "refresh_failed" && input.invalidateAccessToken === true,
           ],
         );
-        await client.query(
-          `DELETE FROM dropship.dropship_store_connection_tokens
-           WHERE store_connection_id = $1`,
-          [input.storeConnectionId],
-        );
+        if (effectiveStatus === "needs_reauth") {
+          await client.query(
+            `DELETE FROM dropship.dropship_store_connection_tokens
+             WHERE store_connection_id = $1`,
+            [input.storeConnectionId],
+          );
+        }
       }
 
       await upsertStoreAuthHealthCheck(client, {
-        ...input,
+        ...effectiveInput,
         previousStatus,
       });
       await recordStoreAuthHealthAuditEvent(client, {
-        ...input,
+        ...effectiveInput,
         previousStatus,
         transitioned,
       });
@@ -282,7 +301,7 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
         storeConnectionId: input.storeConnectionId,
         platform: input.platform,
         previousStatus,
-        status: input.status,
+        status: effectiveStatus,
         transitioned,
       };
       await client.query("COMMIT");
@@ -293,8 +312,8 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
       client.release();
     }
 
-    if (record.transitioned) {
-      await this.notifyStoreAuthFailure(input, record);
+    if (record.transitioned && record.status === "needs_reauth") {
+      await this.notifyStoreAuthFailure({ ...input, status: record.status }, record);
     }
     return record;
   }
@@ -322,6 +341,9 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
         failureCode: input.failureCode,
         retryable: input.retryable,
         statusCode: input.statusCode ?? null,
+        providerErrorCode: input.providerErrorCode ?? null,
+        providerErrorDescription: input.providerErrorDescription ?? null,
+        invalidateAccessToken: input.invalidateAccessToken === true,
       },
       idempotencyKey: `store-auth-health:${input.storeConnectionId}:${input.status}:${input.now.toISOString()}`,
     }, {
@@ -385,7 +407,7 @@ async function loadConnection(
       retryable: false,
     });
   }
-  if (connection.status !== "connected") {
+  if (connection.status !== "connected" && connection.status !== "refresh_failed") {
     throw new DropshipError("DROPSHIP_STORE_CONNECTION_NOT_CONNECTED", "Dropship store connection is not connected.", {
       vendorId: input.vendorId,
       storeConnectionId: input.storeConnectionId,
@@ -488,6 +510,9 @@ async function upsertStoreAuthHealthCheck(
         failureCode: input.failureCode,
         retryable: input.retryable,
         statusCode: input.statusCode ?? null,
+        providerErrorCode: input.providerErrorCode ?? null,
+        providerErrorDescription: input.providerErrorDescription ?? null,
+        invalidateAccessToken: input.invalidateAccessToken === true,
       }),
       input.now,
     ],
@@ -514,6 +539,22 @@ async function resolveStoreAuthHealthCheck(
   );
 }
 
+async function hasOpenStoreSetupBlockers(
+  client: PoolClient,
+  storeConnectionId: number,
+): Promise<boolean> {
+  const result = await client.query<{ count: string | number }>(
+    `SELECT COUNT(*) AS count
+     FROM dropship.dropship_store_setup_checks
+     WHERE store_connection_id = $1
+       AND resolved_at IS NULL
+       AND status <> 'passed'
+       AND severity IN ('blocker','error')`,
+    [storeConnectionId],
+  );
+  return Number(result.rows[0]?.count ?? 0) > 0;
+}
+
 async function recordStoreAuthHealthAuditEvent(
   client: PoolClient,
   input: DropshipMarketplaceStoreAuthFailureInput & {
@@ -538,6 +579,9 @@ async function recordStoreAuthHealthAuditEvent(
         failureCode: input.failureCode,
         retryable: input.retryable,
         statusCode: input.statusCode ?? null,
+        providerErrorCode: input.providerErrorCode ?? null,
+        providerErrorDescription: input.providerErrorDescription ?? null,
+        invalidateAccessToken: input.invalidateAccessToken === true,
       }),
       input.now,
     ],

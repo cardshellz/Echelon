@@ -46,6 +46,10 @@ import {
   type DropshipStorePlatform,
 } from "@/lib/dropship-ops-surface";
 import { DropshipPortalShell } from "./DropshipPortalShell";
+import {
+  readStoreOAuthCallbackStatus,
+  storeOAuthCallbackMessage,
+} from "./store-oauth-callback-status";
 import { storeOAuthEmailVerificationMessage } from "./store-oauth-verification-copy";
 
 type PendingAction = "send-email-code" | "verify-email-code" | "passkey-proof" | "oauth-start" | null;
@@ -71,7 +75,7 @@ export default function DropshipPortalOnboarding() {
   const onboarding = onboardingQuery.data;
   const completedStepCount = onboarding?.steps.filter((step) => step.status === "complete").length ?? 0;
   const totalStepCount = onboarding?.steps.length ?? 0;
-  const connectionStatus = getStoreConnectionCallbackStatus();
+  const connectionStatus = readStoreOAuthCallbackStatus(window.location.search);
 
   return (
     <DropshipPortalShell>
@@ -94,7 +98,7 @@ export default function DropshipPortalOnboarding() {
         {connectionStatus && (
           <Alert className={connectionStatus.kind === "connected" ? "mt-5 border-emerald-200 bg-emerald-50 text-emerald-900" : "mt-5 border-rose-200 bg-rose-50 text-rose-900"}>
             {connectionStatus.kind === "connected" ? <CheckCircle2 className="h-4 w-4" /> : <AlertCircle className="h-4 w-4" />}
-            <AlertDescription>{connectionStatus.message}</AlertDescription>
+            <AlertDescription>{storeOAuthCallbackMessage(connectionStatus)}</AlertDescription>
           </Alert>
         )}
 
@@ -931,20 +935,4 @@ function stepBadgeTone(status: DropshipOnboardingStep["status"] | "incomplete"):
   if (status === "complete") return "border-emerald-200 bg-emerald-50 text-emerald-800";
   if (status === "blocked") return "border-rose-200 bg-rose-50 text-rose-800";
   return "border-amber-200 bg-amber-50 text-amber-900";
-}
-
-function getStoreConnectionCallbackStatus(): { kind: "connected" | "error"; message: string } | null {
-  const params = new URLSearchParams(window.location.search);
-  const status = params.get("storeConnection");
-  if (status === "connected") {
-    return { kind: "connected", message: "Store connection completed." };
-  }
-  if (status === "error") {
-    const code = params.get("error");
-    return {
-      kind: "error",
-      message: code ? `Store connection failed: ${formatStatus(code)}` : "Store connection failed.",
-    };
-  }
-  return null;
 }

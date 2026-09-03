@@ -215,7 +215,13 @@ describe("EbayDropshipListingSetupDirectory", () => {
     new DropshipError(
       "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
       "eBay token refresh failed with HTTP 400.",
-      { storeConnectionId: 44, status: 400, retryable: false },
+      {
+        storeConnectionId: 44,
+        status: 400,
+        authFailureStatus: "needs_reauth",
+        providerErrorCode: "invalid_grant",
+        retryable: false,
+      },
     ),
   ])("converts a credential authorization failure into an actionable setup error", async (credentialError) => {
     const directory = new EbayDropshipListingSetupDirectory({
@@ -243,6 +249,30 @@ describe("EbayDropshipListingSetupDirectory", () => {
       "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
       "eBay token refresh failed before a response was received.",
       { retryable: true, errorName: "TypeError" },
+    );
+    const directory = new EbayDropshipListingSetupDirectory({
+      async loadFreshForStoreConnection() {
+        throw refreshError;
+      },
+    }, vi.fn() as unknown as typeof fetch);
+
+    await expect(directory.discoverForStoreConnection({
+      vendorId: 5,
+      storeConnectionId: 44,
+      marketplaceId: "EBAY_US",
+    })).rejects.toBe(refreshError);
+  });
+
+  it("does not misclassify a retained invalid-scope grant as a revoked authorization", async () => {
+    const refreshError = new DropshipError(
+      "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
+      "eBay token refresh failed with HTTP 400.",
+      {
+        status: 400,
+        authFailureStatus: "refresh_failed",
+        providerErrorCode: "invalid_scope",
+        retryable: false,
+      },
     );
     const directory = new EbayDropshipListingSetupDirectory({
       async loadFreshForStoreConnection() {
