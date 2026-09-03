@@ -18,7 +18,12 @@ describe("shipping fulfillment method scope and capabilities migration", () => {
   it("captures capability snapshots while preserving historical rows", () => {
     expect(migration).toContain("ADD COLUMN provider_capabilities JSONB");
     expect(migration).toContain("shipping_level_method_scoped_capabilities_chk");
-    expect(migration).toMatch(/shipping_level_method_scoped_capabilities_chk[\s\S]+NOT VALID/);
+    expect(migration).toContain("guard_fulfillment_method_capabilities_write");
+    expect(migration).toContain("OLD.provider_capabilities IS NULL");
+    expect(migration).toContain("OLD.is_active OR NOT NEW.is_active");
+    expect(migration).not.toMatch(
+      /ADD CONSTRAINT shipping_level_method_scoped_capabilities_chk/,
+    );
     expect(migration).toContain("supportsPrepaidDutiesTaxes");
     expect(migration).toContain("displaySchemes");
   });

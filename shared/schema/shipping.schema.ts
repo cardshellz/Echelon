@@ -1202,6 +1202,8 @@ export const shippingServiceLevelMethods = shippingSchema.table("service_level_m
   domestic: boolean("domestic").notNull().default(false),
   international: boolean("international").notNull().default(false),
   providerCapabilities: jsonb("provider_capabilities")
+    // Migration 0650 uses a write guard so historical scoped rows may remain
+    // null while new scoped rows are required to persist a valid snapshot.
     .$type<ShippingFulfillmentMethodCapabilities | null>(),
   revisionId: bigint("revision_id", { mode: "number" }),
   isActive: boolean("is_active").notNull().default(true),
@@ -1244,10 +1246,6 @@ export const shippingServiceLevelMethods = shippingSchema.table("service_level_m
     ${table.provider} = 'legacy_unscoped'
     OR ${table.domestic}
     OR ${table.international}
-  `),
-  check("shipping_level_method_scoped_capabilities_chk", sql`
-    ${table.provider} = 'legacy_unscoped'
-    OR ${table.providerCapabilities} IS NOT NULL
   `),
   check("shipping_level_method_capabilities_chk", sql`
     ${table.providerCapabilities} IS NULL

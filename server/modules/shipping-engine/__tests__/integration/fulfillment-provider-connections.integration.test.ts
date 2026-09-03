@@ -199,6 +199,33 @@ describeWithDisposableDb.sequential("fulfillment provider connection PostgreSQL 
     `)).resolves.toBeDefined();
   });
 
+  it("requires capability evidence for every newly inserted scoped route", async () => {
+    await expect(pool.query(`
+      INSERT INTO "${schema}".service_level_methods (
+        service_level_id, provider_connection_id, provider, provider_account_id,
+        provider_account_name, carrier, carrier_name, service_code, service_name,
+        priority, domestic, international, provider_capabilities, revision_id, is_active
+      ) VALUES (
+        8, 1, 'shipstation_v2', 'se-ups', 'UPS account', 'ups', 'UPS',
+        'ups_2nd_day_air', 'UPS 2nd Day Air', 3, TRUE, FALSE, NULL, 92, TRUE
+      )
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "shipping_level_method_scoped_capabilities_chk",
+    });
+  });
+
+  it("does not allow a capability-unknown historical route to be repurposed", async () => {
+    await expect(pool.query(`
+      UPDATE "${schema}".service_level_methods
+      SET service_code = 'ups_ground_repurposed'
+      WHERE service_level_id = 7
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "shipping_level_method_scoped_capabilities_chk",
+    });
+  });
+
   it("rejects disabling a connection referenced by an active route", async () => {
     await expect(pool.query(`
       UPDATE "${schema}".fulfillment_provider_connections
