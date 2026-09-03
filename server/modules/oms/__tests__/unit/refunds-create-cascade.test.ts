@@ -130,6 +130,25 @@ describe("refund-event reservation release calculation", () => {
     expect(quantity).toBe(0);
   });
 
+  it("releases only the unconsumed portion of a partially fulfilled return", () => {
+    const quantity = refundCascadeTest.deriveRefundEventReservationReleaseQuantity({
+      line: omsLine({
+        paid_quantity: 5,
+        refund_other_quantity: 5,
+      }),
+      adjustment: {
+        externalLineItemId: "441680952",
+        quantity: 5,
+        restockPolicy: "return",
+        raw: {},
+      },
+      pickedQuantity: 2,
+      fulfilledQuantity: 2,
+    });
+
+    expect(quantity).toBe(3);
+  });
+
   it("does not double-release a quantity already removed by cancellation authority", () => {
     const quantity = refundCascadeTest.deriveRefundEventReservationReleaseQuantity({
       line: omsLine({

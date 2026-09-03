@@ -23,10 +23,11 @@ the reservation boundary.
 
 The refund cascade invokes this command once per event, including an
 idempotent webhook replay whose earlier attempt may have committed OMS/WMS
-demand before reservation reconciliation completed. Fulfilled return demand,
-already-cancelled demand, non-shippable lines, and lines without a persisted
-catalog variant remain excluded by the existing refund release-target
-derivation.
+demand before reservation reconciliation completed. For a return, fulfilled or
+picked units remain excluded while the unconsumed part of a partially fulfilled
+line is released. Already-cancelled demand, non-shippable lines, and lines
+without a persisted catalog variant remain excluded by the refund
+release-target derivation.
 
 ## Legacy authority
 
@@ -67,6 +68,7 @@ legacy reservations.
 Unit and source-contract coverage proves:
 
 - a two-line refund reaches the cascade helper in one call with both targets;
+- a partially fulfilled return releases only its unconsumed demand;
 - legacy targets and product locks are deterministic and share one transaction;
 - duplicate targets fail before a transaction begins;
 - canonical multi-line refunds perform exactly one claim replacement;

@@ -163,8 +163,6 @@ function deriveRefundEventReservationReleaseQuantity(args: {
   pickedQuantity: number;
   fulfilledQuantity: number;
 }): number {
-  if (args.adjustment.restockPolicy === "return") return 0;
-
   const paidQuantity = Math.max(0, Number(args.line.paid_quantity ?? 0));
   const cancelledQuantity = Math.max(0, Number(args.line.cancelled_quantity ?? 0));
   const cumulativeCancelQuantity = Math.max(
