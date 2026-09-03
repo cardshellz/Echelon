@@ -13,11 +13,14 @@ import {
   canonicalAvailabilityClaimReplacementResultSchema,
   canonicalAvailabilityClaimResultSchema,
   canonicalAvailabilityClaimUnpickCommandSchema,
+  canonicalAvailabilityCycleCountReconciliationCommandSchema,
+  canonicalAvailabilityCycleCountReconciliationResultSchema,
   type CanonicalAvailabilityClaimBuildHandoffResult,
   type CanonicalAvailabilityClaimOperationExecutionResult,
   type CanonicalAvailabilityClaimPickResult,
   type CanonicalAvailabilityClaimReplacementResult,
   type CanonicalAvailabilityClaimResult,
+  type CanonicalAvailabilityCycleCountReconciliationResult,
 } from "@shared/types/inventory-availability-claims";
 
 import type { InventoryAvailabilityClaimStore } from "./inventory-availability-claim.port";
@@ -30,7 +33,8 @@ export type InventoryAvailabilityClaimOperation =
   | "execute_build_operation"
   | "handoff_build_operation"
   | "pick_claim_line"
-  | "unpick_claim_line";
+  | "unpick_claim_line"
+  | "reconcile_cycle_count";
 
 export class InventoryAvailabilityClaimServiceError extends Error {
   constructor(
@@ -134,6 +138,16 @@ export class InventoryAvailabilityClaimService {
     return parseResult(
       canonicalAvailabilityClaimPickResultSchema,
       await this.store.unpickClaimLine(command),
+      operation,
+    );
+  }
+
+  async reconcileCycleCount(input: unknown): Promise<CanonicalAvailabilityCycleCountReconciliationResult> {
+    const operation = "reconcile_cycle_count";
+    const command = parseCommand(canonicalAvailabilityCycleCountReconciliationCommandSchema, input, operation);
+    return parseResult(
+      canonicalAvailabilityCycleCountReconciliationResultSchema,
+      await this.store.reconcileCycleCount(command),
       operation,
     );
   }

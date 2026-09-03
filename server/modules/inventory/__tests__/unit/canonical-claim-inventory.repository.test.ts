@@ -838,4 +838,211 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
     }));
     expect(fake.query.mock.calls.some(([text]) => /^\s*(UPDATE|INSERT)/i.test(String(text)))).toBe(false);
   });
+
+  it("applies a counted shortage only from unreserved FIFO stock and records exact adjustment lineage", async () => {
+    let adjustmentLedgerRows = 0;
+    const fake = createClient(async (text, values) => {
+      if (text.includes("FROM inventory.inventory_levels") && text.includes("WHERE id = $1")) {
+        return { rows: [{ id: 11, warehouse_location_id: 2, product_variant_id: 101, variant_qty: 10, reserved_qty: 4 }] };
+      }
+      if (text.includes("FROM inventory.inventory_lots")) {
+        return { rows: [
+          { id: 51, qty_on_hand: 6, qty_reserved: 4, qty_picked: 0, total_unit_cost_mills: "125" },
+          { id: 52, qty_on_hand: 4, qty_reserved: 0, qty_picked: 0, total_unit_cost_mills: "200" },
+        ] };
+      }
+      if (text.startsWith("UPDATE inventory.inventory_lots")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("UPDATE inventory.inventory_levels")) {
+        expect(values).toEqual([6, OCCURRED_AT, 11, 10]);
+        return { rows: [], rowCount: 1 };
+      }
+      if (text.startsWith("INSERT INTO inventory.inventory_transactions")) {
+        adjustmentLedgerRows += 1;
+        expect(values).toEqual(adjustmentLedgerRows === 1
+          ? [101, 2, null, -2, 10, 8, "1", "125", "250", 51, 8, "81", "approved physical count", "user:7", OCCURRED_AT]
+          : [101, 2, null, -2, 8, 6, "2", "200", "400", 52, 8, "81", "approved physical count", "user:7", OCCURRED_AT]);
+        return { rows: [{ id: 900 + adjustmentLedgerRows }], rowCount: 1 };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.applyCycleCountAdjustment({
+      client: fake.client,
+      inventoryLevelId: 11,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      quantityBefore: 10,
+      countedQty: 6,
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      actor: "user:7",
+      reason: "approved physical count",
+      occurredAt: OCCURRED_AT,
+    })).resolves.toEqual({
+      adjustmentTransactionId: 901,
+      consumedQty: BigInt(4),
+      consumedCostMills: BigInt(650),
+    });
+    const lotUpdates = fake.query.mock.calls.filter(([text]) => String(text).startsWith("UPDATE inventory.inventory_lots"));
+    expect(lotUpdates.map(([, values]) => values)).toEqual([[2, 51], [2, 52]]);
+    expect(adjustmentLedgerRows).toBe(2);
+  });
+
+  it("rejects a counted shortage until exact claims reduce reserved ownership", async () => {
+    const fake = createClient(async (text) => {
+      if (text.includes("FROM inventory.inventory_levels")) {
+        return { rows: [{ id: 11, warehouse_location_id: 2, product_variant_id: 101, variant_qty: 10, reserved_qty: 7 }] };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.applyCycleCountAdjustment({
+      client: fake.client,
+      inventoryLevelId: 11,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      quantityBefore: 10,
+      countedQty: 6,
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      actor: "user:7",
+      reason: "approved physical count",
+      occurredAt: OCCURRED_AT,
+    })).rejects.toEqual(expect.objectContaining<Partial<CanonicalClaimInventoryMutationError>>({
+      code: "CYCLE_COUNT_RESERVATIONS_NOT_RECONCILED",
+    }));
+    expect(fake.query.mock.calls.some(([text]) => String(text).includes("inventory.inventory_lots"))).toBe(false);
+  });
+
+  it("rejects a count when FIFO lot totals disagree with the locked inventory level", async () => {
+    const fake = createClient(async (text) => {
+      if (text.includes("FROM inventory.inventory_levels")) {
+        return { rows: [{ id: 11, warehouse_location_id: 2, product_variant_id: 101, variant_qty: 10, reserved_qty: 4 }] };
+      }
+      if (text.includes("FROM inventory.inventory_lots")) {
+        return { rows: [{
+          id: 51,
+          qty_on_hand: 9,
+          qty_reserved: 4,
+          qty_picked: 0,
+          total_unit_cost_mills: "125",
+        }] };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.applyCycleCountAdjustment({
+      client: fake.client,
+      inventoryLevelId: 11,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      quantityBefore: 10,
+      countedQty: 6,
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      actor: "user:7",
+      reason: "approved physical count",
+      occurredAt: OCCURRED_AT,
+    })).rejects.toEqual(expect.objectContaining<Partial<CanonicalClaimInventoryMutationError>>({
+      code: "CYCLE_COUNT_LOT_AGGREGATE_MISMATCH",
+    }));
+    expect(fake.query.mock.calls.some(([text]) => /^\s*(UPDATE|INSERT)/i.test(String(text)))).toBe(false);
+  });
+
+  it("creates a provisional item-keyed FIFO lot for a counted overage", async () => {
+    const fake = createClient(async (text, values) => {
+      if (text.includes("FROM inventory.inventory_levels")) {
+        return { rows: [{ id: 11, warehouse_location_id: 2, product_variant_id: 101, variant_qty: 4, reserved_qty: 1 }] };
+      }
+      if (text.includes("FROM inventory.inventory_lots")) {
+        return { rows: [{ id: 51, qty_on_hand: 4, qty_reserved: 1, qty_picked: 0, total_unit_cost_mills: "125" }] };
+      }
+      if (text.includes("FROM catalog.product_variants")) {
+        return { rows: [{ cost_cents: "250", cost_source: "last_paid" }] };
+      }
+      if (text.startsWith("INSERT INTO inventory.inventory_lots")) {
+        expect(values).toEqual([
+          "CC-8-81", 101, 2, "250", "25000", 3, OCCURRED_AT, 1, "last_paid", "approved physical count",
+        ]);
+        return { rows: [{ id: 53 }], rowCount: 1 };
+      }
+      if (text.startsWith("UPDATE inventory.inventory_levels")) return { rows: [], rowCount: 1 };
+      if (text.startsWith("INSERT INTO inventory.inventory_transactions")) {
+        expect(values).toEqual([
+          101, null, 2, 3, 4, 7, "250", "25000", "75000", 53,
+          8, "81", "approved physical count", "user:7", OCCURRED_AT,
+        ]);
+        return { rows: [{ id: 902 }], rowCount: 1 };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.applyCycleCountAdjustment({
+      client: fake.client,
+      inventoryLevelId: 11,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      quantityBefore: 4,
+      countedQty: 7,
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      actor: "user:7",
+      reason: "approved physical count",
+      occurredAt: OCCURRED_AT,
+    })).resolves.toEqual({
+      adjustmentTransactionId: 902,
+      consumedQty: BigInt(0),
+      consumedCostMills: BigInt(0),
+    });
+  });
+
+  it("records a durable item-keyed no-op when the physical count is unchanged", async () => {
+    const fake = createClient(async (text, values) => {
+      if (text.startsWith("INSERT INTO inventory.inventory_transactions")) {
+        expect(values).toEqual([
+          101, 2, 6, 8, "81", "verified unchanged count", "user:7", OCCURRED_AT,
+        ]);
+        return { rows: [{ id: 903 }], rowCount: 1 };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.recordCycleCountNoop({
+      client: fake.client,
+      productVariantId: 101,
+      warehouseLocationId: 2,
+      countedQty: 6,
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      actor: "user:7",
+      reason: "verified unchanged count",
+      occurredAt: OCCURRED_AT,
+    })).resolves.toEqual({ adjustmentTransactionId: 903 });
+  });
+
+  it("approves the exact cycle-count item through the inventory-owned writer", async () => {
+    const fake = createClient(async (text, values) => {
+      if (text.startsWith("UPDATE inventory.cycle_count_items")) {
+        expect(values).toEqual(["user:7", OCCURRED_AT, "verified", 901, 81, "variance"]);
+        return { rows: [{ id: 81 }], rowCount: 1 };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    });
+    const repository = new PostgresCanonicalClaimInventoryRepository();
+
+    await expect(repository.approveCycleCountItem({
+      client: fake.client,
+      cycleCountItemId: 81,
+      expectedStatus: "variance",
+      actor: "user:7",
+      reasonCode: "verified",
+      adjustmentTransactionId: 901,
+      occurredAt: OCCURRED_AT,
+    })).resolves.toBeUndefined();
+  });
 });

@@ -134,6 +134,12 @@ export type CanonicalClaimInventoryObservedReconciliationResult = {
   recordedUnreservedQuantityBefore: bigint;
 };
 
+export type CanonicalClaimCycleCountAdjustmentResult = {
+  adjustmentTransactionId: number;
+  consumedQty: bigint;
+  consumedCostMills: bigint;
+};
+
 export interface CanonicalClaimInventoryMutationPort {
   ensureInventoryLevel(input: {
     client: CanonicalClaimTransactionClient;
@@ -229,6 +235,42 @@ export interface CanonicalClaimInventoryMutationPort {
     reason: string;
     occurredAt: Date;
   }): Promise<CanonicalClaimInventoryPickResult>;
+
+  applyCycleCountAdjustment(input: {
+    client: CanonicalClaimTransactionClient;
+    inventoryLevelId: number;
+    productVariantId: number;
+    warehouseLocationId: number;
+    quantityBefore: number;
+    countedQty: number;
+    cycleCountId: number;
+    cycleCountItemId: number;
+    actor: string;
+    reason: string;
+    occurredAt: Date;
+  }): Promise<CanonicalClaimCycleCountAdjustmentResult>;
+
+  recordCycleCountNoop(input: {
+    client: CanonicalClaimTransactionClient;
+    productVariantId: number;
+    warehouseLocationId: number;
+    countedQty: number;
+    cycleCountId: number;
+    cycleCountItemId: number;
+    actor: string;
+    reason: string;
+    occurredAt: Date;
+  }): Promise<{ adjustmentTransactionId: number }>;
+
+  approveCycleCountItem(input: {
+    client: CanonicalClaimTransactionClient;
+    cycleCountItemId: number;
+    expectedStatus: string;
+    actor: string;
+    reasonCode: string;
+    adjustmentTransactionId: number | null;
+    occurredAt: Date;
+  }): Promise<void>;
 
   executePackageOperation(input: {
     client: CanonicalClaimTransactionClient;

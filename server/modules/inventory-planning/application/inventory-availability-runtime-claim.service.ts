@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type {
   CanonicalAvailabilityClaimReplacementResult,
   CanonicalAvailabilityClaimResult,
+  CanonicalAvailabilityCycleCountReconciliationResult,
 } from "@shared/types/inventory-availability-claims";
 import type { ClaimPlanDto } from "@shared/types/inventory-availability-planner";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -14,6 +15,7 @@ import type {
   ReconcileRefundOrderDemandResult,
   ReconcileOrderDemandCommand,
   ReconcileOrderDemandResult,
+  ReconcileCycleCountInventoryCommand,
   ReleaseOrderItemReservationResult,
   ReleaseOrderReservationOptions,
   ReleaseOrderReservationResult,
@@ -42,6 +44,7 @@ export interface RuntimeCanonicalClaimService {
   claimOrder(input: unknown): Promise<CanonicalAvailabilityClaimResult>;
   replaceOrderClaim(input: unknown): Promise<CanonicalAvailabilityClaimReplacementResult>;
   releaseOrderClaim(input: unknown): Promise<CanonicalAvailabilityClaimResult>;
+  reconcileCycleCount(input: unknown): Promise<CanonicalAvailabilityCycleCountReconciliationResult>;
 }
 
 export interface InventoryAvailabilityRuntimeClaimContext {
@@ -345,6 +348,34 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
         context,
         { productVariantId, warehouseLocationId, orphanedQty: orphanedQty ?? null },
       );
+    });
+  }
+
+  async reconcileCycleCountInventory(
+    command: ReconcileCycleCountInventoryCommand,
+  ): Promise<CanonicalAvailabilityCycleCountReconciliationResult> {
+    return this.executor.execute((context) => {
+      if (context.authority === "legacy") {
+        return context.legacy.reconcileCycleCountInventory(command);
+      }
+      if (command.dbOverride != null || command.deferUntilCommit != null) {
+        throw unsupportedCanonicalMutation(
+          "CANONICAL_EXTERNAL_CYCLE_COUNT_TRANSACTION_UNSUPPORTED",
+          "Canonical cycle-count reconciliation owns its serializable transaction.",
+          context,
+          { cycleCountId: command.cycleCountId, cycleCountItemId: command.cycleCountItemId },
+        );
+      }
+      return context.canonical.reconcileCycleCount({
+        cycleCountId: command.cycleCountId,
+        cycleCountItemId: command.cycleCountItemId,
+        productVariantId: command.productVariantId,
+        warehouseLocationId: command.warehouseLocationId,
+        countedQty: command.countedQty,
+        reasonCode: command.reasonCode,
+        actor: command.actor,
+        reason: command.reason,
+      });
     });
   }
 

@@ -32,6 +32,17 @@ describe("AuthorityAwareReservationService", () => {
     await service.releaseOrderReservation(42, "cancelled", "user:7", { disposition: "cancel" });
     await service.reconcileOrderDemand(reconcile);
     await service.reconcileRefundOrderDemand(refund);
+    const cycleCount = {
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 7,
+      countedQty: 4,
+      reasonCode: "shrinkage",
+      actor: "user:7",
+      reason: "approved physical count",
+    };
+    await service.reconcileCycleCountInventory(cycleCount);
 
     expect(legacy.reserveOrder).toHaveBeenCalledWith(42, "user:7", undefined);
     expect(legacy.releaseOrderReservation).toHaveBeenCalledWith(
@@ -48,6 +59,44 @@ describe("AuthorityAwareReservationService", () => {
         { orderItemId: 12, quantity: 2 },
       ],
     });
+    expect(legacy.reconcileCycleCountInventory).toHaveBeenCalledWith(cycleCount);
+  });
+
+  it("routes a complete counted item to canonical reconciliation without legacy fallback", async () => {
+    const result = {
+      outcome: "cycle_count_reconciled" as const,
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 7,
+      quantityBefore: 10,
+      quantityAfter: 4,
+      quantityDelta: -6,
+      adjustmentTransactionId: 901,
+      displacedOrderIds: [42],
+      idempotentReplay: false,
+    };
+    const canonical = {
+      claimOrder: vi.fn(),
+      replaceOrderClaim: vi.fn(),
+      releaseOrderClaim: vi.fn(),
+      reconcileCycleCount: vi.fn(async () => result),
+    };
+    const legacy = fakeLegacy();
+    const service = new AuthorityAwareReservationService(executor({ authority: "canonical", canonical, legacy }));
+
+    await expect(service.reconcileCycleCountInventory({
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 7,
+      countedQty: 4,
+      reasonCode: "shrinkage",
+      actor: "user:7",
+      reason: "approved physical count",
+    })).resolves.toEqual(result);
+    expect(canonical.reconcileCycleCount).toHaveBeenCalledOnce();
+    expect(legacy.reconcileCycleCountInventory).not.toHaveBeenCalled();
   });
 
   it("claims the complete order and maps canonical direct, build, and shortfall evidence", async () => {
@@ -596,6 +645,19 @@ describe("AuthorityAwareReservationService", () => {
     await expect(service.reserveOrder(42, undefined, {})).rejects.toMatchObject({
       code: "CANONICAL_EXTERNAL_RESERVATION_TRANSACTION_UNSUPPORTED",
     });
+    await expect(service.reconcileCycleCountInventory({
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 7,
+      countedQty: 4,
+      reasonCode: "shrinkage",
+      actor: "user:7",
+      reason: "approved physical count",
+      dbOverride: {},
+    })).rejects.toMatchObject({
+      code: "CANONICAL_EXTERNAL_CYCLE_COUNT_TRANSACTION_UNSUPPORTED",
+    });
     await expect(service.releaseOrderReservation(
       42,
       "cancelled",
@@ -645,6 +707,7 @@ function executor(input: {
         claimOrder: vi.fn(),
         replaceOrderClaim: vi.fn(),
         releaseOrderClaim: vi.fn(),
+        reconcileCycleCount: vi.fn(),
       },
       getLatestClaim: input.getLatestClaim ?? vi.fn(async () => null),
       getVariantMetadata: input.getVariantMetadata ?? vi.fn(async () => new Map()),
@@ -686,6 +749,19 @@ function fakeLegacy(): ReservationServiceContract {
         (total, target) => total + target.quantity,
         0,
       ),
+    })),
+    reconcileCycleCountInventory: vi.fn(async (command) => ({
+      outcome: "cycle_count_reconciled" as const,
+      cycleCountId: command.cycleCountId,
+      cycleCountItemId: command.cycleCountItemId,
+      productVariantId: command.productVariantId,
+      warehouseLocationId: command.warehouseLocationId,
+      quantityBefore: command.countedQty,
+      quantityAfter: command.countedQty,
+      quantityDelta: 0,
+      adjustmentTransactionId: null,
+      displacedOrderIds: [],
+      idempotentReplay: false,
     })),
     reallocateOrphaned: vi.fn(async () => ({ released: 0, reallocated: 0, failed: 0 })),
     getOrderReservationStatus: vi.fn(async () => []),

@@ -930,15 +930,24 @@ export class InventoryUseCases {
     reason: string;
     reasonId?: number;
     cycleCountId?: number;
+    cycleCountItemId?: number;
     userId?: string;
     allowNegative?: boolean;
     unitCostCents?: number;
-  }): Promise<{ orphanedQty: number; consumedCostCents?: number; consumedQty?: number }> {
+    /** Internal transaction orchestration hook; effects run only after the caller commits. */
+    deferUntilCommit?: (effect: () => Promise<void>) => void;
+  }): Promise<{
+    orphanedQty: number;
+    adjustmentTransactionId: number;
+    consumedCostCents?: number;
+    consumedQty?: number;
+  }> {
     if (params.qtyDelta === 0) throw new Error("qtyDelta must be non-zero");
 
     let orphanedQty = 0;
     let consumedCostCents: number | undefined;
     let consumedQty: number | undefined;
+    let adjustmentTransactionId: number | null = null;
 
     await this.db.transaction(async (tx) => {
       // Cycle-count adjustments are the ONE mutation allowed on frozen bins
@@ -986,7 +995,7 @@ export class InventoryUseCases {
         consumedQty = lotResult.consumedQty;
       }
 
-      await this.storage.createInventoryTransaction({
+      const transaction = await this.storage.createInventoryTransaction({
         productVariantId: params.productVariantId,
         fromLocationId: params.qtyDelta < 0 ? params.warehouseLocationId : null,
         toLocationId: params.qtyDelta > 0 ? params.warehouseLocationId : null,
@@ -998,15 +1007,113 @@ export class InventoryUseCases {
         sourceState: "on_hand",
         targetState: "on_hand",
         cycleCountId: params.cycleCountId ?? null,
-        referenceType: params.cycleCountId ? "cycle_count" : "manual",
-        referenceId: params.cycleCountId ? String(params.cycleCountId) : null,
+        referenceType: params.cycleCountItemId
+          ? "cycle_count_item"
+          : params.cycleCountId ? "cycle_count" : "manual",
+        referenceId: params.cycleCountItemId
+          ? String(params.cycleCountItemId)
+          : params.cycleCountId ? String(params.cycleCountId) : null,
         notes: params.reason,
         userId: params.userId ?? null,
       }, tx);
+      adjustmentTransactionId = transaction.id;
     });
 
-    this.triggerNotifyChange(params.productVariantId, "adjustment");
-    return { orphanedQty, consumedCostCents, consumedQty };
+    if (adjustmentTransactionId == null) throw new Error("Inventory adjustment transaction was not recorded");
+    const notifyAfterCommit = async () => this.triggerNotifyChange(params.productVariantId, "adjustment");
+    if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
+    else this.triggerNotifyChange(params.productVariantId, "adjustment");
+    return { orphanedQty, adjustmentTransactionId, consumedCostCents, consumedQty };
+  }
+
+  async approveCycleCountItemReconciliation(params: {
+    cycleCountItemId: number;
+    expectedStatus: string;
+    actor: string;
+    reasonCode: string;
+    adjustmentTransactionId: number | null;
+    occurredAt: Date;
+  }): Promise<void> {
+    if (!Number.isSafeInteger(params.cycleCountItemId) || params.cycleCountItemId <= 0) {
+      throw new Error("cycleCountItemId must be a positive integer");
+    }
+    const expectedStatus = params.expectedStatus.trim();
+    if (!["counted", "variance", "investigate"].includes(expectedStatus)) {
+      throw new Error(`Cycle count item status ${expectedStatus || "<blank>"} is not approvable`);
+    }
+    const actor = params.actor.trim();
+    if (!actor || actor.length > 100) throw new Error("actor must contain between 1 and 100 characters");
+    const reasonCode = params.reasonCode.trim();
+    if (!reasonCode || reasonCode.length > 50) {
+      throw new Error("reasonCode must contain between 1 and 50 characters");
+    }
+    if (params.adjustmentTransactionId != null
+      && (!Number.isSafeInteger(params.adjustmentTransactionId) || params.adjustmentTransactionId <= 0)) {
+      throw new Error("adjustmentTransactionId must be a positive integer when provided");
+    }
+    if (!(params.occurredAt instanceof Date) || Number.isNaN(params.occurredAt.getTime())) {
+      throw new Error("occurredAt must be a valid Date");
+    }
+    await this.db.transaction(async (tx) => {
+      const result = await tx.execute(sql`
+        UPDATE inventory.cycle_count_items
+        SET status = 'approved', approved_by = ${actor}, approved_at = ${params.occurredAt},
+            variance_reason = ${reasonCode}, adjustment_transaction_id = ${params.adjustmentTransactionId}
+        WHERE id = ${params.cycleCountItemId} AND status = ${expectedStatus}
+        RETURNING id
+      `);
+      if (result.rows.length !== 1) {
+        throw new Error(
+          `Cycle count item ${params.cycleCountItemId} changed before reconciliation could approve it`,
+        );
+      }
+    });
+  }
+
+  async recordCycleCountReconciliationNoop(params: {
+    productVariantId: number;
+    warehouseLocationId: number;
+    countedQty: number;
+    cycleCountId: number;
+    cycleCountItemId: number;
+    actor: string;
+    reason: string;
+  }): Promise<{ adjustmentTransactionId: number }> {
+    for (const [field, value] of Object.entries({
+      productVariantId: params.productVariantId,
+      warehouseLocationId: params.warehouseLocationId,
+      cycleCountId: params.cycleCountId,
+      cycleCountItemId: params.cycleCountItemId,
+    })) {
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${field} must be a positive integer`);
+    }
+    if (!Number.isSafeInteger(params.countedQty) || params.countedQty < 0) {
+      throw new Error("countedQty must be a nonnegative integer");
+    }
+    const actor = params.actor.trim();
+    const reason = params.reason.trim();
+    if (!actor || actor.length > 100) throw new Error("actor must contain between 1 and 100 characters");
+    if (!reason || reason.length > 1000) throw new Error("reason must contain between 1 and 1000 characters");
+    return this.db.transaction(async (tx) => {
+      const transaction = await this.storage.createInventoryTransaction({
+        productVariantId: params.productVariantId,
+        fromLocationId: params.warehouseLocationId,
+        toLocationId: params.warehouseLocationId,
+        transactionType: "adjustment",
+        variantQtyDelta: 0,
+        variantQtyBefore: params.countedQty,
+        variantQtyAfter: params.countedQty,
+        reservedQtyDelta: 0,
+        sourceState: "on_hand",
+        targetState: "on_hand",
+        cycleCountId: params.cycleCountId,
+        referenceType: "cycle_count_item",
+        referenceId: String(params.cycleCountItemId),
+        notes: reason,
+        userId: actor,
+      }, tx);
+      return { adjustmentTransactionId: transaction.id };
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1773,12 +1880,18 @@ export class InventoryUseCases {
       transaction: async <T>(fn: (innerTx: any) => Promise<T>) => fn(tx),
     };
 
-    return new InventoryUseCases(
+    const scoped = new InventoryUseCases(
       txDb,
       this.storage,
       this.lotService,
       this.cogsService
     );
+    // Transaction-scoped clones must publish through the same dispatcher as
+    // the root service. In particular, deferred post-commit adjustment effects
+    // are registered on the clone but the dependency-aware publisher callback
+    // is wired onto the root instance during service construction.
+    scoped.onChangeCallbacks = this.onChangeCallbacks;
+    return scoped;
   }
 }
 

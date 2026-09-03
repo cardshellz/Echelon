@@ -214,12 +214,21 @@ function bindLegacyReservationToTransaction(
         deferUntilCommit,
       });
     },
+    reconcileCycleCountInventory: (command) => {
+      rejectExternalTransaction(command.dbOverride);
+      return legacy.reconcileCycleCountInventory({
+        ...command,
+        dbOverride: transactionDb,
+        deferUntilCommit,
+      });
+    },
     reallocateOrphaned: (
       productVariantId,
       warehouseLocationId,
       userId,
       orphanedQty,
       dbOverride,
+      _deferUntilCommit,
     ) => {
       rejectExternalTransaction(dbOverride);
       return legacy.reallocateOrphaned(
@@ -228,6 +237,7 @@ function bindLegacyReservationToTransaction(
         userId,
         orphanedQty,
         transactionDb,
+        deferUntilCommit,
       );
     },
     getOrderReservationStatus: (orderId, dbOverride) => {

@@ -111,6 +111,20 @@ const audit = {
   reason: "Accepted order demand changed",
 };
 
+const cycleCountResult = {
+  outcome: "cycle_count_reconciled" as const,
+  cycleCountId: 8,
+  cycleCountItemId: 81,
+  productVariantId: 101,
+  warehouseLocationId: 5,
+  quantityBefore: 10,
+  quantityAfter: 4,
+  quantityDelta: -6,
+  adjustmentTransactionId: 900,
+  displacedOrderIds: [70],
+  idempotentReplay: false,
+};
+
 function makeStore(): InventoryAvailabilityClaimStore {
   return {
     claimOrder: vi.fn(async () => noClaimResult),
@@ -121,6 +135,7 @@ function makeStore(): InventoryAvailabilityClaimStore {
     handoffBuildOperation: vi.fn(async () => handoffResult),
     pickClaimLine: vi.fn(async () => pickResult),
     unpickClaimLine: vi.fn(async () => unpickResult),
+    reconcileCycleCount: vi.fn(async () => cycleCountResult),
   };
 }
 
@@ -172,6 +187,16 @@ describe("InventoryAvailabilityClaimService", () => {
       quantity: "1",
       ...audit,
     })).resolves.toEqual(unpickResult);
+    await expect(service.reconcileCycleCount({
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 5,
+      countedQty: 4,
+      reasonCode: "shrinkage",
+      actor: "user:7",
+      reason: "approved physical count",
+    })).resolves.toEqual(cycleCountResult);
 
     expect(store.claimOrder).toHaveBeenCalledWith({ orderId: 70, ...audit });
     expect(store.replaceOrderClaim).toHaveBeenCalledWith({
@@ -192,6 +217,7 @@ describe("InventoryAvailabilityClaimService", () => {
     expect(store.handoffBuildOperation).toHaveBeenCalledTimes(1);
     expect(store.pickClaimLine).toHaveBeenCalledTimes(1);
     expect(store.unpickClaimLine).toHaveBeenCalledTimes(1);
+    expect(store.reconcileCycleCount).toHaveBeenCalledTimes(1);
   });
 
   it("rejects malformed commands before invoking the store", async () => {
@@ -216,8 +242,22 @@ describe("InventoryAvailabilityClaimService", () => {
       code: "INVALID_CANONICAL_CLAIM_COMMAND",
       context: expect.objectContaining({ operation: "release_order_claim" }),
     }));
+    await expect(service.reconcileCycleCount({
+      cycleCountId: 8,
+      cycleCountItemId: 81,
+      productVariantId: 101,
+      warehouseLocationId: 5,
+      countedQty: -1,
+      reasonCode: "shrinkage",
+      actor: "user:7",
+      reason: "approved physical count",
+    })).rejects.toEqual(expect.objectContaining<Partial<InventoryAvailabilityClaimServiceError>>({
+      code: "INVALID_CANONICAL_CLAIM_COMMAND",
+      context: expect.objectContaining({ operation: "reconcile_cycle_count" }),
+    }));
     expect(store.replaceOrderClaim).not.toHaveBeenCalled();
     expect(store.releaseOrderClaim).not.toHaveBeenCalled();
+    expect(store.reconcileCycleCount).not.toHaveBeenCalled();
   });
 
   it("fails closed when a store returns an invalid result", async () => {

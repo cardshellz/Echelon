@@ -2,6 +2,7 @@ import type {
   CanonicalClaimInventoryExecutionResource,
   CanonicalClaimInventoryObservationCostLayer,
   CanonicalClaimInventoryObservedReconciliationResult,
+  CanonicalClaimCycleCountAdjustmentResult,
   CanonicalClaimInventoryReleaseResource,
   CanonicalClaimInventoryMutationPort,
   CanonicalClaimInventoryPickResource,
@@ -178,6 +179,353 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       );
     }
     return positiveInteger(row?.id, "inventoryLevel.id");
+  }
+
+  async applyCycleCountAdjustment(
+    input: Parameters<CanonicalClaimInventoryMutationPort["applyCycleCountAdjustment"]>[0],
+  ): Promise<CanonicalClaimCycleCountAdjustmentResult> {
+    const inventoryLevelId = positiveInteger(input.inventoryLevelId, "inventoryLevel.id");
+    const productVariantId = positiveInteger(input.productVariantId, "productVariant.id");
+    const warehouseLocationId = positiveInteger(input.warehouseLocationId, "warehouseLocation.id");
+    const quantityBefore = nonnegativeInteger(input.quantityBefore, "cycleCount.quantityBefore");
+    const countedQty = nonnegativeInteger(input.countedQty, "cycleCount.countedQty");
+    const cycleCountId = positiveInteger(input.cycleCountId, "cycleCount.id");
+    const cycleCountItemId = positiveInteger(input.cycleCountItemId, "cycleCountItem.id");
+    nonblank(input.actor, "cycleCount.actor", 100);
+    nonblank(input.reason, "cycleCount.reason", 1000);
+    if (!(input.occurredAt instanceof Date) || Number.isNaN(input.occurredAt.getTime())) {
+      throw new CanonicalClaimInventoryMutationError(
+        "INVALID_INVENTORY_TIMESTAMP",
+        "Cycle-count inventory mutation time must be a valid Date.",
+      );
+    }
+    if (quantityBefore === countedQty) {
+      throw new CanonicalClaimInventoryMutationError(
+        "ZERO_CYCLE_COUNT_ADJUSTMENT",
+        "A cycle-count inventory adjustment must change the recorded physical quantity.",
+        { inventoryLevelId, quantityBefore, countedQty },
+      );
+    }
+
+    const level = await lockLevel(input.client, inventoryLevelId);
+    if (!level
+      || positiveInteger(level.product_variant_id, "inventoryLevel.productVariantId") !== productVariantId
+      || positiveInteger(level.warehouse_location_id, "inventoryLevel.warehouseLocationId") !== warehouseLocationId
+      || nonnegativeInteger(level.variant_qty, "inventoryLevel.variantQty") !== quantityBefore) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CYCLE_COUNT_LEVEL_CHANGED",
+        "The counted inventory level changed before its physical adjustment could be recorded.",
+        { inventoryLevelId, productVariantId, warehouseLocationId, quantityBefore },
+      );
+    }
+    const reservedQty = nonnegativeInteger(level.reserved_qty, "inventoryLevel.reservedQty");
+    if (reservedQty > countedQty) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CYCLE_COUNT_RESERVATIONS_NOT_RECONCILED",
+        "Exact claim ownership must be released before physical stock can be counted below reserved quantity.",
+        { inventoryLevelId, reservedQty, countedQty },
+      );
+    }
+
+    const lotRows = rows(await input.client.query(
+      `SELECT id, qty_on_hand, qty_reserved, qty_picked, total_unit_cost_mills
+       FROM inventory.inventory_lots
+       WHERE product_variant_id = $1
+         AND warehouse_location_id = $2
+       ORDER BY received_at, id
+       FOR UPDATE`,
+      [productVariantId, warehouseLocationId],
+    ));
+    let lotOnHandQty = 0;
+    let lotReservedQty = 0;
+    for (const lot of lotRows) {
+      const qtyOnHand = nonnegativeInteger(lot.qty_on_hand, "inventoryLot.qtyOnHand");
+      const qtyReserved = nonnegativeInteger(lot.qty_reserved, "inventoryLot.qtyReserved");
+      nonnegativeInteger(lot.qty_picked, "inventoryLot.qtyPicked");
+      if (qtyReserved > qtyOnHand) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CYCLE_COUNT_LOT_OWNERSHIP_INVALID",
+          "A FIFO lot reserves more physical stock than it contains.",
+          { inventoryLotId: positiveInteger(lot.id, "inventoryLot.id"), qtyOnHand, qtyReserved },
+        );
+      }
+      lotOnHandQty += qtyOnHand;
+      lotReservedQty += qtyReserved;
+      if (!Number.isSafeInteger(lotOnHandQty) || !Number.isSafeInteger(lotReservedQty)) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CYCLE_COUNT_LOT_AGGREGATE_OVERFLOW",
+          "FIFO lot quantities exceed the supported safe-integer aggregate.",
+          { inventoryLevelId },
+        );
+      }
+    }
+    if (lotOnHandQty !== quantityBefore || lotReservedQty !== reservedQty) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CYCLE_COUNT_LOT_AGGREGATE_MISMATCH",
+        "FIFO lot totals do not equal the locked inventory-level totals.",
+        { inventoryLevelId, quantityBefore, reservedQty, lotOnHandQty, lotReservedQty },
+      );
+    }
+
+    const quantityDelta = countedQty - quantityBefore;
+    let consumedQty = BigInt(0);
+    let consumedCostMills = BigInt(0);
+    const lotEffects: Array<{
+      inventoryLotId: number;
+      quantityDelta: number;
+      unitCostMills: bigint;
+      totalCostMills: bigint;
+    }> = [];
+    if (quantityDelta < 0) {
+      let remaining = -quantityDelta;
+      for (const lot of lotRows) {
+        if (remaining === 0) break;
+        const lotId = positiveInteger(lot.id, "inventoryLot.id");
+        const qtyOnHand = nonnegativeInteger(lot.qty_on_hand, "inventoryLot.qtyOnHand");
+        const qtyReserved = nonnegativeInteger(lot.qty_reserved, "inventoryLot.qtyReserved");
+        const qtyPicked = nonnegativeInteger(lot.qty_picked, "inventoryLot.qtyPicked");
+        const take = Math.min(Math.max(0, qtyOnHand - qtyReserved), remaining);
+        if (take === 0) continue;
+        const unitCostMills = postgresBigInt(BigInt(String(lot.total_unit_cost_mills ?? 0)), "inventoryLot.totalUnitCostMills");
+        const updated = await input.client.query(
+          `UPDATE inventory.inventory_lots
+           SET qty_on_hand = qty_on_hand - $1,
+               status = CASE
+                 WHEN qty_on_hand - $1 = 0 AND qty_reserved = 0 AND qty_picked = 0 THEN 'depleted'
+                 ELSE status
+               END
+           WHERE id = $2 AND qty_on_hand - qty_reserved >= $1`,
+          [take, lotId],
+        );
+        if (updated.rowCount !== 1) {
+          throw new CanonicalClaimInventoryMutationError(
+            "CYCLE_COUNT_LOT_CHANGED",
+            "A FIFO lot changed while the cycle-count shortage was being applied.",
+            { inventoryLotId: lotId, take },
+          );
+        }
+        remaining -= take;
+        consumedQty += BigInt(take);
+        consumedCostMills += BigInt(take) * unitCostMills;
+        lotEffects.push({
+          inventoryLotId: lotId,
+          quantityDelta: -take,
+          unitCostMills,
+          totalCostMills: BigInt(take) * unitCostMills,
+        });
+      }
+      if (remaining !== 0) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CYCLE_COUNT_LOT_SHORTFALL",
+          "FIFO lot evidence does not contain enough unreserved physical stock for the counted shortage.",
+          { inventoryLevelId, requestedQty: -quantityDelta, attributedQty: -quantityDelta - remaining },
+        );
+      }
+    } else {
+      const costRow = rows(await input.client.query(
+        `SELECT CASE
+                  WHEN COALESCE(last_cost_cents, 0) > 0 THEN last_cost_cents
+                  WHEN COALESCE(standard_cost_cents, 0) > 0 THEN standard_cost_cents
+                  WHEN COALESCE(avg_cost_cents, 0) > 0 THEN avg_cost_cents
+                  ELSE 0
+                END AS cost_cents,
+                CASE
+                  WHEN COALESCE(last_cost_cents, 0) > 0 THEN 'last_paid'
+                  WHEN COALESCE(standard_cost_cents, 0) > 0 THEN 'standard'
+                  WHEN COALESCE(avg_cost_cents, 0) > 0 THEN 'avg'
+                  ELSE 'unresolved'
+                END AS cost_source
+         FROM catalog.product_variants
+         WHERE id = $1
+         FOR SHARE`,
+        [productVariantId],
+      ))[0];
+      if (!costRow) {
+        throw new CanonicalClaimInventoryMutationError(
+          "CYCLE_COUNT_VARIANT_MISSING",
+          "The counted product variant no longer exists.",
+          { productVariantId },
+        );
+      }
+      const unitCostCents = postgresBigInt(BigInt(String(costRow.cost_cents ?? 0)), "productVariant.costCents");
+      const unitCostMills = unitCostCents * BigInt(100);
+      const lotNumber = `CC-${cycleCountId}-${cycleCountItemId}`;
+      const insertedLot = rows(await input.client.query(
+        `INSERT INTO inventory.inventory_lots (
+           lot_number, product_variant_id, warehouse_location_id,
+           unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
+           landed_cost_cents, total_unit_cost_cents,
+           unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
+           landed_cost_mills, total_unit_cost_mills,
+           qty_received, qty_on_hand, qty_reserved, qty_picked,
+           received_at, status, cost_provisional, cost_source, notes
+         ) VALUES (
+           $1, $2, $3, $4, $4, 0, 0, $4, $5, $5, 0, 0, $5,
+           $6, $6, 0, 0, $7, 'active', $8, $9, $10
+         )
+         RETURNING id`,
+        [
+          lotNumber,
+          productVariantId,
+          warehouseLocationId,
+          unitCostCents.toString(),
+          unitCostMills.toString(),
+          quantityDelta,
+          input.occurredAt,
+          1,
+          String(costRow.cost_source),
+          input.reason,
+        ],
+      ))[0];
+      const inventoryLotId = positiveInteger(insertedLot?.id, "inventoryLot.id");
+      lotEffects.push({
+        inventoryLotId,
+        quantityDelta,
+        unitCostMills,
+        totalCostMills: BigInt(quantityDelta) * unitCostMills,
+      });
+    }
+
+    const updatedLevel = await input.client.query(
+      `UPDATE inventory.inventory_levels
+       SET variant_qty = $1, updated_at = $2
+       WHERE id = $3 AND variant_qty = $4 AND reserved_qty <= $1`,
+      [countedQty, input.occurredAt, inventoryLevelId, quantityBefore],
+    );
+    if (updatedLevel.rowCount !== 1) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CYCLE_COUNT_LEVEL_CHANGED",
+        "The counted inventory level changed before its aggregate quantity could be recorded.",
+        { inventoryLevelId, quantityBefore, countedQty },
+      );
+    }
+    if (lotEffects.length === 0) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CYCLE_COUNT_LOT_EFFECT_MISSING",
+        "A nonzero cycle-count adjustment did not produce exact FIFO lot evidence.",
+        { inventoryLevelId, quantityDelta },
+      );
+    }
+    let runningQuantity = quantityBefore;
+    let adjustmentTransactionId: number | null = null;
+    for (const effect of lotEffects) {
+      const nextQuantity = runningQuantity + effect.quantityDelta;
+      const transaction = rows(await input.client.query(
+        `INSERT INTO inventory.inventory_transactions (
+           product_variant_id, from_location_id, to_location_id, transaction_type,
+           variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
+           source_state, target_state, unit_cost_cents, unit_cost_mills,
+           total_cost_mills, inventory_lot_id, cycle_count_id, reference_type,
+           reference_id, notes, user_id, created_at
+         ) VALUES ($1, $2, $3, 'adjustment', $4, $5, $6, 0, 'on_hand', 'on_hand',
+                   $7, $8, $9, $10, $11, 'cycle_count_item', $12, $13, $14, $15)
+         RETURNING id`,
+        [
+          productVariantId,
+          effect.quantityDelta < 0 ? warehouseLocationId : null,
+          effect.quantityDelta > 0 ? warehouseLocationId : null,
+          effect.quantityDelta,
+          runningQuantity,
+          nextQuantity,
+          buildMillsToRoundedCents(effect.unitCostMills).toString(),
+          effect.unitCostMills.toString(),
+          effect.totalCostMills.toString(),
+          effect.inventoryLotId,
+          cycleCountId,
+          String(cycleCountItemId),
+          input.reason,
+          input.actor,
+          input.occurredAt,
+        ],
+      ))[0];
+      adjustmentTransactionId ??= positiveInteger(transaction?.id, "inventoryTransaction.id");
+      runningQuantity = nextQuantity;
+    }
+    if (runningQuantity !== countedQty || adjustmentTransactionId == null) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CYCLE_COUNT_LOT_EFFECT_MISMATCH",
+        "Exact FIFO lot evidence does not reconcile to the counted physical quantity.",
+        { inventoryLevelId, quantityBefore, countedQty, runningQuantity },
+      );
+    }
+    return {
+      adjustmentTransactionId,
+      consumedQty,
+      consumedCostMills,
+    };
+  }
+
+  async recordCycleCountNoop(
+    input: Parameters<CanonicalClaimInventoryMutationPort["recordCycleCountNoop"]>[0],
+  ): Promise<{ adjustmentTransactionId: number }> {
+    const productVariantId = positiveInteger(input.productVariantId, "productVariant.id");
+    const warehouseLocationId = positiveInteger(input.warehouseLocationId, "warehouseLocation.id");
+    const countedQty = nonnegativeInteger(input.countedQty, "cycleCount.countedQty");
+    const cycleCountId = positiveInteger(input.cycleCountId, "cycleCount.id");
+    const cycleCountItemId = positiveInteger(input.cycleCountItemId, "cycleCountItem.id");
+    nonblank(input.actor, "cycleCount.actor", 100);
+    nonblank(input.reason, "cycleCount.reason", 1000);
+    if (!(input.occurredAt instanceof Date) || Number.isNaN(input.occurredAt.getTime())) {
+      throw new CanonicalClaimInventoryMutationError(
+        "INVALID_INVENTORY_TIMESTAMP",
+        "Cycle-count inventory reconciliation time must be a valid Date.",
+      );
+    }
+    const transaction = rows(await input.client.query(
+      `INSERT INTO inventory.inventory_transactions (
+         product_variant_id, from_location_id, to_location_id, transaction_type,
+         variant_qty_delta, variant_qty_before, variant_qty_after, reserved_qty_delta,
+         source_state, target_state, unit_cost_cents, unit_cost_mills,
+         total_cost_mills, cycle_count_id, reference_type, reference_id,
+         notes, user_id, created_at
+       ) VALUES ($1, $2, $2, 'adjustment', 0, $3, $3, 0, 'on_hand', 'on_hand',
+                 0, 0, 0, $4, 'cycle_count_item', $5, $6, $7, $8)
+       RETURNING id`,
+      [
+        productVariantId,
+        warehouseLocationId,
+        countedQty,
+        cycleCountId,
+        String(cycleCountItemId),
+        input.reason,
+        input.actor,
+        input.occurredAt,
+      ],
+    ))[0];
+    return { adjustmentTransactionId: positiveInteger(transaction?.id, "inventoryTransaction.id") };
+  }
+
+  async approveCycleCountItem(
+    input: Parameters<CanonicalClaimInventoryMutationPort["approveCycleCountItem"]>[0],
+  ): Promise<void> {
+    const cycleCountItemId = positiveInteger(input.cycleCountItemId, "cycleCountItem.id");
+    const expectedStatus = nonblank(input.expectedStatus, "cycleCountItem.expectedStatus", 20);
+    const actor = nonblank(input.actor, "cycleCountItem.actor", 100);
+    const reasonCode = nonblank(input.reasonCode, "cycleCountItem.reasonCode", 50);
+    const adjustmentTransactionId = input.adjustmentTransactionId == null
+      ? null
+      : positiveInteger(input.adjustmentTransactionId, "inventoryTransaction.id");
+    if (!(input.occurredAt instanceof Date) || Number.isNaN(input.occurredAt.getTime())) {
+      throw new CanonicalClaimInventoryMutationError(
+        "INVALID_INVENTORY_TIMESTAMP",
+        "Cycle-count approval time must be a valid Date.",
+      );
+    }
+    const updated = await input.client.query(
+      `UPDATE inventory.cycle_count_items
+       SET status = 'approved', approved_by = $1, approved_at = $2,
+           variance_reason = $3, adjustment_transaction_id = $4
+       WHERE id = $5 AND status = $6
+       RETURNING id`,
+      [actor, input.occurredAt, reasonCode, adjustmentTransactionId, cycleCountItemId, expectedStatus],
+    );
+    if (updated.rowCount !== 1) {
+      throw new CanonicalClaimInventoryMutationError(
+        "CYCLE_COUNT_ITEM_CHANGED",
+        "The cycle-count item changed before reconciliation could approve it.",
+        { cycleCountItemId, expectedStatus },
+      );
+    }
   }
 
   async reserveResource(

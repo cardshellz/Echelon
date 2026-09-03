@@ -11,6 +11,8 @@ import type {
   CanonicalAvailabilityClaimReplacementResult,
   CanonicalAvailabilityClaimResult,
   CanonicalAvailabilityClaimUnpickCommand,
+  CanonicalAvailabilityCycleCountReconciliationCommand,
+  CanonicalAvailabilityCycleCountReconciliationResult,
 } from "@shared/types/inventory-availability-claims";
 
 /**
@@ -34,4 +36,7 @@ export interface InventoryAvailabilityClaimStore {
   ): Promise<CanonicalAvailabilityClaimBuildHandoffResult>;
   pickClaimLine(command: CanonicalAvailabilityClaimPickCommand): Promise<CanonicalAvailabilityClaimPickResult>;
   unpickClaimLine(command: CanonicalAvailabilityClaimUnpickCommand): Promise<CanonicalAvailabilityClaimPickResult>;
+  reconcileCycleCount(
+    command: CanonicalAvailabilityCycleCountReconciliationCommand,
+  ): Promise<CanonicalAvailabilityCycleCountReconciliationResult>;
 }

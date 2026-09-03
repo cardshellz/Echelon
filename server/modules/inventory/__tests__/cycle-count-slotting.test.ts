@@ -17,7 +17,7 @@ function makeService() {
     {} as any,
     {} as any,
     storage as any,
-    null,
+    {} as any,
   );
 
   return { service, storage };
