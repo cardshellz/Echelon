@@ -91,6 +91,7 @@ describe("legacy reservation demand reconciliation", () => {
   it("locks every refund target and product deterministically before grouped line releases", async () => {
     const dialect = new PgDialect();
     const executed: Array<{ sql: string; params: unknown[] }> = [];
+    let committed = false;
     const tx = {
       execute: vi.fn(async (query: any) => {
         const rendered = dialect.sqlToQuery(query);
@@ -106,9 +107,18 @@ describe("legacy reservation demand reconciliation", () => {
       }),
     };
     const db = {
-      transaction: vi.fn(async (work: (transaction: typeof tx) => Promise<unknown>) => work(tx)),
+      transaction: vi.fn(async (work: (transaction: typeof tx) => Promise<unknown>) => {
+        const result = await work(tx);
+        committed = true;
+        return result;
+      }),
     };
-    const service = createService(db);
+    const channelSync = {
+      queueSyncAfterInventoryChange: vi.fn(async () => {
+        expect(committed).toBe(true);
+      }),
+    };
+    const service = createService(db, channelSync);
     const release = vi.spyOn(service, "releaseOrderItemReservation")
       .mockImplementation(async (command) => ({
         orderId: command.orderId,
@@ -141,6 +151,7 @@ describe("legacy reservation demand reconciliation", () => {
       [918410, 3],
       [918410, 5],
     ]);
+    expect(channelSync.queueSyncAfterInventoryChange.mock.calls).toEqual([[106], [107]]);
   });
 
   it("rejects duplicate refund targets before opening a transaction", async () => {
@@ -158,13 +169,30 @@ describe("legacy reservation demand reconciliation", () => {
     })).rejects.toThrow("duplicate order item 600");
     expect(db.transaction).not.toHaveBeenCalled();
   });
+
+  it("requires a post-commit registrar when grouped work joins an authority transaction", async () => {
+    const transaction = { execute: vi.fn() };
+    const service = createService();
+
+    await expect(service.reconcileRefundOrderDemand({
+      orderId: 42,
+      sourceEventId: "refund:external-transaction",
+      releaseTargets: [{ orderItemId: 600, quantity: 1 }],
+      reason: "refund demand changed",
+      dbOverride: transaction,
+    })).rejects.toThrow("requires a post-commit effect registrar");
+    expect(transaction.execute).not.toHaveBeenCalled();
+  });
 });
 
-function createService(db: any = {}) {
+function createService(
+  db: any = {},
+  channelSync: any = { queueSyncAfterInventoryChange: vi.fn() },
+) {
   return createReservationService(
     db,
     {} as never,
-    { queueSyncAfterInventoryChange: vi.fn() },
+    channelSync,
     {} as never,
   );
 }

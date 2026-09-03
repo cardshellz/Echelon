@@ -142,6 +142,8 @@ export interface ReconcileRefundOrderDemandCommand {
   userId?: string;
   /** Internal transaction propagation used by the authority-aware runtime adapter. */
   dbOverride?: any;
+  /** Internal hook used to defer channel sync until the authority transaction commits. */
+  deferUntilCommit?: (effect: () => Promise<void>) => void;
 }
 
 export interface ReconcileRefundOrderDemandResult {
@@ -184,6 +186,8 @@ export interface ReservationServiceContract {
     reason: string;
     userId?: string;
     dbOverride?: any;
+    /** Internal grouped-refund control; requires a caller-owned transaction. */
+    deferChannelSync?: boolean;
   }): Promise<ReleaseOrderItemReservationResult>;
   reconcileOrderDemand(command: ReconcileOrderDemandCommand): Promise<ReconcileOrderDemandResult>;
   reconcileRefundOrderDemand(
@@ -785,6 +789,7 @@ class ReservationService implements ReservationServiceContract {
     reason: string;
     userId?: string;
     dbOverride?: any;
+    deferChannelSync?: boolean;
   }): Promise<ReleaseOrderItemReservationResult> {
     if (!Number.isInteger(params.orderId) || params.orderId <= 0) {
       throw new Error("orderId must be a positive integer");
@@ -797,6 +802,9 @@ class ReservationService implements ReservationServiceContract {
     }
     const sourceEventId = String(params.sourceEventId ?? "").trim();
     if (!sourceEventId) throw new Error("sourceEventId is required");
+    if (params.deferChannelSync === true && params.dbOverride == null) {
+      throw new Error("deferChannelSync requires a caller-owned transaction");
+    }
 
     const releaseWithinTransaction = async (tx: any) => {
       const itemResult: any = await tx.execute(sql`
@@ -975,7 +983,7 @@ class ReservationService implements ReservationServiceContract {
       ? await releaseWithinTransaction(params.dbOverride)
       : await this.db.transaction(releaseWithinTransaction);
 
-    if (outcome.releasedQuantity > 0) {
+    if (outcome.releasedQuantity > 0 && params.deferChannelSync !== true) {
       await this.channelSync.queueSyncAfterInventoryChange(outcome.productVariantId);
     }
     return outcome;
@@ -1010,6 +1018,14 @@ class ReservationService implements ReservationServiceContract {
     }
     if (!Array.isArray(command.releaseTargets) || command.releaseTargets.length === 0) {
       throw new Error("releaseTargets must contain at least one refund demand reduction");
+    }
+    if (command.dbOverride != null && typeof command.deferUntilCommit !== "function") {
+      throw new Error(
+        "A grouped refund inside a caller-owned transaction requires a post-commit effect registrar",
+      );
+    }
+    if (command.dbOverride == null && command.deferUntilCommit != null) {
+      throw new Error("deferUntilCommit is only valid with a caller-owned transaction");
     }
 
     const seenOrderItemIds = new Set<number>();
@@ -1075,6 +1091,7 @@ class ReservationService implements ReservationServiceContract {
       }
 
       let releasedReservationQuantity = 0;
+      const productVariantIds = new Set<number>();
       for (const target of releaseTargets) {
         const release = await this.releaseOrderItemReservation({
           orderId: command.orderId,
@@ -1084,6 +1101,7 @@ class ReservationService implements ReservationServiceContract {
           reason,
           userId: command.userId,
           dbOverride: tx,
+          deferChannelSync: true,
         });
         if (
           !Number.isSafeInteger(release.releasedQuantity) ||
@@ -1095,13 +1113,32 @@ class ReservationService implements ReservationServiceContract {
           );
         }
         releasedReservationQuantity += release.releasedQuantity;
+        productVariantIds.add(release.productVariantId);
       }
-      return { releasedReservationQuantity } satisfies ReconcileRefundOrderDemandResult;
+      return {
+        releasedReservationQuantity,
+        productVariantIds: [...productVariantIds].sort((left, right) => left - right),
+      };
     };
 
-    return command.dbOverride
+    const outcome = command.dbOverride
       ? reconcileWithinTransaction(command.dbOverride)
       : this.db.transaction(reconcileWithinTransaction);
+    const committed = await outcome;
+    const queueChannelSync = async () => {
+      await Promise.all(
+        committed.productVariantIds.map((productVariantId) =>
+          this.channelSync.queueSyncAfterInventoryChange(productVariantId)),
+      );
+    };
+    if (command.dbOverride != null) {
+      command.deferUntilCommit!(queueChannelSync);
+    } else {
+      await queueChannelSync();
+    }
+    return {
+      releasedReservationQuantity: committed.releasedReservationQuantity,
+    } satisfies ReconcileRefundOrderDemandResult;
   }
 
   /**
@@ -1109,9 +1146,9 @@ class ReservationService implements ReservationServiceContract {
    *
    * Legacy storage has no whole-order replacement primitive, so this retains
    * the deployed idempotent release-then-reserve sequence behind one contract.
-   * The authority-aware adapter rejects this implementation in canonical mode
-   * until replacement can be committed atomically with exact predecessor
-   * lineage.
+   * The authority-aware adapter selects this implementation only while legacy
+   * authority is pinned; canonical authority uses exact-predecessor claim
+   * replacement instead.
    */
   async reconcileOrderDemand(
     command: ReconcileOrderDemandCommand,

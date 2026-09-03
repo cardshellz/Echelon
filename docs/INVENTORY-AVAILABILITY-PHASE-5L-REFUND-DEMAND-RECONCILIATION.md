@@ -38,6 +38,11 @@ order within the same database transaction. Missing or malformed identity,
 partial target resolution, or any line-release failure rejects the complete
 group instead of committing a partial multi-line refund.
 
+Channel synchronization is registered as a post-commit effect. It cannot run
+for a transaction that rolls back, and an effect failure keeps the durable
+refund inbox event retryable. Replays register the affected variants again so
+a transient post-commit failure cannot permanently suppress the quantity push.
+
 The result reports the target-variant units actually released during this
 attempt. Existing `shopify_refund` ledger references make a replay return zero
 for quantities already released by the same event.
