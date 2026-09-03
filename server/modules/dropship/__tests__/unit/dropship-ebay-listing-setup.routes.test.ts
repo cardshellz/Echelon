@@ -123,6 +123,35 @@ describe("dropship eBay listing setup routes", () => {
     });
   });
 
+  it("returns an actionable conflict when Standard Shipping routing is not configured", async () => {
+    service.getError = new DropshipError(
+      "DROPSHIP_EBAY_FULFILLMENT_ROUTING_REQUIRED",
+      "Standard Shipping needs at least one allowed domestic fulfillment method before eBay policies can be validated.",
+      {
+        serviceLevelId: 7,
+        routingCode: "SHIPPING_FULFILLMENT_ROUTING_PROFILE_NOT_CONFIGURED",
+        routingRevision: 0,
+        retryable: false,
+      },
+    );
+    server = await startServer(buildApp(service, true));
+
+    const response = await jsonRequest(`${server.url}/api/dropship/ebay/listing-setup/44`);
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      error: {
+        code: "DROPSHIP_EBAY_FULFILLMENT_ROUTING_REQUIRED",
+        context: {
+          serviceLevelId: 7,
+          routingCode: "SHIPPING_FULFILLMENT_ROUTING_PROFILE_NOT_CONFIGURED",
+          routingRevision: 0,
+          retryable: false,
+        },
+      },
+    });
+  });
+
   it("requires a dropship session", async () => {
     server = await startServer(buildApp(service, false));
 

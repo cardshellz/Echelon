@@ -88,6 +88,8 @@ describe("EbayListingSetupPanel", () => {
 
     expect(source).toContain("eBay listing setup");
     expect(source).toContain("Card Shellz fulfillment capabilities");
+    expect(source).toContain('label="Allowed carriers"');
+    expect(source).not.toContain('label="Connected carriers"');
     expect(source).toContain("Card Shellz controls the physical inventory location");
     expect(source).toContain("managedLocationNeedsReconciliation");
     expect(source).toContain("Save setup to reconcile it automatically");
@@ -127,6 +129,8 @@ function setup(
         rateBookId: 34,
         rateBookCode: "dropship-vendor-default",
         rateTableId: 5,
+        serviceLevelId: 7,
+        fulfillmentRoutingRevision: 4,
       },
     },
     selection: {

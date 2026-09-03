@@ -1684,6 +1684,8 @@ export interface DropshipEbayFulfillmentCapability {
     rateBookId: number;
     rateBookCode: string;
     rateTableId: number;
+    serviceLevelId: number;
+    fulfillmentRoutingRevision: number;
   };
 }
 

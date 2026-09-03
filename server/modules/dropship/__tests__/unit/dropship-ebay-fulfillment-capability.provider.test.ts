@@ -1,12 +1,12 @@
 import type { Pool, PoolClient, QueryResult } from "pg";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  FulfillmentRoutingDropshipCarrierServiceCapabilityProvider,
   PgDropshipEbayInternalFulfillmentEvidenceRepository,
-  ShipStationDropshipCarrierServiceCapabilityProvider,
 } from "../../infrastructure/dropship-ebay-fulfillment-capability.provider";
-import type {
-  ShipStationV2RatingAdapter,
-} from "../../../shipping-engine/infrastructure/shipstation-v2-rating.adapter";
+import {
+  FulfillmentRoutingError,
+} from "../../../shipping-engine/application/fulfillment-routing.service";
 
 describe("PgDropshipEbayInternalFulfillmentEvidenceRepository", () => {
   beforeEach(() => {
@@ -26,7 +26,7 @@ describe("PgDropshipEbayInternalFulfillmentEvidenceRepository", () => {
         zone_set_id: 1,
         origin_warehouse_id: null,
       }]),
-      rows([{ rate_table_id: 5 }]),
+      rows([{ rate_table_id: 5, service_level_id: 7 }]),
       rows([
         { destination_country: "US", destination_region: "CA" },
         { destination_country: "US", destination_region: "NY" },
@@ -47,6 +47,7 @@ describe("PgDropshipEbayInternalFulfillmentEvidenceRepository", () => {
       rateBookId: 34,
       rateBookCode: "dropship-vendor-default",
       rateTableId: 5,
+      serviceLevelId: 7,
       offeredDestinations: [
         { country: "US", region: "CA" },
         { country: "US", region: "NY" },
@@ -88,48 +89,126 @@ describe("PgDropshipEbayInternalFulfillmentEvidenceRepository", () => {
   });
 });
 
-describe("ShipStationDropshipCarrierServiceCapabilityProvider", () => {
-  it("returns the services enabled on every connected carrier", async () => {
-    const adapter: ShipStationV2RatingAdapter = {
-      isConfigured: () => true,
-      getRates: vi.fn(),
-      listCarriers: async () => ({
-        configured: true,
-        carriers: [
-          { carrierId: "se-usps", code: "usps", name: "USPS" },
-          { carrierId: "se-ups", code: "ups", name: "UPS" },
-        ],
-      }),
-      listCarrierServices: async (carrier) => ({
-        configured: true,
-        services: [{
-          carrierId: carrier.carrierId,
-          carrierCode: carrier.code,
-          serviceCode: `${carrier.code}_ground`,
-          serviceName: `${carrier.name} Ground`,
-          domestic: true,
-          international: false,
-        }],
-      }),
-    };
+describe("FulfillmentRoutingDropshipCarrierServiceCapabilityProvider", () => {
+  it("returns only the domestic methods allowed by the service-level routing profile", async () => {
+    const resolve = vi.fn(async () => ({
+      ok: true as const,
+      serviceLevelId: 7,
+      profileRevision: 4,
+      scope: "domestic" as const,
+      candidates: [
+        routeMethod({
+          providerAccountId: "se-usps",
+          providerAccountName: "USPS account",
+          carrierCode: "usps",
+          carrierName: "USPS",
+          serviceCode: "usps_ground_advantage",
+          serviceName: "USPS Ground Advantage",
+          priority: 1,
+        }),
+        routeMethod({
+          providerAccountId: "se-ups",
+          providerAccountName: "UPS account",
+          carrierCode: "ups",
+          carrierName: "UPS",
+          serviceCode: "ups_ground",
+          serviceName: "UPS Ground",
+          priority: 2,
+        }),
+      ],
+    }));
 
-    await expect(new ShipStationDropshipCarrierServiceCapabilityProvider(adapter)
-      .listServices()).resolves.toEqual([
-      {
-        carrierCode: "usps",
-        serviceCode: "usps_ground",
-        serviceName: "USPS Ground",
-        domestic: true,
+    await expect(new FulfillmentRoutingDropshipCarrierServiceCapabilityProvider({ resolve })
+      .listServices({ serviceLevelId: 7 })).resolves.toEqual({
+      serviceLevelId: 7,
+      routingRevision: 4,
+      services: [
+        {
+          provider: "shipstation_v2",
+          carrierCode: "usps",
+          serviceCode: "usps_ground_advantage",
+          serviceName: "USPS Ground Advantage",
+          domestic: true,
+        },
+        {
+          provider: "shipstation_v2",
+          carrierCode: "ups",
+          serviceCode: "ups_ground",
+          serviceName: "UPS Ground",
+          domestic: true,
+        },
+      ],
+    });
+    expect(resolve).toHaveBeenCalledWith({
+      serviceLevelId: 7,
+      scope: "domestic",
+    });
+  });
+
+  it("fails closed when the service-level routing profile has no domestic methods", async () => {
+    const resolve = vi.fn(async () => ({
+      ok: false as const,
+      serviceLevelId: 7,
+      profileRevision: 0,
+      scope: "domestic" as const,
+      code: "SHIPPING_FULFILLMENT_ROUTING_PROFILE_NOT_CONFIGURED" as const,
+      message: "No fulfillment methods are configured for this service level.",
+    }));
+
+    await expect(new FulfillmentRoutingDropshipCarrierServiceCapabilityProvider({ resolve })
+      .listServices({ serviceLevelId: 7 })).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_FULFILLMENT_ROUTING_REQUIRED",
+      context: {
+        serviceLevelId: 7,
+        routingCode: "SHIPPING_FULFILLMENT_ROUTING_PROFILE_NOT_CONFIGURED",
+        routingRevision: 0,
+        retryable: false,
       },
-      {
-        carrierCode: "ups",
-        serviceCode: "ups_ground",
-        serviceName: "UPS Ground",
-        domestic: true,
+    });
+  });
+
+  it("classifies routing data errors as non-retryable without leaking details", async () => {
+    const resolve = vi.fn(async () => {
+      throw new FulfillmentRoutingError(
+        500,
+        "SHIPPING_FULFILLMENT_ROUTING_DATA_INTEGRITY_ERROR",
+        "Fulfillment routing data is inconsistent.",
+        ["sensitive database detail"],
+      );
+    });
+
+    await expect(new FulfillmentRoutingDropshipCarrierServiceCapabilityProvider({ resolve })
+      .listServices({ serviceLevelId: 7 })).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE",
+      message: "Card Shellz fulfillment routing could not be verified.",
+      context: {
+        serviceLevelId: 7,
+        routingCode: "SHIPPING_FULFILLMENT_ROUTING_DATA_INTEGRITY_ERROR",
+        retryable: false,
       },
-    ]);
+    });
   });
 });
+
+function routeMethod(overrides: {
+  providerAccountId: string;
+  providerAccountName: string;
+  carrierCode: string;
+  carrierName: string;
+  serviceCode: string;
+  serviceName: string;
+  priority: number;
+}) {
+  return {
+    providerConnectionId: 11,
+    providerConnectionName: "ShipStation",
+    provider: "shipstation_v2",
+    domestic: true,
+    international: false,
+    capabilities: null,
+    ...overrides,
+  };
+}
 
 class FakePgClient {
   queries: Array<{ text: string; values?: unknown[] }> = [];
