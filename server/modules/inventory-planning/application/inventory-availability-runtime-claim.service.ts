@@ -4,12 +4,13 @@ import type {
   CanonicalAvailabilityClaimReplacementResult,
   CanonicalAvailabilityClaimResult,
   CanonicalAvailabilityCycleCountReconciliationResult,
+  CanonicalAvailabilityReservationStatusProjection,
 } from "@shared/types/inventory-availability-claims";
 import type { ClaimPlanDto } from "@shared/types/inventory-availability-planner";
 import { canonicalJson } from "@shared/utils/canonical-json";
 
 import type {
-  OrderReservationStatus,
+  OrderReservationStatusResult,
   RefundDemandReleaseTarget,
   ReconcileRefundOrderDemandCommand,
   ReconcileRefundOrderDemandResult,
@@ -41,6 +42,7 @@ export interface CanonicalClaimVariantMetadata {
 }
 
 export interface RuntimeCanonicalClaimService {
+  getReservationStatus(input: unknown): Promise<CanonicalAvailabilityReservationStatusProjection>;
   claimOrder(input: unknown): Promise<CanonicalAvailabilityClaimResult>;
   replaceOrderClaim(input: unknown): Promise<CanonicalAvailabilityClaimReplacementResult>;
   releaseOrderClaim(input: unknown): Promise<CanonicalAvailabilityClaimResult>;
@@ -382,7 +384,7 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
   async getOrderReservationStatus(
     orderId: number,
     dbOverride?: any,
-  ): Promise<OrderReservationStatus[]> {
+  ): Promise<OrderReservationStatusResult> {
     const validatedOrderId = positiveInteger(orderId, "orderId");
     return this.executor.execute((context) => {
       if (context.authority === "legacy") {
@@ -390,12 +392,15 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
           ? context.legacy.getOrderReservationStatus(validatedOrderId)
           : context.legacy.getOrderReservationStatus(validatedOrderId, dbOverride);
       }
-      throw unsupportedCanonicalMutation(
-        "CANONICAL_RESERVATION_STATUS_PROJECTION_REQUIRED",
-        "The legacy reservation-status DTO cannot represent canonical resource claims and operations without losing lineage.",
-        context,
-        { orderId: validatedOrderId },
-      );
+      if (dbOverride != null) {
+        throw unsupportedCanonicalMutation(
+          "CANONICAL_EXTERNAL_RESERVATION_STATUS_TRANSACTION_UNSUPPORTED",
+          "Canonical reservation status owns its repeatable-read snapshot and cannot join a legacy Drizzle transaction.",
+          context,
+          { orderId: validatedOrderId },
+        );
+      }
+      return context.canonical.getReservationStatus({ orderId: validatedOrderId });
     });
   }
 

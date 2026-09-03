@@ -65,7 +65,8 @@ Unit coverage proves:
 ## Remaining activation blockers
 
 Canonical authority remains prohibited until the remaining Phase 5J blockers are
-closed. Phase 5M subsequently closes cycle-count claim repair. Canonical
-reservation-status projection, transaction-aware picker routing, complete canonical
-publisher coverage, concurrency/crash-recovery verification, and provider readback
-remain open.
+closed. Phase 5M subsequently closes cycle-count claim repair, and Phase 5N closes
+canonical reservation-status projection. Transaction-aware picker routing,
+complete canonical publisher coverage, concurrency/crash-recovery verification,
+provider readback, and external reservation-status consumer verification remain
+open.

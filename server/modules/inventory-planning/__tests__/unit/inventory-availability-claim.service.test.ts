@@ -6,6 +6,7 @@ import type {
   CanonicalAvailabilityClaimPickResult,
   CanonicalAvailabilityClaimReplacementResult,
   CanonicalAvailabilityClaimResult,
+  CanonicalAvailabilityReservationStatusProjection,
 } from "@shared/types/inventory-availability-claims";
 
 import type { InventoryAvailabilityClaimStore } from "../../application/inventory-availability-claim.port";
@@ -125,8 +126,18 @@ const cycleCountResult = {
   idempotentReplay: false,
 };
 
+const reservationStatus: CanonicalAvailabilityReservationStatusProjection = {
+  schemaVersion: "inventory_availability_reservation_status_v1",
+  authority: "canonical",
+  authorityRevision: "3",
+  activationRunId: "8",
+  orderId: 70,
+  claim: null,
+};
+
 function makeStore(): InventoryAvailabilityClaimStore {
   return {
+    getReservationStatus: vi.fn(async () => reservationStatus),
     claimOrder: vi.fn(async () => noClaimResult),
     replaceOrderClaim: vi.fn(async () => replacementResult),
     releaseOrderClaim: vi.fn(async () => noClaimResult),
@@ -144,6 +155,7 @@ describe("InventoryAvailabilityClaimService", () => {
     const store = makeStore();
     const service = new InventoryAvailabilityClaimService(store);
 
+    await expect(service.getReservationStatus({ orderId: 70 })).resolves.toEqual(reservationStatus);
     await expect(service.claimOrder({ orderId: 70, ...audit })).resolves.toEqual(noClaimResult);
     await expect(service.replaceOrderClaim({
       orderId: 70,
@@ -198,6 +210,7 @@ describe("InventoryAvailabilityClaimService", () => {
       reason: "approved physical count",
     })).resolves.toEqual(cycleCountResult);
 
+    expect(store.getReservationStatus).toHaveBeenCalledWith({ orderId: 70 });
     expect(store.claimOrder).toHaveBeenCalledWith({ orderId: 70, ...audit });
     expect(store.replaceOrderClaim).toHaveBeenCalledWith({
       orderId: 70,
@@ -224,6 +237,12 @@ describe("InventoryAvailabilityClaimService", () => {
     const store = makeStore();
     const service = new InventoryAvailabilityClaimService(store);
 
+    await expect(service.getReservationStatus({ orderId: 0 })).rejects.toEqual(
+      expect.objectContaining<Partial<InventoryAvailabilityClaimServiceError>>({
+        code: "INVALID_CANONICAL_CLAIM_COMMAND",
+        context: expect.objectContaining({ operation: "get_reservation_status" }),
+      }),
+    );
     await expect(service.replaceOrderClaim({
       orderId: 70,
       expectedClaimId: "0",
@@ -255,6 +274,7 @@ describe("InventoryAvailabilityClaimService", () => {
       code: "INVALID_CANONICAL_CLAIM_COMMAND",
       context: expect.objectContaining({ operation: "reconcile_cycle_count" }),
     }));
+    expect(store.getReservationStatus).not.toHaveBeenCalled();
     expect(store.replaceOrderClaim).not.toHaveBeenCalled();
     expect(store.releaseOrderClaim).not.toHaveBeenCalled();
     expect(store.reconcileCycleCount).not.toHaveBeenCalled();
@@ -263,8 +283,18 @@ describe("InventoryAvailabilityClaimService", () => {
   it("fails closed when a store returns an invalid result", async () => {
     const store = makeStore();
     store.claimOrder = vi.fn(async () => ({ outcome: "claimed", orderId: 70 }) as never);
+    store.getReservationStatus = vi.fn(async () => ({
+      ...reservationStatus,
+      authorityRevision: "0",
+    }) as never);
     const service = new InventoryAvailabilityClaimService(store);
 
+    await expect(service.getReservationStatus({ orderId: 70 })).rejects.toEqual(
+      expect.objectContaining<Partial<InventoryAvailabilityClaimServiceError>>({
+        code: "INVALID_CANONICAL_CLAIM_RESULT",
+        context: expect.objectContaining({ operation: "get_reservation_status" }),
+      }),
+    );
     await expect(service.claimOrder({ orderId: 70, ...audit })).rejects.toEqual(
       expect.objectContaining<Partial<InventoryAvailabilityClaimServiceError>>({
         code: "INVALID_CANONICAL_CLAIM_RESULT",

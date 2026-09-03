@@ -227,7 +227,8 @@ consumption, and exact cycle-count-item ledger lineage. It runs only when both
 ## Remaining activation blockers
 
 Canonical authority is still prohibited. Phase 5M closes only cycle-count claim
-repair. The remaining documented blockers are canonical reservation-status
-projection, transaction-aware deployed picker routing, complete canonical publisher
-coverage, concurrency/crash-recovery verification, provider readback, and the
+repair. Phase 5N subsequently closes canonical reservation-status projection. The
+remaining documented blockers are transaction-aware deployed picker routing,
+complete canonical publisher coverage, concurrency/crash-recovery verification,
+provider readback, external reservation-status consumer verification, and the
 separately reviewed and explicitly authorized production activation operation.

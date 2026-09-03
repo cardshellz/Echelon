@@ -3073,4 +3073,343 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     expect(fake.query.mock.calls.some(([text]) => String(text).includes("cycle_count_items"))).toBe(false);
     expect(writer.applyCycleCountAdjustment).not.toHaveBeenCalled();
   });
+
+  it("projects exact canonical line, resource, operation, and build-handoff status", async () => {
+    const plan = buildClaimPlan();
+    const fake = createPool(async (text) => {
+      const sql = text.trim();
+      if (sql.startsWith("BEGIN") || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "3" }] };
+      }
+      if (sql === "SELECT id FROM wms.orders WHERE id = $1") return { rows: [{ id: 70 }] };
+      if (sql.startsWith("SELECT activation_run_id")) return { rows: [{
+        activation_run_id: "8", plan_status: "satisfied", scope_kind: "warehouse",
+        scope_warehouse_id: 1, snapshot_fingerprint: plan.snapshotFingerprint,
+      }] };
+      if (sql.includes("FROM inventory.availability_claims")) {
+        return { rows: [{
+          id: "9",
+          claim_key: plan.requestKey,
+          order_id: 70,
+          revision: 1,
+          runtime_authority_revision: "2",
+          plan_hash: hash(plan),
+          plan_payload: plan,
+        }] };
+      }
+      if (sql.includes("FROM inventory.availability_claim_lines AS line")) {
+        return { rows: [{
+          id: "10",
+          line_key: "order-item:71",
+          order_item_id: 71,
+          sku: "P3",
+          target_variant_id: 105,
+          requested_qty: "3",
+          planned_qty: "3",
+          shortfall_qty: "0",
+          released_target_qty: "0",
+          consumed_target_qty: "0",
+          picked_target_qty: "1",
+        }] };
+      }
+      if (sql.includes("FROM inventory.availability_claim_operations AS operation")) {
+        return { rows: [{
+          id: "11",
+          claim_line_id: "10",
+          operation_key: plan.operations[0].operationKey,
+          parent_operation_key: null,
+          warehouse_id: 1,
+          operation_type: "component_build",
+          authority_id: 7,
+          destination_variant_id: 105,
+          planned_executions: "1",
+          executed_executions: "0",
+          released_executions: "0",
+          output_qty: "3",
+          committed_output_qty: "3",
+          output_location_id: 3,
+          status: "executing",
+          handoff_id: "12",
+          build_order_id: 80,
+          build_system_number: "BLD-00000080",
+          handoff_status: "handed_off",
+          adopted_reservation_qty: "5",
+        }] };
+      }
+      if (sql.includes("FROM inventory.availability_claim_operation_inputs AS input")) {
+        return { rows: [{
+          claim_operation_id: "11",
+          source_variant_id: 101,
+          required_qty: "5",
+          input_ordinal: 0,
+        }] };
+      }
+      if (sql.includes("FROM inventory.availability_claim_resources AS resource")) {
+        return { rows: [{
+          id: "13",
+          claim_line_id: "10",
+          consumer_operation_key: plan.operations[0].operationKey,
+          producer_operation_key: null,
+          warehouse_id: 1,
+          warehouse_location_id: 2,
+          inventory_level_id: 11,
+          source_variant_id: 101,
+          claimed_qty: "5",
+          released_qty: "0",
+          consumed_qty: "0",
+          picked_qty: "0",
+        }] };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      createInventoryWriter(),
+      fake.pool,
+      () => FIXED_TIME,
+    );
+
+    await expect(repository.getReservationStatus({ orderId: 70 })).resolves.toEqual({
+      schemaVersion: "inventory_availability_reservation_status_v1",
+      authority: "canonical",
+      authorityRevision: "3",
+      activationRunId: "8",
+      orderId: 70,
+      claim: {
+        claimId: "9",
+        claimKey: plan.requestKey,
+        revision: 1,
+        activationRunId: "8",
+        runtimeAuthorityRevision: "2",
+        planStatus: "satisfied",
+        scope: { kind: "warehouse", warehouseId: 1 },
+        planHash: hash(plan),
+        snapshotFingerprint: plan.snapshotFingerprint,
+        lines: [{
+          claimLineId: "10",
+          lineKey: "order-item:71",
+          orderItemId: 71,
+          sku: "P3",
+          targetVariantId: 105,
+          requestedQty: "3",
+          plannedQty: "3",
+          shortfallQty: "0",
+          releasedTargetQty: "0",
+          consumedTargetQty: "0",
+          pickedTargetQty: "1",
+          openPlannedQty: "2",
+          resources: [{
+            claimResourceId: "13",
+            consumerOperationKey: plan.operations[0].operationKey,
+            producerOperationKey: null,
+            warehouseId: 1,
+            warehouseLocationId: 2,
+            inventoryLevelId: 11,
+            sourceVariantId: 101,
+            claimedQty: "5",
+            releasedQty: "0",
+            consumedQty: "0",
+            pickedQty: "0",
+            openQty: "5",
+          }],
+          operations: [{
+            claimOperationId: "11",
+            operationKey: plan.operations[0].operationKey,
+            parentOperationKey: null,
+            warehouseId: 1,
+            operationType: "component_build",
+            authorityId: 7,
+            inputs: [{ sourceVariantId: 101, requiredQty: "5" }],
+            destinationVariantId: 105,
+            plannedExecutions: "1",
+            executedExecutions: "0",
+            releasedExecutions: "0",
+            remainingExecutions: "1",
+            outputQty: "3",
+            committedOutputQty: "3",
+            outputLocationId: 3,
+            status: "executing",
+            buildHandoff: {
+              buildHandoffId: "12",
+              buildOrderId: 80,
+              buildSystemNumber: "BLD-00000080",
+              status: "handed_off",
+              adoptedReservationQty: "5",
+            },
+          }],
+        }],
+      },
+    });
+    expect(fake.release).toHaveBeenCalledOnce();
+  });
+
+  it("returns an explicit null claim when the canonical order has no active ownership", async () => {
+    const fake = createPool(async (text) => {
+      const sql = text.trim();
+      if (sql.startsWith("BEGIN") || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "3" }] };
+      }
+      if (sql === "SELECT id FROM wms.orders WHERE id = $1") return { rows: [{ id: 70 }] };
+      if (sql.includes("FROM inventory.availability_claims")) return { rows: [] };
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      createInventoryWriter(),
+      fake.pool,
+      () => FIXED_TIME,
+    );
+
+    await expect(repository.getReservationStatus({ orderId: 70 })).resolves.toMatchObject({
+      authority: "canonical",
+      orderId: 70,
+      claim: null,
+    });
+    expect(fake.query.mock.calls.some(([text]) => String(text).includes("availability_claim_lines"))).toBe(false);
+  });
+
+  it("retains produced-resource lineage for a completed canonical package operation", async () => {
+    const plan = packageClaimPlan();
+    const fake = createPool(async (text) => {
+      const sql = text.trim();
+      if (sql.startsWith("BEGIN") || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "3" }] };
+      }
+      if (sql === "SELECT id FROM wms.orders WHERE id = $1") return { rows: [{ id: 70 }] };
+      if (sql.startsWith("SELECT activation_run_id")) return { rows: [{
+        activation_run_id: "8", plan_status: "satisfied", scope_kind: "warehouse",
+        scope_warehouse_id: 1, snapshot_fingerprint: plan.snapshotFingerprint,
+      }] };
+      if (sql.includes("FROM inventory.availability_claims")) {
+        return { rows: [{
+          id: "9", claim_key: plan.requestKey, order_id: 70, revision: 1,
+          runtime_authority_revision: "2", plan_hash: hash(plan), plan_payload: plan,
+        }] };
+      }
+      if (sql.includes("FROM inventory.availability_claim_lines AS line")) {
+        return { rows: [{
+          id: "10", line_key: "order-item:71", order_item_id: 71, sku: "P3",
+          target_variant_id: 105, requested_qty: "3", planned_qty: "3", shortfall_qty: "0",
+          released_target_qty: "0", consumed_target_qty: "0", picked_target_qty: "0",
+        }] };
+      }
+      if (sql.includes("FROM inventory.availability_claim_operations AS operation")) {
+        return { rows: [{
+          id: "11", claim_line_id: "10", operation_key: plan.operations[0].operationKey,
+          parent_operation_key: null, warehouse_id: 1, operation_type: "assemble_pack",
+          authority_id: 7, destination_variant_id: 105, planned_executions: "1",
+          executed_executions: "1", released_executions: "0", output_qty: "4",
+          committed_output_qty: "3", output_location_id: 3, status: "completed",
+          handoff_id: null, build_order_id: null, build_system_number: null,
+          handoff_status: null, adopted_reservation_qty: null,
+        }] };
+      }
+      if (sql.includes("FROM inventory.availability_claim_operation_inputs AS input")) {
+        return { rows: [{
+          claim_operation_id: "11", source_variant_id: 101, required_qty: "5", input_ordinal: 0,
+        }] };
+      }
+      if (sql.includes("FROM inventory.availability_claim_resources AS resource")) {
+        return { rows: [{
+          id: "13", claim_line_id: "10", consumer_operation_key: plan.operations[0].operationKey,
+          producer_operation_key: null, warehouse_id: 1, warehouse_location_id: 2,
+          inventory_level_id: 11, source_variant_id: 101, claimed_qty: "5",
+          released_qty: "0", consumed_qty: "5", picked_qty: "0",
+        }, {
+          id: "14", claim_line_id: "10", consumer_operation_key: null,
+          producer_operation_key: plan.operations[0].operationKey, warehouse_id: 1,
+          warehouse_location_id: 3, inventory_level_id: 12, source_variant_id: 105,
+          claimed_qty: "3", released_qty: "0", consumed_qty: "0", picked_qty: "0",
+        }] };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      createInventoryWriter(),
+      fake.pool,
+      () => FIXED_TIME,
+    );
+
+    const result = await repository.getReservationStatus({ orderId: 70 });
+
+    expect(result.claim?.lines[0].operations[0]).toMatchObject({
+      status: "completed",
+      executedExecutions: "1",
+      remainingExecutions: "0",
+    });
+    expect(result.claim?.lines[0].resources).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        claimResourceId: "14",
+        producerOperationKey: plan.operations[0].operationKey,
+        sourceVariantId: 105,
+        claimedQty: "3",
+        openQty: "3",
+      }),
+    ]));
+  });
+
+  it("fails canonical status before reading an order while canonical authority is inactive", async () => {
+    const fake = createPool(async (text) => {
+      const sql = text.trim();
+      if (sql.startsWith("BEGIN") || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "legacy", activation_run_id: null, revision: "2" }] };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      createInventoryWriter(),
+      fake.pool,
+      () => FIXED_TIME,
+    );
+
+    await expect(repository.getReservationStatus({ orderId: 70 })).rejects.toMatchObject({
+      code: "CANONICAL_AUTHORITY_NOT_ACTIVE",
+    });
+    expect(fake.query.mock.calls.some(([text]) => String(text).includes("FROM wms.orders"))).toBe(false);
+  });
+
+  it("rolls back a canonical status read when relational line evidence is tampered", async () => {
+    const plan = directClaimPlan();
+    const fake = createPool(async (text) => {
+      const sql = text.trim();
+      if (sql.startsWith("BEGIN") || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "3" }] };
+      }
+      if (sql === "SELECT id FROM wms.orders WHERE id = $1") return { rows: [{ id: 70 }] };
+      if (sql.startsWith("SELECT activation_run_id")) return { rows: [{
+        activation_run_id: "8", plan_status: "satisfied", scope_kind: "warehouse",
+        scope_warehouse_id: 1, snapshot_fingerprint: plan.snapshotFingerprint,
+      }] };
+      if (sql.includes("FROM inventory.availability_claims")) {
+        return { rows: [{
+          id: "9", claim_key: plan.requestKey, order_id: 70, revision: 1,
+          runtime_authority_revision: "2", plan_hash: hash(plan), plan_payload: plan,
+        }] };
+      }
+      if (sql.includes("FROM inventory.availability_claim_lines AS line")) {
+        return { rows: [{
+          id: "10", line_key: "order-item:71", order_item_id: 71, sku: "EA",
+          target_variant_id: 999, requested_qty: "3", planned_qty: "3", shortfall_qty: "0",
+          released_target_qty: "0", consumed_target_qty: "0", picked_target_qty: "0",
+        }] };
+      }
+      if (sql.includes("FROM inventory.availability_claim_operations AS operation")
+        || sql.includes("FROM inventory.availability_claim_operation_inputs AS input")
+        || sql.includes("FROM inventory.availability_claim_resources AS resource")) return { rows: [] };
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+    const repository = new PostgresInventoryAvailabilityClaimRepository(
+      createInventoryWriter(),
+      fake.pool,
+      () => FIXED_TIME,
+    );
+
+    await expect(repository.getReservationStatus({ orderId: 70 })).rejects.toMatchObject({
+      code: "CLAIM_STATUS_LINEAGE_MISMATCH",
+    });
+    expect(fake.query.mock.calls.map(([text]) => String(text).trim())).toContain("ROLLBACK");
+  });
 });
