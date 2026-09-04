@@ -109,98 +109,111 @@ export class InventoryChannelExposureRuntimeService {
 
   async planProduct(productId: number): Promise<InventoryChannelExposureRuntimePlan> {
     const validatedProductId = positiveInteger(productId, "productId");
-    return this.executor.execute(validatedProductId, async (context) => {
-      if (context.authority === "legacy") {
-        return inventoryChannelExposureRuntimePlanSchema.parse({
-          authority: "legacy",
-          authorityRevision: context.authorityRevision,
-          activationRunId: null,
-          productId: validatedProductId,
-          snapshotFingerprint: null,
-          snapshotCapturedAt: null,
-          targets: [],
-          providerWriteAttempted: false,
-          outboxEnqueued: false,
-        });
-      }
-      if (!context.supplySnapshot || !context.activationRunId) {
-        throw new InventoryChannelExposureRuntimeError(
-          "CANONICAL_CHANNEL_EXPOSURE_CONTEXT_INCOMPLETE",
-          "Canonical channel exposure requires activation lineage and an active supply snapshot.",
-          {
-            productId: validatedProductId,
-            authorityRevision: context.authorityRevision,
-            activationRunId: context.activationRunId,
-            hasSupplySnapshot: context.supplySnapshot !== null,
-          },
-        );
-      }
-      if (context.supplySnapshot.productId !== validatedProductId) {
-        throw new InventoryChannelExposureRuntimeError(
-          "CANONICAL_CHANNEL_EXPOSURE_PRODUCT_MISMATCH",
-          "The active supply snapshot does not belong to the requested product.",
-          { productId: validatedProductId, snapshotProductId: context.supplySnapshot.productId },
-        );
-      }
+    return this.executor.execute(validatedProductId, async (context) =>
+      planInventoryChannelExposureProduct(context, validatedProductId, this.logger));
+  }
+}
 
-      const managedIds = new Set(
-        context.managedSellableVariantIds.map((id) => positiveInteger(id, "managedSellableVariantId")),
-      );
-      const variants = context.supplySnapshot.variants
-        .filter((variant) => managedIds.has(variant.id))
-        .filter((variant) => variant.isActive && isCustomerSellableVariant(variant))
-        .sort((left, right) => left.id - right.id);
-      const foundIds = new Set(variants.map((variant) => variant.id));
-      const missingVariantIds = [...managedIds].filter((id) => !foundIds.has(id)).sort((a, b) => a - b);
-      if (missingVariantIds.length > 0) {
-        throw new InventoryChannelExposureRuntimeError(
-          "CANONICAL_CHANNEL_EXPOSURE_VARIANT_MISMATCH",
-          "A managed sellable SKU is absent from the active product supply snapshot.",
-          { productId: validatedProductId, productVariantIds: missingVariantIds },
-        );
-      }
-
-      const plannedTargets = context.publicationTargets
-        .slice()
-        .sort((left, right) => left.publicationTargetId - right.publicationTargetId)
-        .map((target) => planTarget(context.supplySnapshot!, validatedProductId, variants, target));
-
-      applyPartitionOverages(plannedTargets);
-      const targets: InventoryChannelExposureRuntimePlan["targets"] = plannedTargets.map((planned) => {
-        const target = planned.target;
-        const publishable = target.rows.length > 0
-          && target.blockers.length === 0
-          && target.rows.every((row) => row.blockers.length === 0
-            && row.policy !== null
-            && row.mapping !== null);
-        if (!publishable || target.rows.some((row) => row.warnings.length > 0)) {
-          this.logger.warn({
-            event: "canonical_channel_exposure_not_clean",
-            productId: validatedProductId,
-            publicationTargetId: target.publicationTargetId,
-            authorityRevision: context.authorityRevision,
-            activationRunId: context.activationRunId,
-            targetBlockerCodes: target.blockers.map((blocker) => blocker.code),
-            rowBlockerCodes: uniqueStrings(target.rows.flatMap((row) => row.blockers.map((blocker) => blocker.code))),
-            rowWarningCodes: uniqueStrings(target.rows.flatMap((row) => row.warnings.map((warning) => warning.code))),
-          });
-        }
-        return { ...target, publishable };
-      });
-
-      return inventoryChannelExposureRuntimePlanSchema.parse({
-        authority: "canonical",
-        authorityRevision: context.authorityRevision,
-        activationRunId: context.activationRunId,
-        productId: validatedProductId,
-        snapshotFingerprint: context.supplySnapshot.snapshotFingerprint,
-        snapshotCapturedAt: context.supplySnapshot.capturedAt,
-        targets,
-        providerWriteAttempted: false,
-        outboxEnqueued: false,
-      });
+/**
+ * Pure canonical exposure calculation shared by preview planning and the
+ * transactional publication boundary. Callers must supply one internally
+ * consistent, authority-pinned context.
+ */
+export function planInventoryChannelExposureProduct(
+  context: InventoryChannelExposureRuntimeContext,
+  productId: number,
+  logger: InventoryChannelExposureRuntimeLogger = defaultLogger,
+): InventoryChannelExposureRuntimePlan {
+  const validatedProductId = positiveInteger(productId, "productId");
+  if (context.authority === "legacy") {
+    return inventoryChannelExposureRuntimePlanSchema.parse({
+      authority: "legacy",
+      authorityRevision: context.authorityRevision,
+      activationRunId: null,
+      productId: validatedProductId,
+      snapshotFingerprint: null,
+      snapshotCapturedAt: null,
+      targets: [],
+      providerWriteAttempted: false,
+      outboxEnqueued: false,
     });
   }
+  if (!context.supplySnapshot || !context.activationRunId) {
+    throw new InventoryChannelExposureRuntimeError(
+      "CANONICAL_CHANNEL_EXPOSURE_CONTEXT_INCOMPLETE",
+      "Canonical channel exposure requires activation lineage and an active supply snapshot.",
+      {
+        productId: validatedProductId,
+        authorityRevision: context.authorityRevision,
+        activationRunId: context.activationRunId,
+        hasSupplySnapshot: context.supplySnapshot !== null,
+      },
+    );
+  }
+  if (context.supplySnapshot.productId !== validatedProductId) {
+    throw new InventoryChannelExposureRuntimeError(
+      "CANONICAL_CHANNEL_EXPOSURE_PRODUCT_MISMATCH",
+      "The active supply snapshot does not belong to the requested product.",
+      { productId: validatedProductId, snapshotProductId: context.supplySnapshot.productId },
+    );
+  }
+
+  const managedIds = new Set(
+    context.managedSellableVariantIds.map((id) => positiveInteger(id, "managedSellableVariantId")),
+  );
+  const variants = context.supplySnapshot.variants
+    .filter((variant) => managedIds.has(variant.id))
+    .filter((variant) => variant.isActive && isCustomerSellableVariant(variant))
+    .sort((left, right) => left.id - right.id);
+  const foundIds = new Set(variants.map((variant) => variant.id));
+  const missingVariantIds = [...managedIds].filter((id) => !foundIds.has(id)).sort((a, b) => a - b);
+  if (missingVariantIds.length > 0) {
+    throw new InventoryChannelExposureRuntimeError(
+      "CANONICAL_CHANNEL_EXPOSURE_VARIANT_MISMATCH",
+      "A managed sellable SKU is absent from the active product supply snapshot.",
+      { productId: validatedProductId, productVariantIds: missingVariantIds },
+    );
+  }
+
+  const plannedTargets = context.publicationTargets
+    .slice()
+    .sort((left, right) => left.publicationTargetId - right.publicationTargetId)
+    .map((target) => planTarget(context.supplySnapshot!, validatedProductId, variants, target));
+
+  applyPartitionOverages(plannedTargets);
+  const targets: InventoryChannelExposureRuntimePlan["targets"] = plannedTargets.map((planned) => {
+    const target = planned.target;
+    const publishable = target.rows.length > 0
+      && target.blockers.length === 0
+      && target.rows.every((row) => row.blockers.length === 0
+        && row.policy !== null
+        && row.mapping !== null);
+    if (!publishable || target.rows.some((row) => row.warnings.length > 0)) {
+      logger.warn({
+        event: "canonical_channel_exposure_not_clean",
+        productId: validatedProductId,
+        publicationTargetId: target.publicationTargetId,
+        authorityRevision: context.authorityRevision,
+        activationRunId: context.activationRunId,
+        targetBlockerCodes: target.blockers.map((blocker) => blocker.code),
+        rowBlockerCodes: uniqueStrings(target.rows.flatMap((row) => row.blockers.map((blocker) => blocker.code))),
+        rowWarningCodes: uniqueStrings(target.rows.flatMap((row) => row.warnings.map((warning) => warning.code))),
+      });
+    }
+    return { ...target, publishable };
+  });
+
+  return inventoryChannelExposureRuntimePlanSchema.parse({
+    authority: "canonical",
+    authorityRevision: context.authorityRevision,
+    activationRunId: context.activationRunId,
+    productId: validatedProductId,
+    snapshotFingerprint: context.supplySnapshot.snapshotFingerprint,
+    snapshotCapturedAt: context.supplySnapshot.capturedAt,
+    targets,
+    providerWriteAttempted: false,
+    outboxEnqueued: false,
+  });
 }
 
 type RuntimeTarget = InventoryChannelExposureRuntimePlan["targets"][number];

@@ -4,6 +4,7 @@ const repository = vi.hoisted(() => ({
   claimVariantAvailabilitySyncs: vi.fn(),
   enqueueVariantAvailabilitySync: vi.fn(),
   loadVariantAvailabilityContext: vi.fn(),
+  markVariantAvailabilityDelegated: vi.fn(),
   markVariantAvailabilityNotApplicable: vi.fn(),
   markVariantAvailabilityFailed: vi.fn(),
   markVariantAvailabilitySynced: vi.fn(),
@@ -70,12 +71,19 @@ function createHarness() {
   const adapterRegistry = {
     getOrThrow: vi.fn(() => ({ pushInventory })),
   };
+  const inventoryPublication = {
+    publishVariantAvailability: vi.fn(async (
+      _input: unknown,
+      legacyPublisher: () => Promise<unknown>,
+    ) => ({ authority: "legacy" as const, legacyResult: await legacyPublisher() })),
+  };
   const service = createVariantAvailabilitySyncService({
     dbPool: {} as never,
     allocationEngine,
     adapterRegistry: adapterRegistry as never,
+    inventoryPublication: inventoryPublication as never,
   });
-  return { service, pushInventory, allocationEngine, adapterRegistry };
+  return { service, pushInventory, allocationEngine, adapterRegistry, inventoryPublication };
 }
 
 describe("variant availability sync service", () => {
@@ -84,6 +92,7 @@ describe("variant availability sync service", () => {
     repository.claimVariantAvailabilitySyncs.mockResolvedValue([CLAIM]);
     repository.loadVariantAvailabilityContext.mockResolvedValue(CONTEXT);
     repository.markVariantAvailabilitySynced.mockResolvedValue(true);
+    repository.markVariantAvailabilityDelegated.mockResolvedValue(true);
     repository.markVariantAvailabilityNotApplicable.mockResolvedValue(true);
     repository.markVariantAvailabilityFailed.mockResolvedValue("retryable");
     repository.supersedeAvailabilityClaim.mockResolvedValue(undefined);
@@ -168,6 +177,100 @@ describe("variant availability sync service", () => {
       activeClaim,
       expect.objectContaining({ quantity: 31, feedActive: true }),
     );
+  });
+
+  it("hands inactive variant zeroing to the canonical outbox without a direct provider write", async () => {
+    const { service, pushInventory, allocationEngine, inventoryPublication } = createHarness();
+    inventoryPublication.publishVariantAvailability.mockResolvedValue({
+      authority: "canonical",
+      publication: {
+        authority: "canonical",
+        authorityRevision: "9",
+        activationRunId: "44",
+        dryRun: false,
+        productId: 10,
+        rows: [{ productVariantId: 67, desiredQuantity: "0" }],
+        enqueuedRows: 1,
+        coalescedRows: 0,
+        enqueuedPublicationKeys: ["5:67"],
+        coalescedPublicationKeys: [],
+      },
+    });
+
+    await expect(service.processDue()).resolves.toEqual({
+      claimed: 1,
+      synced: 1,
+      retried: 0,
+      superseded: 0,
+    });
+    expect(inventoryPublication.publishVariantAvailability).toHaveBeenCalledWith(
+      expect.objectContaining({
+        productId: 10,
+        productVariantId: 67,
+        channelId: 67,
+        desiredActive: false,
+      }),
+      expect.any(Function),
+    );
+    expect(repository.markVariantAvailabilityDelegated).toHaveBeenCalledWith(
+      expect.anything(),
+      CLAIM,
+    );
+    expect(repository.markVariantAvailabilitySynced).not.toHaveBeenCalled();
+    expect(allocationEngine.allocateProduct).not.toHaveBeenCalled();
+    expect(pushInventory).not.toHaveBeenCalled();
+  });
+
+  it("keeps the trigger retryable when canonical outbox handoff fails", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { service, inventoryPublication, pushInventory } = createHarness();
+    inventoryPublication.publishVariantAvailability.mockRejectedValue(
+      new Error("canonical outbox unavailable"),
+    );
+
+    await expect(service.processDue()).resolves.toEqual({
+      claimed: 1,
+      synced: 0,
+      retried: 1,
+      superseded: 0,
+    });
+    expect(repository.markVariantAvailabilityFailed).toHaveBeenCalledWith(
+      expect.anything(),
+      CLAIM,
+      expect.objectContaining({ message: "canonical outbox unavailable" }),
+    );
+    expect(repository.markVariantAvailabilityDelegated).not.toHaveBeenCalled();
+    expect(pushInventory).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("does not acknowledge a replaced trigger revision after canonical handoff", async () => {
+    const { service, inventoryPublication, pushInventory } = createHarness();
+    inventoryPublication.publishVariantAvailability.mockResolvedValue({
+      authority: "canonical",
+      publication: {
+        authority: "canonical",
+        authorityRevision: "9",
+        activationRunId: "44",
+        dryRun: false,
+        productId: 10,
+        rows: [{ productVariantId: 67, desiredQuantity: "0" }],
+        enqueuedRows: 1,
+        coalescedRows: 0,
+        enqueuedPublicationKeys: ["5:67"],
+        coalescedPublicationKeys: [],
+      },
+    });
+    repository.markVariantAvailabilityDelegated.mockResolvedValue(false);
+
+    await expect(service.processDue()).resolves.toEqual({
+      claimed: 1,
+      synced: 0,
+      retried: 0,
+      superseded: 1,
+    });
+    expect(repository.markVariantAvailabilitySynced).not.toHaveBeenCalled();
+    expect(pushInventory).not.toHaveBeenCalled();
   });
 
   it("completes digital availability work without publishing a quantity", async () => {

@@ -53,6 +53,10 @@ import type { AllocationEngine, ProductAllocationResult } from "./allocation-eng
 import type { SourceLockService } from "./source-lock.service";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
+import type {
+  AuthorityAwareInventoryPublicationService,
+  CanonicalInventoryPublicationResult,
+} from "../inventory-planning/application/inventory-availability-runtime-publication.service";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -106,6 +110,11 @@ export interface InventorySyncResult {
   variantsPushed: number;
   variantsSkipped: number;
   variantsErrored: number;
+  /** Canonical desired-state rows durably accepted for asynchronous publication. */
+  variantsQueued?: number;
+  /** Canonical rows already represented by the latest durable desired state. */
+  variantsCoalesced?: number;
+  publicationAuthority?: "legacy_direct" | "canonical_outbox";
   details: Array<{
     productId: number;
     variantId: number;
@@ -220,7 +229,8 @@ class EchelonSyncOrchestrator {
     private readonly sourceLockService: SourceLockService,
     private readonly adapterRegistry: ChannelAdapterRegistry,
     private readonly productPushService: ProductPushService,
-    private readonly atpService?: AtpService,
+    private readonly atpService: AtpService | undefined,
+    private readonly inventoryPublication: AuthorityAwareInventoryPublicationService,
   ) {}
 
   // =========================================================================
@@ -241,6 +251,20 @@ class EchelonSyncOrchestrator {
    * the inventory item doesn't exist.
    */
   async syncInventoryForProduct(
+    productId: number,
+    config: SyncOrchestratorConfig,
+    triggeredBy?: string,
+  ): Promise<InventorySyncResult[]> {
+    const routed = await this.inventoryPublication.publishProduct(
+      { productId, dryRun: config.dryRun, triggeredBy },
+      () => this.syncInventoryForProductLegacy(productId, config, triggeredBy),
+    );
+    return routed.authority === "legacy"
+      ? routed.legacyResult
+      : canonicalInventorySyncResults(routed.publication);
+  }
+
+  private async syncInventoryForProductLegacy(
     productId: number,
     config: SyncOrchestratorConfig,
     triggeredBy?: string,
@@ -299,7 +323,9 @@ class EchelonSyncOrchestrator {
   ): Promise<InventorySyncResult[]> {
     const allResults: InventorySyncResult[] = [];
 
-    const productIds = await this.getInventorySyncProductIds();
+    const productIds = await this.inventoryPublication.listProductIds(
+      () => this.getInventorySyncProductIds(),
+    );
     console.log(`[SyncOrchestrator] Syncing inventory for ${productIds.length} products`);
 
     // Clear velocity cache at start of full sync cycle — each product will query fresh
@@ -316,6 +342,9 @@ class EchelonSyncOrchestrator {
             existing.variantsPushed += result.variantsPushed;
             existing.variantsSkipped += result.variantsSkipped;
             existing.variantsErrored += result.variantsErrored;
+            existing.variantsQueued = (existing.variantsQueued ?? 0) + (result.variantsQueued ?? 0);
+            existing.variantsCoalesced = (existing.variantsCoalesced ?? 0)
+              + (result.variantsCoalesced ?? 0);
             existing.details.push(...result.details);
           } else {
             allResults.push(result);
@@ -1788,7 +1817,8 @@ export function createEchelonSyncOrchestrator(
   sourceLockService: SourceLockService,
   adapterRegistry: ChannelAdapterRegistry,
   productPushService: ProductPushService,
-  atpService?: any,
+  atpService: any | undefined,
+  inventoryPublication: AuthorityAwareInventoryPublicationService,
 ) {
   return new EchelonSyncOrchestrator(
     db,
@@ -1797,7 +1827,51 @@ export function createEchelonSyncOrchestrator(
     adapterRegistry,
     productPushService,
     atpService,
+    inventoryPublication,
   );
 }
 
 export type { EchelonSyncOrchestrator };
+
+function canonicalInventorySyncResults(
+  publication: CanonicalInventoryPublicationResult,
+): InventorySyncResult[] {
+  const byChannel = new Map<number, InventorySyncResult>();
+  const enqueuedKeys = new Set(publication.enqueuedPublicationKeys);
+  const coalescedKeys = new Set(publication.coalescedPublicationKeys);
+  for (const row of publication.rows) {
+    let result = byChannel.get(row.channelId);
+    if (!result) {
+      result = {
+        channelId: row.channelId,
+        channelName: row.channelName,
+        dryRun: publication.dryRun,
+        products: 1,
+        variantsPushed: 0,
+        variantsSkipped: 0,
+        variantsErrored: 0,
+        variantsQueued: 0,
+        variantsCoalesced: 0,
+        publicationAuthority: "canonical_outbox",
+        details: [],
+      };
+      byChannel.set(row.channelId, result);
+    }
+    const key = `${row.publicationTargetId}:${row.productVariantId}`;
+    if (enqueuedKeys.has(key)) result.variantsQueued = (result.variantsQueued ?? 0) + 1;
+    if (coalescedKeys.has(key)) result.variantsCoalesced = (result.variantsCoalesced ?? 0) + 1;
+    result.details.push({
+      productId: publication.productId,
+      variantId: row.productVariantId,
+      sku: row.externalSku ?? row.sku,
+      allocatedQty: Number(row.desiredQuantity),
+      previousQty: null,
+      status: publication.dryRun
+        ? "dry_run"
+        : enqueuedKeys.has(key)
+          ? "canonical_publication_queued"
+          : "canonical_publication_coalesced",
+    });
+  }
+  return [...byChannel.values()].sort((left, right) => left.channelId - right.channelId);
+}

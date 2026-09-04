@@ -12,6 +12,7 @@ import { eq } from "drizzle-orm";
 import { Pool } from "pg";
 
 import { createAuthorityAwareInventoryAtpService } from "../server/modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
+import { createAuthorityAwareInventoryPublicationService } from "../server/modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import { createAllocationEngine } from "../server/modules/channels/allocation-engine.service";
 import { createSourceLockService } from "../server/modules/channels/source-lock.service";
 import { createShopifyAdapter } from "../server/modules/channels/adapters/shopify.adapter";
@@ -75,6 +76,9 @@ async function main() {
 
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(gatedAdapter);
+  const inventoryPublication = createAuthorityAwareInventoryPublicationService(pool, {
+    channelId: targetChannelId,
+  });
 
   const orchestrator = createEchelonSyncOrchestrator(
     db,
@@ -82,6 +86,8 @@ async function main() {
     sourceLockService,
     adapterRegistry,
     productPushService,
+    atpService,
+    inventoryPublication,
   );
 
   const startedAt = Date.now();
