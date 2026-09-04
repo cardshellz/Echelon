@@ -179,7 +179,7 @@ describe("PostgresInventoryAvailabilityRuntimePublicationExecutor", () => {
     })]);
   });
 
-  it("rejects a Dropship-owned target before the channel outbox can clear it to zero", async () => {
+  it("loads a Dropship-owned target with its exact transport owner", async () => {
     const client = fakeClient(
       { authority: "canonical", authority_revision: "9", activation_run_id: "44" },
       {
@@ -220,8 +220,13 @@ describe("PostgresInventoryAvailabilityRuntimePublicationExecutor", () => {
       productId: 10,
       productVariantIds: [101],
       channelId: 3,
-    }))).rejects.toMatchObject({ code: "INVENTORY_PUBLICATION_DESTINATION_UNSUPPORTED" });
-    expect(transactionCommands(client).at(-1)).toBe("ROLLBACK");
+    }))).resolves.toEqual([expect.objectContaining({
+      destinationKind: "dropship_store_connection",
+      channelConnectionId: null,
+      dropshipStoreConnectionId: 91,
+      providerKey: "ebay",
+    })]);
+    expect(transactionCommands(client).at(-1)).toBe("COMMIT");
   });
 
   it("coalesces an identical reusable desired state instead of creating another revision", async () => {
@@ -337,14 +342,16 @@ function publicationDatabase(options: { failQueueTransition?: boolean } = {}) {
             state: "desired",
             desired_revision: revision,
             desired_quantity: String(values?.[4]),
-            channel_connection_id_snapshot: Number(values?.[5]),
-            external_scope_id_snapshot: String(values?.[6]),
-            external_inventory_item_id_snapshot: String(values?.[7]),
-            channel_id_snapshot: Number(values?.[8]),
-            provider_key_snapshot: String(values?.[9]),
-            provider_scope_type_snapshot: String(values?.[10]),
-            external_sku_snapshot: values?.[11] == null ? null : String(values[11]),
-            publication_target_revision_snapshot: String(values?.[12]),
+            destination_kind_snapshot: String(values?.[5]),
+            channel_connection_id_snapshot: values?.[6] == null ? null : Number(values[6]),
+            dropship_store_connection_id_snapshot: values?.[7] == null ? null : Number(values[7]),
+            external_scope_id_snapshot: String(values?.[8]),
+            external_inventory_item_id_snapshot: String(values?.[9]),
+            channel_id_snapshot: Number(values?.[10]),
+            provider_key_snapshot: String(values?.[11]),
+            provider_scope_type_snapshot: String(values?.[12]),
+            external_sku_snapshot: values?.[13] == null ? null : String(values[13]),
+            publication_target_revision_snapshot: String(values?.[14]),
           };
           return { rows: [{ id: revision }], rowCount: 1 };
         }
@@ -403,7 +410,9 @@ function publicationIntent(desiredQuantity: string): CanonicalInventoryPublicati
     desiredQuantity,
     channelId: 3,
     channelName: "Shopify US",
+    destinationKind: "channel_connection",
     channelConnectionId: 33,
+    dropshipStoreConnectionId: null,
     providerKey: "shopify",
     providerScopeType: "location",
     externalScopeId: "location-1",

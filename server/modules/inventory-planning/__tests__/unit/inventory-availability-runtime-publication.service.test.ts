@@ -75,7 +75,7 @@ describe("AuthorityAwareInventoryPublicationService", () => {
     expect(context.enqueueFullPublications).not.toHaveBeenCalled();
   });
 
-  it("fails closed before enqueueing a Dropship-owned canonical target", async () => {
+  it("enqueues a Dropship-owned target from the same canonical exposure result", async () => {
     const context = runtimeContext("canonical");
     const plan = runtimePlan([target()]);
     context.planProduct = vi.fn(async () => ({
@@ -85,13 +85,34 @@ describe("AuthorityAwareInventoryPublicationService", () => {
         destinationKind: "dropship_store_connection" as const,
         channelConnectionId: null,
         dropshipStoreConnectionId: 91,
+        channelProvider: "ebay",
+        providerScopeType: "account" as const,
+        externalScopeId: "seller-account-1",
       })),
     }));
     const service = new AuthorityAwareInventoryPublicationService(executor(context));
 
     await expect(service.publishProduct({ productId: 10, dryRun: false }, vi.fn()))
-      .rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_DESTINATION_UNSUPPORTED" });
-    expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+      .resolves.toMatchObject({
+        authority: "canonical",
+        publication: {
+          rows: [{
+            desiredQuantity: "4",
+            destinationKind: "dropship_store_connection",
+            channelConnectionId: null,
+            dropshipStoreConnectionId: 91,
+            providerKey: "ebay",
+          }],
+        },
+      });
+    expect(context.enqueueFullPublications).toHaveBeenCalledWith(
+      "44",
+      [expect.objectContaining({
+        destinationKind: "dropship_store_connection",
+        dropshipStoreConnectionId: 91,
+        desiredQuantity: "4",
+      })],
+    );
   });
 
   it("forces an inactive mapped variant to zero without requiring it in the active ATP snapshot", async () => {
@@ -199,7 +220,9 @@ function target(): ActiveInventoryPublicationTarget {
     channelId: 3,
     channelName: "Shopify US",
     providerKey: "shopify",
+    destinationKind: "channel_connection",
     channelConnectionId: 33,
+    dropshipStoreConnectionId: null,
     providerScopeType: "location",
     externalScopeId: "location-1",
     sourceBindingId: 7,
@@ -225,12 +248,12 @@ function runtimePlan(targets: ActiveInventoryPublicationTarget[]): InventoryChan
         return {
           publicationTargetId: target.publicationTargetId,
           publicationTargetRevision: target.publicationTargetRevision,
-          destinationKind: "channel_connection" as const,
+          destinationKind: target.destinationKind,
           channelId: target.channelId,
         channelName: target.channelName,
         channelProvider: target.providerKey,
           channelConnectionId: target.channelConnectionId,
-          dropshipStoreConnectionId: null,
+          dropshipStoreConnectionId: target.dropshipStoreConnectionId,
         providerScopeType: target.providerScopeType,
         externalScopeId: target.externalScopeId,
         publicationAuthority: "echelon" as const,

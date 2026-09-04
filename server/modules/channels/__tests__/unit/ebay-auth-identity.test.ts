@@ -138,6 +138,34 @@ function observedAccount(
 }
 
 describe("EbayAuthService provider account identity", () => {
+  it("returns only a persisted provider-verified account for canonical publication", async () => {
+    const state = mockDb(tokenRow({
+      externalAccountId: "immutable-user-1",
+      externalAccountDisplayName: "display-name",
+      externalAccountIdentityScheme: "provider_user_id",
+      externalAccountVerifiedAt: fixedNow,
+    }));
+    const service = new EbayAuthService(state.db as any, config);
+
+    await expect(service.getVerifiedProviderAccount(67)).resolves.toEqual({
+      externalAccountId: "immutable-user-1",
+      externalAccountDisplayName: "display-name",
+      externalAccountIdentityScheme: "provider_user_id",
+      externalAccountVerifiedAt: fixedNow,
+    });
+  });
+
+  it("does not represent an unverified legacy token as an exact provider account", async () => {
+    const state = mockDb(tokenRow({
+      externalAccountId: "legacy-account",
+      externalAccountIdentityScheme: null,
+      externalAccountVerifiedAt: null,
+    }));
+    const service = new EbayAuthService(state.db as any, config);
+
+    await expect(service.getVerifiedProviderAccount(67)).resolves.toBeNull();
+  });
+
   it("requires immutable Identity API userId before persisting exchanged tokens", async () => {
     const state = mockDb(null);
     const fetchFn = vi

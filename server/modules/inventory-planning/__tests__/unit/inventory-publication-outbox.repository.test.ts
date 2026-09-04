@@ -8,6 +8,86 @@ import {
 const NOW = new Date("2026-09-04T16:00:00.000Z");
 
 describe("PostgresInventoryPublicationOutboxRepository full publication phase", () => {
+  it("holds the target/variant advisory lock while the provider operation runs", async () => {
+    const client = fakeClient((sql) => {
+      if (sql.includes("AS newer_exists")) {
+        return { rows: [{ state: "leased", lease_token: "lease-runtime", newer_exists: false }] };
+      }
+      if (sql.includes("AS unlocked")) return { rows: [{ unlocked: true }] };
+      return { rows: [] };
+    });
+    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
+    const work = vi.fn(async () => "published");
+
+    await expect(repository.runIfCurrent(claim(), work)).resolves.toEqual({
+      status: "current",
+      value: "published",
+    });
+    expect(work).toHaveBeenCalledOnce();
+    expect(client.queries.map(({ sql }) => sql)).toEqual([
+      expect.stringContaining("pg_advisory_lock"),
+      expect.stringContaining("AS newer_exists"),
+      expect.stringContaining("pg_advisory_unlock"),
+    ]);
+  });
+
+  it("records and skips a stale claim before any provider operation", async () => {
+    const client = fakeClient((sql) => {
+      if (sql.includes("AS newer_exists")) {
+        return { rows: [{ state: "superseded", lease_token: null, newer_exists: true }] };
+      }
+      if (sql.includes("AS unlocked")) return { rows: [{ unlocked: true }] };
+      return { rows: [], rowCount: 1 };
+    });
+    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
+    const work = vi.fn();
+
+    await expect(repository.runIfCurrent(claim(), work)).resolves.toEqual({
+      status: "superseded",
+    });
+    expect(work).not.toHaveBeenCalled();
+    expect(client.queries.some(({ sql }) =>
+      sql.includes("SUPERSEDED_BEFORE_PROVIDER_WRITE")
+      && sql.includes("inventory_publication_attempts"))).toBe(true);
+    expect(client.queries.map(({ sql }) => sql)).toEqual([
+      expect.stringContaining("pg_advisory_lock"),
+      expect.stringContaining("AS newer_exists"),
+      "BEGIN",
+      expect.stringContaining("inventory_publication_attempts"),
+      "COMMIT",
+      expect.stringContaining("pg_advisory_unlock"),
+    ]);
+  });
+
+  it("atomically records and transitions a stale claim while its lease is still owned", async () => {
+    const client = fakeClient((sql) => {
+      if (sql.includes("AS newer_exists")) {
+        return { rows: [{ state: "leased", lease_token: "lease-runtime", newer_exists: true }] };
+      }
+      if (sql.includes("AS unlocked")) return { rows: [{ unlocked: true }] };
+      return { rows: [], rowCount: 1 };
+    });
+    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
+
+    await expect(repository.runIfCurrent(claim(), vi.fn())).resolves.toEqual({
+      status: "superseded",
+    });
+    const transition = client.queries.find(({ sql }) =>
+      sql.includes("UPDATE inventory.inventory_publication_outbox")
+      && sql.includes("SUPERSEDED_BEFORE_PROVIDER_WRITE"));
+    expect(transition?.values).toEqual(["41", "lease-runtime"]);
+    expect(client.queries.map(({ sql }) => sql)).toContain("COMMIT");
+  });
+
+  it("rejects a pool that cannot preserve the provider lock during durable recording", () => {
+    expect(() => new PostgresInventoryPublicationOutboxRepository({
+      connect: vi.fn(),
+      options: { max: 1 },
+    } as never)).toThrowError(expect.objectContaining({
+      code: "PUBLICATION_POOL_CAPACITY_INVALID",
+    }));
+  });
+
   it("claims full publications only through the active-run branch", async () => {
     const client = fakeClient((sql) => {
       if (sql.includes("RETURNING outbox.*")) return { rows: [claimRow()] };
@@ -144,6 +224,45 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
     expect(client.queries.some(({ sql }) => sql.includes("state = 'cancelled'")
       && sql.includes("ACTIVATION_ABORTED_DURING_PROVIDER_WRITE"))).toBe(false);
   });
+
+  it("records readback evidence against the exact Dropship owner snapshot", async () => {
+    const client = fakeClient((sql) => {
+      if (sql.includes("SELECT * FROM inventory.inventory_publication_outbox")) {
+        return { rows: [{ id: "41" }] };
+      }
+      if (sql.includes("SELECT state FROM inventory.availability_activation_runs")) {
+        return { rows: [{ state: "active" }] };
+      }
+      if (sql.includes("SELECT state, reason FROM inventory.availability_activation_runs")) {
+        return { rows: [{ state: "active", reason: "Activated" }] };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
+    const dropshipClaim: ClaimedInventoryPublication = {
+      ...claim(),
+      destinationKind: "dropship_store_connection",
+      channelConnectionId: null,
+      dropshipStoreConnectionId: 77,
+      providerKey: "ebay",
+      providerScopeType: "account",
+      externalScopeId: "seller-account-1",
+    };
+
+    await expect(repository.recordVerified(dropshipClaim, {
+      observedQuantity: 7,
+      providerResponse: { status: 200 },
+      completedAt: NOW,
+    })).resolves.toBe("verified");
+
+    const readbackInsert = client.queries.find(({ sql }) =>
+      sql.includes("INSERT INTO inventory.inventory_publication_readbacks"));
+    expect(readbackInsert?.values?.slice(7, 10)).toEqual([
+      "dropship_store_connection",
+      null,
+      77,
+    ]);
+  });
 });
 
 type QueryResponse = { rows: Record<string, unknown>[]; rowCount?: number };
@@ -175,7 +294,9 @@ function claim(): ClaimedInventoryPublication {
     desiredRevision: "2",
     desiredQuantity: "7",
     channelId: 3,
+    destinationKind: "channel_connection",
     channelConnectionId: 33,
+    dropshipStoreConnectionId: null,
     providerKey: "shopify",
     providerScopeType: "location",
     externalScopeId: "location-9",
@@ -199,7 +320,9 @@ function claimRow(): Record<string, unknown> {
     desired_revision: value.desiredRevision,
     desired_quantity: value.desiredQuantity,
     channel_id_snapshot: value.channelId,
+    destination_kind_snapshot: value.destinationKind,
     channel_connection_id_snapshot: value.channelConnectionId,
+    dropship_store_connection_id_snapshot: value.dropshipStoreConnectionId,
     provider_key_snapshot: value.providerKey,
     provider_scope_type_snapshot: value.providerScopeType,
     external_scope_id_snapshot: value.externalScopeId,

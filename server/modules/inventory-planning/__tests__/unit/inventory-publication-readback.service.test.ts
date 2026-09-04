@@ -32,8 +32,8 @@ describe("InventoryPublicationReadbackService", () => {
 
   it("captures an authoritative observation with exact connection and scope identity", async () => {
     const adapter = {
-      inventoryPublicationScopeTypes: ["location"] as const,
-      readInventory: vi.fn(async () => [{ variantId: 101, observedQty: 8, status: "success" as const }]),
+      supportedScopeTypes: ["location"] as const,
+      readAbsolute: vi.fn(async () => ({ observedQuantity: 8, providerResponse: { status: 200 } })),
     };
     const service = new InventoryPublicationReadbackService(
       store,
@@ -42,15 +42,16 @@ describe("InventoryPublicationReadbackService", () => {
     );
 
     await expect(service.capture(request(), "operator-1")).resolves.toEqual(result({}));
-    expect(adapter.readInventory).toHaveBeenCalledWith(3, [{
-      variantId: 101,
-      sku: "SKU-101",
+    expect(adapter.readAbsolute).toHaveBeenCalledWith({
+      destination: {
+        kind: "channel_connection",
+        channelConnectionId: 33,
+        dropshipStoreConnectionId: null,
+      },
+      channelId: 3,
+      productVariantId: 101,
+      externalSku: "SKU-101",
       externalInventoryItemId: "inventory-item-101",
-      providerScopeType: "location",
-      externalScopeId: "location-9",
-    }], {
-      authority: "canonical_outbox",
-      channelConnectionId: 33,
       providerScopeType: "location",
       externalScopeId: "location-9",
     });
@@ -76,8 +77,8 @@ describe("InventoryPublicationReadbackService", () => {
 
   it("fails closed when a target scope cannot be addressed exactly", async () => {
     const adapter = {
-      inventoryPublicationScopeTypes: ["account"] as const,
-      readInventory: vi.fn(),
+      supportedScopeTypes: ["account"] as const,
+      readAbsolute: vi.fn(),
     };
     const service = new InventoryPublicationReadbackService(
       store,
@@ -87,7 +88,7 @@ describe("InventoryPublicationReadbackService", () => {
 
     const captured = await service.capture(request(), "operator-1");
     expect(captured.state).toBe("partial");
-    expect(adapter.readInventory).not.toHaveBeenCalled();
+    expect(adapter.readAbsolute).not.toHaveBeenCalled();
     expect(store.recordFailure).toHaveBeenCalledWith(
       "5",
       target(),
@@ -95,25 +96,58 @@ describe("InventoryPublicationReadbackService", () => {
     );
   });
 
-  it("records an explicit failure for Dropship until its authoritative adapter is installed", async () => {
+  it("routes Dropship readback through the exact store-owned provider adapter", async () => {
     const dropshipTarget = target({
       destinationKind: "dropship_store_connection",
       channelConnectionId: null,
       dropshipStoreConnectionId: 77,
       providerKey: "ebay",
+      providerScopeType: "account",
+      externalScopeId: "seller-account-1",
     });
     store.begin.mockResolvedValueOnce({ kind: "started", readbackRunId: "5", targets: [dropshipTarget] });
-    const get = vi.fn();
+    const adapter = {
+      supportedScopeTypes: ["account"] as const,
+      readAbsolute: vi.fn(async () => ({ observedQuantity: 6, providerResponse: { status: 200 } })),
+    };
+    const get = vi.fn(() => adapter as any);
     const service = new InventoryPublicationReadbackService(store, { get }, { now: () => NOW });
 
     const captured = await service.capture(request(), "operator-1");
 
+    expect(captured.state).toBe("completed");
+    expect(get).toHaveBeenCalledWith("dropship_store_connection", "ebay");
+    expect(adapter.readAbsolute).toHaveBeenCalledWith(expect.objectContaining({
+      destination: {
+        kind: "dropship_store_connection",
+        channelConnectionId: null,
+        dropshipStoreConnectionId: 77,
+      },
+    }));
+    expect(store.recordObserved).toHaveBeenCalledWith("5", dropshipTarget, 6, NOW);
+  });
+
+  it("records a malformed destination owner as a target-scoped failure", async () => {
+    const invalidTarget = target({ channelConnectionId: null });
+    store.begin.mockResolvedValueOnce({ kind: "started", readbackRunId: "5", targets: [invalidTarget] });
+    const adapter = {
+      supportedScopeTypes: ["location"] as const,
+      readAbsolute: vi.fn(),
+    };
+    const service = new InventoryPublicationReadbackService(
+      store,
+      { get: () => adapter as any },
+      { now: () => NOW },
+    );
+
+    const captured = await service.capture(request(), "operator-1");
+
     expect(captured.state).toBe("partial");
-    expect(get).not.toHaveBeenCalled();
+    expect(adapter.readAbsolute).not.toHaveBeenCalled();
     expect(store.recordFailure).toHaveBeenCalledWith(
       "5",
-      dropshipTarget,
-      expect.objectContaining({ code: "PUBLICATION_READBACK_DESTINATION_UNSUPPORTED" }),
+      invalidTarget,
+      expect.objectContaining({ code: "PUBLICATION_READBACK_DESTINATION_INVALID" }),
     );
   });
 

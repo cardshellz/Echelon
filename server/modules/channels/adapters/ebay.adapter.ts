@@ -246,15 +246,22 @@ export class EbayAdapter implements IChannelAdapter {
         retryable: false,
       }));
     }
-    const client = await this.getApiClient(channelId, context?.channelConnectionId);
+    const publicationItems = context
+      ? items.map((item) => ({ ...item, sku: exactEbayInventoryItemKey(item) }))
+      : items;
+    const client = await this.getApiClient(
+      channelId,
+      context?.channelConnectionId,
+      context?.externalScopeId,
+    );
     const results: InventoryPushResult[] = [];
 
     // eBay supports bulk update — batch up to 25 items per call
     const BATCH_SIZE = 25;
     const batches: InventoryPushItem[][] = [];
 
-    for (let i = 0; i < items.length; i += BATCH_SIZE) {
-      batches.push(items.slice(i, i + BATCH_SIZE));
+    for (let i = 0; i < publicationItems.length; i += BATCH_SIZE) {
+      batches.push(publicationItems.slice(i, i + BATCH_SIZE));
     }
 
     for (const batch of batches) {
@@ -415,11 +422,18 @@ export class EbayAdapter implements IChannelAdapter {
         errorCode: "EBAY_INVENTORY_SCOPE_UNSUPPORTED",
       }));
     }
-    const client = await this.getApiClient(channelId, context.channelConnectionId);
+    const publicationItems = items.map((item) => ({
+      ...item,
+      sku: exactEbayInventoryItemKey(item),
+    }));
+    const client = await this.getApiClient(
+      channelId,
+      context.channelConnectionId,
+      context.externalScopeId,
+    );
     const results: InventoryReadResult[] = [];
-    for (const item of items) {
+    for (const item of publicationItems) {
       try {
-        if (!item.sku) throw new Error("eBay inventory readback requires the exact external SKU");
         const inventoryItem = await client.getInventoryItem(item.sku);
         const observedQty = Number(
           inventoryItem?.availability?.shipToLocationAvailability?.quantity,
@@ -849,7 +863,18 @@ export class EbayAdapter implements IChannelAdapter {
   // Helper Methods
   // -------------------------------------------------------------------------
 
-  private async getApiClient(channelId: number, channelConnectionId?: number): Promise<EbayApiClient> {
+  private async getApiClient(
+    channelId: number,
+    channelConnectionId?: number,
+    exactExternalAccountId?: string,
+  ): Promise<EbayApiClient> {
+    if (exactExternalAccountId !== undefined) {
+      await this.assertExactPublicationAccount(
+        channelId,
+        channelConnectionId,
+        exactExternalAccountId,
+      );
+    }
     const cacheKey = `${channelId}:${channelConnectionId ?? "default"}`;
     if (this.apiClients.has(cacheKey)) {
       return this.apiClients.get(cacheKey)!;
@@ -862,6 +887,37 @@ export class EbayAdapter implements IChannelAdapter {
     const client = createEbayApiClient(authService, channelId, environment);
     this.apiClients.set(cacheKey, client);
     return client;
+  }
+
+  private async assertExactPublicationAccount(
+    channelId: number,
+    channelConnectionId: number | undefined,
+    exactExternalAccountId: string,
+  ): Promise<void> {
+    const normalizedAccountId = exactExternalAccountId.trim();
+    if (!normalizedAccountId || channelConnectionId === undefined) {
+      throw new InventoryPublicationConfigurationError(
+        "EBAY_PUBLICATION_ACCOUNT_SCOPE_INVALID",
+        "eBay canonical inventory publication requires an exact connection and provider account.",
+      );
+    }
+    await this.getConnectionMetadata(channelId, channelConnectionId);
+    const account = await (await this.getAuthService(
+      channelId,
+      channelConnectionId,
+    )).getVerifiedProviderAccount(channelId);
+    if (!account) {
+      throw new InventoryPublicationConfigurationError(
+        "EBAY_PROVIDER_ACCOUNT_IDENTITY_UNVERIFIED",
+        "The eBay OAuth credential has no persisted provider-verified account identity.",
+      );
+    }
+    if (account.externalAccountId !== normalizedAccountId) {
+      throw new InventoryPublicationConfigurationError(
+        "EBAY_PROVIDER_ACCOUNT_IDENTITY_MISMATCH",
+        "The publication target account does not match the provider-verified eBay OAuth account.",
+      );
+    }
   }
 
   private async getAuthService(
@@ -1012,6 +1068,26 @@ export class EbayAdapter implements IChannelAdapter {
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+}
+
+function exactEbayInventoryItemKey(
+  item: Pick<InventoryPushItem, "externalInventoryItemId" | "sku">,
+): string {
+  const inventoryItemId = item.externalInventoryItemId?.trim();
+  if (!inventoryItemId) {
+    throw new InventoryPublicationConfigurationError(
+      "EBAY_INVENTORY_ID_REQUIRED",
+      "eBay canonical inventory publication requires the exact provider inventory-item ID.",
+    );
+  }
+  const externalSku = item.sku?.trim() || null;
+  if (externalSku !== null && externalSku !== inventoryItemId) {
+    throw new InventoryPublicationConfigurationError(
+      "EBAY_INVENTORY_IDENTITY_MISMATCH",
+      "The eBay inventory-item ID must equal the external SKU recorded by eBay registration.",
+    );
+  }
+  return inventoryItemId;
 }
 
 // ---------------------------------------------------------------------------

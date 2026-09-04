@@ -2339,7 +2339,10 @@ export const inventoryPublicationOutbox = inventoryPlanningSchema.table(
       .references(() => productVariants.id, { onDelete: "restrict" }),
     desiredRevision: bigint("desired_revision", { mode: "bigint" }).notNull(),
     desiredQuantity: bigint("desired_quantity", { mode: "bigint" }).notNull(),
-    channelConnectionIdSnapshot: integer("channel_connection_id_snapshot").notNull(),
+    destinationKindSnapshot: varchar("destination_kind_snapshot", { length: 30 })
+      .notNull().default("channel_connection"),
+    channelConnectionIdSnapshot: integer("channel_connection_id_snapshot"),
+    dropshipStoreConnectionIdSnapshot: integer("dropship_store_connection_id_snapshot"),
     externalScopeIdSnapshot: varchar("external_scope_id_snapshot", { length: 240 }).notNull(),
     externalInventoryItemIdSnapshot: varchar("external_inventory_item_id_snapshot", { length: 240 }).notNull(),
     publicationPhase: varchar("publication_phase", { length: 20 }).notNull().default("legacy"),
@@ -2394,6 +2397,15 @@ export const inventoryPublicationOutbox = inventoryPlanningSchema.table(
         AND btrim(${table.externalScopeIdSnapshot}) <> ''
         AND btrim(${table.externalInventoryItemIdSnapshot}) <> ''`,
     ),
+    destinationValid: check(
+      "inventory_publication_outbox_destination_chk",
+      sql`(${table.destinationKindSnapshot} = 'channel_connection'
+          AND ${table.channelConnectionIdSnapshot} IS NOT NULL
+          AND ${table.dropshipStoreConnectionIdSnapshot} IS NULL)
+        OR (${table.destinationKindSnapshot} = 'dropship_store_connection'
+          AND ${table.channelConnectionIdSnapshot} IS NULL
+          AND ${table.dropshipStoreConnectionIdSnapshot} IS NOT NULL)`,
+    ),
     leaseValid: check(
       "inventory_publication_outbox_lease_chk",
       sql`(${table.state} = 'leased' AND ${table.leaseToken} IS NOT NULL
@@ -2425,7 +2437,7 @@ export const inventoryPublicationAttempts = inventoryPlanningSchema.table(
       .on(table.outboxId, table.attemptNumber),
     outcomeValid: check(
       "inventory_publication_attempts_outcome_chk",
-      sql`${table.outcome} IN ('acknowledged', 'retryable', 'dead_letter', 'cancelled')`,
+      sql`${table.outcome} IN ('acknowledged', 'retryable', 'dead_letter', 'cancelled', 'superseded')`,
     ),
     evidenceValid: check(
       "inventory_publication_attempts_evidence_chk",

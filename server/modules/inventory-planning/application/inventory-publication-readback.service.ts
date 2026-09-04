@@ -7,12 +7,11 @@ import {
   type InventoryPublicationReadbackRun,
 } from "@shared/types/inventory-availability-phase4";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import type {
-  ChannelAdapterRegistry,
-  InventoryPublicationContext,
-  InventoryReadItem,
-} from "../../channels/channel-adapter.interface";
-import { InventoryPublicationConfigurationError } from "../../channels/channel-adapter.interface";
+import {
+  InventoryPublicationTransportError,
+  type InventoryPublicationDestination,
+  type InventoryPublicationTransportRegistry,
+} from "./inventory-publication-transport";
 
 const actorSchema = z.string().trim().min(1).max(100);
 
@@ -93,7 +92,7 @@ export class InventoryPublicationReadbackServiceError extends Error {
 export class InventoryPublicationReadbackService {
   constructor(
     private readonly store: InventoryPublicationReadbackStore,
-    private readonly adapters: Pick<ChannelAdapterRegistry, "get">,
+    private readonly adapters: Pick<InventoryPublicationTransportRegistry, "get">,
     private readonly clock: InventoryPublicationReadbackClock = systemClock,
   ) {}
 
@@ -151,58 +150,37 @@ export class InventoryPublicationReadbackService {
   ): Promise<PublicationReadbackFailure | null> {
     let observedQuantity: number;
     try {
-      if (target.destinationKind !== "channel_connection" || target.channelConnectionId === null) {
-        throw classified(
-          "PUBLICATION_READBACK_DESTINATION_UNSUPPORTED",
-          "Authoritative Dropship storefront inventory readback is not registered yet.",
-        );
-      }
-      const adapter = this.adapters.get(target.providerKey);
-      if (!adapter?.readInventory) {
+      const adapter = this.adapters.get(target.destinationKind, target.providerKey);
+      if (!adapter) {
         throw classified(
           "PUBLICATION_READBACK_UNSUPPORTED",
-          `No authoritative inventory readback is registered for ${target.providerKey}.`,
+          `No authoritative inventory readback is registered for ${target.destinationKind}:${target.providerKey}.`,
         );
       }
-      if (!adapter.inventoryPublicationScopeTypes?.includes(target.providerScopeType)) {
+      if (!adapter.supportedScopeTypes.includes(target.providerScopeType)) {
         throw classified(
           "PUBLICATION_READBACK_SCOPE_UNSUPPORTED",
           `The ${target.providerKey} adapter cannot read ${target.providerScopeType}-scoped inventory without inference.`,
         );
       }
-      const context: InventoryPublicationContext = {
-        authority: "canonical_outbox",
-        channelConnectionId: target.channelConnectionId,
+      const result = await adapter.readAbsolute({
+        destination: publicationDestination(target),
+        channelId: target.channelId,
         providerScopeType: target.providerScopeType,
         externalScopeId: target.externalScopeId,
-      };
-      const item: InventoryReadItem = {
-        variantId: target.productVariantId,
-        sku: target.externalSku,
+        productVariantId: target.productVariantId,
         externalInventoryItemId: target.externalInventoryItemId,
-        providerScopeType: target.providerScopeType,
-        externalScopeId: target.externalScopeId,
-      };
-      const results = await adapter.readInventory(target.channelId, [item], context);
-      if (results.length !== 1 || results[0]?.variantId !== target.productVariantId) {
-        throw classified("PROVIDER_READBACK_RESPONSE_INVALID", "Provider returned no exact matching readback row.");
-      }
-      const result = results[0];
-      if (result.status !== "success") {
-        throw classified(
-          result.errorCode ?? "PROVIDER_READBACK_FAILED",
-          result.error ?? "Provider inventory readback failed.",
-        );
-      }
-      if (!Number.isSafeInteger(result.observedQty) || result.observedQty < 0) {
+        externalSku: target.externalSku,
+      });
+      if (!Number.isSafeInteger(result.observedQuantity) || result.observedQuantity < 0) {
         throw classified("PROVIDER_READBACK_QUANTITY_INVALID", "Provider returned an invalid inventory quantity.");
       }
-      observedQuantity = result.observedQty;
+      observedQuantity = result.observedQuantity;
     } catch (error) {
       const failure: PublicationReadbackFailure = {
         publicationTargetId: target.publicationTargetId,
         productVariantId: target.productVariantId,
-        code: error instanceof ClassifiedReadbackError || error instanceof InventoryPublicationConfigurationError
+        code: error instanceof ClassifiedReadbackError || error instanceof InventoryPublicationTransportError
           ? error.code
           : "PROVIDER_READBACK_ERROR",
         message: (error instanceof Error ? error.message : String(error)).slice(0, 2000),
@@ -229,6 +207,35 @@ class ClassifiedReadbackError extends Error {
 
 function classified(code: string, message: string): ClassifiedReadbackError {
   return new ClassifiedReadbackError(code, message);
+}
+
+function publicationDestination(
+  target: PublicationReadbackTarget,
+): InventoryPublicationDestination {
+  if (target.destinationKind === "channel_connection") {
+    if (target.channelConnectionId === null || target.dropshipStoreConnectionId !== null) {
+      throw classified(
+        "PUBLICATION_READBACK_DESTINATION_INVALID",
+        "A channel readback target must contain exactly one channel connection owner.",
+      );
+    }
+    return {
+      kind: "channel_connection",
+      channelConnectionId: target.channelConnectionId,
+      dropshipStoreConnectionId: null,
+    };
+  }
+  if (target.channelConnectionId !== null || target.dropshipStoreConnectionId === null) {
+    throw classified(
+      "PUBLICATION_READBACK_DESTINATION_INVALID",
+      "A Dropship readback target must contain exactly one Dropship store connection owner.",
+    );
+  }
+  return {
+    kind: "dropship_store_connection",
+    channelConnectionId: null,
+    dropshipStoreConnectionId: target.dropshipStoreConnectionId,
+  };
 }
 
 function validNow(clock: InventoryPublicationReadbackClock): Date {

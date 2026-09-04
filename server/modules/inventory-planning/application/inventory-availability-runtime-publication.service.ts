@@ -13,7 +13,9 @@ export interface ActiveInventoryPublicationTarget {
   channelId: number;
   channelName: string;
   providerKey: string;
-  channelConnectionId: number;
+  destinationKind: "channel_connection" | "dropship_store_connection";
+  channelConnectionId: number | null;
+  dropshipStoreConnectionId: number | null;
   providerScopeType: "account" | "location";
   externalScopeId: string;
   sourceBindingId: number | null;
@@ -29,7 +31,9 @@ export interface CanonicalInventoryPublicationIntent {
   desiredQuantity: string;
   channelId: number;
   channelName: string;
-  channelConnectionId: number;
+  destinationKind: "channel_connection" | "dropship_store_connection";
+  channelConnectionId: number | null;
+  dropshipStoreConnectionId: number | null;
   providerKey: string;
   providerScopeType: "account" | "location";
   externalScopeId: string;
@@ -354,7 +358,6 @@ function publicationIntentsFromPlan(
         },
       );
     }
-    const channelConnectionId = channelConnectionForOutbox(target, context, plan.productId);
     for (const row of target.rows) {
       if (productVariantId != null && row.productVariantId !== productVariantId) continue;
       if (!row.policy?.eligible) continue;
@@ -378,7 +381,9 @@ function publicationIntentsFromPlan(
           channelId: target.channelId,
           channelName: target.channelName,
           providerKey: target.channelProvider.toLowerCase(),
-          channelConnectionId,
+          destinationKind: target.destinationKind,
+          channelConnectionId: target.channelConnectionId,
+          dropshipStoreConnectionId: target.dropshipStoreConnectionId,
           providerScopeType: target.providerScopeType,
           externalScopeId: target.externalScopeId,
           sourceBindingId: target.sourceBinding.bindingId,
@@ -422,27 +427,6 @@ function publicationBlockerErrorCode(blockerCodes: readonly string[]): string {
   return "CANONICAL_PUBLICATION_TARGET_BLOCKED";
 }
 
-function channelConnectionForOutbox(
-  target: InventoryChannelExposureRuntimePlan["targets"][number],
-  context: InventoryAvailabilityRuntimePublicationContext,
-  productId: number,
-): number {
-  if (target.destinationKind !== "channel_connection" || target.channelConnectionId === null) {
-    throw publicationError(
-      "CANONICAL_PUBLICATION_DESTINATION_UNSUPPORTED",
-      "The canonical publication outbox does not support this destination owner yet.",
-      context,
-      {
-        productId,
-        publicationTargetId: target.publicationTargetId,
-        destinationKind: target.destinationKind,
-        dropshipStoreConnectionId: target.dropshipStoreConnectionId,
-      },
-    );
-  }
-  return target.channelConnectionId;
-}
-
 function intent(
   target: ActiveInventoryPublicationTarget,
   mapping: ActivePublicationVariantMapping,
@@ -459,7 +443,9 @@ function intent(
     desiredQuantity,
     channelId: target.channelId,
     channelName: target.channelName,
+    destinationKind: target.destinationKind,
     channelConnectionId: target.channelConnectionId,
+    dropshipStoreConnectionId: target.dropshipStoreConnectionId,
     providerKey: target.providerKey,
     providerScopeType: target.providerScopeType,
     externalScopeId: target.externalScopeId,
@@ -477,7 +463,10 @@ function assertUnambiguousProviderScopes(
 ): void {
   const scopesByDestinationVariant = new Map<string, CanonicalInventoryPublicationIntent[]>();
   for (const row of rows) {
-    const key = `${row.channelConnectionId}:${row.productVariantId}`;
+    const destinationId = row.destinationKind === "channel_connection"
+      ? row.channelConnectionId
+      : row.dropshipStoreConnectionId;
+    const key = `${row.destinationKind}:${destinationId}:${row.productVariantId}`;
     const values = scopesByDestinationVariant.get(key) ?? [];
     values.push(row);
     scopesByDestinationVariant.set(key, values);
@@ -491,7 +480,9 @@ function assertUnambiguousProviderScopes(
       {
         productId,
         channelId: values[0]!.channelId,
+        destinationKind: values[0]!.destinationKind,
         channelConnectionId: values[0]!.channelConnectionId,
+        dropshipStoreConnectionId: values[0]!.dropshipStoreConnectionId,
         productVariantId: values[0]!.productVariantId,
         publicationTargetIds: values.map((row) => row.publicationTargetId).sort((a, b) => a - b),
       },

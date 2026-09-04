@@ -30,7 +30,9 @@ type PublicationIntent = {
   productVariantId: number;
   desiredQuantity: string;
   channelId: number;
-  channelConnectionId: number;
+  destinationKind: "channel_connection" | "dropship_store_connection";
+  channelConnectionId: number | null;
+  dropshipStoreConnectionId: number | null;
   providerKey: string;
   providerScopeType: "account" | "location";
   externalScopeId: string;
@@ -625,11 +627,16 @@ async function publicationIntents(
             readback.observed_quantity,
             readback.observed_at,
             COALESCE(readback.destination_kind_snapshot,
+              publication.destination_kind_snapshot,
               CASE WHEN COALESCE(readback.channel_connection_id_snapshot,
                 publication.channel_connection_id_snapshot) IS NOT NULL
                 THEN 'channel_connection'
               END) AS destination_kind_snapshot,
-            readback.channel_connection_id_snapshot,
+            COALESCE(readback.channel_connection_id_snapshot,
+                     publication.channel_connection_id_snapshot) AS channel_connection_id_snapshot,
+            COALESCE(readback.dropship_store_connection_id_snapshot,
+                     publication.dropship_store_connection_id_snapshot)
+              AS dropship_store_connection_id_snapshot,
             readback.provider_scope_type_snapshot,
             readback.external_scope_id_snapshot,
             readback.publication_target_revision_snapshot,
@@ -647,10 +654,13 @@ async function publicationIntents(
     `${row.publication_target_id}:${row.product_variant_id}`, row,
   ]));
   return publishRows.map((row) => {
-    if (row.destinationKind !== "channel_connection" || row.channelConnectionId === null) {
+    if ((row.destinationKind === "channel_connection"
+      && (row.channelConnectionId === null || row.dropshipStoreConnectionId !== null))
+      || (row.destinationKind === "dropship_store_connection"
+        && (row.channelConnectionId !== null || row.dropshipStoreConnectionId === null))) {
       throw invalidEvidence(
-        "ACTIVATION_DROPSHIP_PUBLICATION_UNSUPPORTED",
-        "Dropship publication cannot enter activation until its outbox adapter and readback are installed.",
+        "ACTIVATION_PUBLICATION_DESTINATION_INVALID",
+        "The publication target has inconsistent destination ownership.",
         { publicationTargetId: row.publicationTargetId },
       );
     }
@@ -663,7 +673,9 @@ async function publicationIntents(
       if (!readback
         || String(readback.external_inventory_item_id_snapshot ?? "") !== row.externalInventoryItemId
         || String(readback.destination_kind_snapshot ?? "") !== row.destinationKind
-        || Number(readback.channel_connection_id_snapshot) !== row.channelConnectionId
+        || nullableNumber(readback.channel_connection_id_snapshot) !== row.channelConnectionId
+        || nullableNumber(readback.dropship_store_connection_id_snapshot)
+          !== row.dropshipStoreConnectionId
         || String(readback.provider_scope_type_snapshot ?? "") !== row.providerScopeType
         || String(readback.external_scope_id_snapshot ?? "") !== row.externalScopeId
         || String(readback.publication_target_revision_snapshot ?? "") !== row.publicationTargetRevision) {
@@ -702,7 +714,9 @@ async function publicationIntents(
       productVariantId: row.productVariantId,
       desiredQuantity: desired.toString(),
       channelId: row.channelId,
+      destinationKind: row.destinationKind,
       channelConnectionId: row.channelConnectionId,
+      dropshipStoreConnectionId: row.dropshipStoreConnectionId,
       providerKey: row.channelProvider,
       providerScopeType: row.providerScopeType,
       externalScopeId: row.externalScopeId,
@@ -732,21 +746,23 @@ async function enqueuePublication(
   const inserted = (await client.query<{ id: string }>(
     `INSERT INTO inventory.inventory_publication_outbox (
        activation_run_id, publication_target_id, product_variant_id,
-       desired_revision, desired_quantity, channel_connection_id_snapshot,
+       desired_revision, desired_quantity, destination_kind_snapshot,
+       channel_connection_id_snapshot, dropship_store_connection_id_snapshot,
        external_scope_id_snapshot, external_inventory_item_id_snapshot,
        publication_phase, channel_id_snapshot, provider_key_snapshot,
        provider_scope_type_snapshot, external_sku_snapshot,
        publication_target_revision_snapshot,
        state, idempotency_key, payload_hash, available_at
      ) VALUES (
-       $1, $2, $3, $4, $5, $6, $7, $8,
-       $9, $10, $11, $12, $13, $14, 'desired', $15, $16, $17
+       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+       $11, $12, $13, $14, $15, $16, 'desired', $17, $18, $19
      )
      ON CONFLICT (idempotency_key) DO NOTHING
      RETURNING id`,
     [
       runId, intent.publicationTargetId, intent.productVariantId,
-      revision.toString(), intent.desiredQuantity, intent.channelConnectionId,
+      revision.toString(), intent.desiredQuantity, intent.destinationKind,
+      intent.channelConnectionId, intent.dropshipStoreConnectionId,
       intent.externalScopeId, intent.externalInventoryItemId,
       phase, intent.channelId, intent.providerKey, intent.providerScopeType,
       intent.externalSku, intent.publicationTargetRevision,
