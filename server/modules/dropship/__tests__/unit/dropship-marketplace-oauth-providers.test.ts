@@ -38,7 +38,7 @@ describe("EbayDropshipOAuthProvider", () => {
     expect(url.searchParams.toString()).not.toContain("dropship-ebay-secret");
   });
 
-  it("forces eBay login for refresh and change-store authorizations", () => {
+  it("requests eBay login for refresh and change-store authorizations", () => {
     process.env = {
       ...ORIGINAL_ENV,
       DROPSHIP_EBAY_CLIENT_ID: "dropship-ebay-client",

@@ -1916,15 +1916,30 @@ describe("dropship ops surface client helpers", () => {
       buildStoreConnectionOAuthStartInput({
         platform: "shopify",
         intent: "change_store",
+        storeConnectionId: 44,
         shopDomain: "Vendor-Test",
         returnTo: "/onboarding",
       }),
     ).toEqual({
       platform: "shopify",
       intent: "change_store",
+      storeConnectionId: 44,
       shopDomain: "vendor-test.myshopify.com",
       returnTo: "/onboarding",
     });
+    expect(() => buildStoreConnectionOAuthStartInput({
+      platform: "ebay",
+      intent: "refresh_connection",
+      shopDomain: "",
+      returnTo: "/onboarding",
+    })).toThrow("storeConnectionId must be a positive integer");
+    expect(() => buildStoreConnectionOAuthStartInput({
+      platform: "ebay",
+      intent: "connect",
+      storeConnectionId: 44,
+      shopDomain: "",
+      returnTo: "/onboarding",
+    })).toThrow("storeConnectionId cannot be supplied when connecting a new store");
   });
 
   it("builds store disconnect bodies with required confirmation fields", () => {

@@ -157,6 +157,8 @@ function statusForDropshipStoreConnectionError(code: string): number {
     case "DROPSHIP_STORE_OAUTH_CODE_REQUIRED":
     case "DROPSHIP_INVALID_OAUTH_STATE":
     case "DROPSHIP_STORE_OAUTH_STATE_MISMATCH":
+    case "DROPSHIP_STORE_OAUTH_TARGET_REQUIRED":
+    case "DROPSHIP_STORE_OAUTH_TARGET_UNEXPECTED":
     case "DROPSHIP_SHOPIFY_HMAC_REQUIRED":
     case "DROPSHIP_SHOPIFY_HMAC_INVALID":
       return 400;
@@ -168,6 +170,8 @@ function statusForDropshipStoreConnectionError(code: string): number {
     case "DROPSHIP_STORE_CONNECTION_NOT_FOUND":
       return 404;
     case "DROPSHIP_STORE_OAUTH_ACCOUNT_MISMATCH":
+    case "DROPSHIP_STORE_OAUTH_TARGET_MISMATCH":
+    case "DROPSHIP_STORE_OAUTH_TARGET_CHANGED":
     case "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED":
       return 409;
     case "DROPSHIP_OAUTH_STATE_EXPIRED":

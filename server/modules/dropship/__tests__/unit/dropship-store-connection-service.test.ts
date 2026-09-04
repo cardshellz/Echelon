@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
 import type {
@@ -205,10 +206,14 @@ describe("PgDropshipStoreConnectionRepository", () => {
         connectedByMemberId: "member-1",
       },
       oauthIntent: "refresh_connection",
+      targetStoreConnectionId: 21,
+      expectedTargetConnectionUpdatedAt: now,
       connectedAt: now,
     });
 
     const updateCall = queries.find((entry) => entry.sql.includes("UPDATE dropship.dropship_store_connections"));
+    const targetLookup = queries.find((entry) => entry.sql.includes("WHERE vendor_id = $1 AND id = $2"));
+    expect(targetLookup?.params).toEqual([10, 21]);
     expect(updateCall?.sql).toContain("config = COALESCE(config, '{}'::jsonb) || $12::jsonb");
     expect(updateCall?.params[11]).toBe(JSON.stringify({
       tokenMetadata: { scope: "new" },
@@ -216,6 +221,50 @@ describe("PgDropshipStoreConnectionRepository", () => {
     }));
     expect(result.storeConnectionId).toBe(21);
     expect(result.orderProcessingConfig.defaultWarehouseId).toBe(3);
+  });
+
+  it("rejects a reauthorization write when the exact target changed after OAuth started", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const release = () => undefined;
+    const query = async (sql: string, params: unknown[] = []) => {
+      queries.push({ sql, params });
+      const sqlText = String(sql);
+      if (sqlText.includes("WHERE vendor_id = $1 AND id = $2")) {
+        return {
+          rows: [makeStoreConnectionRow({
+            id: 21,
+            status: "needs_reauth",
+            updated_at: new Date(now.getTime() + 1_000),
+          })],
+        };
+      }
+      return { rows: [] };
+    };
+    const connect = async () => ({ query, release });
+    const repository = new PgDropshipStoreConnectionRepository({ connect } as unknown as Pool);
+
+    await expect(repository.connectStore({
+      vendorId: 10,
+      platform: "ebay",
+      externalAccountId: "external-ebay",
+      providerEnvironment: "sandbox",
+      externalAccountIdentityScheme: "provider_user_id",
+      externalAccountVerifiedAt: now,
+      externalDisplayName: "External ebay",
+      shopDomain: null,
+      accessTokenRef: "new-access-ref",
+      refreshTokenRef: "new-refresh-ref",
+      tokenExpiresAt: new Date(now.getTime() + 3_600_000),
+      tokenRecords: [],
+      config: {},
+      oauthIntent: "refresh_connection",
+      targetStoreConnectionId: 21,
+      expectedTargetConnectionUpdatedAt: now,
+      connectedAt: now,
+    })).rejects.toMatchObject({ code: "DROPSHIP_STORE_OAUTH_TARGET_CHANGED" });
+
+    expect(queries.some((entry) => entry.sql.includes("UPDATE dropship.dropship_store_connections"))).toBe(false);
+    expect(queries.some((entry) => entry.sql === "ROLLBACK")).toBe(true);
   });
 
   it("maps launch readiness from stored platform credentials and setup status", async () => {
@@ -375,7 +424,11 @@ describe("DropshipStoreConnectionService", () => {
   it("allows OAuth to change an occupied same-platform store slot", async () => {
     repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "connected" })];
 
-    const start = await service.startOAuth("member-1", { platform: "ebay", intent: "change_store" });
+    const start = await service.startOAuth("member-1", {
+      platform: "ebay",
+      intent: "change_store",
+      storeConnectionId: 21,
+    });
 
     expect(start.platform).toBe("ebay");
     expect(stateSigner.lastPayload).toMatchObject({
@@ -383,6 +436,9 @@ describe("DropshipStoreConnectionService", () => {
       memberId: "member-1",
       platform: "ebay",
       intent: "change_store",
+      targetStoreConnectionId: 21,
+      targetConnectionFingerprint: expect.stringMatching(/^[a-f0-9]{32}$/),
+      targetConnectionUpdatedAt: now.toISOString(),
     });
     expect(ebayOAuthProvider.authorizationCalls[0]).toMatchObject({
       intent: "change_store",
@@ -392,7 +448,11 @@ describe("DropshipStoreConnectionService", () => {
   it("allows OAuth to repair an unhealthy existing store connection", async () => {
     repository.connections = [makeConnection({ storeConnectionId: 21, status: "needs_reauth" })];
 
-    const start = await service.startOAuth("member-1", { platform: "ebay", intent: "refresh_connection" });
+    const start = await service.startOAuth("member-1", {
+      platform: "ebay",
+      intent: "refresh_connection",
+      storeConnectionId: 21,
+    });
 
     expect(start.platform).toBe("ebay");
     expect(stateSigner.lastPayload).toMatchObject({
@@ -400,6 +460,9 @@ describe("DropshipStoreConnectionService", () => {
       memberId: "member-1",
       platform: "ebay",
       intent: "refresh_connection",
+      targetStoreConnectionId: 21,
+      targetConnectionFingerprint: expect.stringMatching(/^[a-f0-9]{32}$/),
+      targetConnectionUpdatedAt: now.toISOString(),
     });
   });
 
@@ -408,7 +471,11 @@ describe("DropshipStoreConnectionService", () => {
     async (intent) => {
       repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "grace_period" })];
 
-      const start = await service.startOAuth("member-1", { platform: "ebay", intent });
+      const start = await service.startOAuth("member-1", {
+        platform: "ebay",
+        intent,
+        storeConnectionId: 21,
+      });
 
       expect(start.platform).toBe("ebay");
       expect(stateSigner.lastPayload).toMatchObject({
@@ -416,9 +483,90 @@ describe("DropshipStoreConnectionService", () => {
         memberId: "member-1",
         platform: "ebay",
         intent,
+        targetStoreConnectionId: 21,
+        targetConnectionFingerprint: expect.stringMatching(/^[a-f0-9]{32}$/),
+        targetConnectionUpdatedAt: now.toISOString(),
       });
     },
   );
+
+  it.each(["refresh_connection", "change_store"] as const)(
+    "rejects %s OAuth when an exact target connection is not supplied",
+    async (intent) => {
+      repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay" })];
+
+      await expect(service.startOAuth("member-1", {
+        platform: "ebay",
+        intent,
+      })).rejects.toMatchObject({
+        code: "DROPSHIP_STORE_OAUTH_TARGET_REQUIRED",
+      });
+      expect(stateSigner.lastPayload).toBeNull();
+    },
+  );
+
+  it("rejects OAuth when the requested target id does not belong to the selected store", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay" })];
+
+    await expect(service.startOAuth("member-1", {
+      platform: "ebay",
+      intent: "refresh_connection",
+      storeConnectionId: 999,
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_OAUTH_TARGET_MISMATCH",
+    });
+    expect(stateSigner.lastPayload).toBeNull();
+  });
+
+  it("rejects callback persistence when the targeted store changes after OAuth starts", async () => {
+    const original = makeConnection({ storeConnectionId: 21, platform: "ebay", status: "needs_reauth" });
+    repository.connections = [original];
+    await service.startOAuth("member-1", {
+      platform: "ebay",
+      intent: "refresh_connection",
+      storeConnectionId: original.storeConnectionId,
+    });
+    repository.connections = [{
+      ...original,
+      updatedAt: new Date(original.updatedAt.getTime() + 1_000),
+    }];
+
+    await expect(service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_OAUTH_TARGET_CHANGED",
+      context: { storeConnectionId: 21 },
+    });
+    expect(ebayOAuthProvider.exchangeCalls).toHaveLength(0);
+    expect(repository.lastConnectInput).toBeNull();
+  });
+
+  it("updates the exact targeted row when multiple historical eBay connections exist", async () => {
+    repository.connections = [
+      makeConnection({ storeConnectionId: 21, status: "disconnected", updatedAt: new Date(now.getTime() - 1_000) }),
+      makeConnection({ storeConnectionId: 22, status: "disconnected" }),
+    ];
+    await service.startOAuth("member-1", {
+      platform: "ebay",
+      intent: "refresh_connection",
+      storeConnectionId: 22,
+    });
+
+    const result = await service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    });
+
+    expect(result.connection.storeConnectionId).toBe(22);
+    expect(repository.lastConnectInput).toMatchObject({
+      oauthIntent: "refresh_connection",
+      targetStoreConnectionId: 22,
+      expectedTargetConnectionUpdatedAt: now,
+    });
+  });
 
   it("blocks a different platform when an unhealthy connection owns the launch store slot", async () => {
     repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "needs_reauth" })];
@@ -516,6 +664,7 @@ describe("DropshipStoreConnectionService", () => {
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
       intent: "refresh_connection",
+      ...oauthTargetStateFields(repository.connections[0]!),
     };
 
     const result = await service.completeOAuthCallback({
@@ -568,6 +717,7 @@ describe("DropshipStoreConnectionService", () => {
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
       intent: "refresh_connection",
+      ...oauthTargetStateFields(repository.connections[0]!),
     };
 
     const result = await service.completeOAuthCallback({
@@ -636,6 +786,7 @@ describe("DropshipStoreConnectionService", () => {
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
       intent: "refresh_connection",
+      ...oauthTargetStateFields(repository.connections[0]!),
     };
 
     await expect(service.completeOAuthCallback({
@@ -673,6 +824,7 @@ describe("DropshipStoreConnectionService", () => {
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
       intent: "refresh_connection",
+      ...oauthTargetStateFields(repository.connections[0]!),
     };
 
     await expect(service.completeOAuthCallback({
@@ -724,6 +876,7 @@ describe("DropshipStoreConnectionService", () => {
         expiresAt: new Date(now.getTime() + 60000).toISOString(),
         returnTo: "/dropship/settings",
         intent,
+        ...(intent === "change_store" ? oauthTargetStateFields(repository.connections[0]!) : {}),
       };
 
       await expect(service.completeOAuthCallback({
@@ -750,6 +903,7 @@ describe("DropshipStoreConnectionService", () => {
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
       intent: "change_store",
+      ...oauthTargetStateFields(repository.connections[0]!),
     };
     ebayOAuthProvider.externalAccountId = "replacement-ebay";
 
@@ -790,6 +944,7 @@ describe("DropshipStoreConnectionService", () => {
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
       intent: "refresh_connection",
+      ...oauthTargetStateFields(repository.connections[0]!),
     };
 
     await expect(service.completeOAuthCallback({
@@ -833,6 +988,7 @@ describe("DropshipStoreConnectionService", () => {
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
       intent: "refresh_connection",
+      ...oauthTargetStateFields(repository.connections[0]!),
     };
 
     await expect(service.completeOAuthCallback({
@@ -865,6 +1021,7 @@ describe("DropshipStoreConnectionService", () => {
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
       intent: "refresh_connection",
+      ...oauthTargetStateFields(repository.connections[0]!),
     };
 
     await expect(service.completeOAuthCallback({
@@ -898,6 +1055,7 @@ describe("DropshipStoreConnectionService", () => {
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
       intent: "change_store",
+      ...oauthTargetStateFields(repository.connections[0]!),
     };
 
     await expect(service.completeOAuthCallback({
@@ -1388,11 +1546,16 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
 
   async connectStore(input: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0]): Promise<DropshipStoreConnectionProfile> {
     this.lastConnectInput = input;
-    const existing = this.connections.find((connection) => (
-      connection.vendorId === input.vendorId
-      && connection.platform === input.platform
-      && ["connected", "needs_reauth", "refresh_failed", "grace_period", "disconnected"].includes(connection.status)
-    ));
+    const existing = input.targetStoreConnectionId === null
+      ? this.connections.find((connection) => (
+          connection.vendorId === input.vendorId
+          && connection.platform === input.platform
+          && ["connected", "needs_reauth", "refresh_failed", "grace_period", "disconnected"].includes(connection.status)
+        ))
+      : this.connections.find((connection) => (
+          connection.vendorId === input.vendorId
+          && connection.storeConnectionId === input.targetStoreConnectionId
+        ));
     const connection = makeConnection({
       storeConnectionId: existing?.storeConnectionId ?? 20,
       vendorId: input.vendorId,
@@ -1591,5 +1754,26 @@ function makeConnection(overrides: Partial<DropshipStoreConnectionProfile> = {})
     createdAt: now,
     updatedAt: now,
     ...overrides,
+  };
+}
+
+function oauthTargetStateFields(connection: DropshipStoreConnectionProfile): Pick<
+  DropshipOAuthStatePayload,
+  "targetStoreConnectionId" | "targetConnectionFingerprint" | "targetConnectionUpdatedAt"
+> {
+  const fingerprint = createHash("sha256")
+    .update([
+      connection.storeConnectionId,
+      connection.platform,
+      connection.providerEnvironment ?? "",
+      connection.externalAccountIdentityScheme ?? "",
+      connection.externalAccountId ?? "",
+    ].join("\u0000"))
+    .digest("hex")
+    .slice(0, 32);
+  return {
+    targetStoreConnectionId: connection.storeConnectionId,
+    targetConnectionFingerprint: fingerprint,
+    targetConnectionUpdatedAt: connection.updatedAt.toISOString(),
   };
 }

@@ -51,9 +51,11 @@ import {
   storeOAuthCallbackMessage,
 } from "./store-oauth-callback-status";
 import { storeOAuthEmailVerificationMessage } from "./store-oauth-verification-copy";
+import { StoreOAuthTargetConfirmationDialog } from "./StoreOAuthTargetConfirmationDialog";
 
 type PendingAction = "send-email-code" | "verify-email-code" | "passkey-proof" | "oauth-start" | null;
 type PendingActivationAction = "send-email-code" | "verify-email-code" | "passkey-proof" | "activate-account" | null;
+type ExistingStoreOAuthIntent = Extract<DropshipStoreOAuthIntent, "refresh_connection" | "change_store">;
 
 const stepIcons: Record<DropshipOnboardingStep["key"], ReactNode> = {
   vendor_profile: <ShieldCheck className="h-4 w-4" />,
@@ -207,6 +209,11 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
   const [shopDomain, setShopDomain] = useState("");
   const [emailCodeSent, setEmailCodeSent] = useState(false);
   const [oauthIntent, setOauthIntent] = useState<DropshipStoreOAuthIntent>("connect");
+  const [oauthTargetStoreConnectionId, setOauthTargetStoreConnectionId] = useState<number | null>(null);
+  const [oauthConfirmation, setOauthConfirmation] = useState<{
+    intent: ExistingStoreOAuthIntent;
+    storeConnectionId: number;
+  } | null>(null);
   const [verificationCode, setVerificationCode] = useState("");
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [message, setMessage] = useState("");
@@ -234,6 +241,14 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
   const platformName = storePlatformName(platform);
   const defaultOAuthIntent = storeOAuthIntentForConnection(selectedPlatformConnection);
   const activeOAuthIntent = emailCodeSent ? oauthIntent : defaultOAuthIntent;
+  const activeOAuthTargetStoreConnectionId = emailCodeSent
+    ? oauthTargetStoreConnectionId
+    : selectedPlatformConnection?.storeConnectionId ?? null;
+  const confirmationConnection = oauthConfirmation === null
+    ? null
+    : reconnectableConnections.find((connection) => (
+        connection.storeConnectionId === oauthConfirmation.storeConnectionId
+      )) ?? null;
   const occupiedPlatform = occupiedConnection?.platform ?? null;
   const selectedShopifyDomain = platform === "shopify"
     ? shopDomain.trim() || selectedPlatformConnection?.shopDomain || ""
@@ -268,8 +283,42 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
     }
   }
 
-  async function startOAuth(requestedIntent: DropshipStoreOAuthIntent = activeOAuthIntent) {
+  function requestOAuth(
+    requestedIntent: DropshipStoreOAuthIntent = activeOAuthIntent,
+    requestedStoreConnectionId: number | null = activeOAuthTargetStoreConnectionId,
+  ): void {
+    if (requestedIntent === "connect") {
+      void startOAuth(requestedIntent, null);
+      return;
+    }
+    if (!Number.isInteger(requestedStoreConnectionId) || (requestedStoreConnectionId ?? 0) <= 0) {
+      setError("The store selected for authorization is no longer available. Refresh the page and choose the store again.");
+      return;
+    }
     setOauthIntent(requestedIntent);
+    setOauthTargetStoreConnectionId(requestedStoreConnectionId);
+    setOauthConfirmation({
+      intent: requestedIntent,
+      storeConnectionId: requestedStoreConnectionId as number,
+    });
+  }
+
+  async function startOAuth(
+    requestedIntent: DropshipStoreOAuthIntent,
+    requestedStoreConnectionId: number | null,
+  ) {
+    setOauthIntent(requestedIntent);
+    setOauthTargetStoreConnectionId(requestedStoreConnectionId);
+    if (requestedIntent !== "connect") {
+      const target = reconnectableConnections.find((connection) => (
+        connection.storeConnectionId === requestedStoreConnectionId
+        && connection.platform === platform
+      ));
+      if (!target) {
+        setError("The store selected for authorization is no longer available. Refresh the page and choose the store again.");
+        return;
+      }
+    }
     if (!connectProofActive) {
       if (principal?.hasPasskey) {
         const verified = await run("passkey-proof", async () => {
@@ -309,6 +358,7 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
         buildStoreConnectionOAuthStartInput({
           platform,
           intent: requestedIntent,
+          storeConnectionId: requestedStoreConnectionId,
           shopDomain: platform === "shopify" ? selectedShopifyDomain : shopDomain,
           returnTo: dropshipPortalPath("/onboarding"),
         }),
@@ -431,7 +481,13 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
         type="button"
         disabled={connectDisabled}
         className="mt-5 h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-        onClick={() => startOAuth()}
+        onClick={() => {
+          if (emailCodeSent) {
+            void startOAuth(activeOAuthIntent, activeOAuthTargetStoreConnectionId);
+            return;
+          }
+          requestOAuth();
+        }}
       >
         {connectButtonIcon({
           connectProofActive,
@@ -446,6 +502,9 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
           intent: activeOAuthIntent,
           pendingAction,
           platform,
+          targetStoreName: selectedPlatformConnection === null
+            ? null
+            : connectionDisplayName(selectedPlatformConnection),
         })}
       </Button>
       {selectedPlatformConnection && defaultOAuthIntent === "refresh_connection" && (
@@ -454,11 +513,29 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
           variant="outline"
           disabled={connectDisabled}
           className="mt-3 h-10 w-full gap-2"
-          onClick={() => startOAuth("change_store")}
+          onClick={() => requestOAuth("change_store", selectedPlatformConnection.storeConnectionId)}
         >
           <Store className="h-4 w-4" />
           Change {platformName} store
         </Button>
+      )}
+      {oauthConfirmation && confirmationConnection && (
+        <StoreOAuthTargetConfirmationDialog
+          intent={oauthConfirmation.intent}
+          open
+          target={{
+            storeConnectionId: confirmationConnection.storeConnectionId,
+            platform: confirmationConnection.platform,
+            displayName: connectionDisplayName(confirmationConnection),
+            externalAccountId: confirmationConnection.externalAccountId,
+          }}
+          onCancel={() => setOauthConfirmation(null)}
+          onConfirm={() => {
+            const confirmed = oauthConfirmation;
+            setOauthConfirmation(null);
+            void startOAuth(confirmed.intent, confirmed.storeConnectionId);
+          }}
+        />
       )}
     </div>
   );
@@ -605,16 +682,24 @@ function connectButtonLabel(input: {
   pendingAction: PendingAction;
   intent: DropshipStoreOAuthIntent;
   platform: DropshipStorePlatform;
+  targetStoreName: string | null;
 }): string {
   const action = storeOAuthActionText(input.intent, input.platform);
   const titleAction = storeOAuthActionTitle(input.intent, input.platform);
+  const exactAction = input.intent === "refresh_connection" && input.targetStoreName
+    ? `reconnect ${input.targetStoreName}`
+    : action;
   if (input.pendingAction === "send-email-code") return "Sending code";
   if (input.pendingAction === "verify-email-code") return "Verifying code";
   if (input.pendingAction === "passkey-proof") return "Waiting for passkey";
   if (input.pendingAction === "oauth-start") return "Opening authorization";
-  if (input.connectProofActive || input.hasPasskey) return titleAction;
-  if (!input.emailCodeSent) return `Verify to ${action}`;
-  return `Verify and ${action}`;
+  if (input.connectProofActive || input.hasPasskey) {
+    return input.intent === "refresh_connection" && input.targetStoreName
+      ? `Reconnect ${input.targetStoreName}`
+      : titleAction;
+  }
+  if (!input.emailCodeSent) return `Verify to ${exactAction}`;
+  return `Verify and ${exactAction}`;
 }
 
 function activateButtonLabel(input: {
