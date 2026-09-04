@@ -198,12 +198,13 @@ describe("DropshipPortalCatalog workflow", () => {
       onVerificationCodeChange: () => undefined,
       pendingAction: null,
       permissionRequired: true,
+      storeName: "marz_cards",
       verificationCode: "813606",
     }));
 
     expect(markup).toContain("Verification code sent to your email address.");
     expect(markup).toContain("Store authorization verification code");
-    expect(markup).toContain("Verify and open eBay authorization");
+    expect(markup).toContain("Verify and continue to eBay for marz_cards");
     expect(markup).not.toContain("Settings");
   });
 });

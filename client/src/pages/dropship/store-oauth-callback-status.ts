@@ -43,7 +43,12 @@ export function storeOAuthCallbackMessage(
       return "The eBay authorization request expired. Start the authorization again.";
     case "DROPSHIP_INVALID_OAUTH_STATE":
     case "DROPSHIP_STORE_OAUTH_STATE_MISMATCH":
+    case "DROPSHIP_STORE_OAUTH_TARGET_REQUIRED":
+    case "DROPSHIP_STORE_OAUTH_TARGET_UNEXPECTED":
       return "The eBay authorization request could not be verified. Start the authorization again.";
+    case "DROPSHIP_STORE_OAUTH_TARGET_MISMATCH":
+    case "DROPSHIP_STORE_OAUTH_TARGET_CHANGED":
+      return "The authorization was not saved because the selected store connection changed or is no longer available. Refresh the page and start again from that store's card.";
     default:
       return status.errorCode
         ? `Store connection failed. No connection changes were saved. Reference: ${status.errorCode}.`

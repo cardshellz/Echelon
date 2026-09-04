@@ -206,6 +206,8 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     tokenRecords: DropshipStoreConnectionTokenRecord[];
     config: Record<string, unknown>;
     oauthIntent: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0]["oauthIntent"];
+    targetStoreConnectionId: number | null;
+    expectedTargetConnectionUpdatedAt: Date | null;
     connectedAt: Date;
   }): Promise<DropshipStoreConnectionProfile> {
     const client = await this.dbPool.connect();
@@ -213,7 +215,10 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
       await client.query("BEGIN");
       await lockVendorConnections(client, input.vendorId);
 
-      const existing = await findReusableConnection(client, input.vendorId, input.platform, input.shopDomain);
+      const existing = input.targetStoreConnectionId === null
+        ? await findReusableConnection(client, input.vendorId, input.platform, input.shopDomain)
+        : await findConnectionByIdForUpdate(client, input.vendorId, input.targetStoreConnectionId);
+      assertOAuthMutationTarget(input, existing);
       const activeCount = await countActiveByVendorIdWithClient(client, input.vendorId);
       if (activeCount > 0 && (activeCount > 1 || !isReconnectableActiveConnection(existing))) {
         throw new DropshipError(
@@ -905,6 +910,55 @@ function isReconnectableActiveConnection(connection: StoreConnectionRow | null):
     || connection?.status === "needs_reauth"
     || connection?.status === "refresh_failed"
     || connection?.status === "grace_period";
+}
+
+function assertOAuthMutationTarget(
+  input: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0],
+  existing: StoreConnectionRow | null,
+): void {
+  if (input.oauthIntent === "connect") {
+    if (input.targetStoreConnectionId !== null || input.expectedTargetConnectionUpdatedAt !== null) {
+      throw new DropshipError(
+        "DROPSHIP_STORE_OAUTH_TARGET_UNEXPECTED",
+        "A new store authorization cannot target an existing store connection.",
+      );
+    }
+    return;
+  }
+
+  if (
+    input.targetStoreConnectionId === null
+    || input.expectedTargetConnectionUpdatedAt === null
+  ) {
+    throw new DropshipError(
+      "DROPSHIP_STORE_OAUTH_TARGET_REQUIRED",
+      "An exact store connection target is required for reauthorization.",
+      { oauthIntent: input.oauthIntent },
+    );
+  }
+  if (
+    existing === null
+    || existing.id !== input.targetStoreConnectionId
+    || existing.platform !== input.platform
+    || !["connected", "needs_reauth", "refresh_failed", "grace_period", "disconnected"].includes(existing.status)
+  ) {
+    throw new DropshipError(
+      "DROPSHIP_STORE_OAUTH_TARGET_MISMATCH",
+      "The selected store connection is no longer available for this authorization.",
+      {
+        storeConnectionId: input.targetStoreConnectionId,
+        platform: input.platform,
+        oauthIntent: input.oauthIntent,
+      },
+    );
+  }
+  if (existing.updated_at.getTime() !== input.expectedTargetConnectionUpdatedAt.getTime()) {
+    throw new DropshipError(
+      "DROPSHIP_STORE_OAUTH_TARGET_CHANGED",
+      "The selected store connection changed while authorization was in progress. Start again.",
+      { storeConnectionId: input.targetStoreConnectionId },
+    );
+  }
 }
 
 async function findConnectionByIdForUpdate(

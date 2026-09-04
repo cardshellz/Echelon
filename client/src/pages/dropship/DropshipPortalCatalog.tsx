@@ -191,6 +191,9 @@ export default function DropshipPortalCatalog() {
   const selectedStoreConnection = launchReadyStoreConnections.find(
     (connection) => connection.storeConnectionId === selectedStoreConnectionIdNumber,
   ) ?? null;
+  const selectedStoreName = selectedStoreConnection?.externalDisplayName
+    || selectedStoreConnection?.shopDomain
+    || "connected eBay store";
   const ebayStoreCategoryQueryKey = [
     "/api/dropship/ebay/store-categories",
     selectedStoreConnectionIdNumber,
@@ -569,6 +572,7 @@ export default function DropshipPortalCatalog() {
           <>
             <EbayListingSetupPanel
               storeConnectionId={selectedStoreConnectionIdNumber}
+              storeName={selectedStoreName}
               onConfigurationChange={() => {
                 setListingPreview(null);
                 setListingPushResult(null);
@@ -588,7 +592,11 @@ export default function DropshipPortalCatalog() {
             />
             <EbayStoreCategoryAssignmentPanel
               authorizationRecovery={(
-                <EbayStoreCategoryAuthorizationRecovery error={ebayStoreCategoryQuery.error} />
+                <EbayStoreCategoryAuthorizationRecovery
+                  error={ebayStoreCategoryQuery.error}
+                  storeConnectionId={selectedStoreConnectionIdNumber}
+                  storeName={selectedStoreName}
+                />
               )}
               data={ebayStoreCategoryQuery.data ?? null}
               error={ebayStoreCategoryQuery.error}

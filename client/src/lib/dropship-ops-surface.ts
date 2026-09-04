@@ -310,6 +310,7 @@ export interface DropshipOnboardingState {
 export interface DropshipStoreConnectionOAuthStartInput {
   platform: DropshipStorePlatform;
   intent: DropshipStoreOAuthIntent;
+  storeConnectionId?: number;
   shopDomain?: string;
   returnTo?: string;
 }
@@ -4068,18 +4069,27 @@ export function catalogExposureRuleKey(
 export function buildStoreConnectionOAuthStartInput(input: {
   platform: DropshipStorePlatform;
   intent?: DropshipStoreOAuthIntent;
+  storeConnectionId?: number | null;
   shopDomain: string;
   returnTo: string;
 }): DropshipStoreConnectionOAuthStartInput {
   const returnTo = normalizePortalReturnPath(input.returnTo);
   const intent = input.intent ?? "connect";
+  if (intent === "connect" && input.storeConnectionId !== undefined && input.storeConnectionId !== null) {
+    throw new Error("storeConnectionId cannot be supplied when connecting a new store.");
+  }
+  const storeConnectionId = intent === "connect"
+    ? undefined
+    : assertPositiveInteger(input.storeConnectionId, "storeConnectionId");
+  const target = storeConnectionId === undefined ? {} : { storeConnectionId };
   if (input.platform === "ebay") {
-    return { platform: input.platform, intent, returnTo };
+    return { platform: input.platform, intent, ...target, returnTo };
   }
 
   return {
     platform: input.platform,
     intent,
+    ...target,
     shopDomain: normalizeShopifyShopDomainInput(input.shopDomain),
     returnTo,
   };
@@ -4560,8 +4570,8 @@ function buildRequestedRetailPricesByVariantId(input: {
   return result;
 }
 
-function assertPositiveInteger(value: number, key: string): number {
-  if (!Number.isInteger(value) || value <= 0) {
+function assertPositiveInteger(value: unknown, key: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
     throw new Error(`${key} must be a positive integer.`);
   }
   return value;
