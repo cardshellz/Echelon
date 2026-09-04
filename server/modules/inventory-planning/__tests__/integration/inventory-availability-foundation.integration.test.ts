@@ -1920,17 +1920,6 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
   it("keeps active authority and legacy runtime state unchanged while recording a draft", async () => {
     const scope = await seedProductAndWarehouse([1, 5]);
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS inventory.inventory_levels (
-        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        warehouse_location_id integer NOT NULL,
-        product_variant_id integer NOT NULL,
-        variant_qty integer NOT NULL DEFAULT 0,
-        reserved_qty integer NOT NULL DEFAULT 0,
-        picked_qty integer NOT NULL DEFAULT 0,
-        packed_qty integer NOT NULL DEFAULT 0,
-        backorder_qty integer NOT NULL DEFAULT 0,
-        updated_at timestamptz NOT NULL DEFAULT now()
-      );
       DROP SCHEMA IF EXISTS wms CASCADE;
       CREATE SCHEMA wms;
       CREATE TABLE wms.order_build_demands (
@@ -2116,7 +2105,6 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
           channels.sync_log
       `);
       await pool.query("DROP SCHEMA IF EXISTS wms CASCADE");
-      await pool.query("DROP TABLE IF EXISTS inventory.inventory_levels");
     }
   });
 
