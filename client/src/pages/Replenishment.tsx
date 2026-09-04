@@ -34,6 +34,11 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
+import {
+  buildReplenTaskRetryRequest,
+  canRetryReplenTask,
+  isNoSourceReviewOnlyTask,
+} from "./replen-task-retry-model";
 import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 import { 
   Plus, 
@@ -847,12 +852,20 @@ export default function Replenishment() {
         credentials: "include",
         body: JSON.stringify(data),
       });
-      if (!res.ok) throw new Error("Failed to update task");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed to update task" }));
+        throw new Error(err.error || "Failed to update task");
+      }
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
       toast({ title: "Task updated" });
+    },
+    // A silent failure here is how a rejected status change (an invalid
+    // transition, a lost permission) looks like a no-op to the operator.
+    onError: (err: Error) => {
+      toast({ title: "Update failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -1323,12 +1336,7 @@ export default function Replenishment() {
     return value.replace(/_/g, " ");
   };
 
-  const isNoSourceReviewTask = (task: ReplenTask) =>
-    task.status === "blocked" &&
-    task.qtySourceUnits <= 0 &&
-    task.qtyTargetUnits <= 0 &&
-    !task.dependsOnTaskId &&
-    (task.exceptionReason === "no_source_stock" || task.exceptionReason === "no_source_variant");
+  const isNoSourceReviewTask = (task: ReplenTask) => isNoSourceReviewOnlyTask(task);
 
   // Apply additional client-side filters for warehouse, demand, and mode
   const filteredTasks = tasks.filter((task) => {
@@ -1707,6 +1715,27 @@ export default function Replenishment() {
                                   <CheckCircle className="w-3 h-3 sm:mr-1" />
                                 )}
                                 <span className="hidden sm:inline">Complete</span>
+                              </Button>
+                            )}
+                            {canRetryReplenTask(task) && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="min-h-[36px] text-xs text-blue-700 border-blue-300 hover:bg-blue-50 dark:text-blue-400 dark:border-blue-700 dark:hover:bg-blue-950/30"
+                                disabled={updateTaskMutation.isPending}
+                                onClick={() => updateTaskMutation.mutate({
+                                  id: task.id,
+                                  data: buildReplenTaskRetryRequest(),
+                                })}
+                                title="Return this task to the queue so it can be run again"
+                                data-testid={`button-retry-task-${task.id}`}
+                              >
+                                {updateTaskMutation.isPending ? (
+                                  <Loader2 className="w-3 h-3 animate-spin sm:mr-1" />
+                                ) : (
+                                  <RefreshCw className="w-3 h-3 sm:mr-1" />
+                                )}
+                                <span className="hidden sm:inline">Retry</span>
                               </Button>
                             )}
                             {task.status === "in_progress" && !noSourceReviewTask && (
