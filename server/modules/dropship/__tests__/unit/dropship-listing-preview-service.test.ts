@@ -288,6 +288,29 @@ describe("DropshipListingPreviewService", () => {
     expect(repository.lastCreatedInput).toBeNull();
   });
 
+  it("uses explicit listing policies when store policy defaults are missing", async () => {
+    repository.context = { ...repository.context, platform: "ebay" };
+    repository.config = {
+      ...repository.config!, platform: "ebay",
+      marketplaceConfig: { profileId: "profile-1", marketplaceId: "EBAY_US", businessPolicies: {} },
+    };
+    repository.listingPolicyOverrides = [{
+      productVariantId: 101, revisionId: 9, fulfillmentPolicyId: "listing-shipping",
+      returnPolicyId: "listing-returns", paymentPolicyId: "listing-payment", updatedAt: now,
+    }];
+
+    const result = await service.previewForMember("member-1", {
+      storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299,
+    });
+    expect(result.rows[0]).toMatchObject({
+      previewStatus: "ready",
+      businessPolicySelection: {
+        fulfillmentPolicyId: "listing-shipping", returnPolicyId: "listing-returns", paymentPolicyId: "listing-payment",
+      },
+    });
+    expect(evaluatedFulfillmentPolicyIds).toContain("listing-shipping");
+  });
+
   it.each(["paused", "lapsed", "suspended", "closed"] as const)(
     "blocks a %s vendor from listing preview",
     async (vendorStatus) => {

@@ -311,7 +311,7 @@ function policy(
       handlingTime: { value: 1, unit: "DAY" },
       shippingOptions: [{
         optionType: "DOMESTIC",
-        shippingServices: [{ shippingServiceCode: "USPSGround" }],
+        shippingServices: [{ shippingServiceCode: "USPSParcel" }],
       }],
       localPickup: false,
       freightShipping: false,
@@ -328,7 +328,7 @@ function parsedFulfillmentPolicy(id: string, name: string) {
     handlingTime: { value: 1, unit: "DAY" },
     shippingOptions: [{
       optionType: "DOMESTIC",
-      shippingServiceCodes: ["USPSGround"],
+      shippingServiceCodes: ["USPSParcel"],
     }],
     localPickup: false,
     freightShipping: false,

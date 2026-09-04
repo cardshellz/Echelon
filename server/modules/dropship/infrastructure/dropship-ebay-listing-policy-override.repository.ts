@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { MAX_EBAY_POLICY_BULK_ASSIGNMENTS } from "@shared/dropship-ebay-policy-limits";
 import { pool as defaultPool } from "../../../db";
 import type {
   DropshipEbayListingPolicyOverride,
@@ -6,6 +8,8 @@ import type {
   DropshipEbayListingPolicyOverrideRepository,
   ReplaceDropshipEbayListingPolicyOverrideRepositoryInput,
   ReplaceDropshipEbayListingPolicyOverrideRepositoryResult,
+  ReplaceDropshipEbayListingPoliciesRepositoryInput,
+  ReplaceDropshipEbayListingPoliciesRepositoryResult,
 } from "../application/dropship-ebay-listing-policy-override-service";
 import { DropshipError } from "../domain/errors";
 
@@ -75,130 +79,190 @@ implements DropshipEbayListingPolicyOverrideRepository {
   async replaceAssignment(
     input: ReplaceDropshipEbayListingPolicyOverrideRepositoryInput,
   ): Promise<ReplaceDropshipEbayListingPolicyOverrideRepositoryResult> {
+    return (await this.replaceInTransaction([input]))[0];
+  }
+
+  async replaceAssignments(
+    input: ReplaceDropshipEbayListingPoliciesRepositoryInput,
+  ): Promise<ReplaceDropshipEbayListingPoliciesRepositoryResult> {
+    const assignments = [...input.assignments].sort(
+      (left, right) => left.productVariantId - right.productVariantId,
+    );
+    const distinctCount = new Set(assignments.map((row) => row.productVariantId)).size;
+    if (assignments.length === 0 || assignments.length > MAX_EBAY_POLICY_BULK_ASSIGNMENTS
+      || distinctCount !== assignments.length) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_INVALID",
+        `Bulk assignments must contain 1 to ${MAX_EBAY_POLICY_BULK_ASSIGNMENTS} distinct listings.`,
+      );
+    }
+    const keyHash = createHash("sha256").update(input.idempotencyKey).digest("hex");
+    const inputs: ReplaceDropshipEbayListingPolicyOverrideRepositoryInput[] = assignments.map((assignment, index) => ({
+      ...assignment,
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      // The first revision reserves the key for the entire target set. Every
+      // child shares the whole-operation hash and commits in the same transaction.
+      idempotencyKey: index === 0 ? input.idempotencyKey : `ebay-policy-bulk:${keyHash}:${assignment.productVariantId}`,
+      requestHash: input.requestHash,
+      actor: input.actor,
+      now: input.now,
+    }));
+    const results = await this.replaceInTransaction(inputs);
+    return {
+      results: results.map((result, index) => ({ ...result, productVariantId: inputs[index].productVariantId })),
+      idempotentReplay: results.every((result) => result.idempotentReplay),
+    };
+  }
+
+  private async replaceInTransaction(
+    inputs: readonly ReplaceDropshipEbayListingPolicyOverrideRepositoryInput[],
+  ): Promise<ReplaceDropshipEbayListingPolicyOverrideRepositoryResult[]> {
+    const input = inputs[0];
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
+      // Request-key locking also serializes reuse against a different store.
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtext('dropship_ebay_policy_request'), hashtext($1))",
+        [`${input.vendorId}:${input.idempotencyKey}`],
+      );
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtext('dropship_ebay_listing_policy_override'), $1::integer)",
         [input.storeConnectionId],
       );
       await this.assertWritableStore(client, input);
-
-      const existingRevision = await client.query<RevisionRow>(
-        `SELECT id, request_hash, product_variant_id, fulfillment_policy_id,
-                return_policy_id, payment_policy_id, created_at
-         FROM dropship.dropship_ebay_listing_policy_override_revisions
-         WHERE vendor_id = $1 AND idempotency_key = $2
-         FOR UPDATE`,
-        [input.vendorId, input.idempotencyKey],
-      );
-      if (existingRevision.rows[0]) {
-        const revision = existingRevision.rows[0];
-        if (revision.request_hash !== input.requestHash) {
-          throw new DropshipError(
-            "DROPSHIP_IDEMPOTENCY_CONFLICT",
-            "eBay listing policy override idempotency key was reused with a different request.",
-            { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId },
-          );
-        }
-        await client.query("COMMIT");
-        return {
-          revisionId: revision.id,
-          idempotentReplay: true,
-          assignment: assignmentFromValues({
-            productVariantId: revision.product_variant_id,
-            revisionId: revision.id,
-            fulfillmentPolicyId: revision.fulfillment_policy_id,
-            returnPolicyId: revision.return_policy_id,
-            paymentPolicyId: revision.payment_policy_id,
-            updatedAt: revision.created_at,
-          }),
-        };
+      const results: ReplaceDropshipEbayListingPolicyOverrideRepositoryResult[] = [];
+      for (const assignment of inputs) {
+        results.push(await this.replaceWithClient(client, assignment));
       }
-
-      const variant = await client.query<{ id: number }>(
-        "SELECT id FROM catalog.product_variants WHERE id = $1 LIMIT 1",
-        [input.productVariantId],
-      );
-      if (!variant.rows[0]) {
+      if (results.some((result) => result.idempotentReplay) && !results.every((result) => result.idempotentReplay)) {
         throw new DropshipError(
-          "DROPSHIP_CATALOG_VARIANT_NOT_FOUND",
-          "Catalog product variant was not found.",
-          { productVariantId: input.productVariantId },
+          "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_REPLAY_INCOMPLETE",
+          "The saved bulk policy operation is incomplete; no changes were applied.",
         );
       }
-
-      const before = await loadAssignmentForUpdate(client, input);
-      const actualRevisionId = before?.revisionId ?? null;
-      if (actualRevisionId !== input.expectedRevisionId) {
-        throw new DropshipError(
-          "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_VERSION_CONFLICT",
-          "The listing policy override changed after it was loaded. Refresh and try again.",
-          {
-            vendorId: input.vendorId,
-            storeConnectionId: input.storeConnectionId,
-            productVariantId: input.productVariantId,
-            expectedRevisionId: input.expectedRevisionId,
-            actualRevisionId,
-            retryable: false,
-          },
-        );
-      }
-      const revisionResult = await client.query<{ id: number }>(
-        `INSERT INTO dropship.dropship_ebay_listing_policy_override_revisions
-          (vendor_id, store_connection_id, product_variant_id, idempotency_key,
-           request_hash, fulfillment_policy_id, return_policy_id, payment_policy_id,
-           actor_type, actor_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-         RETURNING id`,
-        [
-          input.vendorId,
-          input.storeConnectionId,
-          input.productVariantId,
-          input.idempotencyKey,
-          input.requestHash,
-          input.fulfillmentPolicyId,
-          input.returnPolicyId,
-          input.paymentPolicyId,
-          input.actor.actorType,
-          input.actor.actorId,
-          input.now,
-        ],
-      );
-      const revisionId = revisionResult.rows[0]?.id;
-      if (!revisionId) {
-        throw new Error("eBay listing policy override revision insert did not return an id.");
-      }
-
-      const assignment = await persistAssignment(client, input, revisionId);
-      await client.query(
-        `INSERT INTO dropship.dropship_audit_events
-          (vendor_id, store_connection_id, entity_type, entity_id, event_type,
-           actor_type, actor_id, severity, payload, created_at)
-         VALUES ($1, $2, 'dropship_ebay_listing_policy_override', $3,
-                 'ebay_listing_policy_override_replaced', $4, $5, 'info', $6::jsonb, $7)`,
-        [
-          input.vendorId,
-          input.storeConnectionId,
-          String(input.productVariantId),
-          input.actor.actorType,
-          input.actor.actorId,
-          JSON.stringify({
-            revisionId,
-            before: policySnapshot(before),
-            after: policySnapshot(assignment),
-          }),
-          input.now,
-        ],
-      );
       await client.query("COMMIT");
-      return { assignment, revisionId, idempotentReplay: false };
+      return results;
     } catch (error) {
       await rollbackQuietly(client);
       throw error;
     } finally {
       client.release();
     }
+  }
+
+  private async replaceWithClient(
+    client: PoolClient,
+    input: ReplaceDropshipEbayListingPolicyOverrideRepositoryInput,
+  ): Promise<ReplaceDropshipEbayListingPolicyOverrideRepositoryResult> {
+    const existingRevision = await client.query<RevisionRow>(
+      `SELECT id, request_hash, product_variant_id, fulfillment_policy_id,
+              return_policy_id, payment_policy_id, created_at
+       FROM dropship.dropship_ebay_listing_policy_override_revisions
+       WHERE vendor_id = $1 AND idempotency_key = $2
+       FOR UPDATE`,
+      [input.vendorId, input.idempotencyKey],
+    );
+    if (existingRevision.rows[0]) {
+      const revision = existingRevision.rows[0];
+      if (revision.request_hash !== input.requestHash) {
+        throw new DropshipError(
+          "DROPSHIP_IDEMPOTENCY_CONFLICT",
+          "eBay listing policy override idempotency key was reused with a different request.",
+          { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId },
+        );
+      }
+      return {
+        revisionId: revision.id,
+        idempotentReplay: true,
+        assignment: assignmentFromValues({
+          productVariantId: revision.product_variant_id,
+          revisionId: revision.id,
+          fulfillmentPolicyId: revision.fulfillment_policy_id,
+          returnPolicyId: revision.return_policy_id,
+          paymentPolicyId: revision.payment_policy_id,
+          updatedAt: revision.created_at,
+        }),
+      };
+    }
+
+    const variant = await client.query<{ id: number }>(
+      "SELECT id FROM catalog.product_variants WHERE id = $1 LIMIT 1",
+      [input.productVariantId],
+    );
+    if (!variant.rows[0]) {
+      throw new DropshipError(
+        "DROPSHIP_CATALOG_VARIANT_NOT_FOUND",
+        "Catalog product variant was not found.",
+        { productVariantId: input.productVariantId },
+      );
+    }
+
+    const before = await loadAssignmentForUpdate(client, input);
+    const actualRevisionId = before?.revisionId ?? null;
+    if (actualRevisionId !== input.expectedRevisionId) {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_VERSION_CONFLICT",
+        "The listing policy override changed after it was loaded. Refresh and try again.",
+        {
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+          productVariantId: input.productVariantId,
+          expectedRevisionId: input.expectedRevisionId,
+          actualRevisionId,
+          retryable: false,
+        },
+      );
+    }
+    const revisionResult = await client.query<{ id: number }>(
+      `INSERT INTO dropship.dropship_ebay_listing_policy_override_revisions
+        (vendor_id, store_connection_id, product_variant_id, idempotency_key,
+         request_hash, fulfillment_policy_id, return_policy_id, payment_policy_id,
+         actor_type, actor_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id`,
+      [
+        input.vendorId,
+        input.storeConnectionId,
+        input.productVariantId,
+        input.idempotencyKey,
+        input.requestHash,
+        input.fulfillmentPolicyId,
+        input.returnPolicyId,
+        input.paymentPolicyId,
+        input.actor.actorType,
+        input.actor.actorId,
+        input.now,
+      ],
+    );
+    const revisionId = revisionResult.rows[0]?.id;
+    if (!revisionId) {
+      throw new Error("eBay listing policy override revision insert did not return an id.");
+    }
+
+    const assignment = await persistAssignment(client, input, revisionId);
+    await client.query(
+      `INSERT INTO dropship.dropship_audit_events
+        (vendor_id, store_connection_id, entity_type, entity_id, event_type,
+         actor_type, actor_id, severity, payload, created_at)
+       VALUES ($1, $2, 'dropship_ebay_listing_policy_override', $3,
+               'ebay_listing_policy_override_replaced', $4, $5, 'info', $6::jsonb, $7)`,
+      [
+        input.vendorId,
+        input.storeConnectionId,
+        String(input.productVariantId),
+        input.actor.actorType,
+        input.actor.actorId,
+        JSON.stringify({
+          revisionId,
+          before: policySnapshot(before),
+          after: policySnapshot(assignment),
+        }),
+        input.now,
+      ],
+    );
+    return { assignment, revisionId, idempotentReplay: false };
   }
 
   private async assertWritableStore(

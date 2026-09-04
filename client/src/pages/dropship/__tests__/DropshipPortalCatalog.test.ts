@@ -121,8 +121,24 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(storeCategoryPosition).toBeGreaterThan(overridePosition);
     expect(overrideSource).toContain("Store default —");
     expect(overrideSource).toContain("expectedRevisionId");
-    expect(overrideSource).toContain("disabled={rowPending}");
+    expect(overrideSource).toContain("disabled={rowPending || bulkOpen}");
+    expect(overrideSource).toContain("pendingRows.current.has(row.productVariantId)");
+    expect(overrideSource).toContain("checked across filters");
+    expect(overrideSource).toContain("<EbayListingPolicyBulkDialog");
+    expect(catalogSource).toContain("key={selectedStoreConnectionIdNumber}");
     expect(overrideSource).toContain("Search policies...");
+  });
+
+  it("keeps bulk edits distinct from publication and retries confirmed saves as refreshes only", () => {
+    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/EbayListingPolicyBulkDialog.tsx"), "utf8");
+    expect(source).toContain("Leave unchanged preserves each listing");
+    expect(source).toContain("This does not push listings to eBay.");
+    expect(source).toContain("requestIdentity.current.key");
+    expect(source).toContain("buildEbayBulkPolicyAssignments");
+    expect(source).toContain("if (savedCount !== null)");
+    expect(source).toContain("Refresh saved policies");
+    expect(source).not.toContain("startEmailStepUp");
+    expect(source).not.toContain("verifyPasskeyStepUp");
   });
 
   it("offers authorization recovery only for reconnectable eBay Store-category errors", () => {

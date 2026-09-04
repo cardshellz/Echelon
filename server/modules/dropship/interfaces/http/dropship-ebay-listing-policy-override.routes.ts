@@ -25,6 +25,23 @@ export function registerDropshipEbayListingPolicyOverrideRoutes(
   );
 
   app.put(
+    "/api/dropship/ebay/listing-policy-overrides/bulk",
+    requireDropshipAuth,
+    async (req, res) => {
+      try {
+        const result = await service.replaceManyForMember(req.session.dropship!.memberId, {
+          storeConnectionId: req.body?.storeConnectionId,
+          assignments: req.body?.assignments,
+          idempotencyKey: resolveIdempotencyKey(req),
+        });
+        return res.status(result.idempotentReplay ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(res, error);
+      }
+    },
+  );
+
+  app.put(
     "/api/dropship/ebay/listing-policy-overrides/:productVariantId",
     requireDropshipAuth,
     async (req, res) => {
@@ -134,6 +151,7 @@ function statusForError(code: string): number {
     case "DROPSHIP_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_VERSION_CONFLICT":
+    case "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_REPLAY_INCOMPLETE":
       return 409;
     case "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTED":
     case "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_TOKEN_REQUIRED":

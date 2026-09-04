@@ -85,7 +85,9 @@ export const DROPSHIP_EBAY_SERVICE_MAPPINGS: readonly EbayServiceMapping[] = [
     providerCarrierCodes: ["usps", "stamps_com"],
     providerServiceCode: "usps_ground_advantage",
     carrier: "USPS",
-    ebayServiceCode: "USPSGround",
+    // EBAY_US GeteBayDetails (2026-09-04, detail version 1024) identifies
+    // USPSParcel as Ground Advantage. USPSGround is explicitly not sellable.
+    ebayServiceCode: "USPSParcel",
   },
   {
     provider: "shipstation_v2",

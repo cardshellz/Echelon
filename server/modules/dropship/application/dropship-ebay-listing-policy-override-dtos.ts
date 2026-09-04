@@ -1,9 +1,12 @@
 import { z } from "zod";
+import { MAX_EBAY_POLICY_BULK_ASSIGNMENTS } from "@shared/dropship-ebay-policy-limits";
 
-const positiveIdSchema = z.number().int().positive();
+// These foreign keys and revision ids are PostgreSQL integer columns.
+const MAX_POSTGRES_INTEGER_ID = 2_147_483_647;
+const positiveIdSchema = z.number().int().positive().max(MAX_POSTGRES_INTEGER_ID);
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
 const optionalPolicyIdSchema = z.string().trim().min(1).max(100).nullable();
-const optionalRevisionIdSchema = z.number().int().positive().nullable();
+const optionalRevisionIdSchema = positiveIdSchema.nullable();
 
 export const listDropshipEbayListingPolicyOverridesForMemberInputSchema = z.object({
   storeConnectionId: positiveIdSchema,
@@ -18,6 +21,22 @@ export const replaceDropshipEbayListingPolicyOverrideForMemberInputSchema = z.ob
   paymentPolicyId: optionalPolicyIdSchema,
   idempotencyKey: idempotencyKeySchema,
 }).strict();
+
+export const replaceDropshipEbayListingPoliciesForMemberInputSchema = z.object({
+  storeConnectionId: positiveIdSchema,
+  assignments: z.array(replaceDropshipEbayListingPolicyOverrideForMemberInputSchema.omit({
+    storeConnectionId: true,
+    idempotencyKey: true,
+  })).min(1).max(MAX_EBAY_POLICY_BULK_ASSIGNMENTS).refine(
+    (assignments) => new Set(assignments.map((assignment) => assignment.productVariantId)).size === assignments.length,
+    "Each listing must appear only once in a bulk policy assignment.",
+  ),
+  idempotencyKey: idempotencyKeySchema,
+}).strict();
+
+export type ReplaceDropshipEbayListingPoliciesForMemberInput = z.infer<
+  typeof replaceDropshipEbayListingPoliciesForMemberInputSchema
+>;
 
 export type ListDropshipEbayListingPolicyOverridesForMemberInput = z.infer<
   typeof listDropshipEbayListingPolicyOverridesForMemberInputSchema
