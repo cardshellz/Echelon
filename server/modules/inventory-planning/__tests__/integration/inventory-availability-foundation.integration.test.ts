@@ -3011,6 +3011,37 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
        ) VALUES ($1, $2, 10, 2, 0, 0, 0) RETURNING id`,
       [scope.locationId, scope.variantIds[0]],
     );
+    const modelId = await insertDraftModel(scope.productId, "runtime-publication");
+    await pool.query(
+      `INSERT INTO inventory.transformation_model_heads (
+         product_id, draft_model_id, updated_by, update_reason
+       ) VALUES ($1, $2, 'integration-test', 'Runtime publication model')`,
+      [scope.productId, modelId],
+    );
+    await markModelValid(modelId);
+    const modelClient = await pool.connect();
+    try {
+      await modelClient.query("BEGIN");
+      await modelClient.query(
+        `UPDATE inventory.transformation_model_versions
+         SET lifecycle_status = 'sealed', sealed_by = 'integration-test', sealed_at = $2
+         WHERE id = $1`,
+        [modelId, FIXED_TIME],
+      );
+      await modelClient.query(
+        `UPDATE inventory.transformation_model_heads
+         SET active_model_id = $2, draft_model_id = NULL, revision = revision + 1,
+             updated_by = 'integration-test', update_reason = 'Activate runtime publication model'
+         WHERE product_id = $1`,
+        [scope.productId, modelId],
+      );
+      await modelClient.query("COMMIT");
+    } catch (error) {
+      await modelClient.query("ROLLBACK");
+      throw error;
+    } finally {
+      modelClient.release();
+    }
     const safetyScopeKey = `network:variant:${scope.variantIds[0]}`;
     const safetyPolicy = await pool.query<{ id: number }>(
       `INSERT INTO inventory.promise_safety_policy_versions (
