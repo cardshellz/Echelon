@@ -20,8 +20,10 @@ export interface PublicationReadbackTarget {
   publicationTargetId: number;
   publicationTargetRevision: string;
   productVariantId: number;
+  destinationKind: "channel_connection" | "dropship_store_connection";
   channelId: number;
-  channelConnectionId: number;
+  channelConnectionId: number | null;
+  dropshipStoreConnectionId: number | null;
   providerKey: string;
   providerScopeType: "account" | "location";
   externalScopeId: string;
@@ -149,6 +151,12 @@ export class InventoryPublicationReadbackService {
   ): Promise<PublicationReadbackFailure | null> {
     let observedQuantity: number;
     try {
+      if (target.destinationKind !== "channel_connection" || target.channelConnectionId === null) {
+        throw classified(
+          "PUBLICATION_READBACK_DESTINATION_UNSUPPORTED",
+          "Authoritative Dropship storefront inventory readback is not registered yet.",
+        );
+      }
       const adapter = this.adapters.get(target.providerKey);
       if (!adapter?.readInventory) {
         throw classified(

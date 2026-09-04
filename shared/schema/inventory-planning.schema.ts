@@ -19,6 +19,7 @@ import { z } from "zod";
 
 import { products, productVariants } from "./catalog.schema";
 import { channelConnections, channels } from "./channels.schema";
+import { dropshipStoreConnections } from "./dropship.schema";
 import { buildOrders, buildRecipes, inventoryLevels, inventoryLots } from "./inventory.schema";
 import { orderItems, orders } from "./orders.schema";
 import { warehouseLocations, warehouses } from "./warehouse.schema";
@@ -1829,8 +1830,11 @@ export const inventoryPublicationTargets = inventoryPlanningSchema.table(
   "inventory_publication_targets",
   {
     id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    destinationKind: varchar("destination_kind", { length: 30 }).notNull().default("channel_connection"),
     channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "restrict" }),
-    channelConnectionId: integer("channel_connection_id").notNull(),
+    channelConnectionId: integer("channel_connection_id"),
+    dropshipStoreConnectionId: integer("dropship_store_connection_id")
+      .references(() => dropshipStoreConnections.id, { onDelete: "restrict" }),
     fulfillmentNodeId: integer("fulfillment_node_id").notNull()
       .references(() => fulfillmentNodes.id, { onDelete: "restrict" }),
     providerScopeType: varchar("provider_scope_type", { length: 30 }).notNull(),
@@ -1851,11 +1855,26 @@ export const inventoryPublicationTargets = inventoryPlanningSchema.table(
       foreignColumns: [channelConnections.id, channelConnections.channelId],
       name: "inventory_publication_targets_connection_channel_fk",
     }).onDelete("restrict"),
-    identityUnique: uniqueIndex("inventory_publication_targets_identity_uq").on(
+    channelIdentityUnique: uniqueIndex("inventory_publication_targets_channel_identity_uq").on(
       table.channelConnectionId,
       table.fulfillmentNodeId,
       table.providerScopeType,
       table.externalScopeId,
+    ).where(sql`${table.destinationKind} = 'channel_connection'`),
+    dropshipIdentityUnique: uniqueIndex("inventory_publication_targets_dropship_identity_uq").on(
+      table.dropshipStoreConnectionId,
+      table.fulfillmentNodeId,
+      table.providerScopeType,
+      table.externalScopeId,
+    ).where(sql`${table.destinationKind} = 'dropship_store_connection'`),
+    destinationValid: check(
+      "inventory_publication_targets_destination_chk",
+      sql`(${table.destinationKind} = 'channel_connection'
+          AND ${table.channelConnectionId} IS NOT NULL
+          AND ${table.dropshipStoreConnectionId} IS NULL)
+        OR (${table.destinationKind} = 'dropship_store_connection'
+          AND ${table.channelConnectionId} IS NULL
+          AND ${table.dropshipStoreConnectionId} IS NOT NULL)`,
     ),
     stateValid: check(
       "inventory_publication_targets_state_chk",
@@ -2491,7 +2510,9 @@ export const inventoryPublicationReadbacks = inventoryPlanningSchema.table(
       .references(() => inventoryPublicationOutbox.id, { onDelete: "restrict" }),
     readbackRunId: bigint("readback_run_id", { mode: "bigint" })
       .references(() => inventoryPublicationReadbackRuns.id, { onDelete: "restrict" }),
+    destinationKindSnapshot: varchar("destination_kind_snapshot", { length: 30 }),
     channelConnectionIdSnapshot: integer("channel_connection_id_snapshot"),
+    dropshipStoreConnectionIdSnapshot: integer("dropship_store_connection_id_snapshot"),
     providerScopeTypeSnapshot: varchar("provider_scope_type_snapshot", { length: 30 }),
     externalScopeIdSnapshot: varchar("external_scope_id_snapshot", { length: 240 }),
     publicationTargetRevisionSnapshot: bigint("publication_target_revision_snapshot", { mode: "bigint" }),
@@ -2516,6 +2537,32 @@ export const inventoryPublicationReadbacks = inventoryPlanningSchema.table(
       "inventory_publication_readbacks_identity_snapshot_chk",
       sql`${table.externalInventoryItemIdSnapshot} IS NULL
         OR char_length(btrim(${table.externalInventoryItemIdSnapshot})) BETWEEN 1 AND 240`,
+    ),
+    destinationSnapshotValid: check(
+      "inventory_publication_readbacks_destination_snapshot_chk",
+      sql`(${table.destinationKindSnapshot} IS NULL
+          AND ${table.dropshipStoreConnectionIdSnapshot} IS NULL)
+        OR (${table.destinationKindSnapshot} = 'channel_connection'
+          AND ${table.channelConnectionIdSnapshot} IS NOT NULL
+          AND ${table.dropshipStoreConnectionIdSnapshot} IS NULL)
+        OR (${table.destinationKindSnapshot} = 'dropship_store_connection'
+          AND ${table.channelConnectionIdSnapshot} IS NULL
+          AND ${table.dropshipStoreConnectionIdSnapshot} IS NOT NULL)`,
+    ),
+    exactTargetSnapshotValid: check(
+      "inventory_publication_readbacks_exact_target_snapshot_chk",
+      sql`(${table.channelConnectionIdSnapshot} IS NULL
+          AND ${table.dropshipStoreConnectionIdSnapshot} IS NULL
+          AND ${table.providerScopeTypeSnapshot} IS NULL
+          AND ${table.externalScopeIdSnapshot} IS NULL
+          AND ${table.publicationTargetRevisionSnapshot} IS NULL)
+        OR ((${table.channelConnectionIdSnapshot} IS NOT NULL
+            OR ${table.dropshipStoreConnectionIdSnapshot} IS NOT NULL)
+          AND ${table.providerScopeTypeSnapshot} IN ('account', 'location')
+          AND ${table.externalScopeIdSnapshot} IS NOT NULL
+          AND btrim(${table.externalScopeIdSnapshot}) <> ''
+          AND ${table.publicationTargetRevisionSnapshot} IS NOT NULL
+          AND ${table.publicationTargetRevisionSnapshot} > 0)`,
     ),
   }),
 );

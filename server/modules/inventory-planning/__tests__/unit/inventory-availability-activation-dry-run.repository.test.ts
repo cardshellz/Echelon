@@ -22,8 +22,10 @@ describe("Postgres inventory availability activation dry-run repository", () => 
       }];
       if (sql.includes("FROM inventory.inventory_publication_targets")) return [{
         id: 5,
+        destination_kind: "channel_connection",
         channel_id: 36,
         channel_connection_id: 44,
+        dropship_store_connection_id: null,
         fulfillment_node_id: 1,
         warehouse_id: 1,
         provider_scope_type: "location",
@@ -48,7 +50,9 @@ describe("Postgres inventory availability activation dry-run repository", () => 
         observed_quantity: "6",
         observed_at: "2026-08-28T17:05:00.000Z",
         external_inventory_item_id_snapshot: "inventory-item-1",
+        destination_kind_snapshot: "channel_connection",
         channel_connection_id_snapshot: 44,
+        dropship_store_connection_id_snapshot: null,
         provider_scope_type_snapshot: "location",
         external_scope_id_snapshot: "location-1",
         publication_target_revision_snapshot: "2",

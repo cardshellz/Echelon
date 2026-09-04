@@ -60,6 +60,10 @@ const availabilityCutoverMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0638_inventory_availability_cutover.sql"),
   "utf8",
 );
+const publicationDestinationOwnerMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0652_inventory_publication_destination_owners.sql"),
+  "utf8",
+);
 const HASH = "a".repeat(64);
 const FIXED_TIME = "2026-08-26T12:00:00.000Z";
 
@@ -107,10 +111,12 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       DROP SCHEMA IF EXISTS warehouse CASCADE;
       DROP SCHEMA IF EXISTS catalog CASCADE;
       DROP SCHEMA IF EXISTS channels CASCADE;
+      DROP SCHEMA IF EXISTS dropship CASCADE;
       CREATE SCHEMA catalog;
       CREATE SCHEMA warehouse;
       CREATE SCHEMA inventory;
       CREATE SCHEMA channels;
+      CREATE SCHEMA dropship;
 
       CREATE TABLE channels.channels (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -120,6 +126,19 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       CREATE TABLE channels.channel_connections (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         channel_id integer NOT NULL REFERENCES channels.channels(id) ON DELETE CASCADE
+      );
+      CREATE TABLE dropship.dropship_vendors (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        business_name varchar(255) NOT NULL
+      );
+      CREATE TABLE dropship.dropship_store_connections (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id) ON DELETE CASCADE,
+        platform varchar(30) NOT NULL DEFAULT 'ebay',
+        status varchar(30) NOT NULL DEFAULT 'disconnected',
+        external_display_name varchar(255),
+        external_account_id varchar(255),
+        shop_domain varchar(255)
       );
 
       CREATE TABLE catalog.products (
@@ -225,6 +244,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(channelExposureMigrationSql);
       await migrationClient.query(publicationReadinessMigrationSql);
       await migrationClient.query(availabilityCutoverMigrationSql);
+      await migrationClient.query(publicationDestinationOwnerMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -238,6 +258,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     await pool.query(`
       TRUNCATE TABLE
         warehouse.fulfillment_provider_accounts,
+        dropship.dropship_vendors,
         channels.channels,
         catalog.products,
         warehouse.warehouses,
@@ -249,7 +270,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
 
   afterAll(async () => {
     if (pool) {
-      await pool.query("DROP SCHEMA inventory, warehouse, catalog, channels CASCADE");
+      await pool.query("DROP SCHEMA inventory, warehouse, catalog, channels, dropship CASCADE");
       if (createdAuditTable) {
         await pool.query("DROP TABLE public.audit_events");
       }
@@ -2445,7 +2466,11 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
        ) RETURNING id`,
       [scope.warehouseId],
     );
-    const target = await pool.query<{ id: number }>(
+    const target = await pool.query<{
+      id: number;
+      destination_kind: string;
+      dropship_store_connection_id: number | null;
+    }>(
       `INSERT INTO inventory.inventory_publication_targets (
          channel_id, channel_connection_id, fulfillment_node_id,
          provider_scope_type, external_scope_id, publication_authority,
@@ -2453,8 +2478,51 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
        ) VALUES (
          $1, $2, $3, 'location', 'shopify-location-1', 'echelon',
          'preview', 'Integration preview', 'integration-test', 'integration-test', $4
-       ) RETURNING id`,
+       ) RETURNING id, destination_kind, dropship_store_connection_id`,
       [channel.rows[0]!.id, connection.rows[0]!.id, node.rows[0]!.id, FIXED_TIME],
+    );
+    expect(target.rows[0]).toMatchObject({
+      destination_kind: "channel_connection",
+      dropship_store_connection_id: null,
+    });
+
+    const dropshipVendor = await pool.query<{ id: number }>(
+      "INSERT INTO dropship.dropship_vendors (business_name) VALUES ('Integration vendor') RETURNING id",
+    );
+    const dropshipStore = await pool.query<{ id: number }>(
+      `INSERT INTO dropship.dropship_store_connections (vendor_id)
+       VALUES ($1) RETURNING id`,
+      [dropshipVendor.rows[0]!.id],
+    );
+    const dropshipTarget = await pool.query<{
+      id: number;
+      destination_kind: string;
+      channel_connection_id: number | null;
+    }>(
+      `INSERT INTO inventory.inventory_publication_targets (
+         destination_kind, channel_id, channel_connection_id,
+         dropship_store_connection_id, fulfillment_node_id,
+         provider_scope_type, external_scope_id, publication_authority,
+         state, change_reason, created_by
+       ) VALUES (
+         'dropship_store_connection', $1, NULL, $2, $3,
+         'account', 'seller-account-1', 'echelon',
+         'disabled', 'Integration dropship destination', 'integration-test'
+       ) RETURNING id, destination_kind, channel_connection_id`,
+      [channel.rows[0]!.id, dropshipStore.rows[0]!.id, node.rows[0]!.id],
+    );
+    expect(dropshipTarget.rows[0]).toMatchObject({
+      destination_kind: "dropship_store_connection",
+      channel_connection_id: null,
+    });
+    await expectDatabaseError(
+      () => pool.query(
+        `UPDATE inventory.inventory_publication_targets
+         SET dropship_store_connection_id = NULL, revision = revision + 1
+         WHERE id = $1`,
+        [dropshipTarget.rows[0]!.id],
+      ),
+      "inventory publication target identity and creation evidence are immutable",
     );
 
     const outbox = await pool.query<{ id: string }>(
@@ -2829,8 +2897,10 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     const store = new PostgresInventoryChannelExposureAdminStore(testDatabase as never);
     const occurredAt = new Date(FIXED_TIME);
     const targetCommand = {
+      destinationKind: "channel_connection" as const,
       channelId: channel.rows[0]!.id,
       channelConnectionId: connection.rows[0]!.id,
+      dropshipStoreConnectionId: null,
       legacyFulfillmentNodeId: node.rows[0]!.id,
       providerScopeType: "location" as const,
       externalScopeId: "writer-location",

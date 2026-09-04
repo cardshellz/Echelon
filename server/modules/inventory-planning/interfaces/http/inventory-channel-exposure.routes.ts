@@ -157,7 +157,7 @@ export function registerInventoryChannelExposureRoutes(
   );
 }
 
-function parseBody<T>(schema: z.ZodType<T>, value: unknown): T {
+function parseBody<TSchema extends z.ZodType>(schema: TSchema, value: unknown): z.output<TSchema> {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
     throw new InventoryAvailabilityMasterDataError(

@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { InventoryPublicationReadbackService } from "../../application/inventory-publication-readback.service";
+import {
+  InventoryPublicationReadbackService,
+  type PublicationReadbackTarget,
+} from "../../application/inventory-publication-readback.service";
 
 const NOW = new Date("2026-09-01T18:00:00.000Z");
 
@@ -92,6 +95,28 @@ describe("InventoryPublicationReadbackService", () => {
     );
   });
 
+  it("records an explicit failure for Dropship until its authoritative adapter is installed", async () => {
+    const dropshipTarget = target({
+      destinationKind: "dropship_store_connection",
+      channelConnectionId: null,
+      dropshipStoreConnectionId: 77,
+      providerKey: "ebay",
+    });
+    store.begin.mockResolvedValueOnce({ kind: "started", readbackRunId: "5", targets: [dropshipTarget] });
+    const get = vi.fn();
+    const service = new InventoryPublicationReadbackService(store, { get }, { now: () => NOW });
+
+    const captured = await service.capture(request(), "operator-1");
+
+    expect(captured.state).toBe("partial");
+    expect(get).not.toHaveBeenCalled();
+    expect(store.recordFailure).toHaveBeenCalledWith(
+      "5",
+      dropshipTarget,
+      expect.objectContaining({ code: "PUBLICATION_READBACK_DESTINATION_UNSUPPORTED" }),
+    );
+  });
+
   it("returns a durable idempotent replay without calling a provider", async () => {
     store.begin.mockResolvedValueOnce({ kind: "replay", result: result({ alreadyApplied: true }) });
     const get = vi.fn();
@@ -108,18 +133,21 @@ function request() {
   return { idempotencyKey: "readback-1", reason: "Refresh exact provider quantities" };
 }
 
-function target() {
+function target(overrides: Partial<PublicationReadbackTarget> = {}): PublicationReadbackTarget {
   return {
     publicationTargetId: 9,
     publicationTargetRevision: "4",
     productVariantId: 101,
+    destinationKind: "channel_connection" as const,
     channelId: 3,
     channelConnectionId: 33,
+    dropshipStoreConnectionId: null,
     providerKey: "shopify",
     providerScopeType: "location" as const,
     externalScopeId: "location-9",
     externalInventoryItemId: "inventory-item-101",
     externalSku: "SKU-101",
+    ...overrides,
   };
 }
 

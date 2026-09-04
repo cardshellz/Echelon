@@ -57,10 +57,12 @@ describe("PostgresInventoryChannelExposureRuntimeExecutor", () => {
       publicationTargets: [{
         publicationTargetId: 91,
         publicationTargetRevision: "3",
+        destinationKind: "channel_connection",
         channelId: 7,
         channelName: "Shopify US",
         channelProvider: "shopify",
         channelConnectionId: 17,
+        dropshipStoreConnectionId: null,
         sourceBinding: {
           bindingId: 201,
           version: 2,
@@ -118,11 +120,29 @@ describe("PostgresInventoryChannelExposureRuntimeExecutor", () => {
     expect(client.query.mock.calls.map((call) => sqlText(call[0])).at(-1)).toBe("ROLLBACK");
     expect(client.release).toHaveBeenCalledOnce();
   });
+
+  it("loads a Dropship store as the exact transport owner while retaining its allocation channel", async () => {
+    const client = fakeClient("canonical", { dropship: true });
+    const executor = new PostgresInventoryChannelExposureRuntimeExecutor(
+      { connect: vi.fn(async () => client) } as never,
+      vi.fn(async () => ({ productId: 10 }) as never),
+    );
+
+    const context = await executor.execute(10, async (value) => value);
+
+    expect(context.publicationTargets[0]).toMatchObject({
+      destinationKind: "dropship_store_connection",
+      channelId: 7,
+      channelProvider: "ebay",
+      channelConnectionId: null,
+      dropshipStoreConnectionId: 77,
+    });
+  });
 });
 
 function fakeClient(
   authority: "legacy" | "canonical",
-  options: { invalidTargetRevision?: boolean } = {},
+  options: { invalidTargetRevision?: boolean; dropship?: boolean } = {},
 ) {
   const query = vi.fn(async (statement: unknown) => {
     const sql = sqlText(statement);
@@ -137,10 +157,12 @@ function fakeClient(
       && sql.includes("JOIN channels.channels")) return { rows: [{
         publication_target_id: 91,
         publication_target_revision: options.invalidTargetRevision ? "0" : "3",
+        destination_kind: options.dropship ? "dropship_store_connection" : "channel_connection",
         channel_id: 7,
         channel_name: "Shopify US",
-        channel_provider: "shopify",
-        channel_connection_id: 17,
+        channel_provider: options.dropship ? "ebay" : "shopify",
+        channel_connection_id: options.dropship ? null : 17,
+        dropship_store_connection_id: options.dropship ? 77 : null,
         provider_scope_type: "location",
         external_scope_id: "gid://shopify/Location/1",
         publication_authority: "echelon",

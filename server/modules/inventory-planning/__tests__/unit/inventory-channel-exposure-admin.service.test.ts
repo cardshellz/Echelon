@@ -84,6 +84,8 @@ describe("InventoryChannelExposureAdminService", () => {
     await service.createPublicationTarget(targetRequest, "operator-1");
     expect(store.createPublicationTarget).toHaveBeenCalledWith({
       ...targetRequest,
+      destinationKind: "channel_connection",
+      dropshipStoreConnectionId: null,
       actorId: "operator-1",
       requestHash: expect.stringMatching(/^[0-9a-f]{64}$/),
       occurredAt: NOW,

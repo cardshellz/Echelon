@@ -45,10 +45,12 @@ export interface ActivePublicationVariantMappingSnapshot {
 export interface ActiveInventoryPublicationTargetSnapshot {
   publicationTargetId: number;
   publicationTargetRevision: string;
+  destinationKind: "channel_connection" | "dropship_store_connection";
   channelId: number;
   channelName: string;
   channelProvider: string;
-  channelConnectionId: number;
+  channelConnectionId: number | null;
+  dropshipStoreConnectionId: number | null;
   providerScopeType: "account" | "location";
   externalScopeId: string;
   publicationAuthority: "echelon";
@@ -370,10 +372,12 @@ function planTarget(
     target: {
       publicationTargetId: target.publicationTargetId,
       publicationTargetRevision: target.publicationTargetRevision,
+      destinationKind: target.destinationKind,
       channelId: target.channelId,
       channelName: target.channelName,
       channelProvider: target.channelProvider,
       channelConnectionId: target.channelConnectionId,
+      dropshipStoreConnectionId: target.dropshipStoreConnectionId,
       providerScopeType: target.providerScopeType,
       externalScopeId: target.externalScopeId,
       publicationAuthority: target.publicationAuthority,

@@ -126,6 +126,10 @@ export class InventoryAvailabilityActivationDryRunService {
       channel.id,
       channel.provider,
     ] as const));
+    const dropshipProviderById = new Map(exposureView.dropshipStores.map((store) => [
+      store.id,
+      store.platform,
+    ] as const));
     const globalBlockers: ActivationDryRunBlocker[] = [];
     if (previewTargets.length === 0) {
       globalBlockers.push(blocker(
@@ -176,7 +180,9 @@ export class InventoryAvailabilityActivationDryRunService {
               if (preview.publicationTargetRevision !== target.revision
                 || preview.publicationTargetState !== target.state
                 || preview.channelId !== target.channelId
-                || preview.channelConnectionId !== target.channelConnectionId) {
+                || preview.destinationKind !== target.destinationKind
+                || preview.channelConnectionId !== target.channelConnectionId
+                || preview.dropshipStoreConnectionId !== target.dropshipStoreConnectionId) {
                 blockers.push(blocker(
                   "PUBLICATION_TARGET_CHANGED_DURING_DRY_RUN",
                   "blocking",
@@ -243,33 +249,33 @@ export class InventoryAvailabilityActivationDryRunService {
             overage,
           ));
         }
-        const targetScopesByChannelVariant = new Map<string, Array<{
+        const targetScopesByDestinationVariant = new Map<string, Array<{
           publicationTargetId: number;
           providerScopeType: "account" | "location";
         }>>();
         for (const preview of resolvedTargetPreviews) {
           for (const row of preview.rows) {
             if (!row.policy?.eligible) continue;
-            const key = `${preview.channelId}:${row.productVariantId}`;
-            const scopes = targetScopesByChannelVariant.get(key) ?? [];
+            const key = `${publicationDestinationKey(preview)}:${row.productVariantId}`;
+            const scopes = targetScopesByDestinationVariant.get(key) ?? [];
             scopes.push({
               publicationTargetId: preview.publicationTargetId,
               providerScopeType: preview.providerScopeType,
             });
-            targetScopesByChannelVariant.set(key, scopes);
+            targetScopesByDestinationVariant.set(key, scopes);
           }
         }
-        for (const [key, scopes] of targetScopesByChannelVariant) {
+        for (const [key, scopes] of targetScopesByDestinationVariant) {
           if (scopes.length <= 1 || !scopes.some((scope) => scope.providerScopeType === "account")) {
             continue;
           }
-          const [channelId, productVariantId] = key.split(":").map(Number);
+          const productVariantId = Number(key.slice(key.lastIndexOf(":") + 1));
           blockers.push(blocker(
             "PUBLICATION_TARGET_SCOPE_AMBIGUOUS",
             "blocking",
-            "An account-scoped target cannot overlap another enabled target for the same channel and SKU.",
+            "An account-scoped target cannot overlap another enabled target for the same destination and SKU.",
             product.productId,
-            { channelId, productVariantId,
+            { destinationKey: key.slice(0, key.lastIndexOf(":")), productVariantId,
               publicationTargetIds: scopes.map((scope) => scope.publicationTargetId).sort((a, b) => a - b) },
           ));
         }
@@ -351,8 +357,12 @@ export class InventoryAvailabilityActivationDryRunService {
         return {
           publicationTargetId: preview.publicationTargetId,
           channelId: preview.channelId,
+          destinationKind: preview.destinationKind,
           channelConnectionId: preview.channelConnectionId,
-          channelProvider: channelProviderById.get(preview.channelId) ?? "unknown",
+          dropshipStoreConnectionId: preview.dropshipStoreConnectionId,
+          channelProvider: preview.destinationKind === "channel_connection"
+            ? channelProviderById.get(preview.channelId) ?? "unknown"
+            : dropshipProviderById.get(preview.dropshipStoreConnectionId!) ?? "unknown",
           providerScopeType: preview.providerScopeType,
           externalScopeId: preview.externalScopeId,
           publicationAuthority: preview.publicationAuthority,
@@ -696,10 +706,22 @@ function readbackMatchesTarget(
   target: CurrentPublicationEvidence["configuredTargets"][number],
 ): boolean {
   return target.latestReadbackExternalInventoryItemId === target.mapping?.externalInventoryItemId
+    && target.latestReadbackDestinationKind === target.destinationKind
     && target.latestReadbackChannelConnectionId === target.channelConnectionId
+    && target.latestReadbackDropshipStoreConnectionId === target.dropshipStoreConnectionId
     && target.latestReadbackProviderScopeType === target.providerScopeType
     && target.latestReadbackExternalScopeId === target.externalScopeId
     && target.latestReadbackPublicationTargetRevision === target.revision;
+}
+
+function publicationDestinationKey(input: {
+  destinationKind: "channel_connection" | "dropship_store_connection";
+  channelConnectionId: number | null;
+  dropshipStoreConnectionId: number | null;
+}): string {
+  return input.destinationKind === "channel_connection"
+    ? `channel-connection:${input.channelConnectionId}`
+    : `dropship-store:${input.dropshipStoreConnectionId}`;
 }
 
 function readbackIsStale(observedAt: string, reference: Date): boolean {

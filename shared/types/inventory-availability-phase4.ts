@@ -72,7 +72,9 @@ export const currentPublicationEvidenceSchema = z.object({
   lastAcknowledgedAt: z.string().datetime().nullable(),
   configuredTargets: z.array(z.object({
     publicationTargetId: positiveInteger,
-    channelConnectionId: positiveInteger,
+    destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
+    channelConnectionId: positiveInteger.nullable(),
+    dropshipStoreConnectionId: positiveInteger.nullable(),
     fulfillmentNodeId: positiveInteger,
     warehouseId: positiveInteger,
     providerScopeType: z.enum(["account", "location"]),
@@ -91,11 +93,13 @@ export const currentPublicationEvidenceSchema = z.object({
     latestReadbackUnits: plannerNonnegativeQuantitySchema.nullable(),
     latestReadbackAt: z.string().datetime().nullable(),
     latestReadbackExternalInventoryItemId: nonblank(240).nullable(),
+    latestReadbackDestinationKind: z.enum(["channel_connection", "dropship_store_connection"]).nullable(),
     latestReadbackChannelConnectionId: positiveInteger.nullable(),
+    latestReadbackDropshipStoreConnectionId: positiveInteger.nullable(),
     latestReadbackProviderScopeType: z.enum(["account", "location"]).nullable(),
     latestReadbackExternalScopeId: nonblank(240).nullable(),
     latestReadbackPublicationTargetRevision: z.string().regex(/^[1-9]\d*$/).nullable(),
-  }).strict()),
+  }).strict().superRefine(validatePublicationDestination)),
 }).strict();
 
 export const activationDryRunProductSchema = z.object({
@@ -112,7 +116,9 @@ export const activationDryRunProductSchema = z.object({
   proposedPublications: z.array(z.object({
     publicationTargetId: positiveInteger,
     channelId: positiveInteger,
-    channelConnectionId: positiveInteger,
+    destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
+    channelConnectionId: positiveInteger.nullable(),
+    dropshipStoreConnectionId: positiveInteger.nullable(),
     channelProvider: nonblank(60),
     providerScopeType: z.enum(["account", "location"]),
     externalScopeId: nonblank(240),
@@ -144,7 +150,7 @@ export const activationDryRunProductSchema = z.object({
       definitionHash: sha256Hex,
       authority: z.enum(["draft", "active"]),
     }).strict()),
-  }).strict()),
+  }).strict().superRefine(validatePublicationDestination)),
   publicationEvidence: z.array(currentPublicationEvidenceSchema),
   blockers: z.array(activationDryRunBlockerSchema),
 }).strict().superRefine((product, context) => {
@@ -366,6 +372,26 @@ export type RunInventoryActivationDryRunRequest = z.infer<
 >;
 export type ActivationDryRunBlocker = z.infer<typeof activationDryRunBlockerSchema>;
 export type CurrentPublicationEvidence = z.infer<typeof currentPublicationEvidenceSchema>;
+
+function validatePublicationDestination(
+  value: {
+    destinationKind: "channel_connection" | "dropship_store_connection";
+    channelConnectionId: number | null;
+    dropshipStoreConnectionId: number | null;
+  },
+  context: z.RefinementCtx,
+): void {
+  const valid = value.destinationKind === "channel_connection"
+    ? value.channelConnectionId !== null && value.dropshipStoreConnectionId === null
+    : value.channelConnectionId === null && value.dropshipStoreConnectionId !== null;
+  if (!valid) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["destinationKind"],
+      message: "Publication destination kind must have exactly its matching connection identifier.",
+    });
+  }
+}
 export type ActivationDryRunProduct = z.infer<typeof activationDryRunProductSchema>;
 export type InventoryActivationDryRun = z.infer<typeof inventoryActivationDryRunSchema>;
 export type PrepareInventoryActivationRequest = z.infer<

@@ -74,8 +74,13 @@ export default function InventoryExposure() {
   const [policyReason, setPolicyReason] = useState("");
   const [sourceNodeIds, setSourceNodeIds] = useState<number[]>([]);
   const [sourceReason, setSourceReason] = useState("");
+  const [newTargetDestinationKind, setNewTargetDestinationKind] = useState<
+    "channel_connection" | "dropship_store_connection"
+  >("channel_connection");
   const [newTargetChannelId, setNewTargetChannelId] = useState<number | null>(null);
   const [newTargetConnectionId, setNewTargetConnectionId] = useState<number | null>(null);
+  const [newTargetDropshipStoreConnectionId, setNewTargetDropshipStoreConnectionId] =
+    useState<number | null>(null);
   const [newTargetNodeId, setNewTargetNodeId] = useState<number | null>(null);
   const [newTargetScopeType, setNewTargetScopeType] = useState<"account" | "location">("account");
   const [newTargetExternalScopeId, setNewTargetExternalScopeId] = useState("");
@@ -115,11 +120,16 @@ export default function InventoryExposure() {
       || !connections.some((item) => item.id === newTargetConnectionId)) {
       setNewTargetConnectionId(connections[0]?.id ?? null);
     }
+    if (newTargetDropshipStoreConnectionId === null
+      || !view.dropshipStores.some((item) => item.id === newTargetDropshipStoreConnectionId)) {
+      setNewTargetDropshipStoreConnectionId(view.dropshipStores[0]?.id ?? null);
+    }
     if (newTargetNodeId === null
       || !view.fulfillmentNodes.some((item) => item.id === newTargetNodeId)) {
       setNewTargetNodeId(view.fulfillmentNodes[0]?.id ?? null);
     }
-  }, [newTargetChannelId, newTargetConnectionId, newTargetNodeId, view]);
+  }, [newTargetChannelId, newTargetConnectionId, newTargetDropshipStoreConnectionId,
+    newTargetNodeId, view]);
 
   const target = view?.publicationTargets.find((item) => item.id === publicationTargetId) ?? null;
   const channel = view?.channels.find((item) => item.id === target?.channelId) ?? null;
@@ -245,14 +255,20 @@ export default function InventoryExposure() {
 
   const createTarget = useMutation({
     mutationFn: async () => {
-      if (newTargetChannelId === null || newTargetConnectionId === null || newTargetNodeId === null) {
-        throw new Error("Select a channel, connection, and compatibility fulfillment node.");
+      const destinationId = newTargetDestinationKind === "channel_connection"
+        ? newTargetConnectionId : newTargetDropshipStoreConnectionId;
+      if (newTargetChannelId === null || destinationId === null || newTargetNodeId === null) {
+        throw new Error("Select an allocation channel, destination connection, and compatibility fulfillment node.");
       }
       const idempotencyKey = targetIdempotencyKey.current ?? crypto.randomUUID();
       targetIdempotencyKey.current = idempotencyKey;
       const request = createInventoryPublicationTargetRequestSchema.parse({
+        destinationKind: newTargetDestinationKind,
         channelId: newTargetChannelId,
-        channelConnectionId: newTargetConnectionId,
+        channelConnectionId: newTargetDestinationKind === "channel_connection"
+          ? newTargetConnectionId : null,
+        dropshipStoreConnectionId: newTargetDestinationKind === "dropship_store_connection"
+          ? newTargetDropshipStoreConnectionId : null,
         legacyFulfillmentNodeId: newTargetNodeId,
         providerScopeType: newTargetScopeType,
         externalScopeId: newTargetExternalScopeId,
@@ -362,7 +378,18 @@ export default function InventoryExposure() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            <Field label="Channel">
+            <Field label="Destination owner">
+              <select className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+                value={newTargetDestinationKind} disabled={!canEdit}
+                onChange={(event) => {
+                  setNewTargetDestinationKind(event.target.value as typeof newTargetDestinationKind);
+                  targetIdempotencyKey.current = null;
+                }}>
+                <option value="channel_connection">Channel connection</option>
+                <option value="dropship_store_connection">Dropship store connection</option>
+              </select>
+            </Field>
+            <Field label="Allocation dial channel">
               <select className="h-10 w-full rounded-md border bg-background px-3 text-sm"
                 value={newTargetChannelId ?? ""} disabled={!canEdit}
                 onChange={(event) => {
@@ -373,7 +400,7 @@ export default function InventoryExposure() {
                 {view.channels.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
               </select>
             </Field>
-            <Field label="Provider connection">
+            {newTargetDestinationKind === "channel_connection" ? <Field label="Provider connection">
               <select className="h-10 w-full rounded-md border bg-background px-3 text-sm"
                 value={newTargetConnectionId ?? ""} disabled={!canEdit}
                 onChange={(event) => {
@@ -385,7 +412,19 @@ export default function InventoryExposure() {
                   {item.externalAccountLabel ?? `Connection #${item.id}`}
                 </option>)}
               </select>
-            </Field>
+            </Field> : <Field label="Dropship store connection">
+              <select className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+                value={newTargetDropshipStoreConnectionId ?? ""} disabled={!canEdit}
+                onChange={(event) => {
+                  setNewTargetDropshipStoreConnectionId(Number(event.target.value));
+                  targetIdempotencyKey.current = null;
+                }}>
+                {view.dropshipStores.length === 0 && <option value="">No store connection</option>}
+                {view.dropshipStores.map((item) => <option key={item.id} value={item.id}>
+                  {item.vendorName} · {item.platform} · {item.externalAccountLabel ?? `Store #${item.id}`} · {item.status}
+                </option>)}
+              </select>
+            </Field>}
             <Field label="Compatibility node">
               <select className="h-10 w-full rounded-md border bg-background px-3 text-sm"
                 value={newTargetNodeId ?? ""} disabled={!canEdit}
@@ -425,7 +464,10 @@ export default function InventoryExposure() {
                 targetIdempotencyKey.current = null;
               }} />
           </Field>
-          <Button disabled={!canEdit || newTargetConnectionId === null || newTargetNodeId === null
+          <Button disabled={!canEdit
+            || (newTargetDestinationKind === "channel_connection"
+              ? newTargetConnectionId === null : newTargetDropshipStoreConnectionId === null)
+            || newTargetNodeId === null
             || newTargetExternalScopeId.trim().length === 0 || newTargetReason.trim().length === 0
             || createTarget.isPending}
             onClick={() => createTarget.mutate()}>
@@ -452,15 +494,17 @@ export default function InventoryExposure() {
               {view.publicationTargets.length === 0 && <option value="">No targets configured</option>}
               {view.publicationTargets.map((item) => {
                 const targetChannel = view.channels.find((candidate) => candidate.id === item.channelId);
+                const owner = publicationDestinationLabel(item, view);
                 return <option key={item.id} value={item.id}>
-                  {targetChannel?.name ?? `Channel ${item.channelId}`} · {item.providerScopeType} {item.externalScopeId} · {item.state}
+                  {owner} · dial {targetChannel?.name ?? `Channel ${item.channelId}`} · {item.providerScopeType} {item.externalScopeId} · {item.state}
                 </option>;
               })}
             </select>
           </Field>
           {target && <div className="lg:col-span-2 space-y-3 rounded-md border bg-muted/30 p-3 text-sm">
             <div>
-              <strong>{channel?.name ?? `Channel ${target.channelId}`}</strong> via connection #{target.channelConnectionId};
+              <strong>{publicationDestinationLabel(target, view)}</strong>; allocation dials from {" "}
+              <strong>{channel?.name ?? `Channel ${target.channelId}`}</strong>;
               provider authority <strong>{target.publicationAuthority}</strong>; state <strong>{target.state}</strong>;
               revision {target.revision}. The legacy single-node field is #{target.legacyFulfillmentNodeId};
               only the versioned source set below feeds the new preview.
@@ -746,6 +790,24 @@ function VariantMappingRow({ target, variant, view, canEdit }: {
       Save mapping draft
     </Button>
   </div>;
+}
+
+function publicationDestinationLabel(
+  target: InventoryChannelExposureAdminView["publicationTargets"][number],
+  view: InventoryChannelExposureAdminView,
+): string {
+  if (target.destinationKind === "channel_connection") {
+    const owner = view.channels
+      .flatMap((item) => item.connections.map((connection) => ({ item, connection })))
+      .find(({ connection }) => connection.id === target.channelConnectionId);
+    return owner
+      ? `${owner.item.name} · ${owner.connection.externalAccountLabel ?? `connection #${owner.connection.id}`}`
+      : `Channel connection #${target.channelConnectionId}`;
+  }
+  const store = view.dropshipStores.find((item) => item.id === target.dropshipStoreConnectionId);
+  return store
+    ? `${store.vendorName} · ${store.platform} · ${store.externalAccountLabel ?? `store #${store.id}`}`
+    : `Dropship store #${target.dropshipStoreConnectionId}`;
 }
 
 function scopeKey(scope: ChannelExposurePolicyScope): string {

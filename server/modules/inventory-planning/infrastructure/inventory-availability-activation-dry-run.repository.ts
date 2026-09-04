@@ -43,6 +43,10 @@ function positiveInteger(value: unknown, field: string): number {
   return parsed;
 }
 
+function nullablePositiveInteger(value: unknown, field: string): number | null {
+  return value == null ? null : positiveInteger(value, field);
+}
+
 function nonnegativeQuantity(value: unknown, field: string): string {
   try {
     const parsed = BigInt(String(value));
@@ -162,7 +166,8 @@ implements InventoryAvailabilityActivationDryRunStore {
           [channelIds, variantIds],
         )).rows;
         const targetRows = (await client.query<Record<string, any>>(
-          `SELECT target.id, target.channel_id, target.channel_connection_id,
+          `SELECT target.id, target.destination_kind, target.channel_id,
+                  target.channel_connection_id, target.dropship_store_connection_id,
                   target.fulfillment_node_id,
                   node.warehouse_id, target.provider_scope_type,
                   target.external_scope_id, target.publication_authority, target.state,
@@ -204,6 +209,14 @@ implements InventoryAvailabilityActivationDryRunStore {
                    ) AS external_inventory_item_id_snapshot,
                    COALESCE(readback.channel_connection_id_snapshot,
                             publication.channel_connection_id_snapshot) AS channel_connection_id_snapshot,
+                   readback.dropship_store_connection_id_snapshot,
+                   COALESCE(
+                     readback.destination_kind_snapshot,
+                     CASE WHEN COALESCE(readback.channel_connection_id_snapshot,
+                       publication.channel_connection_id_snapshot) IS NOT NULL
+                       THEN 'channel_connection'
+                     END
+                   ) AS destination_kind_snapshot,
                    COALESCE(readback.provider_scope_type_snapshot,
                             publication.provider_scope_type_snapshot) AS provider_scope_type_snapshot,
                    COALESCE(readback.external_scope_id_snapshot,
@@ -248,9 +261,14 @@ implements InventoryAvailabilityActivationDryRunStore {
             const mapping = mappingByKey.get(`${publicationTargetId}:${key.productVariantId}`);
             return {
               publicationTargetId,
-              channelConnectionId: positiveInteger(
+              destinationKind: String(target.destination_kind),
+              channelConnectionId: nullablePositiveInteger(
                 target.channel_connection_id,
                 "publicationTarget.channelConnectionId",
+              ),
+              dropshipStoreConnectionId: nullablePositiveInteger(
+                target.dropship_store_connection_id,
+                "publicationTarget.dropshipStoreConnectionId",
               ),
               fulfillmentNodeId: positiveInteger(
                 target.fulfillment_node_id,
@@ -280,10 +298,21 @@ implements InventoryAvailabilityActivationDryRunStore {
                 readback?.external_inventory_item_id_snapshot == null
                   ? null
                   : String(readback.external_inventory_item_id_snapshot),
+              latestReadbackDestinationKind:
+                readback?.destination_kind_snapshot == null
+                  ? null
+                  : String(readback.destination_kind_snapshot),
               latestReadbackChannelConnectionId:
                 readback?.channel_connection_id_snapshot == null
                   ? null
                   : positiveInteger(readback.channel_connection_id_snapshot, "readback.channelConnectionId"),
+              latestReadbackDropshipStoreConnectionId:
+                readback?.dropship_store_connection_id_snapshot == null
+                  ? null
+                  : positiveInteger(
+                    readback.dropship_store_connection_id_snapshot,
+                    "readback.dropshipStoreConnectionId",
+                  ),
               latestReadbackProviderScopeType:
                 readback?.provider_scope_type_snapshot == null
                   ? null

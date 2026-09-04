@@ -34,10 +34,12 @@ type SupplySnapshotCapture = (
 interface PublicationTargetRow {
   publication_target_id: unknown;
   publication_target_revision: unknown;
+  destination_kind: unknown;
   channel_id: unknown;
   channel_name: unknown;
   channel_provider: unknown;
   channel_connection_id: unknown;
+  dropship_store_connection_id: unknown;
   provider_scope_type: unknown;
   external_scope_id: unknown;
   publication_authority: unknown;
@@ -186,16 +188,23 @@ async function loadActivePublicationTargets(
   const targetResult = await client.query<PublicationTargetRow>(
     `SELECT target.id AS publication_target_id,
             target.revision::text AS publication_target_revision,
+            target.destination_kind,
             target.channel_id,
-            channel.name AS channel_name,
-            channel.provider AS channel_provider,
+            policy_channel.name AS channel_name,
+            CASE target.destination_kind
+              WHEN 'channel_connection' THEN policy_channel.provider
+              WHEN 'dropship_store_connection' THEN dropship_connection.platform
+            END AS channel_provider,
             target.channel_connection_id,
+            target.dropship_store_connection_id,
             target.provider_scope_type,
             target.external_scope_id,
             target.publication_authority,
             target.state AS publication_target_state
      FROM inventory.inventory_publication_targets AS target
-     JOIN channels.channels AS channel ON channel.id = target.channel_id
+     JOIN channels.channels AS policy_channel ON policy_channel.id = target.channel_id
+     LEFT JOIN dropship.dropship_store_connections AS dropship_connection
+       ON dropship_connection.id = target.dropship_store_connection_id
      WHERE target.state = 'live'
        AND target.publication_authority = 'echelon'
      ORDER BY target.id`,
@@ -279,19 +288,38 @@ async function loadActivePublicationTargets(
   return targetResult.rows.map((row): ActiveInventoryPublicationTargetSnapshot => {
     const publicationTargetId = positiveInteger(row.publication_target_id, "publicationTarget.id");
     const channelId = positiveInteger(row.channel_id, "publicationTarget.channelId");
+    const targetDestinationKind = destinationKind(row.destination_kind);
+    const channelConnectionId = nullablePositiveInteger(
+      row.channel_connection_id,
+      "publicationTarget.channelConnectionId",
+    );
+    const dropshipStoreConnectionId = nullablePositiveInteger(
+      row.dropship_store_connection_id,
+      "publicationTarget.dropshipStoreConnectionId",
+    );
+    if ((targetDestinationKind === "channel_connection"
+      && (channelConnectionId === null || dropshipStoreConnectionId !== null))
+      || (targetDestinationKind === "dropship_store_connection"
+        && (channelConnectionId !== null || dropshipStoreConnectionId === null))) {
+      throw invalidRow("A publication target has inconsistent destination ownership.", {
+        publicationTargetId,
+        destinationKind: targetDestinationKind,
+        channelConnectionId,
+        dropshipStoreConnectionId,
+      });
+    }
     return {
       publicationTargetId,
       publicationTargetRevision: positiveBigintString(
         row.publication_target_revision,
         "publicationTarget.revision",
       ),
+      destinationKind: targetDestinationKind,
       channelId,
       channelName: nonblank(row.channel_name, "publicationTarget.channelName"),
       channelProvider: nonblank(row.channel_provider, "publicationTarget.channelProvider"),
-      channelConnectionId: positiveInteger(
-        row.channel_connection_id,
-        "publicationTarget.channelConnectionId",
-      ),
+      channelConnectionId,
+      dropshipStoreConnectionId,
       providerScopeType: providerScopeType(row.provider_scope_type),
       externalScopeId: nonblank(row.external_scope_id, "publicationTarget.externalScopeId"),
       publicationAuthority: literal(row.publication_authority, "echelon", "publicationTarget.authority"),
@@ -492,6 +520,10 @@ function positiveInteger(value: unknown, field: string): number {
   return parsed;
 }
 
+function nullablePositiveInteger(value: unknown, field: string): number | null {
+  return value == null ? null : positiveInteger(value, field);
+}
+
 function positiveBigintString(value: unknown, field: string): string {
   const parsed = String(value);
   if (!/^[1-9][0-9]*$/.test(parsed)) {
@@ -522,6 +554,13 @@ function sha256(value: unknown, field: string): string {
 function providerScopeType(value: unknown): "account" | "location" {
   if (value !== "account" && value !== "location") {
     throw invalidRow("Publication target provider scope is invalid.", { value });
+  }
+  return value;
+}
+
+function destinationKind(value: unknown): "channel_connection" | "dropship_store_connection" {
+  if (value !== "channel_connection" && value !== "dropship_store_connection") {
+    throw invalidRow("Publication target destination kind is invalid.", { value });
   }
   return value;
 }
