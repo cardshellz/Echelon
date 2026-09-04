@@ -27,7 +27,24 @@ import {
   calculateUnreservedLotOnHand,
 } from "./domain/inventory.domain";
 import { millsToCents, centsToMills } from "@shared/utils/money";
-import { IntegrityError } from "../../../shared/errors";
+import { AppError, IntegrityError } from "../../../shared/errors";
+import { normalizeBuildLotCosts } from "./infrastructure/build.repository";
+
+export class LotInventoryConflictError extends AppError {
+  constructor(code: "LOT_ADJUSTMENT_SHORTFALL" | "LOT_ADJUSTMENT_CONFLICT" | "LOT_TRANSFER_SHORTFALL" | "LOT_TRANSFER_CONFLICT", message: string, context: Record<string, unknown>) {
+    super(message, code, 409, context);
+  }
+}
+
+function safeMillsNumber(value: bigint, field: string): number {
+  if (value < BigInt(0) || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new IntegrityError(`${field} is outside the supported integer-mill range.`, {
+      field,
+      value: value.toString(),
+    });
+  }
+  return Number(value);
+}
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -91,6 +108,7 @@ export class InventoryLotService {
     costProvisional?: number;
     poLineId?: number;
     costSource?: string;
+    receivedAt?: Date;
     notes?: string;
   }): Promise<InventoryLot> {
     const lotNumber = await this.generateLotNumber();
@@ -138,7 +156,7 @@ export class InventoryLotService {
         qtyOnHand: params.qty,
         qtyReserved: 0,
         qtyPicked: 0,
-        receivedAt: new Date(),
+        receivedAt: params.receivedAt ?? new Date(),
         receivingOrderId: params.receivingOrderId ?? null,
         purchaseOrderId: params.purchaseOrderId ?? null,
         inboundShipmentId: params.inboundShipmentId ?? null,
@@ -646,7 +664,14 @@ export class InventoryLotService {
     reservedQtyDelta?: number;
     unitCostCents?: number;
     notes?: string;
-  }): Promise<{ consumedCostCents: number; consumedQty: number }> {
+  }): Promise<{
+    consumedCostCents: number;
+    consumedQty: number;
+    consumedPoCostMills: bigint;
+    consumedPackagingCostMills: bigint;
+    consumedLandedCostMills: bigint;
+    consumedCostProvisional: boolean;
+  }> {
     if (params.reservedQtyDelta !== undefined && params.reservedQtyDelta > 0) {
       throw new Error("adjustLots only supports releasing reserved quantity during adjustments");
     }
@@ -665,7 +690,14 @@ export class InventoryLotService {
         costProvisional: resolved.provisional ? 1 : 0,
         notes: params.notes ?? "Manual adjustment",
       });
-      return { consumedCostCents: 0, consumedQty: 0 };
+      return {
+        consumedCostCents: 0,
+        consumedQty: 0,
+        consumedPoCostMills: BigInt(0),
+        consumedPackagingCostMills: BigInt(0),
+        consumedLandedCostMills: BigInt(0),
+        consumedCostProvisional: false,
+      };
     }
 
     // Negative adjustment: consume from oldest lots first, tracking total cost
@@ -678,6 +710,10 @@ export class InventoryLotService {
     let reservedReleaseRemaining = Math.abs(params.reservedQtyDelta ?? 0);
     let consumedCostCents = 0;
     let consumedQty = 0;
+    let consumedPoCostMills = BigInt(0);
+    let consumedPackagingCostMills = BigInt(0);
+    let consumedLandedCostMills = BigInt(0);
+    let consumedCostProvisional = false;
     const adjustUpdates: Array<{ lotId: number; take: number; reservedRelease: number }> = [];
     for (const lot of lots) {
       if (remaining <= 0) break;
@@ -692,15 +728,46 @@ export class InventoryLotService {
       const take = unreservedTake + reservedTake;
       if (take <= 0) continue;
 
+      const normalizedCosts = normalizeBuildLotCosts({
+        total_unit_cost_mills: lot.totalUnitCostMills,
+        unit_cost_mills: lot.unitCostMills,
+        total_unit_cost_cents: lot.totalUnitCostCents,
+        unit_cost_cents: lot.unitCostCents,
+        po_unit_cost_mills: lot.poUnitCostMills,
+        po_unit_cost_cents: lot.poUnitCostCents,
+        packaging_cost_mills: lot.packagingCostMills,
+        packaging_cost_cents: lot.packagingCostCents,
+        landed_cost_mills: lot.landedCostMills,
+        landed_cost_cents: lot.landedCostCents,
+      });
       adjustUpdates.push({ lotId: lot.id, take, reservedRelease: reservedTake });
       consumedCostCents += take * lot.unitCostCents;
       consumedQty += take;
+      consumedPoCostMills += normalizedCosts.poMills * BigInt(take);
+      consumedPackagingCostMills += normalizedCosts.packagingMills * BigInt(take);
+      consumedLandedCostMills += normalizedCosts.landedMills * BigInt(take);
+      consumedCostProvisional ||= lot.costProvisional === 1;
       remaining -= take;
       reservedReleaseRemaining -= reservedTake;
     }
 
+    if (remaining !== 0 || reservedReleaseRemaining !== 0) {
+      throw new LotInventoryConflictError(
+        "LOT_ADJUSTMENT_SHORTFALL",
+        `FIFO lot inventory cannot satisfy adjustment of ${Math.abs(params.qtyDelta)} unit(s).`,
+        {
+          productVariantId: params.productVariantId,
+          warehouseLocationId: params.warehouseLocationId,
+          requestedQty: Math.abs(params.qtyDelta),
+          attributableQty: Math.abs(params.qtyDelta) - remaining,
+          requestedReservedRelease: Math.abs(params.reservedQtyDelta ?? 0),
+          attributableReservedRelease: Math.abs(params.reservedQtyDelta ?? 0) - reservedReleaseRemaining,
+        },
+      );
+    }
+
     if (adjustUpdates.length > 0) {
-      await this.db.execute(sql`
+      const updated = await this.db.execute(sql`
         WITH updates AS (
           SELECT * FROM jsonb_to_recordset(${JSON.stringify(adjustUpdates)}::jsonb) AS x("lotId" int, take int, "reservedRelease" int)
         )
@@ -710,10 +777,31 @@ export class InventoryLotService {
             status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND (il.qty_reserved - u."reservedRelease") = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
         FROM updates u
         WHERE il.id = u."lotId"
+          AND il.qty_on_hand >= u.take
+          AND il.qty_reserved >= u."reservedRelease"
+          AND il.qty_on_hand - il.qty_reserved >= u.take - u."reservedRelease"
+        RETURNING il.id
       `);
+      if ((updated.rows ?? []).length !== adjustUpdates.length) {
+        throw new LotInventoryConflictError(
+          "LOT_ADJUSTMENT_CONFLICT",
+          "A FIFO lot changed while its inventory adjustment was being applied.",
+          {
+            productVariantId: params.productVariantId,
+            warehouseLocationId: params.warehouseLocationId,
+          },
+        );
+      }
     }
 
-    return { consumedCostCents, consumedQty };
+    return {
+      consumedCostCents,
+      consumedQty,
+      consumedPoCostMills,
+      consumedPackagingCostMills,
+      consumedLandedCostMills,
+      consumedCostProvisional,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -747,6 +835,11 @@ export class InventoryLotService {
       receivingOrderId: number | null;
       inboundShipmentId: number | null;
       costProvisional: number;
+      poLineId: number | null;
+      costSource: string | null;
+      totalUnitCostMills: number;
+      packagingCostMills: number;
+      landedCostMills: number;
     }> = [];
 
     for (const lot of lots) {
@@ -756,6 +849,18 @@ export class InventoryLotService {
       if (available <= 0) continue;
 
       const take = Math.min(available, remaining);
+      const normalizedCosts = normalizeBuildLotCosts({
+        total_unit_cost_mills: lot.totalUnitCostMills,
+        unit_cost_mills: lot.unitCostMills,
+        total_unit_cost_cents: lot.totalUnitCostCents,
+        unit_cost_cents: lot.unitCostCents,
+        po_unit_cost_mills: lot.poUnitCostMills,
+        po_unit_cost_cents: lot.poUnitCostCents,
+        packaging_cost_mills: lot.packagingCostMills,
+        packaging_cost_cents: lot.packagingCostCents,
+        landed_cost_mills: lot.landedCostMills,
+        landed_cost_cents: lot.landedCostCents,
+      });
       layers.push({
         lotId: lot.id,
         take,
@@ -765,15 +870,32 @@ export class InventoryLotService {
         receivingOrderId: lot.receivingOrderId ?? null,
         inboundShipmentId: lot.inboundShipmentId ?? null,
         costProvisional: (lot as any).costProvisional ?? 0,
+        poLineId: lot.poLineId ?? null,
+        costSource: lot.costSource ?? null,
+        totalUnitCostMills: safeMillsNumber(normalizedCosts.totalMills, "transfer.totalUnitCostMills"),
+        packagingCostMills: safeMillsNumber(normalizedCosts.packagingMills, "transfer.packagingCostMills"),
+        landedCostMills: safeMillsNumber(normalizedCosts.landedMills, "transfer.landedCostMills"),
       });
       remaining -= take;
     }
 
-    if (layers.length === 0) return;
+    if (remaining !== 0) {
+      throw new LotInventoryConflictError(
+        "LOT_TRANSFER_SHORTFALL",
+        `FIFO lot inventory cannot satisfy transfer of ${params.qty} unreserved unit(s).`,
+        {
+          productVariantId: params.productVariantId,
+          fromLocationId: params.fromLocationId,
+          toLocationId: params.toLocationId,
+          requestedQty: params.qty,
+          attributableQty: params.qty - remaining,
+        },
+      );
+    }
 
     // Decrement source lots
     const transferUpdates = layers.map(l => ({ lotId: l.lotId, take: l.take }));
-    await this.db.execute(sql`
+    const updated = await this.db.execute(sql`
       WITH updates AS (
         SELECT * FROM jsonb_to_recordset(${JSON.stringify(transferUpdates)}::jsonb) AS x("lotId" int, take int)
       )
@@ -782,7 +904,20 @@ export class InventoryLotService {
           status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND il.qty_reserved = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
       FROM updates u
       WHERE il.id = u."lotId"
+        AND il.qty_on_hand - il.qty_reserved >= u.take
+      RETURNING il.id
     `);
+    if ((updated.rows ?? []).length !== transferUpdates.length) {
+      throw new LotInventoryConflictError(
+        "LOT_TRANSFER_CONFLICT",
+        "A FIFO lot changed while its unreserved stock was being transferred.",
+        {
+          productVariantId: params.productVariantId,
+          fromLocationId: params.fromLocationId,
+          toLocationId: params.toLocationId,
+        },
+      );
+    }
 
     // Create one destination lot per source layer — cost identity preserved
     for (const layer of layers) {
@@ -791,10 +926,16 @@ export class InventoryLotService {
         warehouseLocationId: params.toLocationId,
         qty: layer.take,
         unitCostCents: layer.unitCostCents,
+        unitCostMills: layer.totalUnitCostMills,
+        packagingCostMills: layer.packagingCostMills,
+        landedCostMills: layer.landedCostMills,
         purchaseOrderId: layer.purchaseOrderId ?? undefined,
         receivingOrderId: layer.receivingOrderId ?? undefined,
         inboundShipmentId: layer.inboundShipmentId ?? undefined,
+        poLineId: layer.poLineId ?? undefined,
+        costSource: layer.costSource ?? undefined,
         costProvisional: layer.costProvisional,
+        receivedAt: layer.receivedAt,
         notes: params.notes ?? "Transfer",
       });
     }

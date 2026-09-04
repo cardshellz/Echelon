@@ -1820,86 +1820,85 @@ export class PickingUseCases {
         }
 
         // Auto-execute replen in background — no picker confirmation needed.
-        // Fire-and-forget: returns result to caller so UI can show dismissible notification.
-        if (deductResult.authority !== "canonical") {
-          try {
-            const replenResult = deductResult.prePickReplen ?? await this.replenishment.createAndExecuteReplen(
-              deductResult.productVariantId,
-              deductResult.locationId,
-              userId,
-              {
-                orderId: item.orderId,
-                orderItemId: item.id,
-                orderNumber: order?.orderNumber ?? null,
-                blocksShipment: false,
-              },
-            );
-
-            if (replenResult) {
-              const taskStatus = replenResult.task?.status ?? null;
-              const moved = Number(replenResult.moved ?? 0);
-              const autoExecuted = taskStatus === "completed";
-              const movedForPickBin = autoExecuted
-                ? await this.describeInlineReplenMove(replenResult.task, deductResult.productVariantId, moved)
-                : null;
-              console.log(
-                `[Replen] Replen task for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ` +
-                `status=${taskStatus ?? "none"} moved=${moved} base units`,
-              );
-              inventoryCtx.replen.triggered = true;
-              inventoryCtx.replen.taskId = replenResult.task?.id ?? null;
-              inventoryCtx.replen.taskStatus = taskStatus;
-              inventoryCtx.replen.autoExecuted = autoExecuted;
-              inventoryCtx.replen.autoExecutedMoved = movedForPickBin?.pickQty ?? null;
-              inventoryCtx.replen.autoExecutedMovedBaseUnits = movedForPickBin?.baseUnits ?? null;
-              inventoryCtx.replen.autoExecutedMovedUom = movedForPickBin?.uom ?? null;
-              inventoryCtx.replen.autoExecutedFailed = taskStatus === "blocked";
-              inventoryCtx.replen.autoExecuteFailReason = taskStatus === "blocked"
-                ? replenResult.task?.exceptionReason || "blocked"
-                : null;
-              inventoryCtx.replen.qtyToMove = autoExecuted
-                ? movedForPickBin?.pickQty ?? null
-                : replenResult.task?.qtyTargetUnits ?? null;
-
-              // Fix: The "Zero Collision"
-              // If the bin hit zero, it initially flipped binCountNeeded to true.
-              // But if auto-replenishment immediately refilled it inline, we MUST suppress the bin count,
-              // otherwise the picker receives a redundant count prompt that overlaps and crashes replen!
-              if (autoExecuted && (movedForPickBin?.pickQty ?? 0) > 0) {
-                inventoryCtx.binCountNeeded = false;
-              }
-            } else {
-              // createAndExecuteReplen returned null — guidance check says no replen needed
-              // (threshold not met, or no source stock). Nothing to do — this is the normal case.
-              console.log(`[Replen] No replen needed after pick for variant=${deductResult.productVariantId} loc=${deductResult.locationId}`);
-            }
-          } catch (replenErr: any) {
-            // Replen failed — don't block the picker, but surface a persistent alert
-            const failReason = replenErr?.message || "unknown_error";
-            console.warn(`[Replen] Auto-execute failed for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ${failReason}`);
-
-            // Still show replen triggered so UI surfaces the failure alert
-            inventoryCtx.replen.triggered = true;
-            inventoryCtx.replen.autoExecuted = false;
-            inventoryCtx.replen.autoExecutedFailed = true;
-            inventoryCtx.replen.autoExecuteFailReason = failReason.startsWith("execute_failed:") ? "execute_failed" : failReason;
-
-            // Log failure for investigation (fire-and-forget)
-            this.storage.createPickingLog({
-              actionType: "replen_auto_execute_failed",
-              pickerId: pickerId || undefined,
-              pickerName: picker?.displayName || picker?.username || pickerId || undefined,
+        // The result is captured so the UI can show a dismissible notification;
+        // a replenishment failure does not roll back an already completed pick.
+        try {
+          const replenResult = deductResult.prePickReplen ?? await this.replenishment.createAndExecuteReplen(
+            deductResult.productVariantId,
+            deductResult.locationId,
+            userId,
+            {
               orderId: item.orderId,
-              orderNumber: order?.orderNumber,
               orderItemId: item.id,
-              sku: item.sku,
-              itemName: item.name,
-              locationCode: inventoryCtx.locationCode || item.location,
-              reason: failReason,
-              deviceType: deviceType || "desktop",
-              sessionId,
-            }).catch((err: any) => console.warn("[PickingLog] replen failure log failed:", err.message));
+              orderNumber: order?.orderNumber ?? null,
+              blocksShipment: false,
+            },
+          );
+
+          if (replenResult) {
+            const taskStatus = replenResult.task?.status ?? null;
+            const moved = Number(replenResult.moved ?? 0);
+            const autoExecuted = taskStatus === "completed";
+            const movedForPickBin = autoExecuted
+              ? await this.describeInlineReplenMove(replenResult.task, deductResult.productVariantId, moved)
+              : null;
+            console.log(
+              `[Replen] Replen task for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ` +
+              `status=${taskStatus ?? "none"} moved=${moved} base units`,
+            );
+            inventoryCtx.replen.triggered = true;
+            inventoryCtx.replen.taskId = replenResult.task?.id ?? null;
+            inventoryCtx.replen.taskStatus = taskStatus;
+            inventoryCtx.replen.autoExecuted = autoExecuted;
+            inventoryCtx.replen.autoExecutedMoved = movedForPickBin?.pickQty ?? null;
+            inventoryCtx.replen.autoExecutedMovedBaseUnits = movedForPickBin?.baseUnits ?? null;
+            inventoryCtx.replen.autoExecutedMovedUom = movedForPickBin?.uom ?? null;
+            inventoryCtx.replen.autoExecutedFailed = taskStatus === "blocked";
+            inventoryCtx.replen.autoExecuteFailReason = taskStatus === "blocked"
+              ? replenResult.task?.exceptionReason || "blocked"
+              : null;
+            inventoryCtx.replen.qtyToMove = autoExecuted
+              ? movedForPickBin?.pickQty ?? null
+              : replenResult.task?.qtyTargetUnits ?? null;
+
+            // Fix: The "Zero Collision"
+            // If the bin hit zero, it initially flipped binCountNeeded to true.
+            // But if auto-replenishment immediately refilled it inline, we MUST suppress the bin count,
+            // otherwise the picker receives a redundant count prompt that overlaps and crashes replen!
+            if (autoExecuted && (movedForPickBin?.pickQty ?? 0) > 0) {
+              inventoryCtx.binCountNeeded = false;
+            }
+          } else {
+            // createAndExecuteReplen returned null — guidance check says no replen needed
+            // (threshold not met, or no source stock). Nothing to do — this is the normal case.
+            console.log(`[Replen] No replen needed after pick for variant=${deductResult.productVariantId} loc=${deductResult.locationId}`);
           }
+        } catch (replenErr: any) {
+          // Replen failed — don't block the picker, but surface a persistent alert
+          const failReason = replenErr?.message || "unknown_error";
+          console.warn(`[Replen] Auto-execute failed for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ${failReason}`);
+
+          // Still show replen triggered so UI surfaces the failure alert
+          inventoryCtx.replen.triggered = true;
+          inventoryCtx.replen.autoExecuted = false;
+          inventoryCtx.replen.autoExecutedFailed = true;
+          inventoryCtx.replen.autoExecuteFailReason = failReason.startsWith("execute_failed:") ? "execute_failed" : failReason;
+
+          // Log failure for investigation (fire-and-forget)
+          this.storage.createPickingLog({
+            actionType: "replen_auto_execute_failed",
+            pickerId: pickerId || undefined,
+            pickerName: picker?.displayName || picker?.username || pickerId || undefined,
+            orderId: item.orderId,
+            orderNumber: order?.orderNumber,
+            orderItemId: item.id,
+            sku: item.sku,
+            itemName: item.name,
+            locationCode: inventoryCtx.locationCode || item.location,
+            reason: failReason,
+            deviceType: deviceType || "desktop",
+            sessionId,
+          }).catch((err: any) => console.warn("[PickingLog] replen failure log failed:", err.message));
         }
 
         // binCountNeeded is only set for inventory discrepancies (deduction failure path).

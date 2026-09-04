@@ -1010,7 +1010,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     };
     const service = new ReplenishmentUseCases(db as any, {} as any);
     const serviceAny = service as any;
-    vi.spyOn(serviceAny, "getInventoryQty").mockImplementation(async (variantId: number, locationId: number) => {
+    vi.spyOn(serviceAny, "getAvailableInventoryQty").mockImplementation(async (variantId: number, locationId: number) => {
       if (variantId === 438 && locationId === 111) return 0;
       if (variantId === 67 && locationId === 1232) return 36;
       return 0;
@@ -1227,7 +1227,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       triggerValue: 1,
       evaluatedQty: 0,
     });
-    vi.spyOn(serviceAny, "getInventoryQty").mockResolvedValue(80);
+    vi.spyOn(serviceAny, "getAvailableInventoryQty").mockResolvedValue(80);
     vi.spyOn(service, "executeTask").mockResolvedValue({ moved: 1000 });
     vi.spyOn(serviceAny, "getTaskById").mockResolvedValue({
       ...inlineTask,

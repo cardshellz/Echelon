@@ -80,7 +80,7 @@ describe("PickingUseCases canonical authority routing", () => {
       unpickItem: vi.fn(),
       getLevel: vi.fn(async () => ({ variantQty: 4 })),
     };
-    const replenishment = { createAndExecuteReplen: vi.fn() };
+    const replenishment = { createAndExecuteReplen: vi.fn(async () => null) };
     const storage = {
       getOrderItemById: vi.fn()
         .mockResolvedValueOnce(beforeItem)
@@ -179,7 +179,12 @@ describe("PickingUseCases canonical authority routing", () => {
       idempotencyKey: expect.stringMatching(/^inventory-picker-runtime:pick-reconcile_picker_observation:[a-f0-9]{64}$/),
     }));
     expect(inventoryCore.pickItem).not.toHaveBeenCalled();
-    expect(replenishment.createAndExecuteReplen).not.toHaveBeenCalled();
+    expect(replenishment.createAndExecuteReplen).toHaveBeenCalledWith(105, 1, "picker-1", {
+      orderId: 900,
+      orderItemId: 500,
+      orderNumber: "#900",
+      blocksShipment: false,
+    });
     expect(db.transaction).not.toHaveBeenCalled();
     expect(db.insert).not.toHaveBeenCalled();
   });

@@ -6,10 +6,14 @@ import { warehouses, warehouseLocations, channelConnections } from "../../../sto
 import { eq, and } from "drizzle-orm";
 import type { InventoryLevel, InsertInventoryTransaction, InventoryTransaction } from "../../../../shared/schema";
 import { AuditLogger } from "../../../infrastructure/auditLogger";
-import { IntegrityError, ValidationError } from "../../../../shared/errors";
+import { AppError, IntegrityError, ValidationError } from "../../../../shared/errors";
 import { resolveCost } from "../cost-resolver";
 import { centsToMills, millsToCents } from "../../../../shared/utils/money";
 import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-item-commands";
+import { allocateBuildCostLayers } from "../domain/build.domain";
+import {
+  planReplenishmentExecution,
+} from "../domain/replenishment-execution.domain";
 
 export class FreezeViolationError extends Error {
   code = "LOCATION_FROZEN";
@@ -61,6 +65,26 @@ export class ReplacementInventoryUnavailableError extends IntegrityError {
     );
     this.code = "REPLACEMENT_INVENTORY_UNAVAILABLE";
   }
+}
+
+export class ReplenishmentInventoryConflictError extends AppError {
+  constructor(
+    code: "REPLENISHMENT_RESERVED_STOCK_PROTECTED" | "REPLENISHMENT_LOT_SERVICE_UNAVAILABLE",
+    message: string,
+    context: Record<string, unknown>,
+  ) {
+    super(message, code, 409, context);
+  }
+}
+
+function safeMillsNumber(value: bigint, field: string): number {
+  if (value < BigInt(0) || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new IntegrityError(`${field} is outside the supported integer-mill range.`, {
+      field,
+      value: value.toString(),
+    });
+  }
+  return Number(value);
 }
 
 /** Type wrapper for Drizzle database instance */
@@ -1346,6 +1370,223 @@ export class InventoryUseCases {
   }
 
   // ---------------------------------------------------------------------------
+  // REPLENISHMENT MOVEMENT
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Moves only unreserved physical stock for a frozen replenishment task.
+   * Canonical claims own `reservedQty` and exact reserved FIFO quantities, so
+   * this boundary must never trim, relocate, or consume either one.
+   */
+  async executeReplenishmentMove(params: {
+    taskId: number;
+    replenMethod: string;
+    sourceVariant: {
+      id: number;
+      productId: number | null;
+      unitsPerVariant: number;
+    };
+    pickVariant: {
+      id: number;
+      productId: number | null;
+      unitsPerVariant: number;
+    };
+    fromLocationId: number;
+    toLocationId: number;
+    qtySourceUnits: number;
+    qtyTargetUnits: number;
+    userId?: string;
+    notes?: string;
+    occurredAt?: Date;
+    deferUntilCommit?: (effect: () => Promise<void>) => void;
+  }): Promise<{ movedBaseUnits: number; qtyPickUnits: number }> {
+    const plan = planReplenishmentExecution({
+      replenMethod: params.replenMethod,
+      sourceVariantId: params.sourceVariant.id,
+      sourceProductId: params.sourceVariant.productId,
+      sourceUnitsPerVariant: params.sourceVariant.unitsPerVariant,
+      pickVariantId: params.pickVariant.id,
+      pickProductId: params.pickVariant.productId,
+      pickUnitsPerVariant: params.pickVariant.unitsPerVariant,
+      qtySourceUnits: params.qtySourceUnits,
+      qtyTargetUnits: params.qtyTargetUnits,
+    });
+
+    if (!this.lotService) {
+      throw new ReplenishmentInventoryConflictError(
+        "REPLENISHMENT_LOT_SERVICE_UNAVAILABLE",
+        "Replenishment requires exact FIFO lot accounting.",
+        { taskId: params.taskId, replenMethod: params.replenMethod },
+      );
+    }
+
+    if (plan.method === "direct_transfer") {
+      await this.transfer({
+        productVariantId: plan.sourceVariantId,
+        fromLocationId: params.fromLocationId,
+        toLocationId: params.toLocationId,
+        qty: plan.qtySourceUnits,
+        userId: params.userId,
+        notes: params.notes ?? `Replen task #${params.taskId}`,
+        referenceType: "replenishment_task",
+        referenceId: String(params.taskId),
+        deferUntilCommit: params.deferUntilCommit,
+      });
+      return { movedBaseUnits: plan.movedBaseUnits, qtyPickUnits: plan.qtyPickUnits };
+    }
+
+    const occurredAt = params.occurredAt ?? new Date();
+    if (Number.isNaN(occurredAt.getTime())) {
+      throw new ValidationError("Replenishment occurrence time must be valid", { taskId: params.taskId });
+    }
+
+    await this.db.transaction(async (tx) => {
+      const [fromLoc] = await tx
+        .select()
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, params.fromLocationId))
+        .limit(1);
+      const [toLoc] = await tx
+        .select()
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, params.toLocationId))
+        .limit(1);
+      if (!fromLoc || !toLoc) {
+        throw new IntegrityError("Replenishment source and destination locations must both exist", {
+          taskId: params.taskId,
+          fromLocationId: params.fromLocationId,
+          toLocationId: params.toLocationId,
+        });
+      }
+      if (fromLoc.isActive !== 1 || toLoc.isActive !== 1) {
+        throw new IntegrityError("Replenishment source and destination locations must both be active", {
+          taskId: params.taskId,
+          fromLocationCode: fromLoc.code,
+          toLocationCode: toLoc.code,
+        });
+      }
+      if (fromLoc.cycleCountFreezeId || toLoc.cycleCountFreezeId) {
+        throw new FreezeViolationError(fromLoc.cycleCountFreezeId ? params.fromLocationId : params.toLocationId);
+      }
+      if (fromLoc.warehouseId == null || fromLoc.warehouseId !== toLoc.warehouseId) {
+        throw new IntegrityError("Replenishment movement must remain inside one warehouse", {
+          taskId: params.taskId,
+          fromWarehouseId: fromLoc.warehouseId ?? null,
+          toWarehouseId: toLoc.warehouseId ?? null,
+        });
+      }
+
+      const sourceLevel = await this.storage.lockInventoryLevel(
+        params.fromLocationId,
+        plan.sourceVariantId,
+        tx,
+      );
+      const available = (sourceLevel?.variantQty ?? 0) - (sourceLevel?.reservedQty ?? 0);
+      if (!sourceLevel || available < plan.qtySourceUnits) {
+        throw new ReplenishmentInventoryConflictError(
+          "REPLENISHMENT_RESERVED_STOCK_PROTECTED",
+          "Replenishment cannot consume inventory owned by an order claim.",
+          {
+            taskId: params.taskId,
+            productVariantId: plan.sourceVariantId,
+            fromLocationId: params.fromLocationId,
+            requestedQty: plan.qtySourceUnits,
+            onHandQty: sourceLevel?.variantQty ?? 0,
+            reservedQty: sourceLevel?.reservedQty ?? 0,
+            availableQty: Math.max(0, available),
+          },
+        );
+      }
+
+      const targetLevel = await this.storage.upsertInventoryLevel({
+        productVariantId: plan.pickVariantId,
+        warehouseLocationId: params.toLocationId,
+      }, tx);
+      const lotService = this.lotService!.withTx(tx);
+      const consumed = await lotService.adjustLots({
+        productVariantId: plan.sourceVariantId,
+        warehouseLocationId: params.fromLocationId,
+        qtyDelta: -plan.qtySourceUnits,
+        notes: params.notes ?? `Replen task #${params.taskId} case break`,
+      });
+      if (consumed.consumedQty !== plan.qtySourceUnits) {
+        throw new IntegrityError("Case-break FIFO consumption did not match its frozen task quantity", {
+          taskId: params.taskId,
+          expectedQty: plan.qtySourceUnits,
+          consumedQty: consumed.consumedQty,
+        });
+      }
+
+      await this.storage.adjustInventoryLevel(sourceLevel.id, { variantQty: -plan.qtySourceUnits }, tx);
+      await this.storage.adjustInventoryLevel(targetLevel.id, { variantQty: plan.qtyPickUnits }, tx);
+
+      const outputLayers = allocateBuildCostLayers({
+        poMills: consumed.consumedPoCostMills,
+        packagingMills: consumed.consumedPackagingCostMills,
+        landedMills: consumed.consumedLandedCostMills,
+      }, plan.qtyPickUnits);
+      for (const layer of outputLayers) {
+        const totalMills = safeMillsNumber(layer.totalMills, "replenishment.output.totalMills");
+        await lotService.createLot({
+          productVariantId: plan.pickVariantId,
+          warehouseLocationId: params.toLocationId,
+          qty: layer.qty,
+          unitCostCents: millsToCents(totalMills),
+          unitCostMills: totalMills,
+          packagingCostMills: safeMillsNumber(
+            layer.packagingMills,
+            "replenishment.output.packagingMills",
+          ),
+          landedCostMills: safeMillsNumber(layer.landedMills, "replenishment.output.landedMills"),
+          costSource: "transformation",
+          costProvisional: consumed.consumedCostProvisional ? 1 : 0,
+          receivedAt: occurredAt,
+          notes: params.notes ?? `Output from replen task #${params.taskId}`,
+        });
+      }
+
+      const referenceId = String(params.taskId);
+      const notes = params.notes ?? `Replen task #${params.taskId} case break`;
+      await this.storage.createInventoryTransaction({
+        productVariantId: plan.sourceVariantId,
+        fromLocationId: params.fromLocationId,
+        transactionType: "break",
+        variantQtyDelta: -plan.qtySourceUnits,
+        variantQtyBefore: sourceLevel.variantQty,
+        variantQtyAfter: sourceLevel.variantQty - plan.qtySourceUnits,
+        sourceState: "on_hand",
+        targetState: "transformed",
+        referenceType: "replenishment_task",
+        referenceId,
+        userId: params.userId ?? null,
+        notes,
+      }, tx);
+      await this.storage.createInventoryTransaction({
+        productVariantId: plan.pickVariantId,
+        toLocationId: params.toLocationId,
+        transactionType: "break",
+        variantQtyDelta: plan.qtyPickUnits,
+        variantQtyBefore: targetLevel.variantQty,
+        variantQtyAfter: targetLevel.variantQty + plan.qtyPickUnits,
+        sourceState: "transformed",
+        targetState: "on_hand",
+        referenceType: "replenishment_task",
+        referenceId,
+        userId: params.userId ?? null,
+        notes,
+      }, tx);
+    });
+
+    const notifyAfterCommit = async () => {
+      this.triggerNotifyChange(plan.sourceVariantId, "replenishment-case-break-out");
+      this.triggerNotifyChange(plan.pickVariantId, "replenishment-case-break-in");
+    };
+    if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
+    else await notifyAfterCommit();
+    return { movedBaseUnits: plan.movedBaseUnits, qtyPickUnits: plan.qtyPickUnits };
+  }
+
+  // ---------------------------------------------------------------------------
   // TRANSFER
   // ---------------------------------------------------------------------------
 
@@ -1356,6 +1597,11 @@ export class InventoryUseCases {
     qty: number;
     userId?: string;
     notes?: string;
+    /** Audit reference for the owning workflow. Generic transfers retain the legacy internal reference. */
+    referenceType?: string;
+    referenceId?: string;
+    /** Internal transaction orchestration hook; effects run only after the caller commits. */
+    deferUntilCommit?: (effect: () => Promise<void>) => void;
     /**
      * When true, allow the transfer to also move the spillover reserved
      * allocation (and re-point eligible pending order lines) from source to
@@ -1527,8 +1773,8 @@ export class InventoryUseCases {
         variantQtyAfter: sourceLevel.variantQty - params.qty,
         sourceState: "on_hand",
         targetState: "on_hand",
-        referenceType: "internal",
-        referenceId: null,
+        referenceType: params.referenceType ?? "internal",
+        referenceId: params.referenceId ?? null,
         notes: params.notes ?? null,
         userId: params.userId ?? null,
       }, tx);
@@ -1546,8 +1792,8 @@ export class InventoryUseCases {
           variantQtyAfter: reserved - reservedToMove,
           sourceState: "reserved",
           targetState: "reserved",
-          referenceType: "internal",
-          referenceId: null,
+          referenceType: params.referenceType ?? "internal",
+          referenceId: params.referenceId ?? null,
           notes:
             `Moved ${reservedToMove} reserved unit(s) with stock transfer; ` +
             `re-pointed ${orderItemsRepointed} pending order line(s)` +
@@ -1558,7 +1804,9 @@ export class InventoryUseCases {
       }
     });
 
-    this.triggerNotifyChange(params.productVariantId, "transfer");
+    const notifyAfterCommit = async () => this.triggerNotifyChange(params.productVariantId, "transfer");
+    if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
+    else await notifyAfterCommit();
     return { reservedMoved, orderItemsRepointed };
   }
 
