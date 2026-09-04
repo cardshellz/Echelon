@@ -83,7 +83,7 @@ export function createAuthorityAwareInventoryAtpService(
   );
 }
 
-async function loadAndLockRuntimeAuthority(client: PoolClient): Promise<{
+export async function loadAndLockRuntimeAuthority(client: PoolClient): Promise<{
   authority: "legacy" | "canonical";
   authorityRevision: string;
   activationRunId: string | null;

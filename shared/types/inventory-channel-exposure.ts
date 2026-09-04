@@ -408,6 +408,137 @@ export const inventoryChannelExposurePreviewSchema = z.object({
   });
 });
 
+const inventoryChannelExposureRuntimeIssueSchema = z.object({
+  code: nonblank(100),
+  message: nonblank(1000),
+  context: z.record(z.unknown()),
+}).strict();
+
+const activeChannelExposurePolicyEvidenceSchema = z.object({
+  scopeKey: nonblank(200),
+  policyId: positiveInteger,
+  version: positiveInteger,
+  definitionHash: sha256Hex,
+}).strict();
+
+const activePublicationVariantMappingEvidenceSchema = z.object({
+  mappingId: positiveInteger,
+  version: positiveInteger,
+  definitionHash: sha256Hex,
+  externalInventoryItemId: nonblank(240),
+  externalSku: z.string().trim().min(1).max(100).nullable(),
+}).strict();
+
+const inventoryChannelExposureRuntimeRowSchema = z.object({
+  productVariantId: positiveInteger,
+  sku: z.string().max(100).nullable(),
+  unitsPerVariant: positiveInteger,
+  canonicalAtpUnits: plannerNonnegativeQuantitySchema,
+  sharedUnits: plannerNonnegativeQuantitySchema,
+  afterHoldbackUnits: plannerNonnegativeQuantitySchema,
+  cappedUnits: plannerNonnegativeQuantitySchema,
+  publishedUnits: plannerNonnegativeQuantitySchema,
+  sourceWarehouseBreakdown: z.array(z.object({
+    warehouseId: positiveInteger,
+    canonicalAtpUnits: plannerNonnegativeQuantitySchema,
+  }).strict()),
+  policy: resolvedChannelExposurePolicySchema.nullable(),
+  mapping: activePublicationVariantMappingEvidenceSchema.nullable(),
+  blockers: z.array(inventoryChannelExposureRuntimeIssueSchema),
+  warnings: z.array(inventoryChannelExposureRuntimeIssueSchema),
+}).strict().superRefine((row, context) => {
+  const warehouseIds = row.sourceWarehouseBreakdown.map((entry) => entry.warehouseId);
+  const warehouseTotal = row.sourceWarehouseBreakdown.reduce(
+    (total, entry) => total + BigInt(entry.canonicalAtpUnits),
+    BigInt(0),
+  );
+  if (new Set(warehouseIds).size !== warehouseIds.length
+    || warehouseTotal !== BigInt(row.canonicalAtpUnits)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sourceWarehouseBreakdown"],
+      message: "Runtime warehouse ATP rows must be unique and sum to exact-target canonical ATP.",
+    });
+  }
+});
+
+const inventoryChannelExposureRuntimeTargetSchema = z.object({
+  publicationTargetId: positiveInteger,
+  publicationTargetRevision: plannerPositiveQuantitySchema,
+  channelId: positiveInteger,
+  channelName: nonblank(100),
+  channelProvider: nonblank(30),
+  channelConnectionId: positiveInteger,
+  providerScopeType: z.enum(["account", "location"]),
+  externalScopeId: nonblank(240),
+  publicationAuthority: z.literal("echelon"),
+  publicationTargetState: z.literal("live"),
+  sourceBinding: z.object({
+    bindingId: positiveInteger,
+    version: positiveInteger,
+    definitionHash: sha256Hex,
+    fulfillmentNodeIds: z.array(positiveInteger).min(1),
+    warehouseIds: z.array(positiveInteger).min(1),
+  }).strict().nullable(),
+  selectedPolicies: z.array(activeChannelExposurePolicyEvidenceSchema),
+  rows: z.array(inventoryChannelExposureRuntimeRowSchema),
+  blockers: z.array(inventoryChannelExposureRuntimeIssueSchema),
+  publishable: z.boolean(),
+}).strict().superRefine((target, context) => {
+  const actuallyPublishable = target.rows.length > 0
+    && target.blockers.length === 0
+    && target.rows.every((row) => row.blockers.length === 0
+      && row.policy !== null
+      && row.mapping !== null);
+  if (target.publishable !== actuallyPublishable) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["publishable"],
+      message: "Runtime target publishability must match its complete active evidence.",
+    });
+  }
+});
+
+/**
+ * Snapshot-bound calculation output for a canonical, exact publication target.
+ * This contract does not itself enqueue or send provider writes.
+ */
+export const inventoryChannelExposureRuntimePlanSchema = z.object({
+  authority: z.enum(["legacy", "canonical"]),
+  authorityRevision: plannerPositiveQuantitySchema,
+  activationRunId: plannerPositiveQuantitySchema.nullable(),
+  productId: positiveInteger,
+  snapshotFingerprint: sha256Hex.nullable(),
+  snapshotCapturedAt: z.string().datetime().nullable(),
+  targets: z.array(inventoryChannelExposureRuntimeTargetSchema),
+  providerWriteAttempted: z.literal(false),
+  outboxEnqueued: z.literal(false),
+}).strict().superRefine((plan, context) => {
+  const legacyShapeValid = plan.authority !== "legacy"
+    || (plan.activationRunId === null
+      && plan.snapshotFingerprint === null
+      && plan.snapshotCapturedAt === null
+      && plan.targets.length === 0);
+  const canonicalShapeValid = plan.authority !== "canonical"
+    || (plan.activationRunId !== null
+      && plan.snapshotFingerprint !== null
+      && plan.snapshotCapturedAt !== null);
+  if (!legacyShapeValid || !canonicalShapeValid) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Runtime channel-exposure evidence does not match the selected ATP authority.",
+    });
+  }
+  const targetIds = plan.targets.map((target) => target.publicationTargetId);
+  if (new Set(targetIds).size !== targetIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["targets"],
+      message: "A runtime publication target may appear only once.",
+    });
+  }
+});
+
 export type ChannelExposurePolicyScope = z.infer<typeof channelExposurePolicyScopeSchema>;
 export type ChannelExposurePolicyValue = z.infer<typeof channelExposurePolicyValueSchema>;
 export type ChannelExposurePolicyVersion = z.infer<typeof channelExposurePolicyVersionSchema>;
@@ -440,3 +571,6 @@ export type InventoryPublicationTargetCommandResult = z.infer<
 >;
 export type ResolvedChannelExposurePolicy = z.infer<typeof resolvedChannelExposurePolicySchema>;
 export type InventoryChannelExposurePreview = z.infer<typeof inventoryChannelExposurePreviewSchema>;
+export type InventoryChannelExposureRuntimePlan = z.infer<
+  typeof inventoryChannelExposureRuntimePlanSchema
+>;
