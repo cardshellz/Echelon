@@ -454,6 +454,20 @@ export interface DropshipEbayOAuthBrandingConfiguration {
   status: "ready" | "attention_required" | "blocked";
   suggestedDisplayTitle: string;
   message: string;
+  customerFacingAppName: {
+    value: string;
+    source: "default" | "saved";
+    revision: number;
+    providerStatus:
+      | "not_saved"
+      | "pending_external_update"
+      | "manually_verified"
+      | "provider_applied"
+      | "provider_failed";
+    providerResourceChanged: boolean;
+    updatedAt: string | null;
+    updatedBy: string | null;
+  };
   clientId: {
     source: string | null;
     fingerprint: string | null;
@@ -480,6 +494,22 @@ export interface DropshipEbayOAuthBrandingConfiguration {
 
 export interface DropshipEbayOAuthBrandingResponse {
   configuration: DropshipEbayOAuthBrandingConfiguration;
+}
+
+export interface DropshipEbayOAuthBrandingMutationResponse
+  extends DropshipEbayOAuthBrandingResponse {
+  idempotentReplay: boolean;
+}
+
+export interface DropshipEbayOAuthBrandingUpdateInput {
+  customerFacingAppName: string;
+  expectedRevision: number;
+  idempotencyKey: string;
+}
+
+export interface DropshipEbayOAuthBrandingVerificationInput {
+  expectedRevision: number;
+  idempotencyKey: string;
 }
 
 export interface DropshipAuditEventSearchResponse {
@@ -4175,6 +4205,44 @@ export function createDropshipIdempotencyKey(prefix: string): string {
   return `${prefix}:${suffix}`;
 }
 
+export function buildDropshipEbayOAuthBrandingUpdateInput(input: {
+  customerFacingAppName: string;
+  expectedRevision: number;
+  idempotencyKey: string;
+}): DropshipEbayOAuthBrandingUpdateInput {
+  const customerFacingAppName = requiredTrimmedString(
+    input.customerFacingAppName,
+    "customerFacingAppName",
+    200,
+  );
+  if (containsControlCharacter(customerFacingAppName)) {
+    throw new Error(
+      "customerFacingAppName cannot contain control characters.",
+    );
+  }
+  if (!Number.isInteger(input.expectedRevision) || input.expectedRevision < 0) {
+    throw new Error("expectedRevision must be a non-negative integer.");
+  }
+  return {
+    customerFacingAppName,
+    expectedRevision: input.expectedRevision,
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
+}
+
+export function buildDropshipEbayOAuthBrandingVerificationInput(input: {
+  expectedRevision: number;
+  idempotencyKey: string;
+}): DropshipEbayOAuthBrandingVerificationInput {
+  if (!Number.isInteger(input.expectedRevision) || input.expectedRevision <= 0) {
+    throw new Error("expectedRevision must be a positive integer.");
+  }
+  return {
+    expectedRevision: input.expectedRevision,
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
+}
+
 export function buildDropshipOrderAcceptInput(input: {
   idempotencyKey: string;
 }): DropshipOrderAcceptInput {
@@ -4705,6 +4773,13 @@ function requiredTrimmedString(
     throw new Error(`${key} must be ${maxLength} characters or fewer.`);
   }
   return trimmed;
+}
+
+function containsControlCharacter(value: string): boolean {
+  return Array.from(value).some((character) => {
+    const codePoint = character.charCodeAt(0);
+    return codePoint <= 31 || codePoint === 127;
+  });
 }
 
 function optionalTrimmedString(

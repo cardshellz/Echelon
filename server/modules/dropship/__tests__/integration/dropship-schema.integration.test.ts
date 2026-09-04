@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { config } from "dotenv";
 import pg from "pg";
 import { PgDropshipCarrierClaimRepository } from "../../infrastructure/dropship-carrier-claim.repository";
+import { PgDropshipEbayOAuthBrandingRepository } from "../../infrastructure/dropship-ebay-oauth-branding.repository";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 
@@ -23,6 +24,13 @@ const carrierProtectionMigrationSql = readFileSync(
 );
 const carrierClaimMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0586_dropship_carrier_claim_intake.sql"),
+  "utf8",
+);
+const channelConnectionBrandingMigrationSql = readFileSync(
+  resolve(
+    process.cwd(),
+    "migrations/0653_dropship_channel_connection_branding.sql",
+  ),
   "utf8",
 );
 
@@ -234,6 +242,7 @@ describeWithDb("Dropship V2 database foundation", () => {
     await client.query(adminCommandMigrationSql);
     await client.query(carrierProtectionMigrationSql);
     await client.query(carrierClaimMigrationSql);
+    await client.query(channelConnectionBrandingMigrationSql);
 
     const channel = await client.query<{ id: number }>(
       `INSERT INTO channels.channels (name, type, provider, status, sync_enabled, sync_mode)
@@ -289,6 +298,80 @@ describeWithDb("Dropship V2 database foundation", () => {
         [vendorAId],
       ),
       "23505",
+    );
+  });
+
+  it("persists connection-branding requests and confirmations as immutable idempotent revisions", async () => {
+    const repository = new PgDropshipEbayOAuthBrandingRepository(
+      createSavepointPool(client!),
+    );
+    const requestedAt = new Date("2026-09-04T12:00:00.000Z");
+    const request = {
+      environment: "production" as const,
+      providerResourceFingerprint: "a".repeat(64),
+      expectedRevision: 0,
+      customerFacingAppName: "Card Shellz",
+      idempotencyKey: "branding-integration-request-1",
+      requestHash: "branding-integration-request-hash",
+      actor: { actorType: "admin" as const, actorId: "integration-admin" },
+      now: requestedAt,
+    };
+
+    const created = await repository.requestCustomerFacingAppName(request);
+    const replayed = await repository.requestCustomerFacingAppName(request);
+    const confirmed = await repository.confirmExternalUpdate({
+      environment: "production",
+      providerResourceFingerprint: "a".repeat(64),
+      expectedRevision: 1,
+      idempotencyKey: "branding-integration-confirm-1",
+      requestHash: "branding-integration-confirm-hash",
+      actor: { actorType: "admin", actorId: "integration-admin" },
+      now: new Date("2026-09-04T12:05:00.000Z"),
+    });
+
+    expect(created.idempotentReplay).toBe(false);
+    expect(replayed.idempotentReplay).toBe(true);
+    expect(replayed.revision.id).toBe(created.revision.id);
+    expect(confirmed.revision).toMatchObject({
+      revision: 2,
+      customerFacingAppName: "Card Shellz",
+      providerStatus: "manually_verified",
+      action: "external_update_verified",
+    });
+
+    const rows = await client!.query<{
+      revision: number;
+      provider_status: string;
+    }>(
+      `SELECT revision, provider_status
+       FROM dropship.dropship_channel_connection_branding_revisions
+       WHERE platform = 'ebay'
+         AND use_case = 'dropship_vendor_store_oauth'
+         AND environment = 'production'
+       ORDER BY revision`,
+    );
+    expect(rows.rows).toEqual([
+      { revision: 1, provider_status: "pending_external_update" },
+      { revision: 2, provider_status: "manually_verified" },
+    ]);
+
+    const auditCount = await client!.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM dropship.dropship_audit_events
+       WHERE entity_type = 'dropship_channel_connection_branding_revisions'`,
+    );
+    expect(auditCount.rows[0]?.count).toBe("2");
+
+    await expectDatabaseError(
+      client!,
+      () =>
+        client!.query(
+          `UPDATE dropship.dropship_channel_connection_branding_revisions
+           SET customer_facing_app_name = 'Tampered'
+           WHERE id = $1`,
+          [created.revision.id],
+        ),
+      "P0001",
     );
   });
 

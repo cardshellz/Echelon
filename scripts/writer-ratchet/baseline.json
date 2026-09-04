@@ -147,6 +147,9 @@
   "dropship.dropship_catalog_rules": [
     "modules/dropship"
   ],
+  "dropship.dropship_channel_connection_branding_revisions": [
+    "modules/dropship"
+  ],
   "dropship.dropship_collection_attempts": [
     "modules/dropship"
   ],

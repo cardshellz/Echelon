@@ -287,7 +287,6 @@ type DropshipOpsTabValue =
   | "dogfood"
   | "catalog"
   | "shipping"
-  | "oauth-branding"
   | "order-intake"
   | "wallet-ops"
   | "stores"
@@ -369,7 +368,6 @@ const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
   "dogfood",
   "catalog",
   "shipping",
-  "oauth-branding",
   "order-intake",
   "wallet-ops",
   "stores",
@@ -1051,10 +1049,6 @@ export default function Dropship() {
 
           <TabsContent value="shipping" className="m-0">
             <ShippingConfigTab />
-          </TabsContent>
-
-          <TabsContent value="oauth-branding" className="m-0">
-            <EbayOAuthBrandingAdminPanel />
           </TabsContent>
 
           <TabsContent value="order-intake" className="m-0">
@@ -4459,6 +4453,8 @@ function StoreConnectionOpsTab() {
         savingWarehouseConnectionId={savingWarehouseConnectionId}
         total={storeConnectionsQuery.data?.total ?? 0}
       />
+
+      <EbayOAuthBrandingAdminPanel />
 
       <Dialog
         open={warehouseTarget !== null}
