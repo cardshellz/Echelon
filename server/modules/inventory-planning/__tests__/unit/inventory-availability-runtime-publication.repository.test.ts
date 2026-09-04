@@ -112,10 +112,12 @@ describe("PostgresInventoryAvailabilityRuntimePublicationExecutor", () => {
             return { rows: [{
               publication_target_id: 5,
               publication_target_revision: "2",
+              destination_kind: "channel_connection",
               channel_id: 3,
               channel_name: "Shopify US",
               provider_key: "shopify",
               channel_connection_id: 33,
+              dropship_store_connection_id: null,
               provider_scope_type: "location",
               external_scope_id: "location-1",
               active_binding_id: 7,
@@ -175,6 +177,51 @@ describe("PostgresInventoryAvailabilityRuntimePublicationExecutor", () => {
         externalSku: "EA",
       }],
     })]);
+  });
+
+  it("rejects a Dropship-owned target before the channel outbox can clear it to zero", async () => {
+    const client = fakeClient(
+      { authority: "canonical", authority_revision: "9", activation_run_id: "44" },
+      {
+        activationState: "active",
+        query: async (sql) => {
+          if (sql.includes("FROM inventory.inventory_publication_targets AS target")) {
+            return { rows: [{
+              publication_target_id: 5,
+              publication_target_revision: "2",
+              destination_kind: "dropship_store_connection",
+              channel_id: 3,
+              channel_name: "eBay Dropship",
+              provider_key: "ebay",
+              channel_connection_id: null,
+              dropship_store_connection_id: 91,
+              provider_scope_type: "account",
+              external_scope_id: "seller-account-1",
+              active_binding_id: 7,
+              binding_lifecycle_status: "sealed",
+              warehouse_id: 1,
+              fulfillment_node_lifecycle_status: "active",
+              warehouse_is_active: true,
+            }] };
+          }
+          if (sql.includes("FROM inventory.channel_exposure_policy_heads")
+            || sql.includes("FROM inventory.publication_variant_mapping_heads")) {
+            return { rows: [] };
+          }
+          throw new Error(`Unexpected SQL: ${sql}`);
+        },
+      },
+    );
+    const executor = new PostgresInventoryAvailabilityRuntimePublicationExecutor(
+      { connect: vi.fn(async () => client), options: { max: 2 } } as never,
+    );
+
+    await expect(executor.execute((context) => context.loadActivePublicationTargets({
+      productId: 10,
+      productVariantIds: [101],
+      channelId: 3,
+    }))).rejects.toMatchObject({ code: "INVENTORY_PUBLICATION_DESTINATION_UNSUPPORTED" });
+    expect(transactionCommands(client).at(-1)).toBe("ROLLBACK");
   });
 
   it("coalesces an identical reusable desired state instead of creating another revision", async () => {

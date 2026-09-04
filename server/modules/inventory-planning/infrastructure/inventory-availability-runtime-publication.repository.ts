@@ -30,10 +30,12 @@ type ClientPool = Pick<Pool, "connect"> & { options?: { max?: number } };
 interface TargetRow extends Record<string, unknown> {
   publication_target_id: number;
   publication_target_revision: string;
+  destination_kind: string;
   channel_id: number;
   channel_name: string;
   provider_key: string;
-  channel_connection_id: number;
+  channel_connection_id: number | null;
+  dropship_store_connection_id: number | null;
   provider_scope_type: string;
   external_scope_id: string;
   active_binding_id: number | null;
@@ -248,9 +250,11 @@ async function loadZeroPublicationTargets(
   const targetRows = (await client.query<TargetRow>(
     `SELECT target.id AS publication_target_id,
             target.revision::text AS publication_target_revision,
+            target.destination_kind,
             target.channel_id, channel_row.name AS channel_name,
             lower(channel_row.provider) AS provider_key,
-            target.channel_connection_id, target.provider_scope_type,
+            target.channel_connection_id, target.dropship_store_connection_id,
+            target.provider_scope_type,
             target.external_scope_id, binding_head.active_binding_id,
             binding.lifecycle_status AS binding_lifecycle_status,
             node.warehouse_id,
@@ -375,6 +379,19 @@ async function loadZeroPublicationTargets(
       return [positiveInteger(row.warehouse_id, "sourceWarehouseId")];
     });
     const channelId = positiveInteger(first.channel_id, "channelId");
+    if (first.destination_kind !== "channel_connection"
+      || first.channel_connection_id == null
+      || first.dropship_store_connection_id != null) {
+      throw runtimeError(
+        "INVENTORY_PUBLICATION_DESTINATION_UNSUPPORTED",
+        "The canonical publication outbox does not support this destination owner yet.",
+        {
+          publicationTargetId: targetId,
+          destinationKind: first.destination_kind,
+          dropshipStoreConnectionId: first.dropship_store_connection_id,
+        },
+      );
+    }
     return {
       publicationTargetId: targetId,
       publicationTargetRevision: positiveBigintString(
