@@ -115,11 +115,22 @@ implements InventoryChannelExposureAdminStore {
       FROM channels.channel_connections
       ORDER BY channel_id, id
     `));
+    const dropshipStoreRows = rows(await this.database.execute(sql`
+      SELECT connection.id, connection.vendor_id, vendor.business_name AS vendor_name,
+             connection.platform, connection.status,
+             COALESCE(connection.external_display_name, connection.external_account_id,
+               connection.shop_domain) AS external_account_label
+      FROM dropship.dropship_store_connections AS connection
+      JOIN dropship.dropship_vendors AS vendor ON vendor.id = connection.vendor_id
+      ORDER BY vendor.business_name, connection.platform, connection.id
+    `));
     const targetRows = rows(await this.database.execute(sql`
-      SELECT id, channel_id, channel_connection_id, fulfillment_node_id,
+      SELECT id, destination_kind, channel_id, channel_connection_id,
+             dropship_store_connection_id, fulfillment_node_id,
              provider_scope_type, external_scope_id, publication_authority, state, revision
       FROM inventory.inventory_publication_targets
-      ORDER BY channel_id, channel_connection_id, external_scope_id, id
+      ORDER BY channel_id, destination_kind, channel_connection_id,
+               dropship_store_connection_id, external_scope_id, id
     `));
     const nodeRows = rows(await this.database.execute(sql`
       SELECT node.id, node.code, node.name, node.node_type, node.warehouse_id,
@@ -222,10 +233,23 @@ implements InventoryChannelExposureAdminStore {
           })),
         };
       }),
+      dropshipStores: dropshipStoreRows.map((row) => ({
+        id: positiveInteger(row.id, "dropshipStore.id"),
+        vendorId: positiveInteger(row.vendor_id, "dropshipStore.vendorId"),
+        vendorName: String(row.vendor_name),
+        platform: String(row.platform),
+        status: String(row.status),
+        externalAccountLabel: nullableText(row.external_account_label),
+      })),
       publicationTargets: targetRows.map((row) => ({
         id: positiveInteger(row.id, "target.id"),
+        destinationKind: String(row.destination_kind),
         channelId: positiveInteger(row.channel_id, "target.channelId"),
-        channelConnectionId: positiveInteger(row.channel_connection_id, "target.connectionId"),
+        channelConnectionId: nullablePositiveInteger(row.channel_connection_id, "target.connectionId"),
+        dropshipStoreConnectionId: nullablePositiveInteger(
+          row.dropship_store_connection_id,
+          "target.dropshipStoreConnectionId",
+        ),
         legacyFulfillmentNodeId: positiveInteger(row.fulfillment_node_id, "target.legacyNodeId"),
         providerScopeType: String(row.provider_scope_type),
         externalScopeId: String(row.external_scope_id),
@@ -269,22 +293,37 @@ implements InventoryChannelExposureAdminStore {
       if (replay) return replay;
       await insertReceipt(tx, receiptKey, command.requestHash, command.occurredAt);
       await validatePublicationTarget(tx, command);
+      const destinationId = command.destinationKind === "channel_connection"
+        ? command.channelConnectionId!
+        : command.dropshipStoreConnectionId!;
       const identityKey = [
-        command.channelConnectionId,
+        command.destinationKind,
+        destinationId,
         command.providerScopeType,
         command.externalScopeId,
       ].join(":");
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(${PUBLICATION_TARGET_LOCK_NAMESPACE}, hashtext(${identityKey}))
       `);
-      const duplicateRows = rows(await tx.execute(sql`
-        SELECT id
-        FROM inventory.inventory_publication_targets
-        WHERE channel_connection_id = ${command.channelConnectionId}
-          AND provider_scope_type = ${command.providerScopeType}
-          AND external_scope_id = ${command.externalScopeId}
-        FOR SHARE
-      `));
+      const duplicateRows = rows(await tx.execute(command.destinationKind === "channel_connection"
+        ? sql`
+            SELECT id
+            FROM inventory.inventory_publication_targets
+            WHERE destination_kind = 'channel_connection'
+              AND channel_connection_id = ${command.channelConnectionId}
+              AND provider_scope_type = ${command.providerScopeType}
+              AND external_scope_id = ${command.externalScopeId}
+            FOR SHARE
+          `
+        : sql`
+            SELECT id
+            FROM inventory.inventory_publication_targets
+            WHERE destination_kind = 'dropship_store_connection'
+              AND dropship_store_connection_id = ${command.dropshipStoreConnectionId}
+              AND provider_scope_type = ${command.providerScopeType}
+              AND external_scope_id = ${command.externalScopeId}
+            FOR SHARE
+          `));
       if (duplicateRows.length > 0) {
         throw new InventoryAvailabilityMasterDataError(
           409,
@@ -293,8 +332,10 @@ implements InventoryChannelExposureAdminStore {
         );
       }
       const inserted = await tx.insert(inventoryPublicationTargets).values({
+        destinationKind: command.destinationKind,
         channelId: command.channelId,
         channelConnectionId: command.channelConnectionId,
+        dropshipStoreConnectionId: command.dropshipStoreConnectionId,
         fulfillmentNodeId: command.legacyFulfillmentNodeId,
         providerScopeType: command.providerScopeType,
         externalScopeId: command.externalScopeId,
@@ -323,8 +364,10 @@ implements InventoryChannelExposureAdminStore {
         action: "inventory_availability.publication_target.created_disabled",
         target: `inventory.inventory_publication_target:${publicationTargetId}`,
         changes: { before: null, after: {
+          destinationKind: command.destinationKind,
           channelId: command.channelId,
           channelConnectionId: command.channelConnectionId,
+          dropshipStoreConnectionId: command.dropshipStoreConnectionId,
           legacyFulfillmentNodeId: command.legacyFulfillmentNodeId,
           providerScopeType: command.providerScopeType,
           externalScopeId: command.externalScopeId,
@@ -842,7 +885,8 @@ implements InventoryChannelExposureAdminStore {
     return this.database.transaction(async (tx) => {
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`);
       const targetRows = rows(await tx.execute(sql`
-        SELECT id, channel_id, channel_connection_id, provider_scope_type,
+        SELECT id, destination_kind, channel_id, channel_connection_id,
+               dropship_store_connection_id, provider_scope_type,
                external_scope_id, publication_authority, state, revision
         FROM inventory.inventory_publication_targets
         WHERE id = ${publicationTargetId}
@@ -856,9 +900,13 @@ implements InventoryChannelExposureAdminStore {
         );
       }
       const channelId = positiveInteger(target.channel_id, "target.channelId");
-      const channelConnectionId = positiveInteger(
+      const channelConnectionId = nullablePositiveInteger(
         target.channel_connection_id,
         "target.channelConnectionId",
+      );
+      const dropshipStoreConnectionId = nullablePositiveInteger(
+        target.dropship_store_connection_id,
+        "target.dropshipStoreConnectionId",
       );
       const sellableVariantRows = rows(await tx.execute(sql`
         SELECT id
@@ -1080,8 +1128,10 @@ implements InventoryChannelExposureAdminStore {
         });
       return inventoryChannelExposurePreviewSchema.parse({
         publicationTargetId,
+        destinationKind: String(target.destination_kind),
         channelId,
         channelConnectionId,
+        dropshipStoreConnectionId,
         providerScopeType: String(target.provider_scope_type),
         externalScopeId: String(target.external_scope_id),
         publicationAuthority: String(target.publication_authority),
@@ -1130,20 +1180,32 @@ async function validatePublicationTarget(
   tx: Transaction,
   command: CreateInventoryPublicationTargetCommand,
 ): Promise<void> {
-  const found = rows(await tx.execute(sql`
-    SELECT connection.id AS connection_id, node.id AS node_id
-    FROM channels.channel_connections AS connection
-    JOIN warehouse.fulfillment_nodes AS node
-      ON node.id = ${command.legacyFulfillmentNodeId}
-     AND node.lifecycle_status <> 'retired'
-    WHERE connection.id = ${command.channelConnectionId}
-      AND connection.channel_id = ${command.channelId}
-  `));
+  const found = rows(await tx.execute(command.destinationKind === "channel_connection"
+    ? sql`
+        SELECT connection.id AS destination_id, node.id AS node_id
+        FROM channels.channel_connections AS connection
+        JOIN warehouse.fulfillment_nodes AS node
+          ON node.id = ${command.legacyFulfillmentNodeId}
+         AND node.lifecycle_status <> 'retired'
+        WHERE connection.id = ${command.channelConnectionId}
+          AND connection.channel_id = ${command.channelId}
+      `
+    : sql`
+        SELECT connection.id AS destination_id, node.id AS node_id
+        FROM dropship.dropship_store_connections AS connection
+        JOIN channels.channels AS policy_channel ON policy_channel.id = ${command.channelId}
+        JOIN warehouse.fulfillment_nodes AS node
+          ON node.id = ${command.legacyFulfillmentNodeId}
+         AND node.lifecycle_status <> 'retired'
+        WHERE connection.id = ${command.dropshipStoreConnectionId}
+      `));
   if (found.length === 0) {
     throw new InventoryAvailabilityMasterDataError(
       409,
       "INVENTORY_PUBLICATION_TARGET_SCOPE_INVALID",
-      "The channel connection and compatibility fulfillment node must exist and match the target scope.",
+      command.destinationKind === "channel_connection"
+        ? "The channel connection and compatibility fulfillment node must exist and match the target scope."
+        : "The allocation-policy channel, Dropship store connection, and compatibility fulfillment node must exist.",
     );
   }
 }
@@ -1619,6 +1681,10 @@ function positiveInteger(value: unknown, field: string): number {
     throw invalidDatabaseValue(field);
   }
   return parsed;
+}
+
+function nullablePositiveInteger(value: unknown, field: string): number | null {
+  return value == null ? null : positiveInteger(value, field);
 }
 
 function nonnegativeInteger(value: unknown, field: string): number {

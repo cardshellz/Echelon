@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type { ResolvedChannelExposurePolicy } from "@shared/types/inventory-channel-exposure";
+import {
+  createInventoryPublicationTargetRequestSchema,
+  type ResolvedChannelExposurePolicy,
+} from "@shared/types/inventory-channel-exposure";
 
 import {
   calculateChannelExposure,
@@ -22,6 +25,79 @@ const completeChannelValue = {
 };
 
 describe("inventory channel exposure domain", () => {
+  it("normalizes legacy channel target requests to an exact channel destination", () => {
+    expect(createInventoryPublicationTargetRequestSchema.parse({
+      channelId: 7,
+      channelConnectionId: 9,
+      legacyFulfillmentNodeId: 11,
+      providerScopeType: "location",
+      externalScopeId: "location-1",
+      publicationAuthority: "echelon",
+      changeReason: "Preserve the existing request contract",
+      idempotencyKey: "target-channel-1",
+    })).toEqual({
+      destinationKind: "channel_connection",
+      channelId: 7,
+      channelConnectionId: 9,
+      dropshipStoreConnectionId: null,
+      legacyFulfillmentNodeId: 11,
+      providerScopeType: "location",
+      externalScopeId: "location-1",
+      publicationAuthority: "echelon",
+      changeReason: "Preserve the existing request contract",
+      idempotencyKey: "target-channel-1",
+    });
+  });
+
+  it("accepts a dropship store destination with an independent allocation dial", () => {
+    expect(createInventoryPublicationTargetRequestSchema.parse({
+      destinationKind: "dropship_store_connection",
+      channelId: 7,
+      channelConnectionId: null,
+      dropshipStoreConnectionId: 13,
+      legacyFulfillmentNodeId: 11,
+      providerScopeType: "account",
+      externalScopeId: "seller-account-1",
+      publicationAuthority: "echelon",
+      changeReason: "Prepare an inactive dropship target",
+      idempotencyKey: "target-dropship-1",
+    })).toMatchObject({
+      destinationKind: "dropship_store_connection",
+      channelId: 7,
+      channelConnectionId: null,
+      dropshipStoreConnectionId: 13,
+    });
+  });
+
+  it.each([
+    {
+      destinationKind: "channel_connection" as const,
+      channelConnectionId: null,
+      dropshipStoreConnectionId: null,
+    },
+    {
+      destinationKind: "channel_connection" as const,
+      channelConnectionId: 9,
+      dropshipStoreConnectionId: 13,
+    },
+    {
+      destinationKind: "dropship_store_connection" as const,
+      channelConnectionId: 9,
+      dropshipStoreConnectionId: 13,
+    },
+  ])("rejects an invalid exact destination identity: %o", (destination) => {
+    expect(createInventoryPublicationTargetRequestSchema.safeParse({
+      ...destination,
+      channelId: 7,
+      legacyFulfillmentNodeId: 11,
+      providerScopeType: "account",
+      externalScopeId: "seller-account-1",
+      publicationAuthority: "echelon",
+      changeReason: "Invalid identity must fail",
+      idempotencyKey: "target-invalid-1",
+    }).success).toBe(false);
+  });
+
   it("resolves every field SKU then product then channel", () => {
     const result = resolveChannelExposurePolicy({
       channelId: 7,

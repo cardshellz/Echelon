@@ -354,6 +354,7 @@ function publicationIntentsFromPlan(
         },
       );
     }
+    const channelConnectionId = channelConnectionForOutbox(target, context, plan.productId);
     for (const row of target.rows) {
       if (productVariantId != null && row.productVariantId !== productVariantId) continue;
       if (!row.policy?.eligible) continue;
@@ -377,7 +378,7 @@ function publicationIntentsFromPlan(
           channelId: target.channelId,
           channelName: target.channelName,
           providerKey: target.channelProvider.toLowerCase(),
-          channelConnectionId: target.channelConnectionId,
+          channelConnectionId,
           providerScopeType: target.providerScopeType,
           externalScopeId: target.externalScopeId,
           sourceBindingId: target.sourceBinding.bindingId,
@@ -421,6 +422,27 @@ function publicationBlockerErrorCode(blockerCodes: readonly string[]): string {
   return "CANONICAL_PUBLICATION_TARGET_BLOCKED";
 }
 
+function channelConnectionForOutbox(
+  target: InventoryChannelExposureRuntimePlan["targets"][number],
+  context: InventoryAvailabilityRuntimePublicationContext,
+  productId: number,
+): number {
+  if (target.destinationKind !== "channel_connection" || target.channelConnectionId === null) {
+    throw publicationError(
+      "CANONICAL_PUBLICATION_DESTINATION_UNSUPPORTED",
+      "The canonical publication outbox does not support this destination owner yet.",
+      context,
+      {
+        productId,
+        publicationTargetId: target.publicationTargetId,
+        destinationKind: target.destinationKind,
+        dropshipStoreConnectionId: target.dropshipStoreConnectionId,
+      },
+    );
+  }
+  return target.channelConnectionId;
+}
+
 function intent(
   target: ActiveInventoryPublicationTarget,
   mapping: ActivePublicationVariantMapping,
@@ -453,22 +475,23 @@ function assertUnambiguousProviderScopes(
   context: InventoryAvailabilityRuntimePublicationContext,
   productId: number,
 ): void {
-  const scopesByChannelVariant = new Map<string, CanonicalInventoryPublicationIntent[]>();
+  const scopesByDestinationVariant = new Map<string, CanonicalInventoryPublicationIntent[]>();
   for (const row of rows) {
-    const key = `${row.channelId}:${row.productVariantId}`;
-    const values = scopesByChannelVariant.get(key) ?? [];
+    const key = `${row.channelConnectionId}:${row.productVariantId}`;
+    const values = scopesByDestinationVariant.get(key) ?? [];
     values.push(row);
-    scopesByChannelVariant.set(key, values);
+    scopesByDestinationVariant.set(key, values);
   }
-  for (const values of scopesByChannelVariant.values()) {
+  for (const values of scopesByDestinationVariant.values()) {
     if (values.length <= 1 || !values.some((row) => row.providerScopeType === "account")) continue;
     throw publicationError(
       "CANONICAL_PUBLICATION_TARGET_SCOPE_AMBIGUOUS",
-      "An account-scoped publication target overlaps another live target for the same channel and variant.",
+      "An account-scoped publication target overlaps another live target for the same destination and variant.",
       context,
       {
         productId,
         channelId: values[0]!.channelId,
+        channelConnectionId: values[0]!.channelConnectionId,
         productVariantId: values[0]!.productVariantId,
         publicationTargetIds: values.map((row) => row.publicationTargetId).sort((a, b) => a - b),
       },

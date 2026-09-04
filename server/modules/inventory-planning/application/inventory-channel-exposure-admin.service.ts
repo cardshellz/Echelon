@@ -215,11 +215,11 @@ function requestHashFor(commandType: string, actorId: string, request: unknown):
   return createHash("sha256").update(canonicalJson({ commandType, actorId, request }), "utf8").digest("hex");
 }
 
-function parseRequest<T>(
-  schema: z.ZodType<T>,
+function parseRequest<TSchema extends z.ZodType>(
+  schema: TSchema,
   value: unknown,
   code: string,
-): T {
+): z.output<TSchema> {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
     throw new InventoryAvailabilityMasterDataError(

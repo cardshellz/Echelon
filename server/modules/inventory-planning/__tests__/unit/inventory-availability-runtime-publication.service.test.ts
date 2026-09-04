@@ -75,6 +75,25 @@ describe("AuthorityAwareInventoryPublicationService", () => {
     expect(context.enqueueFullPublications).not.toHaveBeenCalled();
   });
 
+  it("fails closed before enqueueing a Dropship-owned canonical target", async () => {
+    const context = runtimeContext("canonical");
+    const plan = runtimePlan([target()]);
+    context.planProduct = vi.fn(async () => ({
+      ...plan,
+      targets: plan.targets.map((publicationTarget) => ({
+        ...publicationTarget,
+        destinationKind: "dropship_store_connection" as const,
+        channelConnectionId: null,
+        dropshipStoreConnectionId: 91,
+      })),
+    }));
+    const service = new AuthorityAwareInventoryPublicationService(executor(context));
+
+    await expect(service.publishProduct({ productId: 10, dryRun: false }, vi.fn()))
+      .rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_DESTINATION_UNSUPPORTED" });
+    expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+  });
+
   it("forces an inactive mapped variant to zero without requiring it in the active ATP snapshot", async () => {
     const context = runtimeContext("canonical");
     const service = new AuthorityAwareInventoryPublicationService(executor(context));
@@ -118,6 +137,17 @@ describe("AuthorityAwareInventoryPublicationService", () => {
     await expect(service.publishProduct({ productId: 10, dryRun: false }, vi.fn()))
       .rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_TARGET_SCOPE_AMBIGUOUS" });
     expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+  });
+
+  it("does not treat separate channel connections as an overlapping provider scope", async () => {
+    const context = runtimeContext("canonical", [
+      { ...target(), providerScopeType: "account", externalScopeId: "account-3" },
+      { ...target(), publicationTargetId: 6, channelConnectionId: 34, externalScopeId: "location-2" },
+    ]);
+    const service = new AuthorityAwareInventoryPublicationService(executor(context));
+
+    await expect(service.publishProduct({ productId: 10, dryRun: false }, vi.fn()))
+      .resolves.toMatchObject({ authority: "canonical", publication: { enqueuedRows: 2 } });
   });
 
   it("uses active canonical mappings to enumerate full-sync products", async () => {
@@ -192,13 +222,15 @@ function runtimePlan(targets: ActiveInventoryPublicationTarget[]): InventoryChan
     snapshotCapturedAt: "2026-09-04T12:00:00.000Z",
     targets: targets.map((target) => {
       const mapping = target.mappings[0] ?? null;
-      return {
-        publicationTargetId: target.publicationTargetId,
-        publicationTargetRevision: target.publicationTargetRevision,
-        channelId: target.channelId,
+        return {
+          publicationTargetId: target.publicationTargetId,
+          publicationTargetRevision: target.publicationTargetRevision,
+          destinationKind: "channel_connection" as const,
+          channelId: target.channelId,
         channelName: target.channelName,
         channelProvider: target.providerKey,
-        channelConnectionId: target.channelConnectionId,
+          channelConnectionId: target.channelConnectionId,
+          dropshipStoreConnectionId: null,
         providerScopeType: target.providerScopeType,
         externalScopeId: target.externalScopeId,
         publicationAuthority: "echelon" as const,

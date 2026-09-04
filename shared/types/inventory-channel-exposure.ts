@@ -123,15 +123,17 @@ export const publicationVariantMappingHeadSchema = z.object({
 
 export const inventoryPublicationTargetAdminSchema = z.object({
   id: positiveInteger,
+  destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
   channelId: positiveInteger,
-  channelConnectionId: positiveInteger,
+  channelConnectionId: positiveInteger.nullable(),
+  dropshipStoreConnectionId: positiveInteger.nullable(),
   legacyFulfillmentNodeId: positiveInteger,
   providerScopeType: z.enum(["account", "location"]),
   externalScopeId: nonblank(240),
   publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
   state: z.enum(["disabled", "preview", "live"]),
   revision: postgresBigintString,
-}).strict();
+}).strict().superRefine(validatePublicationDestination);
 
 export const legacyPublicationMappingCandidateSchema = z.object({
   channelId: positiveInteger,
@@ -170,6 +172,14 @@ export const inventoryChannelExposureAdminViewSchema = z.object({
       id: positiveInteger,
       externalAccountLabel: z.string().max(255).nullable(),
     }).strict()),
+  }).strict()),
+  dropshipStores: z.array(z.object({
+    id: positiveInteger,
+    vendorId: positiveInteger,
+    vendorName: nonblank(255),
+    platform: z.enum(["ebay", "shopify", "tiktok", "instagram", "bigcommerce"]),
+    status: nonblank(30),
+    externalAccountLabel: z.string().max(255).nullable(),
   }).strict()),
   publicationTargets: z.array(inventoryPublicationTargetAdminSchema),
   fulfillmentNodes: z.array(z.object({
@@ -233,15 +243,18 @@ export const savePublicationSourceBindingDraftRequestSchema = z.object({
 });
 
 export const createInventoryPublicationTargetRequestSchema = z.object({
+  destinationKind: z.enum(["channel_connection", "dropship_store_connection"])
+    .default("channel_connection"),
   channelId: positiveInteger,
-  channelConnectionId: positiveInteger,
+  channelConnectionId: positiveInteger.nullable().default(null),
+  dropshipStoreConnectionId: positiveInteger.nullable().default(null),
   legacyFulfillmentNodeId: positiveInteger,
   providerScopeType: z.enum(["account", "location"]),
   externalScopeId: nonblank(240),
   publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
   changeReason: nonblank(1000),
   idempotencyKey: nonblank(120),
-}).strict();
+}).strict().superRefine(validatePublicationDestination);
 
 export const setInventoryPublicationTargetPreviewStateRequestSchema = z.object({
   publicationTargetId: positiveInteger,
@@ -310,8 +323,10 @@ export const resolvedChannelExposurePolicySchema = z.object({
 
 export const inventoryChannelExposurePreviewSchema = z.object({
   publicationTargetId: positiveInteger,
+  destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
   channelId: positiveInteger,
-  channelConnectionId: positiveInteger,
+  channelConnectionId: positiveInteger.nullable(),
+  dropshipStoreConnectionId: positiveInteger.nullable(),
   providerScopeType: z.enum(["account", "location"]),
   externalScopeId: nonblank(240),
   publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
@@ -369,6 +384,7 @@ export const inventoryChannelExposurePreviewSchema = z.object({
   providerWriteAttempted: z.literal(false),
   outboxEnqueued: z.literal(false),
 }).strict().superRefine((preview, context) => {
+  validatePublicationDestination(preview, context);
   const modelEvidence = [preview.modelId, preview.modelVersion, preview.modelDefinitionHash];
   if (![0, 3].includes(modelEvidence.filter((value) => value !== null).length)) {
     context.addIssue({
@@ -465,10 +481,12 @@ const inventoryChannelExposureRuntimeRowSchema = z.object({
 const inventoryChannelExposureRuntimeTargetSchema = z.object({
   publicationTargetId: positiveInteger,
   publicationTargetRevision: plannerPositiveQuantitySchema,
+  destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
   channelId: positiveInteger,
   channelName: nonblank(100),
   channelProvider: nonblank(30),
-  channelConnectionId: positiveInteger,
+  channelConnectionId: positiveInteger.nullable(),
+  dropshipStoreConnectionId: positiveInteger.nullable(),
   providerScopeType: z.enum(["account", "location"]),
   externalScopeId: nonblank(240),
   publicationAuthority: z.literal("echelon"),
@@ -485,6 +503,7 @@ const inventoryChannelExposureRuntimeTargetSchema = z.object({
   blockers: z.array(inventoryChannelExposureRuntimeIssueSchema),
   publishable: z.boolean(),
 }).strict().superRefine((target, context) => {
+  validatePublicationDestination(target, context);
   const actuallyPublishable = target.rows.length > 0
     && target.blockers.length === 0
     && target.rows.every((row) => row.blockers.length === 0
@@ -574,3 +593,23 @@ export type InventoryChannelExposurePreview = z.infer<typeof inventoryChannelExp
 export type InventoryChannelExposureRuntimePlan = z.infer<
   typeof inventoryChannelExposureRuntimePlanSchema
 >;
+
+function validatePublicationDestination(
+  value: {
+    destinationKind: "channel_connection" | "dropship_store_connection";
+    channelConnectionId: number | null;
+    dropshipStoreConnectionId: number | null;
+  },
+  context: z.RefinementCtx,
+): void {
+  const valid = value.destinationKind === "channel_connection"
+    ? value.channelConnectionId !== null && value.dropshipStoreConnectionId === null
+    : value.channelConnectionId === null && value.dropshipStoreConnectionId !== null;
+  if (!valid) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["destinationKind"],
+      message: "Publication destination kind must have exactly its matching connection identifier.",
+    });
+  }
+}

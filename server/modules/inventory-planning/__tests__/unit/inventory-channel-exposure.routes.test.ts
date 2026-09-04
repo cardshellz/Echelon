@@ -32,7 +32,7 @@ describe("inventory channel exposure routes", () => {
     requirePermissionMock.mockClear();
     service = {
       getView: vi.fn(async () => ({
-        products: [], selectedProduct: null, channels: [], publicationTargets: [],
+        products: [], selectedProduct: null, channels: [], dropshipStores: [], publicationTargets: [],
         fulfillmentNodes: [], policyHeads: [], sourceBindingHeads: [],
         variantMappingHeads: [], legacyMappingCandidates: [],
         runtimeAuthority: "legacy_channel_allocation_rules", providerWriteEnabled: false,
@@ -115,7 +115,11 @@ describe("inventory channel exposure routes", () => {
     );
     expect(response.status).toBe(201);
     expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "edit");
-    expect(service.createPublicationTarget).toHaveBeenCalledWith(request, "operator-1");
+    expect(service.createPublicationTarget).toHaveBeenCalledWith({
+      ...request,
+      destinationKind: "channel_connection",
+      dropshipStoreConnectionId: null,
+    }, "operator-1");
     expect(response.body).toMatchObject({ state: "disabled", providerWriteAttempted: false });
   });
 

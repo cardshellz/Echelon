@@ -430,7 +430,8 @@ function configurationDigest(dryRun: InventoryActivationDryRun): string {
     model: [product.draftModelId, product.draftModelVersion, product.draftDefinitionHash],
     publications: product.proposedPublications.map((publication) => ({
       target: [publication.publicationTargetId, publication.publicationTargetRevision,
-        publication.channelId, publication.channelConnectionId, publication.providerScopeType,
+        publication.channelId, publication.destinationKind, publication.channelConnectionId,
+        publication.dropshipStoreConnectionId, publication.providerScopeType,
         publication.externalScopeId, publication.publicationAuthority],
       source: [publication.sourceBindingId, publication.sourceBindingVersion,
         publication.sourceBindingDefinitionHash, publication.sourceWarehouseIds],
@@ -445,7 +446,8 @@ async function assertDryRunSelectionsCurrent(client: PoolClient, dryRun: Invento
   const publications = dryRun.products.flatMap((product) => product.proposedPublications);
   const targetIds = unique(publications.map((row) => row.publicationTargetId));
   const targets = targetIds.length === 0 ? [] : (await client.query<Record<string, unknown>>(
-    `SELECT id, channel_id, channel_connection_id, provider_scope_type, external_scope_id,
+    `SELECT id, destination_kind, channel_id, channel_connection_id,
+            dropship_store_connection_id, provider_scope_type, external_scope_id,
             publication_authority, state, revision
      FROM inventory.inventory_publication_targets WHERE id = ANY($1::integer[]) FOR SHARE`,
     [targetIds],
@@ -455,7 +457,9 @@ async function assertDryRunSelectionsCurrent(client: PoolClient, dryRun: Invento
     const current = targetById.get(publication.publicationTargetId);
     if (!current
       || Number(current.channel_id) !== publication.channelId
-      || Number(current.channel_connection_id) !== publication.channelConnectionId
+      || String(current.destination_kind) !== publication.destinationKind
+      || nullableNumber(current.channel_connection_id) !== publication.channelConnectionId
+      || nullableNumber(current.dropship_store_connection_id) !== publication.dropshipStoreConnectionId
       || String(current.provider_scope_type) !== publication.providerScopeType
       || String(current.external_scope_id) !== publication.externalScopeId
       || String(current.publication_authority) !== publication.publicationAuthority
@@ -620,6 +624,11 @@ async function publicationIntents(
             readback.publication_target_id, readback.product_variant_id,
             readback.observed_quantity,
             readback.observed_at,
+            COALESCE(readback.destination_kind_snapshot,
+              CASE WHEN COALESCE(readback.channel_connection_id_snapshot,
+                publication.channel_connection_id_snapshot) IS NOT NULL
+                THEN 'channel_connection'
+              END) AS destination_kind_snapshot,
             readback.channel_connection_id_snapshot,
             readback.provider_scope_type_snapshot,
             readback.external_scope_id_snapshot,
@@ -638,6 +647,13 @@ async function publicationIntents(
     `${row.publication_target_id}:${row.product_variant_id}`, row,
   ]));
   return publishRows.map((row) => {
+    if (row.destinationKind !== "channel_connection" || row.channelConnectionId === null) {
+      throw invalidEvidence(
+        "ACTIVATION_DROPSHIP_PUBLICATION_UNSUPPORTED",
+        "Dropship publication cannot enter activation until its outbox adapter and readback are installed.",
+        { publicationTargetId: row.publicationTargetId },
+      );
+    }
     if (!row.externalInventoryItemId) {
       throw invalidEvidence("ACTIVATION_PUBLICATION_IDENTITY_MISSING", "A publish row has no provider inventory identity.");
     }
@@ -646,6 +662,7 @@ async function publicationIntents(
       const readback = readbackByKey.get(`${row.publicationTargetId}:${row.productVariantId}`);
       if (!readback
         || String(readback.external_inventory_item_id_snapshot ?? "") !== row.externalInventoryItemId
+        || String(readback.destination_kind_snapshot ?? "") !== row.destinationKind
         || Number(readback.channel_connection_id_snapshot) !== row.channelConnectionId
         || String(readback.provider_scope_type_snapshot ?? "") !== row.providerScopeType
         || String(readback.external_scope_id_snapshot ?? "") !== row.externalScopeId
@@ -846,6 +863,10 @@ function dedupeRefs<T extends { key: string; id: number | null; hash: string | n
 
 function unique(values: number[]): number[] {
   return [...new Set(values)].sort((left, right) => left - right);
+}
+
+function nullableNumber(value: unknown): number | null {
+  return value == null ? null : Number(value);
 }
 
 function count(value: unknown, field: string): number {

@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 
 const migration = readFileSync("migrations/0632_inventory_channel_exposure_policy.sql", "utf8");
 const readinessMigration = readFileSync("migrations/0633_inventory_publication_readiness.sql", "utf8");
+const destinationOwnerMigration = readFileSync(
+  "migrations/0652_inventory_publication_destination_owners.sql",
+  "utf8",
+);
 const schema = readFileSync("shared/schema/inventory-planning.schema.ts", "utf8");
 const routes = readFileSync(
   "server/modules/inventory-planning/interfaces/http/inventory-channel-exposure.routes.ts",
@@ -41,6 +45,40 @@ describe("inventory channel exposure inactive foundation", () => {
     expect(readinessMigration).toContain("a draft publication variant mapping must be owned by its exact head");
     expect(readinessMigration).toContain("a publication target must be previewed before it becomes live");
     expect(readinessMigration).not.toMatch(/INSERT\s+INTO\s+inventory\.(publication_variant|inventory_publication)/i);
+  });
+
+  it("adds exact channel or dropship destination ownership without seeding runtime state", () => {
+    expect(destinationOwnerMigration).toContain(
+      "ADD COLUMN destination_kind VARCHAR(30) NOT NULL DEFAULT 'channel_connection'",
+    );
+    expect(destinationOwnerMigration).toContain(
+      "REFERENCES dropship.dropship_store_connections(id)",
+    );
+    expect(destinationOwnerMigration).toContain(
+      "inventory_publication_targets_destination_chk",
+    );
+    expect(destinationOwnerMigration).toContain(
+      "inventory_publication_targets_channel_identity_uq",
+    );
+    expect(destinationOwnerMigration).toContain(
+      "inventory_publication_targets_dropship_identity_uq",
+    );
+    expect(destinationOwnerMigration).toContain(
+      "NEW.dropship_store_connection_id IS DISTINCT FROM OLD.dropship_store_connection_id",
+    );
+    expect(destinationOwnerMigration).toContain(
+      "inventory_publication_readbacks_destination_snapshot_chk",
+    );
+    expect(destinationOwnerMigration).toContain(
+      "DROP CONSTRAINT inventory_publication_readbacks_exact_target_snapshot_chk",
+    );
+    expect(destinationOwnerMigration).toContain(
+      "ADD CONSTRAINT inventory_publication_readbacks_exact_target_snapshot_chk",
+    );
+    expect(destinationOwnerMigration).toContain(
+      "OR dropship_store_connection_id_snapshot IS NOT NULL",
+    );
+    expect(destinationOwnerMigration).not.toMatch(/INSERT\s+INTO/i);
   });
 
   it("gates disabled configuration and preview admission but exposes no live publication command", () => {

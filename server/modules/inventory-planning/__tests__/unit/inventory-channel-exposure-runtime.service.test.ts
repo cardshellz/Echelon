@@ -97,6 +97,27 @@ describe("InventoryChannelExposureRuntimeService", () => {
     expect(plan.targets[0]!.publishable).toBe(false);
   });
 
+  it("plans a Dropship storefront with the same exact-target ATP and channel dial", async () => {
+    const dropship = target();
+    dropship.destinationKind = "dropship_store_connection";
+    dropship.channelConnectionId = null;
+    dropship.dropshipStoreConnectionId = 77;
+    dropship.channelProvider = "ebay";
+    const service = new InventoryChannelExposureRuntimeService(executor(canonicalContext([dropship])));
+
+    const plan = await service.planProduct(10);
+
+    expect(plan.targets[0]).toMatchObject({
+      destinationKind: "dropship_store_connection",
+      channelId: 7,
+      channelProvider: "ebay",
+      channelConnectionId: null,
+      dropshipStoreConnectionId: 77,
+      publishable: true,
+    });
+    expect(plan.targets[0]!.rows.map((row) => row.publishedUnits)).toEqual(["25", "7"]);
+  });
+
   it("keeps exact physical SKU supply when an invalid conversion path fails locally", async () => {
     const context = canonicalContext([target()]);
     context.supplySnapshot = canonicalSnapshot({ invalidModel: true });
@@ -187,10 +208,12 @@ function target(input: {
   return {
     publicationTargetId,
     publicationTargetRevision: "3",
+    destinationKind: "channel_connection",
     channelId,
     channelName: `Channel ${channelId}`,
     channelProvider: "shopify",
     channelConnectionId: 71 + channelId,
+    dropshipStoreConnectionId: null,
     providerScopeType: "location",
     externalScopeId: `location-${publicationTargetId}`,
     publicationAuthority: "echelon",
