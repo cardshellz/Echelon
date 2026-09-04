@@ -266,6 +266,20 @@ type InventoryCore = {
     userId?: string;
     notes?: string;
   }) => Promise<void>;
+  executeReplenishmentMove: (params: {
+    taskId: number;
+    replenMethod: string;
+    sourceVariant: { id: number; productId: number | null; unitsPerVariant: number };
+    pickVariant: { id: number; productId: number | null; unitsPerVariant: number };
+    fromLocationId: number;
+    toLocationId: number;
+    qtySourceUnits: number;
+    qtyTargetUnits: number;
+    userId?: string;
+    notes?: string;
+    occurredAt?: Date;
+    deferUntilCommit?: (effect: () => Promise<void>) => void;
+  }) => Promise<{ movedBaseUnits: number; qtyPickUnits: number }>;
   receiveInventory: (params: {
     productVariantId: number;
     warehouseLocationId: number;
@@ -292,6 +306,7 @@ export class ReplenishmentUseCases {
   constructor(
     private readonly db: DrizzleDb,
     private readonly inventoryUseCases: InventoryUseCases,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   private async withPickBinTaskLock<T>(
@@ -441,7 +456,7 @@ export class ReplenishmentUseCases {
       FROM inventory.inventory_levels il
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.product_variant_id = ${sourceVariantId}
-        AND il.variant_qty > 0
+        AND il.variant_qty - il.reserved_qty > 0
     `);
 
     return (result.rows ?? []).some((row: any) => this.blockedTaskSourceMatches(task, {
@@ -459,14 +474,17 @@ export class ReplenishmentUseCases {
     }).where(eq(replenTasks.id, task.id));
   }
 
-  private async getInventoryQty(
+  private async getAvailableInventoryQty(
     productVariantId: number | null | undefined,
     warehouseLocationId: number | null | undefined,
   ): Promise<number> {
     if (!productVariantId || !warehouseLocationId) return 0;
 
     const [level] = await this.db
-      .select({ variantQty: inventoryLevels.variantQty })
+      .select({
+        variantQty: inventoryLevels.variantQty,
+        reservedQty: inventoryLevels.reservedQty,
+      })
       .from(inventoryLevels)
       .where(and(
         eq(inventoryLevels.productVariantId, productVariantId),
@@ -474,7 +492,7 @@ export class ReplenishmentUseCases {
       ))
       .limit(1);
 
-    return Number(level?.variantQty ?? 0);
+    return Math.max(0, Number(level?.variantQty ?? 0) - Number(level?.reservedQty ?? 0));
   }
 
   private requiredSourceUnits(task: ReplenTask): number {
@@ -492,7 +510,7 @@ export class ReplenishmentUseCases {
   private async reResolveTaskSourceBeforeExecute(task: ReplenTask, userId?: string): Promise<ReplenTask> {
     const sourceVariantId = task.sourceProductVariantId ?? task.pickProductVariantId;
     const requiredSourceUnits = this.requiredSourceUnits(task);
-    const currentSourceQty = await this.getInventoryQty(sourceVariantId, task.fromLocationId);
+    const currentSourceQty = await this.getAvailableInventoryQty(sourceVariantId, task.fromLocationId);
     if (currentSourceQty >= requiredSourceUnits) return task;
 
     if (!task.pickProductVariantId || !task.toLocationId) {
@@ -533,7 +551,7 @@ export class ReplenishmentUseCases {
     }
 
     const resolvedSourceVariantId = eval_.resolvedSourceVariantId ?? task.pickProductVariantId;
-    const resolvedSourceQty = await this.getInventoryQty(resolvedSourceVariantId, eval_.sourceLocation.id);
+    const resolvedSourceQty = await this.getAvailableInventoryQty(resolvedSourceVariantId, eval_.sourceLocation.id);
     if (resolvedSourceQty < Math.max(1, eval_.qtySourceUnits)) {
       const reason = `resolved source ${eval_.sourceVariant.sku ?? `#${resolvedSourceVariantId}`} at ${eval_.sourceLocation.code} has ${resolvedSourceQty}, needs ${eval_.qtySourceUnits}`;
       await this.blockTaskNoCurrentSource(task, reason);
@@ -1131,38 +1149,9 @@ export class ReplenishmentUseCases {
       );
     }
 
-    const executableTask = await this.reResolveTaskSourceBeforeExecute(task as ReplenTask, userId);
+    await this.reResolveTaskSourceBeforeExecute(task as ReplenTask, userId);
 
-    // Load source and pick variants
-    const [sourceVariant] = executableTask.sourceProductVariantId
-      ? await this.db
-          .select()
-          .from(productVariants)
-          .where(eq(productVariants.id, executableTask.sourceProductVariantId))
-          .limit(1)
-      : [null];
-
-    const [pickVariant] = executableTask.pickProductVariantId
-      ? await this.db
-          .select()
-          .from(productVariants)
-          .where(eq(productVariants.id, executableTask.pickProductVariantId))
-          .limit(1)
-      : [null];
-
-    // Read replen method from the task itself (persisted at creation).
-    // Fall back to rule lookup for legacy tasks that predate the column.
-    let replenMethod = (executableTask as any).replenMethod || "full_case";
-    if (replenMethod === "full_case" && executableTask.replenRuleId) {
-      // Legacy fallback: task didn't have replenMethod, try the linked rule
-      const [rule] = await this.db
-        .select()
-        .from(replenRules)
-        .where(eq(replenRules.id, executableTask.replenRuleId))
-        .limit(1);
-      if (rule?.replenMethod) replenMethod = rule.replenMethod;
-    }
-
+    const postCommitEffects: Array<() => Promise<void>> = [];
     const movedBaseUnits = await this.db.transaction(async (tx: any) => {
       const lockedTaskResult = await tx.execute(sql`
         SELECT *
@@ -1182,147 +1171,87 @@ export class ReplenishmentUseCases {
         );
       }
 
+      const [currentTask] = await tx
+        .select()
+        .from(replenTasks)
+        .where(eq(replenTasks.id, taskId))
+        .limit(1);
+      if (!currentTask) throw new Error(`Replen task ${taskId} not found after lock acquisition`);
+
+      const [sourceVariant] = currentTask.sourceProductVariantId
+        ? await tx
+            .select()
+            .from(productVariants)
+            .where(eq(productVariants.id, currentTask.sourceProductVariantId))
+            .limit(1)
+        : [null];
+      const [pickVariant] = currentTask.pickProductVariantId
+        ? await tx
+            .select()
+            .from(productVariants)
+            .where(eq(productVariants.id, currentTask.pickProductVariantId))
+            .limit(1)
+        : [null];
+
+      // Read the immutable execution method from the locked task. Legacy rows
+      // that predate the method column retain the linked-rule fallback.
+      let replenMethod = currentTask.replenMethod || "full_case";
+      if (replenMethod === "full_case" && currentTask.replenRuleId) {
+        const [rule] = await tx
+          .select()
+          .from(replenRules)
+          .where(eq(replenRules.id, currentTask.replenRuleId))
+          .limit(1);
+        if (rule?.replenMethod) replenMethod = rule.replenMethod;
+      }
+
       let moved = 0;
       const invTx = this.inventoryUseCases.withTx(tx);
-
-      if (
-        replenMethod === "case_break" &&
-        sourceVariant &&
-        pickVariant &&
-        sourceVariant.id !== pickVariant.id
-      ) {
-        const baseUnitsFromSource = executableTask.qtySourceUnits * sourceVariant.unitsPerVariant;
-        const pickVariantUnits = Math.floor(baseUnitsFromSource / pickVariant.unitsPerVariant);
-        const remainder = baseUnitsFromSource - (pickVariantUnits * pickVariant.unitsPerVariant);
-
-        if (pickVariantUnits <= 0) {
-          throw new Error(
-            `Case break would produce 0 pick units: ${executableTask.qtySourceUnits} x ${sourceVariant.unitsPerVariant} ` +
-            `base units / ${pickVariant.unitsPerVariant} per pick unit`,
-          );
-        }
-
-        const breakNotes = `Case break: ${executableTask.qtySourceUnits} x ${sourceVariant.name} -> ${pickVariantUnits} x ${pickVariant.name}` +
-          (remainder > 0 ? ` (${remainder} base units remainder credited back to source)` : "");
-
-        if (remainder > 0 && pickVariant.unitsPerVariant > 1) {
-          // The source units don't divide evenly into pick units. Find the
-          // product's base variant (unitsPerVariant=1) to credit the remainder.
-          const baseVariantRows = await tx.execute(sql`
-            SELECT id, name, sku, units_per_variant
-            FROM catalog.product_variants
-            WHERE product_id = ${pickVariant.productId}
-              AND units_per_variant = 1
-              AND is_active = true
-            LIMIT 1
-          `);
-          const baseVariant = (baseVariantRows.rows as any[])[0];
-          if (!baseVariant) {
-            throw new Error(
-              `Case break produces ${remainder} indivisible base units (no base-unit variant found for product ${pickVariant.productId}). ` +
-              `Create a variant with unitsPerVariant=1, or choose a divisible break quantity.`,
-            );
-          }
-        }
-
-        // Decrement source variant. adjustInventory returns the ACTUAL cost
-        // consumed FIFO from the source lots — carry it onto the broken-out units
-        // so the new lots inherit the real cost of the case(s) opened, instead of
-        // falling back to the pick variant's (possibly stale) book cost.
-        const breakConsumed = await invTx.adjustInventory({
-          productVariantId: sourceVariant.id,
-          warehouseLocationId: executableTask.fromLocationId,
-          qtyDelta: -executableTask.qtySourceUnits,
-          reason: breakNotes,
-          userId: userId ?? undefined,
-        });
-
-        // Cost per base unit actually consumed (weighted across the FIFO source
-        // lots). Left undefined when the source had no cost (e.g. historical $0
-        // lots) so resolveCost falls back rather than forcing 0.
-        const baseConsumed = (breakConsumed.consumedQty ?? 0) * sourceVariant.unitsPerVariant;
-        const perBaseCostCents =
-          baseConsumed > 0 ? (breakConsumed.consumedCostCents ?? 0) / baseConsumed : 0;
-        const pickUnitCostCents =
-          perBaseCostCents > 0 ? Math.round(perBaseCostCents * pickVariant.unitsPerVariant) : undefined;
-        const remainderUnitCostCents =
-          perBaseCostCents > 0 ? Math.round(perBaseCostCents) : undefined;
-
-        // Increment target variant — inherit the case's actual per-unit cost.
-        await invTx.adjustInventory({
-          productVariantId: pickVariant.id,
-          warehouseLocationId: executableTask.toLocationId,
-          qtyDelta: pickVariantUnits,
-          reason: `Replen case-break to pick location` +
-            (remainder > 0 ? ` (${remainder} base units remainder credited back to source)` : ""),
-          userId: userId ?? undefined,
-          unitCostCents: pickUnitCostCents,
-        });
-
-        // Credit remainder back to source — conservation of units.
-        // If breaking 1 case of 12 into packs of 10, the 2 leftover base
-        // units stay at the source as the smallest sellable variant.
-        if (remainder > 0) {
-          if (pickVariant.unitsPerVariant === 1) {
-            // Pick variant IS the base unit — credit directly
-            await invTx.adjustInventory({
-              productVariantId: pickVariant.id,
-              warehouseLocationId: executableTask.fromLocationId,
-              qtyDelta: remainder,
-              reason: `Case-break remainder: ${remainder} x ${pickVariant.name} at source`,
-              userId: userId ?? undefined,
-              unitCostCents: remainderUnitCostCents,
-            });
-          } else {
-            // Remainder can't form complete pick units — credit as base variant
-            const baseVariantRows = await tx.execute(sql`
-              SELECT id, name FROM catalog.product_variants
-              WHERE product_id = ${pickVariant.productId}
-                AND units_per_variant = 1 AND is_active = true
-              LIMIT 1
-            `);
-            const baseVariant = (baseVariantRows.rows as any[])[0];
-            await invTx.adjustInventory({
-              productVariantId: baseVariant.id,
-              warehouseLocationId: executableTask.fromLocationId,
-              qtyDelta: remainder,
-              reason: `Case-break remainder: ${remainder} base units credited as ${baseVariant.name}`,
-              userId: userId ?? undefined,
-              unitCostCents: remainderUnitCostCents,
-            });
-          }
-        }
-
-        moved = baseUnitsFromSource;
-      } else {
-        const variantId = executableTask.sourceProductVariantId ?? executableTask.pickProductVariantId!;
-        const variant = sourceVariant ?? pickVariant;
-        const baseUnits = executableTask.qtySourceUnits * (variant?.unitsPerVariant ?? 1);
-
-        await invTx.transfer({
-          productVariantId: variantId,
-          fromLocationId: executableTask.fromLocationId,
-          toLocationId: executableTask.toLocationId,
-          qty: executableTask.qtySourceUnits,
-          userId,
-          notes: `Replen task #${taskId} (full_case)`,
-        });
-
-        moved = baseUnits;
+      if (!sourceVariant || !pickVariant || !currentTask.fromLocationId || !currentTask.toLocationId) {
+        throw new Error(`Replen task ${taskId} is missing its frozen source, destination, or variant identity`);
       }
+      const occurredAt = this.clock();
+      if (!(occurredAt instanceof Date) || Number.isNaN(occurredAt.getTime())) {
+        throw new Error("Replenishment execution clock returned an invalid timestamp");
+      }
+      const movement = await invTx.executeReplenishmentMove({
+        taskId,
+        replenMethod,
+        sourceVariant: {
+          id: sourceVariant.id,
+          productId: sourceVariant.productId ?? null,
+          unitsPerVariant: sourceVariant.unitsPerVariant,
+        },
+        pickVariant: {
+          id: pickVariant.id,
+          productId: pickVariant.productId ?? null,
+          unitsPerVariant: pickVariant.unitsPerVariant,
+        },
+        fromLocationId: currentTask.fromLocationId,
+        toLocationId: currentTask.toLocationId,
+        qtySourceUnits: currentTask.qtySourceUnits,
+        qtyTargetUnits: currentTask.qtyTargetUnits,
+        userId,
+        occurredAt,
+        notes: `Replen task #${taskId} (${replenMethod})`,
+        deferUntilCommit: (effect) => postCommitEffects.push(effect),
+      });
+      moved = movement.movedBaseUnits;
 
       await tx
         .update(replenTasks)
         .set({
           status: "completed",
           qtyCompleted: moved,
-          completedAt: new Date(),
-          assignedTo: userId ?? executableTask.assignedTo,
+          completedAt: occurredAt,
+          assignedTo: userId ?? currentTask.assignedTo,
         })
         .where(eq(replenTasks.id, taskId));
 
       return moved;
     });
+
+    for (const effect of postCommitEffects) await effect();
 
     await this.unblockDependentTasks(taskId, userId);
 
@@ -1575,7 +1504,7 @@ export class ReplenishmentUseCases {
     if (!eval_.sourceLocation) return null;
 
     const resolvedSourceVariantId = eval_.resolvedSourceVariantId ?? task.pickProductVariantId;
-    const sourceQty = await this.getInventoryQty(resolvedSourceVariantId, eval_.sourceLocation.id);
+    const sourceQty = await this.getAvailableInventoryQty(resolvedSourceVariantId, eval_.sourceLocation.id);
     if (sourceQty < Math.max(1, eval_.qtySourceUnits)) {
       await this.blockTaskNoCurrentSource(
         task,
@@ -1728,7 +1657,7 @@ export class ReplenishmentUseCases {
           FROM inventory.inventory_levels ril
           JOIN warehouse.warehouse_locations rwl ON rwl.id = ril.warehouse_location_id
             JOIN catalog.product_variants source_pv ON source_pv.id = ril.product_variant_id
-          WHERE ril.variant_qty > 0
+          WHERE ril.variant_qty - ril.reserved_qty > 0
             AND source_pv.product_id = pv.product_id
             AND rwl.location_type = effective.source_location_type
             AND (wl.warehouse_id IS NULL OR rwl.warehouse_id = wl.warehouse_id)
@@ -2344,7 +2273,7 @@ export class ReplenishmentUseCases {
           eq(inventoryLevels.warehouseLocationId, guidance.sourceLocationId),
         ))
         .limit(1);
-      sourceQty = sourceLevel?.variantQty ?? 0;
+      sourceQty = Math.max(0, Number(sourceLevel?.variantQty ?? 0) - Number(sourceLevel?.reservedQty ?? 0));
     }
 
     return {
@@ -2785,7 +2714,7 @@ export class ReplenishmentUseCases {
         action: "replen_inline",
         source: {
           locationCode: sourceLocation.code,
-          availableQty: sourceLevel?.variantQty ?? 0,
+          availableQty: Math.max(0, Number(sourceLevel?.variantQty ?? 0) - Number(sourceLevel?.reservedQty ?? 0)),
           variantSku: guidance.sourceVariantSku ?? sourceVariant?.sku ?? variant.sku,
           variantName: (guidance.sourceVariantName ?? sourceVariant?.name) || sourceVariant?.sku || variant.sku,
         },
@@ -3661,7 +3590,7 @@ export class ReplenishmentUseCases {
           eq(inventoryLevels.warehouseLocationId, parentLocationId)
         )
       ).limit(1);
-      if (parentLevel && parentLevel.variantQty > 0) {
+      if (parentLevel && parentLevel.variantQty - parentLevel.reservedQty > 0) {
         const [parentLoc] = await this.db
           .select()
           .from(warehouseLocations)
@@ -3701,7 +3630,7 @@ export class ReplenishmentUseCases {
           eq(warehouseLocations.locationType, sourceLocationType),
           eq(warehouseLocations.isActive, 1),
           isNull(warehouseLocations.cycleCountFreezeId),
-          sql`${inventoryLevels.variantQty} > 0`,
+          sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} > 0`,
           ...(warehouseId != null
             ? [eq(warehouseLocations.warehouseId, warehouseId)]
             : []),
@@ -3709,7 +3638,7 @@ export class ReplenishmentUseCases {
       )
       .orderBy(
         sourcePriority === "smallest_first"
-          ? inventoryLevels.variantQty       // ascending = smallest first
+          ? sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty}` // ascending = smallest available first
           : inventoryLevels.updatedAt        // ascending = FIFO (oldest first)
       );
 
@@ -3739,6 +3668,10 @@ export class ReplenishmentUseCases {
  * await replen.checkReplenNeeded(variantId, locationId);
  * ```
  */
-export function createReplenishmentService(db: any, inventoryUseCases: any) {
-  return new ReplenishmentUseCases(db, inventoryUseCases);
+export function createReplenishmentService(
+  db: any,
+  inventoryUseCases: any,
+  clock: () => Date = () => new Date(),
+) {
+  return new ReplenishmentUseCases(db, inventoryUseCases, clock);
 }

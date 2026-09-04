@@ -61,7 +61,7 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
           };
         }),
       })),
-      execute: vi.fn(async () => ({ rows: [] })),
+      execute: vi.fn(async () => ({ rows: [{ id: 1 }, { id: 2 }] })),
       update: vi.fn(),
       delete: vi.fn(),
       transaction: vi.fn(),
@@ -96,5 +96,45 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
       qtyOnHand: 3,
       unitCostCents: 700,
     });
+  });
+
+  it("fails closed before writing when exact unreserved FIFO quantity is unavailable", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryLotService } = await import("../../lots.service");
+    const db = {
+      select: vi.fn(() => ({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn(async () => [{
+          id: 1,
+          productVariantId: 10,
+          warehouseLocationId: 20,
+          unitCostCents: 500,
+          qtyOnHand: 4,
+          qtyReserved: 3,
+          qtyPicked: 0,
+          receivedAt: new Date("2024-06-01"),
+          status: "active",
+        }]),
+      })),
+      execute: vi.fn(),
+      insert: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      transaction: vi.fn(),
+    } as any;
+
+    await expect(new InventoryLotService(db).transferLots({
+      productVariantId: 10,
+      fromLocationId: 20,
+      toLocationId: 30,
+      qty: 2,
+    })).rejects.toMatchObject({
+      code: "LOT_TRANSFER_SHORTFALL",
+      context: expect.objectContaining({ requestedQty: 2, attributableQty: 1 }),
+    });
+
+    expect(db.execute).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
   });
 });
