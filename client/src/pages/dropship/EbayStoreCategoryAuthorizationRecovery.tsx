@@ -11,6 +11,7 @@ import {
 } from "@/lib/dropship-ops-surface";
 import { dropshipPortalPath, isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
 import { storeOAuthEmailVerificationMessage } from "./store-oauth-verification-copy";
+import { StoreOAuthTargetConfirmationDialog } from "./StoreOAuthTargetConfirmationDialog";
 
 type PendingEbayAuthorizationAction = "send-code" | "verify-code" | "passkey-proof" | "oauth-start" | null;
 const EBAY_AUTHORIZATION_PERMISSION_ERROR_CODES = new Set([
@@ -18,7 +19,15 @@ const EBAY_AUTHORIZATION_PERMISSION_ERROR_CODES = new Set([
   "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
 ]);
 
-export function EbayStoreCategoryAuthorizationRecovery({ error }: { error: unknown }) {
+export function EbayStoreCategoryAuthorizationRecovery({
+  error,
+  storeConnectionId,
+  storeName,
+}: {
+  error: unknown;
+  storeConnectionId: number;
+  storeName: string;
+}) {
   const {
     principal,
     sensitiveProofs,
@@ -31,6 +40,7 @@ export function EbayStoreCategoryAuthorizationRecovery({ error }: { error: unkno
   const [pendingAction, setPendingAction] = useState<PendingEbayAuthorizationAction>(null);
   const [message, setMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
   const connectProofActive = useMemo(() => isDropshipSensitiveProofActive({
     principal,
     action: "connect_store",
@@ -96,6 +106,7 @@ export function EbayStoreCategoryAuthorizationRecovery({ error }: { error: unkno
         buildStoreConnectionOAuthStartInput({
           platform: "ebay",
           intent: "refresh_connection",
+          storeConnectionId,
           shopDomain: "",
           returnTo: dropshipPortalPath("/catalog"),
         }),
@@ -112,19 +123,37 @@ export function EbayStoreCategoryAuthorizationRecovery({ error }: { error: unkno
   }
 
   return (
-    <EbayStoreCategoryAuthorizationRecoveryView
-      connectProofActive={connectProofActive}
-      emailCodeSent={emailCodeSent}
-      errorMessage={errorMessage}
-      hasPasskey={principal?.hasPasskey ?? false}
-      message={message}
-      pendingAction={pendingAction}
-      permissionRequired={permissionRequired}
-      verificationCode={verificationCode}
-      onCancel={cancelAuthorization}
-      onStart={startAuthorization}
-      onVerificationCodeChange={setVerificationCode}
-    />
+    <>
+      <EbayStoreCategoryAuthorizationRecoveryView
+        connectProofActive={connectProofActive}
+        emailCodeSent={emailCodeSent}
+        errorMessage={errorMessage}
+        hasPasskey={principal?.hasPasskey ?? false}
+        message={message}
+        pendingAction={pendingAction}
+        permissionRequired={permissionRequired}
+        storeName={storeName}
+        verificationCode={verificationCode}
+        onCancel={cancelAuthorization}
+        onStart={emailCodeSent ? startAuthorization : () => setConfirmationOpen(true)}
+        onVerificationCodeChange={setVerificationCode}
+      />
+      <StoreOAuthTargetConfirmationDialog
+        intent="refresh_connection"
+        open={confirmationOpen}
+        target={{
+          storeConnectionId,
+          platform: "ebay",
+          displayName: storeName,
+          externalAccountId: null,
+        }}
+        onCancel={() => setConfirmationOpen(false)}
+        onConfirm={() => {
+          setConfirmationOpen(false);
+          void startAuthorization();
+        }}
+      />
+    </>
   );
 }
 
@@ -139,6 +168,7 @@ export function EbayStoreCategoryAuthorizationRecoveryView({
   onVerificationCodeChange,
   pendingAction,
   permissionRequired,
+  storeName,
   verificationCode,
 }: {
   connectProofActive: boolean;
@@ -151,11 +181,12 @@ export function EbayStoreCategoryAuthorizationRecoveryView({
   onVerificationCodeChange: (value: string) => void;
   pendingAction: PendingEbayAuthorizationAction;
   permissionRequired: boolean;
+  storeName: string;
   verificationCode: string;
 }) {
   const pending = pendingAction !== null;
   const actionText = permissionRequired ? "refresh eBay authorization" : "reconnect eBay store";
-  const readyButtonLabel = permissionRequired ? "Refresh eBay authorization" : "Reconnect eBay store";
+  const readyButtonLabel = permissionRequired ? `Refresh eBay authorization for ${storeName}` : `Reconnect ${storeName}`;
   const initialButtonLabel = pendingAction === "send-code"
     ? "Sending verification code"
     : pendingAction === "passkey-proof"
@@ -211,7 +242,7 @@ export function EbayStoreCategoryAuthorizationRecoveryView({
               onClick={onStart}
             >
               <ArrowRight className="h-4 w-4" />
-              {pendingAction === "verify-code" ? "Verifying code" : "Verify and open eBay authorization"}
+              {pendingAction === "verify-code" ? "Verifying code" : `Verify and continue to eBay for ${storeName}`}
             </Button>
           </div>
         </div>

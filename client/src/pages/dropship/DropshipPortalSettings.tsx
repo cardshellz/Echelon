@@ -41,6 +41,7 @@ import {
   storeOAuthCallbackMessage,
 } from "./store-oauth-callback-status";
 import { storeOAuthEmailVerificationMessage } from "./store-oauth-verification-copy";
+import { StoreOAuthTargetConfirmationDialog } from "./StoreOAuthTargetConfirmationDialog";
 
 type PendingStoreAction =
   | "disconnect-send-code"
@@ -52,6 +53,7 @@ type PendingStoreAction =
   | "reauth-passkey-proof"
   | "reauth-start"
   | null;
+type ExistingStoreOAuthIntent = Extract<DropshipStoreOAuthIntent, "refresh_connection" | "change_store">;
 
 const icons: Record<DropshipSettingsSection["key"], React.ReactNode> = {
   account: <Settings className="h-4 w-4" />,
@@ -78,6 +80,10 @@ export default function DropshipPortalSettings() {
   const [disconnectTargetId, setDisconnectTargetId] = useState<number | null>(null);
   const [reauthorizeTargetId, setReauthorizeTargetId] = useState<number | null>(null);
   const [reauthorizeIntent, setReauthorizeIntent] = useState<DropshipStoreOAuthIntent>("refresh_connection");
+  const [reauthorizeConfirmation, setReauthorizeConfirmation] = useState<{
+    intent: ExistingStoreOAuthIntent;
+    storeConnectionId: number;
+  } | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -104,6 +110,11 @@ export default function DropshipPortalSettings() {
   const verificationConnection = verificationTargetId === null
     ? null
     : storeConnections.find((connection) => connection.storeConnectionId === verificationTargetId) ?? null;
+  const confirmationConnection = reauthorizeConfirmation === null
+    ? null
+    : storeConnections.find((connection) => (
+        connection.storeConnectionId === reauthorizeConfirmation.storeConnectionId
+      )) ?? null;
 
   const hasActiveProof = (action: DropshipSensitiveAction) => {
     return isDropshipSensitiveProofActive({
@@ -230,6 +241,7 @@ export default function DropshipPortalSettings() {
           buildStoreConnectionOAuthStartInput({
             platform: connection.platform,
             intent,
+            storeConnectionId: connection.storeConnectionId,
             shopDomain: connection.shopDomain ?? "",
             returnTo: dropshipPortalPath("/settings"),
           }),
@@ -239,6 +251,22 @@ export default function DropshipPortalSettings() {
     } finally {
       setReauthorizeTargetId(null);
     }
+  }
+
+  function requestStoreReauthorization(
+    connection: DropshipStoreConnectionProfileResponse,
+    intent: DropshipStoreOAuthIntent,
+  ): void {
+    if (intent !== "refresh_connection" && intent !== "change_store") {
+      setError("An existing store can only be refreshed or changed from this action.");
+      return;
+    }
+    if (intent === "refresh_connection" && !canRefreshStoreConnection(connection)) return;
+    if (intent === "change_store" && !canChangeStoreConnection(connection)) return;
+    setReauthorizeConfirmation({
+      intent,
+      storeConnectionId: connection.storeConnectionId,
+    });
   }
 
   function cancelSensitiveActionVerification(): void {
@@ -358,6 +386,25 @@ export default function DropshipPortalSettings() {
               />
             )}
 
+            {reauthorizeConfirmation && confirmationConnection && (
+              <StoreOAuthTargetConfirmationDialog
+                intent={reauthorizeConfirmation.intent}
+                open
+                target={{
+                  storeConnectionId: confirmationConnection.storeConnectionId,
+                  platform: confirmationConnection.platform,
+                  displayName: connectionDisplayName(confirmationConnection),
+                  externalAccountId: confirmationConnection.externalAccountId,
+                }}
+                onCancel={() => setReauthorizeConfirmation(null)}
+                onConfirm={() => {
+                  const confirmed = reauthorizeConfirmation;
+                  setReauthorizeConfirmation(null);
+                  void reauthorizeStore(confirmationConnection, confirmed.intent);
+                }}
+              />
+            )}
+
             <StoreConnectionsPanel
               result={storeConnectionsQuery.data}
               isLoading={storeConnectionsQuery.isLoading}
@@ -366,7 +413,7 @@ export default function DropshipPortalSettings() {
               disconnectTargetId={disconnectTargetId}
               reauthorizeTargetId={reauthorizeTargetId}
               onDisconnect={disconnectStore}
-              onReauthorize={reauthorizeStore}
+              onReauthorize={requestStoreReauthorization}
               reauthorizeIntent={reauthorizeIntent}
             />
 
@@ -586,7 +633,7 @@ function StoreConnectionCard({
             onClick={() => onReauthorize(connection, "refresh_connection")}
           >
             {reauthorizeButtonIcon({ intent: "refresh_connection", isReauthorizeTarget, pendingStoreAction, reauthorizeIntent })}
-            {reauthorizeButtonLabel({ intent: "refresh_connection", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent, status: connection.status })}
+            {reauthorizeButtonLabel({ intent: "refresh_connection", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent, status: connection.status, storeName: connectionDisplayName(connection) })}
           </Button>
         )}
         {canChange && (
@@ -600,7 +647,7 @@ function StoreConnectionCard({
             onClick={() => onReauthorize(connection, "change_store")}
           >
             {reauthorizeButtonIcon({ intent: "change_store", isReauthorizeTarget, pendingStoreAction, reauthorizeIntent })}
-            {reauthorizeButtonLabel({ intent: "change_store", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent, status: connection.status })}
+            {reauthorizeButtonLabel({ intent: "change_store", isReauthorizeTarget, pendingStoreAction, platform: connection.platform, reauthorizeIntent, status: connection.status, storeName: connectionDisplayName(connection) })}
           </Button>
         )}
         {canDisconnect && (
@@ -821,12 +868,14 @@ function reauthorizeButtonLabel(input: {
   platform: DropshipStoreConnectionProfileResponse["platform"];
   reauthorizeIntent: DropshipStoreOAuthIntent;
   status: DropshipStoreConnectionProfileResponse["status"];
+  storeName: string;
 }): string {
   const isActiveIntent = input.isReauthorizeTarget && input.reauthorizeIntent === input.intent;
   if (isActiveIntent && input.pendingStoreAction === "reauth-send-code") return "Sending code";
   if (isActiveIntent && input.pendingStoreAction === "reauth-verify-code") return "Verifying code";
   if (isActiveIntent && input.pendingStoreAction === "reauth-passkey-proof") return "Waiting for passkey";
   if (isActiveIntent && input.pendingStoreAction === "reauth-start") return "Opening authorization";
+  if (input.intent === "refresh_connection") return `Reconnect ${input.storeName}`;
   return storeOAuthActionTitle(input.intent, input.platform, input.status);
 }
 

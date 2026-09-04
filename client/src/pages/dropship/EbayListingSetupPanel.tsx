@@ -36,9 +36,11 @@ const EMPTY_SELECTION: ReplaceDropshipEbayListingSetupInput = {
 export function EbayListingSetupPanel({
   onConfigurationChange,
   storeConnectionId,
+  storeName,
 }: {
   onConfigurationChange: () => void;
   storeConnectionId: number;
+  storeName: string;
 }) {
   const queryClient = useQueryClient();
   const queryKey = ["/api/dropship/ebay/listing-setup", storeConnectionId] as const;
@@ -137,7 +139,11 @@ export function EbayListingSetupPanel({
           <Skeleton className="h-16 w-full" />
         </div>
       ) : setupQuery.error ? (
-        <ListingSetupError error={setupQuery.error} />
+        <ListingSetupError
+          error={setupQuery.error}
+          storeConnectionId={storeConnectionId}
+          storeName={storeName}
+        />
       ) : setupQuery.data ? (
         <div className="p-4">
           {setupQuery.data.complete && (
@@ -201,7 +207,11 @@ export function EbayListingSetupPanel({
             <div role="alert" className="mt-4 rounded-md border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900">
               {saveError}
               {saveAuthorizationError !== null && (
-                <EbayStoreCategoryAuthorizationRecovery error={saveAuthorizationError} />
+                <EbayStoreCategoryAuthorizationRecovery
+                  error={saveAuthorizationError}
+                  storeConnectionId={storeConnectionId}
+                  storeName={storeName}
+                />
               )}
             </div>
           )}
@@ -242,7 +252,15 @@ export function EbayListingSetupPanel({
   );
 }
 
-function ListingSetupError({ error }: { error: unknown }) {
+function ListingSetupError({
+  error,
+  storeConnectionId,
+  storeName,
+}: {
+  error: unknown;
+  storeConnectionId: number;
+  storeName: string;
+}) {
   const permissionRequired = queryErrorCode(error) === "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED";
   return (
     <div className="m-4 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
@@ -261,7 +279,11 @@ function ListingSetupError({ error }: { error: unknown }) {
           <div className="mt-1 text-xs">
             If eBay still rejects access after authorization, Card Shellz support must inspect the application&apos;s granted scopes and the seller account&apos;s API eligibility.
           </div>
-          <EbayStoreCategoryAuthorizationRecovery error={error} />
+          <EbayStoreCategoryAuthorizationRecovery
+            error={error}
+            storeConnectionId={storeConnectionId}
+            storeName={storeName}
+          />
         </>
       )}
     </div>

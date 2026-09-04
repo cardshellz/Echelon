@@ -13,8 +13,24 @@ export const dropshipStoreConnectionLifecycleStatusSchema = z.enum([
 export const startDropshipStoreConnectionOAuthInputSchema = z.object({
   platform: z.enum(dropshipSupportedStorePlatforms),
   intent: z.enum(["connect", "refresh_connection", "change_store"]).default("connect"),
+  storeConnectionId: z.number().int().positive().optional(),
   shopDomain: z.string().trim().min(1).max(255).optional(),
   returnTo: z.string().trim().max(500).optional(),
+}).superRefine((input, context) => {
+  if (input.intent !== "connect" && input.storeConnectionId === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["storeConnectionId"],
+      message: "A specific store connection is required when refreshing or changing a store.",
+    });
+  }
+  if (input.intent === "connect" && input.storeConnectionId !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["storeConnectionId"],
+      message: "A new store connection cannot target an existing store connection.",
+    });
+  }
 });
 
 export type StartDropshipStoreConnectionOAuthInput = z.infer<

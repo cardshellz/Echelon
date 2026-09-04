@@ -28,8 +28,31 @@ export class HmacDropshipOAuthStateSigner implements DropshipOAuthStateSigner {
       throw new DropshipError("DROPSHIP_INVALID_OAUTH_STATE", "Store authorization state signature is invalid.");
     }
 
-    const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as DropshipOAuthStatePayload;
-    if (payload.version !== 1 || !payload.vendorId || !payload.memberId || !payload.platform || !payload.expiresAt) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+    } catch {
+      throw new DropshipError("DROPSHIP_INVALID_OAUTH_STATE", "Store authorization state payload is invalid.");
+    }
+    if (!isRecord(parsed)) {
+      throw new DropshipError("DROPSHIP_INVALID_OAUTH_STATE", "Store authorization state payload is invalid.");
+    }
+    const payload = parsed as unknown as DropshipOAuthStatePayload;
+    const intent = payload.intent ?? "connect";
+    if (
+      payload.version !== 1
+      || !Number.isInteger(payload.vendorId)
+      || payload.vendorId <= 0
+      || typeof payload.memberId !== "string"
+      || payload.memberId.length === 0
+      || (payload.platform !== "ebay" && payload.platform !== "shopify")
+      || !["connect", "refresh_connection", "change_store"].includes(intent)
+      || typeof payload.expiresAt !== "string"
+      || Number.isNaN(new Date(payload.expiresAt).getTime())
+      || !isValidOptionalTargetId(payload.targetStoreConnectionId)
+      || !isValidOptionalFingerprint(payload.targetConnectionFingerprint)
+      || !isValidOptionalDate(payload.targetConnectionUpdatedAt)
+    ) {
       throw new DropshipError("DROPSHIP_INVALID_OAUTH_STATE", "Store authorization state payload is invalid.");
     }
 
@@ -53,4 +76,20 @@ function safeEqual(left: string, right: string): boolean {
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isValidOptionalTargetId(value: number | null | undefined): boolean {
+  return value === undefined || value === null || (Number.isInteger(value) && value > 0);
+}
+
+function isValidOptionalFingerprint(value: string | null | undefined): boolean {
+  return value === undefined || value === null || /^[0-9a-f]{32}$/.test(value);
+}
+
+function isValidOptionalDate(value: string | null | undefined): boolean {
+  return value === undefined || value === null || (typeof value === "string" && !Number.isNaN(new Date(value).getTime()));
 }
