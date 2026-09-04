@@ -130,6 +130,7 @@ import { PostgresCanonicalClaimBuildRepository } from "../modules/inventory/infr
 import { PostgresCanonicalClaimPickerObservationReviewRepository } from "../modules/orders/canonical-claim-picker-observation-review.repository";
 import { createAuthorityAwareInventoryAtpService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import { createAuthorityAwareReservationRuntime } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-claim.repository";
+import { createAuthorityAwareInventoryPublicationService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
 
@@ -304,12 +305,20 @@ export function createServices(
   channelShippingCapabilities.register(
     MANUAL_CHANNEL_SHIPPING_CAPABILITY_DECLARATION,
   );
+  const inventoryPublicationRuntime = createAuthorityAwareInventoryPublicationService(databasePool);
   const echelonOrchestrator = createEchelonSyncOrchestrator(
-    db, allocationEngine, sourceLockService, adapterRegistry, channelProductPush, atp,
+    db,
+    allocationEngine,
+    sourceLockService,
+    adapterRegistry,
+    channelProductPush,
+    atp,
+    inventoryPublicationRuntime,
   );
   const variantAvailabilitySync = createVariantAvailabilitySyncService({
     allocationEngine,
     adapterRegistry,
+    inventoryPublication: inventoryPublicationRuntime,
   });
   const inventoryPublicationOutbox = new InventoryPublicationOutboxService(
     new PostgresInventoryPublicationOutboxRepository(),

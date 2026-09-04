@@ -443,6 +443,33 @@ export async function markVariantAvailabilitySynced(
   }
 }
 
+/**
+ * Complete the legacy trigger queue after canonical publication has been
+ * durably handed to the canonical outbox. Provider acknowledgement and
+ * readback remain owned exclusively by inventory_publication_outbox.
+ */
+export async function markVariantAvailabilityDelegated(
+  dbPool: SqlPool,
+  claim: ClaimedVariantAvailabilitySync,
+): Promise<boolean> {
+  const completed = await dbPool.query(`
+    UPDATE channels.channel_variant_availability_sync
+    SET status = 'synced',
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        next_attempt_at = transaction_timestamp(),
+        completed_at = transaction_timestamp(),
+        last_error = NULL,
+        updated_at = transaction_timestamp()
+    WHERE channel_id = $1
+      AND product_variant_id = $2
+      AND revision = $3
+      AND status = 'processing'
+      AND lease_token = $4::uuid
+  `, [claim.channelId, claim.productVariantId, claim.revision, claim.leaseToken]);
+  return completed.rowCount === 1;
+}
+
 /** Complete a claimed repair without publishing an external quantity. */
 export async function markVariantAvailabilityNotApplicable(
   dbPool: SqlPool,

@@ -5,6 +5,7 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { createAuthorityAwareInventoryAtpService } from "../server/modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
+import { createAuthorityAwareInventoryPublicationService } from "../server/modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import { createAllocationEngine } from "../server/modules/channels/allocation-engine.service";
 import { createSourceLockService } from "../server/modules/channels/source-lock.service";
 import { createShopifyAdapter } from "../server/modules/channels/adapters/shopify.adapter";
@@ -23,9 +24,16 @@ async function main() {
   const productPushService = createChannelProductPushService(db);
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
+  const inventoryPublication = createAuthorityAwareInventoryPublicationService(pool);
 
   const orchestrator = createEchelonSyncOrchestrator(
-    db, allocationEngine, sourceLockService, adapterRegistry, productPushService,
+    db,
+    allocationEngine,
+    sourceLockService,
+    adapterRegistry,
+    productPushService,
+    atpService,
+    inventoryPublication,
   );
 
   console.log("=== ECHELON LIVE SYNC — ALL CHANNELS ===");

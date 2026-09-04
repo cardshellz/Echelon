@@ -170,6 +170,16 @@ function createMockAtpService() {
   };
 }
 
+function createMockInventoryPublication() {
+  return {
+    publishProduct: vi.fn(async (_input: unknown, legacyPublisher: () => Promise<unknown>) => ({
+      authority: "legacy" as const,
+      legacyResult: await legacyPublisher(),
+    })),
+    listProductIds: vi.fn(async (legacyReader: () => Promise<number[]>) => legacyReader()),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -200,6 +210,7 @@ describe("EchelonSyncOrchestrator", () => {
       adapterRegistry,
       productPushService,
       atpService as any,
+      createMockInventoryPublication() as any,
     );
   });
 
@@ -208,6 +219,47 @@ describe("EchelonSyncOrchestrator", () => {
   // -----------------------------------------------------------------------
 
   describe("syncInventoryForProduct", () => {
+    it("routes canonical authority only to the durable outbox result", async () => {
+      const inventoryPublication = {
+        publishProduct: vi.fn(async () => ({
+          authority: "canonical" as const,
+          publication: canonicalPublication(1),
+        })),
+        listProductIds: vi.fn(),
+      };
+      orchestrator = createEchelonSyncOrchestrator(
+        db as any,
+        allocationEngine as any,
+        sourceLockService as any,
+        adapterRegistry,
+        productPushService,
+        atpService as any,
+        inventoryPublication as any,
+      );
+
+      const results = await orchestrator.syncInventoryForProduct(1, { dryRun: false }, "test");
+
+      expect(results).toEqual([expect.objectContaining({
+        channelId: 1,
+        variantsPushed: 0,
+        variantsQueued: 1,
+        variantsCoalesced: 0,
+        publicationAuthority: "canonical_outbox",
+        details: [expect.objectContaining({
+          variantId: 100,
+          allocatedQty: 4,
+          status: "canonical_publication_queued",
+        })],
+      })]);
+      expect(inventoryPublication.publishProduct).toHaveBeenCalledWith(
+        { productId: 1, dryRun: false, triggeredBy: "test" },
+        expect.any(Function),
+      );
+      expect(allocationEngine.allocateProduct).not.toHaveBeenCalled();
+      expect(mockAdapter.pushInventory).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
     it("should run allocation and push to channel", async () => {
       // Mock DB responses for variant lookup and feed lookup
       db._selectResult = [
@@ -617,6 +669,37 @@ describe("EchelonSyncOrchestrator", () => {
   });
 
   describe("syncInventoryForAllProducts", () => {
+    it("uses canonical active mappings instead of legacy feed discovery", async () => {
+      const inventoryPublication = {
+        listProductIds: vi.fn(async () => [91]),
+        publishProduct: vi.fn(async ({ productId }: { productId: number }) => ({
+          authority: "canonical" as const,
+          publication: canonicalPublication(productId),
+        })),
+      };
+      orchestrator = createEchelonSyncOrchestrator(
+        db as any,
+        allocationEngine as any,
+        sourceLockService as any,
+        adapterRegistry,
+        productPushService,
+        atpService as any,
+        inventoryPublication as any,
+      );
+      vi.spyOn(orchestrator as any, "delay").mockResolvedValue(undefined);
+
+      const results = await orchestrator.syncInventoryForAllProducts({ dryRun: false }, "manual");
+
+      expect(inventoryPublication.listProductIds).toHaveBeenCalledWith(expect.any(Function));
+      expect(inventoryPublication.publishProduct).toHaveBeenCalledWith(
+        { productId: 91, dryRun: false, triggeredBy: "manual" },
+        expect.any(Function),
+      );
+      expect(results[0]).toMatchObject({ products: 1, variantsQueued: 1 });
+      expect(allocationEngine.allocateProduct).not.toHaveBeenCalled();
+      expect(db.select).not.toHaveBeenCalled();
+    });
+
     it("should include products with channel listings even when channel feeds are missing", async () => {
       allocationEngine.allocateProduct.mockResolvedValue({
         productId: 33,
@@ -635,3 +718,34 @@ describe("EchelonSyncOrchestrator", () => {
     });
   });
 });
+
+function canonicalPublication(productId: number) {
+  return {
+    authority: "canonical" as const,
+    authorityRevision: "9",
+    activationRunId: "44",
+    dryRun: false,
+    productId,
+    rows: [{
+      publicationTargetId: 5,
+      publicationTargetRevision: "2",
+      productVariantId: 100,
+      sku: "TEST-P50",
+      desiredQuantity: "4",
+      channelId: 1,
+      channelName: "Shopify DTC",
+      channelConnectionId: 33,
+      providerKey: "shopify",
+      providerScopeType: "location" as const,
+      externalScopeId: "location-1",
+      externalInventoryItemId: "inventory-item-100",
+      externalSku: "TEST-P50",
+      sourceWarehouseIds: [1],
+      blockerCodes: [],
+    }],
+    enqueuedRows: 1,
+    coalescedRows: 0,
+    enqueuedPublicationKeys: ["5:100"],
+    coalescedPublicationKeys: [],
+  };
+}

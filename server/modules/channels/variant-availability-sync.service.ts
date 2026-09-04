@@ -8,15 +8,18 @@ import {
   claimVariantAvailabilitySyncs,
   enqueueVariantAvailabilitySync,
   loadVariantAvailabilityContext,
+  markVariantAvailabilityDelegated,
   markVariantAvailabilityNotApplicable,
   markVariantAvailabilityFailed,
   markVariantAvailabilitySynced,
   supersedeAvailabilityClaim,
   type ClaimedVariantAvailabilitySync,
   type SqlPool,
+  type VariantAvailabilityContext,
 } from "./variant-availability-sync.repository";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
+import type { AuthorityAwareInventoryPublicationService } from "../inventory-planning/application/inventory-availability-runtime-publication.service";
 
 const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_LEASE_SECONDS = 120;
@@ -39,6 +42,7 @@ export interface VariantAvailabilitySyncServiceDependencies {
   dbPool?: SqlPool;
   allocationEngine: AllocationEngineLike;
   adapterRegistry: ChannelAdapterRegistry;
+  inventoryPublication: AuthorityAwareInventoryPublicationService;
   batchSize?: number;
   leaseSeconds?: number;
 }
@@ -79,7 +83,10 @@ export async function queueVariantAvailabilityRepair(
 }
 
 async function processClaim(
-  dependencies: Required<Pick<VariantAvailabilitySyncServiceDependencies, "dbPool" | "allocationEngine" | "adapterRegistry">>,
+  dependencies: Required<Pick<
+    VariantAvailabilitySyncServiceDependencies,
+    "dbPool" | "allocationEngine" | "adapterRegistry" | "inventoryPublication"
+  >>,
   claim: ClaimedVariantAvailabilitySync,
 ): Promise<"synced" | "retryable" | "superseded"> {
   try {
@@ -126,82 +133,26 @@ async function processClaim(
       return completed ? "synced" : "superseded";
     }
 
-    let allocatedQuantity = 0;
-    if (claim.desiredActive) {
-      if (
-        context.channelStatus !== "active" ||
-        context.channelSyncEnabled !== true ||
-        context.channelSyncMode !== "live"
-      ) {
-        throw new Error(
-          `Cannot reactivate ${context.externalSku ?? context.catalogSku ?? context.productVariantId}: ` +
-          `channel ${context.channelName} is not active with live sync enabled`,
-        );
-      }
-
-      const allocation = await dependencies.allocationEngine.allocateProduct(
-        context.productId,
-        "variant_availability_reactivation",
-      );
-      const matchingAllocation = allocation.allocations.find(
-        (candidate) =>
-          candidate.channelId === context.channelId &&
-          candidate.productVariantId === context.productVariantId,
-      );
-      allocatedQuantity = matchingAllocation?.allocatedUnits ?? 0;
-    }
-
-    const target = resolveVariantAvailabilityTarget({
+    const routed = await dependencies.inventoryPublication.publishVariantAvailability({
+      productId: context.productId,
+      productVariantId: context.productVariantId,
+      channelId: context.channelId,
       desiredActive: claim.desiredActive,
-      catalogVariantActive: context.catalogVariantActive,
-      catalogProductActive: context.catalogProductActive,
-      catalogProductStatus: context.catalogProductStatus,
-      productExcluded: context.productExcluded,
-      variantExcluded: context.variantExcluded,
-      productOverrideIsListed: context.productOverrideIsListed,
-      variantOverrideIsListed: context.variantOverrideIsListed,
-      allocatedQuantity,
-    });
-
-    const externalSku = context.externalSku ?? context.catalogSku;
-    if (!externalSku) {
-      throw new Error(`Variant ${context.productVariantId} has no SKU for eBay availability sync`);
-    }
-
-    const adapter = dependencies.adapterRegistry.getOrThrow(context.channelProvider);
-    const results = await adapter.pushInventory(context.channelId, [{
-      variantId: context.productVariantId,
-      sku: externalSku,
-      externalVariantId: context.externalVariantId,
-      externalInventoryItemId: context.externalInventoryItemId,
-      allocatedQty: target.quantity,
-    }]);
-    const result: InventoryPushResult | undefined = results.find(
-      (candidate) => candidate.variantId === context.productVariantId,
-    );
-    if (!result) {
-      throw new Error(`eBay adapter returned no result for variant ${context.productVariantId}`);
-    }
-    if (result.status !== "success") {
-      throw new Error(result.error || `eBay adapter returned ${result.status}`);
-    }
-
-    const completed = await markVariantAvailabilitySynced(dependencies.dbPool, claim, {
-      quantity: target.quantity,
-      feedActive: target.feedActive,
-      externalProductId: context.externalProductId,
-      externalVariantId: result.refreshedExternalVariantId ?? context.externalVariantId,
-      externalInventoryItemId: context.externalInventoryItemId,
-      externalSku,
-    });
+      triggeredBy: "variant_availability_sync",
+    }, async () => publishLegacyAvailability(dependencies, claim, context));
+    const completed = routed.authority === "legacy"
+      ? await markVariantAvailabilitySynced(dependencies.dbPool, claim, routed.legacyResult)
+      : await markVariantAvailabilityDelegated(dependencies.dbPool, claim);
     if (!completed) return "superseded";
 
     console.info(`${LOG_PREFIX} Synchronized variant availability`, {
       channelId: context.channelId,
       productVariantId: context.productVariantId,
-      sku: externalSku,
+      sku: context.externalSku ?? context.catalogSku,
       desiredActive: claim.desiredActive,
-      quantity: target.quantity,
+      publicationAuthority: routed.authority === "legacy" ? "legacy_direct" : "canonical_outbox",
+      quantity: routed.authority === "legacy" ? routed.legacyResult.quantity : null,
+      canonicalRows: routed.authority === "canonical" ? routed.publication.rows.length : 0,
       revision: claim.revision,
     });
     return "synced";
@@ -236,6 +187,7 @@ export function createVariantAvailabilitySyncService(
     dbPool,
     allocationEngine: dependencies.allocationEngine,
     adapterRegistry: dependencies.adapterRegistry,
+    inventoryPublication: dependencies.inventoryPublication,
   };
 
   return {
@@ -261,5 +213,84 @@ export function createVariantAvailabilitySyncService(
       }
       return summary;
     },
+  };
+}
+
+async function publishLegacyAvailability(
+  dependencies: Required<Pick<
+    VariantAvailabilitySyncServiceDependencies,
+    "allocationEngine" | "adapterRegistry"
+  >>,
+  claim: ClaimedVariantAvailabilitySync,
+  context: VariantAvailabilityContext,
+): Promise<{
+  quantity: number;
+  feedActive: boolean;
+  externalProductId: string | null;
+  externalVariantId: string | null;
+  externalInventoryItemId: string | null;
+  externalSku: string;
+}> {
+  let allocatedQuantity = 0;
+  if (claim.desiredActive) {
+    if (
+      context.channelStatus !== "active" ||
+      context.channelSyncEnabled !== true ||
+      context.channelSyncMode !== "live"
+    ) {
+      throw new Error(
+        `Cannot reactivate ${context.externalSku ?? context.catalogSku ?? context.productVariantId}: ` +
+        `channel ${context.channelName} is not active with live sync enabled`,
+      );
+    }
+    const allocation = await dependencies.allocationEngine.allocateProduct(
+      context.productId,
+      "variant_availability_reactivation",
+    );
+    const matchingAllocation = allocation.allocations.find(
+      (candidate) => candidate.channelId === context.channelId
+        && candidate.productVariantId === context.productVariantId,
+    );
+    allocatedQuantity = matchingAllocation?.allocatedUnits ?? 0;
+  }
+  const target = resolveVariantAvailabilityTarget({
+    desiredActive: claim.desiredActive,
+    catalogVariantActive: context.catalogVariantActive,
+    catalogProductActive: context.catalogProductActive,
+    catalogProductStatus: context.catalogProductStatus,
+    productExcluded: context.productExcluded,
+    variantExcluded: context.variantExcluded,
+    productOverrideIsListed: context.productOverrideIsListed,
+    variantOverrideIsListed: context.variantOverrideIsListed,
+    allocatedQuantity,
+  });
+  const externalSku = context.externalSku ?? context.catalogSku;
+  if (!externalSku) {
+    throw new Error(`Variant ${context.productVariantId} has no SKU for eBay availability sync`);
+  }
+  const adapter = dependencies.adapterRegistry.getOrThrow(context.channelProvider);
+  const results = await adapter.pushInventory(context.channelId, [{
+    variantId: context.productVariantId,
+    sku: externalSku,
+    externalVariantId: context.externalVariantId,
+    externalInventoryItemId: context.externalInventoryItemId,
+    allocatedQty: target.quantity,
+  }]);
+  const result: InventoryPushResult | undefined = results.find(
+    (candidate) => candidate.variantId === context.productVariantId,
+  );
+  if (!result) {
+    throw new Error(`eBay adapter returned no result for variant ${context.productVariantId}`);
+  }
+  if (result.status !== "success") {
+    throw new Error(result.error || `eBay adapter returned ${result.status}`);
+  }
+  return {
+    quantity: target.quantity,
+    feedActive: target.feedActive,
+    externalProductId: context.externalProductId,
+    externalVariantId: result.refreshedExternalVariantId ?? context.externalVariantId,
+    externalInventoryItemId: context.externalInventoryItemId,
+    externalSku,
   };
 }
