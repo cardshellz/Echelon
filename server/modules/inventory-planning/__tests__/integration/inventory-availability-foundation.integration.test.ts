@@ -10,6 +10,7 @@ import * as databaseSchema from "@shared/schema";
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
 import { PostgresInventoryPromiseSafetyAdminStore } from "../../infrastructure/inventory-promise-safety-admin.repository";
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
+import { createAuthorityAwareInventoryPublicationService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { loadInventoryAvailabilityBackfillSources } from "../../infrastructure/inventory-availability-backfill.repository";
 import { planInventoryAvailabilityBackfill } from "../../domain/inventory-availability-backfill";
 import { transformationModelDefinitionSchema } from "../../domain/inventory-availability-master-data.contracts";
@@ -168,12 +169,41 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         name varchar(200) NOT NULL DEFAULT 'Integration warehouse',
         warehouse_type varchar(30) NOT NULL DEFAULT 'operations',
         inventory_source_type varchar(20) NOT NULL DEFAULT 'internal',
+        hub_warehouse_id integer,
         is_active integer NOT NULL DEFAULT 1,
         created_at timestamptz NOT NULL DEFAULT now()
       );
       CREATE TABLE warehouse.warehouse_locations (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        warehouse_id integer NOT NULL REFERENCES warehouse.warehouses(id) ON DELETE RESTRICT
+        warehouse_id integer NOT NULL REFERENCES warehouse.warehouses(id) ON DELETE RESTRICT,
+        code varchar(50) NOT NULL DEFAULT 'PICK-01',
+        location_type varchar(30) NOT NULL DEFAULT 'pick',
+        is_pickable integer NOT NULL DEFAULT 1,
+        is_active integer NOT NULL DEFAULT 1,
+        cycle_count_freeze_id integer
+      );
+      CREATE TABLE warehouse.product_locations (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        product_variant_id integer REFERENCES catalog.product_variants(id) ON DELETE CASCADE,
+        warehouse_location_id integer REFERENCES warehouse.warehouse_locations(id) ON DELETE CASCADE,
+        name text NOT NULL DEFAULT 'Integration slot',
+        location varchar(50) NOT NULL DEFAULT 'PICK-01',
+        zone varchar(10) NOT NULL DEFAULT 'PICK',
+        is_primary integer NOT NULL DEFAULT 1,
+        status varchar(20) NOT NULL DEFAULT 'active'
+      );
+      CREATE TABLE inventory.inventory_levels (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        warehouse_location_id integer NOT NULL
+          REFERENCES warehouse.warehouse_locations(id) ON DELETE CASCADE,
+        product_variant_id integer NOT NULL
+          REFERENCES catalog.product_variants(id) ON DELETE CASCADE,
+        variant_qty integer NOT NULL DEFAULT 0,
+        reserved_qty integer NOT NULL DEFAULT 0,
+        picked_qty integer NOT NULL DEFAULT 0,
+        packed_qty integer NOT NULL DEFAULT 0,
+        backorder_qty integer NOT NULL DEFAULT 0,
+        updated_at timestamptz NOT NULL DEFAULT now()
       );
       CREATE TABLE inventory.build_recipes (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -1890,7 +1920,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
   it("keeps active authority and legacy runtime state unchanged while recording a draft", async () => {
     const scope = await seedProductAndWarehouse([1, 5]);
     await pool.query(`
-      CREATE TABLE inventory.inventory_levels (
+      CREATE TABLE IF NOT EXISTS inventory.inventory_levels (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         warehouse_location_id integer NOT NULL,
         product_variant_id integer NOT NULL,
@@ -2974,5 +3004,346 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       status: 409,
       code: "INVENTORY_PUBLICATION_VARIANT_MAPPING_IDENTITY_CONFLICT",
     });
+  });
+
+  it("plans and revises canonical runtime publication atomically against PostgreSQL", async () => {
+    const scope = await seedProductAndWarehouse([1]);
+    const unmappedScope = await seedProductAndWarehouse([1]);
+    await pool.query(
+      `INSERT INTO warehouse.product_locations (
+         product_variant_id, warehouse_location_id, name, location, zone,
+         is_primary, status
+       ) VALUES ($1, $2, 'Runtime publication slot', 'PICK-01', 'PICK', 1, 'active')`,
+      [scope.variantIds[0], scope.locationId],
+    );
+    const level = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.inventory_levels (
+         warehouse_location_id, product_variant_id, variant_qty, reserved_qty,
+         picked_qty, packed_qty, backorder_qty
+       ) VALUES ($1, $2, 10, 2, 0, 0, 0) RETURNING id`,
+      [scope.locationId, scope.variantIds[0]],
+    );
+    const safetyScopeKey = `network:variant:${scope.variantIds[0]}`;
+    const safetyPolicy = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.promise_safety_policy_versions (
+         scope_key, scope_type, product_variant_id, version, policy_mode,
+         definition_hash, change_reason, idempotency_key, request_hash, created_by
+       ) VALUES ($1, 'network_variant', $2, 1, 'off', $3,
+         'Runtime publication safety policy', 'runtime-publication:safety', $3,
+         'integration-test') RETURNING id`,
+      [safetyScopeKey, scope.variantIds[0], HASH],
+    );
+    await pool.query(
+      `INSERT INTO inventory.promise_safety_policy_heads (
+         scope_key, draft_policy_id, revision, updated_by, update_reason
+       ) VALUES ($1, $2, 1, 'integration-test', 'Runtime publication safety draft')`,
+      [safetyScopeKey, safetyPolicy.rows[0]!.id],
+    );
+
+    const channel = await pool.query<{ id: number }>(
+      "INSERT INTO channels.channels (name, provider) VALUES ('Runtime Shopify', 'shopify') RETURNING id",
+    );
+    const connection = await pool.query<{ id: number }>(
+      "INSERT INTO channels.channel_connections (channel_id) VALUES ($1) RETURNING id",
+      [channel.rows[0]!.id],
+    );
+    const node = await pool.query<{ id: number }>(
+      `INSERT INTO warehouse.fulfillment_nodes (
+         code, name, node_type, warehouse_id, inventory_authority,
+         fulfillment_authority, lifecycle_status, created_by, activated_by, activated_at
+       ) VALUES ('RUNTIME', 'Runtime warehouse', 'internal_warehouse', $1,
+         'echelon', 'echelon', 'active', 'integration-test', 'integration-test', $2)
+       RETURNING id`,
+      [scope.warehouseId, FIXED_TIME],
+    );
+    const target = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.inventory_publication_targets (
+         channel_id, channel_connection_id, fulfillment_node_id,
+         provider_scope_type, external_scope_id, publication_authority,
+         state, change_reason, created_by
+       ) VALUES ($1, $2, $3, 'location', 'runtime-location', 'echelon',
+         'disabled', 'Runtime publication target', 'integration-test') RETURNING id`,
+      [channel.rows[0]!.id, connection.rows[0]!.id, node.rows[0]!.id],
+    );
+    const exposureScopeKey = `channel:${channel.rows[0]!.id}`;
+    const exposurePolicy = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.channel_exposure_policy_versions (
+         scope_key, channel_id, scope_type, version, allocation_semantics,
+         eligible, share_bps, holdback_sellable_units, max_publish_mode,
+         min_publish_sellable_units, definition_hash, change_reason,
+         idempotency_key, request_hash, created_by
+       ) VALUES ($1, $2, 'channel', 1, 'exposure', true, 10000, 0,
+         'unlimited', 0, $3, 'Runtime exposure policy',
+         'runtime-publication:policy', $3, 'integration-test') RETURNING id`,
+      [exposureScopeKey, channel.rows[0]!.id, HASH],
+    );
+    await pool.query(
+      `INSERT INTO inventory.channel_exposure_policy_heads (
+         scope_key, channel_id, draft_policy_id, revision, updated_by, update_reason
+       ) VALUES ($1, $2, $3, 1, 'integration-test', 'Runtime exposure draft')`,
+      [exposureScopeKey, channel.rows[0]!.id, exposurePolicy.rows[0]!.id],
+    );
+    const binding = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.publication_source_binding_versions (
+         publication_target_id, version, definition_hash, change_reason,
+         idempotency_key, request_hash, created_by
+       ) VALUES ($1, 1, $2, 'Runtime source binding',
+         'runtime-publication:binding', $2, 'integration-test') RETURNING id`,
+      [target.rows[0]!.id, HASH],
+    );
+    await pool.query(
+      `INSERT INTO inventory.publication_source_binding_heads (
+         publication_target_id, draft_binding_id, revision, updated_by, update_reason
+       ) VALUES ($1, $2, 1, 'integration-test', 'Runtime source draft')`,
+      [target.rows[0]!.id, binding.rows[0]!.id],
+    );
+    await pool.query(
+      `INSERT INTO inventory.publication_source_binding_members (
+         binding_id, publication_target_id, fulfillment_node_id, priority
+       ) VALUES ($1, $2, $3, 1)`,
+      [binding.rows[0]!.id, target.rows[0]!.id, node.rows[0]!.id],
+    );
+    const mapping = await pool.query<{ id: number }>(
+      `INSERT INTO inventory.publication_variant_mapping_versions (
+         publication_target_id, product_variant_id, version,
+         external_inventory_item_id, external_sku, definition_hash,
+         change_reason, idempotency_key, request_hash, created_by
+       ) VALUES ($1, $2, 1, 'runtime-item-1', 'RUNTIME-EA', $3,
+         'Runtime exact mapping', 'runtime-publication:mapping', $3,
+         'integration-test') RETURNING id`,
+      [target.rows[0]!.id, scope.variantIds[0], HASH],
+    );
+    await pool.query(
+      `INSERT INTO inventory.publication_variant_mapping_heads (
+         publication_target_id, product_variant_id, draft_mapping_id,
+         revision, updated_by, update_reason
+       ) VALUES ($1, $2, $3, 1, 'integration-test', 'Runtime mapping draft')`,
+      [target.rows[0]!.id, scope.variantIds[0], mapping.rows[0]!.id],
+    );
+
+    const configurationClient = await pool.connect();
+    try {
+      await configurationClient.query("BEGIN");
+      await configurationClient.query(
+        `UPDATE inventory.promise_safety_policy_versions
+         SET lifecycle_status = 'sealed', sealed_by = 'integration-test', sealed_at = $2
+         WHERE id = $1`,
+        [safetyPolicy.rows[0]!.id, FIXED_TIME],
+      );
+      await configurationClient.query(
+        `UPDATE inventory.promise_safety_policy_heads
+         SET active_policy_id = draft_policy_id, draft_policy_id = NULL,
+             revision = revision + 1, updated_by = 'integration-test',
+             update_reason = 'Activate runtime safety policy'
+         WHERE scope_key = $1`,
+        [safetyScopeKey],
+      );
+      await configurationClient.query(
+        `UPDATE inventory.channel_exposure_policy_versions
+         SET lifecycle_status = 'sealed', sealed_by = 'integration-test', sealed_at = $2
+         WHERE id = $1`,
+        [exposurePolicy.rows[0]!.id, FIXED_TIME],
+      );
+      await configurationClient.query(
+        `UPDATE inventory.channel_exposure_policy_heads
+         SET active_policy_id = draft_policy_id, draft_policy_id = NULL,
+             revision = revision + 1, updated_by = 'integration-test',
+             update_reason = 'Activate runtime exposure policy'
+         WHERE scope_key = $1`,
+        [exposureScopeKey],
+      );
+      await configurationClient.query(
+        `UPDATE inventory.publication_source_binding_versions
+         SET lifecycle_status = 'sealed', sealed_by = 'integration-test', sealed_at = $2
+         WHERE id = $1`,
+        [binding.rows[0]!.id, FIXED_TIME],
+      );
+      await configurationClient.query(
+        `UPDATE inventory.publication_source_binding_heads
+         SET active_binding_id = draft_binding_id, draft_binding_id = NULL,
+             revision = revision + 1, updated_by = 'integration-test',
+             update_reason = 'Activate runtime source binding'
+         WHERE publication_target_id = $1`,
+        [target.rows[0]!.id],
+      );
+      await configurationClient.query(
+        `UPDATE inventory.publication_variant_mapping_versions
+         SET lifecycle_status = 'sealed', sealed_by = 'integration-test', sealed_at = $2
+         WHERE id = $1`,
+        [mapping.rows[0]!.id, FIXED_TIME],
+      );
+      await configurationClient.query(
+        `UPDATE inventory.publication_variant_mapping_heads
+         SET active_mapping_id = draft_mapping_id, draft_mapping_id = NULL,
+             revision = revision + 1, updated_by = 'integration-test',
+             update_reason = 'Activate runtime mapping'
+         WHERE publication_target_id = $1 AND product_variant_id = $2`,
+        [target.rows[0]!.id, scope.variantIds[0]],
+      );
+      await configurationClient.query(
+        `UPDATE inventory.inventory_publication_targets
+         SET state = 'preview', revision = revision + 1,
+             activated_by = 'integration-test', activated_at = $2
+         WHERE id = $1`,
+        [target.rows[0]!.id, FIXED_TIME],
+      );
+      await configurationClient.query(
+        `UPDATE inventory.inventory_publication_targets
+         SET state = 'live', revision = revision + 1
+         WHERE id = $1`,
+        [target.rows[0]!.id],
+      );
+      await configurationClient.query("COMMIT");
+    } catch (error) {
+      await configurationClient.query("ROLLBACK");
+      throw error;
+    } finally {
+      configurationClient.release();
+    }
+
+    const dryRun = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.availability_activation_runs (
+         mode, scope, state, request_hash, result_hash,
+         expected_catalog_input_hash, expected_catalog_result_hash,
+         captured_catalog_input_hash, captured_catalog_result_hash,
+         evidence_payload, blocker_codes, idempotency_key, reason, requested_by,
+         runtime_authority_changed, provider_write_attempted, outbox_enqueued,
+         started_at, completed_at
+       ) VALUES (
+         'dry_run', 'full_catalog', 'ready_for_publication', $1, $1,
+         $1, $1, $1, $1, '{}'::jsonb, '[]'::jsonb,
+         'runtime-publication:dry-run', 'Runtime publication dry run', 'integration-test',
+         false, false, false, $2, $2
+       ) RETURNING id`,
+      [HASH, FIXED_TIME],
+    );
+    const activation = await pool.query<{ id: string }>(
+      `INSERT INTO inventory.availability_activation_runs (
+         mode, scope, state, source_dry_run_id, request_hash, result_hash,
+         expected_catalog_input_hash, expected_catalog_result_hash,
+         captured_catalog_input_hash, captured_catalog_result_hash,
+         evidence_payload, blocker_codes, idempotency_key, reason, requested_by,
+         runtime_authority_changed, provider_write_attempted, outbox_enqueued,
+         provider_publication_required, started_at, prepared_at, publication_verified_at
+       ) VALUES (
+         'activation', 'full_catalog', 'activating', $1, $2, $2,
+         $2, $2, $2, $2, '{}'::jsonb, '[]'::jsonb,
+         'runtime-publication:activation', 'Runtime publication integration proof',
+         'integration-test', false, false, false, false, $3, $3, $3
+       ) RETURNING id`,
+      [dryRun.rows[0]!.id, "b".repeat(64), FIXED_TIME],
+    );
+    await pool.query(
+      `UPDATE inventory.availability_runtime_authority
+       SET authority = 'canonical', activation_run_id = $1, revision = revision + 1,
+           changed_by = 'integration-test', change_reason = 'Runtime publication integration proof'
+       WHERE singleton_key = true`,
+      [activation.rows[0]!.id],
+    );
+    await pool.query(
+      `UPDATE inventory.availability_activation_runs
+       SET state = 'active', runtime_authority_changed = true, activated_at = $2
+       WHERE id = $1`,
+      [activation.rows[0]!.id, FIXED_TIME],
+    );
+
+    const service = createAuthorityAwareInventoryPublicationService(pool);
+    await expect(service.publishProduct({
+      productId: unmappedScope.productId,
+      dryRun: false,
+      triggeredBy: "integration_unmapped_product",
+    }, async () => "legacy-must-not-run")).rejects.toMatchObject({
+      code: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+    });
+    const afterRollback = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM inventory.inventory_publication_outbox",
+    );
+    expect(afterRollback.rows[0]!.count).toBe("0");
+
+    const first = await service.publishProduct({
+      productId: scope.productId,
+      dryRun: false,
+      triggeredBy: "integration_inventory_change",
+    }, async () => "legacy-must-not-run");
+    expect(first).toMatchObject({
+      authority: "canonical",
+      publication: {
+        activationRunId: activation.rows[0]!.id,
+        productId: scope.productId,
+        enqueuedRows: 1,
+        coalescedRows: 0,
+        rows: [{
+          publicationTargetId: target.rows[0]!.id,
+          productVariantId: scope.variantIds[0],
+          desiredQuantity: "8",
+          externalInventoryItemId: "runtime-item-1",
+          blockerCodes: [],
+        }],
+      },
+    });
+
+    const retry = await service.publishProduct({
+      productId: scope.productId,
+      dryRun: false,
+      triggeredBy: "integration_retry",
+    }, async () => "legacy-must-not-run");
+    expect(retry).toMatchObject({
+      authority: "canonical",
+      publication: { enqueuedRows: 0, coalescedRows: 1 },
+    });
+    await pool.query(
+      "UPDATE inventory.inventory_levels SET variant_qty = 9 WHERE id = $1",
+      [level.rows[0]!.id],
+    );
+    const revised = await service.publishProduct({
+      productId: scope.productId,
+      dryRun: false,
+      triggeredBy: "integration_quantity_change",
+    }, async () => "legacy-must-not-run");
+    expect(revised).toMatchObject({
+      authority: "canonical",
+      publication: { enqueuedRows: 1, coalescedRows: 0 },
+    });
+
+    const publications = await pool.query<{
+      desired_revision: string;
+      desired_quantity: string;
+      state: string;
+      publication_phase: string;
+      channel_id_snapshot: number;
+      provider_key_snapshot: string;
+      publication_target_revision_snapshot: string;
+    }>(
+      `SELECT desired_revision::text, desired_quantity::text, state,
+              publication_phase, channel_id_snapshot, provider_key_snapshot,
+              publication_target_revision_snapshot::text
+       FROM inventory.inventory_publication_outbox
+       ORDER BY desired_revision`,
+    );
+    expect(publications.rows).toEqual([
+      expect.objectContaining({
+        desired_revision: "1",
+        desired_quantity: "8",
+        state: "superseded",
+        publication_phase: "full",
+        channel_id_snapshot: channel.rows[0]!.id,
+        provider_key_snapshot: "shopify",
+        publication_target_revision_snapshot: "3",
+      }),
+      expect.objectContaining({
+        desired_revision: "2",
+        desired_quantity: "7",
+        state: "queued",
+        publication_phase: "full",
+        channel_id_snapshot: channel.rows[0]!.id,
+        provider_key_snapshot: "shopify",
+        publication_target_revision_snapshot: "3",
+      }),
+    ]);
+    const activationEvidence = await pool.query<{ outbox_enqueued: boolean }>(
+      "SELECT outbox_enqueued FROM inventory.availability_activation_runs WHERE id = $1",
+      [activation.rows[0]!.id],
+    );
+    expect(activationEvidence.rows[0]!.outbox_enqueued).toBe(true);
   });
 });
