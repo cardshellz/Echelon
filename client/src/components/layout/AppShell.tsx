@@ -45,7 +45,6 @@ import {
   TrendingUp,
   Route as RouteIcon,
   GitBranch,
-  KeyRound,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -244,7 +243,6 @@ const navStructure: NavEntry[] = [
       { label: "Launch Readiness", icon: Shield, href: "/dropship?tab=dogfood" },
       { label: "Catalog Exposure", icon: Package, href: "/dropship?tab=catalog" },
       { label: "Shipping Config", icon: Truck, href: "/dropship?tab=shipping" },
-      { label: "eBay OAuth Branding", icon: KeyRound, href: "/dropship?tab=oauth-branding" },
       { label: "Store Connections", icon: Store, href: "/dropship?tab=stores" },
       { label: "Order Intake", icon: ClipboardList, href: "/dropship?tab=order-intake" },
       { label: "Listing Pushes", icon: Tag, href: "/dropship?tab=listing-pushes" },

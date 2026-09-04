@@ -49,6 +49,24 @@ export const dropshipSourcePlatformEnum = [
 export type DropshipSourcePlatform =
   (typeof dropshipSourcePlatformEnum)[number];
 
+export const dropshipChannelConnectionBrandingStatusEnum = [
+  "pending_external_update",
+  "manually_verified",
+  "provider_applied",
+  "provider_failed",
+] as const;
+export type DropshipChannelConnectionBrandingStatus =
+  (typeof dropshipChannelConnectionBrandingStatusEnum)[number];
+
+export const dropshipChannelConnectionBrandingActionEnum = [
+  "name_requested",
+  "external_update_verified",
+  "provider_update_applied",
+  "provider_update_failed",
+] as const;
+export type DropshipChannelConnectionBrandingAction =
+  (typeof dropshipChannelConnectionBrandingActionEnum)[number];
+
 export const dropshipStoreConnectionStatusEnum = [
   "connected",
   "needs_reauth",
@@ -3135,6 +3153,94 @@ export const dropshipAdminConfigCommands = dropshipSchema.table(
   ],
 );
 
+export const dropshipChannelConnectionBrandingRevisions = dropshipSchema.table(
+  "dropship_channel_connection_branding_revisions",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    platform: varchar("platform", { length: 30 }).notNull(),
+    useCase: varchar("use_case", { length: 80 }).notNull(),
+    environment: varchar("environment", { length: 20 }).notNull(),
+    revision: integer("revision").notNull(),
+    customerFacingAppName: varchar("customer_facing_app_name", {
+      length: 200,
+    }).notNull(),
+    providerResourceFingerprint: varchar("provider_resource_fingerprint", {
+      length: 64,
+    }),
+    providerStatus: varchar("provider_status", { length: 40 }).notNull(),
+    action: varchar("action", { length: 40 }).notNull(),
+    actorType: varchar("actor_type", { length: 40 }).notNull(),
+    actorId: varchar("actor_id", { length: 255 }),
+    commandId: integer("command_id")
+      .notNull()
+      .references(() => dropshipAdminConfigCommands.id, {
+        onDelete: "restrict",
+      }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("dropship_channel_branding_scope_revision_uq").on(
+      table.platform,
+      table.useCase,
+      table.environment,
+      table.revision,
+    ),
+    uniqueIndex("dropship_channel_branding_command_uq").on(table.commandId),
+    index("dropship_channel_branding_latest_idx").on(
+      table.platform,
+      table.useCase,
+      table.environment,
+      table.revision.desc(),
+    ),
+    check(
+      "dropship_channel_branding_platform_chk",
+      sql`${table.platform} IN ('ebay','shopify')`,
+    ),
+    check(
+      "dropship_channel_branding_use_case_chk",
+      sql`btrim(${table.useCase}) <> ''`,
+    ),
+    check(
+      "dropship_channel_branding_environment_chk",
+      sql`${table.environment} IN ('sandbox','production')`,
+    ),
+    check(
+      "dropship_channel_branding_revision_chk",
+      sql`${table.revision} > 0`,
+    ),
+    check(
+      "dropship_channel_branding_name_chk",
+      sql`btrim(${table.customerFacingAppName}) <> '' AND char_length(${table.customerFacingAppName}) <= 200 AND ${table.customerFacingAppName} !~ '[[:cntrl:]]'`,
+    ),
+    check(
+      "dropship_channel_branding_provider_status_chk",
+      sql`${table.providerStatus} IN ('pending_external_update','manually_verified','provider_applied','provider_failed')`,
+    ),
+    check(
+      "dropship_channel_branding_provider_resource_chk",
+      sql`${table.providerResourceFingerprint} IS NULL OR ${table.providerResourceFingerprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "dropship_channel_branding_action_chk",
+      sql`${table.action} IN ('name_requested','external_update_verified','provider_update_applied','provider_update_failed')`,
+    ),
+    check(
+      "dropship_channel_branding_action_status_chk",
+      sql`(${table.action} = 'name_requested' AND ${table.providerStatus} = 'pending_external_update') OR (${table.action} = 'external_update_verified' AND ${table.providerStatus} = 'manually_verified') OR (${table.action} = 'provider_update_applied' AND ${table.providerStatus} = 'provider_applied') OR (${table.action} = 'provider_update_failed' AND ${table.providerStatus} = 'provider_failed')`,
+    ),
+    check(
+      "dropship_channel_branding_verified_resource_chk",
+      sql`${table.providerStatus} NOT IN ('manually_verified','provider_applied') OR ${table.providerResourceFingerprint} IS NOT NULL`,
+    ),
+    check(
+      "dropship_channel_branding_actor_chk",
+      sql`${table.actorType} IN ('admin','system')`,
+    ),
+  ],
+);
+
 export const dropshipUsdcLedgerEntries = dropshipSchema.table(
   "dropship_usdc_ledger_entries",
   {
@@ -3542,6 +3648,16 @@ export type InsertDropshipAdminConfigCommand = z.infer<
 >;
 export type DropshipAdminConfigCommand =
   typeof dropshipAdminConfigCommands.$inferSelect;
+
+export const insertDropshipChannelConnectionBrandingRevisionSchema =
+  createInsertSchema(dropshipChannelConnectionBrandingRevisions).omit(
+    omitIdCreated,
+  );
+export type InsertDropshipChannelConnectionBrandingRevision = z.infer<
+  typeof insertDropshipChannelConnectionBrandingRevisionSchema
+>;
+export type DropshipChannelConnectionBrandingRevision =
+  typeof dropshipChannelConnectionBrandingRevisions.$inferSelect;
 
 export const insertDropshipUsdcLedgerEntrySchema = createInsertSchema(
   dropshipUsdcLedgerEntries,

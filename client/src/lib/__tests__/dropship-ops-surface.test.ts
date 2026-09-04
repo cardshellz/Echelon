@@ -49,6 +49,8 @@ import {
   buildCatalogExposureRuleFromPreviewRow,
   buildCatalogExposureRuleInput,
   buildDropshipNotificationsUrl,
+  buildDropshipEbayOAuthBrandingUpdateInput,
+  buildDropshipEbayOAuthBrandingVerificationInput,
   buildDropshipOrderAcceptInput,
   buildDropshipOrderRejectInput,
   buildPortalReturnCreateInput,
@@ -1965,6 +1967,59 @@ describe("dropship ops surface client helpers", () => {
         idempotencyKey: "short",
       }),
     ).toThrow("idempotencyKey must be between 8 and 200 characters.");
+  });
+
+  it("validates and normalizes customer-facing connection branding", () => {
+    expect(
+      buildDropshipEbayOAuthBrandingUpdateInput({
+        customerFacingAppName: "  Card Shellz  ",
+        expectedRevision: 0,
+        idempotencyKey: "branding-request-1",
+      }),
+    ).toEqual({
+      customerFacingAppName: "Card Shellz",
+      expectedRevision: 0,
+      idempotencyKey: "branding-request-1",
+    });
+    expect(() =>
+      buildDropshipEbayOAuthBrandingUpdateInput({
+        customerFacingAppName: " ",
+        expectedRevision: 0,
+        idempotencyKey: "branding-request-2",
+      }),
+    ).toThrow("customerFacingAppName is required");
+    expect(() =>
+      buildDropshipEbayOAuthBrandingUpdateInput({
+        customerFacingAppName: `Card${String.fromCharCode(0)}Shellz`,
+        expectedRevision: 0,
+        idempotencyKey: "branding-request-3",
+      }),
+    ).toThrow("cannot contain control characters");
+    expect(() =>
+      buildDropshipEbayOAuthBrandingUpdateInput({
+        customerFacingAppName: "Card Shellz",
+        expectedRevision: -1,
+        idempotencyKey: "branding-request-4",
+      }),
+    ).toThrow("expectedRevision must be a non-negative integer");
+  });
+
+  it("requires a positive revision to confirm the external eBay update", () => {
+    expect(
+      buildDropshipEbayOAuthBrandingVerificationInput({
+        expectedRevision: 3,
+        idempotencyKey: "branding-verify-1",
+      }),
+    ).toEqual({
+      expectedRevision: 3,
+      idempotencyKey: "branding-verify-1",
+    });
+    expect(() =>
+      buildDropshipEbayOAuthBrandingVerificationInput({
+        expectedRevision: 0,
+        idempotencyKey: "branding-verify-2",
+      }),
+    ).toThrow("expectedRevision must be a positive integer");
   });
 
   it("keeps portal return paths relative", () => {
