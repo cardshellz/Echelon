@@ -3038,11 +3038,17 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     const node = await pool.query<{ id: number }>(
       `INSERT INTO warehouse.fulfillment_nodes (
          code, name, node_type, warehouse_id, inventory_authority,
-         fulfillment_authority, lifecycle_status, created_by, activated_by, activated_at
+         fulfillment_authority, created_by
        ) VALUES ('RUNTIME', 'Runtime warehouse', 'internal_warehouse', $1,
-         'echelon', 'echelon', 'active', 'integration-test', 'integration-test', $2)
+         'echelon', 'echelon', 'integration-test')
        RETURNING id`,
-      [scope.warehouseId, FIXED_TIME],
+      [scope.warehouseId],
+    );
+    await pool.query(
+      `UPDATE warehouse.fulfillment_nodes
+       SET lifecycle_status = 'active', activated_by = 'integration-test', activated_at = $2
+       WHERE id = $1`,
+      [node.rows[0]!.id, FIXED_TIME],
     );
     const target = await pool.query<{ id: number }>(
       `INSERT INTO inventory.inventory_publication_targets (
