@@ -60,8 +60,11 @@ export class PostgresInventoryPublicationOutboxRepository {
            JOIN inventory.availability_activation_runs AS run
              ON run.id = outbox.activation_run_id
            WHERE outbox.state = 'queued' AND outbox.available_at <= $1
-             AND outbox.publication_phase = 'conservative'
-             AND run.state = 'publishing'
+             AND (
+               (outbox.publication_phase = 'conservative' AND run.state = 'publishing')
+               OR
+               (outbox.publication_phase = 'full' AND run.state = 'active')
+             )
            ORDER BY outbox.available_at, outbox.id
            FOR UPDATE SKIP LOCKED
            LIMIT $2
@@ -142,7 +145,7 @@ export class PostgresInventoryPublicationOutboxRepository {
          WHERE id = $1 AND provider_write_attempted = false`,
         [claim.activationRunId],
       );
-      const stopRequested = await activationShouldStop(client, claim.activationRunId);
+      const stopRequested = !await publicationCanProceed(client, claim);
       if (!matches) {
         if (stopRequested) {
           await client.query(
@@ -188,9 +191,7 @@ export class PostgresInventoryPublicationOutboxRepository {
       await lockActivationRun(client, claim.activationRunId);
       const current = await lockClaim(client, claim);
       if (!current) return false;
-      const runState = await activationRunState(client, claim.activationRunId);
-      const cancelled = runState !== "publishing"
-        || await activationHasDeadLetter(client, claim.activationRunId);
+      const cancelled = !await publicationCanProceed(client, claim);
       const retryable = !cancelled && input.retryable && claim.attemptNumber < 10;
       const outcome = cancelled ? "cancelled" : retryable ? "retryable" : "dead_letter";
       await client.query(
@@ -233,9 +234,15 @@ async function lockPublicationRuns(client: PoolClient, now: Date): Promise<void>
      WHERE EXISTS (
        SELECT 1 FROM inventory.inventory_publication_outbox AS outbox
        WHERE outbox.activation_run_id = run.id
-         AND outbox.publication_phase = 'conservative'
-         AND ((outbox.state = 'queued' AND outbox.available_at <= $1)
-           OR (outbox.state = 'leased' AND outbox.lease_expires_at <= $1))
+         AND (
+           (outbox.state = 'queued' AND outbox.available_at <= $1 AND (
+             (outbox.publication_phase = 'conservative' AND run.state = 'publishing')
+             OR
+             (outbox.publication_phase = 'full' AND run.state = 'active')
+           ))
+           OR (outbox.state = 'leased' AND outbox.lease_expires_at <= $1
+             AND outbox.publication_phase IN ('conservative', 'full'))
+         )
      )
      ORDER BY run.id
      FOR UPDATE OF run`,
@@ -249,14 +256,17 @@ async function recoverExpiredLeases(client: PoolClient, now: Date): Promise<void
      FROM inventory.inventory_publication_outbox AS outbox
      JOIN inventory.availability_activation_runs AS run ON run.id = outbox.activation_run_id
      WHERE outbox.state = 'leased' AND outbox.lease_expires_at <= $1
-       AND outbox.publication_phase = 'conservative'
+       AND outbox.publication_phase IN ('conservative', 'full')
      ORDER BY outbox.id FOR UPDATE OF outbox SKIP LOCKED`,
     [now.toISOString()],
   )).rows;
   for (const row of expired) {
     const claim = parseClaim(row, validDate(row.updated_at, "attemptStartedAt"));
-    const cancelled = String(row.activation_state) !== "publishing"
-      || await activationHasDeadLetter(client, claim.activationRunId);
+    const cancelled = !await publicationCanProceed(
+      client,
+      claim,
+      String(row.activation_state),
+    );
     await client.query(
       `INSERT INTO inventory.inventory_publication_attempts (
          outbox_id, attempt_number, outcome, provider_request_key, request_hash,
@@ -349,9 +359,19 @@ async function activationHasDeadLetter(client: PoolClient, activationRunId: stri
   return row?.exists === true;
 }
 
-async function activationShouldStop(client: PoolClient, activationRunId: string): Promise<boolean> {
-  return await activationRunState(client, activationRunId) !== "publishing"
-    || await activationHasDeadLetter(client, activationRunId);
+async function publicationCanProceed(
+  client: PoolClient,
+  claim: Pick<ClaimedInventoryPublication, "activationRunId" | "publicationPhase">,
+  knownRunState?: string,
+): Promise<boolean> {
+  const runState = knownRunState ?? await activationRunState(client, claim.activationRunId);
+  // Conservative rows are one coordinated pre-cutover batch: any permanent
+  // failure stops that activation. Full rows are independent desired-state
+  // updates after irreversible cutover, so an older dead letter must not block
+  // a newer runtime publication for a different target or revision.
+  if (claim.publicationPhase === "full") return runState === "active";
+  return runState === "publishing"
+    && !await activationHasDeadLetter(client, claim.activationRunId);
 }
 
 async function finalizeDeadLetteredRunIfQuiescent(
