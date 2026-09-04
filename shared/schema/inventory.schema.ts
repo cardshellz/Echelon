@@ -920,15 +920,22 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   costProvisional: integer("cost_provisional").notNull().default(0), // 1 = landed cost not yet finalized
   // --- COGS cost layers (migration 051 / server/db.ts startup DDL) ---------
   // These were historically raw-SQL-only columns. Surfaced in Drizzle here so
-  // the ORM is the single source of truth for lot cost. NUMERIC(10,4) carries
-  // sub-cent precision for landed-cost allocation (decimal, never float).
+  // the ORM is the single source of truth for lot cost. All four are WHOLE
+  // integer cents: every writer rounds through millsToCents() /
+  // buildMillsToRoundedCents(), and sub-cent precision lives in the *_mills
+  // columns below. They were declared NUMERIC(10,4) here while the database
+  // held bigint (migration 0576) — packaging_cost_cents was the one column
+  // genuinely left as numeric, and Postgres padding it to "0.0000" on the wire
+  // made BigInt() reject it in the FIFO lot cost normalizer. Migration 219
+  // aligned the column; these declarations must stay bigint so the mismatch
+  // cannot come back.
   // `unitCostCents` (above) = PO unit cost used by the pick path; FIFO
   // valuation prefers `totalUnitCostCents` (PO + allocated landed) when set.
   poLineId: integer("po_line_id"),
-  poUnitCostCents: numeric("po_unit_cost_cents", { precision: 10, scale: 4 }).default("0"),
-  packagingCostCents: numeric("packaging_cost_cents", { precision: 10, scale: 4 }).default("0"),
-  landedCostCents: numeric("landed_cost_cents", { precision: 10, scale: 4 }).default("0"),
-  totalUnitCostCents: numeric("total_unit_cost_cents", { precision: 10, scale: 4 }).default("0"),
+  poUnitCostCents: bigint("po_unit_cost_cents", { mode: "number" }).default(0),
+  packagingCostCents: bigint("packaging_cost_cents", { mode: "number" }).default(0),
+  landedCostCents: bigint("landed_cost_cents", { mode: "number" }).default(0),
+  totalUnitCostCents: bigint("total_unit_cost_cents", { mode: "number" }).default(0),
   // --- Mills cost layers (1/100 cent) — AUTHORITATIVE source of truth for cost.
   // Integer mills carry 4-decimal-dollar precision so per-unit × pack-size and
   // FIFO × qty never amplify cent-rounding (see shared/utils/money.ts). The

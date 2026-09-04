@@ -1,0 +1,8 @@
+-- Reverse migration: 219_inventory_lot_packaging_cost_bigint
+--
+-- Intentionally a no-op. The forward migration aligns
+-- inventory.inventory_lots.packaging_cost_cents with every other money column
+-- on the table. Converting it back to NUMERIC(10,4) would restore the padded
+-- "0.0000" wire format that makes BigInt() throw, reinstating the production
+-- failure on inventory transfers, replenishment moves, case breaks and
+-- cycle-count moves that this migration exists to fix.
