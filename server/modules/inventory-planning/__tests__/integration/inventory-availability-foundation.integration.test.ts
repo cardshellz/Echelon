@@ -3024,7 +3024,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     await pool.query(
       `INSERT INTO inventory.promise_safety_policy_heads (
          scope_key, draft_policy_id, revision, updated_by, update_reason
-       ) VALUES ($1, $2, 1, 'integration-test', 'Runtime publication safety draft')`,
+       ) VALUES ($1, $2, 0, 'integration-test', 'Runtime publication safety draft')`,
       [safetyScopeKey, safetyPolicy.rows[0]!.id],
     );
 
