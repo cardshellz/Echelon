@@ -52,6 +52,7 @@ import { registerDropshipAdminCarrierClaimRoutes } from "./modules/dropship/inte
 import { registerDropshipAdminReturnPolicyRoutes } from "./modules/dropship/interfaces/http/dropship-admin-return-policy.routes";
 import { registerDropshipAdminOmsChannelConfigRoutes } from "./modules/dropship/interfaces/http/dropship-admin-oms-channel-config.routes";
 import { registerDropshipAdminWorkerOpsRoutes } from "./modules/dropship/interfaces/http/dropship-admin-worker-ops.routes";
+import { registerDropshipAdminEbayOAuthBrandingRoutes } from "./modules/dropship/interfaces/http/dropship-admin-ebay-oauth-branding.routes";
 import { registerDropshipVendorCatalogRoutes } from "./modules/dropship/interfaces/http/dropship-vendor-catalog.routes";
 import { registerDropshipOnboardingRoutes } from "./modules/dropship/interfaces/http/dropship-onboarding.routes";
 import { registerDropshipStoreConnectionRoutes } from "./modules/dropship/interfaces/http/dropship-store-connection.routes";
@@ -140,6 +141,7 @@ export async function registerRoutes(
   registerOutboundShipmentRoutes(app);
   registerDropshipAdminOmsChannelConfigRoutes(app);
   registerDropshipAdminWorkerOpsRoutes(app);
+  registerDropshipAdminEbayOAuthBrandingRoutes(app);
   registerDropshipVendorCatalogRoutes(app);
   registerDropshipOnboardingRoutes(app);
   registerDropshipStoreConnectionRoutes(app);

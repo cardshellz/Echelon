@@ -447,6 +447,41 @@ export interface DropshipAdminOpsOverviewResponse {
   overview: DropshipAdminOpsOverview;
 }
 
+export interface DropshipEbayOAuthBrandingConfiguration {
+  platform: "ebay";
+  useCase: "dropship_vendor_store_oauth";
+  environment: "sandbox" | "production";
+  status: "ready" | "attention_required" | "blocked";
+  suggestedDisplayTitle: string;
+  message: string;
+  clientId: {
+    source: string | null;
+    fingerprint: string | null;
+    dedicated: boolean;
+  };
+  clientSecret: {
+    source: string | null;
+    configured: boolean;
+    dedicated: boolean;
+  };
+  ruName: {
+    source: string | null;
+    value: string | null;
+    dedicated: boolean;
+  };
+  management: {
+    mode: "external_provider_portal";
+    displayTitleReadableByApi: false;
+    displayTitleWritableByApi: false;
+    portalUrl: string;
+    documentationUrl: string;
+  };
+}
+
+export interface DropshipEbayOAuthBrandingResponse {
+  configuration: DropshipEbayOAuthBrandingConfiguration;
+}
+
 export interface DropshipAuditEventSearchResponse {
   items: DropshipAuditEventRecord[];
   total: number;

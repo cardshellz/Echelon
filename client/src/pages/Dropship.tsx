@@ -262,6 +262,7 @@ import {
   returnPolicyScopeValueToPicker,
 } from "@/lib/dropship-return-policy-scope";
 import { ReturnInspectionModal } from "@/components/dropship/ReturnInspectionModal";
+import { EbayOAuthBrandingAdminPanel } from "@/components/dropship/EbayOAuthBrandingAdminPanel";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
@@ -286,6 +287,7 @@ type DropshipOpsTabValue =
   | "dogfood"
   | "catalog"
   | "shipping"
+  | "oauth-branding"
   | "order-intake"
   | "wallet-ops"
   | "stores"
@@ -367,6 +369,7 @@ const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
   "dogfood",
   "catalog",
   "shipping",
+  "oauth-branding",
   "order-intake",
   "wallet-ops",
   "stores",
@@ -1048,6 +1051,10 @@ export default function Dropship() {
 
           <TabsContent value="shipping" className="m-0">
             <ShippingConfigTab />
+          </TabsContent>
+
+          <TabsContent value="oauth-branding" className="m-0">
+            <EbayOAuthBrandingAdminPanel />
           </TabsContent>
 
           <TabsContent value="order-intake" className="m-0">
