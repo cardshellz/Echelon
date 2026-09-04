@@ -115,3 +115,81 @@ describe("inventory availability runtime claim routing contract", () => {
     expect(webhooks).not.toContain("wmsServices.reservation.releaseOrderItemReservation(args)");
   });
 });
+
+describe("inventory availability runtime publication routing contract", () => {
+  it("constructs the authority-aware publisher at every production orchestration seam", () => {
+    const compositionFiles = [
+      "server/services/index.ts",
+      "scripts/_ca-live-sync.ts",
+      "scripts/run-live-sync-all.ts",
+      "scripts/run-live-inventory-sync.ts",
+      "scripts/run-dry-sync.ts",
+    ];
+
+    for (const file of compositionFiles) {
+      const contents = source(file);
+      expect(contents, file).toContain("createAuthorityAwareInventoryPublicationService");
+      expect(contents, file).toContain("inventoryPublication");
+    }
+  });
+
+  it("makes the publication router mandatory for orchestrator and variant-availability composition", () => {
+    const orchestrator = source("server/modules/channels/echelon-sync-orchestrator.service.ts");
+    const availability = source("server/modules/channels/variant-availability-sync.service.ts");
+
+    expect(orchestrator).toContain(
+      "inventoryPublication: AuthorityAwareInventoryPublicationService",
+    );
+    expect(orchestrator).toContain("this.inventoryPublication.publishProduct(");
+    expect(orchestrator).toContain("this.inventoryPublication.listProductIds(");
+    expect(availability).toContain("inventoryPublication: AuthorityAwareInventoryPublicationService");
+    expect(availability).toContain("dependencies.inventoryPublication.publishVariantAvailability({");
+  });
+
+  it("keeps direct provider writes behind legacy callbacks or the canonical outbox worker", () => {
+    const orchestrator = source("server/modules/channels/echelon-sync-orchestrator.service.ts");
+    const availability = source("server/modules/channels/variant-availability-sync.service.ts");
+    const outbox = source(
+      "server/modules/inventory-planning/application/inventory-publication-outbox.service.ts",
+    );
+
+    const orchestratorWrites = indexesOf(orchestrator, ".pushInventory(");
+    expect(orchestratorWrites).toHaveLength(2);
+    expect(orchestratorWrites.every((index) =>
+      index > orchestrator.indexOf("private async syncInventoryForProductLegacy("))).toBe(true);
+    const availabilityWrites = indexesOf(availability, ".pushInventory(");
+    expect(availabilityWrites).toHaveLength(1);
+    expect(availabilityWrites[0]).toBeGreaterThan(
+      availability.indexOf("async function publishLegacyAvailability("),
+    );
+    expect(indexesOf(outbox, ".pushInventory(")).toHaveLength(1);
+  });
+
+  it("pins publication authority without activating or reverting it", () => {
+    const runtimeRepository = source(
+      "server/modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository.ts",
+    );
+    const authorityRepository = source(
+      "server/modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository.ts",
+    );
+    expect(runtimeRepository).toContain("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+    expect(runtimeRepository).toContain("loadAndLockRuntimeAuthority(connectedClient)");
+    expect(authorityRepository).toContain("FROM inventory.availability_runtime_authority");
+    expect(authorityRepository).toContain("FOR SHARE");
+    expect(runtimeRepository).not.toMatch(/UPDATE\s+inventory\.availability_runtime_authority/i);
+    expect(runtimeRepository).not.toMatch(/INSERT\s+INTO\s+inventory\.availability_runtime_authority/i);
+    expect(runtimeRepository).not.toMatch(/DELETE\s+FROM\s+inventory\.availability_runtime_authority/i);
+  });
+});
+
+function indexesOf(value: string, pattern: string): number[] {
+  const indexes: number[] = [];
+  let offset = 0;
+  while (offset < value.length) {
+    const index = value.indexOf(pattern, offset);
+    if (index === -1) break;
+    indexes.push(index);
+    offset = index + pattern.length;
+  }
+  return indexes;
+}

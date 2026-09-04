@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   claimVariantAvailabilitySyncs,
   enqueueVariantAvailabilitySync,
+  markVariantAvailabilityDelegated,
   markVariantAvailabilityFailed,
   markVariantAvailabilityNotApplicable,
   type ClaimedVariantAvailabilitySync,
@@ -129,6 +130,21 @@ describe("variant availability sync repository", () => {
     expect(query.mock.calls[1][0]).not.toContain("last_synced_quantity");
     expect(query.mock.calls[2][0]).toContain("SET is_active = 0");
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("completes a canonical handoff without claiming provider acknowledgement", async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+    const pool = { query } as unknown as SqlPool;
+
+    await expect(markVariantAvailabilityDelegated(pool, CLAIM)).resolves.toBe(true);
+
+    expect(query).toHaveBeenCalledOnce();
+    expect(query.mock.calls[0][0]).toContain("UPDATE channels.channel_variant_availability_sync");
+    expect(query.mock.calls[0][0]).toContain("SET status = 'synced'");
+    expect(query.mock.calls[0][0]).not.toContain("channels.channel_feeds");
+    expect(query.mock.calls[0][0]).not.toContain("channels.channel_listings");
+    expect(query.mock.calls[0][0]).not.toContain("last_synced_qty");
+    expect(query.mock.calls[0][1]).toEqual([67, 67, 9, CLAIM.leaseToken]);
   });
 
   it("does not overwrite a newer revision when recording a failure", async () => {

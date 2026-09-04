@@ -162,7 +162,7 @@ export function createInventoryChannelExposureRuntimeService(
   );
 }
 
-async function loadManagedSellableVariantIds(
+export async function loadManagedSellableVariantIds(
   client: PoolClient,
   productId: number,
 ): Promise<number[]> {
@@ -180,11 +180,15 @@ async function loadManagedSellableVariantIds(
   return result.rows.map((row) => positiveInteger(row.id, "productVariant.id"));
 }
 
-async function loadActivePublicationTargets(
+export async function loadActivePublicationTargets(
   client: PoolClient,
   productId: number,
   productVariantIds: readonly number[],
+  channelId?: number,
 ): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
+  const targetValues: unknown[] = [];
+  const channelFilter = channelId == null ? "" : "AND target.channel_id = $1";
+  if (channelId != null) targetValues.push(positiveInteger(channelId, "channelId"));
   const targetResult = await client.query<PublicationTargetRow>(
     `SELECT target.id AS publication_target_id,
             target.revision::text AS publication_target_revision,
@@ -207,7 +211,9 @@ async function loadActivePublicationTargets(
        ON dropship_connection.id = target.dropship_store_connection_id
      WHERE target.state = 'live'
        AND target.publication_authority = 'echelon'
+       ${channelFilter}
      ORDER BY target.id`,
+    targetValues,
   );
   if (targetResult.rows.length === 0) return [];
 
