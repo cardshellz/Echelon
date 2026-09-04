@@ -233,20 +233,57 @@ describe("eBay Adapter", () => {
 
       const result = await adapter.readInventory(2, [{
         variantId: 101,
-        sku: "CS-TL35-P25",
+        sku: null,
         externalInventoryItemId: "CS-TL35-P25",
         providerScopeType: "account",
-        externalScopeId: "EBAY_US",
+        externalScopeId: "seller-account-1",
       }], {
         authority: "canonical_outbox",
         channelConnectionId: 22,
         providerScopeType: "account",
-        externalScopeId: "EBAY_US",
+        externalScopeId: "seller-account-1",
       });
 
-      expect(getApiClient).toHaveBeenCalledWith(2, 22);
+      expect(getApiClient).toHaveBeenCalledWith(2, 22, "seller-account-1");
       expect(getInventoryItem).toHaveBeenCalledWith("CS-TL35-P25");
       expect(result).toEqual([{ variantId: 101, observedQty: 9, status: "success" }]);
+    });
+
+    it("rejects a canonical inventory-item identity that conflicts with its SKU", async () => {
+      await expect(adapter.readInventory(2, [{
+        variantId: 101,
+        sku: "SKU-ONE",
+        externalInventoryItemId: "SKU-TWO",
+        providerScopeType: "account",
+        externalScopeId: "seller-account-1",
+      }], {
+        authority: "canonical_outbox",
+        channelConnectionId: 22,
+        providerScopeType: "account",
+        externalScopeId: "seller-account-1",
+      })).rejects.toMatchObject({
+        code: "EBAY_INVENTORY_IDENTITY_MISMATCH",
+      });
+    });
+
+    it("fails closed before constructing a client when the verified OAuth account differs", async () => {
+      vi.spyOn(adapter as any, "getConnectionMetadata").mockResolvedValue({});
+      vi.spyOn(adapter as any, "getAuthService").mockResolvedValue({
+        getVerifiedProviderAccount: vi.fn(async () => ({
+          externalAccountId: "actual-seller",
+          externalAccountDisplayName: null,
+          externalAccountIdentityScheme: "provider_user_id",
+          externalAccountVerifiedAt: new Date("2026-09-04T00:00:00.000Z"),
+        })),
+      });
+
+      await expect((adapter as any).getApiClient(
+        2,
+        22,
+        "target-seller",
+      )).rejects.toMatchObject({
+        code: "EBAY_PROVIDER_ACCOUNT_IDENTITY_MISMATCH",
+      });
     });
 
     it("fails closed when channel-scoped OAuth cannot identify one exact connection", async () => {

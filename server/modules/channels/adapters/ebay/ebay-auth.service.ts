@@ -221,6 +221,31 @@ export class EbayAuthService {
   }
 
   /**
+   * Return the persisted, provider-verified account represented by this
+   * environment's OAuth token. Canonical publication uses this to prove that
+   * an immutable target account and the credential account are identical.
+   */
+  async getVerifiedProviderAccount(
+    channelId: number,
+  ): Promise<EbayObservedProviderAccount | null> {
+    const token = await this.getStoredToken(channelId);
+    const externalAccountId = token?.externalAccountId?.trim();
+    if (!token
+      || !externalAccountId
+      || token.externalAccountIdentityScheme !== EBAY_PROVIDER_ACCOUNT_IDENTITY_SCHEME
+      || !(token.externalAccountVerifiedAt instanceof Date)
+      || Number.isNaN(token.externalAccountVerifiedAt.getTime())) {
+      return null;
+    }
+    return {
+      externalAccountId,
+      externalAccountDisplayName: token.externalAccountDisplayName,
+      externalAccountIdentityScheme: EBAY_PROVIDER_ACCOUNT_IDENTITY_SCHEME,
+      externalAccountVerifiedAt: token.externalAccountVerifiedAt,
+    };
+  }
+
+  /**
    * Generate the eBay OAuth consent URL for initial authorization.
    * The seller must visit this URL and grant permissions.
    */

@@ -1,16 +1,14 @@
 import { randomUUID } from "node:crypto";
 
 import type {
-  ChannelAdapterRegistry,
-  InventoryPublicationContext,
-  InventoryPushItem,
-  InventoryReadItem,
-} from "../../channels/channel-adapter.interface";
-import { InventoryPublicationConfigurationError } from "../../channels/channel-adapter.interface";
-import type {
   ClaimedInventoryPublication,
   PublicationAttemptFailure,
 } from "../infrastructure/inventory-publication-outbox.repository";
+import {
+  InventoryPublicationTransportError,
+  type InventoryPublicationDestination,
+  type InventoryPublicationTransportRegistry,
+} from "./inventory-publication-transport";
 
 const DEFAULT_BATCH_SIZE = 25;
 const DEFAULT_LEASE_SECONDS = 120;
@@ -22,6 +20,10 @@ export interface InventoryPublicationOutboxStore {
     leaseToken: string;
     now: Date;
   }): Promise<ClaimedInventoryPublication[]>;
+  runIfCurrent<T>(
+    claim: ClaimedInventoryPublication,
+    work: () => Promise<T>,
+  ): Promise<{ status: "current"; value: T } | { status: "superseded" }>;
   recordVerified(
     claim: ClaimedInventoryPublication,
     input: { observedQuantity: number; providerResponse: unknown; completedAt: Date },
@@ -40,6 +42,7 @@ export interface InventoryPublicationBatchResult {
   claimed: number;
   verified: number;
   failed: number;
+  superseded: number;
 }
 
 const systemClock: InventoryPublicationClock = { now: () => new Date() };
@@ -47,7 +50,7 @@ const systemClock: InventoryPublicationClock = { now: () => new Date() };
 export class InventoryPublicationOutboxService {
   constructor(
     private readonly store: InventoryPublicationOutboxStore,
-    private readonly adapters: Pick<ChannelAdapterRegistry, "get">,
+    private readonly adapters: Pick<InventoryPublicationTransportRegistry, "get">,
     private readonly clock: InventoryPublicationClock = systemClock,
     private readonly leaseTokenFactory: () => string = randomUUID,
   ) {}
@@ -61,12 +64,18 @@ export class InventoryPublicationOutboxService {
       leaseToken: this.leaseTokenFactory(),
       now: validNow(this.clock),
     });
-    const result: InventoryPublicationBatchResult = { claimed: claims.length, verified: 0, failed: 0 };
+    const result: InventoryPublicationBatchResult = {
+      claimed: claims.length,
+      verified: 0,
+      failed: 0,
+      superseded: 0,
+    };
     for (const claim of claims) {
       try {
         const outcome = await this.publishAndVerify(claim);
         if (outcome === "verified") result.verified += 1;
-        else result.failed += 1;
+        else if (outcome === "drifted" || outcome === "failed") result.failed += 1;
+        else result.superseded += 1;
       } catch (error) {
         const failure = classifyFailure(error);
         await this.store.recordFailure(claim, { ...failure, completedAt: validNow(this.clock) });
@@ -76,72 +85,65 @@ export class InventoryPublicationOutboxService {
     return result;
   }
 
-  private async publishAndVerify(claim: ClaimedInventoryPublication): Promise<"verified" | "drifted"> {
-    const adapter = this.adapters.get(claim.providerKey);
+  private async publishAndVerify(
+    claim: ClaimedInventoryPublication,
+  ): Promise<"verified" | "drifted" | "failed" | "superseded"> {
+    const adapter = this.adapters.get(claim.destinationKind, claim.providerKey);
     if (!adapter) {
-      throw permanent("PUBLICATION_ADAPTER_MISSING", `No inventory adapter is registered for ${claim.providerKey}.`);
-    }
-    if (!adapter.readInventory) {
       throw permanent(
-        "PUBLICATION_READBACK_UNSUPPORTED",
-        `The ${claim.providerKey} adapter cannot verify provider inventory readback.`,
+        "PUBLICATION_ADAPTER_MISSING",
+        `No inventory adapter is registered for ${claim.destinationKind}:${claim.providerKey}.`,
       );
     }
-    if (!adapter.inventoryPublicationScopeTypes?.includes(claim.providerScopeType)) {
+    if (!adapter.supportedScopeTypes.includes(claim.providerScopeType)) {
       throw permanent(
         "PUBLICATION_SCOPE_UNSUPPORTED",
         `The ${claim.providerKey} adapter cannot address ${claim.providerScopeType}-scoped inventory without inference.`,
       );
     }
     const desiredQuantity = safeQuantity(claim.desiredQuantity);
-    const context: InventoryPublicationContext = {
-      authority: "canonical_outbox",
-      channelConnectionId: claim.channelConnectionId,
+    const request = {
+      destination: publicationDestination(claim),
+      channelId: claim.channelId,
       providerScopeType: claim.providerScopeType,
       externalScopeId: claim.externalScopeId,
-    };
-    const pushItem: InventoryPushItem = {
-      variantId: claim.productVariantId,
-      sku: claim.externalSku,
-      externalVariantId: null,
+      productVariantId: claim.productVariantId,
       externalInventoryItemId: claim.externalInventoryItemId,
-      allocatedQty: desiredQuantity,
+      externalSku: claim.externalSku,
     };
-    const pushResults = await adapter.pushInventory(claim.channelId, [pushItem], context);
-    const pushed = singleResult(pushResults, claim.productVariantId, "publication");
-    if (pushed.status !== "success" || pushed.pushedQty !== desiredQuantity) {
-      const message = pushed.error ?? `Provider reported ${pushed.status} for inventory publication.`;
-      throw pushed.retryable === false
-        ? permanent(pushed.errorCode ?? "PROVIDER_PUBLICATION_CONFIGURATION_INVALID", message)
-        : retryable(pushed.errorCode ?? "PROVIDER_PUBLICATION_REJECTED", message);
-    }
-    const readItem: InventoryReadItem = {
-      variantId: claim.productVariantId,
-      sku: claim.externalSku,
-      externalInventoryItemId: claim.externalInventoryItemId,
-      providerScopeType: claim.providerScopeType,
-      externalScopeId: claim.externalScopeId,
-    };
-    const readResults = await adapter.readInventory(claim.channelId, [readItem], context);
-    const readback = singleResult(readResults, claim.productVariantId, "readback");
-    if (readback.status !== "success") {
-      throw retryable(
-        "PROVIDER_READBACK_FAILED",
-        readback.error ?? "Provider inventory readback failed.",
-      );
-    }
-    if (!Number.isSafeInteger(readback.observedQty) || readback.observedQty < 0) {
-      throw retryable("PROVIDER_READBACK_INVALID", "Provider returned an invalid inventory quantity.");
-    }
-    const recorded = await this.store.recordVerified(claim, {
-      observedQuantity: readback.observedQty,
-      providerResponse: { push: pushed, readback },
-      completedAt: validNow(this.clock),
+    const operation = await this.store.runIfCurrent(claim, async () => {
+      try {
+        const push = await adapter.publishAbsolute({ ...request, desiredQuantity });
+        if (push.publishedQuantity !== desiredQuantity) {
+          throw retryable(
+            "PROVIDER_RESPONSE_INVALID",
+            "Provider publication did not confirm the exact desired quantity.",
+          );
+        }
+        const readback = await adapter.readAbsolute(request);
+        if (!Number.isSafeInteger(readback.observedQuantity) || readback.observedQuantity < 0) {
+          throw retryable("PROVIDER_READBACK_INVALID", "Provider returned an invalid inventory quantity.");
+        }
+        const recorded = await this.store.recordVerified(claim, {
+          observedQuantity: readback.observedQuantity,
+          providerResponse: {
+            push: push.providerResponse,
+            readback: readback.providerResponse,
+          },
+          completedAt: validNow(this.clock),
+        });
+        if (recorded === null) {
+          throw permanent("PUBLICATION_LEASE_LOST", "The inventory publication lease was no longer owned by this worker.");
+        }
+        return recorded;
+      } catch (error) {
+        const failure = classifyFailure(error);
+        await this.store.recordFailure(claim, { ...failure, completedAt: validNow(this.clock) });
+        return "failed" as const;
+      }
     });
-    if (recorded === null) {
-      throw permanent("PUBLICATION_LEASE_LOST", "The inventory publication lease was no longer owned by this worker.");
-    }
-    return recorded;
+    if (operation.status === "superseded") return "superseded";
+    return operation.value;
   }
 }
 
@@ -164,8 +166,8 @@ function classifyFailure(error: unknown): PublicationAttemptFailure {
   if (error instanceof ClassifiedPublicationError) {
     return { errorClass: error.code, errorMessage: error.message, retryable: error.retryable };
   }
-  if (error instanceof InventoryPublicationConfigurationError) {
-    return { errorClass: error.code, errorMessage: error.message, retryable: false };
+  if (error instanceof InventoryPublicationTransportError) {
+    return { errorClass: error.code, errorMessage: error.message, retryable: error.retryable };
   }
   return {
     errorClass: "PROVIDER_PUBLICATION_ERROR",
@@ -187,25 +189,38 @@ function safeQuantity(value: string): number {
   return Number(parsed);
 }
 
-function singleResult<T extends { variantId: number }>(
-  results: T[],
-  variantId: number,
-  operation: string,
-): T {
-  if (results.length !== 1 || results[0]?.variantId !== variantId) {
-    throw retryable(
-      "PROVIDER_RESPONSE_INVALID",
-      `Provider ${operation} did not return exactly one matching variant result.`,
-    );
-  }
-  return results[0];
-}
-
 function positiveInteger(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new Error(`${field} must be a positive safe integer.`);
   }
   return value;
+}
+
+function publicationDestination(claim: ClaimedInventoryPublication): InventoryPublicationDestination {
+  if (claim.destinationKind === "channel_connection") {
+    if (claim.channelConnectionId === null || claim.dropshipStoreConnectionId !== null) {
+      throw permanent(
+        "PUBLICATION_DESTINATION_INVALID",
+        "A channel publication must contain exactly one channel connection owner.",
+      );
+    }
+    return {
+      kind: "channel_connection",
+      channelConnectionId: claim.channelConnectionId,
+      dropshipStoreConnectionId: null,
+    };
+  }
+  if (claim.channelConnectionId !== null || claim.dropshipStoreConnectionId === null) {
+    throw permanent(
+      "PUBLICATION_DESTINATION_INVALID",
+      "A Dropship publication must contain exactly one Dropship store connection owner.",
+    );
+  }
+  return {
+    kind: "dropship_store_connection",
+    channelConnectionId: null,
+    dropshipStoreConnectionId: claim.dropshipStoreConnectionId,
+  };
 }
 
 function validNow(clock: InventoryPublicationClock): Date {

@@ -65,6 +65,10 @@ const publicationDestinationOwnerMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0652_inventory_publication_destination_owners.sql"),
   "utf8",
 );
+const publicationOutboxDestinationOwnerMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/220_inventory_publication_outbox_destination_owners.sql"),
+  "utf8",
+);
 const HASH = "a".repeat(64);
 const FIXED_TIME = "2026-08-26T12:00:00.000Z";
 
@@ -275,6 +279,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(publicationReadinessMigrationSql);
       await migrationClient.query(availabilityCutoverMigrationSql);
       await migrationClient.query(publicationDestinationOwnerMigrationSql);
+      await migrationClient.query(publicationOutboxDestinationOwnerMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -2541,6 +2546,43 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         [dropshipTarget.rows[0]!.id],
       ),
       "inventory publication target identity and creation evidence are immutable",
+    );
+
+    const dropshipOutbox = await pool.query<{
+      destination_kind_snapshot: string;
+      channel_connection_id_snapshot: number | null;
+      dropship_store_connection_id_snapshot: number | null;
+    }>(
+      `INSERT INTO inventory.inventory_publication_outbox (
+         publication_target_id, product_variant_id, desired_revision, desired_quantity,
+         destination_kind_snapshot, channel_connection_id_snapshot,
+         dropship_store_connection_id_snapshot, external_scope_id_snapshot,
+         external_inventory_item_id_snapshot, idempotency_key, payload_hash, available_at
+       ) VALUES ($1, $2, 1, 0, 'dropship_store_connection', NULL, $3,
+         'seller-account-1', 'dropship-inventory-item-1',
+         'publication:dropship:1', $4, $5)
+       RETURNING destination_kind_snapshot, channel_connection_id_snapshot,
+                 dropship_store_connection_id_snapshot`,
+      [dropshipTarget.rows[0]!.id, scope.variantIds[0], dropshipStore.rows[0]!.id, HASH, FIXED_TIME],
+    );
+    expect(dropshipOutbox.rows[0]).toEqual({
+      destination_kind_snapshot: "dropship_store_connection",
+      channel_connection_id_snapshot: null,
+      dropship_store_connection_id_snapshot: dropshipStore.rows[0]!.id,
+    });
+    await expectDatabaseError(
+      () => pool.query(
+        `INSERT INTO inventory.inventory_publication_outbox (
+           publication_target_id, product_variant_id, desired_revision, desired_quantity,
+           destination_kind_snapshot, channel_connection_id_snapshot,
+           dropship_store_connection_id_snapshot, external_scope_id_snapshot,
+           external_inventory_item_id_snapshot, idempotency_key, payload_hash, available_at
+         ) VALUES ($1, $2, 2, 0, 'channel_connection', $3, NULL,
+           'seller-account-1', 'dropship-inventory-item-1',
+           'publication:dropship:wrong-owner', $4, $5)`,
+        [dropshipTarget.rows[0]!.id, scope.variantIds[0], connection.rows[0]!.id, HASH, FIXED_TIME],
+      ),
+      "publication identity snapshot differs from its target",
     );
 
     const outbox = await pool.query<{ id: string }>(

@@ -76,7 +76,9 @@ interface LatestPublicationRow extends Record<string, unknown> {
   activation_run_id: string | null;
   publication_target_revision_snapshot: string | null;
   channel_id_snapshot: number | null;
-  channel_connection_id_snapshot: number;
+  destination_kind_snapshot: string;
+  channel_connection_id_snapshot: number | null;
+  dropship_store_connection_id_snapshot: number | null;
   provider_key_snapshot: string | null;
   provider_scope_type_snapshot: string | null;
   external_scope_id_snapshot: string;
@@ -252,7 +254,10 @@ async function loadZeroPublicationTargets(
             target.revision::text AS publication_target_revision,
             target.destination_kind,
             target.channel_id, channel_row.name AS channel_name,
-            lower(channel_row.provider) AS provider_key,
+            lower(CASE target.destination_kind
+              WHEN 'channel_connection' THEN channel_row.provider
+              WHEN 'dropship_store_connection' THEN dropship_connection.platform
+            END) AS provider_key,
             target.channel_connection_id, target.dropship_store_connection_id,
             target.provider_scope_type,
             target.external_scope_id, binding_head.active_binding_id,
@@ -262,6 +267,8 @@ async function loadZeroPublicationTargets(
             warehouse_row.is_active = 1 AS warehouse_is_active
      FROM inventory.inventory_publication_targets AS target
      JOIN channels.channels AS channel_row ON channel_row.id = target.channel_id
+     LEFT JOIN dropship.dropship_store_connections AS dropship_connection
+       ON dropship_connection.id = target.dropship_store_connection_id
      LEFT JOIN inventory.publication_source_binding_heads AS binding_head
        ON binding_head.publication_target_id = target.id
      LEFT JOIN inventory.publication_source_binding_versions AS binding
@@ -379,15 +386,26 @@ async function loadZeroPublicationTargets(
       return [positiveInteger(row.warehouse_id, "sourceWarehouseId")];
     });
     const channelId = positiveInteger(first.channel_id, "channelId");
-    if (first.destination_kind !== "channel_connection"
-      || first.channel_connection_id == null
-      || first.dropship_store_connection_id != null) {
+    const destinationKind = publicationDestinationKind(first.destination_kind);
+    const channelConnectionId = nullablePositiveInteger(
+      first.channel_connection_id,
+      "channelConnectionId",
+    );
+    const dropshipStoreConnectionId = nullablePositiveInteger(
+      first.dropship_store_connection_id,
+      "dropshipStoreConnectionId",
+    );
+    if ((destinationKind === "channel_connection"
+      && (channelConnectionId === null || dropshipStoreConnectionId !== null))
+      || (destinationKind === "dropship_store_connection"
+        && (channelConnectionId !== null || dropshipStoreConnectionId === null))) {
       throw runtimeError(
-        "INVENTORY_PUBLICATION_DESTINATION_UNSUPPORTED",
-        "The canonical publication outbox does not support this destination owner yet.",
+        "INVENTORY_PUBLICATION_DESTINATION_INVALID",
+        "The active publication target has inconsistent destination ownership.",
         {
           publicationTargetId: targetId,
           destinationKind: first.destination_kind,
+          channelConnectionId: first.channel_connection_id,
           dropshipStoreConnectionId: first.dropship_store_connection_id,
         },
       );
@@ -401,7 +419,9 @@ async function loadZeroPublicationTargets(
       channelId,
       channelName: nonblank(first.channel_name, "channelName", 255),
       providerKey: nonblank(first.provider_key, "providerKey", 60),
-      channelConnectionId: positiveInteger(first.channel_connection_id, "channelConnectionId"),
+      destinationKind,
+      channelConnectionId,
+      dropshipStoreConnectionId,
       providerScopeType: providerScopeType(first.provider_scope_type),
       externalScopeId: nonblank(first.external_scope_id, "externalScopeId", 240),
       sourceBindingId,
@@ -494,7 +514,8 @@ async function enqueueFullPublications(
               desired_revision::text AS desired_revision,
               desired_quantity::text AS desired_quantity,
               publication_target_revision_snapshot::text AS publication_target_revision_snapshot,
-              channel_id_snapshot, channel_connection_id_snapshot,
+              channel_id_snapshot, destination_kind_snapshot,
+              channel_connection_id_snapshot, dropship_store_connection_id_snapshot,
               provider_key_snapshot, provider_scope_type_snapshot,
               external_scope_id_snapshot, external_inventory_item_id_snapshot,
               external_sku_snapshot
@@ -529,16 +550,17 @@ async function enqueueFullPublications(
     const inserted = await client.query<{ id: string }>(
       `INSERT INTO inventory.inventory_publication_outbox (
          activation_run_id, publication_target_id, product_variant_id,
-         desired_revision, desired_quantity, channel_connection_id_snapshot,
+         desired_revision, desired_quantity, destination_kind_snapshot,
+         channel_connection_id_snapshot, dropship_store_connection_id_snapshot,
          external_scope_id_snapshot, external_inventory_item_id_snapshot,
          publication_phase, channel_id_snapshot, provider_key_snapshot,
          provider_scope_type_snapshot, external_sku_snapshot,
          publication_target_revision_snapshot,
          state, idempotency_key, payload_hash, available_at
        ) VALUES (
-         $1, $2, $3, $4, $5, $6, $7, $8,
-         'full', $9, $10, $11, $12, $13,
-         'desired', $14, $15, transaction_timestamp()
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+         'full', $11, $12, $13, $14, $15,
+         'desired', $16, $17, transaction_timestamp()
        )
        RETURNING id`,
       [
@@ -547,7 +569,9 @@ async function enqueueFullPublications(
         intent.productVariantId,
         revision.toString(),
         intent.desiredQuantity,
+        intent.destinationKind,
         intent.channelConnectionId,
+        intent.dropshipStoreConnectionId,
         intent.externalScopeId,
         intent.externalInventoryItemId,
         intent.channelId,
@@ -614,7 +638,9 @@ function sameDesiredPublication(
     && String(row.desired_quantity) === intent.desiredQuantity
     && String(row.publication_target_revision_snapshot) === intent.publicationTargetRevision
     && Number(row.channel_id_snapshot) === intent.channelId
-    && Number(row.channel_connection_id_snapshot) === intent.channelConnectionId
+    && String(row.destination_kind_snapshot) === intent.destinationKind
+    && nullableNumber(row.channel_connection_id_snapshot) === intent.channelConnectionId
+    && nullableNumber(row.dropship_store_connection_id_snapshot) === intent.dropshipStoreConnectionId
     && String(row.provider_key_snapshot) === intent.providerKey
     && String(row.provider_scope_type_snapshot) === intent.providerScopeType
     && String(row.external_scope_id_snapshot) === intent.externalScopeId
@@ -648,7 +674,9 @@ function persistedPublicationPayload(
     desiredRevision,
     desiredQuantity: intent.desiredQuantity,
     channelId: intent.channelId,
+    destinationKind: intent.destinationKind,
     channelConnectionId: intent.channelConnectionId,
+    dropshipStoreConnectionId: intent.dropshipStoreConnectionId,
     providerKey: intent.providerKey,
     providerScopeType: intent.providerScopeType,
     externalScopeId: intent.externalScopeId,
@@ -719,6 +747,14 @@ function positiveInteger(value: unknown, field: string): number {
     );
   }
   return parsed;
+}
+
+function nullablePositiveInteger(value: unknown, field: string): number | null {
+  return value == null ? null : positiveInteger(value, field);
+}
+
+function nullableNumber(value: unknown): number | null {
+  return value == null ? null : Number(value);
 }
 
 function uniquePositiveIntegers(values: readonly number[], field: string): number[] {
@@ -823,6 +859,17 @@ function providerScopeType(value: unknown): "account" | "location" {
     );
   }
   return value;
+}
+
+function publicationDestinationKind(
+  value: unknown,
+): "channel_connection" | "dropship_store_connection" {
+  if (value === "channel_connection" || value === "dropship_store_connection") return value;
+  throw runtimeError(
+    "INVENTORY_PUBLICATION_DATABASE_EVIDENCE_INVALID",
+    "Publication destination kind is invalid.",
+    { value },
+  );
 }
 
 function hash(value: unknown): string {

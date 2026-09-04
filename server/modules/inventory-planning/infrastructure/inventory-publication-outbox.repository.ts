@@ -15,7 +15,9 @@ export type ClaimedInventoryPublication = {
   desiredRevision: string;
   desiredQuantity: string;
   channelId: number;
-  channelConnectionId: number;
+  destinationKind: "channel_connection" | "dropship_store_connection";
+  channelConnectionId: number | null;
+  dropshipStoreConnectionId: number | null;
   providerKey: string;
   providerScopeType: "account" | "location";
   externalScopeId: string;
@@ -32,7 +34,9 @@ export type PublicationAttemptFailure = {
   retryable: boolean;
 };
 
-type ClientPool = Pick<Pool, "connect">;
+type ClientPool = Pick<Pool, "connect"> & {
+  readonly options?: { readonly max?: number };
+};
 
 export class InventoryPublicationOutboxRepositoryError extends Error {
   constructor(readonly code: string, message: string, readonly context: Record<string, unknown> = {}) {
@@ -42,7 +46,16 @@ export class InventoryPublicationOutboxRepositoryError extends Error {
 }
 
 export class PostgresInventoryPublicationOutboxRepository {
-  constructor(private readonly connectionPool: ClientPool = pool) {}
+  constructor(private readonly connectionPool: ClientPool = pool) {
+    const maximumConnections = connectionPool.options?.max;
+    if (maximumConnections !== undefined && maximumConnections < 2) {
+      throw new InventoryPublicationOutboxRepositoryError(
+        "PUBLICATION_POOL_CAPACITY_INVALID",
+        "Inventory publication requires at least two database connections so the provider lock and durable result can coexist.",
+        { maximumConnections },
+      );
+    }
+  }
 
   async claimDue(input: {
     batchSize: number;
@@ -82,6 +95,85 @@ export class PostgresInventoryPublicationOutboxRepository {
     });
   }
 
+  async runIfCurrent<T>(
+    claim: ClaimedInventoryPublication,
+    work: () => Promise<T>,
+  ): Promise<{ status: "current"; value: T } | { status: "superseded" }> {
+    const client = await this.connectionPool.connect();
+    let locked = false;
+    let workError: unknown;
+    try {
+      await client.query(
+        "SELECT pg_advisory_lock($1, $2)",
+        [claim.publicationTargetId, claim.productVariantId],
+      );
+      locked = true;
+      const claimState = (await client.query<{
+        state: string;
+        lease_token: string | null;
+        newer_exists: boolean;
+      }>(
+        `SELECT claimed.state, claimed.lease_token,
+                EXISTS (
+                  SELECT 1
+                  FROM inventory.inventory_publication_outbox AS newer
+                  WHERE newer.publication_target_id = claimed.publication_target_id
+                    AND newer.product_variant_id = claimed.product_variant_id
+                    AND newer.desired_revision > claimed.desired_revision
+                ) AS newer_exists
+         FROM inventory.inventory_publication_outbox AS claimed
+         WHERE claimed.id = $1`,
+        [claim.outboxId],
+      )).rows[0];
+      const ownsLease = claimState?.state === "leased"
+        && claimState.lease_token === claim.leaseToken;
+      if (!ownsLease && claimState?.newer_exists !== true) {
+        throw new InventoryPublicationOutboxRepositoryError(
+          "PUBLICATION_LEASE_LOST",
+          "The inventory publication lease was no longer owned by this worker.",
+          { outboxId: claim.outboxId },
+        );
+      }
+      if (claimState?.newer_exists === true) {
+        await supersedeStaleClaim(client, claim, ownsLease);
+        return { status: "superseded" };
+      }
+      return { status: "current", value: await work() };
+    } catch (error) {
+      workError = error;
+      throw error;
+    } finally {
+      let unlockError: unknown;
+      if (locked) {
+        try {
+          const unlocked = (await client.query<{ unlocked: boolean }>(
+            "SELECT pg_advisory_unlock($1, $2) AS unlocked",
+            [claim.publicationTargetId, claim.productVariantId],
+          )).rows[0]?.unlocked;
+          if (unlocked !== true) {
+            unlockError = new InventoryPublicationOutboxRepositoryError(
+              "PUBLICATION_ADVISORY_UNLOCK_FAILED",
+              "The publication target lock was not owned when release was attempted.",
+              { outboxId: claim.outboxId },
+            );
+          }
+        } catch (error) {
+          unlockError = error;
+        }
+      }
+      client.release();
+      if (unlockError) {
+        if (workError) {
+          throw new AggregateError(
+            [workError, unlockError],
+            "Inventory publication and advisory-lock release both failed.",
+          );
+        }
+        throw unlockError;
+      }
+    }
+  }
+
   async recordVerified(
     claim: ClaimedInventoryPublication,
     input: { observedQuantity: number; providerResponse: unknown; completedAt: Date },
@@ -112,9 +204,9 @@ export class PostgresInventoryPublicationOutboxRepository {
         publicationTargetId: claim.publicationTargetId,
         publicationTargetRevision: claim.publicationTargetRevision,
         productVariantId: claim.productVariantId,
-        destinationKind: "channel_connection",
+        destinationKind: claim.destinationKind,
         channelConnectionId: claim.channelConnectionId,
-        dropshipStoreConnectionId: null,
+        dropshipStoreConnectionId: claim.dropshipStoreConnectionId,
         providerScopeType: claim.providerScopeType,
         externalScopeId: claim.externalScopeId,
         externalInventoryItemId: claim.externalInventoryItemId,
@@ -130,12 +222,13 @@ export class PostgresInventoryPublicationOutboxRepository {
            dropship_store_connection_id_snapshot, provider_scope_type_snapshot,
            external_scope_id_snapshot, publication_target_revision_snapshot,
            observed_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'channel_connection', $8,
-           NULL, $9, $10, $11, $12)`,
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+           $10, $11, $12, $13, $14)`,
         [claim.publicationTargetId, claim.productVariantId, claim.outboxId,
           input.observedQuantity, matches, hash(readbackEvidence), claim.externalInventoryItemId,
-          claim.channelConnectionId, claim.providerScopeType, claim.externalScopeId,
-          claim.publicationTargetRevision, input.completedAt.toISOString()],
+          claim.destinationKind, claim.channelConnectionId, claim.dropshipStoreConnectionId,
+          claim.providerScopeType, claim.externalScopeId, claim.publicationTargetRevision,
+          input.completedAt.toISOString()],
       );
       await client.query(
         `UPDATE inventory.inventory_publication_outbox
@@ -231,6 +324,55 @@ export class PostgresInventoryPublicationOutboxRepository {
   }
 }
 
+async function supersedeStaleClaim(
+  client: PoolClient,
+  claim: ClaimedInventoryPublication,
+  ownsLease: boolean,
+): Promise<void> {
+  await client.query("BEGIN");
+  try {
+    await client.query(
+      `INSERT INTO inventory.inventory_publication_attempts (
+         outbox_id, attempt_number, outcome, provider_request_key,
+         request_hash, response_hash, error_class, error_message,
+         started_at, completed_at
+       ) VALUES ($1, $2, 'superseded', $3, $4, NULL,
+         'SUPERSEDED_BEFORE_PROVIDER_WRITE',
+         'A newer desired revision exists; no provider request was made.', $5, transaction_timestamp())`,
+      [claim.outboxId, claim.attemptNumber, providerRequestKey(claim),
+        publicationRequestHash(claim), claim.attemptStartedAt.toISOString()],
+    );
+    if (ownsLease) {
+      const updated = await client.query(
+        `UPDATE inventory.inventory_publication_outbox
+         SET state = 'superseded', lease_token = NULL, lease_expires_at = NULL,
+             last_error_class = 'SUPERSEDED_BEFORE_PROVIDER_WRITE',
+             last_error_message = 'A newer desired revision exists; no provider request was made.'
+         WHERE id = $1 AND state = 'leased' AND lease_token = $2`,
+        [claim.outboxId, claim.leaseToken],
+      );
+      if (updated.rowCount !== 1) {
+        throw new InventoryPublicationOutboxRepositoryError(
+          "PUBLICATION_LEASE_LOST",
+          "The inventory publication lease changed while superseding a stale claim.",
+          { outboxId: claim.outboxId },
+        );
+      }
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [error, rollbackError],
+        "Superseding the stale publication and rolling back both failed.",
+      );
+    }
+    throw error;
+  }
+}
+
 async function lockPublicationRuns(client: PoolClient, now: Date): Promise<void> {
   await client.query(
     `SELECT run.id
@@ -261,6 +403,7 @@ async function recoverExpiredLeases(client: PoolClient, now: Date): Promise<void
      JOIN inventory.availability_activation_runs AS run ON run.id = outbox.activation_run_id
      WHERE outbox.state = 'leased' AND outbox.lease_expires_at <= $1
        AND outbox.publication_phase IN ('conservative', 'full')
+       AND pg_try_advisory_xact_lock(outbox.publication_target_id, outbox.product_variant_id)
      ORDER BY outbox.id FOR UPDATE OF outbox SKIP LOCKED`,
     [now.toISOString()],
   )).rows;
@@ -441,12 +584,32 @@ async function finalizeDeadLetteredRunIfQuiescent(
 function parseClaim(row: Record<string, unknown>, attemptStartedAt: Date): ClaimedInventoryPublication {
   const phase = String(row.publication_phase);
   const scope = String(row.provider_scope_type_snapshot);
+  const destinationKind = String(row.destination_kind_snapshot);
   if (!row.activation_run_id || !["conservative", "full"].includes(phase)
-    || !["account", "location"].includes(scope)) {
+    || !["account", "location"].includes(scope)
+    || !["channel_connection", "dropship_store_connection"].includes(destinationKind)) {
     throw new InventoryPublicationOutboxRepositoryError(
       "INVALID_PUBLICATION_CLAIM",
       "A cutover outbox row is missing its immutable activation identity.",
       { outboxId: row.id },
+    );
+  }
+  const channelConnectionId = nullablePositiveInteger(
+    row.channel_connection_id_snapshot,
+    "channelConnectionId",
+  );
+  const dropshipStoreConnectionId = nullablePositiveInteger(
+    row.dropship_store_connection_id_snapshot,
+    "dropshipStoreConnectionId",
+  );
+  if ((destinationKind === "channel_connection"
+    && (channelConnectionId === null || dropshipStoreConnectionId !== null))
+    || (destinationKind === "dropship_store_connection"
+      && (channelConnectionId !== null || dropshipStoreConnectionId === null))) {
+    throw new InventoryPublicationOutboxRepositoryError(
+      "INVALID_PUBLICATION_CLAIM",
+      "A cutover outbox row has inconsistent destination ownership.",
+      { outboxId: row.id, destinationKind },
     );
   }
   return {
@@ -462,8 +625,10 @@ function parseClaim(row: Record<string, unknown>, attemptStartedAt: Date): Claim
     desiredRevision: String(row.desired_revision),
     desiredQuantity: String(row.desired_quantity),
     channelId: positiveInteger(row.channel_id_snapshot, "channelId"),
-    channelConnectionId: positiveInteger(row.channel_connection_id_snapshot, "channelConnectionId"),
-    providerKey: String(row.provider_key_snapshot),
+    destinationKind: destinationKind as "channel_connection" | "dropship_store_connection",
+    channelConnectionId,
+    dropshipStoreConnectionId,
+    providerKey: nonblank(row.provider_key_snapshot, "providerKey"),
     providerScopeType: scope as "account" | "location",
     externalScopeId: String(row.external_scope_id_snapshot),
     externalInventoryItemId: String(row.external_inventory_item_id_snapshot),
@@ -471,7 +636,7 @@ function parseClaim(row: Record<string, unknown>, attemptStartedAt: Date): Claim
     leaseToken: String(row.lease_token),
     attemptNumber: positiveInteger(row.attempt_count, "attemptNumber"),
     attemptStartedAt,
-  };
+  } satisfies ClaimedInventoryPublication;
 }
 
 async function inTransaction<T>(poolValue: ClientPool, work: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -500,6 +665,21 @@ function positiveInteger(value: unknown, field: string): number {
   return parsed;
 }
 
+function nullablePositiveInteger(value: unknown, field: string): number | null {
+  return value == null ? null : positiveInteger(value, field);
+}
+
+function nonblank(value: unknown, field: string): string {
+  const parsed = String(value ?? "").trim().toLowerCase();
+  if (!parsed) {
+    throw new InventoryPublicationOutboxRepositoryError(
+      "INVALID_PUBLICATION_CLAIM",
+      `${field} is required.`,
+    );
+  }
+  return parsed;
+}
+
 function positiveBigint(value: unknown, field: string): string {
   const parsed = String(value ?? "");
   if (!/^[1-9]\d*$/.test(parsed)) {
@@ -517,7 +697,11 @@ function validDate(value: unknown, field: string): Date {
 }
 
 function providerRequestKey(claim: ClaimedInventoryPublication): string {
-  return `inventory:${claim.activationRunId}:${claim.publicationPhase}:${claim.publicationTargetId}`
+  const destinationId = claim.destinationKind === "channel_connection"
+    ? claim.channelConnectionId
+    : claim.dropshipStoreConnectionId;
+  return `inventory:${claim.destinationKind}:${destinationId}:${claim.activationRunId}`
+    + `:${claim.publicationPhase}:${claim.publicationTargetId}`
     + `:${claim.productVariantId}:${claim.desiredRevision}:${claim.attemptNumber}`;
 }
 
@@ -529,7 +713,9 @@ function publicationRequestHash(claim: ClaimedInventoryPublication): string {
     desiredRevision: claim.desiredRevision,
     desiredQuantity: claim.desiredQuantity,
     channelId: claim.channelId,
+    destinationKind: claim.destinationKind,
     channelConnectionId: claim.channelConnectionId,
+    dropshipStoreConnectionId: claim.dropshipStoreConnectionId,
     providerKey: claim.providerKey,
     providerScopeType: claim.providerScopeType,
     externalScopeId: claim.externalScopeId,

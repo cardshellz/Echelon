@@ -152,6 +152,9 @@ describe("inventory availability runtime publication routing contract", () => {
     const outbox = source(
       "server/modules/inventory-planning/application/inventory-publication-outbox.service.ts",
     );
+    const channelTransport = source(
+      "server/modules/channels/channel-inventory-publication-transport.adapter.ts",
+    );
 
     const orchestratorWrites = indexesOf(orchestrator, ".pushInventory(");
     expect(orchestratorWrites).toHaveLength(2);
@@ -162,7 +165,9 @@ describe("inventory availability runtime publication routing contract", () => {
     expect(availabilityWrites[0]).toBeGreaterThan(
       availability.indexOf("async function publishLegacyAvailability("),
     );
-    expect(indexesOf(outbox, ".pushInventory(")).toHaveLength(1);
+    expect(indexesOf(outbox, ".publishAbsolute(")).toHaveLength(1);
+    expect(indexesOf(outbox, ".pushInventory(")).toHaveLength(0);
+    expect(indexesOf(channelTransport, ".pushInventory(")).toHaveLength(1);
   });
 
   it("pins publication authority without activating or reverting it", () => {

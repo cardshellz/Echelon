@@ -113,6 +113,7 @@ import { createSourceLockService } from "../modules/channels/source-lock.service
 import { createShopifyAdapter } from "../modules/channels/adapters/shopify.adapter";
 import { createEbayAdapter } from "../modules/channels/adapters/ebay.adapter";
 import { ChannelAdapterRegistry } from "../modules/channels/channel-adapter.interface";
+import { ChannelInventoryPublicationTransportAdapter } from "../modules/channels/channel-inventory-publication-transport.adapter";
 import {
   ChannelShippingCapabilityRegistry,
   MANUAL_CHANNEL_SHIPPING_CAPABILITY_DECLARATION,
@@ -123,6 +124,8 @@ import { InventoryPublicationOutboxService } from "../modules/inventory-planning
 import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
 import { InventoryPublicationReadbackService } from "../modules/inventory-planning/application/inventory-publication-readback.service";
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
+import { InventoryPublicationTransportRegistry } from "../modules/inventory-planning/application/inventory-publication-transport";
+import { createEbayDropshipInventoryPublicationTransportAdapterFromEnv } from "../modules/dropship/infrastructure/dropship-ebay-inventory-publication.adapter";
 import { InventoryAvailabilityClaimService } from "../modules/inventory-planning/application/inventory-availability-claim.service";
 import { PostgresInventoryAvailabilityClaimRepository } from "../modules/inventory-planning/infrastructure/inventory-availability-claim.repository";
 import { PostgresCanonicalClaimInventoryRepository } from "../modules/inventory/infrastructure/canonical-claim-inventory.repository";
@@ -299,6 +302,16 @@ export function createServices(
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
   adapterRegistry.register(ebayAdapter);
+  const inventoryPublicationTransports = new InventoryPublicationTransportRegistry();
+  inventoryPublicationTransports.register(
+    new ChannelInventoryPublicationTransportAdapter(shopifyAdapter),
+  );
+  inventoryPublicationTransports.register(
+    new ChannelInventoryPublicationTransportAdapter(ebayAdapter),
+  );
+  inventoryPublicationTransports.register(
+    createEbayDropshipInventoryPublicationTransportAdapterFromEnv(),
+  );
   const channelShippingCapabilities = new ChannelShippingCapabilityRegistry();
   channelShippingCapabilities.register(shopifyAdapter);
   channelShippingCapabilities.register(ebayAdapter);
@@ -322,11 +335,11 @@ export function createServices(
   });
   const inventoryPublicationOutbox = new InventoryPublicationOutboxService(
     new PostgresInventoryPublicationOutboxRepository(),
-    adapterRegistry,
+    inventoryPublicationTransports,
   );
   const inventoryPublicationReadback = new InventoryPublicationReadbackService(
     new PostgresInventoryPublicationReadbackRepository(),
-    adapterRegistry,
+    inventoryPublicationTransports,
   );
   // Wire orchestrator into legacy channelSync so event-driven syncs
   // respect channel_allocation_rules (fixed/share/mirror modes).
