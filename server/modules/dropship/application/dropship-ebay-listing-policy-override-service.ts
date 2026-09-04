@@ -9,6 +9,8 @@ import type {
 import {
   listDropshipEbayListingPolicyOverridesForMemberInputSchema,
   replaceDropshipEbayListingPolicyOverrideForMemberInputSchema,
+  replaceDropshipEbayListingPoliciesForMemberInputSchema,
+  type ReplaceDropshipEbayListingPoliciesForMemberInput,
 } from "./dropship-ebay-listing-policy-override-dtos";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
@@ -52,6 +54,21 @@ export interface ReplaceDropshipEbayListingPolicyOverrideRepositoryResult {
   idempotentReplay: boolean;
 }
 
+export interface ReplaceDropshipEbayListingPoliciesRepositoryInput {
+  vendorId: number;
+  storeConnectionId: number;
+  assignments: ReplaceDropshipEbayListingPoliciesForMemberInput["assignments"];
+  idempotencyKey: string;
+  requestHash: string;
+  actor: ReplaceDropshipEbayListingPolicyOverrideRepositoryInput["actor"];
+  now: Date;
+}
+
+export interface ReplaceDropshipEbayListingPoliciesRepositoryResult {
+  results: Array<ReplaceDropshipEbayListingPolicyOverrideRepositoryResult & { productVariantId: number }>;
+  idempotentReplay: boolean;
+}
+
 export interface DropshipEbayListingPolicyOverrideRepository {
   loadStoreContext(input: {
     vendorId: number;
@@ -65,6 +82,9 @@ export interface DropshipEbayListingPolicyOverrideRepository {
   replaceAssignment(
     input: ReplaceDropshipEbayListingPolicyOverrideRepositoryInput,
   ): Promise<ReplaceDropshipEbayListingPolicyOverrideRepositoryResult>;
+  replaceAssignments(
+    input: ReplaceDropshipEbayListingPoliciesRepositoryInput,
+  ): Promise<ReplaceDropshipEbayListingPoliciesRepositoryResult>;
 }
 
 type ListingSetupPort = Pick<DropshipEbayListingSetupService, "getForMember">;
@@ -148,6 +168,56 @@ export class DropshipEbayListingPolicyOverrideService {
           parsed.returnPolicyId,
           parsed.paymentPolicyId,
         ].filter((value) => value === null).length,
+      },
+    });
+    return result;
+  }
+
+  async replaceManyForMember(
+    memberId: string,
+    input: unknown,
+  ): Promise<ReplaceDropshipEbayListingPoliciesRepositoryResult> {
+    const parsed = replaceDropshipEbayListingPoliciesForMemberInputSchema.parse(input);
+    const vendor = (await this.deps.vendorProvisioning.provisionForMember(memberId)).vendor;
+    await this.requireConnectedEbayStore(vendor.vendorId, parsed.storeConnectionId);
+    const setup = await this.deps.listingSetup.getForMember(memberId, parsed.storeConnectionId);
+    const assignments = [...parsed.assignments].sort(
+      (left, right) => left.productVariantId - right.productVariantId,
+    );
+    for (const assignment of assignments) {
+      validateSelection({ ...assignment, storeConnectionId: parsed.storeConnectionId }, setup);
+    }
+    // Hash the whole operation, including all optimistic revisions. The first
+    // immutable row reserves the request key, so changing targets on retry fails.
+    const requestHash = createHash("sha256").update(JSON.stringify({
+      operation: "ebay_listing_policy_bulk_replace_v1",
+      storeConnectionId: parsed.storeConnectionId,
+      assignments: assignments.map((assignment) => ({
+        productVariantId: assignment.productVariantId,
+        expectedRevisionId: assignment.expectedRevisionId,
+        fulfillmentPolicyId: assignment.fulfillmentPolicyId,
+        returnPolicyId: assignment.returnPolicyId,
+        paymentPolicyId: assignment.paymentPolicyId,
+      })),
+    })).digest("hex");
+    const result = await this.deps.repository.replaceAssignments({
+      vendorId: vendor.vendorId,
+      storeConnectionId: parsed.storeConnectionId,
+      assignments,
+      requestHash,
+      idempotencyKey: parsed.idempotencyKey,
+      actor: { actorType: "vendor", actorId: memberId },
+      now: this.deps.clock.now(),
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_EBAY_LISTING_POLICIES_REPLACED",
+      message: "Bulk eBay listing policy assignment completed.",
+      context: {
+        vendorId: vendor.vendorId,
+        storeConnectionId: parsed.storeConnectionId,
+        listingCount: assignments.length,
+        idempotentReplay: result.idempotentReplay,
+        requestHash,
       },
     });
     return result;

@@ -24,6 +24,48 @@ describe("dropship eBay listing policy override routes", () => {
     await server?.close();
   });
 
+  it("routes bulk assignments to the authenticated bulk service without requiring MFA", async () => {
+    server = await startServer(buildApp(service, true));
+    const body = { storeConnectionId: 44, idempotencyKey: "bulk-route-001", assignments: [
+      { productVariantId: 501, expectedRevisionId: 9, fulfillmentPolicyId: "fulfillment-compatible", returnPolicyId: null, paymentPolicyId: null },
+    ] };
+    const response = await jsonRequest(`${server.url}/api/dropship/ebay/listing-policy-overrides/bulk`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect(response.status).toBe(201);
+    expect(service.bulkCall).toEqual({ memberId: "member-1", input: body });
+    expect(service.replaceCall).toBeNull();
+  });
+
+  it("rejects unauthenticated bulk writes", async () => {
+    server = await startServer(buildApp(service, false));
+    const response = await jsonRequest(`${server.url}/api/dropship/ebay/listing-policy-overrides/bulk`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    expect(response.status).toBe(401);
+    expect(service.bulkCall).toBeNull();
+  });
+
+  it("returns 200 on a replay and 409 on a bulk concurrency failure", async () => {
+    server = await startServer(buildApp(service, true));
+    service.bulkReplay = true;
+    const request = { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ storeConnectionId: 44, idempotencyKey: "bulk-route-002", assignments: [] }) };
+    expect((await jsonRequest(`${server.url}/api/dropship/ebay/listing-policy-overrides/bulk`, request)).status).toBe(200);
+    service.bulkError = new DropshipError("DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_VERSION_CONFLICT", "Listing changed.");
+    expect((await jsonRequest(`${server.url}/api/dropship/ebay/listing-policy-overrides/bulk`, request)).status).toBe(409);
+  });
+
+  it("rejects conflicting bulk request keys before calling the service", async () => {
+    server = await startServer(buildApp(service, true));
+    const response = await jsonRequest(`${server.url}/api/dropship/ebay/listing-policy-overrides/bulk`, {
+      method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": "bulk-route-003" },
+      body: JSON.stringify({ storeConnectionId: 44, idempotencyKey: "bulk-route-004", assignments: [] }),
+    });
+    expect(response.status).toBe(409);
+    expect(service.bulkCall).toBeNull();
+  });
+
   it("lists overrides for the authenticated member-owned store", async () => {
     server = await startServer(buildApp(service, true));
 
@@ -213,6 +255,15 @@ class FakeService {
   listError: Error | null = null;
   replaceCall: unknown = null;
   replaceError: Error | null = null;
+  bulkCall: unknown = null;
+  bulkError: Error | null = null;
+  bulkReplay = false;
+
+  async replaceManyForMember(memberId: string, input: unknown) {
+    this.bulkCall = { memberId, input };
+    if (this.bulkError) throw this.bulkError;
+    return { results: [], idempotentReplay: this.bulkReplay };
+  }
 
   async listForMember(memberId: string, input: unknown) {
     this.listCall = { memberId, input };

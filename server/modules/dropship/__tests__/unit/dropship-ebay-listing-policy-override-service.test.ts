@@ -7,12 +7,126 @@ import {
   type DropshipEbayListingPolicyOverrideContext,
   type DropshipEbayListingPolicyOverrideRepository,
   type ReplaceDropshipEbayListingPolicyOverrideRepositoryInput,
+  type ReplaceDropshipEbayListingPoliciesRepositoryInput,
 } from "../../application/dropship-ebay-listing-policy-override-service";
 import type { DropshipVendorProvisioningService } from "../../application/dropship-vendor-provisioning-service";
 
 const NOW = new Date("2026-09-01T15:00:00.000Z");
 
 describe("DropshipEbayListingPolicyOverrideService", () => {
+  it("validates the entire batch once, sorts targets, and preserves independent choices", async () => {
+    const fixture = makeFixture();
+    const request = bulkInput();
+    const original = structuredClone(request);
+
+    await fixture.service.replaceManyForMember("member-1", request);
+
+    expect(request).toEqual(original);
+    expect(fixture.listingSetup.getForMember).toHaveBeenCalledTimes(1);
+    expect(fixture.repository.lastBulkInput).toMatchObject({
+      vendorId: 10,
+      storeConnectionId: 44,
+      idempotencyKey: request.idempotencyKey,
+      actor: { actorType: "vendor", actorId: "member-1" },
+      now: NOW,
+      assignments: [request.assignments[1], request.assignments[0]],
+    });
+    expect(fixture.repository.lastBulkInput?.requestHash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("canonicalizes ordering but binds the hash to all targets, choices, and revisions", async () => {
+    const fixture = makeFixture();
+    const request = bulkInput();
+    await fixture.service.replaceManyForMember("member-1", request);
+    const hash = fixture.repository.lastBulkInput?.requestHash;
+    await fixture.service.replaceManyForMember("member-1", { ...request, assignments: [...request.assignments].reverse() });
+    expect(fixture.repository.lastBulkInput?.requestHash).toBe(hash);
+
+    for (const update of [
+      { productVariantId: 503 },
+      { expectedRevisionId: 99 },
+      { fulfillmentPolicyId: "fulfillment-default" },
+      { returnPolicyId: "return-default" },
+      { paymentPolicyId: "payment-default" },
+    ]) {
+      await fixture.service.replaceManyForMember("member-1", {
+        ...request, assignments: [{ ...request.assignments[0], ...update }, request.assignments[1]],
+      });
+      expect(fixture.repository.lastBulkInput?.requestHash).not.toBe(hash);
+    }
+  });
+
+  it.each(["fulfillmentPolicyId", "returnPolicyId", "paymentPolicyId"] as const)(
+    "rejects a bad %s on any row before any persistence",
+    async (field) => {
+      const fixture = makeFixture();
+      const request = bulkInput();
+      request.assignments[0][field] = "missing-policy";
+      await expect(fixture.service.replaceManyForMember("member-1", request)).rejects.toMatchObject({
+        code: "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_INVALID",
+        context: { productVariantId: 502, invalidFields: [field] },
+      });
+      expect(fixture.repository.lastBulkInput).toBeNull();
+    },
+  );
+
+  it("rejects an incompatible policy in a bulk operation", async () => {
+    const fixture = makeFixture();
+    const request = bulkInput();
+    request.assignments[0].fulfillmentPolicyId = "fulfillment-incompatible";
+    await expect(fixture.service.replaceManyForMember("member-1", request)).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_INVALID",
+    });
+    expect(fixture.repository.lastBulkInput).toBeNull();
+  });
+
+  it.each(["missing", "disconnected", "wrong-platform"])("rejects a %s store before loading options", async (state) => {
+    const fixture = makeFixture();
+    if (state === "missing") fixture.repository.context = null;
+    else if (state === "disconnected") fixture.repository.context!.status = "needs_reauth";
+    else fixture.repository.context!.platform = "shopify";
+    await expect(fixture.service.replaceManyForMember("member-1", bulkInput())).rejects.toBeInstanceOf(Error);
+    expect(fixture.listingSetup.getForMember).not.toHaveBeenCalled();
+    expect(fixture.repository.lastBulkInput).toBeNull();
+  });
+
+  it("rejects empty, oversized, duplicate, incomplete, unsafe, or unrecognized batch inputs", async () => {
+    const fixture = makeFixture();
+    const request = bulkInput();
+    const invalid = [
+      { ...request, assignments: [] },
+      { ...request, assignments: Array.from({ length: 501 }, (_, index) => ({ ...request.assignments[0], productVariantId: index + 1 })) },
+      { ...request, assignments: [request.assignments[0], request.assignments[0]] },
+      { ...request, assignments: [{ productVariantId: 501 }] },
+      { ...request, assignments: [{ ...request.assignments[0], productVariantId: Number.MAX_SAFE_INTEGER + 1 }] },
+      { ...request, assignments: [{ ...request.assignments[0], vendorId: 99 }] },
+      { ...request, idempotencyKey: "" },
+      { ...request, vendorId: 99 },
+    ];
+    for (const input of invalid) {
+      await expect(fixture.service.replaceManyForMember("member-1", input)).rejects.toMatchObject({ name: "ZodError" });
+    }
+    expect(fixture.listingSetup.getForMember).not.toHaveBeenCalled();
+    expect(fixture.repository.lastBulkInput).toBeNull();
+  });
+
+  it("accepts the maximum batch and explicit inheritance even without store defaults", async () => {
+    const fixture = makeFixture();
+    const setup = setupResult();
+    setup.selection.fulfillmentPolicyId = null;
+    setup.selection.returnPolicyId = null;
+    setup.selection.paymentPolicyId = null;
+    setup.complete = false;
+    fixture.listingSetup.getForMember.mockResolvedValue(setup);
+    const request = bulkInput();
+    request.assignments = Array.from({ length: 500 }, (_, index) => ({
+      productVariantId: index + 1, expectedRevisionId: null,
+      fulfillmentPolicyId: null, returnPolicyId: null, paymentPolicyId: null,
+    }));
+    await expect(fixture.service.replaceManyForMember("member-1", request)).resolves.toMatchObject({ idempotentReplay: false });
+    expect(fixture.repository.lastBulkInput?.assignments).toHaveLength(500);
+  });
+
   it("lists store defaults, current options, and store-variant overrides", async () => {
     const fixture = makeFixture();
 
@@ -118,6 +232,12 @@ class FakeRepository implements DropshipEbayListingPolicyOverrideRepository {
     updatedAt: NOW,
   }];
   lastReplaceInput: ReplaceDropshipEbayListingPolicyOverrideRepositoryInput | null = null;
+  lastBulkInput: ReplaceDropshipEbayListingPoliciesRepositoryInput | null = null;
+
+  async replaceAssignments(input: ReplaceDropshipEbayListingPoliciesRepositoryInput) {
+    this.lastBulkInput = input;
+    return { results: [], idempotentReplay: false };
+  }
 
   async loadStoreContext() {
     return this.context;
@@ -216,4 +336,19 @@ function makeFixture() {
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   });
   return { service, repository, listingSetup };
+}
+
+function bulkInput(): {
+  storeConnectionId: number;
+  idempotencyKey: string;
+  assignments: ReplaceDropshipEbayListingPoliciesRepositoryInput["assignments"];
+} {
+  return {
+    storeConnectionId: 44,
+    idempotencyKey: "listing-policy-bulk-001",
+    assignments: [
+      { productVariantId: 502, expectedRevisionId: null, fulfillmentPolicyId: "fulfillment-compatible", returnPolicyId: "return-override", paymentPolicyId: null },
+      { productVariantId: 501, expectedRevisionId: 90, fulfillmentPolicyId: null, returnPolicyId: null, paymentPolicyId: "payment-default" },
+    ],
+  };
 }

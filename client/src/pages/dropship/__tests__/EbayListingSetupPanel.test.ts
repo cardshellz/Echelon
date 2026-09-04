@@ -117,7 +117,7 @@ function setup(
       destinationCoverageComplete: true,
       supportedServices: [{
         carrier: "USPS",
-        ebayServiceCode: "USPSGround",
+        ebayServiceCode: "USPSParcel",
         serviceName: "USPS Ground Advantage",
         shipStationCarrierCode: "usps",
         shipStationServiceCode: "usps_ground_advantage",

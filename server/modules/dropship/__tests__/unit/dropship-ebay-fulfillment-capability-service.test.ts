@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  EBAY_US_GROUND_ADVANTAGE_EVIDENCE,
+  EBAY_US_LEGACY_GROUND_EVIDENCE,
+} from "../fixtures/ebay-us-ground-advantage-evidence";
+import {
   DROPSHIP_EBAY_US_DESTINATION_REGIONS,
   DropshipEbayFulfillmentCapabilityService,
   mapRoutedServicesToEbay,
@@ -37,7 +41,7 @@ describe("DropshipEbayFulfillmentCapabilityService", () => {
       destinationCoverageComplete: true,
       supportedServices: [{
         carrier: "USPS",
-        ebayServiceCode: "USPSGround",
+        ebayServiceCode: "USPSParcel",
         shipStationServiceCode: "usps_ground_advantage",
       }],
       source: {
@@ -185,6 +189,22 @@ describe("DropshipEbayFulfillmentCapabilityService", () => {
 });
 
 describe("mapRoutedServicesToEbay", () => {
+  it.each(["usps", "stamps_com"])("maps %s Ground Advantage to the verified sellable eBay identity", (carrierCode) => {
+    const result = mapRoutedServicesToEbay([{
+      provider: "shipstation_v2",
+      carrierCode,
+      serviceCode: "usps_ground_advantage",
+      serviceName: "USPS Ground Advantage",
+      domestic: true,
+    }]);
+
+    expect(EBAY_US_GROUND_ADVANTAGE_EVIDENCE.ValidForSellingFlow).toBe(true);
+    expect(EBAY_US_LEGACY_GROUND_EVIDENCE.ValidForSellingFlow).toBe(false);
+    expect(result).toHaveLength(1);
+    expect(result[0].ebayServiceCode).toBe(EBAY_US_GROUND_ADVANTAGE_EVIDENCE.ShippingService);
+    expect(result[0].ebayServiceCode).not.toBe(EBAY_US_LEGACY_GROUND_EVIDENCE.ShippingService);
+  });
+
   it("maps exact domestic services and excludes international or ambiguous aliases", () => {
     expect(mapRoutedServicesToEbay([
       {

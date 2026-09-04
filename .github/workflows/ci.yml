@@ -32,6 +32,12 @@ jobs:
         run: npm run check
       - name: Unit tests
         run: npm run test:unit
+      - name: Dropship listing policy UI contracts
+        run: >-
+          npx vitest run
+          client/src/lib/__tests__/dropship-ebay-policy-assignment.test.ts
+          client/src/pages/dropship/__tests__/DropshipPortalCatalog.test.ts
+          client/src/pages/dropship/__tests__/EbayListingSetupPanel.test.ts
 
   postgres-hardening:
     name: PostgreSQL hardening tests
@@ -103,3 +109,7 @@ jobs:
         run: >-
           npx vitest run --no-file-parallelism
           server/modules/shipping-engine/__tests__/integration/fulfillment-provider-connections.integration.test.ts
+      - name: Bulk eBay listing policy PostgreSQL guarantees
+        run: >-
+          npx vitest run --no-file-parallelism
+          server/modules/dropship/__tests__/integration/dropship-ebay-listing-policy-bulk.integration.test.ts

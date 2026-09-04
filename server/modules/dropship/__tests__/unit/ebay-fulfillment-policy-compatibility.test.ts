@@ -6,6 +6,15 @@ import {
 } from "../../domain/ebay-fulfillment-policy-compatibility";
 
 describe("evaluateDropshipEbayFulfillmentPolicyCompatibility", () => {
+  it.each(["USPSGround", "USPSFirstClass", "US_eBayStandardEnvelope", "US_UPSSurePost"])(
+    "does not treat %s as a Ground Advantage alias",
+    (serviceCode) => {
+      const input = policy();
+      input.shippingOptions[0].shippingServiceCodes = [serviceCode];
+      expect(issueCodes(input)).toContain(`shipping_service_unsupported:${serviceCode}`);
+    },
+  );
+
   it("accepts a domestic policy whose operational promises fit current capabilities", () => {
     const result = evaluateDropshipEbayFulfillmentPolicyCompatibility({
       capability: capability(),
@@ -109,7 +118,7 @@ function capability(): DropshipEbayFulfillmentCapability {
     destinationCoverageComplete: true,
     supportedServices: [{
       carrier: "USPS",
-      ebayServiceCode: "USPSGround",
+      ebayServiceCode: "USPSParcel",
       serviceName: "USPS Ground Advantage",
       shipStationCarrierCode: "usps",
       shipStationServiceCode: "usps_ground_advantage",
@@ -135,7 +144,7 @@ function policy(): DropshipEbayFulfillmentPolicy {
     handlingTime: { value: 1, unit: "DAY" },
     shippingOptions: [{
       optionType: "DOMESTIC",
-      shippingServiceCodes: ["USPSGround"],
+      shippingServiceCodes: ["USPSParcel"],
     }],
     localPickup: false,
     freightShipping: false,

@@ -581,6 +581,7 @@ export default function DropshipPortalCatalog() {
               }}
             />
             <EbayListingPolicyOverridePanel
+              key={selectedStoreConnectionIdNumber}
               storeConnectionId={selectedStoreConnectionIdNumber}
               rows={selectedCatalogRows}
               onConfigurationChange={() => {

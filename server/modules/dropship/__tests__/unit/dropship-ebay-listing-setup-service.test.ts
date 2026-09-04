@@ -400,7 +400,7 @@ function fulfillmentPolicy(id: string, name: string): DropshipEbayFulfillmentPol
     name,
     marketplaceId: "EBAY_US",
     handlingTime: { value: 1, unit: "DAY" },
-    shippingOptions: [{ optionType: "DOMESTIC", shippingServiceCodes: ["USPSGround"] }],
+    shippingOptions: [{ optionType: "DOMESTIC", shippingServiceCodes: ["USPSParcel"] }],
     localPickup: false,
     freightShipping: false,
     pickupDropOff: false,
@@ -416,7 +416,7 @@ function capability(): DropshipEbayFulfillmentCapability {
     destinationCoverageComplete: true,
     supportedServices: [{
       carrier: "USPS",
-      ebayServiceCode: "USPSGround",
+      ebayServiceCode: "USPSParcel",
       serviceName: "USPS Ground Advantage",
       shipStationCarrierCode: "usps",
       shipStationServiceCode: "usps_ground_advantage",

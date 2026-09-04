@@ -1814,6 +1814,11 @@ export interface ReplaceDropshipEbayListingPolicyOverrideResponse {
   idempotentReplay: boolean;
 }
 
+export interface ReplaceDropshipEbayListingPoliciesResponse {
+  results: Array<ReplaceDropshipEbayListingPolicyOverrideResponse & { productVariantId: number }>;
+  idempotentReplay: boolean;
+}
+
 export type DropshipVendorSelectionScope =
   "catalog" | "product_line" | "category" | "product" | "variant";
 export type DropshipVendorSelectionAction = "include" | "exclude";
