@@ -10,6 +10,8 @@ import {
 } from "@shared/types/inventory-availability-backfill";
 
 import { requirePermission } from "../../../../routes/middleware";
+import { InventoryCatalogBatchService } from "../../application/inventory-catalog-batch.service";
+import { inventoryCatalogBatchPreviewSchema, inventoryCatalogBatchResultSchema } from "@shared/types/inventory-catalog-batch";
 import { InventoryAvailabilityBackfillService } from "../../application/inventory-availability-backfill.service";
 import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-availability-master-data.contracts";
 import { PostgresInventoryAvailabilityBackfillRepository } from "../../infrastructure/inventory-availability-backfill.repository";
@@ -42,6 +44,24 @@ export function registerInventoryAvailabilityBackfillRoutes(
     new PostgresInventoryAvailabilityMasterDataStore(),
     new PostgresInventoryAvailabilityChannelPreviewRepository(),
   );
+  const batch = new InventoryCatalogBatchService(service);
+
+  app.post("/api/inventory-planning/admin/migration-queue/batch/preview",
+    requirePermission("inventory_planning", "view"), async (req, res) => {
+      try {
+        return res.json(inventoryCatalogBatchPreviewSchema.parse(await batch.preview(req.body)));
+      } catch (error) {
+        return sendBackfillError(res, error, "preview a catalog batch");
+      }
+    });
+  app.post("/api/inventory-planning/admin/migration-queue/batch/execute",
+    requirePermission("inventory_planning", "edit"), async (req, res) => {
+      try {
+        return res.json(inventoryCatalogBatchResultSchema.parse(await batch.execute(req.body, auditActor(req))));
+      } catch (error) {
+        return sendBackfillError(res, error, "execute a catalog batch");
+      }
+    });
 
   app.get(
     "/api/inventory-planning/admin/migration-queue",

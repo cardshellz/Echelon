@@ -80,6 +80,7 @@ import {
   unavailableBuildBindingsForEdit,
 } from "./supply-transformations-model";
 import { PromiseSafetyPolicyPanel } from "./promise-safety-policy-panel";
+import { InventoryCatalogBatchPanel } from "./inventory-catalog-batch-panel";
 
 type DraftMutationInput =
   | { kind: "create"; request: CreateTransformationModelDraftRequest }
@@ -888,6 +889,8 @@ export default function SupplyTransformations() {
           </div>
         </CardContent>
       </Card>
+
+      <InventoryCatalogBatchPanel rows={migrationQueueQuery.data?.products ?? []} canEdit={canEdit} />
 
       <MigrationQueuePanel
         queue={migrationQueueQuery.data ?? null}

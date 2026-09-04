@@ -5,6 +5,7 @@ import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { registerInventoryAvailabilityBackfillRoutes } from "../../interfaces/http/inventory-availability-backfill.routes";
+import { catalogBatchExecutionPreview, inventoryCatalogBatchPreviewSchema } from "@shared/types/inventory-catalog-batch";
 
 const HASH = "a".repeat(64);
 const { requirePermissionMock } = vi.hoisted(() => ({
@@ -38,6 +39,33 @@ describe("inventory availability backfill routes", () => {
       body: { summary: { totalActiveProducts: 1 }, products: [{ productId: 10 }] },
     });
     expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "view");
+  });
+
+  it("previews a batch without writes and executes with the session actor", async () => {
+    service.getMigrationQueue.mockResolvedValue(queue());
+    service.applyProductDraft.mockResolvedValue({ modelId: 50, version: 1, definitionHash: HASH,
+      inputHash: HASH, resultHash: HASH, alreadyApplied: false });
+    const preview = await jsonRequest(`${server.url}/api/inventory-planning/admin/migration-queue/batch/preview`,
+      jsonPost({ mode: "drafts", productIds: [10] }));
+    expect(preview.status).toBe(200);
+    expect(service.applyProductDraft).not.toHaveBeenCalled();
+    const result = await jsonRequest(`${server.url}/api/inventory-planning/admin/migration-queue/batch/execute`,
+      jsonPost({ preview: catalogBatchExecutionPreview(inventoryCatalogBatchPreviewSchema.parse(preview.body)),
+        reason: "Reviewed batch preview", decision: null }));
+    expect(result).toMatchObject({ status: 200, body: { rows: [{ productId: 10, status: "applied" }],
+      runtimeAuthorityChanged: false, providerWriteAttempted: false } });
+    expect(service.applyProductDraft).toHaveBeenCalledWith(10, expect.any(Object), "operator-1");
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "view");
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "edit");
+  });
+
+  it("rejects batch execution without a session actor before loading data or writing", async () => {
+    await server.close();
+    server = await startServer(buildApp(service, false));
+    const result = await jsonRequest(`${server.url}/api/inventory-planning/admin/migration-queue/batch/execute`, jsonPost({}));
+    expect(result).toMatchObject({ status: 401, body: { error: { code: "INVENTORY_AVAILABILITY_ACTOR_REQUIRED" } } });
+    expect(service.getMigrationQueue).not.toHaveBeenCalled();
+    expect(service.applyProductDraft).not.toHaveBeenCalled();
   });
 
   it("forwards draft evidence and the authenticated actor under edit permission", async () => {

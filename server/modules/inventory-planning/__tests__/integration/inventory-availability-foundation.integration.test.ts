@@ -13,6 +13,10 @@ import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure
 import { createAuthorityAwareInventoryPublicationService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { loadInventoryAvailabilityBackfillSources } from "../../infrastructure/inventory-availability-backfill.repository";
 import { planInventoryAvailabilityBackfill } from "../../domain/inventory-availability-backfill";
+import { InventoryAvailabilityBackfillService } from "../../application/inventory-availability-backfill.service";
+import { InventoryCatalogBatchService } from "../../application/inventory-catalog-batch.service";
+import { catalogBatchExecutionPreview } from "@shared/types/inventory-catalog-batch";
+import { PostgresInventoryAvailabilityBackfillRepository } from "../../infrastructure/inventory-availability-backfill.repository";
 import { transformationModelDefinitionSchema } from "../../domain/inventory-availability-master-data.contracts";
 import {
   projectCanonicalAtp,
@@ -1304,6 +1308,103 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       [scope.productId],
     );
     expect(counts.rows[0]).toEqual({ models: "1", heads: "1" });
+  });
+
+  it("converges catalog batches, safely resumes, and binds reviews to exact unchanged evidence", async () => {
+    const first = await seedProductAndWarehouse([1, 5]);
+    const second = await seedProductAndWarehouse([1, 5]);
+    const database = drizzle(pool, { schema: databaseSchema });
+    const backfill = new InventoryAvailabilityBackfillService(
+      new PostgresInventoryAvailabilityBackfillRepository(database),
+      new PostgresInventoryAvailabilityMasterDataStore(database),
+      { previewLatestShadowChannels: async () => null },
+      { now: () => new Date(FIXED_TIME) },
+    );
+    const batch = new InventoryCatalogBatchService(backfill, () => undefined);
+    const productIds = [first.productId, second.productId];
+    const preview = catalogBatchExecutionPreview(await batch.preview({ mode: "drafts", productIds }));
+    const command = { preview, reason: "Create exact catalog drafts", decision: null };
+    const created = await batch.execute(command, "integration-test");
+    expect(created.rows.map((row) => row.status)).toEqual(["applied", "applied"]);
+    expect((await batch.execute(command, "integration-test")).rows.map((row) => row.status))
+      .toEqual(["already_current", "already_current"]);
+
+    await pool.query("UPDATE catalog.products SET name = 'New source provenance' WHERE id = $1", [first.productId]);
+    const refreshPreview = catalogBatchExecutionPreview(await batch.preview({ mode: "drafts", productIds }));
+    const refreshCommand = { preview: refreshPreview, reason: "Refresh stale provenance", decision: null };
+    expect((await batch.execute(refreshCommand, "integration-test")).rows).toMatchObject([
+      { action: "refresh", status: "applied" }, { action: "skip", status: "skipped" },
+    ]);
+    expect((await batch.execute(refreshCommand, "integration-test")).rows[0].status).toBe("already_current");
+
+    const reviewPreview = catalogBatchExecutionPreview(await batch.preview({ mode: "reviews", productIds }));
+    const reviewCommand = { preview: reviewPreview, reason: "Reviewed exact conversions", decision: "approved" };
+    // Change one product after preview: its transaction must fail without losing the other review.
+    await pool.query("UPDATE catalog.products SET name = 'Changed after preview' WHERE id = $1", [second.productId]);
+    const reviewed = await batch.execute(reviewCommand, "integration-test");
+    expect(reviewed.rows).toMatchObject([
+      { status: "applied", action: "review" },
+      { status: "failed", code: "INVENTORY_AVAILABILITY_REVIEW_SOURCE_CHANGED" },
+    ]);
+    expect((await batch.execute(reviewCommand, "integration-test")).rows[0].status).toBe("replayed");
+    // A competing decision based on the old no-review token must not replace the approval.
+    const competing = await batch.execute({ ...reviewCommand, reason: "Competing decision", decision: "changes_required" }, "integration-test");
+    expect(competing.rows[0]).toMatchObject({ status: "failed", code: "INVENTORY_AVAILABILITY_REVIEW_DECISION_CHANGED" });
+    const counts = await pool.query(`SELECT
+      (SELECT count(*) FROM inventory.transformation_model_versions) AS models,
+      (SELECT count(*) FROM inventory.transformation_model_reviews) AS reviews,
+      (SELECT count(*) FROM inventory.transformation_model_heads WHERE active_model_id IS NOT NULL) AS active,
+      (SELECT count(*) FROM public.audit_events WHERE action = 'inventory_availability.transformation_model.review_recorded') AS review_audits`);
+    expect(counts.rows[0]).toEqual({ models: "3", reviews: "1", active: "0", review_audits: "1" });
+  });
+
+  it("allows only one concurrent batch decision for the same reviewed snapshot", async () => {
+    const scope = await seedProductAndWarehouse([1, 5]);
+    const database = drizzle(pool, { schema: databaseSchema });
+    const backfill = new InventoryAvailabilityBackfillService(
+      new PostgresInventoryAvailabilityBackfillRepository(database),
+      new PostgresInventoryAvailabilityMasterDataStore(database),
+      { previewLatestShadowChannels: async () => null }, { now: () => new Date(FIXED_TIME) },
+    );
+    const batch = new InventoryCatalogBatchService(backfill, () => undefined);
+    const preview = catalogBatchExecutionPreview(await batch.preview({ mode: "drafts", productIds: [scope.productId] }));
+    await batch.execute({ preview, reason: "Create draft", decision: null }, "integration-test");
+    const reviewPreview = catalogBatchExecutionPreview(await batch.preview({ mode: "reviews", productIds: [scope.productId] }));
+    const commands = ["approved", "changes_required"].map((decision) => ({ preview: reviewPreview, reason: `Decision ${decision}`, decision }));
+    const results = await Promise.all(commands.map((command) => batch.execute(command, "integration-test")));
+    expect(results.filter((result) => result.rows[0].status === "applied")).toHaveLength(1);
+    expect(results.filter((result) => result.rows[0].status === "failed")).toHaveLength(1);
+    const loserIndex = results.findIndex((result) => result.rows[0].status === "failed");
+    expect((await batch.execute(commands[loserIndex], "integration-test")).rows[0]).toMatchObject({
+      status: "failed", code: "INVENTORY_AVAILABILITY_REVIEW_DECISION_CHANGED",
+    });
+    const result = await pool.query("SELECT count(*) AS count FROM inventory.transformation_model_reviews");
+    expect(result.rows[0].count).toBe("1");
+  });
+
+  it("uses append order for review concurrency even when the application clock moves backward", async () => {
+    const scope = await seedProductAndWarehouse([1, 5]);
+    const database = drizzle(pool, { schema: databaseSchema });
+    let now = new Date(FIXED_TIME);
+    const backfill = new InventoryAvailabilityBackfillService(
+      new PostgresInventoryAvailabilityBackfillRepository(database),
+      new PostgresInventoryAvailabilityMasterDataStore(database),
+      { previewLatestShadowChannels: async () => null }, { now: () => now },
+    );
+    const batch = new InventoryCatalogBatchService(backfill, () => undefined);
+    const preview = catalogBatchExecutionPreview(await batch.preview({ mode: "drafts", productIds: [scope.productId] }));
+    await batch.execute({ preview, reason: "Create draft", decision: null }, "integration-test");
+    const reviewPreview = catalogBatchExecutionPreview(await batch.preview({ mode: "reviews", productIds: [scope.productId] }));
+    const first = await batch.execute({ preview: reviewPreview, reason: "Initial review", decision: "changes_required" }, "integration-test");
+    const secondPreview = catalogBatchExecutionPreview(await batch.preview({ mode: "reviews", productIds: [scope.productId] }));
+    expect(secondPreview.products[0].expectedLatestReviewId).toBe(first.rows[0].reviewId);
+    now = new Date("2026-08-25T12:00:00.000Z");
+    const second = await batch.execute({ preview: secondPreview, reason: "Revised review", decision: "approved" }, "integration-test");
+    expect(second.rows[0].status).toBe("applied");
+    const queue = await backfill.getMigrationQueue();
+    expect(queue.products[0]).toMatchObject({ queueState: "approved", review: {
+      reviewId: second.rows[0].reviewId, reviewedAt: now.toISOString(), decision: "approved",
+    } });
   });
 
   it("atomically supersedes stale Phase 3 provenance without changing active authority", async () => {

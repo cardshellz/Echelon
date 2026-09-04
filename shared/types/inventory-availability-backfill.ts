@@ -160,6 +160,7 @@ export const refreshInventoryAvailabilityBackfillDraftResultSchema =
   }).strict();
 
 export const reviewInventoryAvailabilityBackfillDraftRequestSchema = z.object({
+  expectedLatestReviewId: plannerNonnegativeQuantitySchema.refine((value) => value !== "0").nullable().optional(),
   expectedModelId: positiveInteger,
   expectedModelVersion: positiveInteger,
   expectedDefinitionHash: sha256Hex,
