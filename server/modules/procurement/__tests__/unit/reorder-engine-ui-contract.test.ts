@@ -62,21 +62,28 @@ describe("reorder engine UI contract", () => {
     expect(page).toContain("/api/purchasing/recommendation-review-queue?limit=100");
     expect(page).toContain("recommendation-review-queue?recommendationId=");
     expect(page).toContain('"/api/purchasing/rfq-queue"');
+    // Inline vendor assignment (queue truth): active vendors for the picker.
+    expect(page).toContain('"/api/vendors"');
   });
 
-  it("wires the Order Builder to EXACTLY the allowed mutations (PR 3)", () => {
+  it("wires the Order Builder to EXACTLY the allowed mutations (PR 3 + queue truth)", () => {
     // Every mutation flows through the single postPurchasingCommand seam with
     // a literal endpoint at the call site — collect them all and pin the set.
     const commandCalls = Array.from(page.matchAll(/postPurchasingCommand\(\s*"([^"]+)"/g)).map(
       (match) => match[1],
     );
-    expect(commandCalls.length).toBeGreaterThanOrEqual(4);
+    expect(commandCalls.length).toBeGreaterThanOrEqual(5);
     expect(new Set(commandCalls)).toEqual(
       new Set([
         "/api/purchasing/recommendation-runs", // manual refresh + RFQ snapshot fallback
         "/api/purchasing/recommendation-decisions", // accepted_for_po per line
         "/api/purchasing/recommendation-accepted-queue/create-po", // one per vendor group
         "/api/purchasing/rfq-queue", // one idempotent batch
+        // Queue truth: inline vendor assignment saves the preferred mapping
+        // as an explicit per-piece quote. The UPSERT (not plain create) is
+        // deliberate — it demotes competing preferred mappings transactionally
+        // instead of tripping the one-active-preferred unique index.
+        "/api/vendor-products/upsert",
       ]),
     );
     // …and no mutation exists outside the seam: the only literal HTTP method
@@ -84,6 +91,21 @@ describe("reorder engine UI contract", () => {
     expect(page.match(/method: "/g)).toHaveLength(1);
     expect(page).toContain('method: "POST"');
     expect(page).not.toMatch(/"(?:PATCH|PUT|DELETE)"/);
+  });
+
+  it("treats no-vendor demand rows as first-class order-queue rows (queue truth)", () => {
+    // The dishonest "Skipped · No order needed" treatment is gone: no_vendor
+    // rows render their true engine status plus an honest badge…
+    expect(page).toContain("No vendor yet");
+    expect(helpers).toContain('item.skippedReason === "no_vendor"');
+    // …and the display-skip split lives in the shared helpers so the KPI,
+    // rollups, and table tell one story.
+    expect(helpers).toContain("export function isVendorGapRow");
+    expect(helpers).toContain("export function isDisplaySkipped");
+    // The costless-mapping PO gate mirrors the handoff's quote gate and names
+    // the server skip reason honestly in the UI copy.
+    expect(helpers).toContain("export function hasPoEligibleSupplierQuote");
+    expect(page).toContain("supplier quote basis review required");
   });
 
   it("collects the full decision-evidence and override-evidence contracts", () => {
