@@ -42,8 +42,8 @@ describe("inventory availability Phase 3 isolation contract", () => {
   });
 
   it("gates draft, refresh, and review writes by the inventory-planning edit ability", () => {
-    expect(routes.match(/requirePermission\("inventory_planning", "view"\)/g)).toHaveLength(2);
-    expect(routes.match(/requirePermission\("inventory_planning", "edit"\)/g)).toHaveLength(3);
+    expect(routes.match(/requirePermission\("inventory_planning", "view"\)/g)).toHaveLength(3);
+    expect(routes.match(/requirePermission\("inventory_planning", "edit"\)/g)).toHaveLength(4);
     expect(routes).not.toMatch(/activate|publish|reservation|inventory-level/i);
   });
 

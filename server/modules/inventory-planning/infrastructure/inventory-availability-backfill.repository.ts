@@ -197,7 +197,9 @@ async function captureProducts(
         .select()
         .from(transformationModelReviews)
         .where(inArray(transformationModelReviews.modelId, draftIds))
-        .orderBy(desc(transformationModelReviews.reviewedAt), desc(transformationModelReviews.id));
+        // Review writers serialize per product. Append order, not an application clock,
+        // determines the latest decision and the optimistic-review token.
+        .orderBy(desc(transformationModelReviews.id));
   const reviewByModelAndHash = new Map<string, typeof reviewRows[number]>();
   for (const review of reviewRows) {
     const key = `${review.modelId}:${review.modelDefinitionHash}`;
@@ -365,6 +367,20 @@ implements InventoryAvailabilityBackfillCatalogStore {
         );
       }
       const [source] = await loadInventoryAvailabilityBackfillSources(tx, [command.productId]);
+      // A batch must not overwrite a decision made after its preview. All review writers
+      // hold the product advisory lock; replay above remains an audit-preserving no-op.
+      if (command.expectedLatestReviewId !== undefined) {
+        const [latest] = await tx.select({ id: transformationModelReviews.id })
+          .from(transformationModelReviews)
+          .where(and(eq(transformationModelReviews.modelId, model.id),
+            eq(transformationModelReviews.modelDefinitionHash, model.definitionHash)))
+          .orderBy(desc(transformationModelReviews.id)).limit(1);
+        if ((latest?.id.toString() ?? null) !== command.expectedLatestReviewId) {
+          throw new InventoryAvailabilityMasterDataError(409,
+            "INVENTORY_AVAILABILITY_REVIEW_DECISION_CHANGED",
+            "Another review was recorded after this preview. Reload before deciding.");
+        }
+      }
       const candidate = source ? planInventoryAvailabilityBackfill(source) : null;
       if (
         !candidate

@@ -80,6 +80,7 @@ export interface InventoryAvailabilityBackfillCatalogStore {
     productId: number,
   ): Promise<CapturedInventoryAvailabilityBackfillProduct | null>;
   reviewTransformationModelDraft(command: {
+    expectedLatestReviewId?: string | null;
     productId: number;
     expectedModelId: number;
     expectedModelVersion: number;
@@ -418,6 +419,7 @@ export class InventoryAvailabilityBackfillService {
     }), "utf8").digest("hex");
     return reviewInventoryAvailabilityBackfillDraftResultSchema.parse(
       await this.catalogStore.reviewTransformationModelDraft({
+        expectedLatestReviewId: request.expectedLatestReviewId,
         productId,
         expectedModelId: request.expectedModelId,
         expectedModelVersion: request.expectedModelVersion,
