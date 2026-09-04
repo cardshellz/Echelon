@@ -3097,23 +3097,36 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
        ) VALUES ($1, $2, $3, 1)`,
       [binding.rows[0]!.id, target.rows[0]!.id, node.rows[0]!.id],
     );
-    const mapping = await pool.query<{ id: number }>(
-      `INSERT INTO inventory.publication_variant_mapping_versions (
-         publication_target_id, product_variant_id, version,
-         external_inventory_item_id, external_sku, definition_hash,
-         change_reason, idempotency_key, request_hash, created_by
-       ) VALUES ($1, $2, 1, 'runtime-item-1', 'RUNTIME-EA', $3,
-         'Runtime exact mapping', 'runtime-publication:mapping', $3,
-         'integration-test') RETURNING id`,
-      [target.rows[0]!.id, scope.variantIds[0], HASH],
-    );
-    await pool.query(
-      `INSERT INTO inventory.publication_variant_mapping_heads (
-         publication_target_id, product_variant_id, draft_mapping_id,
-         revision, updated_by, update_reason
-       ) VALUES ($1, $2, $3, 1, 'integration-test', 'Runtime mapping draft')`,
-      [target.rows[0]!.id, scope.variantIds[0], mapping.rows[0]!.id],
-    );
+    const mappingId = await (async () => {
+      const mappingClient = await pool.connect();
+      try {
+        await mappingClient.query("BEGIN");
+        const mapping = await mappingClient.query<{ id: number }>(
+          `INSERT INTO inventory.publication_variant_mapping_versions (
+             publication_target_id, product_variant_id, version,
+             external_inventory_item_id, external_sku, definition_hash,
+             change_reason, idempotency_key, request_hash, created_by
+           ) VALUES ($1, $2, 1, 'runtime-item-1', 'RUNTIME-EA', $3,
+             'Runtime exact mapping', 'runtime-publication:mapping', $3,
+             'integration-test') RETURNING id`,
+          [target.rows[0]!.id, scope.variantIds[0], HASH],
+        );
+        await mappingClient.query(
+          `INSERT INTO inventory.publication_variant_mapping_heads (
+             publication_target_id, product_variant_id, draft_mapping_id,
+             revision, updated_by, update_reason
+           ) VALUES ($1, $2, $3, 1, 'integration-test', 'Runtime mapping draft')`,
+          [target.rows[0]!.id, scope.variantIds[0], mapping.rows[0]!.id],
+        );
+        await mappingClient.query("COMMIT");
+        return mapping.rows[0]!.id;
+      } catch (error) {
+        await mappingClient.query("ROLLBACK");
+        throw error;
+      } finally {
+        mappingClient.release();
+      }
+    })();
 
     const configurationClient = await pool.connect();
     try {
@@ -3164,7 +3177,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         `UPDATE inventory.publication_variant_mapping_versions
          SET lifecycle_status = 'sealed', sealed_by = 'integration-test', sealed_at = $2
          WHERE id = $1`,
-        [mapping.rows[0]!.id, FIXED_TIME],
+        [mappingId, FIXED_TIME],
       );
       await configurationClient.query(
         `UPDATE inventory.publication_variant_mapping_heads
