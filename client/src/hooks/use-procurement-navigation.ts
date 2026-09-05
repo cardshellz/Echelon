@@ -1,4 +1,5 @@
 import { useLocation, useSearch } from "wouter";
+import { parsePurchaseWorkspaceSelection, purchaseWorkspaceInspectHref, purchaseWorkspaceCloseHref, type ProcurementWorkspaceRef } from "@/lib/purchase-workspace-selection";
 import {
   parseProcurementJourney,
   parseProcurementRecord,
@@ -18,6 +19,10 @@ export function useProcurementNavigation() {
   const parent = journey.trail.at(-1) ?? journey.purchase;
   return {
     record: current,
+    workspace: parsePurchaseWorkspaceSelection(search),
+    inspectHref: (target: ProcurementWorkspaceRef) => purchaseWorkspaceInspectHref(path, search, target),
+    inspectorBackHref: () => purchaseWorkspaceCloseHref(path, search, true),
+    closeInspectorHref: () => purchaseWorkspaceCloseHref(path, search),
     tab: current?.tab ?? "lines",
     setTab: (tab: string) => {
       const href = procurementTabHref(path, search, tab);

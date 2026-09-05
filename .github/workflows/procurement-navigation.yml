@@ -7,7 +7,7 @@ on:
       - "shared/**"
       - "package*.json"
       - "playwright.procurement.config.ts"
-      - "test/browser/procurement-navigation.spec.ts"
+      - "test/browser/procurement-*.ts"
       - ".github/workflows/procurement-navigation.yml"
   workflow_dispatch:
 
