@@ -42,7 +42,11 @@ describe("inventory availability Phase 1 admin surface contract", () => {
     expect(page).toContain("Authority by output SKU");
     expect(page).toContain("path.destinationVariantId === destination.id");
     expect(page).toContain("Drafts do not affect ATP");
-    expect(page).toContain("Runtime ATP still reads legacy inventory strategy");
+    expect(page).toContain("transformationRuntimeLabel(view)");
+    expect(page).toContain("Approved — not live");
+    expect(page).toContain("automatic refresh cannot replace your manual rules");
+    expect(page).toContain("expectedLatestReviewId: row.review?.reviewId ?? null");
+    expect(page).toContain("!manualEvidenceReady");
     expect(page).not.toContain("/activate");
     expect(navigation).toContain("Supply & Transformations");
     expect(navigation).toContain('requiredPermission: { resource: "inventory_planning", action: "view" }');
