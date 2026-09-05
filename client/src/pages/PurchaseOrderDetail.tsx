@@ -17,6 +17,7 @@ import { Link, useLocation, useSearch } from "wouter";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { parseProcurementJourney, procurementRecordHref } from "@/lib/procurement-navigation";
 import { ProcurementContext } from "@/components/procurement-context";
+import { PurchaseLifecycleWorkspace } from "@/features/purchasing/PurchaseLifecycleWorkspace";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -1188,6 +1189,16 @@ export default function PurchaseOrderDetail() {
       navigate(`/purchase-orders/${po.id}/edit`, { replace: true });
     }
   }, [procurementSettings?.useNewPoEditor, po?.id, po?.status, immutableRecommendationPo, navigate, procurementNavigation.purchaseHref, hasExplicitLifecycleTab]);
+
+  // Committed purchases open on their connected lifecycle. Explicit bookmarks
+  // and the existing draft editor retain their selected view.
+  useEffect(() => {
+    if (po?.id && po.status !== "draft" && requestedTabs.length === 0) {
+      const params = new URLSearchParams(searchStr);
+      params.set("tab", "lifecycle");
+      navigate(`/purchase-orders/${po.id}?${params.toString()}`, { replace: true });
+    }
+  }, [po?.id, po?.status, searchStr, navigate]);
 
   const { data: historyData } = useQuery<{ history: any[] }>({
     queryKey: [`/api/purchase-orders/${poId}/history`],
@@ -2896,6 +2907,8 @@ export default function PurchaseOrderDetail() {
       {/* Phase 2: Dual-track header. We pass the history rows so the
           tooltip can derive timestamps for stages that don't have
           dedicated columns (in_transit, receiving, received). */}
+      {activeTab !== "lifecycle" && (
+      <>
       <DualTrackHeader po={po} history={history} />
 
       {/* Charge summary cards */}
@@ -3151,12 +3164,16 @@ export default function PurchaseOrderDetail() {
         </Card>
       )}
 
+      </>
+      )}
+
       {/* Phase 2: Tabs + Quick Actions side rail */}
       <div className="flex flex-col md:flex-row gap-4 items-start">
       <div className="flex-1 min-w-0">
       {/* Tabs: Lines, Receipts, History */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList>
+        <TabsList className="flex h-auto max-w-full flex-wrap justify-start">
+          <TabsTrigger value="lifecycle">Lifecycle</TabsTrigger>
           <TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger>
           <TabsTrigger value="receipts">Receipts</TabsTrigger>
           <TabsTrigger value="invoices">Invoices</TabsTrigger>
@@ -3167,6 +3184,10 @@ export default function PurchaseOrderDetail() {
           </TabsTrigger>
           <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="lifecycle" className="space-y-4">
+          {poId && activeTab === "lifecycle" && <PurchaseLifecycleWorkspace purchaseOrderId={poId} navigation={procurementNavigation} />}
+        </TabsContent>
 
         {/* ── Lines Tab ── */}
         <TabsContent value="lines" className="space-y-4">
@@ -3815,7 +3836,7 @@ export default function PurchaseOrderDetail() {
       </div>{/* end main column */}
 
       {/* ── Quick Actions Side Rail (Phase 2) ── */}
-      <div className="w-full md:w-64 shrink-0 space-y-3">
+      <div className={activeTab === "lifecycle" ? "hidden" : "w-full md:w-64 shrink-0 space-y-3"}>
         <Card>
           <CardHeader className="pb-2 pt-3 px-4">
             <CardTitle className="text-sm">Quick actions</CardTitle>

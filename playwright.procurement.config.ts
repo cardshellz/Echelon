@@ -2,7 +2,7 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./test/browser",
-  testMatch: "procurement-navigation.spec.ts",
+  testMatch: "procurement-*.spec.ts",
   fullyParallel: false,
   workers: 1,
   timeout: 45_000,

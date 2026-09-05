@@ -18,6 +18,8 @@ import * as apLedger from "./ap-ledger.service";
 import { renderPoHtml } from "./po-document";
 import { inArray } from "drizzle-orm";
 import { db } from "../../db";
+import { createPurchaseWorkspaceRepository } from "./purchase-workspace.repository";
+import { createPurchaseWorkspaceService, PurchaseWorkspaceError } from "./purchase-workspace.service";
 import { z } from "zod";
 import { users as identityUsers } from "../../storage/base";
 import {
@@ -288,6 +290,7 @@ function mapPurchaseOrderWithLinesInput(
 
 export function registerPurchaseOrderRoutes(app: Express) {
   const { purchasing, shipmentTracking } = app.locals.services;
+  const purchaseWorkspace = createPurchaseWorkspaceService(createPurchaseWorkspaceRepository(db));
 
   const withLifecycle = (po: any) => ({
     ...po,
@@ -401,6 +404,39 @@ export function registerPurchaseOrderRoutes(app: Express) {
     } catch (error: any) {
       if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/purchase-orders/:id/workspace", requirePermission("purchasing", "view"), async (req, res) => {
+    const parsedId = z.string().regex(/^[1-9]\d*$/).transform(Number)
+      .refine(Number.isSafeInteger).safeParse(req.params.id);
+    if (!parsedId.success) {
+      return res.status(400).json({
+        code: "PURCHASE_WORKSPACE_ID_INVALID",
+        error: "Purchase ID must be a positive safe integer.",
+      });
+    }
+    try {
+      res.json(await purchaseWorkspace.getPurchaseWorkspace(parsedId.data));
+    } catch (error) {
+      const statusCode = error instanceof PurchaseWorkspaceError ? error.statusCode : 500;
+      const code = error instanceof PurchaseWorkspaceError ? error.code : "PURCHASE_WORKSPACE_READ_FAILED";
+      const databaseError = error instanceof Error ? error.cause ?? error : error;
+      const databaseCode = databaseError && typeof databaseError === "object" && "code" in databaseError
+        && typeof databaseError.code === "string" && /^[A-Z0-9]{5}$/.test(databaseError.code)
+        ? databaseError.code : null;
+      console.error(JSON.stringify({
+        event: "procurement.purchase_workspace.read_failed",
+        code,
+        purchaseOrderId: parsedId.data,
+        errorType: error instanceof Error ? error.name : typeof error,
+        databaseCode,
+        message: error instanceof PurchaseWorkspaceError ? error.message : "Unexpected workspace read failure.",
+      }));
+      res.status(statusCode).json({
+        code,
+        error: error instanceof PurchaseWorkspaceError ? error.message : "Unable to load the purchase workspace.",
+      });
     }
   });
 
