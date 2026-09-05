@@ -1,6 +1,10 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useLocation, useSearch } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
+import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
+import { parseProcurementRecord } from "@/lib/procurement-navigation";
+import { createReceivingNavigationSession } from "@/lib/receiving-navigation-session";
+import { ProcurementContext } from "@/components/procurement-context";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { InventoryLocationCombobox } from "@/components/inventory/InventoryLocationCombobox";
@@ -216,8 +220,21 @@ const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outlin
 export default function Receiving() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [, navigate] = useLocation();
+  const [location, navigate] = useLocation();
   const searchStr = useSearch();
+  const procurementNavigation = useProcurementNavigation();
+  const receiptRecord = parseProcurementRecord(location, searchStr);
+  const requestedReceiptId = receiptRecord?.kind === "receipt" ? receiptRecord.id : null;
+  const invalidReceiptId = new URLSearchParams(searchStr).has("open") && requestedReceiptId === null;
+  // Requests finish after navigation, but UI results belong to one committed
+  // visit. A fresh visit to the same URL must not accept an older response.
+  const [receiptNavigationSession] = useState(createReceivingNavigationSession);
+  useLayoutEffect(() => {
+    receiptNavigationSession.enter(`${location}?${searchStr}`);
+    return () => receiptNavigationSession.leave();
+  }, [location, searchStr, receiptNavigationSession]);
+  const captureReceiptNavigation = receiptNavigationSession.capture;
+  const isCurrentReceiptNavigation = receiptNavigationSession.isCurrent;
   
   const [activeTab, setActiveTab] = useState("receipts");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -225,6 +242,9 @@ export default function Receiving() {
   const [showNewVendorDialog, setShowNewVendorDialog] = useState(false);
   const [selectedReceipt, setSelectedReceipt] = useState<ReceivingOrder | null>(null);
   const [showReceiptDetail, setShowReceiptDetail] = useState(false);
+  const [receiptLoading, setReceiptLoading] = useState(false);
+  const [receiptLoadError, setReceiptLoadError] = useState<string | null>(null);
+  const [receiptLoadAttempt, setReceiptLoadAttempt] = useState(0);
   const [showCSVImport, setShowCSVImport] = useState(false);
   const [csvText, setCsvText] = useState("");
   const [importResults, setImportResults] = useState<{ errors: string[]; warnings: string[]; created: number; updated: number } | null>(null);
@@ -325,6 +345,7 @@ DEF-456,25,,,5.00,,Location TBD`;
 
   // Mutations
   const createReceiptMutation = useMutation({
+    onMutate: captureReceiptNavigation,
     mutationFn: async (data: typeof newReceipt) => {
       // If PO source type with a selected PO, use the create-receipt-from-PO endpoint
       if (data.sourceType === "po" && selectedPoId) {
@@ -357,22 +378,16 @@ DEF-456,25,,,5.00,,Location TBD`;
       if (!res.ok) throw new Error("Failed to create receipt");
       return res.json();
     },
-    onSuccess: (receipt) => {
+    onSuccess: (receipt, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      if (!isCurrentReceiptNavigation(context)) return;
       setShowNewReceiptDialog(false);
       setNewReceipt({ sourceType: "blind", vendorId: "", warehouseId: "", poNumber: "", notes: "" });
       setSelectedPoId(null);
       setPoSearch("");
       toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created` });
-      // Fetch the full receipt with lines for the detail view
-      fetch(`/api/receiving/${receipt.id}`).then(r => r.json()).then(full => {
-        setSelectedReceipt(full);
-        setShowReceiptDetail(true);
-      }).catch(() => {
-        setSelectedReceipt(receipt);
-        setShowReceiptDetail(true);
-      });
+      navigate(procurementNavigation.childHref(`/receiving?open=${receipt.id}`));
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message || "Failed to create receipt", variant: "destructive" });
@@ -398,6 +413,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   });
 
   const discardReceiptMutation = useMutation({
+    onMutate: captureReceiptNavigation,
     mutationFn: async (id: number) => {
       const res = await fetch(`/api/receiving-orders/${id}/discard`, { method: "DELETE" });
       if (!res.ok) {
@@ -406,18 +422,18 @@ DEF-456,25,,,5.00,,Location TBD`;
       }
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (_result, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      if (!isCurrentReceiptNavigation(context)) return;
       setSelectedReceipt(null);
       setShowReceiptDetail(false);
       toast({ title: "Receipt discarded" });
-      // Navigate back to the source PO if this receipt was PO-linked
-      if (selectedReceipt?.purchaseOrderId) {
-        navigate(`/purchase-orders/${selectedReceipt.purchaseOrderId}`);
-      } else {
-        navigate("/purchase-orders");
-      }
+      navigate(procurementNavigation.backHref(
+        selectedReceipt?.purchaseOrderId
+          ? `/purchase-orders/${selectedReceipt.purchaseOrderId}`
+          : "/receiving",
+      ));
     },
     onError: (error: Error) => {
       // Surface 409 reason verbatim — do not hide it (spec: "don't pretend it succeeded")
@@ -458,6 +474,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   });
 
   const reverseMutation = useMutation({
+    onMutate: captureReceiptNavigation,
     mutationFn: async (input: {
       scope: "line" | "order";
       lineId?: number;
@@ -488,17 +505,13 @@ DEF-456,25,,,5.00,,Location TBD`;
       }
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (_result, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      if (!isCurrentReceiptNavigation(context)) return;
       reversalsQuery.refetch();
-      // Refresh the detail view so reversed_qty tallies update.
-      if (selectedReceipt) {
-        fetch(`/api/receiving/${selectedReceipt.id}`)
-          .then((r) => r.json())
-          .then((full) => setSelectedReceipt(full))
-          .catch(() => {});
-      }
+      // Reload through the same guarded detail request used by deep links.
+      setReceiptLoadAttempt((attempt) => attempt + 1);
       setReverseTarget(null);
       setReverseQty("");
       setReverseReason("");
@@ -532,13 +545,15 @@ DEF-456,25,,,5.00,,Location TBD`;
   });
 
   const openReceiptMutation = useMutation({
+    onMutate: captureReceiptNavigation,
     mutationFn: async (id: number) => {
       const res = await fetch(`/api/receiving/${id}/open`, { method: "POST" });
       if (!res.ok) throw new Error("Failed to open receipt");
       return res.json();
     },
-    onSuccess: (data) => {
+    onSuccess: (data, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (!isCurrentReceiptNavigation(context)) return;
       setSelectedReceipt(data);
       toast({ title: "Receipt opened for receiving" });
     },
@@ -553,9 +568,11 @@ DEF-456,25,,,5.00,,Location TBD`;
     shipmentId: number;
     shipmentNumber: string | null;
     option: any;
+    returnHref: string;
   } | null>(null);
 
   const closeReceiptMutation = useMutation({
+    onMutate: captureReceiptNavigation,
     mutationFn: async ({ id, allowOverReceipt = false }: { id: number; allowOverReceipt?: boolean }) => {
       const res = await fetch(`/api/receiving/${id}/close`, {
         method: "POST",
@@ -583,10 +600,11 @@ DEF-456,25,,,5.00,,Location TBD`;
       }
       return res.json();
     },
-    onSuccess: (result) => {
+    onSuccess: (result, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      if (!isCurrentReceiptNavigation(context)) return;
       toast({
         title: "Receipt closed — inventory updated",
         description: `${result.unitsReceived} units received across ${result.linesProcessed} lines`
@@ -594,6 +612,9 @@ DEF-456,25,,,5.00,,Location TBD`;
       setShowReceiptDetail(false);
       const closedPoId = selectedReceipt?.purchaseOrderId;
       const chainShipmentId = selectedReceipt?.inboundShipmentId;
+      const returnHref = procurementNavigation.backHref(
+        closedPoId ? `/purchase-orders/${closedPoId}` : "/receiving",
+      );
       // Multi-PO shipment chaining: if this receipt came from a shipment that
       // still has unreceived PO lines, offer the next PO instead of bouncing
       // back to the PO page and orphaning the rest of the truck.
@@ -602,26 +623,25 @@ DEF-456,25,,,5.00,,Location TBD`;
           try {
             const res = await fetch(`/api/inbound-shipments/${chainShipmentId}/po-receive-options`);
             const summary = res.ok ? await res.json() : null;
+            if (!isCurrentReceiptNavigation(context)) return;
             const next = (summary?.purchaseOrders ?? []).find(
               (o: any) => o.receivable && o.action === "create_receipt" && o.remainingBaseQty > 0,
             );
             if (next) {
-              setNextPoPrompt({ shipmentId: chainShipmentId, shipmentNumber: summary?.shipmentNumber ?? null, option: next });
+              setNextPoPrompt({ shipmentId: chainShipmentId, shipmentNumber: summary?.shipmentNumber ?? null, option: next, returnHref });
               return;
             }
           } catch {
             // fall through to the default navigation
           }
-          if (closedPoId) navigate(`/purchase-orders/${closedPoId}`);
+          if (isCurrentReceiptNavigation(context)) navigate(returnHref);
         })();
         return;
       }
-      // Navigate back to the PO detail if this receipt was PO-linked
-      if (closedPoId) {
-        navigate(`/purchase-orders/${closedPoId}`);
-      }
+      navigate(returnHref);
     },
-    onError: (error: any) => {
+    onError: (error: any, _variables, context) => {
+      if (!isCurrentReceiptNavigation(context)) return;
       if (error.code === "SHIPMENT_OVER_RECEIPT_CONFIRMATION_REQUIRED") {
         setOverReceiptPrompt({ id: error.receivingOrderId, overLines: error.overLines ?? [] });
         return;
@@ -644,6 +664,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   });
 
   const receiveNextPoMutation = useMutation({
+    onMutate: captureReceiptNavigation,
     mutationFn: async ({ shipmentId, purchaseOrderId }: { shipmentId: number; purchaseOrderId: number }) => {
       const res = await fetch(`/api/inbound-shipments/${shipmentId}/create-receipt`, {
         method: "POST",
@@ -657,25 +678,23 @@ DEF-456,25,,,5.00,,Location TBD`;
       if (!res.ok) throw new Error(body?.error || "Failed to create receipt");
       return body;
     },
-    onSuccess: (receipt) => {
-      setNextPoPrompt(null);
+    onSuccess: (receipt, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (!isCurrentReceiptNavigation(context)) return;
+      setNextPoPrompt(null);
       toast({ title: "Receipt created", description: `${receipt.receiptNumber} created — continue receiving` });
-      fetch(`/api/receiving/${receipt.id}`).then(r => r.json()).then(full => {
-        setSelectedReceipt(full);
-        setShowReceiptDetail(true);
-      }).catch(() => {
-        setSelectedReceipt(receipt);
-        setShowReceiptDetail(true);
-      });
+      navigate(procurementNavigation.childHref(
+        `/receiving?open=${receipt.id}`,
+        { replaceCurrent: true },
+      ));
     },
     onError: (error: Error) => {
-      setNextPoPrompt(null);
       toast({ title: "Error", description: error.message || "Failed to create receipt", variant: "destructive" });
     },
   });
 
   const bulkImportMutation = useMutation({
+    onMutate: captureReceiptNavigation,
     mutationFn: async ({ orderId, lines }: { orderId: number; lines: any[] }) => {
       const res = await fetch(`/api/receiving/${orderId}/lines/bulk`, {
         method: "POST",
@@ -685,8 +704,9 @@ DEF-456,25,,,5.00,,Location TBD`;
       if (!res.ok) throw new Error("Failed to import lines");
       return res.json();
     },
-    onSuccess: (result) => {
+    onSuccess: (result, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (!isCurrentReceiptNavigation(context)) return;
       setShowCSVImport(false);
       setCsvText("");
       
@@ -719,6 +739,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   });
 
   const addLineMutation = useMutation({
+    onMutate: captureReceiptNavigation,
     mutationFn: async ({ orderId, line }: { orderId: number; line: any }) => {
       const res = await fetch(`/api/receiving/${orderId}/lines`, {
         method: "POST",
@@ -728,8 +749,9 @@ DEF-456,25,,,5.00,,Location TBD`;
       if (!res.ok) throw new Error("Failed to add line");
       return res.json();
     },
-    onSuccess: (updatedOrder) => {
+    onSuccess: (updatedOrder, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (!isCurrentReceiptNavigation(context)) return;
       if (updatedOrder && selectedReceipt) {
         setSelectedReceipt(updatedOrder);
       }
@@ -756,6 +778,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   });
 
   const updateLineMutation = useMutation({
+    onMutate: captureReceiptNavigation,
     mutationFn: async ({ lineId, updates }: { lineId: number; updates: any }) => {
       const res = await fetch(`/api/receiving/lines/${lineId}`, {
         method: "PATCH",
@@ -768,8 +791,9 @@ DEF-456,25,,,5.00,,Location TBD`;
       }
       return res.json();
     },
-    onSuccess: (updatedLine) => {
+    onSuccess: (updatedLine, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (!isCurrentReceiptNavigation(context)) return;
       if (selectedReceipt && selectedReceipt.lines) {
         const updatedLines = selectedReceipt.lines.map(line => 
           line.id === updatedLine.id ? updatedLine : line
@@ -849,6 +873,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   }, [selectedReceipt?.lines, variants]);
 
   const updateReceiptMutation = useMutation({
+    onMutate: captureReceiptNavigation,
     mutationFn: async ({ id, updates }: { id: number; updates: Record<string, any> }) => {
       const res = await fetch(`/api/receiving/${id}`, {
         method: "PATCH",
@@ -858,8 +883,9 @@ DEF-456,25,,,5.00,,Location TBD`;
       if (!res.ok) throw new Error("Failed to update receipt");
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (_result, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (!isCurrentReceiptNavigation(context)) return;
       if (selectedReceipt) {
         queryClient.invalidateQueries({ queryKey: [`/api/receiving/${selectedReceipt.id}`] });
       }
@@ -867,6 +893,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   });
 
   const completeAllMutation = useMutation({
+    onMutate: captureReceiptNavigation,
     mutationFn: async (orderId: number) => {
       const res = await fetch(`/api/receiving/${orderId}/complete-all`, {
         method: "POST",
@@ -874,8 +901,9 @@ DEF-456,25,,,5.00,,Location TBD`;
       if (!res.ok) throw new Error("Failed to complete all lines");
       return res.json();
     },
-    onSuccess: (data) => {
+    onSuccess: (data, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (!isCurrentReceiptNavigation(context)) return;
       if (data.order) {
         setSelectedReceipt(data.order);
       }
@@ -885,6 +913,16 @@ DEF-456,25,,,5.00,,Location TBD`;
 
   // Create a new product variant from a receiving line's SKU
   const createVariantMutation = useMutation({
+    onMutate: () => ({
+      ...captureReceiptNavigation(),
+      // This workflow already links sibling lines after creating a variant.
+      // Capture its original scope so navigation cannot cancel those writes or
+      // redirect them onto a different receipt.
+      receipt: selectedReceipt ? {
+        ...selectedReceipt,
+        lines: selectedReceipt.lines?.map((line) => ({ ...line })),
+      } : null,
+    }),
     mutationFn: async (lineId: number) => {
       const res = await fetch(`/api/receiving/lines/${lineId}/create-variant`, {
         method: "POST",
@@ -895,13 +933,15 @@ DEF-456,25,,,5.00,,Location TBD`;
       }
       return res.json();
     },
-    onSuccess: async (data) => {
+    onSuccess: async (data, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
-      if (!selectedReceipt?.lines) return;
+      const receiptAtStart = context?.receipt;
+      if (!receiptAtStart?.lines) return;
 
-      let updatedLines = selectedReceipt.lines.map(line =>
+      let updatedLines = receiptAtStart.lines.map(line =>
         line.id === data.line.id ? data.line : line
       );
+      const returnedLines = new Map<number, ReceivingLine>([[data.line.id, data.line]]);
 
       // Auto-link other lines with the same SKU that are also missing productVariantId
       const sameSku = updatedLines.filter(l =>
@@ -917,11 +957,17 @@ DEF-456,25,,,5.00,,Location TBD`;
           if (res.ok) {
             const updated = await res.json();
             updatedLines = updatedLines.map(l => l.id === updated.id ? updated : l);
+            returnedLines.set(updated.id, updated);
           }
         } catch { /* continue */ }
       }
 
-      setSelectedReceipt({ ...selectedReceipt, lines: updatedLines });
+      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (!isCurrentReceiptNavigation(context)) return;
+      setSelectedReceipt((current) => current?.id === receiptAtStart.id ? {
+        ...current,
+        lines: current.lines?.map((line) => returnedLines.get(line.id) ?? line),
+      } : current);
 
       const linkedCount = 1 + sameSku.length;
       toast({
@@ -1130,63 +1176,95 @@ DEF-456,25,,,5.00,,Location TBD`;
     return { baseSku: sku.toUpperCase(), typeName: "Each", units: 1 };
   };
 
-  const loadReceiptDetail = async (receipt: ReceivingOrder) => {
-    const res = await fetch(`/api/receiving/${receipt.id}`);
-    if (res.ok) {
-      const data = await res.json();
-      setSelectedReceipt(data);
-      setShowReceiptDetail(true);
-      return;
-    }
-    toast({
-      title: "Receipt unavailable",
-      description: res.status === 404 ? "This receipt was discarded or no longer exists." : `Could not open receipt (${res.status}).`,
-      variant: "destructive",
-    });
+  const receiptHref = (id: number) => procurementNavigation.childHref(`/receiving?open=${id}`);
+
+  const loadReceiptDetail = (receipt: ReceivingOrder) => {
+    navigate(receiptHref(receipt.id));
   };
 
-  // Auto-open receipt when navigated with ?open=<id>
-  const autoOpenHandled = useRef(false);
+  const closeReceiptDetail = () => {
+    navigate(procurementNavigation.backHref("/receiving"));
+  };
+
   useEffect(() => {
-    if (autoOpenHandled.current) return;
-    const params = new URLSearchParams(searchStr);
-    const openId = params.get("open");
-    if (openId && receipts.length > 0) {
-      autoOpenHandled.current = true;
-      const openReceiptId = Number(openId);
-      if (!Number.isInteger(openReceiptId) || openReceiptId <= 0) {
-        navigate("/receiving", { replace: true });
-        return;
-      }
-      const receipt = receipts.find(r => r.id === openReceiptId);
-      if (receipt) {
-        loadReceiptDetail(receipt);
-      } else {
-        // Receipt might not be in the list yet, try direct fetch
-        fetch(`/api/receiving/${openReceiptId}`).then(async (res) => {
-          if (!res.ok) {
-            toast({
-              title: "Receipt unavailable",
-              description: res.status === 404 ? "This receipt was discarded or no longer exists." : `Could not open receipt (${res.status}).`,
-              variant: "destructive",
-            });
-            return null;
-          }
-          return res.json();
-        }).then(data => {
-          if (data && data.id) {
-            setSelectedReceipt(data);
-            setShowReceiptDetail(true);
-          }
-        }).catch(() => {});
-      }
-      // Clean up URL
-      navigate("/receiving", { replace: true });
+    // A browser history change must not carry a pending editor into a different
+    // receipt. Persisted receive quantities remain owned by the server.
+    setShowCSVImport(false);
+    setShowImportResults(false);
+    setImportResults(null);
+    setShowAddLineDialog(false);
+    setShowResolveDialog(false);
+    setReverseTarget(null);
+    setOverReceiptPrompt(null);
+    setNextPoPrompt(null);
+  }, [requestedReceiptId, invalidReceiptId]);
+
+  // The address identifies the open receipt, including after reload or browser
+  // Back. Fetch it directly: list filters and empty lists must not block a link.
+  useEffect(() => {
+    const controller = new AbortController();
+    setSelectedReceipt(null);
+    setReceiptLoadError(null);
+    setReceiptLoading(false);
+    setShowReceiptDetail(requestedReceiptId !== null || invalidReceiptId);
+
+    if (invalidReceiptId) {
+      setReceiptLoadError("This receipt link has an invalid receipt ID.");
+      return () => controller.abort();
     }
-  }, [receipts, searchStr]);
+    if (requestedReceiptId === null) return () => controller.abort();
+
+    setReceiptLoading(true);
+    void (async () => {
+      try {
+        const response = await fetch(`/api/receiving/${requestedReceiptId}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          if (response.status === 404) {
+            throw new Error("This receipt was discarded or no longer exists.");
+          }
+          if (response.status === 401 || response.status === 403) {
+            throw new Error("You do not have access to this receipt. Sign in with an authorized account and retry.");
+          }
+          throw new Error(`Could not load this receipt (HTTP ${response.status}). Please retry.`);
+        }
+        const receipt: unknown = await response.json();
+        // A mismatched or incomplete response must never expose actions for a
+        // different receipt. Existing command handlers receive a complete detail.
+        if (
+          !receipt || typeof receipt !== "object" ||
+          !("id" in receipt) || receipt.id !== requestedReceiptId ||
+          !("receiptNumber" in receipt) || typeof receipt.receiptNumber !== "string" ||
+          !("status" in receipt) || typeof receipt.status !== "string" ||
+          !("lines" in receipt) || !Array.isArray(receipt.lines)
+        ) {
+          throw new Error("The receipt response was incomplete. Please retry.");
+        }
+        if (!controller.signal.aborted) {
+          setSelectedReceipt(receipt as ReceivingOrder);
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setReceiptLoadError(
+            error instanceof Error
+              ? error.message
+              : "Could not load this receipt. Check your connection and retry.",
+          );
+        }
+      } finally {
+        if (!controller.signal.aborted) setReceiptLoading(false);
+      }
+    })();
+
+    // Rapid record changes must not let an older response replace the receipt
+    // named in the current address.
+    return () => controller.abort();
+  }, [requestedReceiptId, invalidReceiptId, receiptLoadAttempt]);
 
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
+      <ProcurementContext navigation={procurementNavigation} />
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl md:text-2xl font-bold flex items-center gap-2">
@@ -1278,7 +1356,9 @@ DEF-456,25,,,5.00,,Location TBD`;
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="font-mono font-medium text-sm">{receipt.receiptNumber}</span>
+                          <Link href={receiptHref(receipt.id)} onClick={(event) => event.stopPropagation()} className="font-mono font-medium text-sm text-primary underline">
+                            {receipt.receiptNumber}
+                          </Link>
                           <Badge variant={STATUS_BADGES[receipt.status]?.variant || "secondary"} className="text-xs">
                             {STATUS_BADGES[receipt.status]?.label || receipt.status}
                           </Badge>
@@ -1296,8 +1376,10 @@ DEF-456,25,,,5.00,,Location TBD`;
                         </div>
                       </div>
                       <div className="flex gap-1">
-                        <Button variant="ghost" size="sm" className="min-h-[44px] min-w-[44px] p-0" onClick={(e) => { e.stopPropagation(); loadReceiptDetail(receipt); }}>
-                          <FileText className="h-4 w-4" />
+                        <Button asChild variant="ghost" size="sm" className="min-h-[44px] min-w-[44px] p-0">
+                          <Link href={receiptHref(receipt.id)} onClick={(event) => event.stopPropagation()} aria-label={`Open receipt ${receipt.receiptNumber}`}>
+                            <FileText className="h-4 w-4" />
+                          </Link>
                         </Button>
                         {receipt.status !== "closed" && (
                           <Button 
@@ -1356,7 +1438,11 @@ DEF-456,25,,,5.00,,Location TBD`;
                       onClick={() => loadReceiptDetail(receipt)}
                       data-testid={`receipt-row-${receipt.id}`}
                     >
-                      <TableCell className="font-mono font-medium">{receipt.receiptNumber}</TableCell>
+                      <TableCell className="font-mono font-medium">
+                        <Link href={receiptHref(receipt.id)} onClick={(event) => event.stopPropagation()} className="text-primary underline">
+                          {receipt.receiptNumber}
+                        </Link>
+                      </TableCell>
                       <TableCell>
                         <Badge variant="outline">{receipt.sourceType}</Badge>
                       </TableCell>
@@ -1379,8 +1465,10 @@ DEF-456,25,,,5.00,,Location TBD`;
                       </TableCell>
                       <TableCell>
                         <div className="flex gap-1">
-                          <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); loadReceiptDetail(receipt); }}>
-                            <FileText className="h-4 w-4" />
+                          <Button asChild variant="ghost" size="sm">
+                            <Link href={receiptHref(receipt.id)} onClick={(event) => event.stopPropagation()} aria-label={`Open receipt ${receipt.receiptNumber}`}>
+                              <FileText className="h-4 w-4" />
+                            </Link>
                           </Button>
                           {receipt.status !== "closed" && (
                             <Button 
@@ -1761,8 +1849,37 @@ DEF-456,25,,,5.00,,Location TBD`;
       </Dialog>
 
       {/* Receipt Detail Dialog */}
-      <Dialog open={showReceiptDetail} onOpenChange={setShowReceiptDetail}>
+      <Dialog open={showReceiptDetail} onOpenChange={(open) => { if (!open) closeReceiptDetail(); }}>
         <DialogContent className="max-w-4xl md:max-w-4xl max-h-[90vh] overflow-y-auto p-4">
+          <div className="pr-6">
+            <Button asChild variant="ghost" size="sm">
+              <Link href={procurementNavigation.backHref("/receiving")}>
+                {procurementNavigation.backLabel || "Back to receiving"}
+              </Link>
+            </Button>
+          </div>
+          <ProcurementContext navigation={procurementNavigation} />
+          {!selectedReceipt && (
+            <>
+              <DialogHeader>
+                <DialogTitle>{receiptLoadError ? "Receipt unavailable" : "Loading receipt"}</DialogTitle>
+                <DialogDescription>
+                  {requestedReceiptId !== null ? `Receipt #${requestedReceiptId}` : "Receipt details"}
+                </DialogDescription>
+              </DialogHeader>
+              {receiptLoading && <p role="status" className="text-sm text-muted-foreground">Loading receipt details…</p>}
+              {receiptLoadError && (
+                <div className="space-y-3">
+                  <p role="alert" className="text-sm text-destructive">{receiptLoadError}</p>
+                  <div className="flex flex-wrap gap-2">
+                    {!invalidReceiptId && (
+                      <Button variant="outline" onClick={() => setReceiptLoadAttempt((attempt) => attempt + 1)}>Retry</Button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
           {selectedReceipt && (
             <>
               <DialogHeader>
@@ -1777,12 +1894,24 @@ DEF-456,25,,,5.00,,Location TBD`;
                   {selectedReceipt.sourceType === "initial_load" ? "Initial Inventory Load" :
                    selectedReceipt.sourceType === "po" ? (
                      selectedReceipt.purchaseOrderId ? (
-                       <span>PO: <a href={`/purchase-orders/${selectedReceipt.purchaseOrderId}`} className="text-primary underline">{selectedReceipt.poNumber}</a></span>
+                       <span>PO: <Link href={procurementNavigation.childHref(`/purchase-orders/${selectedReceipt.purchaseOrderId}`)} className="text-primary underline">{selectedReceipt.poNumber || `#${selectedReceipt.purchaseOrderId}`}</Link></span>
                      ) : `PO: ${selectedReceipt.poNumber}`
                    ) : selectedReceipt.sourceType}
                   {selectedReceipt.vendor && ` • ${selectedReceipt.vendor.name}`}
                 </DialogDescription>
               </DialogHeader>
+              <nav aria-label="Receipt related records" className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
+                {selectedReceipt.purchaseOrderId && (
+                  <Link href={procurementNavigation.childHref(`/purchase-orders/${selectedReceipt.purchaseOrderId}`)} className="text-primary underline">
+                    Purchase order {selectedReceipt.poNumber || `#${selectedReceipt.purchaseOrderId}`}
+                  </Link>
+                )}
+                {selectedReceipt.inboundShipmentId && (
+                  <Link href={procurementNavigation.childHref(`/shipments/${selectedReceipt.inboundShipmentId}`)} className="text-primary underline">
+                    Shipment #{selectedReceipt.inboundShipmentId}
+                  </Link>
+                )}
+              </nav>
 
               <div className="space-y-4">
                 {/* Action buttons */}
@@ -3026,7 +3155,13 @@ DEF-456,25,,,5.00,,Location TBD`;
 
       {/* Multi-PO shipment chaining: after closing one PO's receipt, offer the
           next PO with unreceived lines on the same shipment. */}
-      <AlertDialog open={!!nextPoPrompt} onOpenChange={(open) => { if (!open) setNextPoPrompt(null); }}>
+      <AlertDialog open={!!nextPoPrompt} onOpenChange={(open) => {
+        if (receiveNextPoMutation.isPending) return;
+        if (!open && nextPoPrompt) {
+          navigate(nextPoPrompt.returnHref);
+          setNextPoPrompt(null);
+        }
+      }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Shipment has more to receive</AlertDialogTitle>
@@ -3038,10 +3173,13 @@ DEF-456,25,,,5.00,,Location TBD`;
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Later</AlertDialogCancel>
+            <AlertDialogCancel disabled={receiveNextPoMutation.isPending}>Later</AlertDialogCancel>
             <AlertDialogAction
               disabled={receiveNextPoMutation.isPending}
-              onClick={() => {
+              onClick={(event) => {
+                // Keep this prompt mounted until the request resolves. The
+                // cancel/escape route remains the original purchase context.
+                event.preventDefault();
                 if (!nextPoPrompt) return;
                 receiveNextPoMutation.mutate({
                   shipmentId: nextPoPrompt.shipmentId,

@@ -1,0 +1,33 @@
+name: Procurement navigation
+
+on:
+  pull_request:
+    paths:
+      - "client/src/**"
+      - "shared/**"
+      - "package*.json"
+      - "playwright.procurement.config.ts"
+      - "test/browser/procurement-navigation.spec.ts"
+      - ".github/workflows/procurement-navigation.yml"
+  workflow_dispatch:
+
+jobs:
+  browser:
+    name: Procurement browser journeys
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test --config playwright.procurement.config.ts
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: procurement-browser-traces
+          path: test-results/
+          retention-days: 7
