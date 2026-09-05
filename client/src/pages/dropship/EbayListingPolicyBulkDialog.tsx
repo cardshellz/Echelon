@@ -6,26 +6,32 @@ import { createDropshipIdempotencyKey, putJson, queryErrorCode, queryErrorMessag
   type DropshipEbayListingPolicyOverrideResponse, type ReplaceDropshipEbayListingPoliciesResponse } from "@/lib/dropship-ops-surface";
 import { buildEbayBulkPolicyAssignments, EBAY_POLICY_FIELDS, EBAY_POLICY_LABELS, ebayPolicyDisplayOptions,
   INHERIT_POLICY_VALUE, UNCHANGED_POLICY_VALUE, type EbayPolicyPatch } from "@/lib/dropship-ebay-policy-assignment";
-import { ListingSetupCombobox } from "./EbayListingSetupPanel";
+import { hasEbayPolicyEditorChange, singleEbayListingPolicyPatch } from "@/lib/dropship-ebay-policy-view";
+import { ListingSetupCombobox, type ListingSetupDisplayOption } from "./EbayListingSetupPanel";
 
-export function EbayListingPolicyBulkDialog({ data, productVariantIds, onClose, onSaved, onConflict }: {
+export function EbayListingPolicyBulkDialog({ data, productVariantIds, listingLabel, onClose, onSaved, onConflict }: {
   data: DropshipEbayListingPolicyOverrideResponse;
   productVariantIds: readonly number[];
+  listingLabel?: string;
   onClose: () => void;
   onSaved: (count: number) => Promise<void>;
   onConflict: () => Promise<void>;
 }) {
   // Keep the exact rows/revisions reviewed when opening the dialog. A concurrent
   // edit must produce a conflict, not silently change what this operation means.
-  const [snapshot] = useState(() => ({ data, productVariantIds: [...productVariantIds] }));
-  const [patch, setPatch] = useState<EbayPolicyPatch>({});
+  const [snapshot] = useState(() => ({ data, productVariantIds: [...productVariantIds], listingLabel }));
+  const singleListing = snapshot.listingLabel !== undefined && snapshot.productVariantIds.length === 1;
+  const [initialPatch] = useState(() => singleListing
+    ? singleEbayListingPolicyPatch(snapshot.data.assignments.find((assignment) => assignment.productVariantId === snapshot.productVariantIds[0]))
+    : null);
+  const [patch, setPatch] = useState<EbayPolicyPatch>(() => initialPatch ?? {});
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [conflicted, setConflicted] = useState(false);
   const [savedCount, setSavedCount] = useState<number | null>(null);
   const inFlight = useRef(false);
   const requestIdentity = useRef<{ fingerprint: string; key: string } | null>(null);
-  const hasChange = EBAY_POLICY_FIELDS.some((field) => patch[field] !== undefined);
+  const hasChange = hasEbayPolicyEditorChange(patch, initialPatch);
 
   async function save() {
     if (inFlight.current || conflicted) return;
@@ -73,7 +79,7 @@ export function EbayListingPolicyBulkDialog({ data, productVariantIds, onClose, 
       await onSaved(count);
       onClose();
     } catch {
-      setError(`Policies were saved for ${count} listings, but the refreshed list could not be loaded. Retry the refresh; your changes will not be submitted again.`);
+      setError(`Policies were saved for ${count} listing${count === 1 ? "" : "s"}, but the refreshed list could not be loaded. Retry the refresh; your changes will not be submitted again.`);
     }
   }
 
@@ -82,21 +88,31 @@ export function EbayListingPolicyBulkDialog({ data, productVariantIds, onClose, 
       <DialogContent className="sm:max-w-lg" onEscapeKeyDown={(event) => { if (pending) event.preventDefault(); }}
         onPointerDownOutside={(event) => { if (pending) event.preventDefault(); }}>
         <DialogHeader>
-          <DialogTitle>Assign policies to {snapshot.productVariantIds.length} listings</DialogTitle>
-          <DialogDescription>Applies to your checked listings, including any hidden by filters. Leave unchanged preserves each listing’s current choice. This does not push listings to eBay.</DialogDescription>
+          <DialogTitle>{singleListing ? "Edit listing policies" : `Assign policies to ${snapshot.productVariantIds.length} listings`}</DialogTitle>
+          <DialogDescription>{singleListing
+            ? `${snapshot.listingLabel}. Store default keeps this listing linked to the current store policy. Changes apply when you save.`
+            : "Applies to your checked listings, including any hidden by filters. Leave unchanged preserves each listing’s current choice."} This does not push listings to eBay.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           {EBAY_POLICY_FIELDS.map((field) => {
             const options = ebayPolicyDisplayOptions(snapshot.data, field);
             const defaultId = snapshot.data.defaults[field];
             const defaultName = options.find((option) => option.id === defaultId)?.name ?? defaultId ?? "Not configured";
+            const currentId = patch[field];
+            const displayOptions: ListingSetupDisplayOption[] = [
+              ...(singleListing ? [] : [{ id: UNCHANGED_POLICY_VALUE, name: "Leave unchanged" }]),
+              { id: INHERIT_POLICY_VALUE, name: `Store default — ${defaultName}` },
+              ...options,
+            ];
+            if (currentId && !displayOptions.some((option) => option.id === currentId)) {
+              displayOptions.push({ id: currentId, name: `Unavailable policy (${currentId})`, disabled: true });
+            }
             return <div key={field} className="space-y-2">
               <Label>{EBAY_POLICY_LABELS[field]}</Label>
-              <ListingSetupCombobox ariaLabel={`Bulk ${EBAY_POLICY_LABELS[field]}`} disabled={pending || conflicted || savedCount !== null}
-                emptyMessage="No matching policies." searchPlaceholder="Search policies..." placeholder="Leave unchanged"
+              <ListingSetupCombobox ariaLabel={`${singleListing ? "Listing" : "Bulk"} ${EBAY_POLICY_LABELS[field]}`} disabled={pending || conflicted || savedCount !== null}
+                emptyMessage="No matching policies." searchPlaceholder="Search policies..." placeholder={singleListing ? "Use store default" : "Leave unchanged"}
                 value={patch[field] === undefined ? UNCHANGED_POLICY_VALUE : patch[field] ?? INHERIT_POLICY_VALUE}
-                options={[{ id: UNCHANGED_POLICY_VALUE, name: "Leave unchanged" },
-                  { id: INHERIT_POLICY_VALUE, name: `Store default — ${defaultName}` }, ...options]}
+                options={displayOptions}
                 onValueChange={(value) => setPatch((current) => ({ ...current,
                   [field]: value === UNCHANGED_POLICY_VALUE ? undefined : value === INHERIT_POLICY_VALUE ? null : value }))} />
             </div>;
@@ -106,9 +122,9 @@ export function EbayListingPolicyBulkDialog({ data, productVariantIds, onClose, 
         </div>
         <DialogFooter>
           <Button variant="outline" disabled={pending} onClick={onClose}>{savedCount === null ? "Cancel" : "Close"}</Button>
-          <Button disabled={pending || !hasChange || conflicted} onClick={() => void save()}>
+          <Button disabled={pending || (!hasChange && savedCount === null) || conflicted} onClick={() => void save()}>
             {pending ? savedCount === null ? "Saving policies…" : "Refreshing policies…"
-              : savedCount === null ? "Apply to selected listings" : "Refresh saved policies"}
+              : savedCount === null ? "Save policies" : "Refresh saved policies"}
           </Button>
         </DialogFooter>
       </DialogContent>

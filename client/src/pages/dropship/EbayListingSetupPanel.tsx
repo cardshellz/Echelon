@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, CheckCircle2, ChevronsUpDown, Clock3, MapPinned, RefreshCw, Save, Truck } from "lucide-react";
@@ -25,6 +25,11 @@ import {
   type ReplaceDropshipEbayListingSetupInput,
 } from "@/lib/dropship-ops-surface";
 import { cn } from "@/lib/utils";
+import {
+  ebayListingSetupQueryKey,
+  refreshEbayListingConfiguration,
+  synchronizeSavedEbayListingSetup,
+} from "@/lib/dropship-ebay-listing-query-sync";
 import { EbayStoreCategoryAuthorizationRecovery } from "./EbayStoreCategoryAuthorizationRecovery";
 
 const EMPTY_SELECTION: ReplaceDropshipEbayListingSetupInput = {
@@ -43,7 +48,7 @@ export function EbayListingSetupPanel({
   storeName: string;
 }) {
   const queryClient = useQueryClient();
-  const queryKey = ["/api/dropship/ebay/listing-setup", storeConnectionId] as const;
+  const queryKey = ebayListingSetupQueryKey(storeConnectionId);
   const setupQuery = useQuery<DropshipEbayListingSetupResponse>({
     queryKey,
     queryFn: () => fetchJson<DropshipEbayListingSetupResponse>(
@@ -57,18 +62,19 @@ export function EbayListingSetupPanel({
   const [saveError, setSaveError] = useState("");
   const [saveAuthorizationError, setSaveAuthorizationError] = useState<unknown>(null);
   const [savedMessage, setSavedMessage] = useState("");
+  const [savedStoreToRefresh, setSavedStoreToRefresh] = useState<number | null>(null);
+  const inFlight = useRef(false);
 
   useEffect(() => {
     if (!setupQuery.data) return;
     setDraft(buildEbayListingSetupDraft(setupQuery.data));
-    setSaveError("");
-    setSaveAuthorizationError(null);
   }, [setupQuery.data]);
 
   useEffect(() => {
     setSaveError("");
     setSaveAuthorizationError(null);
     setSavedMessage("");
+    setSavedStoreToRefresh(null);
   }, [storeConnectionId]);
 
   const draftComplete = Object.values(draft).every((value) => value.trim().length > 0);
@@ -81,7 +87,8 @@ export function EbayListingSetupPanel({
   );
 
   async function saveSetup(): Promise<void> {
-    if (!draftComplete || saving) return;
+    if (!draftComplete || inFlight.current || savedStoreToRefresh !== null) return;
+    inFlight.current = true;
     setSaving(true);
     setSaveError("");
     setSaveAuthorizationError(null);
@@ -91,10 +98,10 @@ export function EbayListingSetupPanel({
         `/api/dropship/ebay/listing-setup/${storeConnectionId}`,
         draft,
       );
-      queryClient.setQueryData(queryKey, result);
       setDraft(buildEbayListingSetupDraft(result));
-      setSavedMessage("eBay listing setup saved. Generate a new preview to use it.");
+      setSavedStoreToRefresh(result.storeConnectionId);
       onConfigurationChange();
+      await refreshAfterConfirmedSave(() => synchronizeSavedEbayListingSetup(queryClient, result));
     } catch (caught) {
       setSaveError(caught instanceof Error ? caught.message : "eBay listing setup could not be saved.");
       setSaveAuthorizationError(
@@ -103,6 +110,33 @@ export function EbayListingSetupPanel({
           : null,
       );
     } finally {
+      inFlight.current = false;
+      setSaving(false);
+    }
+  }
+
+  async function refreshAfterConfirmedSave(refresh: () => Promise<void>): Promise<void> {
+    try {
+      await refresh();
+      setSavedStoreToRefresh(null);
+      setSaveError("");
+      setSavedMessage("Store defaults saved and listing policies updated. Generate a new preview to use them.");
+    } catch {
+      setSaveError("Your store defaults were saved, but listing policies could not be refreshed. Retry the refresh below; your saved changes will not be submitted again.");
+    }
+  }
+
+  async function retrySavedSetupRefresh(): Promise<void> {
+    if (savedStoreToRefresh === null || inFlight.current) return;
+    inFlight.current = true;
+    setSaving(true);
+    setSaveError("");
+    try {
+      // A later edit in another tab may have replaced the saved defaults. Reload
+      // both views; replaying the original save response would restore stale UI.
+      await refreshAfterConfirmedSave(() => refreshEbayListingConfiguration(queryClient, savedStoreToRefresh));
+    } finally {
+      inFlight.current = false;
       setSaving(false);
     }
   }
@@ -138,7 +172,7 @@ export function EbayListingSetupPanel({
           <Skeleton className="h-16 w-full" />
           <Skeleton className="h-16 w-full" />
         </div>
-      ) : setupQuery.error ? (
+      ) : setupQuery.error && !setupQuery.data ? (
         <ListingSetupError
           error={setupQuery.error}
           storeConnectionId={storeConnectionId}
@@ -146,6 +180,12 @@ export function EbayListingSetupPanel({
         />
       ) : setupQuery.data ? (
         <div className="p-4">
+          {setupQuery.error && !saveError && (
+            <div role="alert" className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+              {queryErrorMessage(setupQuery.error, "Store setup could not be refreshed.")}
+              <p className="mt-1">Showing the last loaded setup. Use Refresh options to try again.</p>
+            </div>
+          )}
           {setupQuery.data.complete && (
             <div className="mb-4 flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
               <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
@@ -159,6 +199,7 @@ export function EbayListingSetupPanel({
           <FulfillmentCapabilitySummary setup={setupQuery.data} />
           <div className="grid gap-4 md:grid-cols-2">
             <ListingSetupField
+              disabled={saving || savedStoreToRefresh !== null}
               label="Fulfillment policy"
               placeholder="Choose a fulfillment policy"
               searchPlaceholder="Search fulfillment policies..."
@@ -174,6 +215,7 @@ export function EbayListingSetupPanel({
               onValueChange={(value) => setDraft((current) => ({ ...current, fulfillmentPolicyId: value }))}
             />
             <ListingSetupField
+              disabled={saving || savedStoreToRefresh !== null}
               label="Return policy"
               placeholder="Choose a return policy"
               searchPlaceholder="Search return policies..."
@@ -183,6 +225,7 @@ export function EbayListingSetupPanel({
               onValueChange={(value) => setDraft((current) => ({ ...current, returnPolicyId: value }))}
             />
             <ListingSetupField
+              disabled={saving || savedStoreToRefresh !== null}
               label="Payment policy"
               placeholder="Choose a payment policy"
               searchPlaceholder="Search payment policies..."
@@ -203,9 +246,21 @@ export function EbayListingSetupPanel({
               eBay did not return every required compatible business policy. Create or update the policy in eBay Seller Hub, then refresh these options.
             </div>
           )}
+          {setupQuery.error && !saveError && !saving && (
+            <div role="alert" className="mt-4 rounded-md border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900">
+              {queryErrorMessage(setupQuery.error, "The current store defaults could not be refreshed. Previously loaded choices are shown.")}
+            </div>
+          )}
           {saveError && (
             <div role="alert" className="mt-4 rounded-md border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900">
               {saveError}
+              {savedStoreToRefresh !== null && (
+                <Button type="button" variant="outline" className="mt-3 flex gap-2"
+                  disabled={saving} onClick={() => void retrySavedSetupRefresh()}>
+                  <RefreshCw className="h-4 w-4" />
+                  {saving ? "Refreshing saved policies" : "Refresh saved policies"}
+                </Button>
+              )}
               {saveAuthorizationError !== null && (
                 <EbayStoreCategoryAuthorizationRecovery
                   error={saveAuthorizationError}
@@ -225,7 +280,7 @@ export function EbayListingSetupPanel({
               type="button"
               variant="outline"
               className="gap-2"
-              disabled={saving || setupQuery.isFetching}
+              disabled={saving || setupQuery.isFetching || savedStoreToRefresh !== null}
               onClick={() => {
                 setSaveError("");
                 setSaveAuthorizationError(null);
@@ -239,11 +294,11 @@ export function EbayListingSetupPanel({
             <Button
               type="button"
               className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-              disabled={saving || !draftComplete || (!draftChanged && !managedLocationNeedsReconciliation)}
+              disabled={saving || savedStoreToRefresh !== null || !draftComplete || (!draftChanged && !managedLocationNeedsReconciliation)}
               onClick={saveSetup}
             >
               <Save className="h-4 w-4" />
-              {saving ? "Saving setup" : "Save eBay listing setup"}
+              {saving ? savedStoreToRefresh !== null ? "Updating listing policies" : "Saving setup" : "Save eBay listing setup"}
             </Button>
           </div>
         </div>
@@ -365,6 +420,7 @@ export type ListingSetupDisplayOption = DropshipEbayListingSetupOption & {
 };
 
 function ListingSetupField({
+  disabled,
   emptyMessage,
   label,
   onValueChange,
@@ -373,6 +429,7 @@ function ListingSetupField({
   searchPlaceholder,
   value,
 }: {
+  disabled: boolean;
   emptyMessage: string;
   label: string;
   onValueChange: (value: string) => void;
@@ -386,6 +443,7 @@ function ListingSetupField({
       <Label>{label}</Label>
       <div className="mt-2">
         <ListingSetupCombobox
+          disabled={disabled}
           ariaLabel={label}
           emptyMessage={emptyMessage}
           onValueChange={onValueChange}
