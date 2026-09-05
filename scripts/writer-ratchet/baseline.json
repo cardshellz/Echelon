@@ -998,6 +998,15 @@
     "modules/inventory",
     "modules/warehouse"
   ],
+  "warehouse.work_access_scopes": [
+    "modules/warehouse"
+  ],
+  "warehouse.work_configuration_revisions": [
+    "modules/warehouse"
+  ],
+  "warehouse.work_stations": [
+    "modules/warehouse"
+  ],
   "wms.allocation_exceptions": [
     "modules/orders"
   ],
