@@ -8,3 +8,7 @@ vite.config.ts.*
 .env.test
 
 .claude/settings.local.json
+
+# Local browser test output
+test-results/
+playwright-report/

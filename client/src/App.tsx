@@ -446,7 +446,7 @@ function Router() {
           <ProtectedRoute component={PurchaseOrderEdit} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/purchase-orders/:id">
-          <ProtectedRoute component={PurchaseOrderDetail} allowedRoles={["admin", "lead"]} />
+          {(params) => <ProtectedRoute key={params.id} component={PurchaseOrderDetail} allowedRoles={["admin", "lead"]} />}
         </Route>
         <Route path="/purchase-orders">
           <ProtectedRoute component={PurchaseOrders} allowedRoles={["admin", "lead"]} />
@@ -497,7 +497,7 @@ function Router() {
           <ProtectedRoute component={ReturnPolicies} allowedRoles={["admin"]} />
         </Route>
         <Route path="/shipments/:id">
-          <ProtectedRoute component={InboundShipmentDetail} allowedRoles={["admin", "lead"]} />
+          {(params) => <ProtectedRoute key={params.id} component={InboundShipmentDetail} allowedRoles={["admin", "lead"]} />}
         </Route>
         <Route path="/shipments">
           <ProtectedRoute component={InboundShipments} allowedRoles={["admin", "lead"]} />
@@ -512,7 +512,7 @@ function Router() {
           <ProtectedRoute component={APDashboard} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/ap-invoices/:id">
-          <ProtectedRoute component={APInvoiceDetail} allowedRoles={["admin", "lead"]} />
+          {(params) => <ProtectedRoute key={params.id} component={APInvoiceDetail} allowedRoles={["admin", "lead"]} />}
         </Route>
         <Route path="/ap-invoices">
           <ProtectedRoute component={APInvoices} allowedRoles={["admin", "lead"]} />

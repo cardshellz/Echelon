@@ -13,7 +13,10 @@ import {
 } from "@shared/schema/procurement.schema";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useRoute, useLocation, useSearch } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
+import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
+import { parseProcurementJourney, procurementRecordHref } from "@/lib/procurement-navigation";
+import { ProcurementContext } from "@/components/procurement-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -961,10 +964,37 @@ function displayScheduleDate(value: unknown): string {
 export default function PurchaseOrderDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [, navigate] = useLocation();
+  const [location, navigate] = useLocation();
   const searchStr = useSearch();
-  const [, params] = useRoute("/purchase-orders/:id");
-  const poId = params?.id ? Number(params.id) : null;
+  const procurementNavigation = useProcurementNavigation();
+  const poId = procurementNavigation.record?.kind === "purchase" ? procurementNavigation.record.id : null;
+  const navigationIdentity = procurementNavigation.record
+    ? procurementRecordHref(procurementNavigation.record, parseProcurementJourney(searchStr))
+    : location;
+  const navigationVisit = React.useRef({ identity: navigationIdentity, generation: 0, mounted: true });
+  if (navigationVisit.current.identity !== navigationIdentity) {
+    navigationVisit.current = {
+      identity: navigationIdentity,
+      generation: navigationVisit.current.generation + 1,
+      mounted: navigationVisit.current.mounted,
+    };
+  }
+  useEffect(() => {
+    navigationVisit.current.mounted = true;
+    return () => { navigationVisit.current.mounted = false; };
+  }, []);
+
+  // Mutation observers update their callbacks on re-render. Keep the initiating
+  // purchase and journey so a late response cannot attach its child to another PO.
+  const captureNavigation = () => {
+    const generation = navigationVisit.current.generation;
+    return {
+      poId,
+      childHref: procurementNavigation.childHref,
+      isCurrent: () => navigationVisit.current.mounted && navigationVisit.current.generation === generation,
+    };
+  };
+  type NavigationSnapshot = ReturnType<typeof captureNavigation>;
   const [addLineIntent] = useState(() =>
     createFinancialCommandIntentStore(genPoLineIdempotencyKey),
   );
@@ -978,7 +1008,10 @@ export default function PurchaseOrderDetail() {
     createFinancialCommandIntentStore(genPoLineIdempotencyKey),
   );
 
-  const [activeTab, setActiveTab] = useState("lines");
+  const activeTab = procurementNavigation.tab;
+  const setActiveTab = procurementNavigation.setTab;
+  const requestedTabs = new URLSearchParams(searchStr).getAll("tab");
+  const hasExplicitLifecycleTab = requestedTabs.length === 1 && requestedTabs[0] === activeTab;
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
   const [showCancelDialog, setShowCancelDialog] = useState(false);
   const [showAckDialog, setShowAckDialog] = useState(false);
@@ -1113,7 +1146,7 @@ export default function PurchaseOrderDetail() {
   const [newLine, setNewLine] = useState(createEmptyNewLine);
 
   // Queries
-  const { data: po, isLoading } = useQuery<any>({
+  const { data: po, isLoading, error: poError, refetch: refetchPo } = useQuery<any>({
     queryKey: [`/api/purchase-orders/${poId}`],
     enabled: !!poId,
   });
@@ -1137,8 +1170,8 @@ export default function PurchaseOrderDetail() {
 
   // Feature-flag redirect: when the new PO editor is enabled, land-on-draft
   // via direct URL should hop over to the new inline editor. Keeps this
-  // page as the home for non-draft POs (receipts/invoices/shipments/history
-  // tabs still live here).
+  // page as the home for lifecycle views. Explicit tab and journey links
+  // must remain here so returning from a shipment restores the selected tab.
   const { data: procurementSettings } = useQuery<{ useNewPoEditor?: boolean }>({
     queryKey: ["/api/settings/procurement"],
     staleTime: 60_000,
@@ -1148,11 +1181,13 @@ export default function PurchaseOrderDetail() {
       procurementSettings?.useNewPoEditor === true &&
       po?.id &&
       po?.status === "draft" &&
-      !immutableRecommendationPo
+      !immutableRecommendationPo &&
+      !procurementNavigation.purchaseHref &&
+      !hasExplicitLifecycleTab
     ) {
       navigate(`/purchase-orders/${po.id}/edit`, { replace: true });
     }
-  }, [procurementSettings?.useNewPoEditor, po?.id, po?.status, immutableRecommendationPo, navigate]);
+  }, [procurementSettings?.useNewPoEditor, po?.id, po?.status, immutableRecommendationPo, navigate, procurementNavigation.purchaseHref, hasExplicitLifecycleTab]);
 
   const { data: historyData } = useQuery<{ history: any[] }>({
     queryKey: [`/api/purchase-orders/${poId}/history`],
@@ -1470,6 +1505,7 @@ export default function PurchaseOrderDetail() {
   });
 
   const createReceiptMutation = useMutation({
+    onMutate: captureNavigation,
     mutationFn: async () => {
       const idempotencyKey = (
         typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -1483,14 +1519,17 @@ export default function PurchaseOrderDetail() {
       if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create receipt"); }
       return res.json();
     },
-    onSuccess: (receipt) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+    onSuccess: (receipt, _variables, context) => {
+      const originatingPoId = context?.poId;
+      if (originatingPoId) {
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${originatingPoId}`] });
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${originatingPoId}/receipts`] });
+      }
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
-      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] });
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created` });
       // Navigate to the receiving page with this receipt
-      navigate(`/receiving?open=${receipt.id}`);
+      if (context?.isCurrent()) navigate(context.childHref(`/receiving?open=${receipt.id}`));
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -1500,7 +1539,9 @@ export default function PurchaseOrderDetail() {
   // Receive AGAINST a shipment: links the receipt to the shipment so its freight
   // attaches to exactly these lots (vs createReceiptMutation, which is PO-direct).
   const createReceiptFromShipmentMutation = useMutation({
-    mutationFn: async ({ shipmentId, purchaseOrderId }: { shipmentId: number; purchaseOrderId: number }) => {
+    onMutate: (variables: { shipmentId: number; purchaseOrderId: number; navigation?: NavigationSnapshot }) =>
+      variables.navigation ?? captureNavigation(),
+    mutationFn: async ({ shipmentId, purchaseOrderId }: { shipmentId: number; purchaseOrderId: number; navigation?: NavigationSnapshot }) => {
       const idempotencyKey = (
         typeof crypto !== "undefined" && "randomUUID" in crypto
           ? (crypto as any).randomUUID()
@@ -1517,18 +1558,20 @@ export default function PurchaseOrderDetail() {
       if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create receipt"); }
       return res.json();
     },
-    onSuccess: (receipt) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receive-options`] });
+    onSuccess: (receipt, variables, context) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}/receipts`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}/receive-options`] });
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created from shipment` });
+      if (!context?.isCurrent()) return;
       setShowReceivePicker(false);
       setShipmentReceiptPackResolution(null);
       setPendingShipmentReceipt(null);
-      toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created from shipment` });
-      navigate(`/receiving?open=${receipt.id}`);
+      navigate(context.childHref(`/receiving?open=${receipt.id}`));
     },
-    onError: async (err: Error, variables) => {
+    onError: async (err: Error, variables, context) => {
+      if (!context?.isCurrent()) return;
       const openedBlocker = await openShipmentReceiptPackBlocker(variables);
       if (openedBlocker) return;
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -1536,6 +1579,7 @@ export default function PurchaseOrderDetail() {
   });
 
   const cleanupEmptyShipmentReceiptMutation = useMutation({
+    onMutate: captureNavigation,
     mutationFn: async ({
       receiptId,
     }: {
@@ -1550,11 +1594,11 @@ export default function PurchaseOrderDetail() {
       if (!res.ok) throw new Error(body?.error || "Failed to clean up empty receipt");
       return body;
     },
-    onSuccess: async (_result, variables) => {
+    onSuccess: async (_result, variables, context) => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] }),
-        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] }),
-        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receive-options`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}/receipts`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}/receive-options`] }),
         queryClient.invalidateQueries({ queryKey: ["/api/receiving"] }),
       ]);
       toast({
@@ -1564,7 +1608,7 @@ export default function PurchaseOrderDetail() {
       checkAndReceiveShipment({
         shipmentId: variables.shipmentId,
         purchaseOrderId: variables.purchaseOrderId,
-      });
+      }, context);
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -1572,6 +1616,7 @@ export default function PurchaseOrderDetail() {
   });
 
   const voidZeroPostShipmentReceiptMutation = useMutation({
+    onMutate: captureNavigation,
     mutationFn: async ({
       receiptId,
     }: {
@@ -1586,11 +1631,11 @@ export default function PurchaseOrderDetail() {
       if (!res.ok) throw new Error(body?.error || "Failed to void zero-post receipt");
       return body;
     },
-    onSuccess: async (_result, variables) => {
+    onSuccess: async (_result, variables, context) => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] }),
-        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] }),
-        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receive-options`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}/receipts`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}/receive-options`] }),
         queryClient.invalidateQueries({ queryKey: ["/api/receiving"] }),
       ]);
       toast({
@@ -1600,7 +1645,7 @@ export default function PurchaseOrderDetail() {
       checkAndReceiveShipment({
         shipmentId: variables.shipmentId,
         purchaseOrderId: variables.purchaseOrderId,
-      });
+      }, context);
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -1617,10 +1662,12 @@ export default function PurchaseOrderDetail() {
 
   async function openShipmentReceiptPackBlocker(params: { shipmentId: number; purchaseOrderId: number } | undefined | null): Promise<boolean> {
     if (!params) return false;
+    const navigation = captureNavigation();
     setCheckingShipmentReceiptPacks(true);
     setPendingShipmentReceipt(params);
     try {
       const resolution = await fetchShipmentReceiptPackResolution(params);
+      if (!navigation.isCurrent()) return false;
       if (!resolution.canCreateReceipt) {
         setShipmentReceiptPackResolution(resolution);
         return true;
@@ -1629,38 +1676,47 @@ export default function PurchaseOrderDetail() {
     } catch {
       return false;
     } finally {
-      setCheckingShipmentReceiptPacks(false);
+      if (navigation.isCurrent()) setCheckingShipmentReceiptPacks(false);
     }
   }
 
-  async function checkAndReceiveShipment(params: { shipmentId: number; purchaseOrderId: number }) {
-    setCheckingShipmentReceiptPacks(true);
-    setPendingShipmentReceipt(params);
+  async function checkAndReceiveShipment(
+    params: { shipmentId: number; purchaseOrderId: number },
+    navigation: NavigationSnapshot = captureNavigation(),
+  ) {
+    if (navigation.isCurrent()) {
+      setCheckingShipmentReceiptPacks(true);
+      setPendingShipmentReceipt(params);
+    }
     try {
       const resolution = await fetchShipmentReceiptPackResolution(params);
       if (!resolution.canCreateReceipt) {
-        setShipmentReceiptPackResolution(resolution);
+        if (navigation.isCurrent()) setShipmentReceiptPackResolution(resolution);
         return;
       }
-      setShipmentReceiptPackResolution(null);
-      createReceiptFromShipmentMutation.mutate(params);
+      if (navigation.isCurrent()) setShipmentReceiptPackResolution(null);
+      // Continue the authorized receipt command with its original PO/journey;
+      // only completion UI is conditional on still viewing that journey.
+      createReceiptFromShipmentMutation.mutate({ ...params, navigation });
     } catch (err: any) {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     } finally {
-      setCheckingShipmentReceiptPacks(false);
+      if (navigation.isCurrent()) setCheckingShipmentReceiptPacks(false);
     }
   }
 
   async function refreshShipmentReceiptPackResolution() {
     if (!pendingShipmentReceipt) return;
+    const navigation = captureNavigation();
     setCheckingShipmentReceiptPacks(true);
     try {
       const resolution = await fetchShipmentReceiptPackResolution(pendingShipmentReceipt);
+      if (!navigation.isCurrent()) return;
       setShipmentReceiptPackResolution(resolution);
     } catch (err: any) {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     } finally {
-      setCheckingShipmentReceiptPacks(false);
+      if (navigation.isCurrent()) setCheckingShipmentReceiptPacks(false);
     }
   }
 
@@ -1676,9 +1732,14 @@ export default function PurchaseOrderDetail() {
           purchaseOrderId: shipmentReceiptPackResolution.purchaseOrderId,
         }
       : null);
-    const returnTo = context && poId
-      ? `/purchase-orders/${poId}?resumeShipmentReceipt=1&shipmentId=${context.shipmentId}&purchaseOrderId=${context.purchaseOrderId}`
-      : `/purchase-orders/${poId ?? ""}`;
+    // Keep the purchase journey and selected tab through catalog setup.
+    const returnParams = new URLSearchParams(searchStr);
+    if (context && poId) {
+      returnParams.set("resumeShipmentReceipt", "1");
+      returnParams.set("shipmentId", String(context.shipmentId));
+      returnParams.set("purchaseOrderId", String(context.purchaseOrderId));
+    }
+    const returnTo = `/purchase-orders/${poId ?? ""}${returnParams.size ? `?${returnParams.toString()}` : ""}`;
     const setupParams = new URLSearchParams({
       receiptSetup: "1",
       returnTo,
@@ -1704,24 +1765,29 @@ export default function PurchaseOrderDetail() {
 
     const shipmentId = parsePositiveInt(searchParams.get("shipmentId"));
     const purchaseOrderId = parsePositiveInt(searchParams.get("purchaseOrderId")) ?? poId;
+    searchParams.delete("resumeShipmentReceipt");
+    searchParams.delete("shipmentId");
+    searchParams.delete("purchaseOrderId");
+    const returnHref = `/purchase-orders/${poId}${searchParams.size ? `?${searchParams.toString()}` : ""}`;
     if (!shipmentId || purchaseOrderId !== poId) {
       toast({
         title: "Cannot resume receipt",
         description: "The return link is missing the shipment or PO context.",
         variant: "destructive",
       });
-      navigate(`/purchase-orders/${poId}`, { replace: true });
+      navigate(returnHref, { replace: true });
       return;
     }
 
     const resumeKey = `${shipmentId}:${purchaseOrderId}`;
     if (resumeShipmentReceiptHandled.current === resumeKey) return;
     resumeShipmentReceiptHandled.current = resumeKey;
-    navigate(`/purchase-orders/${poId}`, { replace: true });
+    navigate(returnHref, { replace: true });
     void checkAndReceiveShipment({ shipmentId, purchaseOrderId });
   }, [poId, searchStr]);
 
   const createInvoiceMutation = useMutation({
+    onMutate: captureNavigation,
     mutationFn: async () => {
       const idempotencyKey = (
         typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -1750,11 +1816,12 @@ export default function PurchaseOrderDetail() {
       if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create invoice"); }
       return res.json();
     },
-    onSuccess: (invoice) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
-      setShowCreateInvoiceDialog(false);
+    onSuccess: (invoice, _variables, context) => {
+      if (context?.poId) queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${context.poId}`] });
       toast({ title: "Invoice created", description: `Invoice ${invoice.invoiceNumber} created and linked to this PO.` });
-      navigate(`/ap-invoices/${invoice.id}`);
+      if (!context?.isCurrent()) return;
+      setShowCreateInvoiceDialog(false);
+      navigate(context.childHref(`/ap-invoices/${invoice.id}`));
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -2265,6 +2332,7 @@ export default function PurchaseOrderDetail() {
   });
 
   const createShipmentMutation = useMutation({
+    onMutate: captureNavigation,
     mutationFn: async (form: typeof newShipmentForm) => {
       const res = await fetch("/api/inbound-shipments", {
         method: "POST",
@@ -2303,10 +2371,8 @@ export default function PurchaseOrderDetail() {
       }
       return { shipment, lineError: null, lineCount: 0 };
     },
-    onSuccess: ({ shipment, lineError, lineCount }) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/shipments`] });
-      setShowCreateShipmentDialog(false);
-      setLineSelections({});
+    onSuccess: ({ shipment, lineError, lineCount }, _variables, context) => {
+      if (context?.poId) queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${context.poId}/shipments`] });
       if (lineError) {
         toast({
           title: "Shipment created",
@@ -2318,7 +2384,10 @@ export default function PurchaseOrderDetail() {
       } else {
         toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created` });
       }
-      navigate(`/shipments/${shipment.id}`);
+      if (!context?.isCurrent()) return;
+      setShowCreateShipmentDialog(false);
+      setLineSelections({});
+      navigate(context.childHref(`/shipments/${shipment.id}`));
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -2478,8 +2547,46 @@ export default function PurchaseOrderDetail() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-[50vh]">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+      <div className="p-2 md:p-6 space-y-4">
+        <ProcurementContext navigation={procurementNavigation} />
+        <Button variant="ghost" size="sm" asChild>
+          <Link href={procurementNavigation.backHref("/purchase-orders")}>
+            {procurementNavigation.backLabel ?? "Back to purchase orders"}
+          </Link>
+        </Button>
+        <div className="flex items-center justify-center min-h-[50vh]" role="status" aria-label="Loading purchase order">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+        </div>
+      </div>
+    );
+  }
+
+  if (poError && !po) {
+    const notFound = poError instanceof Error && poError.message.startsWith("404:");
+    return (
+      <div className="p-2 md:p-6 space-y-4">
+        <ProcurementContext navigation={procurementNavigation} />
+        <div role="alert" className="rounded-lg border p-4 space-y-3">
+          <p className="font-medium">{notFound ? "Purchase order not found." : "Unable to load purchase order."}</p>
+          {!notFound && (
+            <p className="text-sm text-muted-foreground">
+              The purchase order could not be retrieved. Try again or return to the previous record.
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {!notFound && (
+              <Button variant="outline" size="sm" onClick={() => void refetchPo()}>
+                <RotateCcw className="h-4 w-4 mr-1" />
+                Retry
+              </Button>
+            )}
+            <Button variant="ghost" size="sm" asChild>
+              <Link href={procurementNavigation.backHref("/purchase-orders")}>
+                {procurementNavigation.backLabel ?? "Back to purchase orders"}
+              </Link>
+            </Button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -2488,18 +2595,26 @@ export default function PurchaseOrderDetail() {
     return (
       <div className="p-6 text-center">
         <p className="text-muted-foreground">Purchase order not found.</p>
-        <Button variant="link" onClick={() => navigate("/purchase-orders")}>Back to list</Button>
+        <ProcurementContext navigation={procurementNavigation} />
+        <Button variant="link" asChild>
+          <Link href={procurementNavigation.backHref("/purchase-orders")}>
+            {procurementNavigation.backLabel ?? "Back to purchase orders"}
+          </Link>
+        </Button>
       </div>
     );
   }
 
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
+      <ProcurementContext navigation={procurementNavigation} />
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start gap-4">
-        <Button variant="ghost" size="sm" onClick={() => navigate("/purchase-orders")} className="min-h-[44px]">
-          <ArrowLeft className="h-4 w-4 mr-2" />
-          Back
+        <Button variant="ghost" size="sm" asChild className="min-h-[44px]">
+          <Link href={procurementNavigation.backHref("/purchase-orders")}>
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            {procurementNavigation.backLabel ?? "Back to purchase orders"}
+          </Link>
         </Button>
         <div className="flex-1">
           <div className="flex items-center gap-3 flex-wrap">
@@ -3312,7 +3427,11 @@ export default function PurchaseOrderDetail() {
                   {receipts.map((r: any) => (
                     <TableRow key={r.id}>
                       <TableCell>Line #{r.purchaseOrderLineId}</TableCell>
-                      <TableCell>RO #{r.receivingOrderId}</TableCell>
+                      <TableCell>
+                        <Link href={procurementNavigation.childHref(`/receiving?open=${r.receivingOrderId}`)} className="text-primary hover:underline">
+                          RO #{r.receivingOrderId}
+                        </Link>
+                      </TableCell>
                       <TableCell className="text-right">{r.qtyReceived}</TableCell>
                       <TableCell className="text-right font-mono">
                         {r.poUnitCostMills != null
@@ -3414,8 +3533,12 @@ export default function PurchaseOrderDetail() {
                     };
                     const badge = shipBadge[s.status] || { variant: "secondary" as const, label: s.status };
                     return (
-                      <TableRow key={s.id} className="cursor-pointer" onClick={() => navigate(`/shipments/${s.id}`)}>
-                        <TableCell className="font-mono font-medium">{s.shipmentNumber}</TableCell>
+                      <TableRow key={s.id}>
+                        <TableCell className="font-mono font-medium">
+                          <Link href={procurementNavigation.childHref(`/shipments/${s.id}`)} className="text-primary hover:underline">
+                            {s.shipmentNumber}
+                          </Link>
+                        </TableCell>
                         <TableCell>
                           <Badge variant={badge.variant} className={badge.color || ""}>{badge.label}</Badge>
                         </TableCell>
@@ -3427,7 +3550,9 @@ export default function PurchaseOrderDetail() {
                         <TableCell className="text-right font-mono">{formatCents(s.estimatedTotalCostCents)}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(s.actualTotalCostCents)}</TableCell>
                         <TableCell>
-                          <ExternalLink className="h-3 w-3 text-muted-foreground" />
+                          <Link href={procurementNavigation.childHref(`/shipments/${s.id}`)} aria-label={`Open shipment ${s.shipmentNumber}`} className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center text-muted-foreground hover:text-primary">
+                            <ExternalLink className="h-3 w-3" />
+                          </Link>
                         </TableCell>
                       </TableRow>
                     );
@@ -3487,7 +3612,7 @@ export default function PurchaseOrderDetail() {
                           <Badge variant="outline" className="text-xs">{inv.status?.replace("_", " ")}</Badge>
                         </TableCell>
                         <TableCell>
-                          <a href={`/ap-invoices/${inv.id}`} className="text-xs text-blue-600 hover:underline">View →</a>
+                          <Link href={procurementNavigation.childHref(`/ap-invoices/${inv.id}`)} className="text-xs text-blue-600 hover:underline">View →</Link>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -5011,7 +5136,7 @@ export default function PurchaseOrderDetail() {
                           onClick={() => {
                             if (s.action === "open_existing_receipt" && s.existingReceiptId) {
                               setShowReceivePicker(false);
-                              navigate(`/receiving?open=${s.existingReceiptId}`);
+                              navigate(procurementNavigation.childHref(`/receiving?open=${s.existingReceiptId}`));
                               return;
                             }
                             checkAndReceiveShipment({

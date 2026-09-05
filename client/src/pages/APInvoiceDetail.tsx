@@ -1,7 +1,9 @@
 import { centsToMills, dollarsToCents, dollarsToMills, formatMills } from "@shared/utils/money";
 import React, { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useRoute, Link, useLocation } from "wouter";
+import { Link } from "wouter";
+import { ProcurementContext } from "@/components/procurement-context";
+import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -181,13 +183,13 @@ export default function APInvoiceDetail() {
   const [invoiceLifecycleIntent] = useState(() =>
     createFinancialCommandIntentStore(() => createApCommandIdempotencyKey("ap-invoice")),
   );
-  const [, navigate] = useLocation();
-  const [, params] = useRoute("/ap-invoices/:id");
-  const invoiceId = params?.id ? Number(params.id) : null;
+  const procurementNavigation = useProcurementNavigation();
+  const invoiceId = procurementNavigation.record?.kind === "invoice" ? procurementNavigation.record.id : null;
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Tabs
-  const [activeTab, setActiveTab] = useState<"lines" | "details" | "attachments">("lines");
+  const activeTab = procurementNavigation.tab;
+  const setActiveTab = procurementNavigation.setTab;
 
   // Dialogs
   const [showDisputeDialog, setShowDisputeDialog] = useState(false);
@@ -220,7 +222,7 @@ export default function APInvoiceDetail() {
   });
 
   // Queries
-  const { data: invoice, isLoading } = useQuery<any>({
+  const { data: invoice, isLoading, error: invoiceError, refetch: refetchInvoice } = useQuery<any>({
     queryKey: [`/api/vendor-invoices/${invoiceId}`],
     enabled: !!invoiceId,
   });
@@ -462,12 +464,54 @@ export default function APInvoiceDetail() {
     setEditing(true);
   }
 
+  const backLink = (
+    <Button variant="ghost" size="sm" className="pointer-events-auto" asChild>
+      <Link href={procurementNavigation.backHref("/ap-invoices")}>
+        <ChevronLeft className="h-4 w-4 mr-1" />
+        {procurementNavigation.backLabel ?? "Invoices"}
+      </Link>
+    </Button>
+  );
+
   if (isLoading) {
-    return <div className="flex items-center justify-center h-64"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" /></div>;
+    return (
+      <div className="p-2 md:p-6 max-w-5xl mx-auto space-y-4">
+        <ProcurementContext navigation={procurementNavigation} />
+        {backLink}
+        <div role="status" aria-label="Loading invoice" className="flex items-center justify-center h-64">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+        </div>
+      </div>
+    );
+  }
+
+  if (invoiceError && !invoice) {
+    return (
+      <div className="p-2 md:p-6 max-w-5xl mx-auto space-y-4">
+        <ProcurementContext navigation={procurementNavigation} />
+        {backLink}
+        <div role="alert" className="rounded-lg border p-4 space-y-3">
+          <p className="font-medium">Unable to load invoice.</p>
+          <p className="text-sm text-muted-foreground">
+            The invoice could not be retrieved. Try again or return to the previous record.
+          </p>
+          <Button variant="outline" size="sm" onClick={() => void refetchInvoice()}>
+            <RefreshCw className="h-4 w-4 mr-1" />
+            Retry
+          </Button>
+        </div>
+      </div>
+    );
   }
 
   if (!invoice) {
-    return <div className="p-6 text-muted-foreground">Invoice not found.</div>;
+    return (
+      <div className="p-2 md:p-6 max-w-5xl mx-auto space-y-4">
+        <ProcurementContext navigation={procurementNavigation} />
+        {backLink}
+        <p className="text-muted-foreground">Invoice not found.</p>
+      </div>
+    );
   }
 
   const status = invoice.status;
@@ -483,6 +527,7 @@ export default function APInvoiceDetail() {
 
   return (
     <div className={`p-2 md:p-6 max-w-5xl mx-auto space-y-4 md:space-y-6 ${isVoided ? "opacity-50 pointer-events-auto" : ""}`}>
+      <ProcurementContext navigation={procurementNavigation} />
       {/* ── Voided Banner ── */}
       {isVoided && (
         <div className="bg-slate-100 border border-slate-300 rounded-lg px-4 py-3 text-center pointer-events-auto">
@@ -496,10 +541,7 @@ export default function APInvoiceDetail() {
       {/* ── Header ── */}
       <div className="flex flex-col sm:flex-row items-start justify-between gap-3">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" className="pointer-events-auto" onClick={() => navigate("/ap-invoices")}>
-            <ChevronLeft className="h-4 w-4 mr-1" />
-            Invoices
-          </Button>
+          {backLink}
           <div>
             <div className="flex items-center gap-3">
               <h1 className={`text-lg md:text-xl font-bold ${isVoided ? "line-through" : ""}`}>Invoice #{invoice.invoiceNumber}</h1>
@@ -509,7 +551,7 @@ export default function APInvoiceDetail() {
             </div>
             <p className="text-sm text-muted-foreground">{invoice.vendorName}</p>
             {invoice.inboundShipmentId && (
-              <Link href={`/shipments/${invoice.inboundShipmentId}`} className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline mt-0.5">
+              <Link href={procurementNavigation.childHref(`/shipments/${invoice.inboundShipmentId}`)} className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline mt-0.5">
                 <Ship className="h-3 w-3" />
                 Source: Shipment
               </Link>
@@ -621,7 +663,7 @@ export default function APInvoiceDetail() {
               <span className="text-xs text-muted-foreground">POs:</span>
               {invoice.poLinks.map((link: any) => (
                 <span key={link.id} className="inline-flex items-center gap-1 text-xs bg-muted/60 rounded px-2 py-0.5">
-                  <Link href={`/purchase-orders/${link.purchaseOrderId}`} className="font-mono text-blue-600 hover:underline">
+                  <Link href={procurementNavigation.childHref(`/purchase-orders/${link.purchaseOrderId}`)} className="font-mono text-blue-600 hover:underline">
                     {link.poNumber}
                   </Link>
                   {canEdit && (
