@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { config } from "dotenv";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as databaseSchema from "@shared/schema";
 
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
@@ -103,6 +103,39 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
   let pool: pg.Pool;
   let createdAuditTable = false;
   let createdIdempotencyTable = false;
+
+  async function settleBehindProductLock<T>(
+    productId: number,
+    start: () => Promise<T>[],
+  ): Promise<PromiseSettledResult<T>[]> {
+    const blocker = await pool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT pg_advisory_xact_lock(918422, $1)", [productId]);
+      const outcomes = Promise.allSettled(start());
+      try {
+        // Force both SERIALIZABLE snapshots to precede the first writer's commit.
+        await vi.waitFor(async () => {
+          const waiting = await pool.query<{ count: string }>(
+            `SELECT count(*) FROM pg_locks
+             WHERE locktype = 'advisory' AND classid = 918422 AND objid = $1
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND NOT granted`,
+            [productId],
+          );
+          expect(waiting.rows[0]?.count).toBe("2");
+        }, { timeout: 5_000, interval: 10 });
+      } finally {
+        await blocker.query("ROLLBACK");
+        // Drain both writers even if the barrier assertion failed, so no pending
+        // transaction can escape into the following test's schema reset.
+        await outcomes;
+      }
+      return await outcomes;
+    } finally {
+      blocker.release();
+    }
+  }
 
   beforeAll(async () => {
     const protectedUrls = [
@@ -1276,24 +1309,16 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       paths: [],
       recipeBindings: [],
     });
-    const first = store.createTransformationModelDraft({
+    const commands = [1, 2].map((index) => ({
       actorId: "integration-test",
-      changeReason: "First concurrent draft",
-      idempotencyKey: "repository-integration:concurrent-1",
-      requestHash: "c".repeat(64),
+      changeReason: "Concurrent draft",
+      idempotencyKey: `repository-integration:concurrent-${index}`,
+      requestHash: String(index).repeat(64),
       definition,
       occurredAt: new Date(FIXED_TIME),
-    });
-    const second = store.createTransformationModelDraft({
-      actorId: "integration-test",
-      changeReason: "Second concurrent draft",
-      idempotencyKey: "repository-integration:concurrent-2",
-      requestHash: "d".repeat(64),
-      definition,
-      occurredAt: new Date(FIXED_TIME),
-    });
-
-    const outcomes = await Promise.allSettled([first, second]);
+    }));
+    const outcomes = await settleBehindProductLock(scope.productId,
+      () => commands.map((command) => store.createTransformationModelDraft(command)));
     expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
     const rejected = outcomes.find((outcome) => outcome.status === "rejected");
     expect(rejected).toMatchObject({
@@ -1892,9 +1917,13 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       idempotencyKey: `manual-race:edit-${index}`, requestHash: String(index).repeat(64),
       definition, occurredAt: new Date(FIXED_TIME),
     }));
-    const results = await Promise.allSettled(commands.map((command) => store.updateTransformationModelDraft(command)));
+    const results = await settleBehindProductLock(scope.productId,
+      () => commands.map((command) => store.updateTransformationModelDraft(command)));
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     const loser = results.findIndex((result) => result.status === "rejected");
+    expect(results[loser]).toMatchObject({
+      status: "rejected", reason: { code: "INVENTORY_AVAILABILITY_DRAFT_STALE", status: 409 },
+    });
     await expect(store.updateTransformationModelDraft(commands[loser]!))
       .rejects.toMatchObject({ code: "INVENTORY_AVAILABILITY_DRAFT_STALE" });
     const counts = await pool.query(`SELECT

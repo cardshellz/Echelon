@@ -82,6 +82,28 @@ not a behavior change or an intended PR diff.
 
 ## Not yet proven / next checks
 
+### PR 1377 concurrency correction
+
+CI exposed a missing whole-transaction retry after SERIALIZABLE was applied to
+manual draft creation. A lock-barrier regression reproduced PostgreSQL `40001`
+reliably for both concurrent creation and editing; neither loser returned the
+expected current-state business conflict.
+
+`retrySerializableMasterDataTransaction` now wraps complete create, edit, and
+generated-refresh transactions, including commit/rollback. It retries only
+serialization aborts, at most three attempts, and logs retry metadata without
+SQL or command payloads. Every attempt rechecks the owner head, references, and
+idempotency receipts using a fresh transaction. Isolation is not weakened.
+Constraint failures, business conflicts, and uncertain connection errors are
+not retried. Exhausted serialization failures preserve the existing HTTP retry
+response.
+
+The lock-barrier tests require both transactions to wait on the product owner
+lock before releasing either writer. They retain strict `DRAFT_EXISTS` and
+`DRAFT_STALE` expectations and verify no extra model or losing edit receipt.
+All 34 PostgreSQL tests plus 20 retry/architecture checks passed after the fix.
+This follows [PostgreSQL's complete-transaction retry requirement](https://www.postgresql.org/docs/17/mvcc-serialization-failure-handling.html).
+
 The implementation has not been deployed or browser-tested against production.
 Next: create and review the scoped PR, deploy it, then verify the existing editor
 with a storage-box product. Apply and approve only the explicitly chosen

@@ -58,6 +58,7 @@ import {
 import {
   loadInventoryAvailabilityBackfillSources,
 } from "./inventory-availability-backfill.repository";
+import { retrySerializableMasterDataTransaction } from "./serializable-master-data-transaction";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type Executor = typeof db | Transaction;
@@ -190,7 +191,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
       InventoryAvailabilityMasterDataAdminStore["createTransformationModelDraft"]
     >[0],
   ) {
-    return this.database.transaction(async (tx) => {
+    return retrySerializableMasterDataTransaction("create_transformation_draft", () => this.database.transaction(async (tx) => {
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
       const productId = command.definition.productId;
       await lockIdempotencyKey(tx, command.idempotencyKey);
@@ -331,7 +332,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
         definitionHash,
         alreadyApplied: false,
       };
-    });
+    }));
   }
 
   async updateTransformationModelDraft(
@@ -339,7 +340,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
       InventoryAvailabilityMasterDataAdminStore["updateTransformationModelDraft"]
     >[0],
   ) {
-    return this.database.transaction(async (tx) => {
+    return retrySerializableMasterDataTransaction("edit_transformation_draft", () => this.database.transaction(async (tx) => {
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
       // Keep the public edit receipt separate from the successor's creation key.
       const successorKey = `manual-revision:${createHash("sha256")
@@ -465,7 +466,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
         })
         .where(eq(idempotencyKeys.key, draftUpdateReceiptKey(command.idempotencyKey)));
       return result;
-    });
+    }));
   }
 
   async supersedeTransformationModelBackfillDraft(
@@ -473,7 +474,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
       InventoryAvailabilityMasterDataAdminStore["supersedeTransformationModelBackfillDraft"]
     >[0],
   ) {
-    return this.database.transaction(async (tx) => {
+    return retrySerializableMasterDataTransaction("refresh_transformation_draft", () => this.database.transaction(async (tx) => {
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
       await lockIdempotencyKey(tx, command.idempotencyKey);
       await tx.execute(sql`
@@ -669,7 +670,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
         supersededModelId: command.draftModelId,
         alreadyApplied: false,
       };
-    });
+    }));
   }
 
   async createLocationPromisePolicyDraft(
