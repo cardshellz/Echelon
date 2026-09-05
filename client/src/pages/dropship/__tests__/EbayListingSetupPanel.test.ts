@@ -1,10 +1,38 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { describe, expect, it, vi } from "vitest";
 import type { DropshipEbayListingSetupResponse } from "@/lib/dropship-ops-surface";
-import { buildEbayListingSetupDraft } from "../EbayListingSetupPanel";
+import { ebayListingSetupQueryKey } from "@/lib/dropship-ebay-listing-query-sync";
+import { buildEbayListingSetupDraft, EbayListingSetupPanel } from "../EbayListingSetupPanel";
 
 describe("EbayListingSetupPanel", () => {
+  it("keeps cached setup and a visible retry action when a later read fails", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    vi.stubGlobal("React", React);
+    try {
+      client.setQueryData(ebayListingSetupQueryKey(44), setup({ complete: true }));
+      await expect(client.fetchQuery({
+        queryKey: ebayListingSetupQueryKey(44),
+        queryFn: async () => { throw new Error("Temporary setup outage"); },
+      })).rejects.toThrow("Temporary setup outage");
+      const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, { client },
+        React.createElement(EbayListingSetupPanel, {
+          storeConnectionId: 44, storeName: "Test store", onConfigurationChange: () => undefined,
+        }),
+      ));
+      expect(markup).toContain("Temporary setup outage");
+      expect(markup).toContain("Showing the last loaded setup");
+      expect(markup).toContain("Refresh options");
+      expect(markup).toContain("Card Shellz fulfillment capabilities");
+    } finally {
+      client.clear();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("prefills only unambiguous missing selections", () => {
     const draft = buildEbayListingSetupDraft(setup({
       selection: {

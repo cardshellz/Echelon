@@ -119,14 +119,15 @@ describe("DropshipPortalCatalog workflow", () => {
 
     expect(overridePosition).toBeGreaterThan(setupPosition);
     expect(storeCategoryPosition).toBeGreaterThan(overridePosition);
-    expect(overrideSource).toContain("Store default —");
-    expect(overrideSource).toContain("expectedRevisionId");
-    expect(overrideSource).toContain("disabled={rowPending || bulkOpen}");
-    expect(overrideSource).toContain("pendingRows.current.has(row.productVariantId)");
-    expect(overrideSource).toContain("checked across filters");
+    expect(overrideSource).toContain("summarizeEbayListingPolicy");
+    expect(overrideSource).toContain("Edit policies");
+    expect(overrideSource).toContain("currentPage.rows.map");
+    expect(overrideSource).toContain("Check listings on this page");
+    expect(overrideSource).toContain("checked across pages and filters");
     expect(overrideSource).toContain("<EbayListingPolicyBulkDialog");
     expect(catalogSource).toContain("key={selectedStoreConnectionIdNumber}");
-    expect(overrideSource).toContain("Search policies...");
+    expect(overrideSource).toContain("Refresh policies");
+    expect(overrideSource).not.toContain("putJson");
   });
 
   it("keeps bulk edits distinct from publication and retries confirmed saves as refreshes only", () => {

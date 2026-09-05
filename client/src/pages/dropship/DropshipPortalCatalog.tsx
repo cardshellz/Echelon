@@ -571,6 +571,7 @@ export default function DropshipPortalCatalog() {
         {selectedStoreConnection?.platform === "ebay" && (
           <>
             <EbayListingSetupPanel
+              key={selectedStoreConnectionIdNumber}
               storeConnectionId={selectedStoreConnectionIdNumber}
               storeName={selectedStoreName}
               onConfigurationChange={() => {

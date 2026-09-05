@@ -1,62 +1,33 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import {
-  effectiveEbayPolicies,
-  ebayPolicyDisplayOptions,
-  INHERIT_POLICY_VALUE as INHERIT_VALUE,
-  type EbayPolicyField as PolicyField,
-} from "@/lib/dropship-ebay-policy-assignment";
+import { EBAY_POLICY_FIELDS, effectiveEbayPolicies } from "@/lib/dropship-ebay-policy-assignment";
+import { ebayListingPolicyQueryKey } from "@/lib/dropship-ebay-listing-query-sync";
+import { EBAY_POLICY_PAGE_SIZE, paginateEbayPolicyRows, summarizeEbayListingPolicy } from "@/lib/dropship-ebay-policy-view";
 import { MAX_EBAY_POLICY_BULK_ASSIGNMENTS } from "@shared/dropship-ebay-policy-limits";
 import { EbayListingPolicyBulkDialog } from "./EbayListingPolicyBulkDialog";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
-  createDropshipIdempotencyKey,
   fetchJson,
-  putJson,
-  queryErrorCode,
   queryErrorMessage,
   type DropshipCatalogRow,
-  type DropshipEbayListingPolicyOverride,
   type DropshipEbayListingPolicyOverrideResponse,
-  type ReplaceDropshipEbayListingPolicyOverrideResponse,
 } from "@/lib/dropship-ops-surface";
-import {
-  ListingSetupCombobox,
-  type ListingSetupDisplayOption,
-} from "./EbayListingSetupPanel";
+import { ListingSetupCombobox } from "./EbayListingSetupPanel";
 
-const EMPTY_OVERRIDE: Omit<
-  DropshipEbayListingPolicyOverride,
-  "productVariantId" | "revisionId" | "updatedAt"
-> = {
-  fulfillmentPolicyId: null,
-  returnPolicyId: null,
-  paymentPolicyId: null,
-};
+type PolicyEditor = { productVariantIds: number[]; listingLabel?: string };
 
-export function EbayListingPolicyOverridePanel({
-  onConfigurationChange,
-  rows,
-  storeConnectionId,
-}: {
+export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, storeConnectionId }: {
   onConfigurationChange: () => void;
   rows: readonly DropshipCatalogRow[];
   storeConnectionId: number;
 }) {
   const queryClient = useQueryClient();
-  const queryKey = ["/api/dropship/ebay/listing-policy-overrides", storeConnectionId] as const;
+  const queryKey = ebayListingPolicyQueryKey(storeConnectionId);
   const policyQuery = useQuery<DropshipEbayListingPolicyOverrideResponse>({
     queryKey,
     queryFn: () => fetchJson<DropshipEbayListingPolicyOverrideResponse>(
@@ -65,87 +36,52 @@ export function EbayListingPolicyOverridePanel({
     enabled: Number.isInteger(storeConnectionId) && storeConnectionId > 0,
     staleTime: 60_000,
   });
-  const [pendingFields, setPendingFields] = useState<Set<string>>(() => new Set());
-  const [saveError, setSaveError] = useState("");
-  const pendingRows = useRef(new Set<number>());
   const [search, setSearch] = useState("");
   const [fulfillmentFilter, setFulfillmentFilter] = useState("__all__");
+  const [page, setPage] = useState(1);
   const [checkedIds, setCheckedIds] = useState<Set<number>>(() => new Set());
-  const [bulkOpen, setBulkOpen] = useState(false);
+  const [editor, setEditor] = useState<PolicyEditor | null>(null);
   const [saveMessage, setSaveMessage] = useState("");
+  const [refreshError, setRefreshError] = useState("");
+  const [refreshPending, setRefreshPending] = useState(false);
   const assignmentsByVariantId = useMemo(
-    () => new Map((policyQuery.data?.assignments ?? []).map((assignment) => [
-      assignment.productVariantId,
-      assignment,
-    ])),
+    () => new Map((policyQuery.data?.assignments ?? []).map((assignment) => [assignment.productVariantId, assignment])),
     [policyQuery.data?.assignments],
   );
-  const visibleRows = rows.filter((row) => {
-    const matchesSearch = `${row.productName} ${row.variantName} ${row.variantSku}`.toLowerCase().includes(search.trim().toLowerCase());
-    const effective = policyQuery.data
-      ? effectiveEbayPolicies(assignmentsByVariantId.get(row.productVariantId), policyQuery.data.defaults).fulfillmentPolicyId
-      : null;
-    return matchesSearch && (fulfillmentFilter === "__all__"
-      || (fulfillmentFilter === "__missing__" ? !effective : effective === fulfillmentFilter));
-  });
+  const filteredRows = useMemo(() => {
+    const normalizedSearch = search.trim().toLowerCase();
+    return rows.filter((row) => {
+      const matchesSearch = `${row.productName} ${row.variantName} ${row.variantSku}`.toLowerCase().includes(normalizedSearch);
+      const effective = policyQuery.data
+        ? effectiveEbayPolicies(assignmentsByVariantId.get(row.productVariantId), policyQuery.data.defaults).fulfillmentPolicyId
+        : null;
+      return matchesSearch && (fulfillmentFilter === "__all__"
+        || (fulfillmentFilter === "__missing__" ? !effective : effective === fulfillmentFilter));
+    });
+  }, [rows, search, fulfillmentFilter, policyQuery.data, assignmentsByVariantId]);
+  const currentPage = paginateEbayPolicyRows(filteredRows, page);
   const checkedRows = rows.filter((row) => checkedIds.has(row.productVariantId));
-  const allVisibleChecked = visibleRows.length > 0 && visibleRows.every((row) => checkedIds.has(row.productVariantId));
-  const someVisibleChecked = visibleRows.some((row) => checkedIds.has(row.productVariantId));
+  const allPageChecked = currentPage.rows.length > 0 && currentPage.rows.every((row) => checkedIds.has(row.productVariantId));
+  const somePageChecked = currentPage.rows.some((row) => checkedIds.has(row.productVariantId));
 
-  async function refreshAssignments() {
+  async function refreshAssignments(): Promise<void> {
     await queryClient.invalidateQueries({ queryKey }, { throwOnError: true });
+    setRefreshError("");
   }
 
-  async function replaceField(
-    row: DropshipCatalogRow,
-    field: PolicyField,
-    selectedValue: string,
-  ): Promise<void> {
-    const pendingKey = `${row.productVariantId}:${field}`;
-    if (pendingRows.current.has(row.productVariantId) || bulkOpen) return;
-    const current = assignmentsByVariantId.get(row.productVariantId) ?? EMPTY_OVERRIDE;
-    const next = {
-      fulfillmentPolicyId: current.fulfillmentPolicyId,
-      returnPolicyId: current.returnPolicyId,
-      paymentPolicyId: current.paymentPolicyId,
-      [field]: selectedValue === INHERIT_VALUE ? null : selectedValue,
-    };
-    pendingRows.current.add(row.productVariantId);
-    setPendingFields((values) => new Set(values).add(pendingKey));
-    setSaveError("");
+  async function refreshPolicies(): Promise<void> {
+    if (refreshPending || editor) return;
+    setRefreshPending(true);
+    setRefreshError("");
     setSaveMessage("");
     try {
-      const result = await putJson<ReplaceDropshipEbayListingPolicyOverrideResponse>(
-        `/api/dropship/ebay/listing-policy-overrides/${row.productVariantId}`,
-        {
-          storeConnectionId,
-          expectedRevisionId: "revisionId" in current ? current.revisionId : null,
-          ...next,
-          idempotencyKey: createDropshipIdempotencyKey("ebay-listing-policy-override"),
-        },
-      );
-      queryClient.setQueryData<DropshipEbayListingPolicyOverrideResponse>(queryKey, (existing) => {
-        if (!existing) return existing;
-        const assignments = existing.assignments.filter(
-          (assignment) => assignment.productVariantId !== row.productVariantId,
-        );
-        if (result.assignment) assignments.push(result.assignment);
-        assignments.sort((left, right) => left.productVariantId - right.productVariantId);
-        return { ...existing, assignments };
-      });
+      await refreshAssignments();
       onConfigurationChange();
+      setSaveMessage("Policies refreshed. Preview listings to use the current policies.");
     } catch (caught) {
-      if (queryErrorCode(caught) === "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_VERSION_CONFLICT") {
-        await queryClient.invalidateQueries({ queryKey });
-      }
-      setSaveError(queryErrorMessage(caught, "The listing policy override could not be saved."));
+      setRefreshError(queryErrorMessage(caught, "Policies could not be refreshed. Try Refresh policies again."));
     } finally {
-      pendingRows.current.delete(row.productVariantId);
-      setPendingFields((values) => {
-        const nextValues = new Set(values);
-        nextValues.delete(pendingKey);
-        return nextValues;
-      });
+      setRefreshPending(false);
     }
   }
 
@@ -156,25 +92,28 @@ export function EbayListingPolicyOverridePanel({
           <div>
             <h2 className="text-lg font-semibold">Listing policies</h2>
             <p className="mt-1 text-sm text-zinc-500">
-              Store defaults are fallbacks. Choose different policies for individual listings, or check several listings and assign policies together.
+              Listings inherit your store defaults. Use Edit policies for exceptions, or check listings to assign policies together. Changes apply when you save.
             </p>
             <p className="mt-1 text-xs text-zinc-500">
-              Fulfillment overrides are accepted only when their handling time, destinations, and services fit Card Shellz capabilities. Shipping charges remain yours.
+              Fulfillment policies must fit Card Shellz capabilities. Shipping charges remain yours.
             </p>
           </div>
-          <Badge variant="outline">{rows.length} selected for listing</Badge>
+          <div className="flex shrink-0 items-center gap-2">
+            <Badge variant="outline">{rows.length} selected for listing</Badge>
+            <Button size="sm" variant="outline" disabled={refreshPending || policyQuery.isFetching || editor !== null}
+              onClick={() => void refreshPolicies()}>{refreshPending || policyQuery.isFetching ? "Refreshing policies…" : "Refresh policies"}</Button>
+          </div>
         </div>
       </div>
+      {(refreshError || policyQuery.error) && (
+        <div role="alert" className="m-3 rounded-md border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900">
+          {refreshError || queryErrorMessage(policyQuery.error, "Listing policies could not be loaded. Try Refresh policies again.")}
+          {policyQuery.data && <p className="mt-1">The values below are from the last successful load.</p>}
+        </div>
+      )}
+      {saveMessage && <div role="status" className="m-3 text-sm text-emerald-800">{saveMessage}</div>}
       {policyQuery.isLoading ? (
-        <div className="grid gap-3 p-4 md:grid-cols-3">
-          <Skeleton className="h-16 w-full" />
-          <Skeleton className="h-16 w-full" />
-          <Skeleton className="h-16 w-full" />
-        </div>
-      ) : policyQuery.error ? (
-        <div role="alert" className="m-4 rounded-md border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900">
-          {queryErrorMessage(policyQuery.error, "Listing policy overrides could not be loaded.")}
-        </div>
+        <div className="grid gap-3 p-4 md:grid-cols-3"><Skeleton className="h-16 w-full" /><Skeleton className="h-16 w-full" /><Skeleton className="h-16 w-full" /></div>
       ) : rows.length === 0 ? (
         <div className="p-4 text-sm text-zinc-500">Select catalog items to configure listing-level policies.</div>
       ) : policyQuery.data ? (
@@ -182,122 +121,83 @@ export function EbayListingPolicyOverridePanel({
           <div className="space-y-3 border-b border-zinc-200 p-3">
             <div className="grid gap-2 sm:grid-cols-2">
               <Input aria-label="Search listing policies" placeholder="Search product, variant, or SKU"
-                value={search} onChange={(event) => setSearch(event.target.value)} />
+                value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} />
               <ListingSetupCombobox ariaLabel="Filter by effective fulfillment policy" emptyMessage="No matching policies."
                 searchPlaceholder="Search fulfillment policies..." placeholder="All fulfillment policies" value={fulfillmentFilter}
-                onValueChange={setFulfillmentFilter} options={[
+                onValueChange={(value) => { setFulfillmentFilter(value); setPage(1); }} options={[
                   { id: "__all__", name: "All fulfillment policies" },
                   { id: "__missing__", name: "Missing fulfillment policy" },
                   ...policyQuery.data.options.fulfillmentPolicies,
                 ]} />
             </div>
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs text-zinc-500">{visibleRows.length} shown · {checkedRows.length} checked across filters</span>
+              <span className="text-xs text-zinc-500">{currentPage.start}–{currentPage.end} of {currentPage.total} matching · {checkedRows.length} checked across pages and filters</span>
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" disabled={checkedRows.length === 0 || bulkOpen}
+                <Button size="sm" variant="outline" disabled={checkedRows.length === 0 || editor !== null}
                   onClick={() => setCheckedIds(new Set())}>Clear checks</Button>
-                <Button size="sm" disabled={checkedRows.length === 0 || checkedRows.length > MAX_EBAY_POLICY_BULK_ASSIGNMENTS || pendingFields.size > 0 || bulkOpen}
-                  onClick={() => { if (pendingRows.current.size === 0) setBulkOpen(true); }}>Assign policies ({checkedRows.length})</Button>
+                <Button size="sm" disabled={checkedRows.length === 0 || checkedRows.length > MAX_EBAY_POLICY_BULK_ASSIGNMENTS || editor !== null || refreshPending}
+                  onClick={() => { setSaveMessage(""); setEditor({ productVariantIds: checkedRows.map((row) => row.productVariantId) }); }}>
+                  Assign policies ({checkedRows.length})
+                </Button>
               </div>
             </div>
             {checkedRows.length > MAX_EBAY_POLICY_BULK_ASSIGNMENTS && (
               <p role="alert" className="text-xs text-amber-800">Choose at most {MAX_EBAY_POLICY_BULK_ASSIGNMENTS} listings per policy update.</p>
             )}
           </div>
-          {saveMessage && <div role="status" className="m-3 text-sm text-emerald-800">{saveMessage}</div>}
-          {saveError && (
-            <div role="alert" className="m-4 rounded-md border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900">
-              {saveError}
-            </div>
-          )}
           <div className="max-h-96 overflow-auto">
-            <Table className="min-w-[1000px] table-fixed">
+            <Table className="min-w-[900px] table-fixed">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-10">
-                    <Checkbox aria-label="Check all shown listings" disabled={visibleRows.length === 0 || bulkOpen}
-                      checked={allVisibleChecked ? true : someVisibleChecked ? "indeterminate" : false}
+                    <Checkbox aria-label="Check listings on this page" disabled={currentPage.rows.length === 0 || editor !== null}
+                      checked={allPageChecked ? true : somePageChecked ? "indeterminate" : false}
                       onCheckedChange={(checked) => setCheckedIds((current) => {
                         const next = new Set(current);
-                        for (const row of visibleRows) { if (checked === true) next.add(row.productVariantId); else next.delete(row.productVariantId); }
+                        for (const row of currentPage.rows) {
+                          if (checked === true) next.add(row.productVariantId);
+                          else next.delete(row.productVariantId);
+                        }
                         return next;
                       })} />
                   </TableHead>
                   <TableHead className="w-[24%]">Selected listing</TableHead>
-                  <TableHead className="w-[23%]">Fulfillment policy</TableHead>
-                  <TableHead className="w-[19%]">Return policy</TableHead>
-                  <TableHead className="w-[19%]">Payment policy</TableHead>
-                  <TableHead className="w-28">Status</TableHead>
+                  <TableHead>Fulfillment policy</TableHead>
+                  <TableHead>Return policy</TableHead>
+                  <TableHead>Payment policy</TableHead>
+                  <TableHead className="w-36 text-right">Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {visibleRows.length === 0 && <TableRow><TableCell colSpan={6} className="text-center text-zinc-500">No listings match these filters.</TableCell></TableRow>}
-                {visibleRows.map((row) => {
-                  const assignment = assignmentsByVariantId.get(row.productVariantId) ?? null;
-                  const overrideCount = assignment
-                    ? [assignment.fulfillmentPolicyId, assignment.returnPolicyId, assignment.paymentPolicyId]
-                        .filter((value) => value !== null).length
-                    : 0;
-                  const effective = effectiveEbayPolicies(assignment, policyQuery.data.defaults);
-                  const needsPolicy = Object.values(effective).some((value) => value === null);
-                  const rowPending = [...pendingFields].some(
-                    (pendingKey) => pendingKey.startsWith(`${row.productVariantId}:`),
-                  );
+                {currentPage.rows.length === 0 && <TableRow><TableCell colSpan={6} className="text-center text-zinc-500">No listings match these filters.</TableCell></TableRow>}
+                {currentPage.rows.map((row) => {
+                  const assignment = assignmentsByVariantId.get(row.productVariantId);
                   return (
                     <TableRow key={row.productVariantId}>
                       <TableCell>
                         <Checkbox aria-label={`Check ${row.variantSku} for policy assignment`} checked={checkedIds.has(row.productVariantId)}
-                          disabled={bulkOpen} onCheckedChange={(checked) => setCheckedIds((current) => {
+                          disabled={editor !== null} onCheckedChange={(checked) => setCheckedIds((current) => {
                             const next = new Set(current);
                             if (checked === true) next.add(row.productVariantId); else next.delete(row.productVariantId);
                             return next;
                           })} />
                       </TableCell>
                       <TableCell>
-                        <div className="line-clamp-2 font-medium" title={row.productName}>{row.productName}</div>
-                        <div className="truncate text-xs text-zinc-500" title={`${row.variantName} · ${row.variantSku}`}>
-                          {row.variantName} · {row.variantSku}
-                        </div>
+                        <div className="truncate font-medium" title={row.productName}>{row.productName}</div>
+                        <div className="truncate text-xs text-zinc-500" title={`${row.variantName} · ${row.variantSku}`}>{row.variantName} · {row.variantSku}</div>
                       </TableCell>
-                      <TableCell>
-                        <PolicyFieldCombobox
-                          field="fulfillmentPolicyId"
-                          assignment={assignment}
-                          defaultPolicyId={policyQuery.data.defaults.fulfillmentPolicyId}
-                          options={ebayPolicyDisplayOptions(policyQuery.data, "fulfillmentPolicyId")}
-                          disabled={rowPending || bulkOpen}
-                          onChange={(value) => replaceField(row, "fulfillmentPolicyId", value)}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <PolicyFieldCombobox
-                          field="returnPolicyId"
-                          assignment={assignment}
-                          defaultPolicyId={policyQuery.data.defaults.returnPolicyId}
-                          options={policyQuery.data.options.returnPolicies}
-                          disabled={rowPending || bulkOpen}
-                          onChange={(value) => replaceField(row, "returnPolicyId", value)}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <PolicyFieldCombobox
-                          field="paymentPolicyId"
-                          assignment={assignment}
-                          defaultPolicyId={policyQuery.data.defaults.paymentPolicyId}
-                          options={policyQuery.data.options.paymentPolicies}
-                          disabled={rowPending || bulkOpen}
-                          onChange={(value) => replaceField(row, "paymentPolicyId", value)}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="outline"
-                          className={needsPolicy ? "border-amber-200 bg-amber-50 text-amber-800" : overrideCount > 0
-                            ? "border-violet-200 bg-violet-50 text-violet-800"
-                            : "border-zinc-200 bg-zinc-50 text-zinc-700"}
-                        >
-                          {needsPolicy ? "Missing policy" : overrideCount > 0 ? `${overrideCount} override${overrideCount === 1 ? "" : "s"}` : "Store defaults"}
-                        </Badge>
+                      {EBAY_POLICY_FIELDS.map((field) => {
+                        const summary = summarizeEbayListingPolicy(policyQuery.data, assignment, field);
+                        return <TableCell key={field}>
+                          <div className={`truncate text-sm ${summary.needsAttention ? "text-amber-800" : ""}`} title={summary.name}>{summary.name}</div>
+                          <div className={`text-xs ${summary.source === "Override" ? "text-violet-700" : "text-zinc-500"}`}>{summary.source}</div>
+                        </TableCell>;
+                      })}
+                      <TableCell className="text-right">
+                        <Button size="sm" variant="outline" aria-label={`Edit policies for ${row.variantSku}`} disabled={editor !== null || refreshPending}
+                          onClick={() => { setSaveMessage(""); setEditor({ productVariantIds: [row.productVariantId], listingLabel: `${row.productName} · ${row.variantSku}` }); }}>
+                          Edit policies
+                        </Button>
                       </TableCell>
                     </TableRow>
                   );
@@ -305,55 +205,22 @@ export function EbayListingPolicyOverridePanel({
               </TableBody>
             </Table>
           </div>
-          {bulkOpen && <EbayListingPolicyBulkDialog data={policyQuery.data} productVariantIds={checkedRows.map((row) => row.productVariantId)}
-            onClose={() => setBulkOpen(false)} onConflict={refreshAssignments} onSaved={async (count) => {
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-3 py-2">
+            <span className="text-xs text-zinc-500">Page {currentPage.page} of {currentPage.pageCount} · {EBAY_POLICY_PAGE_SIZE} listings per page</span>
+            <nav aria-label="Listing policy pages" className="flex gap-2">
+              <Button size="sm" variant="outline" disabled={currentPage.page === 1 || editor !== null} onClick={() => setPage(currentPage.page - 1)}>Previous</Button>
+              <Button size="sm" variant="outline" disabled={currentPage.page === currentPage.pageCount || editor !== null} onClick={() => setPage(currentPage.page + 1)}>Next</Button>
+            </nav>
+          </div>
+          {editor && <EbayListingPolicyBulkDialog data={policyQuery.data} productVariantIds={editor.productVariantIds} listingLabel={editor.listingLabel}
+            onClose={() => setEditor(null)} onConflict={refreshAssignments} onSaved={async (count) => {
               onConfigurationChange();
               await refreshAssignments();
-              setCheckedIds(new Set());
-              setSaveMessage(`Policies saved for ${count} listings. Preview them before pushing to eBay.`);
+              if (!editor.listingLabel) setCheckedIds(new Set());
+              setSaveMessage(`Policies saved for ${count} listing${count === 1 ? "" : "s"}. Preview before pushing to eBay.`);
             }} />}
         </>
       ) : null}
     </section>
-  );
-}
-
-function PolicyFieldCombobox({
-  assignment,
-  defaultPolicyId,
-  disabled,
-  field,
-  onChange,
-  options,
-}: {
-  assignment: DropshipEbayListingPolicyOverride | null;
-  defaultPolicyId: string | null;
-  disabled: boolean;
-  field: PolicyField;
-  onChange: (value: string) => void;
-  options: readonly ListingSetupDisplayOption[];
-}) {
-  const defaultOption = options.find((option) => option.id === defaultPolicyId) ?? null;
-  const inheritedName = defaultOption?.name ?? defaultPolicyId ?? "Not configured";
-  const displayOptions: ListingSetupDisplayOption[] = [
-    { id: INHERIT_VALUE, name: `Store default — ${inheritedName}` },
-    ...options,
-  ];
-  const assignedId = assignment?.[field];
-  if (assignedId && !options.some((option) => option.id === assignedId)) displayOptions.push({
-    id: assignedId, name: `Unavailable policy (${assignedId})`, disabled: true,
-    description: "Choose a current policy or inherit the store default.",
-  });
-  return (
-    <ListingSetupCombobox
-      ariaLabel={`${field} listing override`}
-      disabled={disabled}
-      emptyMessage="No matching policies."
-      onValueChange={onChange}
-      options={displayOptions}
-      placeholder="Use store default"
-      searchPlaceholder="Search policies..."
-      value={assignment?.[field] ?? INHERIT_VALUE}
-    />
   );
 }
