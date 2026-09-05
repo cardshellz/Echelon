@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useAuth } from "@/lib/auth";
 import { useParams, Link, useLocation } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -107,6 +108,7 @@ function HintIcon({ text }: { text: string }) {
 // Page
 // ---------------------------------------------------------------------------
 export default function WarehouseSettingsPage() {
+  const { hasPermission } = useAuth();
   const params = useParams<{ id: string }>();
   const routeId = params.id;
   const isDefault = routeId === IS_DEFAULT_ID;
@@ -242,6 +244,13 @@ export default function WarehouseSettingsPage() {
       </div>
 
       <Tabs defaultValue="picking" className="w-full">
+        {!isDefault && hasPermission("warehouse_work", "view") && (
+          <div className="mb-4">
+            <Button variant="outline" asChild>
+              <Link href={`/warehouse/workflows/${routeId}`}>Stations &amp; workflows (draft setup)</Link>
+            </Button>
+          </div>
+        )}
         <TabsList className="w-full overflow-x-auto justify-start">
           <TabsTrigger value="picking">Picking</TabsTrigger>
           <TabsTrigger value="replen">Replenishment</TabsTrigger>
