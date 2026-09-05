@@ -8,9 +8,12 @@ import {
   transformationModelHeads,
   transformationModelReviews,
   transformationModelVersions,
+  transformationModelPaths,
+  transformationRecipeBindings,
 } from "@shared/schema";
 import {
   inventoryAvailabilityBackfillReviewSchema,
+  inventoryAvailabilityBackfillDefinitionSchema,
 } from "@shared/types/inventory-availability-backfill";
 
 import { db } from "../../../db";
@@ -182,6 +185,9 @@ async function captureProducts(
       origin: transformationModelVersions.origin,
       originInputHash: transformationModelVersions.originInputHash,
       originResultHash: transformationModelVersions.originResultHash,
+      operatorInputHash: transformationModelVersions.operatorInputHash,
+      validationState: transformationModelVersions.validationState,
+      buildToPromiseEnabled: transformationModelVersions.buildToPromiseEnabled,
     })
     .from(transformationModelHeads)
     .innerJoin(
@@ -191,6 +197,32 @@ async function captureProducts(
     .where(inArray(transformationModelHeads.productId, productIds));
   const draftByProduct = new Map(headRows.map((row) => [row.productId, row] as const));
   const draftIds = headRows.map((row) => row.modelId);
+  // Load manual definitions in two bounded queries; never substitute the generated
+  // proposal for the exact operator definition displayed for approval.
+  const operatorIds = headRows.filter((row) => row.origin === "operator").map((row) => row.modelId);
+  const bindings = operatorIds.length === 0 ? [] : await executor.select()
+    .from(transformationRecipeBindings).where(inArray(transformationRecipeBindings.modelId, operatorIds))
+    .orderBy(asc(transformationRecipeBindings.id));
+  const paths = operatorIds.length === 0 ? [] : await executor.select()
+    .from(transformationModelPaths).where(inArray(transformationModelPaths.modelId, operatorIds))
+    .orderBy(asc(transformationModelPaths.sourceVariantId), asc(transformationModelPaths.destinationVariantId));
+  const bindingKeyById = new Map(bindings.map((binding) =>
+    [binding.id, `recipe:${binding.recipeId}:${binding.warehouseId ?? "network"}`] as const));
+  const definitionByModel = new Map(headRows.filter((row) => row.origin === "operator").map((row) =>
+    [row.modelId, inventoryAvailabilityBackfillDefinitionSchema.parse({
+      buildToPromiseEnabled: row.buildToPromiseEnabled,
+      paths: paths.filter((path) => path.modelId === row.modelId).map((path) => ({
+        sourceVariantId: path.sourceVariantId, destinationVariantId: path.destinationVariantId,
+        inputQty: path.inputQty, outputQty: path.outputQty, operationType: path.operationType,
+        authorityState: path.authorityState,
+        transformationRecipeBindingKey: path.transformationRecipeBindingId === null ? null
+          : bindingKeyById.get(path.transformationRecipeBindingId),
+      })),
+      recipeBindings: bindings.filter((binding) => binding.modelId === row.modelId).map((binding) => ({
+        bindingKey: bindingKeyById.get(binding.id), recipeId: binding.recipeId,
+        relationshipRole: binding.relationshipRole, warehouseId: binding.warehouseId,
+      })),
+    })] as const));
   const reviewRows = draftIds.length === 0
     ? []
     : await executor
@@ -239,9 +271,13 @@ async function captureProducts(
             origin: draftRow.origin as "operator" | "phase3_backfill",
             originInputHash: draftRow.originInputHash,
             originResultHash: draftRow.originResultHash,
+            operatorInputHash: draftRow.operatorInputHash,
+            validationState: draftRow.validationState as "valid" | "invalid",
           }
         : null,
       review: reviewRow
+        // Reviews remain attached to their historical model; an edited successor
+        // has no review even when its definition happens to equal an older one.
         ? {
             reviewId: reviewRow.id.toString(),
             decision: reviewRow.decision as "approved" | "changes_required",
@@ -262,6 +298,7 @@ async function captureProducts(
             capturedAt: shadowRow.capturedAt.toISOString(),
           }
         : null,
+      draftDefinition: draftRow ? definitionByModel.get(draftRow.modelId) ?? null : null,
     };
   });
 }
@@ -382,18 +419,23 @@ implements InventoryAvailabilityBackfillCatalogStore {
         }
       }
       const candidate = source ? planInventoryAvailabilityBackfill(source) : null;
+      const operatorSourceMatch = model.origin === "operator"
+        && candidate != null && model.operatorInputHash === candidate.inputHash
+        && model.validationState === "valid";
       if (
         !candidate
-        || candidate.definitionHash !== model.definitionHash
-        || (model.origin === "phase3_backfill" && (
-          candidate.inputHash !== model.originInputHash
-          || candidate.resultHash !== model.originResultHash
-        ))
+        || candidate.classification === "blocked"
+        || candidate.classification === "excluded_unmanaged"
+        || candidate.classification === "excluded_internal_supply_only"
+        || (model.origin === "operator" ? !operatorSourceMatch : (
+          candidate.definitionHash !== model.definitionHash
+          || candidate.inputHash !== model.originInputHash
+          || candidate.resultHash !== model.originResultHash))
       ) {
         throw new InventoryAvailabilityMasterDataError(
           409,
           "INVENTORY_AVAILABILITY_REVIEW_SOURCE_CHANGED",
-          "The current product, variants, recipes, or deterministic candidate no longer matches this draft.",
+          "Catalog evidence changed or the draft has not been validated against current sources. Reload and save a new draft version before reviewing.",
         );
       }
       const [created] = await tx

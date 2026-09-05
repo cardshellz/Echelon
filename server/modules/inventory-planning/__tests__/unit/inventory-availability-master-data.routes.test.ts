@@ -341,7 +341,7 @@ describe("inventory availability master-data routes", () => {
     expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "edit");
   });
 
-  it("updates a current draft in place with optimistic evidence and always returns 200", async () => {
+  it("saves a current draft revision with optimistic evidence and always returns 200", async () => {
     service.updateTransformationModelDraft.mockResolvedValue({
       modelId: 91,
       version: 1,

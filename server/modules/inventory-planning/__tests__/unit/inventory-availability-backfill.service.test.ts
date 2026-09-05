@@ -87,6 +87,45 @@ function setup(product: CapturedInventoryAvailabilityBackfillProduct = captured(
 }
 
 describe("InventoryAvailabilityBackfillService", () => {
+  it.each(["awaiting_review", "approved", "changes_required"] as const)(
+    "reviews source-bound manual rules independently of the generator: %s", async (state) => {
+      const candidate = planInventoryAvailabilityBackfill(source());
+      const product = captured({
+        draft: { modelId: 50, version: 2, definitionHash: HASH, headRevision: "3",
+          origin: "operator", originInputHash: null, originResultHash: null,
+          operatorInputHash: candidate.inputHash, validationState: "valid" },
+        draftDefinition: candidate.publicDefinition!,
+        review: state === "awaiting_review" ? null : {
+          reviewId: "4", decision: state, reason: "Explicit manual directions",
+          reviewedBy: "lead", reviewedAt: NOW.toISOString(), modelId: 50,
+          modelVersion: 2, modelDefinitionHash: HASH,
+        },
+      });
+      const queue = await setup(product).service.getMigrationQueue();
+      expect(queue.products[0]).toMatchObject({
+        queueState: state, draft: { candidateMatch: false }, draftDefinition: candidate.publicDefinition,
+      });
+      const changed = await setup({ ...product,
+        draft: { ...product.draft!, definitionHash: "b".repeat(64) },
+      }).service.getMigrationQueue();
+      expect(changed.catalogResultHash).not.toBe(queue.catalogResultHash);
+    },
+  );
+
+  it.each(["stale_source", "invalid", "missing_definition", "legacy_null"] as const)(
+    "blocks manual review when evidence is %s", async (failure) => {
+      const candidate = planInventoryAvailabilityBackfill(source());
+      const queue = await setup(captured({
+        draft: { modelId: 50, version: 2, definitionHash: HASH, headRevision: "3",
+          origin: "operator", originInputHash: null, originResultHash: null,
+          operatorInputHash: failure === "legacy_null" ? null
+            : failure === "stale_source" ? HASH : candidate.inputHash,
+          validationState: failure === "invalid" ? "invalid" : "valid" },
+        draftDefinition: failure === "missing_definition" ? null : candidate.publicDefinition,
+      })).service.getMigrationQueue();
+      expect(queue.products[0]?.queueState).toBe("conflicting_draft");
+    },
+  );
   it("classifies the complete capture and produces catalog hashes", async () => {
     const { service } = setup();
     const queue = await service.getMigrationQueue();

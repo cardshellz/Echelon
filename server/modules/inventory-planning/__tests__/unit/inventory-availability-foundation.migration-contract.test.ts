@@ -43,6 +43,8 @@ const parityMigrationSql = [
   phase3MigrationSql,
   provenanceRefreshMigrationSql,
   demandObservationDaysMigrationSql,
+  readFileSync(resolve(process.cwd(), "migrations",
+    "0654_inventory_manual_transformation_review.sql"), "utf8"),
 ].join("\n");
 const compactMigrationSql = migrationSql.replace(/\s+/g, " ").trim();
 const schemaPath = resolve(process.cwd(), "shared/schema/inventory-planning.schema.ts");

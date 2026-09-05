@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { config } from "dotenv";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as databaseSchema from "@shared/schema";
 
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
@@ -74,6 +74,9 @@ const publicationOutboxDestinationOwnerMigrationSql = readFileSync(
   "utf8",
 );
 const HASH = "a".repeat(64);
+const manualReviewMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0654_inventory_manual_transformation_review.sql"), "utf8",
+);
 const FIXED_TIME = "2026-08-26T12:00:00.000Z";
 
 function sslConfig(connectionString: string) {
@@ -100,6 +103,39 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
   let pool: pg.Pool;
   let createdAuditTable = false;
   let createdIdempotencyTable = false;
+
+  async function settleBehindProductLock<T>(
+    productId: number,
+    start: () => Promise<T>[],
+  ): Promise<PromiseSettledResult<T>[]> {
+    const blocker = await pool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT pg_advisory_xact_lock(918422, $1)", [productId]);
+      const outcomes = Promise.allSettled(start());
+      try {
+        // Force both SERIALIZABLE snapshots to precede the first writer's commit.
+        await vi.waitFor(async () => {
+          const waiting = await pool.query<{ count: string }>(
+            `SELECT count(*) FROM pg_locks
+             WHERE locktype = 'advisory' AND classid = 918422 AND objid = $1
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND NOT granted`,
+            [productId],
+          );
+          expect(waiting.rows[0]?.count).toBe("2");
+        }, { timeout: 5_000, interval: 10 });
+      } finally {
+        await blocker.query("ROLLBACK");
+        // Drain both writers even if the barrier assertion failed, so no pending
+        // transaction can escape into the following test's schema reset.
+        await outcomes;
+      }
+      return await outcomes;
+    } finally {
+      blocker.release();
+    }
+  }
 
   beforeAll(async () => {
     const protectedUrls = [
@@ -278,6 +314,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(backfillMigrationSql);
       await migrationClient.query(phase4MigrationSql);
       await migrationClient.query(backfillProvenanceRefreshMigrationSql);
+      await migrationClient.query(manualReviewMigrationSql);
       await migrationClient.query(demandObservationDaysMigrationSql);
       await migrationClient.query(channelExposureMigrationSql);
       await migrationClient.query(publicationReadinessMigrationSql);
@@ -1272,24 +1309,16 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       paths: [],
       recipeBindings: [],
     });
-    const first = store.createTransformationModelDraft({
+    const commands = [1, 2].map((index) => ({
       actorId: "integration-test",
-      changeReason: "First concurrent draft",
-      idempotencyKey: "repository-integration:concurrent-1",
-      requestHash: "c".repeat(64),
+      changeReason: "Concurrent draft",
+      idempotencyKey: `repository-integration:concurrent-${index}`,
+      requestHash: String(index).repeat(64),
       definition,
       occurredAt: new Date(FIXED_TIME),
-    });
-    const second = store.createTransformationModelDraft({
-      actorId: "integration-test",
-      changeReason: "Second concurrent draft",
-      idempotencyKey: "repository-integration:concurrent-2",
-      requestHash: "d".repeat(64),
-      definition,
-      occurredAt: new Date(FIXED_TIME),
-    });
-
-    const outcomes = await Promise.allSettled([first, second]);
+    }));
+    const outcomes = await settleBehindProductLock(scope.productId,
+      () => commands.map((command) => store.createTransformationModelDraft(command)));
     expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
     const rejected = outcomes.find((outcome) => outcome.status === "rejected");
     expect(rejected).toMatchObject({
@@ -1757,7 +1786,155 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     });
   });
 
-  it("updates a draft atomically with a durable receipt, full audit, and stale rollback", async () => {
+  it("approves exact one-way manual rules, preserves earlier approvals, and refuses automatic replacement", async () => {
+    const scope = await seedProductAndWarehouse([1, 5]);
+    const database = drizzle(pool, { schema: databaseSchema });
+    const store = new PostgresInventoryAvailabilityMasterDataStore(database);
+    const backfill = new InventoryAvailabilityBackfillService(
+      new PostgresInventoryAvailabilityBackfillRepository(database), store,
+      { previewLatestShadowChannels: async () => null }, { now: () => new Date(FIXED_TIME) },
+    );
+    const [source] = await loadInventoryAvailabilityBackfillSources(database, [scope.productId]);
+    const candidate = planInventoryAvailabilityBackfill(source!);
+    const generated = await backfill.applyProductDraft(scope.productId, {
+      expectedInputHash: candidate.inputHash, expectedResultHash: candidate.resultHash,
+      changeReason: "Record generated proposal", idempotencyKey: "manual-test:generated",
+    }, "integration-test");
+    const firstReview = await backfill.reviewProductDraft(scope.productId, {
+      expectedModelId: generated.modelId, expectedModelVersion: generated.version,
+      expectedDefinitionHash: generated.definitionHash, expectedHeadRevision: "0",
+      expectedLatestReviewId: null, decision: "approved", reason: "Original generated review",
+      idempotencyKey: "manual-test:original-review",
+    }, "integration-test");
+    const manualDefinition = transformationModelDefinitionSchema.parse({
+      ...candidate.definition,
+      paths: candidate.definition!.paths.map((path) => ({
+        ...path, authorityState: path.sourceUnitsPerVariant > path.destinationUnitsPerVariant
+          ? "blocked" : "allowed",
+      })),
+    });
+    const editCommand = {
+      actorId: "integration-test", productId: scope.productId, draftModelId: generated.modelId,
+      expectedVersion: generated.version, expectedDefinitionHash: generated.definitionHash,
+      expectedHeadRevision: "0", changeReason: "Storage boxes only assemble smaller into larger",
+      idempotencyKey: "manual-test:edit", requestHash: "d".repeat(64),
+      definition: manualDefinition, occurredAt: new Date(FIXED_TIME),
+    };
+    const manual = await store.updateTransformationModelDraft(editCommand);
+    expect(manual).toMatchObject({ version: 2, alreadyApplied: false });
+    expect(manual.definitionHash).not.toBe(generated.definitionHash);
+    let row = (await backfill.getMigrationQueue()).products[0]!;
+    expect(row).toMatchObject({ queueState: "awaiting_review", review: null,
+      draft: { modelId: manual.modelId, origin: "operator", operatorInputHash: candidate.inputHash,
+        definitionMatch: false, candidateMatch: false },
+      draftDefinition: { paths: [
+        { sourceVariantId: scope.variantIds[0], destinationVariantId: scope.variantIds[1], authorityState: "allowed" },
+        { sourceVariantId: scope.variantIds[1], destinationVariantId: scope.variantIds[0], authorityState: "blocked" },
+      ] },
+    });
+    await expect(backfill.refreshProductDraft(scope.productId, manual.modelId, {
+      expectedInputHash: candidate.inputHash, expectedResultHash: candidate.resultHash,
+      expectedDraftVersion: manual.version, expectedDraftDefinitionHash: manual.definitionHash,
+      expectedDraftHeadRevision: row.draft!.headRevision,
+      expectedDraftOriginInputHash: HASH, expectedDraftOriginResultHash: HASH,
+      changeReason: "Must not restore reverse directions", idempotencyKey: "manual-test:refresh",
+    }, "integration-test")).rejects.toMatchObject({
+      code: "INVENTORY_AVAILABILITY_BACKFILL_OPERATOR_DRAFT",
+    });
+    const batch = new InventoryCatalogBatchService(backfill, () => undefined);
+    expect(catalogBatchExecutionPreview(
+      await batch.preview({ mode: "reviews", productIds: [scope.productId] }),
+    ).products[0])
+      .toMatchObject({ action: "skip" });
+    const reviewCommand = {
+      expectedModelId: manual.modelId, expectedModelVersion: manual.version,
+      expectedDefinitionHash: manual.definitionHash, expectedHeadRevision: row.draft!.headRevision,
+      expectedLatestReviewId: null, decision: "approved", reason: "Reviewed smaller-to-larger only",
+      idempotencyKey: "manual-test:manual-review",
+    };
+    const reviewed = await backfill.reviewProductDraft(scope.productId, reviewCommand, "integration-test");
+    await expect(backfill.reviewProductDraft(scope.productId, reviewCommand, "integration-test"))
+      .resolves.toEqual({ ...reviewed, alreadyApplied: true });
+    await expect(backfill.reviewProductDraft(scope.productId, {
+      ...reviewCommand, decision: "changes_required", idempotencyKey: "manual-test:competing-review",
+    }, "integration-test")).rejects.toMatchObject({ code: "INVENTORY_AVAILABILITY_REVIEW_DECISION_CHANGED" });
+    expect((await backfill.getMigrationQueue()).products[0]?.queueState).toBe("approved");
+
+    // Source drift blocks new review; a resave captures current source evidence and
+    // requires a new approval even when the directional definition is unchanged.
+    await pool.query("UPDATE catalog.products SET name = 'Revised box catalog name' WHERE id = $1", [scope.productId]);
+    row = (await backfill.getMigrationQueue()).products[0]!;
+    expect(row.queueState).toBe("conflicting_draft");
+    await expect(backfill.reviewProductDraft(scope.productId, {
+      ...reviewCommand, expectedLatestReviewId: reviewed.review.reviewId,
+      idempotencyKey: "manual-test:stale-source-review",
+    }, "integration-test")).rejects.toMatchObject({ code: "INVENTORY_AVAILABILITY_REVIEW_SOURCE_CHANGED" });
+    const next = await store.updateTransformationModelDraft({
+      ...editCommand, draftModelId: manual.modelId, expectedVersion: manual.version,
+      expectedDefinitionHash: manual.definitionHash, expectedHeadRevision: row.draft!.headRevision,
+      idempotencyKey: "manual-test:resave", requestHash: "e".repeat(64),
+    });
+    expect(next).toMatchObject({ version: 3, definitionHash: manual.definitionHash });
+    expect((await backfill.getMigrationQueue()).products[0]).toMatchObject({
+      queueState: "awaiting_review", review: null, draft: { modelId: next.modelId },
+    });
+    await expect(store.updateTransformationModelDraft(editCommand))
+      .resolves.toEqual({ ...manual, alreadyApplied: true });
+    const history = await pool.query(
+      "SELECT model_id, id::text FROM inventory.transformation_model_reviews ORDER BY id",
+    );
+    expect(history.rows).toEqual([
+      { model_id: generated.modelId, id: firstReview.review.reviewId },
+      { model_id: manual.modelId, id: reviewed.review.reviewId },
+    ]);
+    const view = await store.getSupplyTransformationsAdminView(scope.productId);
+    expect(view).toMatchObject({ activeModel: null, draftModel: { id: next.modelId, version: 3 },
+      head: { activeModelId: null, draftModelId: next.modelId } });
+    const untouched = await pool.query(`SELECT
+      (SELECT count(*) FROM inventory.inventory_levels) AS inventory_rows,
+      (SELECT count(*) FROM inventory.inventory_publication_outbox) AS publication_rows`);
+    expect(untouched.rows[0]).toEqual({ inventory_rows: "0", publication_rows: "0" });
+    await expectDatabaseError(() => pool.query(
+      "UPDATE inventory.transformation_model_versions SET operator_input_hash = $1 WHERE id = $2",
+      [HASH, next.modelId],
+    ), "operator transformation source evidence is immutable");
+  });
+
+  it("permits only one concurrent manual successor and leaves no losing edit receipt", async () => {
+    const scope = await seedProductAndWarehouse([1]);
+    const store = new PostgresInventoryAvailabilityMasterDataStore(drizzle(pool, { schema: databaseSchema }));
+    const definition = transformationModelDefinitionSchema.parse({
+      productId: scope.productId, buildToPromiseEnabled: false, paths: [], recipeBindings: [],
+    });
+    const created = await store.createTransformationModelDraft({
+      actorId: "integration-test", changeReason: "Concurrent edit source", idempotencyKey: "manual-race:create",
+      requestHash: HASH, definition, occurredAt: new Date(FIXED_TIME),
+    });
+    const commands = [1, 2].map((index) => ({
+      actorId: "integration-test", changeReason: "Concurrent manual edit",
+      productId: scope.productId, draftModelId: created.modelId, expectedVersion: created.version,
+      expectedDefinitionHash: created.definitionHash, expectedHeadRevision: "0",
+      idempotencyKey: `manual-race:edit-${index}`, requestHash: String(index).repeat(64),
+      definition, occurredAt: new Date(FIXED_TIME),
+    }));
+    const results = await settleBehindProductLock(scope.productId,
+      () => commands.map((command) => store.updateTransformationModelDraft(command)));
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const loser = results.findIndex((result) => result.status === "rejected");
+    expect(results[loser]).toMatchObject({
+      status: "rejected", reason: { code: "INVENTORY_AVAILABILITY_DRAFT_STALE", status: 409 },
+    });
+    await expect(store.updateTransformationModelDraft(commands[loser]!))
+      .rejects.toMatchObject({ code: "INVENTORY_AVAILABILITY_DRAFT_STALE" });
+    const counts = await pool.query(`SELECT
+      (SELECT count(*) FROM inventory.transformation_model_versions) AS models,
+      (SELECT count(*) FROM public.idempotency_keys) AS edit_receipts,
+      (SELECT count(*) FROM public.audit_events
+         WHERE action = 'inventory_availability.transformation_model.draft_updated') AS edit_audits`);
+    expect(counts.rows[0]).toEqual({ models: "2", edit_receipts: "1", edit_audits: "1" });
+  });
+
+  it("versions a manual edit atomically with a durable receipt, full audit, and stale rollback", async () => {
     const scope = await seedProductAndWarehouse([1, 5]);
     const testDatabase = drizzle(pool, { schema: databaseSchema });
     const store = new PostgresInventoryAvailabilityMasterDataStore(testDatabase);
@@ -1817,6 +1994,16 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       occurredAt: new Date(FIXED_TIME),
     };
     const updated = await store.updateTransformationModelDraft(updateCommand);
+    expect(updated.modelId).not.toBe(created.modelId);
+    expect(updated.version).toBe(created.version + 1);
+    const original = await pool.query(
+      `SELECT idempotency_key, request_hash, created_by, created_at, lifecycle_status,
+              definition_hash FROM inventory.transformation_model_versions WHERE id = $1`,
+      [created.modelId],
+    );
+    expect(original.rows[0]).toMatchObject({
+      ...identityBefore.rows[0], lifecycle_status: "superseded", definition_hash: created.definitionHash,
+    });
     await expect(store.updateTransformationModelDraft(updateCommand)).resolves.toEqual({
       ...updated,
       alreadyApplied: true,
@@ -1855,15 +2042,15 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
          ON audit.action = 'inventory_availability.transformation_model.draft_updated'
         AND audit.target = 'inventory.transformation_model:' || model.id::text
        WHERE model.id = $1`,
-      [created.modelId, updateCommand.idempotencyKey],
+      [updated.modelId, updateCommand.idempotencyKey],
     );
     expect(persisted.rows[0]).toMatchObject({
-      ...identityBefore.rows[0],
+      request_hash: updateCommand.requestHash,
       revision: "1",
       path_count: "1",
       command_type: "transformation_model_draft_update",
       audit_before_id: created.modelId,
-      audit_after_id: created.modelId,
+      audit_after_id: updated.modelId,
     });
 
     const staleKey = "repository-integration:update-stale";
