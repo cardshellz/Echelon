@@ -1,3 +1,5 @@
+import { MAX_WORKSPACE_TRAIL, parsePurchaseWorkspaceSelection, parseWorkspaceRef, workspaceRefKey, type ProcurementWorkspaceRef } from "./purchase-workspace-selection";
+
 /** Navigation metadata only: these references never authorize or reparent records. */
 export type ProcurementRecordKind = "purchase" | "shipment" | "invoice" | "receipt";
 
@@ -5,6 +7,7 @@ export interface ProcurementRecord {
   kind: ProcurementRecordKind;
   id: number;
   tab: string;
+  workspace?: { selected: ProcurementWorkspaceRef; trail: ProcurementWorkspaceRef[] };
 }
 
 export interface ProcurementJourney {
@@ -13,7 +16,7 @@ export interface ProcurementJourney {
 }
 
 const TABS: Record<ProcurementRecordKind, readonly string[]> = {
-  purchase: ["lines", "receipts", "invoices", "payments", "shipments", "exceptions", "history"],
+  purchase: ["lines", "lifecycle", "receipts", "invoices", "payments", "shipments", "exceptions", "history"],
   shipment: ["lines", "costs", "allocation", "invoices", "timeline"],
   invoice: ["lines", "details", "attachments"],
   receipt: ["detail"],
@@ -45,20 +48,36 @@ export function parseProcurementRecord(path: string, search: string): Procuremen
   const id = positiveId(kind === "receipt" ? single(params, "open") : match?.[2] ?? null);
   if (!kind || id === null) return null;
   const tab = single(params, "tab");
-  return { kind, id, tab: tab && TABS[kind].includes(tab) ? tab : TABS[kind][0] };
+  const selectedTab = tab && TABS[kind].includes(tab) ? tab : TABS[kind][0];
+  const workspace = parsePurchaseWorkspaceSelection(search);
+  return {
+    kind, id, tab: selectedTab,
+    ...(kind === "purchase" && selectedTab === "lifecycle" && workspace.selected && !workspace.invalid
+      ? { workspace: { selected: workspace.selected, trail: workspace.trail } } : {}),
+  };
 }
 
 function encodeReference(record: ProcurementRecord): string {
-  return `${record.kind}:${record.id}:${record.tab}`;
+  const base = `${record.kind}:${record.id}:${record.tab}`;
+  return record.workspace && record.kind === "purchase" && record.tab === "lifecycle"
+    ? [base, workspaceRefKey(record.workspace.selected), ...record.workspace.trail.map(workspaceRefKey)].join("~") : base;
 }
 
 function decodeReference(value: string | null): ProcurementRecord | null {
   if (!value) return null;
-  const parts = value.split(":");
+  const [base, ...workspaceParts] = value.split("~");
+  const parts = base.split(":");
   if (parts.length !== 3 || !Object.prototype.hasOwnProperty.call(TABS, parts[0])) return null;
   const kind = parts[0] as ProcurementRecordKind;
   const id = positiveId(parts[1]);
-  return id !== null && TABS[kind].includes(parts[2]) ? { kind, id, tab: parts[2] } : null;
+  if (id === null || !TABS[kind].includes(parts[2])) return null;
+  const record: ProcurementRecord = { kind, id, tab: parts[2] };
+  if (workspaceParts.length === 0) return record;
+  if (kind !== "purchase" || record.tab !== "lifecycle" || workspaceParts.length > MAX_WORKSPACE_TRAIL + 1) return null;
+  const refs = workspaceParts.map(parseWorkspaceRef);
+  if (refs.some((ref) => ref === null)) return null;
+  record.workspace = { selected: refs[0]!, trail: refs.slice(1) as ProcurementWorkspaceRef[] };
+  return record;
 }
 
 export function parseProcurementJourney(search: string): ProcurementJourney {
@@ -81,6 +100,10 @@ export function procurementRecordHref(record: ProcurementRecord, journey?: Procu
     : record.kind === "invoice" ? `/ap-invoices/${record.id}` : "/receiving";
   if (record.kind === "receipt") params.set("open", String(record.id));
   else params.set("tab", record.tab);
+  if (record.kind === "purchase" && record.tab === "lifecycle" && record.workspace) {
+    params.set("inspect", workspaceRefKey(record.workspace.selected));
+    for (const ref of record.workspace.trail) params.append("inspectVia", workspaceRefKey(ref));
+  }
   if (journey?.purchase) params.set("purchase", encodeReference(journey.purchase));
   for (const parent of journey?.trail ?? []) params.append("via", encodeReference(parent));
   return `${path}?${params.toString()}`;
