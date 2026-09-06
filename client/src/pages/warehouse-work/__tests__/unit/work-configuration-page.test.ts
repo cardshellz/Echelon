@@ -19,7 +19,7 @@ function render(data: WorkSetup) {
 describe("warehouse work draft UI", () => {
   it("clearly labels inactive execution, combined defaults, and real physical stations", () => {
     const html = render(setup());
-    expect(html).toContain("gun and packing integration is not connected yet");
+    expect(html).toContain("single-order gun and assembly execution connected; packing close is separate");
     expect(html).toContain("Saving does not start jobs or post inventory");
     expect(html).toContain("No stations configured");
     expect(html).toContain("Receive &amp; stow");

@@ -9,6 +9,7 @@ import { task, start, fence } from "../assembly-work.fixture";
 describe("assembly work HTTP validation and identity", () => {
   let server: Server; let base: string; let authenticated: boolean;
   const service = { queue: vi.fn(), get: vi.fn(), command: vi.fn(), handoff: vi.fn(), complete: vi.fn() };
+  const execution = { contexts: vi.fn(), order: vi.fn(), task: vi.fn(), pickOutput: vi.fn() };
   beforeEach(async () => {
     vi.resetAllMocks(); authenticated = true;
     service.queue.mockResolvedValue({ tasks: [], nextBeforeId: null });
@@ -16,7 +17,7 @@ describe("assembly work HTTP validation and identity", () => {
     service.command.mockResolvedValue({ task: task(), idempotentReplay: false });
     const app = express(); app.use(express.json());
     app.use((req, _res, next) => { req.session = { user: authenticated ? { id: "session-user" } : undefined } as Request["session"]; next(); });
-    registerAssemblyWorkRoutes(app, { assemblyWork: service });
+    registerAssemblyWorkRoutes(app, { assemblyWork: service, assemblyExecution: execution });
     server = createServer(app); await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/warehouse/assembly-work`;
   });
@@ -24,6 +25,31 @@ describe("assembly work HTTP validation and identity", () => {
   async function post(path: string, body: unknown) {
     return fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   }
+  it.each(["/contexts", "/orders/70", "/1/view", "/1/pick-output"])("requires authentication on execution endpoint %s", async (path) => {
+    authenticated = false;
+    expect((await fetch(`${base}${path}`, { method: path.endsWith("pick-output") ? "POST" : "GET" })).status).toBe(401);
+  });
+  it("resolves contexts before the generic job route and passes only the session identity", async () => {
+    execution.contexts.mockResolvedValue({ contexts: [] });
+    expect((await fetch(`${base}/contexts`)).status).toBe(200);
+    expect(execution.contexts).toHaveBeenCalledWith("session-user"); expect(service.get).not.toHaveBeenCalled();
+    execution.order.mockResolvedValue({ orderId: 70, orderNumber: "ORDER-70", instructions: [] });
+    expect((await fetch(`${base}/orders/70`)).status).toBe(200);
+    expect(execution.order).toHaveBeenCalledWith("session-user", 70);
+    expect((await fetch(`${base}/orders/70junk`)).status).toBe(400);
+  });
+  it("validates the output-pick fence, quantity, and actor injection before posting", async () => {
+    const input = { commandId: start().commandId, quantity: 2, expectedItemStatus: "pending", reason: "Physical output picked",
+      fence: { taskId: "1", expectedVersion: 3, confirmPhysicalOutput: true } };
+    for (const invalid of [{ ...input, actor: "admin" }, { ...input, quantity: 0 }, { ...input, quantity: 1.5 },
+      { ...input, expectedItemStatus: "short" }, { ...input, fence: { ...input.fence, confirmPhysicalOutput: false } }]) {
+      expect((await post("/1/pick-output", invalid)).status).toBe(400);
+    }
+    expect(execution.pickOutput).not.toHaveBeenCalled();
+    execution.pickOutput.mockRejectedValue(new WarehouseWorkError("WORK_SCOPE_DENIED", "Outside scope", 403));
+    expect((await post("/1/pick-output", input)).status).toBe(403);
+    expect(execution.pickOutput).toHaveBeenCalledWith("session-user", "1", input);
+  });
   it.each([["GET", "?warehouseId=1"], ["GET", "/1"], ["POST", "/1/commands"], ["POST", "/handoffs"], ["POST", "/1/complete"]])("requires authentication for %s %s", async (method, path) => {
     authenticated = false;
     expect((await fetch(`${base}${path}`, { method })).status).toBe(401);

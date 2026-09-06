@@ -45,6 +45,7 @@ import { createReturnsService } from "../modules/orders/returns.service";
 import { createFulfillmentRouterService } from "../modules/orders/fulfillment-router.service";
 import { createSLAMonitorService } from "../modules/orders/sla-monitor.service";
 import { createPickingService } from "../modules/orders/picking.use-cases";
+import { AssemblyExecutionService } from "../modules/warehouse/work/application/assembly-execution.service";
 import { createOrderCombiningService } from "../modules/orders/combining.service";
 import { createOperationsDashboardService } from "../modules/orders/operations-dashboard.service";
 import { createReceivingService } from "../modules/procurement/receiving.service";
@@ -171,6 +172,7 @@ export function createServices(
 
   // Channel sync depends on ATP and must precede reservation wiring.
   const assemblyWork = new AssemblyWorkService(assemblyWorkOwner, systemCanonicalClaimClock, inventoryAvailabilityClaims);
+  const assemblyExecution = new AssemblyExecutionService(assemblyWorkOwner, assemblyWork, inventoryAvailabilityClaims);
   const channelSync = createChannelSyncService(db, atp);
 
   // Build completion calls back from inside the inventory-posting transaction.
@@ -207,7 +209,7 @@ export function createServices(
     ...inventoryStorage,
     ...channelsStorage,
     ...identityStorage,
-  }, channelSync, undefined, undefined, reservationRuntime.executor);
+  }, channelSync, undefined, undefined, reservationRuntime.executor, assemblyExecution);
 
   // Standalone
   const inventoryAlerts = createInventoryAlertService(db);
@@ -568,6 +570,7 @@ export function createServices(
     inventoryPublicationReadback,
     inventoryAvailabilityClaims,
     assemblyWork,
+    assemblyExecution,
     oms,
     fulfillmentPush,
     channelFulfillmentAuthority,

@@ -65,6 +65,7 @@ import {
 } from "../domain/inventory-availability-planner";
 import { captureActiveClaimSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 import { persistCanonicalWmsPickProgress } from "../../wms/order-item-commands";
+import { recordAssemblyOutputPickLocation } from "../../wms/assembly-output-pick-command";
 
 type ClientPool = Pick<Pool, "connect">;
 type QueryResult = { rows: any[]; rowCount?: number | null };
@@ -4900,6 +4901,9 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     rawCommand: CanonicalAvailabilityClaimPickCommand,
   ): Promise<CanonicalAvailabilityClaimPickResult> {
     const command = canonicalAvailabilityClaimPickCommandSchema.parse(rawCommand);
+    if (command.assemblyWork && !this.workOwner) {
+      throw new InventoryAvailabilityClaimRepositoryError("ASSEMBLY_WORK_OWNER_UNAVAILABLE", "The warehouse work owner is not configured.");
+    }
     const requestHash = hash(command);
     const occurredAt = this.clock();
     if (Number.isNaN(occurredAt.getTime())) {
@@ -5048,6 +5052,18 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           reason: command.reason,
           occurredAt,
         });
+        let assemblyLocation: { locationCode: string; zone: string | null } | null = null;
+        if (command.assemblyWork) {
+          const producers = await client.query<{ producer_operation_key: string | null }>(
+            "SELECT producer_operation_key FROM inventory.availability_claim_resources WHERE id=ANY($1::bigint[]) ORDER BY id",
+            [pickResources.map((resource) => resource.claimResourceId.toString())]);
+          if (producers.rows.length !== pickResources.length) throw new InventoryAvailabilityClaimRepositoryError("CLAIM_PICK_LINEAGE_MISMATCH", "Assembly output resource evidence changed.");
+          assemblyLocation = await this.workOwner!.authorizeOutputPick(client, {
+            fence: command.assemblyWork, claimId: claim.id.toString(), orderId: claim.orderId, orderItemId: line.orderItemId,
+            variantId: line.targetVariantId, locationId: command.warehouseLocationId, quantity: quantity.toString(), actorId: command.actor,
+            producerOperationKeys: producers.rows.map((row) => row.producer_operation_key),
+          });
+        }
         for (const resource of pickResources) {
           for (const allocation of resource.lotAllocations) {
             const updated = await client.query(
@@ -5104,6 +5120,8 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           progress: command.wmsProgress,
           occurredAt,
         });
+        if (assemblyLocation) await recordAssemblyOutputPickLocation(client, { orderId: claim.orderId,
+          orderItemId: line.orderItemId, ...assemblyLocation });
         const commonResult = {
           claimId: claim.id.toString(),
           claimLineId: line.id.toString(),

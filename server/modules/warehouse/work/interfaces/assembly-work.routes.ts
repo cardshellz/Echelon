@@ -7,15 +7,19 @@ import {
 import { requireAuth } from "../../../../routes/middleware";
 import { logger } from "../../../../platform/observability/logger";
 import type { AssemblyWorkService } from "../application/assembly-work.service";
+import type { AssemblyExecutionService } from "../application/assembly-execution.service";
+import { assemblyExecutionContextsSchema, assemblyOrderInstructionsSchema, assemblyTaskViewSchema, assemblyOutputPickCommandSchema } from "@shared/warehouse-assembly-execution";
 import { InventoryAvailabilityClaimRepositoryError } from "../../../inventory-planning/infrastructure/inventory-availability-claim.repository";
 import { AssemblyOrderAuthorityError } from "../../../orders/assembly-handoff-authority";
+import { WmsOrderItemCommandError } from "../../../wms/order-item-commands";
 import { WarehouseWorkError } from "../domain/work-configuration";
 import { BuildDomainError } from "../../../inventory/domain/build.domain";
 import { CanonicalClaimInventoryMutationError } from "../../../inventory/infrastructure/canonical-claim-inventory.repository";
-import { canonicalAvailabilityClaimBuildHandoffResultSchema, canonicalAvailabilityClaimOperationExecutionResultSchema } from "@shared/types/inventory-availability-claims";
+import { canonicalAvailabilityClaimBuildHandoffResultSchema, canonicalAvailabilityClaimOperationExecutionResultSchema, canonicalAvailabilityClaimPickResultSchema } from "@shared/types/inventory-availability-claims";
 
 interface Services {
   assemblyWork: Pick<AssemblyWorkService, "queue" | "get" | "command" | "handoff" | "complete">;
+  assemblyExecution?: Pick<AssemblyExecutionService, "contexts" | "order" | "task" | "pickOutput">;
 }
 const integerParameter = z.string().regex(/^[1-9][0-9]*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647));
 
@@ -37,7 +41,7 @@ export function registerAssemblyWorkRoutes(app: Express, injected?: Services): v
       }
       try { res.json(output.parse(await run(req, input))); } catch (error) {
         const domain = error instanceof WarehouseWorkError || error instanceof AssemblyOrderAuthorityError;
-        const claim = error instanceof InventoryAvailabilityClaimRepositoryError || error instanceof BuildDomainError || error instanceof CanonicalClaimInventoryMutationError;
+        const claim = error instanceof InventoryAvailabilityClaimRepositoryError || error instanceof BuildDomainError || error instanceof CanonicalClaimInventoryMutationError || error instanceof WmsOrderItemCommandError;
         const sqlState = error && typeof error === "object" && "code" in error ? String(error.code) : null;
         const transient = ["40001", "40P01", "55P03"].includes(sqlState ?? "") || (claim && /RETRY_EXHAUSTED$/.test(error.code));
         const status = transient ? 503 : domain ? error.status : claim ? 409 : sqlState === "23505" ? 409 : 500;
@@ -50,6 +54,19 @@ export function registerAssemblyWorkRoutes(app: Express, injected?: Services): v
     };
   }
   const root = "/api/warehouse/assembly-work";
+  const execution = (req: Request) => {
+    const service = services(req).assemblyExecution;
+    if (!service) throw new WarehouseWorkError("WORK_EXECUTION_NOT_CONFIGURED", "Assembly execution is not configured", 503);
+    return service;
+  };
+  app.get(`${root}/contexts`, requireAuth, handler(() => null,
+    (req) => execution(req).contexts(actor(req)), assemblyExecutionContextsSchema));
+  app.get(`${root}/orders/:orderId`, requireAuth, handler((req) => integerParameter.parse(req.params.orderId),
+    (req, orderId) => execution(req).order(actor(req), orderId), assemblyOrderInstructionsSchema));
+  app.get(`${root}/:id/view`, requireAuth, handler((req) => workEvidenceIdSchema.parse(req.params.id),
+    (req, id) => execution(req).task(actor(req), id), assemblyTaskViewSchema));
+  app.post(`${root}/:id/pick-output`, requireAuth, handler((req) => ({ id: workEvidenceIdSchema.parse(req.params.id), command: assemblyOutputPickCommandSchema.parse(req.body) }),
+    (req, input) => execution(req).pickOutput(actor(req), input.id, input.command), canonicalAvailabilityClaimPickResultSchema));
   app.get(root, requireAuth, handler((req) => assemblyQueueRequestSchema.parse({
     warehouseId: integerParameter.parse(req.query.warehouseId), stationId: req.query.stationId,
     beforeId: req.query.beforeId, limit: req.query.limit === undefined ? undefined : integerParameter.parse(req.query.limit),

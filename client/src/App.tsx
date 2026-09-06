@@ -44,6 +44,7 @@ import WarehousePage from "@/pages/WarehousePage";
 import PickZones from "@/pages/PickZones";
 import WarehouseSettingsPage from "@/pages/WarehouseSettingsPage";
 import WorkConfigurationPage from "@/pages/warehouse-work/WorkConfigurationPage";
+import AssemblyWorkPage from "@/pages/warehouse-work/AssemblyWorkPage";
 import Integrations from "@/pages/Integrations";
 import Users from "@/pages/Users";
 import Roles from "@/pages/Roles";
@@ -376,6 +377,9 @@ function Router() {
         </Route>
         <Route path="/warehouse/workflows/:id">
           <ProtectedRoute component={WorkConfigurationPage} requiredPermission={{ resource: "warehouse_work", action: "view" }} />
+        </Route>
+        <Route path="/assembly">
+          <ProtectedRoute component={AssemblyWorkPage} requiredPermission={{ resource: "warehouse_work", action: "assembly" }} />
         </Route>
         <Route path="/integrations">
           <ProtectedRoute component={Integrations} allowedRoles={["admin"]} />

@@ -24,6 +24,13 @@ function toRevision(row: RevisionRow): WorkRevision {
 export class WorkConfigurationRepository {
   constructor(private readonly pool: Pick<Pool, "connect">) {}
 
+  async scopedWarehouseIds(client: PoolClient, actorId: string): Promise<number[]> {
+    const result = await client.query<{ warehouse_id: number }>(
+      "SELECT warehouse_id FROM warehouse.work_access_scopes WHERE user_id=$1 ORDER BY warehouse_id LIMIT 101", [actorId]);
+    if (result.rows.length > 100) throw new WarehouseWorkError("WORK_CONTEXT_LIMIT_EXCEEDED", "More than 100 warehouse contexts require a narrower context selector", 422);
+    return result.rows.map((row) => row.warehouse_id);
+  }
+
   async transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     let discard: Error | undefined;
